@@ -784,6 +784,15 @@ fn eval_tail_loop(
                         let env_r = heap.root_env(env);
                         let out = apply_closure(heap, mid, &arg_forms)
                             .map_err(|e| e.or_form_pos(heap, call_form))?;
+                        // A template may emit `/name` — the root escape (ADR-236) that stops a
+                        // user module capturing a prelude reference. The compile pass resolves
+                        // it, but a macro reached HERE was not expanded at compile time (it was
+                        // defined after its use site, or defined at runtime), so nothing has
+                        // rewritten it and the evaluator would see the literal symbol `/nil?`
+                        // and call it unbound. Strip it on the way out — this is the runtime
+                        // half of `macros::resolve`'s root case. Cheap: the scan allocates
+                        // nothing and rebuilds only when an escape is actually present.
+                        let out = crate::eval::macros::strip_root_escapes(heap, out);
                         Ok((out, heap.read_root_env(env_r)))
                     })?;
                     env = new_env;

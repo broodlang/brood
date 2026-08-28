@@ -70,7 +70,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
        (try
          (do
            (binding (*err* (fn (s)
-                             (%table-put ~sink :text (str (%table-get ~sink :text "") s))
+                             (%table-put ~sink :text (/str (%table-get ~sink :text "") s))
                              nil))
              ~@body)
            (%table-get ~sink :text ""))

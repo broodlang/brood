@@ -721,7 +721,9 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-26** — every package's `:brood` floor was a lie; the ecosystem release train that fixed it
 - **2026-08-27** — migrating the ecosystem across the waves; two outages, both from verifying the wrong artifact (KI-66/67)
 - **2026-08-27** — stdlib cleanup: `name` folds into `->string` (ADR-258); the seq orphans go home; `last-index-of` moves to `string/`
+- **2026-08-28** — the capture hazard behind that rename: prelude templates, and finishing the `/name` root escape (KI-73)
 - **2026-08-27** — the type system, audited then rebuilt: `sig` fails closed and the definition owns the arity (ADR-259), the walk's totality is gated and found the quasiquote gap (ADR-260), a parameter's type is its domain (ADR-261), a union keeps its terms (ADR-262), `(not T)` (ADR-263)
+- **2026-08-28** — a record is closed, and openness is the type of the keys it doesn't declare (ADR-264) — which is what makes ADR-262's tagged union usable rather than merely representable
 
 ---
 
@@ -4772,3 +4774,90 @@ green, 572 lib unit tests green, whole-tree check still 1.7 s. Two rename leftov
 parallel session fell out of the new checks and were followed: the curated sig for
 `last-index-of` (now `string/last-index-of`) and a dead call site in
 `scripts/fuzz/stress/scale_sweep.blsp`.
+
+## 2026-08-28 — the capture hazard behind the `name` rename, and finishing the root escape
+
+Following the ADR-258 note that renaming `name` "moved the hazard rather than removing it".
+It is a real bug with a silent wrong value, not a theoretical one:
+
+```lisp
+(defmodule inventory)
+(defn get (bag k) :CAPTURED)     ; an ordinary function to want
+(defrecord point (x y))
+(point-x (point 1 2))            ; => :CAPTURED
+```
+
+**Measured the exposure rather than guessing at it.** A scanner written in Brood
+(`reflect/read-all` over the concatenated prelude, walking each `defmacro`'s quasiquote
+template) found 22 emitted bare names — but that over-reports, because a name is only
+capturable if it is a plain *function* (a special form resolves in the compiler) and if the
+macro is ever expanded in *user* code (`%defseq` is prelude-internal). The precise list was
+five macros. Two crude regex passes preceded this and both were wrong; the reader was the tool.
+
+**The `/name` root escape was half-implemented.** ADR-236 documents it, and it worked — in a
+module. `resolve()` returns early when `compile_ns()` is `None`, so at root the rewrite never
+ran and an emitted `/get` reached the evaluator literally, unbound. `macros::strip_root_escapes`
+now covers root: a read-only scan that allocates nothing and a rebuilding walk that runs only
+when it finds an escape. It **skips `quote`/`quasiquote` subtrees**, which is load-bearing and
+not merely consistent — the prelude is itself root code, so without the skip a template's `/get`
+is stripped at *definition* time and the capture returns. That happened, for one build.
+
+`defrecord`, `for`, `defonce` and `with-err-str` are fixed and proved by probe (a module
+defining `get`/`reverse`/`bound?` now gets the real value back).
+
+**Three things that did not work, each cheaper to record than to rediscover:**
+
+- **`defmodule` cannot use the escape at all.** It *establishes* the namespace, so its
+  expansion is evaluated before there is an ns to resolve against. It emits no conversion
+  instead — the callee converts.
+- **`receive` cannot use it either** (KI-73). Its expansion calls `but-last` from `seq.blsp`,
+  which concatenates *after* `process.blsp`, so `receive` cannot expand at prelude compile
+  time; `sleep`'s `(receive …)` expands lazily at first call, where no resolve pass runs, and
+  the escape arrives as the literal unbound `/nil?`. Applying it turned 35 test files red.
+- **Moving `sleep` below `receive` does not rescue it** — the expansion then happens during
+  boot, before `but-last` exists. Tried, reverted.
+
+**The rule is a gate now, not a convention** — `tests/prelude_capture_test.blsp`: a static scan
+of every prelude template plus three behavioural probes, pinning `receive` as the known
+exception so a *new* offender fails the build. Sabotage-verified both halves.
+
+## 2026-08-28 — a record says what a value is NOT
+
+ADR-262 made `{ok: int} | {error: string}` *representable*. It did not make it useful: a
+field read through it still answered nothing, and the reason was not the union but the
+records. An **open** record declared what a value must have and said nothing about
+anything else, so the `{error: string}` term could not rule out an `:ok` — the honest
+answer for the union was `any`, and `any` is what it gave.
+
+So a record is now **closed**: `(record :a int)` names every key, and one it doesn't
+declare is absent, which `get` reads as `nil`. `(record &open :a int)` is the marked
+permissive form, spelled like Brood's other in-list markers.
+
+**The part worth keeping is that openness is a *type*, not a flag** — `nil` for a closed
+shape's undeclared keys, `any` for an open one's. One reading (`field_ty`) then drives
+everything: subtyping quantifies over `keys(a) ∪ keys(b)` and compares readings, so width
+subtyping falls out of `nil ⊆ any` and the required/optional rule stops being a separate
+clause; disjointness is "some key's readings are disjoint", which makes the two arms of a
+tagged union provably distinct with no rule written for tagged unions; and intersection is
+exact per key, which matters because that is what a guard performs. Absence stopped being
+declined too — `{}` really is a subtype of `{a?: int}`.
+
+Three shapes had to stay open, and each is a *domain* rather than a value: a `defrecord`
+accessor's parameter (a real value carries `:__id__` and its siblings), an ability used as
+a type, and the base a path guard refines. The constructor's *result* stays closed, which
+is the shape a union's field read resolves against.
+
+**The interesting failure was downstream.** Once `(get {:x 10} :y)` typed as exactly
+`nil`, `(if-let (v …) (inc v) …)` read as handing `nil` to `inc` — nothing narrowed `v`
+by truthiness. Adding that guard is easy; getting it *right* was not. The exact truthy
+type is "not `nil` and not the literal `false`", which this lattice cannot state, so the
+sayable type is `not nil` — sound as a necessary condition for a true test, and **not**
+invertible, because a false test doesn't imply `nil`. Marked biconditional it read
+`(not v)` as "v is nil" and reported live code as dead, in a telemetry test. One-sided is
+the honest reading, and it is the same negative-atom gap that keeps `(not (tuple int))`
+from meaning what it says.
+
+Gates: `nest check std/**/*.blsp tests/**/*.blsp` back to zero, `nest format --check`
+clean, clippy clean, 583 lib unit tests. One test flipped by design — the runtime
+contract's "extra keys are allowed" is now "an extra key throws", with an `&open` case
+beside it, because the contract and the checker have to agree on what a declaration means.

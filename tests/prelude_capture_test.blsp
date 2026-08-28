@@ -1,0 +1,120 @@
+;; A prelude macro's template is spliced into a USER's file, where a bare reference
+;; resolves against their namespace first. So a template that emits a bare public
+;; function name is captured by any module that happens to define that name — and the
+;; failure is a silent wrong value, not an error:
+;;
+;;     (defmodule mine)
+;;     (defn get (bag k) :CAPTURED)     ; a perfectly reasonable domain function
+;;     (defrecord point (x y))
+;;     (point-x (point 1 2))            ; => :CAPTURED, before `defrecord` used `/get`
+;;
+;; The fix is the `/name` root escape (ADR-236): `/get` pins the reference to root.
+;; This test is the gate that keeps it applied, because nothing else notices — the
+;; arity is right, no name is unbound, and `nest check` is silent.
+;;
+;; NOT flagged, and why:
+;;   - `%name`      — a user cannot define one by accident (ADR-250)
+;;   - `/name`      — already escaped, which is the whole point
+;;   - special form — resolved by the compiler, not through the global table
+;;   - `*earmuff*`  — ambient/root by declaration (ADR-065's earmuff rule)
+;;   - a template's own `let`/`fn` binders — alpha-renamed by the hygiene pass
+(defmodule prelude-capture-test
+  (:use test))
+
+(def- prelude-files
+  ["std/prelude/core.blsp"
+    "std/prelude/predicates.blsp" "std/prelude/map.blsp" "std/prelude/control.blsp"
+    "std/prelude/match.blsp" "std/prelude/process.blsp" "std/prelude/seq.blsp"
+    "std/prelude/string.blsp" "std/prelude/tools.blsp"])
+
+(def- prelude-source
+  (string/join "\n" (map file/slurp prelude-files)))
+
+;; Every bare root name that is NOT a special form — the set a template could capture.
+(def- capturable
+  (let (sf (into #{} (map ->string (special-forms))))
+    (into #{}
+      (seq/remove (fn (s)
+                    (or (string/starts-with? s "%")
+                      (includes? s "/")
+                      (string/starts-with? s "*")
+                      (contains? sf s)))
+        (map ->string (global-names))))))
+
+;; Walk a form, collecting head symbols that sit inside a quasiquote template.
+;; `~`/`~@` holes are caller code (already resolved at the call site) and `quote`
+;; subtrees are data, so both are skipped — the same rule the resolver follows.
+(defn- heads-in
+  (form in-template acc)
+  (cond
+    (not (pair? form)) acc
+    (= (first form) 'quote) acc
+    (= (first form) 'unquote) acc
+    (= (first form) 'unquote-splicing) acc
+    (= (first form) 'quasiquote) (heads-in (second form) true acc)
+    else
+      (let (head (first form)
+            acc (if (and in-template (symbol? head) (contains? capturable (->string head)))
+                  (conj acc (->string head))
+                  acc))
+        (fold (fn (a f) (heads-in f in-template a)) acc form))))
+
+(defn- offenders
+  ()
+  (fold (fn (acc form)
+          (if (and (pair? form) (= (first form) 'defmacro))
+            (let (hits (seq (heads-in form false #{})))
+              (if (empty? hits) acc (assoc acc (->string (second form)) (sort hits))))
+            acc))
+    {}
+    (reflect/read-all prelude-source)))
+
+(describe "prelude macro templates cannot be captured by user code"
+  ;; Compared as the whole MAP, not a count: a failure then prints which macro emits
+  ;; which name, which is the entire fix instruction (write it `/name`).
+  ;;
+  (test "no template emits a bare capturable name"
+    (assert= (offenders) {}))
+
+  ;; The gate above is a static scan; this is the behaviour it stands for. If someone
+  ;; drops the escape, this fails with a wrong VALUE, which is what a user would see.
+  (test "a module defining `get` does not capture defrecord's accessor"
+    (assert=
+      (%load-string
+        "(defmodule capture-probe-get)
+                (defn get (bag k) :CAPTURED)
+                (defrecord pt (x y))
+                (pt-x (pt 7 8))")
+      7))
+
+  (test "a module defining `reverse` does not capture `for`"
+    (assert=
+      (%load-string
+        "(defmodule capture-probe-reverse)
+                (defn reverse (c) :CAPTURED)
+                (for (x [1 2 3]) x)")
+      (list 1 2 3)))
+
+  ;; `receive` was the last holdout: it could not use the escape until `but-last` moved
+  ;; into core.blsp and `sleep` moved below `receive`, because until then `sleep`'s
+  ;; `(receive …)` expanded lazily at first call, where no resolve pass runs.
+  (test "a module defining `nil?`/`nth` does not capture `receive`"
+    (assert=
+      (%load-string
+        "(defmodule capture-probe-receive)
+                (defn nil? (x) :CAPTURED)
+                (defn nth (c i) :CAPTURED)
+                (let (p (spawn (fn () (receive (m m)))))
+                  (send p :hello)
+                  (sleep 20)
+                  :ok)")
+      :ok))
+
+  (test "a module defining `bound?` does not capture `defonce`"
+    (assert=
+      (%load-string
+        "(defmodule capture-probe-bound)
+                (defn bound? (s) :CAPTURED)
+                (defonce zz 5)
+                zz")
+      5)))
