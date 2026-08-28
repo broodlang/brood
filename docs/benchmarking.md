@@ -175,6 +175,32 @@ involved are promoted (RUNTIME) or top-level (LOCAL) — exactly the distinction
 `(vm-stats)`'s `tw_defer`/`vm_apply`/`self_tail` make legible. Always confirm which
 you're measuring before quoting a ratio.)
 
+## The one rule: measure at two sizes and keep only what scales
+
+Boot is **~47 ms** on this tree, and it is macro-expansion-heavy. Anything shorter than about a
+second is *substantially a profile of boot* — and boot does not look like boot. It looks like a
+plausible, specific, wrong answer:
+
+- **`perf` on `bintree` at its benchmark size (n=200, 160 ms)** puts `Heap::env_get` top at 14.4%
+  with `eval_tail_loop` at 4.25%, which reads as "this JIT'd row is 18% interpreted". At n=2000
+  **both symbols disappear**. The tree-walked form count is identical at n=3 and n=6 (13,253
+  either way) — fixed startup work, zero per-node.
+- **The counters at whole-process scope** on `pipeline` report `alloc` and both call-IC counters
+  *identical* between a 1× and a 10× run, while `env-get` scales 8×. Every interesting counter was
+  boot's.
+- **`hof-decline-queued`** at process scope reads as "the HOF fast path is declined on 96% of
+  activations". Scoped and swept, it is a fixed ~33k warm-up cost.
+
+Three different tools, three confident wrong answers, one cause. So:
+
+1. **Scope it** — `(perf/measure thunk)` for counters; a size where boot is <5% for `perf`.
+2. **Sweep it** — run at two sizes and compute the ratio per counter/symbol. Keep what tracks the
+   work; everything flat is fixed cost and cannot be what you are chasing.
+3. **Only then attribute.** A number that has not been swept is not evidence about the row.
+
+This is cheap — two runs instead of one — and it is the difference between the profiles in
+`compute-frontier.md` §2d and the two retractions above them.
+
 ## Making `perf` usable (two blockers, and each looks like the other's fault)
 
 `perf` answers the one question brood's own counters cannot: **self time per symbol**. The

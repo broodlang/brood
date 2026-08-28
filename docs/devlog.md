@@ -6046,3 +6046,35 @@ Full tables in [compute-frontier.md](compute-frontier.md) §2c. Also: `make perf
 the same binary path as `make release-brood`, so it was rebuilt afterwards and the "compiled out"
 hint checked — timing anything against the counter build charges the change for atomics it never
 introduced.
+
+### `perf` works now, and the call protocol is confirmed — after boot faked two findings
+
+`scripts/enable-perf.sh` + `make perf-symbols` (both added today) made per-symbol profiling
+possible for the first time. `--call-graph dwarf` produced no usable chains; frame pointers
+(`-C force-frame-pointers=yes`) do, and that is what resolved the attribution.
+
+**Boot is ~47 ms, and it produced two confident wrong answers before I sized the runs properly.**
+`bintree` at its benchmark size is 160 ms, so 29% of that profile is boot — appearing as
+`Heap::env_get` 14.4% and `eval_tail_loop` 4.25%, which reads exactly like "this JIT'd row is 18%
+interpreted". I reported that. At n=2000 both symbols vanish, and the tree-walked form count is
+*identical* at n=3 and n=6 (13,253 either way): fixed startup work, zero per-node.
+
+The real profiles:
+
+- **`bintree` (n=2000):** `jit_run_fast_link` **24.0%**, native arms 25.1%, `__memmove` 11.4%,
+  `brood_rt_fast_frame` **10.7%**, `make_vector2` 5.7%, `push_n`/`fastlink_base`/`roots_base` 8.9%.
+  **Call protocol ≈ 44%, real work 25%, allocation ≈ 21%.**
+- **`pipeline` (N=10M):** `dispatch` 13.5%, `jit_dispatch_call` 7.9%, `vm_cache_arm_handle` 5.7%,
+  `passthrough_arm` 5.4%, **SmallVec staging 9.9%**, `Heap::closure` 4.9%, `push_frame` 4.3%.
+  **~50% call plumbing.**
+
+So FRONTIER's call-protocol framing is vindicated on both rows, and `jit_run_fast_link` alone costs
+as much as all of `bintree`'s native compute. Starting there rather than at argument staging: 24% +
+10.7% on one row beats 9.9% on another.
+
+**Two of my own answers withdrawn, both from reasoning rather than measuring.** That argument
+staging must be cheap because `SmallVec<[Value; 4]>` keeps ≤4 args inline — true, and irrelevant,
+because the cost is the copy (9.9%, and FRONTIER's old ~8% was right). And that `env_get` was the
+top cost — a boot artifact. Five contaminations in one day across three different tools, all one
+cause, so the rule is now written at the top of [benchmarking.md](benchmarking.md): **measure at
+two sizes and keep only what scales.** Two runs instead of one, and it is the whole difference.
