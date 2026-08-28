@@ -651,7 +651,9 @@ fn literal_keyword_pairs(args: &[Value]) -> Option<Vec<(value::Symbol, Value)>> 
     if !args.len().is_multiple_of(2) {
         return None;
     }
-    args.chunks_exact(2)
+    args.as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| match pair[0] {
             Value::Keyword(name) => Some((name, pair[1])),
             _ => None,
@@ -897,7 +899,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         if let Some((k, v)) = map_ty.as_ref().and_then(Ty::map_kv) {
             let mut key_ty = k.clone();
             let mut val_ty = v.clone();
-            for pair in items[2..].chunks_exact(2) {
+            for pair in items[2..].as_chunks::<2>().0 {
                 key_ty = key_ty.union(expr_ty(heap, pair[0], ctx).unwrap_or(Ty::ANY));
                 val_ty = val_ty.union(expr_ty(heap, pair[1], ctx).unwrap_or(Ty::ANY));
             }

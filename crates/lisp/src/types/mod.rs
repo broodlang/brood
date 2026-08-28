@@ -1881,7 +1881,7 @@ fn term_is_subtype_of_union(a: &Ty, others: &[Ty]) -> bool {
     }
     let mut remaining = a.tags;
     while remaining != 0 {
-        let tag_bit = remaining & remaining.wrapping_neg();
+        let tag_bit = remaining.isolate_lowest_one();
         remaining &= !tag_bit;
         let part = a.project_tag(tag_bit);
         if !others.iter().any(|b| part.is_subtype_term(b)) {

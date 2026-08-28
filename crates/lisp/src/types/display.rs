@@ -447,7 +447,7 @@ impl Ty {
             let mut parts: Vec<String> = Vec::new();
             let mut remaining = self.tags;
             while remaining != 0 {
-                let tag_bit = remaining & remaining.wrapping_neg();
+                let tag_bit = remaining.isolate_lowest_one();
                 remaining &= !tag_bit;
                 parts.push(self.project_tag(tag_bit).to_source()?);
             }
