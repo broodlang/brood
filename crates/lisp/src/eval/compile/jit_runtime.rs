@@ -796,13 +796,61 @@ pub(crate) fn jit_run_fast_link(
     // re-entrant call below therefore re-raises the depth for its duration; see
     // `jit_native_reenter`. Found via JSONTestSuite's 20k-deep documents; the minimal
     // repro is a three-function cycle returning a destructured tuple.
+    // Outcome 0 — the overwhelmingly common case — is handled inline; every other outcome
+    // goes to a `#[cold] #[inline(never)]` helper.
+    //
+    // This is a code-LAYOUT change with no semantic content, and it is worth the indirection
+    // because of where this function sits: `perf` puts `jit_run_fast_link` at **24% of
+    // `bintree`** — as much as all of that row's native compute — and instruction-level
+    // annotation showed the cost spread thin across the prologue/epilogue (register saves,
+    // spills at -0x158/-0x160(%rbp)) rather than concentrated in any operation. That is the
+    // signature of a large function on a hot path: the deopt/preempt/tail arms below need
+    // several `SmallVec`s and many live values, so the compiler sized the frame and saved the
+    // registers for them on EVERY call, including the ~all of them that just return a value.
+    if outcome == 0 {
+        crate::perf_bump!(jit_link_done);
+        let result = heap.root_at(base);
+        heap.truncate_roots(stage_base);
+        return FastLinkOutcome::Done(result);
+    }
+    jit_fast_link_cold_outcome(
+        heap,
+        outcome,
+        argc,
+        site,
+        head,
+        epoch,
+        stage_base,
+        base,
+        nslots,
+        native_depth,
+        callee_env,
+    )
+}
+
+/// The deopt / preempt / tail-chain / error outcomes of a native fast link — everything
+/// except outcome 0. Split out of [`jit_run_fast_link`] and marked `#[cold]`/`#[inline(never)]`
+/// so its frame and register pressure are not charged to the hot return path; see the comment
+/// at the call site for the measurement that motivated it. Semantics are unchanged: this is the
+/// same code, in the same order, with the same comments.
+#[cfg(feature = "jit")]
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn jit_fast_link_cold_outcome(
+    heap: &mut Heap,
+    outcome: i64,
+    argc: usize,
+    site: u32,
+    head: Symbol,
+    epoch: u64,
+    stage_base: usize,
+    base: usize,
+    nslots: usize,
+    native_depth: u32,
+    callee_env: EnvId,
+) -> FastLinkOutcome {
     match outcome {
-        0 => {
-            crate::perf_bump!(jit_link_done);
-            let result = heap.root_at(base);
-            heap.truncate_roots(stage_base);
-            FastLinkOutcome::Done(result)
-        }
         3 => {
             heap.truncate_roots(stage_base);
             FastLinkOutcome::Error

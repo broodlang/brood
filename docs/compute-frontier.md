@@ -795,3 +795,45 @@ The throughline: where I earlier called a row "representation-bound" or "foundat
 capped payoff," immutability often supplies a *contained* path (hoist-and-inline, share-by-
 handle) a mutable language would need a full optimizing pass to justify. The hard residual
 is the boxed 24-byte `Value` itself (§2) — which immutability does *not* fix.
+
+## 2e. `jit_run_fast_link` outlined — `bintree` −4.0% (2026-08-28)
+
+The first change taken off §2d's ranking. `perf` put `jit_run_fast_link` at **24% of `bintree`**,
+as much as all of that row's native compute, and instruction-level annotation showed why: the cost
+was **spread thin across the prologue and epilogue** — register saves (`pushq %r15`/`%rbx`), spills
+at `-0x158`/`-0x160(%rbp)` — with no single hot operation. That is the signature of a large
+function on a hot path, not of expensive work.
+
+It was **201 lines**. Outcome 0 — return the value — is **6** of them; the deopt, preempt,
+tail-chain and error arms are the other ~120, and they need several `SmallVec`s and many live
+values. So the compiler sized a ~350-byte frame and saved the registers for arms that almost never
+run, on **every** call.
+
+Outcome 0 is now handled inline and the rest moved to a `#[cold] #[inline(never)]`
+`jit_fast_link_cold_outcome`. **Pure code layout — the cold code is the same code, same order,
+same comments.**
+
+| measurement | base | new | delta | floor |
+|---|---|---|---|---|
+| `make ab`, best-of-11 | 157 ms | 150 ms | −4.5% | 0.0% |
+| interleaved, min-of-13, n=200 | 155 ms | 150 ms | **−3.2%** | 1.3% |
+| interleaved, min-of-7, **n=2000** | 1021 ms | 980 ms | **−4.0%** | **0.2%** |
+
+Measured at two sizes deliberately (§2d's rule): the win is *larger* at n=2000, because boot is 29%
+of the n=200 run and dilutes it. 20× the floor at the long size.
+
+`fib` −0.9%, `nqueens` −0.7%, `ackermann` −0.5%, `collatz` −1.4%, `pipeline`/`loop`/`sort` flat —
+no row regressed.
+
+**Verified beyond the suite**, because this function owns the deopt/preempt/tail paths where a
+mistake is a *silently repeated side effect* rather than a crash: `--test jit` 40/40, the
+deopt/tier/fast_link/inline/preempt selection 33/33, `tests/jit_effect_once_test.blsp` 6/6 (the
+KI-18 duplicated-effect guard), and `--test jit` again under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` 40/40 — the frame this function builds is GC-visible.
+
+**What is left on this row**, from the same profile: `brood_rt_fast_frame` 10.7% (the next call-path
+item) and ~21% allocation, of which the 11.4% `__memmove` is **not** the call protocol —
+frame-pointer chains put it at `Vec<VecStore>::push` → `RawVecInner::finish_grow`, i.e. the value
+slab reallocating as the row allocates 8.19M node vectors. That is the allocation frontier and a
+separate lever: a segmented slab would never move existing elements. Handles are indices, so
+nothing in the language observes the difference.
