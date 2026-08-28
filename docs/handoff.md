@@ -61,11 +61,32 @@ Four things to carry forward, and the last two are measurement traps that will b
   83 lines of the better one. The code from both sides merged cleanly and every gate stayed green.
   Both accounts, and which claims were withdrawn, are now in the KI entry.
 
-**Still open: KI-74** and **KI-77**. KI-74 (⚠️ watching — one unnamed lib-suite failure, 20 clean
-runs since; re-run under nextest, which names the case, if it recurs). **KI-77** (⚠️ watching —
-the `loop` row is ~2-3% slower than v0.14.1, surviving both unpinned and interleaved measurement,
-localized to `464b6c57..HEAD`, not bisected; its entry carries the drift trap that blocks a naive
-bisect).
+**Three open items carried out of 2026-08-28, all of them measurement/coverage rather than bugs:**
+
+- **KI-78 (open)** — CI never builds a stdlib image, so every job tests the **source** path while
+  the shipped default is the **imaged** one. Not a suspected failure (the suite is green imaged,
+  1222/1222 locally), a gap in what CI proves. The fix has a constraint worth reading before
+  starting: building the image makes `autoload_race`'s default-path arms imaged too, so one job
+  must stay on source with `BROOD_NO_STDIMAGE=1` rather than trading one path for the other.
+- **An unattributed 17% startup win.** v0.15.0 carries a **~5-6 ms fixed per-run saving that lands
+  on every benchmark row** (`startup` 36 -> 30 ms, `loop`/`sieve` -6 ms, `fib`/`collatz` -5 ms).
+  It arrived somewhere in `dfcddc4f..e9c54606` and **nothing records it** — the prelude changes in
+  that range are ADR-278/281's multimethod return types, which are not an obvious cause, and the
+  `cli_support.rs` change there is the `.brood_crash_dump` process-death hook. It closed KI-77 as a
+  side effect. Attribute it before anyone claims it, and note the shape rule from
+  brood-benchmarks' CLAUDE.md: **sample three or four points across the range and look at the curve
+  first** — a ramp means there is nothing to bisect, and `git bisect` will still hand you a commit.
+- **`~/.local/bin/brood` drifts.** It was 15+ commits behind for most of the day, which
+  `make doctor` reports and nothing enforces. For a published benchmark run it must be the **lean**
+  build (`make install INSTALL_FEATURES='$(RUN_FEATURES)'`) so the published numbers, `make ab`'s
+  numbers and what users run are one build. `nest test` works fine on lean (verified 2026-07-30 —
+  an older note claiming otherwise is wrong).
+
+**Still open: KI-74** (⚠️ watching — one unnamed lib-suite failure, 20 clean runs since; re-run
+under nextest, which names the case, if it recurs) and **KI-78** above. **KI-77 is resolved** — it
+was real when filed and the boot win above closed it; its entry keeps the measurement method,
+because that row's absolute numbers drift ~3% between sessions and only same-session interleaved
+pairs mean anything on it.
 
 **Still open: KI-74** (⚠️ watching — one unnamed lib-suite failure, 20 clean runs since;
 re-run under nextest, which names the case, if it recurs).

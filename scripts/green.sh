@@ -135,8 +135,9 @@ if [ "$do_local" = 1 ]; then
   equiv=""
   if [ -n "$nest" ] && [ "$bin_sha" != "$head_sha" ]; then
     if [ -n "$bin_sha" ] && git cat-file -e "${bin_sha}^{commit}" 2>/dev/null &&
-       [ -z "$(git diff --name-only "$bin_sha" HEAD -- std crates 2>/dev/null)" ]; then
-      equiv="built at $bin_sha, not HEAD ($head_sha) — but std/ and crates/ are byte-identical between them"
+       [ -z "$(git diff --name-only "$bin_sha" HEAD -- std crates \
+                 ':(exclude)crates/*/tests/*' 2>/dev/null)" ]; then
+      equiv="built at $bin_sha, not HEAD ($head_sha) — but nothing it bakes in changed between them (std/ and crates/, excluding test dirs)"
     else
       stale=1
     fi
