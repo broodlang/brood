@@ -5671,6 +5671,254 @@ merely configured.
 218/218 `.blsp` test files, 626 Rust lib tests, the zero-warning checker gate, `nest format
 --check`, and clippy `--all-targets --all-features` all green.
 
+## 2026-08-28 (later) — KI-77 closed by a boot win nobody recorded, and the KI-72 guard that stopped guarding
+
+Two perf items, and both turned out to be about *measurement* rather than about code.
+
+### KI-77: real when filed, gone at v0.15.0 — and the original reading was right
+
+Filed earlier the same day: `loop` ~3% slower than v0.14.1, surviving both the unpinned check
+(so not ADR-175's background-JIT-on-one-core artifact) and the interleaved check (so not thermal
+drift). At `e9c54606` it reads **-4.3%** against the same v0.14.1 binary. The tempting conclusion
+is that the original measurement was wrong, and it is worth not jumping to it: building the exact
+tree the entry was filed against and measuring it in **one session** against HEAD gives
+`dfcddc4f` **94 ms** vs HEAD **89 ms**. So `dfcddc4f` really did sit ~4 ms above v0.14.1's ~90 ms,
+as filed. The entry was right and v0.15.0 moved past it.
+
+**What moved is a fixed per-run cost, not `loop`.** `dfcddc4f` -> HEAD, same session, best-of-15:
+
+| row | dfcddc4f | HEAD | delta | absolute |
+|---|---|---|---|---|
+| `startup` | 36 ms | 30 ms | **-16.7%** | -6 ms |
+| `loop` | 94 ms | 88 ms | -6.4% | -6 ms |
+| `sieve` | 84 ms | 78 ms | -7.1% | -6 ms |
+| `fib` | 116 ms | 111 ms | -4.3% | -5 ms |
+| `collatz` | 223 ms | 218 ms | -2.2% | -5 ms |
+
+Every row gained the *same ~5-6 ms* and the percentage just tracks how cheap the row is. That is
+a boot/load win — and it is the exact mirror of what filed KI-77, where almost every row read
+slightly positive for the same reason in reverse. Reading a per-row *percentage* table without
+looking at the absolute column is how a single fixed cost gets mistaken for N separate
+regressions, in both directions.
+
+**A 17% startup win with no commit next to it.** It arrived somewhere in `dfcddc4f..e9c54606`
+and nothing in the devlog records it. The prelude changes in that range are ADR-278/281's
+multimethod return types, which are not an obvious cause, and `cli_support.rs`'s addition there is
+the `.brood_crash_dump` process-death hook (diagnostics, not boot). **Worth attributing before
+anyone claims it.**
+
+**And one arithmetic that must not be done.** It is tempting to subtract the `startup` row from
+`loop` to isolate compute. CLAUDE.md and FRONTIER both record that as an under-subtraction trap:
+`startup` is `(io/puts 0)`, which loads `io` and through it `string`, while most rows load neither.
+If anyone wants to know whether a residual compute delta survives under this boot win, the
+measurement is in-process with a fixed iteration count, not a difference of two whole-invocation
+rows.
+
+### The stdlib image is default-ON, and the KI-72 guard no longer guards it
+
+The flip landed in v0.15.0 (`f114d01e`, opt out with `BROOD_NO_STDIMAGE=1`). Verified empirically
+here rather than from the docs: with no flag set, a `require` of `json` reports `install: 103
+sections` and materialises from the image; with `BROOD_NO_STDIMAGE=1` there is not one `[image]`
+line. `(stdimage/status)` reports `:state :live, :sections 103`. Measured on a three-module
+script: **96 ms -> 66 ms, a 31% saving** (the published figure is 46.5 -> 36.2 ms; this box is
+slower, the ratio is larger, read the direction).
+
+**But `autoload_race` — the guard for KI-72 — never builds or requires an image.** Nothing in
+`ci.yml` builds one either. So in CI that test exercises the *source* path and asserts nothing
+about the imaged race it exists to catch. It is not reliably vacuous, which is worse than being
+reliably vacuous: `image_matches_source.rs` *does* build an image (ADR-280) and writes it to
+`~/.cache/brood`, so whether `autoload_race` runs imaged depends on whether that test happened to
+run first — and nextest gives each test its own process in no guaranteed order.
+
+The differential does not cover the gap. It compares *state* — name, kind, privacy, declared
+signature — and proves the two load paths agree once loaded. KI-72 was not a state divergence; it
+was a **race during install**, where a public name became callable before its private helper was
+bound. A differential over final state cannot see that, by construction.
+
+So the guard was made self-sufficient, following the pattern `image_matches_source` already
+established: build-and-install the image before the racing `Interp` exists, and **assert it is
+live**, so the test cannot pass on the source path and silently report that KI-72 is still fixed.
+
+**The guard, sabotage-verified — and the first attempt at it was vacuous.** Reverting the
+deferral and re-running, per 12 standalone invocations of one case: the pre-existing arm caught it
+6 of 12, the new imaged arm 4 of 12, `cargo test` running all five cases in one process **0 of 3
+runs**, and `cargo nextest run` — what `make test` and CI use — **4 of 4 runs red**.
+
+So the guard is **probabilistic**, and what makes it a gate is nextest running five cases in five
+processes rather than any one case being reliable. Two things to carry: plain `cargo test` cannot
+see this class of bug at all (all five cases share a process and the earlier ones warm the
+allocator, interner and JIT enough to close the window — reproduce with nextest or `--exact`), and
+the new arm is *weaker* than the old one for a knowable reason — building the image in a throwaway
+interpreter warms the same process. That is this bug's documented hazard, that every in-language
+observer moves it, showing up inside the test written to catch it.
+
+Worth stating plainly: the first version of this test **passed with the bug reintroduced**, and
+only sabotage said so. It asserted three preconditions (install returned non-nil,
+`*std-image-file*` set, module not yet loaded) and every one of them held — the test was correct
+about its own setup and still measured nothing, because it was run the wrong way. A precondition
+assertion proves the setup, not the sensitivity.
+
+### Three items documented before fixing them (KI-78, the unattributed boot win, the drifting install)
+
+Recorded first and deliberately, because all three are things a green tree does not show you.
+
+**KI-78 — CI tests the load path users do not get.** The stdlib image is default-ON since
+v0.15.0, and default-ON is safe by construction: no image on disk means `install` returns nil in
+~30 µs and `require` reads source. Nothing in `ci.yml` builds one, so that is what every job
+does. The suite is green *imaged* (1222/1222 locally with one verified live), so this is a gap in
+what CI proves rather than a bug behind it — but it is nondeterministic rather than absent, because
+`image_matches_source.rs` builds an image and writes it to `~/.cache/brood`, and nextest schedules
+cases in no guaranteed order. Same shape as the KI-72 guard hole one level down, found the same way.
+
+The fix has a constraint that is easy to miss: building the image makes `autoload_race`'s
+default-path arms imaged too, so source-path race coverage would silently vanish. One job has to
+stay on source deliberately.
+
+**The boot win nobody recorded.** v0.15.0 carries a ~5-6 ms *fixed per-run* saving that lands on
+every benchmark row — `startup` 36 → 30 ms, `loop`/`sieve` −6 ms, `fib`/`collatz` −5 ms — and it
+closed KI-77 as a side effect. Nothing in the log claims it. Before bisecting, the rule from
+brood-benchmarks' CLAUDE.md applies: **sample three or four points across the range and look at
+the curve.** A ramp means there is nothing to find and `git bisect` will still return a commit —
+that is how a `primes` regression once got attributed to a `.blsp` *test file*.
+
+**The installed binary drifts, and it is load-bearing for benchmarks.** `~/.local/bin/brood` sat
+15+ commits behind most of the day. `make doctor` reports it; nothing enforces it. The harness runs
+whatever is on `PATH`, so a published run against a stale or dev-tools build silently measures
+something other than what `make ab` and `nest release` do. The lean install
+(`INSTALL_FEATURES='$(RUN_FEATURES)'`) is the one that keeps those three on one build — and
+contrary to an older note, `nest test` works fine on it.
+
+### The benchmark publish, and two things it found that nobody was looking for
+
+Published a full seven-language run (brood-benchmarks `9fa69bc`) at the harness defaults on the
+lean installed build. 224/224 row-language combinations agreed on checksums; the only broken row
+in the corpus was `json`, fixed earlier the same day.
+
+**1. `collatz` read 95 → 185 ms and the runtime had not regressed.** The previous published run
+was Brood 0.13.0 and predated the port's migration from bare `rem`/`quot`/`max` to qualified
+`math/*` — a migration the namespacing waves forced, since the bare names no longer exist. So the
+row had to change to keep running, and the change cost ~40%. Measured on one binary: qualified
+205 ms, the same names bare via `(:use math)` 204 ms, the primitives directly 121 ms.
+
+**Qualification is free; the wrapper is not.** `math/rem`/`math/quot` are Brood functions over one
+primitive and `math/max`/`math/min` are variadic over `apply`. Fifteen of the 31 rows call
+`math/*`, so it is a floor under half the suite — written up in
+[compute-frontier.md](compute-frontier.md) §2b with the fix direction CLAUDE.md prescribes
+(multi-arity dispatch in the evaluator, *not* Rust builtins — this is the worked example there).
+
+**2. `make ab` could no longer build any baseline older than today.** `bfa98682` added the
+`stdimage` cargo feature, and `ab-bench.sh` deliberately builds the baseline with *this* tree's
+Makefile so both sides get identical flags — which forwarded `--features brood/stdimage` into a
+worktree whose crate does not declare it. Cargo fails at dependency *resolution*, so it is not a
+compile error you can read past:
+
+```
+package `cli` depends on `brood` with feature `stdimage` but `brood` does not have that feature
+```
+
+`make ab` exists to compare against older refs, so this broke the tool for precisely its purpose,
+and it broke silently in the sense that nothing exercises it — no gate A/Bs against an old ref.
+Fixed by dropping a feature the baseline's own `Cargo.toml` does not declare, checked with one
+grep against that file rather than a hardcoded cutoff, so it cannot go stale the way a date would.
+
+Two limits found while verifying the fix, both worth knowing before trusting a cross-version A/B:
+
+- **A row whose program changed across a rename wave cannot be A/B'd across it.** `collatz` now
+  calls `math/rem`, which does not exist on 0.13.0, so the baseline cannot run the program at all.
+  This is the same shape as the `json/parse` → `json/decode` breakage: the benchmark corpus tracks
+  the current API, so it is only valid on refs that share it.
+- Rows that *didn't* change measure fine. `fib` reads **+12.9%** and `startup` +3.4% across
+  0.13.0 → HEAD, and `fib` also moved +6.4% in the harness — two independent signals, not yet
+  investigated. Taken together with the unattributed ~5-6 ms boot win, what is wanted is a
+  per-commit sweep recording **absolutes for trend**, which is what brood-benchmarks' CLAUDE.md
+  prescribes when the shape might be a ramp rather than a step.
+
+### Retraction, same day: there was no v0.15.0 boot win, and I made this feature's own documented mistake
+
+Earlier today's entries claim v0.15.0 carries a ~5-6 ms fixed per-run saving — an "unattributed
+17% startup win" — and I put that in the handoff, in KI-77's resolution, and in a commit message.
+**It is wrong.** `make ab BASE=dfcddc4f ROWS=startup` compares a worktree binary against the
+working-tree binary, and the working-tree binary had a **current stdlib image** while the worktree
+binary had none, because the image id carries the git sha and nothing had ever built one for that
+ref. So the arm I read as a code improvement was *imaged vs unimaged*.
+
+That is KI-72's trap 3, inverted — "the arm you believe is imaged is reading source" — and I made
+it in the same session in which I restored the paragraph describing it. Three measurements of the
+same quantity disagreed (−16.7%, −10.9%, +0.0%) and I attributed the first one instead of
+distrusting all three. The rule that resolves it was already written down: **verify the image per
+arm, not once per session.** `(stdimage/status)` exists precisely for that and reports `:live` /
+`:stale` / `:absent` beside the id it wants and the ids on disk.
+
+**What the trustworthy measurement says** — one session, all six binaries interleaved, all in the
+same (unimaged) state, core-pinned, best-of-9:
+
+| row | 0.13.0 | v0.14.0 | v0.14.1 | dfcddc4f | e9c54606 | HEAD |
+|---|---|---|---|---|---|---|
+| `startup` | **27 ms** | 35 | 34 | 36 | 36 | 36 |
+| `fib` | 106 | 108 | 112 | 115 | 114 | 114 |
+| `loop` | 84 | 91 | 89 | 93 | 92 | 95 |
+
+- `startup` is **flat from v0.14.0 to HEAD** — nothing in v0.15.0 to attribute. What is there is an
+  unrecorded **~30% step between 0.13.0 and v0.14.0**, partly given back later by the image flip,
+  which is why the published numbers only show 18.3 → 19.4 ms. A step is bisectable; this is the
+  real open question.
+- `fib` and `loop` are **ramps** (+7.5%, +13%), the shape brood-benchmarks' CLAUDE.md says has
+  nothing to find.
+
+**Two traps found while settling it**, both worth knowing before any image measurement:
+
+1. `make release-brood` rebuilds only `brood` (`-p cli`), so `target/release-fast/nest` stays at an
+   older commit and `nest stdimage` writes an image keyed to *nest's* id, which `brood` cannot use.
+   `brood` then reports `:stale` however many times you rebuild the image. Use `make release`.
+2. The id includes the **git sha even when the baked stdlib is byte-identical** — three images on
+   disk here shared content hash `f81c5e8bfacc125` and differed only by sha. So **any** commit
+   invalidates every image, not just a `std/` edit, which is broader than trap 3 states. The sha is
+   a deliberate conservative proxy for "the kernel interpreting this stdlib may have changed", so
+   it is not simply removable; it is a cost worth knowing rather than a bug.
+
+The general lesson, and the reason this is written up rather than quietly fixed: **a number that
+disagrees with itself across three measurements is not a number to attribute.** The failure was
+not the measurement, it was reporting a cause before the measurements agreed.
+
+### Correction: the collatz cost is ONE variadic call, not the `math/*` wrappers
+
+The entry above says the `math/*` wrappers cost ~40% and calls it a floor under 15 of the 31 rows.
+The measurement was right; the attribution was too broad, and the isolation that settles it is one
+line of `sed`:
+
+| variant | time |
+|---|---|
+| `math/rem`, `math/quot`, `math/max` all qualified | 223 ms |
+| the same, but `%max` called directly | **142 ms** |
+| all three primitives directly | **142 ms** |
+
+The middle row **equals** the bottom row. `math/rem` and `math/quot` are free; the whole delta is
+`math/max`.
+
+**And I read the JIT's own diagnostics backwards on the way here.** `math/rem`/`math/quot` appear
+in neither `BROOD_JIT_DUMP_IR`'s lowered arms nor `BROOD_JIT_BAIL_TRACE`'s refusals, and I took
+that to mean they run on the VM and the native loop pays a round-trip per arithmetic op. It means
+the opposite: a fixed-arity body that is a single primitive call is **inlined into its caller and
+ceases to exist**, so there is nothing left to lower or refuse. `steps` proves it — it lowers with
+**no `Call` instruction at all**:
+
+```
+arm: 17 (steps)  insts: Prim2SlotInt JumpIfFalse Local Jump Prim2SlotInt Const Prim2
+                        JumpIfFalse Prim2SlotInt Prim2SlotInt SelfCall Jump …
+```
+
+`math/max` is the one that shows up, as `GlobalIc Local Call`, because `(apply %max xs)` over
+`& xs` allocates an argument list and cannot be inlined.
+
+**Absence in a JIT trace is ambiguous** — it means "never hot", "refused", or "inlined away", and
+those want opposite responses. `BROOD_JIT_BAIL_TRACE` exists precisely because absence from the IR
+dump was ambiguous between the first two; this is the third case, and nothing distinguishes it
+except reading the caller's instruction list or isolating the call.
+
+So the lever is **variadic dispatch**, which is where CLAUDE.md's dogfooding section already points
+(its worked example is variadic `+`/`-`/`=`, and its prescribed fix is multi-arity dispatch in the
+evaluator rather than Rust builtins). The good news in the correction: the one-primitive inlining
+already works, so there is no inliner to build — only the variadic shape it cannot reach.
 ## 2026-08-28 — the ordering hole: three modules that could not sort their own values
 
 Picked up from "what is left on the library changes?" — the review had two datetime items

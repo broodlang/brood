@@ -47,7 +47,10 @@ Four things to carry forward, and the last two are measurement traps that will b
 - **The gate is now a differential, not an anecdote.** ADR-280's `image_matches_source.rs` loads
   every baked-in module twice — source and image — and requires name, kind, privacy and declared
   signature to match. It found a **sixth** divergence on its first run (materialising dropped
-  privacy: 1448 names) and is the thing a default-ON proposal should rest on.
+  privacy: 1448 names). **It is what made the default flip shippable:** the image went
+  **default-ON in v0.15.0** (`f114d01e`), opt out with `BROOD_NO_STDIMAGE=1`. The first flip was
+  reverted the same day it landed (KI-72); this one rests on a construction-level gate rather
+  than on anecdotes.
 - **The amplifier switches itself off.** `BROOD_STDLIB_HASH` covers every `std/**/*.blsp`, so any
   edit — including someone else's while your loop is running — changes the id, no image matches,
   and the image arm silently becomes the no-image arm. **Verify the image inside the measuring
@@ -58,11 +61,43 @@ Four things to carry forward, and the last two are measurement traps that will b
   83 lines of the better one. The code from both sides merged cleanly and every gate stayed green.
   Both accounts, and which claims were withdrawn, are now in the KI entry.
 
-**Still open: KI-74** and **KI-77**. KI-74 (⚠️ watching — one unnamed lib-suite failure, 20 clean
-runs since; re-run under nextest, which names the case, if it recurs). **KI-77** (⚠️ watching —
-the `loop` row is ~2-3% slower than v0.14.1, surviving both unpinned and interleaved measurement,
-localized to `464b6c57..HEAD`, not bisected; its entry carries the drift trap that blocks a naive
-bisect).
+**Three open items carried out of 2026-08-28, all of them measurement/coverage rather than bugs:**
+
+- **KI-78 (open)** — CI never builds a stdlib image, so every job tests the **source** path while
+  the shipped default is the **imaged** one. Not a suspected failure (the suite is green imaged,
+  1222/1222 locally), a gap in what CI proves. The fix has a constraint worth reading before
+  starting: building the image makes `autoload_race`'s default-path arms imaged too, so one job
+  must stay on source with `BROOD_NO_STDIMAGE=1` rather than trading one path for the other.
+- **~~An unattributed 17% startup win~~ — RETRACTED the same day; it was image state.** The
+  apparent v0.15.0 win was `make ab` comparing a working-tree binary that had a **current stdlib
+  image** against a worktree binary that had none (the image id carries the git sha, so no ref
+  ever has one built). That is KI-72's trap 3 inverted, and three measurements of it disagreed
+  (−16.7%, −10.9%, +0.0%) before per-arm state verification settled it. **Verify `(stdimage/status)`
+  is `:live` per arm, not once per session.**
+
+  A single-session interleaved sweep, every binary in the same (unimaged) state, says something
+  more useful — `startup` **27 ms at 0.13.0 → 35 at v0.14.0 → 36 at HEAD**: a **~30% step between
+  0.13.0 and v0.14.0** that nothing records, then flat. That step is the real open question and,
+  being a step, is bisectable. `fib` (106→114) and `loop` (84→95) are **ramps** over the same span,
+  which brood-benchmarks' CLAUDE.md says is the shape with nothing to bisect.
+
+  Two traps to carry: `make release-brood` rebuilds only `brood`, so `nest` is left at an older
+  commit and `nest stdimage` writes an image `brood` cannot use — it reports `:stale` forever.
+  Use `make release`. And the id includes the git sha even when the baked stdlib is byte-identical
+  (seen here: same content hash `f81c5e8bfacc125`, three different shas), so **any** commit
+  invalidates every image, which is broader than trap 3 states.
+
+- **`~/.local/bin/brood` drifts.** It was 15+ commits behind for most of the day, which
+  `make doctor` reports and nothing enforces. For a published benchmark run it must be the **lean**
+  build (`make install INSTALL_FEATURES='$(RUN_FEATURES)'`) so the published numbers, `make ab`'s
+  numbers and what users run are one build. `nest test` works fine on lean (verified 2026-07-30 —
+  an older note claiming otherwise is wrong).
+
+**Still open: KI-74** (⚠️ watching — one unnamed lib-suite failure, 20 clean runs since; re-run
+under nextest, which names the case, if it recurs) and **KI-78** above. **KI-77 is resolved** — it
+was real when filed and the boot win above closed it; its entry keeps the measurement method,
+because that row's absolute numbers drift ~3% between sessions and only same-session interleaved
+pairs mean anything on it.
 
 **Still open: KI-74** (⚠️ watching — one unnamed lib-suite failure, 20 clean runs since;
 re-run under nextest, which names the case, if it recurs).

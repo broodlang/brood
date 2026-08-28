@@ -184,6 +184,21 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 [scripts.setup.warm-boot-cache]
 command = 'scripts/warm-boot-cache.sh'
 
+# --- KI-78: build the stdlib image, so the suite runs the load path users get ---
+#
+# The image is DEFAULT-ON (v0.15.0, ADR-256/281) and safe by construction when absent, so with
+# nothing building one every job ran the SOURCE path while the shipped default was the imaged
+# one. Worse, coverage was nondeterministic rather than absent: `image_matches_source.rs`
+# (ADR-280) builds an image and writes it to ~/.cache/brood, so whether any other case ran imaged
+# depended on which case nextest scheduled first.
+#
+# The script exits 0 on every failure path (no `nest` built yet => no image => the suite behaves
+# as before, which is a correct configuration). Its off switch is BROOD_NO_STDIMAGE=1 — the same
+# variable that disables the image at runtime — which is how ci.yml's tree-walker job keeps
+# deliberate SOURCE-path coverage instead of the two paths trading places.
+[scripts.setup.build-std-image]
+command = 'scripts/build-std-image.sh'
+
 [[profile.default.scripts]]
 filter = 'all()'
-setup = 'warm-boot-cache'
+setup = ['warm-boot-cache', 'build-std-image']
