@@ -38,8 +38,15 @@ if [ "$blsp_touched" -gt 0 ]; then
     #
     # So: prefer a binary whose build sha matches HEAD; failing that take the newest by
     # mtime and say the answer may be stale. Never block on "no binary" — unchanged.
+    #
+    # `target/release-fast/nest` comes FIRST because that is what `make release` builds
+    # (RELEASE_DIR); target/release is only written by a plain `cargo build --release`.
+    # Omitting it is how this hook announced "no nest built at 39cb081b; using the newest
+    # (./target/debug/nest, 6790e1b6)" on 2026-08-28 while a matching binary sat in
+    # release-fast — the same wrong-artifact class as KI-76, which was `green.sh` reading
+    # target/release for the same reason. If you add a build output path, add it here.
     head_sha=$(git rev-parse --short=8 HEAD 2>/dev/null)
-    for candidate in ./target/release/nest ./target/debug/nest "$(command -v nest 2>/dev/null)"; do
+    for candidate in ./target/release-fast/nest ./target/release/nest ./target/debug/nest "$(command -v nest 2>/dev/null)"; do
         [ -n "$candidate" ] && [ -x "$candidate" ] || continue
         case "$("$candidate" --version 2>/dev/null)" in
             *"$head_sha"*) nest_bin="$candidate"; break ;;
@@ -48,7 +55,7 @@ if [ "$blsp_touched" -gt 0 ]; then
     if [ -z "$nest_bin" ]; then
         # Nothing matches HEAD (a dirty tree, or nothing rebuilt since the last commit).
         # Fall back to the most recently BUILT candidate rather than a fixed order.
-        for candidate in ./target/release/nest ./target/debug/nest "$(command -v nest 2>/dev/null)"; do
+        for candidate in ./target/release-fast/nest ./target/release/nest ./target/debug/nest "$(command -v nest 2>/dev/null)"; do
             [ -n "$candidate" ] && [ -x "$candidate" ] || continue
             if [ -z "$nest_bin" ] || [ "$candidate" -nt "$nest_bin" ]; then nest_bin="$candidate"; fi
         done

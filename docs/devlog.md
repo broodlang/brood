@@ -5292,3 +5292,80 @@ Three gate defects in two days (KI-68 dead corpora, KI-70 a walk that returned e
 wrong artifact) now share one sentence: **a gate must assert what it is gating on.** KI-68's
 differential did not check its programs were alive, KI-70's walk did not check it reached the
 code, KI-76's script did not check the binary was the tree's.
+
+### KI-72 closed: the children died, and the image was publishing a module half-built
+
+The only open bug, and the one blocking the biggest available wide-perf win — the stdlib image
+cuts `json` 6.5 → 1.7 ms, `http` 12.0 → 3.6 ms, `regex` 4.7 → 1.1 ms and the `json` benchmark
+row −5.6%, and it has shipped opt-in since the day it was flipped off.
+
+Three prior sessions had characterised this as a lost message: root blocked in `receive`, mailbox
+**empty**, all 12 workers idle, and (correctly) that the wait is unbounded rather than a 5 s
+poll. The entry closed with the honest open question — *"a lost `send`, a child that died
+silently, or a child that never got scheduled. Distinguishing those is where this stands."*
+
+It is the second, and one flag answers it:
+
+```
+$ BROOD_STDIMAGE=1 ./autoload_race-… --exact racing_the_first_call_into_string_is_sound --nocapture
+process 11 died: unbound error: unbound symbol: string/whitespace?
+… 17 of 24 children, same error
+```
+
+`fan` uses `spawn`, not `spawn-link`, so a dead child is invisible to the root: it never sends,
+and the root waits for 24 replies that will never total 24. The empty mailbox and the idle
+workers were consistent with this all along and needed no mailbox or scheduler explanation.
+
+**Why three investigations missed it.** The message is written from a *green process*, and
+libtest captures output per thread — so `cargo test` and nextest swallow it. It shows only under
+`--nocapture`. The bug was chased with gdb and in-language watchdogs (which, as the entry warns,
+perturb the timing) and nobody read a hung run's full output. Same lesson as KI-64: read what the
+program actually printed before reasoning about what it must be doing.
+
+**The mechanism.** A section's entries are `define`d one at a time into the runtime's **shared**
+global table, so each name is callable the instant it lands — and the writer ordered sections by
+`(global-names)`, in which a public can precede a module-private it calls:
+
+| entry | position in `string`'s 51-entry section |
+|---|---|
+| `string/blank?` (public) | 7 |
+| `string/triml` / `triml-from` | 46 / 47 |
+| `string/trimr` / `trimr-to` | 48 / 49 |
+| `string/whitespace?` (**private**, called by all four) | **51** |
+
+For 44 definitions `string/blank?` is bound while the `whitespace?` in its body is not. Loading
+from source is immune for a structural reason: the file defines `whitespace?` at line 190 and
+`blank?` at 192 — callee before caller. The image inherited no such guarantee.
+
+That finally explains every stubborn feature: the image is the amplifier because only the image
+installs in an order unrelated to source order; it is intermittent because a child must resolve
+the public name inside the window; every in-language observer moved the window; re-ordering
+`provide` did nothing because **the child never consults the require protocol at all** — the name
+is already bound, so there is no stub to trigger a load and nothing to wait on; and one `Interp`
+on one thread reproduces because the concurrency needed is between green processes, not runtimes.
+
+**Fix: privates first** (`std/tool/stdimage.blsp` — policy stays in Brood, ADR-006). A public name
+is never reachable before the privates it closes over. Sorting by definition site was tried first
+and cannot work: `reflect/source-location` returns `nil` for a `defn-`, which is exactly the half
+that matters.
+
+**Measured, image verified live in every arm** (`[image] install: 103 sections` *plus* `[image]
+string` materialisation lines — the entry's own trap is that a committed sha invalidates the image
+and a silent 0/N then looks like a fix):
+
+| repro | before | after | control (image off) |
+|---|---|---|---|
+| string test, 12s cap | 5/12 hang | **0/24** | 0/12 |
+| seq test | — | 0/12 | — |
+| whole binary, `--test-threads=4` | — | 0/10 | — |
+| **original 12-parallel, 90s cap** | **12/12** | **0/12** | 0/12 |
+
+The last row is the condition the entry set for calling the image safe to default on: the image
+arm at *parity* with the no-image arm, not merely under the cap.
+
+**Not claimed:** that this makes the image default-ON. That is a separate decision with its own
+measurement, and the residual is recorded — privates-first does not order public→public, and full
+source-order parity is unavailable because privates have no def-site. The complete fix is an
+atomic section install, and the KI entry now carries the GC trap waiting in the obvious version of
+it: buffering the built values in a Rust `Vec` leaves them unrooted while `from_message` keeps
+allocating.
