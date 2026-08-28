@@ -1,0 +1,120 @@
+;; std/tool/doctest.blsp — a documented example is a promise; run it.
+;;
+;; An example in a docstring is a claim about behaviour, and a wrong one is worse than no
+;; example at all: it reads as authoritative and it is invisible to every other gate — the
+;; checker does not evaluate docstrings, and no test covers prose. Two of the first batch
+;; written for `std/` were already wrong when this machinery was first applied there.
+;;
+;; The engine lived as six private functions inside `tests/doc_examples_test.blsp`, hard-wired
+;; to `builtin-modules`, so it could gate the standard library and nothing else. It is the
+;; same code here, made public and pointed at whichever names you ask for — which is what
+;; `nest test` needs to gate a *project's* docstrings the way this repo gates its own.
+
+(defmodule doctest
+  "Run the examples in docstrings and report the ones that do not hold.
+
+The convention, and the one to write new examples in:
+
+    \"…prose…
+
+        (count [1 2 3])   → 3
+        (get {:a 1} :zz)  → nil\"
+
+An **indented** line containing ` → ` is a case: the left side is evaluated and must equal
+the right. A trailing `; comment` is ignored. Only indented lines count — inline `e.g. …`
+prose is left alone deliberately, since much of it names values that do not exist outside
+the sentence.
+
+    (doctest/failures-under \"myapp/\")   ;; → the examples that do not hold
+    (doctest/failures)                    ;; → …across every public name in the image")
+
+(defn- strip-comment
+  (line)
+  ;; `line` up to a trailing `;`, so `→ :x  ; note` compares against `:x`.
+  (let (i (index-of line ";")) (if (and i (>= i 0)) (string/substring line 0 i) line)))
+
+(defn example-lines (d)
+  "The indented ` → ` lines of docstring `d` — the example cases it carries."
+  (filter (fn (l) (and (string/starts-with? l "    ") (includes? l " → ")))
+    (string/split (str d) "\n")))
+
+(defn- case-of
+  (line)
+  ;; `[source expected]` for one example line, or nil when it does not split cleanly.
+  (let (parts (string/split (strip-comment line) " → "))
+    (when (= 2 (count parts))
+      [(string/trim (first parts)) (string/trim (second parts))])))
+
+(defn- holds?
+  (value expected)
+  ;; Does `value` satisfy the documented result text `expected`?
+  ;;
+  ;; Compared as a VALUE when `expected` reads as one, and only then as text. A printed map
+  ;; or set is in the trie's order, and that order depends on the ids the symbol interner
+  ;; handed out — so it moves when anything else in the image changes, *including adding an
+  ;; unrelated kernel primitive*. That is how this fired once: `%codepoints->string` shifted
+  ;; the interning and `(seq/frequencies [:a :b :a])` began printing `{:a 2, :b 1}` where the
+  ;; docstring recorded the equally-correct `{:b 1, :a 2}`. The same example passed when
+  ;; evaluated on its own, which is the tell that the comparison and not the example was
+  ;; wrong.
+  ;;
+  ;; Reading rather than evaluating is deliberate: a documented list result is written
+  ;; `(:a :b)`, which as a *form* would call `:a`. Read, it is the list value it depicts.
+  ;; Anything that does not read — `#<fn>`, a `RAISED …` line — falls back to comparing
+  ;; `pr-str`, so nothing is silently accepted.
+  (let (parsed (try [:ok (reflect/read-string expected)] (catch _ nil)))
+    (if parsed (= value (second parsed)) (= (pr-str value) expected))))
+
+(defn check (name-str line)
+  "nil when the example on `line` holds, else a description of how it failed.
+
+`name-str` only labels the message — it is the name the example was found on."
+  (let (c (case-of line))
+    (when c
+      (let ([src expected] c
+            outcome (try
+                      [:ok (eval (reflect/read-string src))]
+                      (catch e [:raised (str "RAISED " (error-message e))]))
+            ok (if (= (first outcome) :raised)
+                 (= (second outcome) expected)
+                 (holds? (second outcome) expected)))
+        (when (not ok)
+          (str name-str
+            ": "
+            src
+            "  → got "
+            (if (= (first outcome) :raised) (second outcome) (pr-str (second outcome)))
+            ", documented "
+            expected))))))
+
+(defn- documented?
+  (s)
+  (let (d (try (doc (eval s)) (catch _ nil)))
+    (and d (not (empty? (example-lines d))))))
+
+(defn documented-names ()
+  "Every public name in the image whose docstring carries at least one indented example."
+  (filter documented? (filter (fn (s) (not (private? s))) (global-names))))
+
+(defn documented-names-under (prefix)
+  "As `documented-names`, restricted to names starting with `prefix` — `\"myapp/\"` for one
+package's own surface. A nil `prefix` means every public name."
+  (if (nil? prefix)
+    (documented-names)
+    (filter (fn (s) (string/starts-with? (->string s) prefix)) (documented-names))))
+
+(defn- failures-of
+  (s)
+  (let (d (doc (eval s)))
+    (filter (fn (x) (not (nil? x))) (map (fn (l) (check (->string s) l)) (example-lines d)))))
+
+(defn failures-under (prefix)
+  "Every documented example that does not hold, for public names under `prefix` (nil = the
+whole image). A vector of descriptions, empty when every example holds — the caller decides
+whether that is a failure, so this is usable as a report as well as a gate."
+  (apply vector
+    (fold (fn (acc s) (append acc (failures-of s))) [] (documented-names-under prefix))))
+
+(defn failures ()
+  "Every documented example in the image that does not hold."
+  (failures-under nil))
