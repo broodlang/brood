@@ -1859,9 +1859,7 @@ pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Opti
                 // silently stop being checked. (`/or` and friends appear to work anyway
                 // only because the *evaluator* expands macros at runtime — the checker
                 // never evaluates, so it does not get that second chance.)
-                None if is_root_escape(sym) => {
-                    value::intern(&value::symbol_name(sym)[1..])
-                }
+                None if is_root_escape(sym) => value::intern(&value::symbol_name(sym)[1..]),
                 None => heap.import_of(sym).unwrap_or(sym),
             };
             match (

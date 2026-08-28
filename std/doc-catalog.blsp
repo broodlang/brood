@@ -84,6 +84,12 @@
    "bit/->float" :convert
    "string/blank?" :predicates
    "bool?" :predicates
+   ;; The `std/datetime` record predicates. They live in the PRELUDE (identity checks on a
+   ;; record id, so they cost nothing and need no module load) while the types they test
+   ;; live in `std/datetime` — which is exactly why they are easy to miss here.
+   "date?" :predicates
+   "datetime?" :predicates
+   "time-of-day?" :predicates
    "bound?" :meta
    "system/brood-version" :meta
    "system/build-id" :meta
