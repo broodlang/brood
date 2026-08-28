@@ -1,9 +1,28 @@
 //! Value equality, comparison, hashing (child of heap).
 use super::*;
 
+/// Order two floats as a TOTAL order, for `value_cmp` — which is a sort key, not an
+/// IEEE predicate. `partial_cmp(...).unwrap_or(Equal)` used to stand here and it made
+/// `NaN` compare **equal to everything**, so a single `NaN` silently turned `sort` into a
+/// no-op: `(sort [3.0 nan 1.0 2.0])` returned its input unsorted, with no error (KI-75).
+///
+/// NaN sorts LAST and is equal only to itself, which is Rust's `f64::total_cmp` and Java's
+/// `Double.compare`. That deliberately disagrees with `<`/`<=`/`>`, which stay IEEE (every
+/// comparison against NaN is false) — they answer a different question. `compare` promises a
+/// total order because `sort` needs one; `<` promises IEEE because arithmetic needs that.
+fn float_total_cmp(x: f64, y: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (x.is_nan(), y.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => x.partial_cmp(&y).expect("neither operand is NaN"),
+    }
+}
+
 /// Order a bignum against a float for `value_cmp`'s heterogeneous numeric
-/// fallback, **exactly**. A `NaN` float is `Equal` (matching the `Float`/`Float`
-/// arm's `unwrap_or(Equal)`); ±∞ is beyond any finite bignum. Otherwise both
+/// fallback, **exactly**. A `NaN` float sorts LAST (so the bignum is `Less`), matching
+/// `float_total_cmp`; ±∞ is beyond any finite bignum. Otherwise both
 /// sides convert to `BigDecimal` — every finite `f64` is a dyadic rational, so
 /// its decimal form is exact, as is the bignum's — and we compare in base 10.
 /// This avoids the precision loss of the old `BigInt::to_f64` path, which could
@@ -14,14 +33,17 @@ fn bigint_cmp_float(b: &num_bigint::BigInt, f: f64) -> std::cmp::Ordering {
 }
 
 /// Order a `BigDecimal` against a float **exactly** — the shared kernel of the
-/// bignum-vs-float and decimal-vs-float `value_cmp` arms. `NaN` is `Equal`
-/// (matching `Float`/`Float`'s `unwrap_or(Equal)`); ±∞ is beyond any finite
+/// bignum-vs-float and decimal-vs-float `value_cmp` arms. `NaN` sorts LAST (so the
+/// left-hand value is `Less`), matching `float_total_cmp`; ±∞ is beyond any finite
 /// value. Otherwise compare in base 10: every finite f64 is a dyadic rational,
 /// so its `BigDecimal` form is exact — no rounding either side.
 fn bigdecimal_cmp_float(b: &bigdecimal::BigDecimal, f: f64) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     if f.is_nan() {
-        return Ordering::Equal;
+        // NaN sorts LAST, so any real value is Less than it — the same total order
+        // `float_total_cmp` gives. This returned `Equal` until 2026-08-28, which made a
+        // NaN compare equal to every number it met (KI-75).
+        return Ordering::Less;
     }
     if f.is_infinite() {
         return if f > 0.0 {
@@ -780,9 +802,7 @@ impl Heap {
             (ValueRef::Int(x), ValueRef::Int(y)) => return x.cmp(&y),
             (ValueRef::Nil, ValueRef::Nil) => return Ordering::Equal,
             (ValueRef::Bool(x), ValueRef::Bool(y)) => return x.cmp(&y),
-            (ValueRef::Float(x), ValueRef::Float(y)) => {
-                return x.partial_cmp(&y).unwrap_or(Ordering::Equal)
-            }
+            (ValueRef::Float(x), ValueRef::Float(y)) => return float_total_cmp(x, y),
             _ => {}
         }
         stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
@@ -797,9 +817,17 @@ impl Heap {
             (Nil, Nil) => Ordering::Equal,
             (Bool(x), Bool(y)) => x.cmp(&y),
             (Int(x), Int(y)) => x.cmp(&y),
-            (Float(x), Float(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
-            (Int(x), Float(y)) => (x as f64).partial_cmp(&y).unwrap_or(Ordering::Equal),
-            (Float(x), Int(y)) => x.partial_cmp(&(y as f64)).unwrap_or(Ordering::Equal),
+            (Float(x), Float(y)) => float_total_cmp(x, y),
+            // `Int` vs `Float` goes through the same EXACT base-10 path the BigInt,
+            // Decimal and Ratio arms already used. It was `(x as f64)` — a lossy cast —
+            // so past 2^53 two different integers compared EQUAL:
+            // `(compare 9007199254740993 9007199254740992.0)` was 0, while `=` said false
+            // and `>` said false. Every other cross-type numeric arm was already exact;
+            // this one arm was the odd one out (KI-75).
+            (Int(x), Float(y)) => bigdecimal_cmp_float(&bigdecimal::BigDecimal::from(x), y),
+            (Float(x), Int(y)) => {
+                bigdecimal_cmp_float(&bigdecimal::BigDecimal::from(y), x).reverse()
+            }
             // Bignums: compare by value, with the other operand promoted. A
             // BigInt is always outside the i64 range, so a BigInt vs an Int is
             // ordered by the bignum's sign (it's strictly larger/smaller in
@@ -907,12 +935,43 @@ mod bigint_cmp_float_tests {
         assert_eq!(bigint_cmp_float(&(&p70 - &one), f), Ordering::Less);
     }
 
+    /// NaN sorts LAST, so any real value is `Less` than it. This asserted `Equal` until
+    /// 2026-08-28, which is what made a NaN compare equal to every number it met and turned
+    /// `(sort [3.0 nan 1.0 2.0])` into a silent no-op (KI-75). `<`/`<=`/`>` are unaffected
+    /// and stay IEEE — they answer a different question than a sort key does.
     #[test]
-    fn nan_is_equal_and_infinities_order_by_sign() {
+    fn nan_sorts_last_and_infinities_order_by_sign() {
         let b = BigInt::from(5);
-        assert_eq!(bigint_cmp_float(&b, f64::NAN), Ordering::Equal);
+        assert_eq!(bigint_cmp_float(&b, f64::NAN), Ordering::Less);
         assert_eq!(bigint_cmp_float(&b, f64::INFINITY), Ordering::Less);
         assert_eq!(bigint_cmp_float(&b, f64::NEG_INFINITY), Ordering::Greater);
+    }
+
+    /// The total order `float_total_cmp` promises, stated directly: NaN is greater than
+    /// every real, equal to itself, and the ordinary floats are unaffected.
+    #[test]
+    fn float_total_cmp_is_a_total_order() {
+        use super::float_total_cmp;
+        assert_eq!(float_total_cmp(f64::NAN, 1.0), Ordering::Greater);
+        assert_eq!(float_total_cmp(1.0, f64::NAN), Ordering::Less);
+        assert_eq!(float_total_cmp(f64::NAN, f64::NAN), Ordering::Equal);
+        assert_eq!(float_total_cmp(f64::NAN, f64::INFINITY), Ordering::Greater);
+        assert_eq!(float_total_cmp(1.0, 2.0), Ordering::Less);
+        assert_eq!(float_total_cmp(0.0, -0.0), Ordering::Equal);
+    }
+
+    /// The `Int` vs `Float` arm used a lossy `as f64` cast, so two DIFFERENT integers either
+    /// side of 2^53 compared `Equal` (KI-75). Every other cross-type arm was already exact.
+    #[test]
+    fn int_vs_float_is_exact_past_2_53() {
+        use super::bigdecimal_cmp_float;
+        use bigdecimal::BigDecimal;
+        // 2^53 = 9007199254740992 is representable; 2^53+1 is not.
+        let above = BigDecimal::from(9007199254740993i64);
+        let at = 9007199254740992.0f64;
+        assert_eq!(bigdecimal_cmp_float(&above, at), Ordering::Greater);
+        let at_int = BigDecimal::from(9007199254740992i64);
+        assert_eq!(bigdecimal_cmp_float(&at_int, at), Ordering::Equal);
     }
 
     #[test]

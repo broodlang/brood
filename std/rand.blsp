@@ -34,3 +34,4 @@
 
     (count (rand/token 8))   → 16   ; hex, two chars per byte"
   (%random-token n))
+(sig token (int -> string))

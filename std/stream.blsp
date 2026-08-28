@@ -80,6 +80,7 @@ monitor is the whole guard."
 (defn close (s)
   "Signal stream `s` to clean up and exit. Returns nil immediately."
   (send s :stream-close))
+(sig close ((or map pid) -> nil))
 
 ;; ---- sources ----------------------------------------------------------------
 
@@ -138,7 +139,7 @@ monitor is the whole guard."
                    (send r :stream-done)
                    (do
                      (send r [:stream-val (second result)])
-                     (fn-loop f (seq/third result))))))
+                     (fn-loop f (third result))))))
     (:stream-close nil)))
 
 (defn range (start stop)

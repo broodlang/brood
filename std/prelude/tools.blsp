@@ -368,6 +368,7 @@ than once. Prefer the `%swap-registry!` macro, which writes both arguments for y
     (if (%registry-cas! sym old new)
       new
       (%registry-swap! sym read f))))
+(sig %registry-swap! (any (or fn keyword) (or fn keyword) -> any))
 
 (defmacro %swap-registry! (registry f)
   "Atomically update registry global `registry` by `(f current)` — e.g.
@@ -1866,6 +1867,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                   (str "ability " aname "/" op ": no impl for " key)
                   (str "ability " aname "/" op ": no impl for " key " — have " known)))
     (throw {:kind :%no-impl :message message :ability aname :op op :id key :have known})))
+(sig %no-impl (seqable any -> never))
 
 (defn satisfies? (aname x)
   "True if ability `aname` is implemented for `x`'s identity — every declared op
@@ -2242,7 +2244,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   (`+`/`*`/`min`/`max`) or `:antisymmetric` (`compare-to`) — so a binary op is authored as the
   UPPER TRIANGLE of its type-pair matrix. See [[decisions]] ADR-179.
 
-    (defmulti num-add :commutative)
+    (defmulti num/add :commutative)
     (defmulti compare-to :antisymmetric)
     (defmulti render)"
   (let (algebra (if (empty? opts) nil (first opts)))
@@ -2271,8 +2273,8 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   spelling `impl` uses. STRICT (no guessing): the pattern must be a vector of ids and the
   method's arg count must match the pattern length — a mismatch fails at load.
 
-    (defmethod num-add [money money] (a b) (money (+ (cents a) (cents b))))
-    (defmethod num-add [money :int]  (m n) (money (+ (cents m) n)))    ; + is commutative
+    (defmethod num/add [money money] (a b) (money (+ (cents a) (cents b))))
+    (defmethod num/add [money :int]  (m n) (money (+ (cents m) n)))    ; + is commutative
     (defmethod render   :default     (x) (str x))                      ; the catch-all"
   (cond
     ; the catch-all: consulted only when no exact identity-tuple matches. A keyword sentinel,
@@ -2428,10 +2430,10 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; operand is a record, so int/float arithmetic is byte-for-byte untouched. `+`/`*` are
 ;; `:commutative` (author `[usd :int]` and `[:int usd]` is derived); `-`/`/` are not. There is
 ;; NO `:default` — a pair with no method gets the loud `%no-method` error.
-(defmulti num-add :commutative)
-(defmulti num-sub)
-(defmulti num-mul :commutative)
-(defmulti num-div)
+(defmulti num/add :commutative)
+(defmulti num/sub)
+(defmulti num/mul :commutative)
+(defmulti num/div)
 
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through

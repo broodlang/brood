@@ -21,7 +21,9 @@ crypto/syscalls are Rust.")
 (defn listen (host port cert-pem key-pem)
   "Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like `tcp/listen`, connections arrive as `[:tcp-accept lsock client]`; each accepted socket transparently decrypts inbound to `[:tcp …]` and encrypts `tcp/send`, so code above the transport is unchanged. Returns a socket."
   (%tls-listen host port cert-pem key-pem))
+(sig listen (string int string string -> socket))
 
 (defn self-signed (host)
   "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns `[cert-pem key-pem]` — pass them to `tls/listen`. Not for production (clients reject a self-signed cert unless told to trust it)."
   (%tls-self-signed host))
+(sig self-signed (string -> list))

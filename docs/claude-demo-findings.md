@@ -4,7 +4,7 @@ Written 2026-05-28 by an LLM (Claude Opus 4.7) after attempting a
 concurrent ASCII Mandelbrot in Brood, working only from the supplied
 docs/brood-for-claude.md and the std/prelude source. The demo is
 intentionally ambitious — it exercises math, recursion, immutable maps,
-transducers, processes, defprocess/hatch, selective receive, pattern
+transducers, processes, defserver/hatch, selective receive, pattern
 matching, gensym macros, and timing. Everything worked **in isolation**
 in a probe; the full program tripped a runtime bug under load. The
 notes below mix everything I hit: language familiarity, stdlib gaps,
@@ -26,7 +26,7 @@ next person fastest.
    `crates/lisp/src/eval/mod.rs:380`. With `-j 1` everything works.
    Until this is fixed, no fan-out demo can credibly ship.
 2. **Type-checker noise around `(require 'hatch)`** — every file using
-   `defprocess` / `cast` / `!` / `hatch` prints five "unbound symbol"
+   `defserver` / `cast` / `!` / `hatch` prints five "unbound symbol"
    warnings at load. They look like errors. A new user's first
    reaction is "this is broken."
 3. **`nest format` collapses readable code onto single lines** — multi-
@@ -38,7 +38,7 @@ next person fastest.
 
 4. The quick-ref doc (`docs/brood-for-claude.md`) is missing a number of
    builtins the prelude/examples assume: `apply`, `now`, `gensym`, `for`,
-   `defprocess` / `hatch` / `!` / `gen-call` / `sleep`, `char-at`,
+   `defserver` / `hatch` / `!` / `gen-call` / `sleep`, `char-at`,
    `quot`, `string-length`.
 5. Float formatting via `str` prints full f64 precision
    (`0.015873015873015872`). No `format`, no `to-fixed`, no `printf`.
@@ -59,11 +59,11 @@ I had to:
 - Read `std/prelude.blsp` end-to-end to find `apply`, `gensym`, `for`,
   `quot`, `char-at`, `string-length`, `pr-str`, `enumerate`,
   `%iterate-times`, `partition`, `frequencies`.
-- Read `std/hatch.blsp` to learn `defprocess`/`cast`/`call`/`!`/
+- Read `std/hatch.blsp` to learn `defserver`/`cast`/`call`/`!`/
   `gen-call`/`hatch`/`sleep` — none of these appear in the quick-ref.
 - Read `crates/lisp/src/builtins/mod.rs` to discover `now` (no other doc
   mentions it).
-- Read `examples/life.blsp` to discover `defprocess` exists at all,
+- Read `examples/life.blsp` to discover `defserver` exists at all,
   and that ANSI escape codes are first-class (great feature!).
 
 **What this means in practice:** any non-trivial demo requires a
@@ -74,7 +74,7 @@ that's three or four extra tool calls per attempt.
 
 - `apply`, `now`, `gensym`, `for`, `doseq`, `dotimes`, `dolist`,
   `enumerate`, `partition`, `frequencies`, `mapcat`, `zip`.
-- `defprocess`, `hatch`, `!`, `gen-call`, `sleep` — these *are* the
+- `defserver`, `hatch`, `!`, `gen-call`, `sleep` — these *are* the
   idiomatic concurrency story and they're completely missing from
   the doc that bills itself as "the pocket guide."
 - `pr-str` vs `str`, and which one preserves structure (the prelude
@@ -162,7 +162,7 @@ reliably, but kills the speedup story.
 - The panic site `eval/mod.rs:380` — start there.
 - Whether `Heap` or `EnvId` is `Send` but not actually safe to share.
 - Whether `def` (which the prelude does at load) is racing with
-  worker spawns. Note: `defprocess`-generated functions are `defn`s,
+  worker spawns. Note: `defserver`-generated functions are `defn`s,
   so they're added to the global env after `require 'hatch` completes.
   If a worker is spawned while another thread is still resolving
   prelude symbols, the env could be in an intermediate state.
@@ -262,7 +262,7 @@ to reach into the prelude to find:
 
 - `(parallel-map f coll [n-workers])` — the cliché demo of "fan out and
   gather" is currently 30+ lines (worker loop, dispatch, collector,
-  defprocess, hatch, stop-all, await-done). Could be one function.
+  defserver, hatch, stop-all, await-done). Could be one function.
 - `(supervise [pids…] strategy)` — for shutdown, restart, etc.
 - A worked example of `monitor` somewhere visible.
 
@@ -330,10 +330,10 @@ This is the standard Clojure/Racket/Emacs-Lisp formatter behavior.
 The current Brood formatter feels closer to `prettier --print-width=120`
 on JS — which is the wrong target for a Lisp.
 
-### 6.2 Type-checker warnings on `defprocess` / `hatch` / `!` / `cast` (severity: high for first-time UX)
+### 6.2 Type-checker warnings on `defserver` / `hatch` / `!` / `cast` (severity: high for first-time UX)
 
 ```
-src/mandel.blsp:53:1: warning: unbound symbol: defprocess
+src/mandel.blsp:53:1: warning: unbound symbol: defserver
 src/mandel.blsp:53:23: warning: unbound symbol: state
 src/mandel.blsp:57:3: warning: unbound symbol: cast
 src/mandel.blsp:66:6: warning: unbound symbol: !
@@ -347,7 +347,7 @@ type-checker should:
 - Recognize macros and macro-introduced bindings.
 - Or run after `require` resolution rather than before.
 - Or suppress unknown-symbol warnings inside the body of a form whose
-  head is itself a known macro (defprocess introduces its own scope).
+  head is itself a known macro (defserver introduces its own scope).
 
 This is the first thing a new user sees. It looks broken.
 
@@ -412,7 +412,7 @@ program exercises:
 - Multi-clause / destructured `fn` params.
 - Tail-recursive `escape--iter`.
 - Transducer in the render path (`xmap` + `str` as the reducing fn).
-- `defprocess` collector with a `cast` clause that returns the next
+- `defserver` collector with a `cast` clause that returns the next
   state, with a guard to `send` the parent when work is complete.
 - Selective `receive` with two patterns (`[:job …]` and `:stop`).
 - A `gensym`-based `time-it` macro returning `[ms result]` for
@@ -444,7 +444,7 @@ If you can only do **three things**:
 If you have **a week**, add to that list:
 
 4. Expand `docs/brood-for-claude.md` to cover the missing builtins,
-   `defprocess`/`hatch`, and a worked worker-pool example.
+   `defserver`/`hatch`, and a worked worker-pool example.
 5. Add `(format …)`, `(bench …)`, `(now-ns)`, `(string-repeat …)`,
    `(repeat …)`, `(pad-left …)`, `(pad-right …)`, `(round-to …)`,
    `(parallel-map …)` to the prelude.
@@ -472,7 +472,7 @@ If the scheduler race were fixed, the natural next demo would be:
   frames; main process drives the redraw.
 - **Distributed N-queens** — `node-start` / `remote-spawn` are
   intriguing kernel features that I didn't touch.
-- **A toy bytecode VM written in Brood** — `defprocess` workers as
+- **A toy bytecode VM written in Brood** — `defserver` workers as
   CPU cores, executing a tagged-data ISA, would showcase pattern
   matching and immutable state machines simultaneously.
 
@@ -520,9 +520,9 @@ method noted next to each item.
 | # | Item | Original status | Today | Notes |
 |---|------|------|-------|------|
 | 1 | Multi-thread scheduler race | 🐛 blocker | 🐛 still present | Re-ran the mandel demo at default `-j`; race trips at `crates/lisp/src/eval/mod.rs:446` now (was `:380`). Same symptoms — workers die with "unbound symbol: acc / iter" and one Rust panic. Race appears to have moved, not been fixed. |
-| 2 | Type-checker noise around `(require 'hatch)` | 🐛 blocker | 🟢 partial fix | `nest check` (project-aware, runs through `(check-project-structured)`) is now silent on hatch macros. `brood file.blsp` directly **still emits all five warnings** (`defprocess` / `cast` / `!` / `hatch` / `state`). The project-aware path is the agent path, so this is meaningful progress; the file-direct path needs the same know-what's-required behaviour. |
+| 2 | Type-checker noise around `(require 'hatch)` | 🐛 blocker | 🟢 partial fix | `nest check` (project-aware, runs through `(check-project-structured)`) is now silent on hatch macros. `brood file.blsp` directly **still emits all five warnings** (`defserver` / `cast` / `!` / `hatch` / `state`). The project-aware path is the agent path, so this is meaningful progress; the file-direct path needs the same know-what's-required behaviour. |
 | 3 | `nest format` collapses readable code | 🐛 blocker | 🐛 still present | Re-tested with a synthetic multi-line `let` + `cond` probe (8 lines hand-aligned). Formatter rewrote it onto a single 92-char line. Reasoning from §6.1 still applies. |
-| 4 | Quick-ref doc gaps | 🟡 polish | 🟢 partial fix | `docs/brood-for-claude.md` gained a strong "Idiomatic syntax" section on `(` vs `[`, tuple-destructure caveats, and a Filesystem section. Still missing from the builtin lists: `apply`, `now`, `gensym`, `quot`, `mod`, `rem`, `char-at`, `dotimes`/`doseq`/`dolist`, `for`, `defprocess` / `hatch` / `!` / `gen-call` / `sleep`. |
+| 4 | Quick-ref doc gaps | 🟡 polish | 🟢 partial fix | `docs/brood-for-claude.md` gained a strong "Idiomatic syntax" section on `(` vs `[`, tuple-destructure caveats, and a Filesystem section. Still missing from the builtin lists: `apply`, `now`, `gensym`, `quot`, `mod`, `rem`, `char-at`, `dotimes`/`doseq`/`dolist`, `for`, `defserver` / `hatch` / `!` / `gen-call` / `sleep`. |
 | 5 | Float formatting / no `format` builtin | 🟡 polish | 🟡 unchanged | `std/format.blsp` exists, but it's the **source-code formatter** behind `nest format`, not a `(format "%.2f" x)` helper. No general number/string formatter shipped. |
 | 6 | Pattern-destructure failure surfaces as Rust panic | 🟡 polish | 🐛 still present | Same panic shape (`index out of bounds: the len is N but the index is M`), now at `eval/mod.rs:446`. Structured errors landed (`E00xx`, see §10.3) but this specific failure site hasn't been routed through the new error wrapper yet. |
 
@@ -596,7 +596,7 @@ If you have **a week**, also:
 4. **Expand the builtin lists in `brood-for-claude.md`** to cover
    `apply` / `now` / `gensym` / `quot` / `mod` / `char-at` / `dotimes` /
    `doseq` / `dolist` / `for` and a "Concurrency framework" subsection
-   for `defprocess` / `hatch` / `!` / `gen-call` / `sleep`. (The
+   for `defserver` / `hatch` / `!` / `gen-call` / `sleep`. (The
    "Idiomatic syntax" section was great; finish the surface coverage.)
 5. **Ship a number/string `format`** (`(format "%.2f" x)`). Demo
    numeric output is currently ugly.
@@ -629,7 +629,7 @@ are now compelling:
 
 - **A Brood-aware coding agent driven by `nest mcp`.** Use the live
   `eval` tool to iterate on a real function, the `macroexpand` tool to
-  understand `defprocess`, the `lookup` tool to find prelude helpers,
+  understand `defserver`, the `lookup` tool to find prelude helpers,
   and the `check` tool to validate. This *is* the demo of the MCP
   story.
 - **A self-documenting incarnations CI.** Have an agent attempt the

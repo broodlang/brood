@@ -309,8 +309,8 @@ pub const DOC_FORMS: &[(&str, bool)] = &[
     (kw::DEFN_PRIVATE, true),
     (kw::DEFMACRO, true),
     // `std/proc/gen.blsp`'s server macro — not a kernel head, but the same shape
-    // (`(defprocess name (state) "doc" clauses…)`), and it peels the doc the same way.
-    ("defprocess", true),
+    // (`(defserver name (state) "doc" clauses…)`), and it peels the doc the same way.
+    ("defserver", true),
     (kw::DEFMODULE, false),
     (kw::DEFABILITY, false),
 ];

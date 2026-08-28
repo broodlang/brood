@@ -12,6 +12,7 @@
 (defn put (t k v)
   "Store v under key k in table t, overwriting any existing entry. Keys use the same structural equality as map keys. Returns t (for threading). Both k and v are deep-copied into the store."
   (%table-put t k v))
+(sig put (table any any -> table))
 
 (defn get "A fresh copy of the value stored under k in table t, or default (nil if omitted) when absent."
   ;; Two arity CLAUSES rather than one `&optional` head, and the reason is performance, not
@@ -24,16 +25,19 @@
   ;; `put`, and `every_inlinable_head_still_reaches_its_primitive`, which is what caught this.
   ((t k) (%table-get t k))
   ((t k default) (%table-get t k default)))
+(sig get (table any -> any))
 
 (defn has? (t k)
   "True if table t has an entry for key k.
 
     (let (t (table/new)) (do (table/put t :k 1) (table/has? t :k)))   → true"
   (%table-has? t k))
+(sig has? (table any -> bool))
 
 (defn delete (t k)
   "Remove key k from table t if present. Returns t."
   (%table-delete t k))
+(sig delete (table any -> table))
 
 (defn incr (t k &optional delta)
   "Atomically add delta (default 1) to the integer at key k in table t, treating an absent key as 0, and return the new value. The read-modify-write is atomic under the table lock, so concurrent increments never lose an update — use this for counters. Errors if the existing value is not an integer.
@@ -44,11 +48,14 @@
 (defn count (t)
   "The number of entries in table t."
   (%table-count t))
+(sig count (table -> int))
 
 (defn snapshot (t)
   "A consistent point-in-time copy of the whole table t as an immutable map. Atomic; the returned map is unaffected by later mutation of t. Use map ops (keys/vals/get/reduce) on it. O(n)."
   (%table-snapshot t))
+(sig snapshot (table -> map))
 
 (defn drop (t)
   "Remove table t from the registry, freeing its store. Idempotent; returns true if it existed. Other handles to t then error on use."
   (%table-drop t))
+(sig drop (table -> bool))

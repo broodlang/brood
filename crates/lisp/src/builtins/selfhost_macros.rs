@@ -63,6 +63,56 @@ pub(super) fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -
     Ok(heap.list(out))
 }
 
+/// `(file-signatures path)` — the signature the checker holds for every function the
+/// file at `path` defines, as `{:name :sig :declared?}` maps where `:sig` is the type
+/// written in **source syntax** (`"(int int -> int)"`), ready to paste into a `(sig …)`.
+///
+/// The bulk counterpart of the LSP's "declare sig" code action, and the reason both
+/// exist: `sig` adoption across a 2800-definition standard library is the type system's
+/// longest-standing backlog item, and doing it by hand means guessing what the checker
+/// already knows. A signature it *cannot* write — one naming a runtime kind the grammar
+/// has no word for — is reported with `:sig nil` rather than a wrong string.
+///
+/// Reads but does not evaluate, exactly like `check-file`.
+pub(super) fn file_signatures_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file-signatures", arg(args, 0))?;
+    let src = std::fs::read_to_string(&path).map_err(|e| {
+        LispError::runtime(format!("file-signatures: cannot read {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
+    let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
+    let signatures = crate::types::check::file_signatures(heap, &just_forms);
+    let mut out = Vec::with_capacity(signatures.len());
+    for signature in &signatures {
+        let name = heap.alloc_string(&signature.name);
+        let rendered = match signature.sig.to_source() {
+            Some(text) => heap.alloc_string(&text),
+            None => Value::Nil,
+        };
+        let entry = heap.map_from_pairs(vec![
+            (Value::Keyword(value::intern("name")), name),
+            (Value::Keyword(value::intern("sig")), rendered),
+            (
+                Value::Keyword(value::intern("declared?")),
+                Value::Bool(signature.declared),
+            ),
+            // Whether the signature says anything a reader doesn't already have.
+            // Decided here, on the types, because the rendered string cannot be
+            // tested for it — `(string any -> any)` contains the text of the
+            // uninformative `(any -> any)` and is not uninformative at all.
+            (
+                Value::Keyword(value::intern("informative?")),
+                Value::Bool(
+                    signature.sig.params.iter().any(|p| !p.is_any()) || !signature.sig.ret.is_any(),
+                ),
+            ),
+        ]);
+        out.push(entry);
+    }
+    Ok(heap.list(out))
+}
+
 /// A `required-mods` argument (a list/vector of module-name strings or symbols) → a
 /// `Vec<String>`. `nil` / absent → empty. Backs the optional KI-17 reachability set on
 /// the `check-file*` builtins.

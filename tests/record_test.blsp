@@ -124,10 +124,10 @@
 ;; kernel-dispatched, no hot-path cost). Same-type add/sub; scale by an int scalar for mul/div
 ;; (`*` is commutative, so `(* 3 (usd …))` works via the derived mirror; `/` is not). ----
 (defrecord usd (cents))
-(defmethod num-add [usd usd] (a b) (usd (+ (get a :cents) (get b :cents))))
-(defmethod num-sub [usd usd] (a b) (usd (- (get a :cents) (get b :cents))))
-(defmethod num-mul [usd :int] (m n) (usd (* (get m :cents) n))) ; scale by a scalar
-(defmethod num-div [usd :int] (m n) (usd (math/quot (get m :cents) n)))
+(defmethod num/add [usd usd] (a b) (usd (+ (get a :cents) (get b :cents))))
+(defmethod num/sub [usd usd] (a b) (usd (- (get a :cents) (get b :cents))))
+(defmethod num/mul [usd :int] (m n) (usd (* (get m :cents) n))) ; scale by a scalar
+(defmethod num/div [usd :int] (m n) (usd (math/quot (get m :cents) n)))
 
 (describe "defrecord: custom Num"
   (test "a Num record uses +/-/*// (dispatched from the kernel %add fallback)"
@@ -142,7 +142,7 @@
     ;; `usd` has no `[usd usd]` mul method — mixing errors instead of silently coercing.
     (let (e (try (* (usd 5) (usd 5)) (catch e e)))
       (assert= (get e :kind) :%no-method)
-      (assert= (get e :multi) 'num-mul)))
+      (assert= (get e :multi) 'num/mul)))
   (test "a hand-written {:__id__ nil} is a plain map, not a record (truthy-id rule)"
     ;; matches `record?`/`%identity-of`: a nil id dispatches as :map, so arithmetic gives the
     ;; ordinary number error rather than routing to the Num multimethod.

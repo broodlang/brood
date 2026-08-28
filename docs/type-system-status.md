@@ -201,3 +201,223 @@ That pair is also the answer to this document's longest-standing backlog item, *
 adoption**: 34 declarations over 2828 definitions is not a problem you fix by asking
 people to type more, and a hint you can accept with one keystroke is the cheapest path
 from "the checker knows" to "the file says".
+
+---
+
+## Adoption in bulk, and what was invisible while adopting (2026-08-28)
+
+The editor pair above is the per-function path. Three things followed from trying it
+at the scale of the standard library.
+
+**`nest check --suggest-sigs`** — the bulk counterpart. It prints the `(sig …)` the
+checker would write for every function that lacks one, grouped by file, and changes
+nothing. Adopting one is *sound*: an inferred parameter domain over-approximates the
+real one (ADR-261, asserted by the soundness oracle), so a call the declaration
+rejects would have failed anyway. It is still advice rather than a patch, because a
+signature is documentation and deserves a reader. The mechanism is a new primitive,
+`reflect/file-signatures`, returning `{:name :sig :declared? :informative?}` per
+definition — `:informative?` decided on the *types*, since the rendered text cannot be
+tested for it (`(string any -> any)` contains the text of the uninformative
+`(any -> any)` and is worth declaring).
+
+**A module-private function had no inferred signature at all.** `defn-` expands to
+`(do (def name (fn …)) (%mark-private 'name))`, and every inference pass keyed on a
+top-level `(def …)` saw no definition there — so a private function's *call sites went
+unchecked*. That is most of a real module: 40 of `std/json.blsp`'s 42 definitions, and
+precisely the internals where an argument-order slip lives (the KI-71 class). The
+descent is deliberately narrow — only the privacy expansion, identified by its
+`%mark-private` call — because opening every top-level `do` was tried and reverted
+twice over: it typed the linear-map rewrite's generated temporary (flagging a branch of
+the rewrite's own wrapper that cannot run) and it displaced the `:-> T` return that
+`defability` declares for its ops. A gensym'd name is now never typed on its own
+account, whatever encloses it.
+
+Arming this across `std/` + `tests/` produced **zero** new warnings — the coverage
+grew and the corpus stayed clean.
+
+**Cross-term subtyping got its per-tag decomposition.** `is_subtype` over a union
+required each term of the left to fit inside a *single* term of the right, which is
+sound but incomplete — and the incompleteness costs a **false positive**, the one
+unacceptable class. `int | vector<int>` is a single term (the union merged exactly)
+and sits inside `int | vector<string> | vector<int>` only once you notice its two
+halves land in different alternatives. A term is the disjoint union of its per-tag
+projections, so placing each projection somewhere is both sound and strictly sharper.
+Still incomplete where one *tag's* refinement is split across alternatives
+(`vector<int|string>` against `vector<int> | vector<string>`); deciding that needs the
+emptiness procedure a full negation type would bring.
+
+The same projection fixed `Ty::to_source`, which dropped a refinement on any term
+carrying tags beside it — `int | vector<int>` rendered as `(or int vector)`. Caught by
+the round-trip test the moment the type entered the property corpus.
+
+## The complement of a literal (2026-08-28)
+
+`(not T)` (ADR-263) gave the lattice an exact complement for **tags**. It gave none for
+**literals**: `¬:ok` widened to `any`, because a keyword domain is infinite and a literal
+set could only be held positively. Bool was the one exception — a finite domain, so
+`¬{false}` is `{true}`, which is what had made the truthiness guard biconditional.
+
+That gap sat exactly where a set-theoretic system is supposed to earn its keep. The
+**tagged-union dispatch** — the shape most Brood code branches on — refined only on the
+true side, and the equality guard was marked `then_only` for precisely that reason.
+
+A literal refinement is now `In(A)` or `Out(A)` — exactly these values, or anything but
+these (ADR-268). `(or :ok :err) ∩ ¬:ok` is `:err`. The four literal slots carry a
+`LitSet` instead of a bare set, the algebra is one rule per pair, and bool is normalised
+back to positive so every rule may assume an `Out` set has an infinite complement.
+Consumers outside the lattice read literals through `members()`, which reports `None` for
+a negative set — the same conservative widening they already handled, so nothing outside
+`types/mod.rs` changed.
+
+The equality guard is biconditional **where the guard type is exact**: `(= tag :ok)`
+narrows both branches, `(= m "x")` still narrows only the true one, because `of_value` has
+no heap to read a string literal's bytes and yields the bare `string` tag. Rendering is
+`(not :ok)` or `(and keyword (not :ok))`, both round-tripping through the parser, and the
+runtime `type-matches?` agrees with the checker on all of them.
+
+Zero new warnings across `std/` + `tests/`, with the property corpus extended to carry
+negative atoms so every lattice law is asserted over them.
+
+## The refinement-carrying rules, and a false positive on `assoc` (2026-08-28)
+
+Closed records made the record *sinks* load-bearing: without them a closed record decays
+to a flat `map` on its first update, and the idiom that builds one field at a time loses
+its shape immediately. `assoc`/`dissoc` now carry the shape forward, and `keys`/`vals`
+report the declared names and the union of the declared field types — for a **closed**
+record only, since an open one may carry keys nothing declares.
+
+Building those surfaced a real defect in the neighbouring rule (ADR-269). `(assoc m
+:extra "text")` on a `(map keyword int)` was typed `(map keyword int)`, so reading the key
+back gave `nil | int` and the checker **flagged correct code** — a false positive on the
+operation everyone uses to build a map. The rule carried `K`/`V` forward unchanged on the
+recorded grounds of "no false-positive risk either way", which was wrong in the direction
+that matters: claiming a narrower type than reality is what manufactures one.
+
+The lasting fix is the gate, not the rule. The soundness oracle checks **map and record
+refinements** now — a map value's entries against `map_kv`, each declared field, and a
+closed record's claim that no other key is present. A tags-only membership check passes
+on any map-typed expression whatever its refinement says, which is why this survived an
+oracle that had been running since the refinements were introduced. Sabotage-verified in
+both directions.
+
+## Two spellings, and a suggestion that could not be pasted (2026-08-28)
+
+Declaring the first curated batch of signatures — the **KI-71 class**, a function whose
+parameters have different concrete types, where a reversed call is accepted in silence —
+turned up two defects in the machinery that offers them.
+
+`(sig string/last-index-of (-> int))` was offered for a three-parameter function
+(ADR-271). An inferred signature is a fact about types and says nothing about shape, so a
+function whose parameters the checker could not type came out nullary; pasted in, Pass
+2.85 rejects it as contradicting its `defn`. A captured signature is now reshaped to the
+definition's parameter list, filling untyped slots with `any` — and it fills in rather than
+overruling, since a multi-clause `defn` lowers to a variadic `fn` whose form-level arity
+would discard what the clause inference knows.
+
+`(or false true)` was not `bool` (ADR-270) — not merely rendered differently, but a
+different `Ty`: unequal, unhashable together, and `bool <: (or false true)` came out
+**false** for two identical sets. Literal slots are canonicalised now, so no operation can
+produce the second spelling.
+
+Twelve declarations landed: `string/char-at`, the six `text/*` rope operations, the three
+`reflect/scan-form-*` scanners, `math/->fixed` and `bytes/at`. `(string/char-at 3 "abc")`
+and `(text/insert r "text" 3)` are warnings now; the corpus stayed at zero. That is 12 of
+890 the tool can already write — the rest is judgement per declaration, not archaeology.
+
+## The callback position (2026-08-28)
+
+Declaring the reversal-prone signatures showed what was still missing: `(seq/group-by
+[1 2 3] f)` stayed silent, because a *callback* parameter typed `any`. Every ADR-261
+domain rule reads a parameter's arguments — passed to a known callee, tested by a guard,
+destructured by a pattern — and none read the head of a call, which is the position that
+says the most about a function parameter.
+
+A parameter in call-head position is now intersected with the callable type (ADR-272),
+sound on the same footing as every other demand: `(g x)` only runs if `g` is callable.
+Callable is `fn | native | keyword`, since a keyword is a function of a map in Brood while
+maps, vectors and strings raise. `(each-of 5 [1 2 3])` is a warning now, and so is any
+higher-order call with its arguments the wrong way round once the callback is inferred.
+
+The propagation compounds with adoption: with `string/char-at` declared, `(defn indirect
+(n s) (string/char-at s n))` infers `(int string -> string)` on its own.
+
+## The four worries, closed (2026-08-28)
+
+An audit of what was still weak found four things; three were real and one was a
+misjudgement worth pinning.
+
+**An arrow parameter was inert** (ADR-273). `(sig apply-it ((int -> string) -> any))`
+declares a parameter's full signature, and the call inside the body is the only site that
+can use it — but that path consulted only *global* signature sources, so `(f
+"not-an-int")` went unchecked and `(f 1)` produced no type. Declaring an arrow changed no
+outcome, which is a poor lesson to teach an author now that every callback parameter
+infers as callable (ADR-272). A variable whose own type carries an arrow now describes the
+call it heads, in both directions, consulted ahead of every global since a local shadows
+one.
+
+**The oracle could not reach `map<K, V>` or arrows.** Its expression facet types *closed*
+expressions, and neither shape can arise without an annotation — so every `map_kv` rule and
+every arrow rested on hand-written tests, and ADR-269 was a defect in exactly that gap. A
+new facet types a body under a parameter given a type *through the annotation parser
+itself*, then evaluates the same body with a value of that type bound and requires the
+result to be a member of what the checker claimed. It catches ADR-269's `assoc` defect
+automatically. Two further blind spots were closed alongside it: **literal sets**
+(`contains_tag` passes `6` against `{5}`) and **tuple shapes** (length and positions, which
+`elem_ty` does not describe). All sabotage-verified; none found a live defect, which is
+what was true of the map rules until the day one of them wasn't.
+
+**What a declaration catches was pinned, not changed.** A closed record catches a wrong
+field name, a wrong field type, a missing required field and an extra one — the last two
+only because ADR-264 made closedness provable. What it deliberately does *not* catch is an
+argument whose type is a union that **might** be right: `(or int string)` against `string`
+is silent, because argument checks fire on provable disjointness, and warning there would
+fire on correct code whenever the checker knows less than the programmer. A union with no
+`string` in it *is* flagged. I misjudged this line myself while writing a test, so it is a
+regression test now rather than a belief.
+
+**`fn` is one word** (ADR-274). `Fn`/`Native` is an implementation detail the language does
+not have — `(type-of inc)` is `:fn`, `(fn? inc)` is true for both, and the grammar's `fn`
+already parsed to both. Only the renderers disagreed, so a warning read `expects keyword |
+fn | native` and `to_source` **declined** on `Tag::Native` — leaving the callable type
+ADR-272 infers for every callback with no faithful annotation, so the declare-sig surfaces
+could not offer the newest and most useful inference. It writes as `(or fn keyword)` now,
+and round-trips.
+
+## Adoption, and why it compounds (2026-08-28)
+
+`std/` carries **358** `(sig …)` declarations, up from ~34. That took three rounds, and
+the rounds are the interesting part: ADR-277 made a file-local declaration constrain its
+callers *in the same file*, so each round sharpened the domains the next one read.
+`bytes/int` was `(any (or map number) (or map number) -> any)` — noise ADR-276 rejects —
+before its neighbour `bytes/at` was declared; afterwards it was `(bytes int … -> any)`.
+Round 2 found 45 newly-adoptable signatures, round 3 found 20, and the remaining ~1550 are
+the tiers ADR-276 rejects on purpose (return-only, module-private, and the arithmetic-domain
+noise).
+
+Adoption paid for itself in defects, not just documentation. It surfaced ADR-275 (**every**
+unconditionally-raising function with a signature was told its body contradicted its
+declared return, because `never` is disjoint from itself), an inconsistency where `odd?`
+demanded `number` while `even?` demanded `int` for the same argument, and ADR-277 itself.
+
+One rule turned out not to be decidable in advance: a function whose job is to *validate*
+its own argument must not declare that argument's type, or its own guard becomes provably
+dead code. Guessing that from the source is guesswork the checker has already done, so it
+is a feedback step — declare, run `nest check`, drop any declaration that now reports an
+`unreachable clause`. Rounds 1 and 2 both re-added the same two functions because the rule
+lived only in a human's memory; round 3 dropped them automatically.
+
+The declarations are visible where they are read: `nest doc` renders the type under each
+heading now, for a declared signature and a curated primitive alike.
+
+### What's left
+
+- **`sig` adoption itself** — now mechanical rather than archaeological, but still a
+  judgement call per declaration. Note that a domain the checker infers from
+  arithmetic reads as `(or map number)`, not `int`: honest (a record participates
+  through the `Num` ability) and noisier than a human would write.
+- **Negative *structural* atoms** — `(not (tuple int))`. The literal half is done
+  (ADR-268); the structural half needs an emptiness decision procedure over the lattice,
+  since a negated arrow/record/tuple cannot be normalised away the way a negated literal
+  set can.
+- **Complete cross-term subtyping** — the refinement-split direction above. Same
+  procedure, same piece of work.

@@ -43,8 +43,8 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/deriv.inp
                          (cons '+ (map (fn (b) (list '/ (deriv b) b)) (rest a))))
       (= (first a) '/)
         (list '-
-          (list '/ (deriv (second a)) (seq/third a))
+          (list '/ (deriv (second a)) (third a))
           (list '/
             (second a)
-            (list '* (seq/third a) (seq/third a) (deriv (seq/third a)))))
+            (list '* (third a) (third a) (deriv (third a)))))
       else (error "deriv: no derivation method available: " (pr-str a)))))

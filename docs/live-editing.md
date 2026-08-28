@@ -50,7 +50,7 @@ running `nest mcp` image:
   **local gensym** (a `(letrec (loop (fn (k) … (loop …))) …)`) rather than a
   global, there is no global name to re-resolve, so the epoch guard can't reach it;
   redefining the enclosing global does not swap a running inner loop's code (only
-  globals its body *calls by name* late-bind). **This is the shape `defprocess`
+  globals its body *calls by name* late-bind). **This is the shape `defserver`
   expands to** (`std/proc/gen.blsp` — the dispatch loop is an anonymous `letrec`),
   so a running `gen` server does **not** adopt a redefinition of its own clauses;
   put handler logic in top-level `defn`s the clauses call if you want it reloadable,
@@ -326,7 +326,7 @@ Brood where supervision already lives.
 **Done when.** A documented example loop survives a state-shape change across
 reload by migrating on `[:code-change]`. Suite green.
 
-**→ Shipped 2026-08-06.** `defprocess` gained an optional `(code-change old-state
+**→ Shipped 2026-08-06.** `defserver` gained an optional `(code-change old-state
 body…)` lifecycle clause (sibling of `init`/`terminate`) that runs on a
 `[:$code-change]` envelope, binding the current state and returning the migrated
 one; `(gen/code-change pid)` is the push trigger (a supervisor or `on-reload` hook

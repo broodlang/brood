@@ -1949,6 +1949,62 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
 
 ### Tooling & errors
 
+- **Stability metadata per name: `:since`, `:deprecated`, `:beta`.** Three facts a
+  library must state and Brood currently has no way to say — *when did this appear*,
+  *is it going away*, and *is it settled enough to build on*. All three are the same
+  mechanism (a fact recorded against a name, read by the tooling), so they should ship
+  together rather than as three features.
+
+  ```lisp
+  (defn parse (text) …)
+  (meta parse :since "0.9.0")
+  (meta old-parse :deprecated "0.14.0" :use 'parse)   ; what to use instead
+  (meta try-this :beta "the shape of the options map may change")
+  ```
+
+  **Why the machinery already exists.** A per-name fact recorded at definition time and
+  read back by tooling is exactly what `%mark-private` (ADR-146) and `%register-sig`
+  (ADR-259 / the `(sig …)` macro) already are — a Brood macro over a primitive that
+  writes into a side table the checker, `nest doc` and the LSP consult. `meta` is the
+  same shape with a payload of data instead of a type, and it should be one form with
+  keyword clauses rather than three macros, so a name can carry all three at once.
+
+  **Where each one is spent — this is the part that decides the design:**
+
+  - **`:since`** is *documentation only*. `nest doc` shows it, hover shows it, and the
+    doc catalogue can render a "new in 0.14" index. Nothing warns. It is also the one
+    fact that could be **derived rather than declared** — the version a name first
+    appeared in is recoverable from git history, and a `nest doc --stamp-since` that
+    writes them once beats asking every author to remember. Declaring it by hand is the
+    fallback for names whose history predates the convention.
+  - **`:deprecated`** is a **checker** warning, not a runtime one: `nest check` reports
+    each use, with `:use` naming the replacement so the message is actionable and
+    `nest check --fix-renames` could later rewrite it mechanically (it already does the
+    unambiguous half of a rename wave — ADR-257). Warning at run time instead would fire
+    in a hot loop, on a machine that cannot act on it, long after the edit that caused
+    it. It should also be **suppressible per call site**, via the existing
+    `(check-allow :deprecated …)` directive, since a library must sometimes call its own
+    deprecated name from the shim that replaces it.
+  - **`:beta`** is the one with a genuine runtime component, and it needs the discipline
+    the kernel already worked out for the ADR-232 drop warning: **deduplicated per name,
+    printed once**, never per call. A beta warning that floods is a beta warning everyone
+    silences. `nest check` should report it too — the static path is where it is
+    actionable — with the runtime notice as the backstop for a name reached through
+    `eval` or a dynamic dispatch the checker cannot see.
+
+  **Open questions to settle before building:**
+  - Does `:deprecated` gate CI? `nest check` exits nonzero on any warning today
+    (ADR-023's batch-only hard reject), which would make a single deprecation break every
+    downstream build the day it lands. It probably needs its own severity, which is the
+    unresolved half of the warning-suppression question already noted below.
+  - What does a version *mean* for a std name — the Brood release, or the package
+    version from `project.blsp`? For `std/` they are the same; for a published package
+    they are not, and the answer decides whether the value is a literal string or is
+    resolved against the enclosing project.
+  - Does metadata compose with hot reload? A `def` rebinding a name mid-run must not
+    silently keep the old name's `:deprecated` fact (the same late-binding rule ADR-013
+    established for the code itself).
+
 - ✅ **LSP: type-directed record-field completion** — shipped 2026-07-30. Completing a
   `:keyword` at a map-**key** position (`get`/`assoc`/`update`/`dissoc`/`contains?`,
   or the keyword-accessor head `(:… m)`) whose map argument the checker types as a
@@ -2399,6 +2455,61 @@ The bar a candidate has to clear, in order:
   that `tests/prelude_capture_test.blsp` now enforces by hand. ADR-066 rejected
   Scheme-style per-symbol lexical context on ship-by-name/homoiconicity/GC grounds, and
   that reasoning still holds; the gate is the cheap 90%.
+
+### Union dispatch positions — and why the type system is the easy half
+
+> **Designed 2026-08-28: [`docs/union-dispatch-design.md`](docs/union-dispatch-design.md)** —
+> the specificity rule, the four questions checked empirically, and the build order. The
+> summary below is the case for doing it; the design doc is the how.
+
+The question that prompted this: can a dispatch position accept a *union*
+(`[usd (or :int :float)]`), and how does the checker derive the result?
+
+**Where things stand.** `defmulti`/`defmethod` already do the multi-argument half:
+
+```lisp
+(defmethod convert [usd eur] (a b) …)     ; per-argument types
+(defmethod scale   [usd :int] (a n) …)    ; record x built-in kind
+(defmulti mix :commutative)               ; author [usd eur]; [eur usd] derived
+```
+
+A union in a position is a clean compile error ("each position must be a record name or a
+built-in id keyword"). `defability` is **single-dispatch** — the generated op dispatches on
+`(%identity-of first-arg)` (`std/prelude/tools.blsp`), first argument only.
+
+**The type system is not the obstacle — it is already solved, and for a structural reason.**
+An ability op declares its own return (`(compare-to [self other] :-> int)`), and
+`check_impl_returns` verifies *every impl body* against it. So `(area s)` types as the op's
+declared `:-> RET` **whichever impl runs**; inference never joins return types across impls
+(`types/check/infer.rs`: "the declared return is the only static handle… a contract, not a
+guess"). Adding a union to a dispatch position therefore changes **nothing** about the result
+type. Unions are free on the inference side, precisely because an ability separates the
+contract (the op) from the implementations.
+
+`defmulti` is the opposite: it declares no return at all, so a multimethod call is already
+opaque to the checker. A union there costs nothing and gains nothing.
+
+**So the ordering is the reverse of what it looks like.** The union is the easy part; the
+missing piece is **multi-argument ability dispatch** — abilities are where return types live,
+and they only dispatch on argument one. Sequence: multi-arg abilities first, then union
+positions nearly fall out.
+
+**Two things to get right when it is built.**
+
+- **Keep dispatch nominal.** A union position must reduce to a *set of ids*
+  (`(or :int :float)` → `{:int, :float}`), not an arbitrary type. Dispatch is identity-based
+  (ADR-177/179) and must stay that way; borrowing the type language's *spelling* is fine,
+  borrowing its structural types is not — `(or (record …) int)` has no id to dispatch on.
+- **It is an inference GAIN, not a cost.** Ability ops declare a return but not argument
+  types. A union position is the first construct where dispatch and typing coincide, so the
+  dispatch table becomes a free source of argument types: `[usd (or :int :float)]` tells the
+  checker argument 2 is `int|float` at every call site. Today it knows nothing about it.
+
+Against the bar: it fails test 1 as a pure convenience (two methods already express one
+union), and passes it for the numeric tower, where a binary op over `int`/`float`/`decimal`/
+`ratio` needs 16 methods that `:commutative` only halves. Build it when a `Comparable`-style
+ability over the tower is actually wanted — that is the concrete need that makes it a
+capability rather than a spelling.
 
 ### Warning suppression — configurable, and currently only at one granularity
 

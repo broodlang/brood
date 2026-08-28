@@ -58,3 +58,4 @@ Fast path: a chunk with no ESC byte only needs its CRs dropped (a single
     (let (v (into [] (string/->list s)))
       (ansi-strip v 0 (count v) ()))
     (string/replace s "\r" "")))
+(sig strip (string -> any))

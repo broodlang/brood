@@ -85,6 +85,7 @@ reply is delivered. A no-op if the task already finished (its handle is a dead
 pid). Returns nil."
   (send handle :task--cancel)
   nil)
+(sig cancel ((or map pid) -> nil))
 
 (defn latest (prev thunk & opts)
   "Start `thunk` as the *latest* job of its kind, superseding an in-flight one:

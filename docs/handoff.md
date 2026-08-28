@@ -1327,7 +1327,7 @@ distribution. If you are timing a boot, state which path you measured, and use
   `tests/vm_selfcall_reload_test.blsp`) it watches the global epoch and re-resolves its own global
   name on a `def`, so a running `(defn serve (s) … (serve …))` *does* adopt its own redefinition on
   the next back-edge. But when the back-edge targets a **local gensym** (a `letrec` loop — the shape
-  `defprocess` expands to) there is no global to re-resolve, so it keeps old code; only globals the
+  `defserver` expands to) there is no global to re-resolve, so it keeps old code; only globals the
   body calls by name late-bind. Erlang's local-vs-remote rule; see `live-editing.md` (and Stage 6 /
   the ROADMAP `code_change` item for the state-migration hand-off).
 - **A closure that captures no locals is already shared code**; one that captures a local is copied

@@ -816,6 +816,12 @@ mod prelude_hygiene {
             "defdyn",
             "defability",
             "defrecord",
+            // `defmulti` binds a name exactly as the others do. It was missing until
+            // 2026-08-28 and nothing noticed, because no prelude multimethod had a
+            // slash in its name — the lint only inspects QUALIFIED references, so a bare
+            // `num-add` never reached it. `num/add` did, and read as an unloaded module
+            // wrapper.
+            "defmulti",
         ];
         let mut out = std::collections::HashSet::new();
         for &form in forms {
@@ -1039,6 +1045,40 @@ mod prelude_hygiene {
             "false",
             "`name` is bound again — the point of folding it into `->string` was to free it"
         );
+    }
+
+    /// `builtins::numeric::num_multi_dispatch` maps an operator to a multimethod NAME as a
+    /// bare string — `"+" => "num/add"` — and looks it up in the global table. That is
+    /// ADR-251's recorded rename hazard in its purest form: a rename that updates the
+    /// `defmulti` but not the table does not fail to compile and does not fail a test. It
+    /// fails at a *user's* call site, the first time someone adds a record to a record, with
+    /// "the `num/add` multimethod is not loaded" — for an operator that works fine on ints.
+    ///
+    /// This was one string table away from happening when the family moved off its `num-`
+    /// hyphen prefix, so pin the two together.
+    #[test]
+    fn the_num_multimethods_the_kernel_names_all_exist() {
+        let mut interp = Interp::new();
+        for op in ["num/add", "num/sub", "num/mul", "num/div"] {
+            let v = interp
+                .eval_str(&format!("(bound? '{op})"))
+                .unwrap_or_else(|e| panic!("{op}: {}", e.message));
+            assert_eq!(
+                interp.print(v),
+                "true",
+                "`{op}` is named by numeric.rs's operator table but is not bound — the \
+                 `defmulti` in std/prelude/tools.blsp and that table have drifted apart"
+            );
+        }
+        // And the table really is the source of those names, so a future edit to it is
+        // caught here rather than by a user: assert the spelling the kernel uses.
+        let src = include_str!("builtins/numeric.rs");
+        for op in ["num/add", "num/sub", "num/mul", "num/div"] {
+            assert!(
+                src.contains(&format!("\"{op}\"")),
+                "numeric.rs no longer names `{op}` — update this test with the table"
+            );
+        }
     }
 
     #[test]

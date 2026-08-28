@@ -46,6 +46,7 @@ use sha256 for security-sensitive work. Useful for checksums, ETags, UUID v3.
 
     (hash/md5 \"abc\")      → \"900150983cd24fb0d6963f7d28e17f72\""
   (bytes->hex (%digest :md5 (string/->bytes s))))
+(sig md5 (string -> string))
 
 (defn md5-bytes (bytes)
   "Lowercase hex MD5 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -63,6 +64,7 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes.
 
     (hash/sha1 \"abc\")     → \"a9993e364706816aba3e25717850c26c9cd0d89d\""
   (bytes->hex (%digest :sha1 (string/->bytes s))))
+(sig sha1 (string -> string))
 
 (defn sha1-bytes (bytes)
   "Lowercase hex SHA-1 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -79,6 +81,7 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes.
 
     (hash/sha256 \"abc\")   → \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\""
   (bytes->hex (%digest :sha256 (string/->bytes s))))
+(sig sha256 (string -> string))
 
 (defn sha256-bytes (bytes)
   "Lowercase hex SHA-256 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -95,6 +98,7 @@ value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. S
 (defn sha384 (s)
   "Lowercase hex SHA-384 of string `s`'s UTF-8 bytes."
   (bytes->hex (%digest :sha384 (string/->bytes s))))
+(sig sha384 (string -> string))
 
 (defn sha384-bytes (bytes)
   "Lowercase hex SHA-384 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -111,6 +115,7 @@ value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. S
 
     (count (hash/sha512 \"a\"))   → 128   ; 64 bytes as hex"
   (bytes->hex (%digest :sha512 (string/->bytes s))))
+(sig sha512 (string -> string))
 
 (defn sha512-bytes (bytes)
   "Lowercase hex SHA-512 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
@@ -131,15 +136,18 @@ value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. S
 
     (hash/hmac-sha256 \"k\" \"m\")   → \"b60090e3052297aeb5a080889ce2fc4bca957e756faeb4df7d31800ca1e771ec\""
   (bytes->hex (%hmac :sha256 (string/->bytes key) (string/->bytes message))))
+(sig hmac-sha256 (string string -> string))
 
 (defn hmac-sha1 (key message)
   "HMAC-SHA1 of `message` using `key`. Both are strings; result is lowercase hex.
 SHA-1 is not collision-resistant; prefer hmac-sha256 for new protocols."
   (bytes->hex (%hmac :sha1 (string/->bytes key) (string/->bytes message))))
+(sig hmac-sha1 (string string -> string))
 
 (defn hmac-sha512 (key message)
   "HMAC-SHA512 of `message` using `key`. Both are strings; result is lowercase hex."
   (bytes->hex (%hmac :sha512 (string/->bytes key) (string/->bytes message))))
+(sig hmac-sha512 (string string -> string))
 
 ;; ---- raw-byte HMAC ----------------------------------------------------------
 ;;
@@ -172,3 +180,4 @@ Suitable for hash tables and sharding; NOT cryptographically secure."
   (fold (fn (h c) (bit/xor (* h 31) (string/char->int c)))
     5381
     (string/->list s)))
+(sig string (string -> int))

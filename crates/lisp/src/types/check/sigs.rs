@@ -1111,13 +1111,42 @@ fn domain_of_inner(
     // to a callee whose signature is known takes the type that position demands.
     // Table lookups only (primitive / curated / declared) — never `infer_sig`, so
     // this can't recurse into the inference that called it.
-    let callee_sig = primitive_sig(heap, h)
+    // A **file-local** `(sig …)` first: the file is checked before it loads, so its
+    // declarations are on `ctx` and NOT in the heap — `declared_heap_sig` cannot see
+    // them. Without this a signature constrained its callers in every OTHER module and
+    // not in its own, which is where most calls to it are. `std/bytes.blsp` declares
+    // `(sig at (bytes int -> int))` and then calls `(bytes/at bs off)` three lines
+    // later; `off` still inferred as the arithmetic domain rather than `int`.
+    //
+    // A lexical local shadows the global, so its type is not the declared one; and this
+    // stays a table lookup like the three below, never `infer_sig`, so it cannot recurse
+    // into the inference that called it.
+    let callee_sig = (!scope.shadowed.contains(&h))
+        .then(|| ctx.declared_sig(h))
+        .flatten()
+        .or_else(|| primitive_sig(heap, h))
         .or_else(|| curated_sig(h))
         .or_else(|| declared_heap_sig(heap, h));
     // Ability-op occurrence typing (ADR-190): a call to a *sealed* ability op demands
     // its first argument be a member of that ability.
     let op_domain = super::protocol::sealed_op_domain(h);
     let mut acc = any_domain(n);
+    // **A parameter in call-HEAD position is callable.** `(g x)` only runs if `g` is,
+    // so an accepted call proves it — the same argument every other demand rests on.
+    // This is what types a *callback* parameter, which is what most higher-order
+    // functions take and the position an argument-order slip reverses: without it
+    // `(defn each (f xs) (f (first xs)))` types `f` as `any`, and passing the sequence
+    // first is accepted in silence.
+    //
+    // Callable is `fn | native | keyword`, not just `fn`: a keyword is a function of a
+    // map in Brood (`(:a {:a 1})` → 1), while maps, vectors and strings are not
+    // callable (verified, not assumed — each raises).
+    if let Some(pos) = param_index(head, params, scope) {
+        let callable = Ty::of(Tag::Fn)
+            .union(Ty::of(Tag::Native))
+            .union(Ty::of(Tag::Keyword));
+        acc[pos] = acc[pos].clone().intersect(callable);
+    }
     for (i, &arg) in items[1..].iter().enumerate() {
         if let Some(pos) = param_index(arg, params, scope) {
             if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i)) {

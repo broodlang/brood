@@ -161,9 +161,11 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 (defn tap (x f)
   "Call `(f x)` for its side effects and return `x` unchanged — a pass-through probe for a `->` pipeline: `(-> v (tap log) (process))` logs `v` and keeps threading it. Elixir's `Kernel.tap`."
   (do (f x) x))
+(sig tap (any (or fn keyword) -> any))
 (defn then (x f)
   "Return `(f x)` — apply `f` to `x`. Lets a `->` pipeline step call an arbitrary function on the threaded value, not only splice it as a first argument: `(-> v (then (fn (n) (g n other))))`. Elixir's `Kernel.then`."
   (f x))
+(sig then (any (or fn keyword) -> any))
 
 ;; ---- binding-conditionals: bind, test the *source* value, branch -------------
 ;; `if-let`/`when-let` evaluate the binding expression once, branch on its
@@ -233,6 +235,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
   "Apply `f` to each item of `coll` for its side effects, returning `nil`. The function-valued counterpart of `doseq`: `(run! io/puts xs)`."
   (fold (fn (acc x) (f x) acc) nil coll)
   nil)
+(sig run! (any seqable -> nil))
 
 ;; ---- error handling ----
 ;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything

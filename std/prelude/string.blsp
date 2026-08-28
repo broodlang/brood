@@ -103,6 +103,7 @@ what incremental search rides on (formerly the separate `index-of`).
 (defn %path-join (a b)
   "Join path segments `a` and `b` with a single `/` separator."
   (if (string/ends-with? a "/") (str a b) (str a "/" b)))
+(sig %path-join (string any -> string))
 
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
 ;; Brood has no global mutable state, so randomness is *threaded*: every step
@@ -121,6 +122,7 @@ what incremental search rides on (formerly the separate `index-of`).
   "Normalize integer `n` into a valid nonzero 32-bit PRNG seed (xorshift32 cannot start from 0)."
   (let (m (bit/and n *rand-mask*))
     (if (= m 0) 2463534242 m)))
+(sig %rand-seed (int -> int))
 
 (defn- %rand-step
   (state)

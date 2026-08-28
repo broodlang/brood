@@ -584,7 +584,7 @@ oracle is the rewrite count published in upstream's own source header; see
             subst (nboyer-unify1 term (second lemma) nil))
         (if (= subst :fail)
           (nboyer-rewrite-with-lemmas term (rest lemmas) db count)
-          (nboyer-rewrite (nboyer-apply-subst subst (seq/third lemma)) db count))))))
+          (nboyer-rewrite (nboyer-apply-subst subst (third lemma)) db count))))))
 
 ;; ---- the tautology checker ---------------------------------------------------
 
@@ -608,14 +608,14 @@ oracle is the rewrite count published in upstream's own source header; see
       (not (pair? x)) false
       (= (first x) 'if)
         (cond
-          (nboyer-truep (second x) true-lst) (nboyer-tautologyp (seq/third x)
+          (nboyer-truep (second x) true-lst) (nboyer-tautologyp (third x)
                                                true-lst false-lst)
 
           (nboyer-falsep (second x) false-lst) (nboyer-tautologyp (nth x 3)
                                                  true-lst false-lst)
 
           else
-            (and (nboyer-tautologyp (seq/third x)
+            (and (nboyer-tautologyp (third x)
                    (cons (second x) true-lst)
                    false-lst)
               (nboyer-tautologyp (nth x 3) true-lst (cons (second x) false-lst))))

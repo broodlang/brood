@@ -44,3 +44,4 @@ parent."
         root? (fn (p) (let (pa (get p :parent)) (or (nil? pa) (< (index-of ids pa) 0))))
         roots (by-id (filter root? procs)))
     (mapcat (fn (r) (tree-walk r procs 0 limit)) roots)))
+(sig tree-order (seqable -> any))

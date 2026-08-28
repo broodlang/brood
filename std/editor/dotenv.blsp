@@ -102,3 +102,4 @@ editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Cover
 comments, the `export` keyword, the `KEY` of an assignment, and quoted values. Spans
 are ascending and non-overlapping; unquoted values carry no span (the default face)."
   (env-lex src 0 (string/length src) '()))
+(sig env-spans (string -> any))

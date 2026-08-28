@@ -5,7 +5,7 @@
 (defmodule gen-test (:use test) (:use gen))
 
 (describe "gen: cast and call"
-  :isolated (defprocess counter
+  :isolated (defserver counter
     (n)
     (cast :inc (+ n 1))
     (cast [:add m] (+ n m))
@@ -46,7 +46,7 @@
     (assert= (receive (:keep :present) (after 0 :eaten)) :present)))
 
 (describe "gen: concurrent servers don't cross wires"
-  :isolated (defprocess echo (state) (call [:double x] [(* x 2) state]))
+  :isolated (defserver echo (state) (call [:double x] [(* x 2) state]))
 
   (test "two gen-calls to two servers get their own replies"
     (let (a (start echo nil) b (start echo nil))
@@ -59,7 +59,7 @@
   ;; `query` is a synchronous read that doesn't change state — the body is just
   ;; the reply, no `[reply state]` pair needed. State is threaded along by the
   ;; macro, so casts still observe the right value across queries.
-  (defprocess kv
+  (defserver kv
     (m)
     (cast [:put k v] (assoc m k v))
     (query [:get k] (get m k))
@@ -90,7 +90,7 @@
   :isolated
   ;; `info` clauses match messages that are *not* a cast/call envelope — a raw
   ;; send, a monitor [:down …], a link [:EXIT …]. The server records the last one.
-  (defprocess inbox
+  (defserver inbox
     (last)
     (cast [:watch pid] (do (monitor pid) last))
     ; arm a monitor from inside the server
@@ -126,7 +126,7 @@
       (assert= (call s :last) :normal))))
 
 (describe "gen: init runs once"
-  :isolated (defprocess doubler
+  :isolated (defserver doubler
     (n)
     (init (* n 2))
     ; transform the seed, once
@@ -143,7 +143,7 @@
 ; 20+1+1, not re-doubled
 
 (describe "gen: terminate runs on stop"
-  :isolated (defprocess closer
+  :isolated (defserver closer
     (owner)
     (query :ping :pong)
     (terminate reason (send owner [:closed reason])))
@@ -158,8 +158,8 @@
   :isolated
   ;; A server with no call/query clause never replies to a call — the call
   ;; envelope is dropped by the catch-all, so the caller must time out.
-  (defprocess silent (s) (cast :ignore s))
-  (defprocess echoing (s) (query :ping :pong))
+  (defserver silent (s) (cast :ignore s))
+  (defserver echoing (s) (query :ping :pong))
 
   (test "call-timeout raises when the server never replies"
     (let (s (start silent nil))
@@ -195,7 +195,7 @@
       (assert= (call-timeout s :ping 2000) :pong))))
 
 (describe "gen: named and linked spawn"
-  :isolated (defprocess echo2 (s) (query [:echo x] x))
+  :isolated (defserver echo2 (s) (query [:echo x] x))
 
   (test "start-named registers the server for proc/whereis"
     (let (p (start-named :echo-srv echo2 nil))
@@ -216,13 +216,13 @@
 (describe "gen: code-change state migration"
   :isolated
   ;; old state is a bare int; after a code-change it is a versioned map.
-  (defprocess migrating
+  (defserver migrating
     (n)
     (query :value n)
     (query :shape (if (map? n) :map :int))
     (code-change old {:count old :ver 2}))
 
-  (defprocess plain (n) (query :value n))
+  (defserver plain (n) (query :value n))
 
   (test "code-change runs the migration clause, reshaping the loop state"
     (let (c (start migrating 5))

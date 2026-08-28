@@ -61,6 +61,7 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 
     (url/percent-encode \"a b\")   → \"a%20b\""
   (apply str (reverse (url-encode-bytes (seq (string/->bytes s)) nil))))
+(sig percent-encode (string -> any))
 
 ;; ---- percent-decoding -------------------------------------------------------
 
@@ -119,6 +120,7 @@ Invalid or incomplete %XX sequences are passed through as-is.
     (url/percent-decode \"a%20b\") → \"a b\""
   (let (v (into [] (string/->list s)))
     (url-pct-decode-loop v 0 (count v) nil)))
+(sig percent-decode (string -> any))
 
 ;; ---- query string encoding --------------------------------------------------
 ;;
@@ -170,6 +172,7 @@ defines rather than as its field map.
                              (->string (second kv))))
                       (%map-pairs params))))
     (apply str (reverse (url-pairs->query pairs nil true)))))
+(sig query-encode (map -> any))
 
 ;; ---- query string decoding --------------------------------------------------
 

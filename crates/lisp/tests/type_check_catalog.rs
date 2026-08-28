@@ -103,10 +103,10 @@ const SHOULD_WARN: &[(&str, &str)] = &[
          (defn f () (let (x (usd 1)) (scale x 2.5)))",
         "no method for",
     ),
-    // operator sugar: `(+ record scalar)` routes to num-add; no method → warn (ADR-179).
+    // operator sugar: `(+ record scalar)` routes to num/add; no method → warn (ADR-179).
     (
-        "(defrecord usd (cents)) (defmethod num-add [usd usd] (a b) a) (defn f () (+ (usd 1) 2.5))",
-        "num-add",
+        "(defrecord usd (cents)) (defmethod num/add [usd usd] (a b) a) (defn f () (+ (usd 1) 2.5))",
+        "num/add",
     ),
     // operator sugar: `(< record scalar)` routes to compare-to.
     (
@@ -182,9 +182,9 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(defmulti mm) (defmethod mm [:int :int] (a b) a) (defn f (x) (mm x 2))",
     // ---- operator sugar: only a record operand is checked, and a covered pair stays silent ----
     // pure numbers never route to a multimethod — `(+ 1 2)` must NOT warn.
-    "(defrecord usd (cents)) (defmethod num-add [usd usd] (a b) a) (defn f () (+ 1 2))",
-    // a covered record pair (`num-add [usd usd]`) stays silent.
-    "(defrecord usd (cents)) (defmethod num-add [usd usd] (a b) a) (defn f () (+ (usd 1) (usd 2)))",
+    "(defrecord usd (cents)) (defmethod num/add [usd usd] (a b) a) (defn f () (+ 1 2))",
+    // a covered record pair (`num/add [usd usd]`) stays silent.
+    "(defrecord usd (cents)) (defmethod num/add [usd usd] (a b) a) (defn f () (+ (usd 1) (usd 2)))",
     // a covered comparison pair (`compare-to [usd usd]`) stays silent.
     "(defrecord usd (cents)) (defmethod compare-to [usd usd] (a b) 0) (defn f () (< (usd 1) (usd 2)))",
     // inference: a covered record-variable call stays silent.

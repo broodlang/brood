@@ -8,53 +8,63 @@
 
     (text/->string (text/insert (text/from-string \"ac\") 1 \"b\"))   → \"abc\""
   (%rope-insert r idx s))
+(sig insert (rope int string -> rope))
 
 (defn delete (r start end)
   "A fresh rope with characters [start, end) removed.
 
     (text/->string (text/delete (text/from-string \"abc\") 1 2))   → \"ac\""
   (%rope-delete r start end))
+(sig delete (rope int int -> rope))
 
 (defn slice (r start end)
   "The text of characters [start, end) of rope r, as a string.
 
     (text/slice (text/from-string \"abcd\") 1 3)   → \"bc\""
   (%rope-slice r start end))
+(sig slice (rope int int -> string))
 
 (defn length (r)
   "The number of characters in rope r.
 
     (text/length (text/from-string \"hi\"))   → 2"
   (%rope-length r))
+(sig length (rope -> int))
 
 (defn line (r n)
   "The text of line n (0-based) of rope r, including any trailing newline.
 
     (text/line (text/from-string \"a\nb\") 1)   → \"b\""
   (%rope-line r n))
+(sig line (rope int -> string))
 
 (defn line-count (r)
   "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line).
 
     (text/line-count (text/from-string \"a\nb\"))   → 2"
   (%rope-line-count r))
+(sig line-count (rope -> int))
 
 (defn char->line (r idx)
   "The 0-based line index containing character idx."
   (%rope-char->line r idx))
+(sig char->line (rope int -> int))
 
 (defn line->char (r n)
   "The character index where line n (0-based) begins."
   (%rope-line->char r n))
+(sig line->char (rope int -> int))
 
 (defn ->string (r)
   "The full text of rope r as a string.
 
     (text/->string (text/from-string \"hi\"))   → \"hi\""
   (%rope->string r))
+(sig ->string (rope -> string))
 
 (defn from-string (s)
   "A rope (editor buffer text) holding the characters of string s.
 
     (text/->string (text/from-string \"hi\"))   → \"hi\""
   (%string->rope s))
+(sig from-string (string -> rope))

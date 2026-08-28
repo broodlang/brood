@@ -219,6 +219,7 @@ can.)
       (if (= a :%contains-miss-a)
         (not (= (%map-get m k :%contains-miss-b) :%contains-miss-b))
         true))))
+(sig contains? ((or map set) any -> bool))
 
 ;; ---- map: merge / update / nested access -----------------------------------
 ;; All Brood over the kernel ops (`%map-assoc`/`%map-pairs`) and the surface above

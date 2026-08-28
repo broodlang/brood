@@ -6,12 +6,14 @@
 
     (bytes/at #b\"hi\" 0)        → 104"
   (%byte-at b i))
+(sig at (bytes int -> int))
 
 (defn length (b)
   "The number of bytes in b. O(1).
 
     (bytes/length #b\"hi\")      → 2"
   (%byte-length b))
+(sig length (bytes -> int))
 
 (defn slice (b start & more)
   "The byte slice [start, end) of b as a fresh bytes value (end defaults to the length). Errors if the range is out of bounds.

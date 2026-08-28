@@ -59,6 +59,7 @@ lands correctly at the process no matter where other participants' points are.
 Native (`%str-splice-diff`, one O(n) pass) — this runs per keystroke on every
 hosted buffer, where a per-char Brood scan cost ~40 ms on a 300-line file."
   (%str-splice-diff old new))
+(sig text-splice (string string -> vector))
 
 (defn splice-noop? (splice)
   "True when `splice` (`[lo hi repl]`) changes nothing — an empty range and empty
@@ -66,6 +67,7 @@ replacement. A pure-movement command (point moved, text unchanged) yields this, 
 no edit is sent."
   (let ([lo hi repl] splice)
     (and (= lo hi) (= repl ""))))
+(sig splice-noop? (vector -> bool))
 
 (defn text-apply-splice (text splice)
   "`text` with `splice` (`[lo hi repl]`) applied — the plain-STRING counterpart of
@@ -74,6 +76,7 @@ no edit is sent."
 `[:splice …]` action with this and its `[:text s]` action by replacement."
   (let ([lo hi repl] splice)
     (str (string/substring text 0 lo) repl (string/substring text hi (string/length text)))))
+(sig text-apply-splice (string vector -> string))
 
 ;; ---- the wire-view normalizer -------------------------------------------------
 
@@ -113,6 +116,7 @@ the link (unchanged when the texts are equal — pure movement sends nothing)."
         (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version))
         (assoc link
           :pending (append (or (get link :pending) ()) (list [lo hi (string/length repl)])))))))
+(sig link-propagate (any string string -> any))
 
 (defn link-fold (link version view origin)
   "Fold one `[:buffer-updated proc version view origin]` push into `link`: returns

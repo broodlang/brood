@@ -126,6 +126,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
 (ADR-141), so the response path needs nothing."
   (tcp/set-binary sock true)
   (http-read-raw sock))
+(sig read-request (socket -> any))
 
 ;; ---- parsing ----------------------------------------------------------------
 (defn- http-split-first
@@ -273,6 +274,7 @@ request/response splitting)."
              (http-crlf-free "header value" (second kv))
              "\r\n"))
       (%map-pairs headers))))
+(sig render-headers (map -> any))
 
 (defn render-response (resp)
   "Render a response map into the HTTP/1.0 wire **iolist** (ADR-139) — hand it to
@@ -350,6 +352,7 @@ rather than closed after a body. An identity check on the record, not a key snif
 (defn mime-type (path)
   "A guessed Content-Type for `path` based on its extension."
   (/get *http-mime* (path/extension path) "application/octet-stream"))
+(sig mime-type (string -> any))
 
 (defn serve-file (path)
   "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is missing."
@@ -369,6 +372,7 @@ rather than closed after a body. An identity check on the record, not a key snif
 (defn listen (port)
   "A listening socket on 127.0.0.1:`port` (port 0 = OS-assigned), owned by the calling process — which must be the one that runs `serve-loop` on it."
   (tcp/listen "127.0.0.1" port))
+(sig listen (int -> socket))
 
 (defn serve-loop (ls handler)
   "Accept connections on `ls` and serve each in its **own** process, forever.
@@ -410,6 +414,7 @@ socket is registered *passive* (no reader until the worker calls
 (defn serve (port handler)
   "Listen on 127.0.0.1:`port` and serve `handler` forever. **Blocks** (the accept loop runs in the calling process) — `(spawn (serve …))` to run it in the background. One handler process per connection (HTTP/1.0)."
   (serve-loop (listen port) handler))
+(sig serve (int any -> any))
 
 ;; ---- HTTP client -----------------------------------------------------------
 ;; `get` works over both `http://` (plaintext, via tcp/connect) and
