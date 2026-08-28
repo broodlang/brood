@@ -63,17 +63,24 @@ const SNAPSHOT: &str = r#"
 fn snapshot(install_image: bool) -> String {
     let mut interp = Interp::new();
     if install_image {
+        // Build one if there is no current image, then install. The id carries the git sha
+        // and a hash of every `.blsp`, so *any* commit or std edit makes the previous image
+        // stale — and an install that misses returns nil and leaves this arm as the SOURCE
+        // arm wearing the image's name. That is KI-72's signature trap, and a test that
+        // merely asks the developer to build first would take it on every commit.
+        //
+        // Building here is also the only *correct* order: nothing is installed yet, so the
+        // build reads the modules from source. Building while an image is installed
+        // re-encodes the materialised state and launders any divergence into the next
+        // image (ADR-280).
         let installed = interp
-            .eval_str("(%std-image-install)")
+            .eval_str("(or (%std-image-install) (do (stdimage/build) (%std-image-install)))")
             .map(|v| interp.print(v))
             .expect("install the stdlib image");
-        // A miss returns nil, and then this arm is the SOURCE arm wearing the image's
-        // name — the trap KI-72 records, where a content-hash mismatch (any `.blsp` edit,
-        // by anyone) silently turns the amplifier off and both arms measure the same path.
         assert_ne!(
             installed, "nil",
-            "no current stdlib image, so this differential would compare source against \
-             source and pass vacuously. Build one first: `(stdimage/build)`",
+            "could not install a stdlib image even after building one, so this differential \
+             would compare source against source and pass vacuously",
         );
     }
     let v = interp.eval_str(SNAPSHOT).expect("snapshot the globals");
