@@ -71,7 +71,9 @@ fn a_named_section_restores_the_sigs_of_its_own_symbols() {
     .expect("loading the probe section");
 
     assert!(
-        r.heap.env_get(brood::core::value::EnvId::GLOBAL, sym).is_some(),
+        r.heap
+            .env_get(brood::core::value::EnvId::GLOBAL, sym)
+            .is_some(),
         "the binding itself did not restore — the section is wrong, not just its sigs"
     );
     assert!(
