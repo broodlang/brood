@@ -23,7 +23,7 @@ missing is now measured as present; what remains is listed under
 
 | Layer | State |
 |---|---|
-| **The lattice** — values-as-sets, semantic subtyping, ∪/∩/¬/∖, gradual `dynamic(bound)` | A union now **keeps its terms** (ADR-262), so a union of two structured types is exact instead of widening to a bare tag. Complements are sayable (`(not T)`, ADR-263) and render as complements. Still approximate in two documented places: the complement of a *refined* term, and subtyping's incompleteness across terms — both the safe direction. |
+| **The lattice** — values-as-sets, semantic subtyping, ∪/∩/¬/∖, gradual `dynamic(bound)` | A union now **keeps its terms** (ADR-262), so a union of two structured types is exact instead of widening to a bare tag, and a record **says what a value is not** (ADR-264) — closed by default, openness modelled as the type of the undeclared keys — which is what makes that union usable rather than merely representable. Complements are sayable (`(not T)`, ADR-263). The relations are now checked *against each other* over a type corpus (`disjointness_agrees_with_intersection` and friends), which found three defects a per-case test had not. Still approximate in two documented places: the complement of a *refined* term, and subtyping's incompleteness across terms — both the safe direction. |
 | **Inference** — how a function's domain and range are derived without annotations | A parameter's type is now its **domain** (ADR-261): a guarded use is credited *within its guard* and the alternatives union, so branch shapes, `match` patterns, head destructuring, multi-arm functions and `:when` clause guards all constrain callers with no annotation. |
 | **The annotation surface** — `sig`, and the checker's reach over program text | `sig` **fails closed** (ADR-259) and the *definition* owns the arity. The walk's totality is now gated (ADR-260), and that gate immediately found the next instance of the KI-67/KI-70 class (quasiquote escapes). |
 
@@ -86,7 +86,7 @@ what they left behind, plus the items that were deferred on ADR-011 grounds and 
 
 | # | Item | Why it is left | Cost |
 |---|---|---|---|
-| 1 | **A field lookup on a tagged union** — `(get r :ok)` where `r : {ok: int} \| {error: string}` | Not the accessor rule: **records are open**, so a term that does not declare `:ok` may still carry one of unknown type, and the honest union is `any`. This needs *closed* record shapes (deferred in [type-records.md](type-records.md)) before a union-aware `get` derivation can say anything | Blocked |
+| ~~1~~ | ~~A field lookup on a tagged union~~ | **Shipped** (ADR-264): records are closed by default, with `&open` as the marked case and openness modelled as the type of the undeclared keys, so `(get r :ok)` over `{ok: int} \| {error: string}` resolves to `int \| nil` and the two arms are provably disjoint | ✅ |
 | 2 | **The complement of a refined term** — `(not (tuple int))` widens to `vector` | Needs negative structural atoms (the full BDD), i.e. terms that say "not this shape" — a second representation change, with emptiness-checking to match | Large |
 | 3 | **A callback's result** is never checked | An inferred return over-approximates, so comparing results false-positives at every call site; needs a "this return is precise" distinction the sig sources do not carry today | Medium |
 | 4 | **Subtyping across terms is incomplete** — a value covered jointly by two alternatives but by neither alone defers | The complete rule needs a distributivity/emptiness decision procedure; the incompleteness is in the safe direction (it defers, never warns) | Large |
@@ -177,3 +177,27 @@ require-reachability (KI-17) · **190** occurrence typing · **191** staged call
 **192** ability bounds · **193** super-abilities · **226** clause guards · **259** a
 declaration that cannot be read is reported · **260** the walk's totality is gated · **261**
 parameter domains · **262** a union keeps its terms · **263** `(not T)`.
+
+---
+
+## Seeing it while you edit (2026-08-28)
+
+The checker's answer is now visible in the editor, which is where it is worth
+having. `types::check::file_signatures` exposes what `check_file` already computes —
+the effective signature of every function a *buffer* defines, inferred from forms
+without loading it (ADR-188/190/261), which is the question `hover` structurally
+cannot answer because it reads the loaded image.
+
+- **An inlay hint** after each `defn`'s parameter list, showing the type the checker
+  inferred. Quiet by construction: nothing for a function that already carries a
+  `(sig …)`, nothing for an uninformative `(any …) -> any`, nothing it declined to
+  infer, and only the informative half (`→ T` when the parameters are unknown).
+- **A "Declare signature" code action** that writes that signature into the file as a
+  real `(sig …)`. `Ty::to_source` renders it — the inverse of the annotation parser,
+  round-trip tested over the whole corpus — and declines rather than approximating
+  when a type has no faithful spelling.
+
+That pair is also the answer to this document's longest-standing backlog item, **`sig`
+adoption**: 34 declarations over 2828 definitions is not a problem you fix by asking
+people to type more, and a hint you can accept with one keystroke is the cheapest path
+from "the checker knows" to "the file says".
