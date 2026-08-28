@@ -18452,3 +18452,51 @@ still says only "callable" (ADR-272).
 
 **No false positives across `std/` + `tests/`**, and sabotage-verified: remove the arrow
 branch and the too-many-arguments case goes unreported.
+
+## ADR-285 — The structural order is total over every value, including maps and sets
+
+`compare` is documented as "the binary form of `sort`'s order", and `%ord-compare`'s
+docstring promised the structural fallback was "deterministic **and** total". It was neither
+for two of the most common values in the language: maps and sets fell through `value_cmp` to
+the cross-kind `tag_rank` compare, where two maps rank identically — so `(compare {:a 1}
+{:a 2})` returned **0**, and `(sort maps)` returned its input in input order, silently and
+with no error.
+
+That is the KI-75 shape exactly (a `compare` that reports unequal values as equal, and a
+`sort` that becomes a no-op rather than failing), and it had the same cause: an arm that
+looked like a deliberate fallback and was really a gap. The doc comment even recorded the
+intent — "sorting them by content isn't well-defined here" — which is true of a function or a
+pid, and false of a map.
+
+**Decision: a map and a set order by content.** Size first, then the entries in key order.
+Sorting the entries before comparing is load-bearing rather than a tidiness: a CHAMP's
+iteration order is an artifact of key hashes, so without it the answer would depend on
+insertion history and two `equal` maps could compare non-`Equal` — the total-order axiom that
+`sort` actually relies on.
+
+Two things this deliberately does **not** change. Records still route through the
+`compare-to` multimethod at the `%ord-compare` seam and remain STRICT — a record type with no
+method is a loud `%no-method`, never a silent order by map layout — so this fallback applies
+to plain maps, not to records that forgot to define an order. And the cost is paid only when
+two maps are actually compared, which no numeric or string sort ever does.
+
+## ADR-286 — A temporal value is ordered by the language's ordering, not its own vocabulary
+
+`std/datetime` shipped five comparison functions — `before?`, `after?`, `not-before?`,
+`not-after?`, `same?` — that were `<`, `>`, `>=`, `<=` and `=` computed over `->epoch-ms`.
+None of the real operators could see them: ordering a record routes through the `compare-to`
+multimethod, and the module registered no method, so `(sort dates)` raised `%no-method` while
+`datetime/before?` sat beside it working. `std/tempo` had the same gap in a different
+spelling — a plain `tempo/compare-to` *function*, which the multimethod dispatch never
+consults, in the module whose entire subject is putting time on a line.
+
+**Decision: register `compare-to`, and delete the vocabulary it replaces.** One method per
+type buys `<`, `<=`, `>`, `>=`, `sort`, `compare` and `math/min`/`math/max` at once, which is
+strictly more than the five functions offered, and it is the answer to the review's "can we
+consolidate some of these to be not so specific?" — the specific thing was a private
+re-spelling of an operator.
+
+Same-type only. A `date` and a `datetime` do not compare: ordering them would have to invent
+a time of day, and a coercion the caller did not ask for is a wrong answer wearing the shape
+of a right one — the rule the cross-type arithmetic review already settled on. A mixed pair
+raises, and the error names the methods that do exist.

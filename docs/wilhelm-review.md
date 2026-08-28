@@ -83,8 +83,29 @@ if the question had never been asked. Same rule as `decisions.md` and `known-iss
       been missed. They are pure record-id checks, so they need no module loaded.
       `before?`/`after?`/`same?`/`leap-year?` stay in the module — those are comparisons,
       not type predicates.
-- [ ] **can we consolidate some of these functions to be not so specific?**
-- [ ] **how do timezones work?** — needs an answer in `docs/` either way.
+- [x] **can we consolidate some of these functions to be not so specific?** — **done, and the
+      over-specific thing turned out to be an operator in disguise.** `before?`, `after?`,
+      `not-before?`, `not-after?` and `same?` were `<`, `>`, `>=`, `<=` and `=` computed over
+      `->epoch-ms` — five public functions doing what the operators do, and *invisible to
+      them*: ordering a record routes through the `compare-to` multimethod, which the module
+      never registered, so `(sort dates)` raised `%no-method` while `datetime/before?` worked
+      beside it. Registering `compare-to` for `datetime`/`date`/`time-of-day` (and for
+      `tempo`, which had the same gap as a plain function) deleted all five and bought `<`,
+      `<=`, `>`, `>=`, `sort`, `compare`, `math/min` and `math/max` instead — ADR-286.
+      Same-type only: a date and a datetime do not compare, since that would have to invent a
+      time of day.
+
+      The seven field accessors (`year`, `month`, … — each `(get dt :field)`) were considered
+      and **kept**: 35 call sites across the repos, and nothing anywhere does `(:use
+      datetime)`, so the `second` shadowing they can cause is latent and already
+      self-documenting in the warning.
+- [x] **how do timezones work?** — **answered in the module docstring, and one real defect
+      fixed behind the question.** There is no zone type and no zone database: a value never
+      carries a zone, so "09:00 in Berlin" is not representable and the questions needing a
+      database cannot be asked. What is supported is the boundary case that actually matters:
+      `parse-iso8601` now reads a numeric offset (`+02:00`, `-05:30`, `+0200`, `+02`) and
+      applies it, so an API timestamp becomes the UTC instant it denotes. It returned **nil**
+      before — a valid ISO 8601 string reported identically to garbage. Rendering stays UTC.
 
 ## json
 
@@ -138,3 +159,28 @@ if the question had never been asked. Same rule as `decisions.md` and `known-iss
       (`defrecord` + a user `get` returned `:CAPTURED`). Fixed for every prelude macro,
       `receive` included, which meant finishing the `/name` root escape so it resolves in a
       module, at root, and at runtime macro expansion (KI-73).
+
+## Found while answering the datetime items (2026-08-28)
+
+Four defects that were not on the list, all surfaced by probing the two datetime questions
+rather than reasoning about them.
+
+- [x] **`sort` was a silent no-op over maps and sets.** `(compare {:a 1} {:a 2})` returned
+      **0**, and `(sort maps)` handed back its input in input order with no error — both
+      types fell through `value_cmp` to the cross-kind tag compare, where they rank the same.
+      This is the KI-75 failure shape (a `compare` calling unequal values equal, a `sort` that
+      no-ops instead of failing) on a different type, and `%ord-compare`'s docstring had been
+      promising the order was "deterministic **and** total" throughout. Now ordered by content
+      (ADR-285). Records are untouched: they still route to `compare-to` and stay strict.
+- [x] **`(defrecord p (x y) :derives [Ord])` — the `defrecord` docstring's only example of
+      `:derives` — was an expansion error.** `Ord` has never existed: `(%ability-ops 'Ord)` is
+      nil. The `defability` docstring illustrated provided-vs-required ops with the same
+      fictional ability, spelling its required op `compare-to`, which is a live multimethod.
+      Both examples replaced with working ones.
+- [x] **`%ord-compare`'s comment contradicted itself** — "the default is the kernel's
+      structural `compare`" three lines above "there is NO `:default`". The code has always
+      been strict; only the prose disagreed.
+- [x] **`:derives` conflated two faults**, reporting "ability X is not derivable (declares no
+      `:derive-record` recipe)" for an ability that is not loaded at all — which sends you
+      looking for a recipe on something that does not exist. The two cases now read
+      differently.

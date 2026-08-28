@@ -517,12 +517,18 @@ Either argument may be anything implementing `Spanning`.
     (tempo/during? (tempo/parse! \"2026-06-15\") (tempo/parse! \"2026-06\"))   → true"
   (tp-rel? a b :during))
 
-(sig compare-to (map map -> int))
-
-(defn compare-to (a b)
-  "-1, 0 or 1 by opening instant, breaking ties on the closing instant — so a
-mixed-resolution list sorts into timeline order, and where two values begin
-together the **shorter** one sorts first (`2026-01` before `2026`)."
+;; Ordering: -1, 0 or 1 by opening instant, breaking ties on the closing instant — so a
+;; mixed-resolution list sorts into timeline order, and where two values begin together the
+;; **shorter** one sorts first (`2026-01` before `2026`).
+;;
+;; A `defmethod` on the prelude's `compare-to` multimethod, not a plain `tempo/compare-to`
+;; function. It was the latter until 2026-08-28, which meant tempo values were orderable only
+;; by naming this function: `sort`, `<`, `<=`, `>`, `>=` and `compare` all route a RECORD
+;; through the multimethod (`%ord-compare`), found no method, and raised — so the module that
+;; exists to put time on a line could not put its own values in order.
+(defmethod compare-to
+  [tempo tempo]
+  (a b)
   (let (sa (->span a)
         sb (->span b))
     (cond
