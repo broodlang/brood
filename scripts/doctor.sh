@@ -53,9 +53,17 @@ for b in target/release-fast/brood target/release/brood "$(command -v brood 2>/d
 done
 
 # A binary older than the newest source is stale even when its sha matches (uncommitted work).
+#
+# `std/**/*.blsp` counts as source and this once looked only at `crates/**/*.rs`. The
+# standard library is `include_str!`'d INTO the binary, so a `.blsp` edited after the last
+# build is invisible to the running program in exactly the way an edited `.rs` is — and it
+# fails more confusingly, because the file on disk plainly contains the function the binary
+# says is unbound. That cost a session: a suite was reported as failing when it passed, read
+# through a binary built before the `std/` edit under test.
 for b in target/release-fast/brood target/release/brood; do
   [ -x "$b" ] || continue
   newer=$(find crates -name '*.rs' -newer "$b" -print -quit 2>/dev/null || true)
+  [ -z "$newer" ] && newer=$(find std -name '*.blsp' -newer "$b" -print -quit 2>/dev/null || true)
   [ -n "$newer" ] && note "$b is older than $newer — rebuild before measuring"
 done
 

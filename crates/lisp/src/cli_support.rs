@@ -346,6 +346,103 @@ where
         .unwrap_or_else(|_| panic!("{name} thread panicked"))
 }
 
+/// Warn once if this binary's baked-in standard library is **older than the tree it is
+/// running in** — the trap that has cost this project three separate sessions, in three
+/// disguises.
+///
+/// `std/**/*.blsp` is `include_str!`'d into the binary, so an edited module is invisible to
+/// the running program while sitting plainly on disk. The failure does not look like
+/// staleness: a function the file clearly defines reports as *unbound*, a docstring fix
+/// "doesn't take", a suite reads as failing when it passes. Every time, the conclusion drawn
+/// was about the code rather than about the binary.
+///
+/// The binary already knows the answer — `BROOD_STDLIB_HASH` is a content hash of every
+/// baked-in `.blsp`, computed by `build.rs`. This recomputes it from the tree and compares.
+/// It is only called from **development entry points** (`--test` and `nest test`), where the
+/// ~1 ms of hashing is nothing against a test run, and it says nothing at all when there is
+/// no tree to compare against — an installed binary run anywhere is not stale, it is
+/// installed.
+pub fn warn_if_stdlib_is_stale() {
+    let Some(root) = repo_root() else {
+        return; // not running inside a brood checkout: nothing to be stale against
+    };
+    let Some(tree) = stdlib_tree_hash(&root) else {
+        return;
+    };
+    if tree == env!("BROOD_STDLIB_HASH") {
+        return;
+    }
+    eprintln!(
+        "brood: this binary's baked-in std/ is OLDER than {} — it will ignore your \
+         .blsp edits (rebuild, or `make doctor`)",
+        root.display()
+    );
+}
+
+/// The workspace root above `cwd`: the nearest ancestor holding both `Cargo.toml` and a
+/// `std/` directory. `None` when the process is not inside a brood checkout.
+fn repo_root() -> Option<std::path::PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if dir.join("Cargo.toml").is_file() && dir.join("std").is_dir() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// The content hash of `std/**/*.blsp` under `root`, in the hex form `BROOD_STDLIB_HASH`
+/// carries.
+///
+/// **This must mirror `crates/lisp/build.rs` exactly** — same FNV constants, same sorted
+/// order, same "relative path bytes then file bytes" per file. `build.rs` cannot share code
+/// with the crate it builds, so the algorithm is written twice; `the_runtime_and_build_time_
+/// stdlib_hashes_agree` is the gate that keeps the two copies honest, and it is a real gate
+/// because `cargo test` rebuilds first, so the two are always comparable when it runs.
+#[doc(hidden)]
+pub fn stdlib_tree_hash_for_test(root: &Path) -> Option<String> {
+    stdlib_tree_hash(root)
+}
+
+fn stdlib_tree_hash(root: &Path) -> Option<String> {
+    fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    collect(&p, out);
+                } else if p.extension().is_some_and(|x| x == "blsp") {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    collect(&root.join("std"), &mut files);
+    if files.is_empty() {
+        return None;
+    }
+    files.sort();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for f in &files {
+        for chunk in [
+            f.strip_prefix(root)
+                .unwrap_or(f)
+                .to_string_lossy()
+                .as_bytes(),
+            &std::fs::read(f).unwrap_or_default(),
+        ] {
+            for b in chunk {
+                hash ^= *b as u64;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    Some(format!("{hash:x}"))
+}
+
 /// Read a source file or exit non-zero with a uniform `"{prog}: cannot read
 /// {path}: {e}"` diagnostic. The repeated read-or-die block at every CLI file
 /// entry point (`brood --test`, `brood <file>`, `nest test`). `prog` is the
