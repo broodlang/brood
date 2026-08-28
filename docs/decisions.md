@@ -12078,11 +12078,45 @@ ability's domain: `(sig total (Shape -> float))`. The type grammar had no way to
 ability, so `Shape` in type position was an unknown name and the whole sig was dropped.
 
 **Decision.** In the type grammar (`annot::parse_type`), a bare symbol that names a
-**sealed** ability resolves to the **union of its members' record shapes** — `Shape :sealed
+**sealed** ability resolves to the **union of what its members denote** — `Shape :sealed
 [circle rect]` becomes `(or (record :__id__ :ns/circle) (record :__id__ :ns/rect))`. Each
 member shape carries only the nominal `:__id__` keyword singleton — records are open
 (width-subtyped), so a real `(circle 2)` with extra fields is still a subtype, and
 `:__id__` is exactly what nominal dispatch and `ty_record_id` key on.
+
+**Amendment (2026-08-28) — a member need not be a record.** `impl` dispatches on built-in
+kinds as well as records (`(impl Numeric :int …)`), so a seal may name them: `:sealed [:int
+:float :decimal :ratio]`. Such a member denotes **its own lattice point** (`base_ty`), not a
+record shape. The original mechanism turned *every* member into `%{__id__: :m}`, so a
+kind-sealed ability's domain **rejected its own members** — `(use-it 42)` warned that an int
+was not `{__id__: :int | :float}`, which no int is: a `nest check` false positive (exit 1) on
+a program that runs correctly.
+
+It read as working because the two paths that only need the *id set* were unaffected — the
+exhaustiveness gate, and rejecting a provable non-member. Passing a real member was the only
+way to see it, and nothing in-tree is kind-sealed, which is why this ADR's own false-positive
+audit came back clean. That is also why the numeric tower (`Numeric`/`Zero` in `std/math`) —
+the one genuinely closed member set in the stdlib — could not be sealed.
+
+Both construction sites (`annot::ability_type` for the name-as-a-type, `protocol::
+sealed_op_domain` for the ADR-190 occurrence-typing domain) now route through one helper,
+`annot::sealed_members_ty`, so a value a `sig` accepts cannot be rejected by the op call
+inside it.
+
+Classifying a member by **spelling** is not enough, and the first attempt was wrong for it:
+a record declared at ROOT namespace registers under its bare name, so `(defrecord ratio …)`
+outside any `defmodule` owns the id `:ratio` — the identical dispatch key the built-in ratio
+kind uses. The language genuinely conflates them (a real `1/2` reaches that record's impl),
+so reading the member as the kind rejected the record, reintroducing the same defect in a
+narrower case. The tiebreak is the `*record-ids*` registry (`protocol::record_id_names`,
+installed per file next to the ability table): a registered record wins, and only then does
+`base_ty` get a say. It must union the runtime registry with **this file's own**
+`%record-register` forms from the expanded tree — `nest check` expands but never evaluates,
+so a file's own `defrecord`s are not in the registry when it is checked. A seal mixing records and kinds accepts every member; the record half widens to
+`map` in the union (`Ty::union` drops a differing `fields` map — sound, since it only ever
+accepts more), so a mixed seal trades `:__id__` precision for coverage while a purely-record
+seal keeps it. Regression tests: `types::check::tests::sealed_over_builtin_kinds_*`,
+`sealed_over_records_keeps_its_id_precision`, `sealed_mixing_records_and_kinds_*`.
 
 **Sealed only, by soundness.** Only a **sealed** ability has a closed member set to
 enumerate into a *finite* union. An open ability is deliberately *not* a type (its name in
@@ -18071,3 +18105,142 @@ domains of everything that calls it in the same module, which makes *those* sign
 worth declaring in turn. `bytes/int` went from `(any (or map number) (or map number) ->
 any)` — which ADR-276 would reject as noise — to `(bytes int (or map number) -> any)`, two
 of three parameters now saying what they mean.
+
+## ADR-278 — a multimethod declares its return type, and every method is checked against it
+
+**Status:** accepted and implemented, 2026-08-28. The multimethod half of ADR-172's `:-> RET`;
+step 1 of the sequence in [`union-dispatch-design.md`](union-dispatch-design.md).
+
+**Context.** An ability op declares its return — `(compare-to [self other] :-> int)` — and
+`check_impl_returns` verifies every impl body against it, which is what lets
+`types/check/infer.rs` say *"the declared return is the only static handle… a contract, not a
+guess"*. A **multimethod** declared nothing. Its generic is a `defn` whose body is the dispatch
+machinery, so its inferred type is opaque and a call site could not be typed **at all**:
+`(compare-to a b)` contributed nothing to inference, and no method body was constrained.
+
+The asymmetry was invisible because the two forms are documented together. `Ord` declares
+`(compare-to [self other] :-> int)` on the *ability* and the multimethod's own comment says
+`(compare-to a b) → -1 / 0 / 1` — so the contract was stated twice in prose and enforced
+nowhere. A method returning a string or `nil` was caught by neither, and `sort` is built on
+`compare-to`.
+
+**Decision.** `defmulti` accepts a trailing `:-> RET`, beside the optional algebra keyword:
+
+```lisp
+(defmulti compare-to :antisymmetric :-> int)
+(defmulti render :-> string)
+```
+
+`%register-multi` records it in `*multi-ret*`; `multi-return-type` reads it back. `:->` is the
+same marker an ability op spec uses, so there is one spelling for "and it returns" across both
+dispatch forms.
+
+**Two halves, and shipping only the first would be worse than shipping neither.**
+
+1. **Call sites are typed** — `MultiInfo::ret_of` feeds `infer.rs` exactly where
+   `AbilityInfo::op_ret_of` already did.
+2. **Every method body is checked** — `check_one_method_return`, the analogue of
+   `check_one_impl_return`. Without it, `:-> int` would be an unchecked assertion and the
+   checker would confidently type every call `int` while a method returned a string. That is
+   strictly worse than not declaring, which is why both landed together.
+
+**Consequences.** `compare-to` now declares `:-> int`, making its long-documented contract
+machine-checked — no existing method violated it. The `num/*` operators deliberately declare
+nothing: their result type follows their operands (`usd + usd` is a `usd`), so `any` would add
+no information.
+
+Two limits, recorded rather than discovered later. A `defmulti` declares only its **return**,
+not parameter types, so method params bind unknown — a sound under-approximation (fewer known
+types means fewer graded bodies, never a wrong grade). And `ret_of` falls back to the symbol's
+own spelling for a multimethod declared in another module, because `MultiInfo::generics` is
+built from the *file's* forms; that is exact for a root-level `defmulti` (the global has the
+multimethod's name) and is what makes the prelude's `compare-to` type call sites elsewhere.
+
+## ADR-279 — An image section installs its stubbed entry points last
+
+**Status:** accepted (2026-08-28)
+
+Materialising a module from the startup image defines its globals one at a time, and
+**each `env_define` publishes immediately**. For a module that is not yet loaded, the only
+pre-existing binding one of its names can have is an ADR-246 **autoload stub** — and the
+stub is the door every other process comes through: it routes a caller into `require-one`,
+which sees the in-flight claim and waits for `provide`.
+
+Overwriting a stub mid-section opens that door early, onto a module whose remaining entries
+are not bound yet. `std/string.blsp` shows it exactly: `blank?` is public and stubbed,
+`whitespace?` is `defn-` and called from `blank?`'s body. The section installed `blank?`
+first, a racing process took the *real* `blank?` instead of the stub, and died on
+`unbound symbol: string/whitespace?`.
+
+**The source path cannot produce this**, which is why it had never been seen there: `load`
+evaluates in **file order**, and a helper is written before the caller that needs it. The
+image has no such order — it installs whatever order the section was written in.
+
+**Decision:** a section defines every name that has **no current binding** first, and the
+names that already have one **last**. While any stub is still in place the module stays
+unreachable except through `require-one`, and by the time the stubs are replaced every
+other entry in the section is bound.
+
+Deferring is enough; full atomicity is not needed, and this is the same "publish last"
+discipline ADR-256 applied to `provide` and to the require-edge replay — one step further
+down, to the bindings themselves. A `sig` is never deferred: it is not callable and cannot
+open the door.
+
+**Measured**, `autoload_race::racing_the_first_call_into_string_is_sound` with the image
+verified live in every run:
+
+| | hangs |
+|---|---|
+| before | 9–10 of 12 |
+| after | **0 of 24** |
+| after, deferral disabled (sabotage) | 9 of 12 |
+
+and on KI-72's original acceptance load — 12 parallel copies at `--test-threads=4`, 90 s —
+**image ON 0/12, image OFF 0/12**, against the 12/12 vs 0/12 that opened the entry.
+
+## ADR-280 — Materialising is checked against loading, by construction
+
+**Status:** accepted (2026-08-28)
+
+The startup image's history is a list of things materialising silently failed to reproduce,
+each found by a downstream symptom:
+
+| dropped | how it surfaced |
+|---|---|
+| declared **sigs** | `nest check` lost every std signature and the reversed-argument lint had nothing to compare against — a gate that stopped gating |
+| **require edges** | an imaged start built a heap with holes; the program died across a missing edge (ADR-256) |
+| **ability impls/regs** | a restored `http` was bound but not dispatchable (ADR-256) |
+| `provide` **ordering** | a racing process saw a module whose dependencies were missing (ADR-256) |
+| **binding order** | a racing process took a real function before its private helpers were bound — KI-72, read as a scheduler hang for two sessions (ADR-279) |
+| **privacy** | *this ADR* |
+
+One shape underlies all six: **materialising defines bindings and evaluates nothing**, so
+anything the evaluation would have *done* must be replayed and anything it would have
+*recorded* must be written. Finding them one at a time, by consequence, is not a method.
+
+**Decision (the gate):** `crates/lisp/tests/image_matches_source.rs` loads every baked-in
+module twice — once from source, once from the image — and requires the resulting global
+state to be identical: every name, its kind (`:fn`/`:macro`/`:native`/data), its privacy,
+and its declared signature. Values are deliberately not compared: two closures built by
+different routes are not `=`, and no defect in this class has ever been a wrong value.
+
+The install's own bookkeeping (`*std-impls*`, `*std-require-edges*`, …) is excluded **by
+name**, not by dropping root globals — a module's root globals are exactly what broke once
+before, when `*lineedit-keymap*` was credited to `repl`'s section and
+`(require 'editor/lineedit)` restored the module without it.
+
+**Decision (the sixth defect):** privacy is written into the section as its own
+`KIND_PRIVATE` entry and re-marked on materialise. ADR-146 records privacy by *evaluating*
+`(%mark-private 'name)`, so every `defn-` in an imaged module came back **public** — and
+silently: `(:use mod)` refers the internals, `nest doc` publishes them as API, and the
+checker's cross-module private-reference error stops firing. Its own entry rather than a
+flag on the value entry, so the fact survives for a name whose value is not encodable.
+
+The differential found it on its first run: **1448 names diverged, 0 after the fix.**
+Sabotage-verified — disable the privacy entries and the test fails.
+
+**A trap this exposed.** Building an image *while an image is installed* re-encodes the
+materialised state, so any divergence launders itself into the next image. It does not bite
+in practice only because the id is a content hash: when a rebuild is needed the old image no
+longer installs. Force a rebuild against a current image — as this session did — and the
+loss is copied forward invisibly.

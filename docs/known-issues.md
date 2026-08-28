@@ -4485,7 +4485,7 @@ boundary — and the shapes on the far side of it are exactly where nobody is lo
 
 ---
 
-## KI-72 — the stdlib image cannot be default-ON yet: a require-stall storm ⚠️ OPEN 2026-08-27
+## KI-72 — the stdlib image cannot be default-ON yet: a require-stall storm ✅ FIXED 2026-08-28
 
 **Symptom.** With the stdlib image installed at boot, `autoload_race::racing_the_first_call_into_string_is_sound`
 exceeds nextest's 120 s cap during `make test`. It passes **12/12 in 0.5 s** when run alone, and
@@ -4696,6 +4696,87 @@ hold the state lock across its check-then-wait, which closes the obvious window,
 not yet a proven mechanism for the loss — but it is the structural difference, and unifying
 the two wake paths (or latching the wakeup in the mailbox state the way `ERTS_PSFLG_ACTIVE`
 does) would remove the whole class.
+
+### FIXED 2026-08-28 — it was never a stall. A section published its entry points too early
+
+**It is not a hang, a lost wakeup, or a lost message.** Every prior account here — the
+5 ms poll, the condvar that does not latch, the `code_server` model, the two wake paths —
+was chasing a symptom. The root is an **unbound symbol in a child**, which presents as the
+root hanging because the test's `reduce` waits for 24 replies and one child died before
+sending its own.
+
+**What found it: three counters and a signal handler.** Every in-language observer moved or
+suppressed this bug, and `ptrace_scope` forbids attaching gdb to a process the shell did not
+fork. What worked was relaxed atomics on paths that run once per process (`spawn`, exit,
+`send`) plus a **SIGTERM handler** that writes them with `libc::write(2, …)` — `timeout`
+already sends SIGTERM at the cap, so the readout happens only once the process is *already*
+stuck and cannot perturb the race. Three readings, in order:
+
+- `spawned=24 exited=24` — no child is parked, none is missing;
+- `delivered == sent` exactly — **nothing is lost in transit**; and
+- `sent-to-root` 16–23, never 24, with `done + err = 24` and `sent-to-root == done`.
+
+So children were *crashing*, and the shortfall was exactly `err`.
+
+**Why "no child prints died" was believed.** It does print — `pool.rs` has an `eprintln!`
+for exactly this. **libtest captures a test's stderr and discards it for a test that never
+completes**, so the message was written and thrown away. With `--nocapture`:
+
+```
+process 9 died: unbound error: unbound symbol: string/whitespace?
+```
+
+**The mechanism** (ADR-279). `blank?` is public and carries an ADR-246 autoload stub;
+`whitespace?` is `defn-` and is called from `blank?`'s body. An image section defines its
+globals one at a time and each define publishes immediately, so installing the real
+`blank?` **removed the stub** — the one door that routes a racing caller into `require-one`
+and makes it wait — while `whitespace?` was still unbound. The source path cannot produce
+this: `load` evaluates in file order, where a helper precedes its caller.
+
+**The fix:** a section defines names with no current binding first and names that already
+have one (i.e. the stubs) last. Sabotage-verified: 9 of 12 hang with the deferral disabled,
+**0 of 24** with it enabled.
+
+**Acceptance load** (the one this entry opened with — 12 parallel copies at
+`--test-threads=4`, 90 s): **image ON 0/12, image OFF 0/12**, against 12/12 vs 0/12 before.
+
+### A third trap, worse than the two above: the amplifier switches off *by itself*
+
+Trap 1 said "committing invalidates the image". It is broader and it invalidated real work:
+`BROOD_STDLIB_HASH` is a content hash over **every `std/**/*.blsp`**, so *any* edit to std
+— including one made by somebody else while your measurement is running — changes the id,
+no image matches, and the image arm silently becomes the no-image arm. During this session
+the tree was being edited in parallel and a 12-run measurement read **0 of 12** purely
+because of it; the same runs read 9 of 12 once the image was rebuilt.
+
+This very likely explains the entry's own "baseline and fixed are indistinguishable, and the
+baseline itself swung between 9/20 and 13/20 across runs of *identical* code".
+
+**So: verify the image inside the same command that measures.** Not once at the start —
+every run. `BROOD_IMAGE_TRACE=1` and count `install: N sections`; `N` must be a number and
+not `nil`, and the loop should report how many runs saw it:
+
+```
+hangs: 0 of 24   (image live 24/24)
+```
+
+**Still open:** whether the image can now be **default-ON**. Parity is met on this load, but
+that is one workload; flipping the default is a shipping decision and ADR-256's flip was
+reverted once already.
+
+**And the bar for that decision moved, in both directions, the same day.** Asked whether the
+image should default on "except when running scripts", the measurement says the opposite: a
+script requiring three std modules runs **46.5 ms → 36.2 ms**, a 22% saving it pays on
+*every* invocation, where a long-lived process pays it once and amortises it away. Scripts
+are the beneficiary, not the exception — and the exceptions that do exist are already
+handled by construction (coverage stands aside; editing std invalidates the id).
+
+What was missing was not a workload but a *proof*. Every divergence in this feature's
+history was found by consequence, so ADR-280 added the differential — load every module
+from source, load it from the image, require the resulting state to match. It found a
+**sixth** on its first run: materialising dropped **privacy**, so every `defn-` in an imaged
+module came back public. 1448 names diverged; 0 after the fix. Default-on is a decision
+about one gate now rather than about five anecdotes.
 
 **Status:** the image ships **opt-in** (`BROOD_STDIMAGE=1`), which is where it was before the flip.
 Everything else from ADR-256 is unaffected and shipped: the registration replay, the
