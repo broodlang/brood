@@ -257,24 +257,7 @@ since the prelude is always present."
                                  owned (filter (fn (s) (string/starts-with? (->string s) pfx))
                                          (global-names))
                                  mine (filter (fn (g) (= (%map-get owner-of g nil) mn)) roots)
-                                 all (append owned mine)
-                                 ;; KI-72: a section's entries are defined one at a time into the
-                                 ;; SHARED global table, so each name becomes callable the moment it
-                                 ;; lands. In `global-names` order a PUBLIC can precede a
-                                 ;; module-private it calls — `string/blank?` sat at position 7 and
-                                 ;; the `string/whitespace?` its body calls at 51 — and any green
-                                 ;; process that resolved `blank?` inside that window died with
-                                 ;; `unbound symbol: string/whitespace?`. Loading from source never
-                                 ;; shows it, because the file defines the helper (line 190) before
-                                 ;; its caller (line 192); the image had no such guarantee.
-                                 ;; So: PRIVATES FIRST. A public name is never reachable before the
-                                 ;; privates it closes over, which is the ordering property source
-                                 ;; loading gives for free. Sorting by `reflect/source-location`
-                                 ;; cannot do this — a private has no recorded def-site (it returns
-                                 ;; nil), which is exactly the half that matters.
-                                 syms (apply vector
-                                        (append (filter private? all)
-                                          (filter (fn (s) (not (private? s))) all))))
+                                 syms (apply vector (append owned mine)))
                              ;; A module contributing nothing would image as materialisable-but-empty,
                              ;; and a later require would restore no bindings rather than fall back.
                              (when (> (count syms) 0) [mn syms])))
