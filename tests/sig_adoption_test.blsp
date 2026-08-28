@@ -122,8 +122,11 @@
 
 (describe "occurrence typing — a sealed ability op derives the param"
   (test "a param used as a sealed op's arg is inferred to the member union; a non-member caller is flagged"
+    ;; The derived domain is the member union, and it RENDERS as the names you would write
+    ;; in a `sig` — `ot5/circle | ot5/rect` — not as the `:__id__` shape that carries the
+    ;; identity, which was the representation leaking into the message.
     (is (warns-about? "(defmodule ot5) (defrecord circle (r)) (defrecord rect (w h)) (defability Shape :sealed [circle rect] (area [self] :-> float)) (impl Shape circle (area [c] 1.0)) (impl Shape rect (area [r] 1.0)) (defn shout (s) (area s)) (defn c () (shout 5))"
-          "__id__")))
+          "ot5/circle | ot5/rect")))
   (test "a member caller is silent"
     (assert= (warns-of "(defmodule ot6) (defrecord circle (r)) (defability Shape :sealed [circle] (area [self] :-> float)) (impl Shape circle (area [c] 1.0)) (defn shout (s) (area s)) (defn c () (shout (circle 2)))")
       nil))

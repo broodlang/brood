@@ -622,6 +622,16 @@ provable mismatch; anything whose type isn't pinned down defers — sound, no fa
 > `{__id__: :int | :float}`, which no int is. Only passing a real member exposed it; the
 > exhaustiveness gate and non-member rejection both looked right.)
 
+**A record name is a type.** `(sig area (circle -> float))`, `:-> circle` — a record is the
+language's nominal type, so its name resolves in type position to the open shape
+`%{__id__: :ns/circle, …}`. Open, so a record carrying extra fields (`(assoc (circle 2) :z 3)`)
+is still one; a *different* record or a non-record is a provable mismatch. Both the bare
+spelling (inside the declaring module) and the qualified one (`shapes/circle`) work; a bare
+name that two modules both claim **declines** rather than guessing, so it reads as an unknown
+type rather than the wrong one. A base type name outranks a record that took the same id — in
+a type expression `int` is the int kind, even where a root-namespace `(defrecord int …)`
+exists.
+
 **Any ability name is a type (ADR-186).** An *open* ability (no `:sealed`) has no finite
 member set, so it resolves to the permissive **`any`** — a `sig` mentioning it (`(sig render
 (Display -> string))`) still *checks* (the return and other params flow), the open-ability

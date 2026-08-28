@@ -325,6 +325,7 @@ Call immediately after accept or connect, before any data has been read."
 The last vector may be shorter if the source isn't a multiple of `n`."
   (when (<= n 0) (error "chunk: n must be > 0"))
   (spawn (chunk-outer n s)))
+(sig chunk (int any -> pid))
 
 (defn- chunk-outer
   (n up)

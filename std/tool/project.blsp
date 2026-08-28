@@ -2552,6 +2552,14 @@ Backs `nest check --suggest-sigs`."
                             (for (line lines) (io/puts (str "  " line)))
                             (+ acc (count lines))))))
                 0 targets))
+    ;; "across 0 files" is a true sentence that answers nothing — the same shape
+    ;; `nest doc <module>` had until today, where a command succeeds, produces nothing,
+    ;; and leaves the reader to guess whether that is the answer or a misfire. Say which.
+    (when (empty? targets)
+      (io/puts (str "suggest-sigs: no .blsp files under this project's source paths "
+                 (->string *project-source-paths*)
+                 " — name the files explicitly (`nest check --suggest-sigs a.blsp …`), "
+                 "or run it where the project lists them")))
     (io/puts (str "\nsuggest-sigs: "
                total
                " undeclared signature"
