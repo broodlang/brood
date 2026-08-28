@@ -1,0 +1,873 @@
+;; std/tempo.blsp — time as an interval, not an instant.
+;;
+;; A Brood adaptation of Tempo, the Elixir library by Kip Cole
+;; (https://github.com/elixir-tempo/tempo), Copyright 2021 Kip Cole, licensed
+;; under the Apache License 2.0. An independent reimplementation of Tempo's
+;; model, written from scratch in Brood. No Elixir source is copied. See
+;; NOTICE.md, and PORTING.md for what is adapted and what is not.
+;;
+;; Layered on `std/datetime` for exactly three things: the Hinnant civil<->days
+;; conversions (`->epoch-ms` / `epoch-ms->`), `days-in-month`, and `utc-now`.
+;; Those are the only calendar arithmetic in the system and there should be one
+;; copy of them.
+
+(defmodule tempo
+  "Time as an interval, not an instant.
+
+Every mainstream date library gives you three scalar types — a date, a time, a
+datetime — and leaves the meaning of each to the caller. Is `2026-06-15`
+midnight, or the whole day? Most codebases answer with a hand-rolled
+`end-of-day` helper, and a good number get a boundary wrong.
+
+`tempo` takes the other road. **One** type, carrying its own **resolution**, and
+every value is the half-open span it denotes:
+
+    2026        →  [2026-01-01T00:00, 2027-01-01T00:00)
+    2026-06     →  [2026-06-01T00:00, 2026-07-01T00:00)
+    2026-06-15  →  [2026-06-15T00:00, 2026-06-16T00:00)
+
+A year, a month, a day and a minute become the same type at different
+resolutions, so one set of operations covers all of them.
+
+Three types and one ability:
+
+- **`tempo`** — a calendar value: a resolution plus its units.
+- **`span`** — a half-open `[from, to)` pair of epoch milliseconds.
+- **`iset`** — an interval set: sorted, disjoint, non-touching spans. What
+  `union` / `intersection` / `difference` return, so the algebra is closed.
+- **`Spanning`** — the open ability saying a value occupies a span. Impl it and
+  every operation here accepts your type; `tempo`, `span`, `datetime/date` and
+  `datetime/datetime` already do.
+
+    (tempo/->iso (tempo/new! {:year 2026 :month 6}))                  → \"2026-06\"
+    (tempo/relation (tempo/parse! \"2026-06\") (tempo/parse! \"2026\"))   → :during
+    (tempo/total-width (tempo/gaps workday meetings))                 ;; ms free
+
+Values are UTC and Gregorian, matching `datetime`. Resolution runs
+`:year :month :day :hour :minute :second :ms` and a value must carry a
+contiguous prefix of that list — `{:year 2026 :day 15}` is an error, not a
+guess.
+
+Adapted from Tempo (Kip Cole, Apache-2.0); see PORTING.md.")
+
+;; ---- units ------------------------------------------------------------------
+;;
+;; Resolution is the whole game: a value's finest unit fixes both the width of
+;; the span it denotes and the step at which it enumerates. The order below is
+;; the only place that hierarchy is written down.
+
+(def- unit-order [:year :month :day :hour :minute :second :ms])
+
+(defn- tp-rank
+  (u)
+  (cond
+    (= u :year) 0
+    (= u :month) 1
+    (= u :day) 2
+    (= u :hour) 3
+    (= u :minute) 4
+    (= u :second) 5
+    (= u :ms) 6
+    else -1))
+
+(defn- tp-unit? (u) (>= (tp-rank u) 0))
+
+(sig finer (keyword -> (or keyword nil)))
+
+(defn finer (u)
+  "The unit one step finer than `u`, or nil when `u` is `:ms`.
+
+    (tempo/finer :month)   → :day
+    (tempo/finer :ms)      → nil"
+  (let (r (tp-rank u))
+    (if (and (>= r 0) (< r 6)) (nth unit-order (+ r 1)) nil)))
+
+(sig coarser (keyword -> (or keyword nil)))
+
+(defn coarser (u)
+  "The unit one step coarser than `u`, or nil when `u` is `:year`."
+  (let (r (tp-rank u))
+    (if (> r 0) (nth unit-order (- r 1)) nil)))
+
+;; Fixed-width units, in ms. Years and months are NOT here — they vary, and are
+;; advanced by field arithmetic instead.
+(defn- tp-unit-ms
+  (u)
+  (cond
+    (= u :day) 86400000
+    (= u :hour) 3600000
+    (= u :minute) 60000
+    (= u :second) 1000
+    (= u :ms) 1
+    else nil))
+
+;; ---- the three types --------------------------------------------------------
+;;
+;; `tempo` carries its units as a MAP plus its resolution, not as an ordered
+;; pair vector. The units are a contiguous prefix of `unit-order` by
+;; construction, so the map and the resolution together determine the ordered
+;; form — which makes unit access O(1) and means nothing has to fold a vector
+;; back into a map on every comparison.
+
+(defrecord tempo (by-unit res))
+(defrecord span (from to))
+(defrecord iset (spans))
+
+(defn tempo? (x) "True when `x` is a tempo value." (and (record? x) (= (record-id x) :tempo/tempo)))
+(defn span? (x) "True when `x` is a span." (and (record? x) (= (record-id x) :tempo/span)))
+(defn iset? (x) "True when `x` is an interval set." (and (record? x) (= (record-id x) :tempo/iset)))
+
+;; ---- the Spanning ability ---------------------------------------------------
+;;
+;; OPEN, deliberately. Everything below — `relation`, the predicates, the whole
+;; set algebra — reaches for `->span` rather than testing types, so a package
+;; teaches this module about its own type with one `impl` and no edit here. That
+;; is what lets an iCalendar `event` flow straight into `difference` while
+;; keeping its summary and location attached.
+;;
+;; Open means it cannot serve as a sig bound (ADR-192). A closed set of temporal
+;; types is exactly what we do not want, so that is the right trade.
+
+(defability Spanning
+  "A value occupying a half-open `[from, to)` stretch of the timeline."
+  (->span [self] :-> map))
+
+;; ---- construction -----------------------------------------------------------
+
+(defn- tp-in?
+  (v lo hi)
+  (and (int? v) (>= v lo) (<= v hi)))
+
+(defn- tp-present
+  (m)
+  ;; The known units present in `m`, coarse to fine.
+  (vec (for (u unit-order :when (contains? m u)) u)))
+
+(defn- tp-unknown-units
+  (m)
+  (vec (for (k (keys m) :when (not (tp-unit? k))) k)))
+
+(defn- tp-contiguous?
+  (present)
+  ;; The units must be exactly the first N of unit-order — no gaps.
+  (= present (vec (take (count present) unit-order))))
+
+(defn- tp-validate
+  (m)
+  ;; nil when `m` is a valid component map, otherwise the reason it is not.
+  (let (bad (tp-unknown-units m)
+        present (tp-present m)
+        y (get m :year)
+        mo (get m :month))
+    (cond
+      (not (empty? bad)) (str "unknown time unit: " (str (nth bad 0)))
+      (empty? present) "no time units given"
+      (not (tp-contiguous? present))
+        (str "units must be a contiguous prefix of " (str unit-order) " — got " (str present))
+      (not (int? y)) (str "year must be an integer, got " (str y))
+      (and (contains? m :month) (not (tp-in? mo 1 12))) (str "month out of range: " (str mo))
+      (and (contains? m :day) (not (tp-in? (get m :day) 1 (datetime/days-in-month y mo))))
+        (str "day out of range for " (str y) "-" (str mo) ": " (str (get m :day)))
+      (and (contains? m :hour) (not (tp-in? (get m :hour) 0 23)))
+        (str "hour out of range: " (str (get m :hour)))
+      (and (contains? m :minute) (not (tp-in? (get m :minute) 0 59)))
+        (str "minute out of range: " (str (get m :minute)))
+      (and (contains? m :second) (not (tp-in? (get m :second) 0 59)))
+        (str "second out of range: " (str (get m :second)))
+      (and (contains? m :ms) (not (tp-in? (get m :ms) 0 999)))
+        (str "ms out of range: " (str (get m :ms)))
+      else nil)))
+
+(defn new (m)
+  "Build a tempo from a component map → `[:ok t]` or `[:error message]`.
+
+The units present must form a contiguous prefix of
+`[:year :month :day :hour :minute :second :ms]`, and each must be in range for
+the calendar — `{:year 2026 :month 2 :day 30}` is an error, not a silently
+normalised 2 March. Key order does not matter.
+
+Years are proleptic Gregorian and may be zero or negative. Note that ISO 8601
+requires a mutually-agreed expanded representation for those, so `->iso` on a
+negative year emits a leading `-` and is not interchange-safe.
+
+    (tempo/->iso (tempo/new! {:day 15 :year 2026 :month 6}))   → \"2026-06-15\""
+  (let (problem (tp-validate m))
+    (if problem [:error (str "tempo/new: " problem)] [:ok (tempo m (last (tp-present m)))])))
+
+(defn new! (m)
+  "As `new`, but throws on invalid components instead of returning `[:error …]`."
+  (let (r (new m))
+    (if (= (nth r 0) :ok) (nth r 1) (error (nth r 1)))))
+
+(sig resolution (map -> keyword))
+
+(defn resolution (t)
+  "The finest unit present in `t` — the width of the span it denotes.
+
+    (tempo/resolution (tempo/parse! \"2026-06\"))   → :month"
+  (tempo-res t))
+
+(defn unit (t u)
+  "The value of unit `u` in `t`, or nil when `t` is coarser than `u`.
+
+    (tempo/unit (tempo/parse! \"2026-06-15\") :month)   → 6
+    (tempo/unit (tempo/parse! \"2026-06\") :day)        → nil"
+  (get (tempo-by-unit t) u))
+
+(defn units (t)
+  "The units present in `t`, coarse to fine.
+
+    (tempo/units (tempo/parse! \"2026-06\"))   → [:year :month]"
+  (vec (take (+ (tp-rank (tempo-res t)) 1) unit-order)))
+
+(defn- tp-restrict
+  (m u)
+  ;; `m` keeping only the units at or coarser than `u`.
+  (fold (fn (acc k) (assoc acc k (get m k))) {} (take (+ (tp-rank u) 1) unit-order)))
+
+(defn truncate (t u)
+  "`t` at the coarser resolution `u`, dropping every finer unit. Returns `t`
+unchanged when it is already at or coarser than `u`, and throws when `u` is not
+a time unit at all — a typo'd keyword is a mistake, not a no-op.
+
+    (tempo/->iso (tempo/truncate (tempo/parse! \"2026-06-15T14:30\") :day))   → \"2026-06-15\""
+  (let (r (tp-rank u))
+    (cond
+      (< r 0) (error (str "tempo/truncate: not a time unit: " (str u)))
+      (>= r (tp-rank (tempo-res t))) t
+      else (tempo (tp-restrict (tempo-by-unit t) u) u))))
+
+;; ---- parsing ----------------------------------------------------------------
+;;
+;; ISO 8601 Part 1, extended format, reduced precision: the string may stop at
+;; any unit. Basic format (`20260615`) and zone offsets are not accepted — see
+;; PORTING.md. A leading `-` IS accepted, as a negative year: not interchange-
+;; safe without a mutually-agreed expanded form, but `->iso` emits it, so
+;; refusing to read it would leave the module unable to parse its own output.
+
+(defn- tp-digits?
+  (s)
+  ;; DIGITS, not "parses as an integer". `string/->number` reads a sign, so the
+  ;; obvious `(int? (string/->number s))` accepts \"+6\" and would let
+  ;; \"2026-+6\" through as June. The sign a year may legitimately carry is
+  ;; stripped by `parse` before any field reaches here.
+  (and (string? s)
+    (> (string/length s) 0)
+    (every? (fn (i) (>= (index-of "0123456789" (string/char-at s i)) 0))
+      (range 0 (string/length s)))))
+
+(defn- tp-int
+  (s)
+  (let (n (string/->number s))
+    (if (int? n) n nil)))
+
+(defn- tp-frac->ms
+  (frac)
+  ;; Fractional seconds → ms, truncating past three digits. \"5\" → 500, \"05\" → 50.
+  (let (padded (str frac "000"))
+    (tp-int (str (string/char-at padded 0) (string/char-at padded 1) (string/char-at padded 2)))))
+
+(defn- tp-parse-date-parts
+  (s)
+  ;; \"2026-06-15\" → {:year 2026 :month 6 :day 15}, or nil on a shape failure.
+  (let (parts (string/split s "-"))
+    (when (and (>= (count parts) 1) (<= (count parts) 3) (every? tp-digits? parts))
+      (let (y {:year (tp-int (nth parts 0))}
+            ym (if (> (count parts) 1) (assoc y :month (tp-int (nth parts 1))) y))
+        (if (> (count parts) 2) (assoc ym :day (tp-int (nth parts 2))) ym)))))
+
+(defn- tp-parse-time-parts
+  (s)
+  ;; \"14:30:05.123\" → {:hour … :minute … :second … :ms …}, or nil.
+  (let (dot (string/split s ".")
+        hms (nth dot 0)
+        frac (if (> (count dot) 1) (nth dot 1) nil)
+        parts (string/split hms ":"))
+    (when (and (<= (count dot) 2)
+            (>= (count parts) 1)
+            (<= (count parts) 3)
+            (every? tp-digits? parts)
+            ;; a fraction is only meaningful on a full HH:MM:SS, and must itself
+            ;; be digits — \"14:30:05.xyz\" is a parse failure, not 0 ms.
+            (or (not frac) (and (tp-digits? frac) (= (count parts) 3))))
+      (let (h {:hour (tp-int (nth parts 0))}
+            hm (if (> (count parts) 1) (assoc h :minute (tp-int (nth parts 1))) h)
+            hms-map (if (> (count parts) 2) (assoc hm :second (tp-int (nth parts 2))) hm))
+        (if frac (assoc hms-map :ms (tp-frac->ms frac)) hms-map)))))
+
+(defn parse (s)
+  "Parse an ISO 8601 value at any precision → `[:ok t]` or `[:error message]`.
+
+Accepts `2026`, `2026-06`, `2026-06-15`, `2026-06-15T14`, `2026-06-15T14:30`,
+`2026-06-15T14:30:05` and `2026-06-15T14:30:05.123`, each with an optional
+trailing `Z`. The resolution of the result is however far the string went —
+which is the point of the type, and why there is no separate date / time /
+datetime parser to choose between.
+
+A leading `-` is read as a negative (proleptic) year, so `->iso` and `parse`
+round-trip every value the module can build. Such a string is not interchange-
+safe — ISO 8601 requires a mutually-agreed expanded representation for years
+outside 0000–9999 — but a library that cannot read back what it just wrote is
+worse.
+
+    (tempo/resolution (tempo/parse! \"2026-06-15T14\"))   → :hour
+    (tempo/unit (tempo/parse! \"-0044-03-15\") :year)     → -44"
+  (let (body (if (string/ends-with? s "Z") (string/substring s 0 (- (string/length s) 1)) s)
+        neg (string/starts-with? body "-")
+        rest-body (if neg (string/substring body 1 (string/length body)) body)
+        halves (string/split rest-body "T")
+        date-str (nth halves 0)
+        time-str (if (> (count halves) 1) (nth halves 1) nil))
+    (if (> (count halves) 2)
+      [:error (str "tempo/parse: not an ISO 8601 value: " s)]
+      (let (d0 (tp-parse-date-parts date-str)
+            d (if (and d0 neg) (assoc d0 :year (- (get d0 :year))) d0)
+            tm (if time-str (tp-parse-time-parts time-str) {}))
+        (if (or (not d) (not tm))
+          [:error (str "tempo/parse: not an ISO 8601 value: " s)]
+          (let (r (new (merge d tm)))
+            (if (= (nth r 0) :ok) r [:error (str "tempo/parse: " s " — " (nth r 1))])))))))
+
+(defn parse! (s)
+  "As `parse`, but throws on a malformed string instead of returning `[:error …]`."
+  (let (r (parse s))
+    (if (= (nth r 0) :ok) (nth r 1) (error (nth r 1)))))
+
+;; ---- materialisation --------------------------------------------------------
+;;
+;; Bounds are half-open, [from, to). That is what makes \"the whole of June\" and
+;; \"1 July\" adjacent rather than overlapping, and why no `end-of-day` helper
+;; appears anywhere in this module.
+
+(defn- tp-dt
+  (y mo d h mi s ms)
+  ;; A real `datetime` record, not a lookalike map. `datetime/->epoch-ms` reads
+  ;; its fields with `get`, so a plain map would work — but relying on that
+  ;; would make this module depend on an undocumented duck-typing contract.
+  (datetime/datetime y mo d h mi s ms))
+
+(defn- tp-floor-dt
+  (t)
+  (let (m (tempo-by-unit t))
+    (tp-dt (get m :year)
+      (get m :month 1)
+      (get m :day 1)
+      (get m :hour 0)
+      (get m :minute 0)
+      (get m :second 0)
+      (get m :ms 0))))
+
+(sig from-ms (map -> int))
+
+(defn from-ms (t)
+  "The instant `t` opens, in Unix epoch milliseconds (inclusive)."
+  (datetime/->epoch-ms (tp-floor-dt t)))
+
+(sig to-ms (map -> int))
+
+(defn to-ms (t)
+  "The instant `t` closes, in Unix epoch milliseconds (**exclusive**)."
+  (let (u (tempo-res t)
+        m (tempo-by-unit t)
+        y (get m :year)
+        mo (get m :month 1))
+    (cond
+      (= u :year) (datetime/->epoch-ms (tp-dt (+ y 1) 1 1 0 0 0 0))
+      (= u :month)
+        (if (= mo 12)
+          (datetime/->epoch-ms (tp-dt (+ y 1) 1 1 0 0 0 0))
+          (datetime/->epoch-ms (tp-dt y (+ mo 1) 1 0 0 0 0)))
+      else (+ (from-ms t) (tp-unit-ms u)))))
+
+;; The four types that span out of the box. A `date` is the day it names and a
+;; `datetime` the millisecond it names — exactly the reading tempo gives them,
+;; so existing `datetime` values flow into every operation below unchanged.
+;;
+;; `datetime/time-of-day` is deliberately absent: a wall-clock time has no
+;; position on the timeline until a date anchors it, so `->span` on one is a
+;; loud missing-impl error rather than a silent guess at today's date.
+(impl Spanning tempo/tempo (->span [t] (span (from-ms t) (to-ms t))))
+(impl Spanning tempo/span (->span [s] s))
+(impl Spanning
+  datetime/date
+  (->span [d] (let (ms (datetime/->epoch-ms d)) (span ms (+ ms 86400000)))))
+(impl Spanning
+  datetime/datetime
+  (->span [dt] (let (ms (datetime/->epoch-ms dt)) (span ms (+ ms 1)))))
+
+(defn from (x)
+  "The opening instant of `x`, as a `datetime`."
+  (datetime/epoch-ms-> (span-from (->span x))))
+
+(defn to (x)
+  "The closing (exclusive) instant of `x`, as a `datetime`."
+  (datetime/epoch-ms-> (span-to (->span x))))
+
+(defn width (x)
+  "The width of `x` in milliseconds.
+
+    (tempo/width (tempo/parse! \"2026-02\"))   → 2419200000"
+  (let (s (->span x))
+    (- (span-to s) (span-from s))))
+
+(defn between (a b)
+  "The smallest single span covering both `a` and `b`, **gap included** — the
+hull. `union` is the set operation that keeps a gap a gap.
+
+    (tempo/width (tempo/between (tempo/parse! \"2026-01\") (tempo/parse! \"2026-12\")))
+      ;; the whole of 2026, January through December"
+  (let (sa (->span a)
+        sb (->span b))
+    (span (math/min (span-from sa) (span-from sb)) (math/max (span-to sa) (span-to sb)))))
+
+(defn parse-span (s)
+  "Parse an ISO 8601 interval `start/end` → `[:ok span]` or `[:error message]`.
+
+Both sides are ordinary tempo values at any precision, and the right one names
+the **exclusive** endpoint — `2026-06-15T07/2026-06-15T09` is 07:00 up to but
+not including 09:00, matching the half-open bounds used everywhere else here.
+That is what `->iso-span` emits, so the two round-trip.
+
+For the inclusive reading — \"June through August\" — use `between`.
+
+    (tempo/width (tempo/parse-span! \"2026-06-15T07/2026-06-15T09\"))   → 7200000"
+  (let (halves (string/split s "/"))
+    (if (not= (count halves) 2)
+      [:error (str "tempo/parse-span: not an ISO 8601 interval: " s)]
+      (let (a (parse (nth halves 0))
+            b (parse (nth halves 1)))
+        (cond
+          (= (nth a 0) :error) a
+          (= (nth b 0) :error) b
+          else
+            (let (lo (from-ms (nth a 1))
+                  hi (from-ms (nth b 1)))
+              (if (< lo hi)
+                [:ok (span lo hi)]
+                [:error (str "tempo/parse-span: end is not after start: " s)])))))))
+
+(defn parse-span! (s)
+  "As `parse-span`, but throws instead of returning `[:error …]`."
+  (let (r (parse-span s))
+    (if (= (nth r 0) :ok) (nth r 1) (error (nth r 1)))))
+
+;; ---- Allen's thirteen relations ---------------------------------------------
+;;
+;; Every pairwise arrangement of two intervals is exactly one of thirteen cases
+;; (Allen 1983). Getting the arrangement from one function, rather than
+;; assembling it from four `<`s at each call site, is most of the reason to
+;; model time as intervals at all.
+;;
+;; Single spans only. An interval set has no single arrangement relative to
+;; another value, so passing one is a missing-`Spanning`-impl error — which is
+;; the right answer, loudly.
+
+(defn relation (a b)
+  "The Allen relation of `a` to `b`: one of `:before` `:meets` `:overlaps`
+`:starts` `:during` `:finishes` `:equals` `:finished-by` `:contains`
+`:started-by` `:overlapped-by` `:met-by` `:after`.
+
+Either argument may be anything implementing `Spanning`.
+
+    (tempo/relation (tempo/parse! \"2026-06\") (tempo/parse! \"2026\"))      → :during
+    (tempo/relation (tempo/parse! \"2026-06\") (tempo/parse! \"2026-07\"))   → :meets
+    (tempo/relation (tempo/parse! \"2026-01\") (tempo/parse! \"2026\"))      → :starts"
+  (let (sa (->span a)
+        sb (->span b)
+        a1 (span-from sa)
+        a2 (span-to sa)
+        b1 (span-from sb)
+        b2 (span-to sb))
+    (cond
+      (< a2 b1) :before
+      (= a2 b1) :meets
+      (> a1 b2) :after
+      (= a1 b2) :met-by
+      (and (= a1 b1) (= a2 b2)) :equals
+      (and (= a1 b1) (< a2 b2)) :starts
+      (and (= a1 b1) (> a2 b2)) :started-by
+      (and (= a2 b2) (> a1 b1)) :finishes
+      (and (= a2 b2) (< a1 b1)) :finished-by
+      (and (> a1 b1) (< a2 b2)) :during
+      (and (< a1 b1) (> a2 b2)) :contains
+      (< a1 b1) :overlaps
+      else :overlapped-by)))
+
+(defn- tp-rel?
+  (a b wanted)
+  (= (relation a b) wanted))
+
+(defn before? (a b) "True when `a` ends strictly before `b` begins." (tp-rel? a b :before))
+(defn after? (a b) "True when `a` begins strictly after `b` ends." (tp-rel? a b :after))
+(defn meets? (a b) "True when `a` ends exactly where `b` begins." (tp-rel? a b :meets))
+(defn equals? (a b) "True when `a` and `b` are the same span." (tp-rel? a b :equals))
+
+(defn during? (a b)
+  "True when `a` falls strictly inside `b`, sharing neither endpoint.
+
+    (tempo/during? (tempo/parse! \"2026-06-15\") (tempo/parse! \"2026-06\"))   → true"
+  (tp-rel? a b :during))
+
+(sig compare-to (map map -> int))
+
+(defn compare-to (a b)
+  "-1, 0 or 1 by opening instant, breaking ties on the closing instant — so a
+mixed-resolution list sorts into timeline order, and where two values begin
+together the **shorter** one sorts first (`2026-01` before `2026`)."
+  (let (sa (->span a)
+        sb (->span b))
+    (cond
+      (< (span-from sa) (span-from sb)) -1
+      (> (span-from sa) (span-from sb)) 1
+      (< (span-to sa) (span-to sb)) -1
+      (> (span-to sa) (span-to sb)) 1
+      else 0)))
+
+;; ---- interval sets ----------------------------------------------------------
+;;
+;; The piece that makes the algebra closed. A set is a vector of spans, sorted
+;; by opening instant, pairwise disjoint, and non-touching — `[a,b)` and `[b,c)`
+;; merge into `[a,c)`, because under half-open bounds they are literally the
+;; same stretch of timeline. Empty spans are dropped on the way in.
+;;
+;; Normalising at construction is what lets union / intersection / difference be
+;; single linear sweeps rather than quadratic pairwise work, and it means two
+;; sets covering the same timeline are `=` to each other.
+
+(defn- tp-merge-acc
+  (xs acc)
+  ;; `xs` sorted spans; `acc` the merged result so far, reversed.
+  (if (empty? xs)
+    (vec (reverse acc))
+    (let (s (first xs)
+          prev (if (empty? acc) nil (first acc)))
+      (if (and prev (<= (span-from s) (span-to prev)))
+        (tp-merge-acc (rest xs)
+          (cons (span (span-from prev) (math/max (span-to prev) (span-to s))) (rest acc)))
+        (tp-merge-acc (rest xs) (cons s acc))))))
+
+(defn- tp-normalize
+  (ss)
+  (tp-merge-acc (sort-by span-from (vec (for (s ss :when (< (span-from s) (span-to s))) s))) nil))
+
+(defn set-of (xs)
+  "An interval set covering every value in `xs` — each anything implementing
+`Spanning`. Overlapping and touching members merge; empty ones drop.
+
+    (count (tempo/spans (tempo/set-of [(tempo/parse! \"2026-06\") (tempo/parse! \"2026-07\")])))   → 1"
+  (iset (tp-normalize (map ->span xs))))
+
+(defn- tp-as-set
+  (x)
+  (if (iset? x) x (iset (tp-normalize [(->span x)]))))
+
+(defn spans (x)
+  "The spans of `x` as a vector — sorted, disjoint and non-touching. A single
+value yields a one-element vector."
+  (iset-spans (tp-as-set x)))
+
+(defn empty-set? (x) "True when `x` covers no time at all." (empty? (spans x)))
+
+(defn bounds (x)
+  "The single span from the earliest opening to the latest closing instant of
+`x`, gaps included — or nil when `x` is empty."
+  (let (ss (spans x))
+    (if (empty? ss) nil (span (span-from (nth ss 0)) (span-to (last ss))))))
+
+(sig total-width (map -> int))
+
+(defn total-width (x)
+  "The total time `x` covers in milliseconds, **excluding** gaps. The free/busy
+answer: how much time is actually taken.
+
+    (tempo/total-width (tempo/gaps workday meetings))   ;; ms genuinely free"
+  (fold (fn (acc s) (+ acc (- (span-to s) (span-from s)))) 0 (spans x)))
+
+(defn union (a b)
+  "Everything covered by `a` or `b`, as an interval set. Unlike `between`, a gap
+between them stays a gap.
+
+    (count (tempo/spans (tempo/union (tempo/parse! \"2026-06\") (tempo/parse! \"2026-08\"))))   → 2
+    (count (tempo/spans (tempo/union (tempo/parse! \"2026-06\") (tempo/parse! \"2026-07\"))))   → 1"
+  (iset (tp-normalize (into (vec (spans a)) (spans b)))))
+
+(defn- tp-inter-acc
+  (xs ys acc)
+  ;; Linear sweep over two sorted disjoint span lists.
+  (if (or (empty? xs) (empty? ys))
+    (vec (reverse acc))
+    (let (x (first xs)
+          y (first ys)
+          lo (math/max (span-from x) (span-from y))
+          hi (math/min (span-to x) (span-to y))
+          acc2 (if (< lo hi) (cons (span lo hi) acc) acc))
+      (if (< (span-to x) (span-to y))
+        (tp-inter-acc (rest xs) ys acc2)
+        (tp-inter-acc xs (rest ys) acc2)))))
+
+(defn intersection (a b)
+  "Everything covered by both `a` and `b`, as an interval set.
+
+    (tempo/->iso-set (tempo/intersection (tempo/parse! \"2026-06\") (tempo/parse! \"2026-06-15\"))) → \"2026-06-15T00:00:00.000Z/2026-06-16T00:00:00.000Z\""
+  (iset (tp-inter-acc (spans a) (spans b) nil)))
+
+(defn- tp-diff-acc
+  (xs ys acc)
+  ;; `xs` minus `ys`, both sorted and disjoint. Every step either retires a span
+  ;; from one side or shrinks the head of `xs`, so it terminates.
+  (if (empty? xs)
+    (vec (reverse acc))
+    (let (x (first xs))
+      (if (empty? ys)
+        (tp-diff-acc (rest xs) ys (cons x acc))
+        (let (y (first ys))
+          (cond
+            ;; y is done before x starts
+            (<= (span-to y) (span-from x)) (tp-diff-acc xs (rest ys) acc)
+            ;; y starts after x ends — x survives whole
+            (>= (span-from y) (span-to x)) (tp-diff-acc (rest xs) ys (cons x acc))
+            else
+              (let (kept (if (< (span-from x) (span-from y))
+                           (cons (span (span-from x) (span-from y)) acc)
+                           acc))
+                (if (< (span-to y) (span-to x))
+                  ;; a tail of x survives past y — carry it forward as the new head
+                  (tp-diff-acc (cons (span (span-to y) (span-to x)) (rest xs)) (rest ys) kept)
+                  (tp-diff-acc (rest xs) ys kept)))))))))
+
+(defn difference (a b)
+  "`a` with everything covered by `b` removed, as an interval set. The free/busy
+primitive: a workday minus its meetings.
+
+    (count (tempo/spans (tempo/difference (tempo/parse! \"2026-06\") (tempo/parse! \"2026-06-15\"))))   → 2"
+  (iset (tp-diff-acc (spans a) (spans b) nil)))
+
+(defn gaps (window x)
+  "The parts of `window` that `x` does not cover — the complement of `x` within
+`window`. The same operation as `difference`, named for the scheduling call
+site where it reads better.
+
+    (tempo/gaps workday meetings)   ;; when am I free?"
+  (difference window x))
+
+(defn intersects? (a b)
+  "True when `a` and `b` share any part of the timeline. Works for interval sets
+on either side.
+
+This is the everyday \"do these overlap\" question, and it is deliberately *not*
+Allen's `:overlaps`, which is the narrower case of a partial overlap with four
+distinct endpoints. Reach for `relation` when that distinction matters.
+
+    (tempo/intersects? (tempo/parse! \"2026-06\") (tempo/parse! \"2026\"))   → true"
+  (not (empty-set? (intersection a b))))
+
+(defn covers? (a b)
+  "True when `a` fully covers `b` — nothing of `b` falls outside `a`. Defined as
+\"`b` minus `a` is empty\" rather than as a relation, so it works with interval
+sets on either side.
+
+Named `covers?` and not `contains?` because `contains?` is the prelude's
+collection predicate, and shadowing it inside this module would be a trap.
+
+    (tempo/covers? (tempo/parse! \"2026\") (tempo/parse! \"2026-06-15\"))   → true"
+  (empty-set? (difference b a)))
+
+;; ---- enumeration ------------------------------------------------------------
+
+(defn- tp-part-count
+  (t)
+  ;; How many parts `t` has at the next finer unit — arithmetic, so `explain`
+  ;; and friends never materialise 1000 records just to print a number.
+  (let (f (finer (tempo-res t)))
+    (cond
+      (nil? f) 0
+      (= f :month) 12
+      (= f :day) (datetime/days-in-month (unit t :year) (unit t :month))
+      (= f :hour) 24
+      (= f :minute) 60
+      (= f :second) 60
+      else 1000)))
+
+(defn- tp-part-start
+  (u)
+  ;; Months and days count from 1; clock units from 0.
+  (if (or (= u :month) (= u :day)) 1 0))
+
+(defn part-count (t)
+  "How many parts `t` has at the next finer unit, without building them.
+
+    (tempo/part-count (tempo/parse! \"2024-02\"))   → 29"
+  (tp-part-count t))
+
+(defn parts (t)
+  "The parts of `t` at the next finer unit, as a vector of tempos. Empty when
+`t` is already at `:ms`.
+
+The step is implied by the value's own resolution — a month yields its days, a
+year its months — so there is no granularity argument to pass, and none to get
+wrong. February yields 28 or 29 parts because the calendar says so.
+
+    (count (tempo/parts (tempo/parse! \"2026-02\")))              → 28
+    (tempo/->iso (nth (tempo/parts (tempo/parse! \"2026\")) 5))    → \"2026-06\""
+  (let (f (finer (tempo-res t)))
+    (if (nil? f)
+      []
+      (let (lo (tp-part-start f)
+            m (tempo-by-unit t))
+        (vec (for (v (range lo (+ lo (tp-part-count t)))) (tempo (assoc m f v) f)))))))
+
+(defn- tp-of-datetime
+  (dt u)
+  ;; A datetime truncated to unit `u`, as a tempo.
+  (let (all {:year (get dt :year)
+             :month (get dt :month)
+             :day (get dt :day)
+             :hour (get dt :hour 0)
+             :minute (get dt :minute 0)
+             :second (get dt :second 0)
+             :ms (get dt :ms 0)})
+    (tempo (tp-restrict all u) u)))
+
+(defn shift (t n)
+  "`t` moved `n` steps of its own resolution — negative to go back. Calendar
+arithmetic for years and months, exact millisecond arithmetic below that.
+
+    (tempo/->iso (tempo/shift (tempo/parse! \"2026-11\") 3))       → \"2027-02\"
+    (tempo/->iso (tempo/shift (tempo/parse! \"2026-03-01\") -1))   → \"2026-02-28\""
+  (let (u (tempo-res t)
+        m (tempo-by-unit t))
+    (cond
+      (= u :year) (new! {:year (+ (get m :year) n)})
+      (= u :month)
+        (let (total (+ (* (get m :year) 12) (- (get m :month) 1) n)
+              q (math/quot total 12)
+              y (if (< (math/rem total 12) 0) (- q 1) q)
+              mo (+ (- total (* y 12)) 1))
+          (new! {:year y :month mo}))
+      else (tp-of-datetime (datetime/epoch-ms-> (+ (from-ms t) (* n (tp-unit-ms u)))) u))))
+
+(defn next (t) "`t` advanced one step of its own resolution." (shift t 1))
+(defn prev (t) "`t` moved back one step of its own resolution." (shift t -1))
+
+(defn now (u)
+  "The current UTC moment at resolution `u`.
+
+    (tempo/resolution (tempo/now :day))   → :day"
+  (tp-of-datetime (datetime/utc-now) u))
+
+(defn today () "The current UTC day, at `:day` resolution." (now :day))
+
+;; ---- formatting -------------------------------------------------------------
+
+(defn- tp-pad-digits
+  (n w)
+  (let (s (str n)
+        need (- w (string/length s)))
+    (if (> need 0) (str (string/repeat "0" need) s) s)))
+
+(defn- tp-pad
+  (n w)
+  ;; The sign is handled before padding — otherwise year -44 pads to \"0-44\".
+  ;; Unlike `datetime/dt-zero-pad` this does NOT spend a digit on the sign: only
+  ;; years can be negative here, and ISO 8601's expanded form wants four digits
+  ;; after the sign (`-0044`), not three.
+  (if (< n 0) (str "-" (tp-pad-digits (- n) w)) (tp-pad-digits n w)))
+
+(sig ->iso (map -> string))
+
+(defn ->iso (t)
+  "`t` as an ISO 8601 string at its own precision — no more, no less. A month
+prints as a month; nothing is padded out to a full timestamp.
+
+    (tempo/->iso (tempo/parse! \"2026-06\"))            → \"2026-06\"
+    (tempo/->iso (tempo/parse! \"2026-06-15T14:30\"))   → \"2026-06-15T14:30Z\""
+  (let (m (tempo-by-unit t)
+        r (tp-rank (tempo-res t))
+        date (cond
+               (= r 0) (tp-pad (get m :year) 4)
+               (= r 1) (str (tp-pad (get m :year) 4) "-" (tp-pad (get m :month) 2))
+               else
+                 (str (tp-pad (get m :year) 4)
+                   "-"
+                   (tp-pad (get m :month) 2)
+                   "-"
+                   (tp-pad (get m :day) 2))))
+    (if (< r 3)
+      date
+      (let (clock (cond
+                    (= r 3) (tp-pad (get m :hour) 2)
+                    (= r 4) (str (tp-pad (get m :hour) 2) ":" (tp-pad (get m :minute) 2))
+                    (= r 5)
+                      (str (tp-pad (get m :hour) 2)
+                        ":"
+                        (tp-pad (get m :minute) 2)
+                        ":"
+                        (tp-pad (get m :second) 2))
+                    else
+                      (str (tp-pad (get m :hour) 2)
+                        ":"
+                        (tp-pad (get m :minute) 2)
+                        ":"
+                        (tp-pad (get m :second) 2)
+                        "."
+                        (tp-pad (get m :ms) 3))))
+        (str date "T" clock "Z")))))
+
+(sig ->iso-span (map -> string))
+
+(defn ->iso-span (s)
+  "A span as an ISO 8601 interval, `start/end`, at millisecond precision. The
+end is the exclusive endpoint, so `parse-span` reads back what this writes."
+  (str (datetime/->iso (datetime/epoch-ms-> (span-from s)))
+    "/"
+    (datetime/->iso (datetime/epoch-ms-> (span-to s)))))
+
+(sig ->iso-set (map -> string))
+
+(defn ->iso-set (x)
+  "An interval set as its spans in ISO 8601 interval form, comma-separated. An
+empty set renders as the empty string."
+  (string/join "," (map ->iso-span (spans x))))
+
+;; A temporal value's display form is its ISO string, so `(io/puts …)` shows
+;; `2026-06` rather than the field map. `str`/`pr-str` stay native (ADR-171), so
+;; the data form is still there for debugging.
+(impl Display tempo/tempo (->string [t] (->iso t)))
+(impl Display tempo/span (->string [s] (->iso-span s)))
+(impl Display tempo/iset (->string [s] (->iso-set s)))
+
+(defn- tp-unit-name
+  (u)
+  (cond
+    (= u :year) "year"
+    (= u :month) "month"
+    (= u :day) "day"
+    (= u :hour) "hour"
+    (= u :minute) "minute"
+    (= u :second) "second"
+    else "millisecond"))
+
+(defn explain (t)
+  "A prose description of `t` — what it is, the span it covers, and how it
+enumerates. For staring at an unfamiliar value in the REPL.
+
+    (tempo/explain (tempo/parse! \"2026-06\")) → \"A month: 2026-06.\\nSpans [2026-06-01T00:00:00.000Z, 2026-07-01T00:00:00.000Z) — 30 days.\\nEnumerates 30 days.\""
+  (let (u (tempo-res t)
+        f (finer u)
+        n (tp-part-count t)
+        w (width t)
+        days (math/quot w 86400000))
+    (str "A "
+      (tp-unit-name u)
+      ": "
+      (->iso t)
+      ".\nSpans ["
+      (datetime/->iso (from t))
+      ", "
+      (datetime/->iso (to t))
+      ") — "
+      (if (>= days 1) (str (str days) " days") (str (str w) " ms"))
+      ".\n"
+      (if f
+        (str "Enumerates " (str n) " " (tp-unit-name f) "s.")
+        "Finest resolution — does not enumerate."))))

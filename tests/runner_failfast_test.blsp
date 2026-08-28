@@ -30,4 +30,4 @@
       (assert= 1 (count results))
       ; its name is preserved
       (assert= "boom" (second r))
-      (is (not (empty? (seq/third r)))))))
+      (is (not (empty? (third r)))))))

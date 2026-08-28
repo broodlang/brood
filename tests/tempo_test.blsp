@@ -1,0 +1,420 @@
+;; Tests for std/tempo.blsp — time as an interval, not an instant.
+;; Run via `nest test` or `cargo run -p cli -- --test tests/tempo_test.blsp`.
+
+(defmodule tempo-test (:use test))
+
+;; ---- construction and validation --------------------------------------------
+
+(describe "new"
+  (test "orders components coarse to fine regardless of map key order"
+    (assert= [:year :month :day] (tempo/units (tempo/new! {:day 15 :year 2026 :month 6})))
+    (assert= "2026-06-15" (tempo/->iso (tempo/new! {:day 15 :year 2026 :month 6}))))
+  (test "a bare year is a legal value"
+    (assert= :year (tempo/resolution (tempo/new! {:year 2026}))))
+  (test "gaps in the unit chain are rejected, not guessed"
+    (assert= :error (nth (tempo/new {:year 2026 :day 15}) 0)))
+  (test "unknown units are rejected"
+    (assert= :error (nth (tempo/new {:year 2026 :fortnight 2}) 0)))
+  (test "an impossible day is rejected rather than normalised"
+    (assert= :error (nth (tempo/new {:year 2026 :month 2 :day 30}) 0))
+    (assert= :error (nth (tempo/new {:year 2026 :month 2 :day 29}) 0))
+    (assert= :ok (nth (tempo/new {:year 2024 :month 2 :day 29}) 0)))
+  (test "out-of-range clock components are rejected"
+    (assert= :error (nth (tempo/new {:year 2026 :month 6 :day 15 :hour 24}) 0))
+    (assert= :error (nth (tempo/new {:year 2026 :month 13}) 0)))
+  ;; The sign used to be padded as if it were a digit, giving "0-44".
+  (test "proleptic and negative years render with the sign outside the padding"
+    (assert= "0044" (tempo/->iso (tempo/new! {:year 44})))
+    (assert= "-0044" (tempo/->iso (tempo/new! {:year -44})))
+    (assert= "0000" (tempo/->iso (tempo/new! {:year 0})))))
+
+;; ---- parsing ----------------------------------------------------------------
+
+(describe "parse"
+  (test "resolution follows the precision of the string"
+    (assert= :year (tempo/resolution (tempo/parse! "2026")))
+    (assert= :month (tempo/resolution (tempo/parse! "2026-06")))
+    (assert= :day (tempo/resolution (tempo/parse! "2026-06-15")))
+    (assert= :hour (tempo/resolution (tempo/parse! "2026-06-15T14")))
+    (assert= :minute (tempo/resolution (tempo/parse! "2026-06-15T14:30")))
+    (assert= :second (tempo/resolution (tempo/parse! "2026-06-15T14:30:05")))
+    (assert= :ms (tempo/resolution (tempo/parse! "2026-06-15T14:30:05.123"))))
+  (test "a trailing Z is accepted and means UTC"
+    (assert= (tempo/->iso (tempo/parse! "2026-06-15T14:30"))
+      (tempo/->iso (tempo/parse! "2026-06-15T14:30Z"))))
+  (test "fractional seconds pad to milliseconds"
+    (assert= 500 (tempo/unit (tempo/parse! "2026-06-15T14:30:05.5") :ms))
+    (assert= 50 (tempo/unit (tempo/parse! "2026-06-15T14:30:05.05") :ms))
+    (assert= 123 (tempo/unit (tempo/parse! "2026-06-15T14:30:05.123") :ms)))
+  (test "malformed input is an error, never a silently repaired value"
+    (assert= :error (nth (tempo/parse "2026-13") 0))
+    (assert= :error (nth (tempo/parse "2026-02-31") 0))
+    (assert= :error (nth (tempo/parse "not-a-date") 0))
+    (assert= :error (nth (tempo/parse "2026-06-15T14:30:05.xyz") 0))
+    (assert= :error (nth (tempo/parse "2026-06-15T14:30T09") 0)))
+  ;; `string/->number` reads a sign, so the obvious digits? test accepted "+6"
+  ;; and parsed "2026-+6" as June.
+  (test "a signed field is not a digit string"
+    (assert= :error (nth (tempo/parse "2026-+6") 0))
+    (assert= :error (nth (tempo/parse "2026-06-+5") 0))
+    (assert= :error (nth (tempo/parse "2026-06-15T+4:30") 0))
+    (assert= :error (nth (tempo/parse "+2026") 0))
+    (assert= :error (nth (tempo/parse "2026-06-15T14:30:05.+5") 0)))
+  ;; ->iso emitted "-0044" and parse rejected it: the module could not read its
+  ;; own output.
+  (test "a negative year round-trips through ->iso"
+    (assert= -44 (tempo/unit (tempo/parse! "-0044") :year))
+    (assert= -44 (tempo/unit (tempo/parse! "-0044-03-15") :year))
+    (assert= 3 (tempo/unit (tempo/parse! "-0044-03-15") :month))
+    (assert= 15 (tempo/unit (tempo/parse! "-0044-03-15") :day))
+    (run! (fn (t) (assert= (tempo/->iso t) (tempo/->iso (tempo/parse! (tempo/->iso t)))))
+      [(tempo/new! {:year -44})
+        (tempo/new! {:year -44 :month 3})
+        (tempo/new! {:year -1 :month 12 :day 31})
+        (tempo/new! {:year 0})
+        (tempo/new! {:year 0 :month 1 :day 1 :hour 0 :minute 0})]))
+  (test "a bare sign is not a value"
+    (assert= :error (nth (tempo/parse "-") 0))
+    (assert= :error (nth (tempo/parse "-abc") 0)))
+  (test "round-trips through ->iso at every precision"
+    (assert= "2026" (tempo/->iso (tempo/parse! "2026")))
+    (assert= "2026-06" (tempo/->iso (tempo/parse! "2026-06")))
+    (assert= "2026-06-15" (tempo/->iso (tempo/parse! "2026-06-15")))
+    (assert= "2026-06-15T14Z" (tempo/->iso (tempo/parse! "2026-06-15T14")))
+    (assert= "2026-06-15T14:30Z" (tempo/->iso (tempo/parse! "2026-06-15T14:30")))
+    (assert= "2026-06-15T14:30:05.123Z" (tempo/->iso (tempo/parse! "2026-06-15T14:30:05.123")))))
+
+(describe "parse-span"
+  (test "the right operand is the exclusive endpoint"
+    (assert= 7200000 (tempo/width (tempo/parse-span! "2026-06-15T07/2026-06-15T09"))))
+  (test "both sides may be at any precision"
+    (assert= (tempo/from-ms (tempo/parse! "2026-06"))
+      (tempo/span-from (tempo/parse-span! "2026-06/2026-08")))
+    (assert= (tempo/from-ms (tempo/parse! "2026-08"))
+      (tempo/span-to (tempo/parse-span! "2026-06/2026-08"))))
+  (test "round-trips with ->iso-span"
+    (let (s (tempo/parse-span! "2026-06-15T07/2026-06-15T09"))
+      (assert= (tempo/span-from s) (tempo/span-from (tempo/parse-span! (tempo/->iso-span s))))
+      (assert= (tempo/span-to s) (tempo/span-to (tempo/parse-span! (tempo/->iso-span s))))))
+  (test "a backwards or malformed interval is an error"
+    (assert= :error (nth (tempo/parse-span "2026-08/2026-06") 0))
+    (assert= :error (nth (tempo/parse-span "2026-06") 0))
+    (assert= :error (nth (tempo/parse-span "2026-06/2026-13") 0))))
+
+(describe "between"
+  (test "is the hull, gap included — unlike union"
+    (assert= (tempo/width (tempo/parse! "2026"))
+      (tempo/width (tempo/between (tempo/parse! "2026-01") (tempo/parse! "2026-12")))))
+  (test "is order-insensitive"
+    (assert= (tempo/width (tempo/between (tempo/parse! "2026-01") (tempo/parse! "2026-12")))
+      (tempo/width (tempo/between (tempo/parse! "2026-12") (tempo/parse! "2026-01"))))))
+
+;; ---- the interval model -----------------------------------------------------
+;;
+;; The load-bearing claim of the whole module: a value IS its span.
+
+(describe "bounds"
+  (test "a day opens at its own midnight and closes at the next"
+    (assert= 86400000 (tempo/from-ms (tempo/parse! "1970-01-02")))
+    (assert= 172800000 (tempo/to-ms (tempo/parse! "1970-01-02"))))
+  (test "a year spans to the start of the next year"
+    (assert= (tempo/from-ms (tempo/parse! "2027")) (tempo/to-ms (tempo/parse! "2026"))))
+  (test "December rolls the year over"
+    (assert= (tempo/from-ms (tempo/parse! "2027-01")) (tempo/to-ms (tempo/parse! "2026-12"))))
+  (test "width is the real calendar width"
+    (assert= 2419200000 (tempo/width (tempo/parse! "2026-02")))
+    (assert= 2505600000 (tempo/width (tempo/parse! "2024-02")))
+    (assert= 86400000 (tempo/width (tempo/parse! "2026-06-15")))
+    (assert= 1000 (tempo/width (tempo/parse! "2026-06-15T14:30:05"))))
+  (test "bounds are half-open, so consecutive values meet rather than overlap"
+    (assert= :meets (tempo/relation (tempo/parse! "2026-06") (tempo/parse! "2026-07")))
+    (refute (tempo/intersects? (tempo/parse! "2026-06-15") (tempo/parse! "2026-06-16")))))
+
+;; ---- Allen relations --------------------------------------------------------
+
+(describe "relation"
+  (test "containment cases"
+    (assert= :during (tempo/relation (tempo/parse! "2026-06") (tempo/parse! "2026")))
+    (assert= :contains (tempo/relation (tempo/parse! "2026") (tempo/parse! "2026-06"))))
+  (test "shared-endpoint cases are not 'during'"
+    (assert= :starts (tempo/relation (tempo/parse! "2026-01") (tempo/parse! "2026")))
+    (assert= :started-by (tempo/relation (tempo/parse! "2026") (tempo/parse! "2026-01")))
+    (assert= :finishes (tempo/relation (tempo/parse! "2026-12") (tempo/parse! "2026")))
+    (assert= :finished-by (tempo/relation (tempo/parse! "2026") (tempo/parse! "2026-12"))))
+  (test "adjacency and separation"
+    (assert= :meets (tempo/relation (tempo/parse! "2026-06") (tempo/parse! "2026-07")))
+    (assert= :met-by (tempo/relation (tempo/parse! "2026-07") (tempo/parse! "2026-06")))
+    (assert= :before (tempo/relation (tempo/parse! "2026-06") (tempo/parse! "2026-08")))
+    (assert= :after (tempo/relation (tempo/parse! "2026-08") (tempo/parse! "2026-06"))))
+  (test "equality"
+    (assert= :equals (tempo/relation (tempo/parse! "2026-06") (tempo/parse! "2026-06")))
+    (is (tempo/equals? (tempo/parse! "2026-06") (tempo/new! {:year 2026 :month 6}))))
+  (test "genuine partial overlap"
+    (let (shifted (tempo/parse-span! "2026-06-15/2026-07-15"))
+      (assert= :overlaps (tempo/relation (tempo/parse! "2026-06") shifted))
+      (assert= :overlapped-by (tempo/relation shifted (tempo/parse! "2026-06")))))
+  (test "each relation mirrors its inverse when the arguments swap"
+    (let (pairs [[(tempo/parse! "2026-06") (tempo/parse! "2026-08") :before :after]
+                  [(tempo/parse! "2026-06") (tempo/parse! "2026-07") :meets :met-by]
+                  [(tempo/parse! "2026-01") (tempo/parse! "2026") :starts :started-by]
+                  [(tempo/parse! "2026-12") (tempo/parse! "2026") :finishes :finished-by]
+                  [(tempo/parse! "2026-06") (tempo/parse! "2026") :during :contains]])
+      (run! (fn (p)
+              (let (a (nth p 0) b (nth p 1))
+                (assert= (nth p 2) (tempo/relation a b))
+                (assert= (nth p 3) (tempo/relation b a))))
+        pairs))))
+
+(describe "predicates"
+  (test "covers? is the loose containment question"
+    (is (tempo/covers? (tempo/parse! "2026") (tempo/parse! "2026-06-15")))
+    (is (tempo/covers? (tempo/parse! "2026") (tempo/parse! "2026-01")))
+    (is (tempo/covers? (tempo/parse! "2026") (tempo/parse! "2026")))
+    (refute (tempo/covers? (tempo/parse! "2026-06") (tempo/parse! "2026"))))
+  (test "during? is the strict one"
+    (is (tempo/during? (tempo/parse! "2026-06-15") (tempo/parse! "2026-06")))
+    (refute (tempo/during? (tempo/parse! "2026-01") (tempo/parse! "2026"))))
+  (test "intersects? is not Allen's :overlaps"
+    (is (tempo/intersects? (tempo/parse! "2026-06") (tempo/parse! "2026")))
+    (assert= :during (tempo/relation (tempo/parse! "2026-06") (tempo/parse! "2026"))))
+  (test "compare-to sorts the shorter value first when two begin together"
+    (assert= -1 (tempo/compare-to (tempo/parse! "2026-01") (tempo/parse! "2026")))
+    (assert= 1 (tempo/compare-to (tempo/parse! "2026") (tempo/parse! "2026-01")))
+    (assert= 0 (tempo/compare-to (tempo/parse! "2026") (tempo/parse! "2026")))))
+
+;; ---- interop with the datetime module ---------------------------------------
+;;
+;; Both `datetime` record types impl Spanning, so they flow through unchanged.
+
+(describe "datetime interop"
+  (test "a datetime/date takes part in the algebra as the day it names"
+    (is (tempo/covers? (tempo/parse! "2026-06") (datetime/parse-date "2026-06-15")))
+    (refute (tempo/covers? (tempo/parse! "2026-05") (datetime/parse-date "2026-06-15")))
+    (assert= 86400000 (tempo/width (datetime/parse-date "2026-06-15"))))
+  (test "a datetime/datetime takes part as the instant it names"
+    (is (tempo/covers? (tempo/parse! "2026-06-15")
+          (datetime/parse-iso8601 "2026-06-15T14:30:00Z")))
+    (refute (tempo/covers? (tempo/parse! "2026-06-15")
+              (datetime/parse-iso8601 "2026-06-16T00:00:00Z")))))
+
+;; ---- interval sets ----------------------------------------------------------
+
+(describe "set-of"
+  (test "merges touching and overlapping members"
+    (assert= 1
+      (count (tempo/spans (tempo/set-of [(tempo/parse! "2026-06") (tempo/parse! "2026-07")]))))
+    (assert= 1
+      (count (tempo/spans (tempo/set-of [(tempo/parse! "2026") (tempo/parse! "2026-06")]))))
+    (assert= 2
+      (count (tempo/spans (tempo/set-of [(tempo/parse! "2026-06") (tempo/parse! "2026-08")])))))
+  (test "normalises regardless of input order"
+    (let (a (tempo/set-of [(tempo/parse! "2026-08") (tempo/parse! "2026-06")])
+          b (tempo/set-of [(tempo/parse! "2026-06") (tempo/parse! "2026-08")]))
+      (assert= (tempo/->iso-set b) (tempo/->iso-set a))))
+  (test "an empty input is an empty set"
+    (is (tempo/empty-set? (tempo/set-of []))))
+  (test "a single value is a one-span set"
+    (assert= 1 (count (tempo/spans (tempo/parse! "2026-06"))))))
+
+(describe "union"
+  (test "touching values join into one span"
+    (assert= 1
+      (count (tempo/spans (tempo/union (tempo/parse! "2026-06") (tempo/parse! "2026-07"))))))
+  (test "a gap stays a gap — this is what between does not do"
+    (let (u (tempo/union (tempo/parse! "2026-06") (tempo/parse! "2026-08")))
+      (assert= 2 (count (tempo/spans u)))
+      (assert= (+ (tempo/width (tempo/parse! "2026-06")) (tempo/width (tempo/parse! "2026-08")))
+        (tempo/total-width u))
+      (assert= (tempo/width (tempo/between (tempo/parse! "2026-06") (tempo/parse! "2026-08")))
+        (tempo/width (tempo/bounds u)))))
+  (test "is idempotent"
+    (assert= (tempo/->iso-set (tempo/parse! "2026-06"))
+      (tempo/->iso-set (tempo/union (tempo/parse! "2026-06") (tempo/parse! "2026-06"))))))
+
+(describe "intersection"
+  (test "narrows to the finer value when one covers the other"
+    (assert= (tempo/->iso-set (tempo/parse! "2026-06-15"))
+      (tempo/->iso-set (tempo/intersection (tempo/parse! "2026") (tempo/parse! "2026-06-15")))))
+  (test "disjoint values intersect to the empty set"
+    (is (tempo/empty-set? (tempo/intersection (tempo/parse! "2025") (tempo/parse! "2026")))))
+  (test "touching values do not intersect — half-open bounds"
+    (is (tempo/empty-set? (tempo/intersection (tempo/parse! "2026-06") (tempo/parse! "2026-07")))))
+  (test "sweeps correctly across multi-span sets"
+    (let (a (tempo/set-of [(tempo/parse! "2026-01")
+                            (tempo/parse! "2026-03")
+                            (tempo/parse! "2026-05")])
+          b (tempo/set-of [(tempo/parse! "2026-03")
+                            (tempo/parse! "2026-05")
+                            (tempo/parse! "2026-07")]))
+      (assert= 2 (count (tempo/spans (tempo/intersection a b))))
+      (assert= (+ (tempo/width (tempo/parse! "2026-03")) (tempo/width (tempo/parse! "2026-05")))
+        (tempo/total-width (tempo/intersection a b))))))
+
+(describe "difference"
+  (test "removing an interior value splits into two spans"
+    (let (d (tempo/difference (tempo/parse! "2026-06") (tempo/parse! "2026-06-15"))
+          ss (tempo/spans d))
+      (assert= 2 (count ss))
+      (assert= (tempo/from-ms (tempo/parse! "2026-06")) (tempo/span-from (nth ss 0)))
+      (assert= (tempo/from-ms (tempo/parse! "2026-06-15")) (tempo/span-to (nth ss 0)))
+      (assert= (tempo/to-ms (tempo/parse! "2026-06-15")) (tempo/span-from (nth ss 1)))
+      (assert= (tempo/to-ms (tempo/parse! "2026-06")) (tempo/span-to (nth ss 1)))))
+  (test "removing a leading value leaves one span"
+    (assert= 1
+      (count (tempo/spans (tempo/difference (tempo/parse! "2026-06") (tempo/parse! "2026-06-01"))))))
+  (test "removing a covering value leaves nothing"
+    (is (tempo/empty-set? (tempo/difference (tempo/parse! "2026-06") (tempo/parse! "2026")))))
+  (test "removing a disjoint value leaves the original untouched"
+    (assert= (tempo/->iso-set (tempo/parse! "2026-06"))
+      (tempo/->iso-set (tempo/difference (tempo/parse! "2026-06") (tempo/parse! "2026-08")))))
+  (test "one removal can cut across several spans"
+    (let (a (tempo/set-of [(tempo/parse! "2026-01")
+                            (tempo/parse! "2026-03")
+                            (tempo/parse! "2026-05")]))
+      (is (tempo/empty-set? (tempo/difference a (tempo/parse! "2026"))))
+      (assert= 2 (count (tempo/spans (tempo/difference a (tempo/parse! "2026-03")))))))
+  (test "widths account: a minus b, plus their intersection, is a"
+    (let (a (tempo/parse! "2026-06")
+          b (tempo/parse-span! "2026-06-15/2026-07-15"))
+      (assert= (tempo/width a)
+        (+ (tempo/total-width (tempo/difference a b)) (tempo/total-width (tempo/intersection a b)))))))
+
+;; ---- free/busy, the reason the set exists -----------------------------------
+
+(describe "gaps"
+  (test "a workday minus its meetings"
+    (let (workday (tempo/parse-span! "2026-06-15T09/2026-06-15T17")
+          meetings (tempo/set-of [(tempo/parse-span! "2026-06-15T10/2026-06-15T11")
+                                   (tempo/parse-span! "2026-06-15T14/2026-06-15T15")])
+          free (tempo/gaps workday meetings))
+      (assert= 3 (count (tempo/spans free)))
+      (assert= 21600000 (tempo/total-width free))
+      (assert= 7200000 (tempo/total-width meetings))
+      (is (tempo/covers? workday free))
+      (is (tempo/empty-set? (tempo/intersection free meetings)))))
+  (test "back-to-back meetings leave no gap between them"
+    (let (workday (tempo/parse-span! "2026-06-15T09/2026-06-15T17")
+          meetings (tempo/set-of [(tempo/parse-span! "2026-06-15T10/2026-06-15T11")
+                                   (tempo/parse-span! "2026-06-15T11/2026-06-15T12")]))
+      (assert= 1 (count (tempo/spans meetings)))
+      (assert= 2 (count (tempo/spans (tempo/gaps workday meetings))))))
+  (test "a meeting outside the window does not eat into it"
+    (let (workday (tempo/parse-span! "2026-06-15T09/2026-06-15T17")
+          meetings (tempo/set-of [(tempo/parse-span! "2026-06-15T18/2026-06-15T19")]))
+      (assert= (tempo/width workday) (tempo/total-width (tempo/gaps workday meetings))))))
+
+(describe "set predicates"
+  (test "covers? works with a set on either side"
+    (let (halves (tempo/set-of [(tempo/parse! "2026-06") (tempo/parse! "2026-07")]))
+      (is (tempo/covers? (tempo/parse! "2026") halves))
+      (refute (tempo/covers? halves (tempo/parse! "2026")))
+      (is (tempo/covers? halves (tempo/parse! "2026-06-15")))))
+  (test "intersects? works with a set on either side"
+    (let (s (tempo/set-of [(tempo/parse! "2026-01") (tempo/parse! "2026-06")]))
+      (is (tempo/intersects? s (tempo/parse! "2026-06-15")))
+      (refute (tempo/intersects? s (tempo/parse! "2026-09")))))
+  (test "bounds spans the gap, total-width does not"
+    (let (s (tempo/set-of [(tempo/parse! "2026-01") (tempo/parse! "2026-12")]))
+      (assert= (tempo/width (tempo/parse! "2026")) (tempo/width (tempo/bounds s)))
+      (assert= (+ (tempo/width (tempo/parse! "2026-01")) (tempo/width (tempo/parse! "2026-12")))
+        (tempo/total-width s))))
+  (test "bounds of an empty set is nil"
+    (assert= nil (tempo/bounds (tempo/set-of [])))))
+
+;; ---- enumeration ------------------------------------------------------------
+
+(describe "parts"
+  (test "a year yields its twelve months"
+    (assert= 12 (count (tempo/parts (tempo/parse! "2026"))))
+    (assert= "2026-01" (tempo/->iso (nth (tempo/parts (tempo/parse! "2026")) 0)))
+    (assert= "2026-06" (tempo/->iso (nth (tempo/parts (tempo/parse! "2026")) 5)))
+    (assert= "2026-12" (tempo/->iso (nth (tempo/parts (tempo/parse! "2026")) 11))))
+  (test "a month yields the days the calendar actually gives it"
+    (assert= 28 (count (tempo/parts (tempo/parse! "2026-02"))))
+    (assert= 29 (count (tempo/parts (tempo/parse! "2024-02"))))
+    (assert= 30 (count (tempo/parts (tempo/parse! "2026-06"))))
+    (assert= 31 (count (tempo/parts (tempo/parse! "2026-07")))))
+  (test "a day yields 24 hours and a minute 60 seconds"
+    (assert= 24 (count (tempo/parts (tempo/parse! "2026-06-15"))))
+    (assert= 60 (count (tempo/parts (tempo/parse! "2026-06-15T14:30")))))
+  (test "the finest resolution does not enumerate"
+    (assert= 0 (count (tempo/parts (tempo/parse! "2026-06-15T14:30:05.123")))))
+  (test "part-count agrees without building anything"
+    (assert= 29 (tempo/part-count (tempo/parse! "2024-02")))
+    (assert= 1000 (tempo/part-count (tempo/parse! "2026-06-15T14:30:05")))
+    (assert= 0 (tempo/part-count (tempo/parse! "2026-06-15T14:30:05.123"))))
+  (test "the parts tile the parent exactly, with no gaps and no overlap"
+    (let (t (tempo/parse! "2026-02")
+          ps (tempo/parts t)
+          covered (tempo/set-of ps))
+      (assert= 1 (count (tempo/spans covered)))
+      (assert= (tempo/width t) (tempo/total-width covered))
+      (assert= (tempo/from-ms t) (tempo/from-ms (nth ps 0)))
+      (assert= (tempo/to-ms t) (tempo/to-ms (nth ps 27))))))
+
+;; ---- shifting ---------------------------------------------------------------
+
+(describe "shift"
+  (test "months roll the year over in both directions"
+    (assert= "2027-02" (tempo/->iso (tempo/shift (tempo/parse! "2026-11") 3)))
+    (assert= "2025-11" (tempo/->iso (tempo/shift (tempo/parse! "2026-02") -3)))
+    (assert= "2027-01" (tempo/->iso (tempo/next (tempo/parse! "2026-12"))))
+    (assert= "2025-12" (tempo/->iso (tempo/prev (tempo/parse! "2026-01")))))
+  (test "days cross month and leap-year boundaries"
+    (assert= "2026-02-28" (tempo/->iso (tempo/prev (tempo/parse! "2026-03-01"))))
+    (assert= "2024-02-29" (tempo/->iso (tempo/prev (tempo/parse! "2024-03-01"))))
+    (assert= "2027-01-01" (tempo/->iso (tempo/next (tempo/parse! "2026-12-31")))))
+  (test "clock units shift exactly"
+    (assert= "2026-06-16T00Z" (tempo/->iso (tempo/next (tempo/parse! "2026-06-15T23"))))
+    (assert= "2026-06-15T14:31Z" (tempo/->iso (tempo/next (tempo/parse! "2026-06-15T14:30")))))
+  (test "shifting preserves resolution"
+    (assert= :month (tempo/resolution (tempo/shift (tempo/parse! "2026-11") 3)))
+    (assert= :day (tempo/resolution (tempo/shift (tempo/parse! "2026-11-01") 3))))
+  (test "a shift and its inverse round-trip"
+    (assert= "2026-06" (tempo/->iso (tempo/shift (tempo/shift (tempo/parse! "2026-06") 7) -7))))
+  (test "successive shifts meet, never overlap"
+    (assert= :meets (tempo/relation (tempo/parse! "2026-06") (tempo/next (tempo/parse! "2026-06"))))))
+
+;; ---- truncation and accessors -----------------------------------------------
+
+(describe "truncate"
+  (test "drops finer units"
+    (assert= "2026-06-15" (tempo/->iso (tempo/truncate (tempo/parse! "2026-06-15T14:30") :day)))
+    (assert= "2026" (tempo/->iso (tempo/truncate (tempo/parse! "2026-06-15T14:30") :year))))
+  (test "a value already coarse enough is returned unchanged"
+    (assert= "2026-06" (tempo/->iso (tempo/truncate (tempo/parse! "2026-06") :day))))
+  (test "the truncation covers the original"
+    (is (tempo/covers? (tempo/truncate (tempo/parse! "2026-06-15T14:30") :day)
+          (tempo/parse! "2026-06-15T14:30"))))
+  ;; A bogus unit used to fall into the "already coarse enough" branch and
+  ;; return the value unchanged, so a typo'd keyword read as a no-op.
+  (test "a keyword that is not a time unit throws rather than doing nothing"
+    (assert-error (tempo/truncate (tempo/parse! "2026-06-15T14:30") :fortnight))
+    (assert-error (tempo/truncate (tempo/parse! "2026-06-15T14:30") :days))))
+
+(describe "unit"
+  (test "reads a present unit and nil for an absent one"
+    (assert= 6 (tempo/unit (tempo/parse! "2026-06-15") :month))
+    (assert= 15 (tempo/unit (tempo/parse! "2026-06-15") :day))
+    (assert= nil (tempo/unit (tempo/parse! "2026-06") :day))))
+
+(describe "finer / coarser"
+  (test "walk the unit hierarchy"
+    (assert= :day (tempo/finer :month))
+    (assert= :month (tempo/coarser :day))
+    (assert= nil (tempo/finer :ms))
+    (assert= nil (tempo/coarser :year))))
+
+;; ---- display ----------------------------------------------------------------
+
+(describe "display"
+  ;; `str`/`pr-str` stay native (ADR-171), so the Display op is what carries the
+  ;; ISO form — the same contract `datetime` gives its three types.
+  (test "a tempo displays as its ISO string, not its field map"
+    (assert= "2026-06" (->string (tempo/parse! "2026-06"))))
+  (test "a set displays as its spans"
+    (assert= "" (->string (tempo/set-of [])))
+    (is (>= (index-of (->string (tempo/set-of [(tempo/parse! "2026-06")])) "/") 0)))
+  (test "explain names the unit and the span"
+    (is (>= (index-of (tempo/explain (tempo/parse! "2026-06")) "A month") 0))
+    (is (>= (index-of (tempo/explain (tempo/parse! "2026-06")) "30 days") 0))))

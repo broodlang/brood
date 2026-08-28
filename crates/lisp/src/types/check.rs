@@ -142,7 +142,7 @@ use ctx::Ctx;
 use walk::{check_into, collect_all_syms, collect_def_names, list_items};
 
 /// True when `form` is a top-level `(require …)` call — the one form the
-/// checker pre-evaluates so a module's macros (e.g. `defprocess` from
+/// checker pre-evaluates so a module's macros (e.g. `defserver` from
 /// `std/proc/gen.blsp`) are resolvable for the rest of the file.
 fn is_require_form(heap: &Heap, form: Value) -> bool {
     if let Value::Pair(p) = form {
@@ -1031,7 +1031,7 @@ pub fn check_file_ext(
     // When a top-level form is `(require 'mod …)`, also *evaluate* it so the
     // module's macros and globals become resolvable for the rest of the file.
     // Otherwise the next form using a macro the module brought in
-    // (`defprocess`, `cast`, `!`, etc. from `std/proc/gen.blsp`) would expand as
+    // (`defserver`, `cast`, `!`, etc. from `std/proc/gen.blsp`) would expand as
     // an un-known head and trip the unbound-symbol diagnostic. `require` is
     // idempotent (it checks `*features*`), so a later real run re-evaluating
     // the same form is a no-op. Failures are swallowed: the checker is

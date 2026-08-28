@@ -1957,19 +1957,19 @@ right tool for request/reply to a long-lived process.
 `std/proc/gen.blsp` packages the request/reply idiom above into a
 gen_server-style framework — ~180 lines of Brood over `spawn`/`send`/`receive`/
 `ref`/`monitor`, no kernel surface (ADR-099). A server carries one immutable
-state value through a tail-recursive `receive` loop; `defprocess` declares how it
+state value through a tail-recursive `receive` loop; `defserver` declares how it
 handles each kind of message.
 
 `gen` is an **ordinary module** with a bare namespace, so its client API is
-`gen/start`, `gen/call`, `gen/cast`, `gen/stop`, `gen/defprocess` — or bare
+`gen/start`, `gen/call`, `gen/cast`, `gen/stop`, `gen/defserver` — or bare
 after `(:use gen)`. (It was briefly prelude-bundled with those names bare; that
 seized `call`, `cast` and `stop` as un-redefinable global names, which a framework
 does not get to own. `(def call …)` is yours again.)
 
 ```clojure
-(defmodule my-app (:use gen))   ;; refers defprocess / start / call / cast / stop bare
+(defmodule my-app (:use gen))   ;; refers defserver / start / call / cast / stop bare
 
-(defprocess counter (n)
+(defserver counter (n)
   (init  (do (io/puts "up") n))            ; runs once at startup; returns the initial state
   (cast  :inc            (+ n 1))          ; fire-and-forget; body = next state
   (call  :value          [n n])            ; synchronous; body = [reply next-state]
@@ -1985,7 +1985,7 @@ does not get to own. `(def call …)` is yours again.)
 
 Without `(:use gen)` the same three lines are `(gen/cast c :inc)`,
 `(gen/call c :value)`, `(gen/stop c)`, and the definition head is
-`(gen/defprocess counter (n) …)`.
+`(gen/defserver counter (n) …)`.
 
 The clause kinds map onto Erlang's `handle_cast`/`handle_call`/`handle_info` plus
 two lifecycle hooks: **`cast`** (body → next state), **`call`** (body →
@@ -2004,7 +2004,7 @@ instead of hanging); `(gen/call-timeout pid payload ms)` sets a custom deadline;
 `(gen/stop pid)` ends the loop; `(gen/code-change pid)` asks a running server to
 migrate its state after a hot reload. Spawn with `gen/start`,
 `gen/start-link` (Erlang `start_link` — links the server to the caller), or
-`gen/start-named` (registers it for `proc/whereis`). A `defprocess` server
+`gen/start-named` (registers it for `proc/whereis`). A `defserver` server
 composes directly under `supervisor` (see `std/proc/supervisor.blsp`).
 
 **A call that times out leaves nothing behind.** `gen/call-timeout` mints a fresh
@@ -2099,7 +2099,7 @@ failure only appears under load — exactly where a supervisor matters.
 
 **Use `spawn-link` for anything supervised.** `std/proc/supervisor.blsp`'s
 `:start` thunks do (`(fn () (spawn-link (worker …)))`), and `gen`'s
-`gen/start-link` is the same guarantee for a `defprocess` server. The prelude
+`gen/start-link` is the same guarantee for a `defserver` server. The prelude
 macro expands to the `%spawn-link` primitive (ADR-067).
 
 ### Timers
@@ -3038,6 +3038,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Only the **operators** (`+` `-` `*` `/` `<` `=` …) and `inc`/`dec` stay bare in the prelude — `quot`/`mod`/`rem`/`floor`/`min`/`max` are derived arithmetic and live here too, so they are `math/quot`, `math/min`, … unless `(:use math)` brings them back bare |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
+| `std/tempo.blsp` | `'tempo` | **Time as an interval, not an instant** (adapted from Tempo, Apache-2.0 — see `docs/tempo.md`). One resolution-carrying value type whose span is half-open, so `2026-06` *is* `[2026-06-01, 2026-07-01)`: `new`/`parse`/`->iso` at any precision, `relation` (Allen's thirteen) with the predicates over it, an interval-set algebra (`union`, `intersection`, `difference`, `gaps`, `total-width`), unit-implied enumeration (`parts`) and `shift`/`next`/`prev`. The open `Spanning` ability admits your own types; `datetime/date` and `datetime/datetime` already impl it. Layered on `datetime` for the calendar arithmetic |
 | `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |
 | `std/stats.blsp` | `'stats` | Descriptive statistics: `mean`, `median`, `variance`, `stddev`, `percentile`, `mode`, `stats-min`, `stats-max` (`mode` uses `seq/frequencies` internally) |
 | `std/stream.blsp` | `'stream` | Process-based pull streams (lazy, I/O-friendly): sources (`stream-from-list`, `stream-range`, `stream-from-socket`), transformers (`stream-map`, `stream-filter`, `stream-chunk`, `stream-lines`), terminals (`stream-fold`, `stream-to-vector`, `stream-pipe`) |
