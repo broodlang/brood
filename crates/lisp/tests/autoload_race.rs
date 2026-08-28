@@ -77,6 +77,13 @@ fn race_first_call(module: &str, call: &str, expected: &str) {
 ///    so the globals being imaged are live in THIS heap" — which would load `string`/`seq` in
 ///    the very interpreter that is supposed to race their *first* call. So the build happens
 ///    somewhere else and only the finished image crosses over.
+///
+/// Gated on the cargo feature: `./configure --without-stdimage` (ADR-281) ships a build with
+/// no image machinery at all, for a deployment that must never touch a cache directory. In such
+/// a build these arms cannot install anything, so they must not exist rather than fail — a red
+/// test for a supported configuration is a red nobody can act on. `(%build-stdimage?)` is the
+/// runtime equivalent if this ever needs checking from Brood.
+#[cfg(feature = "stdimage")]
 fn race_first_call_from_the_stdlib_image(module: &str, call: &str, expected: &str) {
     // The id carries the git sha and a hash of every baked-in `.blsp`, so any commit or `std/`
     // edit makes the previous image stale. Build on demand rather than asking the developer to
@@ -189,6 +196,7 @@ fn racing_the_first_call_into_string_is_sound() {
 // cause went unread for two sessions of KI-72.
 
 /// `reserved-package-name?` -> `seq/distinct`, materialised from the stdlib image.
+#[cfg(feature = "stdimage")]
 #[test]
 fn racing_the_first_call_into_seq_is_sound_from_the_stdlib_image() {
     race_first_call_from_the_stdlib_image(
@@ -200,6 +208,7 @@ fn racing_the_first_call_into_seq_is_sound_from_the_stdlib_image() {
 
 /// `doc-search` -> `string/blank?` -> the module-private `string/whitespace?`: the exact shape
 /// of KI-72, on the exact load path it occurred on.
+#[cfg(feature = "stdimage")]
 #[test]
 fn racing_the_first_call_into_string_is_sound_from_the_stdlib_image() {
     race_first_call_from_the_stdlib_image(
