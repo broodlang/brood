@@ -123,10 +123,12 @@
 (impl Display csv-test/usd (->string [m] (str "$" (get m :cents))))
 
 (describe "emit renders non-string cells"
-  ;; `->string` on a keyword is its printed form, colon included (`name` would strip it) —
-  ;; the display form, not the bare word.
+  ;; `->string` on a keyword is the bare word, colon stripped. It was the printed form
+  ;; (`:b`) until 2026-08-27, when the sigil-stripping `name` primitive was folded into
+  ;; `->string`; a CSV cell is one of the places that change is visible, and `b` is the
+  ;; cell a reader of the file wants. `(str :b)` and `(pr-str :b)` still give ":b".
   (test "numbers and keywords emit as their display form"
-    (assert= (csv/emit [["a" 1 :b]]) "a,1,:b"))
+    (assert= (csv/emit [["a" 1 :b]]) "a,1,b"))
   (test "a record emits via its Display impl, not as a field map"
     (assert= (csv/emit [[(usd 1050) "x"]]) "$1050,x")
     (is (not (includes? (csv/emit [[(usd 1050)]]) "__id__"))))

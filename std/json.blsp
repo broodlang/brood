@@ -420,7 +420,7 @@ the named escapes + every C0 control) that would each find nothing."
 (defn- enc-key
   (k)
   "A JSON object key: a string as-is, a keyword/symbol by name, else its `str`."
-  (enc-string (cond (keyword? k) (name k) (symbol? k) (name k) (string? k) k else (str k))))
+  (enc-string (cond (keyword? k) (->string k) (symbol? k) (->string k) (string? k) k else (str k))))
 
 ;; The encoder EMITS into a reversed fragment list threaded through the recursion
 ;; (a string builder), assembled with one `(apply str (reverse …))` at the top. The
@@ -510,8 +510,8 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
           " — JSON has no infinity or NaN; encode it as a string or null instead")
         (cons (str v) acc))
     (string? v) (cons (enc-string v) acc)
-    (keyword? v) (cons (enc-string (name v)) acc)
-    (symbol? v) (cons (enc-string (name v)) acc)
+    (keyword? v) (cons (enc-string (->string v)) acc)
+    (symbol? v) (cons (enc-string (->string v)) acc)
     (record? v) (emit-record v acc)
     (map? v) (cons "}" (emit-pairs (%map-pairs v) (cons "{" acc) true))
     (vector? v) (cons "]" (emit-items v 0 (count v) (cons "[" acc)))

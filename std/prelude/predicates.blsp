@@ -222,7 +222,7 @@ and a set its elements, as everywhere else `seq` applies.
 (defn- %nth-bad-index
   (coll i)
   (error (str "nth: expected an integer index, got "
-           (name (type-of i))
+           (->string (type-of i))
            " ("
            (pr-str i)
            ")"
@@ -239,7 +239,7 @@ and a set its elements, as everywhere else `seq` applies.
     (record? coll) (%nth-list (seq coll) i d)
     else
       (error (str "nth: expected a collection to index, got "
-               (name (type-of coll))
+               (->string (type-of coll))
                " ("
                (pr-str coll)
                ")"))))

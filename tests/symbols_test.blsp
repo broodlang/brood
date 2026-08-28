@@ -8,9 +8,9 @@
 (defmodule symbols-test (:use test))
 
 (describe "name"
-  (test "symbol → string" (assert= (name 'foo) "foo"))
-  (test "keyword → string" (assert= (name :bar) "bar"))
-  (test "string passes through" (assert= (name "baz") "baz")))
+  (test "symbol → string" (assert= (->string 'foo) "foo"))
+  (test "keyword → string" (assert= (->string :bar) "bar"))
+  (test "string passes through" (assert= (->string "baz") "baz")))
 
 (describe "symbol (lenient constructor)"
   (test "from string" (assert= (symbol "hello") 'hello))
@@ -29,21 +29,21 @@
 
 (describe "round-trips"
   (test "name ↔ symbol"
-    (assert= (name (symbol "round")) "round")
-    (assert= (symbol (name 'round)) 'round))
+    (assert= (->string (symbol "round")) "round")
+    (assert= (symbol (->string 'round)) 'round))
   (test "name ↔ keyword"
-    (assert= (name (keyword "round")) "round")
-    (assert= (keyword (name :round)) :round))
+    (assert= (->string (keyword "round")) "round")
+    (assert= (keyword (->string :round)) :round))
   ;; A symbol and the keyword spelled the same share an interner id; only the
   ;; tag distinguishes them.
-  (test "shared interner" (assert= (name 'shared) (name :shared))))
+  (test "shared interner" (assert= (->string 'shared) (->string :shared))))
 
 (describe "symbol -> string via ->string / name"
   ;; The symbol → string direction is the polymorphic `->string` (Display) op — no
   ;; dedicated `symbol->string` wrapper. `name` gives the same spelling for a symbol.
   (test "->string of a symbol" (assert= (->string 'foo) "foo"))
-  (test "name of a symbol" (assert= (name 'foo) "foo"))
-  (test "->string agrees with name" (assert= (->string 'bar) (name 'bar))))
+  (test "name of a symbol" (assert= (->string 'foo) "foo"))
+  (test "->string agrees with name" (assert= (->string 'bar) (->string 'bar))))
 
 (describe "string/->symbol (strict)"
   (test "string input" (assert= (string/->symbol "foo") 'foo))

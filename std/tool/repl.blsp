@@ -197,7 +197,7 @@ highlights. Used to colour a printed result on an interactive TTY."
   (first (filter (fn (c) (repl-has-name? (get c :names) cmd)) *repl-commands*)))
 
 (defn register-repl-command (spec)
-  "Register a `,cmd` meta-command. `spec` is `{:names (name alias…) :usage str
+  "Register a `,cmd` meta-command. `spec` is `{:names (->string alias…) :usage str
 :summary str :handler (fn (rest)) :hidden bool?}`; `:handler` receives the trimmed
 argument text. Re-registering any of `:names` replaces the earlier command (kept in
 registration order, the new one last). The extension seam tools use to add commands
@@ -444,7 +444,7 @@ innermost frame first (each location is the call site that entered the frame)."
 `{:kind :message [:line :col] [:trace …] …}`, a user `throw` arrives as the raw
 value."
   (if (and (map? e) (contains? e :message))
-    (str (if (contains? e :kind) (str (name (get e :kind)) " error") "error")
+    (str (if (contains? e :kind) (str (->string (get e :kind)) " error") "error")
       ": "
       (get e :message)
       (if (contains? e :line)

@@ -99,7 +99,7 @@ silently accepted."
                            (let (d (doc (eval s)))
                              (append acc
                                (filter (fn (x) (not (nil? x)))
-                                 (map (fn (l) (check (name s) l)) (example-lines d))))))
+                                 (map (fn (l) (check (->string s) l)) (example-lines d))))))
                      []
                      (documented-names)))
       ;; Name every offender — a count alone does not say which promise is broken.

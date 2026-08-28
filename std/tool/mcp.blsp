@@ -448,12 +448,12 @@ exist?\" without guessing names one at a time."
   (let (pattern (get args :pattern))
     (when (not (string? pattern))
       (throw "apropos: :pattern must be a string"))
-    {:matches (map name (apropos pattern))}))
+    {:matches (map ->string (apropos pattern))}))
 
 (defn all-globals-tool (args)
   "`all-globals` — every globally bound name in the image. Returns
 `{:globals [name ...]}` (sorted strings)."
-  {:globals (map name (global-names))})
+  {:globals (map ->string (global-names))})
 
 (defn doc-search-tool (args)
   "`doc-search` — find globals whose docstring contains a query string. Returns
@@ -461,7 +461,8 @@ exist?\" without guessing names one at a time."
   (let (query (get args :query))
     (when (not (string? query))
       (throw "doc-search: :query must be a string"))
-    {:results (map (fn (pair) {:name (name (first pair)) :doc (second pair)}) (doc-search query))}))
+    {:results (map (fn (pair) {:name (->string (first pair)) :doc (second pair)})
+                (doc-search query))}))
 
 (defn progress (progress &optional (total nil) (message nil))
   "Report incremental progress from a `nest mcp` tool handler (the streaming
@@ -532,7 +533,7 @@ like `eval`. Returns `{:error msg}` on failure."
 
 (defn- op-provided?
   (spec)
-  "Does an op spec `(name [params] :-> ret? body…)` carry a body (a provided
+  "Does an op spec `(->string [params] :-> ret? body…)` carry a body (a provided
 default) rather than being a bare required op? Skip the name + params, then the
 optional `:-> ret`, and check whether anything remains."
   (let (tail (drop 2 spec)
@@ -549,7 +550,7 @@ across its ops via the `*impls*` registry."
                             (if methods (into acc (keys methods)) acc)))
                     #{}
                     op-names))
-    (sort (map name (vec type-keys)))))
+    (sort (map ->string (vec type-keys)))))
 
 (defn abilities-tool (args)
   "`abilities` — list every ability defined in the image, sorted. Returns
@@ -579,7 +580,7 @@ its owner namespace, whether it's derivable, and which types implement it. Retur
                         :provided (op-provided? spec)})
                   ops)
            :sealed (not (nil? members))
-           :members (if members (map name members) [])
+           :members (if members (map ->string members) [])
            :requires (if reqs (map str reqs) [])
            :owner (if owner (str owner) nil)
            :derivable (not (nil? (%ability-derive-recipe aname)))

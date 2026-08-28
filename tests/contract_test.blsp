@@ -274,3 +274,27 @@
   (test "the empty tuple accepts only the empty vector"
     (assert= (c-empty []) [])
     (assert-error (c-empty [1]))))
+
+;; --- the complement `(not T)` (ADR-263) -----------------------------------------
+;; The lattice has computed complements since ADR-023 — the else-branch of a type
+;; guard is one — but the grammar could not say one, so "anything but nil" could
+;; not be written down. The runtime `type-matches?` implements the same clause, so
+;; a `sig!` contract and the checker agree on what a complement admits.
+
+(defn c-not-nil (x) x)
+(sig! c-not-nil ((not nil) -> any))
+
+(defn c-int-not-five (n) n)
+(sig! c-int-not-five ((and int (not 5)) -> any))
+
+(describe "complement type contracts"
+  (test "a complement admits everything outside the negated set"
+    (assert= (c-not-nil 1) 1)
+    (assert= (c-not-nil "s") "s")
+    (assert= (c-not-nil false) false))
+  (test "a complement rejects a member of the negated set"
+    (assert-error (c-not-nil nil)))
+  (test "a complement composes with an intersection"
+    (assert= (c-int-not-five 4) 4)
+    (assert-error (c-int-not-five 5))
+    (assert-error (c-int-not-five "x"))))

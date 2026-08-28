@@ -44,7 +44,7 @@ arg silently becoming `nil`.
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 2-3 | characters `[start, end)`, char-indexed; `end` defaults to `(string-length s)` |
 | | `%str-index-of` | 2-3 | char index of the first occurrence of a substring at or after the optional start (or -1; empty needle → the start). Linear (byte-level `find` → char index) — the search counterpart of `substring`, needed in Rust because Brood has no O(1) char access (a pure-Brood scan is O(n²)). `index-of` / `includes?` ride on it. The start offset is taken here rather than by slicing in Brood: `(index-of s needle from)` used to search `(substring s from n)`, copying the suffix on every call |
-| | `%str-last-index-of` | 2-3 | char index of the **last** occurrence starting strictly before the optional `before` bound (default end; -1 if none). One forward pass with an advancing cursor. Backs `last-index-of`, which used to walk forward in Brood calling `index-of` per match — O(matches × length), and on an editor hot path both ways (reverse buffer search; finding the current line's start per keystroke) |
+| | `%str-last-index-of` | 2-3 | char index of the **last** occurrence starting strictly before the optional `before` bound (default end; -1 if none). One forward pass with an advancing cursor. Backs `string/last-index-of`, which used to walk forward in Brood calling `index-of` per match — O(matches × length), and on an editor hot path both ways (reverse buffer search; finding the current line's start per keystroke) |
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
 | | `lower` | 1 | `s` lower-cased (Unicode-aware) |
 | | `string/->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `reflect/read-string`) |
@@ -121,9 +121,8 @@ arg silently becoming `nil`.
 | | `%run-program-file` | 1 | Run the program file at `path` as its own green process (ADR-135) and block until it finishes; nil, or raises if a top-level form did. |
 | | `system/reload-defs` | 1 | Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil. |
 | | `%offload` | 2 | Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. |
-| **Symbols** | `name` | 1 | a symbol/keyword's spelling as a string (no leading `:`) |
-| | `symbol` | 1 | coerce a string / symbol / keyword to the matching symbol (intern as needed). Lenient inverse of `name`; strict `string/->symbol` is a Brood wrapper |
-| | `keyword` | 1 | coerce a string / symbol / keyword to the matching keyword (intern as needed). Mirrors `symbol`; they share an interner so `(= (name 'x) (name :x))` |
+| **Symbols** | `symbol` | 1 | coerce a string / symbol / keyword to the matching symbol (intern as needed). Lenient inverse of `->string`; strict `string/->symbol` is a Brood wrapper |
+| | `keyword` | 1 | coerce a string / symbol / keyword to the matching keyword (intern as needed). Mirrors `symbol`; they share an interner so `(= (->string 'x) (->string :x))`. There is no `name` primitive: the spelling direction is the Brood `->string` (ADR-258) |
 | **Filesystem** | `file/cwd` | 0 | current working directory |
 | | `file/exists?` `file/dir?` | 1 | path exists / is a directory → bool |
 | | `file/ls` | 1 | entry names directly under a directory (sorted) |

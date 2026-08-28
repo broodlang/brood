@@ -23,14 +23,14 @@
   (coll k)
   (if (or (pair? coll) (vector? coll) (bytes? coll) (string? coll))
     (error (str "get: expected an integer index, got "
-             (name (type-of k))
+             (->string (type-of k))
              " ("
              (pr-str k)
              ")"
              " — a vector, list, string or bytes is indexed by position, not by key."
              " Did you mean one element of it, or `get-in` for a nested key?"))
     (error (str "get: expected a collection (map, set, vector, list, string or bytes), got "
-             (name (type-of coll))
+             (->string (type-of coll))
              " ("
              (pr-str coll)
              ")"))))

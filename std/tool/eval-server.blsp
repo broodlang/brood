@@ -127,7 +127,7 @@ looking identical to a round-trip that cleaned up after itself."
 (defn- eval-server-spy-entry
   (e)
   ;; One collected `*spy-sink*` entry, display-bounded for the wire.
-  {:kind (name (or (get e :spy) :event))
+  {:kind (->string (or (get e :spy) :event))
    :fn (when (get e :fn) (str (get e :fn)))
    :args (when (get e :args) (pr-str-bounded (get e :args)))
    :value (when (contains? e :value) (pr-str-bounded (get e :value)))

@@ -351,7 +351,7 @@ record's use; deriving an ability with no recipe is a clean error.
 ```lisp
 (defability Columns
   (columns [self] :-> vector)
-  :derive-record (fn (fs) (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (name f)))) fs)]))))
+  :derive-record (fn (fs) (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (->string f)))) fs)]))))
 (defrecord point (x y) :derives [Columns])
 (columns (point 3 4))          ;=> [3 4]   — synthesized, no impl written
 ```
@@ -957,8 +957,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `string/starts-with?` `string/ends-with?` `string/->list` `string/list->`
   `string/->bytes` `string/bytes->`.
   **Bare (core, not in the module):** `str` `pr-str` `index-of` `includes?`
-  `string/->number` `->string` (the polymorphic Display op) `name`.
-  There is no `symbol->string`/`number->string` — use `str`, `->string` or `name`
+  `string/->number` `->string` (the polymorphic Display op — on a symbol or keyword it
+  yields the bare spelling, so `(->string :foo)` is `"foo"` while `(str :foo)` is `":foo"`).
+  There is no `symbol->string`/`number->string`/`name` — use `str` or `->string`
   (ADR-239 removed both as redundant).
 - **unicode**: `string/->graphemes` (extended grapheme clusters as a vector of
   strings — the unit a human calls "a character", and what a cursor must step by;
@@ -1067,6 +1068,14 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   literal.)
 - **Bare symbols in patterns *bind*.** Match a literal symbol with `'foo`;
   match a runtime value with `~expr`.
+- **A wrong `(sig …)` is a warning, not a shrug** (ADR-259). A misspelled type or
+  constructor (`strng`, `(tupel int)`), a sig whose arity contradicts its `defn`,
+  and a sig for a name the file never defines are all reported — a declaration used
+  to be dropped in silence, which quietly widened the position it was meant to pin.
+  The **definition** owns the arity, so a sig cannot make a wrong call look right.
+  Type grammar beyond the basics: `(or A B)`, `(and A B)`, `(not T)` — so "anything
+  but nil" is `(and any (not nil))` — `(vector E)`, `(map K V)`, `(tuple A B)`,
+  `(record :k T)`, and bare literals (`:ok`, `5`, `true`, `"GET"`).
 - **`=` is structural** and recursive — two unrelated structures that look the
   same compare equal.
 - **Variadic operators**: `(+ a b c)` works. The fast 2-arg primitives, when

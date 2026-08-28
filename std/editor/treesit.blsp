@@ -196,7 +196,7 @@ if none."
   "Whether `node` is a definition for `beginning-of-defun`: a definition-*kind* node (Ruby
 `method`/`class`/`module`, …) or a `call` whose callee text is a `def`-family macro (Elixir,
 where `def`/`defmodule`/… are calls, not distinct node kinds)."
-  (let (k (name (get node :kind)))
+  (let (k (->string (get node :kind)))
     (or (includes? ts-def-kinds k)
       (and (= k "call")
         (let (head (first (ts-named-kids node)))

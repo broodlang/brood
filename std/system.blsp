@@ -71,4 +71,4 @@ to degrade rather than fail asks the build."
 
 (defn module-doc (mod)
   "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."
-  (get *module-docs* (name mod)))
+  (get *module-docs* (->string mod)))

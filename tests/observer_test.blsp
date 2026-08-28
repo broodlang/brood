@@ -46,8 +46,8 @@
     (assert= (observer/observe-bytes->human 2048) "2 KB")
     (assert= (observer/observe-bytes->human 3145728) "3 MB"))
   (test "observer/observe-opt renders a value or a dash when absent"
-    (assert= (observer/observe-opt nil name) "-")
-    (assert= (observer/observe-opt :foo name) "foo"))
+    (assert= (observer/observe-opt nil ->string) "-")
+    (assert= (observer/observe-opt :foo ->string) "foo"))
   (test "observer/observe-cells lays out eight fixed-width columns"
     (let (r (observer/observe-cells 7 "worker" "waiting" 3 "8 KB" 240000 "1200" 1))
       (is (includes? r "7"))

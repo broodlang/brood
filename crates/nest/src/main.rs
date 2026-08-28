@@ -2030,7 +2030,10 @@ fn cmd_release(
 
     // 2. Default the output name from the manifest's `:name` (set in the interp
     //    by `bundle-collect`'s `project--apply`).
-    let name = match run_for_value(interp, "(if *project-name* (name *project-name*) \"app\")") {
+    let name = match run_for_value(
+        interp,
+        "(if *project-name* (->string *project-name*) \"app\")",
+    ) {
         Value::Str(id) => interp.heap.string(id).to_string(),
         _ => "app".to_string(),
     };

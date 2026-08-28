@@ -99,6 +99,34 @@
 ;; kernel already exposes.)
 ;; `empty?` is a native builtin (builtins.rs) for Prim1-level dispatch speed.
 
+;; ---- ->string: the value → display string conversion ----
+;; ONE name for this operation, from here to user code. This is the BOOTSTRAP
+;; implementation; `defability Display` (std/prelude/tools.blsp) rebinds the same
+;; name to a dispatching version far below, so a record can define its own display.
+;; The rebind is the whole point of defining it here rather than beside the ability:
+;; the prelude's own machinery — `defmodule`, `require`, package rooting, `defrecord`
+;; — needs this operation ~60 times *before* `defability` has been evaluated, and a
+;; second `%`-prefixed spelling for those callers would be two names for one idea.
+;;
+;; Written with kernel natives only (`type-of`/`%eq`/`str`/`string/substring`), since
+;; `keyword?` and `cond` are not defined until `predicates.blsp`, which concatenates
+;; after this file.
+;;
+;; A symbol or keyword yields its SPELLING, with no sigil: `(->string :foo)` is "foo".
+;; This is the one kind where `->string` and `str` deliberately disagree — `(str :foo)`
+;; is ":foo", and `pr-str` must also stay ":foo" because it has to round-trip. It was
+;; the bare `name` primitive until 2026-08-27; that spelling is now a user's to take.
+(defn ->string (x)
+  "The display string of `x`: a symbol or keyword yields its spelling with no sigil
+(`(->string :foo)` → \"foo\"), and everything else is `str`. A record may customise
+this by implementing the `Display` ability, which takes over this name below.
+
+    (->string :foo)   → \"foo\"
+    (->string 'foo)   → \"foo\"
+    (->string 42)     → \"42\"
+    (str :foo)        → \":foo\"   ; `str` keeps the sigil; this does not"
+  (if (%eq (type-of x) :keyword) (string/substring (str x) 1) (str x)))
+
 ;; ---- universal list view ----
 ;; `seq` is what lets every list-shaped op (map/filter/fold/reduce/…) walk a
 ;; *map* without callers reaching for `(seq/zip (keys m) (vals m))`: a map becomes
@@ -400,7 +428,7 @@ fewer than two items.
   (let (ns (current-ns))
     (if (or (nil? ns) (includes? (str sym) "/"))
       sym
-      (symbol (str (name ns) "/" (str sym))))))
+      (symbol (str (->string ns) "/" (str sym))))))
 
 (defmacro defonce (name val)
   "Bind `name` to `val` only if it isn't already bound, so the value survives
@@ -505,6 +533,7 @@ names accept anything, so a contract never throws on a type it can't interpret."
         (cond
           (%eq h 'or) (any? (fn (s) (type-matches? s v)) (rest t))
           (%eq h 'and) (every? (fn (s) (type-matches? s v)) (rest t))
+          (%eq h 'not) (not (any? (fn (s) (type-matches? s v)) (rest t)))
           (%eq h 'list)
             (and (list? v)
               (let (elem (first (rest t)))
