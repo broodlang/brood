@@ -874,3 +874,59 @@ Three things follow, and the first two are corrections to the comment rather tha
 
 The remaining call-path item from §2d is `brood_rt_fast_frame` (10.7%) — same family as §2e's
 win, and a better next target than this at 1.3%.
+
+## 2g. Re-profiled after §2e, and the call convention now has a price tag on one instruction
+
+Re-profiled deliberately rather than continuing against §2d's numbers — §2e changed the very
+function that was 24%, so the ranking had moved.
+
+**`bintree` n=2000, after the outlining:**
+
+| % | symbol | vs §2d |
+|---|---|---|
+| **22.17** | `jit_run_fast_link` | 24.03 → 22.17 |
+| 12.56 + 12.47 | `brood_jit_arm_43`/`_44` (the real work) | ~unchanged at 25% |
+| 10.16 | `__memmove` | 11.38 → 10.16 |
+| **9.12** | `brood_rt_fast_frame` | 10.67 → 9.12 |
+| 5.02 / 4.75 | `make_vector2` / `push_n` | |
+| 2.73 | `env_get` | boot residue at this size |
+
+The ~2-point drop in `jit_run_fast_link` matches §2e's −4% wall-clock. It is **still the top item**,
+so the next question is what remains inside it.
+
+### One instruction is 23.5% of the function
+
+Instruction-level annotation is unambiguous this time — where §2d found cost *spread thin* across
+the prologue (which is what outlining fixed), what is left is concentrated:
+
+```
+23.50 :  movups (%rax,%rcx,8), %xmm0
+ 3.28 :  movq   0x170(%r15), %rax        # the roots pointer
+```
+
+A 16-byte load from the roots stack (scale 8 with the index pre-multiplied by 3 = 24-byte
+`Value` stride). 23.5% of a function that is 22.17% of the row is **~5.2% of `bintree` on a single
+load**, and it sits shortly after the `callq *%rdx` that runs the callee's native code.
+
+**The mechanism, stated with the confidence the evidence supports:** the callee writes its result
+into `roots[base]` and the caller loads it straight back out — a store-to-load round trip through
+memory across the native call boundary. A load that close behind a call, at that share, is a
+store-forwarding/latency stall rather than expensive work. (Perf skid means the exact source line
+is not certain; the *instruction* and its cost are.)
+
+**So the X-register call convention now has a measured price tag and a first concrete step**:
+return the callee's result **in a register** instead of through the roots slot. That is worth ~5%
+of `bintree` on its own, it is the narrowest possible slice of the convention change, and it is
+testable in isolation.
+
+**Not attempted here, deliberately.** That is an ABI change spanning `jit_lower.rs`'s Cranelift
+lowering, the `brood_rt_*` callback contract and the VM's expectations of a frame — the
+multi-session redesign FRONTIER describes. Starting it at the end of a long session risks leaving
+a half-migrated ABI, which is the one state worse than not starting. The finding is the valuable
+part: it turns "redesign the call convention" into "make the return value come back in a register,
+and expect ~5% on `bintree`."
+
+**Also still open on this row:** `brood_rt_fast_frame` 9.12% (whose inlined work is
+`jit_dispatch_fast_frame`'s per-call cap and `jit_native_headroom_ok` checks — worth reading before
+assuming they are free), and ~19% allocation of which §2f showed the tenure reservation is only
+1.3%.
