@@ -18020,6 +18020,13 @@ learned, each from a suggestion that turned out to be wrong.
   entry)) (error …))`. Declaring `vector` makes its own guard provably dead code — and the
   unreachable-clause lint correctly says so. A function whose job is to check its input
   must not declare that input's type.
+
+  This one is **not** decidable from the suggestion, and trying to guess it from the
+  source is guesswork the checker has already done. So it is applied as a feedback step
+  rather than a predicate: declare, run `nest check`, and drop the declaration on any
+  function that now reports an `unreachable clause`. The same two functions came back on
+  the second adoption round because the rule lived only in a human's memory; reading the
+  checker's own verdict back is what makes it stick.
 - **It restates what inference already gives.** A **return-only** signature (656 of them)
   and a **module-private** function's signature (457) both add nothing: inference computes
   them and, since ADR-266, private call sites are checked either way. The declaration is

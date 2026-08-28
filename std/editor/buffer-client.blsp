@@ -116,6 +116,7 @@ the link (unchanged when the texts are equal — pure movement sends nothing)."
         (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version))
         (assoc link
           :pending (append (or (get link :pending) ()) (list [lo hi (string/length repl)])))))))
+(sig link-propagate (any string string -> any))
 
 (defn link-fold (link version view origin)
   "Fold one `[:buffer-updated proc version view origin]` push into `link`: returns

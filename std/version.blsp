@@ -75,6 +75,7 @@ more identifiers outrank a prefix). `+build` metadata never affects order.
     (if (= c 0)
       (compare-prerelease (prerelease a) (prerelease b))
       c)))
+(sig compare (string string -> int))
 
 (defn prerelease (v)
   "The pre-release identifiers of version string `v` (`\"1.0.0-rc.1\"` → `(\"rc\" \"1\")`), or

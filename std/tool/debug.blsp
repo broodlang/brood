@@ -320,9 +320,11 @@ was attempted."
 (defn paused (dbg)
   "The map of currently parked processes: `pid -> snapshot`."
   (get (dbg-state dbg) :paused))
+(sig paused ((or map pid) -> any))
 (defn dbg-events (dbg)
   "The ordered event log the debugger has collected."
   (get (dbg-state dbg) :events))
+(sig dbg-events ((or map pid) -> any))
 (defn resume (dbg pid)
   "Release one parked process."
   (send dbg [:resume pid])
@@ -640,3 +642,4 @@ no raw-terminal setup and works when piped."
                   (io/puts (str "=> " (pr-str-bounded (eval-string line))))
                   (catch e (io/puts (str "! " (pr-str-bounded e)))))
                 (repl-session dbg))))))))
+(sig repl-session ((or map pid) -> any))

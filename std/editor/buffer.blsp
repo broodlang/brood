@@ -1477,3 +1477,4 @@ sinks may want `(buffer-edit pid disable-undo)` so appends don't grow undo histo
   "Stop buffer process `bp` and free it — the symmetric name for `stop-buffer`.
 Synchronous; returns :stopped."
   (stop-buffer bp))
+(sig delete-buffer ((or map pid) -> any))

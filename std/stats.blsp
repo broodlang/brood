@@ -20,6 +20,7 @@ Empty sequences raise unless documented otherwise.
   (let (n (count xs))
     (when (= n 0) (error "stats/mean: empty sequence"))
     (/ (* 1.0 (sum xs)) n)))
+(sig mean (seqable -> float))
 
 (defn- sum-of-squares
   (xs m)

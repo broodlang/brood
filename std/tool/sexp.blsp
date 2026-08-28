@@ -52,6 +52,7 @@ the structure queries below navigate the result directly. (This replaced an
 in-Brood `annotate` walk that re-derived positions by summing leaf lengths: O(n)
 interpreted and the bottleneck in structural navigation.)"
   (reflect/parse-source-positioned text))
+(sig tree (string -> map))
 
 ;; ---- structure queries ------------------------------------------------------
 

@@ -180,6 +180,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
     (let (sym (symbol (node-text head-node)))
       (get *format-headers-extra* sym (get *format-headers* sym -1)))
     -1))
+(sig head-header-count (vector -> any))
 
 ;; Forms whose FIRST header arg is a pair-list (alternating name/value). When
 ;; that list breaks across lines, we group each name+value on one line and
@@ -197,11 +198,13 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   "True if `head-node` names a form whose first header arg is a pair-list."
   (and (= (node-kind head-node) :symbol)
     (get *format-pair-bindings* (symbol (node-text head-node)) false)))
+(sig pair-bindings? (vector -> any))
 
 (defn pair-body? (head-node)
   "True if `head-node` names a form whose body emits in pairs."
   (and (= (node-kind head-node) :symbol)
     (get *format-pair-body* (symbol (node-text head-node)) false)))
+(sig pair-body? (vector -> any))
 
 ;; ---- the inlineability check ------------------------------------------------
 ;; Every LEAF node kind that re-emits as exactly its own source text. ONE
@@ -243,6 +246,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       ; a set literal `#{ … }` — a flat sequence, like a vector, with the `#{` glued
       (= k :set) (single-line-seq (node-children n) "#{" "}")
       else nil)))
+(sig single-line (vector -> any))
 
 (defn- single-line-str
   (text)
@@ -298,6 +302,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       ; a set literal `#{ … }` — flat like a vector (not pair-broken like a map)
       (= k :set) (render-seq n indent "#{" "}")
       else (node-text n))))
+(sig render (vector any -> any))
 
 (defn- render-wrap
   (prefix child indent)
@@ -952,6 +957,7 @@ retired the `comment-on-own-line?` distinction this used to need."
 
     (string/trim (format/source \"(a  b)\"))   → \"(a b)\""
   (let (root (reflect/parse-source src)) (cst-root (node-children root))))
+(sig source (string -> any))
 
 (defn cst-root (kids)
   "Render the root's child nodes `kids` — the top-level forms — into the formatted source string, with exactly one trailing newline."

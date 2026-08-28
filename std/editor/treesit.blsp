@@ -230,8 +230,10 @@ The shared body of `point-defun-start` / `point-defun-end`."
 / `module` / … containing `point` — so a `def` inside an Elixir `defmodule` or a Ruby `class`,
 not the whole enclosing module. Falls back to the top-level form, then `point`."
   (ts-defun-edge text lang point :start))
+(sig point-defun-start (string keyword any -> any))
 
 (defn point-defun-end (text lang point)
   "End of the enclosing **definition** (`end-of-defun`, C-M-e) — the close of the same node
 `point-defun-start` finds, so the pair brackets one `def` / `class` / `module`."
   (ts-defun-edge text lang point :end))
+(sig point-defun-end (string keyword any -> any))

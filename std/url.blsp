@@ -61,6 +61,7 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 
     (url/percent-encode \"a b\")   → \"a%20b\""
   (apply str (reverse (url-encode-bytes (seq (string/->bytes s)) nil))))
+(sig percent-encode (string -> any))
 
 ;; ---- percent-decoding -------------------------------------------------------
 
