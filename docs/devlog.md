@@ -5879,3 +5879,43 @@ same (unimaged) state, core-pinned, best-of-9:
 The general lesson, and the reason this is written up rather than quietly fixed: **a number that
 disagrees with itself across three measurements is not a number to attribute.** The failure was
 not the measurement, it was reporting a cause before the measurements agreed.
+
+### Correction: the collatz cost is ONE variadic call, not the `math/*` wrappers
+
+The entry above says the `math/*` wrappers cost ~40% and calls it a floor under 15 of the 31 rows.
+The measurement was right; the attribution was too broad, and the isolation that settles it is one
+line of `sed`:
+
+| variant | time |
+|---|---|
+| `math/rem`, `math/quot`, `math/max` all qualified | 223 ms |
+| the same, but `%max` called directly | **142 ms** |
+| all three primitives directly | **142 ms** |
+
+The middle row **equals** the bottom row. `math/rem` and `math/quot` are free; the whole delta is
+`math/max`.
+
+**And I read the JIT's own diagnostics backwards on the way here.** `math/rem`/`math/quot` appear
+in neither `BROOD_JIT_DUMP_IR`'s lowered arms nor `BROOD_JIT_BAIL_TRACE`'s refusals, and I took
+that to mean they run on the VM and the native loop pays a round-trip per arithmetic op. It means
+the opposite: a fixed-arity body that is a single primitive call is **inlined into its caller and
+ceases to exist**, so there is nothing left to lower or refuse. `steps` proves it — it lowers with
+**no `Call` instruction at all**:
+
+```
+arm: 17 (steps)  insts: Prim2SlotInt JumpIfFalse Local Jump Prim2SlotInt Const Prim2
+                        JumpIfFalse Prim2SlotInt Prim2SlotInt SelfCall Jump …
+```
+
+`math/max` is the one that shows up, as `GlobalIc Local Call`, because `(apply %max xs)` over
+`& xs` allocates an argument list and cannot be inlined.
+
+**Absence in a JIT trace is ambiguous** — it means "never hot", "refused", or "inlined away", and
+those want opposite responses. `BROOD_JIT_BAIL_TRACE` exists precisely because absence from the IR
+dump was ambiguous between the first two; this is the third case, and nothing distinguishes it
+except reading the caller's instruction list or isolating the call.
+
+So the lever is **variadic dispatch**, which is where CLAUDE.md's dogfooding section already points
+(its worked example is variadic `+`/`-`/`=`, and its prescribed fix is multi-arity dispatch in the
+evaluator rather than Rust builtins). The good news in the correction: the one-primitive inlining
+already works, so there is no inliner to build — only the variadic shape it cannot reach.
