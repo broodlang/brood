@@ -6015,3 +6015,34 @@ while changing the answer at the arity everyone actually calls.
 **Left alone on purpose:** `bytes/concat` and `hash-map` are the only other single-clause
 `(& rest)` wrappers over an `apply` in `std/`. Neither is shown to be hot, and adding arms on
 speculation is how a tree fills up with changes nobody can attach a measurement to.
+
+### Re-profiled the call path before starting the call-convention work — one claim confirmed, one withdrawn
+
+`perf` is unusable on this box (`perf_event_paranoid: 4`), so this used brood's own counters. The
+method that made them trustworthy is worth stating, because the first pass was wrong: **scope with
+`perf/measure`, then size-sweep and keep only the counters whose ratio tracks the work.**
+
+At whole-process scope, `pipeline` reported `alloc` and both call-IC counters *identical* between a
+1× and a 10× run while `env-get` scaled 8× — every interesting counter was boot's, not the row's.
+And `hof-decline-queued` at process scope reads like "the HOF fast path is declined on 96% of
+activations", which is a striking and completely wrong conclusion: scoped and swept, it is a fixed
+~33k warm-up cost that does not grow with the work at all. I nearly wrote it up as the finding.
+
+**`pipeline` — the "allocation churn dominates" claim is withdrawn.** `alloc` is **15 and flat**
+across a 10× sweep. `alloc_slot!` is the single macro behind `alloc_pair`/`alloc_vector`/
+`alloc_map`/`alloc_closure` and the rest, so that is all LOCAL heap allocation: the lazy
+`lfilter`/`lmap` form really does stream without allocating per element, which is what it exists
+for. What scales is **1.48 `jit-link-done` and 1.40 `env-get` per element** — the call path. The
+entry's other half ("~50% call plumbing") stands.
+
+**`bintree` — confirmed, not corrected.** 4,095 allocations per iteration is exactly 2¹²−1, one per
+node; 15,772 links per iteration is **3.85 per node**. That is an independent confirmation of the
+entry's "~77 ns per node over four non-tail calls" from a counter rather than a stopwatch, so the
+call-convention work is aimed at the right row. Note `vm-apply`/`env-get`/`prim2-inline` read
+*fixed* here — the arm is native, so its iterations stop being counted while its allocations do
+not, which is the documented `:alloc-bound` caveat and the reason not to read those columns.
+
+Full tables in [compute-frontier.md](compute-frontier.md) §2c. Also: `make perf-brood` overwrites
+the same binary path as `make release-brood`, so it was rebuilt afterwards and the "compiled out"
+hint checked — timing anything against the counter build charges the change for atomics it never
+introduced.
