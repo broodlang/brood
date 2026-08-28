@@ -388,6 +388,52 @@ call site. And the leaf/one-prim inlining is already doing its job, which is a b
 position than the earlier framing implied: there is no missing inliner to build here, only the
 variadic shape it cannot reach.
 
+## 2c. Re-profiled 2026-08-28, before starting the call-convention work
+
+`perf` is unusable on this box (`perf_event_paranoid: 4`), so this is brood's own counters via
+`(perf/measure …)` — **scoped**, because process-global totals are dominated by boot. That is not
+a theoretical caveat: at whole-process scope `pipeline` reported `alloc` and both call-IC counters
+*identical* between a 1× and a 10× run while `env-get` scaled 8×, i.e. the interesting counters
+were all boot's.
+
+The method that works: run the same program at two sizes and keep only the counters whose ratio
+tracks the work. Everything else is fixed cost and cannot be what you are chasing.
+
+### `pipeline` — the "allocation churn" claim does not hold
+
+| counter | N=100k | N=1M | ratio | per element |
+|---|---|---|---|---|
+| `env-get` | 140,182 | 1,400,182 | **10.0×** | 1.40 |
+| `jit-link-done` | 101,623 | 1,482,098 | **14.6×** | 1.48 |
+| `jit-fast-tail4` | 30,043 | 450,869 | **15.0×** | 0.45 |
+| `alloc` | 15 | 15 | 1.0× | **~0** |
+| `vm-apply`, `prim2-inline`, `tail-call`, `call-ic-*`, `hof-decline-queued`, `n-compile` | | | 1.0× | fixed |
+
+**`alloc` is 15 and flat.** `alloc_slot!` is the single macro behind `alloc_pair`/`alloc_vector`/
+`alloc_map`/`alloc_closure` and the rest, so that is all LOCAL heap allocation — the lazy
+`lfilter`/`lmap` form genuinely streams without allocating per element, which is what it is for.
+So FRONTIER's "allocation churn dominates" for this row is **wrong on this tree**; the per-element
+cost is ~1.5 fast-linked calls plus ~1.4 environment lookups. The "~50% call plumbing" half of
+that entry stands; the allocation half does not.
+
+Also worth recording: `hof-decline-queued` is ~33k and **fixed**, not per-element. Read at
+process scope it looks like "the HOF fast path is declined on 96% of activations"; scoped and
+size-swept it is a one-off warm-up cost.
+
+### `bintree` — FRONTIER's characterisation is confirmed
+
+| counter | n=100 | n=200 | ratio | per iteration |
+|---|---|---|---|---|
+| `alloc` | 409,501 | 819,001 | **2.0×** | **4,095** |
+| `jit-link-done` | 1,519,372 | 3,154,494 | **2.1×** | **15,772** |
+| `jit-native` | 196 | 397 | 2.0× | 2 |
+| `vm-apply`, `env-get`, `prim2-inline`, `call-ic-hit` | | | 1.0× | fixed (the arm is native, so its iterations stop being counted — see the `:alloc-bound` caveat) |
+
+4,095 allocations per iteration is exactly 2¹²−1, one per node, and 15,772 links per iteration is
+**3.85 per node** — an independent confirmation of the entry's "~77 ns per node over four non-tail
+calls" from a counter rather than a stopwatch. So `bintree` really is one allocation and ~four
+calls per node, and the call-convention work is aimed at the right row.
+
 ## 3. The remaining gaps are data-structure-specific (measured 2026-06-14)
 
 Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_IR`.
