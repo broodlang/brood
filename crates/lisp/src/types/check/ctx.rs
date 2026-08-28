@@ -200,6 +200,10 @@ pub(super) const SUPPRESS_UNBOUND: u8 = 1 << 3;
 /// file never `require`s/`:use`s (KI-17). Suppresses the load-order-reachability lint
 /// for a file that deliberately relies on an ambient require pulled in elsewhere.
 pub(super) const SUPPRESS_UNREQUIRED: u8 = 1 << 4;
+/// `(check-allow :deprecated …)` — a use of a name a `(meta … :deprecated …)` marks
+/// (ADR-283). A library must sometimes call its own deprecated name from the shim that
+/// replaces it, and a test must sometimes exercise the old surface deliberately.
+pub(super) const SUPPRESS_DEPRECATED: u8 = 1 << 5;
 
 /// One step of a narrowable access path: a keyword field (`(get x :k)`) or a
 /// fixed integer index (`(nth x 0)` / `(first x)` / `(second x)` / `(third x)`).

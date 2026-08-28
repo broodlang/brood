@@ -470,6 +470,25 @@ disabled snippets. The body is still *read*, so it must be balanced sexps; use
 ;; as a runtime contract (same as `(sig! …)`) for a dev/test run. See
 ;; `docs/type-annotations.md`. NOTE: the checker reads the *un-expanded* form, so
 ;; this macro intentionally discards its arguments.
+(defmacro meta (name & clauses)
+  "Record stability metadata for `name` (ADR-283) — three independent facts, each optional:
+
+    (meta parse       :since \"0.9.0\")
+    (meta old-parse   :deprecated \"0.14.0\" :use 'parse)
+    (meta try-this    :beta \"the options map may still change\")
+
+`:since` is documentation — `nest doc` and hover show it, nothing warns. `:deprecated`
+makes every use an ADVISORY checker diagnostic naming `:use`'s replacement, so it is
+visible without failing a build; suppress a deliberate one with
+`(check-allow :deprecated …)`. `:beta` says the surface is not settled yet.
+
+Written beside the definition, like `(sig …)`, and cleared if the name is redefined — a
+`def` that rebinds mid-run must not inherit the old name's facts."
+  ;; A VECTOR literal, not `(list …)`: a prelude macro template must not emit a bare
+  ;; capturable name, or a user module defining `list` would capture it (KI-73). A literal
+  ;; is not a name at all, and `%register-meta` reads a list or a vector alike.
+  `(%register-meta '~name [~@clauses]))
+
 (defmacro sig (name type)
   "Declare a type signature for `name`, e.g. `(sig area (number -> number))`.
 Read by the advisory type checker; a runtime no-op unless `BROOD_CONTRACTS=1`
