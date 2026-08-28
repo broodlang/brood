@@ -1872,6 +1872,12 @@ fn head_name(sym: Symbol) -> String {
 /// The items of `form` when it is an `(fn …)` form, else `None` —
 /// so `check_def` can recognise the `(def name (fn …))` shape that `defn`
 /// expands to.
+/// Is this `def`'s value a `fn` form — i.e. does the name denote a *function*, so that
+/// a signature is the right thing to say about it?
+pub(super) fn is_fn_value_form(heap: &Heap, form: Value) -> bool {
+    fn_form_items(heap, form).is_some()
+}
+
 fn fn_form_items(heap: &Heap, form: Value) -> Option<Vec<Value>> {
     let items = list_items(heap, form)?;
     match items.first()? {

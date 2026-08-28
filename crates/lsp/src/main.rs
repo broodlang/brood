@@ -714,6 +714,10 @@ fn handle_request(
                     // Resolve a diagnostic's range to the byte offset of its
                     // start — where the unbound name sits, for `names_in_scope`.
                     let offset_of = |r: Range| a.line_index.offset(&doc.text, r.start);
+                    // The request's own range too: not every action hangs off a
+                    // diagnostic — "declare this signature" is offered wherever the
+                    // cursor sits inside a `defn`.
+                    let at = a.line_index.offset(&doc.text, p.range.start);
                     code_actions::code_actions(
                         interp,
                         &p.text_document.uri,
@@ -723,6 +727,7 @@ fn handle_request(
                         &a.line_index,
                         offset_of,
                         &p.context.diagnostics,
+                        at,
                     )
                 }
                 None => Vec::new(),

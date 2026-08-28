@@ -118,7 +118,7 @@
 //! All of it reuses the one `is_unbound` predicate, so head and operand checks
 //! can't drift.
 
-mod annot;
+pub(crate) mod annot;
 mod ctx;
 pub(super) mod deps;
 mod exhaustive;
@@ -875,6 +875,106 @@ pub fn arg_ty_at(
     walk::take_arg_ty_query()
 }
 
+/// What a file's functions are, as the checker sees them — the data behind the LSP's
+/// **effective-type inlay hints** (`docs/lsp.md`).
+#[derive(Clone, Debug)]
+pub struct FnSignature {
+    /// The name as written at the def site (unqualified).
+    pub name: String,
+    /// Its signature: what the author *declared*, else what the checker inferred.
+    pub sig: Sig,
+    /// True when a `(sig …)` states this — in which case the signature is already on
+    /// screen, and a hint repeating it is noise.
+    pub declared: bool,
+}
+
+/// Every function a file defines, with its **effective** signature.
+///
+/// This is the question a buffer wants answered and `hover` could not: hover reads the
+/// *loaded* image, and a file being edited is not loaded. The checker has inferred
+/// same-file functions from their FORMS since ADR-188/190 (and per-clause since
+/// ADR-261) precisely because it cannot load them either — so the answer already
+/// exists, one pass away, and this exposes it.
+///
+/// Runs the full [`check_file`] analysis with a capture armed and discards the
+/// diagnostics, exactly as [`arg_ty_at`] does: one code path, so a hint can never
+/// describe a different inference than the warnings do.
+pub fn file_signatures(heap: &mut Heap, forms: &[Value]) -> Vec<FnSignature> {
+    arm_signature_capture();
+    let _ = check_file(heap, forms);
+    take_signature_capture()
+}
+
+thread_local! {
+    /// Armed by [`file_signatures`]; filled once the passes have built the `Ctx`.
+    static SIGNATURE_CAPTURE: std::cell::RefCell<Option<Vec<FnSignature>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn arm_signature_capture() {
+    SIGNATURE_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+fn take_signature_capture() -> Vec<FnSignature> {
+    SIGNATURE_CAPTURE
+        .with(|c| c.borrow_mut().take())
+        .unwrap_or_default()
+}
+
+/// Record each `defn`'s effective signature, if a capture is armed. Called once the
+/// inference passes have run, so a declared sig, an inferred single arm and an
+/// inferred multi-arm set are all visible.
+fn capture_file_signatures(heap: &Heap, expanded: &[Value], ctx: &Ctx) {
+    SIGNATURE_CAPTURE.with(|c| {
+        let mut slot = c.borrow_mut();
+        let Some(out) = slot.as_mut() else {
+            return; // not armed — the ordinary checking path pays nothing
+        };
+        for &form in expanded {
+            let Some((name, rhs)) = def_name_and_value(heap, form) else {
+                continue;
+            };
+            // Only functions: a `(def x 5)` has a value type, not a signature.
+            if !walk::is_fn_value_form(heap, rhs) || ctx.is_file_macro(name) {
+                continue;
+            }
+            let (sig, declared) = match ctx.declared_sig(name) {
+                Some(sig) => (sig, true),
+                None => match inferred_signature(ctx, name) {
+                    Some(sig) => (sig, false),
+                    None => continue,
+                },
+            };
+            out.push(FnSignature {
+                name: value::symbol_name(name),
+                sig,
+                declared,
+            });
+        }
+    });
+}
+
+/// The most informative inferred signature for `name`.
+///
+/// A **multi-arm** function has one signature per arm (ADR-261) and, separately, a
+/// params-less sig carrying the union of the arms' returns — because a guarded
+/// multi-clause `defn` lowers to one variadic `fn`, so the per-position inference
+/// declines while the return inference does not. Neither half alone is worth showing:
+/// the first is `(string) -> any`, the second `() -> 1 | 2`. Take the first arm's
+/// parameters and that union return, which is a sound over-approximation of what the
+/// arm returns and the shape a reader is actually looking at.
+fn inferred_signature(ctx: &Ctx, name: Symbol) -> Option<Sig> {
+    let single = ctx.inferred_fn_sig(name);
+    let Some(arm) = ctx.inferred_overload(name).and_then(|a| a.first().cloned()) else {
+        return single;
+    };
+    let ret = match &single {
+        Some(s) if s.params.is_empty() => s.ret.clone(),
+        _ => arm.ret.clone(),
+    };
+    Some(Sig::new(arm.params, ret))
+}
+
 /// [`check_file`] with an explicit **KI-17 reachability set** — the file's *transitive*
 /// require-closure (module names), computed by the whole-project driver
 /// (`std/tool/project.blsp`, which alone sees every file's header). Unioned with the
@@ -1258,6 +1358,9 @@ pub fn check_file_ext(
         // (which *suppressed* the correct arity check — the call then type-checked clean
         // and died at run time); and a sig for a name the file never defines.
         check_sig_declarations(heap, &forms, file_ns_name.as_deref(), &ctx, &mut out);
+        // With the signature passes done, hand the per-function answer to a `file_signatures`
+        // capture if one is armed (a no-op otherwise).
+        capture_file_signatures(heap, &expanded, &ctx);
         // Pass 2.6: protocol/behaviour conformance. Model `(defprotocol …)` /
         // `(defbehaviour …)` (from the un-expanded forms + the runtime registry of
         // imported ones), then check that every `(defimpl …)` provides each declared op

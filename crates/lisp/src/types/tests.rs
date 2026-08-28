@@ -1449,3 +1449,32 @@ fn an_intersection_of_element_and_tuple_types_is_a_lower_bound() {
         .intersect(Ty::tuple_of(vec![Ty::of(Tag::Int), Ty::of(Tag::Int)]))
         .is_never());
 }
+
+#[test]
+fn to_source_round_trips_through_the_annotation_parser() {
+    // The quick-fix that writes an inferred signature into a `(sig …)` must write the
+    // type it showed. Anything that renders must parse back to an equal type — and
+    // anything that cannot be written faithfully must decline (`None`) rather than
+    // approximate, which is the whole contract.
+    let mut interp = crate::Interp::new();
+    for ty in property_corpus() {
+        let Some(src) = ty.to_source() else { continue };
+        let form = crate::syntax::reader::read_one(&mut interp.heap, &src)
+            .unwrap_or_else(|e| panic!("`{src}` (from `{ty}`) does not parse: {e:?}"));
+        let back = super::check::annot::parse_type(&interp.heap, form)
+            .unwrap_or_else(|| panic!("`{src}` (from `{ty}`) is not a type expression"));
+        assert_eq!(
+            back, ty,
+            "`{ty}` rendered as `{src}`, which reads back as `{back}`"
+        );
+    }
+}
+
+#[test]
+fn to_source_declines_what_it_cannot_write() {
+    // `macro` and `native` are runtime kinds with no spelling in the grammar.
+    assert_eq!(Ty::of(Tag::Macro).to_source(), None);
+    assert_eq!(Ty::of(Tag::Native).to_source(), None);
+    // …and a type carrying one declines as a whole rather than dropping it.
+    assert_eq!(Ty::of(Tag::Int).union(Ty::of(Tag::Macro)).to_source(), None);
+}

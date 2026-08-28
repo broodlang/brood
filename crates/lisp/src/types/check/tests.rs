@@ -5492,3 +5492,64 @@ fn a_bare_local_test_narrows_by_truthiness() {
     let ws = warnings_expanded("(let (s (if true true false)) (let (v (not s)) (if v 1 2)))");
     assert!(!ws.iter().any(|w| w.contains("unreachable")), "{ws:?}");
 }
+
+// ---- effective signatures for a buffer (the LSP inlay-hint source) ----
+
+/// `file_signatures` over a source string, as `name → rendered sig (declared?)`.
+fn signatures(src: &str) -> Vec<(String, String, bool)> {
+    let interp = crate::Interp::new();
+    let mut heap =
+        crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    heap.set_global(crate::core::value::EnvId::GLOBAL);
+    let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
+    super::file_signatures(&mut heap, &forms)
+        .into_iter()
+        .map(|s| (s.name, s.sig.to_string(), s.declared))
+        .collect()
+}
+
+#[test]
+fn file_signatures_reports_what_the_checker_inferred() {
+    // The buffer is never loaded, which is exactly why hover cannot answer this and
+    // the form-based inference can.
+    let sigs = signatures("(defn f (s) (string/length s))");
+    assert_eq!(sigs.len(), 1, "{sigs:?}");
+    assert_eq!(sigs[0].0, "f");
+    assert!(sigs[0].1.contains("string"), "{sigs:?}");
+    assert!(!sigs[0].2, "an inferred sig must not read as declared");
+}
+
+#[test]
+fn file_signatures_prefer_and_mark_a_declaration() {
+    let sigs = signatures("(sig f (int -> string))\n(defn f (n) \"x\")");
+    assert_eq!(sigs.len(), 1, "{sigs:?}");
+    assert!(sigs[0].2, "a declared sig must be marked: {sigs:?}");
+    assert!(sigs[0].1.contains("int"), "{sigs:?}");
+}
+
+#[test]
+fn file_signatures_covers_guarded_clauses_and_skips_non_functions() {
+    // A multi-clause definition has one signature per clause (ADR-261); the first is
+    // what a reader is looking at.
+    let sigs = signatures(
+        "(defn g ((x) :when (string? x) 1) ((x) :when (int? x) 2))\n\
+         (def not-a-fn 5)\n\
+         (defmacro m (x) x)",
+    );
+    let names: Vec<&str> = sigs.iter().map(|s| s.0.as_str()).collect();
+    assert_eq!(names, vec!["g"], "{sigs:?}");
+    assert!(sigs[0].1.contains("string"), "{sigs:?}");
+    // …and it carries the union of the clauses' returns rather than a bare `any`.
+    assert!(sigs[0].1.contains("1 | 2"), "{sigs:?}");
+}
+
+#[test]
+fn file_signatures_costs_nothing_when_unarmed() {
+    // The capture is a no-op on the ordinary checking path — pinned because it runs
+    // inside `check_file`, which every diagnostic request goes through.
+    assert!(file_warnings("(defn f (s) (string/length s))")
+        .iter()
+        .all(|w| !w.contains("panic")));
+    let ws = file_warnings("(defn f (s) (string/length s))\n(defn c () (f 5))");
+    assert!(ws.iter().any(|w| w.contains("expects string")), "{ws:?}");
+}
