@@ -148,8 +148,14 @@ So the real choice is narrower than it looks:
    three, so that test changes too.
 3. **Leave it.** Two `->iso` ops, callers pick by namespace.
 
-Shipped as (3) only because it changes nothing not asked for. (1) is a one-liner and
-is the recommendation.
+**Shipped as (1).** `std/tempo.blsp` carries `(impl Temporal tempo/tempo (->iso [t] (->iso t)))`,
+so `(datetime/->iso x)` renders a tempo, a date, a datetime or a time-of-day. `std/datetime` is
+untouched and `(%sealed-members 'Temporal)` still names exactly its original three; the only
+thing not gained is the checker *demanding* the impl exist, which is what (2) would buy at the
+price of the reversed dependency.
+
+`tempo/->iso` remains as a plain function — the ability op delegates to it, and
+`tests/tempo_test.blsp` pins that the two agree at every resolution.
 
 ## Defects found and fixed on integration
 
@@ -166,6 +172,26 @@ three real defects, since fixed with regression tests:
 3. **`truncate` silently no-op'd on a non-unit.** `(truncate t :fortnight)` gave rank
    `-1`, which fell into the "already coarse enough" branch and returned `t`. A typo'd
    keyword now throws.
+4. **`now`, `finer`, `coarser` and `unit` had the same hole** — found on later review passes,
+   after (3) was already fixed. `now` was the worst: an unguarded unit reaches
+   `tp-restrict` at rank `-1`, which keeps *no* units, so `(now :fortnight)` built a tempo
+   with an empty unit map and only failed later, as `expected number, got nil` from inside
+   `tp-pad` or `datetime/dt-ymd->days` — nowhere near the typo. `finer`/`coarser` returned
+   `nil`, conflating "there is no finer unit" (a real answer, for `:ms`) with "that is not a
+   unit"; `unit` did the same with the nil that means "`t` does not carry it". All five
+   unit-taking entry points — `finer`, `coarser`, `truncate`, `now`, `unit`, enumerated from
+   the source rather than recalled — now throw. Fixing one site of a class without sweeping
+   for its siblings is the mistake worth naming here; it took two further passes to finish.
+
+   Everything else validates acceptably by house convention: a wrong type reaches a primitive
+   and throws (`(parse 42)` → `string/length: expected string`), and a non-`Spanning` value
+   gets the ability's own error, which names the impls it does have. `unit` was the only
+   entry point that answered wrongly instead of raising.
+
+Cross-process coverage was also missing, which the repo's test protocol requires of anything
+carrying values: a `send` deep-copies between per-process heaps, so `tests/tempo_test.blsp`
+now round-trips a tempo, a negative year and a multi-span interval set through workers, and
+checks that both `Temporal` and `Spanning` dispatch in a process that never registered them.
 
 Checked and *not* found: pre-epoch spans, month shifts across year zero
 (`0000-01` → `-0001-12`), ±100-month shifts, day shifts over month and leap-year

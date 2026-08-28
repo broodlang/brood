@@ -37,6 +37,17 @@ thread_local! {
     /// `--check`) and installed by `set_sealed_op_domains`.
     static SEALED_OP_DOMAINS: RefCell<HashMap<String, Vec<String>>> =
         RefCell::new(HashMap::new());
+
+    /// The record ids `defrecord` has registered (`protocol::record_id_names`). Consulted
+    /// only to disambiguate an UNQUALIFIED sealed member that also spells a built-in kind —
+    /// see [`sealed_members_ty`]. Populated and cleared with the tables above.
+    static RECORD_IDS: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Install this file's registered-record-id set (call with the ability-type table).
+pub(super) fn set_record_ids(ids: std::collections::HashSet<String>) {
+    RECORD_IDS.with(|m| *m.borrow_mut() = ids);
 }
 
 /// Install this file's ability-type table (call before parsing sigs). Overwrites any prior
@@ -48,6 +59,7 @@ pub(super) fn set_ability_types(map: HashMap<String, Option<Vec<String>>>) {
 /// Drop the ability-type table — per-file hygiene, mirroring [`super::sigs::clear_sig_memo`].
 pub(super) fn clear_ability_types() {
     ABILITY_TYPES.with(|m| m.borrow_mut().clear());
+    RECORD_IDS.with(|m| m.borrow_mut().clear());
 }
 
 /// Install this file's sealed-op occurrence-typing domains (ADR-190). Overwrites the prior
@@ -84,43 +96,94 @@ fn ability_type(name: &str) -> Option<Ty> {
         match m.borrow().get(bare)? {
             // Open ability: permissive — the type checks nothing, but the sig survives.
             None => Some(Ty::ANY),
-            // Sealed ability: the finite union of its members' record shapes, built at its
-            // true set-theoretic denotation as a SINGLE record shape whose `:__id__` is the
-            // union of the member keyword-literals: `%{__id__: (:c | :r | …)}`.
-            //
-            // This is *equal as a set of values* to `⋃ₘ %{__id__: :m}` precisely because each
-            // member shape is an OPEN record constraining only `:__id__` — so the union is
-            // exactly "maps whose `:__id__` ∈ members". We build the single shape directly
-            // rather than `Ty::union`-ing the member shapes, because `Ty::union` widens a
-            // differing `fields` map away (a sound over-approximation → `map`, but it drops the
-            // member set). Field-wise-merging arbitrary records in `Ty::union` would be UNSOUND
-            // (it invents cross terms), so that stays as-is; only *this* union, where the
-            // shapes differ solely in `:__id__`, collapses soundly to a lit-union field. The
-            // preserved `:__id__` lit set is what drives both a precise non-member rejection
-            // and sealed-`match` exhaustiveness (ADR-187 part 2).
-            Some(members) => {
-                let id_ty = members.iter().fold(None::<Ty>, |acc, member| {
-                    let lit = Ty::keyword_lit(value::intern(member));
-                    Some(match acc {
-                        Some(a) => a.union(lit),
-                        None => lit,
-                    })
-                });
-                match id_ty {
-                    Some(id) => {
-                        let mut fields = BTreeMap::new();
-                        fields.insert(value::intern("__id__"), (id, true));
-                        // **Open** (ADR-264): a real `(circle 2)` carries `:radius` as
-                        // well as `:__id__`, so a shape that pinned the id and nothing
-                        // else would, closed, describe no record at all.
-                        Some(Ty::record_of_open(fields))
-                    }
-                    // A sealed ability with no members is degenerate → permissive, not NEVER.
-                    None => Some(Ty::ANY),
-                }
-            }
+            // Sealed ability: the finite union its member set denotes.
+            // A sealed ability with no members is degenerate → permissive, not NEVER.
+            Some(members) => Some(sealed_members_ty(members).unwrap_or(Ty::ANY)),
         }
     })
+}
+
+/// The type a **sealed** ability's member set denotes (ADR-181) — shared by the
+/// ability-name-as-a-type resolution above and the occurrence-typing domain
+/// (`protocol::sealed_op_domain`), which must agree or a value accepted by a `sig` is
+/// rejected at the op call inside it.
+///
+/// Members come in two kinds, because `impl` dispatches on both:
+///
+/// - A **record** member is ns-qualified (`shapes/circle` — `%ability-id-kw` qualifies a bare
+///   record symbol with the current ns) and denotes the open record shape whose `:__id__` is
+///   that keyword. All of them collapse into ONE shape whose `:__id__` is the union of their
+///   literals: `%{__id__: (:c | :r | …)}`. That is *equal as a set of values* to
+///   `⋃ₘ %{__id__: :m}` precisely because each member shape is an OPEN record constraining
+///   only `:__id__` — so the union is exactly "maps whose `:__id__` ∈ members". We build the
+///   single shape directly rather than `Ty::union`-ing the member shapes, because `Ty::union`
+///   widens a differing `fields` map away (a sound over-approximation → `map`, but it drops
+///   the member set). Field-wise-merging arbitrary records in `Ty::union` would be UNSOUND (it
+///   invents cross terms), so that stays as-is; only *this* union, where the shapes differ
+///   solely in `:__id__`, collapses soundly to a lit-union field. The preserved `:__id__` lit
+///   set is what drives both a precise non-member rejection and sealed-`match` exhaustiveness
+///   (ADR-187 part 2).
+/// - A **built-in kind** member (`(impl Numeric :int …)` — the numeric tower, `:string`,
+///   `:vector`, …) is not a record at all, so it denotes its own lattice point via
+///   [`base_ty`]. An int is an int; it is not a map carrying `:__id__ :int`.
+///
+/// A seal may **mix** the two. The record half then degrades to `map` in the union, because
+/// `Ty::union` widens a differing `fields` map away — sound (it only ever accepts more), and
+/// the alternative, field-wise-merging arbitrary records, would be unsound. So a mixed seal
+/// trades `:__id__` precision for coverage; a purely-record seal (the common case) keeps it.
+///
+/// Treating every member as a record shape was the defect: sealing over kinds produced a
+/// domain that **rejected its own members**. `(defability Sizey :sealed [:int :float] …)` with
+/// both impls present warned that `(use-it 42)` "expects `{__id__: :float | :int, ...}`, got
+/// 42" — a `nest check` false positive on a program that runs correctly. It read as working
+/// because the two paths that *do* only need the id set were unaffected: the exhaustiveness
+/// gate, and rejecting a non-member. Only passing a real member exposed it. Nothing in-tree is
+/// kind-sealed, which is why ADR-181's own false-positive audit came back clean.
+pub(super) fn sealed_members_ty(members: &[String]) -> Option<Ty> {
+    let mut record_ids: Option<Ty> = None;
+    let mut kind_ty: Option<Ty> = None;
+    for member in members {
+        // A member is a built-in kind when it is unqualified, `base_ty` knows the spelling,
+        // and **no registered record claims that id**. The last clause is not paranoia: a
+        // record declared at ROOT namespace registers under its bare name, so
+        // `(defrecord ratio …)` outside any `defmodule` owns the id `:ratio` — the identical
+        // dispatch key the built-in ratio kind uses. The language conflates them (a real
+        // `1/2` reaches that record's impl), so the registry is the only thing that can say
+        // which one a seal meant, and a record that exists wins. With the registry
+        // unreadable we fall through to the kind, which is right for every member that is
+        // one and wrong only for the root-namespace collision that made the id ambiguous.
+        let is_kind = !member.contains('/')
+            && !RECORD_IDS.with(|m| m.borrow().contains(member))
+            && base_ty(member).is_some();
+        match if is_kind { base_ty(member) } else { None } {
+            Some(t) => {
+                kind_ty = Some(match kind_ty {
+                    Some(acc) => acc.union(t),
+                    None => t,
+                })
+            }
+            None => {
+                let lit = Ty::keyword_lit(value::intern(member));
+                record_ids = Some(match record_ids {
+                    Some(acc) => acc.union(lit),
+                    None => lit,
+                });
+            }
+        }
+    }
+    let records = record_ids.map(|id| {
+        let mut fields = BTreeMap::new();
+        fields.insert(value::intern("__id__"), (id, true));
+        // **Open** (ADR-264): a real `(circle 2)` carries `:radius` as well as `:__id__`, so a
+        // shape that pinned the id and nothing else would, closed, describe no record at all.
+        Ty::record_of_open(fields)
+    });
+    match (records, kind_ty) {
+        (Some(r), Some(k)) => Some(r.union(k)),
+        (Some(r), None) => Some(r),
+        (None, Some(k)) => Some(k),
+        (None, None) => None,
+    }
 }
 
 /// The lattice point a base type *name* denotes — the spellings `type-of`

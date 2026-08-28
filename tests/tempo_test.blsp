@@ -396,14 +396,36 @@
   (test "reads a present unit and nil for an absent one"
     (assert= 6 (tempo/unit (tempo/parse! "2026-06-15") :month))
     (assert= 15 (tempo/unit (tempo/parse! "2026-06-15") :day))
-    (assert= nil (tempo/unit (tempo/parse! "2026-06") :day))))
+    (assert= nil (tempo/unit (tempo/parse! "2026-06") :day)))
+  ;; nil already means "t does not carry that unit", so it must not also mean "that is not a
+  ;; unit". This completes the guard across all five unit-taking entry points — `finer`,
+  ;; `coarser`, `truncate`, `now`, `unit`.
+  (test "a non-unit throws rather than returning the nil that means 'absent'"
+    (assert-error (tempo/unit (tempo/parse! "2026-06-15") :fortnight))
+    (assert-error (tempo/unit (tempo/parse! "2026-06-15") "day"))))
 
 (describe "finer / coarser"
   (test "walk the unit hierarchy"
     (assert= :day (tempo/finer :month))
     (assert= :month (tempo/coarser :day))
     (assert= nil (tempo/finer :ms))
-    (assert= nil (tempo/coarser :year))))
+    (assert= nil (tempo/coarser :year)))
+  ;; nil is a real answer here ("nothing finer than :ms"), so it must not double as the
+  ;; answer for a keyword that names no unit at all.
+  (test "a non-unit throws rather than returning the nil that means 'nothing finer'"
+    (assert-error (tempo/finer :fortnight))
+    (assert-error (tempo/coarser :fortnight))))
+
+(describe "now"
+  (test "builds at the requested resolution"
+    (assert= :day (tempo/resolution (tempo/now :day)))
+    (assert= :year (tempo/resolution (tempo/now :year))))
+  ;; `now` shared `truncate`'s hole and failed further from the mistake: an unguarded unit
+  ;; reaches tp-restrict at rank -1, keeping NO units, so the malformed tempo only surfaced
+  ;; later as "expected number, got nil" from inside tp-pad or datetime/dt-ymd->days.
+  (test "a non-unit throws at the call, not later inside the formatter"
+    (assert-error (tempo/now :fortnight))
+    (assert-error (tempo/now :days))))
 
 ;; ---- display ----------------------------------------------------------------
 
@@ -415,6 +437,79 @@
   (test "a set displays as its spans"
     (assert= "" (->string (tempo/set-of [])))
     (is (>= (index-of (->string (tempo/set-of [(tempo/parse! "2026-06")])) "/") 0)))
+  ;; `Temporal` is `datetime`'s ISO-rendering ability, `:sealed [datetime date time-of-day]`.
+  ;; Sealing is an exhaustiveness checklist, not access control, so a tempo joins from its own
+  ;; module with the dependency still pointing one way — and one op then covers all four.
+  (test "a tempo joins datetime's Temporal ability, so one ->iso op covers four types"
+    (assert= "2026-06" (datetime/->iso (tempo/parse! "2026-06")))
+    (assert= "2026-06-15T14:30Z" (datetime/->iso (tempo/parse! "2026-06-15T14:30")))
+    (assert= "2026-06-15" (datetime/->iso (datetime/parse-date "2026-06-15")))
+    (assert= "2026-06-15T14:30:00.000Z"
+      (datetime/->iso (datetime/parse-iso8601 "2026-06-15T14:30:00Z"))))
+  (test "the ability op and the plain function agree"
+    (run! (fn (t) (assert= (tempo/->iso t) (datetime/->iso t)))
+      [(tempo/parse! "2026")
+        (tempo/parse! "2026-06-15")
+        (tempo/parse! "2026-06-15T14:30:05.123")
+        (tempo/new! {:year -44 :month 3})]))
   (test "explain names the unit and the span"
     (is (>= (index-of (tempo/explain (tempo/parse! "2026-06")) "A month") 0))
     (is (>= (index-of (tempo/explain (tempo/parse! "2026-06")) "30 days") 0))))
+
+;; ---- across processes -------------------------------------------------------
+;;
+;; A `send` deep-copies between per-process heaps, so this exercises to_message /
+;; from_message and the promote/freeze round-trip for a record carrying a keyword-keyed
+;; unit map — and, on the ability side, that an `impl` registered in `std/tempo` is live in
+;; a process that did not register it.
+
+(defn tpt-echo (parent) (send parent (receive)))
+(defn tpt-iso (parent) (receive (t (send parent (datetime/->iso t)))))
+(defn tpt-span (parent) (receive (t (send parent (tempo/total-width t)))))
+(defn tpt-emit (parent m) (send parent (tempo/->iso (tempo/shift (tempo/parse! "2026-01") m))))
+(defn tpt-spawn (parent ms)
+  (when (not (empty? ms)) (spawn (tpt-emit parent (first ms))) (tpt-spawn parent (rest ms))))
+(defn tpt-collect (got total acc)
+  (if (= got total) acc (tpt-collect (+ got 1) total (conj acc (receive)))))
+
+(describe "tempo across processes"
+  :isolated (test "a tempo round-trips through a worker unchanged"
+    (let (me (self) w (spawn (tpt-echo me)))
+      (send w (tempo/parse! "2026-06-15T14:30:05.123"))
+      (let (back (receive))
+        (assert= "2026-06-15T14:30:05.123Z" (tempo/->iso back))
+        (assert= :ms (tempo/resolution back))
+        (assert= :equals (tempo/relation back (tempo/parse! "2026-06-15T14:30:05.123"))))))
+
+  (test "a negative year survives the copy"
+    (let (me (self) w (spawn (tpt-echo me)))
+      (send w (tempo/new! {:year -44 :month 3}))
+      (assert= "-0044-03" (tempo/->iso (receive)))))
+
+  (test "an interval set round-trips, spans and all"
+    (let (me (self) w (spawn (tpt-echo me)))
+      (send w
+        (tempo/gaps (tempo/parse-span! "2026-06-15T09/2026-06-15T17")
+          (tempo/set-of [(tempo/parse-span! "2026-06-15T10/2026-06-15T11")
+                          (tempo/parse-span! "2026-06-15T14/2026-06-15T15")])))
+      (let (back (receive))
+        (assert= 3 (count (tempo/spans back)))
+        (assert= 21600000 (tempo/total-width back)))))
+
+  (test "the Temporal impl dispatches in a process that never registered it"
+    (let (me (self) w (spawn (tpt-iso me)))
+      (send w (tempo/parse! "2026-06"))
+      (assert= "2026-06" (receive))))
+
+  (test "Spanning dispatches across a heap boundary too"
+    (let (me (self) w (spawn (tpt-span me)))
+      (send w (tempo/parse! "2026-02"))
+      (assert= 2419200000 (receive))))
+
+  (test "fan-out: twelve workers each shift a month, the parent folds the year"
+    (tpt-spawn (self) (vec (range 0 12)))
+    (let (got (tpt-collect 0 12 []))
+      (assert= 12 (count got))
+      (assert= 12 (count (seq/distinct got)))
+      (is (includes? got "2026-01"))
+      (is (includes? got "2026-12")))))

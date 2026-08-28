@@ -75,18 +75,22 @@ Adapted from Tempo (Kip Cole, Apache-2.0); see PORTING.md.")
 (sig finer (keyword -> (or keyword nil)))
 
 (defn finer (u)
-  "The unit one step finer than `u`, or nil when `u` is `:ms`.
+  "The unit one step finer than `u`, or nil when `u` is `:ms`. Throws when `u` is not a
+time unit — nil means \"nothing finer\", never \"no such unit\".
 
     (tempo/finer :month)   → :day
     (tempo/finer :ms)      → nil"
   (let (r (tp-rank u))
-    (if (and (>= r 0) (< r 6)) (nth unit-order (+ r 1)) nil)))
+    (when (< r 0) (error (str "tempo/finer: not a time unit: " (str u))))
+    (if (< r 6) (nth unit-order (+ r 1)) nil)))
 
 (sig coarser (keyword -> (or keyword nil)))
 
 (defn coarser (u)
-  "The unit one step coarser than `u`, or nil when `u` is `:year`."
+  "The unit one step coarser than `u`, or nil when `u` is `:year`. Throws when `u` is not a
+time unit — nil means \"nothing coarser\", never \"no such unit\"."
   (let (r (tp-rank u))
+    (when (< r 0) (error (str "tempo/coarser: not a time unit: " (str u))))
     (if (> r 0) (nth unit-order (- r 1)) nil)))
 
 ;; Fixed-width units, in ms. Years and months are NOT here — they vary, and are
@@ -208,10 +212,15 @@ negative year emits a leading `-` and is not interchange-safe.
   (tempo-res t))
 
 (defn unit (t u)
-  "The value of unit `u` in `t`, or nil when `t` is coarser than `u`.
+  "The value of unit `u` in `t`, or nil when `t` is coarser than `u`. Throws when `u` is not
+a time unit — nil means \"`t` does not carry it\", never \"no such unit\".
 
     (tempo/unit (tempo/parse! \"2026-06-15\") :month)   → 6
     (tempo/unit (tempo/parse! \"2026-06\") :day)        → nil"
+  ;; The last of the five unit-taking entry points to be guarded (`finer`, `coarser`,
+  ;; `truncate`, `now` are the others) — a bare `get` returned the same nil for `:fortnight`
+  ;; as for a genuinely absent unit.
+  (when (not (tp-unit? u)) (error (str "tempo/unit: not a time unit: " (str u))))
   (get (tempo-by-unit t) u))
 
 (defn units (t)
@@ -750,9 +759,14 @@ arithmetic for years and months, exact millisecond arithmetic below that.
 (defn prev (t) "`t` moved back one step of its own resolution." (shift t -1))
 
 (defn now (u)
-  "The current UTC moment at resolution `u`.
+  "The current UTC moment at resolution `u`. Throws when `u` is not a time unit.
 
     (tempo/resolution (tempo/now :day))   → :day"
+  ;; Guarded for the same reason `truncate` is, and more urgently: an unguarded `u` reaches
+  ;; `tp-restrict` at rank -1, which keeps NO units, so `(now :fortnight)` used to build a
+  ;; tempo with an empty unit map — and that only surfaced later, as `expected number, got
+  ;; nil` from inside `tp-pad` or `datetime/dt-ymd->days`, nowhere near the typo.
+  (when (not (tp-unit? u)) (error (str "tempo/now: not a time unit: " (str u))))
   (tp-of-datetime (datetime/utc-now) u))
 
 (defn today () "The current UTC day, at `:day` resolution." (now :day))
@@ -828,6 +842,16 @@ end is the exclusive endpoint, so `parse-span` reads back what this writes."
   "An interval set as its spans in ISO 8601 interval form, comma-separated. An
 empty set renders as the empty string."
   (string/join "," (map ->iso-span (spans x))))
+
+;; `Temporal` is `datetime`'s ability for "renders as ISO 8601". Joining it from HERE keeps
+;; the dependency pointing one way — `:sealed` is an exhaustiveness checklist, not access
+;; control, so a non-member may implement it and both the checker and the runtime accept it.
+;; The cost is only that `tempo/tempo` is absent from the sealed list, so nothing *demands*
+;; this impl exist; widening that list is what would make `std/datetime` name `std/tempo`.
+;;
+;; The body's `->iso` is tempo's own function, not the op — so this is a delegation, not a
+;; recursion.
+(impl Temporal tempo/tempo (->iso [t] (->iso t)))
 
 ;; A temporal value's display form is its ISO string, so `(io/puts …)` shows
 ;; `2026-06` rather than the field map. `str`/`pr-str` stay native (ADR-171), so

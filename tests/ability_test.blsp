@@ -423,6 +423,22 @@
                "argument 1"))))
   (test "an open ability name is NOT a type (sig dropped, no spurious warning)"
     (is (not (abt-warns-about? "(defmodule u) (defability Open (op [self] :-> int)) (sig f (Open -> int)) (defn f (s) 1) (defn g () (f 5))"
+               "argument 1"))))
+  ;; `impl` dispatches on built-in kinds as well as records, so a seal may name them.
+  ;; Every member used to become a record shape `%{__id__: :int}`, which no int satisfies —
+  ;; so the domain REJECTED ITS OWN MEMBERS and `nest check` exited nonzero on a program
+  ;; that runs correctly. It read as working because the exhaustiveness gate and the
+  ;; non-member rejection only need the id set; passing a real member is what exposed it.
+  (test "a kind-sealed ability accepts its own members"
+    (is (not (abt-warns-about? "(defmodule u) (defability Sz :sealed [:int :float] (sz [self] :-> int)) (impl Sz :int (sz [n] n)) (impl Sz :float (sz [n] 0)) (sig f (Sz -> int)) (defn f (x) (sz x)) (defn a () (f 42)) (defn b () (f 1.5))"
+               "argument 1"))))
+  (test "a kind-sealed ability still rejects a non-member"
+    (is (abt-warns-about? "(defmodule u) (defability Sz :sealed [:int :float] (sz [self] :-> int)) (impl Sz :int (sz [n] n)) (impl Sz :float (sz [n] 0)) (sig f (Sz -> int)) (defn f (x) (sz x)) (defn bad () (f \"nope\"))"
+          "argument 1")))
+  (test "a seal mixing records and kinds accepts every member"
+    ;; The record half widens to `map` in the union (sound — it only ever accepts more), so
+    ;; a mixed seal trades `:__id__` precision for coverage. No member may be rejected.
+    (is (not (abt-warns-about? "(defmodule u) (defrecord money (cents)) (defability Amt :sealed [:int :float money] (amt [self] :-> float)) (impl Amt :int (amt [n] 1.0)) (impl Amt :float (amt [n] n)) (impl Amt u/money (amt [m] 1.0)) (sig f (Amt -> float)) (defn f (x) (amt x)) (defn a () (f 42)) (defn b () (f 1.5)) (defn c () (f (money 500)))"
                "argument 1")))))
 
 (describe "direct-constructor ability calls (the BROOD_MONO Tier-1 devirt target)"

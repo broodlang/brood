@@ -606,11 +606,21 @@ tail is a real type the checker consumes, not a comment. Two things follow from 
   case, including `self`) impose nothing.
 
 **A sealed ability *is a type* (ADR-181).** A `:sealed` ability names a closed member set,
-so its name is usable directly in the type grammar — it denotes the **union of its members'
-record shapes**. `Shape :sealed [circle rect]` means `(or circle rect)` as a type, so you can
+so its name is usable directly in the type grammar — it denotes the **union of what its
+members denote**. `Shape :sealed [circle rect]` means `(or circle rect)` as a type, so you can
 write `(sig total (Shape -> float))` or return one from an op (`(scaled [self] :-> Shape)`).
 A member record satisfies it (records are open, so extra fields are fine); a non-record is a
 provable mismatch; anything whose type isn't pinned down defers — sound, no false positives.
+
+> **Members may be built-in kinds, not just records.** `impl` dispatches on either, so
+> `(defability Numeric :sealed [:int :float :decimal :ratio] …)` is legal, and such a member
+> denotes **its own lattice point** — an int, not a record carrying `:__id__ :int`. Mixing the
+> two in one seal works and accepts every member, but the record half widens to `map` in the
+> union, so a mixed seal trades `:__id__` precision for coverage. A purely-record seal keeps
+> it. (Until 2026-08-28 every member was turned into a record shape, so a kind-sealed
+> ability's domain **rejected its own members** — `(use-it 42)` warned against
+> `{__id__: :int | :float}`, which no int is. Only passing a real member exposed it; the
+> exhaustiveness gate and non-member rejection both looked right.)
 
 **Any ability name is a type (ADR-186).** An *open* ability (no `:sealed`) has no finite
 member set, so it resolves to the permissive **`any`** — a `sig` mentioning it (`(sig render
@@ -3038,7 +3048,7 @@ its names bare. Run `nest doc <module>` for the full API of any module.
 | `std/math.blsp` | `'math` | The derived **math library** (ADR-227): `sqrt`, `pow`, `ceil`, `round`, `round-to`, `clamp`, `abs`, `sum`, `product`, the sign/parity predicates (`positive?`/`negative?`/`even?`/`odd?`), and the constants `pi`/`e`. Only the **operators** (`+` `-` `*` `/` `<` `=` …) and `inc`/`dec` stay bare in the prelude — `quot`/`mod`/`rem`/`floor`/`min`/`max` are derived arithmetic and live here too, so they are `math/quot`, `math/min`, … unless `(:use math)` brings them back bare |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
-| `std/tempo.blsp` | `'tempo` | **Time as an interval, not an instant** (adapted from Tempo, Apache-2.0 — see `docs/tempo.md`). One resolution-carrying value type whose span is half-open, so `2026-06` *is* `[2026-06-01, 2026-07-01)`: `new`/`parse`/`->iso` at any precision, `relation` (Allen's thirteen) with the predicates over it, an interval-set algebra (`union`, `intersection`, `difference`, `gaps`, `total-width`), unit-implied enumeration (`parts`) and `shift`/`next`/`prev`. The open `Spanning` ability admits your own types; `datetime/date` and `datetime/datetime` already impl it. Layered on `datetime` for the calendar arithmetic |
+| `std/tempo.blsp` | `'tempo` | **Time as an interval, not an instant** (adapted from Tempo, Apache-2.0 — see `docs/tempo.md`). One resolution-carrying value type whose span is half-open, so `2026-06` *is* `[2026-06-01, 2026-07-01)`: `new`/`parse`/`->iso` at any precision, `relation` (Allen's thirteen) with the predicates over it, an interval-set algebra (`union`, `intersection`, `difference`, `gaps`, `total-width`), unit-implied enumeration (`parts`) and `shift`/`next`/`prev`. The open `Spanning` ability admits your own types; `datetime/date` and `datetime/datetime` already impl it. Joins `datetime`'s `Temporal`, so one `->iso` covers all four temporal types. Layered on `datetime` for the calendar arithmetic |
 | `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |
 | `std/stats.blsp` | `'stats` | Descriptive statistics: `mean`, `median`, `variance`, `stddev`, `percentile`, `mode`, `stats-min`, `stats-max` (`mode` uses `seq/frequencies` internally) |
 | `std/stream.blsp` | `'stream` | Process-based pull streams (lazy, I/O-friendly): sources (`stream-from-list`, `stream-range`, `stream-from-socket`), transformers (`stream-map`, `stream-filter`, `stream-chunk`, `stream-lines`), terminals (`stream-fold`, `stream-to-vector`, `stream-pipe`) |
