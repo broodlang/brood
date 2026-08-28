@@ -137,6 +137,45 @@
     (is (= (= 1 1) (%eq 0 (compare 1 1))))
     (is (= (= 1.5 1.5) (%eq 0 (compare 1.5 1.5))))))
 
+;; ---- maps and sets were not ordered at all ---------------------------------------
+;; Both fell through to the cross-kind tag rank, where two maps (or two sets) rank the same —
+;; so `compare` returned 0 for EVERY pair, and `sort` over them returned its input in input
+;; order, silently and with no error. Exactly the NaN failure above, on a different type: the
+;; `%ord-compare` docs even promised this structural order was "deterministic and total".
+(describe "compare orders maps by content"
+  (test "maps with different values order"
+    (assert= (compare {:a 1} {:a 2}) -1)
+    (assert= (compare {:a 2} {:a 1}) 1)
+    (assert= (compare {:a 1} {:a 1}) 0))
+  (test "a smaller map sorts before a larger one"
+    (assert= (compare {:a 1} {:a 1 :b 2}) -1)
+    (assert= (compare {:a 1 :b 2} {:a 1}) 1))
+  (test "keys are compared too, not just values"
+    (assert= (compare {:a 1} {:b 1}) -1))
+  (test "the order does not depend on insertion history"
+    ;; a CHAMP's iteration order is a hash artifact, so the entries are sorted before
+    ;; comparison — otherwise two `equal` maps could compare non-equal
+    (assert= 0 (compare (assoc (assoc {} :a 1) :b 2) (assoc (assoc {} :b 2) :a 1))))
+  (test "it agrees with = , and is antisymmetric"
+    (is (= (= {:a 1} {:a 1}) (%eq 0 (compare {:a 1} {:a 1}))))
+    (assert= (compare {:a 1} {:a 2}) (- (compare {:a 2} {:a 1}))))
+  (test "nested maps compare by their contents"
+    (assert= (compare {:a {:b 1}} {:a {:b 2}}) -1))
+  (test "sort over maps actually sorts — it was a silent no-op"
+    (assert= (sort (list {:a 2} {:a 1} {:a 3})) (list {:a 1} {:a 2} {:a 3}))))
+
+(describe "compare orders sets by content"
+  (test "a smaller set sorts before a larger one"
+    (assert= (compare (set/set [1]) (set/set [1 2])) -1))
+  (test "same-size sets order by their elements"
+    (assert= (compare (set/set [1 2]) (set/set [1 3])) -1)
+    (assert= (compare (set/set [1 2]) (set/set [1 2])) 0))
+  (test "insertion order does not matter"
+    (assert= 0 (compare (set/set [1 2 3]) (set/set [3 2 1]))))
+  (test "sort over sets is no longer a no-op"
+    (assert= (count (sort (list (set/set [1 2 3]) (set/set [1])))) 2)
+    (assert= (compare (first (sort (list (set/set [1 2 3]) (set/set [1])))) (set/set [1])) 0)))
+
 (describe "compare gives a total order across KINDS too (what sort-by relies on)"
   (test "different kinds order consistently and antisymmetrically"
     (let (a (compare 1 "a") b (compare "a" 1))

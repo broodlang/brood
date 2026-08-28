@@ -95,6 +95,13 @@ silently accepted."
     ;; Load the whole library so the examples of every module are in scope, not just
     ;; whatever the test runner happened to pull in.
     (doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))
+    ;; The corpus, before the verdict. The sabotage test below proves the harness CAN
+    ;; fail; this proves it had something to run on. They are different guards, and a
+    ;; `documented-names` that quietly stopped matching — a change to `doc`, to
+    ;; `private?`, to how examples are indented — would leave the sabotage test passing
+    ;; while this one verified nothing (the ADR-280 lesson: assert coverage, not only the
+    ;; verdict).
+    (assert= true (> (count (documented-names)) 100))
     (let (failures (fold (fn (acc s)
                            (let (d (doc (eval s)))
                              (append acc

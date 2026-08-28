@@ -3295,6 +3295,22 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // `defn-`/`def-` emit it to record the defined name as module-private (ADR-146).
     def(
         heap,
+        "%register-meta",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        &["name", "clauses"],
+        "Record a global's stability metadata (ADR-283) from a flat `:key value` list — `:since`/`:deprecated`/`:beta` take a version or reason string, `:use` a replacement symbol. The primitive behind the `(meta …)` form; unknown keys are ignored so a newer clause degrades on an older runtime. Cleared by any redefinition of the name, like privacy.",
+        register_meta);
+    def(
+        heap,
+        "%meta-of",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        &["name"],
+        "The stability metadata a `(meta …)` recorded for `name`, as `{:since :deprecated :use :beta}` with absent facts omitted — nil if none. `name` is resolved to the CURRENT namespace, exactly as a `def` head is, so pass a qualified symbol when asking from anywhere but the defining module.",
+        meta_of);
+    def(
+        heap,
         "%mark-private",
         Arity::exact(1),
         Sig::new(vec![sym], sym),

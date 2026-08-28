@@ -371,6 +371,7 @@
    "set?" :predicates
    "%show-args" :io
    "%show-print-hook" :meta
+   "meta" :meta
    "sig" :meta
    "sig!" :meta
    "%sig-pos" :meta

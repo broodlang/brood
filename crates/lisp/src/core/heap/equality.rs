@@ -890,6 +890,59 @@ impl Heap {
                 }
                 xs.len().cmp(&ys.len())
             }
+            // Maps by CONTENT. This arm used to fall through to the tag-rank compare at the
+            // bottom, where both sides rank 8 — so every map was `Equal` to every other map:
+            // `(compare {:a 1} {:a 2})` returned 0, and `sort` over maps therefore returned
+            // its input in input order, silently and with no error. That is the same shape as
+            // the NaN sort bug (KI-75), and the `Ord` docstring already promised this order
+            // was "deterministic **and** total". It is now.
+            //
+            // Size first — cheap, and it settles most pairs without touching entries. Then
+            // the entries in KEY order: a CHAMP's iteration order is an artifact of key
+            // hashes, so the pairs must be sorted here or the answer would depend on
+            // insertion history and two `equal` maps could compare non-`Equal`.
+            (Map(x), Map(y)) => {
+                let (sx, sy) = (self.map_size(x), self.map_size(y));
+                if sx != sy {
+                    return sx.cmp(&sy);
+                }
+                let mut xs = self.map_entries(x);
+                let mut ys = self.map_entries(y);
+                xs.sort_by(|a, b| self.value_cmp(a.0, b.0));
+                ys.sort_by(|a, b| self.value_cmp(a.0, b.0));
+                for ((xk, xv), (yk, yv)) in xs.iter().zip(ys.iter()) {
+                    match self.value_cmp(*xk, *yk) {
+                        Ordering::Equal => {}
+                        o => return o,
+                    }
+                    match self.value_cmp(*xv, *yv) {
+                        Ordering::Equal => {}
+                        o => return o,
+                    }
+                }
+                Ordering::Equal
+            }
+            // Sets, for the same reason and by the same rule — a set is a map underneath
+            // (`equal` sends both to `map_equal`), and it had the same hole: every set
+            // compared `Equal` to every other, so `(sort sets)` was a silent no-op. Elements
+            // sorted before comparison, since set iteration order is a hash artifact too.
+            (Set(x), Set(y)) => {
+                let (sx, sy) = (self.map_size(x), self.map_size(y));
+                if sx != sy {
+                    return sx.cmp(&sy);
+                }
+                let mut xs = self.set_elems(x);
+                let mut ys = self.set_elems(y);
+                xs.sort_by(|a, b| self.value_cmp(*a, *b));
+                ys.sort_by(|a, b| self.value_cmp(*a, *b));
+                for (xv, yv) in xs.iter().zip(ys.iter()) {
+                    match self.value_cmp(*xv, *yv) {
+                        Ordering::Equal => {}
+                        o => return o,
+                    }
+                }
+                Ordering::Equal
+            }
             // Lists: walk the cons spine like equal(). Empty list < non-empty.
             (Nil, Pair(_)) => Ordering::Less,
             (Pair(_), Nil) => Ordering::Greater,

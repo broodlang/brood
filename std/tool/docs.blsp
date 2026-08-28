@@ -82,8 +82,31 @@ module's namespace-rooted globals (ADR-070) back to it."
         ;; is most of them, and that line is simply omitted. Guarded like the structured
         ;; record's: a name the checker cannot type must not fail the whole doc build.
         arrow (try (reflect/type-signature sym) (catch _ nil))
-        type-line (if (nil? arrow) "" (str "`" arrow "`\n\n")))
-    (str "### `" sig "`" suffix "\n\n" type-line (if (nil? d) "_Undocumented._\n" (str d "\n")))))
+        type-line (if (nil? arrow) "" (str "`" arrow "`\n\n"))
+        ;; Stability metadata (ADR-283), where a `(meta …)` recorded any: when the name
+        ;; appeared, whether it is going away, whether the surface is settled. `:since` is
+        ;; documentation and this is the place it is spent.
+        m (try (%meta-of sym) (catch _ nil))
+        stability (if (nil? m)
+                    ""
+                    (str (if (get m :deprecated)
+                           (str "> **Deprecated** since "
+                             (get m :deprecated)
+                             (if (get m :use)
+                               (str " — use `" (->string (get m :use)) "` instead.")
+                               ".")
+                             "\n\n")
+                           "")
+                      (if (get m :beta) (str "> **Beta** — " (get m :beta) "\n\n") "")
+                      (if (get m :since) (str "*Since " (get m :since) ".*\n\n") ""))))
+    (str "### `"
+      sig
+      "`"
+      suffix
+      "\n\n"
+      stability
+      type-line
+      (if (nil? d) "_Undocumented._\n" (str d "\n")))))
 
 ;; The "Definitions" section: every public function/macro the module added.
 (defn- docs-section-defs
@@ -226,6 +249,7 @@ module's namespace-rooted globals (ADR-070) back to it."
      :sig (pr-str (cons (symbol bare) (arglist v)))
      :doc (doc v)
      :macro (= (type-of v) :macro)
+     :meta (try (%meta-of sym) (catch _ nil))
      :type (try (reflect/type-signature sym) (catch _ nil))
      :source (try (reflect/source-location sym) (catch _ nil))}))
 

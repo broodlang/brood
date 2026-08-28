@@ -1,12 +1,23 @@
 (defmodule datetime
-  "Date and time utilities (UTC). No timezone support.
+  "Date and time utilities. **Every value is UTC**; the epoch is Unix time
+(1970-01-01T00:00:00Z).
 
 Datetimes, dates, and times are plain maps:
   datetime  {:year Y :month M :day D :hour H :minute Min :second S :ms Ms}
   date      {:year Y :month M :day D}
   time-of-day  {:hour H :minute Min :second S :ms Ms}
 
-All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
+**Timezones.** There is no zone *type* and no zone database: a value never carries a zone,
+so there is no way to represent \"09:00 in Berlin\" as such, and none of the questions that
+need a database — when does this zone shift, what is the local time there now — can be asked
+here. What IS supported is the boundary case that matters in practice: `parse-iso8601` reads
+a numeric offset (`+02:00`, `-05:30`, `+0200`, `+02`) and applies it, so a timestamp from an
+API becomes the UTC instant it denotes. Rendering is always UTC (`->iso` emits `Z`). If you
+need civil time in a named zone, keep the zone alongside the value and convert at the edges.
+
+**Ordering** is the `compare-to` multimethod, so `<`, `<=`, `>`, `>=`, `sort` and `compare`
+work on these values directly — same type only, since a date and a datetime are not two
+spellings of one instant.")
 
 ;; ---- internal helpers -------------------------------------------------------
 
@@ -296,14 +307,71 @@ nil. Hour 0–23, minute and second 0–59; anything else is nil."
     (>= (index-of s "Z") 0) nil
     else (dt-parse-time-str s)))
 
+;; A numeric zone designator (`+02:00`) is as much a part of ISO 8601 as `Z`, and every
+;; timestamp a real API hands you carries one. It used to yield **nil** — indistinguishable
+;; from malformed input, and silent: the caller saw "not a datetime" for a perfectly good
+;; timestamp. This module is UTC-only and says so, but "UTC-only" is a statement about the
+;; values it *holds*, not about the inputs it can read: an offset names a real instant, so
+;; the honest reading is to shift it to UTC rather than refuse it.
+
+(defn- dt-offset-index
+  (time-part)
+  "Where a numeric zone designator starts in an ISO 8601 time part, or -1. A `-` cannot occur
+  inside a time, so either sign marks the offset."
+  (let (plus (index-of time-part "+")
+        minus (index-of time-part "-"))
+    (cond
+      (>= plus 0) plus
+      (>= minus 0) minus
+      else -1)))
+
+(defn- dt-parse-offset-ms
+  (o)
+  "The signed milliseconds a zone designator denotes — `+02:00`, `-05:30`, `+0200`, `+02` —
+  or nil when it is not one. `Z` never reaches here; `parse-time` consumes it."
+  (let (sign (if (string/starts-with? o "-") -1 1)
+        body (string/substring o 1 (string/length o))
+        n (string/length body)
+        ;; Checked by SHAPE, and before the colon is removed. Stripping it first let "+2:0"
+        ;; collapse to "20" and parse as +20:00 — a string that means nothing accepted as a
+        ;; specific, wrong offset, which is worse than the nil this was meant to stop
+        ;; returning.
+        shape (cond
+                (= n 2) :hh
+                (and (= n 4) (< (index-of body ":") 0)) :hhmm
+                (and (= n 5) (= (string/char-at body 2) ":")) :hh-mm
+                else nil)
+        digits (if (= shape :hh-mm)
+                 (str (string/substring body 0 2) (string/substring body 3 5))
+                 body)
+        h (if shape (dt-parse-int (string/substring digits 0 2)) nil)
+        mn (cond
+             (not shape) nil
+             (= shape :hh) 0
+             else (dt-parse-int (string/substring digits 2 4))))
+    (when (and shape (dt-in-range? h 0 23) (dt-in-range? mn 0 59))
+      (* sign (+ (* h 3600000) (* mn 60000))))))
+
 (defn parse-iso8601 (s)
-  "Parse an ISO 8601 datetime string \"YYYY-MM-DDTHH:MM:SS[.mmm][Z]\" → a `datetime`, or nil."
+  "Parse an ISO 8601 datetime string \"YYYY-MM-DDTHH:MM:SS[.mmm][Z|±HH:MM]\" → a `datetime`,
+or nil.
+
+A numeric offset is applied, yielding the equivalent UTC instant — every datetime this module
+produces is UTC.
+
+    (datetime/->iso (datetime/parse-iso8601 \"2026-01-02T03:04:05+02:00\"))   → \"2026-01-02T01:04:05.000Z\""
   (let (parts (string/split s "T"))
     (when (= (count parts) 2)
       (let (d (parse-date (nth parts 0))
-            t (parse-time (nth parts 1)))
-        (when (and d t)
-          (date+time d t))))))
+            time-part (nth parts 1)
+            oi (dt-offset-index time-part))
+        (if (< oi 0)
+          (let (t (parse-time time-part))
+            (when (and d t) (date+time d t)))
+          (let (t (parse-time (string/substring time-part 0 oi))
+                off (dt-parse-offset-ms (string/substring time-part oi (string/length time-part))))
+            ;; subtract: a local time east of UTC names an EARLIER UTC instant
+            (when (and d t off) (add (date+time d t) (- off)))))))))
 
 ;; ---- duration helpers -------------------------------------------------------
 
@@ -343,12 +411,33 @@ nil. Hour 0–23, minute and second 0–59; anything else is nil."
   (- (->epoch-ms dt1) (->epoch-ms dt2)))
 
 ;; ---- comparison -------------------------------------------------------------
+;;
+;; Ordering is the `compare-to` multimethod, not a private family of predicates. Registering
+;; it is what makes `<`, `<=`, `>`, `>=`, `sort`, `compare` and `math/min`/`math/max` work on
+;; a temporal value — record ordering is STRICT (see `std/prelude/seq.blsp`: no structural
+;; default), so until this existed `(sort dates)` raised `compare-to: no method for
+;; [:datetime/date :datetime/date]` while the module carried five hand-written comparisons
+;; that none of those operators could see. `before?`/`after?`/`not-before?`/`not-after?`/
+;; `same?` are gone with it: they were `<`/`>`/`>=`/`<=`/`=` spelled a second way.
+;;
+;; **Same-type only, deliberately.** A `date` and a `datetime` are not two spellings of one
+;; instant — ordering them would have to invent a time of day — so a mixed pair raises the
+;; loud `%no-method` rather than silently assuming midnight. That is the same rule the
+;; cross-type arithmetic review settled on: a coercion the user did not ask for is a wrong
+;; answer that looks like a right one.
 
-(defn before? (a b) "True if `a` is before `b`." (< (->epoch-ms a) (->epoch-ms b)))
-(defn not-after? (a b) "True if `a` is at or before `b`." (<= (->epoch-ms a) (->epoch-ms b)))
-(defn after? (a b) "True if `a` is after `b`." (> (->epoch-ms a) (->epoch-ms b)))
-(defn not-before? (a b) "True if `a` is at or after `b`." (>= (->epoch-ms a) (->epoch-ms b)))
-(defn same? (a b) "True if `a` and `b` are the same instant." (= (->epoch-ms a) (->epoch-ms b)))
+(defn- dt-tod-ms
+  (t)
+  "A time-of-day as milliseconds since midnight. `->epoch-ms` cannot serve here — it reads
+  the date fields a time-of-day does not have."
+  (+ (* (get t :hour 0) 3600000)
+    (* (get t :minute 0) 60000)
+    (* (get t :second 0) 1000)
+    (get t :ms 0)))
+
+(defmethod compare-to [datetime datetime] (a b) (compare (->epoch-ms a) (->epoch-ms b)))
+(defmethod compare-to [date date] (a b) (compare (->epoch-ms a) (->epoch-ms b)))
+(defmethod compare-to [time-of-day time-of-day] (a b) (compare (dt-tod-ms a) (dt-tod-ms b)))
 
 ;; ---- calendar ---------------------------------------------------------------
 

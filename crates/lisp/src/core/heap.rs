@@ -1401,6 +1401,24 @@ pub enum RegistryOp {
     ConsNew,
 }
 
+/// What a `(meta name …)` form records about a global (ADR-283): three independent facts,
+/// each optional, each spent in a different place. `since` is documentation only; `deprecated`
+/// drives an advisory checker diagnostic naming `use_instead`; `beta` warns that a surface is
+/// not settled. Held as owned data rather than a heap `Value` so it is independent of any one
+/// process's heap, the way `Sig` is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NameMeta {
+    /// The version this name first appeared in.
+    pub since: Option<String>,
+    /// The version it was deprecated in.
+    pub deprecated: Option<String>,
+    /// What to use instead — the half that makes a deprecation actionable rather than
+    /// merely discouraging.
+    pub use_instead: Option<Symbol>,
+    /// Why this surface is not settled yet.
+    pub beta: Option<String>,
+}
+
 pub struct RuntimeCode {
     /// The **two** code generations (ADR-091 Erlang-style 2-generation collector).
     /// New code (`def`/`promote`) lands in `gens[current_gen]`; the *other* slot
@@ -1507,6 +1525,13 @@ pub struct RuntimeCode {
     /// re-`eval`ed). Shared through the runtime `Arc`, so every inner process sees one
     /// set.
     private: RwLock<std::collections::HashSet<Symbol>>,
+    /// **Stability metadata** per global (ADR-283): when a name appeared, whether it is
+    /// deprecated and what replaces it, whether it is beta. Recorded by the `%register-meta`
+    /// primitive a `(meta …)` form emits, and cleared by `env_define` on any redefinition —
+    /// the same rule privacy follows, and for the same reason: a `def` that rebinds a name
+    /// mid-run must not leave the OLD name's "deprecated" fact attached to the new one
+    /// (ADR-013's late binding applies to the facts about code, not only to the code).
+    meta: RwLock<SymbolMap<NameMeta>>,
     /// Monotonic version of `globals`, bumped on every binding change (`def`
     /// rebind, `restore_globals`). Per-process global **inline caches**
     /// (`Heap::global_ic`) stamp the version they resolved at and re-resolve only
@@ -1817,6 +1842,7 @@ impl Default for RuntimeCode {
             gen_inflight: [AtomicUsize::new(0), AtomicUsize::new(0)],
             gen_version: AtomicU64::new(0),
             globals: RwLock::new(SymbolMap::default()),
+            meta: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
             // A default (un-seeded) runtime reserves nothing — the prelude hasn't run.
             sealed: RwLock::new(std::collections::HashSet::new()),
@@ -1914,6 +1940,7 @@ impl RuntimeCode {
             runtime_tag: next_runtime_tag(),
             gen_inflight: [AtomicUsize::new(0), AtomicUsize::new(0)],
             gen_version: AtomicU64::new(0),
+            meta: RwLock::new(SymbolMap::default()),
             // Reserved at seed time: every shipped **function**, macro and builtin.
             // Deliberately NOT the prelude's data globals — `*features*`,
             // `*load-path*`, `*module-docs*`, `*reload-diagnostics*` are registries
@@ -2031,6 +2058,31 @@ impl RuntimeCode {
     }
     /// Is `sym` recorded module-private? The authoritative (and, since ADR-146 step 2,
     /// the *only*) half of [`Heap::is_private`].
+    /// Record `sym`'s stability metadata, replacing whatever was there. See [`NameMeta`].
+    fn set_meta(&self, sym: Symbol, meta: NameMeta) {
+        self.meta
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(sym, meta);
+    }
+    /// Drop `sym`'s metadata — called from `env_define` on every global definition, so a
+    /// redefined name does not inherit the old one's `:deprecated`/`:beta` facts. A
+    /// `(meta …)` form re-records immediately, exactly as `%mark-private` does for privacy.
+    fn clear_meta(&self, sym: Symbol) {
+        self.meta
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&sym);
+    }
+    /// `sym`'s recorded metadata, if any.
+    fn meta_of(&self, sym: Symbol) -> Option<NameMeta> {
+        self.meta
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&sym)
+            .cloned()
+    }
+
     fn is_private_recorded(&self, sym: Symbol) -> bool {
         self.private
             .read()
@@ -4326,6 +4378,18 @@ impl Heap {
         self.runtime.mark_private(sym);
     }
 
+    /// Record `sym`'s stability metadata (ADR-283) — the public face of
+    /// [`RuntimeCode::set_meta`], called by the `%register-meta` primitive a `(meta …)`
+    /// form emits.
+    pub fn set_name_meta(&self, sym: Symbol, meta: NameMeta) {
+        self.runtime.set_meta(sym, meta);
+    }
+
+    /// `sym`'s stability metadata, if a `(meta …)` recorded any.
+    pub fn name_meta(&self, sym: Symbol) -> Option<NameMeta> {
+        self.runtime.meta_of(sym)
+    }
+
     /// A snapshot of this runtime's recorded module-private names. Used once, at
     /// prelude-build time, to capture the privates `%mark-private` recorded in the
     /// builder heap so they can seed each live runtime (the prelude is inserted, not
@@ -5854,6 +5918,9 @@ impl Heap {
             // public — so editing `defn-` → `defn` and hot-reloading makes the name
             // public. The prelude's privates are seeded in `seeded`, not here.
             self.runtime.unmark_private(sym);
+            // …and its stability facts, for the same reason (ADR-283): a redefinition must
+            // not inherit the old name's `:deprecated`.
+            self.runtime.clear_meta(sym);
             // Dedup an unchanged hot-reload redefinition (Stage 5): if `sym` is
             // already bound to a closure structurally identical to `val`, keep the
             // existing (already-promoted) binding rather than append a duplicate

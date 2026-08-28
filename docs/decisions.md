@@ -18264,6 +18264,24 @@ flag on the value entry, so the fact survives for a name whose value is not enco
 The differential found it on its first run: **1448 names diverged, 0 after the fix.**
 Sabotage-verified — disable the privacy entries and the test fails.
 
+**The generalisation, applied to the suite.** A gate of the shape *walk a corpus, collect
+violations, assert none* passes vacuously the moment the corpus goes empty — and nothing
+about the failure looks like a failure. So such a gate must assert its **coverage** as well
+as its verdict:
+
+- `image_matches_source` refuses to run against a missing image, and builds one rather than
+  comparing source against source;
+- the soundness oracle asserts it typed at least 90% of its expression corpus;
+- `docs_test`'s catalogue gate now asserts it considered 200+ candidate names before
+  asserting none are uncatalogued (sabotage-verified: make the filter match nothing and it
+  fails);
+- `doc_examples_test` now asserts it found 100+ documented examples. It already had a
+  *sabotage* test proving the harness can fail — that is a different guard, and it would
+  have kept passing while the main assertion verified nothing.
+
+`curated_sigs_exist` (`names.len() > 40`) and `doc_refs` (`known.len() > 100`) already did
+this, which is where the pattern was taken from.
+
 **A trap this exposed.** Building an image *while an image is installed* re-encodes the
 materialised state, so any divergence launders itself into the next image. It does not bite
 in practice only because the id is a content hash: when a rebuild is needed the old image no
@@ -18351,3 +18369,134 @@ one variable must not itself require a rebuild.
 So the rule this ADR sets: **a shipping choice may be a configure option; a measurement
 lever may not.** The image is the former and also has a use as the latter, which is why it
 gets both layers — like the JIT, and for the same reason.
+
+## ADR-283 — Stability metadata: `:since`, `:deprecated`, `:beta`
+
+**Status:** accepted (2026-08-28)
+
+Three facts a library must be able to state and Brood had no way to say: *when did this
+appear*, *is it going away*, *is it settled enough to build on*.
+
+```lisp
+(defn parse (text) …)
+(meta parse :since "0.9.0")
+(meta old-parse :deprecated "0.14.0" :use 'parse)
+(meta try-this :beta "the shape of the options map may change")
+```
+
+**One mechanism, not three features.** All three are a fact recorded against a name at
+definition time and read back by tooling — which is exactly what `%mark-private` (ADR-146)
+and `%register-sig` already are. `(meta …)` is the same shape with a data payload, and one
+form with keyword clauses rather than three macros, so a name can carry all three at once.
+
+**Where each one is spent — the part that decided the design.**
+
+- **`:since` is documentation only.** `nest doc` renders it; nothing warns. It is also the
+  one fact that could later be *derived* rather than declared (the version a name first
+  appeared in is recoverable from git history), so a future `--stamp-since` is left open
+  and hand-declaration is the fallback.
+- **`:deprecated` is a *checker* diagnostic, and an advisory one.** Warning at run time
+  would fire in a hot loop, on a machine that cannot act on it, long after the edit that
+  caused it. And it must not gate: **a deprecation that fails the build is a removal with
+  extra steps**, so `project-advisory-warning?` classifies it as printed-but-not-counted —
+  the mechanism that already existed for the non-tail-recursion lint. `:use` names the
+  replacement, which is what makes the message actionable rather than merely discouraging,
+  and `(check-allow :deprecated …)` silences a deliberate use (a library calling its own
+  deprecated name from the shim that replaces it).
+- **`:beta` warns with its reason**, through the same advisory path. The runtime notice
+  sketched in the roadmap is deferred: the static path is where it is actionable, and a
+  per-call hook would need the once-per-name deduplication ADR-232's drop warning uses —
+  additive, and gated on a real consumer (ADR-011).
+
+**Metadata is cleared by any redefinition**, in `env_define`, exactly as privacy is. A `def`
+that rebinds a name mid-run must not leave the *old* name's `:deprecated` attached to the
+new one — ADR-013's late binding applies to the facts about code, not only to the code.
+
+**It is an annotation on a definition, so it belongs beside one at top level**, like
+`(sig …)`. `meta` resolves its name to the current namespace the way a `def` head is
+resolved; written inside a function body the two can disagree about which namespace is
+current, and the annotation would key off a different symbol than the definition it
+annotates. Found by the test that asserts the redefinition rule, which is the right place
+for it to be found.
+
+## ADR-284 — An arrow parameter's arity is exact
+
+**Status:** accepted (2026-08-28)
+
+ADR-273 made a variable whose type is an arrow describe the call it heads — the result type
+and the argument types. It did not give that call an **arity**, because the arity lookup
+short-circuits on `is_lexical_local`: a local's arity is normally unknown, so the whole
+computation is skipped.
+
+For an arrow-typed local it is not unknown. `(int -> string)` says *one argument*, exactly,
+and the caller of
+
+```lisp
+(sig apply-it ((int -> string) -> any))
+(defn apply-it (f) (f 1 2))          ; not flagged, before this
+```
+
+had to supply a one-argument function to satisfy that parameter. So `(f 1 2)` always raises
+— it is a **certain** error, not a gradual one, which is the class this checker is most
+useful on and the one it was silently missing here. An arrow described the call's types but
+not its shape, which is half a contract.
+
+**Decision:** when a called name's own type carries an arrow, that arrow's shape *is* the
+arity — checked ahead of the `is_lexical_local` short-circuit. `&` rest maps to unbounded,
+`&optional` to a range, otherwise an exact count: the same mapping a declared sig already
+gets, now factored into one `arity_of_sig` so the two cannot drift, because they are the
+same question asked of the same shape.
+
+A bare `fn` parameter carries no arrow and therefore imposes nothing — `(sig f (fn -> any))`
+still says only "callable" (ADR-272).
+
+**No false positives across `std/` + `tests/`**, and sabotage-verified: remove the arrow
+branch and the too-many-arguments case goes unreported.
+
+## ADR-285 — The structural order is total over every value, including maps and sets
+
+`compare` is documented as "the binary form of `sort`'s order", and `%ord-compare`'s
+docstring promised the structural fallback was "deterministic **and** total". It was neither
+for two of the most common values in the language: maps and sets fell through `value_cmp` to
+the cross-kind `tag_rank` compare, where two maps rank identically — so `(compare {:a 1}
+{:a 2})` returned **0**, and `(sort maps)` returned its input in input order, silently and
+with no error.
+
+That is the KI-75 shape exactly (a `compare` that reports unequal values as equal, and a
+`sort` that becomes a no-op rather than failing), and it had the same cause: an arm that
+looked like a deliberate fallback and was really a gap. The doc comment even recorded the
+intent — "sorting them by content isn't well-defined here" — which is true of a function or a
+pid, and false of a map.
+
+**Decision: a map and a set order by content.** Size first, then the entries in key order.
+Sorting the entries before comparing is load-bearing rather than a tidiness: a CHAMP's
+iteration order is an artifact of key hashes, so without it the answer would depend on
+insertion history and two `equal` maps could compare non-`Equal` — the total-order axiom that
+`sort` actually relies on.
+
+Two things this deliberately does **not** change. Records still route through the
+`compare-to` multimethod at the `%ord-compare` seam and remain STRICT — a record type with no
+method is a loud `%no-method`, never a silent order by map layout — so this fallback applies
+to plain maps, not to records that forgot to define an order. And the cost is paid only when
+two maps are actually compared, which no numeric or string sort ever does.
+
+## ADR-286 — A temporal value is ordered by the language's ordering, not its own vocabulary
+
+`std/datetime` shipped five comparison functions — `before?`, `after?`, `not-before?`,
+`not-after?`, `same?` — that were `<`, `>`, `>=`, `<=` and `=` computed over `->epoch-ms`.
+None of the real operators could see them: ordering a record routes through the `compare-to`
+multimethod, and the module registered no method, so `(sort dates)` raised `%no-method` while
+`datetime/before?` sat beside it working. `std/tempo` had the same gap in a different
+spelling — a plain `tempo/compare-to` *function*, which the multimethod dispatch never
+consults, in the module whose entire subject is putting time on a line.
+
+**Decision: register `compare-to`, and delete the vocabulary it replaces.** One method per
+type buys `<`, `<=`, `>`, `>=`, `sort`, `compare` and `math/min`/`math/max` at once, which is
+strictly more than the five functions offered, and it is the answer to the review's "can we
+consolidate some of these to be not so specific?" — the specific thing was a private
+re-spelling of an operator.
+
+Same-type only. A `date` and a `datetime` do not compare: ordering them would have to invent
+a time of day, and a coercion the caller did not ask for is a wrong answer wearing the shape
+of a right one — the rule the cross-type arithmetic review already settled on. A mixed pair
+raises, and the error names the methods that do exist.

@@ -6,7 +6,11 @@
 ;; value the static checker trusted can never silently slip through. Place a
 ;; `sig!` after the function's definition (it rebinds the name, preserving arity).
 (defmodule contract-test
-  (:use test))
+  (:use test)
+  ;; `project-advisory-warning?` is module-private: the stability tests below assert that a
+  ;; deprecation PRINTS but does not gate the build, and that classifier is the thing that
+  ;; decides it (ADR-283).
+  (:use-internals project))
 
 (defn c-add (a b) (+ a b))
 (sig! c-add (int int -> int))
@@ -309,3 +313,66 @@
     (assert= (c-int-not-five 4) 4)
     (assert-error (c-int-not-five 5))
     (assert-error (c-int-not-five "x"))))
+
+;; Stability metadata (ADR-283). The definitions and their `(meta …)` live at TOP LEVEL,
+;; beside each other, exactly as `(sig …)` does — and for the same reason: both are
+;; annotations on a definition, and `meta` resolves its name to the current namespace the
+;; way a `def` head is resolved. Written inside a function body the two can disagree about
+;; which namespace is current, so the annotation would key off a different symbol than the
+;; definition it annotates.
+(defn m-since (s) s)
+(meta m-since :since "0.9.0")
+
+(defn m-new (s) s)
+(defn m-old (s) s)
+(meta m-old :deprecated "0.14.0" :use 'm-new)
+
+(defn m-wobbly (s) s)
+(meta m-wobbly :beta "the options map may still change")
+
+(defn m-old2 (s) s)
+(meta m-old2 :deprecated "0.14.0")
+
+(defn- stability-messages
+  (src)
+  "The stability diagnostics the checker reports for `src`."
+  (filter (fn (m) (or (includes? m "is deprecated") (includes? m "is beta")))
+    (map (fn (d) (get d :message)) (reflect/check-string-structured src))))
+
+(describe "stability metadata (meta …)"
+
+  (test "`:since` records, and is documentation only — nothing warns"
+    ;; QUALIFIED: `%meta-of` resolves its argument to the *current* namespace, which
+    ;; inside a test body is not the defining module's.
+    (assert= "0.9.0" (get (%meta-of 'contract-test/m-since) :since))
+    (assert= []
+      (apply vector
+        (stability-messages "(defn u () (contract-test/m-since 1))"))))
+
+  (test "`:deprecated` warns at each use and names the replacement"
+    (let (msgs (stability-messages "(defn u (s) (contract-test/m-old s))"))
+      (assert= true
+        (any? (fn (m)
+                (and (includes? m "is deprecated since 0.14.0")
+                  (includes? m "m-new")))
+          msgs))))
+
+  (test "a deprecation is ADVISORY — it prints, it does not gate the build"
+    ;; The point of a deprecation is to say "this is going away" while the code still
+    ;; works. One that fails CI is a removal with extra steps.
+    (assert= true
+      (project/project-advisory-warning? "f.blsp:1:1: warning: `x` is deprecated since 0.14.0 — use `y` instead"))
+    (assert= false
+      (project/project-advisory-warning? "f.blsp:1:1: warning: unbound symbol: zz")))
+
+  (test "`:beta` warns with its reason"
+    (let (msgs (stability-messages "(defn u (s) (contract-test/m-wobbly s))"))
+      (assert= true
+        (any? (fn (m) (includes? m "is beta — the options map may still change"))
+          msgs))))
+
+  (test "`(check-allow :deprecated …)` silences a deliberate use"
+    ;; A library calls its own deprecated name from the shim that replaces it.
+    (assert= []
+      (apply vector
+        (stability-messages "(defn u (s) (check-allow :deprecated (contract-test/m-old2 s)))")))))

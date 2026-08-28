@@ -113,6 +113,95 @@ pub(super) fn file_signatures_builtin(args: &[Value], _env: EnvId, heap: &mut He
     Ok(heap.list(out))
 }
 
+/// `(%register-meta 'name (list :since "0.9.0" :deprecated "0.14.0" :use 'other :beta "why"))`
+/// — record a global's stability metadata (ADR-283). The primitive behind the `(meta …)`
+/// form, the same shape `%mark-private` and `%register-sig` have: a fact recorded against a
+/// name at definition time, read back by the checker and the doc tooling.
+///
+/// Unknown keys are ignored rather than an error, so a newer `(meta …)` clause read by an
+/// older runtime degrades to "records less" instead of failing the load.
+pub(super) fn register_meta(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let Value::Sym(name) = arg(args, 0) else {
+        return Err(LispError::type_err("%register-meta: name must be a symbol"));
+    };
+    // Qualify to the current namespace exactly as a `def` head is, via the same entry
+    // `%register-sig` and `%mark-private` use. Without this the fact is keyed by the BARE
+    // symbol while `env_define` clears the QUALIFIED one, so a redefinition inside a module
+    // leaves the old `:deprecated` attached — which is the one rule this feature must not
+    // get wrong, and which a test caught immediately.
+    let name = crate::eval::macros::resolve_reference(heap, name);
+    let items = list_or_vec_items(heap, arg(args, 1));
+    let mut meta = crate::core::heap::NameMeta::default();
+    for pair in items.chunks(2) {
+        let (Some(&Value::Keyword(k)), Some(&v)) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        let text = |v: Value| match v.unpack() {
+            value::ValueRef::Str(id) => Some(heap.string(id).to_string()),
+            _ => None,
+        };
+        if value::symbol_is(k, "since") {
+            meta.since = text(v);
+        } else if value::symbol_is(k, "deprecated") {
+            meta.deprecated = text(v);
+        } else if value::symbol_is(k, "beta") {
+            meta.beta = text(v);
+        } else if value::symbol_is(k, "use") {
+            if let Value::Sym(s) = v {
+                meta.use_instead = Some(s);
+            }
+        }
+    }
+    heap.set_name_meta(name, meta);
+    Ok(Value::Sym(name))
+}
+
+/// `(%meta-of 'name)` — the metadata a `(meta …)` recorded, as
+/// `{:since :deprecated :use :beta}` with absent facts omitted, or nil for a name with none.
+pub(super) fn meta_of(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let Value::Sym(name) = arg(args, 0) else {
+        return Ok(Value::Nil);
+    };
+    // Same resolution as the register side, so `(%meta-of 'name)` inside a module finds
+    // what `(meta name …)` there recorded.
+    let name = crate::eval::macros::resolve_reference(heap, name);
+    let Some(meta) = heap.name_meta(name) else {
+        return Ok(Value::Nil);
+    };
+    let mut pairs: Vec<(Value, Value)> = Vec::new();
+    for (key, text) in [
+        ("since", &meta.since),
+        ("deprecated", &meta.deprecated),
+        ("beta", &meta.beta),
+    ] {
+        if let Some(t) = text {
+            let v = heap.alloc_string(t);
+            pairs.push((Value::Keyword(value::intern(key)), v));
+        }
+    }
+    if let Some(s) = meta.use_instead {
+        pairs.push((Value::Keyword(value::intern("use")), Value::Sym(s)));
+    }
+    Ok(heap.map_from_pairs(pairs))
+}
+
+/// A list-or-vector argument flattened to a `Vec<Value>`; empty for anything else.
+fn list_or_vec_items(heap: &Heap, v: Value) -> Vec<Value> {
+    match v.unpack() {
+        value::ValueRef::Vector(id) => heap.vector(id).to_vec(),
+        _ => {
+            let mut out = Vec::new();
+            let mut cur = v;
+            while let Value::Pair(p) = cur {
+                let (h, t) = heap.pair(p);
+                out.push(h);
+                cur = t;
+            }
+            out
+        }
+    }
+}
+
 /// A `required-mods` argument (a list/vector of module-name strings or symbols) → a
 /// `Vec<String>`. `nil` / absent → empty. Backs the optional KI-17 reachability set on
 /// the `check-file*` builtins.

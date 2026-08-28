@@ -5919,6 +5919,61 @@ So the lever is **variadic dispatch**, which is where CLAUDE.md's dogfooding sec
 (its worked example is variadic `+`/`-`/`=`, and its prescribed fix is multi-arity dispatch in the
 evaluator rather than Rust builtins). The good news in the correction: the one-primitive inlining
 already works, so there is no inliner to build — only the variadic shape it cannot reach.
+## 2026-08-28 — the ordering hole: three modules that could not sort their own values
+
+Picked up from "what is left on the library changes?" — the review had two datetime items
+open. Answering them turned up five defects, and the first four were one defect wearing
+different clothes: **a value that is obviously orderable, which the language could not
+order.**
+
+`(sort [dt1 dt2])` raised `compare-to: no method for [:datetime/datetime …]`. Ordering a
+record routes through the `compare-to` multimethod (`%ord-compare`, the seam `sort`/`sort-by`
+consult) and `std/datetime` registered no method — while carrying five hand-written
+comparisons, `before?`/`after?`/`not-before?`/`not-after?`/`same?`, that were `<`/`>`/`>=`/
+`<=`/`=` over `->epoch-ms`. Five public functions doing what the operators would have done,
+none of them reachable by an operator. `std/tempo` had the same gap spelled differently: a
+plain `tempo/compare-to` *function*, which multimethod dispatch never consults, in the module
+whose whole subject is putting time on a line. One `defmethod` per type replaced all six and
+bought `<`, `<=`, `>`, `>=`, `sort`, `compare` and `min`/`max` (ADR-286). Zero external
+callers, so the five deleted cleanly.
+
+Then the same probe asked `(compare dt1 dt2)` and got **0** for two different datetimes.
+That one was not datetime's: **every map compared equal to every other map**, and every set
+to every set — both fell through `value_cmp` to the cross-kind `tag_rank` arm, where they
+rank identically. So `(compare {:a 1} {:a 2})` was 0 and `(sort maps)` returned its input
+unsorted, silently. This is KI-75 again — a `compare` that calls unequal values equal and a
+`sort` that no-ops rather than failing — five weeks later, on a different type, and the
+`%ord-compare` docstring had been promising this order was "deterministic **and** total" the
+whole time. Ordered by size then entries-in-key-order, with the entries sorted before
+comparison, since a CHAMP iterates in hash order and the result would otherwise depend on
+insertion history (ADR-285).
+
+The fifth was the other open review item. `(parse-iso8601 "2026-01-02T03:04:05+02:00")`
+returned **nil** — a valid ISO 8601 timestamp, of the shape every real API emits, reported
+identically to garbage. The module is UTC-only and says so, but that is a statement about the
+values it holds, not the inputs it can read: an offset names a real instant, so it is applied
+and the UTC instant comes back. Worth recording that my first cut of this was itself the bug
+it was fixing — it stripped the colon before validating the shape, so `+2:0` collapsed to
+`20` and parsed as **+20:00**. A malformed offset silently becoming a specific wrong one is
+worse than the nil I was removing. Caught by the test asserting it stayed nil, which I had
+written before the code.
+
+Along the way, three documentation claims that were false rather than merely stale. The
+`defrecord` docstring's only example of `:derives` was `(defrecord point (x y) :derives
+[Ord])` — and `Ord` **does not exist**: `(%ability-ops 'Ord)` is nil, so the one worked
+example of that clause was an expansion error. The `defability` docstring illustrated
+provided-vs-required ops with the same fictional ability, using an op name that is a live
+multimethod. And the `%ord-compare` comment opened by saying the default is the structural
+`compare`, three lines above the sentence saying there is no default — the code has always
+been strict; only the prose disagreed. The `:derives` error message was also conflating "no
+such ability" with "ability declares no recipe", which sends you looking for a recipe on
+something that isn't there; it now distinguishes them.
+
+219/219 `.blsp` test files (the 9 conformance/JIT-depth files are environment-gated, matched
+against the pre-change baseline), 628 Rust lib tests, the zero-warning checker gate, `nest
+format --check`, `cargo fmt --all --check`, and clippy `--all-targets --all-features` all
+green.
+
 
 ### `math/max`/`math/min` get a two-argument arm — `collatz` −38.2%, and nothing in the kernel changed
 

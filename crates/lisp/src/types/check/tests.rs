@@ -6345,3 +6345,49 @@ fn no_declared_std_sig_widens_its_curated_signature() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn an_arrow_parameter_has_an_exact_arity() {
+    // ADR-273 made an arrow parameter describe the call's TYPES. Its shape was still
+    // unchecked, which is half a contract — and the arity half is the certain one: the
+    // caller had to supply a one-argument function to satisfy `(int -> string)`, so
+    // calling it with two arguments always raises.
+    let w = file_warnings(
+        r#"
+        (sig apply-it ((int -> string) -> any))
+        (defn apply-it (f) (f 1 2))
+        "#,
+    );
+    assert!(
+        w.iter().any(|s| s.contains("expected 1, got 2")),
+        "too many arguments through an arrow parameter: {w:?}"
+    );
+
+    let w = file_warnings(
+        r#"
+        (sig apply-it ((int -> string) -> any))
+        (defn apply-it (f) (f))
+        "#,
+    );
+    assert!(
+        w.iter().any(|s| s.contains("expected 1, got 0")),
+        "too few arguments through an arrow parameter: {w:?}"
+    );
+
+    // `&optional` widens to a range and `&` to unbounded — the same mapping a declared
+    // sig gets, because it is the same question asked of the same shape.
+    for src in [
+        "(sig f ((int -> string) -> any))\n(defn f (g) (g 1))",
+        "(sig f ((int &optional int -> string) -> any))\n(defn f (g) (g 1 2))",
+        "(sig f ((int &optional int -> string) -> any))\n(defn f (g) (g 1))",
+        "(sig f ((int & int -> string) -> any))\n(defn f (g) (g 1 2 3))",
+        // A bare `fn` carries no arrow, so it says nothing about arity.
+        "(sig f (fn -> any))\n(defn f (g) (g 1 2 3))",
+    ] {
+        let w = file_warnings(src);
+        assert!(
+            w.iter().all(|s| !s.contains("wrong number of arguments")),
+            "correct call flagged for `{src}`: {w:?}"
+        );
+    }
+}
