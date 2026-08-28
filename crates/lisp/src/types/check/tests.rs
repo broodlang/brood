@@ -327,10 +327,7 @@ fn an_ambiguous_bare_record_name_declines_rather_than_guessing() {
          (sig amb (pt -> int))\n\
          (defn amb (p) 1)",
     );
-    assert!(
-        ws.iter().any(|w| w.contains("unknown type `pt`")),
-        "{ws:?}"
-    );
+    assert!(ws.iter().any(|w| w.contains("unknown type `pt`")), "{ws:?}");
 }
 
 #[test]
