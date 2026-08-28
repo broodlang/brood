@@ -346,6 +346,7 @@ was attempted."
 (defn trace-entries (dbg)
   "The raw `:trace` events the debugger collected (each `{:pid :entry :seq …}`)."
   (filter (fn (e) (= (get e :kind) :trace)) (dbg-events dbg)))
+(sig trace-entries ((or map pid) -> seqable))
 
 (defn observations (dbg)
   "Every `spy` node observation, flattened to `{:pid :form :value}`."
@@ -402,6 +403,7 @@ running shows `:value :running`."
                       :value (value-of (get e :span))
                       :children (map build (children-of (get e :span)))}))
       (map build (filter (fn (e) (nil? (get e :parent))) enters)))))
+(sig causal-tree ((or map pid) -> seqable))
 
 (defn- causal-lines
   (nodes depth)

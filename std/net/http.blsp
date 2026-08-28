@@ -414,6 +414,7 @@ socket is registered *passive* (no reader until the worker calls
 (defn serve (port handler)
   "Listen on 127.0.0.1:`port` and serve `handler` forever. **Blocks** (the accept loop runs in the calling process) — `(spawn (serve …))` to run it in the background. One handler process per connection (HTTP/1.0)."
   (serve-loop (listen port) handler))
+(sig serve (int any -> any))
 
 ;; ---- HTTP client -----------------------------------------------------------
 ;; `get` works over both `http://` (plaintext, via tcp/connect) and

@@ -82,6 +82,7 @@ fine for position queries, but don't feed the returned spans to `eval` unchecked
 
     (count (sexp/top-level-forms \"(a)\n(b)\n\"))   → 2"
   (forms-of (tree text)))
+(sig top-level-forms (string -> seqable))
 
 ;; ---- narrowing: bound structural queries to the forms around point ----------
 ;; `parse-source-positioned` plus the CST walk below are O(buffer): at the bottom of a
@@ -389,6 +390,7 @@ new open (paredit `wrap-round`).
            ")"
            (string/substring text ne))
           (inc ns)]))))
+(sig point-wrap-round (string any -> (or nil (vector (or number string)))))
 
 (defn point-transpose (text point)
   "Interchange the sexp before `point` with the one after it, point landing just past both
@@ -418,6 +420,7 @@ at `next.end` (the whitespace between the two forms is preserved in place).
            (string/substring text ps pe) ; … then the earlier form
            (string/substring text ne))
           ne]))))
+(sig point-transpose (string any -> (or nil (vector any))))
 
 ;; ---- structure-aware kill bound ---------------------------------------------
 
