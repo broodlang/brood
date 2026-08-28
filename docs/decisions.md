@@ -18264,6 +18264,24 @@ flag on the value entry, so the fact survives for a name whose value is not enco
 The differential found it on its first run: **1448 names diverged, 0 after the fix.**
 Sabotage-verified — disable the privacy entries and the test fails.
 
+**The generalisation, applied to the suite.** A gate of the shape *walk a corpus, collect
+violations, assert none* passes vacuously the moment the corpus goes empty — and nothing
+about the failure looks like a failure. So such a gate must assert its **coverage** as well
+as its verdict:
+
+- `image_matches_source` refuses to run against a missing image, and builds one rather than
+  comparing source against source;
+- the soundness oracle asserts it typed at least 90% of its expression corpus;
+- `docs_test`'s catalogue gate now asserts it considered 200+ candidate names before
+  asserting none are uncatalogued (sabotage-verified: make the filter match nothing and it
+  fails);
+- `doc_examples_test` now asserts it found 100+ documented examples. It already had a
+  *sabotage* test proving the harness can fail — that is a different guard, and it would
+  have kept passing while the main assertion verified nothing.
+
+`curated_sigs_exist` (`names.len() > 40`) and `doc_refs` (`known.len() > 100`) already did
+this, which is where the pattern was taken from.
+
 **A trap this exposed.** Building an image *while an image is installed* re-encodes the
 materialised state, so any divergence launders itself into the next image. It does not bite
 in practice only because the id is a content hash: when a rebuild is needed the old image no
