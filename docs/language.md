@@ -622,6 +622,29 @@ provable mismatch; anything whose type isn't pinned down defers — sound, no fa
 > `{__id__: :int | :float}`, which no int is. Only passing a real member exposed it; the
 > exhaustiveness gate and non-member rejection both looked right.)
 
+**Doctests.** An indented ` → ` line in a docstring is a runnable example, and `nest test`
+runs the ones in the project's own modules after the suite passes — a wrong example is worse
+than none, since it reads as authoritative and no other gate sees it (the checker does not
+evaluate docstrings). The engine is `std/tool/doctest.blsp`; `doctest/failures-under` scopes
+a run to one package's surface, and `tests/doc_examples_test.blsp` is what points it at the
+standard library.
+
+    "Twice `n`.
+
+        (demo/double 4)   → 8"
+
+The expected side is **read**, not evaluated, so `(:a :b)` is the list it depicts rather than
+a call; and values are compared as values, so a map's key order (the trie's, not insertion
+order) cannot break an example. A trailing `; comment` is ignored, and only *indented* lines
+count — inline `e.g. …` prose is left alone.
+
+**Integer division has a type: `int | ratio`.** Brood's `/` is **exact** — it yields an `int`
+when it divides evenly and a `ratio` when it does not (`(/ 4 2)` → `2`, `(/ 3 2)` → `3/2`), and
+never a float, at any arity (`(/ 2)` → `1/2`). So `(sig f (int -> float))` over `(/ x 2)` is a
+provable mismatch, as is feeding the result somewhere non-numeric. One float operand still
+makes the whole expression a float (contagion wins). Declaring `int` over it is *not* flagged:
+for an even numerator that is correct, and proving it would need range analysis (ADR-011).
+
 **A record name is a type.** `(sig area (circle -> float))`, `:-> circle` — a record is the
 language's nominal type, so its name resolves in type position to the open shape
 `%{__id__: :ns/circle, …}`. Open, so a record carrying extra fields (`(assoc (circle 2) :z 3)`)

@@ -1035,6 +1035,11 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // relations, and an interval-set algebra (union/intersection/difference/gaps).
     // Layered on `datetime` for the calendar arithmetic. Opt-in, never in the prelude.
     embedded_module!("tempo", "std/tempo.blsp"),
+    // Run the examples in docstrings and report the ones that do not hold — a documented
+    // example is a claim about behaviour, and a wrong one is invisible to every other gate
+    // (the checker does not evaluate docstrings, no test covers prose). Backs the doctest
+    // pass in `nest test`; `tests/doc_examples_test.blsp` gates `std/` with the same engine.
+    embedded_module!("doctest", "std/tool/doctest.blsp"),
     // Hex and Base64 encoding/decoding. Pure Brood over `string/char->int` /
     // `string->utf8-bytes` / `utf8-bytes->string`. Opt-in, never in the prelude.
     embedded_module!("encoding", "std/encoding.blsp"),
