@@ -44,7 +44,7 @@ A *backend* is any value implementing the **`LogBackend`** ability (one op,
 build it with `stdout-backend` / `stderr-backend` / `process-backend` / `file-backend` /
 `fn-backend`. For anything else (batching, JSON lines, sampling), `defrecord` your own
 and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
-  ;; `gen` for defprocess / start / cast / stop; `io` for the port sinks.
+  ;; `gen` for defserver / start / cast / stop; `io` for the port sinks.
   (:use gen)
   ;; `:exclude [inspect]` — `io/inspect` WRITES, while the root `inspect` is the `Inspect`
   ;; ability op that RETURNS a string. Referring the writer bare here would shadow the op.
@@ -157,7 +157,7 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
   (fold (fn (acc b) (backend-emit b rec) acc) nil backends)
   nil)
 
-(defprocess server
+(defserver server
   (cfg)
   "The logger process: carries `{:level :backends}` and dispatches each
 `[:log rec]` cast to every backend that passes the global and per-backend levels."

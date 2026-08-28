@@ -277,10 +277,10 @@
    "nth" :collections
    "%nth-bad-index" :collections
    "%nth-seq-or-fail" :collections
-   "num-add" :meta
-   "num-div" :math
-   "num-mul" :meta
-   "num-sub" :meta
+   "num/add" :meta
+   "num/div" :math
+   "num/mul" :meta
+   "num/sub" :meta
    "number?" :predicates
    "math/numerator" :math
    "or" :control
@@ -355,6 +355,7 @@
    "run!" :control
    "satisfies?" :meta
    "second" :collections
+   "third" :collections
    "self" :processes
    "send" :processes
    "seq" :collections
@@ -467,15 +468,18 @@
    "take-while" :collections
    "seq/zip" :collections
    ;; ---- added so nothing falls into :other (every core name has a home) ----
-   ;; (`gen`'s client API — call / cast / stop / start / defprocess — is NOT
+   ;; (`gen`'s client API — call / cast / stop / start / defserver — is NOT
    ;; here: `gen` is an ordinary module, so those names are `gen/…` and catalogued
    ;; with the module, exactly like `supervisor`'s and `agent`'s.)
    "defbehaviour" :meta
+   "date?" :predicates
+   "datetime?" :predicates
    "multimap?" :predicates
    "offload" :processes
    "reflect/behaviour-ops" :meta
    "pq?" :predicates
    "queue?" :predicates
+   "time-of-day?" :predicates
    "%register-protocol" :meta
    "reserved-package-name?" :meta
    "tap" :control

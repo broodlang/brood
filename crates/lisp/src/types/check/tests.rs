@@ -5973,3 +5973,40 @@ fn a_body_that_never_returns_is_consistent_with_any_declared_return() {
         "a real mismatch must still be reported: {w:?}"
     );
 }
+
+#[test]
+fn a_file_local_declaration_constrains_its_callers_in_that_file() {
+    // A `(sig …)` is on `ctx`, not in the heap — the file is checked before it loads —
+    // so the domain walk's "callee with a known signature" rule, which read the heap,
+    // could not see it. A declaration constrained callers in every OTHER module and not
+    // in its own, which is where most calls to it are: `std/bytes.blsp` declares
+    // `(sig at (bytes int -> int))` and calls `(bytes/at bs off)` three lines later.
+    let w = file_warnings(
+        r#"
+        (defn at (bs i) bs)
+        (sig at (bytes int -> int))
+        (defn read-at (bs off) (at bs off))
+        (defn misuse () (read-at "not-bytes" "not-an-int"))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("read-at") && s.contains("argument 1")),
+        "the callee's declared parameter types should reach its caller's domain: {w:?}"
+    );
+
+    // …and a lexical local shadowing the name is NOT the declared global, so it imposes
+    // nothing — the same guard every other declared-sig lookup carries.
+    let w = file_warnings(
+        r#"
+        (defn at (bs i) bs)
+        (sig at (bytes int -> int))
+        (defn shadowed (at x) (at x x))
+        (defn fine () (shadowed (fn (a b) a) 1))
+        "#,
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("shadowed: argument")),
+        "a shadowing local must not inherit the global's declared parameters: {w:?}"
+    );
+}

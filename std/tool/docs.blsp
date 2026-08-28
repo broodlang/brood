@@ -83,8 +83,7 @@ module's namespace-rooted globals (ADR-070) back to it."
         ;; record's: a name the checker cannot type must not fail the whole doc build.
         arrow (try (reflect/type-signature sym) (catch _ nil))
         type-line (if (nil? arrow) "" (str "`" arrow "`\n\n")))
-    (str "### `" sig "`" suffix "\n\n" type-line
-      (if (nil? d) "_Undocumented._\n" (str d "\n")))))
+    (str "### `" sig "`" suffix "\n\n" type-line (if (nil? d) "_Undocumented._\n" (str d "\n")))))
 
 ;; The "Definitions" section: every public function/macro the module added.
 (defn- docs-section-defs
