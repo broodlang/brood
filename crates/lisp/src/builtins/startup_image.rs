@@ -134,12 +134,23 @@ fn get_str(r: &mut Cursor<Vec<u8>>) -> Option<String> {
     Some(s)
 }
 
-/// Encode one section: the global bindings named by `syms`, plus (for the root section)
-/// every declared sig. Returns the section bytes and how many entries went in.
+/// Encode one section: the global bindings named by `syms`, plus their declared sigs.
+/// Returns the section bytes and how many entries went in.
+///
+/// `all_sigs` asks for EVERY declared sig rather than just this section's. That is the
+/// root/project section's shape (one unnamed section carrying the whole image), and it is
+/// what `with_sigs` used to mean — the only shape there was. A NAMED section now carries
+/// the sigs of its own symbols, because the stdlib image is written as one named section
+/// per module and never writes an unnamed one: every std signature was therefore dropped on
+/// the floor, and a module restored from the image came back bound but **unsigned**. The
+/// visible effect was a gate quietly ceasing to gate — with the image installed, `nest
+/// check` lost every std signature, so a reversed-argument call it is supposed to catch
+/// (`types::check::tests::a_reversed_index_and_collection_call_is_flagged`) passed silently.
+/// Deterministic: 3/3 with the image, 0/3 without.
 fn encode_section(
     heap: &mut Heap,
     syms: &[Value],
-    with_sigs: bool,
+    all_sigs: bool,
     ns_to_msg: &mut u64,
     ns_encode: &mut u64,
     tables_seen: &mut std::collections::HashMap<u64, String>,
@@ -221,17 +232,33 @@ fn encode_section(
         *ns_encode += t1.elapsed().as_nanos() as u64;
         count += 1;
     }
-    if with_sigs {
-        for (sym, tv) in heap.declared_sigs_snapshot() {
-            let Ok(msg) = to_message(heap, tv) else {
-                continue; // a type expression with no portable form: skip, never fail
-            };
-            entries.push(KIND_SIG);
-            put_str(&mut entries, &value::symbol_name(sym));
-            encode_msg(&mut entries, &msg)
-                .map_err(|e| LispError::runtime(format!("%image-write: sig encode: {e}")))?;
-            count += 1;
-        }
+    // Sigs: every one for the root/project section, else exactly this section's own — so a
+    // signature materialises with the module that declared it, and a module this binary does
+    // not bake never contributes one.
+    let sig_pairs: Vec<(value::Symbol, Value)> = if all_sigs {
+        heap.declared_sigs_snapshot()
+    } else {
+        let mine: std::collections::HashSet<value::Symbol> = syms
+            .iter()
+            .filter_map(|nv| match nv.unpack() {
+                value::ValueRef::Sym(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        heap.declared_sigs_snapshot()
+            .into_iter()
+            .filter(|(sym, _)| mine.contains(sym))
+            .collect()
+    };
+    for (sym, tv) in sig_pairs {
+        let Ok(msg) = to_message(heap, tv) else {
+            continue; // a type expression with no portable form: skip, never fail
+        };
+        entries.push(KIND_SIG);
+        put_str(&mut entries, &value::symbol_name(sym));
+        encode_msg(&mut entries, &msg)
+            .map_err(|e| LispError::runtime(format!("%image-write: sig encode: {e}")))?;
+        count += 1;
     }
     put_u32(&mut out, count);
     out.extend_from_slice(&entries);
@@ -270,11 +297,12 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         }
         let name = need_str(heap, pair[0], "%image-write")?;
         let syms = seq_items(heap, pair[1])?;
-        let with_sigs = name.is_empty();
+        // The unnamed root/project section takes every sig; a named one takes its own.
+        let all_sigs = name.is_empty();
         let (bytes, n) = encode_section(
             heap,
             &syms,
-            with_sigs,
+            all_sigs,
             &mut ns_to_msg,
             &mut ns_encode,
             &mut tables_seen,
