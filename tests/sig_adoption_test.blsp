@@ -198,3 +198,30 @@
               "f: argument")))
   (test "a complement reads as a complement, not a tag dump"
     (is (warns-about? "(defn f (x) (if (string? x) 1 (string/length x)))" "(not string)"))))
+
+(describe "a record is closed, and openness is a type (ADR-264)"
+  ;; A shape that says only what a value must HAVE cannot say what it is NOT — and
+  ;; without that, a union of shapes is representable but useless.
+  (test "an undeclared key is rejected by a closed record"
+    (is (warns-about? "(sig f ((record :name string) -> any)) (defn f (m) m) (defn c () (f {:name \"Ada\" :extra :k}))"
+          "f: argument 1 expects")))
+  (test "…and admitted by an open one"
+    (refute (warns-about? "(sig f ((record &open :name string) -> any)) (defn f (m) m) (defn c () (f {:name \"Ada\" :extra :k}))"
+              "f: argument")))
+  (test "an open record still enforces the fields it declares"
+    (is (warns-about? "(sig f ((record &open :name string) -> any)) (defn f (m) m) (defn c () (f {:name 42}))"
+          "f: argument 1 expects")))
+  (test "a field read through a tagged union resolves"
+    (is (warns-about? "(sig f ((or (record :ok int) (record :error string)) -> any)) (defn f (r) (string/length (get r :ok)))"
+          "string/length")))
+  (test "an open alternative says nothing about the key, so the union says nothing"
+    (refute (warns-about? "(sig f ((or (record :ok int) (record &open :error string)) -> any)) (defn f (r) (string/length (get r :ok)))"
+              "string/length")))
+  (test "a key absent from a fully-read literal is nil"
+    (is (warns-about? "(defn f () (string/length (get {:a 1} :b)))" "string/length")))
+  (test "a literal the checker could not read completely stays open"
+    (refute (warns-about? "(defn f () (string/length (get {:a 1 :b (zzz)} :other)))"
+              "string/length")))
+  (test "a defrecord accessor takes any record carrying its field"
+    (refute (warns-about? "(defrecord point ((x int) (y int))) (defn c () (point-x (point 1 2)))"
+              "point-x"))))

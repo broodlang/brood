@@ -668,7 +668,10 @@ pub(super) fn sealed_op_domain(op_sym: value::Symbol) -> Option<crate::types::Ty
     })?;
     let mut fields = std::collections::BTreeMap::new();
     fields.insert(value::intern("__id__"), (id_ty, true));
-    Some(crate::types::Ty::record_of(fields))
+    // **Open** (ADR-264): a member record carries its own fields beside `:__id__`, so a
+    // closed shape here would describe no real value — this is a *domain* the argument
+    // must satisfy, not the shape it has.
+    Some(crate::types::Ty::record_of_open(fields))
 }
 
 /// Build the per-file sealed-op occurrence-typing domains from `AbilityInfo` (ADR-190): op-name

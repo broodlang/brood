@@ -152,15 +152,27 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
         // never a false positive. `{}` / an all-unknown map infers the empty
         // record (equivalent to flat `map` for every check that matters here).
         Value::Map(id) => {
+            // **Closed only when the whole literal was read** (ADR-264). A closed shape
+            // asserts that every *other* key is absent, which is exactly true of a
+            // literal whose entries could all be typed — `(get {:a 1} :b)` really is
+            // `nil`. But a non-keyword key, or a value whose type is unknown, means an
+            // entry was dropped from the shape, and claiming it absent would be a lie
+            // the checker could warn on. Those infer OPEN.
             let mut fields = std::collections::BTreeMap::new();
+            let mut complete = true;
             for (k, v) in heap.map_entries(id) {
-                if let Value::Keyword(name) = k {
-                    if let Some(vty) = expr_ty(heap, v, ctx) {
+                match (k, expr_ty(heap, v, ctx)) {
+                    (Value::Keyword(name), Some(vty)) => {
                         fields.insert(name, (vty, true));
                     }
+                    _ => complete = false,
                 }
             }
-            Some(Ty::record_of(fields))
+            Some(if complete {
+                Ty::record_of(fields)
+            } else {
+                Ty::record_of_open(fields)
+            })
         }
         Value::Pair(_) => {
             let items = list_items(heap, form)?;
@@ -186,12 +198,12 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 // are open, so the type is genuinely unknown, not an error).
                 Some(Value::Keyword(key)) if items.len() == 2 || items.len() == 3 => {
                     let recv = expr_ty(heap, items[1], ctx);
-                    if let Some((fty, _required)) = recv
-                        .as_ref()
-                        .and_then(Ty::record_fields)
-                        .and_then(|f| f.get(&key))
-                    {
-                        return Some(fty.clone().union(Ty::of(Tag::Nil)));
+                    // A record shape answers for EVERY key (ADR-264): the declared type
+                    // for a required field, `T | nil` for an optional one, and — on a
+                    // closed shape — `nil` for a key it does not declare, because the
+                    // key is absent. Over a union of shapes it is the union of those.
+                    if let Some(fty) = recv.as_ref().and_then(|t| t.record_field_ty(key)) {
+                        return Some(fty);
                     }
                     if let Some((_, v)) = recv.as_ref().and_then(Ty::map_kv) {
                         return Some(v.clone().union(Ty::of(Tag::Nil)));
@@ -730,12 +742,8 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let map_arg = *items.get(1)?;
         let map_ty = expr_ty(heap, map_arg, ctx);
         if let Value::Keyword(key) = items[2] {
-            if let Some((fty, _required)) = map_ty
-                .as_ref()
-                .and_then(Ty::record_fields)
-                .and_then(|f| f.get(&key))
-            {
-                return Some(fty.clone().union(Ty::of(Tag::Nil)));
+            if let Some(fty) = map_ty.as_ref().and_then(|t| t.record_field_ty(key)) {
+                return Some(fty);
             }
         }
         if let Some((_, v)) = map_ty.as_ref().and_then(Ty::map_kv) {

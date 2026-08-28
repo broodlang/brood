@@ -1588,14 +1588,21 @@ fn record_field_refinement_flows_through_checker() {
         "expected string-length warning for int|nil arg, got {w:?}"
     );
 
-    // Getting a field the record doesn't declare stays unknown — records
-    // are open, so this must NOT warn (no false positive on an
-    // undeclared/dynamic key).
+    // A key a *fully-read literal* doesn't carry is provably absent (ADR-264), so it
+    // reads as `nil` — and `(string/length nil)` is a real error, not a false positive.
     assert!(
         warnings("(let (m {:a 1}) (string/length (get m :other)))")
             .iter()
-            .all(|w| !w.contains("expects")),
-        "undeclared record field should stay unresolved, not warn"
+            .any(|w| w.contains("expects string")),
+        "an absent key on a closed literal is nil, and must be caught"
+    );
+    // But a literal the checker could not read completely stays OPEN — the dropped
+    // entry might be the key being asked for, so nothing may be concluded about it.
+    assert!(
+        warnings("(let (m {:a 1 :b (unknown-thing)}) (string/length (get m :other)))")
+            .iter()
+            .all(|w| !w.contains("expects string")),
+        "an incompletely-read literal must not claim a key is absent"
     );
 
     // Record-literal type inference: `{:a 1}` infers a record shape
@@ -5405,4 +5412,83 @@ fn a_union_of_record_shapes_rejects_a_map_matching_neither() {
          (defn c () (f {:a 1}))",
     );
     assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
+}
+
+// ---- closed records (ADR-264) ----
+
+#[test]
+fn a_closed_record_rejects_an_undeclared_key() {
+    let ws = file_warnings(
+        "(sig f ((record :name string) -> any))\n(defn f (m) m)\n\
+         (defn c () (f {:name \"Ada\" :extra :k}))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 1 expects")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn an_open_record_admits_undeclared_keys() {
+    let ws = file_warnings(
+        "(sig f ((record &open :name string) -> any))\n(defn f (m) m)\n\
+         (defn c () (f {:name \"Ada\" :extra :k}))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
+    // …and still enforces what it does declare.
+    let ws = file_warnings(
+        "(sig f ((record &open :name string) -> any))\n(defn f (m) m)\n\
+         (defn c () (f {:name 42}))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 1 expects")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_field_read_through_a_tagged_union_resolves() {
+    // The payoff. Each term answers for `:ok` — `int` in the first, `nil` in the
+    // second (closed: the key is absent) — so the union answers `int | nil`.
+    let ws = file_warnings(
+        "(sig f ((or (record :ok int) (record :error string)) -> any))\n\
+         (defn f (r) (string/length (get r :ok)))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("string/length") && w.contains("int")),
+        "{ws:?}"
+    );
+    // An open alternative says nothing about the key, so the union says nothing.
+    let ws = file_warnings(
+        "(sig f ((or (record :ok int) (record &open :error string)) -> any))\n\
+         (defn f (r) (string/length (get r :ok)))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("string/length")), "{ws:?}");
+}
+
+#[test]
+fn a_defrecord_accessor_takes_any_record_carrying_its_field() {
+    // The accessor sig is `&open` by construction: a real value carries `:__id__` and
+    // every sibling field, so a closed one-field shape would describe nothing.
+    let ws =
+        file_warnings("(defrecord point ((x int) (y int)))\n(defn c () (point-x (point 1 2)))");
+    assert!(!ws.iter().any(|w| w.contains("point-x")), "{ws:?}");
+}
+
+#[test]
+fn a_bare_local_test_narrows_by_truthiness() {
+    // `(if v …)` is itself a guard: only `nil` and `false` are falsy, so the
+    // then-branch has `v` as neither. This is what `if-let`/`when-let` expand to, and
+    // without it a closed literal's `nil` read as a false positive there.
+    let ws = warnings("(let (v (get {:x 10} :y)) (if v (inc v) :none))");
+    assert!(!ws.iter().any(|w| w.contains("inc")), "{ws:?}");
+    // Deliberately ONE-SIDED: the exact truthy type is unsayable, so the else-branch
+    // is left unnarrowed rather than narrowed to a complement that is wrong for `false`.
+    let ws = warnings("(fn (x) (let (v (if (int? x) 1 nil)) (if v :ok (inc v))))");
+    assert!(!ws.iter().any(|w| w.contains("inc")), "{ws:?}");
+    // …and `(not v)` must NOT read as "v is nil": that inversion reported live code
+    // as dead when the guard was two-sided.
+    let ws = warnings_expanded("(let (s (if true true false)) (let (v (not s)) (if v 1 2)))");
+    assert!(!ws.iter().any(|w| w.contains("unreachable")), "{ws:?}");
 }
