@@ -369,12 +369,15 @@ Shipped as ADRs:
     - ⬜ *low-med* — **Custom match extractors / view patterns** (F# active patterns, Scala
       `unapply`). Match on computed meaning, not just shape. `:when` guards + record patterns
       cover the common case; wait for a parsing-heavy need.
-    - ⬜ *med* — **Exhaustiveness from *inferred* scrutinees** — a `match` on an occurrence-typed
-      param (no `sig`) gets exhaustiveness. Small (`exhaustive.rs` reads inferred sigs), but
-      narrow reach (must both constrain *and* hand-match the scrutinee).
-    - ⬜ *med* — **Per-arm parameter checking of a multi-arity callee** — a multi-arity closure
-      gets a return-only sig, so its args aren't checked against the matching arm. Needs an
-      inferred-overload path + per-argc arm selection; the miss is a false *negative* (sound).
+    - ✅ **Exhaustiveness from *inferred* scrutinees** (2026-08-28) — a `match` whose scrutinee
+      is typed by inference rather than by a `sig` gets exhaustiveness: `(defn pick (b) (if b
+      :ok :err))` then `(match (pick b) (:ok 1))` reports the missing `:err`, the same as when
+      a `(sig …)` declares the union.
+    - ✅ **Per-arm parameter checking of a multi-arity callee** (2026-08-28) — closed by the
+      clause-guard overload inference (ADR-226/261 path, `infer_overload_from_clauses`). A
+      multi-arity `defn` now selects the arm by argument count and checks against *that* arm:
+      `(defn greet ((name) …) ((name n) …))` flags both `(greet 42)` and `(greet "x" "y")`,
+      naming the arm's own types, while the correct calls stay silent.
     - 🚫 *won't* — **Open-ability bounds** — declined, not deferred: an open ability accepts
       late impls, so no argument is soundly rejectable on the type (ADR-123/124). Safety lives
       at the op call site instead.
