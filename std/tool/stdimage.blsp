@@ -294,7 +294,14 @@ instead of being inferred from a run that looked wrong."
   (let (want (system/stdlib-id)
         path (image-path))
     (if (nil? path)
-      {:state :no-cache :want want :path nil :sections 0 :others []}
+      ;; Two different nils: a build with the image compiled out, and a machine with no
+      ;; cache directory. Reporting both as `:no-cache` would send a reader looking for a
+      ;; directory that was never going to be consulted.
+      {:state (if (%build-stdimage?) :no-cache :disabled)
+       :want want
+       :path nil
+       :sections 0
+       :others []}
       (let (dir (path/dirname path)
             present (if (file/dir? dir)
                       (filter (fn (e) (string/starts-with? e "std-image-")) (file/list-files dir))

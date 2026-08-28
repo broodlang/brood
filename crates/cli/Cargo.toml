@@ -18,7 +18,7 @@ path = "src/main.rs"
 # for a lean shipped runtime (ADR-038), then re-adds the JIT via `brood/jit` when
 # the host supports it. `default-features = false` on the dep below makes this the
 # *only* switch, so `--no-default-features` here fully strips both.
-default = ["brood/dev-tools", "brood/jit", "brood/wasm"]
+default = ["brood/dev-tools", "brood/jit", "brood/wasm", "brood/stdimage"]
 # Forward the brood lib's VM work-attribution counters (docs/benchmarking.md):
 # `cargo run -p cli --features perf-stats`. Off by default — zero cost.
 perf-stats = ["brood/perf-stats"]
