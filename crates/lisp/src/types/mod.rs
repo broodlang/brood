@@ -1151,6 +1151,31 @@ impl Ty {
                 tags |= bit;
             }
         }
+        // …except **bool**, whose domain is finite. `¬{false}` within the bool members
+        // is exactly `{true}`, so this one complement is representable rather than
+        // widened — and it is the one that matters: *truthy* is `¬(nil ∪ false)`, the
+        // type every `(if x …)` narrows to. Widened, that lands on `not nil`, which is
+        // a sound necessary condition but not invertible (a false test does not imply
+        // `nil`), and the truthiness guard has to be one-sided as a result. Exact, it
+        // is biconditional.
+        //
+        // The other three literal kinds have infinite domains — `¬5` within the ints is
+        // not a set this lattice can hold — so they keep widening. That asymmetry is
+        // the whole of the "negative atoms" gap, narrowed to where it is unavoidable.
+        if let Some(set) = &self.lit_bool {
+            let complement: BTreeSet<bool> = [true, false]
+                .into_iter()
+                .filter(|b| !set.contains(b))
+                .collect();
+            if complement.is_empty() {
+                tags &= !BOOL_BIT; // `¬{true, false}` admits no bool at all
+            } else {
+                return Ty {
+                    lit_bool: Some(Arc::new(complement)),
+                    ..Ty::flat(tags | BOOL_BIT)
+                };
+            }
+        }
         Ty::flat(tags)
     }
 

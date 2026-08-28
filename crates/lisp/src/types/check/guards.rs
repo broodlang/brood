@@ -211,19 +211,21 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
         // {:x 10} :y)) (inc v) …)` read as handing `nil` to `inc` — a false positive
         // on a branch that cannot run.
         //
-        // **One-sided, and it has to be.** The exact truthy type is "anything but
-        // `nil` and the *literal* `false`", which this lattice cannot state: negating
-        // a literal set widens to its whole tag, so the closest sayable type is `not
-        // nil`. That is a sound *necessary* condition for a true test — right for the
-        // then-branch — but its complement (`nil`) is **not** implied by a false test,
-        // because `false` is falsy too. Marked biconditional it read `(not v)` as "v
-        // is nil" and reported live code as dead. One-sided is the honest reading
-        // until a negative literal atom exists to say the other half.
+        // **Biconditional, because the type is now exact.** Truthy is `¬(nil ∪ false)`.
+        // That was unsayable while negating a literal set widened to its whole tag —
+        // the closest was `not nil`, a sound *necessary* condition for a true test but
+        // not invertible (a false test does not imply `nil`, since `false` is falsy
+        // too), so this guard had to be one-sided, and marking it biconditional read
+        // `(not v)` as "v is nil" and reported live code as dead.
+        //
+        // `Ty::negate` now complements a **bool** literal set exactly — the one literal
+        // kind with a finite domain, where `¬{false}` really is `{true}` — so the type
+        // below *is* truthy, and its complement really is falsy. Both branches narrow.
         if ctx.is_lexical_local(s) {
             return Some(Guard {
                 sym: s,
-                ty: Ty::of(Tag::Nil).negate(),
-                then_only: true,
+                ty: Ty::of(Tag::Nil).union(Ty::bool_lit(false)).negate(),
+                then_only: false,
             });
         }
         return None;

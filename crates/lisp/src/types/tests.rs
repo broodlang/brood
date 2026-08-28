@@ -1478,3 +1478,35 @@ fn to_source_declines_what_it_cannot_write() {
     // …and a type carrying one declines as a whole rather than dropping it.
     assert_eq!(Ty::of(Tag::Int).union(Ty::of(Tag::Macro)).to_source(), None);
 }
+
+#[test]
+fn a_bool_literal_complement_is_exact() {
+    // Bool is the one literal kind with a finite domain, so its complement is a set
+    // this lattice can hold: `¬{false}` is `{true}`, not "any bool". That is what makes
+    // *truthy* — `¬(nil ∪ false)` — sayable, and with it the `(if x …)` guard
+    // biconditional rather than one-sided.
+    assert_eq!(
+        Ty::bool_lit(false).negate().as_lit_bool().map(|s| s.len()),
+        Some(1)
+    );
+    assert!(Ty::bool_lit(false)
+        .negate()
+        .is_disjoint(&Ty::bool_lit(false)));
+    assert!(!Ty::bool_lit(false)
+        .negate()
+        .is_disjoint(&Ty::bool_lit(true)));
+    // The truthy type itself: everything but `nil` and `false`.
+    let truthy = Ty::of(Tag::Nil).union(Ty::bool_lit(false)).negate();
+    assert!(truthy.is_disjoint(&Ty::of(Tag::Nil)));
+    assert!(truthy.is_disjoint(&Ty::bool_lit(false)));
+    assert!(!truthy.is_disjoint(&Ty::bool_lit(true)));
+    assert!(!truthy.is_disjoint(&Ty::of(Tag::Int)));
+    // …and negating it back gives falsy, which is why the guard can narrow both ways.
+    let falsy = truthy.clone().negate();
+    assert!(falsy.is_disjoint(&Ty::of(Tag::Int)));
+    assert!(!falsy.is_disjoint(&Ty::of(Tag::Nil)));
+    assert!(!falsy.is_disjoint(&Ty::bool_lit(false)));
+    // Negating BOTH bool literals removes the tag: no bool is neither true nor false.
+    let both = Ty::bool_lit(true).union(Ty::bool_lit(false));
+    assert!(!both.negate().contains_tag(Tag::Bool));
+}
