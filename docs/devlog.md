@@ -5392,3 +5392,27 @@ public→public residual is worth closing rather than working around.
 **Deliberately not attempted in this session:** the atomic section install. It is the complete fix
 and it is kernel work with a live use-after-GC hazard in its obvious form (see the KI entry), so
 it wants review rather than an unsupervised landing.
+
+**Correction to the paragraph above, made the same session.** It said atomic install was "the
+follow-up if a public→public instance ever appears". They already exist. `(global-names)` order is
+**alphabetical** — that is *why* `string/blank?` (b) preceded `string/whitespace?` (w) — so the
+identical window exists wherever a public calls a sibling public sorting later. A static scan over
+`std/`'s 1318 module publics finds **≈257** such calls, three verified by hand:
+`datetime/days-in-month` → `(leap-year? y)`, `datetime/today` → `(utc-now)`, and
+`editor/ansi/ansi-clear` → `(ansi-clear-screen)`/`(ansi-home)`. None has been seen to fail because
+none sits on a funnelled autoload path the way `string/blank?` does — the stub aims 24 processes at
+it simultaneously — but the windows are there.
+
+So the honest statement is: **privates-first is necessary and not sufficient.** It fixes the
+reproducible hang; it does not make the image safe to default-ON. Atomic section install is the
+prerequisite, and the kernel already has the rooting API for it (`Heap::root`/`read_root` plus
+`roots_len`/`truncate_roots` in `core/heap/gc.rs`) — pass 1 builds and roots, pass 2 defines from
+the roots, validated under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+Two process notes worth keeping. The first count I took was **757**, and it was wrong twice over:
+`:year` matched the public `year` (the keyword colon was not excluded) and `(defn- foo` parsed as a
+public named `-`, because `defn-?` matched `defn` and then captured the hyphen as the name. Both
+inflations pointed the same way — toward a scarier number — and only hand-checking a single case
+(`epoch-ms->` "calling" `year`, which is actually `(get ymd :year)` beside three `let`-locals named
+`hour`/`minute`/`second`) exposed them. A static scan over a Lisp needs call-position matching and
+a hand-verified sample before its count means anything.
