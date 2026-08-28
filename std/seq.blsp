@@ -3,16 +3,23 @@
 ;; consumers `(:use seq)` to refer them bare, or call them qualified.
 ;;
 ;; The *core* sequence protocol stays bare in the prelude — `map`/`filter`/`reduce`/
-;; `fold`/`seq`/`into`/`count`/`take`/`drop`/`distinct`/`take-while`/`partition`/`zip`
+;; `fold`/`seq`/`into`/`count`/`take`/`drop`/`take-while`/`drop-while`/`partition`/`sort`
 ;; and friends are the universal collection surface (and several are load-bearing
 ;; during the prelude's own bootstrap, so they cannot move). This module is the
-;; higher-level, derived helpers layered on top — the Elixir-`Enum`-flavour extras.
+;; higher-level, derived helpers layered on top.
+;;
+;; `distinct`, `zip`, `find` and `flatten` are NOT bare — they live here, as
+;; `seq/distinct` and friends. This comment and the module docstring below both listed
+;; them among the bare core until 2026-08-27, which sent a reader to write `(distinct xs)`
+;; and get an unbound symbol. `(bound? 'distinct)` is `false`; check before adding a name
+;; to either list.
 (defmodule seq
   "Sequence helpers — the derived enumeration API over the bare collection protocol.
 
 The core ops (`map` `filter` `reduce` `fold` `into` `count` `take` `drop`
-`distinct` `take-while` `drop-while` `partition` `sort` …) stay bare in the
-prelude and need no import. This module adds the higher-level helpers: grouping
+`take-while` `drop-while` `partition` `sort` …) stay bare in the
+prelude and need no import. `distinct`, `zip`, `find` and `flatten` are NOT bare —
+they are `seq/distinct` and friends, defined here. This module adds the higher-level helpers: grouping
 (`group-by` `frequencies` `chunk-by` `chunk-every`), dedup-by-key (`distinct-by`),
 running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 `interleave` `interpose`), extremum-by-key (`min-by` `max-by`), and indexing
@@ -93,6 +100,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
                      coll)
     reverse))
 
+;; Byte-identical to `string/join-parts` — see the note there for why the copy stands.
 (defn- interpose-acc
   (sep coll acc)
   (if (empty? coll) acc (interpose-acc sep (rest coll) (cons (first coll) (cons sep acc)))))
@@ -219,8 +227,15 @@ equality); recover the item itself with `find`.
     (seq/index-where math/even? [1 3 4])   → 2"
   (index-where-from pred coll 0))
 
+;; `subvec` is the ONE deliberate exception to this module's index-first rule: it takes
+;; the vector first, because two indices trailing a collection (`(subvec start end v)`)
+;; reads worse than either alternative and because it mirrors `string/substring`, the
+;; op it is the vector counterpart of. The `sig` still pins the shape, which is what
+;; KI-71 was actually about — a reversed pair that keeps its arity and stays silent.
+(sig subvec (vector int -> any))
 (defn subvec (v start & more)
-  "A fresh vector of v's elements in [start, end); end defaults to the length.
+  "A fresh vector of v's elements in [start, end); end defaults to the length. The
+vector comes FIRST here, unlike the rest of this module — see the note above.
 
     (seq/subvec [1 2 3 4] 1 3)   → [2 3]"
   (if (empty? more) (%subvec v start) (%subvec v start (first more))))
@@ -270,18 +285,48 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     (seq/find math/even? [1 3 4])   → 4"
   (cond (empty? coll) nil (pred (first coll)) (first coll) else (seq/find pred (rest coll))))
 
+;; distinct: keep the first occurrence of each item. A map carried alongside the result
+;; acts as the "seen" set, so membership is O(1)-ish rather than the O(n²) a
+;; `member?`-per-item scan would cost. State is the 2-vector [seen result-rev].
+;;
+;; This helper lived in the PRELUDE as `%distinct-step` until 2026-08-27, with its only
+;; caller here — one of four helpers stranded there when their public functions moved out.
+;; A prelude-resident helper that only a module uses costs boot-image size and reads as a
+;; core primitive in `global-names`; it belongs beside its caller.
+(defn- distinct-step
+  (state x)
+  ;; the "seen" map only ever stores `true`, so a single `%map-get` (default `false`)
+  ;; distinguishes present from absent — no need for `contains?`'s two-sentinel probe
+  ;; (which exists to tell a stored `nil`/`false` from absence).
+  (if (%map-get (nth state 0) x false)
+    state
+    [(%map-assoc (nth state 0) x true) (cons x (nth state 1))]))
+
 (defn distinct (coll)
   "The items of `coll` with duplicates removed, keeping the first occurrence of each (order-preserving).
 
     (seq/distinct [1 1 2])     → (1 2)"
-  (reverse (nth (fold %distinct-step [{} nil] coll) 1)))
+  (reverse (nth (fold distinct-step [{} nil] coll) 1)))
+
+;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil` (so
+;; empty sub-lists and nils vanish); vectors and maps are leaf items. The outer walk is
+;; tail-recursive; the nested call recurses only as deep as the nesting (bounded), not
+;; the length. Moved here from the prelude with `distinct-step` — same reason.
+;; check-allow: deliberately non-tail — depth = the structure's nesting, not its element count.
+(check-allow :non-tail-recursion
+  (defn- flatten-acc
+    (coll acc)
+    (cond
+      (empty? coll) acc
+      (list? (first coll)) (flatten-acc (rest coll) (flatten-acc (first coll) acc))
+      else (flatten-acc (rest coll) (cons (first coll) acc)))))
 
 (defn flatten (coll)
   "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves.
 
     (seq/flatten '(1 (2 (3))))   → (1 2 3)
     (seq/flatten '(1 [2 3]))     → (1 [2 3])   ; a vector is a LEAF, not descended into"
-  (reverse (%flatten-acc coll nil)))
+  (reverse (flatten-acc coll nil)))
 
 (sig split-at (int seqable -> any))
 (defn split-at (n coll)
@@ -310,17 +355,39 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     (seq/third [1 2 3])        → 3"
   (first (rest (rest coll))))
 
+(defn- iterate-times-acc
+  (f x n acc)
+  (if (< n 0) acc (iterate-times-acc f (f x) (dec n) (cons x acc))))
+(sig iterate-times (any any int -> any))
+(defn iterate-times (f x n)
+  "The list `(x f(x) f²(x) … fⁿ(x))` — the `n`+1 successive states of applying `f`,
+starting from `x`. `times` returns only the last of these; this keeps the trajectory.
+
+This was a PRIVATE prelude helper (`%iterate-times`) that nothing in `std/` called, yet
+`tests/sequence_test.blsp` exercised it directly and `docs/deferred.md` cited it as the
+supported workaround for unbounded `iterate`. Private, tested and documented is a
+contradiction; it is public here, where its callers can reach it.
+
+    (seq/iterate-times (fn (n) (* n 2)) 1 4)   → (1 2 4 8 16)
+    (seq/iterate-times inc 0 0)                → (0)"
+  (reverse (iterate-times-acc f x n nil)))
+
+(sig times (int any any -> any))
 (defn times (n f x)
   "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`.
 
     (seq/times 3 inc 0)   → 3"
   (if (<= n 0) x (seq/times (dec n) f (f x))))
 
+(defn- repeatedly-acc
+  (n f acc)
+  (if (<= n 0) (reverse acc) (repeatedly-acc (dec n) f (cons (f) acc))))
+(sig repeatedly (int any -> any))
 (defn repeatedly (n f)
   "A list of `n` successive calls to the zero-argument function `f` (in call order).
 
     (seq/repeatedly 3 (fn () 7))   → (7 7 7)"
-  (%repeatedly-acc n f nil))
+  (repeatedly-acc n f nil))
 
 (sig sample (int seqable -> any))
 (defn sample (seed coll)

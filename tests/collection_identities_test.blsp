@@ -113,7 +113,7 @@
     ; forward search from i lands on i, since the char at i is the needle
     (= (index-of mb-text (string/char-at mb-text i) i) i)
     ; and the last occurrence strictly before i+1 is i
-    (= (last-index-of mb-text (string/char-at mb-text i) (+ i 1)) i)
+    (= (string/last-index-of mb-text (string/char-at mb-text i) (+ i 1)) i)
     (if (< i j) (= (index-of mb-text (string/substring mb-text i j) i) i) true)))
 
 (defn check-mb (s n)

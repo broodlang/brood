@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::core::value::Symbol;
+use crate::core::value::{Arity, Symbol};
 use crate::types::{Sig, Ty};
 
 // ---- Type-variable representation for user-declared sigs --------------------
@@ -279,11 +279,28 @@ pub(super) struct Ctx {
     /// preserving the advisory no-false-positives rule. Populated by
     /// [`collect_def_names`](super::walk::collect_def_names).
     variadic_globals: HashSet<Symbol>,
+    /// File-local `def`/`defn` names → the arity their **definition** admits, read
+    /// off the def site's own parameter list ([`collect_def_names`](super::walk::collect_def_names)).
+    /// The file isn't loaded while it is checked, so `sigs::arity_of` (which reads the
+    /// global table) sees nothing for a same-file name — before this, a call to a function
+    /// defined in the same file had **no arity check at all**, and a `(sig …)` that
+    /// disagreed with the definition silently supplied a wrong one. Multi-arm closures
+    /// store the interval hull (smallest min, largest max), exactly as `arity_of` does for
+    /// a loaded closure: sound (over-accepting), never a false positive. Absent for a
+    /// def whose value isn't a `fn` form, or whose parameter list the checker can't read
+    /// (a destructuring binder) — the check then stays silent, as before.
+    file_arity: HashMap<Symbol, Arity>,
     /// `(sig name (… -> …))` declarations — authoritative signatures the user
     /// wrote, read *first* by the call-checker (ahead of primitive/curated/
     /// inferred). Populated by [`check_file`]'s scan of the un-expanded forms.
     /// Slice 1 trusts these without runtime enforcement; slice 2 (the strong
     /// arrow) makes that trust sound. See `docs/type-annotations.md`.
+    /// **Inferred** per-arm signatures for a same-file *multi-arm* function — the
+    /// inferred counterpart of [`declared_overload`](Ctx::declared_overload). A
+    /// multi-arm closure has no single `Sig`, so its callers' arguments went
+    /// unchecked; each arm has one, and a call no arity-relevant arm accepts is a
+    /// provable error. Populated by `check_file`'s Pass 2.8.
+    inferred_overload: HashMap<Symbol, Vec<Sig>>,
     declared: HashMap<Symbol, Sig>,
     /// `(sig x T)` declarations for **value** names (non-arrow types) — `x : int`.
     /// The gradual-assignment check reads these to verify a `(def x <expr>)`
@@ -648,9 +665,39 @@ impl Ctx {
     pub(super) fn mark_variadic_global(&mut self, sym: Symbol) {
         self.variadic_globals.insert(sym);
     }
+    /// The inferred per-arm signatures of a same-file multi-arm function, if any.
+    pub(super) fn inferred_overload(&self, sym: Symbol) -> Option<Vec<Sig>> {
+        self.inferred_overload.get(&sym).cloned()
+    }
+    /// Record a same-file multi-arm function's per-arm signatures (Pass 2.8).
+    pub(super) fn add_inferred_overload(&mut self, sym: Symbol, sigs: Vec<Sig>) {
+        self.inferred_overload.insert(sym, sigs);
+    }
     /// Is `sym` a file-local definition whose value is a variadic `fn`?
     pub(super) fn is_variadic_global(&self, sym: Symbol) -> bool {
         self.variadic_globals.contains(&sym)
+    }
+    /// Record the arity a same-file definition of `sym` admits. A name defined more
+    /// than once (a redefinition, or a `def` in two branches) merges to the interval
+    /// **hull** of the two — accepting a call either definition would accept, which is
+    /// the only sound reading when the checker can't say which one a given call sees.
+    pub(super) fn add_file_arity(&mut self, sym: Symbol, arity: Arity) {
+        self.file_arity
+            .entry(sym)
+            .and_modify(|a| {
+                *a = Arity {
+                    min: a.min.min(arity.min),
+                    max: match (a.max, arity.max) {
+                        (Some(x), Some(y)) => Some(x.max(y)),
+                        _ => None,
+                    },
+                };
+            })
+            .or_insert(arity);
+    }
+    /// The arity a same-file definition of `sym` admits, if the checker could read it.
+    pub(super) fn file_arity(&self, sym: Symbol) -> Option<Arity> {
+        self.file_arity.get(&sym).copied()
     }
     /// The user-declared signature for `sym` from a `(sig …)` form, if any.
     pub(super) fn declared_sig(&self, sym: Symbol) -> Option<Sig> {

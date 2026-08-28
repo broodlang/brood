@@ -57,10 +57,18 @@
     (is (warns-about? "(sig wd (decimal -> decimal)) (defn wd (d) d) (defn p () (wd 1))"
           "expects decimal")))
 
-  (test "an unrecognised type name is still dropped, never guessed"
-    ;; The zero-false-positive contract: a typo in an annotation must not invent a
-    ;; constraint (and must not warn on its own).
-    (assert= (warns-of "(sig q (strng -> int)) (defn q (x) 1) (defn p () (q 42))") nil)))
+  (test "an unrecognised type name is REPORTED, never guessed (ADR-259)"
+    ;; The zero-false-positive contract still holds — a typo invents no constraint, so
+    ;; the call `(q 42)` is not flagged. What changed is that the typo itself is now
+    ;; said out loud: a declaration that is ignored when wrong is a gate that cannot
+    ;; fail, and a `sig` is read ahead of every other signature source.
+    (is (warns-about? "(sig q (strng -> int)) (defn q (x) 1) (defn p () (q 42))"
+          "sig q: unknown type `strng`"))
+    (refute (warns-about? "(sig q (strng -> int)) (defn q (x) 1) (defn p () (q 42))"
+              "q: argument 1"))
+    ;; A capitalised unknown name stays silent — that is an ability used as a type,
+    ;; whose module a single-file check may not have loaded (ADR-181/186).
+    (assert= (warns-of "(sig w (Shape -> int)) (defn w (x) 1) (defn p () (w 42))") nil)))
 
 (describe "sig: placement is load-bearing under BROOD_CONTRACTS=1"
   ;; `sig` is a pure declaration by default, so placement is free. With contracts
@@ -122,3 +130,71 @@
   (test "a :default impl makes the op accept any value — no demand (sound)"
     (assert= (warns-of "(defmodule ot7) (defrecord circle (r)) (defability Shape :sealed [circle] (area [self] :-> float)) (impl Shape circle (area [c] 1.0)) (impl Shape :default (area [_] 0.0)) (defn shout (s) (area s)) (defn c () (shout 5))")
       nil)))
+
+(describe "sig: a declaration must agree with what it annotates (ADR-259)"
+  ;; The file being checked is never loaded, so `arity_of` sees nothing for its own
+  ;; functions — which made a declared sig the ONLY arity source a same-file call had.
+  ;; A wrong one therefore *suppressed* the correct check: the call type-checked clean
+  ;; and died on its first run.
+  (test "a sig whose arity contradicts the definition is reported"
+    (is (warns-about? "(sig q3 (int -> int)) (defn q3 (a b) a)"
+          "declares 1 argument(s) but the definition takes 2")))
+  (test "…and the definition, not the sig, is what the call is checked against"
+    (is (warns-about? "(sig q3 (int -> int)) (defn q3 (a b) a) (defn c () (q3 5))"
+          "wrong number of arguments — expected 2, got 1")))
+  (test "a sig that merely narrows a multi-arm definition stays silent"
+    (refute (warns-about? "(sig f (int -> int)) (defn f ((a) a) ((a b) a))" "sig f:")))
+  (test "a sig for a name the file never defines is reported"
+    (is (warns-about? "(sig ghost (int -> int))" "nothing named `ghost` is defined here")))
+  (test "a same-file call is arity-checked at all"
+    (is (warns-about? "(defn f (x y) x) (defn c () (f 1))"
+          "wrong number of arguments — expected 2, got 1"))
+    (refute (warns-about? "(defn f (x y) x) (defn c () (f 1 2))" "wrong number"))))
+
+(describe "a parameter's type is its domain (ADR-261)"
+  ;; The old rule credited only unconditional demands, so a body that branches on what
+  ;; its argument *is* — the ordinary shape of Brood code — constrained nothing.
+  (test "a value no branch admits is flagged"
+    (is (warns-about? "(defn f (x) (if (string? x) (string/length x) (+ x 1))) (defn c () (f :kw))"
+          "f: argument 1 expects")))
+  (test "…and both admitted types stay silent"
+    (refute (warns-about? "(defn f (x) (if (string? x) (string/length x) (+ x 1))) (defn c () (f \"s\"))"
+              "f: argument"))
+    (refute (warns-about? "(defn f (x) (if (string? x) (string/length x) (+ x 1))) (defn c () (f 5))"
+              "f: argument")))
+  (test "a `when` body constrains nothing — it may not run"
+    (refute (warns-about? "(defn f (b x) (when b (string/length x))) (defn c () (f true 5))"
+              "f: argument")))
+  (test "a match's clause patterns are its domain"
+    (is (warns-about? "(defn f (x) (match x ((:ok v) v) ((:error e) e))) (defn c () (f 5))"
+          "f: argument 1 expects")))
+  (test "a destructuring head constrains the argument"
+    (is (warns-about? "(defn f ([a b]) (+ a b)) (defn c () (f 5))" "f: argument 1 expects")))
+  (test "guarded clauses give a multi-clause function its domain"
+    (is (warns-about? "(defn g ((x) :when (string? x) (string/length x)) ((x) :when (int? x) (+ x 1))) (defn c () (g :kw))"
+          "no clause accepts these arguments"))
+    (refute (warns-about? "(defn g ((x) :when (string? x) (string/length x)) ((x) :when (int? x) (+ x 1))) (defn c () (g 5))"
+              "no clause accepts")))
+  (test "an unguarded catch-all clause keeps every call silent"
+    (refute (warns-about? "(defn g ((x) :when (string? x) 1) ((x) x)) (defn c () (g :kw))"
+              "no clause accepts"))))
+
+(describe "a union of shapes is checkable (ADR-262/263)"
+  (test "a union of tuple shapes rejects a member of neither"
+    (is (warns-about? "(sig f ((or (tuple int) (tuple string)) -> any)) (defn f (t) t) (defn c () (f [true]))"
+          "expects (tuple int) | (tuple string)")))
+  (test "…and admits either alternative"
+    (refute (warns-about? "(sig f ((or (tuple int) (tuple string)) -> any)) (defn f (t) t) (defn c () (f [1]))"
+              "f: argument"))
+    (refute (warns-about? "(sig f ((or (tuple int) (tuple string)) -> any)) (defn f (t) t) (defn c () (f [\"s\"]))"
+              "f: argument")))
+  (test "a union of record shapes rejects a map matching neither"
+    (is (warns-about? "(sig f ((or (record :a int) (record :b int)) -> any)) (defn f (m) m) (defn c () (f {:zzz 1}))"
+          "expects {a: int} | {b: int}")))
+  (test "`(not T)` is a type a sig can name"
+    (is (warns-about? "(sig f ((not nil) -> any)) (defn f (x) x) (defn c () (f nil))"
+          "f: argument 1 expects"))
+    (refute (warns-about? "(sig f ((not nil) -> any)) (defn f (x) x) (defn c () (f 5))"
+              "f: argument")))
+  (test "a complement reads as a complement, not a tag dump"
+    (is (warns-about? "(defn f (x) (if (string? x) 1 (string/length x)))" "(not string)"))))

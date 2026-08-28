@@ -280,7 +280,7 @@
 ;; Linear in BOTH encoding regimes since ADR-213 (was 16.85x under UTF8=1, and effectively
 ;; free in ASCII the whole time — see the header's correction and its FIXED note).
 (defn inc-scan (k) (let (d (doc-of k)) (scan-all d "NEEDLE" 0 0)))
-(defn last-idx (k) (let (d (doc-of k)) (last-index-of d "NEEDLE")))
+(defn last-idx (k) (let (d (doc-of k)) (string/last-index-of d "NEEDLE")))
 
 ;; ---- run -------------------------------------------------------------------
 

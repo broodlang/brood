@@ -143,11 +143,11 @@ stands out at a glance (cumulative only tells you lifetime work). `mem` and
   "The table line for one `proc/info` map `p`. In tree view the map carries a
 `:depth`, which indents the NAME (clipped to its column so the rest stay aligned)."
   (let (depth (or (get p :depth) 0)
-        nm (observe-opt (get p :name) name)
+        nm (observe-opt (get p :name) ->string)
         nm (if (> depth 0) (observe-fit (str (string/repeat "  " depth) nm) 12) nm))
     (observe-cells (get p :id)
       nm
-      (observe-opt (get p :status) name)
+      (observe-opt (get p :status) ->string)
       (get p :mailbox)
       (observe-opt (get p :memory) observe-bytes->human)
       (observe-opt (get p :reductions) str)
@@ -173,9 +173,9 @@ the colours live in one place (`:observer/*`)."
 (`:name`/`:memory`/`:parent`) are omitted rather than shown as a placeholder."
   (str "  pid "
     (get p :id)
-    (let (nm (get p :name)) (if (nil? nm) "" (str " (" (name nm) ")")))
+    (let (nm (get p :name)) (if (nil? nm) "" (str " (" (->string nm) ")")))
     " · "
-    (let (s (get p :status)) (if (nil? s) "?" (name s)))
+    (let (s (get p :status)) (if (nil? s) "?" (->string s)))
     " · mailbox "
     (get p :mailbox)
     (let (m (get p :memory)) (if (nil? m) "" (str " · mem " (observe-bytes->human m))))
@@ -193,7 +193,7 @@ the colours live in one place (`:observer/*`)."
 `observe-node-info`), the live process count, and the `link` status indicator
 (`:ok` shows nothing; `:stale`/`:down` flag a slow/dropped remote link)."
   [(str " brood observer · node "
-     (name (get node :name))
+     (->string (get node :name))
      " · "
      nprocs
      " processes"
@@ -285,7 +285,7 @@ completion already works via `lineedit/lineedit-handle`'s keymap in `observe-com
 e.g. `  kill pid 7 (worker)? y/n`. The name is shown when the process has one."
   (str "  kill pid "
     (get c :id)
-    (let (nm (get c :name)) (if (nil? nm) "" (str " (" (name nm) ")")))
+    (let (nm (get c :name)) (if (nil? nm) "" (str " (" (->string nm) ")")))
     "? y/n"))
 
 ;; ---- the pure render core (no IO — the testable heart) ----------------------
@@ -323,7 +323,7 @@ the observer's testable core; `observe-loop` feeds it live data."
                      nprocs cap sel))
         footer (str (if paused "  PAUSED · space resume" "  space pause")
                  " · ↑/↓ select · t tree · s sort("
-                 (name sort)
+                 (->string sort)
                  ") · x kill · : eval · r refresh · q quit")
         ;; last row: the minibuffer (command mode), the kill confirm prompt, or the
         ;; help footer — each a list of ops so `append` splices it in.
@@ -836,7 +836,7 @@ two `(observe key)` calls with the same key share **one** window (named `spawn` 
 idempotent) while distinct keys get their own. Namespaced under `observer/` so it
 never collides with an app's own process names; any `key` — keyword, symbol, node
 name, string, number — is stringified and interned to that one keyword."
-  (keyword (str "observer/" (if (or (keyword? key) (symbol? key)) (name key) key))))
+  (keyword (str "observer/" (if (or (keyword? key) (symbol? key)) (->string key) key))))
 
 (defn observe (&optional (key :self))
   "Open the observer over this runtime's own processes in a **native GUI window**,

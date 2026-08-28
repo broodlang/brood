@@ -15813,6 +15813,14 @@ carve-outs:
    inside its own module. The **constructor keeps the type name** (`queue/queue`, the
    `defrecord`-generated one; the public empty constructor is the clean `queue/new`), mirroring
    `set/set`.
+
+   *Correction (2026-08-27):* the empty constructor shipped as **`queue/empty`**, not
+   `queue/new`, and `pq` and `multimap` followed it — three collections agreeing on `empty`.
+   That is the better name for a value type (it denotes the empty *value*, and two calls are
+   `=`), so the code is right and this paragraph was stale. `table/new` is deliberately NOT
+   renamed to match: a table is the one identity-mutable structure (ADR-107), so two calls
+   yield two *different* tables and `new` says exactly that. The rule is `empty` for a value,
+   `new` for an identity — not one word for all four.
 3. **A module holding two types splits**, because the un-prefixed operations would collide:
    `queue` (FIFO: `push`/`pop`/`peek`) splits from `pq` (min-priority: `insert`/`pop`/`peek`),
    co-existing as two modules.
@@ -17171,3 +17179,316 @@ and measured **+1.4 ms of a 20 ms boot**, against one comparison paid only by a 
 actually materialises. Verified by sabotage against a real lean build (`make release-brood`) and
 an image written by the dev-tools binary — forced true, `(require-one 'test)` succeeds; as
 written it is refused while `json` still materialises from the same file.
+
+## ADR-258 — `name` folds into `->string`: one spelling, bootstrapped in Brood, taken over by the ability
+
+**Status:** accepted and implemented, 2026-08-27. Supersedes the "call sites use `str` (number)
+or `->string`/`name` (symbol)" clause of ADR-239; relaxes ADR-227's "a 2-function `symbol/` does
+not earn a namespace" by removing the need for one.
+
+**Context.** `name` — the symbol/keyword → sigil-free spelling primitive — was a bare Rust
+builtin at root, and it is an ordinary English noun. ADR-166 reserves every shipped function, so
+a root-level `(defn name …)` raised; a module-level one was legal but captured the bare `name`
+that `defmodule`'s own template emitted, making a file's own header warn (`shadowtest/name:
+argument 1 expects … got symbol ((%root-module-name (quote shadowtest)))`) and so fail `nest
+check`'s zero-warning gate. `std/node.blsp` had already collided with it badly enough to need
+the `/name` root escape to reach past its own `name`.
+
+Three prior decisions had each looked at a piece of this and left it: ADR-227 rejected a
+`symbol/` namespace as too small to earn one, ADR-166 declared "define it in a module and it is
+yours" the answer, and ADR-239 kept `name` while deleting `symbol->string` beside it.
+
+**Decision.** There is no `name`. The operation is **`->string`**, the `Display` ability op that
+already existed — so a keyword now displays as its bare spelling: `(->string :foo)` is `"foo"`.
+`str` and `pr-str` are unchanged (`":foo"`), and `pr-str` must stay that way because it
+round-trips. The word `name` returns to users at both root and module scope.
+
+**The shape, which is the interesting part.** `->string` is defined **twice on purpose**, and
+neither copy is a `%`-prefixed second public name:
+
+1. `std/prelude/core.blsp` defines it as an ordinary Brood function over kernel natives
+   (`type-of`/`%eq`/`str`/`string/substring`). This is the bootstrap: the prelude's own
+   machinery — `defmodule`, `require`, package rooting, `defrecord` — needs it ~60 times
+   *before* `defability Display` has been evaluated.
+2. `defability Display` later **rebinds that same name** to the dispatcher, and the
+   `:keyword`/`:symbol` impls restate the sigil rule rather than delegating, because delegating
+   to a name that has just been rebound recurses forever. (It did, for one commit: the bulk
+   rename rewrote them into `(->string [k] (->string k))` — a silent hang, not a compile error.)
+
+`prelude_hygiene::bootstrap_and_ability_agree` pins both tiers to the same answers.
+
+**Cost, measured.** A direct primitive is 89 ms/1M; the ability dispatch is 601 ms/1M — ~6×,
+the cost class ADR-166 was written about. Accepted for library and user code. The prelude does
+not pay it: its calls run before the rebind. No `%name` primitive is kept, so there is no second
+name for one idea — the point of the exercise.
+
+**The hazard this moves rather than removes, recorded because it recurred immediately.** A
+prelude macro that emits a *bare* prelude name into user code is captured by any module defining
+that name. Renaming `name` to `->string` reproduced the identical failure one commit later
+against `std/text.blsp` and `std/decimal.blsp`, which both define their own `->string`. The `/`
+root escape is **not** the fix: the resolver that rewrites `/x` is a no-op for the root prelude
+(ADR-230), so an emitted `/->string` survives to runtime literally and is unbound — verified.
+`defmodule` now emits *no* conversion at all; `%record-module-doc!` and `%defmodule-provide`
+take a symbol and convert in their own bodies, where nothing can capture. **The rule: a prelude
+macro emits `%`-names and data, never a bare public verb.**
+
+**Consequences.** 235 call sites in `std/` + `tests/`, plus three pieces of Brood embedded in
+Rust *string literals* — `crates/nest/src/main.rs`, `crates/cli/tests/observe_attach.rs`,
+`crates/nest/tests/package_rooted_namespaces.rs` — which neither `nest check` nor the `.blsp`
+suite can see, and which failed one at a time as each gate was run. One user-visible behaviour
+change beyond the rename: a keyword rendered through `->string` loses its colon, so `csv/emit`
+now writes `b` where it wrote `:b`. Symbols are unaffected (`str` already gave `"foo"`).
+`%show-print-hook` keeps `:keyword`/`:symbol` on its native path, which is now load-bearing for
+*correctness* — routing them through `Display` would strip the colon from everything printed.
+
+## ADR-259 — An annotation that is ignored when wrong is a gate that cannot fail
+
+**Status:** accepted and implemented, 2026-08-27.
+
+**Context.** A `(sig …)` is read *first* by the call checker, ahead of the primitive table,
+the curated table and inference. That authority was unconditional and unverified: every
+`(sig …)` shape the parser could not read was discarded in silence. Four of them, all
+measured on `0.14.1` as `exit 0` with no diagnostic:
+
+```lisp
+(sig q1 (strng -> int))          ; a misspelled base type    → the parameter becomes `any`
+(sig q2 ((tupel int) -> int))    ; a misspelled constructor  → the same
+(sig q3 (int -> int))            ; …beside (defn q3 (a b) …) — sig and defn disagree
+(sig q4 (int -> int))            ; q4 is never defined at all
+```
+
+The third is not a missed check but a **suppressed** one. The file being checked is never
+loaded, so `sigs::arity_of` — which reads the global table — sees nothing for the file's own
+functions; the declared sig was therefore the *only* arity source a same-file call had, and a
+wrong one made a wrong call look right:
+
+```
+$ brood --check probe.blsp   → exit 0
+$ brood probe.blsp           → arity error: q3: expected 2 arguments, got 1
+```
+
+Behind that sat a second absence: a call to a function defined **in the same file** had no
+arity check at all. That is the cheapest and highest-hit-rate check in the system, missing
+exactly where a fresh edit is.
+
+**Decision.** *The definition is the authority; the declaration must be readable and must
+agree with it.*
+
+1. `Ctx::file_arity` records what each def site's own parameter list admits — the interval
+   hull across arms, exactly as `arity_of` computes for a loaded closure — and the call check
+   reads it **ahead of** any declared sig. What a call meets at run time is the definition.
+2. A new pass (2.85) reports an unreadable or contradicted declaration: an unknown type name
+   or constructor, a fixed arity provably disjoint from the definition's, and a sig for a name
+   the file never defines.
+
+**The one deliberate silence.** An unknown *capitalised* name stays silent: an ability used
+as a type (ADR-181/186) resolves by bare name, and a single-file `brood --check` only knows
+the abilities the file itself declares. Ability names are capitalised and no base type is, so
+the split is exact for well-named code and false-positive-free for the rest.
+
+**Only a provably-disjoint arity is reported.** A multi-arm `defn` annotated with one arm's
+arrow, or an `&optional` definition against a fixed-arity sig, *overlaps* — not provably
+wrong, so silent. The no-false-positive rule is unchanged.
+
+**Consequences.** `nest check std/**/*.blsp tests/**/*.blsp` stayed at zero: std's 34 hand-
+written sigs are all well-formed and agree with their definitions. One existing test asserted
+the old fail-open behaviour for a malformed marker order (`(int & number &optional string ->
+int)`) and now asserts the diagnostic instead. This is the same class as the two gate failures
+of the same day — a curated sig under a retired name silencing the checker (`66656dcf`), and
+`doc_refs` collapsing two identically-numbered entries so every citation "resolved" — and it
+matters more now that the KI-71 remedy (catching a reversed-args rename) *depends* on declared
+sigs.
+
+## ADR-260 — Every "return early if this is not the shape I expect" is a coverage boundary; gate the walk's totality
+
+**Status:** accepted and implemented, 2026-08-27.
+
+**Context.** KI-67 (`try` bodies) and KI-70 (vector and map literals) were the same bug at two
+depths: a `return`-early line in the checker's walk behind which *no lint ran at all*. KI-70
+meant the entire Hiccup-shaped style — `std/editor/*`, every UI spec, hive's web layer — was
+unchecked, and it surfaced a dead call site that had been raising `unbound symbol` on every
+invocation of the MCP `callers` tool. Both were found by accident, weeks apart.
+
+A lint that is *suppressed* leaves a trace you can grep for. A lint that is never *reached*
+leaves nothing. The fix for each instance was one line; the fix for the class is a gate.
+
+**Decision.** A table (`REACH_CASES`) plants an unresolvable name in every code position of
+every `SPECIAL_HEAD` entry and every container literal, and asserts what the walk must do with
+it — reported, or (for `quote` / `comment`, which hold data) deliberately not. A second test
+requires every `SPECIAL_HEAD` entry to *have* a case, so a head added later cannot inherit
+unwatched reach: adding one fails the suite until someone says what its body is for.
+
+The gate runs both walks — `check_file` (whole-file facts, what `nest check` runs) and
+`check_form` on the expanded fragment (what the REPL, the LSP and the MCP `check` tool run).
+That is not thoroughness: the gate's own first sabotage attempt **passed**, because file mode
+caught the planted name through an unrelated whole-file pass while the arm under test did
+nothing.
+
+**A second find, from the same principle applied to depth.** Writing the domain walk's
+deep-body test (a 20 000-deep body inside a `(def n (fn …))`, built by construction — the
+reader caps nesting at 256, a macro expansion does not) aborted the process. Not in the new
+code: the **non-tail-recursion lint's** `walk` recursed unguarded. The 2026-07-23 host-panic
+pass had hardened that lint's *entry point* and not the recursion that descends a function's
+body, so the guard sat one frame above the loop that needed it. Same shape as the coverage
+class: the protection was written where the walk *starts*, not where it *recurses*.
+
+**What it found immediately.** `quasiquote` was skipped whole — but a template's `~` / `~@`
+escapes are ordinary code, evaluated at expansion time in the macro's own scope, so a rename
+that killed a name inside `~(…)` left every gate green. The template stays data; only the
+escapes are walked, with quasiquote depth tracked so an inner template's `~` is left alone.
+(An escape nested *two* templates deep still isn't reached — silence there is sound, and the
+shape does not occur in the tree.)
+
+**Consequences.** Sabotage-verified by reverting quasiquote to `SkipBody`: `expected
+report=true for `zzz-qq` … got []`. Zero new warnings across `std/` + `tests/` and the four
+corpora.
+
+## ADR-261 — A parameter's type is its domain: credit a guarded use inside its guard, and union the branches
+
+**Status:** accepted and implemented, 2026-08-27. Supersedes the "a guarded use never
+constrains a param" rule of ADR-190.
+
+**Context.** Inference credited only *unconditional* demands: a use inside any branch
+constrained nothing, because crediting it outright would flag a caller whose value never
+reaches that branch. Sound, and it left the ordinary shape of Brood code invisible:
+
+```lisp
+(defn f (x) (if (string? x) (string/length x) (+ x 1)))
+(f :kw)   ; neither branch admits a keyword — and nothing said so
+```
+
+The same absence covered a head destructuring (`(defn f ([a b]) …)`), a `match`-shaped
+dispatch, and every multi-clause definition — including the `:when` clause guards the language
+had just grown (ADR-226).
+
+**Decision.** Credit a guarded use *within its guard*, and union the alternatives:
+
+> `D(if test then else)` = `D(test) ∩ ( (G ∩ D(then)) ∪ (¬G ∩ D(else)) )`
+
+where `G` is the parameter slice the test proves — `guards::guard_assertion`, whose `ty` is a
+**necessary** condition for the test being true, which is exactly what this needs — and `¬G`
+its complement, or `any` for a `then_only` guard that proves nothing when false. With no guard
+on that parameter both slices are `any`, so the rule degrades to `D(then) ∪ D(else)`:
+"whichever branch runs, one of them demands this."
+
+Three shapes fall out of the same rule:
+
+- **`match`** — the compiler's no-clause-matched branch is `(throw [:match-error …])`, an
+  execution no caller can want, so its domain is `never`; the clause patterns then add up to
+  the function's domain instead of vanishing.
+- **Multi-arm functions** — each arm is its own signature (the inferred counterpart of
+  ADR-116's declared overloads), and a call is ruled out only when *every* arity-relevant arm
+  rejects it.
+- **`:when` clause guards** — a guarded multi-clause definition **lowers** to a single
+  variadic `fn` over `match*`, so by the time the expanded tree exists there are no clauses
+  left to read, only a rest-list being destructured. The *un-expanded* form still says what
+  each clause takes, so that is where this reads them.
+
+**Soundness.** Every combinator widens or is exact: an unrecognised form is `any`, sequenced
+forms intersect (both really do run), alternatives union, and only a guard slice narrows —
+where the guard makes it a fact. The result is a *superset* of the true domain, so an argument
+disjoint from it is disjoint from the truth: it genuinely errors.
+
+**The trap this walked into, recorded because the gate is what caught it.** A prelude closure
+keeps its body **as written** — the checker meets `(cond …)`, `(when …)` and user macros
+verbatim there, not the `if` chains the file path sees. Reading an unrecognised head as an
+ordinary call (every operand evaluated) made `type-matches?` demand a `seqable` first
+argument, because `(first t)` sits in a clause body: 21 false positives across `tests/`, from
+one missing case. `cond`/`when`/`unless` now go through the same rule, `case`/`match` credit
+only their scrutinee, and an unexpanded **macro** call demands nothing at all — its operands
+are syntax, not necessarily code.
+
+**Verified against the runtime, not against itself.** The soundness oracle gained a third
+facet: for a table of definitions × a spread of argument values, *call* the function — and
+whenever the call succeeds, assert the argument is a member of the inferred domain. A call
+that runs is proof the value was in the true domain, so a domain excluding it is exactly a
+false positive. 135 probes for single-arm domains, 36 for clause domains. Sabotage-verified
+by intersecting the branches instead of unioning them: `(and (string? x) (string/length x))`
+accepts `5` at run time, and the broken rule inferred `string`.
+
+**A trap that oracle walked into first, worth recording.** `sig_of`'s inference memo is a
+**thread-local cleared per `check_file`**. A test that calls `sig_of` directly across several
+fresh images therefore reads the *previous* image's answer — which is how the new oracle
+"found" an unsoundness that was its own: four different definitions all reported the same
+domain. Any tool reaching for `sig_of` outside a check pass must clear the memo itself.
+
+**Consequences.** Zero warnings across `std/` + `tests/` and the four corpora. The
+"guarded-use false-positive class" that ADR-190 deferred is closed, not by ignoring guarded
+uses but by scoping them.
+
+## ADR-262 — A union keeps its terms
+
+**Status:** accepted and implemented, 2026-08-27.
+
+**Context.** A `Ty` is a set of values, and a set of values is a union of terms — but the
+representation held exactly one term: a tag bitset plus one refinement per slot (arrow,
+element, `map<K,V>`, record fields, tuple, four literal kinds). Union therefore *widened*: two
+different refinements in the same slot became "any of that tag". Sound, and it made the
+tagged-union idiom — `{:ok v}` or `{:error e}`, the shape most Brood code returns — invisible.
+Measured, each of these was checked precisely alone and silently ignored inside an `(or …)`:
+
+```lisp
+(sig t ((or (tuple int) (tuple string)) -> any))       (t [true])     ; silent
+(sig r ((or (record :a int) (record :b int)) -> any))  (r {:z 1})     ; silent
+(sig v ((or (vector int) (vector string)) -> any))     (v [true])     ; silent
+```
+
+**Decision.** A `Ty` carries an optional tail of **alternative terms**. The single-term case —
+the overwhelming majority, and every `const` lattice point — is byte-identical to before, down
+to the widening merge, so nothing that already had one representable term pays for this. A
+union that *cannot* merge exactly keeps both terms instead of widening.
+
+Invariants, all restored by `from_terms`: every alternative is itself alts-free (two levels,
+not a tree) and non-`never`; no term is a subtype of another; and at most `MAX_TY_TERMS` (4)
+terms, beyond which the remainder collapses by the old widening merge — so a runaway fixpoint
+still cannot grow a type without limit (the KI-13 property).
+
+The five set operations quantify over terms: union merges-and-absorbs, intersection
+distributes, complement is De Morgan (`¬(A ∪ B)` = `¬A ∩ ¬B`), subtyping asks that each of
+`self`'s terms fit *some* term of `other`, and disjointness that every pair is disjoint.
+Equality and hashing are **set** equality: `A ∪ B` and `B ∪ A` are one set, and every memo
+keyed on a `Ty` depends on them agreeing.
+
+**Every refinement accessor reports only for a single term.** `as_arrow`, `elem_ty`,
+`record_fields`, `tuple_elems`, the literal sets and `map_kv` return `None` for a union — a
+refinement that holds for one term does not hold for the union, and reporting it would be the
+unsound reading the old widening avoided by throwing the refinement away. This is what let the
+change land without touching a single consumer: they see exactly what a widened type showed
+them. The relations are what got sharper.
+
+**What is still approximate.** The complement of a *refined* term widens to its tag ("not
+exactly this tuple" has no representation), so negation is exact only on flat terms.
+Subtyping is sound but not complete: a term covered jointly by two of `other`'s terms but by
+neither alone reads as "not a subtype", which defers rather than warns. Both are the safe
+direction.
+
+**Consequences.** Zero warnings across `std/` + `tests/` and the four corpora; the whole-tree
+`nest check` stays at 1.7 s. Diagnostics now name both alternatives — `expects (tuple int) |
+(tuple string), got (tuple true)`.
+
+## ADR-263 — `(not T)`: the complement, sayable at last
+
+**Status:** accepted and implemented, 2026-08-27.
+
+**Context.** The lattice has had `negate`/`difference` since ADR-023 — the else-branch of a
+type guard *is* a complement, and the checker has always computed one — but the surface
+grammar had no way to write one. So the most-wanted annotation in a nil-carrying language,
+"anything but nil", could not be said.
+
+**Decision.** `(not T)` joins `(or …)` / `(and …)` in the type grammar, denoting the
+complement; `(and any (not nil))` is the idiom. The runtime `type-matches?` learns the same
+clause, so a `sig!` contract agrees with the checker. Exactly one argument, matching the
+lattice operation; a multi-argument `(not A B)` is reported as malformed rather than guessed
+(ADR-259).
+
+Complements also **render** as complements. `expects string, got nil | bool | number | symbol
+| keyword | pair | vector | fn | macro | native | map | ref | pid | rope | socket | subprocess
+| table | bytes | set` was a real diagnostic — that is `¬string` spelled out. It now reads
+`(not string)`: parenthesised to match the grammar, and to read as a *name* inside a message
+rather than as a negated sentence. Only for a genuinely small complement (at most three
+omitted tags, well past half the universe), so an ordinary wide union still renders as a union.
+
+**A hazard worth stating.** The runtime contract's fail-open rule — an unknown type name
+accepts anything — inverts under a complement: `(not strng)` would accept nothing. That is
+now caught statically by ADR-259's fail-closed sig validation, which is the reason the two
+shipped together.

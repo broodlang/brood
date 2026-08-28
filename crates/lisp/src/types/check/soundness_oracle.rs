@@ -145,3 +145,113 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         assert!(bad.is_empty(), "FALSE POSITIVE on correct `{src}`: {bad:?}");
     }
 }
+
+/// The argument values every domain case is probed with — one per tag family the
+/// lattice distinguishes, so a domain that wrongly excludes any of them is caught.
+const PROBE_ARGS: [&str; 9] = [
+    "5",
+    "1.5",
+    "\"s\"",
+    ":k",
+    "nil",
+    "true",
+    "[1 2]",
+    "(list 1 2)",
+    "{:a 1}",
+];
+
+#[test]
+fn an_inferred_parameter_domain_over_approximates_the_real_one() {
+    // Facet (III), for ADR-261: a parameter's inferred **domain** must contain every
+    // value the function actually accepts. The runtime is the oracle — if a call
+    // succeeds, that argument was in the true domain, so a domain excluding it would
+    // make the checker warn on a working call.
+    //
+    // The cases are the shapes ADR-261 introduced (branch unions, guard slices,
+    // `match` patterns, destructuring, `cond`, short-circuits, `let` aliases), where
+    // an *under*-approximation would hide.
+    let cases = [
+        "(defn f (x) (if (string? x) (string/length x) (+ x 1)))",
+        "(defn f (x) (if (nil? x) 0 (+ x 1)))",
+        "(defn f (x) (if (string? x) 1 2))",
+        "(defn f (x) (when (string? x) (string/length x)))",
+        "(defn f (x) (unless (string? x) 0))",
+        "(defn f (x) (cond (nil? x) 0 (string? x) (string/length x) else 1))",
+        "(defn f (x) (and (string? x) (string/length x)))",
+        "(defn f (x) (or (nil? x) (+ x 1)))",
+        "(defn f (x) (match x ((:ok v) v) (_ 0)))",
+        "(defn f (x) (let (y x) (if (int? y) (+ y 1) 0)))",
+        "(defn f (x) (do (str x) (if (int? x) (+ x 1) 0)))",
+        "(defn f (x) (if (and (int? x) (> x 0)) (+ x 1) 0))",
+        "(defn f (x) (str x))",
+        "(defn f (x) (+ x 1))",
+        "(defn f (x) x)",
+    ];
+    for def in cases {
+        for arg in PROBE_ARGS {
+            let mut interp = crate::Interp::new();
+            interp.eval_str(def).expect("def");
+            let call = format!("(f {arg})");
+            // Only a call that RUNS makes a claim: the value was in the true domain.
+            if interp.eval_str(&call).is_err() {
+                continue;
+            }
+            // The inference memo is a *thread-local* cleared per `check_file`; this
+            // oracle calls `sig_of` directly across many fresh images, so it must clear
+            // it itself or case N reads case N-1's answer (which is how this test first
+            // "found" an unsoundness that was its own).
+            super::sigs::clear_sig_memo();
+            let Some(sig) = super::sigs::sig_of(&interp.heap, value::intern("f")) else {
+                continue; // no inferred signature → no claim
+            };
+            let Some(domain) = sig.params.first() else {
+                continue; // params-less (return-only) sig → no claim
+            };
+            let v = interp.eval_str(arg).expect("arg evaluates");
+            assert!(
+                value_member_of(&interp.heap, v, domain),
+                "UNSOUND DOMAIN: `{def}` accepts {arg} at run time, but its inferred \
+                 parameter domain is `{domain}` — the checker would warn on a working call",
+            );
+        }
+    }
+}
+
+#[test]
+fn an_inferred_clause_domain_over_approximates_the_real_one() {
+    // The same claim for a multi-arm definition, where the domain is per clause and a
+    // call is ruled out only if EVERY arity-relevant arm rejects it (ADR-261). A value
+    // the runtime accepts must be admitted by at least one arm of that arity.
+    let cases = [
+        "(defn f ((x) :when (string? x) (string/length x)) ((x) :when (int? x) (+ x 1)))",
+        "(defn f ((x) :when (string? x) 1) ((x) 2))",
+        "(defn f ((x) (str x)) ((x y) (str x y)))",
+        "(defn f ((x) :when (nil? x) 0) ((x) :when (vector? x) (count x)) ((x) 9))",
+    ];
+    for def in cases {
+        for arg in PROBE_ARGS {
+            let mut interp = crate::Interp::new();
+            interp.eval_str(def).expect("def");
+            if interp.eval_str(&format!("(f {arg})")).is_err() {
+                continue;
+            }
+            super::sigs::clear_sig_memo(); // see the note in the sibling test
+            let Some(arms) = super::sigs::infer_overload_of(&interp.heap, value::intern("f"))
+            else {
+                continue;
+            };
+            let v = interp.eval_str(arg).expect("arg evaluates");
+            let admitted = arms.iter().filter(|s| s.params.len() == 1).any(|s| {
+                s.params
+                    .first()
+                    .is_none_or(|d| value_member_of(&interp.heap, v, d))
+            });
+            assert!(
+                admitted,
+                "UNSOUND CLAUSE DOMAIN: `{def}` accepts {arg} at run time, but no \
+                 1-argument clause's inferred domain admits it: {:?}",
+                arms.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            );
+        }
+    }
+}

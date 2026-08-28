@@ -292,12 +292,12 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // Search → int: all have branchy/recursive/optional-param bodies.
     //   index-of      — multi-clause cond over collection type; &optional from.
     //   index-where   — tail-recursive helper; 1-ary predicate.
-    //   last-index-of — &optional before param; infer_sig bails.
+    //   string/last-index-of — &optional before param; infer_sig bails.
     put("index-of", Sig::new(vec![any, any], int));
     // `seq/` since ADR-227 — keyed qualified for the same reason as `math/abs` above: a
     // bare key here would suppress the unbound lint on a name that no longer exists bare.
     put("seq/index-where", Sig::new(vec![cb1, seq], int));
-    put("last-index-of", Sig::new(vec![str_ty, str_ty], int));
+    put("string/last-index-of", Sig::new(vec![str_ty, str_ty], int));
     m
 });
 
@@ -380,6 +380,12 @@ thread_local! {
     /// per file by [`clear_sig_memo`]. Stores the final `Option<Sig>` (including a
     /// deliberate `None` for "inferred nothing"), never an in-progress cycle result.
     static SIG_MEMO: RefCell<HashMap<Symbol, Option<Sig>>> = RefCell::new(HashMap::new());
+
+    /// The same memo for **multi-arm** inference ([`infer_overload_of`]) — a separate
+    /// table because the two answer different questions about the same name (one arm's
+    /// signature vs every arm's), and a multi-arm closure has no single `Sig` to cache.
+    static OVERLOAD_MEMO: RefCell<HashMap<Symbol, Option<Vec<Sig>>>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Reset the per-pass inference memo. `check_file` calls this at the start of each file so
@@ -387,6 +393,7 @@ thread_local! {
 /// so an edit re-infers rather than serving a stale cached sig.
 pub(super) fn clear_sig_memo() {
     SIG_MEMO.with(|m| m.borrow_mut().clear());
+    OVERLOAD_MEMO.with(|m| m.borrow_mut().clear());
 }
 
 /// Max cross-function depth for return-type inference. Tier-2 inference recurses
@@ -467,6 +474,150 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     result
 }
 
+/// Every arm of a **multi-arm** closure, as its own signature — the inferred
+/// counterpart of a declared overload (`(sig f (and (int -> int) (bool -> bool)))`).
+///
+/// A multi-arm closure has no single signature, so [`infer_sig`] falls back to a
+/// params-less return-only sig for one and a call's arguments go unchecked. But each
+/// *arm* does have one, and the runtime picks an arm by arity and (for a `:when`
+/// guard, which lowers into the arm's body) by guard — so a call whose arguments no
+/// arm of the matching arity accepts errors as surely as a single-arm mismatch:
+///
+/// ```lisp
+/// (defn g ((x) :when (string? x) (string/length x))
+///         ((x) :when (int? x)    (+ x 1)))
+/// (g :kw)   ; no clause takes a keyword
+/// ```
+///
+/// `None` for a single-arm closure (that is [`infer_sig`]'s job) or a non-closure.
+/// The call-site check requires *every* arity-relevant arm to reject before it warns
+/// (see `walk::overload_arg_mismatch`), so an arm whose domain stays `any` — the
+/// common case — keeps the whole call silent.
+pub(super) fn infer_overload_of(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
+    if let Some(cached) = OVERLOAD_MEMO.with(|m| m.borrow().get(&sym).cloned()) {
+        return cached;
+    }
+    let _guard = InferGuard::enter(sym)?;
+    let result = infer_overload_inner(heap, sym);
+    OVERLOAD_MEMO.with(|m| m.borrow_mut().insert(sym, result.clone()));
+    result
+}
+
+fn infer_overload_inner(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
+    let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
+        return None;
+    };
+    let closure = heap.closure(cid);
+    if closure.arms.len() < 2 {
+        return None;
+    }
+    let self_name = closure.name;
+    let mut sigs = Vec::with_capacity(closure.arms.len());
+    for arm in closure.arms.iter() {
+        // A rest/optional arm's parameters don't map 1:1 to argument positions, so it
+        // can't be checked positionally — and one unreadable arm makes the *set*
+        // unusable (the check needs every arm to reject before it warns).
+        if !arm.optionals.is_empty() || arm.rest.is_some() {
+            return None;
+        }
+        let params: Vec<Symbol> = arm.params.clone();
+        let param_tys = param_domains(heap, &arm.body, &params, &Ctx::default());
+        let mut ctx = match self_name {
+            Some(name) => Ctx::default().with_inferring_self(name),
+            None => Ctx::default(),
+        };
+        for &p in &params {
+            ctx = ctx.bind(p, Some(Ty::ANY));
+        }
+        let ret = arm
+            .body
+            .last()
+            .and_then(|&tail| expr_ty(heap, tail, &ctx))
+            .unwrap_or(Ty::ANY);
+        sigs.push(Sig::new(param_tys, ret));
+    }
+    Some(sigs)
+}
+
+/// The same, read from a **form** rather than a loaded closure — the same-file
+/// counterpart (`check_file` Pass 2.8), where the file being checked is not loaded.
+pub(super) fn infer_overload_from_form(heap: &Heap, fn_form: Value, ctx: &Ctx) -> Option<Vec<Sig>> {
+    let items = super::walk::list_items(heap, fn_form)?;
+    if !matches!(items.first(), Some(&Value::Sym(s)) if super::walk::is_fn_head(s)) {
+        return None;
+    }
+    if !crate::eval::macros::fn_is_arity_multi_clause(heap, &items) {
+        return None;
+    }
+    let forms = &items[1..];
+    let forms = match forms.first() {
+        Some(Value::Str(_)) if forms.len() > 1 => &forms[1..],
+        _ => forms,
+    };
+    infer_overload_from_clauses(heap, forms, ctx)
+}
+
+/// The clause list of a multi-clause `fn`/`defn`, as one signature per clause.
+///
+/// Taken as a *slice of clauses* rather than a form because the surface `defn` is
+/// where this fact is legible: a `:when`-guarded multi-clause definition **lowers**
+/// to a single variadic `fn` over `match*` (ADR-226), so by the time the expanded
+/// tree exists there are no clauses left to read — only a rest-list being
+/// destructured. The un-expanded form still says exactly what each clause takes.
+pub(super) fn infer_overload_from_clauses(
+    heap: &Heap,
+    clauses: &[Value],
+    ctx: &Ctx,
+) -> Option<Vec<Sig>> {
+    let mut sigs = Vec::with_capacity(clauses.len());
+    for &clause in clauses {
+        let parts = super::walk::list_items(heap, clause)?;
+        let plist = *parts.first()?;
+        // Same restriction as the loaded path: a variadic/optional arm has no
+        // positional signature, and one unreadable arm makes the set unusable.
+        let raw = match plist {
+            Value::Vector(id) => heap.vector(id).to_vec(),
+            _ => super::walk::list_items(heap, plist).unwrap_or_default(),
+        };
+        if raw.iter().any(|&it| {
+            matches!(it, Value::Sym(s)
+                if value::symbol_is(s, kw::AMP)
+                    || value::symbol_is(s, kw::AMP_OPTIONAL)
+                    || value::symbol_is(s, kw::AMP_REST))
+        }) {
+            return None;
+        }
+        let params = super::walk::fn_params(heap, plist);
+        // A `:when` guard on the clause head (ADR-226) — `(params :when guard body…)`.
+        // The clause runs only for arguments its guard admits, so that is exactly the
+        // clause's domain, intersected with whatever its body demands. This is where a
+        // guarded multi-clause `defn` gets its argument types from, with no annotation:
+        // each clause contributes its guard, and a call no clause admits raises
+        // `match*`'s no-match at run time.
+        let guarded = matches!(parts.get(1), Some(&Value::Keyword(k))
+            if value::symbol_name_ref(k) == "when");
+        let (guard, body): (Option<Value>, Vec<Value>) = if guarded {
+            (parts.get(2).copied(), parts.get(3..)?.to_vec())
+        } else {
+            (None, parts[1..].to_vec())
+        };
+        if body.is_empty() {
+            return None;
+        }
+        let mut param_tys = param_domains(heap, &body, &params, ctx);
+        if let Some(g) = guard {
+            let scope = DomainScope {
+                shadowed: HashSet::new(),
+                aliases: HashMap::new(),
+            };
+            let (then_slice, _) = guard_slices(heap, g, &params, &scope, ctx);
+            param_tys = meet(param_tys, then_slice);
+        }
+        sigs.push(Sig::new(param_tys, Ty::ANY));
+    }
+    (sigs.len() >= 2).then_some(sigs)
+}
+
 fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
         return None;
@@ -498,13 +649,13 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
         }
     }
 
-    // Tier 1.5: parameters from **unconditional** type-demands across the whole
-    // body — the sound generalisation of Tier 1 beyond a single top-level call
-    // (a `do`, a nested call argument, a `let`-RHS). A param used only inside a
-    // branch/guard is left `ANY` (see `collect_param_demands`), so this cannot
-    // produce the guarded-use false positive. Params with no demand stay `ANY`,
-    // recovering the old return-only behaviour exactly.
-    let param_tys = collect_param_demands(heap, &arm.body, &params);
+    // Tier 1.5: each parameter's **domain** across the whole body — the union over
+    // the body's possible executions, each branch credited only within the guard
+    // that selects it (see [`param_domains`]). Generalises Tier 1 beyond a single
+    // top-level call, and reaches the guarded uses the old unconditional-demand rule
+    // had to ignore. Params nothing constrains stay `ANY`, recovering the return-only
+    // behaviour exactly.
+    let param_tys = param_domains(heap, &arm.body, &params, &Ctx::default());
 
     // Tier 2: sound return-only inference. Bind parameters to `ANY` (in scope, no
     // constraint) and read the body tail's type — the return, unconditionally.
@@ -650,14 +801,14 @@ pub(super) fn infer_return_from_form(
     ret
 }
 
-/// A single-arity file function's inferred **parameter demands**, read from its
-/// `(fn (params) body…)` form (ADR-190) — each param's unconditional type demand across the
-/// body (see [`collect_param_demands`]). `None` for a multi-arity / malformed / no-param fn
-/// (no single demand to pin). **Sound for caller-flagging:** `collect_param_demands`
-/// under-constrains (a superset of the true valid-argument type), so an argument disjoint from
-/// a demand is disjoint from the truth too — it genuinely errors at runtime, never a false
+/// A single-arity file function's inferred **parameter domains**, read from its
+/// `(fn (params) body…)` form (ADR-190) — the set of values each parameter can be called
+/// with (see [`param_domains`]). `None` for a multi-arity / malformed / no-param fn (no
+/// single parameter list to describe). **Sound for caller-flagging:** the domain
+/// over-approximates (a superset of the true valid-argument type), so an argument disjoint
+/// from it is disjoint from the truth too — it genuinely errors at runtime, never a false
 /// positive. The companion of [`infer_return_from_form`] (which yields the return).
-pub(super) fn infer_params_from_form(heap: &Heap, fn_form: Value) -> Option<Vec<Ty>> {
+pub(super) fn infer_params_from_form(heap: &Heap, fn_form: Value, ctx: &Ctx) -> Option<Vec<Ty>> {
     let items = super::walk::list_items(heap, fn_form)?;
     if !matches!(items.first(), Some(&Value::Sym(s)) if super::walk::is_fn_head(s)) {
         return None;
@@ -695,155 +846,406 @@ pub(super) fn infer_params_from_form(heap: &Heap, fn_form: Value) -> Option<Vec<
     if body.is_empty() {
         return None;
     }
-    Some(collect_param_demands(heap, &body, &params))
+    Some(param_domains(heap, &body, &params, ctx))
 }
 
-/// Collect each parameter's **unconditional** type demand across the whole body:
-/// the type a known-sig callee requires of a parameter passed *directly* in a
-/// position guaranteed to execute on every call — a call argument, a `do` form, a
-/// `let`-binding RHS or body, an `if`/`when`/`cond`/`case`/`match` *test*, an
-/// `and`/`or` *first* operand. Positions gated by a branch or guard (branch arms,
-/// `and`/`or` tails, `try` bodies, nested `fn` bodies, quoted forms) are skipped —
-/// so a guarded use like `(if (string? x) (str x) (+ x 1))` never constrains `x`
-/// (sound: no false positive). Multiple demands on one param intersect; a param
-/// shadowed by an inner `let`/`fn` binder is excluded within that scope; params
-/// with no unconditional demand stay `ANY`.
-fn collect_param_demands(heap: &Heap, body: &[Value], params: &[Symbol]) -> Vec<Ty> {
-    let mut tys = vec![Ty::ANY; params.len()];
-    let shadowed: HashSet<Symbol> = HashSet::new();
-    // Every top-level body form runs unconditionally (sequenced, like a `do`).
+// ---- parameter DOMAINS: the union over a body's possible executions ----
+
+/// One parameter's slot in a domain vector, indexed like `params`.
+type Domain = Vec<Ty>;
+
+/// The scope facts the domain walk carries: which names an inner binder shadows,
+/// and which `let`-binders **alias** a parameter. The alias table is load-bearing:
+/// the `match` lowering binds the scrutinee to a fresh `m__28` and tests *that*, so
+/// without it no clause guard would ever reach the parameter it came from.
+#[derive(Clone)]
+struct DomainScope {
+    shadowed: HashSet<Symbol>,
+    aliases: HashMap<Symbol, usize>,
+}
+
+/// Each parameter's **domain** (ADR-261): the set of values for which this body can run to
+/// completion, over-approximated. The successor to the unconditional-demand rule,
+/// and the piece that makes an inferred parameter type describe a function's actual
+/// shape instead of only its straight-line uses.
+///
+/// The old rule credited only *unconditional* demands — a use inside any branch
+/// constrained nothing, because crediting it outright would flag a caller whose
+/// value never reaches that branch. That left the ordinary shape of Brood code
+/// invisible:
+///
+/// ```lisp
+/// (defn f (x) (if (string? x) (string/length x) (+ x 1)))
+/// (f :kw)   ; neither branch admits a keyword — and nothing said so
+/// ```
+///
+/// The fix is not to credit a guarded use unconditionally but to credit it *within
+/// its guard*, and to union the alternatives:
+///
+/// > `D(if test then else)` = `D(test) ∩ ( (G ∩ D(then)) ∪ (¬G ∩ D(else)) )`
+///
+/// where `G` is the parameter slice the test proves ([`guards::guard_assertion`],
+/// whose `ty` is a **necessary** condition for the test being true — exactly what
+/// this needs) and `¬G` its complement, or `any` for a `then_only` guard that proves
+/// nothing when false. With no guard on this parameter both slices are `any`, so the
+/// rule degrades to `D(then) ∪ D(else)` — "whichever branch runs, one of them
+/// demands this" — which is itself sound, and is what catches the example above.
+///
+/// **Soundness.** Every combinator widens or is exact: an unrecognised form is
+/// `any`, sequenced forms intersect (both really do run), alternatives union, and
+/// only a guard slice narrows — where the guard makes it a fact. So the result is a
+/// *superset* of the true domain, and an argument disjoint from it is disjoint from
+/// the truth: it genuinely errors. Never a false positive.
+fn param_domains(heap: &Heap, body: &[Value], params: &[Symbol], ctx: &Ctx) -> Domain {
+    let scope = DomainScope {
+        shadowed: HashSet::new(),
+        aliases: HashMap::new(),
+    };
+    // The body's forms are sequenced: all of them run.
+    let mut acc = any_domain(params.len());
     for &form in body {
-        collect_demands(heap, form, params, &shadowed, &mut tys);
+        acc = meet(acc, domain_of(heap, form, params, &scope, ctx));
     }
-    // A conflicting set of unconditional demands intersects to NEVER (the function
-    // could never be called successfully). Rather than flag every caller, drop such
-    // a param back to `ANY` — conservative, and avoids a surprising all-callers warning.
-    for t in tys.iter_mut() {
+    // A parameter whose demands conflict to `never` could never be called
+    // successfully at all. Rather than flag every caller, hand back `any` — the
+    // same conservative retreat the unconditional rule made.
+    for t in acc.iter_mut() {
         if t.is_never() {
             *t = Ty::ANY;
         }
     }
-    tys
+    acc
 }
 
-/// Walk one **unconditionally-executed** `form`, recording param demands into `tys`.
-/// `shadowed` names enclosing `let` binders that hide a same-named parameter.
-fn collect_demands(
+fn any_domain(n: usize) -> Domain {
+    vec![Ty::ANY; n]
+}
+
+/// Both run — a value must satisfy each.
+fn meet(a: Domain, b: Domain) -> Domain {
+    a.into_iter().zip(b).map(|(x, y)| x.intersect(y)).collect()
+}
+
+/// One or the other runs — a value need only satisfy the one it reaches.
+fn join(a: Domain, b: Domain) -> Domain {
+    a.into_iter().zip(b).map(|(x, y)| x.union(y)).collect()
+}
+
+/// The domain of one form, per parameter.
+///
+/// Grows the stack in heap-backed segments as it recurses, like the rest of the
+/// checker's walkers: a deeply-nested-but-legal body (the kernel's own deep-value
+/// tests build them) must be *typed*, not blow the host's native stack.
+fn domain_of(
     heap: &Heap,
     form: Value,
     params: &[Symbol],
-    shadowed: &HashSet<Symbol>,
-    tys: &mut [Ty],
-) {
+    scope: &DomainScope,
+    ctx: &Ctx,
+) -> Domain {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        domain_of_inner(heap, form, params, scope, ctx)
+    })
+}
+
+fn domain_of_inner(
+    heap: &Heap,
+    form: Value,
+    params: &[Symbol],
+    scope: &DomainScope,
+    ctx: &Ctx,
+) -> Domain {
+    let n = params.len();
     let Some(items) = list_items(heap, form) else {
-        return; // an atom (a bare param reference demands nothing on its own)
+        return any_domain(n); // an atom demands nothing on its own
     };
     let Some(&head) = items.first() else {
-        return; // the empty list
+        return any_domain(n);
     };
     let Value::Sym(h) = head else {
-        // A computed callee `((f) x …)` — the args still evaluate unconditionally.
-        for &arg in &items[1..] {
-            collect_demands(heap, arg, params, shadowed, tys);
-        }
-        return;
+        // A computed callee `((f) x …)` — the operands still all evaluate.
+        return items[1..].iter().fold(any_domain(n), |acc, &arg| {
+            meet(acc, domain_of(heap, arg, params, scope, ctx))
+        });
     };
-    // Non-executed / definer forms: nothing here runs against the parameters now.
+    // Nothing here runs against the parameters now: quoted data, a closure body
+    // (deferred), a definer, or a `try` — whose failure is caught, so what its body
+    // demands is not a requirement on the caller.
     if value::symbol_is(h, kw::QUOTE)
         || value::symbol_is(h, kw::QUASIQUOTE)
         || value::symbol_is(h, kw::FN)
         || value::symbol_is(h, kw::TRY)
+        || value::symbol_is(h, kw::TRY_PRIM)
         || value::symbol_is(h, kw::DEF)
         || value::symbol_is(h, kw::DEFN)
         || value::symbol_is(h, kw::DEFMACRO)
         || value::symbol_is(h, kw::DEFDYN)
     {
-        return;
+        return any_domain(n);
     }
-    // Branch/guard forms: only the TEST (or scrutinee / first cond-test / case key)
-    // runs unconditionally; the arms don't.
-    if value::symbol_is(h, kw::IF)
-        || value::symbol_is(h, kw::WHEN)
-        || value::symbol_is(h, kw::UNLESS)
-        || value::symbol_is(h, kw::COND)
-        || value::symbol_is(h, kw::CASE)
-        || value::symbol_is(h, kw::MATCH)
-    {
-        if let Some(&test) = items.get(1) {
-            collect_demands(heap, test, params, shadowed, tys);
-        }
-        return;
+    // The `match` compiler's failure branch: `(throw [:match-error …])`. Reaching it
+    // is not an execution any caller can want — every value that lands there raises.
+    // So its domain is `never`, which is what makes a `match`'s clause patterns (and
+    // a `defn` clause's `:when` guard, which lowers through the same engine) add up
+    // to the function's domain instead of vanishing.
+    if value::symbol_is(h, "throw") && items.len() == 2 && is_match_failure(heap, items[1]) {
+        return vec![Ty::NEVER; n];
     }
-    // `and`/`or`: only the FIRST operand is unconditional (the rest short-circuit).
+    // `if` — the rule this whole function exists for.
+    if value::symbol_is(h, kw::IF) {
+        let Some(&test) = items.get(1) else {
+            return any_domain(n);
+        };
+        let d_test = domain_of(heap, test, params, scope, ctx);
+        let (then_slice, else_slice) = guard_slices(heap, test, params, scope, ctx);
+        let d_then = items
+            .get(2)
+            .map(|&t| domain_of(heap, t, params, scope, ctx))
+            .unwrap_or_else(|| any_domain(n));
+        let d_else = items
+            .get(3)
+            .map(|&e| domain_of(heap, e, params, scope, ctx))
+            .unwrap_or_else(|| any_domain(n));
+        return meet(
+            d_test,
+            join(meet(then_slice, d_then), meet(else_slice, d_else)),
+        );
+    }
+    // `cond` / `when` / `unless` — `if`s in disguise, and *not* always expanded away
+    // before this runs: a prelude closure keeps its body as written, so the checker
+    // reads `(cond …)` verbatim there. (Reading it as an ordinary call is what made
+    // `type-matches?` demand a `seqable` first argument: every clause body, including
+    // `(first t)`, looked unconditional.)
+    if value::symbol_is(h, kw::COND) {
+        return cond_domain(heap, &items[1..], params, scope, ctx);
+    }
+    if value::symbol_is(h, kw::WHEN) || value::symbol_is(h, kw::UNLESS) {
+        let Some(&test) = items.get(1) else {
+            return any_domain(n);
+        };
+        let d_test = domain_of(heap, test, params, scope, ctx);
+        let (then_slice, else_slice) = guard_slices(heap, test, params, scope, ctx);
+        let d_body = items[2..].iter().fold(any_domain(n), |acc, &f| {
+            meet(acc, domain_of(heap, f, params, scope, ctx))
+        });
+        // `unless` runs its body on the *false* side; either way the other outcome
+        // runs nothing and demands nothing.
+        let (taken, skipped) = if value::symbol_is(h, kw::WHEN) {
+            (then_slice, else_slice)
+        } else {
+            (else_slice, then_slice)
+        };
+        return meet(d_test, join(meet(taken, d_body), skipped));
+    }
+    // `case` / `match`: only the scrutinee is guaranteed to run. Their clause bodies
+    // are guarded by patterns this walk doesn't read (the *expanded* form is where a
+    // pattern becomes a guard chain it can read — and does).
+    if value::symbol_is(h, kw::CASE) || value::symbol_is(h, kw::MATCH) {
+        return items
+            .get(1)
+            .map(|&scrutinee| domain_of(heap, scrutinee, params, scope, ctx))
+            .unwrap_or_else(|| any_domain(n));
+    }
+    // `and` / `or` are `if`s in disguise — `(and a b)` runs `b` only when `a` holds,
+    // `(or a b)` only when it doesn't. Running them through the same rule keeps a
+    // narrowing conjunct (`(and (int? x) (> x 0))`) working on the un-expanded path,
+    // where they survive as themselves.
     if value::symbol_is(h, kw::AND) || value::symbol_is(h, kw::OR) {
-        if let Some(&first) = items.get(1) {
-            collect_demands(heap, first, params, shadowed, tys);
-        }
-        return;
+        return short_circuit_domain(
+            heap,
+            &items[1..],
+            value::symbol_is(h, kw::AND),
+            params,
+            scope,
+            ctx,
+        );
     }
-    // `let`/`letrec`: each binding RHS runs (sequentially), then the body. A binder
-    // shadows a same-named parameter for the remainder of the form.
+    // `let` / `letrec`: every binding RHS runs, then the body. A binder shadows a
+    // same-named parameter; a binder whose RHS *is* a parameter aliases it.
     if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LETREC) {
         let Some(&binds_form) = items.get(1) else {
-            return;
+            return any_domain(n);
         };
         let Some(binds) = list_items(heap, binds_form) else {
-            return;
+            return any_domain(n);
         };
         if binds.len() % 2 != 0 {
-            return;
+            return any_domain(n);
         }
-        let mut scope = shadowed.clone();
+        let mut inner = scope.clone();
+        let mut acc = any_domain(n);
         let mut i = 0;
         while i < binds.len() {
-            // A non-Sym binder is a destructuring pattern — we can't track exactly
-            // which names it shadows, so bail on the whole form (sound: collect
-            // nothing rather than risk a shadowed param leaking a demand).
+            // A destructuring binder hides names we can't enumerate — bail to `any`
+            // rather than let a shadowed parameter leak a demand.
             let Value::Sym(name) = binds[i] else {
-                return;
+                return any_domain(n);
             };
-            collect_demands(heap, binds[i + 1], params, &scope, tys);
-            scope.insert(name); // shadows a same-named param from here on
+            acc = meet(acc, domain_of(heap, binds[i + 1], params, &inner, ctx));
+            match param_index(binds[i + 1], params, &inner) {
+                Some(idx) => inner.aliases.insert(name, idx),
+                None => inner.aliases.remove(&name),
+            };
+            inner.shadowed.insert(name);
             i += 2;
         }
         for &b in &items[2..] {
-            collect_demands(heap, b, params, &scope, tys);
+            acc = meet(acc, domain_of(heap, b, params, &inner, ctx));
         }
-        return;
+        return acc;
     }
-    // `do`: every form runs unconditionally.
+    // `do`: every form runs.
     if value::symbol_is(h, kw::DO) {
-        for &f in &items[1..] {
-            collect_demands(heap, f, params, shadowed, tys);
-        }
-        return;
+        return items[1..].iter().fold(any_domain(n), |acc, &f| {
+            meet(acc, domain_of(heap, f, params, scope, ctx))
+        });
     }
-    // Otherwise: a normal call. All arguments evaluate unconditionally before it.
-    // A parameter passed *directly* to a known-sig callee takes the demanded type;
-    // every argument is itself an unconditional position (nested calls contribute).
-    let callee_sig = primitive_sig(heap, h).or_else(|| curated_sig(h));
-    // Ability-op occurrence typing (ADR-190): a call to a *sealed* ability op demands its
-    // FIRST argument be a member of that ability (a non-member `no-impl`s at runtime), so a
-    // `(defn f (s) (area s))` derives `s : Shape` with no annotation. `None` unless provably
-    // sound — see `protocol::sealed_op_domain`.
+    // An unexpanded **macro** call: its operands are syntax, not necessarily code —
+    // a template may drop them, defer them, or bind them. Nothing here is known to
+    // run, so nothing is demanded. (The generic rule below assumes every operand
+    // evaluates, which is true of a call and false of a macro.)
+    if super::walk::resolves_to_macro(heap, ctx, h) {
+        return any_domain(n);
+    }
+    // An ordinary call: every argument evaluates, and a parameter passed *directly*
+    // to a callee whose signature is known takes the type that position demands.
+    // Table lookups only (primitive / curated / declared) — never `infer_sig`, so
+    // this can't recurse into the inference that called it.
+    let callee_sig = primitive_sig(heap, h)
+        .or_else(|| curated_sig(h))
+        .or_else(|| declared_heap_sig(heap, h));
+    // Ability-op occurrence typing (ADR-190): a call to a *sealed* ability op demands
+    // its first argument be a member of that ability.
     let op_domain = super::protocol::sealed_op_domain(h);
+    let mut acc = any_domain(n);
     for (i, &arg) in items[1..].iter().enumerate() {
-        if let Value::Sym(a) = arg {
-            if !shadowed.contains(&a) {
-                if let Some(pos) = params.iter().position(|&p| p == a) {
-                    if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i)) {
-                        tys[pos] = tys[pos].clone().intersect(expected);
-                    }
-                    if i == 0 {
-                        if let Some(dom) = op_domain.clone() {
-                            tys[pos] = tys[pos].clone().intersect(dom);
-                        }
-                    }
+        if let Some(pos) = param_index(arg, params, scope) {
+            if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i)) {
+                acc[pos] = acc[pos].clone().intersect(expected);
+            }
+            if i == 0 {
+                if let Some(dom) = op_domain.clone() {
+                    acc[pos] = acc[pos].clone().intersect(dom);
                 }
             }
         }
-        collect_demands(heap, arg, params, shadowed, tys);
+        acc = meet(acc, domain_of(heap, arg, params, scope, ctx));
     }
+    acc
+}
+
+/// `(and a b c…)` / `(or a b c…)` — each operand after the first runs only when the
+/// ones before it went the right way. Recurses over the tail rather than rebuilding
+/// a form, so `c`'s demand is guarded by `b`'s outcome as well as `a`'s (folding the
+/// whole tail together instead would *narrow* the domain — the unsound direction).
+fn short_circuit_domain(
+    heap: &Heap,
+    operands: &[Value],
+    is_and: bool,
+    params: &[Symbol],
+    scope: &DomainScope,
+    ctx: &Ctx,
+) -> Domain {
+    let n = params.len();
+    match operands {
+        [] => any_domain(n),
+        [only] => domain_of(heap, *only, params, scope, ctx),
+        [first, rest @ ..] => {
+            let d_first = domain_of(heap, *first, params, scope, ctx);
+            let d_rest = short_circuit_domain(heap, rest, is_and, params, scope, ctx);
+            let (then_slice, else_slice) = guard_slices(heap, *first, params, scope, ctx);
+            // `and` continues when the first operand holds, `or` when it doesn't; the
+            // other way, the tail never runs and demands nothing (its slice alone).
+            let (taken, skipped) = if is_and {
+                (then_slice, else_slice)
+            } else {
+                (else_slice, then_slice)
+            };
+            meet(d_first, join(meet(taken, d_rest), skipped))
+        }
+    }
+}
+
+/// `(cond t1 b1 t2 b2 … else bn)` — the `if` rule, applied down the clause list.
+/// A clause's body is credited only within the slice its own test proves, and the
+/// tail (no clause matched, so nothing ran) demands nothing.
+fn cond_domain(
+    heap: &Heap,
+    clauses: &[Value],
+    params: &[Symbol],
+    scope: &DomainScope,
+    ctx: &Ctx,
+) -> Domain {
+    let n = params.len();
+    match clauses {
+        [] | [_] => any_domain(n), // exhausted, or a malformed dangling test
+        [test, body, rest @ ..] => {
+            let d_test = domain_of(heap, *test, params, scope, ctx);
+            let (then_slice, else_slice) = guard_slices(heap, *test, params, scope, ctx);
+            let d_body = domain_of(heap, *body, params, scope, ctx);
+            let d_rest = cond_domain(heap, rest, params, scope, ctx);
+            meet(
+                d_test,
+                join(meet(then_slice, d_body), meet(else_slice, d_rest)),
+            )
+        }
+    }
+}
+
+/// The parameter a form refers to — directly, or through a `let` alias — unless an
+/// inner binder shadows it.
+fn param_index(form: Value, params: &[Symbol], scope: &DomainScope) -> Option<usize> {
+    let Value::Sym(s) = form else { return None };
+    if scope.shadowed.contains(&s) {
+        return scope.aliases.get(&s).copied();
+    }
+    params.iter().position(|&p| p == s)
+}
+
+/// The two parameter slices a test splits its branches by: what a parameter must be
+/// for the test to be true, and what it must be for the test to be false. `any` in
+/// both slots when the test proves nothing about that parameter — which degrades the
+/// `if` rule to a plain union of the branches, the sound default.
+///
+/// A whole-test guard gives both slices. A *conjunction* gives only then-slices:
+/// every conjunct must hold for the test to be true, but its being false says only
+/// that *some* conjunct failed — never that a particular one did.
+fn guard_slices(
+    heap: &Heap,
+    test: Value,
+    params: &[Symbol],
+    scope: &DomainScope,
+    ctx: &Ctx,
+) -> (Domain, Domain) {
+    let n = params.len();
+    let mut then_slice = any_domain(n);
+    let mut else_slice = any_domain(n);
+    if let Some(guard) = super::guards::guard_assertion(heap, test, ctx) {
+        if let Some(idx) = param_index(Value::Sym(guard.sym), params, scope) {
+            then_slice[idx] = guard.ty.clone();
+            if !guard.then_only {
+                else_slice[idx] = guard.ty.negate();
+            }
+        }
+        return (then_slice, else_slice);
+    }
+    for guard in super::guards::and_conjunct_guards(heap, test, ctx) {
+        if let Some(idx) = param_index(Value::Sym(guard.sym), params, scope) {
+            then_slice[idx] = then_slice[idx].clone().intersect(guard.ty);
+        }
+    }
+    (then_slice, else_slice)
+}
+
+/// Is this the vector the `match` compiler throws when no clause matched —
+/// `[:match-error 'context target 'patterns]`?
+fn is_match_failure(heap: &Heap, arg: Value) -> bool {
+    let Value::Vector(vid) = arg else {
+        return false;
+    };
+    let elems = heap.vector(vid).to_vec();
+    matches!(elems.first(), Some(&Value::Keyword(tag))
+        if value::symbol_name_ref(tag) == "match-error")
 }
 
 /// Tier 1 of [`infer_sig`]: the precise, parameter-inferring case — a body that is

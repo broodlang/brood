@@ -1040,7 +1040,7 @@
       (file/mkdir gui)
       (file/spit (path/join (path/join root "src") "top.blsp") "(defmodule top)\n")
       (file/spit (path/join gui "window.blsp") "(defmodule gui/window)\n")
-      (assert= (sort (map name (package/package-provided-modules (path/join root "src"))))
+      (assert= (sort (map ->string (package/package-provided-modules (path/join root "src"))))
         (list "gui/window" "top"))))
   (test "two providers of the same NESTED module name collide loudly"
     (let (parent (pkg-fixture-root)

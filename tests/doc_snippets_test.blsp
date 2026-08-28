@@ -105,7 +105,7 @@ exist."
 
 (defn- qualified?
   (sym)
-  (let (n (name sym))
+  (let (n (->string sym))
     (and (not (string/starts-with? n "%")) (contains-slash? n))))
 
 (defn- contains-slash?
@@ -114,7 +114,7 @@ exist."
 
 (defn- module-of
   (sym)
-  (first (string/split (name sym) "/")))
+  (first (string/split (->string sym) "/")))
 
 (describe "the docs' code blocks"
   ;; ---- anti-vacuity, first ----------------------------------------------------------
@@ -151,6 +151,6 @@ exist."
         (is (bound? h)))))
 
   (test "no doc block calls a retired name"
-    (let (heads (into #{} (map name (all-heads))))
+    (let (heads (into #{} (map ->string (all-heads))))
       (doseq (kv (seq *retired*))
         (is (not (contains? heads (first kv))))))))

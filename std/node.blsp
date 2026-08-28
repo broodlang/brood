@@ -161,7 +161,7 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
 ;; (`/name` is the kernel symbol→string, since `name` here is node/name.)
 (defn- node-qualify
   (nm addr)
-  (let (s (/name nm))
+  (let (s (->string nm))
     (cond
       (>= (node-at s 0 (string/length s)) 0) (keyword s)
       (nil? addr) (keyword (str s "@" (os/hostname)))
@@ -178,7 +178,7 @@ peers. The cookie defaults to `(node/cookie)`. Returns the qualified node name.
 Errors if this runtime is already a node."
   (%node-listen (node-qualify nm addr)
     (if (nil? addr)
-      (str "unix:" (node-socket-path (node-name-part (/name nm))))
+      (str "unix:" (node-socket-path (node-name-part (->string nm))))
       (str "tcp:" addr))
     (or cookie-override (cookie))))
 
@@ -219,5 +219,5 @@ runtime isn't a node yet."
   (when (= (name) :nonode)
     (error "node/also-listen: this runtime is not a node yet — call (node/start name) first"))
   (%node-also-listen (if (nil? addr)
-                       (str "unix:" (node-socket-path (node-name-part (/name (name)))))
+                       (str "unix:" (node-socket-path (node-name-part (->string (name)))))
                        (str "tcp:" addr))))

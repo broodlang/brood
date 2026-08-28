@@ -130,7 +130,7 @@ is the word-constituent predicate (`lineedit-word-pred` picks it per mode)."
   (text p)
   "Offset of the first char of the line containing point `p` (just after the previous
 newline, or 0)."
-  (inc (last-index-of text "\n" p)))
+  (inc (string/last-index-of text "\n" p)))
 
 (defn- lineedit-line-end
   (text p)

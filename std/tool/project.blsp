@@ -562,7 +562,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (try
     (fold (fn (acc f)
             (if (and (nil? acc) (pair? f) (= (first f) 'defmodule) (symbol? (second f)))
-              (name (%root-module-name (second f)))
+              (->string (%root-module-name (second f)))
               acc))
       nil
       (reflect/read-all (file/slurp path)))
@@ -754,7 +754,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; nil for a root-level name — a registry, or a def from a file with no `defmodule`.
 (defn- project-image-section-of
   (n)
-  (let (parts (string/split (name n) "/"))
+  (let (parts (string/split (->string n) "/"))
     (cond
       (< (count parts) 2) nil
       else (string/join "/" (take (- (count parts) 1) parts)))))
@@ -769,7 +769,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (k)
   (and (contains? *module-files* k)
     (not (= (first (string/split k "/"))
-           (if *project-name* (name *project-name*) nil)))))
+           (if *project-name* (->string *project-name*) nil)))))
 
 ;; Group the image's globals into per-module sections, so `require` can materialise one
 ;; module at a time (ADR-218). The `""` section is the one the loader always materialises,
@@ -989,7 +989,7 @@ A `:path` dep loads in place, so its manifest sits at its `:path`; a `:git` /
             (not (nil? acc)) acc
             (not (= (get d :name) dep-name)) acc
             (dep-path? d) (path/join (path/join root (get d :path)) "project.blsp")
-            else (path/join (path/join (path/join root "_deps") (name dep-name)) "project.blsp")))
+            else (path/join (path/join (path/join root "_deps") (->string dep-name)) "project.blsp")))
     nil *project-dependencies*))
 
 (defn- project-manifest-format-headers
@@ -1186,13 +1186,13 @@ rules merged in declaration order, then this project's own `:format-headers` on 
       ;; `:name` may be written as a symbol (`:name demo`) or a string (`:name "demo"`)
       ;; — the manifest is read as data. Normalise to a string so the registry keys
       ;; (and `%require-force-package`'s string-keyed lookup of them) always agree.
-      (let (pkg (name *project-name*)
+      (let (pkg (->string *project-name*)
             dirs (abs-paths root *project-source-paths*)
             module-files (/apply append (map package/module-files dirs))
             short-modules (map first module-files))
         (%register-package-modules! pkg short-modules)
         (map (fn (mf)
-               (%register-package-module! (str pkg "/" (name (first mf))) (second mf)))
+               (%register-package-module! (str pkg "/" (->string (first mf))) (second mf)))
           module-files)
         ;; Ambient: not restored — the project's default context for the whole run. A dep
         ;; load nests its own context over this and restores back to it.
@@ -1394,6 +1394,11 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
   (project-await-pool 50))
 
 ;; Slice `coll` into ≤`n`-sized chunks, KEEPING a short trailing chunk.
+;; A list-returning chunker that KEEPS the trailing partial chunk. Neither bare
+;; `partition` (drops the partial) nor `seq/chunk-every` (returns VECTORS) can stand in:
+;; the caller conses onto each chunk, and `(cons x [1 2])` is the improper pair
+;; `(x . [1 2])`, not a list. `std/tool/test.blsp:run-chunks` is the same five lines for
+;; the same reason — two tool modules independently hitting one gap in `seq`.
 (defn- project-chunk-list
   (n coll acc)
   (if (empty? coll)
@@ -2277,7 +2282,7 @@ Returns nil when there is nothing to report."
 project's own sources. The `srcdirs` guard matters: a feature like `project` (the std
 tooling module) otherwise resolves to the manifest `./project.blsp` sitting in the cwd,
 and the pre-flight would 'check' the manifest and warn on it."
-  (let (n (name feat)
+  (let (n (->string feat)
         prefix (cond (nil? *project-name*) nil else (str *project-name* "/"))
         rel (cond
               (and prefix (string/starts-with? n prefix))
@@ -2311,7 +2316,7 @@ and the pre-flight would 'check' the manifest and warn on it."
                 (if (empty? frontier)
                   ;; sorted, so a cold and a warm run print in the same order too
                   [(sort (vec files)) (vec seen)]
-                  (let (m (name (first frontier)))
+                  (let (m (->string (first frontier)))
                     (if (contains? seen m)
                       (go (rest frontier) seen files)
                       (let (seen2 (conj seen m)
@@ -2324,7 +2329,7 @@ and the pre-flight would 'check' the manifest and warn on it."
                             (go (append (rest frontier) (or (%map-get info :requires nil) []))
                               seen2
                               (conj files p))))))))))
-    (go [(name entry)] #{} #{})))
+    (go [(->string entry)] #{} #{})))
 
 (defn check-run-closure (entry)
   "Advisory pre-flight over the entry point's require-closure — the modules the program is
@@ -2398,9 +2403,9 @@ there the module is wrong, not the name, and no single-name rewrite can be infer
 the global table. A scan per name would be O(names × globals) against a table of thousands."
   (fold
     (fn (acc sym)
-      (let (spelling (name sym)
+      (let (spelling (->string sym)
             ;; -1, not nil, for an unqualified name — see `index-of`.
-            slash (last-index-of spelling "/"))
+            slash (string/last-index-of spelling "/"))
         (if (< slash 0)
           acc
           (let (bare (string/substring spelling (+ slash 1))
@@ -2443,7 +2448,7 @@ the global table. A scan per name would be O(names × globals) against a table o
       (bound? withdrawn)
         [:skip
           (str "moved behind `%` as `"
-            (name withdrawn)
+            (->string withdrawn)
             "` — withdrawn deliberately, so not rewritten for you")]
       else [:skip "not defined anywhere — rot, not a rename"])))
 
@@ -2461,7 +2466,7 @@ more than one namespace, and a name that moved behind `%`. Backs `nest check --f
         (file/cwd)
         ")"))
     (let (names (unbound-bare-names (check-structured))
-          pname (if *project-name* (name *project-name*) nil))
+          pname (if *project-name* (->string *project-name*) nil))
       (if (empty? names)
         (do (io/puts "fix-renames: no unbound names — nothing to do") 0)
         (let (index (rename-index names)
@@ -2838,7 +2843,7 @@ as unchanged (only when some were)."
 ;; the caller in the error text.
 (defn- project-entry-fn
   (who modname fname)
-  (let (qual (symbol (str (name modname) "/" (name fname))))
+  (let (qual (symbol (str (->string modname) "/" (->string fname))))
     (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
       (when (nil? target)
         (error who ": entry fn '" fname "' is not defined (module '" modname "')"))
@@ -2932,9 +2937,9 @@ of those loads the entry point, which is where a stale dependency actually dies 
       (require-one modname)
       (project-entry-fn "check-boot" modname fname)
       (io/puts (str "boot ok: "
-                 (name modname)
+                 (->string modname)
                  "/"
-                 (name fname)
+                 (->string fname)
                  " ("
                  (count (source-files root))
                  " source files loaded, nothing run)"))
@@ -3139,7 +3144,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
   ;; manifest (transitive deps included) — use it. Fall back to the direct `:dependencies` names
   ;; for a bundle built before this field existed (its transitive deps stay unrooted, as before).
   (let (dep-names (or *project-bundled-packages*
-                    (map (fn (d) (name (get d :name))) *project-dependencies*))
+                    (map (fn (d) (->string (get d :name))) *project-dependencies*))
         keys (%bundle-module-names))
     (map (fn (pkg)
            (let (marker (str pkg "/")
@@ -3213,9 +3218,9 @@ which is what `nest release --smoke` does to the binary it just wrote."
     (require-one modname)
     (project-entry-fn "check-bundle-boot" modname fname)
     (io/puts (str "boot ok: "
-               (name modname)
+               (->string modname)
                "/"
-               (name fname)
+               (->string fname)
                " ("
                (count (%bundle-module-names))
                " modules loaded, nothing run)"))
@@ -3265,7 +3270,7 @@ the reserved `--brood-build-info` argument prints."
     (io/puts (str "build-id: " (get info :build-id)))
     (io/puts (str "features: "
                (let (fs (get info :features))
-                 (if (empty? fs) "(none)" (string/join " " (map name fs))))))
+                 (if (empty? fs) "(none)" (string/join " " (map ->string fs))))))
     0))
 
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------

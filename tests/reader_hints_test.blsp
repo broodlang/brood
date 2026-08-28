@@ -124,7 +124,7 @@
       (is (includes? h "FLAT")))
     ;; more than two pairs, and non-numeric literal values, hint too
     (is (includes? (hint-of "(let ((a 1) (b 2) (c 3) (d 4)) a)") "FLAT"))
-    (is (includes? (hint-of "(let ((name \"bob\") (k :x)) name)") "FLAT")))
+    (is (includes? (hint-of "(let ((->string \"bob\") (k :x)) name)") "FLAT")))
   (test "(letrec ((f …) (g …)) …) — even, function-valued — hints"
     (is (includes? (hint-of "(letrec ((f (fn () 1)) (g (fn () 2))) (f))") "FLAT")))
   (test "a genuinely-flat let with an odd count has no false Scheme hint"

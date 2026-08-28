@@ -16,8 +16,9 @@ must respect so we never drift off this path. Decision recorded in
 
 ## The decision, in one paragraph
 
-Brood's types follow the **Elixir model — set-theoretic and gradual** — not
-TypeScript's pragmatic-but-unsound one. A type *is a set of values*; subtyping is
+Brood's types are **set-theoretic and gradual** (the Castagna line — see
+[research/set-theoretic-types-in-brood.md](research/set-theoretic-types-in-brood.md)),
+not TypeScript's pragmatic-but-unsound model. A type *is a set of values*; subtyping is
 set inclusion; what can't be pinned down statically is `dynamic()` and mixes
 soundly with the rest. Checking is **advisory for the live image**: it warns and
 optimises, and it never gates the running image (a `def`/reload always wins —
@@ -67,14 +68,31 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   relates by subtyping and *would* error when an `int` is wanted; `dynamic()`
   defers). This is the valve that lets typing coexist with live redefinition.
   (Castagna & Lanvin, ICFP 2017; Castagna et al., POPL 2019 — the reconciliation
-  Elixir uses.) **Note:** the advisory *checker* (Step 4) doesn't use `GradualTy`
-  — it carries `Option<Ty>` (known / unknown). `dynamic()` is foundation for a
-  later gradual-*assignment* checker, not the disjointness pass.
+  Elixir uses.) **Note:** the advisory *checker*'s working vocabulary is
+  `Option<Ty>` (known / unknown); `GradualTy` is consulted at the one place that
+  needs the bounded-dynamic reading `Option<Ty>` cannot express — the
+  gradual-*assignment* check on `(def x …)` against a declared value type.
 - **Structured types** arrive as refinements on the flat lattice (Step 5+, all
   shipped — ADR-078): a **function arrow** `int -> int` (the `arrow` refinement)
   and a **sequence element type** `vector<int>` (the `elem` refinement), with
   `map`/`filter`/`reduce`/`fold` results derived from their arguments. The flat
   tag bitset remains the coarse set under any refinement.
+- **A union keeps its terms** (ADR-262). A refinement slot holds one refinement, so
+  a union of two *different* structured types has no single term to live in.
+  Rather than widen it away — which made the tagged-union idiom (`{:ok v}` or
+  `{:error e}`) invisible to every check — a `Ty` carries an optional tail of
+  **alternative terms**. The single-term case is unchanged, down to the widening
+  merge; the five set operations quantify over terms (union merges and absorbs,
+  intersection distributes, complement is De Morgan, subtyping asks each term to
+  fit *some* term of the other, disjointness asks every pair to be disjoint); and
+  equality/hashing are set-based, since `A ∪ B` and `B ∪ A` are one set. At most
+  four terms are kept, after which the remainder collapses by the old widening
+  merge, so a type's size stays bounded (KI-13). Every *refinement accessor*
+  (`as_arrow`, `elem_ty`, `record_fields`, …) reports only for a single-term type:
+  a refinement that holds for one term does not hold for the union.
+- **The complement is sayable** (ADR-263): `(not T)` joins `(or …)`/`(and …)` in
+  the grammar, so "anything but nil" is `(and any (not nil))`. Exact on flat
+  terms; the complement of a refined term widens to its tag.
 - **Literal (singleton) types** (`lit`/`lit_int`/`lit_bool`/`lit_str` refinements,
   ADR-105/117/120): a sig can enumerate exact keyword, int, bool, or string
   values — `(or :maximized :fullboth nil)`, `(or 200 404 500)`, `(or true
@@ -692,6 +710,27 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
    goldmine (step 4). Don't add opaque guards that hide the type they imply.
 9. **Errors, `type-of`, and `Ty` agree on names.** All use `Tag::name`
    spellings, so a `Ty` in a message reads the same as `type-of` returns.
+10. **A refinement reported for a union must hold for the whole union.** A `Ty`
+   may carry alternative terms (ADR-262), so every accessor that returns a
+   refinement (`as_arrow`, `elem_ty`, `map_kv`, `record_fields`, `tuple_elems`,
+   the literal sets) reports only for a single-term type. Reading the head term's
+   refinement and applying it to the union would be unsound in the one direction
+   that matters — it would manufacture warnings. A new refinement slot must
+   follow the same rule, and must say in `merge_is_exact` when two terms *can*
+   merge, or unions of it will silently keep terms that should have collapsed.
+   `term_eq`/`hash_term` **destructure** the type for this reason: a new slot fails
+   to compile until it is listed, rather than silently making two different types
+   compare equal (`term_equality_distinguishes_every_refinement_slot` is the
+   behavioural half — a listed-but-unused slot fails there).
+11. **A declaration is checked, not trusted blindly.** A new annotation form must
+   report what it cannot read (ADR-259). An annotation that is ignored when wrong
+   is a gate that cannot fail, and the checker reads declarations *first* — so a
+   dropped one silently widens the position it was meant to pin.
+12. **A new special form must be added to the reach gate.** `REACH_CASES`
+   (`types/check/tests.rs`) plants an unresolvable name in each of a form's code
+   positions and asserts the walk reports it; a companion test requires every
+   `SPECIAL_HEAD` entry to have a case, so a form added later cannot inherit
+   unwatched coverage (ADR-260, the KI-67/KI-70 class).
 
 ## Where it lives
 

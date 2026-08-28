@@ -2423,15 +2423,12 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
 
     // symbols
-    def(
-        heap,
-        "name",
-        Arity::exact(1),
-        Sig::new(vec![sym.union(kw).union(string)], string),
-        &["x"],
-        "The spelling of a symbol or keyword as a string (no leading colon).",
-        name_of,
-    );
+    //
+    // There is deliberately no `name` primitive here. The symbol/keyword → spelling
+    // operation is `->string` (std/prelude/core.blsp, taken over by `defability
+    // Display`): one name in the language, and a Brood one, since the sigil rule is
+    // policy rather than mechanism. `name` had been a bare Rust builtin holding an
+    // ordinary English noun at root; it is now a word a user's program may take.
     def(
         heap,
         "symbol",

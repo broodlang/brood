@@ -245,6 +245,18 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                 }
                 return acc;
             }
+            // (not T) — the complement: every value that is NOT a `T`. The lattice
+            // has had `negate`/`difference` since ADR-023 (the else-branch of a guard
+            // is a complement), but there was no way to *write* one — so the most
+            // wanted annotation in a nil-carrying language, "anything but nil", could
+            // not be said. `(and any (not nil))` says it now.
+            //
+            // Exact on the flat tag lattice; a complement of a *refined* type widens
+            // to that tag (see `Ty::negate`), which over-approximates — sound, and it
+            // can only ever suppress a warning.
+            if value::symbol_is(head, "not") && items.len() == 2 {
+                return Some(parse_type(heap, items[1])?.negate());
+            }
             // (map K V) — key/value typed map.  Full refinement: produce Ty::map_of
             // so the checker can derive `get`/`keys`/`vals`/`assoc` result types.
             if value::symbol_is(head, "map") && items.len() == 3 {
@@ -293,6 +305,127 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
         }
         _ => None,
     }
+}
+
+/// The type constructors the grammar knows, by head symbol — the vocabulary
+/// [`type_expr_problem`] validates an unrecognised head against. Kept beside
+/// [`parse_type`]'s dispatch (which is the authority); a head added there and not
+/// here would be reported as unknown, so `sig_grammar_heads_are_all_validated`
+/// pins the two lists together.
+pub(super) const TYPE_HEADS: [&str; 8] = [
+    "list", "vector", "or", "and", "not", "map", "tuple", "record",
+];
+
+/// Why this type-expression can't be read as a type, or `None` if it can.
+///
+/// [`parse_type`] answers "did it parse", and its `None` is silently discarded —
+/// so a misspelled type name (`strng`, `(tupel int)`) used to widen the annotated
+/// position to `any` with no diagnostic at all: an annotation that is ignored when
+/// wrong is a gate that cannot fail. This finds the *innermost* offending
+/// sub-expression and says what is wrong with it.
+///
+/// **The one deliberate silence:** an unknown symbol whose name starts with an
+/// uppercase letter is taken to be an ability used as a type (ADR-181/186) whose
+/// defining module this particular check didn't load — abilities resolve by bare
+/// name through `ABILITY_TYPES`, which under a single-file `brood --check` only
+/// carries what the file itself declares. Ability names are capitalised (they are
+/// named like records) and no base type is, so the split is exact for
+/// well-named code and false-positive-free for the rest.
+pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
+    if parse_type(heap, form).is_some() {
+        return None;
+    }
+    match form {
+        Value::Sym(s) => {
+            let name = value::symbol_name(s);
+            if name.starts_with(|c: char| c.is_uppercase()) {
+                return None; // an ability from a module this check didn't load
+            }
+            Some(format!("unknown type `{name}`"))
+        }
+        Value::Pair(_) => {
+            let Some(items) = list_items(heap, form) else {
+                return Some("malformed type expression".to_string());
+            };
+            // An arrow: every part must be a type, and the shape must be
+            // `params… [&optional …] [& rest] -> ret` with exactly one result.
+            if let Some(pos) = items.iter().position(|v| is_arrow_marker(*v)) {
+                for &part in items.iter() {
+                    if is_arrow_marker(part) || is_param_marker(part) {
+                        continue;
+                    }
+                    // A part that doesn't parse decides the whole expression —
+                    // *including* when its verdict is a deliberate silence (an unknown
+                    // capitalised name). Reporting a structural problem instead would
+                    // name the wrong thing: `(Shape -> int)` is not a malformed arrow,
+                    // it is an arrow over an ability this check could not resolve.
+                    if parse_type(heap, part).is_none() {
+                        return type_expr_problem(heap, part);
+                    }
+                }
+                return Some(if pos + 2 != items.len() {
+                    "malformed function type: exactly one result type must follow `->`".to_string()
+                } else {
+                    "malformed function type: `&optional` and `&` must trail the parameters"
+                        .to_string()
+                });
+            }
+            let Some(&Value::Sym(head)) = items.first() else {
+                return Some("malformed type expression".to_string());
+            };
+            let head_name = value::symbol_name(head);
+            if !TYPE_HEADS.contains(&head_name.as_str()) {
+                return Some(format!("unknown type constructor `{head_name}`"));
+            }
+            // A known constructor: report a bad argument before the arity, so the
+            // innermost real problem wins.
+            let args = if head_name == "record" {
+                // `(record :k T …)` — the keys are keywords, only the values are types.
+                if items[1..].len() % 2 != 0 {
+                    return Some(
+                        "malformed `record` type: each field needs a keyword and a type"
+                            .to_string(),
+                    );
+                }
+                for pair in items[1..].as_chunks::<2>().0 {
+                    if !matches!(pair[0], Value::Keyword(_)) {
+                        return Some(
+                            "malformed `record` type: field names must be keywords".to_string(),
+                        );
+                    }
+                    let value_form = unwrap_optional(heap, pair[1]).unwrap_or(pair[1]);
+                    if parse_type(heap, value_form).is_none() {
+                        return type_expr_problem(heap, value_form);
+                    }
+                }
+                Vec::new()
+            } else {
+                items[1..].to_vec()
+            };
+            for &arg in &args {
+                if parse_type(heap, arg).is_none() {
+                    return type_expr_problem(heap, arg);
+                }
+            }
+            // Every part reads as a type, so the arity of the constructor is what's wrong.
+            Some(match head_name.as_str() {
+                "list" | "vector" => {
+                    format!("`{head_name}` takes exactly one element type")
+                }
+                "map" => "`map` takes exactly two types — a key and a value".to_string(),
+                "or" => "`or` needs at least one member type".to_string(),
+                _ => format!("malformed `{head_name}` type"),
+            })
+        }
+        _ => Some("unrecognised type expression".to_string()),
+    }
+}
+
+/// A parameter-list marker inside an arrow type-expr (`&`, `&optional`) — not a
+/// type, and not an error either.
+fn is_param_marker(v: Value) -> bool {
+    matches!(v, Value::Sym(s)
+        if value::symbol_is(s, "&") || value::symbol_is(s, "&optional"))
 }
 
 /// If a field type is wrapped `(optional T)`, peel it to `Some(T)`; anything
@@ -483,6 +616,27 @@ pub(super) fn parse_sig_decl_with_vars(heap: &Heap, form: Value) -> Option<(Symb
         return None;
     }
     Some((name, sig))
+}
+
+/// The `(name, type-form)` of any `(sig name T)` / `(sig! name T)` declaration,
+/// whatever `T` turns out to be — the shape-only recogniser the *validation* pass
+/// needs, since every other recogniser here returns `None` for a declaration it
+/// cannot parse, which is exactly the case being reported on.
+pub(super) fn sig_decl_parts(heap: &Heap, form: Value) -> Option<(Symbol, Value)> {
+    let items = list_items(heap, form)?;
+    if items.len() != 3 {
+        return None;
+    }
+    let Value::Sym(head) = items[0] else {
+        return None;
+    };
+    if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
+        return None;
+    }
+    let Value::Sym(name) = items[1] else {
+        return None;
+    };
+    Some((name, items[2]))
 }
 
 /// If `form` is a `(sig name (… -> …))` declaration whose type-expr is an arrow,

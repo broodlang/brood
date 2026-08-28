@@ -169,7 +169,6 @@
    "disj" :collections
    "string/display-width" :strings
    "dissoc" :maps
-   "%distinct-step" :collections
    "doc" :meta
    "doc-search" :meta
    "%doc-search-terms" :meta
@@ -198,7 +197,6 @@
    "file/stat" :filesystem
    "filter" :collections
    "first" :collections
-   "%flatten-acc" :collections
    "bit/float->" :convert
    "float?" :predicates
    "math/floor" :math
@@ -236,13 +234,11 @@
    "lkeep" :collections
    "lmap" :collections
    "lremove" :collections
-   "%iterate-times-acc" :collections
    "string/join" :strings
    "keys" :maps
    "keyword" :convert
    "keyword?" :predicates
    "last" :collections
-   "last-index-of" :strings
    "link" :processes
    "list" :collections
    "string/list->" :strings
@@ -273,7 +269,6 @@
    "math/mod" :math
    "system/module-doc" :meta
    "monitor" :processes
-   "name" :strings
    "math/nan?" :predicates
    "nil?" :predicates
    "not" :predicates
@@ -346,7 +341,6 @@
    "math/rem" :math
    "file/rename" :filesystem
    "%repeat-acc" :collections
-   "%repeatedly-acc" :collections
    "string/replace" :strings
    "%require-await" :meta
    "%require-find" :meta
@@ -424,7 +418,7 @@
    "throw" :errors
    "math/->fixed" :strings
    "->seq" :meta
-   "->string" :meta
+   "->string" :convert
    "trap-exit" :processes
    "string/trim" :strings
    "string/triml" :strings

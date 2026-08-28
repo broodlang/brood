@@ -580,11 +580,11 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
               pkg (nth kv 0)
               allowed (pg-term-allows ctx pkg (nth kv 1)))
           (if (empty? allowed)
-            (str "no version of " (name pkg) " satisfies every requirement on it")
-            (str (name pkg) " must be " (string/join " or " allowed))))
+            (str "no version of " (->string pkg) " satisfies every requirement on it")
+            (str (->string pkg) " must be " (string/join " or " allowed))))
       else
         (str "the requirements on "
-          (string/join " and " (map (fn (kv) (name (nth kv 0))) reals))
+          (string/join " and " (map (fn (kv) (->string (nth kv 0))) reals))
           " cannot all hold"))))
 
 ;; One premise's rendering: an external cause is its plain fact; a derived cause is stated by
@@ -667,13 +667,13 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
   (leaf)
   (match leaf
     ([:root pkg constraint] (str "your project requires "
-                              (name pkg)
+                              (->string pkg)
                               (resolver-constraint-suffix constraint)))
-    ([:dep pkg version dep-name dep-constraint] (str (name pkg)
+    ([:dep pkg version dep-name dep-constraint] (str (->string pkg)
                                                   " "
                                                   version
                                                   " requires "
-                                                  (name dep-name)
+                                                  (->string dep-name)
                                                   (resolver-constraint-suffix dep-constraint)))))
 
 (defn- pg-leaf-packages
@@ -689,7 +689,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
       (map (fn (pkg)
              (let (real (filter (fn (v) (not (= v pg-none))) (pg-universe ctx pkg)))
                (str "\n  "
-                 (name pkg)
+                 (->string pkg)
                  (if (empty? real)
                    " has no versions available"
                    (str " available: " (string/join ", " real))))))
@@ -699,9 +699,9 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
   (state ctx ics pkg)
   (let (universe (pg-universe ctx pkg))
     (if (empty? universe)
-      (str "dependency resolution failed:\n  no versions of " (name pkg) " are available")
+      (str "dependency resolution failed:\n  no versions of " (->string pkg) " are available")
       (str "dependency resolution failed:\n  no version of "
-        (name pkg)
+        (->string pkg)
         " satisfies every requirement (available: "
         (string/join ", " universe)
         ")"))))

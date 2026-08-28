@@ -91,7 +91,8 @@ Internal — the published name is `seq/zip`."
 
 ;; (partition n coll) -> consecutive n-sized chunks; a trailing partial chunk is
 ;; dropped (Clojure `partition` semantics). `%has-at-least?` avoids re-counting.
-(defn %has-at-least? (n coll)
+(defn- %has-at-least?
+  (n coll)
   "True when `coll` has at least `n` items, walking only that far — the O(n) test that lets
 `partition` and friends check a chunk without counting the whole (possibly long) sequence.
 Always true for `n` <= 0.
@@ -133,9 +134,9 @@ Always true for `n` <= 0.
     ;; define its own order; every built-in keeps the native `%sort-cmp` path.
     (record? (first a)) (%merge-sort (fn (x y) (< (%ord-compare x y) 0)) a)
     else (%sort-cmp a)))
-;; Split `coll` into its first `n` items and the rest in ONE pass — what
-;; %merge-sort needs instead of a separate `take` + `drop` (two walks). Generally
-;; useful, so it's public.
+;; Split `coll` into its first `n` items and the rest in ONE pass — what `%merge-sort`
+;; needs instead of a separate `take` + `drop` (two walks). Private: the published
+;; spelling is `seq/split-at`, a wrapper over this in std/seq.blsp.
 (defn- %split-at-acc
   (n coll acc)
   (if (or (<= n 0) (empty? coll))
@@ -153,8 +154,13 @@ Always true for `n` <= 0.
     (less? coll n)
     (if (<= n 1)
       coll
+      ;; `%split-at-acc`, NOT `seq/split-at`. The module function is a one-line wrapper
+      ;; over this very helper three lines above, and reaching it through the qualified
+      ;; name meant every `sort` of a non-trivial list fired the `%autoload seq` stub and
+      ;; loaded the whole `seq` module — to call back into the prelude. `sort` is core and
+      ;; now pulls in nothing.
       (let (h (%quot n 2)
-            parts (seq/split-at h coll))
+            parts (%split-at-acc h coll nil))
         (%merge-runs less?
           (%merge-sort-n less? (nth parts 0) h)
           (%merge-sort-n less? (nth parts 1) (- n h)))))))
@@ -256,31 +262,6 @@ import (and so `(:use set)` can't shadow them)."
 ;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
 ;; stack-safe on long inputs — see the sequence-library note above.
 
-;; distinct: keep the first occurrence of each item. A map carried alongside the
-;; result acts as the "seen" set, so membership is O(1)-ish, not the O(n²) a
-;; `member?`-per-item scan would cost. State is the 2-vector [seen result-rev].
-(defn- %distinct-step
-  (state x)
-  ;; the "seen" map only ever stores `true`, so a single `%map-get` (default
-  ;; `false`) distinguishes present from absent — no need for `contains?`'s
-  ;; two-sentinel probe (which exists to tell a stored `nil`/`false` from absence).
-  (if (%map-get (nth state 0) x false)
-    state
-    [(%map-assoc (nth state 0) x true) (cons x (nth state 1))]))
-
-;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil`
-;; (so empty sub-lists and nils vanish); vectors and maps are leaf items. The
-;; outer walk is tail-recursive; the nested call recurses only as deep as the
-;; nesting (bounded), not the length.
-;; check-allow: deliberately non-tail — depth = the structure's nesting, not its element count.
-(check-allow :non-tail-recursion
-  (defn- %flatten-acc
-    (coll acc)
-    (cond
-      (empty? coll) acc
-      (list? (first coll)) (%flatten-acc (rest coll) (%flatten-acc (first coll) acc))
-      else (%flatten-acc (rest coll) (cons (first coll) acc)))))
-
 ;; ---- records: named, optionally-typed maps (defrecord — ADR-130) ------------
 ;; A record is a plain immutable map with a positional constructor and one
 ;; accessor per field. `(defrecord point (x y))` defines:
@@ -299,10 +280,10 @@ import (and so `(:use set)` can't shadow them)."
 ;; type and each accessor's field type — so the advisory checker gets field-type
 ;; and field-presence checking from the existing record-type machinery (ADR-115).
 
-;; A field spec is a bare `name` (untyped) or `(name type)` (typed).
+;; A field spec is a bare `name` (untyped) or `(->string type)` (typed).
 (defn- %defrecord-fname (f) (if (pair? f) (first f) f))
 (defn- %defrecord-ftype (f) (if (pair? f) (second f) nil))
-(defn- %defrecord-acc-sym (rec fld) (symbol (str (name rec) "-" (name fld))))
+(defn- %defrecord-acc-sym (rec fld) (symbol (str (->string rec) "-" (->string fld))))
 (defn- %defrecord-derives
   (opts)
   "The vector following `:derives` in a `defrecord`'s trailing opts (the abilities to
@@ -318,7 +299,7 @@ root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecor
 bakes a record's `:__id__`) and `%ability-id-kw` (an impl's bare id) so the two AGREE — a
 record built at root and an impl for it at root must land on the same dispatch id."
   (let (ns (current-ns))
-    (if ns (keyword (str (name ns) "/" nm)) (keyword nm))))
+    (if ns (keyword (str (->string ns) "/" nm)) (keyword nm))))
 
 ;; The `(sig …)` forms for an all-typed record: the constructor arrow, then one
 ;; accessor arrow per field. Built as plain data — `sig` reads the un-expanded type.
@@ -358,10 +339,10 @@ and it must be loaded before this `defrecord`.
     (impl Shape circle (area [c] (* 3.14 (get c :r) (get c :r))))
     (defrecord point (x y) :derives [Ord])   ; compare-to synthesized field-wise"
   (let (fnames (map %defrecord-fname fields)
-        fkws (map (fn (n) (keyword (name n))) fnames)
+        fkws (map (fn (n) (keyword (->string n))) fnames)
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
         ;; checker tracks via `Ty::keyword_lit`), captured at definition.
-        id (%defrecord-qualify (name rec))
+        id (%defrecord-qualify (->string rec))
         ;; ctor body: a MAP LITERAL (built here, at macro time) whose values are the field
         ;; symbols, with the reserved `:__id__` carrying the id keyword. Emitting a real
         ;; map value (not a `(hash-map …)` call) is what makes the checker infer the result
@@ -370,7 +351,7 @@ and it must be loaded before this `defrecord`.
         ctor `(defn ~rec (~@fnames) ~body)
         accs (map (fn (f)
                     (let (fnm (%defrecord-fname f))
-                      `(defn ~(%defrecord-acc-sym rec fnm) (r) (get r ~(keyword (name fnm))))))
+                      `(defn ~(%defrecord-acc-sym rec fnm) (r) (get r ~(keyword (->string fnm))))))
                fields)
         ;; the record-shaped constructor sig (always — this is the dispatch-inference
         ;; seam): each field keeps its declared type, else `any`.
@@ -379,7 +360,7 @@ and it must be loaded before this `defrecord`.
                  (cons :__id__
                    (cons id
                      (mapcat (fn (f)
-                               (list (keyword (name (%defrecord-fname f)))
+                               (list (keyword (->string (%defrecord-fname f)))
                                  (or (%defrecord-ftype f) 'any)))
                        fields))))
         ctor-sig (list 'sig rec (append arg-tys (list '-> rec-ty)))
@@ -390,7 +371,7 @@ and it must be loaded before this `defrecord`.
                           (let (fnm (%defrecord-fname f))
                             (list 'sig
                               (%defrecord-acc-sym rec fnm)
-                              (list (list 'record (keyword (name fnm)) (%defrecord-ftype f))
+                              (list (list 'record (keyword (->string fnm)) (%defrecord-ftype f))
                                 '->
                                 (%defrecord-ftype f)))))
                      fields)
@@ -419,10 +400,6 @@ and it must be loaded before this `defrecord`.
     (repeat 3 :a)   → (:a :a :a)
     (repeat 0 :a)   → nil"
   (%repeat-acc n x nil))
-
-(defn- %repeatedly-acc
-  (n f acc)
-  (if (<= n 0) (reverse acc) (%repeatedly-acc (dec n) f (cons (f) acc))))
 
 ;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
 ;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
@@ -549,14 +526,6 @@ iterating for side effects.
 ;; ---- iteration combinators --------------------------------------------------
 ;; Hide the hand-rolled counter/accumulator recursion behind names that read as
 ;; intent (the way `defprocess` hides a receive loop). All ordinary Brood.
-
-(defn- %iterate-times-acc
-  (f x n acc)
-  (if (< n 0) acc (%iterate-times-acc f (f x) (dec n) (cons x acc))))
-(defn- %iterate-times
-  (f x n)
-  "The list (x f(x) f²(x) … fⁿ(x)) — `n`+1 successive states of applying `f`."
-  (reverse (%iterate-times-acc f x n nil)))
 
 ;; One tail pass pairing each item with a running index — the old
 ;; `(seq/zip (range (count coll)) coll)` made three passes (count, build the range
