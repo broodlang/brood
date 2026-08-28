@@ -18244,3 +18244,48 @@ materialised state, so any divergence launders itself into the next image. It do
 in practice only because the id is a content hash: when a rebuild is needed the old image no
 longer installs. Force a rebuild against a current image — as this session did — and the
 loss is copied forward invisibly.
+
+## ADR-281 — The stdlib image is on by default
+
+**Status:** accepted (2026-08-28)
+
+The startup image ships **on**, with `BROOD_NO_STDIMAGE=1` as the opt-out. It was default-on
+once before, for a day, and reverted (KI-72).
+
+**What it buys.** A `require`d std module materialises its bindings instead of re-reading and
+re-evaluating its source: `json` 6.5 → 1.7 ms, `http` 12.0 → 3.6 ms, and a script requiring
+three modules **46.5 → 36.2 ms**, a 22% saving. That last number is the case for the flip:
+the saving is paid on *every* invocation of a short-lived run and amortised to nothing by a
+long-lived one, so the workload that benefits most is precisely the one people reach for a
+scripting language to write.
+
+**Why now, and not because KI-72 was fixed.** That fix matters — a section replaced a
+module's autoload stub before its own private helpers were bound, so a racing process took
+the real function and died on an unbound symbol (ADR-279) — but one fixed bug is a weak
+reason to flip a default that was reverted once already.
+
+The reason is ADR-280. Every divergence between materialising and evaluating in this
+feature's history was found by downstream symptom, one at a time: dropped sigs, unreplayed
+require edges, unreplayed ability impls, `provide` ordering, binding order, and privacy.
+Six, all silent. The differential now loads every baked-in module from source and from the
+image and requires the resulting state to match — and it found the sixth itself. The
+decision rests on a gate rather than on five anecdotes.
+
+**Measured before flipping**, image on, three full runs of `cargo nextest run -p brood`:
+**873/873** each time, and 873/873 with it off. On KI-72's own acceptance load — 12 parallel
+copies of `autoload_race` at `--test-threads=4`, 90 s — 0/12 on both arms, against the
+12/12-vs-0/12 that opened the entry.
+
+**The exceptions are by construction, not by workload.** Coverage stands aside (a
+materialised module is never compiled, so it has no lines to instrument); editing `std/`
+invalidates the content hash, so a library author falls back to source automatically. There
+is no third state: a run gets a snapshot of the library this binary bakes in, or the source.
+
+**A miss stays silent on the default path and speaks on an explicit request.** `BROOD_STDIMAGE=1`
+is kept for exactly that: the id carries the git sha and a hash of every baked-in `.blsp`,
+so a commit — or somebody else editing `std/` while a measurement runs — makes the image
+stale and the arm believed to be imaged is quietly reading source. That produced every wrong
+measurement in KI-72's history, three of them in one session. An unmet explicit request now
+prints a line, and `(stdimage/status)` reports `:live`/`:stale`/`:absent`/`:unreadable` with
+the wanted id beside what is on disk. On the default path a miss is ordinary — no image built
+yet, or the id just moved — and falling back to source is right, so it says nothing.

@@ -1647,12 +1647,15 @@ fn collect_register_multi(
                     if let Some(alg) = items.get(2).and_then(|&v| sym_name(v)) {
                         algebras.insert(mname.clone(), alg);
                     }
-                    // arg 3 is the quoted `:-> RET` form (nil when undeclared).
+                    // arg 3 is the quoted `:-> RET` form, and it is ABSENT — not nil —
+                    // when none was declared: `defmulti` emits a two-argument call in that
+                    // case, so `get(3)` answers the question on its own. Treating a nil
+                    // *value* as "undeclared" here would make `:-> nil` unenforceable, and
+                    // `nil` is a legal return type (`parse_type` maps it to `Tag::Nil`,
+                    // and both `sig` and `defability` accept it).
                     if let Some(form) = items.get(3).and_then(|&v| unquote(heap, v)) {
-                        if !matches!(form, Value::Nil) {
-                            if let Some(ty) = super::annot::parse_type(heap, form) {
-                                rets.insert(mname, ty);
-                            }
+                        if let Some(ty) = super::annot::parse_type(heap, form) {
+                            rets.insert(mname, ty);
                         }
                     }
                 }
@@ -1688,7 +1691,11 @@ fn read_multi_ret_registry(heap: &Heap, rets: &mut HashMap<String, crate::types:
         let Some(mname) = sym_name(name_v) else {
             continue;
         };
-        if rets.contains_key(&mname) || matches!(form, Value::Nil) {
+        // A nil VALUE here is a declared `:-> nil`, not an absent declaration — `defmulti`
+        // only registers the key when a return type was actually given (`%register-multi`
+        // takes it as a variadic tail for exactly this reason), so absence is the key
+        // missing, never a nil under it.
+        if rets.contains_key(&mname) {
             continue;
         }
         if let Some(ty) = super::annot::parse_type(heap, form) {
