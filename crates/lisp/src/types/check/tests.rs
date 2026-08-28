@@ -5055,7 +5055,7 @@ fn every_special_form_is_covered_by_the_reach_gate() {
     // otherwise inherit whatever reach it happened to get, unwatched — which is
     // exactly how KI-67 and KI-70 survived. Adding a head now fails this test until
     // someone says, in a case above, what the walk is supposed to do with its body.
-    for (&sym, _) in super::walk::SPECIAL_HEAD.iter() {
+    for &sym in super::walk::SPECIAL_HEAD.keys() {
         let name = crate::core::value::symbol_name(sym);
         assert!(
             REACH_CASES.iter().any(|(head, _, _)| *head == name),
