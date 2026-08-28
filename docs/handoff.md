@@ -5,10 +5,65 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-27 (the dead-gates session, then the toolchain-gaps session — both
-concluded).** Released **v0.14.0** and **v0.14.1**, both tagged and pushed.
-`known-issues.md` shows **no open bug and no watch item**, and the open lists of both
-sessions are now empty (see "the toolchain gaps … are CLOSED too", below).
+**As of 2026-08-28 (the green-again session).** The previous session's work — `092ba281`
+(three require/process defects) and its merge — had been **committed but never pushed**, and
+`origin/main` was red in three CI jobs. All of it is fixed and verified; see the devlog entry
+"a red tree, and a gate reading the wrong binary". What a cold reader most needs:
+
+- **`make green`'s `.blsp` half was reading the wrong binary (KI-76).** It gated on
+  `target/release/nest` while `make release` builds `target/release-fast` — 9 commits of drift,
+  and `std/` is `include_str!`'d, so it reported the `defprocess`→`defserver` rename *backwards*
+  as two `unbound symbol` failures. Now it resolves the binary by HEAD's sha and treats a stale
+  one as a **failure that skips the gates**, not a note beside a verdict. If you see
+  `the .blsp gates DID NOT RUN`, that is the new behaviour working — run `make release`.
+- **Local clippy is only as good as its version.** CI pins `dtolnay/rust-toolchain@stable` and
+  there is no `rust-toolchain.toml`. Four CI errors were lints new in **clippy 1.98** that a
+  full `--all-features -D warnings` run on 1.97 passes cleanly. `rustup update stable` before
+  believing a local clippy green. (The `--all-features` warning in CLAUDE.md has this companion:
+  the *version* arms lints too, not just the feature set.)
+- **An adopted `(sig …)` can be less precise than the curated sig it shadows, silently.**
+  `(sig capitalize (string -> any))` shadowed the curated `(string -> string)` and switched off
+  the `(+ 1 (string/capitalize "x"))` finding. Declared sigs are authoritative, so this loses
+  checking with no warning anywhere. Now gated structurally by
+  `no_declared_std_sig_widens_its_curated_signature` (returns only — see its doc comment for
+  why parameters are deliberately out of scope). **Read that before the next adoption round.**
+
+**KI-72 is FIXED (2026-08-28), and it was not what three sessions thought.** Not a lost message,
+not the require protocol, not the scheduler: a section's entries are defined one at a time into
+the **shared** global table in `(global-names)` order, so `string/blank?` (position 7) was callable
+while the module-private `string/whitespace?` its body calls (position 51) was not — and 17 of 24
+`spawn`ed children died `unbound symbol: string/whitespace?`, so the root waited forever for
+replies that could never total 24. Source loading is immune because the file defines the helper
+(line 190) before its caller (192). Fixed by emitting each section **privates-first**.
+
+Two things to carry forward from it:
+
+- **Read a hung run's own output before theorising.** The dying children print to stderr from a
+  *green process*, and libtest captures per thread — so `cargo test`/nextest swallow it and it
+  shows only under `--nocapture`. Three investigations used gdb and in-language watchdogs (which
+  perturb the timing) and never read the output. Same lesson as KI-64.
+- **The image is not default-ON, and the reason is now measured rather than hedged.** The hang is
+  gone and the image arm is at parity with the no-image arm on every repro (the original
+  12-parallel one went 12/12 over the cap → 0/12). But `(global-names)` order is **alphabetical**,
+  so the same window exists for a public calling a sibling public that sorts later — a static scan
+  finds **≈257** such calls across `std/`'s 1318 module publics, three verified by hand
+  (`datetime/days-in-month`→`leap-year?`, `datetime/today`→`utc-now`,
+  `editor/ansi/ansi-clear`→`ansi-clear-screen`). They have not been *seen* to fail only because
+  none is on a funnelled autoload path the way `string/blank?` is. **So privates-first is
+  necessary and not sufficient.**
+
+  The prerequisite for a default-ON proposal is an **atomic section install**, and it is more
+  tractable than it looks: the kernel already has `Heap::root`/`read_root` +
+  `roots_len`/`truncate_roots` (`core/heap/gc.rs`), so pass 1 can build-and-root and pass 2
+  define-from-root. The trap to avoid is the naive version — buffering built values in a plain
+  Rust `Vec` leaves them unrooted while `from_message` keeps allocating (use-after-GC). Validate
+  under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. The win waiting behind it, measured on this box:
+  `http` 12.93 → 5.98 ms, `json` 8.29 → 3.97 ms, `regex` 4.90 → 1.87 ms (1.5–2.6× on the module
+  load every short-lived invocation pays).
+
+**Still open: KI-74** only (⚠️ watching — one unnamed lib-suite failure, 20 clean runs since;
+re-run under nextest, which names the case, if it recurs).
+
 
 Three separate gates turned out to be passing without testing anything, and the theme of
 that day is that *all three failed the same way* — see the box after the next section.

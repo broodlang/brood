@@ -1180,10 +1180,13 @@ load-time (`require`) guards."
 ;; the same class as the wake this file's callers depend on: a notification delivered to
 ;; nobody is gone, so the state has to be observable to a late arrival.
 (defn- %require-enqueue-waiter!
-  (key me)
-  "Add `me` to `key`'s waiter list, atomically against a concurrent drain."
+  (key me rref)
+  "Add `[me rref]` to `key`'s waiter list, atomically against a concurrent drain. `rref` is
+this waiter's one-shot REPLY ALIAS (OTP 24's `{alias, demonitor}`): the loader addresses the
+completion to it, so a waiter that stops waiting can have a late reply dropped at delivery
+rather than left in its mailbox — see `%require-unwatch!`."
   (%swap-registry! *features-waiting*
-    (fn (m) (assoc m key (cons me (or (get m key) (list)))))))
+    (fn (m) (assoc m key (cons [me rref] (or (get m key) (list)))))))
 
 (defn- %require-take-waiters!
   (key)
@@ -1208,48 +1211,100 @@ marker is cleared on failure), never before — see the ordering note above."
   (ws key)
   (unless (empty? ws)
     (do
-      (send (first ws) [:load-done key])
+      ;; `[:load-done <ref> …]` — keyword first, ref second, which is the shape the kernel
+      ;; recognises as a reply alias. A waiter that has already given up deactivated its
+      ;; ref, so this send is dropped at delivery instead of queueing in a process that is
+      ;; back to doing application work.
+      (let ([p r] (first ws)) (send p [:load-done r key]))
       (%require-notify-each (rest ws) key))))
 
 (defn- %require-await
   (key)
   "Block until the process that claimed `key`'s load has finished it. Returns `key`."
-  (let (loader (get *features-loading* key)
-        me (self))
-    (%require-enqueue-waiter! key me)
-    ;; Monitor the claimant so its DEATH is a wakeup too (OTP's `LOADER_DOWN`). Taken after
-    ;; the enqueue and before the re-check, so a loader that dies at any point from here on
-    ;; reaches us as a `[:down …]`; one that died BEFORE this is covered by the re-check
-    ;; (it cleared the marker on its way out) or, failing that, by the backstop below.
-    (let (mref (if (pid? loader) (monitor loader) nil))
-      (if (%registry-member? '*features* key)
-        ;; It landed while we were getting on the list: take ourselves back off (so we do
-        ;; not sit in the queue of a load that is over) and return.
-        (do
-          (when mref (demonitor mref))
-          (%require-drop-waiter! key me)
-          key)
-        (receive
-          ([:load-done k] :when
-            (= k key)
-            (do (when mref (demonitor mref)) key))
-          ;; The claimant died mid-load: the marker is stale and nobody will provide. Take
-          ;; the load over — this is a HANDOFF, not a duplicate: the claim is vacant.
-          ([:down r _ _] :when
-            (= r mref)
-            (do (%require-drop-waiter! key me) (%require-force key)))
-          ;; Backstop. OTP needs none, because its code server cannot silently forget a
-          ;; requester. Ours is ordinary Brood, so keep a last-resort timeout — but make it
-          ;; LOUD rather than silent: a force-load here means the protocol above dropped a
-          ;; waiter, and the whole point of KI-72 was that a silent stall is unattributable.
-          (after 30000
-            (do
-              (when mref (demonitor mref))
-              (%require-drop-waiter! key me)
-              (%eprint (str "[require] BUG: waited 30s for an in-flight load of '"
-                         key "' with no completion and no loader death; force-loading. "
-                         "This should be unreachable — please report it.\n"))
-              (%require-force key))))))))
+  (let (me (self)
+        rref (ref))
+    ;; Register FIRST, then look at the world — see the ordering note above.
+    (%require-enqueue-waiter! key me rref)
+    ;; The claimant, for the death watch (OTP's `LOADER_DOWN`). Advisory only: every branch
+    ;; below is correct without it, so a stale or missing pid costs a slower path, never a
+    ;; wrong answer.
+    (let (loader (get *features-loading* key)
+          mref (if (pid? loader) (monitor loader) nil))
+      (cond
+        ;; It landed while we were getting on the list.
+        (%registry-member? '*features* key) (do (%require-unwatch! key me rref mref) key)
+        ;; The claim is VACANT and `key` is still unprovided: the claimant's load threw, and
+        ;; it released its waiters before we joined the queue — so no notification is coming.
+        ;; Retry through `require-one`, not `%require-force`: that re-runs the claim CAS, so
+        ;; two waiters arriving here together still produce exactly one loader. Going
+        ;; straight to `%require-force` is what made the old timeout a DOUBLE LOAD.
+        (not (%registry-member? '*features-loading* key))
+          (do (%require-unwatch! key me rref mref) (require-one key))
+        else
+          (receive
+            ([:load-done r k] :when
+              (= r rref)
+              (do
+                (when mref (demonitor mref))
+                ;; "Finished" includes FAILED — the error path releases waiters too, so that
+                ;; nobody blocks on a load that will never provide. So re-check rather than
+                ;; trust the notification: without this a failed load is reported to every
+                ;; waiter as a success, and the caller meets an unbound name instead of the
+                ;; loader's actual error.
+                (if (%registry-member? '*features* k) k (require-one k))))
+            ;; The claimant died mid-load: nobody will provide, and its marker is still there
+            ;; — nothing clears `*features-loading*` on process death. CLEAR IT FIRST, then
+            ;; retry. Retrying without clearing is not a slow retry, it is a hot infinite
+            ;; loop: `require-one` sees the stale marker, comes back here, monitors the same
+            ;; dead pid, and `add_monitor` answers a dead target with an IMMEDIATE synthetic
+            ;; `[:down … :noproc]` — so the cycle spins at 100% CPU with no delay in it, and
+            ;; it poisons that module for every process, not just this one.
+            ([:down r _ _] :when
+              (= r mref)
+              (do
+                (%require-unwatch! key me rref nil)
+                (%require-release-dead-claim! key loader)
+                (require-one key)))
+            ;; Backstop. OTP needs none — its code server cannot silently forget a requester.
+            ;; Ours is ordinary Brood, so keep a last resort, but make it LOUD: reaching it
+            ;; means the protocol above dropped a waiter, and KI-72's whole lesson is that a
+            ;; silent stall is unattributable.
+            (after 30000
+              (do
+                (%require-unwatch! key me rref mref)
+                (%eprint (str "[require] BUG: waited 30s for an in-flight load of '"
+                           key "' with no completion and no loader death; force-loading. "
+                           "This should be unreachable — please report it.\n"))
+                ;; `%require-force`, not `require-one`: reaching here means the claimant is
+                ;; alive and has been mid-load for 30 s, so its marker is still set and
+                ;; `require-one` would simply wait another 30 s, forever. Forcing risks a
+                ;; duplicate load, which is the lesser evil against never making progress —
+                ;; and the message above says the protocol is broken either way.
+                (%require-force key))))))))
+
+(defn- %require-release-dead-claim!
+  (key loader)
+  "Clear `key`'s in-flight marker, but only while it still names `loader` — CAS-retried, so
+a claim another process has meanwhile taken over is left alone rather than clobbered."
+  (%swap-registry! *features-loading*
+    (fn (m) (if (= (get m key) loader) (dissoc m key) m))))
+
+(defn- %require-unwatch!
+  (key me rref mref)
+  "Stop waiting on `key`: leave the waiter queue, drop the death watch, and DEACTIVATE both
+refs so a notification already in flight is dropped at delivery instead of queueing.
+
+The deactivation is the part that is easy to miss. Leaving the queue does not un-send a
+completion the loader has already taken the list for, and `demonitor` is explicitly
+best-effort — a `[:down …]` already queued is not recalled. Without this, an ordinary
+process that merely triggered a lazy autoload can be left holding a stray
+`[:load-done \"json\" …]` or `[:down …]`, which some later catch-all `receive` (a `gen`
+server's unknown-message clause, say) then picks up as if it were application traffic. This
+is exactly what OTP 24 reply aliases exist for."
+  (when mref (demonitor mref))
+  (when mref (%ref-deactivate mref))
+  (%ref-deactivate rref)
+  (%require-drop-waiter! key me))
 
 (defn- %require-drop-waiter!
   (key me)
@@ -1257,7 +1312,7 @@ marker is cleared on failure), never before — see the ordering note above."
   (%swap-registry! *features-waiting*
     (fn (m)
       (let (ws (or (get m key) (list))
-            left (filter (fn (p) (not (= p me))) ws))
+            left (filter (fn (w) (not (= (first w) me))) ws))
         (if (empty? left) (dissoc m key) (assoc m key left))))))
 
 ;; Load one feature once. CONCURRENT-SAFE: `require` returning means the module's

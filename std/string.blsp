@@ -49,7 +49,7 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
   (if (= (string/length s) 0)
     s
     (str (string/upper (string/substring s 0 1)) (string/lower (string/substring s 1)))))
-(sig capitalize (string -> any))
+(sig capitalize (string -> string))
 
 ;; ---- char access & content conversions --------------------------------------
 

@@ -5205,6 +5205,217 @@ the same treatment. It does now, delta kept as the fallback for a bare-rooted mo
 which is a correction: the delta had been crediting it with names from the modules its own
 `require` pulled in.
 
+## 2026-08-28 (second session) — a red tree, and a gate reading the wrong binary
+
+Picked up where the previous session stopped: `092ba281` (the three require/process defects) and
+its merge `6790e1b6` were **committed and never pushed** — the session ended mid-push when every
+shell command started failing silently. That turned out to be environmental, not the repo: `/tmp`
+is a 16 GB tmpfs mounted `usrquota` (systemd 259, `tmpfiles.d/tmp.conf`'s `q /tmp`), the per-user
+slice is ~8 GB, and 13 GB of stale Claude scratchpads — one an 8.3 GB `cargo test` **debug** tree
+inside a worktree under `/tmp` — had exhausted it. Writes returned `EDQUOT` while `df` read 81%
+full with 3 GB free, because the filesystem was not full; the *user* was. Worth knowing because
+`df` is the natural thing to check and it exonerates the real cause.
+
+`origin/main` itself was red in three CI jobs. Both root causes were in the type-system wave.
+
+### An adopted signature can be *less precise* than the one it shadows, silently
+
+`type_check_catalog::checker_catches_every_should_warn_case` failed on one case:
+
+```lisp
+(+ 1 (string/capitalize "hello"))   ; expected a warning containing "+", got none
+```
+
+`std/string.blsp` had adopted `(sig capitalize (string -> any))`. A declared sig is
+**authoritative** — `annot.rs` reads it ahead of primitive / curated / inferred — so it shadowed
+the curated `string/capitalize : (string -> string)` and widened the return to `any`, and there
+is nothing to warn about when an argument's type is `any`. Both arms of `capitalize` provably
+return a string (the curated entry's own comment says so, `sigs.rs:240`), so the declaration was
+just wrong. Now `(string -> string)`.
+
+The shape is the interesting part: **adoption can lose checking, and nothing says so.** No
+warning, no failing gate — the only thing that broke was a catalog entry that happened to contain
+that exact expression. Ten of `std/`'s 358 declarations shadow one of `curated_sig`'s ~35 names;
+a shadowed name nobody had written an example for would have gone unchecked in silence.
+
+So it is gated structurally now rather than by example:
+`types::check::tests::no_declared_std_sig_widens_its_curated_signature` walks every `std/**/*.blsp`,
+parses each `(sig …)` with the checker's own `parse_sig_decl`, qualifies it by its `defmodule`,
+and asserts the declared return is a **subtype** of the curated one. It also asserts it inspected
+at least 8 shadowing pairs, so a broken walk or a broken qualification fails instead of passing
+vacuously — the KI-68 lesson applied at the point of writing rather than after.
+
+**Returns only, deliberately.** A declaration that *narrows* a parameter (`math/even?` declares
+`int` over a curated `number`) is a tightening: it can only produce a warning the curated sig
+would have missed, and `nest check`'s zero-warning gate over `std/` + `tests/` is where that
+surfaces. Widening a return is the direction that loses checking quietly, so that is the
+direction asserted, and the doc comment says so rather than implying the gate covers more.
+
+### Four clippy errors that no local run could have shown
+
+`clippy (all features)` failed with two `chunks_exact_to_as_chunks` (`types/check/infer.rs`) and
+two `manual_isolate_lowest_one` (`types/mod.rs`, `types/display.rs`). Both lints are **new in
+clippy 1.98**; this machine was on 1.97, where a full `cargo clippy --all-targets --all-features
+-- -D warnings` passes cleanly on the identical code. CI pins `dtolnay/rust-toolchain@stable` and
+there is no `rust-toolchain.toml`, so local and CI drift apart silently and the local run's green
+means only "green for whatever version you happen to have".
+
+Applied clippy's own suggestions, then **verified rather than assumed**: `rustup update stable`
+to 1.98 and re-ran CI's exact invocation, which is now clean. Both APIs (`slice::as_chunks`,
+`isolate_lowest_one`) were probed on 1.97 first and are stable there too, so nothing regressed
+for an older toolchain. Note the CLAUDE.md warning about `--all-features` has a companion: it is
+not only the feature set that arms lints, it is the *version*.
+
+### KI-76 — the green gate was reading a 9-commit-old binary
+
+`make green` also reported 8 `unbound symbol` warnings — `third` in the Gabriel support files,
+`defserver` in `gen_test.blsp`. Both names exist. `green.sh` gated on `target/release/nest` while
+telling you to run `make release`, which builds `RELEASE_DIR=target/release-fast`: a different
+binary, which no documented command refreshes. It was 9 commits behind, and `std/` is
+`include_str!`'d into the binary — so it was reporting that *its own baked-in stdlib* lacked
+`defserver`, the name `e38e9a0b` renamed from `defprocess`. It was reading a rename backwards.
+Current binary: zero warnings.
+
+Its staleness guard could not have caught this: it was conditioned on `std/` or `crates/` having
+**uncommitted** changes, so it skipped entirely on the clean tree you have right before a push —
+precisely when the gate gets consulted — and it was a `note` beside a printed verdict rather than
+a failure. `make doctor` had the finding all along (*"built from 464b6c57, HEAD is 6790e1b6"*),
+but nothing makes `green.sh` consult it.
+
+Fixed by resolving the binary by **identity, not path**: prefer whichever candidate reports HEAD's
+sha from `nest --version` (doctor's own mechanism), and make a stale-or-older-than-source binary a
+**failure** that skips the gates with `the .blsp gates DID NOT RUN`. That direction is the point —
+a stale binary's verdict is meaningless in both directions, so it must not be possible to read a
+believable green *or* a believable red off the wrong `std/`. Sabotage-verified in both states.
+
+Three gate defects in two days (KI-68 dead corpora, KI-70 a walk that returned early, KI-76 the
+wrong artifact) now share one sentence: **a gate must assert what it is gating on.** KI-68's
+differential did not check its programs were alive, KI-70's walk did not check it reached the
+code, KI-76's script did not check the binary was the tree's.
+
+### KI-72 closed: the children died, and the image was publishing a module half-built
+
+The only open bug, and the one blocking the biggest available wide-perf win — the stdlib image
+cuts `json` 6.5 → 1.7 ms, `http` 12.0 → 3.6 ms, `regex` 4.7 → 1.1 ms and the `json` benchmark
+row −5.6%, and it has shipped opt-in since the day it was flipped off.
+
+Three prior sessions had characterised this as a lost message: root blocked in `receive`, mailbox
+**empty**, all 12 workers idle, and (correctly) that the wait is unbounded rather than a 5 s
+poll. The entry closed with the honest open question — *"a lost `send`, a child that died
+silently, or a child that never got scheduled. Distinguishing those is where this stands."*
+
+It is the second, and one flag answers it:
+
+```
+$ BROOD_STDIMAGE=1 ./autoload_race-… --exact racing_the_first_call_into_string_is_sound --nocapture
+process 11 died: unbound error: unbound symbol: string/whitespace?
+… 17 of 24 children, same error
+```
+
+`fan` uses `spawn`, not `spawn-link`, so a dead child is invisible to the root: it never sends,
+and the root waits for 24 replies that will never total 24. The empty mailbox and the idle
+workers were consistent with this all along and needed no mailbox or scheduler explanation.
+
+**Why three investigations missed it.** The message is written from a *green process*, and
+libtest captures output per thread — so `cargo test` and nextest swallow it. It shows only under
+`--nocapture`. The bug was chased with gdb and in-language watchdogs (which, as the entry warns,
+perturb the timing) and nobody read a hung run's full output. Same lesson as KI-64: read what the
+program actually printed before reasoning about what it must be doing.
+
+**The mechanism.** A section's entries are `define`d one at a time into the runtime's **shared**
+global table, so each name is callable the instant it lands — and the writer ordered sections by
+`(global-names)`, in which a public can precede a module-private it calls:
+
+| entry | position in `string`'s 51-entry section |
+|---|---|
+| `string/blank?` (public) | 7 |
+| `string/triml` / `triml-from` | 46 / 47 |
+| `string/trimr` / `trimr-to` | 48 / 49 |
+| `string/whitespace?` (**private**, called by all four) | **51** |
+
+For 44 definitions `string/blank?` is bound while the `whitespace?` in its body is not. Loading
+from source is immune for a structural reason: the file defines `whitespace?` at line 190 and
+`blank?` at 192 — callee before caller. The image inherited no such guarantee.
+
+That finally explains every stubborn feature: the image is the amplifier because only the image
+installs in an order unrelated to source order; it is intermittent because a child must resolve
+the public name inside the window; every in-language observer moved the window; re-ordering
+`provide` did nothing because **the child never consults the require protocol at all** — the name
+is already bound, so there is no stub to trigger a load and nothing to wait on; and one `Interp`
+on one thread reproduces because the concurrency needed is between green processes, not runtimes.
+
+**Fix: privates first** (`std/tool/stdimage.blsp` — policy stays in Brood, ADR-006). A public name
+is never reachable before the privates it closes over. Sorting by definition site was tried first
+and cannot work: `reflect/source-location` returns `nil` for a `defn-`, which is exactly the half
+that matters.
+
+**Measured, image verified live in every arm** (`[image] install: 103 sections` *plus* `[image]
+string` materialisation lines — the entry's own trap is that a committed sha invalidates the image
+and a silent 0/N then looks like a fix):
+
+| repro | before | after | control (image off) |
+|---|---|---|---|
+| string test, 12s cap | 5/12 hang | **0/24** | 0/12 |
+| seq test | — | 0/12 | — |
+| whole binary, `--test-threads=4` | — | 0/10 | — |
+| **original 12-parallel, 90s cap** | **12/12** | **0/12** | 0/12 |
+
+The last row is the condition the entry set for calling the image safe to default on: the image
+arm at *parity* with the no-image arm, not merely under the cap.
+
+**Not claimed:** that this makes the image default-ON. That is a separate decision with its own
+measurement, and the residual is recorded — privates-first does not order public→public, and full
+source-order parity is unavailable because privates have no def-site. The complete fix is an
+atomic section install, and the KI entry now carries the GC trap waiting in the obvious version of
+it: buffering the built values in a Rust `Vec` leaves them unrooted while `from_message` keeps
+allocating.
+
+**The win now unblocked, measured on this machine** (best-of-7 whole invocations, `%now-ns`
+around a single `require-one`, which is the right shape here because module load is exactly what
+a short-lived run pays):
+
+| module | image OFF | image ON | speedup |
+|---|---|---|---|
+| `http` | 12.93 ms | 5.98 ms | **2.2×** |
+| `json` | 8.29 ms | 3.97 ms | **2.1×** |
+| `regex` | 4.90 ms | 1.87 ms | **2.6×** |
+| `datetime` | 4.02 ms | 2.75 ms | 1.5× |
+| `seq` | 3.66 ms | 2.27 ms | 1.6× |
+| `string` | 2 µs | 2 µs | — (already loaded: `io/puts` pulls `string` in before the timer starts, so this row measures nothing — kept as the reminder to check what your probe has already loaded) |
+
+Absolutes run higher than the published FRONTIER figures on this box and the ratios are smaller
+(FRONTIER has `json` 6.5 → 1.7 ms); read the ratios, not the absolutes. Either way this is 1.5–2.6×
+on the cost every short-lived invocation pays — a `nest check`, a one-shot script, a handler on a
+freshly spawned process — which is why the image is the widest lever left on startup and why the
+public→public residual is worth closing rather than working around.
+
+**Deliberately not attempted in this session:** the atomic section install. It is the complete fix
+and it is kernel work with a live use-after-GC hazard in its obvious form (see the KI entry), so
+it wants review rather than an unsupervised landing.
+
+**Correction to the paragraph above, made the same session.** It said atomic install was "the
+follow-up if a public→public instance ever appears". They already exist. `(global-names)` order is
+**alphabetical** — that is *why* `string/blank?` (b) preceded `string/whitespace?` (w) — so the
+identical window exists wherever a public calls a sibling public sorting later. A static scan over
+`std/`'s 1318 module publics finds **≈257** such calls, three verified by hand:
+`datetime/days-in-month` → `(leap-year? y)`, `datetime/today` → `(utc-now)`, and
+`editor/ansi/ansi-clear` → `(ansi-clear-screen)`/`(ansi-home)`. None has been seen to fail because
+none sits on a funnelled autoload path the way `string/blank?` does — the stub aims 24 processes at
+it simultaneously — but the windows are there.
+
+So the honest statement is: **privates-first is necessary and not sufficient.** It fixes the
+reproducible hang; it does not make the image safe to default-ON. Atomic section install is the
+prerequisite, and the kernel already has the rooting API for it (`Heap::root`/`read_root` plus
+`roots_len`/`truncate_roots` in `core/heap/gc.rs`) — pass 1 builds and roots, pass 2 defines from
+the roots, validated under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+Two process notes worth keeping. The first count I took was **757**, and it was wrong twice over:
+`:year` matched the public `year` (the keyword colon was not excluded) and `(defn- foo` parsed as a
+public named `-`, because `defn-?` matched `defn` and then captured the hyphen as the name. Both
+inflations pointed the same way — toward a scarier number — and only hand-checking a single case
+(`epoch-ms->` "calling" `year`, which is actually `(get ymd :year)` beside three `let`-locals named
+`hour`/`minute`/`second`) exposed them. A static scan over a Lisp needs call-position matching and
+a hand-verified sample before its count means anything.
 
 ## 2026-08-28 — a sealed ability over the numeric tower rejected its own members
 

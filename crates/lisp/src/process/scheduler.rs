@@ -1263,6 +1263,44 @@ thread_local! {
     static ROOT_CTX_GUARD: RefCell<Option<RootCtxGuard>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// The runtime a freshly-minted root context should be stamped with — set for the
+    /// duration of `Interp::eval_forms`, which is the only place a root context can be
+    /// minted with a known owner. 0 means "no owning runtime known".
+    static MINTING_RUNTIME_TAG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Scope `tag` as the runtime that owns any root context minted on this thread while `f`
+/// runs. Restores the previous value (rather than clearing) so nesting — a host evaluating
+/// on one `Interp` from inside another's call — leaves the outer scope intact.
+pub fn with_minting_runtime_tag<T>(tag: u64, f: impl FnOnce() -> T) -> T {
+    let prev = MINTING_RUNTIME_TAG.with(|t| t.replace(tag));
+    let out = f();
+    MINTING_RUNTIME_TAG.with(|t| t.set(prev));
+    out
+}
+
+/// Retire this thread's root context, but only if it belongs to runtime `tag`.
+///
+/// The unconditional [`deregister_root_ctx`] takes whatever context the thread holds, with
+/// no check that the caller minted it. That is fine for a host tearing a thread down and
+/// wrong for `Interp::drop`: a host with a long-lived `Interp` that builds a short-lived one
+/// on the same thread would, on dropping the temporary, retire the long-lived
+/// interpreter's context — changing its pid, discarding its queued mailbox, and firing its
+/// monitors and links as a death. Returns false (and touches nothing) for a context minted
+/// by another runtime, or minted with no known owner.
+pub fn deregister_root_ctx_of(tag: u64) -> bool {
+    let owned = CURRENT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .is_some_and(|ctx| ctx.mailbox.runtime_tag() == tag)
+    });
+    if !owned {
+        return false;
+    }
+    deregister_root_ctx()
+}
+
 /// Retire this thread's root context now, rather than at thread exit: remove its pid from
 /// the process registry, fire its monitors/links, and unbind it, so a subsequent
 /// `self`/`receive` mints a fresh one. Returns whether there was one to retire.
@@ -1297,6 +1335,16 @@ pub(super) fn ensure_ctx() -> Ctx {
         }
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let mailbox = Mailbox::new();
+        // Stamp the owning runtime, so this context can later be retired by the `Interp`
+        // that caused it and by no other (see `deregister_root_ctx_of`). A green process
+        // gets its tag in `spawn`; a root context had none at all — it read 0, which also
+        // meant it silently declined every shared-closure handle (ADR-208).
+        //
+        // 0 when minted outside any `Interp::eval_forms` — an embedder touching
+        // `self`/`send` directly off a bare thread. That is deliberately treated as
+        // "unowned": `deregister_root_ctx_of` will not retire it, because retiring a
+        // context we cannot prove is ours is the failure this guards against.
+        mailbox.set_runtime_tag(MINTING_RUNTIME_TAG.with(|t| t.get()));
         REGISTRY.insert(pid, Arc::clone(&mailbox));
         let ctx = Ctx {
             pid,

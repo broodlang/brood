@@ -46,6 +46,116 @@ fn racing_requirers_are_all_released_by_the_loader() {
     );
 }
 
+/// A waiter that stops waiting must not be left holding the loader's completion.
+///
+/// The waiter registers, *then* re-checks. If the re-check wins — the loader provided while
+/// we were joining the queue — we stop waiting, but the loader may already have taken the
+/// waiter list and will still `send` the completion. Leaving the queue does not un-send it,
+/// and `demonitor` is best-effort, so an ordinary process that merely called an autoloaded
+/// function could be left holding a stray `[:load-done …]`. A later catch-all `receive` — a
+/// `gen` server's unknown-message clause — would then pick it up as application traffic.
+///
+/// That interleaving is not reproducible on demand (racing an autoload 16 ways does not hit
+/// it), so this stages it directly through the protocol's own helpers instead: enqueue a
+/// waiter, give up the way `%require-unwatch!` does, and only then let the loader drain and
+/// send. The guarantee is the one OTP 24 reply aliases provide — the completion is addressed
+/// to the waiter's ref, and a deactivated ref's message is dropped at DELIVERY.
+#[test]
+fn a_completion_for_a_waiter_that_gave_up_is_dropped_at_delivery() {
+    let mut interp = Interp::new();
+    let v = interp
+        .eval_str(
+            r#"
+            (let (k "zz-not-a-real-module" r (ref))
+              ;; 1. join the queue, as `%require-await` does
+              (%require-enqueue-waiter! k (self) r)
+              ;; 2. give up, as every non-notified exit path does
+              (%require-unwatch! k (self) r nil)
+              ;; 3. the loader finishes and drains a list it took BEFORE we left. Staged by
+              ;;    re-adding us: the loader cannot tell the difference, and this is exactly
+              ;;    the state the race produces.
+              (%require-enqueue-waiter! k (self) r)
+              (%require-release! k)
+              ;; Nothing may have queued: the ref is deactivated.
+              (%mailbox-size (self)))
+            "#,
+        )
+        .expect("staging the give-up window");
+    assert_eq!(
+        interp.print(v),
+        "0",
+        "the completion for a waiter that had already given up was queued in its mailbox — \
+         the reply alias was not deactivated, so require-protocol traffic leaks into an \
+         application process"
+    );
+}
+
+/// A loader KILLED mid-load must hand the load back, not poison the module.
+///
+/// Nothing clears `*features-loading*` when a process dies, so the dead claimant's marker
+/// outlives it. A waiter that retries without clearing it re-enters `%require-await`,
+/// monitors the same dead pid, and `add_monitor` answers a dead target with an *immediate*
+/// synthetic `[:down … :noproc]` — a hot loop with no delay in it, spinning at 100% CPU and
+/// poisoning that module for every process. The `:down` handler clears the stale claim first.
+///
+/// The assertion is that the require completes at all: before the fix this test does not
+/// fail, it hangs.
+#[test]
+fn a_loader_killed_mid_load_hands_the_load_back() {
+    let mut interp = Interp::new();
+    let v = interp
+        .eval_str(
+            "(def root (self))\
+             ;; Claim `string`'s load, then die holding the claim — the marker stays set.
+             (def victim (spawn (do (%registry-update! '*features-loading* :assoc-new\
+                                      [\"string\"] (self))\
+                                  (send root [:claimed])\
+                                  (receive ([:never] nil)))))\
+             (receive ([:claimed] nil) (after 2000 nil))\
+             (exit victim :kill)\
+             ;; Now require it. The claim is held by a corpse.
+             (require-one \"string\")\
+             [(string/blank? \"\") (%registry-member? '*features* \"string\")]",
+        )
+        .expect("requiring a module whose claimant was killed mid-load");
+    assert_eq!(
+        interp.print(v),
+        "[true true]",
+        "a dead claimant's stale marker was not cleared — the module stays unloadable"
+    );
+}
+
+/// A load that FAILS must not be reported to its waiters as a success.
+///
+/// The loader releases its waiters on the error path too — it has to, or they would block on
+/// a load that will never provide. So `[:load-done]` means "the claimant is finished", not
+/// "the module is loaded", and a waiter that trusts it returns as if the require succeeded;
+/// the caller then meets an unbound name instead of the loader's actual error. `%require-await`
+/// re-checks `*features*` rather than trusting the notification.
+#[test]
+fn a_failed_load_does_not_report_success_to_racing_requirers() {
+    let mut interp = Interp::new();
+    // Every one of these must see an ERROR, not a silent success: the module does not exist,
+    // so whichever process wins the claim fails, and the waiters must fail the same way
+    // rather than being told the load is done.
+    let v = interp
+        .eval_str(
+            "(def root (self))\
+             (dotimes (_ 8)\
+               (spawn (send root [:r (try (do (require-one \"zzz-no-such-module\") :ok)\
+                                       (catch _ :err))])))\
+             (let (got (reduce (fn (a _) (receive ([:r v] (cons v a)))) (list) (range 8)))\
+               [(count got) (count (filter (fn (x) (= x :err)) got))])",
+        )
+        .expect("8 processes racing a require of a module that does not exist");
+    assert_eq!(
+        interp.print(v),
+        "[8 8]",
+        "a failed load was reported to a racing requirer as success — `[:load-done]` means \
+         the claimant finished, not that the module loaded"
+    );
+}
+
 /// The exact failing shape: a `receive` nested inside the native `reduce` builtin, with **no
 /// `after`** — so nothing can self-wake it and a lost notify is a permanent hang rather than
 /// a slow test. The harness timeout is the only backstop, which is why this is a test and not

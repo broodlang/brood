@@ -6146,3 +6146,126 @@ fn a_file_local_declaration_constrains_its_callers_in_that_file() {
         "a shadowing local must not inherit the global's declared parameters: {w:?}"
     );
 }
+
+// ---- declared-vs-curated precision (2026-08-28) -------------------------------------
+
+/// Every `.blsp` under `dir`, recursively.
+fn blsp_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            blsp_files(&p, out);
+        } else if p.extension().is_some_and(|x| x == "blsp") {
+            out.push(p);
+        }
+    }
+}
+
+/// The `(defmodule NAME …)` name, read textually so this gate does not depend on the
+/// module-form API it is checking around. `None` for a bare-rooted (prelude) file.
+fn declared_module_name(src: &str) -> Option<String> {
+    let rest = src.split_once("(defmodule")?.1;
+    let name: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != '(' && *c != ')')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// A declared `(sig …)` in `std/` must never be **less precise** than the curated
+/// signature it shadows.
+///
+/// A declaration is authoritative — `annot.rs` reads it ahead of primitive / curated /
+/// inferred — so widening one silently switches off every finding that rested on the
+/// curated version. Nothing warns and nothing fails: during the ADR-276/277 adoption
+/// rounds `string/capitalize` shipped as `(string -> any)` over a curated
+/// `(string -> string)`, which disabled the `(+ 1 (string/capitalize "x"))` finding.
+/// `type_check_catalog` caught that one only because that exact expression happened to be
+/// in the catalog — a shadowed name nobody had written an example for would have gone
+/// unchecked in silence. This gate is structural instead: it needs no example per name.
+///
+/// **Returns only.** A declaration that *narrows* a parameter (`math/even?` declares
+/// `int` over a curated `number`) is a tightening, not a loss — it can only produce a
+/// warning the curated sig would have missed, and `nest check`'s zero-warning gate over
+/// `std/` + `tests/` is where that surfaces. Widening a *return* is the direction that
+/// loses checking silently, so that is the direction asserted.
+#[test]
+fn no_declared_std_sig_widens_its_curated_signature() {
+    let interp = crate::Interp::new();
+    let std_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+
+    let mut files = Vec::new();
+    blsp_files(&std_root, &mut files);
+    files.sort();
+    assert!(
+        files.len() > 40,
+        "only {} .blsp files found under {} — the walk is broken, so a green result here \
+         would mean nothing",
+        files.len(),
+        std_root.display()
+    );
+
+    let mut compared = 0usize;
+    let mut violations: Vec<String> = Vec::new();
+
+    for path in &files {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let module = declared_module_name(&src);
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let Ok(forms) = crate::syntax::reader::read_all(&mut heap, &src) else {
+            continue;
+        };
+
+        for form in &forms {
+            let Some((name, declared)) = super::annot::parse_sig_decl(&heap, *form) else {
+                continue;
+            };
+            let bare = crate::core::value::symbol_name(name);
+            let qualified = match &module {
+                Some(m) if !bare.contains('/') => format!("{m}/{bare}"),
+                _ => bare.clone(),
+            };
+            let Some(curated) = super::sigs::curated_sig(crate::core::value::intern(&qualified))
+            else {
+                continue;
+            };
+            compared += 1;
+            if !declared.ret.is_subtype(&curated.ret) {
+                violations.push(format!(
+                    "  {qualified} ({}): declared return `{}` is WIDER than the curated `{}`",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    declared.ret,
+                    curated.ret
+                ));
+            }
+        }
+    }
+
+    // The gate must not be satisfiable by doing nothing (docs/handoff.md: "a gate whose
+    // pass condition can be satisfied by doing nothing is worse than no gate, because it
+    // is believed"). `curated_sig` holds ~35 names and `std/` declares a sig for ten of
+    // them; if qualification or the sig walk breaks, `compared` collapses to 0 and this
+    // fires instead of reporting success.
+    assert!(
+        compared >= 8,
+        "only {compared} declared/curated collisions were inspected — the sig walk or the \
+         module qualification broke, and a green result here would mean nothing"
+    );
+    assert!(
+        violations.is_empty(),
+        "{} declared std sig(s) are less precise than the curated signature they shadow \
+         (this silently disables lints — see the doc comment):\n{}",
+        violations.len(),
+        violations.join("\n")
+    );
+}

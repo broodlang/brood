@@ -59,3 +59,41 @@ fn an_unconsumed_message_does_not_cross_into_the_next_runtime() {
          root mailbox was inherited across the `Interp` swap"
     );
 }
+
+/// Dropping a short-lived `Interp` must not retire a *different*, still-live `Interp`'s root
+/// context on the same thread.
+///
+/// `deregister_root_ctx` takes whatever context the thread holds, with no check that the
+/// caller minted it — so the ownership check has to come from the runtime tag. A host with a
+/// long-lived interpreter that builds a scratch one beside it (an LSP-style server doing a
+/// throwaway check) would otherwise find, on dropping the scratch one, that its main
+/// interpreter's pid changed, its queued mailbox was discarded, and its monitors and links
+/// had fired as a death.
+#[test]
+fn dropping_a_nested_interp_leaves_the_outer_ones_root_ctx_alone() {
+    let mut outer = Interp::new();
+    let before = root_pid(&mut outer);
+    outer
+        .eval_str("(send (self) [:mine 1])")
+        .expect("queue a message on the outer root");
+
+    {
+        let mut scratch = Interp::new();
+        scratch.eval_str("(+ 1 2)").expect("scratch work");
+    } // dropped here
+
+    let after = root_pid(&mut outer);
+    assert_eq!(
+        before, after,
+        "dropping a nested `Interp` retired the outer interpreter's root context — its pid \
+         changed from {before} to {after}"
+    );
+    let v = outer
+        .eval_str("(receive ([:mine n] [:kept n]) (after 200 :LOST))")
+        .expect("the outer root's own message");
+    assert_eq!(
+        outer.print(v),
+        "[:kept 1]",
+        "dropping a nested `Interp` discarded the outer interpreter's queued mailbox"
+    );
+}
