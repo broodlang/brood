@@ -172,9 +172,14 @@ pub const FLAGS: &[DebugFlag] = &[
         "trace which arms qualify for self/leaf inlining (pairs with the two NO_*INLINE flags)",
     ),
     f(
+        "BROOD_NO_STDIMAGE",
+        OPTOUT,
+        "opt OUT of the stdlib startup image (ADR-281, default ON): `require` materialises a module's bindings from ~/.cache/brood instead of evaluating its source (json 6.5 -> 1.7 ms; a three-module script 46.5 -> 36.2 ms). Set it to A/B, to bisect a suspected materialise fault, or as the stopgap if one is found",
+    ),
+    f(
         "BROOD_STDIMAGE",
         ENGINE,
-        "opt IN to the stdlib startup image: `require` materialises a module's bindings from ~/.cache/brood instead of evaluating its source (json 6.5 -> 1.7 ms). Not default — KI-72",
+        "ask for the image explicitly. Redundant now that it is the default, and kept for one reason: an explicit request that goes UNMET prints a line, where the default path falls back to source in silence. Use it when measuring — `(stdimage/status)` says which of absent/stale/unreadable it was",
     ),
     f(
         "BROOD_IMAGE_TRACE",

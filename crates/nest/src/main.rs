@@ -759,10 +759,10 @@ fn run_main(cli: Cli) {
     // built from one tree — so `nest` building it also speeds up `brood`, `brood-lsp` and every
     // later `nest`. Skipped for the commands where a second of silence would be the whole
     // command (`--version`, `complete`), and never for `stdimage` itself, which does its own.
-    // Only when the image is switched on (`BROOD_STDIMAGE=1`) — see KI-72. There is no point
-    // spending ~1 s writing a file nothing will read, and doing it unconditionally made every
-    // `nest` command in a parallel test run pay for it.
-    if std::env::var_os("BROOD_STDIMAGE").is_some() {
+    // Skipped when the image is switched OFF (`BROOD_NO_STDIMAGE=1`): there is no point
+    // spending ~1 s writing a file nothing will read, and doing it unconditionally made
+    // every `nest` command in a parallel test run pay for it.
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_none() {
         ensure_stdimage(&mut interp, &cli.cmd);
     }
 

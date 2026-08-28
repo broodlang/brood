@@ -559,7 +559,14 @@ fn handle_capture_outcome(
             // :message … :trace}]`, see `message::error_reason` — so a monitor /
             // trapping link / supervisor gets BEAM's `{Reason, Stacktrace}`
             // rather than a flattened string.
-            eprintln!("process {} died: {}", proc_descr(proc.pid), e.located());
+            // …and durably, not only to stderr. KI-72 spent two sessions believing this
+            // line was never printed: libtest discards a never-completing test's stderr,
+            // so the one message naming the cause was written and thrown away. A TUI or
+            // `nest run --watch` loses it the same way.
+            let who = proc_descr(proc.pid);
+            let why = e.located();
+            eprintln!("process {who} died: {why}");
+            crate::cli_support::dump_process_death(&who, &why.to_string());
             deregister(
                 proc.pid,
                 crate::process::message::error_reason(&e),
@@ -567,7 +574,9 @@ fn handle_capture_outcome(
             );
         }
         Err(_) => {
-            eprintln!("process {} panicked", proc_descr(proc.pid));
+            let who = proc_descr(proc.pid);
+            eprintln!("process {who} panicked");
+            crate::cli_support::dump_process_death(&who, "panicked");
             deregister(
                 proc.pid,
                 Message::Keyword(value::intern(pk::KILLED)),

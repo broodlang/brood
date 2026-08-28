@@ -4,7 +4,62 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.15.0 — 2026-08-28
+
+**BREAKING — the bare core gives back four ordinary English words, and one primitive becomes
+an ability op.** `name` was a Rust builtin holding a plain noun at root, so `(defn name …)`
+raised at root and, inside a module, was *captured by `defmodule`'s own expansion* — a file
+could not name a function `name` without failing its own `nest check`. It is now the `Display`
+op **`->string`**: one spelling, defined in Brood, and `(->string :foo)` is `"foo"` where
+`(str :foo)` stays `":foo"`. `str` and `pr-str` are unchanged (ADR-258).
+
+The visible consequence beyond the rename: a keyword rendered through `->string` loses its
+colon, so `csv/encode` writes `b` where it wrote `:b`. Symbols are unaffected.
+
+**Renamed** (greenfield, no aliases):
+
+- `gen/defprocess` → **`gen/defserver`** — it never defined a *process* (`spawn`/`send`/
+  `receive` are core and need no import); it defines a gen server, whose clauses are
+  `cast`/`call`/`query`/`info`. The old name promised the core thing and delivered the
+  framework one.
+- `json/parse` → **`json/decode`**, pairing with `json/encode`. `csv/parse`/`parse-maps`/
+  `emit`/`emit-maps` → **`csv/decode`/`decode-maps`/`encode`/`encode-maps`**, so both codec
+  modules use one convention.
+- `uuid/nil-uuid` → **`uuid/zero`** — it returns the zero-UUID *string*, so `nil` would have
+  been wrong, and the `-uuid` suffix was the redundant module-name prefix ADR-236 dropped
+  everywhere else.
+- `num-add`/`num-sub`/`num-mul`/`num-div` → **`num/add`/`num/sub`/`num/mul`/`num/div`**, with
+  `std/num.blsp` declaring the namespace. A four-name hyphen prefix is "a namespace spelled by
+  hand" (ADR-251).
+- `last-index-of` → **`string/last-index-of`**. It is string-only, so ADR-230's boundary rule
+  puts it in the module; `index-of` stays bare because it really is polymorphic over strings,
+  lists and vectors. The pair looked symmetric and was not.
+
+**Moved to the bare core**, where their siblings already were:
+
+- **`third`** — `first` is a kernel builtin and `second` is in the prelude; `third` was in
+  `seq`. One trio, three homes.
+- **`datetime?`, `date?`, `time-of-day?`** — type predicates belong beside `queue?`/`pq?`/
+  `multimap?` (ADR-236 carve-out 2). They are pure record-id checks and need no module loaded.
+- **`seq/iterate-times`** is public. It was private, dead in `std/`, yet exercised by a test
+  and cited in `docs/deferred.md` as the supported workaround — private, tested and documented
+  is a contradiction.
+
+**Added**
+
+- **A multimethod can declare its return type** — `(defmulti compare-to :antisymmetric :-> int)`
+  (ADR-278). A `defmulti`'s body is the dispatch machinery, so its inferred type was opaque and
+  a call site could not be typed at all. Both halves ship together: call sites are typed, *and*
+  every method body is checked against the declaration — without the second, `:-> int` would be
+  an assertion the checker believed while a method returned a string. `multi-return-type` reads
+  it back. `compare-to` adopts it, making a contract that was stated twice in prose (the `Ord`
+  ability and the multimethod's own comment) machine-checked for the first time.
+- **`tests/prelude_capture_test.blsp`** — a gate asserting no prelude macro template emits a
+  bare capturable name, plus behavioural probes. See KI-73.
+- **A declared MSRV** (`rust-version` in `[workspace.package]`, inherited by all five crates).
+  CI deliberately tracks `stable`, so this declares rather than pins — but it is the difference
+  between cargo naming the version it needs and a bare `error[E0658]: use of unstable library
+  feature`, which reads as broken code rather than an old toolchain.
 
 **The three ungated classes, closed.** Each was a place where a rename could land and no gate
 would notice.
@@ -53,6 +108,24 @@ would notice.
 **Fixed**
 
 - `docs/language.md` still documented the `table-*` family under its pre-namespacing names.
+- **A prelude macro template could be captured by a user module defining the same name**
+  (KI-73). `(defmodule m) (defn get (b k) :CAPTURED) (defrecord pt (x y))` made every accessor
+  return `:CAPTURED` — right arity, nothing unbound, `nest check` silent. Fixed for every
+  prelude macro, which meant finishing the `/name` root escape so it resolves in a module, at
+  root, and at runtime macro expansion.
+- **`compare` reported unequal values as equal, two ways** (KI-75). A single `NaN` turned
+  `sort` into a no-op — `(sort [3.0 nan 1.0 2.0])` returned its input unsorted, no error —
+  because `compare` treated `NaN` as equal to everything; it now sorts last, as Rust's
+  `total_cmp` and Java's `Double.compare` do. And the `Int`-vs-`Float` arm used a lossy cast
+  while every other cross-type arm was exact, so past 2^53 two different integers compared
+  equal. `<`/`<=`/`>` stay IEEE deliberately — a sort key and an arithmetic predicate answer
+  different questions.
+- **`sort` loaded the whole `seq` module to reach a helper three lines above it** — it went
+  through `seq/split-at`, firing the `%autoload` stub, to call back into the prelude.
+- **`std/seq.blsp`'s header and published docstring said `distinct` and `zip` were bare.**
+  They are `seq/distinct` and `seq/zip`; a reader following the docs got an unbound symbol.
+- ADR-236 stated the empty constructor was `queue/new`; it shipped as `queue/empty`, and `pq`
+  and `multimap` followed. The code was right.
 
 ## v0.14.1 — 2026-08-27
 
