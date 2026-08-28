@@ -279,6 +279,7 @@ Whitespace and plain variable references carry no span (the default colour). The
 per-character scan is the native `scan-tokens`; this only assigns faces over the token
 stream (O(tokens)), so it stays fast enough for per-frame fontification."
   (hl-spans (reflect/scan-tokens src) '() '()))
+(sig highlight-spans (string -> any))
 
 ;; ---- windowed highlighting (fontify just a viewport) ------------------------
 ;; A large buffer is too costly to lex whole every frame. The editor instead lexes

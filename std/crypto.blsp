@@ -73,6 +73,7 @@ or tampered ciphertext). Inputs may be bytes values or vectors/lists of ints."
 (defn encrypt-string (key nonce s)
   "Encrypt the UTF-8 bytes of string `s`. Returns a ciphertext bytes value."
   (encrypt key nonce (string/->bytes s)))
+(sig encrypt-string (any any string -> bytes))
 
 (defn decrypt-string (key nonce ciphertext-bytes)
   "Decrypt to a string. Returns the decoded string, or `:error` on failure."

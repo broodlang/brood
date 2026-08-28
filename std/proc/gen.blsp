@@ -70,6 +70,7 @@ raises at once rather than hanging; a timeout raises too. Use `call-timeout`
 for a custom deadline. Other messages stay queued — the reply is matched by a
 fresh (ref)."
   (call-timeout pid payload 5000))
+(sig call ((or map pid) any -> any))
 
 (defn call-timeout (pid payload ms)
   "Like `call`, but wait at most `ms` milliseconds. Monitors the server for

@@ -823,6 +823,7 @@ were loaded. Returns the entry count."
     (%image-write (image-path root)
       (project-image-sections before)
       (project-image-fingerprint root))))
+(sig write-image (string any -> any))
 
 ;; Install `root`'s image as a source of features, if it is current. Materialises the root
 ;; section (registries + declared sigs — small, and needed before anything else) and hands
@@ -1227,6 +1228,7 @@ resolve in the advisory checker. Returns the project root."
   ;; is unchanged, and writes one when it isn't — no separate build step, ever.
   (load-sources-cached root)
   root)
+(sig setup-tooling-image (string -> any))
 
 ;; If the manifest declared :dependencies, resolve them (writing/refreshing
 ;; project.lock.blsp) and append each dep's source dir to *load-path* so its
