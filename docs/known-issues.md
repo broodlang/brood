@@ -82,8 +82,8 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | # | What | Status |
 |---|---|---|
 | KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict |
-| KI-77 | **the `loop` benchmark row is ~2-3% slower than v0.14.1, and it survives every check that usually kills such a signal.** `loop` is a pure integer self-tail loop — the simplest JIT'd shape — so a real regression there is wide. Persists **unpinned** (so it is not the background-JIT-on-one-core artifact ADR-175 records) and persists under **interleaved** measurement (so it is not thermal/session drift): +3.4% pinned and +2.8% unpinned interleaved, +3.3% against a base-vs-base floor of 0.0%, +2.2% interleaved vs both v0.14.1 and 464b6c57. `make ab` reports it as `noise` because with a ~0% floor its rule falls back to a 5% absolute threshold, which is arguably too lenient for a row this quiet | ⚠️ **WATCHING 2026-08-28** — not bisected. Localized to `464b6c57..HEAD` only; the intermediate binaries (v0.14.1, 6b172c1d, 464b6c57) are within 1.1% of each other. **The measurement trap that blocks a bisect is the finding here:** this row's ABSOLUTE numbers drift ~3% between measurement sessions — the same `6b172c1d` binary read 90 ms in one interleaved pair and 93 ms in the next — so a single-shot per-step bisect on a 3% signal reads pure noise. Bisect it with *same-session interleaved* pairs only, or not at all |
-| KI-72 | **a stdlib-image section replaced a module's autoload stub before the rest of the module was bound, so a racing process took the real function and died on an unbound helper.** `string/blank?` is public and stubbed; `whitespace?` is `defn-` and is called from its body. Installing the real `blank?` removed the ADR-246 stub — the one door that routes a caller into `require-one` and makes it *wait* — while `whitespace?` was still unbound, so 17 of 24 `spawn`ed children died `unbound symbol: string/whitespace?` and the test's root waited forever for replies that could never total 24. **A wrong answer presenting as a hang.** Two sessions read it as a scheduler/mailbox stall and chased the 5 ms poll, the non-latching condvar, the `code_server` model and the two wake paths — all symptoms. The source path cannot produce it: `load` evaluates in file order, where a helper precedes its caller | ✅ **FIXED 2026-08-28** (ADR-279) — a section now defines names with **no current binding first and already-bound names (the stubs) last**; deferring is enough, atomicity is not needed. Sabotage-verified: deferral off 9/12 hang, on **0/24**. Acceptance load (12 parallel copies at `--test-threads=4`, 90 s): image ON **0/12**, image OFF 0/12, against 12/12 vs 0/12 before. Guarded by ADR-280's `image_matches_source.rs` differential (source vs image must agree on name, kind, privacy and sig — it found a **sixth** divergence on its first run: materialising dropped privacy, 1448 names, 0 after). Two things hid this for two sessions: **libtest captures a test's stderr and discards it when the test never completes**, so the `process N died` line was written and thrown away (`--nocapture` shows it), and the amplifier switches itself off — `BROOD_STDLIB_HASH` covers every `std/**/*.blsp`, so any edit (even someone else's, mid-run) silently turns the image arm into the no-image arm. **Verify the image per run, not once.** Still opt-in; default-ON is a shipping decision, now resting on one gate rather than five anecdotes |
+| KI-77 | **the `loop` benchmark row is ~2-3% slower than v0.14.1, and it survives every check that usually kills such a signal.** `loop` is a pure integer self-tail loop — the simplest JIT'd shape — so a real regression there is wide. Persists **unpinned** (so it is not the background-JIT-on-one-core artifact ADR-175 records) and persists under **interleaved** measurement (so it is not thermal/session drift): +3.4% pinned and +2.8% unpinned interleaved, +3.3% against a base-vs-base floor of 0.0%, +2.2% interleaved vs both v0.14.1 and 464b6c57. `make ab` reports it as `noise` because with a ~0% floor its rule falls back to a 5% absolute threshold, which is arguably too lenient for a row this quiet | ☑️ **NO LONGER REPRODUCES 2026-08-28** — real when filed, gone at v0.15.0 (`e9c54606`): `loop` is now **-2.2%** against v0.14.1 and **-6.4%** against `dfcddc4f`, the very tree the regression was measured on. It was not fixed by chasing it — v0.15.0 carries a ~5-6 ms FIXED per-run saving that lands on every row (`startup` **-16.7%**, 36 -> 30 ms; `loop` -6 ms, `sieve` -6 ms, `fib` -5 ms, `collatz` -5 ms), which swamped it. Not attributed to a commit. Original detail below — not bisected. Localized to `464b6c57..HEAD` only; the intermediate binaries (v0.14.1, 6b172c1d, 464b6c57) are within 1.1% of each other. **The measurement trap that blocks a bisect is the finding here:** this row's ABSOLUTE numbers drift ~3% between measurement sessions — the same `6b172c1d` binary read 90 ms in one interleaved pair and 93 ms in the next — so a single-shot per-step bisect on a 3% signal reads pure noise. Bisect it with *same-session interleaved* pairs only, or not at all |
+| KI-72 | **a stdlib-image section replaced a module's autoload stub before the rest of the module was bound, so a racing process took the real function and died on an unbound helper.** `string/blank?` is public and stubbed; `whitespace?` is `defn-` and is called from its body. Installing the real `blank?` removed the ADR-246 stub — the one door that routes a caller into `require-one` and makes it *wait* — while `whitespace?` was still unbound, so 17 of 24 `spawn`ed children died `unbound symbol: string/whitespace?` and the test's root waited forever for replies that could never total 24. **A wrong answer presenting as a hang.** Two sessions read it as a scheduler/mailbox stall and chased the 5 ms poll, the non-latching condvar, the `code_server` model and the two wake paths — all symptoms. The source path cannot produce it: `load` evaluates in file order, where a helper precedes its caller | ✅ **FIXED 2026-08-28** (ADR-279) — a section now defines names with **no current binding first and already-bound names (the stubs) last**; deferring is enough, atomicity is not needed. Sabotage-verified: deferral off 9/12 hang, on **0/24**. Acceptance load (12 parallel copies at `--test-threads=4`, 90 s): image ON **0/12**, image OFF 0/12, against 12/12 vs 0/12 before. Guarded by ADR-280's `image_matches_source.rs` differential (source vs image must agree on name, kind, privacy and sig — it found a **sixth** divergence on its first run: materialising dropped privacy, 1448 names, 0 after). Two things hid this for two sessions: **libtest captures a test's stderr and discards it when the test never completes**, so the `process N died` line was written and thrown away (`--nocapture` shows it), and the amplifier switches itself off — `BROOD_STDLIB_HASH` covers every `std/**/*.blsp`, so any edit (even someone else's, mid-run) silently turns the image arm into the no-image arm. **Verify the image per run, not once.** **The image is now DEFAULT-ON** (v0.15.0, `f114d01e`; opt out with `BROOD_NO_STDIMAGE=1`) — this fix plus ADR-280's differential is what made that shippable, after the first flip was reverted the same day it landed |
 | KI-73 | **a prelude macro's template can be captured by a user module that defines the same name.** A template is spliced into the user's file, where a bare reference resolves against *their* namespace first — so `(defmodule m) (defn get (b k) :CAPTURED) (defrecord pt (x y))` made every accessor return `:CAPTURED`. Silent wrong value: right arity, nothing unbound, `nest check` quiet. Fixed for `defrecord`/`for`/`defonce`/`with-err-str` with the `/name` root escape (ADR-236), which this pass also had to *finish implementing* — it was a resolve-time rewrite only, so `/get` was unbound at root. `receive` included | ✅ **FIXED 2026-08-28** — the escape is now total: resolved in a module (`resolve_sym`), at root (`macros::strip_root_escapes`), and at **runtime macro expansion** (`eval/mod.rs`, for a macro defined after its use site or at the REPL). `but-last` moved to `core.blsp` and `sleep` below `receive` so `receive` expands at prelude compile time. Gated by `tests/prelude_capture_test.blsp` — a static scan asserting ZERO offenders plus four behavioural probes |
 | KI-75 | **`compare` reported values as EQUAL that are not, two ways — and `sort` is built on it.** (1) `(compare nan x)` was `0` for every `x`, so one NaN silently turned `sort` into a no-op: `(sort [3.0 nan 1.0 2.0])` returned its input unsorted, no error. (2) the `Int`-vs-`Float` arm used a lossy `as f64` cast while every other cross-type arm was exact, so past 2^53 two different integers compared equal — `(compare 9007199254740993 9007199254740992.0)` was `0` while `=` and `>` both said otherwise | ✅ **FIXED 2026-08-28** — NaN now sorts LAST via `float_total_cmp` (Rust's `total_cmp` / Java's `Double.compare` choice), and `Int`/`Float` routes through the same exact base-10 path the BigInt/Decimal/Ratio arms already used. `<`/`<=`/`>` stay IEEE deliberately — a sort key and an arithmetic predicate are different questions. Guarded by `tests/comparison_test.blsp` (25 cases) plus three Rust unit tests |
 | KI-71 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right; fixed downstream with `nest rename --swap`. ✅ **The class now HAS a gate (same day):** the checker already catches a reversed call precisely, per argument — it was silent here only because `seq/remove-nth` had **no declared `sig`**. The index/collection functions (`remove-nth`, `take-last`, `drop-last`, `chunk-every`, `split-at`, `sample`, `shuffle`, `vector-ref`) now carry one, so the reversal is a warning and CI's zero-warning gate makes it a hard failure. Argument types precise, return `any` — the reversal is an argument mistake, and a narrow return would false-positive at every call site. Zero new warnings across std/ + tests/. Guards `a_reversed_index_and_collection_call_is_flagged` + `the_correct_index_first_order_stays_silent`, sabotage-verified by deleting one `sig` |
@@ -4764,7 +4764,9 @@ not `nil`, and the loop should report how many runs saw it:
 hangs: 0 of 24   (image live 24/24)
 ```
 
-**Still open:** whether the image can now be **default-ON**. Parity is met on this load, but
+**Was open, now decided:** the image went **default-ON in v0.15.0** (`f114d01e`), opt out with `BROOD_NO_STDIMAGE=1` — verified empirically: with no flag set a `require` of `json` reports `install: 103 sections` and materialises from the image, and `BROOD_NO_STDIMAGE=1` emits no `[image]` line at all. The paragraph below is the reasoning as it stood before that call.
+
+Parity is met on this load, but
 that is one workload; flipping the default is a shipping decision and ADR-256's flip was
 reverted once already.
 
@@ -4783,6 +4785,54 @@ module came back public. 1448 names diverged; 0 after the fix. Default-on is a d
 about one gate now rather than about five anecdotes.
 
 
+
+### The guard was accidental until 2026-08-28, and it is probabilistic
+
+`autoload_race` is what stands between this bug and a silent return, and until now whether it
+ran on the **imaged** path — the only path the bug exists on — was an accident. It never built or
+required an image, and nothing in `ci.yml` builds one. What *does* build one is
+`image_matches_source.rs` (ADR-280), which writes it to `~/.cache/brood` — so coverage depended
+on whether that case happened to run before this one, and nextest gives each case its own process
+in no guaranteed order. In CI, with no image on disk, these races ran on the source path and
+asserted nothing about the imaged one.
+
+The differential does not cover the gap. It compares final **state** — name, kind, privacy,
+declared signature — and proves the two load paths agree *once loaded*. This bug was not a state
+divergence but an **ordering** one during install. A differential over end state cannot see it.
+
+So `race_first_call_from_the_stdlib_image` was added, which builds the image in a **throwaway**
+interpreter (`stdimage/build` `require`s every module into the calling heap, which would load the
+very module whose *first* call is being raced), then installs it into a fresh interpreter and
+asserts three things before racing: that the install returned non-nil, that `*std-image-file*` is
+set, and that the module is **not yet loaded**. Any of those failing means the test would have
+exercised the source path while reporting that KI-72 is still fixed.
+
+**Sabotage-verified, and the first attempt was vacuous — which is the part worth recording.**
+Reverting the deferral (`if false && kind != KIND_SIG && heap.env_get(global, sym).is_some()`)
+and re-running gave, per 12 standalone invocations of a single case:
+
+| arm | caught the sabotage |
+|---|---|
+| pre-existing (`…_string_is_sound`) | **6 of 12** |
+| new (`…_from_the_stdlib_image`) | **4 of 12** |
+| `cargo test` running all 5 cases in one process | **0 of 3 runs** |
+| **`cargo nextest run` (what `make test` and CI use)** | **4 of 4 runs RED** |
+
+Three things follow, and none of them is "the guard is fine, move on":
+
+1. **The guard is probabilistic, not deterministic.** The race is intermittent by nature, so a
+   single case catches a reintroduced bug roughly half the time. What makes it a usable gate is
+   nextest running five cases in five processes: 4 of 4 whole runs went red. Do not reason about
+   this guard as if one green case proves anything.
+2. **Plain `cargo test` suppresses it entirely** — all five cases share one process, and the
+   earlier cases warm the allocator, interner and JIT enough to close the window. CLAUDE.md
+   already warns that `cargo test` has no per-test timeout; add that it cannot see this class of
+   bug at all. **Reproduce with nextest, or with `--exact` on a single case.**
+3. **The new arm is weaker than the old one** (4/12 vs 6/12) for a knowable reason: building the
+   image in the throwaway interpreter warms the same process. That is the documented hazard of
+   this bug — *every* in-language observer moves it — appearing inside the test written to catch
+   it. It is kept because it is the only arm that runs on the imaged path *deterministically*,
+   and the two together are stronger than either.
 
 ### Two accounts, one bug — and a merge that dropped one of them
 
@@ -5084,7 +5134,7 @@ gate that names the wrong artifact is not a weaker gate, it is a *different* gat
 reports confidently about something you did not ask. Whenever a script runs a built binary,
 assert the binary's identity — not its existence.
 
-## KI-77 — `loop` is ~2-3% slower than v0.14.1 ⚠️ WATCHING 2026-08-28
+## KI-77 — `loop` was ~3% slower than v0.14.1 ☑️ NO LONGER REPRODUCES 2026-08-28 (fixed by v0.15.0)
 
 **Symptom.** The `loop` benchmark row (a pure integer self-tail loop — the simplest shape the
 JIT covers) reads consistently slower than `v0.14.1`:
@@ -5129,3 +5179,59 @@ irreducible spread even then.
 plausible suspects are the ones that touch runtime rather than the checker — `092ba281`'s root-ctx
 tagging and `e38e9a0b`'s `core/heap/equality.rs` changes — but nothing has been measured to
 implicate either.
+
+### Resolved 2026-08-28: gone at v0.15.0, and the original reading was right
+
+Re-measured at `e9c54606` (v0.15.0) against the same `v0.14.1` worktree binary, `--floor`,
+best-of-15, pinned:
+
+| row | v0.14.1 | HEAD | delta | verdict |
+|---|---|---|---|---|
+| `loop` | 93 ms | 89 ms | **-4.3%** | noise |
+| `startup` | 35 ms | 29 ms | **-17.1%** | improved |
+| `sieve` | 83 ms | 80 ms | -3.6% | noise |
+| `collatz` | 219 ms | 217 ms | -0.9% | noise |
+| `fib` | 111 ms | 111 ms | +0.0% | noise |
+
+**The original reading was not a measurement error**, which was worth settling rather than
+assuming. Building the exact tree the regression was filed against and measuring it in one
+session against HEAD gives `dfcddc4f` **94 ms** vs HEAD **89 ms** — so `dfcddc4f` really did sit
+~4 ms above v0.14.1's ~90 ms, as filed, and v0.15.0 moved past both.
+
+**What actually changed is a fixed per-run saving, not a `loop` fix.** `dfcddc4f` -> HEAD, same
+session:
+
+| row | dfcddc4f | HEAD | delta | absolute |
+|---|---|---|---|---|
+| `startup` | 36 ms | 30 ms | **-16.7%** | -6 ms |
+| `loop` | 94 ms | 88 ms | -6.4% | -6 ms |
+| `sieve` | 84 ms | 78 ms | -7.1% | -6 ms |
+| `fib` | 116 ms | 111 ms | -4.3% | -5 ms |
+| `collatz` | 223 ms | 218 ms | -2.2% | -5 ms |
+
+Every row gained the *same ~5-6 ms*, and the percentage simply tracks how cheap the row is.
+That is the signature of a boot/load win, not a compute change — and it is the mirror image of
+what filed this entry, where almost every row read *slightly positive* for the same reason in
+reverse.
+
+**Not attributed.** The saving arrived somewhere in `dfcddc4f..e9c54606`; nothing in the devlog
+records it, and the prelude changes in that range (ADR-278/281's multimethod return types) are not
+an obvious cause. `cli_support.rs`'s addition there is the `.brood_crash_dump` process-death hook,
+which is diagnostics, not boot. **Worth attributing before anyone claims it**, because a 17%
+startup win is the kind of thing that should have a commit next to it.
+
+**One arithmetic that must NOT be done here.** It is tempting to read "boot fell 6 ms but `loop`'s
+wall fell only 6 ms, so compute is unchanged" — or worse, to subtract the `startup` row from
+another row to isolate compute. CLAUDE.md and FRONTIER both record that as an **under-subtraction
+trap**: the `startup` row is `(io/puts 0)`, which loads `io` and through it `string`, while most
+rows load neither, so a row keeps a lazy-load saving that the subtraction only partly removes.
+If anyone wants to know whether a residual *compute* delta survives underneath this boot win, the
+measurement is an in-process one with a fixed iteration count (`%now-ns` around N iterations
+inside one process), not a difference of two whole-invocation rows.
+
+**Kept as an entry rather than deleted** because the *method* is the reusable part: this row's
+absolute numbers drift ~3% between measurement sessions (the same `6b172c1d` binary read 90 ms in
+one interleaved pair and 93 ms in the next), so a per-step bisect on a 3% signal reads drift. What
+worked was building every candidate first and measuring them all in **one** session — and, when a
+signal disappears, building the exact tree it was filed against rather than assuming the original
+was wrong.
