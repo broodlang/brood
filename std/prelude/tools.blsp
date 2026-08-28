@@ -2278,19 +2278,30 @@ which is meaningless for a rope, so falling through unconditionally would swap a
     (defmulti render)"
   (let (ret-pos (%index-of-arrow opts)
         ret (if ret-pos (nth opts (inc ret-pos)) nil)
+        ; ABSENT is not `nil`. `nil` is a legal return type — `sig` and `defability` both
+        ; accept `:-> nil` — so "was a type given?" is a question about POSITION, never about
+        ; the value read. The earlier `(nil? ret)` test answered it wrongly in BOTH
+        ; directions: it rejected a legal `:-> nil`, and because it also demanded
+        ; `(<= (count opts) 0)` it let a DANGLING `:->` through whenever an algebra preceded
+        ; it — `(defmulti f :commutative :->)` registered silently, losing the declaration a
+        ; typo was reaching for.
+        ret-missing? (and ret-pos (>= (inc ret-pos) (count opts)))
         opts (if ret-pos (take ret-pos opts) opts)
         algebra (if (empty? opts) nil (first opts)))
     ; STRICT: an unknown algebra keyword is a clear declaration error — fail at expansion.
     (when (and algebra (not (includes? (list :commutative :antisymmetric) algebra)))
       (error "defmulti "
         mname ": unknown algebra " algebra " (expected :commutative, :antisymmetric, or none)"))
-    (when (and ret-pos (<= (count opts) 0) (nil? ret))
+    (when ret-missing?
       (error "defmulti " mname ": `:->` must be followed by a return type"))
     (list 'do
-      (list '%register-multi
-        (list 'quote mname)
-        algebra
-        (list 'quote ret))
+      ; Pass the return ONLY when one was declared. `%register-multi` takes it as a variadic
+      ; tail precisely so absent stays distinguishable from a declared `nil` (see its
+      ; docstring); always passing a third argument defeated that, and both checker-side
+      ; readers then had to treat a nil as "undeclared" to compensate.
+      (if ret-pos
+        (list '%register-multi (list 'quote mname) algebra (list 'quote ret))
+        (list '%register-multi (list 'quote mname) algebra))
       (list 'defn
         mname
         '(& args)

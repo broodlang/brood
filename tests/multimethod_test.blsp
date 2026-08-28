@@ -118,4 +118,25 @@
       (list)))
 
   (test "a declared `any` return imposes no constraint"
-    (assert= (mm-warnings "(defmulti k :-> any) (defmethod k [:string] (s) \"fine\")") (list))))
+    (assert= (mm-warnings "(defmulti k :-> any) (defmethod k [:string] (s) \"fine\")") (list)))
+
+  ;; ABSENT is not `nil`. `nil` is a legal return type — `sig` and `defability` both take
+  ;; `:-> nil` — so "was a return declared?" is a question about POSITION, never about the
+  ;; value read. Testing it with `(nil? ret)` was wrong in BOTH directions at once: it
+  ;; rejected a legal `:-> nil`, and (because it also demanded the arrow be the FIRST opt)
+  ;; it let a dangling `:->` past whenever an algebra preceded it, silently discarding the
+  ;; declaration the author was reaching for.
+  (test "a dangling `:->` is an error wherever it appears"
+    (is (not (nil? (error-of (macroexpand (quote (defmulti dang :->)))))))
+    (is (not (nil? (error-of (macroexpand (quote (defmulti dang :commutative :->))))))))
+
+  (test "`:-> nil` is a legal declaration, not a missing one"
+    (assert= (mm-warnings "(defmulti k :-> nil) (defmethod k [:int] (n) nil)") (list)))
+
+  (test "and a declared nil return is ENFORCED, not silently dropped"
+    ;; The whole point of distinguishing it: `render` promises nil, so using its result as a
+    ;; number is a provable mismatch. Before, a nil return was indistinguishable from no
+    ;; declaration at all and this warned nowhere.
+    (let (w (mm-warnings "(defmulti k :-> nil) (defmethod k [:int] (n) nil) (defn u () (+ 1 (k 5)))"))
+      (is (not (empty? w)))
+      (is (any? (fn (m) (includes? m "got nil")) w)))))
