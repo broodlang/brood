@@ -76,8 +76,15 @@ module's namespace-rooted globals (ADR-070) back to it."
   (sym v)
   (let (sig (pr-str (cons sym (arglist v)))
         d (doc v)
-        suffix (if (= (type-of v) :macro) "  *(macro)*" ""))
-    (str "### `" sig "`" suffix "\n\n" (if (nil? d) "_Undocumented._\n" (str d "\n")))))
+        suffix (if (= (type-of v) :macro) "  *(macro)*" "")
+        ;; The TYPE, when anything knows one — a `(sig …)` the author declared, or the
+        ;; curated signature a primitive carries. `nil` for a name nothing types, which
+        ;; is most of them, and that line is simply omitted. Guarded like the structured
+        ;; record's: a name the checker cannot type must not fail the whole doc build.
+        arrow (try (reflect/type-signature sym) (catch _ nil))
+        type-line (if (nil? arrow) "" (str "`" arrow "`\n\n")))
+    (str "### `" sig "`" suffix "\n\n" type-line
+      (if (nil? d) "_Undocumented._\n" (str d "\n")))))
 
 ;; The "Definitions" section: every public function/macro the module added.
 (defn- docs-section-defs
@@ -147,7 +154,19 @@ module's namespace-rooted globals (ADR-070) back to it."
     (when (nil? src) (error "doc: cannot find module '" key "'"))
     (let (before (global-names))
       (require-one modname)
-      (docs-render key (docs-leading-doc src) (docs-added before (global-names))))))
+      ;; Attribute by NAMESPACE, not by a `(global-names)` delta — the same correction
+      ;; `document-file` already carries, for the same reason. The delta credits a module
+      ;; with only the names its own `require` happened to add, so a module ALREADY bound
+      ;; — transitively loaded by the tool's own bootstrap, or materialised from a startup
+      ;; image (ADR-218) — documented as EMPTY, silently. `nest doc math`, `nest doc json`
+      ;; and `nest doc text` all rendered a header and nothing else; `nest doc uuid`
+      ;; worked only because nothing else pulls uuid in.
+      ;;
+      ;; The delta stays as the fallback for a module whose names are not under its own
+      ;; namespace (a bare-rooted module), where the prefix filter finds nothing.
+      (let (owned (docs-namespace-syms key)
+            syms (if (empty? owned) (docs-added before (global-names)) owned))
+        (docs-render key (docs-leading-doc src) syms)))))
 
 ;; Markdown for the whole project: find it from the cwd, put its sources on the
 ;; load-path, and document each source file in turn.
