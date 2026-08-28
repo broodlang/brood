@@ -307,6 +307,46 @@ single-word/NaN-boxed `Value` buys ~zero at tier-1; its only upside is tier-2
 register-passing, deferred. **Nothing this round changes that** — do not reach for
 NaN-boxing to close the rows below. (Tracked there; not re-opened here.)
 
+## 2b. The `math/*` wrappers are a suite-wide floor (measured 2026-08-28)
+
+Found by publishing a benchmark run, not by looking for it: `collatz` read 95 → 185 ms against
+the previous published run, and the runtime had not regressed. The port had moved from bare
+`rem`/`quot`/`max` to qualified `math/*`, because the namespacing waves retired the bare names —
+it had to change to keep running at all.
+
+Measured on one binary, same program shape:
+
+| form | time |
+|---|---|
+| qualified `math/rem` / `math/quot` / `math/max` | 205 ms |
+| the same names referred bare via `(:use math)` | 204 ms |
+| the primitives `%rem` / `%quot` / `%max` | **121 ms** |
+
+Two things fall out. **Qualification itself is free** — the compiler resolves `math/rem` to the
+same target as a bare reference, so the module system costs nothing at a call site, which is worth
+knowing on its own. And **the wrapper call costs ~40%** on an integer-arithmetic row:
+`math/rem`/`math/quot`/`math/mod` are Brood functions whose body is one primitive call, and
+**`math/max`/`math/min` are variadic over `apply`** — the shape CLAUDE.md's dogfooding section
+measures at ~40× a direct call.
+
+**Fifteen of the 31 benchmark rows call `math/*`**, so this is a floor under half the suite rather
+than one row's story: `base64`, `pipeline`, `collatz`, `matmul`, `json`, `errors`, `errors-deep`,
+`persistent-map`, `supervisor`, `primes`, `nbody`, `wordcount`, `latency`, `sort`, `regex`.
+`collatz` and `latency` use the *variadic* ones inside loops.
+
+**The fix is not Rust builtins, and CLAUDE.md names this exact case as the worked example of the
+wrong move** — it would reverse "write the language in the language" and teach nothing. The lever
+is efficient **multi-arity dispatch in the evaluator**: it keeps `max`/`min` in Brood, removes the
+`apply`, and makes *every* multi-arity function faster rather than these two. The fixed-arity
+wrappers are a thinner problem and want either the same dispatch work or inlining of a
+single-call body — note the JIT already has a leaf-callee inliner (ADR-210), so the question is
+why a one-primitive body is not being spliced, which is a cheaper thing to find out than a
+redesign.
+
+**Before optimising any compute row, check whether it is standing on this.** A row-specific win of
+a few percent may be sitting on top of a ~40% call-protocol cost that one change removes
+everywhere — the same reasoning ADR-175 applies to shared compiled code.
+
 ## 3. The remaining gaps are data-structure-specific (measured 2026-06-14)
 
 Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_IR`.
