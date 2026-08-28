@@ -307,7 +307,7 @@ single-word/NaN-boxed `Value` buys ~zero at tier-1; its only upside is tier-2
 register-passing, deferred. **Nothing this round changes that** — do not reach for
 NaN-boxing to close the rows below. (Tracked there; not re-opened here.)
 
-## 2b. A variadic call in a loop costs ~36%; fixed-arity wrappers cost nothing (measured 2026-08-28)
+## 2b. A variadic call in a loop cost ~36% — FIXED 2026-08-28 (`collatz` −38.2%)
 
 Found by publishing a benchmark run. `collatz` read 95 → 185 ms against the previous published
 run with no runtime regression: the port had to migrate off the bare `rem`/`quot`/`max` the
@@ -343,6 +343,44 @@ section already uses as its worked example ("variadic `+`/`-`/`=` … ~40× a di
 prescribed fix: efficient **multi-arity dispatch in the evaluator**, which keeps the functions in
 Brood and makes *every* multi-arity call faster rather than two. `math/max` and `math/min` are the
 `math` entries in that shape; `collatz` and `latency` are the rows that call them in a loop.
+
+**Fixed, in Brood, using capability the language already had.** `max` and `min` were
+single-clause `(& xs)` over `(apply %max xs)`. They now carry a **two-argument arm**, which is
+exactly how the prelude keeps its own variadic arithmetic fast — `<=` spells its 2-arg body
+`(%le a b)` and its comment says why: "so the ADR-069 thin-wrapper elision reaches it". Nothing
+in the kernel changed; no multi-arity dispatch had to be built, because
+[`docs/language.md`](language.md) already guarantees an arity arm "binds its params *directly*
+(no rest-list), so it's as cheap as a single-clause fn".
+
+```lisp
+(defn max "…"
+  ((a b) (%max a b))
+  ((& xs) (apply %max xs)))
+```
+
+Measured, `make ab` against the parent commit, best-of-11 with `--floor`:
+
+| row | base | new | delta | floor | verdict |
+|---|---|---|---|---|---|
+| `collatz` | 228 ms | 141 ms | **−38.2%** | 0.4% | improved |
+| `latency` | 4743 ms | 4589 ms | −3.2% | 2.4% | noise (same direction; the other `math/min` row) |
+| `loop`, `fib`, `primes`, `sort`, `json` | | | ±1.4% | | flat — no regression |
+
+The qualified call is now indistinguishable from calling the primitive: 139 ms against the
+`%max`-direct control at 141 ms and the all-primitives lower bound at 140 ms, where it had been
+223 ms. `math/max` no longer appears as a lowered arm at all — it is elided into its caller like
+`math/rem`.
+
+**Guarded** by `tests/math_test.blsp`'s "the two-argument arm agrees with the variadic path" —
+equal args, negatives, mixed int/float, and 2-arg-vs-variadic agreement. Sabotage-verified: the
+suite goes red naming the assertion (5151 in-language tests, 1 failed). The point of pinning the
+2-arg case separately is that a wrong arm would leave every existing many-arg test green while
+silently changing the answer at the arity everyone uses.
+
+**Not done, deliberately:** `bytes/concat` and `hash-map` are the only other single-clause
+`(& rest)` wrappers over an `apply` in `std/`. Neither is shown to be hot, and adding arms on
+speculation is how a codebase accumulates changes nobody can point at a measurement for. They are
+candidates if a row ever implicates them.
 
 **Two side results worth keeping.** Qualification is free — `math/rem` referred bare via
 `(:use math)` measured 204 ms against 205 ms qualified — so the module system costs nothing at a
