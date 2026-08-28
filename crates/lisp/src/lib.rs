@@ -473,7 +473,12 @@ impl Drop for Interp {
         //
         // A no-op (returns false) on a thread that never touched `self`/`send`/`receive`,
         // which is every thread that only ever built and evaluated.
-        process::deregister_root_ctx();
+        // …only if it is OURS. `deregister_root_ctx` takes whatever context the thread
+        // holds; a host with a long-lived `Interp` that builds a short-lived one on the same
+        // thread would otherwise, on dropping the temporary, retire the long-lived
+        // interpreter's context — changing its pid, discarding its queued mailbox, and
+        // firing its monitors and links as a death.
+        process::deregister_root_ctx_of(self.heap.runtime_tag());
     }
 }
 
@@ -560,6 +565,19 @@ impl Interp {
     /// `roots_len`/`truncate_roots` pairing and the namespace restore both run
     /// exactly once, on every path.
     fn eval_forms(
+        &mut self,
+        forms: Vec<(Value, Option<crate::error::Pos>)>,
+    ) -> Result<Value, LispError> {
+        // Scope this runtime as the owner of any ROOT context minted while these forms run.
+        // A root context is minted lazily, the first time the root thread touches
+        // `self`/`send`/`receive`, and `ensure_ctx` has no heap to read the runtime from —
+        // so this is the one place that can tell it whose it is. `Interp::drop` then retires
+        // only a context stamped with its own tag (`deregister_root_ctx_of`).
+        let tag = self.heap.runtime_tag();
+        process::with_minting_runtime_tag(tag, || self.eval_forms_inner(forms))
+    }
+
+    fn eval_forms_inner(
         &mut self,
         forms: Vec<(Value, Option<crate::error::Pos>)>,
     ) -> Result<Value, LispError> {
