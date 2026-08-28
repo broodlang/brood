@@ -5919,3 +5919,44 @@ So the lever is **variadic dispatch**, which is where CLAUDE.md's dogfooding sec
 (its worked example is variadic `+`/`-`/`=`, and its prescribed fix is multi-arity dispatch in the
 evaluator rather than Rust builtins). The good news in the correction: the one-primitive inlining
 already works, so there is no inliner to build — only the variadic shape it cannot reach.
+
+### `math/max`/`math/min` get a two-argument arm — `collatz` −38.2%, and nothing in the kernel changed
+
+The lever the isolation pointed at, taken. `max` and `min` were single-clause `(& xs)` over
+`(apply %max xs)`; they now carry a two-argument arm as well:
+
+```lisp
+(defn max "…"
+  ((a b) (%max a b))
+  ((& xs) (apply %max xs)))
+```
+
+**The capability was already there, which is the pleasant part.** `docs/language.md` guarantees an
+arity arm "binds its params *directly* (no rest-list), so it's as cheap as a single-clause fn —
+this is how the prelude's variadic `+`/`-`/`<`/`=` stay fast and stay Brood", and `<=`'s own
+comment records the mechanism: its 2-arg body is spelled `(%le a b)` rather than
+`(not (%lt b a))` "so the ADR-069 thin-wrapper elision reaches it". `math/max`/`math/min` had
+simply never been given the treatment their prelude neighbours got. So no multi-arity dispatch had
+to be built — CLAUDE.md's prescribed lever turned out to be *already implemented and unused here*.
+
+`make ab` against the parent, best-of-11, `--floor`:
+
+| row | base | new | delta | floor | verdict |
+|---|---|---|---|---|---|
+| `collatz` | 228 ms | 141 ms | **−38.2%** | 0.4% | improved |
+| `latency` | 4743 ms | 4589 ms | −3.2% | 2.4% | noise, same direction (the other `math/min` row) |
+| `loop`, `fib`, `primes`, `sort`, `json` | — | — | within ±1.4% | — | flat |
+
+The qualified call is now indistinguishable from the primitive — 139 ms against a `%max`-direct
+control of 141 and an all-primitives bound of 140, from 223 — and `math/max` no longer appears as a
+lowered arm at all, because it is elided into its caller exactly as `math/rem` is.
+
+**Guarded and sabotage-verified.** `tests/math_test.blsp` pins the 2-arg arm separately from the
+variadic path: equal args, negatives, mixed int/float, and explicit 2-arg-vs-variadic agreement.
+Breaking one assertion reddens the suite and names it (5151 in-language tests, 1 failed). Pinning
+the 2-arg case on its own matters because a wrong arm leaves every pre-existing many-arg test green
+while changing the answer at the arity everyone actually calls.
+
+**Left alone on purpose:** `bytes/concat` and `hash-map` are the only other single-clause
+`(& rest)` wrappers over an `apply` in `std/`. Neither is shown to be hot, and adding arms on
+speculation is how a tree fills up with changes nobody can attach a measurement to.

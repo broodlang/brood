@@ -56,8 +56,24 @@ and the constants `pi`/`e`. `(:use math)` for bare access, or call qualified.")
 ;; load a module to do arithmetic. `eval/compile/ir.rs` keys `PrimOp::Max`/`Min`/`Rem` on the
 ;; call-site NAME, so these wrappers are still inlined — `table/get` is the same shape.
 
-(defn max (& xs) "The largest of the arguments.\n\n    (math/max 1 2)   → 2" (apply %max xs))
-(defn min (& xs) "The smallest of the arguments.\n\n    (math/min 1 2)   → 1" (apply %min xs))
+;; Two-argument arms so the common call is a DIRECT primitive call, which is what the
+;; ADR-069 thin-wrapper elision needs to reach it — the same reason `<=` in the prelude
+;; spells its 2-arg body `(%le a b)` rather than `(not (%lt b a))`. As a single-clause
+;; `(& xs)` over `(apply %max xs)` this allocated a rest-list per call and could not be
+;; inlined: measured at **36% of the `collatz` benchmark row** (223 ms -> 142 ms), where
+;; one `math/max` runs per loop iteration. `math/rem`/`math/quot` beside it cost nothing
+;; precisely because they are fixed-arity one-primitive bodies. See
+;; docs/compute-frontier.md §2b.
+(defn max "The largest of the arguments.
+
+    (math/max 1 2)   → 2"
+  ((a b) (%max a b))
+  ((& xs) (apply %max xs)))
+(defn min "The smallest of the arguments.
+
+    (math/min 1 2)   → 1"
+  ((a b) (%min a b))
+  ((& xs) (apply %min xs)))
 (defn rem (a b)
   "The remainder of `a / b`, taking the sign of the DIVIDEND (truncated division), the
 partner of `quot`. `mod` is the one whose sign follows the divisor.

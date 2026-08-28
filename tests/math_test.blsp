@@ -148,7 +148,29 @@
   (test "max / min on a single arg return it" (assert= (math/max 7) 7) (assert= (math/min 7) 7))
   (test "max / min work on floats and mixed numbers"
     (assert= (math/max 1 2.5 2) 2.5)
-    (assert= (math/min 1 2.5 0.5) 0.5)))
+    (assert= (math/min 1 2.5 0.5) 0.5))
+  ;; `max`/`min` gained a two-argument arm so the common call is a direct primitive call and
+  ;; the ADR-069 thin-wrapper elision can reach it — worth 38% of the `collatz` benchmark row,
+  ;; which calls one per loop iteration (docs/compute-frontier.md §2b). The arms must agree
+  ;; with each other and with the variadic path, so the two-arg case is pinned separately
+  ;; rather than trusted because the many-arg case above passes: a wrong 2-arg arm would leave
+  ;; every test above green and silently change the answer at the arity everyone actually uses.
+  (test "the two-argument arm agrees with the variadic path"
+    (assert= (math/max 1 2) 2)
+    (assert= (math/max 2 1) 2)
+    (assert= (math/min 1 2) 1)
+    (assert= (math/min 2 1) 1)
+    ;; equal args, and negatives — where a swapped comparison hides
+    (assert= (math/max 4 4) 4)
+    (assert= (math/min 4 4) 4)
+    (assert= (math/max -7 -2) -2)
+    (assert= (math/min -7 -2) -7)
+    ;; mixed int/float at two args: the result keeps its own type (see `%max`)
+    (assert= (math/max 2.5 1) 2.5)
+    (assert= (math/min 2.5 1) 1)
+    ;; the 2-arg arm and the variadic arm must not disagree
+    (assert= (math/max 3 9) (math/max 3 9 3))
+    (assert= (math/min 3 9) (math/min 9 3 9))))
 
 (describe "arbitrary-precision integers (bignums)"
   (test "arithmetic past i64 promotes; in-range results demote"
