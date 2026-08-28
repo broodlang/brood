@@ -6076,3 +6076,47 @@ Rust tests in `check::tests` (positive, merely-wider negative, and contagion-sti
 in-language coverage in `tests/sig_adoption_test.blsp` that asserts the runtime agrees with the
 claim on both arms. Sabotage-verified. Zero-warning gate over `std/` + `tests/` still clean,
 207/207 `.blsp` files, 630 Rust lib tests, clippy `--all-features` clean.
+
+## 2026-08-28 — doctests were mostly already written, and merely-wider got measured
+
+Two of the four open items; the other two were "prove green end-to-end" (1227/1227 via
+`make test-light`, the first full run over today's ~15.6k insertions plus the checker work)
+and pushing.
+
+**Doctests shipped, and were much cheaper than recorded.** The ROADMAP called this "bigger
+(docstring example parser + a discovery pass)". Both already existed — as six *private*
+functions inside `tests/doc_examples_test.blsp`, hard-wired to `builtin-modules` so they could
+gate `std/` and nothing else. The work was extraction, not construction: lift to
+`std/tool/doctest.blsp`, make the parts public, and take a prefix so a run can be scoped to
+one package's surface. `nest test` now runs a project's own examples after the suite passes
+and fails the run on a broken one, naming it:
+
+    1 documented example(s) do not hold:
+      proj/demo/triple: (demo/triple 4)  → got 12, documented 99
+
+Scoped to `*project-name*` so it gates what the project promises, not its dependencies or the
+stdlib; a **nameless** project is skipped rather than widened to the whole image (its modules
+are unrooted, so no prefix means "mine"). `tests/doc_examples_test.blsp` now *uses* the module
+instead of duplicating it — which is also the proof the extraction is faithful: sabotaging a
+`std/` docstring still fails it with the identical message.
+
+**The merely-wider residue: measured rather than argued a third time.** The deferral turns out
+to be *architectural*, not an omission. The body grades as **dynamic**, so `consistent_with`
+takes the `∩ ≠ ⊥` arm and `int|ratio ∩ int ≠ ⊥` passes; flagging it means switching that arm
+to `⊆`. I did exactly that, temporarily, and counted:
+
+- **zero** new warnings across all of `std/` + `tests/`;
+- **4 of 5** on a probe of ordinary *correct* code — `(/ x 1)`, `(/ 6 3)`, `(/ x x)` and
+  `(/ (* 2 x) 2)` are each provably int and each get flagged. Only `(/ x 2)` for an unknown
+  `x` is genuinely undecidable.
+
+So the in-repo cost is zero *only because nobody has written the code that breaks yet*, which
+is the trap rather than the reassurance: the gate looks free until someone divides by 1. Not
+shipped. What the measurement does give is the **order for a future attempt** — narrow first,
+flag second: make the decidable cases type as exactly `int` (literal folding, a literal ±1
+divisor, then parity), and only once the residual really is undecidable does flagging it
+become a strictness judgement instead of a false positive. Recorded on the ROADMAP entry so
+it is not re-litigated from scratch.
+
+Worth keeping as method: "would this false-positive?" is an empirical question, and a
+throwaway 10-line experiment answers it better than a third round of reasoning.

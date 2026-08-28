@@ -2791,7 +2791,30 @@ as unchanged (only when some were)."
         (let (percent (project-coverage-report! root opts))
           (if (and (pair? outcome) (= (first outcome) :%suite-raised))
             (throw (second outcome))
-            (project-coverage-gate percent opts)))))))
+            (do (project-doctest-gate) (project-coverage-gate percent opts))))))))
+
+;; Run the examples in the project's own docstrings (`std/tool/doctest.blsp`). A documented
+;; example is a promise about behaviour, and a wrong one is worse than none: it reads as
+;; authoritative and no other gate sees it — the checker does not evaluate docstrings and no
+;; test covers prose.
+;;
+;; Scoped to the project's OWN package prefix, so a run gates what this project promises and
+;; not what its dependencies or the stdlib do (`std/` has its own gate,
+;; `tests/doc_examples_test.blsp`, over the same engine). A NAMELESS project is skipped
+;; rather than widened to the whole image: without a `:name` its modules are unrooted, so
+;; there is no prefix that means "mine", and running every std example on someone's `nest
+;; test` would be both wrong and slow.
+;;
+;; Runs only once the suite is green — a red suite is already the answer, and a wall of
+;; doctest output underneath it buries the failure that matters.
+(defn- project-doctest-gate
+  ()
+  (when *project-name*
+    (let (fails (doctest/failures-under (str (->string *project-name*) "/")))
+      (when (not (empty? fails))
+        (io/puts (str (count fails) " documented example(s) do not hold:") :to *err*)
+        (run! (fn (f) (io/puts (str "  " f) :to *err*)) fails)
+        (error "doctest: " (count fails) " documented example(s) do not hold")))))
 
 ;; Whichever coverage tier was asked for. Both may be on at once — they measure
 ;; different things (was a function entered vs did a line run) — in which case the
