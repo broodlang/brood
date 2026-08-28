@@ -5557,3 +5557,29 @@ five repeat runs.
 
 Suite: tempo 85 → 94, ability 92, checker units 293. `nest format --check` clean, the
 zero-warning gate over `std/` + `tests/` clean.
+
+**Nothing pinned or declared the Rust version, and that is a bug (2026-08-28).** Merging
+`origin/main` failed to build here with `error[E0658]: use of unstable library feature
+'isolate_most_least_significant_one'` — `types/mod.rs` and `types/display.rs` use
+`isolate_lowest_one`, stabilised in 1.98, against a local 1.95. The error names no version and
+reads as "this code is wrong" rather than "your toolchain is old"; the first instinct is to
+patch the code, which would have been exactly wrong.
+
+The repo had **no `rust-toolchain.toml`, no `rust-version`, and CI on
+`dtolnay/rust-toolchain@stable`** — a floating target with nothing recording what the code
+actually needs. Freezing the toolchain would fight a deliberate choice (`package-ci.yml`:
+"a warning for the whole ecosystem rather than a check against a frozen toolchain"), so the fix
+is to declare rather than pin: `rust-version` in `[workspace.package]`, inherited by all five
+crates, so cargo reports the requirement and the actual version instead of an E0658.
+
+The number is **1.95**, not 1.98, and how that was settled is the useful part: two fixes landed
+for this in the same hour from opposite directions — one removing the 1.98 dependency (both
+sites now iterate the tag table, since the clippy lint that suggested `isolate_lowest_one` and
+the 1.95 floor cannot both be satisfied by a bit trick), one declaring 1.98 as the minimum.
+Committed together they contradicted: the code no longer needed 1.98, so declaring it would
+have rejected toolchains that build fine. The declaration follows the code — the floor is the
+oldest version actually exercised, never a guess.
+
+Worth stating plainly because the instinct is to wave it away as environmental: a build that
+fails on a supported toolchain with an error that misdirects the reader **is** a bug, and the
+absence of an MSRV is what made it one.

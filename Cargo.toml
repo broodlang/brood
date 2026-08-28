@@ -7,6 +7,23 @@ version = "0.14.1"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["Wilhelm Kirschbaum"]
+# The minimum Rust this builds on. NOT a frozen toolchain — CI deliberately tracks `stable`
+# (see .github/workflows/package-ci.yml: "a warning for the whole ecosystem rather than a
+# check against a frozen toolchain"), and pinning would defeat that. This makes the
+# requirement *legible* instead.
+#
+# Nothing declared it until 2026-08-28, and the failure mode was a bad one: `types/mod.rs`
+# and `types/display.rs` briefly used `isolate_lowest_one` — stable only from 1.98 — so a
+# build on 1.95 produced `error[E0658]: use of unstable library feature
+# 'isolate_most_least_significant_one'`, which reads as "this code is wrong" rather than
+# "your toolchain is old", and names no version to move to. Both sites now iterate the tag
+# table instead, so **1.95 is the verified floor**; with this line cargo says "requires
+# rustc N or newer, while the currently active rustc version is …" instead of an E0658.
+#
+# Raise it deliberately, never by accident: a bump is a real compatibility decision, and this
+# is the one place it is visible. Verify by building on the version you claim — the number
+# below is the oldest actually exercised, not a guess.
+rust-version = "1.95"
 
 # `cargo test` / `cargo nextest` build this profile. It is OPTIMIZED, deliberately.
 #

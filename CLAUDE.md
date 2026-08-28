@@ -256,6 +256,12 @@ drift as the language evolves).
 
 ## Commands
 
+**Minimum Rust: 1.95** (`rust-version` in `Cargo.toml`, inherited by every crate). CI tracks
+`stable` deliberately, so this is a *declaration*, not a pin — but it is the difference between
+cargo naming the version it needs and a bare `error[E0658]: use of unstable library feature`,
+which reads as broken code rather than an old toolchain. Raise it only deliberately, and only
+after building on the version you claim.
+
 ```bash
 cargo build                       # build the workspace
 make test                         # Rust tests + the Brood suite via cargo-nextest

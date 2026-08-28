@@ -444,11 +444,15 @@ impl Ty {
             structural_tags |= FN_BITS;
         }
         if structural_tags != 0 && self.tags & !structural_tags != 0 {
+            // Tag-table iteration, not bit isolation — see the note in
+            // `term_is_subtype_of_union`: the lint's suggested `isolate_lowest_one` is
+            // unstable below Rust 1.98 and this crate builds on 1.95.
             let mut parts: Vec<String> = Vec::new();
-            let mut remaining = self.tags;
-            while remaining != 0 {
-                let tag_bit = remaining.isolate_lowest_one();
-                remaining &= !tag_bit;
+            for tag in ALL_TAGS {
+                let tag_bit = 1u32 << bit(tag);
+                if self.tags & tag_bit == 0 {
+                    continue;
+                }
                 parts.push(self.project_tag(tag_bit).to_source()?);
             }
             parts.sort();
