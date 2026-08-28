@@ -109,15 +109,35 @@ fi
 # ── local: the gates CI runs that `make check` does not ──────────────────────────────────
 if [ "$do_local" = 1 ]; then
   echo "== local gates (the ones \`make check\` skips) =="
-  nest="$root/target/release/nest"
-  if [ ! -x "$nest" ]; then
-    note "target/release/nest missing — run \`make release\` first; skipping the .blsp gates"
+  # WHICH binary: `make release` builds RELEASE_DIR=target/release-fast; only a plain
+  # `cargo build --release` writes target/release. This gated on target/release while
+  # telling you to run `make release`, which never touches it — so it ran a binary no
+  # documented command refreshes. On 2026-08-28 that binary was 9 commits behind and
+  # reported two phantom `unbound symbol` failures (a pre-rename std/ baked into it).
+  # Prefer whichever candidate reports HEAD's sha.
+  head_sha=$(git rev-parse --short HEAD 2>/dev/null || echo '?')
+  binary_sha() { "$1" --version 2>/dev/null | sed -n 's/.*(\([0-9a-f]\{7,\}\)).*/\1/p'; }
+  nest=""
+  for cand in "$root/target/release-fast/nest" "$root/target/release/nest"; do
+    [ -x "$cand" ] || continue
+    [ -n "$nest" ] || nest="$cand"                                   # first that exists
+    if [ "$(binary_sha "$cand")" = "$head_sha" ]; then nest="$cand"; break; fi
+  done
+
+  # A stale binary's verdict is meaningless in BOTH directions, so a stale one is a FAILURE,
+  # not a note: it must not be possible to read a green — or a red — off the wrong std/. The
+  # old guard only fired when std/ or crates/ had UNCOMMITTED changes, i.e. never on the clean
+  # tree you have right before a push, which is exactly when this gate gets consulted.
+  if [ -z "$nest" ]; then
+    note "no nest in target/release-fast or target/release — run \`make release\`; skipping the .blsp gates"
+  elif [ "$(binary_sha "$nest")" != "$head_sha" ]; then
+    red "the .blsp gates DID NOT RUN — $nest is built from $(binary_sha "$nest"), HEAD is $head_sha"
+    note "  rebuild with \`make release\`, then re-run. A stale binary bakes in a stale std/."
+  elif newer=$(find std crates \( -name '*.blsp' -o -name '*.rs' \) -newer "$nest" -print -quit 2>/dev/null);
+       [ -n "$newer" ]; then
+    red "the .blsp gates DID NOT RUN — $newer is newer than $nest (uncommitted work)"
+    note "  rebuild with \`make release\`, then re-run."
   else
-    # Built from the same tree? A stale binary passes by agreeing with itself (see `make doctor`).
-    if [ -n "$(git status --porcelain -- std crates 2>/dev/null)" ] &&
-       [ "$nest" -ot "$(git diff --name-only -- std crates 2>/dev/null | head -1)" ] 2>/dev/null; then
-      note "std/ or crates/ changed after target/release/nest was built — rebuild before believing these"
-    fi
 
     if "$nest" format --check >/dev/null 2>&1; then
       ok "nest format --check"

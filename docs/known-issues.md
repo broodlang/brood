@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict |
 | KI-72 | **the stdlib image cannot be default-ON yet: it turns a latent require-stall into a reliable one.** Measured with 12 parallel copies of `autoload_race --test-threads=4` against a 90 s timeout: **12 of 12 exceed it with the image installed, 0 of 12 without**, and the same test passes 12/12 alone in 0.5 s. Not a deadlock — nothing hangs permanently. The edge replay must run BEFORE `provide` (or a racing process sees a module whose dependencies are missing — the 112-failure bug ADR-256 fixed), so a module stays unprovided while it recursively requires its whole edge set, and every process that wants it meanwhile enters `%require-await`'s **5 ms x 1000** poll before force-loading. **The "not a deadlock" half of this was WRONG (2026-08-28): the wait is unbounded** — a root blocked in `receive` sat >30 s with an EMPTY mailbox and every scheduler worker idle, so a reply is genuinely never delivered, not merely delayed | ⚠️ **OPEN 2026-08-27, re-characterised 2026-08-28** — image reverted to opt-in (`BROOD_STDIMAGE=1`) the day it was flipped; everything else from ADR-256 ships. The poll IS now the `code_server` model (2026-08-28) and it did **not** fix this; two other real defects found alongside did not either. Repro is now ONE test, single-threaded, 8/12 — see below. Note the synthetic load stresses something pre-existing — at 12x4 parallelism the default (no image) still shows 4 of 12 — so a fix should be measured on both arms |
 | KI-73 | **a prelude macro's template can be captured by a user module that defines the same name.** A template is spliced into the user's file, where a bare reference resolves against *their* namespace first — so `(defmodule m) (defn get (b k) :CAPTURED) (defrecord pt (x y))` made every accessor return `:CAPTURED`. Silent wrong value: right arity, nothing unbound, `nest check` quiet. Fixed for `defrecord`/`for`/`defonce`/`with-err-str` with the `/name` root escape (ADR-236), which this pass also had to *finish implementing* — it was a resolve-time rewrite only, so `/get` was unbound at root. `receive` included | ✅ **FIXED 2026-08-28** — the escape is now total: resolved in a module (`resolve_sym`), at root (`macros::strip_root_escapes`), and at **runtime macro expansion** (`eval/mod.rs`, for a macro defined after its use site or at the REPL). `but-last` moved to `core.blsp` and `sleep` below `receive` so `receive` expands at prelude compile time. Gated by `tests/prelude_capture_test.blsp` — a static scan asserting ZERO offenders plus four behavioural probes |
 | KI-75 | **`compare` reported values as EQUAL that are not, two ways — and `sort` is built on it.** (1) `(compare nan x)` was `0` for every `x`, so one NaN silently turned `sort` into a no-op: `(sort [3.0 nan 1.0 2.0])` returned its input unsorted, no error. (2) the `Int`-vs-`Float` arm used a lossy `as f64` cast while every other cross-type arm was exact, so past 2^53 two different integers compared equal — `(compare 9007199254740993 9007199254740992.0)` was `0` while `=` and `>` both said otherwise | ✅ **FIXED 2026-08-28** — NaN now sorts LAST via `float_total_cmp` (Rust's `total_cmp` / Java's `Double.compare` choice), and `Int`/`Float` routes through the same exact base-10 path the BigInt/Decimal/Ratio arms already used. `<`/`<=`/`>` stay IEEE deliberately — a sort key and an arithmetic predicate are different questions. Guarded by `tests/comparison_test.blsp` (25 cases) plus three Rust unit tests |
@@ -4890,3 +4891,74 @@ deliberate `<`-vs-`compare` disagreement — plus `float_total_cmp_is_a_total_or
 `int_vs_float_is_exact_past_2_53` and `nan_sorts_last_and_infinities_order_by_sign` in Rust.
 One test in that file has to compare via `pr-str` rather than `assert=`, because a result
 containing NaN is never `=` to itself — the contract biting the test that checks it.
+
+## KI-76 — `make green` gated on a binary no command refreshes ✅ FIXED 2026-08-28
+
+**Symptom.** `./scripts/green.sh` reported the tree NOT green with 8 warnings from the one
+gate that is supposed to be held at zero:
+
+```
+  FAIL nest check std/ + tests/
+       tests/support/gabriel/deriv.blsp:46:39: warning: unbound symbol: third
+       …
+       tests/gen_test.blsp:8:13: warning: unbound symbol: defserver
+```
+
+Every one was phantom. `third` is defined at `std/prelude/predicates.blsp:118` and
+`defserver` at `std/proc/gen.blsp:225`. Run against the current binary, the same command
+returns `format: 412 files checked, all clean` and **zero** checker warnings.
+
+**Cause.** Two independent mistakes about *which* binary to run.
+
+1. `green.sh` gated on `$root/target/release/nest`. `make release` builds
+   `RELEASE_DIR := target/$(TARGET_SUBDIR)release-fast` — a **different path**. Only a plain
+   `cargo build --release` writes `target/release`. So the script's own remedy
+   ("run `make release` first") could never refresh the binary it was about to run, and that
+   binary drifted freely. On this tree it was 9 commits old (`464b6c57` against HEAD
+   `6790e1b6`).
+2. `std/` is `include_str!`'d into the binary, so a 9-commit-old `nest` carries a 9-commit-old
+   `std/` — including `gen/defprocess`, which `e38e9a0b` renamed to `defserver`. The gate was
+   faithfully reporting that *its own baked-in stdlib* did not have the name the current
+   `tests/gen_test.blsp` calls. It was reading a rename backwards.
+
+**Why it survived.** The guard written for exactly this hazard could not fire:
+
+```sh
+if [ -n "$(git status --porcelain -- std crates)" ] && [ "$nest" -ot "$(git diff --name-only …)" ]
+```
+
+It is conditioned on `std/` or `crates/` having **uncommitted** changes. A clean tree — which
+is the state you are in immediately before a push, and the state in which "is this tree
+green?" is actually asked — takes the `[ -n … ]` test to false and skips the check entirely.
+The guard was live only in the situation where you already knew your binary was behind.
+It was also a `note` (advisory) rather than a failure, so even when it did fire the gate still
+printed a verdict beside it.
+
+`make doctor` had the finding all along — *"target/release/brood is built from 464b6c57, HEAD
+is 6790e1b6 — it will silently ignore anything newer"* — but nothing makes `green.sh` consult
+it, and `make green` is documented as the answer to "is this tree green?".
+
+**Fix.** `green.sh` now resolves the binary by identity rather than by path: it prefers
+whichever of `target/release-fast/nest`, `target/release/nest` reports HEAD's short sha from
+`nest --version` (the `binary_sha` mechanism `doctor` already used). A binary that is stale, or
+merely older than any `std/`/`crates/` source, is **`red`** — not a note — and the `.blsp`
+gates are skipped with `the .blsp gates DID NOT RUN`. That direction is deliberate: a stale
+binary's verdict is meaningless in *both* directions, so the failure mode must not be a
+believable green **or** a believable red. This one cost a real investigation on 2026-08-28 —
+two names were chased as rename rot before the binary was suspected.
+
+**Guard, sabotage-verified.** There is no unit test; the gate guards itself, which is checked
+by breaking it on purpose. With `std/string.blsp` edited and uncommitted (binary older than
+the source), it prints:
+
+```
+  FAIL the .blsp gates DID NOT RUN — std/string.blsp is newer than …/target/release-fast/nest (uncommitted work)
+       rebuild with `make release`, then re-run.
+```
+
+and after `make release`, both `.blsp` gates run and pass. Confirmed in both states.
+
+**The general lesson, which this file already states once (KI-68/69/70) and now again:** a
+gate that names the wrong artifact is not a weaker gate, it is a *different* gate, and it
+reports confidently about something you did not ask. Whenever a script runs a built binary,
+assert the binary's identity — not its existence.

@@ -5204,3 +5204,91 @@ the same treatment. It does now, delta kept as the fallback for a bare-rooted mo
 `math` documents 37 entries, `datetime` 51, `seq` 39 — and `uuid` drops from 11 to **6**,
 which is a correction: the delta had been crediting it with names from the modules its own
 `require` pulled in.
+
+## 2026-08-28 (second session) — a red tree, and a gate reading the wrong binary
+
+Picked up where the previous session stopped: `092ba281` (the three require/process defects) and
+its merge `6790e1b6` were **committed and never pushed** — the session ended mid-push when every
+shell command started failing silently. That turned out to be environmental, not the repo: `/tmp`
+is a 16 GB tmpfs mounted `usrquota` (systemd 259, `tmpfiles.d/tmp.conf`'s `q /tmp`), the per-user
+slice is ~8 GB, and 13 GB of stale Claude scratchpads — one an 8.3 GB `cargo test` **debug** tree
+inside a worktree under `/tmp` — had exhausted it. Writes returned `EDQUOT` while `df` read 81%
+full with 3 GB free, because the filesystem was not full; the *user* was. Worth knowing because
+`df` is the natural thing to check and it exonerates the real cause.
+
+`origin/main` itself was red in three CI jobs. Both root causes were in the type-system wave.
+
+### An adopted signature can be *less precise* than the one it shadows, silently
+
+`type_check_catalog::checker_catches_every_should_warn_case` failed on one case:
+
+```lisp
+(+ 1 (string/capitalize "hello"))   ; expected a warning containing "+", got none
+```
+
+`std/string.blsp` had adopted `(sig capitalize (string -> any))`. A declared sig is
+**authoritative** — `annot.rs` reads it ahead of primitive / curated / inferred — so it shadowed
+the curated `string/capitalize : (string -> string)` and widened the return to `any`, and there
+is nothing to warn about when an argument's type is `any`. Both arms of `capitalize` provably
+return a string (the curated entry's own comment says so, `sigs.rs:240`), so the declaration was
+just wrong. Now `(string -> string)`.
+
+The shape is the interesting part: **adoption can lose checking, and nothing says so.** No
+warning, no failing gate — the only thing that broke was a catalog entry that happened to contain
+that exact expression. Ten of `std/`'s 358 declarations shadow one of `curated_sig`'s ~35 names;
+a shadowed name nobody had written an example for would have gone unchecked in silence.
+
+So it is gated structurally now rather than by example:
+`types::check::tests::no_declared_std_sig_widens_its_curated_signature` walks every `std/**/*.blsp`,
+parses each `(sig …)` with the checker's own `parse_sig_decl`, qualifies it by its `defmodule`,
+and asserts the declared return is a **subtype** of the curated one. It also asserts it inspected
+at least 8 shadowing pairs, so a broken walk or a broken qualification fails instead of passing
+vacuously — the KI-68 lesson applied at the point of writing rather than after.
+
+**Returns only, deliberately.** A declaration that *narrows* a parameter (`math/even?` declares
+`int` over a curated `number`) is a tightening: it can only produce a warning the curated sig
+would have missed, and `nest check`'s zero-warning gate over `std/` + `tests/` is where that
+surfaces. Widening a return is the direction that loses checking quietly, so that is the
+direction asserted, and the doc comment says so rather than implying the gate covers more.
+
+### Four clippy errors that no local run could have shown
+
+`clippy (all features)` failed with two `chunks_exact_to_as_chunks` (`types/check/infer.rs`) and
+two `manual_isolate_lowest_one` (`types/mod.rs`, `types/display.rs`). Both lints are **new in
+clippy 1.98**; this machine was on 1.97, where a full `cargo clippy --all-targets --all-features
+-- -D warnings` passes cleanly on the identical code. CI pins `dtolnay/rust-toolchain@stable` and
+there is no `rust-toolchain.toml`, so local and CI drift apart silently and the local run's green
+means only "green for whatever version you happen to have".
+
+Applied clippy's own suggestions, then **verified rather than assumed**: `rustup update stable`
+to 1.98 and re-ran CI's exact invocation, which is now clean. Both APIs (`slice::as_chunks`,
+`isolate_lowest_one`) were probed on 1.97 first and are stable there too, so nothing regressed
+for an older toolchain. Note the CLAUDE.md warning about `--all-features` has a companion: it is
+not only the feature set that arms lints, it is the *version*.
+
+### KI-76 — the green gate was reading a 9-commit-old binary
+
+`make green` also reported 8 `unbound symbol` warnings — `third` in the Gabriel support files,
+`defserver` in `gen_test.blsp`. Both names exist. `green.sh` gated on `target/release/nest` while
+telling you to run `make release`, which builds `RELEASE_DIR=target/release-fast`: a different
+binary, which no documented command refreshes. It was 9 commits behind, and `std/` is
+`include_str!`'d into the binary — so it was reporting that *its own baked-in stdlib* lacked
+`defserver`, the name `e38e9a0b` renamed from `defprocess`. It was reading a rename backwards.
+Current binary: zero warnings.
+
+Its staleness guard could not have caught this: it was conditioned on `std/` or `crates/` having
+**uncommitted** changes, so it skipped entirely on the clean tree you have right before a push —
+precisely when the gate gets consulted — and it was a `note` beside a printed verdict rather than
+a failure. `make doctor` had the finding all along (*"built from 464b6c57, HEAD is 6790e1b6"*),
+but nothing makes `green.sh` consult it.
+
+Fixed by resolving the binary by **identity, not path**: prefer whichever candidate reports HEAD's
+sha from `nest --version` (doctor's own mechanism), and make a stale-or-older-than-source binary a
+**failure** that skips the gates with `the .blsp gates DID NOT RUN`. That direction is the point —
+a stale binary's verdict is meaningless in both directions, so it must not be possible to read a
+believable green *or* a believable red off the wrong `std/`. Sabotage-verified in both states.
+
+Three gate defects in two days (KI-68 dead corpora, KI-70 a walk that returned early, KI-76 the
+wrong artifact) now share one sentence: **a gate must assert what it is gating on.** KI-68's
+differential did not check its programs were alive, KI-70's walk did not check it reached the
+code, KI-76's script did not check the binary was the tree's.
