@@ -47,6 +47,7 @@
     (bytes-width-check "bytes-int" n)
     (let (b0 (bytes/at bs off))
       (bytes-acc-be bs (+ off 1) (+ off n) (if (>= b0 128) (- b0 256) b0)))))
+(sig int (bytes int int -> any))
 
 (defn int-le (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a little-endian signed (two's-complement) integer."
@@ -54,16 +55,19 @@
     (bytes-width-check "bytes-int-le" n)
     (let (bt (bytes/at bs (+ off (- n 1))))
       (bytes-acc-le bs off (+ off (- n 2)) (if (>= bt 128) (- bt 256) bt)))))
+(sig int-le (bytes int int -> any))
 
 (defn uint (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a big-endian unsigned integer.
 
     (bytes/uint (bytes/int-> 258 2) 0 2)   → 258"
   (bytes-acc-be bs off (+ off (bytes-width-check "bytes-uint" n)) 0))
+(sig uint (bytes int int -> any))
 
 (defn uint-le (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a little-endian unsigned integer."
   (bytes-acc-le bs off (+ off (- (bytes-width-check "bytes-uint-le" n) 1)) 0))
+(sig uint-le (bytes int int -> any))
 
 (defn int-> (v n)
   "Encode integer `v` as `n` bytes (1–8), big-endian two's complement. Bits

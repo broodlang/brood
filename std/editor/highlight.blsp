@@ -416,6 +416,7 @@ and comments are ignored."
             (if (< m 0) [bi :unmatched] [bi m]))
           (let (m (hl-opener-scan full 0 n bi '()))
             (if (< m 0) [bi :unmatched] [m bi])))))))
+(sig bracket-match (string int -> (or nil (vector any))))
 
 (defn enclosing-open (full pos)
   "The offset of the innermost *unclosed* opening bracket enclosing `pos`, or -1 when
