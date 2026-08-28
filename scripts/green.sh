@@ -151,7 +151,13 @@ if [ "$do_local" = 1 ]; then
   elif [ "$stale" = 1 ]; then
     red "the .blsp gates DID NOT RUN — $nest is built from ${bin_sha:-an unknown commit}, HEAD is $head_sha"
     note "  rebuild with \`make release\`, then re-run. A stale binary bakes in a stale std/."
-  elif newer=$(find std crates \( -name '*.blsp' -o -name '*.rs' \) -newer "$nest" -print -quit 2>/dev/null);
+  # `crates/*/tests/` is excluded: an integration test compiles into its OWN test binary, never
+  # into `nest`, so it cannot change what the two .blsp gates below see. Including it only
+  # refuses correct work — the same way requiring an exact sha refused every docs-only commit
+  # until the check above was added, and with the same consequence: a gate that cries wolf on
+  # changes it is not measuring stops being read.
+  elif newer=$(find std crates \( -name '*.blsp' -o -name '*.rs' \) \
+                 -not -path 'crates/*/tests/*' -newer "$nest" -print -quit 2>/dev/null);
        [ -n "$newer" ]; then
     red "the .blsp gates DID NOT RUN — $newer is newer than $nest (uncommitted work)"
     note "  rebuild with \`make release\`, then re-run."

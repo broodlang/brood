@@ -5626,3 +5626,90 @@ survives both the unpinned and the interleaved check, so it is not the pinning a
 drift. Not bisected: that row's absolute numbers move ~3% between measurement *sessions* (the same
 binary read 90 ms in one interleaved pair and 93 ms in the next), which is enough to swamp a 3%
 per-step bisect. The entry says to use same-session interleaved pairs or not to bother.
+
+## 2026-08-28 (later) — KI-77 closed by a boot win nobody recorded, and the KI-72 guard that stopped guarding
+
+Two perf items, and both turned out to be about *measurement* rather than about code.
+
+### KI-77: real when filed, gone at v0.15.0 — and the original reading was right
+
+Filed earlier the same day: `loop` ~3% slower than v0.14.1, surviving both the unpinned check
+(so not ADR-175's background-JIT-on-one-core artifact) and the interleaved check (so not thermal
+drift). At `e9c54606` it reads **-4.3%** against the same v0.14.1 binary. The tempting conclusion
+is that the original measurement was wrong, and it is worth not jumping to it: building the exact
+tree the entry was filed against and measuring it in **one session** against HEAD gives
+`dfcddc4f` **94 ms** vs HEAD **89 ms**. So `dfcddc4f` really did sit ~4 ms above v0.14.1's ~90 ms,
+as filed. The entry was right and v0.15.0 moved past it.
+
+**What moved is a fixed per-run cost, not `loop`.** `dfcddc4f` -> HEAD, same session, best-of-15:
+
+| row | dfcddc4f | HEAD | delta | absolute |
+|---|---|---|---|---|
+| `startup` | 36 ms | 30 ms | **-16.7%** | -6 ms |
+| `loop` | 94 ms | 88 ms | -6.4% | -6 ms |
+| `sieve` | 84 ms | 78 ms | -7.1% | -6 ms |
+| `fib` | 116 ms | 111 ms | -4.3% | -5 ms |
+| `collatz` | 223 ms | 218 ms | -2.2% | -5 ms |
+
+Every row gained the *same ~5-6 ms* and the percentage just tracks how cheap the row is. That is
+a boot/load win — and it is the exact mirror of what filed KI-77, where almost every row read
+slightly positive for the same reason in reverse. Reading a per-row *percentage* table without
+looking at the absolute column is how a single fixed cost gets mistaken for N separate
+regressions, in both directions.
+
+**A 17% startup win with no commit next to it.** It arrived somewhere in `dfcddc4f..e9c54606`
+and nothing in the devlog records it. The prelude changes in that range are ADR-278/281's
+multimethod return types, which are not an obvious cause, and `cli_support.rs`'s addition there is
+the `.brood_crash_dump` process-death hook (diagnostics, not boot). **Worth attributing before
+anyone claims it.**
+
+**And one arithmetic that must not be done.** It is tempting to subtract the `startup` row from
+`loop` to isolate compute. CLAUDE.md and FRONTIER both record that as an under-subtraction trap:
+`startup` is `(io/puts 0)`, which loads `io` and through it `string`, while most rows load neither.
+If anyone wants to know whether a residual compute delta survives under this boot win, the
+measurement is in-process with a fixed iteration count, not a difference of two whole-invocation
+rows.
+
+### The stdlib image is default-ON, and the KI-72 guard no longer guards it
+
+The flip landed in v0.15.0 (`f114d01e`, opt out with `BROOD_NO_STDIMAGE=1`). Verified empirically
+here rather than from the docs: with no flag set, a `require` of `json` reports `install: 103
+sections` and materialises from the image; with `BROOD_NO_STDIMAGE=1` there is not one `[image]`
+line. `(stdimage/status)` reports `:state :live, :sections 103`. Measured on a three-module
+script: **96 ms -> 66 ms, a 31% saving** (the published figure is 46.5 -> 36.2 ms; this box is
+slower, the ratio is larger, read the direction).
+
+**But `autoload_race` — the guard for KI-72 — never builds or requires an image.** Nothing in
+`ci.yml` builds one either. So in CI that test exercises the *source* path and asserts nothing
+about the imaged race it exists to catch. It is not reliably vacuous, which is worse than being
+reliably vacuous: `image_matches_source.rs` *does* build an image (ADR-280) and writes it to
+`~/.cache/brood`, so whether `autoload_race` runs imaged depends on whether that test happened to
+run first — and nextest gives each test its own process in no guaranteed order.
+
+The differential does not cover the gap. It compares *state* — name, kind, privacy, declared
+signature — and proves the two load paths agree once loaded. KI-72 was not a state divergence; it
+was a **race during install**, where a public name became callable before its private helper was
+bound. A differential over final state cannot see that, by construction.
+
+So the guard was made self-sufficient, following the pattern `image_matches_source` already
+established: build-and-install the image before the racing `Interp` exists, and **assert it is
+live**, so the test cannot pass on the source path and silently report that KI-72 is still fixed.
+
+**The guard, sabotage-verified — and the first attempt at it was vacuous.** Reverting the
+deferral and re-running, per 12 standalone invocations of one case: the pre-existing arm caught it
+6 of 12, the new imaged arm 4 of 12, `cargo test` running all five cases in one process **0 of 3
+runs**, and `cargo nextest run` — what `make test` and CI use — **4 of 4 runs red**.
+
+So the guard is **probabilistic**, and what makes it a gate is nextest running five cases in five
+processes rather than any one case being reliable. Two things to carry: plain `cargo test` cannot
+see this class of bug at all (all five cases share a process and the earlier ones warm the
+allocator, interner and JIT enough to close the window — reproduce with nextest or `--exact`), and
+the new arm is *weaker* than the old one for a knowable reason — building the image in a throwaway
+interpreter warms the same process. That is this bug's documented hazard, that every in-language
+observer moves it, showing up inside the test written to catch it.
+
+Worth stating plainly: the first version of this test **passed with the bug reintroduced**, and
+only sabotage said so. It asserted three preconditions (install returned non-nil,
+`*std-image-file*` set, module not yet loaded) and every one of them held — the test was correct
+about its own setup and still measured nothing, because it was run the wrong way. A precondition
+assertion proves the setup, not the sensitivity.

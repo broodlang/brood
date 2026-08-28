@@ -47,7 +47,10 @@ Four things to carry forward, and the last two are measurement traps that will b
 - **The gate is now a differential, not an anecdote.** ADR-280's `image_matches_source.rs` loads
   every baked-in module twice — source and image — and requires name, kind, privacy and declared
   signature to match. It found a **sixth** divergence on its first run (materialising dropped
-  privacy: 1448 names) and is the thing a default-ON proposal should rest on.
+  privacy: 1448 names). **It is what made the default flip shippable:** the image went
+  **default-ON in v0.15.0** (`f114d01e`), opt out with `BROOD_NO_STDIMAGE=1`. The first flip was
+  reverted the same day it landed (KI-72); this one rests on a construction-level gate rather
+  than on anecdotes.
 - **The amplifier switches itself off.** `BROOD_STDLIB_HASH` covers every `std/**/*.blsp`, so any
   edit — including someone else's while your loop is running — changes the id, no image matches,
   and the image arm silently becomes the no-image arm. **Verify the image inside the measuring
