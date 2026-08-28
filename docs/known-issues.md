@@ -81,7 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-72 | **the stdlib image cannot be default-ON yet: it turns a latent require-stall into a reliable one.** Measured with 12 parallel copies of `autoload_race --test-threads=4` against a 90 s timeout: **12 of 12 exceed it with the image installed, 0 of 12 without**, and the same test passes 12/12 alone in 0.5 s. Not a deadlock — nothing hangs permanently. The edge replay must run BEFORE `provide` (or a racing process sees a module whose dependencies are missing — the 112-failure bug ADR-256 fixed), so a module stays unprovided while it recursively requires its whole edge set, and every process that wants it meanwhile enters `%require-await`'s **5 ms x 1000** poll before force-loading. **The "not a deadlock" half of this was WRONG (2026-08-28): the wait is unbounded** — a root blocked in `receive` sat >30 s with an EMPTY mailbox and every scheduler worker idle, so a reply is genuinely never delivered, not merely delayed | ⚠️ **OPEN 2026-08-27, re-characterised 2026-08-28** — image reverted to opt-in (`BROOD_STDIMAGE=1`) the day it was flipped; everything else from ADR-256 ships. The fix is the POLL, not the ordering: `%require-await` should wait on the loader finishing rather than sleep-and-recheck — the OTP `code_server` model, see below. Note the synthetic load stresses something pre-existing — at 12x4 parallelism the default (no image) still shows 4 of 12 — so a fix should be measured on both arms |
+| KI-72 | **the stdlib image cannot be default-ON yet: it turns a latent require-stall into a reliable one.** Measured with 12 parallel copies of `autoload_race --test-threads=4` against a 90 s timeout: **12 of 12 exceed it with the image installed, 0 of 12 without**, and the same test passes 12/12 alone in 0.5 s. Not a deadlock — nothing hangs permanently. The edge replay must run BEFORE `provide` (or a racing process sees a module whose dependencies are missing — the 112-failure bug ADR-256 fixed), so a module stays unprovided while it recursively requires its whole edge set, and every process that wants it meanwhile enters `%require-await`'s **5 ms x 1000** poll before force-loading. **The "not a deadlock" half of this was WRONG (2026-08-28): the wait is unbounded** — a root blocked in `receive` sat >30 s with an EMPTY mailbox and every scheduler worker idle, so a reply is genuinely never delivered, not merely delayed | ⚠️ **OPEN 2026-08-27, re-characterised 2026-08-28** — image reverted to opt-in (`BROOD_STDIMAGE=1`) the day it was flipped; everything else from ADR-256 ships. The poll IS now the `code_server` model (2026-08-28) and it did **not** fix this; two other real defects found alongside did not either. Repro is now ONE test, single-threaded, 8/12 — see below. Note the synthetic load stresses something pre-existing — at 12x4 parallelism the default (no image) still shows 4 of 12 — so a fix should be measured on both arms |
 | KI-73 | **a prelude macro's template can be captured by a user module that defines the same name.** A template is spliced into the user's file, where a bare reference resolves against *their* namespace first — so `(defmodule m) (defn get (b k) :CAPTURED) (defrecord pt (x y))` made every accessor return `:CAPTURED`. Silent wrong value: right arity, nothing unbound, `nest check` quiet. Fixed for `defrecord`/`for`/`defonce`/`with-err-str` with the `/name` root escape (ADR-236), which this pass also had to *finish implementing* — it was a resolve-time rewrite only, so `/get` was unbound at root. `receive` included | ✅ **FIXED 2026-08-28** — the escape is now total: resolved in a module (`resolve_sym`), at root (`macros::strip_root_escapes`), and at **runtime macro expansion** (`eval/mod.rs`, for a macro defined after its use site or at the REPL). `but-last` moved to `core.blsp` and `sleep` below `receive` so `receive` expands at prelude compile time. Gated by `tests/prelude_capture_test.blsp` — a static scan asserting ZERO offenders plus four behavioural probes |
 | KI-75 | **`compare` reported values as EQUAL that are not, two ways — and `sort` is built on it.** (1) `(compare nan x)` was `0` for every `x`, so one NaN silently turned `sort` into a no-op: `(sort [3.0 nan 1.0 2.0])` returned its input unsorted, no error. (2) the `Int`-vs-`Float` arm used a lossy `as f64` cast while every other cross-type arm was exact, so past 2^53 two different integers compared equal — `(compare 9007199254740993 9007199254740992.0)` was `0` while `=` and `>` both said otherwise | ✅ **FIXED 2026-08-28** — NaN now sorts LAST via `float_total_cmp` (Rust's `total_cmp` / Java's `Double.compare` choice), and `Int`/`Float` routes through the same exact base-10 path the BigInt/Decimal/Ratio arms already used. `<`/`<=`/`>` stay IEEE deliberately — a sort key and an arithmetic predicate are different questions. Guarded by `tests/comparison_test.blsp` (25 cases) plus three Rust unit tests |
 | KI-71 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right; fixed downstream with `nest rename --swap`. ✅ **The class now HAS a gate (same day):** the checker already catches a reversed call precisely, per argument — it was silent here only because `seq/remove-nth` had **no declared `sig`**. The index/collection functions (`remove-nth`, `take-last`, `drop-last`, `chunk-every`, `split-at`, `sample`, `shuffle`, `vector-ref`) now carry one, so the reversal is a warning and CI's zero-warning gate makes it a hard failure. Argument types precise, return `any` — the reversal is an argument mistake, and a narrow return would false-positive at every call site. Zero new warnings across std/ + tests/. Guards `a_reversed_index_and_collection_call_is_flagged` + `the_correct_index_first_order_stays_silent`, sabotage-verified by deleting one `sig` |
@@ -4583,6 +4583,62 @@ that a `receive` nested inside the native `reduce` builtin was the trigger (3/10
 for a Brood-level loop) — **that conclusion did not hold**: under parallel load the plain
 loop lost a reply and the nested one did not. Do not trust a shape comparison at n=10 on
 this bug. Use the unmodified `autoload_race` binary as the repro and observe from gdb.
+
+### 2026-08-28, later: three fixes landed, NONE of them closes this
+
+Fixed and pushed, all found while chasing this bug, none of them its cause:
+
+- **the wake was an either/or** — `deliver` re-queued a parked green process *or else*
+  notified the condvar, and a green process in a native-nested `receive` is reachable by
+  both, so a present `waiter` suppressed the notify. `wake_for_timeout` had no notify at
+  all. Now `mailbox::wake_both` signals both, always.
+- **`%require-await` polled** — replaced with the `code_server` model described below.
+- **the root ctx outlived its `Interp`** — `ensure_ctx` cached it per THREAD, so a second
+  `Interp` on one thread inherited the first's pid *and mailbox*, and a queued
+  `Payload::Local { slot }` then indexed the new runtime's heap at the old one's index.
+
+**Measured, interleaved, with the image verified live in both arms: no change.** Baseline
+and fixed are indistinguishable, and the baseline itself swung between 9/20 and 13/20 across
+runs of *identical* code. Do not read the fixes as having narrowed this.
+
+**A much cheaper repro than the one above.** The hang is one test, not the suite:
+
+```
+BROOD_STDIMAGE=1 ./target/debug/deps/autoload_race-* \
+    --exact racing_the_first_call_into_string_is_sound --test-threads=1     # 8 of 12 hang
+```
+
+One test, one thread, one `Interp`, a 12 s cap, no parallelism at all. Across whole-binary
+runs it is nearly always `racing_the_first_call_into_string_is_sound` that hangs (sometimes
+`seq` as well), never `boot_loads_no_library_feature`.
+
+**Two traps that cost hours here; read these before measuring anything.**
+
+1. **`stdlib-id` embeds the git sha, so COMMITTING invalidates the image.** Commit while
+   investigating and the amplifier silently switches off: the baseline then measures 0/12
+   and any fix looks perfect. Every measurement in this session that read 0/N was this. Check
+   for `[image] install: N sections` — and note the line is prefixed by libtest's `test … `
+   output, so a `grep -E '^\[image\]'` anchored at line start finds nothing and looks like
+   a clean run.
+2. **Every in-language observer moves or suppresses it.** Collecting the child pids
+   (`spawn-many`) instead of discarding them (`dotimes`) suppressed it; a `%list-processes`
+   watchdog suppressed it (0/48); enlarging the `after` body suppressed it; and so did a
+   *Rust* watchdog thread that does nothing for its first 3 s. Reproduce with the unmodified
+   binary and observe from gdb.
+
+**What the state looks like when it is stuck** (gdb, single test, single thread): the root
+is in `receive_match` → `wait_for_message` on the mailbox condvar, inside `range_reduce_slow`;
+**all 12 scheduler workers are idle** in `wait_timeout` on the run queue; the JIT thread is
+idle. Nothing is runnable, and the root's mailbox is empty. So the 24 children have all
+finished or never ran, and no reply is in flight — consistent with a lost `send`, a child that
+died silently, or a child that never got scheduled. Distinguishing those is where this stands.
+
+**Ruled out since**, each with a measurement: the mailbox park/notify in general (a `pure`
+variant with no `require` never loses a reply); pid collision across runtimes; the
+`ensure_ctx` inheritance above; and `BROOD_NO_RECV_MARK` / `BROOD_NO_HANDOFF` /
+`BROOD_NO_MSGTAG`, none of which separated from baseline. An earlier A/B concluding that a
+`receive` nested in the native `reduce` was the trigger (3/10 vs 0/10 for a Brood-level loop)
+**did not hold** — under parallel load the plain loop lost a reply and the nested one did not.
 
 ### How Erlang does it — the `code_server` model
 

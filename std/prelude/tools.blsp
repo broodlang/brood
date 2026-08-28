@@ -331,6 +331,10 @@ The primary source is consulted first, then `*image-sources*` in install order."
   "Record package `prefix`'s SHORT module names (a list of symbols) — the intra-package set."
   (%registry-update! '*package-modules-of* :assoc [prefix] short-modules)
   prefix)
+(def- *features-waiting* {})
+; feature key → the list of pids WAITING for that key's in-flight load. The waiter
+; queue of the OTP `code_server` model — see `%require-await` for the protocol and
+; why its two orderings (register-then-recheck, provide-then-drain) are load-bearing.
 (def- *features-loading* {})
 ; feature key → loader pid for loads IN FLIGHT. Set before a load begins so (a) a
 ; CIRCULAR require inside that same load returns immediately (the contract
@@ -1143,22 +1147,118 @@ load-time (`require`) guards."
       (%set-package-context (first prev) (second prev))
       key)))
 
-;; Wait (5ms ticks, ~`n` of them) for another process's in-flight load of `key`;
-;; if it never completes — the loader died or its load threw, leaving a stale
-;; marker — take the load over ourselves (re-evaluating a module is idempotent:
-;; same source, same defs). `sleep`, not a bare receive: waiting must not eat a
-;; queued mailbox message.
+;; ---- waiting for someone else's in-flight load (the OTP `code_server` model) ----
+;;
+;; This used to POLL: `(sleep 5)` a thousand times, re-reading `*features*`, then give up
+;; and load the module itself. Three things were wrong with that, and OTP gets all three
+;; right, so this is modelled on it directly.
+;;
+;; `code_server` keeps a per-module queue of requesters (`schedule_or_run_loader/4`): a
+;; request for a module already in `loading` is appended to that module's waiting list and
+;; deliberately left unanswered — the caller just stays blocked in its `gen_server:call` —
+;; and `run_loader_next/2` replies to it when the in-flight load finishes. So:
+;;
+;;   1. a waiter costs the load's REAL DURATION, not a 5 ms quantum times however many
+;;      rounds it takes;
+;;   2. there is NO force-load fallback. The claim is authoritative and only the claimant
+;;      releases a waiter. Loading the module ourselves after a timeout is a *second*
+;;      loader for a module already being loaded — which is what turned a slow load into a
+;;      duplicate one here;
+;;   3. a loader that DIES is handled by monitoring it, not by timing out. OTP monitors the
+;;      client for exactly this (`{'LOADER_DOWN', Mod}`).
+;;
+;; Two orderings make the handoff airtight, and both are load-bearing:
+;;
+;;   * the waiter REGISTERS in `*features-waiting*` and only then RE-CHECKS `*features*`.
+;;     That closes the window where the loader finishes before we are on the list — we see
+;;     its `provide` ourselves rather than waiting for a notification nobody will send.
+;;   * the loader PROVIDES first and only then drains the waiter list (`%require-release!`).
+;;     That closes the mirror window where we join the list after the drain — our re-check
+;;     then sees the provide.
+;;
+;; Reverse either one and a waiter blocks on a notification that can never arrive. That is
+;; the same class as the wake this file's callers depend on: a notification delivered to
+;; nobody is gone, so the state has to be observable to a late arrival.
+(defn- %require-enqueue-waiter!
+  (key me)
+  "Add `me` to `key`'s waiter list, atomically against a concurrent drain."
+  (%swap-registry! *features-waiting*
+    (fn (m) (assoc m key (cons me (or (get m key) (list)))))))
+
+(defn- %require-take-waiters!
+  (key)
+  "Atomically REMOVE and return `key`'s waiter list (empty if none). CAS-retried, so a
+waiter joining concurrently either lands before the take (and is returned here) or after it
+(and its own re-check sees the `provide` that preceded this call)."
+  (let (old *features-waiting*
+        ws (or (get old key) (list)))
+    (cond
+      (empty? ws) ws
+      (%registry-cas! '*features-waiting* old (dissoc old key)) ws
+      else (%require-take-waiters! key))))
+
+(defn- %require-release!
+  (key)
+  "Wake every process waiting on `key`'s load. MUST be called after `provide` (or after the
+marker is cleared on failure), never before — see the ordering note above."
+  (let (ws (%require-take-waiters! key))
+    (%require-notify-each ws key)))
+
+(defn- %require-notify-each
+  (ws key)
+  (unless (empty? ws)
+    (do
+      (send (first ws) [:load-done key])
+      (%require-notify-each (rest ws) key))))
+
 (defn- %require-await
-  (key n)
-  (cond
-    ;; `%registry-member?`, NOT `contains?`: the latter reads the per-process global inline
-    ;; cache, which can miss a racing loader's `provide` — `require-one` says exactly that
-    ;; twenty lines below and bypasses it for the same reason, while this loop polled the
-    ;; cached read. A waiter whose cache stays stale sleeps its whole budget and then
-    ;; force-loads a module that was ready all along, which is both a stall and a double load.
-    (%registry-member? '*features* key) key
-    (> n 0) (do (sleep 5) (%require-await key (dec n)))
-    else (%require-force key)))
+  (key)
+  "Block until the process that claimed `key`'s load has finished it. Returns `key`."
+  (let (loader (get *features-loading* key)
+        me (self))
+    (%require-enqueue-waiter! key me)
+    ;; Monitor the claimant so its DEATH is a wakeup too (OTP's `LOADER_DOWN`). Taken after
+    ;; the enqueue and before the re-check, so a loader that dies at any point from here on
+    ;; reaches us as a `[:down …]`; one that died BEFORE this is covered by the re-check
+    ;; (it cleared the marker on its way out) or, failing that, by the backstop below.
+    (let (mref (if (pid? loader) (monitor loader) nil))
+      (if (%registry-member? '*features* key)
+        ;; It landed while we were getting on the list: take ourselves back off (so we do
+        ;; not sit in the queue of a load that is over) and return.
+        (do
+          (when mref (demonitor mref))
+          (%require-drop-waiter! key me)
+          key)
+        (receive
+          ([:load-done k] :when
+            (= k key)
+            (do (when mref (demonitor mref)) key))
+          ;; The claimant died mid-load: the marker is stale and nobody will provide. Take
+          ;; the load over — this is a HANDOFF, not a duplicate: the claim is vacant.
+          ([:down r _ _] :when
+            (= r mref)
+            (do (%require-drop-waiter! key me) (%require-force key)))
+          ;; Backstop. OTP needs none, because its code server cannot silently forget a
+          ;; requester. Ours is ordinary Brood, so keep a last-resort timeout — but make it
+          ;; LOUD rather than silent: a force-load here means the protocol above dropped a
+          ;; waiter, and the whole point of KI-72 was that a silent stall is unattributable.
+          (after 30000
+            (do
+              (when mref (demonitor mref))
+              (%require-drop-waiter! key me)
+              (%eprint (str "[require] BUG: waited 30s for an in-flight load of '"
+                         key "' with no completion and no loader death; force-loading. "
+                         "This should be unreachable — please report it.\n"))
+              (%require-force key))))))))
+
+(defn- %require-drop-waiter!
+  (key me)
+  "Remove `me` from `key`'s waiter list (best-effort; a concurrent drain may beat us)."
+  (%swap-registry! *features-waiting*
+    (fn (m)
+      (let (ws (or (get m key) (list))
+            left (filter (fn (p) (not (= p me))) ws))
+        (if (empty? left) (dissoc m key) (assoc m key left))))))
 
 ;; Load one feature once. CONCURRENT-SAFE: `require` returning means the module's
 ;; defs exist — a require that races another process's load of the same feature
@@ -1179,7 +1279,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; the classic load-once contract for circular requires
       (= (get *features-loading* key) (self)) key
       ;; someone else is mid-load: wait for their provide (never see a partial module)
-      (contains? *features-loading* key) (%require-await key 1000)
+      (contains? *features-loading* key) (%require-await key)
       ;; Claim the load atomically. `:assoc-new` sets the marker only if `key` is
       ;; still absent — the test-and-set runs INSIDE the registry lock — and returns
       ;; false if another process claimed it between the `contains?` read above and
@@ -1187,9 +1287,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; `contains? = false`, both `:assoc`, and both run `%require-force`: the module
       ;; body is evaluated twice and `provide`d twice (the double-load ADR-136 forbids).
       ;; Losing the race means someone else now owns the load — wait for their provide.
-      (not (%registry-update! '*features-loading* :assoc-new [key] (self)))
-        (%require-await key
-          1000)
+      (not (%registry-update! '*features-loading* :assoc-new [key] (self))) (%require-await key)
       else
       ;; We won the claim (the marker is now set). Clear it on BOTH exits: a load that
       ;; throws (module not found, or an error inside its source) must not leave `key`
@@ -1210,8 +1308,19 @@ it waits for that load to finish (a half-evaluated module is never observable)."
             (catch e
               (do
                 (%registry-update! '*features-loading* :dissoc [key] nil)
+                ;; Release BEFORE rethrowing. A load that throws must not strand its
+                ;; waiters: the marker is gone, so nobody will provide, and a waiter
+                ;; blocked on a completion that can never arrive would sit until its
+                ;; backstop. Woken here, each waiter re-checks, finds `key` unprovided and
+                ;; unclaimed, and one of them wins the claim and retries the load — which
+                ;; is what the poll's timeout used to achieve, without the wait.
+                (%require-release! key)
                 (throw e)))))
+        ;; Marker cleared, then waiters released — and both AFTER `provide` (inside
+        ;; `%require-force`). See the ordering note on `%require-await`: provide-then-drain
+        ;; is what lets a waiter that joins the queue late still observe the load itself.
         (%registry-update! '*features-loading* :dissoc [key] nil)
+        (%require-release! key)
         key))))
 
 ;; ---- lazily-loaded library names the PRELUDE itself references ---------------

@@ -792,7 +792,10 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> LocalDelivery {
         trace: None,
     });
     drop(st);
-    wake_enqueue(proc);
+    // Both paths, for the reason `wake_both` documents: taking a `waiter` here does not prove
+    // the receiver is *only* reachable by re-queue. This path never notified the condvar at
+    // all, so a receiver that was both parked and cv-blocked was unreachable through it.
+    wake_both(&mb, Some(proc));
     l1_stats::bump(&l1_stats::HIT);
     LocalDelivery::Delivered
 }
@@ -818,12 +821,38 @@ fn deliver_envelope_timed(pid: u64, env: Envelope) {
             }
         }
         st.push(env);
-        if let Some(proc) = wake_parked(&mut st) {
-            drop(st);
-            wake_enqueue(proc); // wake a parked green process (capture-mode → may migrate)
-        } else {
-            mb.cv.notify_one(); // wake the root thread, if it's blocked in receive
-        }
+        let parked = wake_parked(&mut st);
+        drop(st);
+        wake_both(&mb, parked);
+    }
+}
+
+/// Signal **both** wake paths for a mailbox we have just pushed to (or set a kill on):
+/// re-queue the parked green process if there was one, *and* notify the condvar.
+///
+/// The `if parked { requeue } else { notify }` this replaces looks exhaustive and is not.
+/// It assumes a receiver is reachable by exactly one path, but the two are not mutually
+/// exclusive: a green process that entered a **native-nested** `receive` (a `receive` inside
+/// a HOF running in a Rust builtin — the §7.4 dirty-scheduler carve-out) blocks its worker on
+/// this condvar *without* clearing any `waiter` a previous park left behind. Whenever a
+/// `waiter` is present the `else` never runs, so that receiver's condvar is never notified
+/// and — with no `after` to self-wake it — it blocks forever. A condvar notify does **not
+/// latch**: delivered to no one it is discarded, and nothing later recovers it.
+///
+/// BEAM has no such either/or, because it has no second wake path: `erts_queue_message`
+/// enqueues and then `erts_proc_notify_new_message` schedules the process if it is not
+/// already `ERTS_PSFLG_ACTIVE` — a **persistent state bit**, so however the interleaving
+/// falls, a process made active gets run. We keep two mechanisms (a root/file-runner thread
+/// really does block an OS thread), so the invariant has to be: signal both, every time.
+///
+/// Notifying with no waiter is a no-op, and a spurious wake costs one re-scan — `receive_match`
+/// re-scans after every `wait_for_message` return anyway. Called with the state lock already
+/// released: we pushed under it, so a receiver that locks after us sees the message on its
+/// own `queue.len() > i` check and never reaches the wait.
+pub(super) fn wake_both(mb: &Mailbox, parked: Option<Box<Process>>) {
+    mb.cv.notify_all();
+    if let Some(proc) = parked {
+        wake_enqueue(proc); // wake a parked green process (capture-mode → may migrate)
     }
 }
 
@@ -1622,10 +1651,14 @@ pub(super) fn wake_for_timeout(pid: u64, gen: u64) {
             return;
         }
         let mut st = crate::core::sync::lock(&mb.state);
-        if let Some(proc) = wake_parked(&mut st) {
-            drop(st);
-            wake_enqueue(proc); // timer wake (capture-mode → may migrate)
-        }
+        let parked = wake_parked(&mut st);
+        drop(st);
+        // Both paths (`wake_both`). This site had **no** condvar notify at all — alone among
+        // the wake sites — which was survivable only because a cv-blocked receiver with a
+        // deadline sits in `wait_timeout` and self-wakes at the same instant. That made the
+        // timer thread's wake redundant *for that shape* and missing for any other; leaving
+        // one wake site with different reachability is how the either/or bug above got in.
+        wake_both(&mb, parked); // timer wake (capture-mode → may migrate)
     }
 }
 

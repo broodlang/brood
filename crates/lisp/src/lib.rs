@@ -456,6 +456,24 @@ impl Drop for Interp {
     /// host that creates and drops `Interp`s no longer accumulates them.
     fn drop(&mut self) {
         process::shutdown_runtime_parked(&self.heap.runtime_arc());
+        // …then retire THIS THREAD's root context, if it minted one.
+        //
+        // `ensure_ctx` caches the root `Ctx` in a thread-local keyed to the THREAD, not the
+        // runtime, and nothing cleared it: a second `Interp` on the same thread inherited the
+        // first's pid *and its mailbox*. Six sequential `Interp`s all report
+        // `#<pid nonode/1>`. That is not merely untidy — the inherited mailbox keeps whatever
+        // the previous runtime left queued, and a `Payload::Local { slot, .. }` is an index
+        // into the heap of the runtime that took delivery. Popping one after the swap reads
+        // the NEW runtime's `msg_roots` at the OLD runtime's index: a wrong-heap read, and
+        // silent, because the slot is in range far more often than not.
+        //
+        // Retiring here also gives the root ctx the death path a green process gets — its
+        // monitors and links fire — rather than leaving it registered until the OS thread
+        // ends, which for a host thread that outlives many `Interp`s is never.
+        //
+        // A no-op (returns false) on a thread that never touched `self`/`send`/`receive`,
+        // which is every thread that only ever built and evaluated.
+        process::deregister_root_ctx();
     }
 }
 
