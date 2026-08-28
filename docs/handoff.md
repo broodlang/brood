@@ -28,11 +28,31 @@ option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
   `no_declared_std_sig_widens_its_curated_signature` (returns only — see its doc comment for
   why parameters are deliberately out of scope). **Read that before the next adoption round.**
 
-**Still open, and unchanged by this session: KI-72** (the stdlib image cannot be default-ON — a
-require-stall storm under parallel load; `BROOD_STDIMAGE=1` opt-in) and **KI-74** (⚠️ watching —
-one unnamed lib-suite failure, 20 clean runs since; re-run under nextest if it recurs). So
-`known-issues.md` no longer shows a clear board: **KI-72 is the work** before new features, per
-the green-tree rule below.
+**KI-72 is FIXED (2026-08-28), and it was not what three sessions thought.** Not a lost message,
+not the require protocol, not the scheduler: a section's entries are defined one at a time into
+the **shared** global table in `(global-names)` order, so `string/blank?` (position 7) was callable
+while the module-private `string/whitespace?` its body calls (position 51) was not — and 17 of 24
+`spawn`ed children died `unbound symbol: string/whitespace?`, so the root waited forever for
+replies that could never total 24. Source loading is immune because the file defines the helper
+(line 190) before its caller (192). Fixed by emitting each section **privates-first**.
+
+Two things to carry forward from it:
+
+- **Read a hung run's own output before theorising.** The dying children print to stderr from a
+  *green process*, and libtest captures per thread — so `cargo test`/nextest swallow it and it
+  shows only under `--nocapture`. Three investigations used gdb and in-language watchdogs (which
+  perturb the timing) and never read the output. Same lesson as KI-64.
+- **The image is not default-ON, deliberately.** The hang is gone and the image arm is at parity
+  with the no-image arm on every repro (the original 12-parallel one went 12/12 over the cap →
+  0/12), but privates-first does not order **public→public**, and full source-order parity is
+  unavailable because a `defn-` has no recorded def-site. The complete fix is an **atomic section
+  install** — and the KI entry records the trap in the obvious version: buffering the built values
+  in a Rust `Vec` leaves them unrooted while `from_message` keeps allocating (a use-after-GC).
+  Close that before proposing the default flip; the win waiting behind it is `json` 6.5 → 1.7 ms,
+  `http` 12.0 → 3.6 ms, `regex` 4.7 → 1.1 ms, and the `json` row −5.6%.
+
+**Still open: KI-74** only (⚠️ watching — one unnamed lib-suite failure, 20 clean runs since;
+re-run under nextest, which names the case, if it recurs).
 
 
 Three separate gates turned out to be passing without testing anything, and the theme of
