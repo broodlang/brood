@@ -578,10 +578,11 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         return t.is_subtype(&num).then_some(float);
     }
 
+    let is_division = value::symbol_is(head, "/");
     let is_contagious = value::symbol_is(head, "+")
         || value::symbol_is(head, "-")
         || value::symbol_is(head, "*")
-        || value::symbol_is(head, "/");
+        || is_division;
     let is_int_closed = value::symbol_is(head, "+")
         || value::symbol_is(head, "-")
         || value::symbol_is(head, "*")
@@ -614,6 +615,22 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     }
     if is_int_closed && all_int {
         return Some(int);
+    }
+    // `/` is the one contagious operator that is NOT int-closed, and it used to fall through
+    // to `None` here — so the checker made **no claim at all** about `(/ x 2)`, the single
+    // most ordinary arithmetic expression there is.
+    //
+    // It is not int-closed because Brood's division is EXACT: it yields an `int` when it
+    // divides evenly and a `ratio` when it does not — `(/ 4 2)` → 2, `(/ 3 2)` → 3/2 — and
+    // never a float, at any arity (unary `(/ 2)` → 1/2, `(/ 12 5 3)` → 4/5) or width (a
+    // bigint numerator gives a bigint-backed ratio). So the sound claim is exactly
+    // `int | ratio`, which is narrower than the `number` the roadmap assumed and narrow
+    // enough to be useful: it catches `(sig f (int -> float))` over `(/ x 2)`, and a result
+    // fed somewhere non-numeric, without touching the *merely-wider* case that stays
+    // deferred (a body of `int | ratio` DECLARED `int` is not flagged — for an even
+    // numerator it is right, and proving that needs range analysis; ADR-011).
+    if is_division && all_int {
+        return Some(int.union(Ty::of(Tag::Ratio)));
     }
     None
 }

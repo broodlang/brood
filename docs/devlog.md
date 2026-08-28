@@ -6046,3 +6046,33 @@ Full tables in [compute-frontier.md](compute-frontier.md) §2c. Also: `make perf
 the same binary path as `make release-brood`, so it was rebuilt afterwards and the "compiled out"
 hint checked — timing anything against the counter build charges the change for atomics it never
 introduced.
+
+## 2026-08-28 — the checker had no opinion about `(/ x 2)`
+
+Picked up the **merely-wider** roadmap item, and the first finding was that the entry
+described its own example wrongly. It called `(/ x 2)` "a body typed exactly `number`
+(int ∪ float)". It is neither: Brood's division is **exact**, so integer division yields an
+`int` when it divides evenly and a **ratio** when it does not — never a float, at any arity
+(`(/ 2)` → 1/2, `(/ 12 5 3)` → 4/5) or width (a bigint numerator gives a bigint-backed ratio).
+
+And the checker was not typing it as `number` either. `/` sits in `is_contagious` but not in
+`is_int_closed`, so for all-int operands the arithmetic rule fell straight through to `None`:
+**no claim at all** about the most ordinary arithmetic expression in the language.
+
+So the sound half was sitting there unclaimed. `(/ int int)` now types as `int | ratio`, which
+catches a declared `float` return (`declared return type float but the body yields int |
+ratio`) and a result fed somewhere non-numeric — at **no cost in false positives**, because
+the case that got the item deferred is a *different* one: `int | ratio` DECLARED `int`, which
+is right whenever the numerator is even and needs range analysis to prove. That stays
+deferred, and it is now a narrower gap than the entry claimed — the residual ambiguity is
+int-vs-ratio, not int-vs-float.
+
+Worth recording as method, since the same shape recurs: the entry had been carrying a wrong
+premise long enough to look settled, and one `type-of` probe at the REPL overturned it. The
+deferral was still right; the reason given for it was not, and the useful 80% was on the other
+side of that reason.
+
+Rust tests in `check::tests` (positive, merely-wider negative, and contagion-still-wins), plus
+in-language coverage in `tests/sig_adoption_test.blsp` that asserts the runtime agrees with the
+claim on both arms. Sabotage-verified. Zero-warning gate over `std/` + `tests/` still clean,
+207/207 `.blsp` files, 630 Rust lib tests, clippy `--all-features` clean.

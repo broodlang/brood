@@ -257,6 +257,69 @@ fn sealed_ability_complete_is_silent() {
 }
 
 #[test]
+fn integer_division_yields_int_or_ratio() {
+    // `/` is the one contagious operator that is not int-closed, and the rule used to fall
+    // through to `None` — so the checker made NO claim about `(/ x 2)`, the most ordinary
+    // arithmetic expression there is. Brood's division is exact: an `int` when it divides
+    // evenly, a `ratio` when it does not, never a float. Declaring `float` over it is
+    // therefore provably wrong, and so is feeding it somewhere non-numeric.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig c (int -> float))\n\
+         (defn c (x) (/ x 2))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("declared return type float") && w.contains("int | ratio")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn integer_division_does_not_flag_the_merely_wider_case() {
+    // The residue that stays deferred (ADR-011): a body of `int | ratio` DECLARED `int` is
+    // right whenever the numerator is even, and proving that needs range analysis. Adding
+    // the division rule must not smuggle in the false positive that deferral exists to
+    // avoid — nor flag `number`, which `int | ratio` genuinely is.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig a (int -> int))\n\
+         (defn a (x) (/ x 2))\n\
+         (sig b (int -> number))\n\
+         (defn b (x) (/ x 2))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("declared return type")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn division_with_a_float_operand_is_still_contagious() {
+    // The pre-existing contagion rule must win over the new one: one float operand makes the
+    // result a float, not `int | ratio`.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig f (int -> float))\n\
+         (defn f (x) (/ x 2.0))\n\
+         (sig g (int -> int))\n\
+         (defn g (x) (/ x 2.0))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("g:") && w.contains("yields float")),
+        "the int declaration over a float body must warn — {ws:?}"
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("t/f:")),
+        "the float declaration is correct — {ws:?}"
+    );
+}
+
+#[test]
 fn a_record_name_is_a_type_in_a_sig() {
     // A record is the language's nominal type and `defrecord` already emits one in its own
     // constructor sig — but the NAME could not be written in type position, so the natural

@@ -1611,9 +1611,20 @@ Runtime housekeeping (both items landed):
   non-LOCAL reachable state into the builder's slabs first; `to_prelude` re-tags
   LOCAL only. Also: a unit tagged `:slow`/`:conformance` now raises its batch
   timeout, so the external corpora stop being hard-killed as if hung.
-- ⬜ **Merely-wider inference case** — a body typed exactly `number` (int ∪ float)
-  declared `int`, e.g. `(/ x 2)`; can't be pinned without occurrence/range analysis
-  and flagging it would false-positive on int-valued runs (ADR-011).
+- 🟡 **Merely-wider inference case.** The description here was wrong about its own example:
+  `(/ x 2)` on ints is not `number` (int ∪ float) — Brood's division is **exact**, so it is
+  `int | ratio`, and never a float at any arity. `/` is contagious but not int-closed, so the
+  arithmetic rule fell straight through and the checker made **no claim at all** about the
+  most ordinary arithmetic expression there is.
+  - ✅ **The sound half shipped** (2026-08-28): `(/ int int)` now types as `int | ratio`, which
+    catches a declared `float` return, and a result fed somewhere non-numeric, at no cost in
+    false positives. `int.union(ratio)` in `numeric_call_ty`; tests in `check::tests` +
+    `tests/sig_adoption_test.blsp`.
+  - ⬜ **The residue stays deferred**: a body of `int | ratio` **declared `int`** is correct
+    whenever the numerator is even, so flagging it false-positives on int-valued runs and
+    pinning it needs occurrence/range analysis (ADR-011). Note this is now a *narrower* gap
+    than the entry originally claimed — the remaining ambiguity is int-vs-ratio, not
+    int-vs-float.
 - ✅ **Parameter-type inference from body usage → callers checked** (occurrence typing,
   [ADR-190](docs/decisions.md), completed 2026-07-30). The **sound (unconditional-demand)
   slice shipped 2026-07-25**: `infer_sig` infers a parameter's type from every position
