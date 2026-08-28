@@ -117,6 +117,7 @@ cost of ~three forms, not the whole buffer."
         ;; scan (strings/comments skipped, bracket depth tracked) in one native byte pass.
         end (reflect/scan-form-end text base 3))
     [base (string/substring text base end)]))
+(sig narrow (string int -> (tuple any string)))
 
 ;; ---- pure navigation: (text point) -> point ---------------------------------
 
@@ -184,6 +185,7 @@ over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
   (let ([base sub] (narrow text point)
         enc (enclosing (tree sub) (- point base)))
     (if (= (get enc :kind) :root) point (+ base (get enc :start)))))
+(sig point-up (any int -> any))
 
 (defn point-up-forward (text point)
   "Just past the enclosing list's closing delimiter — the forward counterpart of
@@ -193,6 +195,7 @@ over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
   (let ([base sub] (narrow text point)
         enc (enclosing (tree sub) (- point base)))
     (if (= (get enc :kind) :root) point (+ base (get enc :end)))))
+(sig point-up-forward (any int -> any))
 
 (defn point-down (text point)
   "Just inside the next list at or after `point` (Emacs `down-list`); unchanged if
@@ -204,6 +207,7 @@ none.
         enc (enclosing (tree sub) rp)
         lst (seq/find (fn (f) (and (sexp-list? f) (>= (get f :start) rp))) (forms-of enc)))
     (if (nil? lst) point (+ base (get lst :start) 1))))
+(sig point-down (any int -> any))
 
 (defn- sexp-defun-edge
   (text point edge)
