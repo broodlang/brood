@@ -107,9 +107,7 @@ passed through (not re-wrapped), like `spawn`."
 ;; queued and the timeout always fires. Parks the green process on the scheduler's
 ;; timer (it does NOT block a worker thread) — which is why sleep is pure Brood
 ;; rather than a Rust primitive.
-(defn sleep (ms)
-  "Park the current process for `ms` milliseconds without touching its mailbox — every queued message stays queued. Parks on the scheduler timer; it does not block a worker thread."
-  (let (never (ref)) (receive (^never nil) (after ms nil))))
+;; `sleep` is defined AFTER `receive`, below — see the note at its definition.
 
 ;; ---- timers ----------------------------------------------------------------
 ;; `timer/send-after` / `timer/send-interval` / `cancel` moved to `std/timer.blsp`: they SCHEDULE a
@@ -346,7 +344,7 @@ passed through (not re-wrapped), like `spawn`."
                     `(fn (~msg) [0 ~msg])
                     `(fn (~msg)
                        ~(%match-build-from (map %receive-result-clause preps) msg nil)))
-          dispatch (if (empty? real) `(nth ~r 1) (%receive-dispatch preps r))
+          dispatch (if (empty? real) `(/nth ~r 1) (%receive-dispatch preps r))
           ;; nil when the filter can't apply (see `%receive-tags`). Built as a vector
           ;; FORM (`[~@tags]`), not by calling a function: a plain list would expand to
           ;; `(:tag …)`, which evaluates as a keyword accessor call (ADR-165) rather
@@ -364,7 +362,20 @@ passed through (not re-wrapped), like `spawn`."
       (if (nil? ms)
         `(let (~r (%receive ~matcher nil ~tags ~pin)) ~dispatch)
         `(let (~r (%receive ~matcher ~ms ~tags ~pin))
-           (if (nil? ~r) ~on-time ~dispatch))))))
+           (if (/nil? ~r) ~on-time ~dispatch))))))
+
+;; `sleep` is defined HERE, below `receive`, and the order is load-bearing. Its body IS a
+;; `receive`, and a macro that is not yet defined when a form is compiled does not expand
+;; then — it expands LAZILY, at first call, on a path that runs no namespace-resolve pass.
+;; `receive`'s template uses the `/name` root escape (so a user module defining `nil?` or
+;; `nth` cannot capture it), and an escape that reaches the evaluator unresolved is an
+;; unbound symbol — which is what `sleep` sitting 200 lines earlier produced: every
+;; `(sleep …)` raised `unbound symbol: /nil?`. Defined after `receive`, it expands at
+;; compile time where the escape resolves. This is the other half of moving `but-last`
+;; into core.blsp; both were needed (KI-73). Keep it here.
+(defn sleep (ms)
+  "Park the current process for `ms` milliseconds without touching its mailbox — every queued message stays queued. Parks on the scheduler timer; it does not block a worker thread."
+  (let (never (ref)) (receive (^never nil) (after ms nil))))
 
 ;; ---- dirty-native offload (ADR-144) -----------------------------------------
 ;; The BEAM dirty-scheduler shape: a long/blocking native runs on a small OS

@@ -139,11 +139,11 @@ current element and `acc` is the current accumulator."
     `(defn ~sym (~@params coll)
        ~docstring
        (letrec (-loop (fn (coll ~'acc)
-                        (if (empty? coll)
+                        (if (/empty? coll)
                           acc
-                          (let (~'item (first coll))
-                            (-loop (rest coll) ~step)))))
-         (reverse (-loop (seq coll) nil))))))
+                          (let (~'item (/first coll))
+                            (-loop (/rest coll) ~step)))))
+         (/reverse (-loop (/seq coll) nil))))))
 
 (%defseq map
   (f)

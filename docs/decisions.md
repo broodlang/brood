@@ -17225,12 +17225,23 @@ name for one idea — the point of the exercise.
 **The hazard this moves rather than removes, recorded because it recurred immediately.** A
 prelude macro that emits a *bare* prelude name into user code is captured by any module defining
 that name. Renaming `name` to `->string` reproduced the identical failure one commit later
-against `std/text.blsp` and `std/decimal.blsp`, which both define their own `->string`. The `/`
-root escape is **not** the fix: the resolver that rewrites `/x` is a no-op for the root prelude
-(ADR-230), so an emitted `/->string` survives to runtime literally and is unbound — verified.
-`defmodule` now emits *no* conversion at all; `%record-module-doc!` and `%defmodule-provide`
-take a symbol and convert in their own bodies, where nothing can capture. **The rule: a prelude
-macro emits `%`-names and data, never a bare public verb.**
+against `std/text.blsp` and `std/decimal.blsp`, which both define their own `->string`.
+
+`defmodule` is the special case and is fixed by emitting *no* conversion at all
+(`%record-module-doc!` and `%defmodule-provide` take a symbol and convert in their own bodies,
+where nothing can capture): it is the form that *establishes* the namespace, so its expansion is
+evaluated before there is an ns to resolve against, and even the root escape cannot help there.
+
+For every other prelude macro the answer is the **`/name` root escape** (ADR-236) — which this
+pass had to finish implementing. `resolve` returned early at root, so the escape was a
+module-only feature and an emitted `/get` was unbound in any root script; `strip_root_escapes`
+now handles the root case, skipping `quote`/`quasiquote` subtrees (without that skip the
+prelude's own templates get stripped at definition time and the capture comes straight back —
+it did, for one build). Every prelude macro is fixed, `receive` included (KI-73) — which took making the escape total:
+it resolves in a module (`resolve_sym`), at root (`strip_root_escapes`), and at **runtime macro
+expansion**, the path a macro defined at the REPL or after its use site takes. The general
+statement of the rule is now a gate rather than a convention, asserting ZERO offenders:
+`tests/prelude_capture_test.blsp`.
 
 **Consequences.** 235 call sites in `std/` + `tests/`, plus three pieces of Brood embedded in
 Rust *string literals* — `crates/nest/src/main.rs`, `crates/cli/tests/observe_attach.rs`,
@@ -17492,3 +17503,92 @@ omitted tags, well past half the universe), so an ordinary wide union still rend
 accepts anything — inverts under a complement: `(not strng)` would accept nothing. That is
 now caught statically by ADR-259's fail-closed sig validation, which is the reason the two
 shipped together.
+
+## ADR-264 — A record is closed; openness is the type of the keys it does not declare
+
+**Status:** accepted and implemented, 2026-08-28. Supersedes the "records are **open**
+(structural width subtyping in the permissive direction)" rule of ADR-115 /
+[type-records.md](type-records.md), and its deferred "closed-record variant … if a real
+need appears" — the need appeared with ADR-262.
+
+**Context.** ADR-262 made a union of two record shapes *representable*: `{ok: int} |
+{error: string}` keeps both terms instead of widening to bare `map`. It did not make one
+**useful**. A field read through it still answered nothing:
+
+```lisp
+(sig f ((or (record :ok int) (record :error string)) -> any))
+(defn f (r) (string/length (get r :ok)))    ; silent — no type for `(get r :ok)`
+```
+
+The reason was not the union. It was that records were **open**: a shape declared what a
+value must have and said nothing about anything else, so the `{error: string}` term could
+not rule out an `:ok` of some other type. The honest answer for the union was `any`, and
+`any` is what it gave. Every record annotation was therefore weaker than it reads — the
+same shape of problem as ADR-259's fail-open `sig`, where a declaration quietly widened
+the position it was meant to pin.
+
+**Decision.** *A record is closed.* `(record :a int)` means exactly that key; every other
+key is absent, which Brood reads through `get` as `nil`. `(record &open :a int)` is the
+open form, marked the way Brood marks the other in-list modifiers (`&optional`, `&rest`).
+
+Openness is modelled as **the type of the undeclared keys**, not as a boolean:
+
+| shape | `rest` | a read of an undeclared key |
+|---|---|---|
+| `(record :a int)` | `nil` | `nil` — the key is absent |
+| `(record &open :a int)` | `any` | unknown |
+
+That is what keeps the set operations uniform. One reading — `field_ty(k)`: the declared
+type for a required field, `T \| nil` for an optional one, `rest` otherwise — and then:
+
+- **subtyping** is "for every key either declares, `a`'s reading fits `b`'s, and `a.rest`
+  fits `b.rest`". Width subtyping falls out (`nil ⊆ any`, so closed is a subtype of open
+  but not the reverse), and so does the required/optional rule, which used to be a
+  separate clause.
+- **disjointness** is "some key's readings are disjoint". `{ok: int}` says `:error` is
+  `nil`, `{error: string}` requires a string, and `nil ∩ string = ⊥` — the two terms of a
+  tagged union are provably distinct, with no rule written for tagged unions.
+- **intersection** is exact and per-key, which matters because that is what a type guard
+  performs; the old generic merge widened the refinement away and lost what the guard had
+  just established.
+
+**Absence is now reasoned about, not declined.** `{}` *is* a subtype of `{a?: int}` — the
+old rule had to refuse that as unprovable. And a `(get r :k)` derivation answers for every
+key, over a union of shapes as well as one, which is the whole point.
+
+**What must be open, and why each one.** Closed-by-default is only right where a shape
+describes a *value*; a shape used as a *domain* has to stay open, and three do:
+
+- a `defrecord` **accessor**'s parameter — a real value carries `:__id__` and every
+  sibling field, so a closed one-field shape would describe nothing. (Its **constructor's
+  result** stays closed: the constructor builds exactly those keys, and that is the shape
+  a field read through a union resolves against.)
+- an **ability used as a type**, whose shape pins `:__id__` and nothing else (ADR-181).
+- the base refined by a **path guard** — `(if (int? (get r :age)) …)` proves that path is
+  present and typed, and says nothing about the rest of `r`.
+
+**A map literal infers closed only when it was read completely.** `{:a 1}` really does
+have exactly one key, so `(get {:a 1} :b)` is `nil` — a precision improvement that falls
+out for free. But a literal with a non-keyword key, or an entry whose value type is
+unknown, has had an entry *dropped* from the shape; claiming those keys absent would be a
+lie the checker could warn on, so those infer open.
+
+**One thing this exposed, recorded because it is the interesting failure.** Once
+`(get {:x 10} :y)` typed as exactly `nil`, `(if-let (v (get {:x 10} :y)) (inc v) …)` read
+as handing `nil` to `inc` — a false positive on a branch that cannot run, because nothing
+narrowed `v` by **truthiness**. A bare local as an `if` test is a guard: only `nil` and
+`false` are falsy, so a true test proves the local is neither. That guard is now applied,
+and it is deliberately **one-sided**: the exact truthy type is "not `nil` and not the
+*literal* `false`", which this lattice cannot state (negating a literal set widens to its
+whole tag — the negative-atom gap ADR-262 documents), so the sayable type is `not nil`.
+Sound as a necessary condition for a true test; **not** invertible, because a false test
+does not imply `nil`. Marked biconditional it read `(not v)` as "v is nil" and reported
+live code as dead — which is how the one-sidedness got proven rather than assumed.
+
+**Consequences.** `nest check std/**/*.blsp tests/**/*.blsp` back to zero. One test flipped
+by design: the runtime contract's "extra, undeclared keys are allowed (open records)" is
+now "an extra key throws — a record is closed", with an `&open` case beside it, since the
+contract and the checker must agree on what a declaration means. And the relaxation that
+dropped an expected shape's optional fields before the membership test is gone: it existed
+because the old subtyping refused `{a: 1} <: {a: int, b?: string}`, and keeping it would
+now *cause* the false positive it was written to prevent.

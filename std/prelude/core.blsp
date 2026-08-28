@@ -240,6 +240,20 @@ this by implementing the `Display` ability, which takes over this name below.
 A string is not a sequence here — reverse its `string/->list` if you need that."
   (%reverse-acc (seq coll) nil))
 
+;; `but-last` lives HERE, in core, rather than with the rest of the sequence library —
+;; the position is load-bearing. `receive`'s macro body calls it, and `sleep` (in
+;; process.blsp) is a `receive`, so the call happens while the PRELUDE ITSELF is booting.
+;; With `but-last` defined in seq.blsp — concatenated after process.blsp — `receive` could
+;; not expand at compile time at all; it expanded lazily at first call instead, on a path
+;; that runs no namespace-resolve pass, which is what made `receive` the one prelude macro
+;; whose template could not use the `/name` root escape (KI-73). It needs only `reverse`
+;; (just above) and the kernel `rest`, so it costs nothing to define this early.
+(defn but-last (xs)
+  "All but the last item of `xs`, as a list.
+
+    (but-last [1 2 3])   → (1 2)"
+  (reverse (rest (reverse xs))))
+
 (defn- %reverse-onto
   (coll tail)
   "The items of `coll` reversed, prepended onto `tail`. `(%reverse-onto xs ys)` is
@@ -436,7 +450,7 @@ hot-reload (cf. Emacs `defvar`). Once bound, re-evaluating is a no-op; restart
 or re-`def` to force re-init. Works for a module-level name: the bound? check is
 resolved against the LOADING module's namespace (`%defonce-qualified-name`), the same
 binding `def` writes — a bare `(bound? '~name)` would read at root and miss it."
-  `(unless (bound? (%defonce-qualified-name '~name)) (def ~name ~val)))
+  `(unless (/bound? (%defonce-qualified-name '~name)) (def ~name ~val)))
 
 ;; `(comment …)` — the dev-scratch block every Lisp has. Its body is read (so it
 ;; must still be balanced sexps) but never evaluated, which is the point: a
@@ -558,17 +572,29 @@ names accept anything, so a contract never throws on a type it can't interpret."
           ;; be absent/nil. Every other field is required: `(get v k)`
           ;; on a missing key is nil, so `type-matches?` on the bare
           ;; field type naturally fails unless that type accepts nil —
-          ;; no separate presence check needed. Extra keys are ignored
-          ;; (open records).
-          (and (map? v)
-            (every? (fn (field)
-                      (let (k (first field)
-                            ftype (second field))
-                        (if (and (pair? ftype) (%eq (first ftype) 'optional))
-                          (or (nil? (get v k))
-                            (type-matches? (second ftype) (get v k)))
-                          (type-matches? ftype (get v k)))))
-              (partition 2 (rest t))))
+          ;; no separate presence check needed.
+          ;;
+          ;; A record is **closed** unless it opens with `&open` (ADR-264):
+          ;; a key it does not declare must be absent. That is what makes a
+          ;; record say what a value is *not*, which is what discriminates
+          ;; a tagged union — and the contract has to agree with the checker
+          ;; about it or `sig!` and `nest check` would disagree on the same
+          ;; declaration.
+          (let (open? (%eq (second t) '&open)
+                flds (partition 2 (if open? (rest (rest t)) (rest t))))
+            (and (map? v)
+              (every? (fn (field)
+                        (let (k (first field)
+                              ftype (second field))
+                          (if (and (pair? ftype) (%eq (first ftype) 'optional))
+                            (or (nil? (get v k))
+                              (type-matches? (second ftype) (get v k)))
+                            (type-matches? ftype (get v k)))))
+                flds)
+              (or open?
+                (every? (fn (kv)
+                          (any? (fn (field) (%eq (first field) (first kv))) flds))
+                  (%map-pairs v)))))
             (%eq h
               'tuple)
           ;; A fixed-arity positional vector shape (ADR-128): exact
