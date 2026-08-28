@@ -34,6 +34,55 @@ fn value_member_of(heap: &Heap, v: Value, ty: &Ty) -> bool {
             _ => {}
         }
     }
+    // **Literal sets.** `contains_tag` passes the value `6` against the type `{5}` —
+    // both are ints — so without this the oracle cannot see a rule that produced the
+    // WRONG literal, and `expr_ty` infers literal singletons for every literal in the
+    // language. Positive sets only: a negatively-stated one (ADR-268) reports no members
+    // and is skipped, which is the conservative direction.
+    match v {
+        Value::Int(n) => {
+            if let Some(set) = ty.as_lit_int() {
+                if !set.contains(&n) {
+                    return false;
+                }
+            }
+        }
+        Value::Keyword(k) => {
+            if let Some(set) = ty.as_lit() {
+                if !set.contains(&k) {
+                    return false;
+                }
+            }
+        }
+        Value::Bool(b) => {
+            if let Some(set) = ty.as_lit_bool() {
+                if !set.contains(&b) {
+                    return false;
+                }
+            }
+        }
+        Value::Str(id) => {
+            if let Some(set) = ty.as_lit_str() {
+                if !set.contains(&*heap.string(id)) {
+                    return false;
+                }
+            }
+        }
+        _ => {}
+    }
+    // **Tuple shapes** (ADR-128) — a positional refinement `elem_ty` does not describe.
+    // A tuple pins both the length and each position, and neither was checked.
+    if let (Value::Vector(id), Some(positions)) = (v, ty.tuple_elems()) {
+        let items = heap.vector(id).to_vec();
+        if items.len() != positions.len() {
+            return false;
+        }
+        for (item, want) in items.iter().zip(positions.iter()) {
+            if !value_member_of(heap, *item, want) {
+                return false;
+            }
+        }
+    }
     // Map refinements. Without these the oracle passes on any map-typed expression
     // whatever the refinement claims — which is how `(assoc m :extra "text")` on a
     // `(map keyword int)` went on reporting `(map keyword int)`, flagging correct code
@@ -140,6 +189,10 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(get {:a 1} :a)",
         "(get {:a 1} :missing)",
         "(assoc (assoc {} :a 1) :b :k)",
+        // tuple-producing and literal-producing forms — the two refinements the
+        // membership check above was blind to until 2026-08-28.
+        "(seq/split-at 1 [1 2 3])",
+        "(seq/split-at 0 [])",
         // sequence rules that reshape rather than construct — each one carries an
         // element refinement through an operation, the shape ADR-269 showed is where
         // an under-approximation hides.
