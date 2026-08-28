@@ -49,6 +49,13 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
 
 (def-face :syntax/comment {:fg :dark-grey})
 (def-face :syntax/string {:fg :green})
+;; A DOCSTRING — the string a `def…` form documents itself with, as opposed to one it
+;; returns. Distinct from `:syntax/string` on purpose: the two are the same token to a
+;; lexer and completely different things to a reader (`(defn greeting () "doc" "hi")`
+;; colours the prose and the value apart). Grey + italic reads as prose without
+;; disappearing the way a comment does; a terminal that can't do italic still shows the
+;; hue difference.
+(def-face :syntax/doc {:fg :grey :italic true})
 (def-face :syntax/number {:fg :yellow})
 (def-face :syntax/keyword {:fg :magenta})
 ; special forms / core macros
@@ -67,6 +74,7 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
 ;; these snapshots (and so the default REPL look) stay put.
 (def hl-face-comment (face :syntax/comment))
 (def hl-face-string (face :syntax/string))
+(def hl-face-doc (face :syntax/doc))
 (def hl-face-number (face :syntax/number))
 (def hl-face-keyword (face :syntax/keyword))
 (def hl-face-special (face :syntax/special))
@@ -86,6 +94,17 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
   "True if string `s` names a Brood special form / core macro that should highlight
 as a keyword. Mirrors the LSP's SPECIAL_FORMS list."
   (= true (get hl-special-set s)))
+
+;; The `def…` heads that carry a docstring, head -> `:fn` / `:head`. Read from the
+;; kernel's canonical `(doc-forms)` — the same list the LSP's semantic tokens and the
+;; generated VS Code / tree-sitter / Emacs grammars use — so "is this string a doc?"
+;; has one answer across every editor (ADR-265).
+(def- hl-doc-forms (doc-forms))
+
+(defn doc-form? (s)
+  "True if string `s` names a `def…` head whose form carries a docstring. Mirrors the
+LSP's DOC_FORMS list."
+  (not (nil? (get hl-doc-forms s))))
 
 ;; ---- character classes ------------------------------------------------------
 
@@ -141,52 +160,125 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
 ;; regardless of position — so `(nil? x)` shows `nil` as a constant, not a call head.
 ;; (The native `scan-tokens` classifies those, and `:`-prefixed names, as `:keyword`.)
 
-;; The `:syntax/*` face NAME a `:keyword` / `:number` / `:comment` / `:string` token
-;; paints in — the position-independent kinds. `:symbol` is resolved separately (head
-;; position decides special-form vs call vs plain), and `:open`/`:close` carry no
-;; colour. The name is resolved to a face via `(face …)` at span time, so a live
-;; restyle of `:syntax/*` takes effect on the next frame.
+;; The `:syntax/*` face NAME a `:keyword` / `:number` / `:comment` token paints in —
+;; the position-independent kinds. `:symbol` and `:string` are resolved separately (head
+;; position decides special-form vs call vs plain; doc position decides doc vs. string
+;; value), and `:open`/`:close` carry no colour. The name is resolved to a face via
+;; `(face …)` at span time, so a live restyle of `:syntax/*` takes effect on the next
+;; frame.
 (def- hl-kind->face-name
   {:comment :syntax/comment
-   :string :syntax/string
    :number :syntax/number
    :keyword :syntax/keyword})
 
+;; ---- the form stack ---------------------------------------------------------
+;; The lexer carries one frame per open bracket: `[open n head params?]` — the
+;; bracket's text (only `(` opens head position), how many forms of this list have
+;; STARTED, the head symbol's text (nil until seen), and whether the form at index 2
+;; was itself a bracketed list (a parameter list). The old walk carried a single
+;; `after` boolean, which answers "is this symbol a call head?" but not "is this
+;; string a docstring?" — that one is positional (`(defn f (x) "doc" …)` documents,
+;; `(defn f (x) "hi")` returns), so it needs the head and the index, not just a flag.
+
+(defn- hl-push
+  (stack open)
+  "Open a frame for the bracket `open`."
+  (cons [open 0 nil false] stack))
+
+(defn- hl-advance
+  (stack params?)
+  "Advance the innermost frame past one started form; `params?` marks that form as a
+bracketed list sitting in parameter position (index 2)."
+  (if (empty? stack)
+    stack
+    (let ([open n head p] (first stack))
+      (cons [open (inc n) head (or p (and params? (= n 2)))] (rest stack)))))
+
+(defn- hl-name
+  (stack text)
+  "Advance past a symbol, recording it as the list's head when it is the first form."
+  (if (empty? stack)
+    stack
+    (let ([open n head p] (first stack))
+      (cons [open (inc n) (if (and (= n 0) (= open "(")) text head) p] (rest stack)))))
+
+(defn- hl-head?
+  (stack)
+  "True when the form starting here is in HEAD position — the first form of a `(` list."
+  (and (not (empty? stack))
+    (let ([open n _ _] (first stack)) (and (= open "(") (= n 0)))))
+
+(defn- hl-more-forms?
+  (toks)
+  "True if another form follows in the current list — the next non-comment token is
+not this list's closing bracket."
+  (cond
+    (empty? toks) false
+    else
+      (let ([_ _ kind _] (first toks))
+        (cond
+          (= kind :comment) (hl-more-forms? (rest toks))
+          else (not (= kind :close))))))
+
+(defn- hl-doc?
+  (stack toks)
+  "True when the string token starting here is a DOCSTRING rather than a string value:
+the enclosing form is a doc-carrying `def…` head (`(doc-forms)`), the string sits right
+after the name — or after the parameter list — and, for the heads that build a function,
+more body follows it (a function whose body is a lone string returns that string, which
+is why `\"hello mylife\"` in `(defn greeting () \"Doc.\" \"hello mylife\")` stays a
+string). `toks` is the stream AFTER the string."
+  (and (not (empty? stack))
+    (let ([open n head params?] (first stack)
+          kind (get hl-doc-forms head))
+      (and (= open "(")
+        (not (nil? kind))
+        (or (= n 2) (and (= n 3) params?))
+        (or (= kind :head) (hl-more-forms? toks))))))
+
+;; ---- the lexer walk ---------------------------------------------------------
+
 (defn- hl-spans
-  (toks after acc)
-  "Walk the `scan-tokens` stream into `[start end face]` colour spans, tracking head
-position (`after` — true just inside a `(`, carried across comments like the reader).
-Only `:symbol` needs position: head + special form → keyword face, head → call face,
-else uncoloured. Accumulates in reverse."
+  (toks stack acc)
+  "Walk the `scan-tokens` stream into `[start end face]` colour spans, carrying the
+form `stack` (head position, and enough shape to tell a docstring from a string).
+`:symbol` needs position — head + special form → keyword face, head → call face, else
+uncoloured — and `:string` needs it too (doc vs. value). Accumulates in reverse."
   (if (empty? toks)
     (reverse acc)
     (let ([s e kind text] (first toks)
-          rest (rest toks))
+          more (rest toks))
       (cond
-        (= kind :open) (hl-spans rest (= text "(") acc)
-        ; only `(` opens head position
-        (= kind :close) (hl-spans rest false acc)
-        (= kind :comment) (hl-spans rest after (cons [s e (face :syntax/comment)] acc))
-        ; keeps `after`
+        (= kind :open) (hl-spans more (hl-push (hl-advance stack true) text) acc)
+        (= kind :close) (hl-spans more (rest stack) acc)
+        (= kind :comment) (hl-spans more stack (cons [s e (face :syntax/comment)] acc))
+        ; a comment starts no form — the stack is untouched
         (= kind :symbol)
-          (let (f (cond
-                    (and after (special-form? text)) (face :syntax/special)
-                    after (face :syntax/function)
+          (let (head? (hl-head? stack)
+                f (cond
+                    (and head? (special-form? text)) (face :syntax/special)
+                    head? (face :syntax/function)
                     else nil))
-            (hl-spans rest false (if (nil? f) acc (cons [s e f] acc))))
+            (hl-spans more (hl-name stack text) (if (nil? f) acc (cons [s e f] acc))))
+        (= kind :string)
+          (let (f (if (hl-doc? stack more) (face :syntax/doc) (face :syntax/string)))
+            (hl-spans more (hl-advance stack false) (cons [s e f] acc)))
         else
           (let (f (face (get hl-kind->face-name kind)))
-            ; :string / :number / :keyword
-            (hl-spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
+            ; :number / :keyword
+            (hl-spans more
+              (hl-advance stack false)
+              (if (nil? f) acc (cons [s e f] acc))))))))
 
 (defn highlight-spans (src)
   "Lexically tokenize Brood `src` into a list of `[start end face]` colour spans
 (character offsets, end-exclusive) for the tokens that carry a colour — comments,
-strings, numbers, keywords, and head-position symbols (special forms vs calls).
+strings (a `def…` form's docstring apart from a string value), numbers, keywords, and
+head-position symbols (special forms vs calls).
 Whitespace and plain variable references carry no span (the default colour). The
 per-character scan is the native `scan-tokens`; this only assigns faces over the token
 stream (O(tokens)), so it stays fast enough for per-frame fontification."
-  (hl-spans (reflect/scan-tokens src) false '()))
+  (hl-spans (reflect/scan-tokens src) '() '()))
 
 ;; ---- windowed highlighting (fontify just a viewport) ------------------------
 ;; A large buffer is too costly to lex whole every frame. The editor instead lexes

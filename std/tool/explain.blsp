@@ -33,7 +33,7 @@ the `nest mcp` tools of the same names.")
    "E0010" {:summary "Unbound symbol — a name that resolves to nothing."
             :causes "A typo; a BARE name that lives in a module — `sqrt`/`even?` are `math/…`, `frequencies` is `seq/…` since ADR-227, so a bare use is unbound without `(:use math)`; a module-private name (`defn-`/`def-`) referenced from another module (ADR-146); using a `let`-bound name out of scope."
             :fix "Check the spelling with `(apropos \"part\")`. For a module function either write it qualified — `math/sqrt`, which loads the module by inference — or `(:use math)` in the header to refer it bare. There is no `require` to add (ADR-229 removed it). For a private (check with `(private? 'mod/x)`), call it from its own module or add `(:use-internals mod)`."
-            :example "(json/parse \"{}\")   ; qualified — the module loads itself"}
+            :example "(json/decode \"{}\")   ; qualified — the module loads itself"}
    "E0020" {:summary "Arity mismatch — a function called with the wrong number of arguments."
             :causes "Too many or too few args; forgetting a required parameter; a variadic vs fixed confusion."
             :fix "Check the arglist with `(arglist 'the-fn)` (or the `lookup` MCP tool). `&optional` params may be omitted; `& rest` takes any number."

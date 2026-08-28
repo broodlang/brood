@@ -59,11 +59,30 @@
                   acc))
         (fold (fn (a f) (heads-in f in-template a)) acc form))))
 
+;; The second emission shape, and the one that hid a live bug for a day. A macro can
+;; build its output with `(list 'head …)` instead of a quasiquote — `defmulti` did, with
+;; `(list 'mapv '%identity-of 'args)` — and the template walker above skips `quote`
+;; subtrees by design, so it never saw those heads. A module defining `mapv` therefore
+;; broke every multimethod it declared, silently: dispatch keyed on `:CAPTURED`.
+(defn- quoted-heads-in
+  (form acc)
+  (if (not (pair? form))
+    acc
+    (let (acc (if (and (= (first form) 'list)
+                    (pair? (rest form))
+                    (pair? (second form))
+                    (= (first (second form)) 'quote)
+                    (symbol? (second (second form)))
+                    (contains? capturable (->string (second (second form)))))
+                (conj acc (->string (second (second form))))
+                acc))
+      (fold (fn (a f) (quoted-heads-in f a)) acc form))))
+
 (defn- offenders
   ()
   (fold (fn (acc form)
           (if (and (pair? form) (= (first form) 'defmacro))
-            (let (hits (seq (heads-in form false #{})))
+            (let (hits (seq (quoted-heads-in form (heads-in form false #{}))))
               (if (empty? hits) acc (assoc acc (->string (second form)) (sort hits))))
             acc))
     {}
@@ -108,6 +127,31 @@
                   (send p :hello)
                   (sleep 20)
                   :ok)")
+      :ok))
+
+  ;; `sig` is the subtle one: capturing it does not produce a wrong value, it silently
+  ;; stops the checker seeing a record's field types. The escape only works because
+  ;; macro-head lookup learned it — `compile` expands before it resolves, so an
+  ;; unrecognised `/sig` never produces the `%register-sig` the checker collects.
+  (test "a module defining `sig` does not capture defrecord's signatures"
+    (assert=
+      (%load-string
+        "(defmodule capture-probe-sig)
+         (defn sig (a b) :CAPTURED)
+         (defrecord pt ((x int) (y int)))
+         (pt-x (pt 3 4))")
+      3))
+
+  ;; the `(list 'head …)` shape — `defmulti` built its dispatch key with `mapv`
+  (test "a module defining `mapv` does not capture `defmulti` dispatch"
+    (assert=
+      (%load-string
+        "(defmodule capture-probe-mapv)
+         (defn mapv (f c) :CAPTURED)
+         (defrecord sq (n))
+         (defmulti describe-it)
+         (defmethod describe-it [capture-probe-mapv/sq] (x) :ok)
+         (describe-it (sq 2))")
       :ok))
 
   (test "a module defining `bound?` does not capture `defonce`"

@@ -1,119 +1,119 @@
-;; Tests for std/csv.blsp — CSV parsing and emitting.
+;; Tests for std/csv.blsp — CSV decoding and encoding.
 
 (defmodule csv-test (:use test))
 
-;; ---- parse --------------------------------------------------------------
+;; ---- decode --------------------------------------------------------------
 
-(describe "parse — basic"
+(describe "decode — basic"
   (test "empty string"
-    (assert= nil (csv/parse "")))
+    (assert= nil (csv/decode "")))
   (test "single field"
-    (assert= (list ["a"]) (csv/parse "a")))
+    (assert= (list ["a"]) (csv/decode "a")))
   (test "single row, multiple fields"
-    (assert= (list ["a" "b" "c"]) (csv/parse "a,b,c")))
+    (assert= (list ["a" "b" "c"]) (csv/decode "a,b,c")))
   (test "two rows"
-    (assert= (list ["a" "b"] ["1" "2"]) (csv/parse "a,b\n1,2")))
+    (assert= (list ["a" "b"] ["1" "2"]) (csv/decode "a,b\n1,2")))
   (test "trailing newline is ignored"
-    (assert= (list ["a" "b"]) (csv/parse "a,b\n")))
+    (assert= (list ["a" "b"]) (csv/decode "a,b\n")))
   (test "empty field"
-    (assert= (list ["a" "" "c"]) (csv/parse "a,,c")))
+    (assert= (list ["a" "" "c"]) (csv/decode "a,,c")))
   (test "all empty fields"
-    (assert= (list ["" ""]) (csv/parse ","))))
+    (assert= (list ["" ""]) (csv/decode ","))))
 
-(describe "parse — quoted fields"
+(describe "decode — quoted fields"
   (test "quoted field with comma"
-    (assert= (list ["a,b" "c"]) (csv/parse "\"a,b\",c")))
+    (assert= (list ["a,b" "c"]) (csv/decode "\"a,b\",c")))
   (test "quoted field with newline"
-    (assert= (list ["a\nb" "c"]) (csv/parse "\"a\nb\",c")))
+    (assert= (list ["a\nb" "c"]) (csv/decode "\"a\nb\",c")))
   (test "quoted field with escaped quote"
-    (assert= (list ["say \"hi\""]) (csv/parse "\"say \"\"hi\"\"\"")))
+    (assert= (list ["say \"hi\""]) (csv/decode "\"say \"\"hi\"\"\"")))
   (test "empty quoted field"
-    (assert= (list [""]) (csv/parse "\"\"")))
+    (assert= (list [""]) (csv/decode "\"\"")))
   (test "quoted field with spaces"
-    (assert= (list [" hello "]) (csv/parse "\" hello \""))))
+    (assert= (list [" hello "]) (csv/decode "\" hello \""))))
 
-(describe "parse — line endings"
+(describe "decode — line endings"
   (test "\\r\\n line endings"
-    (assert= (list ["a" "b"] ["1" "2"]) (csv/parse "a,b\r\n1,2")))
+    (assert= (list ["a" "b"] ["1" "2"]) (csv/decode "a,b\r\n1,2")))
   (test "mixed line endings"
-    (assert= (list ["a"] ["b"] ["c"]) (csv/parse "a\nb\r\nc")))
+    (assert= (list ["a"] ["b"] ["c"]) (csv/decode "a\nb\r\nc")))
   (test "\\r\\n trailing newline ignored"
-    (assert= (list ["a" "b"]) (csv/parse "a,b\r\n"))))
+    (assert= (list ["a" "b"]) (csv/decode "a,b\r\n"))))
 
-(describe "parse — multiline"
+(describe "decode — multiline"
   (test "three rows"
-    (let (result (csv/parse "h1,h2\nv1,v2\nv3,v4"))
+    (let (result (csv/decode "h1,h2\nv1,v2\nv3,v4"))
       (assert= 3 (count result))
       (assert= ["h1" "h2"] (nth (into [] result) 0))
       (assert= ["v1" "v2"] (nth (into [] result) 1))
       (assert= ["v3" "v4"] (nth (into [] result) 2)))))
 
-;; ---- parse-maps ---------------------------------------------------------
+;; ---- decode-maps ---------------------------------------------------------
 
-(describe "parse-maps"
+(describe "decode-maps"
   (test "empty string"
-    (assert= nil (csv/parse-maps "")))
+    (assert= nil (csv/decode-maps "")))
   (test "header only"
-    (assert= nil (csv/parse-maps "name,age")))
+    (assert= nil (csv/decode-maps "name,age")))
   (test "one data row"
-    (let (result (csv/parse-maps "name,age\nAlice,30"))
+    (let (result (csv/decode-maps "name,age\nAlice,30"))
       (assert= 1 (count result))
       (assert= "Alice" (get (first result) "name"))
       (assert= "30" (get (first result) "age"))))
   (test "multiple data rows"
-    (let (result (csv/parse-maps "x,y\n1,2\n3,4"))
+    (let (result (csv/decode-maps "x,y\n1,2\n3,4"))
       (assert= 2 (count result))
       (assert= "1" (get (first result) "x"))
       (assert= "4" (get (second result) "y"))))
   (test "quoted headers and values"
-    (let (result (csv/parse-maps "\"first name\",age\n\"John Doe\",25"))
+    (let (result (csv/decode-maps "\"first name\",age\n\"John Doe\",25"))
       (assert= "John Doe" (get (first result) "first name")))))
 
-;; ---- emit ---------------------------------------------------------------
+;; ---- encode ---------------------------------------------------------------
 
-(describe "emit"
+(describe "encode"
   (test "nil / empty"
-    (assert= "" (csv/emit nil))
-    (assert= "" (csv/emit nil)))
+    (assert= "" (csv/encode nil))
+    (assert= "" (csv/encode nil)))
   (test "single row"
-    (assert= "a,b,c" (csv/emit [["a" "b" "c"]])))
+    (assert= "a,b,c" (csv/encode [["a" "b" "c"]])))
   (test "two rows"
-    (assert= "a,b\n1,2" (csv/emit [["a" "b"] ["1" "2"]])))
+    (assert= "a,b\n1,2" (csv/encode [["a" "b"] ["1" "2"]])))
   (test "field with comma is quoted"
-    (assert= "\"a,b\",c" (csv/emit [["a,b" "c"]])))
+    (assert= "\"a,b\",c" (csv/encode [["a,b" "c"]])))
   (test "field with newline is quoted"
-    (assert= "\"a\nb\",c" (csv/emit [["a\nb" "c"]])))
+    (assert= "\"a\nb\",c" (csv/encode [["a\nb" "c"]])))
   (test "field with quote is quoted and escaped"
-    (assert= "\"say \"\"hi\"\"\"" (csv/emit [["say \"hi\""]])))
+    (assert= "\"say \"\"hi\"\"\"" (csv/encode [["say \"hi\""]])))
   (test "empty field"
-    (assert= ",b" (csv/emit [["" "b"]])))
-  (test "roundtrip: parse then emit"
+    (assert= ",b" (csv/encode [["" "b"]])))
+  (test "roundtrip: decode then encode"
     (let (original "name,age\nAlice,30\nBob,25")
-      (assert= original (csv/emit (csv/parse original))))))
+      (assert= original (csv/encode (csv/decode original))))))
 
-;; ---- emit-maps ----------------------------------------------------------
+;; ---- encode-maps ----------------------------------------------------------
 
-(describe "emit-maps"
+(describe "encode-maps"
   (test "single map"
     (assert= "name,age\nAlice,30"
-      (csv/emit-maps [{"name" "Alice" "age" "30"}] ["name" "age"])))
+      (csv/encode-maps [{"name" "Alice" "age" "30"}] ["name" "age"])))
   (test "multiple maps"
     (assert= "x,y\n1,2\n3,4"
-      (csv/emit-maps [{"x" "1" "y" "2"} {"x" "3" "y" "4"}] ["x" "y"])))
+      (csv/encode-maps [{"x" "1" "y" "2"} {"x" "3" "y" "4"}] ["x" "y"])))
   (test "column order follows headers"
     (assert= "b,a\n2,1"
-      (csv/emit-maps [{"a" "1" "b" "2"}] ["b" "a"])))
+      (csv/encode-maps [{"a" "1" "b" "2"}] ["b" "a"])))
   (test "missing key produces empty field"
     (assert= "name,age\nAlice,"
-      (csv/emit-maps [{"name" "Alice"}] ["name" "age"])))
+      (csv/encode-maps [{"name" "Alice"}] ["name" "age"])))
   (test "keyword keys"
     (assert= "name,age\nAlice,30"
-      (csv/emit-maps [{:name "Alice" :age "30"}] ["name" "age"])))
-  (test "roundtrip via parse-maps"
+      (csv/encode-maps [{:name "Alice" :age "30"}] ["name" "age"])))
+  (test "roundtrip via decode-maps"
     (let (original "name,age\nAlice,30\nBob,25")
-      (let (maps (csv/parse-maps original))
+      (let (maps (csv/decode-maps original))
         (assert= original
-          (csv/emit-maps maps ["name" "age"]))))))
+          (csv/encode-maps maps ["name" "age"]))))))
 
 ;; ---- non-string cells render through Display --------------------------------
 ;; A cell is rendered with `->string` before quoting, so a record emits the string its type
@@ -122,55 +122,55 @@
 (defrecord usd (cents))
 (impl Display csv-test/usd (->string [m] (str "$" (get m :cents))))
 
-(describe "emit renders non-string cells"
+(describe "encode renders non-string cells"
   ;; `->string` on a keyword is the bare word, colon stripped. It was the printed form
   ;; (`:b`) until 2026-08-27, when the sigil-stripping `name` primitive was folded into
   ;; `->string`; a CSV cell is one of the places that change is visible, and `b` is the
   ;; cell a reader of the file wants. `(str :b)` and `(pr-str :b)` still give ":b".
   (test "numbers and keywords emit as their display form"
-    (assert= (csv/emit [["a" 1 :b]]) "a,1,b"))
+    (assert= (csv/encode [["a" 1 :b]]) "a,1,b"))
   (test "a record emits via its Display impl, not as a field map"
-    (assert= (csv/emit [[(usd 1050) "x"]]) "$1050,x")
-    (is (not (includes? (csv/emit [[(usd 1050)]]) "__id__"))))
+    (assert= (csv/encode [[(usd 1050) "x"]]) "$1050,x")
+    (is (not (includes? (csv/encode [[(usd 1050)]]) "__id__"))))
   (test "a rendered cell is still quoted when it needs to be"
-    (assert= (csv/emit [[(usd "1,050")]]) "\"$1,050\""))
-  (test "emit-maps renders record values too"
-    (assert= (csv/emit-maps (list {:amount (usd 25)}) ["amount"]) "amount\n$25"))
+    (assert= (csv/encode [[(usd "1,050")]]) "\"$1,050\""))
+  (test "encode-maps renders record values too"
+    (assert= (csv/encode-maps (list {:amount (usd 25)}) ["amount"]) "amount\n$25"))
   (test "a plain string cell is untouched"
-    (assert= (csv/emit [["plain"]]) "plain")))
+    (assert= (csv/encode [["plain"]]) "plain")))
 
-;; ---- emit-maps: presence, not truthiness ------------------------------------
+;; ---- encode-maps: presence, not truthiness ------------------------------------
 ;; `false` is FALSY in Brood, so the old `(or (get m h) (get m (keyword h) ""))`
 ;; treated a legitimately-stored `false` as a missing key and emitted an EMPTY
 ;; field — silently corrupting every boolean column.
 
-(describe "emit-maps — a stored false is a value, not a missing key"
+(describe "encode-maps — a stored false is a value, not a missing key"
   (test "false emits as false"
-    (assert= "a\nfalse" (csv/emit-maps (list {"a" false}) (list "a"))))
+    (assert= "a\nfalse" (csv/encode-maps (list {"a" false}) (list "a"))))
   (test "false under a keyword key emits as false too"
-    (assert= "a\nfalse" (csv/emit-maps (list {:a false}) (list "a"))))
+    (assert= "a\nfalse" (csv/encode-maps (list {:a false}) (list "a"))))
   (test "a missing key still emits an empty field"
-    (assert= "a\n" (csv/emit-maps (list {}) (list "a"))))
+    (assert= "a\n" (csv/encode-maps (list {}) (list "a"))))
   (test "a key present but holding nil emits an empty field"
-    (assert= "a\n" (csv/emit-maps (list {"a" nil}) (list "a"))))
+    (assert= "a\n" (csv/encode-maps (list {"a" nil}) (list "a"))))
   (test "true, zero and the empty string are unaffected"
-    (assert= "a,b,c\ntrue,0," (csv/emit-maps (list {"a" true "b" 0 "c" ""}) (list "a" "b" "c")))))
+    (assert= "a,b,c\ntrue,0," (csv/encode-maps (list {"a" true "b" 0 "c" ""}) (list "a" "b" "c")))))
 
-;; ---- parse-maps is linear in the column count -------------------------------
+;; ---- decode-maps is linear in the column count -------------------------------
 ;; `(into [] row)` used to be rebuilt INSIDE the fold, once per column, making
-;; parse-maps O(cols²) per row (400 columns measured 517 ms). `parse` already
+;; decode-maps O(cols²) per row (400 columns measured 517 ms). `decode` already
 ;; returns vectors, so the conversion is hoisted out.
 
 (defn- csv-wide-header
   (n acc)
   (if (= n 0) acc (csv-wide-header (- n 1) (cons (str "c" n) acc))))
 
-(describe "parse-maps — wide rows"
+(describe "decode-maps — wide rows"
   (test "a 400-column row parses correctly (and no longer quadratically)"
     (let (cols (csv-wide-header 400 nil)
           header (string/join "," cols)
           row (string/join "," (map (fn (c) (str "v" c)) cols))
-          ms (%map-pairs (first (csv/parse-maps (str header "\n" row)))))
+          ms (%map-pairs (first (csv/decode-maps (str header "\n" row)))))
       (assert= 400 (count ms))
-      (assert= "vc1" (get (first (csv/parse-maps (str header "\n" row))) "c1"))
-      (assert= "vc400" (get (first (csv/parse-maps (str header "\n" row))) "c400")))))
+      (assert= "vc1" (get (first (csv/decode-maps (str header "\n" row))) "c1"))
+      (assert= "vc400" (get (first (csv/decode-maps (str header "\n" row))) "c400")))))

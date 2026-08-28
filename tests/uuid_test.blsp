@@ -20,11 +20,11 @@
     (let (a (uuid/v4) b (uuid/v4))
       (is (not= a b)))))
 
-(describe "nil-uuid"
+(describe "uuid/zero"
   (test "is the zero UUID"
-    (assert= "00000000-0000-0000-0000-000000000000" (uuid/nil-uuid)))
+    (assert= "00000000-0000-0000-0000-000000000000" (uuid/zero)))
   (test "passes uuid? validation"
-    (is (uuid/valid? (uuid/nil-uuid)))))
+    (is (uuid/valid? (uuid/zero)))))
 
 (describe "uuid-v7"
   (test "produces a 36-character string"

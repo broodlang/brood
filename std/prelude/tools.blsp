@@ -1474,6 +1474,20 @@ and that every declared arity still matches its module's actual definition."
   "True if `x` is a multi-valued map (`std/multimap`) — by identity, not by shape."
   (%eq (record-id x) :multimap/multimap))
 
+(defn datetime? (x)
+  "True if `x` is a datetime — a date *and* a time-of-day (`std/datetime`) — by identity."
+  (%eq (record-id x) :datetime/datetime))
+
+(defn date? (x)
+  "True if `x` is a date with no time component (`std/datetime`) — by identity.
+
+    (date? (datetime/today))   → true"
+  (%eq (record-id x) :datetime/date))
+
+(defn time-of-day? (x)
+  "True if `x` is a time-of-day with no date component (`std/datetime`) — by identity."
+  (%eq (record-id x) :datetime/time-of-day))
+
 ; ---- registration -----------------------------------------------------------
 
 ; The owning module of a record id keyword `:mod/name` (as a string), or nil for a
@@ -1763,7 +1777,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   (if (includes? arg-syms '&)
     (let (fixed (take-while (fn (s) (not (= s '&))) arg-syms)
           rest-sym (second (drop-while (fn (s) (not (= s '&))) arg-syms)))
-      (append (list 'apply impl-sym) (append fixed (list rest-sym))))
+      (append (list '/apply impl-sym) (append fixed (list rest-sym))))
     (cons impl-sym arg-syms)))
 
 (defn- %defability-op-body
@@ -1824,7 +1838,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
               (append (cons (list '%register-ability
                               (list 'quote aname)
                               (list 'quote ops)
-                              (list 'current-ns))
+                              (list '/current-ns))
                         (if sealed-ids
                           (list (list '%register-sealed
                                   (list 'quote aname)
@@ -1857,7 +1871,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                                               (list 'quote aname)
                                               (list 'quote (first op))
                                               :default (cons 'fn (cons arg-syms body))
-                                              (list 'current-ns))))))))
+                                              (list '/current-ns))))))))
                         nil ops)
         op-defs (map
                   (fn (op)
@@ -1942,7 +1956,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
       (list 'quote aname)
       id-kw
       (if (empty? ops)
-        (list 'map 'first (list 'or (list '%ability-ops (list 'quote aname)) (list)))
+        (list '/map '/first (list '/or (list '%ability-ops (list 'quote aname)) (list)))
         (list 'quote ops)))))
 
 (defn- %unimpl-do
@@ -2074,12 +2088,12 @@ which is meaningless for a rope, so falling through unconditionally would swap a
         '(& args)
         (list 'let
           (list 'key
-            (list 'mapv '%identity-of 'args)
+            (list '/mapv '%identity-of 'args)
             'f
             (list '%multi-resolve (list 'quote mname) 'key))
           (list 'if
             'f
-            (list 'apply 'f 'args)
+            (list '/apply 'f 'args)
             (list '%no-method (list 'quote mname) 'key)))))))
 
 (defmacro defmethod (mname pattern arglist & body)
@@ -2098,7 +2112,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
       (list '%register-method
         (list 'quote mname)
         :default (cons 'fn (cons arglist body))
-        (list 'current-ns))
+        (list '/current-ns))
     (vector? pattern)
       (do
         (when (not (every? (fn (p) (or (symbol? p) (keyword? p))) pattern))
@@ -2125,7 +2139,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
             (list 'quote mname)
             (list 'quote key)
             (cons 'fn (cons arglist body))
-            (list 'current-ns))))
+            (list '/current-ns))))
     else
       (error "defmethod "
         mname ": the dispatch pattern must be a vector of ids or " "`:default`, got " pattern)))

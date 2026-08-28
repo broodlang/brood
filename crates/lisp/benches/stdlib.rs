@@ -338,13 +338,13 @@ mod csv {
     /// Parse a CSV string with `n` rows.
     #[divan::bench(args = [10, 100])]
     fn parse(bencher: divan::Bencher, n: usize) {
-        csv_prog(bencher, n, "(csv/parse src)");
+        csv_prog(bencher, n, "(csv/decode src)");
     }
 
     /// Emit `n` rows as CSV (pre-parsed).
     #[divan::bench(args = [10, 100])]
     fn emit(bencher: divan::Bencher, n: usize) {
-        csv_prog(bencher, n, "(csv/emit (csv/parse src))");
+        csv_prog(bencher, n, "(csv/encode (csv/decode src))");
     }
 }
 

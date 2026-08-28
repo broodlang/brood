@@ -1,5 +1,5 @@
 #![no_main]
-//! `json/parse` (pure Brood, std/json.blsp) must never panic/abort the HOST
+//! `json/decode` (pure Brood, std/json.blsp) must never panic/abort the HOST
 //! on any input string — only a value or a clean in-language error. The
 //! interp is built once per fuzz process (the boot is ~ms); each input rides
 //! the printer's escape-correct string literal (print->read is a checked
@@ -28,6 +28,6 @@ fuzz_target!(|data: &[u8]| {
             let v = interp.heap.alloc_string(s);
             brood::syntax::printer::print(&interp.heap, v)
         };
-        let _ = interp.eval_str(&format!("(try (json/parse {lit}) (catch e nil))"));
+        let _ = interp.eval_str(&format!("(try (json/decode {lit}) (catch e nil))"));
     });
 });

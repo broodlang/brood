@@ -1850,6 +1850,18 @@ pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Opti
         None => {
             let q = match heap.compile_ns() {
                 Some(ns) => resolve_sym(heap, sym, value::symbol_name_ref(ns), &[]),
+                // At ROOT there is no namespace to resolve against, but a `/name` root
+                // escape (ADR-236) still has to name the root binding — and a MACRO head
+                // has to be recognised here, at expansion time, not merely rewritten
+                // later by `resolve`. `compile` expands before it resolves, so an
+                // unrecognised `/sig` stays unexpanded and never produces the
+                // `%register-sig` the checker collects: every record's field types
+                // silently stop being checked. (`/or` and friends appear to work anyway
+                // only because the *evaluator* expands macros at runtime — the checker
+                // never evaluates, so it does not get that second chance.)
+                None if is_root_escape(sym) => {
+                    value::intern(&value::symbol_name(sym)[1..])
+                }
                 None => heap.import_of(sym).unwrap_or(sym),
             };
             match (

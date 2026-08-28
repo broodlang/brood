@@ -54,9 +54,11 @@ what was *checked*, not a decision — the call is still yours.
 
 ## json
 
-- [ ] **is `decode` not the opposite of `encode`, not `parse`?** — confirmed asymmetric:
-      `std/json.blsp` defines **`parse`** (line 357) and **`encode`** (line 529). Pick one
-      pair — `encode`/`decode` or `serialize`/`parse` — and rename the odd one out.
+- [x] **is `decode` not the opposite of `encode`, not `parse`?** — **done: `json/parse` →
+      `json/decode`**, pairing with `json/encode`. 46 call sites plus its `sig`, the module
+      docstring, and the prose in `json_test`/`grammar_test`. Note `std/csv.blsp` keeps
+      `csv/decode` / `csv/encode` — that pair is *internally* coherent (reader/writer), so it
+      was left alone rather than churned; flag it if you want one convention across both.
 
 ## seq
 
@@ -70,10 +72,10 @@ what was *checked*, not a decision — the call is still yours.
 
 ## uuid
 
-- [ ] **can `nil-uuid` not just be `nil`? or `zero`?** — checked: `uuid/nil-uuid`
+- [ ] **can `uuid/zero` not just be `nil`? or `zero`?** — checked: `uuid/zero`
       (`std/uuid.blsp:78`) returns the *string*
       `"00000000-0000-0000-0000-000000000000"`, not a nil value — so `nil` would be wrong
-      and `zero` (or `uuid/zero`) reads better than `nil-uuid`.
+      and `zero` (or `uuid/zero`) reads better than `uuid/zero`.
 
 ---
 

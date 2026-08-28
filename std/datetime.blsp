@@ -74,19 +74,10 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 (defrecord date (year month day))
 (defrecord time-of-day (hour minute second ms))
 
-(defn datetime? (x)
-  "True if `x` is a datetime (date *and* time-of-day)."
-  (and (record? x) (= (record-id x) :datetime/datetime)))
-
-(defn date? (x)
-  "True if `x` is a date (no time component).
-
-    (datetime/date? (datetime/today))   → true"
-  (and (record? x) (= (record-id x) :datetime/date)))
-
-(defn time-of-day? (x)
-  "True if `x` is a time-of-day (no date component)."
-  (and (record? x) (= (record-id x) :datetime/time-of-day)))
+;; The three type predicates are BARE, in the prelude beside `queue?`/`pq?`/`multimap?`
+;; (ADR-236 carve-out 2): a value's type should read the same way whatever its type, rather
+;; than doubling as `datetime?` inside its own module. They are pure record-id
+;; checks and need no module loaded, so they cost the prelude nothing.
 
 ;; ---- epoch conversion -------------------------------------------------------
 

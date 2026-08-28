@@ -121,14 +121,14 @@
     (let (dt (datetime/datetime 2026 6 7 1 2 3 4)
           d (datetime/date 2026 6 7)
           t (datetime/time-of-day 1 2 3 4))
-      (is (datetime/datetime? dt))
-      (is (not (datetime/datetime? d)))
-      (is (datetime/date? d))
-      (is (not (datetime/date? dt)))
-      (is (datetime/time-of-day? t))
-      (is (not (datetime/time-of-day? d)))))
+      (is (datetime? dt))
+      (is (not (datetime? d)))
+      (is (date? d))
+      (is (not (date? dt)))
+      (is (time-of-day? t))
+      (is (not (time-of-day? d)))))
   (test "a look-alike map is none of them"
-    (is (not (datetime/date? {:year 2026 :month 6 :day 7})))
+    (is (not (date? {:year 2026 :month 6 :day 7})))
     (is (not (= (datetime/date 2026 6 7) {:year 2026 :month 6 :day 7}))))
   (test "a date and a datetime for the same day are different values"
     (is (not (= (datetime/date 2026 6 7) (datetime/datetime 2026 6 7 0 0 0 0)))))
@@ -278,11 +278,11 @@
   (test "->date strips time fields"
     (let (d (datetime/->date (datetime/datetime 2026 6 7 10 30 5 123)))
       (assert= (datetime/date 2026 6 7) d)
-      (is (datetime/date? d))))
+      (is (date? d))))
   (test "->time strips date fields"
     (let (t (datetime/->time (datetime/datetime 2026 6 7 10 30 5 123)))
       (assert= (datetime/time-of-day 10 30 5 123) t)
-      (is (datetime/time-of-day? t)))))
+      (is (time-of-day? t)))))
 
 ;; ---- input validation --------------------------------------------------------
 ;; The parsers checked SHAPE only and handed whatever came out straight to the

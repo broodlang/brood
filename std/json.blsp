@@ -25,10 +25,10 @@
 (defmodule json
   "JSON ↔ Brood data, written entirely in Brood (pure; opt-in).
 
-    (parse \"{\\\"a\\\":[1,2],\\\"b\\\":true}\")  ; => {:a [1 2] :b true}
+    (decode \"{\\\"a\\\":[1,2],\\\"b\\\":true}\")  ; => {:a [1 2] :b true}
     (encode {:a [1 2] :b nil})                ; => \"{\\\"a\\\":[1,2],\\\"b\\\":null}\"
 
-`parse` maps a JSON object → a Brood map with **keyword** keys (`(get m :repo)`),
+`decode` maps a JSON object → a Brood map with **keyword** keys (`(get m :repo)`),
 array → vector, string → string, number → int/float, true/false → bool, null → nil;
 it errors on malformed input. `encode` is the inverse — it accepts keyword,
 symbol, or string keys (all emitted as JSON string keys) and keyword/symbol values
@@ -66,7 +66,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 ;; returns `[value next-index]`. Whitespace is skipped between tokens. Tail
 ;; recursion + accumulators throughout; `error` on anything malformed.
 
-;; The parser indexes a vector of INTEGER CODE POINTS (built once in `parse`),
+;; The parser indexes a vector of INTEGER CODE POINTS (built once in `decode`),
 ;; not the raw string and not 1-char strings. `char-at` on a UTF-8 string is O(i),
 ;; so calling it at every position made parsing O(n^2); and 1-char-string tokens made
 ;; every comparison a string-equality through the slow dispatch path. Int codes make
@@ -205,7 +205,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
             (let (lo (hex4 s (+ i 6)))
               ;; The second escape must be a LOW surrogate (DC00..DFFF). Without this
               ;; check `\uD800A` computed 65536 + 0 - 56320 + 65 = a bogus
-              ;; codepoint (U+2441) and `(json/parse "\"\\uD800\\u0041\"")` silently
+              ;; codepoint (U+2441) and `(json/decode "\"\\uD800\\u0041\"")` silently
               ;; returned "⑁" — a mis-decode, which is worse than an error.
               (if (or (< lo 56320) (> lo 57343))
                 (error "json: high surrogate at index " i " is not followed by a low surrogate")
@@ -354,12 +354,12 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       (= c -1) (error "json: unexpected end of input")
       else (json-number s i n))))
 
-(defn parse (s)
+(defn decode (s)
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →
 a vector, string → string, number → int/float, true/false → bool, null → nil. Errors
 on malformed input or trailing content. Pure.
 
-    (json/parse \"[1,2]\")   → [1 2]"
+    (json/decode \"[1,2]\")   → [1 2]"
   (let (
         ; int code points: O(1) nth, one native pass
         s (string/->codepoints s)
@@ -373,7 +373,7 @@ on malformed input or trailing content. Pure.
         (if (< k n)
           (error "json: trailing content at index " k)
           v)))))
-(sig parse (string -> (or map vector string number bool nil)))
+(sig decode (string -> (or map vector string number bool nil)))
 
 ;; ---- encode -----------------------------------------------------------------
 
