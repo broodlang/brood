@@ -28,40 +28,43 @@ option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
   `no_declared_std_sig_widens_its_curated_signature` (returns only — see its doc comment for
   why parameters are deliberately out of scope). **Read that before the next adoption round.**
 
-**KI-72 is FIXED (2026-08-28), and it was not what three sessions thought.** Not a lost message,
-not the require protocol, not the scheduler: a section's entries are defined one at a time into
-the **shared** global table in `(global-names)` order, so `string/blank?` (position 7) was callable
-while the module-private `string/whitespace?` its body calls (position 51) was not — and 17 of 24
-`spawn`ed children died `unbound symbol: string/whitespace?`, so the root waited forever for
-replies that could never total 24. Source loading is immune because the file defines the helper
-(line 190) before its caller (192). Fixed by emitting each section **privates-first**.
+**KI-72 is FIXED (2026-08-28, ADR-279), and it was not what three sessions thought.** Not a lost
+message, not the require protocol, not the scheduler. An image section defines its globals one at
+a time and each define publishes immediately, so installing the real `string/blank?` **removed its
+ADR-246 autoload stub** — the one door that routes a racing caller into `require-one` and makes it
+*wait* — while the `whitespace?` its body calls was still unbound. 17 of 24 `spawn`ed children
+died `unbound symbol: string/whitespace?`; the root then waited forever for replies that could
+never total 24. **A wrong answer presenting as a hang.** The fix: a section defines names with no
+current binding first and already-bound names (the stubs) last. Deferring is enough — atomicity is
+not needed.
 
-Two things to carry forward from it:
+Four things to carry forward, and the last two are measurement traps that will bite again:
 
-- **Read a hung run's own output before theorising.** The dying children print to stderr from a
-  *green process*, and libtest captures per thread — so `cargo test`/nextest swallow it and it
-  shows only under `--nocapture`. Three investigations used gdb and in-language watchdogs (which
-  perturb the timing) and never read the output. Same lesson as KI-64.
-- **The image is not default-ON, and the reason is now measured rather than hedged.** The hang is
-  gone and the image arm is at parity with the no-image arm on every repro (the original
-  12-parallel one went 12/12 over the cap → 0/12). But `(global-names)` order is **alphabetical**,
-  so the same window exists for a public calling a sibling public that sorts later — a static scan
-  finds **≈257** such calls across `std/`'s 1318 module publics, three verified by hand
-  (`datetime/days-in-month`→`leap-year?`, `datetime/today`→`utc-now`,
-  `editor/ansi/ansi-clear`→`ansi-clear-screen`). They have not been *seen* to fail only because
-  none is on a funnelled autoload path the way `string/blank?` is. **So privates-first is
-  necessary and not sufficient.**
+- **Read a hung run's own output before theorising.** `pool.rs` prints `process N died: …`, but
+  **libtest captures a test's stderr and discards it when the test never completes**, so the line
+  was written and thrown away. `--nocapture` shows it. Two sessions of gdb and in-language
+  watchdogs (which perturb the race) went past it.
+- **The gate is now a differential, not an anecdote.** ADR-280's `image_matches_source.rs` loads
+  every baked-in module twice — source and image — and requires name, kind, privacy and declared
+  signature to match. It found a **sixth** divergence on its first run (materialising dropped
+  privacy: 1448 names) and is the thing a default-ON proposal should rest on.
+- **The amplifier switches itself off.** `BROOD_STDLIB_HASH` covers every `std/**/*.blsp`, so any
+  edit — including someone else's while your loop is running — changes the id, no image matches,
+  and the image arm silently becomes the no-image arm. **Verify the image inside the measuring
+  command, every run** (`BROOD_IMAGE_TRACE=1`, count `install: N sections`), and report
+  `image live N/N` beside the result.
+- **A doc conflict resolved by "keep one side" loses findings no test can catch.** This bug was
+  root-caused twice in parallel that day; the merge kept the weaker account and silently dropped
+  83 lines of the better one. The code from both sides merged cleanly and every gate stayed green.
+  Both accounts, and which claims were withdrawn, are now in the KI entry.
 
-  The prerequisite for a default-ON proposal is an **atomic section install**, and it is more
-  tractable than it looks: the kernel already has `Heap::root`/`read_root` +
-  `roots_len`/`truncate_roots` (`core/heap/gc.rs`), so pass 1 can build-and-root and pass 2
-  define-from-root. The trap to avoid is the naive version — buffering built values in a plain
-  Rust `Vec` leaves them unrooted while `from_message` keeps allocating (use-after-GC). Validate
-  under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. The win waiting behind it, measured on this box:
-  `http` 12.93 → 5.98 ms, `json` 8.29 → 3.97 ms, `regex` 4.90 → 1.87 ms (1.5–2.6× on the module
-  load every short-lived invocation pays).
+**Still open: KI-74** and **KI-77**. KI-74 (⚠️ watching — one unnamed lib-suite failure, 20 clean
+runs since; re-run under nextest, which names the case, if it recurs). **KI-77** (⚠️ watching —
+the `loop` row is ~2-3% slower than v0.14.1, surviving both unpinned and interleaved measurement,
+localized to `464b6c57..HEAD`, not bisected; its entry carries the drift trap that blocks a naive
+bisect).
 
-**Still open: KI-74** only (⚠️ watching — one unnamed lib-suite failure, 20 clean runs since;
+**Still open: KI-74** (⚠️ watching — one unnamed lib-suite failure, 20 clean runs since;
 re-run under nextest, which names the case, if it recurs).
 
 

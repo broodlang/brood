@@ -82,7 +82,8 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | # | What | Status |
 |---|---|---|
 | KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict |
-| KI-72 | **the stdlib image cannot be default-ON yet: it turns a latent require-stall into a reliable one.** Measured with 12 parallel copies of `autoload_race --test-threads=4` against a 90 s timeout: **12 of 12 exceed it with the image installed, 0 of 12 without**, and the same test passes 12/12 alone in 0.5 s. Not a deadlock — nothing hangs permanently. The edge replay must run BEFORE `provide` (or a racing process sees a module whose dependencies are missing — the 112-failure bug ADR-256 fixed), so a module stays unprovided while it recursively requires its whole edge set, and every process that wants it meanwhile enters `%require-await`'s **5 ms x 1000** poll before force-loading. **The "not a deadlock" half of this was WRONG (2026-08-28): the wait is unbounded** — a root blocked in `receive` sat >30 s with an EMPTY mailbox and every scheduler worker idle, so a reply is genuinely never delivered, not merely delayed | ✅ **FIXED 2026-08-28** — cause was NOT the require protocol: a section's entries are defined one at a time into the SHARED global table in `(global-names)` order, so `string/blank?` (position 7) was callable while the module-private `string/whitespace?` its body calls (position 51) was not, and 17 of 24 `spawn`ed children died `unbound symbol: string/whitespace?` — the root then waited forever for replies that could never total 24. Source loading is immune because the file defines the helper (line 190) before its caller (192). Fixed by emitting each section **privates-first** (`std/tool/stdimage.blsp`). Original 12-parallel repro 12/12 over the cap → **0/12**, at parity with the no-image arm. Earlier framing — image reverted to opt-in (`BROOD_STDIMAGE=1`) the day it was flipped; everything else from ADR-256 ships. The poll IS now the `code_server` model (2026-08-28) and it did **not** fix this; two other real defects found alongside did not either. Repro is now ONE test, single-threaded, 8/12 — see below. Note the synthetic load stresses something pre-existing — at 12x4 parallelism the default (no image) still shows 4 of 12 — so a fix should be measured on both arms |
+| KI-77 | **the `loop` benchmark row is ~2-3% slower than v0.14.1, and it survives every check that usually kills such a signal.** `loop` is a pure integer self-tail loop — the simplest JIT'd shape — so a real regression there is wide. Persists **unpinned** (so it is not the background-JIT-on-one-core artifact ADR-175 records) and persists under **interleaved** measurement (so it is not thermal/session drift): +3.4% pinned and +2.8% unpinned interleaved, +3.3% against a base-vs-base floor of 0.0%, +2.2% interleaved vs both v0.14.1 and 464b6c57. `make ab` reports it as `noise` because with a ~0% floor its rule falls back to a 5% absolute threshold, which is arguably too lenient for a row this quiet | ⚠️ **WATCHING 2026-08-28** — not bisected. Localized to `464b6c57..HEAD` only; the intermediate binaries (v0.14.1, 6b172c1d, 464b6c57) are within 1.1% of each other. **The measurement trap that blocks a bisect is the finding here:** this row's ABSOLUTE numbers drift ~3% between measurement sessions — the same `6b172c1d` binary read 90 ms in one interleaved pair and 93 ms in the next — so a single-shot per-step bisect on a 3% signal reads pure noise. Bisect it with *same-session interleaved* pairs only, or not at all |
+| KI-72 | **a stdlib-image section replaced a module's autoload stub before the rest of the module was bound, so a racing process took the real function and died on an unbound helper.** `string/blank?` is public and stubbed; `whitespace?` is `defn-` and is called from its body. Installing the real `blank?` removed the ADR-246 stub — the one door that routes a caller into `require-one` and makes it *wait* — while `whitespace?` was still unbound, so 17 of 24 `spawn`ed children died `unbound symbol: string/whitespace?` and the test's root waited forever for replies that could never total 24. **A wrong answer presenting as a hang.** Two sessions read it as a scheduler/mailbox stall and chased the 5 ms poll, the non-latching condvar, the `code_server` model and the two wake paths — all symptoms. The source path cannot produce it: `load` evaluates in file order, where a helper precedes its caller | ✅ **FIXED 2026-08-28** (ADR-279) — a section now defines names with **no current binding first and already-bound names (the stubs) last**; deferring is enough, atomicity is not needed. Sabotage-verified: deferral off 9/12 hang, on **0/24**. Acceptance load (12 parallel copies at `--test-threads=4`, 90 s): image ON **0/12**, image OFF 0/12, against 12/12 vs 0/12 before. Guarded by ADR-280's `image_matches_source.rs` differential (source vs image must agree on name, kind, privacy and sig — it found a **sixth** divergence on its first run: materialising dropped privacy, 1448 names, 0 after). Two things hid this for two sessions: **libtest captures a test's stderr and discards it when the test never completes**, so the `process N died` line was written and thrown away (`--nocapture` shows it), and the amplifier switches itself off — `BROOD_STDLIB_HASH` covers every `std/**/*.blsp`, so any edit (even someone else's, mid-run) silently turns the image arm into the no-image arm. **Verify the image per run, not once.** Still opt-in; default-ON is a shipping decision, now resting on one gate rather than five anecdotes |
 | KI-73 | **a prelude macro's template can be captured by a user module that defines the same name.** A template is spliced into the user's file, where a bare reference resolves against *their* namespace first — so `(defmodule m) (defn get (b k) :CAPTURED) (defrecord pt (x y))` made every accessor return `:CAPTURED`. Silent wrong value: right arity, nothing unbound, `nest check` quiet. Fixed for `defrecord`/`for`/`defonce`/`with-err-str` with the `/name` root escape (ADR-236), which this pass also had to *finish implementing* — it was a resolve-time rewrite only, so `/get` was unbound at root. `receive` included | ✅ **FIXED 2026-08-28** — the escape is now total: resolved in a module (`resolve_sym`), at root (`macros::strip_root_escapes`), and at **runtime macro expansion** (`eval/mod.rs`, for a macro defined after its use site or at the REPL). `but-last` moved to `core.blsp` and `sleep` below `receive` so `receive` expands at prelude compile time. Gated by `tests/prelude_capture_test.blsp` — a static scan asserting ZERO offenders plus four behavioural probes |
 | KI-75 | **`compare` reported values as EQUAL that are not, two ways — and `sort` is built on it.** (1) `(compare nan x)` was `0` for every `x`, so one NaN silently turned `sort` into a no-op: `(sort [3.0 nan 1.0 2.0])` returned its input unsorted, no error. (2) the `Int`-vs-`Float` arm used a lossy `as f64` cast while every other cross-type arm was exact, so past 2^53 two different integers compared equal — `(compare 9007199254740993 9007199254740992.0)` was `0` while `=` and `>` both said otherwise | ✅ **FIXED 2026-08-28** — NaN now sorts LAST via `float_total_cmp` (Rust's `total_cmp` / Java's `Double.compare` choice), and `Int`/`Float` routes through the same exact base-10 path the BigInt/Decimal/Ratio arms already used. `<`/`<=`/`>` stay IEEE deliberately — a sort key and an arithmetic predicate are different questions. Guarded by `tests/comparison_test.blsp` (25 cases) plus three Rust unit tests |
 | KI-71 | **a reversed-args rename is invisible to every gate** — `seq/remove-nth` correctly moved to index-first, but arity is unchanged and no symbol is unbound, so `nest check` is clean and the type warning is advisory. In bedit it surfaced as SEVEN failures in `buffers_eval`/`hosted`/`tutor` that read as buffer-lifecycle bugs; the raise happened inside `ed-kill-at` and the caller absorbed it | ☑️ **not a bug (2026-08-27)** — the rename is right; fixed downstream with `nest rename --swap`. ✅ **The class now HAS a gate (same day):** the checker already catches a reversed call precisely, per argument — it was silent here only because `seq/remove-nth` had **no declared `sig`**. The index/collection functions (`remove-nth`, `take-last`, `drop-last`, `chunk-every`, `split-at`, `sample`, `shuffle`, `vector-ref`) now carry one, so the reversal is a warning and CI's zero-warning gate makes it a hard failure. Argument types precise, return `any` — the reversal is an argument mistake, and a narrow return would false-positive at every call site. Zero new warnings across std/ + tests/. Guards `a_reversed_index_and_collection_call_is_flagged` + `the_correct_index_first_order_stays_silent`, sabotage-verified by deleting one `sig` |
@@ -4700,124 +4701,128 @@ not yet a proven mechanism for the loss — but it is the structural difference,
 the two wake paths (or latching the wakeup in the mailbox state the way `ERTS_PSFLG_ACTIVE`
 does) would remove the whole class.
 
-### 2026-08-28, resolved: the children DIED. It was never a lost message
+### FIXED 2026-08-28 — it was never a stall. A section published its entry points too early
 
-The question this entry left open — *"consistent with a lost `send`, a child that died
-silently, or a child that never got scheduled. Distinguishing those is where this stands"* —
-has an answer, and it is the second one. Run the unmodified repro under `--nocapture`:
+**It is not a hang, a lost wakeup, or a lost message.** Every prior account here — the
+5 ms poll, the condvar that does not latch, the `code_server` model, the two wake paths —
+was chasing a symptom. The root is an **unbound symbol in a child**, which presents as the
+root hanging because the test's `reduce` waits for 24 replies and one child died before
+sending its own.
+
+**What found it: three counters and a signal handler.** Every in-language observer moved or
+suppressed this bug, and `ptrace_scope` forbids attaching gdb to a process the shell did not
+fork. What worked was relaxed atomics on paths that run once per process (`spawn`, exit,
+`send`) plus a **SIGTERM handler** that writes them with `libc::write(2, …)` — `timeout`
+already sends SIGTERM at the cap, so the readout happens only once the process is *already*
+stuck and cannot perturb the race. Three readings, in order:
+
+- `spawned=24 exited=24` — no child is parked, none is missing;
+- `delivered == sent` exactly — **nothing is lost in transit**; and
+- `sent-to-root` 16–23, never 24, with `done + err = 24` and `sent-to-root == done`.
+
+So children were *crashing*, and the shortfall was exactly `err`.
+
+**Why "no child prints died" was believed.** It does print — `pool.rs` has an `eprintln!`
+for exactly this. **libtest captures a test's stderr and discards it for a test that never
+completes**, so the message was written and thrown away. With `--nocapture`:
 
 ```
-test racing_the_first_call_into_string_is_sound ... process 11 died: unbound error: unbound symbol: string/whitespace?
-process 12 died: unbound error: unbound symbol: string/whitespace?
-… 17 of the 24 children, same error
+process 9 died: unbound error: unbound symbol: string/whitespace?
 ```
 
-The root is not waiting on a lost reply. It is waiting for 24 replies from 24 children, 17 of
-which died before sending one. `fan` uses `spawn`, not `spawn-link`, so a dead child is
-invisible to the root — it simply never sends, and the root blocks forever with an empty
-mailbox and every worker idle. **Every observation in the "unbounded wait" section above is
-consistent with this and none of it needed a scheduler or mailbox explanation.**
+**The mechanism** (ADR-279). `blank?` is public and carries an ADR-246 autoload stub;
+`whitespace?` is `defn-` and is called from `blank?`'s body. An image section defines its
+globals one at a time and each define publishes immediately, so installing the real
+`blank?` **removed the stub** — the one door that routes a racing caller into `require-one`
+and makes it wait — while `whitespace?` was still unbound. The source path cannot produce
+this: `load` evaluates in file order, where a helper precedes its caller.
 
-**Why nobody saw the message.** It is written to stderr from a *green process*, not from the
-test thread, and libtest captures per-thread output — so `cargo test` / nextest swallow it.
-It is visible only with `--nocapture`. Every investigation here used gdb and in-language
-watchdogs (which perturb the timing, as this entry warns) and never simply read a hung run's
-full output.
+**The fix:** a section defines names with no current binding first and names that already
+have one (i.e. the stubs) last. Sabotage-verified: 9 of 12 hang with the deferral disabled,
+**0 of 24** with it enabled.
 
-**Cause: the image publishes a module's bindings incrementally, in the wrong order.** A
-section's entries are `define`d one at a time into the runtime's **shared** global table, so
-each name is callable the instant it lands. The writer orders a section by `(global-names)`,
-and in that order a PUBLIC function can precede a module-private helper it calls:
+**Acceptance load** (the one this entry opened with — 12 parallel copies at
+`--test-threads=4`, 90 s): **image ON 0/12, image OFF 0/12**, against 12/12 vs 0/12 before.
 
-| entry | position in `string`'s section |
-|---|---|
-| `string/blank?` (public) | **7** |
-| `string/triml` / `string/triml-from` | 46 / 47 |
-| `string/trimr` / `string/trimr-to` | 48 / 49 |
-| `string/whitespace?` (**private**, called by all four) | **51** — last of 51 |
+### A third trap, worse than the two above: the amplifier switches off *by itself*
 
-So for the span of 44 definitions, `string/blank?` is bound and callable while the
-`whitespace?` in its body is not. A child reaching `doc-search` → `string/blank?` in that
-window dies. **Loading from source is immune for a structural reason**: the file defines
-`whitespace?` at line 190 and `blank?` at line 192, so a callee is bound before its caller.
-The image inherited no such guarantee.
+Trap 1 said "committing invalidates the image". It is broader and it invalidated real work:
+`BROOD_STDLIB_HASH` is a content hash over **every `std/**/*.blsp`**, so *any* edit to std
+— including one made by somebody else while your measurement is running — changes the id,
+no image matches, and the image arm silently becomes the no-image arm. During this session
+the tree was being edited in parallel and a 12-run measurement read **0 of 12** purely
+because of it; the same runs read 9 of 12 once the image was rebuilt.
 
-This also explains, at last, every stubborn feature of the bug:
+This very likely explains the entry's own "baseline and fixed are indistinguishable, and the
+baseline itself swung between 9/20 and 13/20 across runs of *identical* code".
 
-- **why the image is the amplifier and not the fault** — only the image installs in an order
-  unrelated to source order, and it does so for many modules in a burst;
-- **why it is intermittent** (5/12 here, 8/12 and 13/20 elsewhere) — a child has to resolve
-  the public name inside that window;
-- **why every in-language observer suppressed it** — they all move the window;
-- **why re-ordering `provide` did nothing** — `provide` is irrelevant. The child never
-  consults the require protocol at all: the name is *already bound*, so there is no stub to
-  trigger a load and nothing to wait on;
-- **why `--test-threads=1` and a single `Interp` still reproduce** — the concurrency needed is
-  between green processes of one runtime, not between runtimes.
+**So: verify the image inside the same command that measures.** Not once at the start —
+every run. `BROOD_IMAGE_TRACE=1` and count `install: N sections`; `N` must be a number and
+not `nil`, and the loop should report how many runs saw it:
 
-**Fix: privates first.** `std/tool/stdimage.blsp` now emits each section as
-`(privates … publics …)`, so a public name is never reachable before the privates it closes
-over — the ordering property source loading gives for free. Policy stays in Brood (ADR-006);
-the kernel is untouched.
+```
+hangs: 0 of 24   (image live 24/24)
+```
 
-Sorting by definition site was tried first and **cannot** work: `reflect/source-location`
-returns `nil` for a `defn-`, which is exactly the half that matters.
+**Still open:** whether the image can now be **default-ON**. Parity is met on this load, but
+that is one workload; flipping the default is a shipping decision and ADR-256's flip was
+reverted once already.
 
-**Residual, measured — and it is NOT hypothetical.** Privates-first closes public→private, the
-observed class. It does **not** order public→public, and that matters more than it first looked:
-`(global-names)` order is **alphabetical**, which is why `string/blank?` (b) preceded
-`string/whitespace?` (w) at all. So a public calling a sibling public whose name sorts later
-has exactly the same window.
+**And the bar for that decision moved, in both directions, the same day.** Asked whether the
+image should default on "except when running scripts", the measurement says the opposite: a
+script requiring three std modules runs **46.5 ms → 36.2 ms**, a 22% saving it pays on
+*every* invocation, where a long-lived process pays it once and amortises it away. Scripts
+are the beneficiary, not the exception — and the exceptions that do exist are already
+handled by construction (coverage stands aside; editing std invalidates the id).
 
-A static scan of `std/`'s 1318 module-level publics finds **≈257 such calls** (caller installs
-before callee), concentrated in `editor/buffer` (42), `tool/project` (26), `tool/sexp` (16),
-`tempo`/`tool/debug`/`tool/package` (13 each). Three verified by hand:
+What was missing was not a workload but a *proof*. Every divergence in this feature's
+history was found by consequence, so ADR-280 added the differential — load every module
+from source, load it from the image, require the resulting state to match. It found a
+**sixth** on its first run: materialising dropped **privacy**, so every `defn-` in an imaged
+module came back public. 1448 names diverged; 0 after the fix. Default-on is a decision
+about one gate now rather than about five anecdotes.
 
-| caller | calls | why the order bites |
+
+
+### Two accounts, one bug — and a merge that dropped one of them
+
+This was root-caused twice in parallel on 2026-08-28, from opposite ends, reaching the same
+mechanism. The merge (`cba50894`) then hit a conflict in this file and **kept only the weaker
+account**, silently dropping the 83 lines above; they were restored by hand afterwards. Worth
+recording because nothing failed — the code from both sides merged cleanly and every gate stayed
+green, so the loss was invisible to CI. **A doc conflict resolved by "keep one side" loses
+findings no test can miss.**
+
+| | the loader account (authoritative, ADR-279) | the writer account (superseded) |
 |---|---|---|
-| `datetime/days-in-month` | `(leap-year? y)` | `days-in-month` < `leap-year?` |
-| `datetime/today` | `(utc-now)` | `today` < `utc-now` |
-| `editor/ansi/ansi-clear` | `(ansi-clear-screen)`, `(ansi-home)` | `ansi-clear` sorts before both |
+| **what is deferred** | names that already have a binding — the ADR-246 **stubs** | module-**privates**, emitted first by `%image-write` |
+| **why the race is reachable at all** | overwriting the stub removes the door that routes a caller into `require-one` and makes it wait | not identified — framed as ordering alone |
+| **coverage** | total: a public->public window is only reachable *through* a stub | partial: public->private only |
+| **where it lives** | `startup_image.rs` (the loader) | `std/tool/stdimage.blsp` (the writer) |
 
-(The scan's shadow detection is crude, so treat 257 as an upper bound of the same order — the
-hand-verified cases establish the class, not the exact count.)
+The writer change was **reverted** once the loader fix landed: with it removed the repro is
+**0 of 24, image verified live 24/24**, so it was redundant — and two half-mechanisms for one
+bug is worse than one whole one.
 
-None of these has been *seen* to fail, because a second process has to resolve the caller inside
-its specific window and these are not on a funnelled autoload path the way `string/blank?` is —
-the stub sends 24 processes at it at once. But the windows exist, so **privates-first is
-necessary and not sufficient**: it fixes the reproducible hang, and it does not make the image
-safe to default-ON. Nor can ordering alone fix it: `reflect/source-location` returns `nil` for a
-`defn-`, so the privates cannot be put in source order, and full source-load parity is
-unavailable by ordering.
+The writer account also produced a claim that is now **withdrawn**: that privates-first was
+"necessary and not sufficient", and that an **atomic** section install was the prerequisite for
+default-ON, on the evidence of a static scan finding ~257 public->public calls whose caller
+sorts first (`(global-names)` order is alphabetical). The arithmetic was right and the
+conclusion was wrong: those windows are **not reachable**, because a racing process can only
+enter a partially-installed module through a stub, and stubs now install last. Deferring is
+enough; atomicity is not needed.
 
-**The stronger fix, and the trap in it.** The complete fix is to make a section install
-*atomic* — nothing in it visible until all of it is. `image_load_section` currently interleaves
-`decode` → `from_message` → `heap.env_define(global, …)` per entry, so every name is published
-the instant it is built, and the exposed window is the whole expensive part (milliseconds).
-The obvious rewrite is two passes: build all `(kind, sym, value)` first, then define them all.
+That scan is still a cautionary tale about static analysis over a Lisp. Its first run said
+**757**, inflated twice over: `:year` matched the public `year` (the keyword colon was not
+excluded), and `(defn- foo` parsed as a public named `-` (`defn-?` matched `defn`, then captured
+the hyphen). Both errors pointed the same, scarier way, and only hand-checking one case caught
+them — `epoch-ms->` "calling" `year` is really `(get ymd :year)` beside three `let`-locals named
+`hour`/`minute`/`second`.
 
-**Do not write that naively.** Buffering the values in a Rust `Vec` across the build pass leaves
-them **unrooted** while `from_message` keeps allocating, so a collection during the pass
-reclaims values the Vec still points at — the use-after-GC class the per-deref tripwire and
-`BROOD_GC_VERIFY=1` exist for. A correct version needs the pending values rooted — and the
-kernel already has the API for exactly this: `Heap::root(v) -> Root` / `read_root(r)` (a
-GC-stable handle), with `roots_len()` / `truncate_roots(n)` for scope save/restore
-(`core/heap/gc.rs`). So: pass 1 builds each value and holds a `Root` for it; pass 2 reads each
-root back (post-relocation) and defines it. Even then N separate `env_define` calls are only
-*nearly* atomic — true atomicity wants a batch-define holding the globals write lock once — but
-pass 2 does no `from_message`, so the exposed window drops from milliseconds to microseconds.
-Validate under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, which is precisely what those flags are
-for. **This is the prerequisite for any default-ON proposal**, given the ≈257 public→public
-windows above.
-
-
-**Status:** ✅ the hang is **fixed** (privates-first, 2026-08-28) and the image arm is at parity
-with the no-image arm on every repro variant, including the original 12-parallel one that was
-12/12 over the cap. The image still ships **opt-in** (`BROOD_STDIMAGE=1`): flipping the default
-is a separate decision with its own measurement, and the residual above (public→public ordering)
-should be closed by an atomic section install first. Everything else from ADR-256 is unaffected
-and shipped: the registration replay, the provide/edges ordering, the reserved-name rule,
-`%std-image-serves?`, the atomic `%image-write`, and the coverage stand-aside.
+One measurement caveat, in fairness to the third trap above: the writer account's figures were
+taken with the image verified **once before the loop**, not per run. Per-run verification is now
+known to be required, so those figures should not be leaned on. The numbers in this section, and
+the 0-of-24 above, were taken with it.
 
 ## KI-71 — `seq/remove-nth`'s argument swap was invisible to every gate ☑️ NOT A BUG 2026-08-27
 
@@ -5078,3 +5083,49 @@ and after `make release`, both `.blsp` gates run and pass. Confirmed in both sta
 gate that names the wrong artifact is not a weaker gate, it is a *different* gate, and it
 reports confidently about something you did not ask. Whenever a script runs a built binary,
 assert the binary's identity — not its existence.
+
+## KI-77 — `loop` is ~2-3% slower than v0.14.1 ⚠️ WATCHING 2026-08-28
+
+**Symptom.** The `loop` benchmark row (a pure integer self-tail loop — the simplest shape the
+JIT covers) reads consistently slower than `v0.14.1`:
+
+| measurement | base | new | delta | floor |
+|---|---|---|---|---|
+| `make ab` sweep, best-of-7, pinned | 93 ms | 96 ms | +3.2% | 1.1% |
+| solo re-run, best-of-15, pinned | 91 ms | 95 ms | +4.4% | 0.0% |
+| fixed baseline + base-vs-base control | 90 ms | 93 ms | +3.3% | **0.0%** (90/90) |
+| interleaved, min-of-15, pinned | 89 ms | 92 ms | +3.4% | — |
+| interleaved, min-of-15, **unpinned** | 72 ms | 74 ms | +2.8% | — |
+| interleaved vs `464b6c57` | 92 ms | 94 ms | +2.2% | — |
+
+**Why it is a watch and not dismissed as noise.** It survives the two checks that normally kill
+a few-percent signal on this suite:
+
+- **Unpinned.** `make ab` pins compute rows to one core, which charges the benchmark for
+  background JIT compilation, and 70 commits of `std/` growth means more arms tier up — exactly
+  the ADR-175 artifact that showed `collatz` +8% pinned and zero unpinned. This row keeps +2.8%
+  unpinned, so that is not it.
+- **Interleaved.** Alternating the two binaries within one session controls thermal/cache drift.
+  The gap holds.
+
+`make ab` still prints `noise`, because its verdict rule is `max(5%, 2 x floor)` and a ~0% floor
+collapses that to the 5% absolute threshold. For a row whose base-vs-base spread is genuinely
+0.0%, 5% is a lenient bar — worth revisiting in `ab-bench.sh` rather than treating the verdict as
+the answer.
+
+**Localization.** `464b6c57..HEAD` only. v0.14.1, `6b172c1d` and `464b6c57` are all within 1.1%
+of each other interleaved, and HEAD is +2.2% against both. Not bisected further.
+
+**The measurement trap, which is the more useful half of this entry.** A bisect stalled because
+this row's **absolute** numbers drift ~3% between measurement *sessions*: the same `6b172c1d`
+binary read **90 ms** in one interleaved pair and **93 ms** in the next. So a per-step bisect that
+compares a freshly built candidate against a number taken earlier is reading drift, not signal —
+which is how the first three readings here disagreed (+3.2%, +4.4%, −1.1%). If this is picked up:
+**compare only same-session interleaved pairs**, budget ~15 reps a side, and expect ~1% of
+irreducible spread even then.
+
+**Next step if it is worth chasing:** interleaved-pair bisect over the 24 commits in
+`464b6c57..HEAD` (the type-system wave, `e38e9a0b`, `092ba281`, and the KI-72/KI-76 fixes). The
+plausible suspects are the ones that touch runtime rather than the checker — `092ba281`'s root-ctx
+tagging and `e38e9a0b`'s `core/heap/equality.rs` changes — but nothing has been measured to
+implicate either.
