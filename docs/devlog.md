@@ -5832,3 +5832,50 @@ Two limits found while verifying the fix, both worth knowing before trusting a c
   investigated. Taken together with the unattributed ~5-6 ms boot win, what is wanted is a
   per-commit sweep recording **absolutes for trend**, which is what brood-benchmarks' CLAUDE.md
   prescribes when the shape might be a ramp rather than a step.
+
+### Retraction, same day: there was no v0.15.0 boot win, and I made this feature's own documented mistake
+
+Earlier today's entries claim v0.15.0 carries a ~5-6 ms fixed per-run saving — an "unattributed
+17% startup win" — and I put that in the handoff, in KI-77's resolution, and in a commit message.
+**It is wrong.** `make ab BASE=dfcddc4f ROWS=startup` compares a worktree binary against the
+working-tree binary, and the working-tree binary had a **current stdlib image** while the worktree
+binary had none, because the image id carries the git sha and nothing had ever built one for that
+ref. So the arm I read as a code improvement was *imaged vs unimaged*.
+
+That is KI-72's trap 3, inverted — "the arm you believe is imaged is reading source" — and I made
+it in the same session in which I restored the paragraph describing it. Three measurements of the
+same quantity disagreed (−16.7%, −10.9%, +0.0%) and I attributed the first one instead of
+distrusting all three. The rule that resolves it was already written down: **verify the image per
+arm, not once per session.** `(stdimage/status)` exists precisely for that and reports `:live` /
+`:stale` / `:absent` beside the id it wants and the ids on disk.
+
+**What the trustworthy measurement says** — one session, all six binaries interleaved, all in the
+same (unimaged) state, core-pinned, best-of-9:
+
+| row | 0.13.0 | v0.14.0 | v0.14.1 | dfcddc4f | e9c54606 | HEAD |
+|---|---|---|---|---|---|---|
+| `startup` | **27 ms** | 35 | 34 | 36 | 36 | 36 |
+| `fib` | 106 | 108 | 112 | 115 | 114 | 114 |
+| `loop` | 84 | 91 | 89 | 93 | 92 | 95 |
+
+- `startup` is **flat from v0.14.0 to HEAD** — nothing in v0.15.0 to attribute. What is there is an
+  unrecorded **~30% step between 0.13.0 and v0.14.0**, partly given back later by the image flip,
+  which is why the published numbers only show 18.3 → 19.4 ms. A step is bisectable; this is the
+  real open question.
+- `fib` and `loop` are **ramps** (+7.5%, +13%), the shape brood-benchmarks' CLAUDE.md says has
+  nothing to find.
+
+**Two traps found while settling it**, both worth knowing before any image measurement:
+
+1. `make release-brood` rebuilds only `brood` (`-p cli`), so `target/release-fast/nest` stays at an
+   older commit and `nest stdimage` writes an image keyed to *nest's* id, which `brood` cannot use.
+   `brood` then reports `:stale` however many times you rebuild the image. Use `make release`.
+2. The id includes the **git sha even when the baked stdlib is byte-identical** — three images on
+   disk here shared content hash `f81c5e8bfacc125` and differed only by sha. So **any** commit
+   invalidates every image, not just a `std/` edit, which is broader than trap 3 states. The sha is
+   a deliberate conservative proxy for "the kernel interpreting this stdlib may have changed", so
+   it is not simply removable; it is a cost worth knowing rather than a bug.
+
+The general lesson, and the reason this is written up rather than quietly fixed: **a number that
+disagrees with itself across three measurements is not a number to attribute.** The failure was
+not the measurement, it was reporting a cause before the measurements agreed.
