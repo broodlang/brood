@@ -777,7 +777,7 @@
       (file/spit (path/join dir "shapes.blsp")
         "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
       (let (pairs (package/module-files dir)
-            names (sort (map (fn (p) (name (first p))) pairs)))
+            names (sort (map (fn (p) (->string (first p))) pairs)))
         (assert= names (list "shapes" "shapes-internal"))
         ;; every declared module maps back to the one file that declares it
         (is (every? (fn (p) (string/ends-with? (second p) "shapes.blsp")) pairs)))))

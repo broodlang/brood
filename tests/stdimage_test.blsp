@@ -20,7 +20,7 @@
     ;; `json` is a good probe: a plain namespaced module with no root globals.
     (require-one 'json)
     (let (from-source (into #{}
-                        (filter (fn (s) (string/starts-with? (name s) "json/"))
+                        (filter (fn (s) (string/starts-with? (->string s) "json/"))
                           (global-names))))
       (is (> (count from-source) 20))
       ;; the image path is only exercised when one exists for THIS binary
@@ -28,7 +28,7 @@
         (when n
           (is (> n 0))
           ;; already-loaded, so this asserts the section is present, not that it reloads
-          (is (contains? (into #{} (map name (global-names))) "json/->json"))))))
+          (is (contains? (into #{} (map ->string (global-names))) "json/->json"))))))
 
   (test "the image is keyed on system/stdlib-id — content, not the executable"
     ;; Deliberately NOT `system/build-id`: that embeds the running executable's mtime, so `brood`,
@@ -63,7 +63,7 @@
   ;; `stdimage/*std-edges*` it made `stdimage` look already-loaded the moment that section
   ;; was restored, so its source never loaded and `(:use stdimage)` referred nothing.
   (test "the edges the image carries live in a global no module owns"
-    (is (not (includes? (name '*std-require-edges*) "/"))))
+    (is (not (includes? (->string '*std-require-edges*) "/"))))
 
   ;; The image is keyed on `system/stdlib-id` — the stdlib's CONTENT — deliberately the same for
   ;; `brood`, `nest` and `brood-lsp` from one tree so they share one copy. But those binaries
@@ -78,8 +78,8 @@
           _ (%merge-require-edges! fake)
           deps (get *require-edges* "somemod"))
       ;; the unloadable dep is dropped, the real one kept
-      (is (nil? (seq/find (fn (d) (= (name d) "definitely-not-a-real-module")) deps)))
-      (is (not (nil? (seq/find (fn (d) (= (name d) "string")) deps))))
+      (is (nil? (seq/find (fn (d) (= (->string d) "definitely-not-a-real-module")) deps)))
+      (is (not (nil? (seq/find (fn (d) (= (->string d) "string")) deps))))
       ;; and requiring still works afterwards
       (is (= :ok (try (do (require-one 'json) :ok) (catch e (get e :message)))))))
 
@@ -175,7 +175,7 @@
           mine (or (%map-get by-mod "datetime" nil) []))
       (is (> (count mine) 0))
       ;; every tuple this module claims really was declared by it
-      (is (empty? (filter (fn (r) (not (= (name (get r 4)) "datetime"))) mine)))))
+      (is (empty? (filter (fn (r) (not (= (->string (get r 4)) "datetime"))) mine)))))
 
   :isolated (test "a module materialised under concurrency is never seen before its deps are"
     ;; THE regression test for the race. The image branch used to `provide` before following

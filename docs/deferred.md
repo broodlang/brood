@@ -82,7 +82,7 @@ force just to compare); printing shows `#<lazy>` unrealised.
 - *Or* a benchmark where pre-materialising an intermediate list is
   measurable hot-path cost.
 
-**Workaround today.** Bounded `%iterate-times` already exists in
+**Workaround today.** Bounded `seq/iterate-times` already exists in
 `std/prelude.blsp` for the "n successive states" case. For unbounded
 evolution, write a tail-recursive `--at`/`--loop` helper — the pattern is
 mechanical (state + step → next state, in tail position) and stays O(1)

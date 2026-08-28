@@ -931,6 +931,80 @@ mod prelude_hygiene {
     /// Checks both: the loaded arity matches the declaration, and the loaded arglist is not
     /// still the stub's own generated `(a0 a1 …)` parameters (which would mean the module
     /// loaded without defining the name, and the count alone would agree).
+    /// `->string` is defined TWICE by construction: once in `std/prelude/core.blsp` as the
+    /// bootstrap implementation the prelude's own machinery calls (~60 sites, all of them
+    /// before `defability Display` has been evaluated), and again as the `Display` impls for
+    /// `:keyword`/`:symbol`, which restate the sigil rule because delegating to the name
+    /// they have just rebound would recurse forever.
+    ///
+    /// Two statements of one rule can drift, and both failure modes are silent: the impls
+    /// once shipped as `(->string [k] (->string k))` — an infinite loop, not a compile
+    /// error — and a fix to one spelling that misses the other changes a value's display
+    /// only after the ability loads. So pin the answer at both tiers.
+    #[test]
+    fn bootstrap_and_ability_agree() {
+        let mut interp = Interp::new();
+        let mut eval = |src: &str| -> String {
+            let v = interp
+                .eval_str(src)
+                .unwrap_or_else(|e| panic!("{src}: {}", e.message));
+            interp.print(v)
+        };
+        // The ability has taken over the name by now; this is the post-upgrade tier.
+        for (expr, want) in [
+            ("(->string :foo)", "\"foo\""),
+            ("(->string 'foo)", "\"foo\""),
+            ("(->string \"foo\")", "\"foo\""),
+            ("(->string 42)", "\"42\""),
+            ("(->string (type-of 1))", "\"int\""),
+            // the sigil rule is exactly what distinguishes this from `str`/`pr-str`
+            ("(str :foo)", "\":foo\""),
+            ("(pr-str :foo)", "\":foo\""),
+        ] {
+            assert_eq!(eval(expr), want, "{expr}");
+        }
+        // And the bootstrap tier. The body is EXTRACTED from `core.blsp` rather than
+        // copied here: a hard-coded copy would keep passing after someone edited the real
+        // one, which is the exact drift this test exists to catch.
+        let core = include_str!("../../../std/prelude/core.blsp");
+        let marker = "(defn ->string (x)";
+        let start = core
+            .find(marker)
+            .expect("core.blsp no longer defines the bootstrap `->string`");
+        // Search only the defn's own lines — scanning the whole rest of the file would
+        // happily find some *other* `(if …)` and test that instead, which is how this
+        // check first "passed" a deliberate sabotage for the wrong reason.
+        let body_line = core[start..]
+            .lines()
+            .take_while(|l| !l.starts_with(";;"))
+            .find(|l| l.trim_start().starts_with("(if "))
+            .expect(
+                "bootstrap `->string` in core.blsp is no longer a single `(if …)` line — \
+                 update this extraction (and check the ability impls still agree with it)",
+            )
+            .trim();
+        // The line ends with the `defn`'s own closing paren(s) too; keep only as many as
+        // the body itself opened.
+        let mut body = body_line;
+        while body.matches(')').count() > body.matches('(').count() {
+            body = body[..body.len() - 1].trim_end();
+        }
+        let boot = format!("(fn (x) {body})");
+        for (arg, want) in [(":foo", "\"foo\""), ("'foo", "\"foo\""), ("42", "\"42\"")] {
+            assert_eq!(
+                eval(&format!("({boot} {arg})")),
+                want,
+                "bootstrap tier disagrees for {arg}"
+            );
+        }
+        // `name` is a user's word now, not the language's — ADR-166 reserved it for years.
+        assert_eq!(
+            eval("(bound? 'name)"),
+            "false",
+            "`name` is bound again — the point of folding it into `->string` was to free it"
+        );
+    }
+
     #[test]
     fn every_autoload_declaration_matches_its_module() {
         let mut heap = Heap::new();

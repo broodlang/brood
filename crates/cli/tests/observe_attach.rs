@@ -45,7 +45,7 @@ fn remote_attach_reads_snapshot_then_sees_disconnect() {
 (node/monitor peer)
 (def snap (observer/observe-request peer))
 (if (map? snap)
-  (io/puts (str "ATTACH-OK node=" (name (get (get snap :node) :name))
+  (io/puts (str "ATTACH-OK node=" (->string (get (get snap :node) :name))
                 " procs=" (count (get snap :procs))))
   (io/puts (str "ATTACH-FAIL " snap)))
 (defn poll-down (n)

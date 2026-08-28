@@ -34,7 +34,7 @@
 ;; A row map keyed by keyword -> the same map keyed by the header string.
 (defn- csv-stringify-keys
   (m)
-  (fold (fn (acc pair) (let ([k v] pair) (assoc acc (name k) v))) {} m))
+  (fold (fn (acc pair) (let ([k v] pair) (assoc acc (->string k) v))) {} m))
 
 (defn- csv-expected
   (stem)

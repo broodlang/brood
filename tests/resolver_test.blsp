@@ -215,8 +215,8 @@
           "check" {"1.0.0" [['b1 "= 1.0.0"]]})
         (append (map (fn (nm) [(symbol nm) ">= 1.0"]) bs) (list ['check nil]))]))
   (defn rt-tangled-provider (versions deps)
-    (make-provider (fn (nm) (get versions (if (symbol? nm) (name nm) nm)))
-      (fn (nm v) (get (get deps (if (symbol? nm) (name nm) nm)) v))))
+    (make-provider (fn (nm) (get versions (if (symbol? nm) (->string nm) nm)))
+      (fn (nm v) (get (get deps (if (symbol? nm) (->string nm) nm)) v))))
   (test "a 12-deep tangle that would explode under naive backtracking resolves correctly"
     (let ([versions deps roots] (rt-tangled 12)
           p (rt-tangled-provider versions deps)

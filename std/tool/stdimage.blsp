@@ -102,11 +102,11 @@ paths and so never describes baked-in std. Ability declarations are attributed t
 multimethod names by their own qualifier — each key names its owner, so none of this guesses."
   (let (ability-owner (fn (kv)
                         (let (o (%map-get *ability-owner* (first kv) nil))
-                          (when o (name o))))
-        by-qualifier (fn (kv) (%owner-prefix (name (first kv))))
+                          (when o (->string o))))
+        by-qualifier (fn (kv) (%owner-prefix (->string (first kv))))
         method-owner (fn (kv)
                        (let (o (%map-get *method-from* (first kv) nil))
-                         (when o (name o))))
+                         (when o (->string o))))
         one (fn (acc spec)
               (let ([reg pairs owner-fn] spec)
                 (%merge-by-module acc (%reg-entries reg pairs owner-fn))))
@@ -129,7 +129,7 @@ multimethod names by their own qualifier — each key names its owner, so none o
       (fold one
         {}
         [['*abilities* (%map-pairs *abilities*) ability-owner]
-          ['*ability-owner* (%map-pairs *ability-owner*) (fn (kv) (name (second kv)))]
+          ['*ability-owner* (%map-pairs *ability-owner*) (fn (kv) (->string (second kv)))]
           ['*sealed* (%map-pairs *sealed*) ability-owner]
           ['*ability-derives* (%map-pairs *ability-derives*) ability-owner]
           ['*ability-requires* (%map-pairs *ability-requires*) ability-owner]
@@ -138,7 +138,7 @@ multimethod names by their own qualifier — each key names its owner, so none o
           ['*multi-algebra* (%map-pairs *multi-algebra*) by-qualifier]
           ['*module-docs* (%map-pairs *module-docs*) (fn (kv) (first kv))]
           ;; single-level despite its PAIR key `[multimethod id-vector]`
-          ['*method-from* (%map-pairs *method-from*) (fn (kv) (name (second kv)))]])
+          ['*method-from* (%map-pairs *method-from*) (fn (kv) (->string (second kv)))]])
       [['*methods* *methods* method-owner]])))
 
 (defn- prune!
@@ -178,7 +178,7 @@ it is dropped, since nothing materialises it back."
                 f (get (get *impls* [aname op]) key))
             (if (or (nil? from) (nil? f))
               acc
-              (let (mn (name from))
+              (let (mn (->string from))
                 (%map-assoc acc mn (append (or (%map-get acc mn nil) []) [[aname op key f from]]))))))
     {}
     (%map-pairs *impl-from*)))
@@ -211,7 +211,7 @@ since the prelude is always present."
             names (or modules (builtin-modules))
             probed (fold (fn (acc m)
                            (%map-assoc acc
-                             (name m)
+                             (->string m)
                              (%isolate (fn ()
                                          (let (before (into #{} (global-names))
                                                _ (try (require-one m) (catch _ nil)))
@@ -233,10 +233,10 @@ since the prelude is always present."
             ;; dispatchable, and the failure surfaces at `(send-response r)`, not at load.
             _ (%set-std-impls! (%std-impls-by-module))
             _ (%set-std-regs! (%std-regs-by-module))
-            roots (filter (fn (s) (not (prefixed-by-any? (name s) names))) (global-names))
+            roots (filter (fn (s) (not (prefixed-by-any? (->string s) names))) (global-names))
             owner-of (fold (fn (acc g)
                              (let (best (fold (fn (winner m)
-                                                (let (probe (%map-get probed (name m) nil))
+                                                (let (probe (%map-get probed (->string m) nil))
                                                   (if (and probe
                                                         (contains? probe g)
                                                         (or (nil? winner)
@@ -244,7 +244,7 @@ since the prelude is always present."
                                                     [m (count probe)]
                                                     winner)))
                                           nil names))
-                               (if best (%map-assoc acc g (name (first best))) acc)))
+                               (if best (%map-assoc acc g (->string (first best))) acc)))
                        {}
                        roots)
             sections (append [["%std-edges" ['*std-require-edges*]]
@@ -252,9 +252,9 @@ since the prelude is always present."
                                ["%std-regs" ['*std-regs*]]]
                        (seq/keep
                          (fn (m)
-                           (let (mn (name m)
+                           (let (mn (->string m)
                                  pfx (str mn "/")
-                                 owned (filter (fn (s) (string/starts-with? (name s) pfx))
+                                 owned (filter (fn (s) (string/starts-with? (->string s) pfx))
                                          (global-names))
                                  mine (filter (fn (g) (= (%map-get owner-of g nil) mn)) roots)
                                  syms (apply vector (append owned mine)))

@@ -193,7 +193,7 @@
   (test "nothing falls through to :other"
     (let (uncatalogued (filter
                          (fn (s)
-                           (let (nm (name s) i (index-of nm "/"))
+                           (let (nm (->string s) i (index-of nm "/"))
                              (and (not (and i (> i 0)))
                                ; not a module function
                                (not (includes? nm "--"))
@@ -203,4 +203,4 @@
                                (= (doc-catalog/category-of nm) :other))))
                          (global-names)))
       ;; Names, not a count — a failure should say WHICH name needs a category.
-      (assert= (sort (map name uncatalogued)) (list)))))
+      (assert= (sort (map ->string uncatalogued)) (list)))))

@@ -720,6 +720,8 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-26** — the codecs: `json` parse 1.8x (row -20.8%) and `base64` decode 1.8x (row -9.5%) (ADR-249)
 - **2026-08-26** — every package's `:brood` floor was a lie; the ecosystem release train that fixed it
 - **2026-08-27** — migrating the ecosystem across the waves; two outages, both from verifying the wrong artifact (KI-66/67)
+- **2026-08-27** — stdlib cleanup: `name` folds into `->string` (ADR-258); the seq orphans go home; `last-index-of` moves to `string/`
+- **2026-08-27** — the type system, audited then rebuilt: `sig` fails closed and the definition owns the arity (ADR-259), the walk's totality is gated and found the quasiquote gap (ADR-260), a parameter's type is its domain (ADR-261), a union keeps its terms (ADR-262), `(not T)` (ADR-263)
 
 ---
 
@@ -4622,3 +4624,151 @@ installs an image but never builds one, so a benchmark host that had never run `
 measure the source path while a developer's machine measured the image — a split across hosts, not
 a fair-comparison question. The harness now writes it in the build phase. This is not a thumb on
 the scale: default-on means the image is what every user's `require` already does.
+
+## 2026-08-27 — stdlib cleanup: sequences, collections, and the word `name`
+
+A review pass over `std/` and the language core, then the fixes. Worth recording that **three of
+the seven findings did not survive contact with the ADRs** and were withdrawn rather than
+implemented: `set/set` is blessed as the constructor model (ADR-236), `multimap/get` is a
+deliberate per-module vocabulary (ADR-239), and `seq/vector-ref` is the measured hot path across
+720 sites (ADR-164) plus an `%autoload` entry (ADR-246). Reviewing against the decision record
+before writing code is cheaper than reviewing against it afterwards.
+
+**`name` → `->string` (ADR-258).** The full rationale is in the ADR. The short version: `name`
+was an ordinary English noun holding a root binding, `defmodule` emitted it bare into every
+user file, and a module defining its own `name` therefore failed its own `nest check`. It is now
+the `Display` op `->string`, defined once in `core.blsp` as a Brood bootstrap and taken over by
+the `defability` — no `%name` primitive, so no second name for one idea.
+
+Three things this cost that are worth knowing next time:
+
+- **A call-position regex is not a rename.** `(name ` missed `name` in *multi-line arglists*
+  (10 functions had their PARAMETER renamed instead), in `let` bindings and `defrecord` fields
+  (21 more), and as a higher-order *value* (`(map name …)`, 13). Each class failed differently
+  and none failed at build. The detector that actually worked was arity: `->string` takes one
+  argument, so any `(->string a b c)` is damage.
+- **The gates disagree about what they can see.** The in-language suite, `std_check_test`,
+  `cargo test -p brood --lib`, and `cargo test -p nest -p cli --tests` each caught a *different*
+  remaining site, in that order, and three of them were Brood embedded in Rust **string
+  literals**, which `nest check` and the `.blsp` suite cannot see at all. Running one gate and
+  believing it is how this rename would have shipped broken.
+- **Renaming moved the capture hazard instead of removing it.** One commit after `name` stopped
+  being captured, `->string` started being captured — by `std/text.blsp` and `std/decimal.blsp`,
+  which define their own. The `/` root escape does not fix it (the resolver is a no-op for the
+  prelude), so `defmodule` now emits no conversion at all.
+
+**Sequences.** `sort` was reaching `%split-at-acc` — a helper three lines above it in the same
+file — through `seq/split-at`, which fired the `%autoload` stub and loaded the entire `seq`
+module to get back to the prelude. It calls the helper directly now and `split-at` leaves the
+autoload list. Four helpers stranded in the prelude when their public functions moved out
+(`%distinct-step`, `%flatten-acc`, `%repeatedly-acc`, `%iterate-times`) moved to `std/seq.blsp`
+beside their callers and dropped the `%` prefix the module makes redundant; `%iterate-times` was
+private, dead in `std/`, yet exercised by a test and cited in `docs/deferred.md` as a supported
+workaround, so it is public as `seq/iterate-times`. `%has-at-least?` became `defn-`.
+
+`std/seq.blsp`'s own header and module docstring both listed `distinct` and `zip` among the ops
+that "stay bare in the prelude". They are `seq/distinct` and `seq/zip`; `(bound? 'distinct)` is
+`false`. A reader following the published docstring got an unbound symbol.
+
+**`last-index-of` → `string/last-index-of`.** String-only (it calls `%str-last-index-of` and
+defaults `before` to `(string/length s)`), so by ADR-230's own boundary rule it never belonged
+bare. Its forward partner `index-of` stays bare because that one really is polymorphic over
+strings, lists and vectors — the pair looked symmetric and was not. This surfaced a genuine
+limitation on the way: the prelude referenced it, and `%autoload` declares exactly **one** arity
+per name, which cannot express an `&optional` function. The prelude calls the `%str-last-index-of`
+primitive instead, which is the rule `prelude_hygiene` already states.
+
+**Duplication found and deliberately kept**, now annotated at both ends so neither reads as an
+oversight: `string/join-parts` and `seq/interpose-acc` are byte-identical, because routing `join`
+through `seq/interpose` would make a prelude-reachable op drag in a second module; and
+`project/project-chunk-list` and `test/run-chunks` are byte-identical because `seq` has no
+list-returning chunker that keeps the trailing partial chunk — `partition` drops it and
+`chunk-every` returns vectors, which does not survive the callers' `cons` (`(cons x [1 2])` is
+the improper pair `(x . [1 2])`, not a list).
+
+**ADR-236 corrected:** it states the empty constructor is `queue/new`; it shipped as
+`queue/empty`, and `pq`/`multimap` followed. The code is right — `empty` denotes a value, and
+`table/new` stays `new` because a table is the one identity-mutable structure, where two calls
+must give two different tables.
+
+## 2026-08-27 (tenth session) — the type system: what the audit measured, and what fixing it took
+
+Started as a review — "where are we against a set-theoretic, gradual type system?" — and the
+honest answer needed measuring rather than reading. A probe corpus through `brood --check` on
+`0.14.1` separated three layers that were in very different states, and each turned out to be
+a different kind of problem.
+
+**The lattice was close; the surface feeding it was open.** `(sig q1 (strng -> int))` — a
+misspelled type name — exited 0 with no diagnostic, and so did a misspelled constructor, a sig
+for a name that is never defined, and (the bad one) a sig whose arity contradicts its `defn`.
+That last is not a missed check but a *suppressed* one: the file being checked is never
+loaded, so `arity_of` sees nothing for its own functions and the declared sig was the only
+arity source a same-file call had. `nest check` passed a program that died on its first call.
+Behind it sat a plainer absence — a same-file call had **no arity check at all**, the cheapest
+check in the system, missing exactly where a fresh edit is. ADR-259: the definition owns the
+arity, and a declaration that cannot be read is reported.
+
+**The KI-67/KI-70 class got its gate, and the gate immediately found the next one.** Both were
+`return`-early lines in the walk behind which no lint ran; both were found by accident.
+`REACH_CASES` now plants an unresolvable name in every code position of every `SPECIAL_HEAD`
+entry and every container literal and asserts what the walk must do with it, with a companion
+test that a *new* special form must declare its own case. It runs in both walks — and that is
+not thoroughness: the gate's own first sabotage attempt **passed**, because whole-file mode
+caught the planted name through an unrelated pass while the arm under test did nothing. What
+it found: a `quasiquote` template was skipped whole, though its `~`/`~@` escapes are code
+evaluated at expansion time (ADR-260).
+
+**Inference was the deep one.** It credited only *unconditional* demands, so the ordinary
+shape of Brood code — a body that branches on what its argument is — constrained nothing:
+
+    (defn f (x) (if (string? x) (string/length x) (+ x 1)))
+    (f :kw)   ; neither branch admits a keyword, and nothing said so
+
+The fix is to credit a guarded use *within its guard* and union the alternatives
+(`D(if) = D(test) ∩ ((G ∩ D(then)) ∪ (¬G ∩ D(else)))`), which also gives `match` (its
+no-match branch throws, so its domain is ⊥), head destructuring, multi-arm functions and
+`:when` clause guards their domains for free — ADR-261.
+
+**The trap in that one is worth the entry.** A prelude closure keeps its body **as written**,
+so the checker meets `(cond …)` verbatim there, not the `if` chain the file path sees. Reading
+an unrecognised head as an ordinary call — every operand evaluated — made `type-matches?`
+demand a `seqable` first argument, because `(first t)` sits in a clause body. 21 false
+positives across `tests/`, from one missing case, and the whole-tree gate is what caught it
+within a minute of the change. An unexpanded *macro* call now demands nothing at all: its
+operands are syntax, not necessarily code.
+
+**And the representation.** A union of two structured types had nowhere to live — one term
+holds one refinement per slot — so `(or (tuple int) (tuple string))` widened to bare `vector`
+and the tagged-union idiom was invisible to every check. A `Ty` now carries an optional tail
+of alternative terms (ADR-262). The single-term case is byte-identical, including its widening
+merge; what changed is that a union that *cannot* merge keeps both terms, and the five set
+operations quantify over them. The reason it landed without touching a single consumer: every
+refinement accessor reports only for a single-term type, so consumers see exactly what a
+widened type showed them — the *relations* are what got sharper.
+
+`(not T)` closed the last gap between what the lattice could compute and what a `sig` could
+say (ADR-263), and complements stopped rendering as a twenty-two-tag dump.
+
+**The new rule is checked against the runtime, not against itself.** The soundness oracle
+gained a facet for it: define a function, *call* it with a spread of values, and whenever the
+call succeeds assert the argument is inside the inferred domain — a call that runs is proof
+the value was in the true domain, so a domain excluding it is precisely a false positive.
+Sabotage-verified (intersect the branches instead of unioning: `(and (string? x)
+(string/length x))` accepts `5`, and the broken rule inferred `string`).
+
+It also walked into a trap on its first run, which is worth more than the test: `sig_of`'s
+memo is a thread-local cleared per `check_file`, so calling it directly across fresh images
+reads the previous image's answer. Four different definitions all reported the same domain,
+and the "unsoundness" was the oracle's own.
+
+**One host crash fell out of writing a test.** A deep-body test for the domain walk — 20 000
+levels, built by construction, since the reader caps nesting at 256 and a macro expansion does
+not — aborted the process, and not in the new code: the non-tail-recursion lint's `walk`
+recursed unguarded. The 2026-07-23 host-panic pass hardened that lint's *entry point* and not
+the recursion that descends a function's body. Guarded, and the test now covers the shape.
+
+Gates: `nest check std/**/*.blsp tests/**/*.blsp` at zero throughout, `make check-corpora`
+green, 572 lib unit tests green, whole-tree check still 1.7 s. Two rename leftovers from the
+parallel session fell out of the new checks and were followed: the curated sig for
+`last-index-of` (now `string/last-index-of`) and a dead call site in
+`scripts/fuzz/stress/scale_sweep.blsp`.

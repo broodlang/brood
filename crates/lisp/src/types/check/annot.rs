@@ -245,6 +245,18 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                 }
                 return acc;
             }
+            // (not T) — the complement: every value that is NOT a `T`. The lattice
+            // has had `negate`/`difference` since ADR-023 (the else-branch of a guard
+            // is a complement), but there was no way to *write* one — so the most
+            // wanted annotation in a nil-carrying language, "anything but nil", could
+            // not be said. `(and any (not nil))` says it now.
+            //
+            // Exact on the flat tag lattice; a complement of a *refined* type widens
+            // to that tag (see `Ty::negate`), which over-approximates — sound, and it
+            // can only ever suppress a warning.
+            if value::symbol_is(head, "not") && items.len() == 2 {
+                return Some(parse_type(heap, items[1])?.negate());
+            }
             // (map K V) — key/value typed map.  Full refinement: produce Ty::map_of
             // so the checker can derive `get`/`keys`/`vals`/`assoc` result types.
             if value::symbol_is(head, "map") && items.len() == 3 {
@@ -300,7 +312,9 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
 /// [`parse_type`]'s dispatch (which is the authority); a head added there and not
 /// here would be reported as unknown, so `sig_grammar_heads_are_all_validated`
 /// pins the two lists together.
-pub(super) const TYPE_HEADS: [&str; 7] = ["list", "vector", "or", "and", "map", "tuple", "record"];
+pub(super) const TYPE_HEADS: [&str; 8] = [
+    "list", "vector", "or", "and", "not", "map", "tuple", "record",
+];
 
 /// Why this type-expression can't be read as a type, or `None` if it can.
 ///
@@ -340,8 +354,13 @@ pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
                     if is_arrow_marker(part) || is_param_marker(part) {
                         continue;
                     }
-                    if let Some(p) = type_expr_problem(heap, part) {
-                        return Some(p);
+                    // A part that doesn't parse decides the whole expression —
+                    // *including* when its verdict is a deliberate silence (an unknown
+                    // capitalised name). Reporting a structural problem instead would
+                    // name the wrong thing: `(Shape -> int)` is not a malformed arrow,
+                    // it is an arrow over an ability this check could not resolve.
+                    if parse_type(heap, part).is_none() {
+                        return type_expr_problem(heap, part);
                     }
                 }
                 return Some(if pos + 2 != items.len() {
@@ -375,8 +394,8 @@ pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
                         );
                     }
                     let value_form = unwrap_optional(heap, pair[1]).unwrap_or(pair[1]);
-                    if let Some(p) = type_expr_problem(heap, value_form) {
-                        return Some(p);
+                    if parse_type(heap, value_form).is_none() {
+                        return type_expr_problem(heap, value_form);
                     }
                 }
                 Vec::new()
@@ -384,8 +403,8 @@ pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
                 items[1..].to_vec()
             };
             for &arg in &args {
-                if let Some(p) = type_expr_problem(heap, arg) {
-                    return Some(p);
+                if parse_type(heap, arg).is_none() {
+                    return type_expr_problem(heap, arg);
                 }
             }
             // Every part reads as a type, so the arity of the constructor is what's wrong.

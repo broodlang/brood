@@ -1180,23 +1180,9 @@ pub(super) fn pr_str(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult 
     Ok(heap.alloc_string(&s))
 }
 
-pub(super) fn name_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    match v {
-        Value::Sym(s) | Value::Keyword(s) => Ok(heap.alloc_string(&value::symbol_name(s))),
-        Value::Str(_) => Ok(v),
-        _ => Err(LispError::wrong_type(
-            heap,
-            "name",
-            "symbol, keyword, or string",
-            v,
-        )),
-    }
-}
-
 /// `(symbol x)` — the symbol whose spelling is `x`. Accepts a string (intern as
 /// a fresh-or-existing symbol), a symbol (identity), or a keyword (same spelling,
-/// retagged as a symbol). The lenient inverse of `name`; pairs with `keyword`.
+/// retagged as a symbol). The lenient inverse of `->string`; pairs with `keyword`.
 pub(super) fn to_symbol(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {

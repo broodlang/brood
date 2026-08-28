@@ -447,7 +447,7 @@ the record opts in with `:derives`:
   (ncols [self] :-> int (count (columns self)))     ; provided — composes with derive
   :derive-record
   (fn (flds)
-    (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (name f)))) flds)]))))
+    (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (->string f)))) flds)]))))
 
 (defrecord point (x y) :derives [Columns])
 (columns (point 3 4))    ;=> [3 4]     — synthesized
@@ -970,7 +970,7 @@ For purely side-effecting iteration, two prelude macros wrap the common patterns
 ```clojure
 (dotimes (i 3) (io/write i " "))    ; prints "0 1 2 "
 (dolist (x (list :a :b))         ; runs the body for each element
-  (io/puts (name x)))            ; prints "a" then "b"
+  (io/puts (->string x)))            ; prints "a" then "b"
 ```
 
 Both are tail-recursive and return `nil` (they're for effects). `doseq` (over
@@ -1697,16 +1697,24 @@ bool nil pair vector list map set bytes fn rope pid ref table socket subprocess`
 plus `any` (everything) and `never` (nothing); the spellings match what `type-of`
 returns, with `number` = int∪float, `list` = nil∪pair, and `fn` = closure∪native.
 Then function arrows `(p… -> r)`, element-typed
-sequences `(list E)` / `(vector E)`, unions `(or A B …)` and intersections
-`(and A B …)`, literal (singleton) types — a bare keyword/int/bool/string
+sequences `(list E)` / `(vector E)`, unions `(or A B …)`, intersections
+`(and A B …)` and the complement `(not T)` — so "anything but nil" is `(and any
+(not nil))` — literal (singleton) types — a bare keyword/int/bool/string
 (`:foo`/`5`/`true`/`"GET"`) — any combination composing freely in one `(or …)`
 (see [type-int-literals.md](type-int-literals.md) and
 [type-bool-string-literals.md](type-bool-string-literals.md)), type
 variables (`?A`), key/value-typed maps `(map K V)` (see
 [type-map-kv.md](type-map-kv.md)), and heterogeneous record shapes `(record
 :k1 T1 :k2 T2 …)` with required-by-default fields and an `(optional T)` wrapper
-for optional ones (see [type-records.md](type-records.md)). An unrecognised
-type-expression is ignored, never guessed.
+for optional ones (see [type-records.md](type-records.md)).
+
+A type-expression the checker cannot read is **reported**, not guessed: a
+misspelled name (`strng`) or constructor (`(tupel int)`), a declaration whose
+arity contradicts the definition it annotates, and a declaration for a name the
+file never defines are all warnings. (An unknown *capitalised* name is taken to
+be an ability used as a type, whose module this check may not have loaded, and
+stays silent.) A union of two different structured types keeps both — `(or
+(tuple int) (tuple string))` rejects `[true]` and admits either shape.
 
 A `match` whose scrutinee's declared type is a *pure* enumerable literal type
 (any combination of the literal kinds above, plus `nil`) gets two more checks

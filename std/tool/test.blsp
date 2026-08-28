@@ -427,7 +427,7 @@ the test rather than hanging the run."
   ;; tests can pin exact text. A `(throw v)` lands here as the raw value `v` —
   ;; pass it through unchanged (matches the macro's stated contract).
   (cond
-    (map? e) (str (name (get e :kind)) " error: " (get e :message))
+    (map? e) (str (->string (get e :kind)) " error: " (get e :message))
     else e))
 (defmacro error-of (& body)
   "Evaluate `body` and return the error it raised — a built-in error as its `\"kind error: message\"` string, a `(throw v)` as the value `v` — or nil if `body` completes without raising."
@@ -573,7 +573,7 @@ the test rather than hanging the run."
 
 (defn- test-has-tag?
   (tags key-string)
-  (fold (fn (found tag) (or found (= (name tag) key-string))) false (into [] tags)))
+  (fold (fn (found tag) (or found (= (->string tag) key-string))) false (into [] tags)))
 
 ;; Is `needle` a trailing suffix of `path` on a PATH-COMPONENT boundary? The
 ;; boundary check is what stops `a_test.blsp` from matching `extra_test.blsp` —
@@ -1218,6 +1218,8 @@ the test rather than hanging the run."
 
 ;; Chunk `coll` into ≤`n`-sized groups, KEEPING a short trailing group (`partition`
 ;; drops it — which here would silently skip tests).
+;; See `project/project-chunk-list`: same five lines, same gap — `seq` has no
+;; list-returning chunker that keeps the trailing partial chunk.
 (defn- run-chunks
   (n coll acc)
   (if (empty? coll)

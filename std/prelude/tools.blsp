@@ -14,7 +14,7 @@
   ()
   "Every global worth OFFERING to a human: no `%` plumbing, no module-private names."
   (filter (fn (s)
-            (and (not (string/starts-with? (name s) "%"))
+            (and (not (string/starts-with? (->string s) "%"))
               (not (private? s))))
     (global-names)))
 
@@ -26,8 +26,8 @@ are not callable vocabulary, and they used to bury the answer.
     (apropos \"gensy\")   → (gensym)"
   ;; `name` (not `str`) so a keyword pattern drops its leading colon, matching
   ;; the bare global names; a string passes through unchanged.
-  (let (needle (if (string? pattern) pattern (name pattern)))
-    (filter (fn (s) (includes? (name s) needle)) (%discoverable-names))))
+  (let (needle (if (string? pattern) pattern (->string pattern)))
+    (filter (fn (s) (includes? (->string s) needle)) (%discoverable-names))))
 
 ;; Whitespace-split a query into lowercased terms (blanks dropped) — the unit
 ;; doc-search ranks by. A single-word query yields one term, so it degrades to
@@ -379,7 +379,7 @@ would name a registry that does not exist."
 ;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
 (defn provide (mod)
   "Mark feature `mod` (a symbol or string) as loaded (idempotent); returns its name."
-  (let (key (name mod))
+  (let (key (->string mod))
     (%registry-update! '*features* :assoc-new [key] true)
     key))
 
@@ -392,9 +392,11 @@ would name a registry that does not exist."
 ;; Called from `defmodule`'s expansion, which runs inside the *consumer's* module —
 ;; where a bare `(def *module-docs* …)` would define `mod/*module-docs*`. Defined
 ;; here at root, so the `def` below targets the one real registry.
-(defn %record-module-doc! (key doc)
-  "Record `doc` as module `key`'s docstring (the registry `system/module-doc` reads); returns doc."
-  (%registry-update! '*module-docs* :assoc [key] doc)
+(defn %record-module-doc! (mod doc)
+  "Record `doc` as module `mod`'s docstring (the registry `system/module-doc` reads); returns
+doc. Takes a symbol OR a string, and converts here rather than at the call site, because the
+one call site is inside `defmodule`'s template — see the note there."
+  (%registry-update! '*module-docs* :assoc [(->string mod)] doc)
   doc)
 
 ;; The hot-reload `def` diagnostics switch. The kernel reads it by BARE name from
@@ -489,7 +491,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; web/views/counter → counter  (a module name's last `/`-segment, as a symbol).
 (defn- %defmodule-last-segment
   (mod)
-  (symbol (last (string/split (name mod) "/"))))
+  (symbol (last (string/split (->string mod) "/"))))
 
 ;; The `(require …)`+`(%alias …)` forms for one `(:alias mod [:as short])` clause:
 ;; load the module, then register a prefix alias so a later `short/name` resolves to
@@ -525,8 +527,10 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; window a concurrent requirer used to slip through. A direct `(load "x.blsp")`
 ;; (no require in flight) keeps the immediate provide it always had.
 (defn- %defmodule-provide
-  (key)
-  (if (contains? *features-loading* key) key (provide key)))
+  (mod)
+  ;; Symbol or string in; converts here, not at the call site — see `defmodule`'s template.
+  (let (key (->string mod))
+    (if (contains? *features-loading* key) key (provide key))))
 
 ;; The only clauses the header understands. Anything else in a `defmodule` header
 ;; used to be silently IGNORED — so a misspelled `(:use-internal m)` or a
@@ -567,7 +571,22 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
     ;; `foo/b`, so an outside `foo/b/…` reference finds it and the file's defs become
     ;; `foo/b/…`. At root (no package context) `%root-module-name` is the identity, so
     ;; the root project and std stay short. Computed at load time, when the context is set.
-    `(let (root-key# (name (%root-module-name '~mod)))
+    ;; This template emits NO conversion call, deliberately. Every symbol it emits lands in
+    ;; the user's namespace, where a same-named definition of theirs wins — so a bare
+    ;; `(name …)` here (what this was until 2026-08-27) is captured by any module defining
+    ;; `name`, and a bare `(->string …)` is captured by any module defining `->string`,
+    ;; which `std/text.blsp` and `std/decimal.blsp` both do. Renaming the operation moves
+    ;; that hazard; it does not remove it.
+    ;;
+    ;; The `/` root escape (ADR-236) is NOT the fix either: the resolver that rewrites `/x`
+    ;; is a no-op for the root prelude (ADR-230), so an emitted `/->string` survives to
+    ;; runtime literally and is unbound. Verified, not assumed.
+    ;;
+    ;; So the symbol is passed through untouched and `%record-module-doc!` /
+    ;; `%defmodule-provide` convert it in THEIR bodies, which are ordinary prelude functions
+    ;; resolved in the prelude's own scope and beyond a user's reach. The rule this states:
+    ;; a prelude macro should emit `%`-prefixed names and data, never a bare public verb.
+    `(let (root-key# (%root-module-name '~mod))
        (%record-module-doc! root-key# ~doc)
        (%defmodule-provide root-key#)
        (%in-ns '~mod)
@@ -597,7 +616,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
           (and (pair? form)
             (= (first form) 'defmodule)
             (not (empty? (rest form)))
-            (= (name (first (rest form))) key-name)))
+            (= (->string (first (rest form))) key-name)))
     (try (%read-all (file/slurp path)) (catch _ nil))))
 (defn- %require-colocated-files
   (key-name dirs)
@@ -615,7 +634,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
   (key)
   ;; The single file declaring co-located module `key`, or nil if none. Errors if two files
   ;; declare it — the nameless/bare analogue of a named project's duplicate-module rejection.
-  (let (key-name (name key)
+  (let (key-name (->string key)
         matches (seq/distinct (%require-colocated-files key-name *load-path*)))
     (cond
       (empty? matches) nil
@@ -712,8 +731,8 @@ binary cannot load would fail the require outright."
       live
       (let (rec (get (or *std-require-edges* {}) key))
         (when rec
-          (let (have (into #{} (map name (builtin-modules))))
-            (filter (fn (d) (contains? have (name d))) rec)))))))
+          (let (have (into #{} (map ->string (builtin-modules))))
+            (filter (fn (d) (contains? have (->string d))) rec)))))))
 
 (def- *std-impls* nil)
 
@@ -798,13 +817,13 @@ own, and whichever installs second must not erase the first."
   ;;
   ;; Filtered here rather than at build time on purpose: the image may have been written by
   ;; a different binary from the one reading it, which is the whole point of sharing the key.
-  (let (have (into #{} (map name (builtin-modules))))
+  (let (have (into #{} (map ->string (builtin-modules))))
     (doseq (kv (%map-pairs edges))
       (let ([k deps] kv)
         (when (not (contains? *require-edges* k))
           (%registry-update! '*require-edges*
             :assoc [k]
-            (filter (fn (d) (contains? have (name d))) deps))))))
+            (filter (fn (d) (contains? have (->string d))) deps))))))
   *require-edges*)
 
 ;; --- the stdlib image, from the prelude --------------------------------------
@@ -882,7 +901,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
   ;; `*require-parent*` is the fallback for a file with no `(defmodule …)` header, which
   ;; establishes no namespace but is still `require`able by its filename.
   (let (ns (current-ns)
-        parent (if ns (name ns) *require-parent*))
+        parent (if ns (->string ns) *require-parent*))
     (when (and parent
             (not (= parent key))
             (not (includes? (or (get *require-edges* parent) nil) key)))
@@ -977,7 +996,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
           ;; a std module's functions reserved (ADR-166). A project's own image must not
           ;; reserve its functions: the program is allowed to redefine those.
           (%image-load-section img-path (first sec) (second sec) (not (nil? src)))
-          (when (%getenv "BROOD_IMAGE_TRACE") (%eprint (str "[image] " (name key) "\n")))
+          (when (%getenv "BROOD_IMAGE_TRACE") (%eprint (str "[image] " (->string key) "\n")))
           ;; Materialising defines this module's bindings but evaluates nothing, so the
           ;; requires its load would have run have to be replayed from the edges the
           ;; original load recorded. Without this an imaged start built a heap with holes
@@ -1040,7 +1059,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
       (do
         (let (prefix (%bundle-module-package load-key)
               prev (if prefix
-                     (%set-package-context prefix (get *package-modules-of* (name prefix)))
+                     (%set-package-context prefix (get *package-modules-of* (->string prefix)))
                      (%set-package-context nil nil)))
           (%load-module-source src (%builtin-module-file load-key))
           (%set-package-context (first prev) (second prev)))
@@ -1091,7 +1110,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
 its first segment names a module baked into this binary, so a package taking it would
 root its own modules onto stdlib namespaces. Backs the `nest new` / `nest publish` /
 load-time (`require`) guards."
-  (let (seg (first (string/split (name nm) "/"))
+  (let (seg (first (string/split (->string nm) "/"))
         owned (seq/distinct (map (fn (m) (first (string/split m "/"))) (builtin-modules))))
     (includes? owned seg)))
 
@@ -1108,13 +1127,13 @@ load-time (`require`) guards."
     ;; a baked-in module would silently root its modules onto stdlib namespaces.
     (when (reserved-package-name? prefix)
       (error "require: package '"
-        (name prefix)
+        (->string prefix)
         "' is reserved by the standard library "
         "(it owns the '"
-        (name prefix)
+        (->string prefix)
         "' module namespace) — a package cannot take this "
         "name; rename the package"))
-    (let (modules (get *package-modules-of* (name prefix))
+    (let (modules (get *package-modules-of* (->string prefix))
           prev (%set-package-context prefix modules))
       (try
         (do (load path) (provide key))
@@ -1144,7 +1163,7 @@ load-time (`require`) guards."
   "Load a single feature `mod` once (a no-op if already loaded); returns its name.
 Safe under concurrency: never returns while another process is mid-load of `mod` —
 it waits for that load to finish (a half-evaluated module is never observable)."
-  (let (key (name mod))
+  (let (key (->string mod))
     ;; Before every early return below: the edge is a property of the requiring module,
     ;; not of who won the race to load the target.
     (%require-record-edge! key)
@@ -1231,7 +1250,7 @@ stub `%autoload` binds; see there. Raises if loading `mod` leaves `nm` still a s
         (apply (eval nm) args)))))
 
 (defmacro %autoload (mod & specs)
-  "Bind each `(name arity)` of module `mod` to a stub that loads `mod` on its first call
+  "Bind each `(->string arity)` of module `mod` to a stub that loads `mod` on its first call
 and forwards to the real definition. `arity` is the definition's fixed parameter count,
 declared rather than discovered so the stub has the SAME arity as the function it stands
 in for: a variadic placeholder would report every arity error as an argument-count
@@ -1245,7 +1264,7 @@ every qualified reference the prelude makes into a lazily-loaded module is decla
 and that every declared arity still matches its module's actual definition."
   (cons 'do
     (map (fn (spec)
-           (let (nm (symbol (str (name mod) "/" (name (first spec))))
+           (let (nm (symbol (str (->string mod) "/" (->string (first spec))))
                  params (map (fn (i) (symbol (str "a" i))) (range 0 (second spec))))
              (list 'def
                nm
@@ -1276,7 +1295,6 @@ and that every declared arity still matches its module's actual definition."
   (keep 2)
   (remove 2)
   (distinct 1)
-  (split-at 2)
   (vector-ref 2))
 
 ;; ═══ Abilities + the Display protocol (core) ════════════════════════════════
@@ -1315,7 +1333,7 @@ and that every declared arity still matches its module's actual definition."
   "The global symbol an ability op's `defn` binds: `op-name` qualified to the declaring ns
   `owner` (`<owner>/op`), or bare `op-name` when `owner` is nil (root/REPL). Mirrors how the
   `defn` `defability` emits is namespaced at load, so `*op-ability*` keys on the real global."
-  (if owner (symbol (str (name owner) "/" (name op-name))) op-name))
+  (if owner (symbol (str (->string owner) "/" (->string op-name))) op-name))
 
 (defn %register-ability (aname specs &optional owner)
   "Record ability `aname`'s declared op specs (raw forms) for the checker / LSP, and its
@@ -1472,7 +1490,7 @@ and that every declared arity still matches its module's actual definition."
 (defn- %impl-id-owner
   (key)
   (if (keyword? key)
-    (let (nm (name key)
+    (let (nm (->string key)
           cut (%str-last-index-of nm "/"))
       (if (< cut 0) nil (string/substring nm 0 cut)))
     nil))
@@ -1497,12 +1515,12 @@ resolution; `%impl-for` is what picks the winner."
   ;; (2) > other (1)**. `from` = nil is the root/REPL — the user IS the app, so app tier; a
   ;; module whose package is the project's own is likewise the app. Otherwise `from` owns the
   ;; record's type (id-owner) or the ability (its `:default`/built-in impls), else it's other.
-  ;; Guard the nil/app cases before `(name from)`.
+  ;; Guard the nil/app cases before `(->string from)`.
   (if (or (nil? from) (%impl-app? from))
     4
-    (let (from-name (name from)
+    (let (from-name (->string from)
           id-owner (%impl-id-owner key)
-          abl-owner (let (o (%ability-owner-ns aname)) (if o (name o) nil)))
+          abl-owner (let (o (%ability-owner-ns aname)) (if o (->string o) nil)))
       (cond
         (= from-name id-owner) 3
         (= from-name abl-owner) 2
@@ -1720,11 +1738,17 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   path too, or it registers under `:lsp-requests/lsp-hover` while every value presents
   `:bedit/lsp-requests/lsp-hover` and dispatch finds no impl."
   (if (symbol? m)
-    (let (nm (name m)
-          cut (last-index-of nm "/"))
+    ;; `%str-last-index-of`, the kernel primitive, not the `string/last-index-of` wrapper
+    ;; around it: this runs during `impl` at module-load time, and a `string/…` reference
+    ;; from the prelude resolves only through an `%autoload` stub (ADR-246). A stub would
+    ;; be wrong here anyway — `last-index-of` is `&optional`, so its arity is 2-or-3 and
+    ;; `%autoload` declares exactly one. This is the rule `prelude_hygiene` states: prelude
+    ;; code reaches for the `%`-primitive, never the module wrapper.
+    (let (nm (->string m)
+          cut (%str-last-index-of nm "/" (string/length nm)))
       (if (< cut 0)
         (%defrecord-qualify nm)
-        (keyword (str (name (%root-module-name (symbol (string/substring nm 0 cut))))
+        (keyword (str (->string (%root-module-name (symbol (string/substring nm 0 cut))))
                    "/"
                    (string/substring nm (inc cut) (string/length nm))))))
     m))
@@ -1839,7 +1863,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                   (fn (op)
                     (let (op-name (first op)
                           ; arg vector → list of bare param symbols; dispatch reads the FIRST
-                          ; arg's identity. A param may be typed `(name T)` (the `:-> RET`
+                          ; arg's identity. A param may be typed `(->string T)` (the `:-> RET`
                           ; sibling — a checker-only annotation, ADR-180); strip the type here
                           ; so the generated `defn` gets a plain symbol, `factor` not `(factor float)`.
                           arg-syms (map (fn (s) (if (pair? s) (first s) s)) (second op))
@@ -2115,6 +2139,23 @@ which is meaningless for a rope, so falling through unconditionally would swap a
 ;; native `str` — i.e. exactly what printing produced before this module loaded.
 (impl Display :default (->string [x] (str x)))
 
+;; A symbol or keyword displays as its SPELLING, without the sigil — `(->string :foo)`
+;; is "foo", not ":foo". This is the one built-in kind where `->string` and `str`
+;; deliberately DISAGREE (`(str :foo)` is ":foo", and `pr-str` must stay ":foo" because
+;; it round-trips). It was the bare `name` primitive until 2026-08-27: an ordinary
+;; English noun holding a root binding, which `std/node.blsp` had already collided with
+;; badly enough to need the `/name` root escape to reach past its own `name` function.
+;;
+;; These two RESTATE the rule rather than delegating to the bootstrap `->string` in
+;; `core.blsp`, because `defability Display` has just rebound that name to the
+;; dispatcher — a delegating body would call itself forever. (It did, for one commit:
+;; the bulk `%name` → `->string` rename rewrote them into `(->string [k] (->string k))`,
+;; which is a silent hang, not a compile error.) Restating costs three kernel ops and is
+;; pinned by `bootstrap_and_ability_agree` in `prelude_hygiene`, so the two spellings
+;; cannot drift apart unnoticed.
+(impl Display :keyword (->string [k] (string/substring (str k) 1)))
+(impl Display :symbol (->string [s] (str s)))
+
 ;; `Inspect` — the DEBUG form (Elixir's `Inspect`, Haskell's `Show`), the companion
 ;; to `Display`. `(inspect x)` is what you want in a log line or a REPL: unambiguous,
 ;; type-revealing, and free to include a wrapper a human reads (`#money<$10.50>`).
@@ -2223,7 +2264,7 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
   ;; REGISTERED, RESOLVED when called directly, and was then never consulted by any printer
   ;; — a silently inert impl, worse than a refusal (ADR-253). Consulting `Display` for
   ;; EVERYTHING fixes that and is behaviour-preserving (its `:default` is `(str x)`, and
-  ;; `%render` and `->string` agree on every built-in kind) but costs **+17%** on a
+  ;; `%render` and `->string` agree on every built-in kind it is consulted for) but costs **+17%** on a
   ;; print-heavy loop: 319 -> 374 ms over 40k `io/write` batches, best-of-7, pinned and
   ;; interleaved. That is a real bill for printing, which the tests and the REPL pay
   ;; constantly.
@@ -2232,6 +2273,13 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
   ;; everything else consults the ability. A map is tested with `record?` exactly as before
   ;; (a record IS a map, so the two cannot be told apart by `type-of`); rope, table, bytes,
   ;; set, pid, ref and functions now reach `Display`, which is the point.
+  ;;
+  ;; `:keyword` and `:symbol` are in the native list for CORRECTNESS as well as cost, and
+  ;; that is new. `Display`'s impl for them is the former `name` primitive — it strips the
+  ;; sigil, so `(->string :foo)` is "foo" while printing must stay ":foo". Routing them
+  ;; through the ability, as a later "consult Display for everything" tidy-up would, does
+  ;; not merely cost a lookup: it silently drops the colon from every keyword any program
+  ;; ever prints. Leave them here.
   (let (t (type-of x))
     (cond
       (%eq t :map) (if (record? x) (->string x) x)

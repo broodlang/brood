@@ -324,7 +324,9 @@ fn union_keeps_a_lone_arrow_but_widens_two() {
     let mixed = Ty::of(Tag::Int).union(f.clone());
     assert!(mixed.contains_tag(Tag::Int));
     assert_eq!(mixed.as_arrow(), f.as_arrow());
-    // two distinct arrows can't be one arrow → widen to "any function".
+    // two distinct arrows can't be ONE arrow — the union keeps both terms, and the
+    // single-arrow accessor reports none for it (an *intersection* of arrows is what
+    // `overload_of` is for; this is a union).
     let widened = f.clone().union(g);
     assert!(widened.contains_tag(Tag::Fn));
     assert_eq!(widened.as_arrow(), None);
@@ -550,9 +552,8 @@ fn record_union_widens_on_field_mismatch_but_keeps_a_match() {
 
     // Identical field maps survive a union unchanged.
     assert_eq!(a.clone().union(a_again).record_fields(), a.record_fields());
-    // Distinct field maps widen to "no declared shape" — still sound (a
-    // union is always a supertype, and dropping the refinement only
-    // widens further), just less precise.
+    // Distinct field maps are kept as two terms (ADR-262); the accessor reports no
+    // single declared shape for the union, as it did when the union widened.
     assert!(a.union(b).record_fields().is_none());
 }
 
@@ -641,7 +642,10 @@ fn element_type_is_covariant_under_subtyping() {
 fn element_refinement_widens_on_a_union_mismatch_but_keeps_a_match() {
     let vi = Ty::vector_of(Ty::of(Tag::Int));
     let vs = Ty::vector_of(Ty::of(Tag::Str));
-    // vector<int> ∪ vector<string> → vector (element widened; sound supertype)
+    // vector<int> ∪ vector<string> keeps both terms (ADR-262), and the *accessor*
+    // reports no single element type for the union — which is what every consumer
+    // saw when the union widened, so none of them changed. See
+    // `a_union_of_two_tuple_shapes_keeps_both` for what the terms now buy.
     let u = vi.clone().union(vs);
     assert!(u.contains_tag(Tag::Vector));
     assert_eq!(u.elem_ty(), None);
@@ -985,4 +989,165 @@ fn inferred_type_size_is_bounded_ki13() {
         "a deeply nested inferred type must stay within MAX_TY_NODES, got {}",
         t.node_count(MAX_TY_NODES * 8)
     );
+}
+
+// ---- a union keeps its terms (ADR-262) ----
+// One term carries one refinement per slot, so `(or (tuple int) (tuple string))` had
+// no representation at all: both refinements were widened away and the type became
+// bare `vector`. Sound, and it made the tagged-union idiom — the shape most Brood
+// code returns — invisible to every check.
+
+#[test]
+fn a_union_of_two_tuple_shapes_keeps_both() {
+    let a = Ty::tuple_of(vec![Ty::of(Tag::Int)]);
+    let b = Ty::tuple_of(vec![Ty::of(Tag::Str)]);
+    let u = a.clone().union(b.clone());
+    assert_eq!(u.to_string(), "(tuple int) | (tuple string)");
+    // Each alternative is still a subtype of the union…
+    assert!(a.is_subtype(&u) && b.is_subtype(&u));
+    // …and a shape neither admits is provably outside it.
+    let c = Ty::tuple_of(vec![Ty::of(Tag::Bool)]);
+    assert!(!c.is_subtype(&u));
+    assert!(c.is_disjoint(&u));
+}
+
+#[test]
+fn a_union_of_two_record_shapes_keeps_both() {
+    let a = rec(&[("a", Ty::of(Tag::Int), true)]);
+    let b = rec(&[("b", Ty::of(Tag::Str), true)]);
+    let u = a.clone().union(b.clone());
+    assert!(a.is_subtype(&u) && b.is_subtype(&u));
+    // A record conflicting with *both* alternatives is disjoint from the union.
+    let c = rec(&[("a", Ty::of(Tag::Str), true), ("b", Ty::of(Tag::Int), true)]);
+    assert!(c.is_disjoint(&u));
+    // …while one that satisfies an alternative is not.
+    assert!(!a.is_disjoint(&u));
+}
+
+#[test]
+fn a_union_still_merges_when_one_term_can_hold_it() {
+    // Nothing that already had an exact single-term union pays for the new machinery:
+    // agreeing refinements merge, and a side that contributes no refined member
+    // carries the other's refinement through.
+    let vi = Ty::vector_of(Ty::of(Tag::Int));
+    assert_eq!(vi.clone().union(vi.clone()).elem_ty(), vi.elem_ty());
+    let mixed = Ty::of(Tag::Int).union(vi.clone());
+    assert_eq!(mixed.elem_ty(), vi.elem_ty());
+    // Literal sets were always exact, and stay one term.
+    let kw = kw_union(&["a", "b"]);
+    assert_eq!(kw.to_string(), ":a | :b");
+    assert!(kw.as_lit().is_some());
+}
+
+#[test]
+fn a_union_absorbs_a_term_another_already_covers() {
+    let vi = Ty::vector_of(Ty::of(Tag::Int));
+    let v = Ty::of(Tag::Vector); // any vector
+                                 // vector<int> ⊆ vector, so the union is just `vector` — one term, not two.
+    assert_eq!(vi.clone().union(v.clone()).to_string(), "vector");
+    assert_eq!(v.union(vi).to_string(), "vector");
+}
+
+#[test]
+fn a_union_of_many_shapes_collapses_at_the_cap() {
+    // Beyond `MAX_TY_TERMS` the terms merge by the old widening union, so a runaway
+    // fixpoint can't grow a type without limit (the KI-13 property).
+    let mut u = Ty::NEVER;
+    for i in 0..12 {
+        u = u.union(Ty::tuple_of(vec![Ty::int_lit(i)]));
+    }
+    assert!(
+        u.alt_terms().is_none_or(|t| t.len() <= 4),
+        "terms must stay capped: {u}"
+    );
+    // Still a supertype of what went in — collapsing only ever widens.
+    assert!(Ty::tuple_of(vec![Ty::int_lit(0)]).is_subtype(&u));
+}
+
+#[test]
+fn a_refinement_accessor_reports_nothing_for_a_union() {
+    // A refinement that holds for one term does not hold for the union, so every
+    // accessor reports `None` there — exactly what a widened type reported before,
+    // which is why no consumer had to change.
+    let u = Ty::tuple_of(vec![Ty::of(Tag::Int)]).union(Ty::tuple_of(vec![Ty::of(Tag::Str)]));
+    assert_eq!(u.tuple_elems(), None);
+    assert_eq!(u.elem_ty(), None);
+    let r = rec(&[("a", Ty::of(Tag::Int), true)]).union(rec(&[("b", Ty::of(Tag::Str), true)]));
+    assert_eq!(r.record_fields(), None);
+}
+
+#[test]
+fn union_equality_ignores_term_order() {
+    // `A ∪ B` and `B ∪ A` are the same set — and every memo keyed on a `Ty` depends
+    // on them comparing (and hashing) equal.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let a = Ty::tuple_of(vec![Ty::of(Tag::Int)]);
+    let b = Ty::tuple_of(vec![Ty::of(Tag::Str)]);
+    let ab = a.clone().union(b.clone());
+    let ba = b.union(a);
+    assert_eq!(ab, ba);
+    let hash = |t: &Ty| {
+        let mut h = DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    };
+    assert_eq!(hash(&ab), hash(&ba));
+}
+
+#[test]
+fn negating_a_union_is_the_intersection_of_the_negations() {
+    // De Morgan, and the flat case stays exact.
+    let u = Ty::of(Tag::Int).union(Ty::of(Tag::Str));
+    let n = u.clone().negate();
+    assert!(n.is_disjoint(&u));
+    assert!(!n.contains_tag(Tag::Int) && !n.contains_tag(Tag::Str));
+    assert!(n.contains_tag(Tag::Nil));
+}
+
+#[test]
+fn term_equality_distinguishes_every_refinement_slot() {
+    // The compile-time half is the destructuring in `term_eq`/`hash_term` (a new slot
+    // fails to compile until it is listed); this is the behavioural half — each slot
+    // must actually *participate*, so a listed-but-unused field can't slip through
+    // either. Two types differing only in slot N must compare unequal.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let hash = |t: &Ty| {
+        let mut h = DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    };
+    let variants: Vec<(&str, Ty)> = vec![
+        ("tags", Ty::of(Tag::Int)),
+        (
+            "arrow",
+            Ty::arrow(Sig::new(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int))),
+        ),
+        (
+            "overload",
+            Ty::overload_of(vec![
+                Sig::new(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int)),
+                Sig::new(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool)),
+            ]),
+        ),
+        ("elem", Ty::vector_of(Ty::of(Tag::Int))),
+        ("map_kv", Ty::map_of(Ty::of(Tag::Keyword), Ty::of(Tag::Int))),
+        ("fields", rec(&[("a", Ty::of(Tag::Int), true)])),
+        ("tuple", Ty::tuple_of(vec![Ty::of(Tag::Int)])),
+        ("lit", Ty::keyword_lit(value::intern("a"))),
+        ("lit_int", Ty::int_lit(5)),
+        ("lit_bool", Ty::bool_lit(true)),
+        ("lit_str", Ty::str_lit("s")),
+    ];
+    for (i, (name_a, a)) in variants.iter().enumerate() {
+        for (name_b, b) in variants.iter().skip(i + 1) {
+            assert_ne!(a, b, "`{name_a}` and `{name_b}` must not compare equal");
+            assert_ne!(
+                hash(a),
+                hash(b),
+                "`{name_a}` and `{name_b}` must not hash the same"
+            );
+        }
+    }
 }

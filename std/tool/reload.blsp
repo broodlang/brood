@@ -100,7 +100,7 @@ behind a long-lived loop has changed since it started."
     (if (nil? key)
       (thunk)
       (let (prefix (symbol (first (string/split key "/")))
-            modules (get *package-modules-of* (name prefix))
+            modules (get *package-modules-of* (->string prefix))
             prev (%set-package-context prefix modules)
             restore (fn () (%set-package-context (first prev) (second prev))))
         (try

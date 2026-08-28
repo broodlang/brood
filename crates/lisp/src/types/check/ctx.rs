@@ -295,6 +295,12 @@ pub(super) struct Ctx {
     /// inferred). Populated by [`check_file`]'s scan of the un-expanded forms.
     /// Slice 1 trusts these without runtime enforcement; slice 2 (the strong
     /// arrow) makes that trust sound. See `docs/type-annotations.md`.
+    /// **Inferred** per-arm signatures for a same-file *multi-arm* function — the
+    /// inferred counterpart of [`declared_overload`](Ctx::declared_overload). A
+    /// multi-arm closure has no single `Sig`, so its callers' arguments went
+    /// unchecked; each arm has one, and a call no arity-relevant arm accepts is a
+    /// provable error. Populated by `check_file`'s Pass 2.8.
+    inferred_overload: HashMap<Symbol, Vec<Sig>>,
     declared: HashMap<Symbol, Sig>,
     /// `(sig x T)` declarations for **value** names (non-arrow types) — `x : int`.
     /// The gradual-assignment check reads these to verify a `(def x <expr>)`
@@ -658,6 +664,14 @@ impl Ctx {
     /// arity is never used to flag a variadic defn (see `variadic_globals`).
     pub(super) fn mark_variadic_global(&mut self, sym: Symbol) {
         self.variadic_globals.insert(sym);
+    }
+    /// The inferred per-arm signatures of a same-file multi-arm function, if any.
+    pub(super) fn inferred_overload(&self, sym: Symbol) -> Option<Vec<Sig>> {
+        self.inferred_overload.get(&sym).cloned()
+    }
+    /// Record a same-file multi-arm function's per-arm signatures (Pass 2.8).
+    pub(super) fn add_inferred_overload(&mut self, sym: Symbol, sigs: Vec<Sig>) {
+        self.inferred_overload.insert(sym, sigs);
     }
     /// Is `sym` a file-local definition whose value is a variadic `fn`?
     pub(super) fn is_variadic_global(&self, sym: Symbol) -> bool {

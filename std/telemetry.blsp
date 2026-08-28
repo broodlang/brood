@@ -67,7 +67,7 @@ LISTENER process."
       (io/puts (str "telemetry: event "
                  (pr-str event)
                  " "
-                 (name (first problem))
+                 (->string (first problem))
                  " missing key "
                  (pr-str (second problem)))
         :to *err*)))
@@ -189,7 +189,7 @@ handler logic in a process you own, off even the listener. Returns `id`."
 
 (defn- telemetry-spec-name
   (spec)
-  "The field name of a `(name type)` / bare-`name` schema spec."
+  "The field name of a `(->string type)` / bare-`name` schema spec."
   (if (pair? spec) (first spec) spec))
 (defn- telemetry-spec-type
   (spec)
@@ -237,8 +237,8 @@ runtime presence-check of a declared event.
         doc (telemetry-opt opts :doc)
         m-names (map telemetry-spec-name meas)
         md-names (map telemetry-spec-name meta)
-        m-kws (map (fn (n) (keyword (name n))) m-names)
-        md-kws (map (fn (n) (keyword (name n))) md-names)
+        m-kws (map (fn (n) (keyword (->string n))) m-names)
+        md-kws (map (fn (n) (keyword (->string n))) md-names)
         all-names (append m-names md-names)
         all-types (append (map telemetry-spec-type meas) (map telemetry-spec-type meta))
         ;; the emitter's measurement/metadata map bodies — `{:field field}` with the field

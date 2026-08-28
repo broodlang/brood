@@ -1329,9 +1329,11 @@ fn curated_equality_and_string_sigs() {
         .any(|w| w.contains("format") && w.contains("string")));
     // format returns a string.
     assert!(warnings("(string/length (string/format \"hi %s\" x))").is_empty());
-    // index-of/index-where/last-index-of return int — safe to add.
+    // index-of/index-where/string/last-index-of return int — safe to add.
+    // (`last-index-of` moved into the `string` module on 2026-08-27; the curated
+    // entry is keyed qualified, so the bare name is now correctly unbound.)
     assert!(warnings("(+ 1 (index-of coll x))").is_empty());
-    assert!(warnings("(+ 1 (last-index-of s needle))").is_empty());
+    assert!(warnings("(+ 1 (string/last-index-of s needle))").is_empty());
     // Correct uses stay silent.
     for ok in [
         "(= 1 2)",
@@ -3864,7 +3866,7 @@ fn overload_call_matching_no_arm_is_flagged() {
     let bad = file_warnings(&format!(r#"{decl} (def c (f "hello"))"#));
     assert!(
         bad.iter()
-            .any(|m| m.contains("f: no overload clause accepts")),
+            .any(|m| m.contains("f: no clause accepts these arguments")),
         "an arg matching no arm must warn: {bad:?}"
     );
     // An arg that matches *some* arm, and an unknown arg, must NOT warn.
@@ -4894,6 +4896,21 @@ fn a_sig_for_a_name_that_is_never_defined_is_reported() {
 }
 
 #[test]
+fn a_capitalised_unknown_type_name_stays_silent_inside_an_arrow_too() {
+    // The first cut reported `(Shape -> int)` as a *malformed arrow*: every part read
+    // as fine (the capitalised name being deliberately silent), so the walk fell
+    // through to the structural message and named the wrong thing. A part that does
+    // not parse now decides the whole expression — including when its verdict is
+    // silence.
+    let ws = file_warnings("(sig w (Shape -> int))\n(defn w (x) 1)\n(defn p () (w 42))");
+    assert!(!ws.iter().any(|m| m.contains("sig w:")), "{ws:?}");
+    let ws = file_warnings("(sig w ((vector Shape) -> int))\n(defn w (x) 1)");
+    assert!(!ws.iter().any(|m| m.contains("sig w:")), "{ws:?}");
+    let ws = file_warnings("(sig w ((record :s Shape) -> int))\n(defn w (x) 1)");
+    assert!(!ws.iter().any(|m| m.contains("sig w:")), "{ws:?}");
+}
+
+#[test]
 fn a_capitalised_unknown_type_name_stays_silent() {
     // An ability used as a type resolves by bare name (ADR-181/186), and a
     // single-file check only knows the abilities the file itself declares — so an
@@ -4914,6 +4931,7 @@ fn every_type_constructor_the_grammar_parses_is_known_to_the_validator() {
             "record" => "(record :a int)".to_string(),
             "tuple" => "(tuple int string)".to_string(),
             "or" | "and" => format!("({head} int string)"),
+            "not" => "(not nil)".to_string(),
             _ => format!("({head} int)"),
         };
         let form = reader::read_one(&mut interp.heap, &src).expect("parse");
@@ -5037,4 +5055,354 @@ fn every_special_form_is_covered_by_the_reach_gate() {
             "special form `{name}` has no reach-gate case in REACH_CASES"
         );
     }
+}
+
+// ---- `(not T)` — the complement, sayable at last ----
+
+#[test]
+fn not_type_in_a_sig_rejects_a_member_of_the_negated_set() {
+    let ws = file_warnings("(sig f ((not nil) -> int))\n(defn f (x) 0)\n(defn g () (f nil))");
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 1 expects")),
+        "{ws:?}"
+    );
+    // …and admits everything else.
+    let ws = file_warnings("(sig f ((not nil) -> int))\n(defn f (x) 0)\n(defn g () (f 5))");
+    assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
+}
+
+#[test]
+fn not_type_composes_with_and_and_or() {
+    // The idiom the lattice could always compute and the grammar could not say.
+    let ws = file_warnings(
+        "(sig f ((and number (not float)) -> int))\n(defn f (x) 0)\n(defn g () (f 1.5))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 1 expects")),
+        "{ws:?}"
+    );
+    let ws = file_warnings(
+        "(sig f ((and number (not float)) -> int))\n(defn f (x) 0)\n(defn g () (f 1))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
+}
+
+#[test]
+fn a_small_complement_renders_as_not_rather_than_a_tag_dump() {
+    // `expects string, got nil | bool | number | symbol | keyword | pair | vector | fn
+    // | macro | native | map | ref | pid | rope | socket | subprocess | table | bytes |
+    // set` was a real diagnostic — the else-branch of a `(string? x)` guard.
+    assert_eq!(Ty::of(Tag::Str).negate().to_string(), "(not string)");
+    assert_eq!(
+        Ty::of(Tag::Str)
+            .union(Ty::of(Tag::Nil))
+            .negate()
+            .to_string(),
+        "(not (nil | string))"
+    );
+    // An ordinary wide union is still a union — the rendering only fires for a
+    // genuinely small complement.
+    assert_eq!(
+        Ty::of(Tag::Int).union(Ty::of(Tag::Str)).to_string(),
+        "int | string"
+    );
+}
+
+// ---- arrow-typed parameters are enforced at the call site ----
+// A `sig`-declared higher-order parameter was annotated and then not checked:
+// `(sig g ((int -> int) -> int))` accepted `string/length` in silence.
+
+#[test]
+fn a_callback_that_cannot_accept_what_it_is_handed_is_flagged() {
+    let ws = file_warnings(
+        "(sig g ((int -> int) -> int))\n(defn g (f) (f 1))\n(defn c () (g string/length))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains(
+            "g: argument 1 is a callback handed int at position 1, but string/length takes string there"
+        )),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_callback_whose_parameter_merely_widens_is_silent() {
+    // `math/abs` takes `number`, which overlaps `int` — not provably wrong, so
+    // silent. Disjointness, never subtyping: the no-false-positive rule.
+    let ws = file_warnings(
+        "(sig g ((int -> int) -> int))\n(defn g (f) (f 1))\n(defn c () (g math/abs))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("callback handed")), "{ws:?}");
+}
+
+#[test]
+fn a_callback_result_mismatch_is_never_flagged() {
+    // Results are over-approximated by inference, so comparing them would
+    // false-positive at every call site — the check is arguments-only.
+    let ws = file_warnings(
+        "(sig g ((int -> string) -> int))\n(defn g (f) 0)\n(defn h (n) (+ n 1))\n(defn c () (g h))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("callback handed")), "{ws:?}");
+}
+
+#[test]
+fn a_same_file_callback_is_checked_from_its_inferred_signature() {
+    // An inferred parameter demand is a *superset* of what the function really
+    // accepts, so disjoint-from-the-superset is disjoint from the truth.
+    let ws = file_warnings(
+        "(sig g ((int -> int) -> int))\n(defn g (f) (f 1))\n\
+         (defn cb (s) (string/length s))\n(defn c () (g cb))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("but cb takes string there")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_permissive_higher_order_stdlib_callback_stays_silent() {
+    // `map`'s curated arrow is `(any) -> any`, which is disjoint from nothing.
+    let ws = file_warnings("(defn c () (map string/length [1 2 3]))");
+    assert!(!ws.iter().any(|w| w.contains("callback handed")), "{ws:?}");
+}
+
+// ---- parameter DOMAINS: a branch's demand, credited within its guard ----
+// The old rule credited only unconditional demands, so the ordinary shape of Brood
+// code — a body that branches on what its argument is — constrained nothing at all.
+
+#[test]
+fn the_domain_walk_survives_a_pathologically_deep_body() {
+    // The sibling of `checker_survives_pathologically_deep_forms`, for the passes that
+    // walk a function's BODY: a body this deep can only arrive by construction (the
+    // reader caps nesting at 256), which is exactly what a macro expansion can produce.
+    // The property under test is "returns instead of crashing the host".
+    //
+    // It found one on its first run, and not in the pass it was written for: the
+    // non-tail-recursion lint's `walk` recursed unguarded, so a deep body inside a
+    // `(def n (fn …))` aborted the process — the 2026-07-23 host-panic pass hardened
+    // that lint's entry point and not the recursion that descends the body.
+    let interp = crate::Interp::new();
+    let mut heap =
+        crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    heap.set_global(crate::core::value::EnvId::GLOBAL);
+    let identity = crate::core::value::intern("identity");
+    let x = crate::core::value::intern("x");
+    // (identity (identity … x))
+    let mut body = Value::Sym(x);
+    for _ in 0..20_000 {
+        let tail = heap.alloc_pair(body, Value::Nil);
+        body = heap.alloc_pair(Value::Sym(identity), tail);
+    }
+    // (def deep (fn (x) <body>)) — the shape Pass 2.8 infers a parameter domain from.
+    let params = heap.alloc_pair(Value::Sym(x), Value::Nil);
+    let fn_tail = heap.alloc_pair(body, Value::Nil);
+    let fn_parts = heap.alloc_pair(params, fn_tail);
+    let fn_form = heap.alloc_pair(Value::Sym(crate::core::value::intern("fn")), fn_parts);
+    let def_tail = heap.alloc_pair(fn_form, Value::Nil);
+    let def_parts = heap.alloc_pair(Value::Sym(crate::core::value::intern("deep")), def_tail);
+    let def_form = heap.alloc_pair(Value::Sym(crate::core::value::intern("def")), def_parts);
+    let _ = check_file(&mut heap, &[def_form]);
+}
+
+#[test]
+fn a_branch_union_domain_rejects_what_no_branch_admits() {
+    let ws = file_warnings(
+        "(defn f (x) (if (string? x) (string/length x) (+ x 1)))\n(defn c () (f :kw))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 1 expects")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_branch_union_domain_admits_what_either_branch_admits() {
+    // Both members of the union must stay silent — this is the false-positive class
+    // the unconditional-demand rule was protecting against.
+    for arg in ["\"s\"", "5"] {
+        let ws = file_warnings(&format!(
+            "(defn f (x) (if (string? x) (string/length x) (+ x 1)))\n(defn c () (f {arg}))"
+        ));
+        assert!(
+            !ws.iter().any(|w| w.contains("f: argument 1")),
+            "arg {arg}: {ws:?}"
+        );
+    }
+}
+
+#[test]
+fn a_guard_that_proves_nothing_leaves_the_branch_unconstrained() {
+    // `(if b …)` on an unrelated variable: whichever branch runs, one of the two
+    // demands must hold — but neither alone may constrain.
+    let ws = file_warnings(
+        "(defn f (b x) (if b (string/length x) (+ x 1)))\n(defn c () (f true \"s\"))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
+    // …and a value no branch admits is still caught.
+    let ws =
+        file_warnings("(defn f (b x) (if b (string/length x) (+ x 1)))\n(defn c () (f true :kw))");
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 2 expects")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_when_body_does_not_constrain_what_the_test_does_not_reach() {
+    // `(when test body)` runs `body` only sometimes, so an argument the body would
+    // reject is not provably wrong — unless the test itself pins the argument.
+    let ws = file_warnings("(defn f (b x) (when b (string/length x)))\n(defn c () (f true 5))");
+    assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
+}
+
+#[test]
+fn a_match_domain_comes_from_its_clause_patterns() {
+    // Every clause's pattern is a guard; the no-clause-matched branch raises, so its
+    // domain is `never` and the clauses' patterns add up to the function's domain.
+    let ws = file_warnings("(defn f (x) (match x ((:ok v) v) ((:error e) e)))\n(defn c () (f 5))");
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 1 expects")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_destructuring_head_constrains_the_argument() {
+    let ws = file_warnings("(defn f ([a b]) (+ a b))\n(defn c () (f 5))");
+    assert!(
+        ws.iter().any(|w| w.contains("f: argument 1 expects")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn a_clause_guard_constrains_the_argument() {
+    let ws = file_warnings("(defn f (x) :when (string? x) (string/length x))\n(defn c () (f 5))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("f: argument 1 expects string")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn an_unexpanded_macro_body_does_not_leak_a_demand() {
+    // A prelude closure keeps its body *as written*, so the walk meets `(cond …)`,
+    // `(when …)` and user macros verbatim. Reading those as ordinary calls — every
+    // operand evaluated — made `type-matches?` demand a `seqable` first argument,
+    // because `(first t)` sat in a clause body. The whole-file gate caught it; these
+    // pin the two rules that fixed it.
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defn tm (t v) (cond (nil? t) (nil? v) (pair? t) (first t) else true))")
+        .expect("def");
+    let sig = super::sigs::sig_of(&interp.heap, crate::core::value::intern("tm"))
+        .expect("a sig is inferred");
+    assert_eq!(
+        sig.params.first().map(Ty::to_string),
+        Some("any".to_string()),
+        "a `cond` clause body must not constrain unconditionally"
+    );
+}
+
+// ---- multi-arm functions: every clause is a signature ----
+// A multi-arm closure has no single `Sig`, so its callers' arguments went entirely
+// unchecked. Each arm has one, and a call no arity-relevant arm accepts is a
+// provable error — the same rule ADR-116's declared overloads already used.
+
+#[test]
+fn a_call_no_clause_of_a_multi_arity_function_accepts_is_flagged() {
+    let ws = file_warnings("(defn f ((x) (string/length x)) ((x y) (+ x y)))\n(defn c () (f 5))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("f: no clause accepts these arguments")),
+        "{ws:?}"
+    );
+    // The arity that fits a different clause stays silent.
+    let ws = file_warnings("(defn f ((x) (string/length x)) ((x y) (+ x y)))\n(defn c () (f 1 2))");
+    assert!(
+        !ws.iter().any(|w| w.contains("no clause accepts")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn guarded_clauses_give_a_function_its_domain() {
+    // `:when` guards (ADR-226) lower to a single variadic `fn` over `match*`, so the
+    // clauses only exist in the un-expanded form — which is where this reads them.
+    let ws = file_warnings(
+        "(defn g ((x) :when (string? x) (string/length x)) ((x) :when (int? x) (+ x 1)))\n\
+         (defn c () (g :kw))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("g: no clause accepts these arguments")
+                && w.contains("(string), (int)")),
+        "{ws:?}"
+    );
+    // Both admitted types stay silent.
+    for arg in ["\"s\"", "5"] {
+        let ws = file_warnings(&format!(
+            "(defn g ((x) :when (string? x) (string/length x)) ((x) :when (int? x) (+ x 1)))\n\
+             (defn c () (g {arg}))"
+        ));
+        assert!(
+            !ws.iter().any(|w| w.contains("no clause accepts")),
+            "arg {arg}: {ws:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unguarded_final_clause_keeps_a_multi_clause_call_silent() {
+    // A clause that admits anything is the catch-all every dispatch-style function
+    // ends with; its domain is `any`, so no call can be ruled out.
+    let ws = file_warnings(
+        "(defn g ((x) :when (string? x) (string/length x)) ((x) x))\n(defn c () (g :kw))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("no clause accepts")),
+        "{ws:?}"
+    );
+}
+
+// ---- a union of shapes is checkable at a call site (ADR-262) ----
+
+#[test]
+fn a_union_of_tuple_shapes_rejects_a_member_of_neither() {
+    let ws = file_warnings(
+        "(sig f ((or (tuple int) (tuple string)) -> any))\n(defn f (t) t)\n(defn c () (f [true]))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("expects (tuple int) | (tuple string)")),
+        "{ws:?}"
+    );
+    // …and admits either alternative.
+    for arg in ["[1]", "[\"s\"]"] {
+        let ws = file_warnings(&format!(
+            "(sig f ((or (tuple int) (tuple string)) -> any))\n(defn f (t) t)\n(defn c () (f {arg}))"
+        ));
+        assert!(
+            !ws.iter().any(|w| w.contains("f: argument")),
+            "{arg}: {ws:?}"
+        );
+    }
+}
+
+#[test]
+fn a_union_of_record_shapes_rejects_a_map_matching_neither() {
+    let ws = file_warnings(
+        "(sig f ((or (record :a int) (record :b int)) -> any))\n(defn f (m) m)\n\
+         (defn c () (f {:zzz 1}))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("expects {a: int} | {b: int}")),
+        "{ws:?}"
+    );
+    let ws = file_warnings(
+        "(sig f ((or (record :a int) (record :b int)) -> any))\n(defn f (m) m)\n\
+         (defn c () (f {:a 1}))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("f: argument")), "{ws:?}");
 }
