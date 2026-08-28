@@ -12,15 +12,24 @@ if the question had never been asked. Same rule as `decisions.md` and `known-iss
 
 ## Math and Numbers
 
-- [ ] **is `compare` Math and Number or is it an ability? how does that compare with `==`?**
+- [x] **is `compare` Math and Number or is it an ability? how does that compare with `==`?**
       Checked: `compare` is a **kernel builtin** (`builtins/mod.rs:571`), a 3-way
       `-1/0/1` structural comparison over any two values. There is **no `==` in Brood** —
       `=` is the only equality, and `%ord-compare` is the record-aware wrapper that
       `sort`/`sort-by` use (a record defers to its `Ord` `compare-to`). So the surface is
       three things wearing one idea: `=`, `compare`, `compare-to`. Worth a doc section at
       minimum; possibly `compare` belongs with `Ord` rather than under "math".
-- [ ] **where is `==`, and what is `compare` then? add an example** — see above; needs a
-      `docs/language.md` entry once the naming above is settled.
+- [x] **where is `==`, and what is `compare` then? add an example** — **`==` now exists**,
+      and the reason it should is stronger than familiarity. Brood already had *two*
+      equalities and they disagreed: `(= 1 1.0)` is false (strict, deliberate, tested in
+      three places) while `(<= 1 1.0)`, `(>= 1 1.0)` and `(compare 1 1.0)` all say equal.
+      Only the strict one had a name — so `a <= b` and `b <= a` could both hold while
+      `(= a b)` was false, and **antisymmetry was quietly untrue**. `==` names what the order
+      operators already believed; it is not a third notion.
+
+      Defined over `compare`, not beside it, so there stays exactly one comparison engine.
+      `not==` is its negation. Documented at the place `language.md` already explained the
+      strict rule, and the antisymmetry law itself is now a test.
 - [x] **`dev/inc` can be under math** — **already true, no change needed.** `inc`/`dec` are
       bare in `std/prelude/core.blsp` and catalogued `:math`, so the reference already lists
       them under "Math and numbers". `std/dev.blsp` has no `inc` at all — it is 19 runtime

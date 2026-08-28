@@ -1509,7 +1509,7 @@ fn resolve_def(
     match items.get(1).map(|v| v.unpack()) {
         Some(ValueRef::Sym(name)) => {
             // Register the (bare) name as known before resolving the value, so a
-            // self-reference in the body — e.g. the recursion in a `defprocess`-
+            // self-reference in the body — e.g. the recursion in a `defserver`-
             // generated receive loop — qualifies to the same `ns/name` the head
             // gets. `scan_def_names` misses macro-defined names (it scans the raw,
             // unexpanded form), so without this a `(defn counter … (counter …))`
@@ -2908,7 +2908,7 @@ mod resolve_tests {
 
     #[test]
     fn imported_macro_expands_in_the_compile_walk() {
-        // The `defprocess` checker bug (ADR-065): a `(:use mod)`-imported macro must
+        // The `defserver` checker bug (ADR-065): a `(:use mod)`-imported macro must
         // expand during macroexpand/compile, not only a directly-bound one. Without
         // this, the compile pass (and the advisory checker) walks the macro's raw
         // body and flags its clause keywords / pattern vars as unbound.

@@ -2458,6 +2458,10 @@ The bar a candidate has to clear, in order:
 
 ### Union dispatch positions — and why the type system is the easy half
 
+> **Designed 2026-08-28: [`docs/union-dispatch-design.md`](docs/union-dispatch-design.md)** —
+> the specificity rule, the four questions checked empirically, and the build order. The
+> summary below is the case for doing it; the design doc is the how.
+
 The question that prompted this: can a dispatch position accept a *union*
 (`[usd (or :int :float)]`), and how does the checker derive the result?
 

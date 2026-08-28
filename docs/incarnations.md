@@ -40,20 +40,20 @@ session sees them on first connect.
 ### 2026-05-28 — Claude Opus 4.7 — concurrent Mandelbrot demo
 
 **Goal:** a "VERY complicated" demo program exercising math, recursion,
-immutable maps, transducers, processes, `defprocess`/`hatch`, selective
+immutable maps, transducers, processes, `defserver`/`hatch`, selective
 receive, pattern matching, gensym macros, and timing.
 **Blockers:** multi-thread scheduler race under default `-j 0` (fan-out
 ~20+ workers reliably crashes with bogus "unbound symbol" errors and a
 Rust panic in `eval/mod.rs`); type-checker noise around
-`(require 'hatch)` (five "unbound symbol" warnings on `defprocess` /
+`(require 'hatch)` (five "unbound symbol" warnings on `defserver` /
 `cast` / `!` / `gen-call` look like errors); `nest format` collapses
 multi-line `let` / `cond` / `defmacro` bodies onto 100+ char lines.
-**Surprises:** `defprocess` lives in `hatch` (not the prelude); `apply`
+**Surprises:** `defserver` lives in `hatch` (not the prelude); `apply`
 exists but isn't in the quick-ref; ANSI escapes are first-class
 (`examples/life.blsp`); float printing has no precision control.
 **What I'd tell next-me:** read `std/prelude.blsp` once end-to-end before
 starting a demo (the pocket reference is incomplete on `apply`, `now`,
-`gensym`, `for`, `defprocess`, `hatch`, `!`, `gen-call`, `sleep`,
+`gensym`, `for`, `defserver`, `hatch`, `!`, `gen-call`, `sleep`,
 `pr-str`); use `-j 1` for fan-out demos until the scheduler race is
 fixed; ignore type-checker warnings on hatch macros for now; pattern
 destructure failures surface as Rust panics, not Brood errors — wrap in

@@ -33,7 +33,7 @@ Brood code, fetch these three resources in order:
 - `lookup` — `:arglist` + `:doc` + `:source-location` for a name. No
   quote: `{:name "map"}`.
 - `macroexpand` — see what a macro lowers to. Useful for `when-let`,
-  `cond`, `match`, and anything from `hatch` (`defprocess`, `cast`, `!`,
+  `cond`, `match`, and anything from `hatch` (`defserver`, `cast`, `!`,
   `gen-call`).
 - `format` — reformat source idempotently.
 - `load` — load a `.blsp` file into the live image.

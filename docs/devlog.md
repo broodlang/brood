@@ -5063,3 +5063,144 @@ silence. Callable is `fn | native | keyword`, because a keyword is a function of
 while maps, vectors and strings are not (verified, not assumed). The oracle gained a probe
 whose argument is a map, which is the only one under which a keyword succeeds and therefore
 the only one that catches a domain admitting merely `fn | native`.
+
+**`gen/defprocess` → `gen/defserver`.** It never defined a *process* — `spawn`/`send`/
+`receive` are core and need no import for that. It defines a **gen server**: its clauses are
+`cast`/`call`/`query`/`info` and its output speaks the gen envelope (`[:$call from ref …]`).
+The old name promised the core thing and delivered the framework one, which is exactly why it
+read as a `def*` that had escaped the language core. It now sits with `start`/`start-link`/
+`start-named`, which start the same thing. `telemetry/defevent` and `test/deftest` keep their
+names: both define what they say they define.
+
+**`==` and `not==`.** The language already had two equalities and only one had a name:
+`(= 1 1.0)` is false — strict, deliberate, three tests and two doc mentions — while
+`(<= 1 1.0)`, `(>= 1 1.0)` and `(compare 1 1.0)` all say equal. So `a <= b` and `b <= a`
+could both hold while `(= a b)` was false: **antisymmetry was quietly untrue**, and the
+numeric notion was reachable only as `(= 0 (compare a b))`. `==` names what the order
+operators already believed rather than adding a third notion, and is defined *over* `compare`
+so there stays exactly one comparison engine — change `compare` and `<`/`<=`/`==` move
+together. The law it restores is now a test, not just a docstring.
+
+Checked against the roadmap's own bar for a language addition, which it clears on all three
+counts: it buys a capability rather than a spelling (there was no way to say this), it costs
+no English word, and it is a prelude function rather than an evaluator form.
+
+**The four remaining type-system worries, closed.** (1) An **arrow parameter was inert**
+(ADR-273): `(sig apply-it ((int -> string) -> any))` bought nothing at the only site that
+could use it — `(f "not-an-int")` went unchecked and `(f 1)` had no type — because the call
+path consulted only global signature sources. A variable whose own type is an arrow now
+describes the call it heads, consulted ahead of every global since a local shadows one.
+(2) The oracle **could not reach** `map<K, V>` or arrows at all: its corpus is closed
+expressions, and neither shape can arise without an annotation. A new facet types a body
+under a parameter typed through the annotation parser and checks the result against the
+runtime — it catches ADR-269's `assoc` defect automatically, the one that previously needed
+a hand-written test. (3) What a declaration catches was **pinned rather than changed**: a
+closed record catches a wrong name, a wrong type, a missing field and an extra one, while a
+union that *might* be right is deliberately silent — I had misjudged this myself, so it is
+now a test rather than a belief. (4) `fn | native` renders as **`fn`** (ADR-274), which is
+all the language has — `type-of` says `:fn` for both — so a warning no longer names a kind
+nobody can write, and a callback parameter finally has an annotation: `(or fn keyword)`.
+
+**The comparison review — and `==` withdrawn (KI-75).** Asked to look at `=`/`<=`/`compare`
+across types in detail. The design turned out defensible and the *implementation* had two
+holes, both silent-wrong:
+
+- `(compare nan x)` was 0 for every `x` — NaN equal to everything — so one NaN turned `sort`
+  into a no-op returning its input unsorted, with no error. The doc comments recorded this as
+  deliberate ("a `NaN` float is `Equal`"), which is exactly why it survived: consistent, and
+  consistently wrong.
+- `(Int, Float)` used a lossy `as f64` cast while BigInt/Decimal/Ratio-vs-Float all went
+  through an exact base-10 path *with a comment explaining why the lossy one was wrong*. So
+  past 2^53 two different integers compared equal.
+
+Fixed: NaN sorts last (Rust's `total_cmp`, Java's `Double.compare`), and `Int`/`Float` joins
+the exact path. `<`/`<=`/`>` stay IEEE on purpose — `compare` promises a total order because
+`sort` needs one; `<` promises IEEE because arithmetic needs that. `=` stays strict.
+
+**The `==` added earlier the same day was withdrawn on this evidence.** Built over `compare`,
+it inherited both bugs — claiming `(== nan nan)` is true and that 2^53+1 equals 2^53. The gap
+it was filling was real (the order operators believed a numeric equality that had no name), but
+I validated the gap without validating the foundation. Reverted; the foundation is fixed now,
+so it can be reconsidered on its merits rather than on a broken `compare`.
+
+**Also answered: multi-arg ability dispatch already exists.** It is `defmulti`/`defmethod`, not
+`defability` — a vector of ids one per argument, record names mixed with built-in kind keywords,
+`:default` fallback, and `:commutative`/`:antisymmetric` deriving the mirror method. `defability`
+is single-dispatch by design: an ability is one type's interface, a multimethod is a relation
+between types. Unions in a dispatch position are the one real gap, now a roadmap candidate.
+
+## 2026-08-28 — `std/tempo`: an unverified module, and the three defects its own tests could not see
+
+Integrated **`std/tempo.blsp`** — a Brood adaptation of [Tempo](https://github.com/elixir-tempo/tempo)
+(Kip Cole, Apache-2.0). Full notes in [tempo.md](tempo.md); the short version is that it
+takes one idea from Tempo and drops the rest. The idea: **resolution is part of the value,
+and every value is the half-open span it denotes.** `2026-06` *is* `[2026-06-01, 2026-07-01)`,
+so a year, a month, a day and a minute are the same type at different resolutions and one set
+of operations covers all of them. That deletes the `end-of-day` helper, the last-day-of-month
+special case, and the class of off-by-one boundary bug that comes with instants.
+
+On top of that: Allen's thirteen relations from one `relation` function, an interval-set
+algebra closed over `union`/`intersection`/`difference`/`gaps`, unit-implied enumeration
+(`parts` of June are its days — no granularity argument to pass, none to get wrong), and an
+**open** `Spanning` ability so a package teaches the module about its own type with one `impl`.
+`datetime/date` and `datetime/datetime` already impl it; `datetime/time-of-day` deliberately
+does not, because a wall-clock time has no place on the timeline until a date anchors it.
+
+Layered on `std/datetime` for exactly three ideas — the Hinnant civil↔days pair, `days-in-month`,
+`utc-now`. That pair is the only calendar arithmetic in the system and there should be one copy.
+
+**The interesting part was verification.** The module arrived written but *unverified* — its
+author had no toolchain, and said so, with a list of the four places they expected it to break
+first. It built clean, passed `nest check` at zero warnings, and passed all 79 of its own tests
+unchanged. None of the four predicted failures occurred.
+
+Three real defects did, and an independent probe of ~35 edge cases is what found them — not the
+suite, which was written by the same hand as the module and agreed with it:
+
+1. **`->iso` and `parse` did not round-trip on negative years.** `->iso` emits `-0044`; `parse`
+   split on `-` and read the sign as an empty first field. The module could not read its own
+   output. The docstring warned that a negative year is not interchange-safe — a true statement
+   that reads as covering this, and does not.
+2. **`parse` accepted a signed field.** `tp-digits?` was `(int? (string/->number s))`, and
+   `string/->number` reads a sign, so `"2026-+6"` parsed as June. A predicate named for digits
+   that tested for something else.
+3. **`truncate` silently no-op'd on a non-unit.** `(truncate t :fortnight)` ranks `-1`, which
+   fell into the "already coarse enough" branch and returned the value unchanged. A typo'd
+   keyword read as "no change needed".
+
+All three are the same shape: **a wrong answer that does not look wrong.** None throws, none is
+visible at the call site, and none is reachable from an example the author would think to write —
+which is the argument for probing a contributed module adversarially rather than re-running the
+tests that shipped with it and calling it verified. Fixed, with regression tests; the suite is
+83 tests, and the surviving behaviour (pre-epoch spans, month shift across year zero, ±100-month
+shifts, leap-year day shifts, fraction truncation, the empty-set algebra) is now pinned too.
+
+Left alone: `datetime`'s `Temporal` ability is `:sealed [datetime date time-of-day]`, so `tempo`
+ships a plain `->iso` rather than joining it. **The reason recorded in the incoming notes was
+wrong, and I repeated it before checking** — "`tempo` cannot join a sealed ability from outside;
+`nest check` would flag an impl for a non-member". It does not. `:sealed` is an *exhaustiveness
+checklist*: the checker demands every listed id implement every required op, and that is all it
+does. A non-member impl from any module checks clean and runs — including from inside
+`std/tempo.blsp`, where the body's `->iso` resolves to tempo's own function rather than back to
+the op, so there is no recursion either. One `->iso` op can cover all four types today with
+`std/datetime` untouched; widening the sealed list buys only the *demand* that the impl exist,
+and that is what would reverse the dependency and change a `datetime` test. Left for its own
+commit, but the cost is a line, not a refactor.
+
+**Cashing in the signatures, and a silent bug in `nest doc`.** Declaring 306 signatures is
+only worth it if they reach a reader, and the Markdown `nest doc` emits rendered the
+arglist and the docstring but not the *type* — the structured doc-model record already
+carried it, the human-readable heading did not. It does now, for a declared `(sig …)` and
+for the curated signature a primitive carries alike, omitted where nothing types the name.
+
+Validating that turned up a worse problem next door: **`nest doc <module>` documented
+nothing for most modules, silently.** `document-module` attributed definitions by a
+`(global-names)` delta across its own `require`, so a module the tool had ALREADY loaded —
+transitively, through its own bootstrap — added no names and rendered a header with no
+entries. `math`, `json` and `text` were all empty; `uuid` worked only because nothing else
+pulls uuid in. `document-file` had already hit this and fixed it by attributing by
+namespace, with its docstring naming the exact failure mode; `document-module` never got
+the same treatment. It does now, delta kept as the fallback for a bare-rooted module.
+`math` documents 37 entries, `datetime` 51, `seq` 39 — and `uuid` drops from 11 to **6**,
+which is a correction: the delta had been crediting it with names from the modules its own
+`require` pulled in.

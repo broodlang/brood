@@ -430,6 +430,60 @@ mod tests {
             .collect()
     }
 
+    /// Every `Str` token in `src`, as `(text, is_documentation)` in source order.
+    fn strings(src: &str) -> Vec<(String, bool)> {
+        let lines: Vec<&str> = src.lines().collect();
+        tokens(src)
+            .into_iter()
+            .filter(|t| t.3 == T_STRING)
+            .map(|(line, col, len, _, mods)| {
+                let text = &lines[line as usize];
+                let start = col as usize;
+                (
+                    text[start..start + len as usize].to_string(),
+                    mods & M_DOCUMENTATION != 0,
+                )
+            })
+            .collect()
+    }
+
+    /// A docstring and a string value are the same token to a lexer; only position
+    /// separates them (ADR-265, `builtins::DOC_FORMS`). The parse tree is what makes
+    /// the distinction exact here — a regex grammar can only approximate it.
+    #[test]
+    fn a_docstring_carries_the_documentation_modifier_and_a_value_does_not() {
+        // The string after the parameter list documents; the one after it is the body.
+        assert_eq!(
+            strings("(defn greeting ()\n  \"Doc.\"\n  \"hello\")"),
+            vec![("\"Doc.\"".into(), true), ("\"hello\"".into(), false)]
+        );
+        // A function whose body is a LONE string returns it — that is a value.
+        assert_eq!(
+            strings("(defn greeting () \"hello\")"),
+            vec![("\"hello\"".into(), false)]
+        );
+        // `defmodule` has no body, so its docstring may be the last form.
+        assert_eq!(
+            strings("(defmodule m \"Doc.\")"),
+            vec![("\"Doc.\"".into(), true)]
+        );
+        // A multi-arity `defn` puts the docstring before the arms.
+        assert_eq!(
+            strings("(defn f \"Doc.\" ((x) x))"),
+            vec![("\"Doc.\"".into(), true)]
+        );
+        // `def`/`def-` take no docstring at all — that third form is the VALUE.
+        assert_eq!(
+            strings("(def- pattern \"[a-z]\")"),
+            vec![("\"[a-z]\"".into(), false)]
+        );
+        // A string deeper in the body is a value wherever it sits.
+        assert_eq!(
+            strings("(defn f () (str \"a\"))"),
+            vec![("\"a\"".into(), false)]
+        );
+    }
+
     #[test]
     fn range_returns_only_the_tokens_it_covers() {
         let src = "(defn f (x) x)\n(defn g (y) y)";

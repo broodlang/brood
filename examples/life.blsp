@@ -29,7 +29,7 @@ the world is unbounded); a `gen` process owns it, advanced by `cast` and read by
   "The w×h window of `board` as text."
   (apply str (for (y (range h)) (str (render-row board y w) "\n"))))
 
-(defprocess life-server
+(defserver life-server
   (board)
   "Owns the board: a :step cast advances it, a :board call reads it back. Driving
 the animation through these is the demo of process calls."

@@ -1,0 +1,146 @@
+;; The comparison contract — `=`, `compare`, and the order operators, and specifically
+;; where they deliberately DISAGREE. Written 2026-08-28 after a review found two live bugs
+;; here (KI-75), both of which were silent wrong answers rather than errors.
+;;
+;; Brood has three comparison surfaces and they answer three different questions:
+;;
+;;   `=`             STRUCTURAL, strict. A value equals only its own type, so `(= 1 1.0)`
+;;                   is false. Deliberate — see docs/language.md and docs/spec.md.
+;;   `<` `<=` `>` `>=`  IEEE for floats: every comparison against NaN is false. They DO
+;;                   coerce across the numeric tower, so `(< 1 1.5)` works.
+;;   `compare`       A TOTAL ORDER, because `sort` needs one. It coerces across the tower
+;;                   like the order operators, but unlike them it must place NaN
+;;                   somewhere — so NaN sorts LAST and is equal only to itself.
+;;
+;; `compare` disagreeing with `<` on NaN is intentional and is the same choice Rust makes
+;; (`total_cmp` vs `partial_cmp`) and Java (`Double.compare`). A sort key and an arithmetic
+;; predicate are not the same thing. What is NOT acceptable is what these tests were written
+;; to prevent: `compare` reporting values as equal when they are not.
+(defmodule comparison-test
+  ;; `nan`/`inf` are bare — no `(:use math)` needed, and adding one is an unused-import
+  ;; warning, which the zero-warning gate turns into a CI failure.
+  (:use test))
+
+(describe "= is strict: a value equals only its own type"
+  (test "across the numeric tower, = never coerces"
+    (is (not (= 1 1.0)))
+    (is (not (= 1 1M)))
+    (is (not (= 1.0 1M)))
+    (is (not (= 2.0 2))))
+  (test "= is still structural within a type"
+    (is (= 1 1))
+    (is (= [1 2] [1 2]))
+    (is (= {:a 1} {:a 1})))
+  (test "= on NaN is false, including against itself (IEEE)"
+    (is (not (= nan nan)))))
+
+(describe "compare coerces across the numeric tower"
+  (test "numerically equal values across types compare equal"
+    (assert= (compare 1 1.0) 0)
+    (assert= (compare 1 1M) 0)
+    (assert= (compare 1.0 1M) 0))
+  (test "and order correctly when they differ"
+    (assert= (compare 1 1.5) -1)
+    (assert= (compare 1.5 1) 1)))
+
+;; ---- KI-75, defect 1: precision -------------------------------------------------
+;; The `Int` vs `Float` arm used a lossy `as f64` cast while every other cross-type arm
+;; (BigInt, Decimal, Ratio vs Float) went through an exact base-10 path. So past 2^53 two
+;; DIFFERENT integers compared equal — `compare` said 0, `=` said false, `>` said false.
+(describe "compare is EXACT across int/float, past f64's 53-bit mantissa"
+  (test "2^53+1 is greater than 2^53.0, not equal to it"
+    ;; 2^53 = 9007199254740992 is the last integer f64 represents exactly
+    (assert= (compare 9007199254740993 9007199254740992.0) 1)
+    (assert= (compare 9007199254740992 9007199254740992.0) 0)
+    (assert= (compare 9007199254740991 9007199254740992.0) -1))
+  (test "and the reverse direction agrees"
+    (assert= (compare 9007199254740992.0 9007199254740993) -1)
+    (assert= (compare 9007199254740992.0 9007199254740991) 1))
+  (test "compare and = now tell a consistent story about those two values"
+    ;; they are different numbers, and every surface should say so
+    (is (not (= 9007199254740993 9007199254740992.0)))
+    (is (not (%eq 0 (compare 9007199254740993 9007199254740992.0)))))
+  (test "bignums past f64 range still order by magnitude"
+    ;; 10^40-ish squared is far beyond 1e40, and far beyond f64::MAX beyond that
+    (assert= (compare (* 99999999999999999999 99999999999999999999) 1.0) 1)
+    (assert= (compare 1.0 (* 99999999999999999999 99999999999999999999)) -1)))
+
+;; ---- KI-75, defect 2: NaN --------------------------------------------------------
+;; `compare` returned 0 for NaN against ANY value — "equal to everything". Because `sort`
+;; is built on `compare`, a single NaN silently turned it into a no-op: the list came back
+;; in input order with no error. That is the worst shape a bug can take.
+(describe "compare places NaN in a total order (it sorts last)"
+  (test "NaN is greater than every real number"
+    (assert= (compare nan 1) 1)
+    (assert= (compare nan 1.0) 1)
+    (assert= (compare nan -1000000) 1))
+  (test "and every real number is less than NaN"
+    (assert= (compare 1 nan) -1)
+    (assert= (compare 1.0 nan) -1))
+  (test "NaN is equal only to itself, so a sort stays stable"
+    (assert= (compare nan nan) 0))
+  (test "NaN outranks the infinities too"
+    (assert= (compare nan inf) 1)
+    (assert= (compare inf nan) -1)
+    (assert= (compare nan -inf) 1)))
+
+(describe "sort is total again — the bug KI-75 actually caused"
+  ;; Compared via `pr-str`, not `assert=`. A result containing NaN is never `=` to itself,
+  ;; because `(= nan nan)` is false — so `assert=` fails on two lists that print
+  ;; identically. That is the contract two describes above, biting the test that checks it.
+  (test "a NaN no longer defeats the sort"
+    ;; this returned its input UNSORTED — (3.0 nan 1.0 2.0) — with no error
+    (assert= (pr-str (sort [3.0 nan 1.0 2.0])) (pr-str (list 1.0 2.0 3.0 nan))))
+  (test "NaN sorts to the end wherever it starts"
+    (assert= (pr-str (sort [nan 2.0 1.0])) (pr-str (list 1.0 2.0 nan)))
+    (assert= (pr-str (sort [2.0 1.0 nan])) (pr-str (list 1.0 2.0 nan))))
+  (test "several NaNs are all placed, and the reals stay ordered"
+    (assert= (count (sort [nan 3.0 nan 1.0])) 4)
+    (assert= (first (sort [nan 3.0 nan 1.0])) 1.0))
+  (test "ordinary sorts are untouched"
+    (assert= (sort [3 1 2]) (list 1 2 3))
+    (assert= (sort [3.0 1.0 2.0]) (list 1.0 2.0 3.0))
+    (assert= (sort ["b" "a"]) (list "a" "b"))))
+
+;; ---- the deliberate disagreement -------------------------------------------------
+(describe "the order operators stay IEEE — compare is the one that totalises"
+  (test "every ordering comparison against NaN is false"
+    (is (not (< nan 1)))
+    (is (not (> nan 1)))
+    (is (not (<= nan 1)))
+    (is (not (>= nan 1)))
+    (is (not (<= nan nan)))
+    (is (not (>= nan nan))))
+  (test "so `<` and `compare` deliberately disagree on NaN, and that is the contract"
+    ;; compare: NaN is greatest (a sort needs somewhere to put it)
+    (assert= (compare nan 1) 1)
+    ;; `>`: false, because IEEE says every NaN comparison is false
+    (is (not (> nan 1))))
+  (test "but they agree on every non-NaN pair"
+    (is (= (< 1 2) (%eq -1 (compare 1 2))))
+    (is (= (< 2 1) (%eq -1 (compare 2 1))))
+    (is (= (< 1 1.5) (%eq -1 (compare 1 1.5))))
+    (is (= (< 1.5 1) (%eq -1 (compare 1.5 1))))))
+
+;; ---- what `=` and `compare` disagree about, stated once ---------------------------
+;; `compare` returning 0 does NOT imply `=`. This is the cross-type case and it is the
+;; whole reason `=` is documented as strict: 1 and 1.0 are the same POINT ON THE LINE and
+;; different VALUES. Pinned so nobody "fixes" one to match the other by accident.
+(describe "compare-equal does not imply =, by design"
+  (test "1 and 1.0 are the same number and different values"
+    (assert= (compare 1 1.0) 0)
+    (is (not (= 1 1.0))))
+  (test "the same holds for decimals"
+    (assert= (compare 1 1M) 0)
+    (is (not (= 1 1M))))
+  (test "within a type the two agree"
+    (is (= (= 1 1) (%eq 0 (compare 1 1))))
+    (is (= (= 1.5 1.5) (%eq 0 (compare 1.5 1.5))))))
+
+(describe "compare gives a total order across KINDS too (what sort-by relies on)"
+  (test "different kinds order consistently and antisymmetrically"
+    (let (a (compare 1 "a") b (compare "a" 1))
+      (is (not (%eq a 0)))
+      (assert= a (- b))))
+  (test "and the order is stable across calls"
+    (assert= (compare :a "a") (compare :a "a"))))
