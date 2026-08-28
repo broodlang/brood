@@ -224,6 +224,7 @@ suggestions\", never to an error on the user's command line."
         cleaned (string/replace prefix "\\\"" ""))
     ;; Odd number of quotes before the position ⇒ still inside one.
     (= 1 (math/rem (- (count (string/split cleaned "\"")) 1) 2))))
+(sig complete-in-string? (string int -> bool))
 
 ;; The bare names of the `:keyword`s in a whitespace-separated fragment.
 (defn- complete-keywords

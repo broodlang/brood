@@ -1748,7 +1748,19 @@ fn check_fn_seeded(
     if let Some(s) = sig {
         if let Some(&ret_form) = items[body_start..].last() {
             let g = gradual_of(heap, ret_form, &scope);
-            if !g.consistent_with(s.ret.clone())
+            // A body that yields `never` **never returns** — it always throws — so it is
+            // consistent with every declared return, including `never` itself. Without
+            // this skip the dynamic half of `consistent_with` (`∩ ≠ ⊥`) reads `never` as
+            // disjoint from everything, since it is: an empty set shares no value with
+            // any set, itself included. The result was a false positive on every
+            // always-throwing function that carried a `(sig …)` — `declared return type
+            // string but the body yields never` — and, at its silliest, on a function
+            // declared `never` whose body yields `never`. It stayed hidden only because
+            // so few signatures were declared; adopting them across `std/` surfaced it.
+            // The argument check has carried the same skip, for the same reason, all
+            // along.
+            if !g.bound.is_never()
+                && !g.consistent_with(s.ret.clone())
                 && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
             {
                 let who = name

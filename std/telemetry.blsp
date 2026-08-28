@@ -334,6 +334,7 @@ stream. One system monitor exists at a time — a second call replaces the first
   "Stop a `watch-runtime` watcher and disarm the kernel stream. Returns nil."
   (send watcher :stop)
   nil)
+(sig stop-watch-runtime ((or map pid) -> nil))
 
 ;; ---- distribution liveness (node up/down) → the telemetry stream ------------
 ;; The kernel has no `[:nodeup]` event — `monitor-node` fires only `[:nodedown]`,
@@ -386,6 +387,7 @@ at start are the baseline (no spurious `:nodeup` for them)."
   "Stop a `watch-nodes` watcher. Returns nil."
   (send watcher :stop)
   nil)
+(sig stop-watch-nodes ((or map pid) -> nil))
 
 ;; ---- unified runtime vitals (the snapshot builtins, behind one stream) -------
 ;; The kernel exposes its runtime state through several point-in-time snapshot builtins —
@@ -452,6 +454,7 @@ folding the kernel snapshot builtins behind the same attach seam as `watch-runti
   "Stop a `watch-vitals` watcher. Returns nil."
   (send watcher :stop)
   nil)
+(sig stop-watch-vitals ((or map pid) -> nil))
 
 ;; ---- remote tier: subscribe to a peer node's telemetry stream (ADR-053) ------
 ;; Location-transparency for the attach seam: a runtime opts in with `serve`
@@ -496,6 +499,7 @@ pid; `stop-serve` (or killing it) tears down every remote subscription."
   "Stop a `serve` agent and detach every remote-subscription forwarder. Returns nil."
   (send agent :stop)
   nil)
+(sig stop-serve ((or map pid) -> nil))
 
 (defn- telemetry-remote-loop
   (target event ref local-event)
@@ -534,6 +538,7 @@ unsubscribes and exits."
   "Stop a `subscribe-remote` watcher: unsubscribe from the peer and exit. Returns nil."
   (send watcher :stop)
   nil)
+(sig stop-subscribe-remote ((or map pid) -> nil))
 
 ;; ---- span -------------------------------------------------------------------
 

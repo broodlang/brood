@@ -15,6 +15,7 @@ scheduling unit, updated every quantum; exact for spawned processes, coarse for 
 root). nil for a remote/dead pid. The process-introspection snapshot the observer reads;
 see std/tool/observer.blsp."
   (%process-info pid))
+(sig info (pid -> (or map nil)))
 
 ;; `& more`, not `&optional value`: for this primitive an ABSENT value reads the flag
 ;; while an explicit `nil` CLEARS it, and `&optional` collapses the two (both arrive as
@@ -43,6 +44,7 @@ processes."
   "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is
 not a live local process. See std/tool/observer.blsp."
   (%mailbox-size pid))
+(sig mailbox-size (pid -> (or int nil)))
 
 (defn hibernate ()
   "Tell the runtime this process is about to idle for a long time: collect, shrink its

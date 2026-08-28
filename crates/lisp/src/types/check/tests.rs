@@ -5928,3 +5928,48 @@ fn what_a_declared_parameter_catches_and_what_it_deliberately_does_not() {
         "a union that cannot be a string must be flagged: {w:?}"
     );
 }
+
+#[test]
+fn a_body_that_never_returns_is_consistent_with_any_declared_return() {
+    // `never` is disjoint from everything — an empty set shares no value with any set,
+    // *itself included* — so the dynamic half of the return check read an always-throwing
+    // body as inconsistent with whatever was declared. Every function that raises
+    // unconditionally and carries a `(sig …)` drew a false positive, and at its silliest
+    // one declared `never` was told its `never` body was wrong. It stayed hidden because
+    // so few signatures were declared; adopting them across `std/` surfaced it.
+    let w = file_warnings(
+        r#"
+        (sig boom (int -> string))
+        (defn boom (n) (error "nope"))
+        "#,
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("declared return type")),
+        "an always-throwing body returns nothing, so it contradicts no declaration: {w:?}"
+    );
+
+    // …including when the declaration is `never` itself.
+    let w = file_warnings(
+        r#"
+        (sig boom (int -> never))
+        (defn boom (n) (error "nope"))
+        "#,
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("declared return type")),
+        "`never` against `never`: {w:?}"
+    );
+
+    // The check still fires on a body that DOES return something disjoint.
+    let w = file_warnings(
+        r#"
+        (sig wrong (int -> string))
+        (defn wrong (n) 5)
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("declared return type string") && s.contains("yields 5")),
+        "a real mismatch must still be reported: {w:?}"
+    );
+}

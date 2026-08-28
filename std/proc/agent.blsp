@@ -80,6 +80,7 @@ replies (up to 5 s; a dead agent raises rather than hanging)."
 (defn cast (pid f)
   "Fire-and-forget update: apply `(f state)` asynchronously, no reply waited."
   (send pid [:$cast f]))
+(sig cast ((or map pid) any -> nil))
 
 (defn stop (pid)
   "Ask the agent to exit its loop cleanly. Blocks until it acknowledges (up to

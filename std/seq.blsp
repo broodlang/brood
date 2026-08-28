@@ -270,6 +270,7 @@ Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter
 `lmap`/`lfilter`/… are the ergonomic front end over the same machinery; use
 `transduce` when the stage stack is computed, reused, or your own."
   (fold (xform rf) init coll))
+(sig transduce ((or fn keyword) any any seqable -> any))
 
 (defn filterv (pred coll)
   "A VECTOR of the items of `coll` for which `(pred x)` is truthy — `filter`

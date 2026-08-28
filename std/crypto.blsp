@@ -32,6 +32,7 @@ cryptographically secure random bytes.
 
     (count (crypto/random-bytes 8))   → 8"
   (%random-bytes n))
+(sig random-bytes (int -> bytes))
 
 (defn random-key ()
   "Generate a random 32-byte key suitable for ChaCha20-Poly1305."
@@ -100,6 +101,7 @@ slower brute force; use ≥ 600,000 for password storage."
     (crypto-as-bytes salt)
     iterations
     key-len))
+(sig pbkdf2 (any any int int -> bytes))
 
 ;; ---- utilities --------------------------------------------------------------
 

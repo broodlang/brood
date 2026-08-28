@@ -77,6 +77,7 @@ buffer wants — the user should be able to see where they may type."
                             acc))
                       else (go (rest lines) (inc lineno) next-off open acc))))))
     (go (string/split text "\n") 0 0 nil '())))
+(sig delimited-regions (string any any -> any))
 
 (defn tail-region (text start)
   "The single region from `start` to the end of `text` — the shape a prompt buffer
@@ -103,6 +104,7 @@ counts as inside), or nil."
 (defn region-texts (text regions)
   "The text of every region, in order."
   (map (fn (r) (region-text text r)) regions))
+(sig region-texts (any seqable -> (or nil (list string))))
 
 (defn skeleton (text regions)
   "Everything OUTSIDE the regions, concatenated — the generated part of the form,
@@ -115,6 +117,7 @@ typed inside the regions, so it is stable while they work."
             regions)
         [pos parts] r)
     (apply str (reverse (cons (string/substring text pos (string/length text)) parts)))))
+(sig skeleton (string seqable -> any))
 
 (defn protected-spans (text regions)
   "The COMPLEMENT of `regions` over `text` — the `[lo hi)` ranges *outside* every editable
@@ -132,6 +135,7 @@ to remember to run). An empty region contributes no gap on either side beyond it
             regions)
         [pos spans] r)
     (reverse (if (< pos len) (cons [pos len] spans) spans))))
+(sig protected-spans (string seqable -> any))
 
 (defn splice (new-text old-text regions-fn)
   "`new-text` (a freshly generated form) with `old-text`'s region CONTENTS carried
@@ -155,6 +159,7 @@ changed shape, and there is no honest correspondence to preserve)."
                 (enumerate new-regions))
             [pos parts] r)
         (apply str (reverse (cons (string/substring new-text pos (string/length new-text)) parts)))))))
+(sig splice (any any (or fn keyword) -> any))
 
 ;; ---- the guard policies (a `:post-key` facet body) -----------------------------
 
@@ -179,6 +184,7 @@ the form is re-rendered."
     (intact? (read-text after) regions-fn (read-skeleton after)) after
     (intact? (read-text before) regions-fn (read-skeleton before)) (on-reject before)
     else after))
+(sig guard-veto (any any (or fn keyword) (or fn keyword) any any -> any))
 
 (defn guard-clamp (after read-text read-point set-point regions-fn)
   "The `:clamp` policy: leave the text alone, but if point sits OUTSIDE every
@@ -196,3 +202,4 @@ A context with no regions is returned untouched."
                               (if (or (nil? best) (< d (abs (- p best)))) cand best)))
                       nil regions))
         (if (nil? nearest) after (set-point after nearest))))))
+(sig guard-clamp (any (or fn keyword) (or fn keyword) any (or fn keyword) -> any))

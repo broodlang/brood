@@ -347,6 +347,7 @@ then whitespace or `n` — or nil when `i` doesn't end a sentence."
     nil
     (let (j (buffer-sentence-closers-end text (inc i) n))
       (if (or (>= j n) (buffer-sentence-space? (string/char-at text j))) j nil))))
+(sig buffer-sentence-end-at (string int any -> any))
 
 (defn- buffer-scan-sentence-fwd
   (text i limit)
@@ -431,6 +432,7 @@ strictly before `before`, or nil if there is none. The backward counterpart of
 `buffer-search-forward`."
   (let (i (string/last-index-of (buffer-text buf) needle before))
     (if (< i 0) nil i)))
+(sig buffer-search-backward (any string any -> (or int nil)))
 
 ;; ---- undo (an undo *tree*, Emacs-style) -------------------------------------
 ;;
@@ -890,6 +892,7 @@ insertion point shift with the text. Throws if `buf` is read-only."
                              (string/length s))
         :insert p
         (string/length s)))))
+(sig insert (any string -> any))
 
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
@@ -1117,6 +1120,7 @@ buffer through — the scaffold for line-wise commands (comment, indent-region, 
 the resulting buffer."
   (let ([sl el] (region-line-range buf))
     (fold f buf (range sl (inc el)))))
+(sig map-region-lines (any (any any -> any) -> any))
 
 ;; ---- the actor shell (buffer-as-process) ------------------------------------
 ;;
@@ -1387,10 +1391,12 @@ to delete no longer exists as written)."
       (<= ahi lo) [(+ lo delta) (+ hi delta) repl]
       (>= alo hi) splice
       else (let (p (+ alo alen)) [p p repl]))))
+(sig splice-transform (vector vector -> any))
 
 (defn splice-transform-all (splice applieds)
   "`splice` transformed over each of `applieds` in order (oldest first)."
   (fold (fn (sp a) (splice-transform sp a)) splice applieds))
+(sig splice-transform-all (any seqable -> any))
 
 (defn buffer-splice (bp lo hi repl &optional origin base)
   "Replace `[lo, hi)` with `repl` inside buffer process `bp` — the structured-edit
@@ -1419,6 +1425,7 @@ Asynchronous — returns nil."
   (let (r (ref))
     (send bp [:get f (self) r])
     (receive ([:reply ^r v] v))))
+(sig buffer-query ((or map pid) any -> any))
 
 (defn subscribe-buffer (bp proj)
   "Subscribe the calling process to buffer process `bp`. It immediately receives — and then
@@ -1428,10 +1435,12 @@ nil (a bare change notification). The push side of buffers-as-processes: a pane 
 with its viewport projection and re-renders from each pushed frame instead of polling. Many
 processes may subscribe to one buffer — that is what lets several sessions see each edit."
   (send bp [:subscribe (self) proj]))
+(sig subscribe-buffer ((or map pid) any -> nil))
 
 (defn unsubscribe-buffer (bp)
   "Stop the calling process receiving `[:buffer-updated …]` pushes from buffer process `bp`."
   (send bp [:unsubscribe (self)]))
+(sig unsubscribe-buffer ((or map pid) -> nil))
 
 (defn buffer-sync (bp proj &optional (timeout 2000))
   "An ATOMIC `[version view]` snapshot of buffer process `bp` through projection
@@ -1452,6 +1461,7 @@ crashed, before the [:down] has been folded)."
   (let (r (ref))
     (send bp [:stop (self) r])
     (receive ([:reply ^r v] v) (after 2000 :no-reply))))
+(sig stop-buffer ((or map pid) -> any))
 
 ;; ---- create / delete (the buffer-process lifecycle) -------------------------
 

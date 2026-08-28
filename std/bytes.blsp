@@ -13,6 +13,7 @@
 
     (bytes/length #b\"hi\")      → 2"
   (%byte-length b))
+(sig length (bytes -> int))
 
 (defn slice (b start & more)
   "The byte slice [start, end) of b as a fresh bytes value (end defaults to the length). Errors if the range is out of bounds.

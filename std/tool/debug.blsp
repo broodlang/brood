@@ -316,6 +316,7 @@ was attempted."
 (defn dbg-state (dbg)
   "The debugger's full state snapshot: `{:events :paused :seq}`."
   (let (me (self)) (send dbg [:query me]) (receive ([:state s] s))))
+(sig dbg-state ((or map pid) -> any))
 (defn paused (dbg)
   "The map of currently parked processes: `pid -> snapshot`."
   (get (dbg-state dbg) :paused))
@@ -326,12 +327,15 @@ was attempted."
   "Release one parked process."
   (send dbg [:resume pid])
   nil)
+(sig resume ((or map pid) any -> nil))
 (defn resume-all (dbg)
   "Release every parked process; returns how many were waiting."
   (let (me (self)) (send dbg [:resume-all me]) (receive ([:resumed n] n))))
+(sig resume-all ((or map pid) -> any))
 (defn dbg-stop (dbg)
   "Stop the debugger process."
   (let (me (self)) (send dbg [:stop me]) (receive ([:stopped] :ok))))
+(sig dbg-stop ((or map pid) -> :ok))
 
 ;; ---- aggregate / statistical querying (debug the population, not one hit) ----
 ;; When thousands of processes hit the same trace point you don't want thousands of

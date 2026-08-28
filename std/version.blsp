@@ -40,6 +40,7 @@ compare what a human typed in a manifest, not to validate it (that is
     (version/core \"1.2.3-rc1\")   → (1 2 3)"
   (let (core (first (string/split (first (string/split v "+")) "-")))
     (map (fn (p) (or (string/->number p) 0)) (string/split core "."))))
+(sig core (string -> (or nil (list (or nil number)))))
 
 (defn- digit-run?
   (s)
@@ -86,6 +87,7 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
     (if (nil? dash)
       nil
       (string/split (string/substring no-build (+ dash 1) (string/length no-build)) "."))))
+(sig prerelease (string -> list))
 
 (defn- index-of-str
   (s sub)
@@ -384,6 +386,7 @@ The shape a plugin manifest's `:enhances` map is checked with:
                      have (get versions nm))
                  (or (nil? have) (not (satisfies? have constraint)))))
          (%map-pairs constraints))))
+(sig satisfies-all? (any map -> bool))
 
 (defn unsatisfied (versions constraints)
   "The `constraints` entries `versions` does NOT satisfy, as a list of
@@ -395,3 +398,4 @@ the user when it declines a plugin, instead of a bare false."
                 (when (or (nil? have) (not (satisfies? have constraint)))
                   [nm constraint have])))
     (%map-pairs constraints)))
+(sig unsatisfied (any map -> any))

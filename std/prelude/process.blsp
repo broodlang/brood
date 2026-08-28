@@ -376,6 +376,7 @@ passed through (not re-wrapped), like `spawn`."
 (defn sleep (ms)
   "Park the current process for `ms` milliseconds without touching its mailbox — every queued message stays queued. Parks on the scheduler timer; it does not block a worker thread."
   (let (never (ref)) (receive (^never nil) (after ms nil))))
+(sig sleep ((or int nil) -> nil))
 
 ;; ---- dirty-native offload (ADR-144) -----------------------------------------
 ;; The BEAM dirty-scheduler shape: a long/blocking native runs on a small OS

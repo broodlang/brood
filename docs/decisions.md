@@ -17964,3 +17964,77 @@ now writes as `(or fn keyword)`, and it round-trips.
 the only form the grammar can express and the only form the language can produce; writing
 half of it as `fn` would be a widening, and ADR-271 is the rule that a suggestion must not
 claim a different type than the checker meant.
+
+## ADR-275 — A body that never returns contradicts no declared return
+
+**Status:** accepted (2026-08-28)
+
+`never` is disjoint from everything — an empty set shares no value with any set, *itself
+included*. The return check's dynamic half asks `∩ ≠ ⊥`, so an always-throwing body read
+as inconsistent with whatever was declared:
+
+```lisp
+(sig boom (int -> string))
+(defn boom (n) (error "nope"))     ; warning: declared string but the body yields never
+```
+
+Every function that raises unconditionally and carries a `(sig …)` drew that, and at its
+silliest a function declared `never` was told its `never` body was wrong. It stayed hidden
+because so few signatures were declared; adopting them across `std/` surfaced it on the
+first pass.
+
+**Decision:** a body whose type is `never` never returns, so it is consistent with every
+declared return. The check skips it — the same skip, for the same reason, that the
+*argument* check has carried all along.
+
+## ADR-276 — What makes a signature worth declaring
+
+**Status:** accepted (2026-08-28)
+
+`nest check --suggest-sigs` reports **1911** undeclared signatures the checker can already
+write across `std/`. Pasting them in would be a mistake, and not a small one: a declaration
+is *authoritative* — read ahead of inference, permanently — so a bad one is worse than none.
+These are the criteria the first real adoption pass produced, in the order they were
+learned, each from a suggestion that turned out to be wrong.
+
+**Declare it when:**
+
+- **Two or more parameters have different concrete types.** This is the KI-71 class, and
+  the only one where the declaration catches something inference cannot: with both
+  parameters `any`, a reversed call is accepted in silence. `(tcp/connect 8080
+  "localhost")` is a warning now. *(37 of these.)*
+- **It is a public function with a meaningful parameter type.** The value here is
+  documentation — this is the surface people call and read in `nest doc` — plus the fact
+  that a declaration is validated against its definition (ADR-259) and so cannot silently
+  drift. *(~200 of these, after the exclusions below.)*
+
+**Do not declare it when:**
+
+- **The parameter type is an artifact of a generic accessor.** `(defn year (dt) (get dt
+  :year))` infers `(or seqable string)` — that is `get`'s domain, not the author's intent,
+  and it says the function takes a sequence when it takes a datetime. *134 suggestions
+  were dropped for this alone.*
+- **The type names an internal representation.** A derived record type carrying the
+  `__id__` discriminator freezes a private shape into a public contract.
+- **The function validates its own argument.** `parse-dep` begins `(when (not (vector?
+  entry)) (error …))`. Declaring `vector` makes its own guard provably dead code — and the
+  unreachable-clause lint correctly says so. A function whose job is to check its input
+  must not declare that input's type.
+- **It restates what inference already gives.** A **return-only** signature (656 of them)
+  and a **module-private** function's signature (457) both add nothing: inference computes
+  them and, since ADR-266, private call sites are checked either way. The declaration is
+  pure maintenance cost, and it *blocks inference from improving*.
+- **It renders as noise.** 237 suggestions contain `(or map number)` — the arithmetic
+  domain, honest (a record joins it through the `Num` ability) and unreadable. Freezing an
+  unreadable contract on the API surface is worse than no contract.
+
+**And a hard constraint, not a judgement:** a `(sig …)` cannot appear in a prelude file
+*before* the `sig` macro is defined (`std/prelude/core.blsp:476`). Three declarations
+landed above that line and the interpreter would not boot — `prelude: unbound error:
+unbound symbol: sig`. The prelude is concatenated and evaluated in order; everything after
+that line, and every later prelude file, is fine.
+
+**What the pass produced:** 306 declarations in `std/`, up from ~34. The corpus stayed at
+zero warnings, and the four warnings it *did* raise on the way were all real — one
+inconsistency (`odd?` declared `number` while `even?` demanded `int`, where both take an
+int and `(math/odd? 2.5)` raises), two dead guards, and ADR-275.

@@ -157,6 +157,7 @@ shape `std/observer` draws by hand. Returns one `text` op.
       (= align :center)
         (string/pad-right (str (string/repeat " " (math/quot (- cells n) 2)) s) cells)
       else (string/pad-right s cells))))
+(sig bar-fit (string int any -> string))
 
 (defn frame (& ops)
   "Collect render ops into a frame (a vector), dropping any `nil` ops so callers
@@ -190,6 +191,7 @@ zone) and on click (to find the target)."
               z
               hit)))
     nil zones))
+(sig zone-at (seqable any any -> any))
 
 (defn zone-cursor-ops (zones)
   "`cursor-zone` render ops for every zone in `zones` that requests a `:cursor` shape — so
@@ -197,6 +199,7 @@ the one zone list the model hit-tests also drives the frontend's pointer shape. 
 no `:cursor` contribute nothing."
   (map (fn (z) (let ([x y w h] (get z :rect)) (cursor-zone x y w h (get z :cursor))))
     (filter :cursor zones)))
+(sig zone-cursor-ops (seqable -> (or nil (list (tuple :cursor-zone any any any any any)))))
 
 ;; ---- floating cards (popups, menus, tooltips) -------------------------------
 ;; The shared shape behind every floating overlay — completion popup, context menu,

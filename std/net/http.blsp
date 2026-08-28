@@ -273,6 +273,7 @@ request/response splitting)."
              (http-crlf-free "header value" (second kv))
              "\r\n"))
       (%map-pairs headers))))
+(sig render-headers (map -> any))
 
 (defn render-response (resp)
   "Render a response map into the HTTP/1.0 wire **iolist** (ADR-139) — hand it to
@@ -350,6 +351,7 @@ rather than closed after a body. An identity check on the record, not a key snif
 (defn mime-type (path)
   "A guessed Content-Type for `path` based on its extension."
   (/get *http-mime* (path/extension path) "application/octet-stream"))
+(sig mime-type (string -> any))
 
 (defn serve-file (path)
   "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is missing."

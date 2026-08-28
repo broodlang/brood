@@ -296,6 +296,7 @@ observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
           (and (not (empty? history)) (= (first history) entry)))
       history
       (cons entry history))))
+(sig lineedit-remember (any string -> any))
 
 (defn- lineedit-hist-next
   (state)

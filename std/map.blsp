@@ -33,9 +33,11 @@ access, or call qualified (`map/update-vals`).")
 (defn update-vals (m f)
   "A map like `m` with `f` applied to every value."
   (into {} (map (fn (p) [(first p) (f (second p))]) (%map-pairs m))))
+(sig update-vals (map any -> any))
 (defn update-keys (m f)
   "A map like `m` with `f` applied to every key (later keys win on a collision)."
   (into {} (map (fn (p) [(f (first p)) (second p)]) (%map-pairs m))))
+(sig update-keys (map any -> any))
 
 (defn select-keys (m ks)
   "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped)."
@@ -56,6 +58,7 @@ access, or call qualified (`map/update-vals`).")
 (defn reduce-kv (f init m)
   "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
   (fold (fn (acc p) (f acc (first p) (second p))) init (%map-pairs m)))
+(sig reduce-kv (any any map -> any))
 
 ;; ---- zipmap (ADR-251) -------------------------------------------------------
 ;; Published here rather than bare: it RETURNS a map, so it belongs with the map

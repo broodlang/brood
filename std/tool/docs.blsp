@@ -136,6 +136,7 @@ module's namespace-rooted globals (ADR-070) back to it."
         (docs-leading-doc src)
         (docs-namespace-syms feature))
       (docs-render (docs-basename path) (docs-leading-doc src) (docs-added before (global-names))))))
+(sig document-file (string -> string))
 
 ;; Markdown for a module named `modname` (symbol or string): resolve its source
 ;; (baked-in or on *load-path*), snapshot the globals, `require` it, and document
@@ -260,6 +261,7 @@ module's namespace-rooted globals (ADR-070) back to it."
       (docs-module-model (docs-basename path)
         (docs-leading-doc src)
         (docs-added before (global-names))))))
+(sig model-file (string -> (record :defs any :doc any :module any :qualified? true)))
 
 (defn model-module (modname)
   "The doc-model module entry for the module named `modname` (a symbol or string),
@@ -473,6 +475,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 
     (docs/markdown->html \"# hi\")   → \"<h1>hi</h1>\""
   (get (md-flush (fold md-line {:out "" :mode :none :buf nil} (string/split md "\n"))) :out))
+(sig markdown->html (string -> any))
 
 ;; A guide's display title from its filename: `getting-started.md` -> `Getting started`.
 (defn- guide-title
