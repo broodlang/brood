@@ -2459,8 +2459,20 @@ The bar a candidate has to clear, in order:
 ### Union dispatch positions — and why the type system is the easy half
 
 > **Designed 2026-08-28: [`docs/union-dispatch-design.md`](docs/union-dispatch-design.md)** —
-> the specificity rule, the four questions checked empirically, and the build order. The
-> summary below is the case for doing it; the design doc is the how.
+> the specificity rule, the four questions checked empirically, and the build order.
+>
+> **A prior decision now makes this step 3 of three.** Cross-type numeric arithmetic and
+> comparison will **raise unless a method is declared** for the pair — implemented by widening
+> `num_multi_dispatch`'s trigger from "an operand is a record" to "the operands are different
+> numeric types" and *deleting* the float-contagion branch, with the tower shipped as an
+> opt-in `std/num/tower.blsp`. Measured blast radius: **27 call sites, 0 at boot**. That
+> decision is what turns union positions from a convenience into a capability.
+>
+> **Attempted strict-first on 2026-08-28 and reverted** — the order is backwards. The
+> mechanism works (15 lines, correct loud error), but `->float` is itself implemented with
+> mixed arithmetic, so the declarations cannot bootstrap; and by hand the tower needs **36**
+> methods versus **4** with unions. Revised sequence: typed `defmulti` → union positions →
+> a promotion primitive → strict default.
 
 The question that prompted this: can a dispatch position accept a *union*
 (`[usd (or :int :float)]`), and how does the checker derive the result?

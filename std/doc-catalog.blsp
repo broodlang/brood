@@ -254,6 +254,7 @@
    "load" :meta
    "string/lower" :strings
    "macroexpand" :meta
+   "multi-return-type" :meta
    "macroexpand-1" :meta
    "%macroexpand-loop" :meta
    "file/mkdir" :filesystem

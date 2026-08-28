@@ -1790,7 +1790,8 @@ pub(super) fn check_impl_returns(
     ctx: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
-    if ctx.ability().is_none_or(|i| i.is_empty()) {
+    // Runs for abilities OR multimethods — either kind can declare a return.
+    if ctx.ability().is_none_or(|i| i.is_empty()) && ctx.multi().is_none() {
         return;
     }
     for &form in expanded {
@@ -1810,11 +1811,100 @@ fn walk_impl_returns(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<
             if head_name(head) == kw::REGISTER_IMPL {
                 check_one_impl_return(heap, &items, ctx, out);
             }
+            if head_name(head) == kw::REGISTER_METHOD {
+                check_one_method_return(heap, &items, ctx, out);
+            }
         }
         for &item in items.get(1..).unwrap_or(&[]) {
             walk_impl_returns(heap, item, ctx, out);
         }
     })
+}
+
+/// Check one `(%register-method 'mname KEY (fn params body…) ns)` against the multimethod's
+/// declared `:-> RET`. The multimethod counterpart of [`check_one_impl_return`], and the
+/// reason a `defmulti`'s declared return is a **contract** rather than an unchecked
+/// assertion: without this, `(defmulti f :-> int)` would let the checker type every call as
+/// `int` while a method returned a string, which is worse than not declaring at all.
+///
+/// Two differences from the impl version. The fn is arg **3** (a method registration carries
+/// `mname KEY fn ns`, not `ability op id fn ns`), and there are no declared *parameter*
+/// types to seed — a `defmulti` declares only its return, so every param binds unknown. That
+/// is a soundness-preserving under-approximation: fewer known types means fewer graded
+/// bodies, never a wrong grade.
+fn check_one_method_return(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    let Some(info) = ctx.multi() else {
+        return;
+    };
+    let Some(mname) = items.get(1).and_then(|&v| quoted_sym_name(heap, v)) else {
+        return;
+    };
+    let Some(ret) = info.ret_by_name(&mname) else {
+        return;
+    };
+    // An `any` declared return imposes no constraint — nothing to check.
+    if ret.is_any() {
+        return;
+    }
+    let ret = ret.clone();
+    // The dispatch key, for the diagnostic: `:default` or a vector of ids.
+    // The key arrives quoted in the registration form; unwrap it so the diagnostic reads
+    // `for [:string]` rather than `for (quote [:string])`.
+    let key = items.get(2).copied().map(|v| {
+        let v = list_items(heap, v)
+            .filter(|it| {
+                it.len() == 2
+                    && matches!(it.first(), Some(&Value::Sym(h)) if value::symbol_is(h, kw::QUOTE))
+            })
+            .and_then(|it| it.get(1).copied())
+            .unwrap_or(v);
+        match v {
+            Value::Keyword(k) => format!(":{}", value::symbol_name(k)),
+            other => crate::syntax::printer::print(heap, other),
+        }
+    });
+    let Some(&fn_form) = items.get(3) else {
+        return;
+    };
+    let Some(fn_items) = list_items(heap, fn_form) else {
+        return;
+    };
+    if !matches!(fn_items.first(), Some(&Value::Sym(s)) if is_fn_head(s)) {
+        return;
+    }
+    if crate::eval::macros::fn_is_arity_multi_clause(heap, &fn_items) {
+        return;
+    }
+    let Some(&params_form) = fn_items.get(1) else {
+        return;
+    };
+    let mut scope = ctx.clone();
+    for p in fn_params(heap, params_form) {
+        scope = scope.bind(p, None);
+    }
+    let body_start = match (fn_items.get(2), fn_items.get(3)) {
+        (Some(Value::Str(_)), Some(_)) => 3,
+        _ => 2,
+    };
+    let Some(&ret_form) = fn_items.get(body_start..).and_then(|b| b.last()) else {
+        return;
+    };
+    let g = gradual_of(heap, ret_form, &scope);
+    if !g.consistent_with(ret.clone()) && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) {
+        let key_str = key.map(|k| format!(" for {k}")).unwrap_or_default();
+        out.push((
+            heap.form_pos_only(ret_form),
+            format!(
+                "multimethod {mname}{key_str}: declared return type {} but the method yields {}",
+                ret, g.bound
+            ),
+        ));
+    }
 }
 
 /// Check one `(register-impl 'A 'op :id (fn params body…) 'ns)` against its op's declared

@@ -63,3 +63,59 @@
       (let (got (mm-collect 0 (count pairs) nil))
         ;; order-independent: each worker returns its own result
         (assert= (sort-by str got) (sort-by str (list 5 "1x" "4y")))))))
+
+;; ---- a declared return type (`:-> RET`) --------------------------------------
+;; A `defmulti`'s body is the dispatch machinery, so its inferred type is opaque and a call
+;; site could not be typed at all. The declaration is the only static handle — the same role
+;; an ability op's `:-> RET` plays — and it is a CONTRACT rather than a guess because every
+;; method body is checked against it (`check_method_returns`). Without that check, declaring
+;; `:-> int` while a method returned a string would be worse than not declaring at all: the
+;; checker would confidently type every call wrong.
+
+(defmulti mm-typed :-> int)
+(defmethod mm-typed [:string] (s) (string/length s))
+(defmethod mm-typed [:int] (n) n)
+
+(defmulti mm-typed-alg :commutative :-> int)
+(defmethod mm-typed-alg [:int :string] (n s) (+ n (string/length s)))
+
+(describe "defmulti :-> RET — the declared return type"
+  (test "a declared return is recorded and readable"
+    (assert= (multi-return-type 'mm-typed) 'int)
+    (assert= (multi-return-type 'mm-typed-alg) 'int))
+
+  (test "an undeclared multimethod records none — absent, not nil-valued"
+    (assert= (multi-return-type 'mm-combine) nil))
+
+  (test "the declaration does not disturb dispatch"
+    (assert= (mm-typed "abcd") 4)
+    (assert= (mm-typed 7) 7))
+
+  (test "an algebra keyword and a return type coexist, and the mirror still derives"
+    (assert= (mm-typed-alg 2 "xyz") 5)
+    ;; the :commutative mirror — authored [:int :string], called [:string :int]
+    (assert= (mm-typed-alg "xyz" 2) 5))
+
+  ;; The checker half, exercised through `check-string-structured` so a warning is a VALUE
+  ;; rather than a build failure. A conforming method is silent; a non-conforming one names
+  ;; the multi, the dispatch key, the declared type, and what the body actually yields.
+  (defn- mm-warnings
+    (src)
+    (map (fn (d) (get d :message)) (reflect/check-string-structured src)))
+
+  (test "a method whose body conforms to the declared return is silent"
+    (assert= (mm-warnings "(defmulti k :-> int) (defmethod k [:int] (n) n)") (list)))
+
+  (test "a method that violates the declared return warns, naming the key and both types"
+    (let (w (mm-warnings "(defmulti k :-> int) (defmethod k [:string] (s) \"nope\")"))
+      (is (not (empty? w)))
+      (is (includes? (first w) "multimethod k"))
+      (is (includes? (first w) "[:string]"))
+      (is (includes? (first w) "declared return type int"))))
+
+  (test "an undeclared multimethod constrains nothing"
+    (assert= (mm-warnings "(defmulti k) (defmethod k [:string] (s) \"anything\") (defmethod k [:int] (n) n)")
+      (list)))
+
+  (test "a declared `any` return imposes no constraint"
+    (assert= (mm-warnings "(defmulti k :-> any) (defmethod k [:string] (s) \"fine\")") (list))))

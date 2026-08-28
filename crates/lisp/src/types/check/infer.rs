@@ -281,6 +281,17 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                                 return Some(ret.clone());
                             }
                         }
+                        // The same handle for a MULTIMETHOD's declared `:-> RET`. A
+                        // `defmulti` generic is a `defn` whose body is the dispatch
+                        // machinery, so its inferred type is just as opaque as an ability
+                        // op's, and the declaration is the only thing that can type
+                        // `(compare-to a b)` at a call site. Sound for the same reason:
+                        // `check_method_returns` warns when a method body does not conform.
+                        if let Some(info) = ctx.multi() {
+                            if let Some(ret) = info.ret_of(s) {
+                                return Some(ret.clone());
+                            }
+                        }
                     }
                     // Sequence-aware refinements (`list`/`vector` constructors,
                     // `first`/`last`/`nth` extractors) and the integer-closed

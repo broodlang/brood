@@ -5204,3 +5204,145 @@ the same treatment. It does now, delta kept as the fallback for a bare-rooted mo
 `math` documents 37 entries, `datetime` 51, `seq` 39 — and `uuid` drops from 11 to **6**,
 which is a correction: the delta had been crediting it with names from the modules its own
 `require` pulled in.
+
+
+## 2026-08-28 — a sealed ability over the numeric tower rejected its own members
+
+Asked why so little in the stdlib is `:sealed` (15 abilities, 1 sealed), and the honest answer
+turned up a bug. Most of them shouldn't be sealed — sealing puts the member list in the
+*declaring* module, so it inverts who depends on whom, which is fatal for an interface meant to
+be extended. Five of the fifteen have **no impls anywhere in std**; `JsonEncode`'s only impls
+are in tests. Those are extension seams, and enumerating their members means enumerating types
+that don't exist yet.
+
+But two — `Numeric` and `Zero` in `std/math` — *are* closed sets, implemented over
+`:int :float :decimal :ratio` and nothing else. By the rule they're seal candidates. **They
+can't be sealed**, and that turned out not to be a design choice:
+
+```lisp
+(defability Sizey :sealed [:int :float] (sizey [self] :-> int))
+(impl Sizey :int (sizey [n] n))
+(impl Sizey :float (sizey [n] 0))
+(sig use-it (Sizey -> int))
+(defn use-it (x) (sizey x))
+(use-it 42)     ; warning: argument 1 expects {__id__: :float | :int, ...}, got 42
+```
+
+Both are declared members with working impls. The program prints `42`. `nest check` exits 1.
+
+`impl` dispatches on built-in kinds as well as records, but ADR-181's mechanism turned *every*
+sealed member into a record shape `%{__id__: :m}` — so `:int` became "a record whose `__id__` is
+`:int`", which no int is. Same in `protocol::sealed_op_domain` (the ADR-190 occurrence-typing
+domain), independently.
+
+**Why it survived: the two paths that look like the whole feature only need the id set.** The
+exhaustiveness gate fires correctly over kinds. Rejecting a provable non-member fires correctly
+over kinds. Only *passing a real member* exposes it — and since nothing in-tree is kind-sealed,
+ADR-181's own false-positive audit ("confirmed across all of `std/` + `tests/`: zero argument
+warnings introduced") was true and told you nothing. A latent trap for whoever tried it first.
+
+Fixed: both sites route through one `annot::sealed_members_ty`, which splits members into
+records (one open `%{__id__: (:a | :b | …)}` shape, as before) and built-in kinds (their own
+lattice points via `base_ty`). Sharing the helper is load-bearing, not tidiness — the two
+denotations must agree, or a value a `sig` accepts gets rejected by the op call inside it. The
+discriminator is cheap and total: a record member is always ns-qualified, so an unqualified
+name `base_ty` knows is a kind, and a record named `map` can't collide.
+
+A seal may now mix the two. All members pass; the record half widens to `map` in the union
+(`Ty::union` drops a differing `fields` map — sound, it only ever accepts more), so a mixed
+seal trades `:__id__` precision for coverage and a purely-record seal keeps it. Error messages
+improved on the way: `expects int | float` rather than `expects {__id__: :float | :int, ...}`.
+
+Four regression tests, the zero-warning gate over `std/` + `tests/` still clean, 383 checker
+tests and clippy `--all-targets --all-features` green. ADR-181 amended.
+
+**Then the join it had been blocking, which was never blocked.** With sealing understood,
+`std/tempo` now carries `(impl Temporal tempo/tempo (->iso [t] (->iso t)))` — so one
+`datetime/->iso` renders a tempo, a date, a datetime or a time-of-day. `std/datetime` is
+untouched, the dependency still points one way, and `(%sealed-members 'Temporal)` is unchanged.
+The body's `->iso` is tempo's own function, so it delegates rather than recurses; a test pins
+that the op and the plain function agree at every resolution. The only thing not gained is the
+checker *demanding* the impl exist, which is the one thing widening the sealed list would buy —
+at the price of `std/datetime` naming `std/tempo`.
+
+**Not changed, but worth recording:** `Numeric` and `Zero` are now sealable — but on the rule
+above they probably shouldn't be sealed either. `Zero`'s own docstring anticipates user types
+("a type with no impl RAISES rather than answering"), and a money record answering `zero?` is a
+feature, not a bug; sealing would make the *name-as-a-type* narrower than reality and reject
+that record from a `(sig f (Zero -> bool))`. Being able to seal them was the point; sealing them
+is not. And `Temporal` — the one ability that *is* sealed — is the counter-example: nobody can
+enumerate the temporal types in advance, and `std/tempo` is the proof, arriving years later in
+another module.
+
+**Typed multimethods shipped (ADR-278)** — step 1 of the resequenced plan. `defmulti` takes a
+trailing `:-> RET` beside the algebra keyword, `%register-multi` records it, and both halves
+landed together: call sites get typed (`MultiInfo::ret_of` → `infer.rs`, where
+`AbilityInfo::op_ret_of` already fed) **and** every method body is checked
+(`check_one_method_return`). Shipping only the first would have been worse than shipping
+neither — the checker would type every call `int` while a method returned a string.
+
+The find while adopting it in std: **`compare-to`'s contract was stated twice in prose and
+enforced nowhere.** The `Ord` ability declares `(compare-to [self other] :-> int)` and the
+multimethod's own comment says `→ -1 / 0 / 1`, but the multimethod declared nothing — so a
+method returning a string was caught by neither, and `sort` is built on it. It declares
+`:-> int` now; no existing method violated it. `num/*` deliberately stays undeclared: its
+result follows its operands, so `any` would say nothing.
+
+Two things worth knowing next time. `MultiInfo::generics` is built from the *file's* forms, so
+a prelude multimethod's call sites were untyped until `ret_of` gained a by-name fallback —
+exact for a root-level `defmulti`, since the global carries the multimethod's name. And the
+editor saved over `types/check/protocol.rs` mid-edit, silently dropping one script's changes
+while the next script's landed; the tell was a build error naming a method that "should" have
+existed. Re-read before assuming an edit stuck.
+
+## 2026-08-28 — the review pass: a fix that half-fixed, and a fix that broke something narrower
+
+Re-reviewed the day's two pieces adversarially rather than re-reading them. Three findings,
+two of them in my own fixes.
+
+**1. I fixed one site of a class and not its siblings.** `truncate` was made to throw on a
+keyword that names no unit. `now` had the identical hole and failed *further from the
+mistake*: an unguarded unit reaches `tp-restrict` at rank `-1`, which keeps no units at all,
+so `(tempo/now :fortnight)` built a tempo with an empty unit map that only blew up later —
+`expected number, got nil` from inside `tp-pad`, or from `datetime/dt-ymd->days` two modules
+away. `finer`/`coarser` had the softer version: they returned `nil`, conflating "there is no
+finer unit" (a real answer, for `:ms`) with "that is not a unit". A third pass found `unit`
+doing it too, with the nil that means "`t` does not carry that unit". All five unit-taking
+entry points — `finer`, `coarser`, `truncate`, `now`, `unit` — throw now, enumerated by
+grepping the source rather than by recall, which is what should have happened first. The
+lesson is the cheap one, learned twice: when you fix a silent-wrong input guard, sweep every
+other function taking the same argument, and do it before reporting the fix.
+
+The rest of the input surface was swept the same way and is fine by house convention: a wrong
+type reaches a primitive and throws loudly (`(parse 42)` → `string/length: expected string`;
+every float `shift` dies in `quot` inside `epoch-ms->`), and a non-`Spanning` argument gets
+the ability error, which helpfully lists the impls that do exist. `unit` was the only entry
+point returning a wrong answer rather than raising.
+
+**2. The sealed-member fix introduced a narrower version of the bug it fixed.** Classifying a
+member as a built-in kind by its *spelling* is wrong, because a record declared at ROOT
+namespace registers under its bare name: `(defrecord ratio …)` outside any `defmodule` owns
+the id `:ratio`, the same dispatch key the built-in ratio kind uses. So `:sealed [ratio]`
+read as the kind and rejected `(ratio 1 2)` — a false positive where, before the change,
+there had been none.
+
+Worth recording *why* that is not simply "revert to record-wins": the language itself
+conflates the two. With a root record named `ratio` and no kind impl at all,
+`(sz 1/2)` — a genuine ratio — dispatches to the **record's** impl and returns its answer.
+Both the old behaviour (always a record) and the new one (always a kind) are wrong in
+opposite directions, because the id honestly denotes whichever exists. The tiebreak is the
+`*record-ids*` registry: a registered record wins, `base_ty` only otherwise. It has to union
+the runtime registry with this file's own `%record-register` forms from the expanded tree —
+`nest check` expands but never evaluates, so a file's own `defrecord`s are invisible to the
+registry at the moment it is checked. That detail cost a wrong first attempt that built
+cleanly, passed every existing test, and fixed nothing.
+
+**3. `std/tempo` had no cross-process coverage**, which the repo's protocol requires of
+anything carrying values. Added: a tempo, a negative year and a three-span interval set
+round-tripping through workers (so `to_message`/`from_message` and the promote/freeze path
+are exercised), both `Temporal` and `Spanning` dispatching in a process that never registered
+them, and a twelve-worker fan-out. Green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` and over
+five repeat runs.
+
+Suite: tempo 85 → 94, ability 92, checker units 293. `nest format --check` clean, the
+zero-warning gate over `std/` + `tests/` clean.

@@ -659,19 +659,11 @@ pub(super) fn sealed_op_domain(op_sym: value::Symbol) -> Option<crate::types::Ty
     let full = value::symbol_name(op_sym);
     let op_last = full.rsplit('/').next().unwrap_or(&full);
     let members = super::annot::sealed_op_members(op_last)?;
-    let id_ty = members.iter().fold(None::<crate::types::Ty>, |acc, m| {
-        let lit = crate::types::Ty::keyword_lit(value::intern(m));
-        Some(match acc {
-            Some(a) => a.union(lit),
-            None => lit,
-        })
-    })?;
-    let mut fields = std::collections::BTreeMap::new();
-    fields.insert(value::intern("__id__"), (id_ty, true));
-    // **Open** (ADR-264): a member record carries its own fields beside `:__id__`, so a
-    // closed shape here would describe no real value — this is a *domain* the argument
-    // must satisfy, not the shape it has.
-    Some(crate::types::Ty::record_of_open(fields))
+    // The SAME denotation `annot::ability_type` gives the ability's name, deliberately: a
+    // value a `(sig f (Shape -> …))` accepts must not be rejected by the `(area s)` inside
+    // it. Records become one open `%{__id__: (:a | :b | …)}` shape, built-in kind members
+    // (`:int`, `:float`, …) their own lattice points — see `annot::sealed_members_ty`.
+    super::annot::sealed_members_ty(&members)
 }
 
 /// Build the per-file sealed-op occurrence-typing domains from `AbilityInfo` (ADR-190): op-name
@@ -1179,6 +1171,56 @@ fn read_abilities_registry(
     }
 }
 
+/// The record ids `defrecord` has registered (`*record-ids*`, the same ground truth the
+/// optimizer's constructor detection uses). Needed to disambiguate a sealed member: an
+/// UNQUALIFIED member that also spells a built-in kind (`ratio`, `map`, `int`, …) could be
+/// either, because a **root-namespace** `(defrecord ratio …)` registers under the bare
+/// `:ratio` — the very same dispatch key the built-in kind uses. The language itself
+/// conflates them (a real `1/2` dispatches to that record's impl), so the type has to pick
+/// the same side the runtime does, and only the registry can say which exists.
+pub(super) fn record_id_names(
+    heap: &Heap,
+    expanded: &[Value],
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    // Imported/already-loaded records: the runtime registry.
+    if let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*record-ids*")) {
+        for (id, _) in heap.map_entries(mid) {
+            if let Some(name) = sym_name(id) {
+                out.insert(name);
+            }
+        }
+    }
+    // THIS file's records, which the registry cannot know: `nest check` expands the file but
+    // never evaluates it, so its `defrecord`s have not run. Same two-source union
+    // `ability_type_table` needs for the same reason.
+    for &form in expanded {
+        collect_record_registers(heap, form, &mut out);
+    }
+    out
+}
+
+/// Walk for `(%record-register :ns/name (quote name))` — what `defrecord` expands to. The id
+/// is a BARE keyword here, unlike `%register-sealed`'s quoted ability name, so it is read
+/// directly rather than through `unquote`.
+fn collect_record_registers(heap: &Heap, form: Value, out: &mut std::collections::HashSet<String>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("%record-register") {
+                if let Some(name) = items.get(1).copied().and_then(sym_name) {
+                    out.insert(name);
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_record_registers(heap, item, out);
+        }
+    })
+}
+
 /// Union in the runtime `*sealed*` registry — name → member id keywords.
 fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
     let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*sealed*")) else {
@@ -1392,6 +1434,12 @@ pub(super) struct MultiInfo {
     /// `*record-ids*` registry). Lets the operator-sugar check tell a record operand from a
     /// plain number, so `(+ 1 2)` is never checked but `(+ (usd 1) 2.5)` is.
     record_ids: HashSet<String>,
+    /// multimethod name → its declared `:-> RET` type. A multimethod's own body is the
+    /// dispatch machinery, so its inferred type is opaque; the declaration is the only
+    /// static handle on what a call yields — the role `AbilityInfo::op_ret` plays for an
+    /// ability op, and sound for the same reason (`check_method_returns` verifies every
+    /// method body against it, so it is a contract rather than a guess).
+    rets: HashMap<String, crate::types::Ty>,
 }
 
 impl MultiInfo {
@@ -1401,6 +1449,24 @@ impl MultiInfo {
     /// The multimethod name a generic global symbol denotes, if any.
     pub(super) fn generic_of(&self, sym: value::Symbol) -> Option<&String> {
         self.generics.get(&sym)
+    }
+    /// The declared return type of the multimethod a generic symbol denotes — the call-site
+    /// path, mirroring `AbilityInfo::op_ret_of`.
+    pub(super) fn ret_of(&self, sym: value::Symbol) -> Option<&crate::types::Ty> {
+        if let Some(ty) = self.generics.get(&sym).and_then(|m| self.rets.get(m)) {
+            return Some(ty);
+        }
+        // Fall back to the symbol's own spelling. `generics` is built from the FILE's
+        // expanded forms, so it only knows multimethods this file declares; a prelude or
+        // cross-module one (`compare-to`, `num/add`) is absent and its call sites would go
+        // untyped. A `defmulti` at root defines a global of exactly its own name, so for
+        // those the symbol *is* the multimethod name.
+        self.rets.get(&value::symbol_name(sym))
+    }
+    /// The declared return type of `mname` — the by-name path the method-return check uses
+    /// (a `register-method` form carries the multimethod's name, not the generic symbol).
+    pub(super) fn ret_by_name(&self, mname: &str) -> Option<&crate::types::Ty> {
+        self.rets.get(mname)
     }
     /// True when neither an exact method nor a `:default` covers `mname`'s identity `tuple`.
     fn missing(&self, mname: &str, tuple: &[String]) -> bool {
@@ -1561,7 +1627,12 @@ fn read_methods_registry(
 
 /// Collect `(register-multi (quote NAME) ALGEBRA)` → NAME's closure-algebra name
 /// (`commutative`/`antisymmetric`); a nil algebra is skipped.
-fn collect_register_multi(heap: &Heap, form: Value, algebras: &mut HashMap<String, String>) {
+fn collect_register_multi(
+    heap: &Heap,
+    form: Value,
+    algebras: &mut HashMap<String, String>,
+    rets: &mut HashMap<String, crate::types::Ty>,
+) {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
@@ -1574,13 +1645,21 @@ fn collect_register_multi(heap: &Heap, form: Value, algebras: &mut HashMap<Strin
                     .and_then(sym_name)
                 {
                     if let Some(alg) = items.get(2).and_then(|&v| sym_name(v)) {
-                        algebras.insert(mname, alg);
+                        algebras.insert(mname.clone(), alg);
+                    }
+                    // arg 3 is the quoted `:-> RET` form (nil when undeclared).
+                    if let Some(form) = items.get(3).and_then(|&v| unquote(heap, v)) {
+                        if !matches!(form, Value::Nil) {
+                            if let Some(ty) = super::annot::parse_type(heap, form) {
+                                rets.insert(mname, ty);
+                            }
+                        }
                     }
                 }
             }
         }
         for &item in items.get(1..).unwrap_or(&[]) {
-            collect_register_multi(heap, item, algebras);
+            collect_register_multi(heap, item, algebras, rets);
         }
     })
 }
@@ -1594,6 +1673,26 @@ fn read_multi_algebra_registry(heap: &Heap, algebras: &mut HashMap<String, Strin
     for (name_v, alg_v) in heap.map_entries(mid) {
         if let (Some(mname), Some(alg)) = (sym_name(name_v), sym_name(alg_v)) {
             algebras.entry(mname).or_insert(alg);
+        }
+    }
+}
+
+/// Union in the runtime `*multi-ret*` registry — multimethod name → its declared `:-> RET`
+/// form — so a multimethod declared in another module is typed here too. The file's own
+/// `%register-multi` forms win, matching how the algebra registry is merged.
+fn read_multi_ret_registry(heap: &Heap, rets: &mut HashMap<String, crate::types::Ty>) {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*multi-ret*")) else {
+        return;
+    };
+    for (name_v, form) in heap.map_entries(mid) {
+        let Some(mname) = sym_name(name_v) else {
+            continue;
+        };
+        if rets.contains_key(&mname) || matches!(form, Value::Nil) {
+            continue;
+        }
+        if let Some(ty) = super::annot::parse_type(heap, form) {
+            rets.insert(mname, ty);
         }
     }
 }
@@ -1616,10 +1715,12 @@ pub(super) fn build_multi_info(heap: &Heap, expanded: &[Value]) -> MultiInfo {
     // mirror order (`(scale 3 money)` for a `[money :int]` method) would false-warn when the
     // file's own methods are read from forms (not yet in the runtime registry).
     let mut algebras = HashMap::new();
+    let mut rets = HashMap::new();
     for &form in expanded {
-        collect_register_multi(heap, form, &mut algebras);
+        collect_register_multi(heap, form, &mut algebras, &mut rets);
     }
     read_multi_algebra_registry(heap, &mut algebras);
+    read_multi_ret_registry(heap, &mut rets);
     for (mname, set) in methods.iter_mut() {
         if algebras.contains_key(mname) {
             let mirrors: Vec<Vec<String>> = set
@@ -1639,6 +1740,7 @@ pub(super) fn build_multi_info(heap: &Heap, expanded: &[Value]) -> MultiInfo {
         methods,
         defaults,
         record_ids,
+        rets,
     }
 }
 
