@@ -5230,6 +5230,53 @@ If anyone wants to know whether a residual *compute* delta survives underneath t
 measurement is an in-process one with a fixed iteration count (`%now-ns` around N iterations
 inside one process), not a difference of two whole-invocation rows.
 
+### RETRACTED 2026-08-28 (same day): there was no v0.15.0 boot win — it was image state
+
+The section above attributes KI-77's closure to a "~5-6 ms fixed per-run saving" in v0.15.0 and
+calls it an unattributed 17% startup win. **That is wrong, and the error is instructive: it is
+this feature's own documented trap, taken while writing about it.**
+
+`make ab BASE=dfcddc4f ROWS=startup` compares a worktree binary against the working-tree binary.
+The working-tree binary had a **current stdlib image** (the harness and `make install` both build
+one); the worktree binary had none, because the image id carries the git sha and no image was ever
+built for that ref. So the arm I read as "v0.15.0 is faster" was *imaged vs unimaged*, which is
+KI-72's trap 3 — "the arm you believe is imaged is reading source" — inverted.
+
+**The trustworthy measurement is a single-session interleaved sweep with every binary in the same
+image state** (all unimaged, core-pinned, best-of-9):
+
+| row | 0.13.0 | v0.14.0 | v0.14.1 | dfcddc4f | e9c54606 | HEAD |
+|---|---|---|---|---|---|---|
+| `startup` | **27 ms** | 35 | 34 | 36 | 36 | 36 |
+| `fib` | 106 | 108 | 112 | 115 | 114 | 114 |
+| `loop` | 84 | 91 | 89 | 93 | 92 | 95 |
+
+Which says something quite different, and more useful:
+
+- **`startup` is flat from v0.14.0 to HEAD.** There is no v0.15.0 win to attribute. What there *is*
+  is a **step of ~30% between 0.13.0 and v0.14.0** (27 → 35 ms) that no entry records — masked in
+  the published numbers because the image flip landed later in the same window and gives some of
+  it back. That is the real open question, and it is a step, so it is bisectable.
+- **`fib` and `loop` are ramps**, not steps (+7.5% and +13% across 0.13.0 → HEAD, no single jump).
+  brood-benchmarks' CLAUDE.md describes exactly this shape and says there is nothing to bisect —
+  `git bisect` will still return a commit, and on `primes` it once returned a `.blsp` *test file*.
+
+**Three measurements of the same thing disagreed before this was settled** (−16.7%, −10.9%, +0.0%),
+and every disagreement was image state rather than code. The rule that resolves it is already in
+this file and was not followed: **verify the image per arm, not once per session.**
+`(stdimage/status)` reports `:live`/`:stale`/`:absent` with the id it wants beside the ids on disk.
+
+**And a papercut that makes this easy to walk into.** `make release-brood` rebuilds only `brood`
+(`-p cli`), leaving `target/release-fast/nest` at whatever commit it was built at. `nest stdimage`
+then writes an image keyed to *nest's* `stdlib-id`, which `brood` cannot use — so `brood` reports
+`:stale` no matter how many times you build one. Observed here with `brood` at `70fbdb32` and
+`nest` at `7cd92eed`, and note the content hash was **identical in both** (`f81c5e8bfacc125`): the
+baked stdlib was byte-for-byte the same and only the git sha differed. The sha is a deliberate
+conservative proxy for "the kernel that interprets this stdlib may have changed", so it is not
+simply removable — but it does mean **any** commit invalidates every image, not just a `std/` edit,
+which is broader than trap 3 states. If you are measuring, build the image with the *sibling* nest
+(`make release`, not `make release-brood`) and check `:state` is `:live`.
+
 **Kept as an entry rather than deleted** because the *method* is the reusable part: this row's
 absolute numbers drift ~3% between measurement sessions (the same `6b172c1d` binary read 90 ms in
 one interleaved pair and 93 ms in the next), so a per-step bisect on a 3% signal reads drift. What

@@ -68,14 +68,25 @@ Four things to carry forward, and the last two are measurement traps that will b
   1222/1222 locally), a gap in what CI proves. The fix has a constraint worth reading before
   starting: building the image makes `autoload_race`'s default-path arms imaged too, so one job
   must stay on source with `BROOD_NO_STDIMAGE=1` rather than trading one path for the other.
-- **An unattributed 17% startup win.** v0.15.0 carries a **~5-6 ms fixed per-run saving that lands
-  on every benchmark row** (`startup` 36 -> 30 ms, `loop`/`sieve` -6 ms, `fib`/`collatz` -5 ms).
-  It arrived somewhere in `dfcddc4f..e9c54606` and **nothing records it** — the prelude changes in
-  that range are ADR-278/281's multimethod return types, which are not an obvious cause, and the
-  `cli_support.rs` change there is the `.brood_crash_dump` process-death hook. It closed KI-77 as a
-  side effect. Attribute it before anyone claims it, and note the shape rule from
-  brood-benchmarks' CLAUDE.md: **sample three or four points across the range and look at the curve
-  first** — a ramp means there is nothing to bisect, and `git bisect` will still hand you a commit.
+- **~~An unattributed 17% startup win~~ — RETRACTED the same day; it was image state.** The
+  apparent v0.15.0 win was `make ab` comparing a working-tree binary that had a **current stdlib
+  image** against a worktree binary that had none (the image id carries the git sha, so no ref
+  ever has one built). That is KI-72's trap 3 inverted, and three measurements of it disagreed
+  (−16.7%, −10.9%, +0.0%) before per-arm state verification settled it. **Verify `(stdimage/status)`
+  is `:live` per arm, not once per session.**
+
+  A single-session interleaved sweep, every binary in the same (unimaged) state, says something
+  more useful — `startup` **27 ms at 0.13.0 → 35 at v0.14.0 → 36 at HEAD**: a **~30% step between
+  0.13.0 and v0.14.0** that nothing records, then flat. That step is the real open question and,
+  being a step, is bisectable. `fib` (106→114) and `loop` (84→95) are **ramps** over the same span,
+  which brood-benchmarks' CLAUDE.md says is the shape with nothing to bisect.
+
+  Two traps to carry: `make release-brood` rebuilds only `brood`, so `nest` is left at an older
+  commit and `nest stdimage` writes an image `brood` cannot use — it reports `:stale` forever.
+  Use `make release`. And the id includes the git sha even when the baked stdlib is byte-identical
+  (seen here: same content hash `f81c5e8bfacc125`, three different shas), so **any** commit
+  invalidates every image, which is broader than trap 3 states.
+
 - **`~/.local/bin/brood` drifts.** It was 15+ commits behind for most of the day, which
   `make doctor` reports and nothing enforces. For a published benchmark run it must be the **lean**
   build (`make install INSTALL_FEATURES='$(RUN_FEATURES)'`) so the published numbers, `make ab`'s
