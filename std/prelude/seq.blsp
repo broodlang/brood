@@ -363,14 +363,14 @@ and it must be loaded before this `defrecord`.
                                (list (keyword (->string (%defrecord-fname f)))
                                  (or (%defrecord-ftype f) 'any)))
                        fields))))
-        ctor-sig (list 'sig rec (append arg-tys (list '-> rec-ty)))
+        ctor-sig (list '/sig rec (append arg-tys (list '-> rec-ty)))
         ;; per-accessor sigs only when every field is typed (else an accessor call on a
         ;; bare map would false-warn), mirroring the pre-unification behaviour.
         acc-sigs (if (every? pair? fields)
                    (map
                      (fn (f)
                        (let (fnm (%defrecord-fname f))
-                         (list 'sig
+                         (list '/sig
                            (%defrecord-acc-sym rec fnm)
                            ;; `&open` (ADR-264): an accessor takes any record CARRYING
                            ;; this field — a real value also has `:__id__` and every
@@ -398,7 +398,7 @@ and it must be loaded before this `defrecord`.
                                 (list 'quote a)
                                 id
                                 (list 'quote fnames)
-                                (list 'current-ns)))
+                                (list '/current-ns)))
                          derives)
                        nil))
     `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs ~@derive-calls (%record-register ~id '~rec) nil)))

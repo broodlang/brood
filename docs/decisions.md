@@ -17592,3 +17592,53 @@ contract and the checker must agree on what a declaration means. And the relaxat
 dropped an expected shape's optional fields before the membership test is gone: it existed
 because the old subtyping refused `{a: 1} <: {a: int, b?: string}`, and keeping it would
 now *cause* the false positive it was written to prevent.
+
+## ADR-265 — A docstring is not a string: `(doc-forms)` is the kernel's answer, for every editor
+
+**Status:** accepted and implemented, 2026-08-28.
+
+**Context.** A docstring and a string value are the *same token* to a lexer — nothing in
+`"Return the project's greeting string."` distinguishes it from `"hello mylife"` on the
+next line. Every editor coloured both with the string face, so a `defn`'s prose and its
+return value read as one thing:
+
+```lisp
+(defn greeting ()
+  "Return the project's greeting string."   ; documentation
+  "hello mylife")                           ; the value it returns
+```
+
+What separates them is **position**, and the position rule is not obvious: the docstring
+is the third form (right after the name) or the fourth (after a parameter list); `def`
+and `def-` take none at all, so their third form is a value; and for a form that builds a
+*function* a **lone** trailing string is the return value, not documentation
+(`parse_closure_template`'s rule) — while a `defmodule` docstring has no body to follow
+it and may well be the form's last element.
+
+Four independent highlighters would each have had to encode that: the VS Code TextMate
+grammar, the tree-sitter query, `brood-mode`'s font-lock, and the in-language highlighter
+`std/editor/highlight.blsp` that the REPL and bedit use.
+
+**Decision.** State the rule **once, in the kernel**, the way ADR-092 already states
+"what reads as a keyword": `builtins::DOC_FORMS` pairs each doc-carrying `def…` head with
+whether it builds a function, and the `(doc-forms)` primitive returns it as
+`head -> :fn | :head`. Every consumer reads it:
+
+- **the LSP** (`semantic_tokens`) emits the docstring as a `string` token with the
+  `documentation` modifier — it has the CST, so it applies the rule *exactly*;
+- **`std/editor/highlight.blsp`** paints it `:syntax/doc` (the REPL, the observer, bedit);
+- **`std/tool/grammar.blsp`** generates the VS Code and tree-sitter rules from it, and the
+  `brood-doc-forms` defconst `brood-mode` reads.
+
+**Consequence — the approximation is explicit and one-sided.** A tree-sitter query states
+the position precisely (child anchors); a TextMate grammar cannot, because it has no
+lookahead past the string, so `(defn f (x) "hi")` — a lone return value — reads as
+documentation there. That is the *only* case it gets wrong, and VS Code's semantic tokens
+correct it wherever the server runs. Emacs and the in-language highlighter both get it
+right (both can look ahead for a following form).
+
+**Colour, not just scope.** The point is only served if the two *look* different:
+`comment.block.documentation.brood` in TextMate (mapped from `string.documentation` for
+semantic tokens), `@string.documentation` in tree-sitter, `font-lock-doc-face` in Emacs,
+and a new `:syntax/doc` face — grey, italic by default — in the in-language highlighter,
+which a theme restyles like any other `:syntax/*` face.

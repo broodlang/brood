@@ -1070,7 +1070,7 @@ for possible repurposing.
 
 **Stage 4 (`json`).** With the mechanism in place, `std/json.blsp`'s exports drop their
 now-redundant `json-` prefix — `json-parse`→`parse`, `json-encode`→`encode` (referenced
-qualified as `json/parse`, the prefix was doubled). Consumers updated with no new `require`
+qualified as `json/decode`, the prefix was doubled). Consumers updated with no new `require`
 lines needed anywhere: `std/net/sse.blsp`, `std/tool/{docs,explain,grammar,package,test}.blsp`,
 `tests/*_test.blsp`, and the JSON fuzz target. The stage-1/2/3 test consumers move to the
 qualified spellings too (`math/even?`, `enum/frequencies`, …) in `basic.rs` and the
@@ -1897,7 +1897,7 @@ another flag someone has to know to arm.
 
 Started dropping the redundant module-name prefix from std operation functions — `queue/queue-push`
 → `queue/push`, the smell being that the module qualifier already namespaces the name so repeating
-it (`queue/queue-push`, `stream/stream-map`) is noise. `set/union`/`json/parse` were already the
+it (`queue/queue-push`, `stream/stream-map`) is noise. `set/union`/`json/decode` were already the
 house style. Carve-outs: `defrecord`'s `-field` accessors stay (CL `defstruct` idiom); the type
 constructor/predicate keep the type name (`queue/queue`, `queue/queue?`, like `set/set`).
 
@@ -4861,3 +4861,95 @@ Gates: `nest check std/**/*.blsp tests/**/*.blsp` back to zero, `nest format --c
 clean, clippy clean, 583 lib unit tests. One test flipped by design — the runtime
 contract's "extra keys are allowed" is now "an extra key throws", with an `&open` case
 beside it, because the contract and the checker have to agree on what a declaration means.
+
+**Stdlib naming, from the review list.** `json/parse` → **`json/decode`** (46 call sites, its
+`sig`, the module docstring and the test prose): its partner is `json/encode`, and `parse`'s
+opposite is not `encode`. `std/csv.blsp` was left as `csv/parse` / `csv/emit` — that pair is
+coherent on its own terms (reader/writer), and churning it would trade one convention for
+another rather than fix an asymmetry.
+
+`uuid/nil-uuid` → **`uuid/zero`**. It returns the zero-UUID *string*, so the suggested `nil`
+would have been wrong; and the `-uuid` suffix was a plain ADR-236 violation — the redundant
+module-name prefix that ADR dropped everywhere else.
+
+Both renames tripped the same trap the `name` rename did, in the same order: the call-position
+pass missed the `sig`, the higher-order use (`(map parse results)`), the bare references in
+files that `(:use json)`, and finally the prose in test names. There is a lesson here that is
+now three-for-three — **a rename is not a call-site rewrite**; the classes are call, value,
+declaration (`sig`), re-export (`:use`), and prose, and each one failed a different gate.
+
+**`csv` follows `json`.** `csv/parse`/`parse-maps`/`emit`/`emit-maps` →
+`decode`/`decode-maps`/`encode`/`encode-maps`. The pair was already internally coherent
+(reader/writer); this is about one convention across both codec modules. Two *internal*
+calls inside `std/csv.blsp` were part of the rename and are the kind a call-site sweep
+misses because they are unqualified.
+
+**Seq consolidation: measured, and the first measurement was wrong.** Counting qualified
+`seq/x` references said seven functions were entirely unused. They are not — files that
+`(:use seq)` call them bare, and re-counting both shapes showed every one of the 37 in use.
+Nearly deleted live API on the strength of a grep. What the corrected numbers *do* show is
+that **18 of 37 have zero uses inside `std/` itself** — expected for a module ADR-227
+created as helpers for downstream code, so it is a product question about surface breadth,
+not a defect. The one genuine structural defect found: **`first` is a kernel builtin,
+`second` is in the prelude, and `third` is in `seq`** — one trio, three homes.
+
+**And a second capture shape (KI-73).** Chasing `mapv`'s placement turned up that
+`defmulti` emits `(list 'mapv '%identity-of 'args)` — quoted-head construction, which the
+quasiquote scanner skips. It was a live bug: a module defining `mapv` dispatched every
+multimethod on `:CAPTURED`. Five macros were affected (`map`, `apply`, `mapv`, `current-ns`,
+`sig`). `sig` could not be escaped — the checker matches it structurally by head name, so
+`/sig` silently disables record signature checking — which four checker tests caught before
+it shipped. Gate widened to both shapes and sabotage-verified.
+
+**And `sig` turned out to be escapable after all — the constraint was ordering.** Recorded
+an hour earlier as the one name that could not use the root escape. It could; `compile`
+expands before it resolves, and `macro_head_id`'s ROOT fallback (`import_of`) did not know
+about `/name`, so `/sig` was not seen as a macro head, never expanded, and never produced
+the `%register-sig` the checker collects. One branch in `macro_head_id` fixes it for every
+macro a template emits.
+
+The tell was that `/or` *appeared* to work while `/sig` did not. Both are macros; the
+difference is that the evaluator expands macros at runtime, so `/or` got a second chance —
+and the checker never evaluates, so `sig` did not. Two macros, same escape, opposite
+outcomes, for a reason that has nothing to do with either name.
+
+**On the question this raised — reserving names, or warning:** neither, now. Reserving
+`sig`/`get`/`map`/`mapv` inside modules would break ADR-166's rule that a name is yours
+inside a module, which is what makes namespacing worth having; and a warning is only worth
+adding for a hazard that still exists. The gate asserts zero offenders. The *inverse*
+problem — no way to turn a warning off per file/function/project when `nest check` exits
+nonzero on any of them — is the real gap, now on the roadmap.
+
+## 2026-08-28 — a docstring is not a string, in four editors at once
+
+Docstrings were coloured with the string face everywhere, so a `defn`'s prose and its
+return value were the same colour on adjacent lines. The rule that separates them is
+positional and has three edges nobody encodes twice by accident (`def` takes no
+docstring; a function's *lone* trailing string is its return value; a `defmodule`'s doc
+may be the form's last element), so it went in the kernel once — `builtins::DOC_FORMS` +
+the `(doc-forms)` primitive — and everything reads it: the LSP's semantic tokens (with
+the `documentation` modifier), `std/editor/highlight.blsp`'s new `:syntax/doc` face, and
+the VS Code / tree-sitter / Emacs artifacts `nest grammar` generates. ADR-265 has the why,
+including the one case TextMate cannot get right and the LSP corrects.
+
+**The highlighter needed a form stack, not a flag.** `hl-spans` carried a single `after`
+boolean — enough for "is this symbol a call head?", not for "is this string a doc?" It now
+carries a frame per open bracket (`[open n head params?]`), which is also what makes the
+lone-return-string case answerable: peek the token stream past the string for a following
+form.
+
+**`brood-mode`'s indentation was fixed the same day, and it was worth measuring rather
+than eyeballing.** `indent-region` over the 336 format-clean `.blsp` files in the repo
+rewrote **316** of them; it now rewrites **none**. Four causes, in order of damage: Emacs
+indents a `;` comment to `comment-column` and `;;;` to column 0 (Brood's formatter puts
+every comment at the code indent, whatever its semicolon count) — hence a `brood-indent-line`
+that indents comments as code, plus `indent-region-function nil` and `indent-tabs-mode nil`;
+`brood-indent-line` passed `syntax-ppss` where `calculate-lisp-indent` needs `lisp-ppss`
+(only the latter fills element 2, so the "line follows the open paren" branch answered
+without ever calling the Brood hook); the formatter renders `:keyword value` as one unit at
+the *body* indent, so `:isolated (test …)` lays its body out from the keyword's column, not
+the bracket's; and a comment *breaks a pair*, flipping every following `cond` clause between
+test and value position — so the clause walk pairs the way the formatter does instead of
+counting to parity. The per-form header table that used to drive it is gone: the formatter
+puts every body line +2 from its bracket, and only the two pair shapes (map / bindings list
+at +1, dropped pair value at +4) depart from that.

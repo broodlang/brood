@@ -45,6 +45,37 @@
   (test "a plain variable reference carries no span"
     (assert= (highlight-spans "x") '())))
 
+;; A docstring and a string value are the same TOKEN — only position tells them apart —
+;; so these pin the positional rule the kernel's `(doc-forms)` states (ADR-265).
+(describe "highlight-spans — a docstring is not a string value"
+  (test "the string after a defn's parameter list is documentation"
+    (assert= (highlight-spans "(defn f () \"Doc.\" 1)")
+      (list [1 5 hl-face-special] [11 17 hl-face-doc] [18 19 hl-face-number])))
+  (test "a defmodule's docstring may be the form's last element"
+    (assert= (highlight-spans "(defmodule m \"Doc.\")")
+      (list [1 10 hl-face-special] [13 19 hl-face-doc])))
+  (test "a multi-arity defn's leading docstring comes before the arms"
+    (assert= (highlight-spans "(defn f \"Doc.\" ((x) x))")
+      (list [1 5 hl-face-special] [8 14 hl-face-doc] [17 18 hl-face-function])))
+  (test "a function whose body is a LONE string returns it — that is a value"
+    (assert= (highlight-spans "(defn f () \"hi\")")
+      (list [1 5 hl-face-special] [11 15 hl-face-string])))
+  (test "the body string after a docstring stays a string"
+    (assert= (highlight-spans "(defn f () \"Doc.\" \"hi\")")
+      (list [1 5 hl-face-special] [11 17 hl-face-doc] [18 22 hl-face-string])))
+  (test "a def / def- value is never documentation (def takes no docstring)"
+    (assert= (highlight-spans "(def- p \"[a-z]\")")
+      (list [1 5 hl-face-function] [8 15 hl-face-string])))
+  (test "a string deeper in the body is a value, whatever its position"
+    (assert= (highlight-spans "(defn f () (str \"a\"))")
+      (list [1 5 hl-face-special] [12 15 hl-face-function] [16 19 hl-face-string])))
+  (test "doc-form? mirrors the kernel's (doc-forms)"
+    (is (doc-form? "defn"))
+    (is (doc-form? "defmodule"))
+    (is (not (doc-form? "def")))
+    (is (not (doc-form? "def-")))
+    (is (not (doc-form? "let")))))
+
 (describe "highlight-window — spans shifted into absolute coordinates"
   (test "base 0 equals highlight-spans"
     (assert= (highlight-window "(+ 1)" 0) (highlight-spans "(+ 1)")))

@@ -7,8 +7,10 @@
 ;; editor integrations stop hand-maintaining (and drifting) parallel keyword lists.
 ;; A future tree-sitter target is the same `special-keywords` over a new emitter.
 ;;
-;; Only the special-form *keyword alternation* is data-driven; the rest of a grammar
-;; (comments, strings, the `def…`-head rule, `:keywords`, numbers) is fixed structure.
+;; Two things are data-driven: the special-form *keyword alternation* and the
+;; *doc-carrying `def…` heads* (`(doc-forms)`), which is how a DOCSTRING gets coloured
+;; apart from a string value. The rest of a grammar (comments, strings, the `def…`-head
+;; rule, `:keywords`, numbers) is fixed structure.
 ;; Macros that aren't in `(special-forms)` (e.g. `spawn`) are coloured by the LSP's
 ;; semantic tokens, not this static keyword list — so the static list stays exactly
 ;; the canonical set.
@@ -22,6 +24,17 @@ over `(special-forms)` + `encode`."
   (:use json))
 
 ;; ---- the source of truth -----------------------------------------------------
+
+(defn doc-heads ()
+  "The `def…` heads whose form carries a docstring — the keys of the kernel's canonical
+`(doc-forms)`, the same list the LSP's semantic tokens and `std/editor/highlight.blsp`
+read. The shared input to every grammar's docstring rule."
+  (keys (doc-forms)))
+
+(defn fn-doc-heads ()
+  "The subset of `doc-heads` that build a FUNCTION — where a lone trailing string is
+the return value rather than documentation."
+  (filter (fn (h) (= :fn (get (doc-forms) h))) (doc-heads)))
 
 (defn special-keywords ()
   "The special-form / core-macro names to highlight as control keywords:
@@ -47,6 +60,12 @@ grammar target."
 (a `*` in a keyword name → `\\*`)."
   (fold (fn (acc c) (string/replace acc c (str "\\" c))) s grammar-meta))
 
+(defn- grammar-quoted
+  (names)
+  "`names` as a space-separated run of double-quoted literals — the shape a tree-sitter
+`#any-of?` predicate and an elisp list both want."
+  (string/join " " (map (fn (n) (str "\"" n "\"")) names)))
+
 (defn- grammar-alternation
   (keywords)
   "An escaped, longest-first `a|b|c` regex alternation. Longest-first so a prefix
@@ -60,17 +79,32 @@ can't shadow a longer form (`->>` before `->`)."
   "Wrap a regex `body` in symbol-character boundaries on both sides."
   (str "(?<!" grammar-sym ")(" body ")(?!" grammar-sym ")"))
 
+;; A bracketed parameter list, as a regex: `(x y)` or `[x y]`, one level deep and with
+;; no string inside. Deliberately not general — it exists so the docstring rule can step
+;; over the parameter list between a name and its doc, and a regex engine has no way to
+;; balance brackets. A destructuring list with nested parens simply doesn't match, and
+;; the rule then falls back to no doc colouring rather than mis-colouring.
+(def- grammar-params "\\([^()\"]*\\)|\\[[^\\[\\]\"]*\\]")
+
 (defn tmlanguage-grammar ()
   "The full VS Code TextMate grammar as Brood data (a map). The static rules —
 comments, strings, the `def…`-head name capture, `:keywords`, constants, numbers,
-`&optional` — plus the **generated** special-form pattern (the only data-driven
-part, from `special-keywords`). Returned as data so callers/tests can inspect it;
-`(tmlanguage)` is the JSON serialisation."
+`&optional` — plus the **generated** parts: the special-form pattern (from
+`special-keywords`) and the docstring rule (from `doc-heads`). Returned as data so
+callers/tests can inspect it; `(tmlanguage)` is the JSON serialisation.
+
+The `:definition` rule is a *block* rather than a match because a docstring is a
+position, not a shape: it opens on a doc-carrying `def…` head, steps over the name and
+the parameter list, colours the string that follows as documentation, and ends at the
+first form that isn't it. What a regex grammar cannot see is whether a body follows, so
+the one string in `(defn f (x) \"hi\")` — a return value — reads as a doc here; the
+LSP's semantic tokens (which parse) correct that wherever the server runs."
   {:name "Brood"
    :scopeName "source.brood"
    :patterns [{:include "#comment"}
                {:include "#string"}
                {:include "#definition"}
+               {:include "#definition-other"}
                {:include "#special-form"}
                {:include "#param-marker"}
                {:include "#constant"}
@@ -81,9 +115,50 @@ part, from `special-keywords`). Returned as data so callers/tests can inspect it
                          :begin "\""
                          :end "\""
                          :patterns [{:name "constant.character.escape.brood" :match "\\\\."}]}
-                :definition {:match (str "(?<=\\()(def" grammar-sym "*)(\\s+(" grammar-sym "+))?")
-                             :captures {"1" {:name "keyword.declaration.brood"}
-                                        "3" {:name "entity.name.function.brood"}}}
+                :definition {:begin (str "(?<=\\()("
+                                      (grammar-alternation (doc-heads))
+                                      ")(?!"
+                                      grammar-sym
+                                      ")"
+                                      "(?:[ \\t]+("
+                                      grammar-sym
+                                      "+))?"
+                                      "(?:[ \\t]*("
+                                      grammar-params
+                                      "))?")
+                             :beginCaptures {"1" {:name "keyword.declaration.brood"}
+                                             "2" {:name "entity.name.function.brood"}
+                                             "3" {:patterns [{:include "#param-marker"}]}}
+                             ;; End the moment the docstring closes (`(?<=")` — the
+                             ;; scanner resumes exactly there), or at the first form
+                             ;; that isn't one. Without the first alternative the block
+                             ;; would go on claiming strings, and a function whose body
+                             ;; starts with one — `(defn greeting () "Doc." "hello")` —
+                             ;; would read as two docstrings.
+                             :end "(?<=\")|(?=\\S)"
+                             ;; …and let the contained rules win at that same position,
+                             ;; which is how the docstring gets claimed before the end.
+                             :applyEndPatternLast true
+                             :patterns [{:include "#comment"}
+                                         {:include "#doc-params"}
+                                         {:include "#docstring"}]}
+                :definition-other {:match (str "(?<=\\()(def"
+                                            grammar-sym "*)(\\s+(" grammar-sym "+))?")
+                                   :captures {"1" {:name "keyword.declaration.brood"}
+                                              "3" {:name "entity.name.function.brood"}}}
+                :docstring {:name "comment.block.documentation.brood"
+                            :begin "\""
+                            :end "\""
+                            :patterns [{:name "constant.character.escape.brood"
+                                        :match "\\\\."}]}
+                ;; A parameter list alone on its own line — the multi-line header style
+                ;; (`(defn- f\n  (s)\n  "doc")`), where the list didn't fit in `begin`.
+                ;; Its contents keep their ordinary colours via the capture patterns.
+                :doc-params {:match (str "^[ \\t]*(" grammar-params ")[ \\t]*$")
+                             :captures {"1" {:patterns [{:include "#param-marker"}
+                                                         {:include "#constant"}
+                                                         {:include "#keyword"}
+                                                         {:include "#number"}]}}}
                 :special-form {:name "keyword.control.brood"
                                :match (grammar-bounded (grammar-alternation (special-keywords)))}
                 :param-marker {:name "keyword.operator.brood"
@@ -104,12 +179,15 @@ generated from `(special-forms)`. Redirect `nest grammar` to the grammar file."
 
 (defn tree-sitter-highlights ()
   "The tree-sitter highlight query (`queries/highlights.scm` for `tree-sitter-brood`,
-the Neovim/Helix/Zed/GitHub grammar) generated from `(special-forms)`. The static
-node→capture rules (the grammar's node names are stable) plus the data-driven
-special-form rule, emitted with a `#any-of?` predicate over `special-keywords` (literal
-node-text, so no regex escaping)."
+the Neovim/Helix/Zed/GitHub grammar) generated from `(special-forms)` + `(doc-forms)`.
+The static node→capture rules (the grammar's node names are stable) plus the two
+data-driven rules: the special-form head, emitted with a `#any-of?` predicate over
+`special-keywords` (literal node-text, so no regex escaping), and the docstring, which
+a query CAN state precisely — child anchors give it the position a regex grammar has to
+approximate. Emitted last so it overrides the blanket `(string) @string` above."
   (str ";; tree-sitter-brood highlight query.\n"
-    ";; GENERATED from (special-forms) by `nest grammar tree-sitter` — do not hand-edit.\n\n"
+    ";; GENERATED from (special-forms) + (doc-forms) by `nest grammar tree-sitter` —\n"
+    ";; do not hand-edit.\n\n"
     "(comment) @comment\n"
     "(string) @string\n"
     "(escape_sequence) @string.escape\n"
@@ -126,16 +204,48 @@ node-text, so no regex escaping)."
     "((list . (symbol) @keyword.control)\n"
     " (#any-of? @keyword.control "
     (string/join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
+    "))\n\n"
+    ";; docstrings: in a doc-carrying def… form ((doc-forms)) the string right after the\n"
+    ";; name — or after the parameter list — DOCUMENTS the definition rather than being a\n"
+    ";; value, so it reads as documentation, not as a string.\n"
+    "((list . (symbol) @_doc-head . (symbol) . (string) @string.documentation)\n"
+    " (#any-of? @_doc-head "
+    (grammar-quoted (doc-heads))
+    "))\n\n"
+    "((list . (symbol) @_doc-head . (symbol) . (list) . (string) @string.documentation)\n"
+    " (#any-of? @_doc-head "
+    (grammar-quoted (fn-doc-heads))
     "))\n"))
 
-;; ---- Emacs font-lock list ----------------------------------------------------
+;; ---- Emacs font-lock lists ---------------------------------------------------
 
 (defn emacs-special-forms ()
   "The Emacs `brood-special-forms` defconst (elisp text) built from the same
 `special-keywords`, so `brood-mode` can generate its highlight list too."
   (str "(defconst brood-special-forms\n"
     "  '("
-    (string/join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
+    (grammar-quoted (special-keywords))
     ")\n"
     "  \"Brood special forms and core macros to highlight.\n"
     "Generated from `(special-forms)` by `nest grammar emacs` — do not edit by hand.\")\n"))
+
+(defn emacs-doc-forms ()
+  "The Emacs `brood-doc-forms` defconst (elisp text) — the `def…` heads that carry a
+docstring, as a `(HEAD . KIND)` alist where KIND is `fn` (the head builds a function, so
+a lone trailing string is its return value) or `head`. `brood-mode` reads it to fontify a
+docstring with `font-lock-doc-face` instead of the string face."
+  (str "(defconst brood-doc-forms\n"
+    "  '("
+    (string/join " "
+      (map (fn (h) (str "(\"" h "\" . " (->string (get (doc-forms) h)) ")")) (doc-heads)))
+    ")\n"
+    "  \"Brood `def…' heads whose form carries a docstring, as (HEAD . KIND).\n"
+    "KIND is `fn\' when the head builds a function — there a lone trailing string is the\n"
+    "return value, not documentation — or `head\' when the docstring may be the form\'s\n"
+    "last element.  Generated from `(doc-forms)\' by `nest grammar emacs\' — do not edit\n"
+    "by hand.\")\n"))
+
+(defn emacs ()
+  "Both Emacs defconsts (`brood-special-forms` + `brood-doc-forms`) — what `nest grammar
+emacs` prints, for pasting into `brood-mode`'s `brood.el`."
+  (str (emacs-special-forms) "\n" (emacs-doc-forms)))

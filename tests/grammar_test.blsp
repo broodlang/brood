@@ -2,7 +2,9 @@
 ;; kernel's canonical `(special-forms)` into a VS Code TextMate grammar (+ an Emacs
 ;; list), so editors stop hand-maintaining parallel keyword lists. These tests pin
 ;; the data-driven contract: the keyword set is `(special-forms)` minus def-heads,
-;; and the emitted grammar is valid JSON of the right shape with that set escaped in.
+;; and the emitted grammar is valid JSON of the right shape with that set escaped in —
+;; plus the docstring rules, which are driven by the kernel's `(doc-forms)` so a `def…`
+;; form's documentation colours apart from a string value in every editor (ADR-265).
 
 (defmodule grammar-test (:use test) (:use grammar) (:use json))
 
@@ -23,7 +25,7 @@
         (count (filter (fn (k) (not (string/starts-with? k "def"))) (special-forms))))))
 
   (test "(tmlanguage) is valid JSON of the TextMate shape"
-    (let (g (parse (tmlanguage)))
+    (let (g (decode (tmlanguage)))
       (assert= (get g :scopeName) "source.brood")
       (assert= (get g :name) "Brood")
       (is (map? (get g :repository)))
@@ -31,7 +33,7 @@
       (is (vector? (get g :patterns)))))
 
   (test "the special-form rule carries the escaped keyword alternation"
-    (let (g (parse (tmlanguage))
+    (let (g (decode (tmlanguage))
           m (get (get (get g :repository) :special-form) :match))
       ;; regex metacharacters in keywords are escaped (`match*` → `match\*`)
       (is (includes? m "match\\*"))
@@ -41,6 +43,33 @@
       ;; def-heads are NOT in the keyword alternation (they're the :definition rule)
       (is (not (includes? m "defn")))
       (is (map? (get (get g :repository) :definition)))))
+
+  (test "doc-heads is exactly (doc-forms)'s heads, and fn-doc-heads its function half"
+    (is (includes? (doc-heads) "defn"))
+    (is (includes? (doc-heads) "defmodule"))
+    ;; `def` takes no docstring — a string there is the VALUE
+    (is (not (includes? (doc-heads) "def")))
+    (is (not (includes? (doc-heads) "def-")))
+    (assert= (count (doc-heads)) (count (keys (doc-forms))))
+    ;; a function's lone trailing string is its return value; a module's is its doc
+    (is (includes? (fn-doc-heads) "defn"))
+    (is (not (includes? (fn-doc-heads) "defmodule"))))
+
+  (test "the definition rule is a block that colours a docstring as documentation"
+    (let (repo (get (decode (tmlanguage)) :repository)
+          d (get repo :definition))
+      ;; a block, not a match — a docstring is a position, so the rule needs state
+      (is (includes? (get d :begin) "defmodule"))
+      (is (includes? (get d :begin) "defn-"))
+      ;; …and only the doc-carrying heads: `def`/`defdyn` fall to :definition-other
+      (is (not (includes? (get d :begin) "defdyn")))
+      (is (map? (get repo :definition-other)))
+      ;; it ends the moment the docstring closes, else at the first other form
+      (is (includes? (get d :end) "(?<="))
+      (is (= true (get d :applyEndPatternLast)))
+      ;; the docstring gets a documentation scope, NOT the string scope
+      (assert= (get (get repo :docstring) :name) "comment.block.documentation.brood")
+      (assert= (get (get repo :string) :name) "string.quoted.double.brood")))
 
   (test "(tree-sitter-highlights) emits a highlight query with the keyword set as #any-of?"
     (let (q (tree-sitter-highlights))
@@ -54,8 +83,15 @@
       ;; static node→capture rules + the separate def-head rule
       (is (includes? q "@punctuation.bracket"))
       (is (includes? q "(#match? @keyword \"^def\"))"))
-      ;; def-heads are matched by the ^def rule, not listed in the keyword set
-      (is (not (includes? q "\"defn\"")))))
+      ;; def-heads are matched by the ^def rule, not listed in the keyword alternation
+      ;; (they DO appear below it, in the docstring rules' own #any-of? list)
+      (let (kw-line (seq/find (fn (l) (includes? l "#any-of? @keyword.control"))
+                      (string/split q "\n")))
+        (is (not (includes? kw-line "\"defn\""))))
+      ;; the docstring rules: child anchors state the position a regex can only guess
+      (is (includes? q "@string.documentation"))
+      (is (includes? q "#any-of? @_doc-head"))
+      (is (includes? q "\"defmodule\""))))
 
   (test "(emacs-special-forms) emits the brood-special-forms defconst from the same set"
     (let (e (emacs-special-forms))
@@ -63,4 +99,16 @@
       (is (includes? e "\"when\""))
       (is (includes? e "\"->>\""))
       ;; same source of truth — no def-heads
-      (is (not (includes? e "\"defn\""))))))
+      (is (not (includes? e "\"defn\"")))))
+
+  (test "(emacs-doc-forms) emits the brood-doc-forms alist with each head's kind"
+    (let (e (emacs-doc-forms))
+      (is (includes? e "(defconst brood-doc-forms"))
+      (is (includes? e "(\"defn\" . fn)"))
+      (is (includes? e "(\"defmodule\" . head)"))
+      (is (not (includes? e "(\"def\" . ")))))
+
+  (test "(emacs) emits both defconsts — what `nest grammar emacs` prints"
+    (let (e (emacs))
+      (is (includes? e "(defconst brood-special-forms"))
+      (is (includes? e "(defconst brood-doc-forms")))))

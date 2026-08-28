@@ -4609,6 +4609,34 @@ the evaluator, which no resolve pass ever touches. `eval/mod.rs`'s macro-applica
 strips escapes on the way out, which is the runtime half of `macros::resolve`'s root case. Found
 by `tests/syntax_finalization_test.blsp`, not by reasoning.
 
+**A second emission shape, found a day later and live the whole time.** A macro need not
+use a quasiquote at all — it can build its output with `(list 'head …)`, and the template
+walker skips `quote` subtrees by design, so those heads were never scanned. Five prelude
+macros did it, emitting `map`, `apply`, `mapv`, `current-ns` and `sig`. `defmulti`'s
+`(list 'mapv '%identity-of 'args)` was the live bug: a module defining `mapv` broke every
+multimethod it declared, dispatching on `:CAPTURED` instead of the record id. All escaped
+except `sig` — see below. The gate now walks both shapes.
+
+**`sig` looked unescapable, and the reason was the ordering, not the name.** `compile`
+**expands before it resolves**, and `macro_head_id`'s root fallback did not understand the
+escape — so `(/sig …)` was not recognised as a macro head, stayed unexpanded, and never
+produced the `%register-sig` the checker collects. Every record's constructor and accessor
+signature silently stopped being checked. Four checker tests caught it; without them it
+would have shipped as a quiet loss of type checking, which is the worst shape a bug can take
+in a checker.
+
+The fix is at the lookup site: `macro_head_id` strips a leading `/` in its root fallback, so
+a macro head is recognised at *expansion* time rather than merely rewritten afterwards. It is
+general — every macro a template emits, not just `sig`. (The escape appeared to work on
+macros already; that was the *evaluator* expanding them at runtime. The checker never
+evaluates, so it never got that second chance — which is why only a checker test could find
+this.)
+
+**No name is reserved and no warning is added.** Reserving `sig`/`get`/`map`/`mapv` inside
+modules would break ADR-166's one-sentence rule — reserved ⇔ it shipped with Brood, and in a
+module it is yours — which is the escape hatch that makes namespacing worth having. With the
+escape total there is nothing left to warn about; the gate asserts **zero** offenders.
+
 **Guarded by** `tests/prelude_capture_test.blsp` — a static scan of every prelude `defmacro`
 template plus three behavioural probes that define `get`/`reverse`/`bound?` and assert the real
 value comes back. It pins `receive` as the known exception, so a *new* offender fails the build.

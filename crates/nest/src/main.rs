@@ -525,8 +525,8 @@ enum Cmd {
     /// stdout; redirect to the editor's grammar file.
     ///
     /// TARGET is `tmlanguage` (default — a VS Code TextMate grammar, JSON), `emacs`
-    /// (the `brood-special-forms` defconst), or `tree-sitter` (the `tree-sitter-brood`
-    /// `queries/highlights.scm`). E.g.
+    /// (the `brood-special-forms` + `brood-doc-forms` defconsts), or `tree-sitter` (the
+    /// `tree-sitter-brood` `queries/highlights.scm`). E.g.
     /// `nest grammar > brood-vscode/syntaxes/brood.tmLanguage.json`.
     Grammar {
         /// What to emit (default `tmlanguage`).
@@ -1803,8 +1803,8 @@ fn cmd_doctest(interp: &mut Interp) {
 }
 
 /// `nest grammar [TARGET]` — emit an editor syntax grammar generated from the
-/// language's own `(special-forms)` (ADR-092), to stdout. `tmlanguage` (default) is
-/// a VS Code TextMate grammar (JSON); `emacs` is the `brood-special-forms` defconst.
+/// language's own `(special-forms)` + `(doc-forms)` (ADR-092), to stdout. `tmlanguage`
+/// (default) is a VS Code TextMate grammar (JSON); `emacs` the font-lock defconsts.
 /// Pure Brood — `std/tool/grammar.blsp` — so adding a special form updates every
 /// editor's highlighting from one place.
 fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
@@ -1812,7 +1812,7 @@ fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
     // error) before we get here, so there's no fallback/exit(2) arm.
     let call = match target {
         GrammarTarget::Tmlanguage => "(grammar/tmlanguage)",
-        GrammarTarget::Emacs => "(grammar/emacs-special-forms)",
+        GrammarTarget::Emacs => "(grammar/emacs)",
         GrammarTarget::TreeSitter => "(grammar/tree-sitter-highlights)",
     };
     run(interp, &format!("(require-one 'grammar) (io/puts {call})"));

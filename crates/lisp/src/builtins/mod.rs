@@ -54,7 +54,7 @@ use tooling::*;
 pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_captured_stdout};
 pub use os::set_script_args;
 pub use terminal::{restore_raw, restore_terminal, restore_terminal_on_exit};
-pub use tooling::SPECIAL_FORMS;
+pub use tooling::{DOC_FORMS, SPECIAL_FORMS};
 
 pub fn realize_seqview(heap: &mut Heap, env: EnvId, sv: Value) -> LispResult {
     let f = heap
@@ -3112,6 +3112,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &[],
         "The special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter and the LSP.",
         special_forms);
+    def(
+        heap,
+        "doc-forms",
+        Arity::exact(0),
+        Sig::nullary(map_ty),
+        &[],
+        "The def... heads that carry a docstring, as head -> :fn or :head — the canonical list shared by the syntax highlighter and the LSP. :fn means the head builds a function, where a lone trailing string is the return value, not a doc.",
+        doc_forms,
+    );
     def(
         heap,
         "bound?",

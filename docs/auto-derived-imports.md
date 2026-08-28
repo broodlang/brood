@@ -33,8 +33,8 @@ this trigger over Design B:
 - **Root-region scripts DO auto-require** (`scan_root_refs`), resolving the "bare scripts"
   gotcha below — but for *qualified* references, not bare ones.
 - **Works library-wide.** Because the trigger is a `/` and not a curated-name lookup, it
-  applies to `json/parse`, `csv/…`, project modules — the reason stage 4 (`json`) could
-  drop its `json-` export prefix and rely on `json/parse` self-loading.
+  applies to `json/decode`, `csv/…`, project modules — the reason stage 4 (`json`) could
+  drop its `json-` export prefix and rely on `json/decode` self-loading.
 
 The checker's KI-17 *"reference to an unrequired module"* lint (`unrequired_module`,
 `walk.rs`) is now permanently obsolete — a qualified reference requires its own module —
