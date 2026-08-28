@@ -837,3 +837,40 @@ frame-pointer chains put it at `Vec<VecStore>::push` → `RawVecInner::finish_gr
 slab reallocating as the row allocates 8.19M node vectors. That is the allocation frontier and a
 separate lever: a segmented slab would never move existing elements. Handles are indices, so
 nothing in the language observes the difference.
+
+## 2f. The tenure reservation, re-measured — 1.3%, and its justifying numbers are stale
+
+§2d's `bintree` profile put **11.4% in `__memmove`**, and frame-pointer chains put that at
+`brood_rt_make_vector2` → `Vec<VecStore>::push` → `RawVecInner::finish_grow` — the value slab
+reallocating. The obvious suspect was the tenure path in `minor_collect`, which installs
+`Slabs::default()` (zero capacity) for the new nursery while the flip path beside it uses
+`Slabs::with_capacity_like`. That asymmetry is **deliberate and documented**: reserving there
+"holds a peak-sized allocation the next cycle may never touch", and the comment cites `sort`
+peaking at 191 MB against .NET's 30 MB as the reason. `BROOD_GC_TENURE_RESERVE=1` exists to A/B it.
+
+**Measured, both arms, this tree:**
+
+| row | reserve OFF (default) | reserve ON | |
+|---|---|---|---|
+| `bintree` n=200 | 149 ms · 115.8 MB | 149 ms · **107.9 MB** | time equal, memory *better* with reserve |
+| `bintree` n=2000 | 987 ms | **974 ms** | **−1.3%** |
+| `sort` | 134 ms · 252.4 MB | 134 ms · 252.1 MB | indistinguishable |
+
+Three things follow, and the first two are corrections to the comment rather than to the code:
+
+1. **`sort` is 252 MB on this tree, not 191 MB**, and it measures the same with the reservation
+   on or off. Whatever made the reservation expensive for `sort` no longer does — so the memory
+   argument that decided this trade-off no longer reproduces as written. **Do not re-cite the
+   191 MB figure without re-measuring it.**
+2. **The prize is ~1.3%, not 11.4%.** The tenure ladder is a small part of that memmove; most of
+   it is elsewhere (the `major_collect` path still uses `Slabs::default()`, and first-time growth
+   is genuine). My hypothesis was mostly wrong and the measurement is the only reason it is not
+   recorded as a win.
+3. **The default was NOT flipped.** On these two rows `ON` is equal-or-better on both time and
+   memory, which looks like a free win — but that is two rows, the original decision rested on
+   evidence this measurement cannot reconstruct, and a GC memory policy is the wrong thing to
+   change on a narrow sample. Worth revisiting with the full row set and a peak-RSS sweep;
+   `BROOD_GC_TENURE_RESERVE=1` makes that a one-flag experiment.
+
+The remaining call-path item from §2d is `brood_rt_fast_frame` (10.7%) — same family as §2e's
+win, and a better next target than this at 1.3%.
