@@ -47,6 +47,17 @@ const CASES: &[(&str, &str, bool)] = &[
     // the complement (ADR-263)
     ("(not nil)", "5", true),
     ("(not nil)", "nil", false),
+    // Negative LITERAL atoms — the complement of a literal, which the lattice now holds
+    // exactly (an equality guard's else branch produces these). The runtime matcher has
+    // to agree, or a `sig!` contract and the static check disagree about the same type.
+    ("(not :ok)", ":err", true),
+    ("(not :ok)", ":ok", false),
+    ("(not :ok)", "5", true),
+    ("(not 5)", "6", true),
+    ("(not 5)", "5", false),
+    ("(and keyword (not :ok))", ":err", true),
+    ("(and keyword (not :ok))", ":ok", false),
+    ("(and keyword (not :ok))", "5", false),
     ("(and any (not nil))", "\"s\"", true),
     // literal singletons
     (":ok", ":ok", true),

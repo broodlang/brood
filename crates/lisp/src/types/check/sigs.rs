@@ -1118,6 +1118,22 @@ fn domain_of_inner(
     // its first argument be a member of that ability.
     let op_domain = super::protocol::sealed_op_domain(h);
     let mut acc = any_domain(n);
+    // **A parameter in call-HEAD position is callable.** `(g x)` only runs if `g` is,
+    // so an accepted call proves it — the same argument every other demand rests on.
+    // This is what types a *callback* parameter, which is what most higher-order
+    // functions take and the position an argument-order slip reverses: without it
+    // `(defn each (f xs) (f (first xs)))` types `f` as `any`, and passing the sequence
+    // first is accepted in silence.
+    //
+    // Callable is `fn | native | keyword`, not just `fn`: a keyword is a function of a
+    // map in Brood (`(:a {:a 1})` → 1), while maps, vectors and strings are not
+    // callable (verified, not assumed — each raises).
+    if let Some(pos) = param_index(head, params, scope) {
+        let callable = Ty::of(Tag::Fn)
+            .union(Ty::of(Tag::Native))
+            .union(Ty::of(Tag::Keyword));
+        acc[pos] = acc[pos].clone().intersect(callable);
+    }
     for (i, &arg) in items[1..].iter().enumerate() {
         if let Some(pos) = param_index(arg, params, scope) {
             if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i)) {

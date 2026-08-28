@@ -1,7 +1,8 @@
 # Record/shape types — `(record :k1 T1 :k2 T2 …)` in the type grammar
 
 > Status: **slice 1 + 2 shipped** (Brood runtime, checker refinement, sinks,
-> and literal inference). `type-matches?` checks each declared field's
+> literal inference, and the field-precise `get`/`assoc`/`dissoc`/`keys`/`vals` sinks).
+> `type-matches?` checks each declared field's
 > presence/type at the runtime-contract boundary; `Ty` carries a full `fields`
 > refinement with width/depth subtyping; `(get r :k)` on a declared or
 > inferred record resolves to the exact field type; a `{…}` map literal infers
@@ -195,10 +196,15 @@ Smaller items, each additive, gated on a real consumer (ADR-011):
 - ✅ **Closed records** — shipped as the *default* (ADR-264), with `&open` as the
   marked case, once ADR-262's union-of-terms made an open record's silence about
   undeclared keys the thing standing between a tagged union and a usable field read.
-- **`assoc`/`keys`/`vals` field-precise sinks** — `(assoc r :k v)` returning an
-  updated record shape, and `(keys r)`/`(vals r)` unioning across declared
-  field types, weren't built (only `get` was, as the highest-value case). Both
-  fall through to the flat/unresolved case today (sound, just less precise).
+- ✅ **`assoc`/`keys`/`vals`/`dissoc` field-precise sinks** — shipped 2026-08-28, once
+  closed records made them load-bearing rather than nice-to-have: without them a closed
+  record degrades to a flat `map` on its first update, and the idiom that builds one
+  field at a time loses its shape immediately. `(assoc r :k v)` carries the shape forward
+  with `:k` added or replaced (required — `assoc` definitely puts it there), `(dissoc r
+  :k)` removes it, and `(keys r)`/`(vals r)` yield the declared keyword literals and the
+  union of the declared field types. `keys`/`vals` read "these are ALL the keys", which
+  is true only of a **closed** record — an open one falls through to the flat rule. A
+  dynamic (non-literal) key widens, since the checker cannot say which field is touched.
 - **A less conservative subtyping algorithm** — the current one requires
   `self` to declare every field `other` does, even optional ones (see the
   `is_subtype` section above); a smarter version could prove more relations

@@ -70,6 +70,7 @@ partner of `quot`. `mod` is the one whose sign follows the divisor.
 
     (math/->fixed 1.5 2)   → \"1.50\""
   (%->fixed x n))
+(sig ->fixed (number int -> string))
 
 (defn rational (n d)
   "The exact rational `n`/`d` — reduced, with a positive denominator (a denominator

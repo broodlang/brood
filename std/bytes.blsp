@@ -6,6 +6,7 @@
 
     (bytes/at #b\"hi\" 0)        → 104"
   (%byte-at b i))
+(sig at (bytes int -> int))
 
 (defn length (b)
   "The number of bytes in b. O(1).

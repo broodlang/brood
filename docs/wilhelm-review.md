@@ -1,7 +1,12 @@
 # Wilhelm's review — language core & standard library
 
-Status marks added 2026-08-28. `[x]` resolved, `[ ]` open. A note under an open item is
-what was *checked*, not a decision — the call is still yours.
+Status marks added 2026-08-28. `[x]` resolved, `[ ]` open, `[~]` partly. A note under an
+open item is what was *checked*, not a decision — the call is still yours.
+
+**This file quotes the original question wording, so it is a record — exclude it from any
+bulk rename.** Three renames this session (`json/parse`, `uuid/nil-uuid`, `num-div`) each
+swept through it and rewrote the very names the questions were asking about, which reads as
+if the question had never been asked. Same rule as `decisions.md` and `known-issues.md`.
 
 # Language Core
 
@@ -16,14 +21,27 @@ what was *checked*, not a decision — the call is still yours.
       minimum; possibly `compare` belongs with `Ord` rather than under "math".
 - [ ] **where is `==`, and what is `compare` then? add an example** — see above; needs a
       `docs/language.md` entry once the naming above is settled.
-- [ ] **`dev/inc` can be under math** — checked: `inc`/`dec` are **bare in
-      `std/prelude/core.blsp:325`**, not in `dev`. If a `dev/inc` is showing up somewhere
-      it is a doc/catalogue artefact, not a definition. Worth confirming where you saw it.
-- [ ] **`num-div` does not make sense to me** — it is a `defmulti`
-      (`std/prelude/tools.blsp:2251`), part of the `Num` ability that lets a *record*
-      (money, complex, 2-D vector) answer `+`/`-`/`*`/`/`. Deliberately not called from the
-      operators — a Brood branch in `+` cost ~195x — the kernel `%div` calls it only on its
-      cold fallback when an operand is a record. The name is the problem, not the mechanism.
+- [x] **`dev/inc` can be under math** — **already true, no change needed.** `inc`/`dec` are
+      bare in `std/prelude/core.blsp` and catalogued `:math`, so the reference already lists
+      them under "Math and numbers". `std/dev.blsp` has no `inc` at all — it is 19 runtime
+      diagnostics (`mem-bytes`, `gc-stats`, `vm-stats`, …).
+- [x] **`num-div` does not make sense to me** — **done: the family is now `num/add`,
+      `num/sub`, `num/mul`, `num/div`**, with `std/num.blsp` declaring and documenting the
+      namespace. `num-*` was a four-name hyphen prefix — exactly what ADR-251 calls "a
+      namespace spelled by hand: it groups the names for a reader and not for the language".
+
+      The mechanism is unchanged and worth stating, since that was half the question: these
+      are multimethods dispatching on **both** operands, which the kernel's
+      `%add`/`%sub`/`%mul`/`%div` call on their **cold fallback** when an operand is a
+      record — so a money, complex or 2-D vector type can answer arithmetic. The operators
+      deliberately do not test record-ness themselves; a Brood branch in `+` cost ~195x.
+
+      Two latent gaps this exposed, both now closed. `numeric.rs` maps operator →
+      multimethod by **bare string** (`"+" => "num/add"`), which is ADR-251's recorded
+      rename hazard in its purest form: a miss would not fail the build, it would fail at a
+      user's first `(+ record record)`. There is now a test pinning that table to the actual
+      bindings. And the prelude-hygiene lint did not know `defmulti` defines a name — nothing
+      had noticed, because no prelude multimethod had ever had a slash in it.
 
 ## Strings and text
 
@@ -38,17 +56,24 @@ what was *checked*, not a decision — the call is still yours.
 
 ## gen
 
-- [ ] **`defprocess` does not make sense here; `def*` is usually part of the language core**
-      Agreed as an observation — every other `def*` (`defn`, `defmacro`, `defrecord`,
-      `defability`, `defmulti`, `defdyn`, `defmodule`) is core, and `defprocess` is the one
-      that lives in a module (`std/proc/gen.blsp:213`). Either it moves to the prelude or
-      it gets a non-`def` name; leaving it is the inconsistency you spotted.
+- [x] **`defprocess` does not make sense here; `def*` is usually part of the language core**
+      — **checked: it is not an outlier, so no change.** Three module-level `def*` macros
+      exist and agree: `gen/defprocess`, `test/deftest`, `telemetry/defevent`. And
+      `defprocess` genuinely cannot move — its expansion calls `gen-clause` and builds a
+      gen-server receive loop, so it is a `gen` form, not a language construct. The working
+      rule is "`def*` means this form defines something", which a module may legitimately do;
+      it is not reserved to the core.
 
 ## datetime
 
-- [ ] **don't we have the `?` predicates in language core?** — ADR-251 already settled the
-      general rule (*"a type predicate does not move — the predicates are one family,
-      recognisable by their `?`"*), so `datetime`'s predicates are a live counter-example.
+- [x] **don't we have the `?` predicates in language core?** — **done: `datetime?`, `date?`
+      and `time-of-day?` are now bare in the prelude**, beside `queue?`/`pq?`/`multimap?`.
+      ADR-236's carve-out 2 already stated the rule and the prelude comment already spelled
+      out the reasoning ("a value's type should read the same way whatever its type, rather
+      than doubling as `queue/queue?` inside its own module"); datetime's three had simply
+      been missed. They are pure record-id checks, so they need no module loaded.
+      `before?`/`after?`/`same?`/`leap-year?` stay in the module — those are comparisons,
+      not type predicates.
 - [ ] **can we consolidate some of these functions to be not so specific?**
 - [ ] **how do timezones work?** — needs an answer in `docs/` either way.
 
@@ -62,20 +87,32 @@ what was *checked*, not a decision — the call is still yours.
 
 ## seq
 
-- [ ] **can we consolidate some of these functions?** — partially touched this pass
-      (helpers moved out of the prelude, `sig`s added, `iterate-times` published), but the
-      *surface* was not reduced. 37 public functions is still the question you're asking.
+- [~] **can we consolidate some of these functions?** — **measured, and the honest answer is
+      "less than it looks".** First count said seven were dead; that was wrong — it only saw
+      qualified `seq/x` calls, and files that `(:use seq)` call them bare. Re-counting both
+      shapes: all 37 are used.
+
+      What the numbers do show: **18 of 37 have zero uses inside `std/` itself.** That is
+      expected for a module ADR-227 created as helpers for *downstream* code, so it is a
+      product question about surface breadth rather than a defect — the per-function table is
+      in the devlog if you want to cut. **The one structural defect is fixed:** `third` was in
+      `seq` while `first` (kernel) and `second` (prelude) were elsewhere — one trio, three
+      homes. `third` is now bare beside `second`.
 
 ## stdimage
 
-- [ ] **is some of this not just private?** — not audited yet.
+- [x] **is some of this not just private?** — **audited: it is already right, no change.**
+      8 of the 13 definitions are `defn-`; of the five public ones, every one has an external
+      caller (`install` 12, `image-path` 3, `ensure` 3, `ensure-built` 2, `build` 1). The only
+      other public is `%std-impls-by-module`, whose `%` already says internal (ADR-250).
 
 ## uuid
 
-- [ ] **can `uuid/zero` not just be `nil`? or `zero`?** — checked: `uuid/zero`
-      (`std/uuid.blsp:78`) returns the *string*
-      `"00000000-0000-0000-0000-000000000000"`, not a nil value — so `nil` would be wrong
-      and `zero` (or `uuid/zero`) reads better than `uuid/zero`.
+- [x] **can `nil-uuid` not just be `nil`? or `zero`?** — **done: `uuid/nil-uuid` →
+      `uuid/zero`.** It returns the *string* `"00000000-…-000000000000"`, not a nil value,
+      so `nil` would have been actively wrong. It was an ADR-236 violation in its own right
+      too: the `-uuid` suffix is the redundant module-name prefix that ADR dropped everywhere
+      else (`queue/push`, not `queue/queue-push`).
 
 ---
 

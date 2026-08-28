@@ -465,10 +465,10 @@ it satisfies call-site and `:sealed` checks.
 ordering — needs to see **both** operand types, which single dispatch cannot express
 symmetrically (`(+ money 5)` could dispatch on `money`, but `(+ 5 money)` cannot). So those
 live in the **`defmulti` multiple-dispatch seam**, not in an ability: `Num`
-(`num-add`/`num-sub`/`num-mul`/`num-div`) and `Ord` (`compare-to`) are **multimethods**
+(`num/add`/`num/sub`/`num/mul`/`num/div`) and `Ord` (`compare-to`) are **multimethods**
 dispatching on the operand *pair* (see [Multiple dispatch](#polymorphism-multiple-dispatch-defmulti)
-below, [ADR-179](decisions.md)). Author `(defmethod num-add [money money] …)` and
-`(defmethod num-mul [money :int] …)`; `+`/`*` are commutative, so the mirror is derived and
+below, [ADR-179](decisions.md)). Author `(defmethod num/add [money money] …)` and
+`(defmethod num/mul [money :int] …)`; `+`/`*` are commutative, so the mirror is derived and
 `(+ 5 (money 50))` and `(+ (money 50) 5)` agree. There is **no implicit coercion** — a pair
 with no method is a loud `no-method`, never a silent conversion.
 
@@ -756,9 +756,9 @@ method for an exact tuple of ids (a built-in id keyword `:int`, or a record name
 
 ```clojure
 (defrecord money (cents))
-(defmulti  num-add :commutative)                                  ; declare (with an algebra)
-(defmethod num-add [money money] (a b) (money (+ (cents a) (cents b))))
-(defmethod num-add [money :int]  (m n) (money (+ (cents m) n)))   ; scalar mixing, if you want it
+(defmulti  num/add :commutative)                                  ; declare (with an algebra)
+(defmethod num/add [money money] (a b) (money (+ (cents a) (cents b))))
+(defmethod num/add [money :int]  (m n) (money (+ (cents m) n)))   ; scalar mixing, if you want it
 
 (+ (money 100) (money 50))   ;=> (money 150)
 (+ (money 100) 5)            ;=> (money 105)
@@ -787,7 +787,7 @@ There is **no implicit coercion**: a closure derives the mirror of a method *you
 never invents a conversion — so cross-type arithmetic is explicit-per-method yet symmetric.
 
 **`Num` and `Ord` are the built-in multimethods.** `+`/`-`/`*`/`/` route to
-`num-add`/`num-sub`/`num-mul`/`num-div`, and `<`/`<=`/`>`/`>=`/`min`/`max` route to
+`num/add`/`num/sub`/`num/mul`/`num/div`, and `<`/`<=`/`>`/`>=`/`min`/`max` route to
 `compare-to`, **only when a record is an operand** — pure `int`/`float`/`decimal` arithmetic
 stays byte-for-byte on the kernel's fast path (records never touch it). Both are **strict**:
 neither has a `:default`, so a record type must define the methods it means. `(+ (money 1)
@@ -806,7 +806,7 @@ known but has no method and no `:default` — accounting for the closure mirror,
 `:commutative` call in either order stays silent. An arg's identity is known from a literal, a
 `defrecord` constructor, **or its inferred type** (a record-typed variable — `(let (m (usd 1))
 (scale m 2.5))` is flagged). This covers **direct generic calls** *and* the **operator sugar**:
-`(+ (money 1) 2.5)` and `(< money 5)` route to `num-add`/`compare-to`, so an uncovered record
+`(+ (money 1) 2.5)` and `(< money 5)` route to `num/add`/`compare-to`, so an uncovered record
 operand is flagged there too (a pure-number call like `(+ 1 2)` is never touched). So an
 unclear dispatch fails at type-check, not only at runtime.
 

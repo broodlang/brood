@@ -98,8 +98,13 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   is absent, so a field read through `{ok: int} | {error: string}` resolves, and the
   two alternatives are provably disjoint.
 - **The complement is sayable** (ADR-263): `(not T)` joins `(or …)`/`(and …)` in
-  the grammar, so "anything but nil" is `(and any (not nil))`. Exact on flat
-  terms; the complement of a refined term widens to its tag.
+  the grammar, so "anything but nil" is `(and any (not nil))`. Exact on flat terms and
+  on **literal sets** (ADR-268 — a literal refinement is held positively *or*
+  negatively, so `¬:ok` is "any value but the keyword `:ok`", not `any`); the complement
+  of a *structurally* refined term still widens to its tag. Exactness is what makes an
+  equality test narrow its **else** branch: after `(= tag :ok)` fails, a `(or :ok :err)`
+  tag is `:err`. A guard whose type is not exact stays one-sided — `(= m "x")` proves
+  only `m : string`, since `of_value` has no heap to read the literal's bytes.
 - **Literal (singleton) types** (`lit`/`lit_int`/`lit_bool`/`lit_str` refinements,
   ADR-105/117/120): a sig can enumerate exact keyword, int, bool, or string
   values — `(or :maximized :fullboth nil)`, `(or 200 404 500)`, `(or true

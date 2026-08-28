@@ -823,7 +823,7 @@ fn part_has_rest(heap: &Heap, part: Value) -> bool {
 /// never a false positive. `None` when the form isn't a `fn`, or when a parameter
 /// list isn't a readable list/vector — the caller then leaves the call unchecked,
 /// which is the pre-existing behaviour.
-fn fn_form_arity(heap: &Heap, value_form: Value) -> Option<Arity> {
+pub(super) fn fn_form_arity(heap: &Heap, value_form: Value) -> Option<Arity> {
     let items = fn_form_items(heap, value_form)?;
     let forms = &items[1..];
     // A leading docstring is not a parameter list.
@@ -2688,6 +2688,18 @@ fn bindings(heap: &Heap, form: Value) -> Option<Vec<Value>> {
 /// The elements of a proper list, or `None` for an improper list / non-list.
 /// `pub(super)` because `sigs` (`infer_sig`) and `guards` (`guard_assertion`,
 /// `expr_ty`) all need to peel a list head off a call form.
+/// The body forms of a `(do …)`, or `None` for anything else. `defn-`/`def-` expand to
+/// one, so a walk over top-level forms that does not look inside a `do` cannot see a
+/// module-private definition at all.
+pub(super) fn do_body(heap: &Heap, form: Value) -> Option<Vec<Value>> {
+    let items = list_items(heap, form)?;
+    let head = items.first()?;
+    if !matches!(head, Value::Sym(s) if value::symbol_is(*s, "do")) {
+        return None;
+    }
+    Some(items[1..].to_vec())
+}
+
 pub(super) fn list_items(heap: &Heap, mut v: Value) -> Option<Vec<Value>> {
     let mut out = Vec::new();
     loop {
