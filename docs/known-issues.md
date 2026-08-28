@@ -4763,13 +4763,32 @@ the kernel is untouched.
 Sorting by definition site was tried first and **cannot** work: `reflect/source-location`
 returns `nil` for a `defn-`, which is exactly the half that matters.
 
-**Residual, stated precisely.** Privates-first closes public→private, which is the observed
-class and the only one reachable in `string`/`seq` today. It does **not** order public→public:
-the publics still go in `(global-names)` order, so a public calling a public defined later in
-the same module would still have a window. That class is not reachable from a source-order fix
-either — `reflect/source-location` returns `nil` for a `defn-`, so the privates cannot be
-placed in source order at all, and full source-load parity is therefore unavailable by
-ordering alone.
+**Residual, measured — and it is NOT hypothetical.** Privates-first closes public→private, the
+observed class. It does **not** order public→public, and that matters more than it first looked:
+`(global-names)` order is **alphabetical**, which is why `string/blank?` (b) preceded
+`string/whitespace?` (w) at all. So a public calling a sibling public whose name sorts later
+has exactly the same window.
+
+A static scan of `std/`'s 1318 module-level publics finds **≈257 such calls** (caller installs
+before callee), concentrated in `editor/buffer` (42), `tool/project` (26), `tool/sexp` (16),
+`tempo`/`tool/debug`/`tool/package` (13 each). Three verified by hand:
+
+| caller | calls | why the order bites |
+|---|---|---|
+| `datetime/days-in-month` | `(leap-year? y)` | `days-in-month` < `leap-year?` |
+| `datetime/today` | `(utc-now)` | `today` < `utc-now` |
+| `editor/ansi/ansi-clear` | `(ansi-clear-screen)`, `(ansi-home)` | `ansi-clear` sorts before both |
+
+(The scan's shadow detection is crude, so treat 257 as an upper bound of the same order — the
+hand-verified cases establish the class, not the exact count.)
+
+None of these has been *seen* to fail, because a second process has to resolve the caller inside
+its specific window and these are not on a funnelled autoload path the way `string/blank?` is —
+the stub sends 24 processes at it at once. But the windows exist, so **privates-first is
+necessary and not sufficient**: it fixes the reproducible hang, and it does not make the image
+safe to default-ON. Nor can ordering alone fix it: `reflect/source-location` returns `nil` for a
+`defn-`, so the privates cannot be put in source order, and full source-load parity is
+unavailable by ordering.
 
 **The stronger fix, and the trap in it.** The complete fix is to make a section install
 *atomic* — nothing in it visible until all of it is. `image_load_section` currently interleaves
@@ -4780,10 +4799,16 @@ The obvious rewrite is two passes: build all `(kind, sym, value)` first, then de
 **Do not write that naively.** Buffering the values in a Rust `Vec` across the build pass leaves
 them **unrooted** while `from_message` keeps allocating, so a collection during the pass
 reclaims values the Vec still points at — the use-after-GC class the per-deref tripwire and
-`BROOD_GC_VERIFY=1` exist for. A correct version needs the pending values rooted (a temp root
-scope the GC scans), and even then N separate `env_define` calls are only *nearly* atomic;
-true atomicity wants a batch-define holding the globals write lock once. Worth doing, but it is
-kernel work with a live GC hazard, not the tidy-up it looks like.
+`BROOD_GC_VERIFY=1` exist for. A correct version needs the pending values rooted — and the
+kernel already has the API for exactly this: `Heap::root(v) -> Root` / `read_root(r)` (a
+GC-stable handle), with `roots_len()` / `truncate_roots(n)` for scope save/restore
+(`core/heap/gc.rs`). So: pass 1 builds each value and holds a `Root` for it; pass 2 reads each
+root back (post-relocation) and defines it. Even then N separate `env_define` calls are only
+*nearly* atomic — true atomicity wants a batch-define holding the globals write lock once — but
+pass 2 does no `from_message`, so the exposed window drops from milliseconds to microseconds.
+Validate under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, which is precisely what those flags are
+for. **This is the prerequisite for any default-ON proposal**, given the ≈257 public→public
+windows above.
 
 
 **Status:** ✅ the hang is **fixed** (privates-first, 2026-08-28) and the image arm is at parity

@@ -42,14 +42,24 @@ Two things to carry forward from it:
   *green process*, and libtest captures per thread — so `cargo test`/nextest swallow it and it
   shows only under `--nocapture`. Three investigations used gdb and in-language watchdogs (which
   perturb the timing) and never read the output. Same lesson as KI-64.
-- **The image is not default-ON, deliberately.** The hang is gone and the image arm is at parity
-  with the no-image arm on every repro (the original 12-parallel one went 12/12 over the cap →
-  0/12), but privates-first does not order **public→public**, and full source-order parity is
-  unavailable because a `defn-` has no recorded def-site. The complete fix is an **atomic section
-  install** — and the KI entry records the trap in the obvious version: buffering the built values
-  in a Rust `Vec` leaves them unrooted while `from_message` keeps allocating (a use-after-GC).
-  Close that before proposing the default flip; the win waiting behind it is `json` 6.5 → 1.7 ms,
-  `http` 12.0 → 3.6 ms, `regex` 4.7 → 1.1 ms, and the `json` row −5.6%.
+- **The image is not default-ON, and the reason is now measured rather than hedged.** The hang is
+  gone and the image arm is at parity with the no-image arm on every repro (the original
+  12-parallel one went 12/12 over the cap → 0/12). But `(global-names)` order is **alphabetical**,
+  so the same window exists for a public calling a sibling public that sorts later — a static scan
+  finds **≈257** such calls across `std/`'s 1318 module publics, three verified by hand
+  (`datetime/days-in-month`→`leap-year?`, `datetime/today`→`utc-now`,
+  `editor/ansi/ansi-clear`→`ansi-clear-screen`). They have not been *seen* to fail only because
+  none is on a funnelled autoload path the way `string/blank?` is. **So privates-first is
+  necessary and not sufficient.**
+
+  The prerequisite for a default-ON proposal is an **atomic section install**, and it is more
+  tractable than it looks: the kernel already has `Heap::root`/`read_root` +
+  `roots_len`/`truncate_roots` (`core/heap/gc.rs`), so pass 1 can build-and-root and pass 2
+  define-from-root. The trap to avoid is the naive version — buffering built values in a plain
+  Rust `Vec` leaves them unrooted while `from_message` keeps allocating (use-after-GC). Validate
+  under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. The win waiting behind it, measured on this box:
+  `http` 12.93 → 5.98 ms, `json` 8.29 → 3.97 ms, `regex` 4.90 → 1.87 ms (1.5–2.6× on the module
+  load every short-lived invocation pays).
 
 **Still open: KI-74** only (⚠️ watching — one unnamed lib-suite failure, 20 clean runs since;
 re-run under nextest, which names the case, if it recurs).
