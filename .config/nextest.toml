@@ -61,6 +61,22 @@ test-group = 'real-tcp'
 # Same real-network timing exposure as `distribution` above — same one-retry policy.
 retries = 1
 
+# `live_migration` asserts that a scheduler EVENT WAS OBSERVED, not just that results are
+# right: `deep_receive_continuations_resume_correctly_across_workers` runs up to 400 bursts and
+# fails unless `migrate_count() > 0` — i.e. unless a capture-mode process actually resumed on a
+# *different* worker. On a runner sharing 2 cores with the workspace build, that observation can
+# simply not happen while every result is correct, which is exactly how it failed on 12b31fc2
+# (2026-08-28, KI-79): the per-burst correctness assertion passed 400/400 and only the
+# "was a migration seen" assertion fired. The test's own message says as much.
+#
+# It was the last test in the suite asserting an observation of concurrency with NO retry, which
+# is the same gap the `distribution` comment above describes. One retry: a starvation blip stops
+# reddening CI, a real regression still fails both attempts, and a pass-on-retry is reported as
+# FLAKY so it cannot be silently absorbed.
+[[profile.default.overrides]]
+filter = 'binary(live_migration)'
+retries = 1
+
 # `brood_suite_passes` (tests/suite.rs) runs the ENTIRE in-language suite (~1200
 # cases) inside ONE nextest case, so the 120s default cap is the wrong scale: under
 # a full `make test` it competes with the rest of the workspace for cores and
