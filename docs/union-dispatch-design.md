@@ -245,3 +245,128 @@ in Brood.** Ordinary code then behaves exactly as it does today, and:
 
 That ordering also de-risks it: build the mechanism, keep today's behaviour, then decide the
 default on evidence rather than in advance.
+
+---
+
+## DECIDED (2026-08-28): strict by default, via the mechanism that already exists
+
+Called after the two measurements above. **Cross-type numeric arithmetic and comparison raise
+unless a method is declared for the pair.**
+
+### Implemented by deleting, not adding
+
+`num_multi_dispatch` already does exactly this job — its own comment says *"A pair with no
+method raises the multimethod's loud `no-method` error, so mixed types are explicit, never
+silently coerced."* That is the existing design intent **for records**; the numeric tower is
+the one case never brought under it.
+
+So: widen the trigger from *"an operand is a record"* to *"the operands are different numeric
+types"*, and **delete** the float-contagion branch. No new concept, no resolver to invent, and
+net less code than today. Comparison joins the same way through `compare-to`.
+
+This is what makes it "simpler but more complete": one dispatch mechanism uniformly applied,
+instead of a Rust special case for the tower plus a Brood multimethod for records.
+
+### Why strict is the right default to *enter* with
+
+ADR-166 settled an identical question: *"relaxing a restriction later is backward-compatible —
+every program that worked still works — while adding one breaks whoever monkey-patched. Of the
+two possible mistakes, sealing is the recoverable one."* Same asymmetry, and the cost of being
+wrong is measured, not guessed: **27 sites, 0 at boot**.
+
+It also makes the checker warning legitimate. Under a lenient default the coercion is *valid
+for the image's current state*, so warning on it would violate the checker's own contract
+(`docs/types.md`, `docs/type-gating.md`, `CLAUDE.md`); under a strict one the warning is simply
+correct, and the error moves from runtime to `nest check`.
+
+### `std/num/tower.blsp` — the one-line escape
+
+Ship the tower coercions as an **opt-in module**, not as a default:
+
+- default: nothing loaded, mixed ops raise, checker warns;
+- `(require 'num/tower)` restores today's behaviour process-wide, in one line;
+- the methods are readable Brood, and a user may require it and then override a pair.
+
+That is what keeps this from being strenuous, and it makes relaxing the decision a single line
+rather than a kernel change.
+
+### Known cost, recorded rather than argued away
+
+`(+ 1 1.5)` raising will surprise anyone arriving from another Lisp. That is the real argument
+for a lenient default. It is outweighed by consistency: `=` is *already* strict, and `=` strict
+while `+` silently coerces is a worse surprise than both being strict — inconsistent rather
+than merely unusual.
+
+### Sequencing
+
+1. **This decision** (widen the trigger, delete contagion, ship `num/tower` opt-in). Works
+   without unions: a user writes one method per pair.
+2. **Typed multimethods** — `defmulti … :-> RET` + `check_method_returns`. Independently
+   useful; makes multimethod calls typeable at all.
+3. **Union positions.** Now a capability rather than a convenience: without them the full
+   tower is 16 pairs per binary op (10 after `:commutative`), which is exactly the boilerplate
+   step 1 creates. Build them when that friction is real.
+
+Note the form: step 2/3 are **typed `defmulti`**, not multi-argument `defability` — see
+Decision 1. Abilities stay single-dispatch; a cross-type coercion is a relation between two
+types, not a type implementing an interface.
+
+---
+
+## Attempted 2026-08-28, reverted — the sequencing is backwards
+
+Step 1 was implemented and backed out the same day. **The design is sound and the mechanism
+works; the ORDER was wrong.** What the attempt established:
+
+**The mechanism is proven.** Widening `num_multi_dispatch`'s trigger from "an operand is a
+record" to "the operands are different tower kinds" took ~15 lines and produced exactly the
+intended error:
+
+```
+multimethod num/mul: no method for [:float :int]
+```
+
+Loud, names the operator and the pair, no silent coercion. `Int` vs `BigInt` correctly stayed
+native (same kind — both `:int`), so bignum promotion was unaffected.
+
+**Correction: the 13-contagion measurement was an UNDERCOUNT.** It instrumented `num_to_f64`
+in the *native* path, but the VM inlines `(Int, Float)` in `prim_apply_float` and never calls
+the native for it — so the fast path bypassed the very site being measured. Real fallout when
+both paths were closed: **17 test files**, including `stats` (percentiles), `pane` (geometry)
+and `math`. The lesson generalises: instrumenting one tier of a tiered runtime measures that
+tier, not the language.
+
+**The blocker is a circular bootstrap.** Declaring the promotions in Brood needs conversion
+primitives — and `->float`, the obvious one, is *itself* implemented with mixed arithmetic. So
+it breaks under the very rule its declaration would restore:
+
+```
+(->float 1)   ; => no method for [:float :int]
+```
+
+Nothing can be declared until there is a promotion primitive that does not use the operators
+being declared.
+
+**And without unions the declaration burden is prohibitive.** To restore the tower by hand:
+
+| | methods |
+|---|---|
+| exact pairs `{int, decimal, ratio}` — add/mul commutative, sub/div both ways | 18 |
+| float pairs `{float × int, decimal, ratio}` | 18 |
+| **total** | **36** |
+
+With union positions plus a `promote-to-wider` helper, that collapses to **4** — one per
+operator, each body "promote both to the wider kind, then apply". So the boilerplate the
+strict default creates is *exactly* what unions remove.
+
+### Revised sequence
+
+1. **Typed multimethods** — `defmulti … :-> RET` + `check_method_returns`. Independently
+   useful; nothing else makes a multimethod call typeable.
+2. **Union dispatch positions** — Decisions 2 and 4 above.
+3. **A promotion primitive** that does not route through `+`/`-`/`*`/`/` (the circular-bootstrap
+   fix), so a method body can widen its operands.
+4. **Then** the strict default, which becomes 4 declarations rather than 36.
+
+The earlier framing — "strict first, unions later as ergonomics" — had it backwards. Unions are
+not a convenience layered on top; they are what makes the strict default implementable at all.

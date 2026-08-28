@@ -2082,6 +2082,19 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   at expansion time or from a caller's list at runtime."
   (fold (fn (n op) (if (%unregister-impl aname op key) (inc n) n)) 0 ops))
 
+;; The position of `:->` in a `defmulti`'s opts, or nil. `:->` is the same marker an
+;; ability op spec uses for its return (`(compare-to [self other] :-> int)`), so a reader
+;; meets one spelling for "and it returns" across both dispatch forms.
+(defn- %index-of-arrow
+  (opts)
+  (%arrow-at opts 0))
+(defn- %arrow-at
+  (opts i)
+  (cond
+    (empty? opts) nil
+    (%eq (first opts) :->) i
+    else (%arrow-at (rest opts) (inc i))))
+
 ;; ── Multiple dispatch: `defmulti` / `defmethod` (ADR-179) ──────────────────────
 ;; Dispatch on the IDENTITY-TUPLE of the arguments, resolved by EXACT match, then a declared
 ;; `:default`, else a loud `%no-method` error — never a nearest-neighbour guess. Ambiguity is
@@ -2092,12 +2105,28 @@ which is meaningless for a rope, so falling through unconditionally would swap a
 
 (def- *methods* {}) ; multimethod name → { [id …] → fn, :default → fn }
 (def- *multi-algebra* {}) ; multimethod name → :commutative | :antisymmetric | nil (declared)
+(def- *multi-ret* {}) ; multimethod name → its declared `:-> RET` type form, or nil
 (def- *method-from* {}) ; [mname key] → registering ns, for cross-module conflict detection
-(defn %register-multi (mname algebra)
+(defn %register-multi (mname algebra & more)
   "Declare multimethod `mname` with optional closure `algebra` (nil, :commutative, or
-  :antisymmetric). Records the algebra so `%register-method` can derive each mirror."
+  :antisymmetric) and optional declared return type `ret` (the `:-> RET` tail). Records the
+  algebra so `%register-method` can derive each mirror, and the return so the checker can
+  type a CALL — a multimethod's own body is the dispatch machinery, so its inferred type is
+  opaque and the declaration is the only static handle, exactly as an ability op's `:-> RET`
+  is (`types/check/infer.rs`).
+
+  `& more` rather than a fixed `ret` parameter: absent must be distinguishable from an
+  explicitly declared nil, and a variadic tail is how that is spelled."
   (%registry-update! '*multi-algebra* :assoc [mname] algebra)
+  (when (not (empty? more))
+    (%registry-update! '*multi-ret* :assoc [mname] (first more)))
   nil)
+
+(defn multi-return-type (mname)
+  "The declared `:-> RET` type form of multimethod `mname`, or nil when it declares none.
+  The multimethod counterpart of an ability's `op-return-type`; the checker reads it to type
+  a call site, and `check-method-returns` reads it to verify each method body against it."
+  (get *multi-ret* mname))
 
 (defn %multi-resolve (mname key)
   "The method fn of multimethod `mname` for identity-tuple `key` (a vector), else the declared
@@ -2192,13 +2221,21 @@ which is meaningless for a rope, so falling through unconditionally would swap a
     (defmulti num/add :commutative)
     (defmulti compare-to :antisymmetric)
     (defmulti render)"
-  (let (algebra (if (empty? opts) nil (first opts)))
+  (let (ret-pos (%index-of-arrow opts)
+        ret (if ret-pos (nth opts (inc ret-pos)) nil)
+        opts (if ret-pos (take ret-pos opts) opts)
+        algebra (if (empty? opts) nil (first opts)))
     ; STRICT: an unknown algebra keyword is a clear declaration error — fail at expansion.
     (when (and algebra (not (includes? (list :commutative :antisymmetric) algebra)))
       (error "defmulti "
         mname ": unknown algebra " algebra " (expected :commutative, :antisymmetric, or none)"))
+    (when (and ret-pos (<= (count opts) 0) (nil? ret))
+      (error "defmulti " mname ": `:->` must be followed by a return type"))
     (list 'do
-      (list '%register-multi (list 'quote mname) algebra)
+      (list '%register-multi
+        (list 'quote mname)
+        algebra
+        (list 'quote ret))
       (list 'defn
         mname
         '(& args)
@@ -2354,7 +2391,13 @@ contents are not simply its fields."
 ;; type must define `compare-to` to be ordered (`<`/`<=`/`>`/`>=`/`sort`), else the pair is a
 ;; loud `%no-method` (a record is not silently ordered by its map layout). `(compare-to a b)`
 ;; → -1 / 0 / 1.
-(defmulti compare-to :antisymmetric)
+;;
+;; The `:-> int` is that last sentence, machine-checked. The `Ord` ability has always
+;; declared `(compare-to [self other] :-> int)`, but the MULTIMETHOD declared nothing, so a
+;; method returning a string or nil was caught by neither — and `sort`, which is built on
+;; this, would then compare on garbage. Declaring it here types every `(compare-to a b)` call
+;; site and makes each method body checkable against the same contract the ability states.
+(defmulti compare-to :antisymmetric :-> int)
 
 ;; Record-aware compare: a record uses its `compare-to` (a type with no `Ord` method is a loud
 ;; %no-method — strict), everything else the kernel `compare`. This is the comparator
