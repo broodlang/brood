@@ -71,6 +71,11 @@ impl fmt::Display for Ty {
                     })
                     .collect();
                 parts.sort();
+                // An **open** shape says so (ADR-264) — without the marker `{a: int}`
+                // would read as "exactly this", which is what the *closed* shape means.
+                if self.record_is_open() == Some(true) {
+                    parts.push("...".to_string());
+                }
                 return write!(f, "{{{}}}", parts.join(", "));
             }
         }

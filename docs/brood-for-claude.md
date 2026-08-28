@@ -1076,6 +1076,11 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   Type grammar beyond the basics: `(or A B)`, `(and A B)`, `(not T)` — so "anything
   but nil" is `(and any (not nil))` — `(vector E)`, `(map K V)`, `(tuple A B)`,
   `(record :k T)`, and bare literals (`:ok`, `5`, `true`, `"GET"`).
+- **A `(record …)` is CLOSED** (ADR-264) — it names every key, and one it doesn't
+  declare reads as `nil`. Write `(record &open :k T)` when a value may carry more,
+  which is what a *parameter* usually wants. Closedness is what makes a tagged union
+  work: `(get r :ok)` over `(or (record :ok int) (record :error string))` is
+  `int | nil`, since the other alternative says `:ok` is absent.
 - **`=` is structural** and recursive — two unrelated structures that look the
   same compare equal.
 - **Variadic operators**: `(+ a b c)` works. The fast 2-arg primitives, when

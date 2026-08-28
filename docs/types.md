@@ -90,6 +90,13 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   merge, so a type's size stays bounded (KI-13). Every *refinement accessor*
   (`as_arrow`, `elem_ty`, `record_fields`, …) reports only for a single-term type:
   a refinement that holds for one term does not hold for the union.
+- **A record is closed** (ADR-264). `(record :a int)` names every key; one it does not
+  declare is absent, which a `get` reads as `nil`. `(record &open :a int)` is the
+  permissive form. Openness is modelled as *the type of the undeclared keys* (`nil` vs
+  `any`) rather than a flag, so one field reading drives subtyping, disjointness and
+  intersection alike — and a tagged union becomes usable: `{ok: int}` asserts `:error`
+  is absent, so a field read through `{ok: int} | {error: string}` resolves, and the
+  two alternatives are provably disjoint.
 - **The complement is sayable** (ADR-263): `(not T)` joins `(or …)`/`(and …)` in
   the grammar, so "anything but nil" is `(and any (not nil))`. Exact on flat
   terms; the complement of a refined term widens to its tag.
@@ -710,7 +717,12 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
    goldmine (step 4). Don't add opaque guards that hide the type they imply.
 9. **Errors, `type-of`, and `Ty` agree on names.** All use `Tag::name`
    spellings, so a `Ty` in a message reads the same as `type-of` returns.
-10. **A refinement reported for a union must hold for the whole union.** A `Ty`
+10. **A shape says what a value is NOT, so a domain must say `&open`.** A `(record …)`
+   used to describe a *value* is closed (ADR-264) and that is the default; a shape used
+   as a *parameter domain* — a `defrecord` accessor, an ability-as-a-type, a
+   path-guard's refined base — must be `&open`, or it describes a value that does not
+   exist. A new producer of record shapes has to make that choice explicitly.
+11. **A refinement reported for a union must hold for the whole union.** A `Ty`
    may carry alternative terms (ADR-262), so every accessor that returns a
    refinement (`as_arrow`, `elem_ty`, `map_kv`, `record_fields`, `tuple_elems`,
    the literal sets) reports only for a single-term type. Reading the head term's
@@ -722,11 +734,11 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
    to compile until it is listed, rather than silently making two different types
    compare equal (`term_equality_distinguishes_every_refinement_slot` is the
    behavioural half — a listed-but-unused slot fails there).
-11. **A declaration is checked, not trusted blindly.** A new annotation form must
+12. **A declaration is checked, not trusted blindly.** A new annotation form must
    report what it cannot read (ADR-259). An annotation that is ignored when wrong
    is a gate that cannot fail, and the checker reads declarations *first* — so a
    dropped one silently widens the position it was meant to pin.
-12. **A new special form must be added to the reach gate.** `REACH_CASES`
+13. **A new special form must be added to the reach gate.** `REACH_CASES`
    (`types/check/tests.rs`) plants an unresolvable name in each of a form's code
    positions and asserts the walk reports it; a companion test requires every
    `SPECIAL_HEAD` entry to have a case, so a form added later cannot inherit
