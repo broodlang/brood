@@ -71,8 +71,17 @@ pub(super) fn sealed_op_members(op_name: &str) -> Option<Vec<String>> {
 /// on the type — but naming it keeps the rest of a `sig` alive (its return, its other
 /// params) instead of dropping the whole declaration. `None` when `name` isn't an ability.
 fn ability_type(name: &str) -> Option<Ty> {
+    // A **qualified** spelling names the same ability: the registry (`*abilities*`) is
+    // keyed by the bare CamelCase name (ADR-255), one flat namespace — `(:use shapes)`
+    // does not create a second `Shape`. So `shapes/Shape` in a `sig` resolves through
+    // its last segment, which is the only part that identifies anything. The module
+    // half cannot be *verified* for the same reason it is not needed: nothing records
+    // which module declared an ability. Before this, a qualified spelling read as an
+    // unknown type — silently widening the annotated position to `any` until ADR-259
+    // started reporting it.
+    let bare = name.rsplit('/').next().unwrap_or(name);
     ABILITY_TYPES.with(|m| {
-        match m.borrow().get(name)? {
+        match m.borrow().get(bare)? {
             // Open ability: permissive — the type checks nothing, but the sig survives.
             None => Some(Ty::ANY),
             // Sealed ability: the finite union of its members' record shapes, built at its
@@ -170,7 +179,7 @@ fn base_ty(name: &str) -> Option<Ty> {
 /// `Ty::Map` in slice 1), `(record …)`, and `(tuple T1 T2 …)` (ADR-128,
 /// a fixed-arity positional vector shape). `None` for anything unrecognised
 /// — the annotation is then dropped, never guessed.
-pub(crate) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
+pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
     match form {
         Value::Sym(s) => {
             let name = value::symbol_name(s);

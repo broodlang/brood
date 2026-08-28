@@ -1112,6 +1112,12 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // `decimal/*`, this module declares the namespace. `decimal?` stays bare with the
     // other type predicates. Bare until 2026-08-26.
     embedded_module!("decimal", "std/decimal.blsp"),
+    // Arithmetic for RECORD types — the `+`/`-`/`*`/`/` extension point (ADR-179). The
+    // `bit`/`decimal` story with one twist: the ops are neither Rust nor loadable, they are
+    // prelude MULTIMETHODS, because `%add`'s cold fallback calls them before any module can
+    // load. This module declares the namespace and documents them. `num-add`… until
+    // 2026-08-28 — a four-name hyphen prefix is a namespace spelled by hand (ADR-251).
+    embedded_module!("num", "std/num.blsp"),
     // OS/process interface: env vars, argv, subprocess execution, OS type, halt.
     // Wraps the %env-all/%argv/%os-cmd/%os-type/%halt primitives with a clean API.
     embedded_module!("system", "std/system.blsp"),

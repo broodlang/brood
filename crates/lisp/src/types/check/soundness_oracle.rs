@@ -186,6 +186,18 @@ fn an_inferred_parameter_domain_over_approximates_the_real_one() {
         "(defn f (x) (str x))",
         "(defn f (x) (+ x 1))",
         "(defn f (x) x)",
+        // Truthiness (ADR-264's tail): a bare local as an `if` test is a guard, and it
+        // is one-sided because the exact truthy type is unsayable here. These are the
+        // shapes that guard fires on — including the `if-let` expansion that motivated
+        // it, where a closed literal's `nil` had read as a false positive.
+        "(defn f (x) (if x (inc x) 0))",
+        "(defn f (x) (if x 1 (string/length x)))",
+        "(defn f (x) (let (v x) (if v (inc v) 0)))",
+        "(defn f (x) (when x (inc x)))",
+        "(defn f (x) (unless x (string/length x)))",
+        "(defn f (x) (if-let (v (get x :k)) (inc v) 0))",
+        "(defn f (x) (when-let (v (get x :k)) (str v)))",
+        "(defn f (x) (if (not x) 0 (inc x)))",
     ];
     for def in cases {
         for arg in PROBE_ARGS {
