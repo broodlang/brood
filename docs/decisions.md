@@ -17096,7 +17096,7 @@ Three choices inside it are load-bearing:
   because it is optimising a hot dev loop; a *gate* that optimises for latency checks
   less than it claims to. `run-bundle` requires every embedded module, so a check
   walking only the closure would go green on a dead module the bundle will still load.
-- **`--smoke` runs the ARTIFACT, not the tree that produced it.** A bundle carries a
+- **The release check runs the ARTIFACT, not the tree that produced it.** A bundle carries a
   *snapshot* of every dependency, so a dependency updated on disk since the last `nest
   fetch`, a module outside `:source-paths`, and a `:main` naming a module that was
   never collected are all invisible upstream and fatal in the binary. A cross-target
@@ -17118,13 +17118,37 @@ three complementary answers, not a replacement for either:
 
 | failure | caught by |
 |---|---|
-| a top-level form in a module raises at load | **`--check-boot`** / `--smoke` |
+| a top-level form in a module raises at load | **`--check-boot`** / the `nest release` boot check |
 | an unbound name in a function body | `nest check` (and, inside a `try`, only since KI-67) |
 | a name reached only when `main` actually executes | `nest run --for <DURATION>` (KI-66; wired into hive's `bin/ci` and `package-ci.yml`'s opt-in `boot-check`) |
 
 `--check-boot` is the cheap, always-safe member of that set — no window, no port, no
 side effects, valid for a library with no runnable `:main` — which is why it can run
 unconditionally where `--for` cannot.
+
+**Amended 2026-08-29 — the artifact check is on by DEFAULT, and a binary that fails it
+is deleted.** Shipping it as opt-in `--smoke` was the wrong default, and the reason is
+in the sentence above it: *nothing else asks whether the thing you just built starts*.
+An opt-in gate for a question with no other answer is a gate that is absent exactly
+when it matters — so `nest release` now runs the artifact unless `--no-smoke` says not
+to. Cost is one process and a module load, against a release that already spends
+minutes assembling a 30 MB binary.
+
+The deletion is the other half, and it is about *where the two signals live*. A nonzero
+exit is seen once, by whoever ran the command; the file outlives the terminal it was
+printed in and is what a later `scp`, `docker COPY` or `gh release upload` picks up.
+Leaving a known-unbootable executable named `app` on disk after saying the release
+failed asks every downstream step to have read the scrollback. A removal that itself
+fails is *said*, loudly, rather than swallowed — "I could not delete it" has to be as
+audible as "I did".
+
+Two things this deliberately does **not** become. It does not run `:main` — that is
+still `nest run --for`, for the reason the table gives. And it does not check that the
+runtime carries the *features* the app needs: a bundle whose `:main` resolves can still
+die at its first frame on `gui backend not compiled in`, because a feature gate is a
+property of the runtime the app was appended to, not of the app's modules. That gap is
+real and unaddressed here; see the same-day `./configure` change, which stops the far
+commoner cause — a re-run of `./configure` silently reverting an option to its default.
 
 ### 2. The `--brood-` argument namespace is reserved — *what is this binary?*
 
@@ -18943,3 +18967,77 @@ call site the checker can type, and needs a checker→compiler channel that does
 should not be built on a mechanism that was both unsound and unexercised; it now has a sound
 base and a differential that will catch the next miscompile the same way this one was caught —
 the first time anyone turned the flag on.
+
+**Addendum (same day) — the rewrite had a tier-2 bug, and the invariant it broke is now
+asserted.** The emitted call carried `head = Some(%dispatch)` with `site = NO_SITE`. That
+pairing is not merely unusual, it is unrepresentable from `compile_node`, which allocates the
+site in the same match arm that yields a `Global` callee — and `emit_node` relies on it: for a
+named head it does **not push the callee**, leaving `Inst::Call` to resolve it through the
+site-keyed call IC. With `NO_SITE` the JIT's site-indexed fast-link path read garbage and the
+call returned nil (`cannot call non-function: nil`). Correct below the tiering threshold,
+wrong above it, so it reproduced only past ~5000 iterations and only at `BROOD_TIER=2`.
+
+Fixed by allocating a real site (`scope.site_alloc()`, threaded into `mono_devirtualize`),
+which also keeps the call-site IC working for `%dispatch` rather than merely silencing the
+bug.
+
+Two things it changed beyond the fix:
+
+- **`emit_node` now `debug_assert`s the invariant** — a named head must carry a site. It was
+  real and load-bearing and written down nowhere; the next hand-built `Node::Call` meets it as
+  a panic naming the head, instead of as a nil somewhere else.
+- **The differential could not have caught it**, and now can. `mono_differential.rs` ran the
+  ability suite, where no devirtualized call executes often enough to tier past the bytecode
+  VM — so the entire native path was uncovered and a JIT-only fault read as green. It now
+  carries a 300 000-iteration case that crosses the threshold. `CLAUDE.md` already insists a
+  tiered runtime be measured at both call counts; this is the same discipline applied to
+  correctness, and it is cheap. Sabotage-verified: restoring `NO_SITE` fails the new case
+  while both original cases stay green, which is exactly the shape of the gap.
+
+## ADR-295 — A rope and a table are sized collections; `seq` returning them was never the bug
+
+**Status:** accepted (2026-08-29). Completes the seqable half of ADR-253.
+
+**Context.** ADR-253 recorded that ability seams do not reach built-in kinds, with three
+symptoms: `(count r)` raises on a rope, `(seq r)` "silently returns the rope", and an
+`(impl Display :rope …)` is never consulted. Re-measured on 2026-08-29, **two of the three
+were already false**:
+
+- `Display` **does** reach a built-in — `(impl Display :rope (->string [x] …))` is consulted,
+  almost certainly since `->string` became an ability op in v0.15.0.
+- Both `seq` (`std/prelude/core.blsp`) and `count` (`std/prelude/predicates.blsp`) already
+  fall through to `Seqable` for a non-record kind. The seam is built. What was missing was
+  any *impl* for `:rope` or `:table`.
+
+**And the remaining symptom was misdiagnosed.** `(seq rope)` returning the rope is not a
+defect: a **string does exactly the same**. Measured — `(seq "abc")` → `"abc"`,
+`(count "abc")` → `3`, `(first "abc")` raises. A rope stands for a string, so passing through
+`seq` and raising on `first` is the *consistent* behaviour, and "fixing" it would have made a
+rope less like the thing it models. The real inconsistency was narrower and duller: `count`
+and `empty?` raised on a rope and a table while working on every other collection.
+
+**Decision.** `count` and `empty?` accept a rope and a table:
+
+- a **rope** counts in CHARACTERS, so `(count r)` = `(string/length (rope->string r))` — the
+  two must never disagree about the same text, and a test pins exactly that, including a
+  multi-byte case where counting bytes would diverge.
+- a **table** counts its entries, so `(count t)` = `(table/count t)`.
+
+Sized **directly**, not through `Seqable`. An `->seq` is a *list* view, so routing `count`
+through it would make a rope materialise every character to answer a question its length
+already knows — and a rope is on the editor's hot path. This matches how `string?`,
+`vector?`, `bytes?` and `set?` are already handled in `count`: the kinds with an O(1) size get
+an arm; `Seqable` is for kinds that genuinely have to be walked.
+
+**Consequences.** `(count r)`, `(count t)`, `(empty? r)`, `(empty? t)` work; `seq` and `first`
+are deliberately unchanged. The checker's `countable` type gains `Tag::Rope` and `Tag::Table`
+— a signature narrower than its function is a false positive on correct code, and this one
+had already started emitting `count: argument 1 expects … got rope` against the new arm
+during development, which is the gate working. Sabotage-verified: replacing `%rope-length`
+with a constant reddens four tests.
+
+**The general lesson, which is why this ADR exists at all.** Three claims recorded as open
+work had drifted: one was fixed by an unrelated change, one described the wrong culprit, and
+one was consistent behaviour mistaken for a bug. **An item recorded as open can be fixed and
+still read as work**, and the cost is paid twice — once in a to-do that never shrinks, and
+once when someone "fixes" behaviour that was correct. Re-measure before scheduling.

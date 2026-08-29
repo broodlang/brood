@@ -86,17 +86,12 @@ fn the_kernel_and_the_language_agree_on_every_dispatch_identity() {
     );
 }
 
-/// The exported callback native guard code calls. Declared here rather than imported —
-/// `jit::rt` is `pub(crate)` — which also makes this a test of the symbol that is actually
-/// registered with Cranelift (`jit/cranelift.rs`), not of a Rust-visible copy of it.
+// The exported callback native guard code calls. Declared here rather than imported —
+// `jit::rt` is `pub(crate)` — which also makes this a test of the symbol that is actually
+// registered with Cranelift (`jit/cranelift.rs`), not of a Rust-visible copy of it.
 #[cfg(feature = "jit")]
 extern "C" {
-    fn brood_rt_dispatch_identity(
-        heap: *mut std::ffi::c_void,
-        w0: i64,
-        w1: i64,
-        w2: i64,
-    ) -> i64;
+    fn brood_rt_dispatch_identity(heap: *mut std::ffi::c_void, w0: i64, w1: i64, w2: i64) -> i64;
 }
 
 #[cfg(feature = "jit")]
