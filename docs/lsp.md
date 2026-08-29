@@ -139,6 +139,15 @@ one server that owns the language knowledge.
 > private (ADR-266). A fourth surface sits on the same pass without a file at all:
 > `reflect/source-signatures` answers for source *text*, which is what an editor
 > buffer mid-edit or a live evaluator's single form actually has (2026-08-29).
+>
+> The scope pass behind find-references and rename **did not know `defn-`** until
+> 2026-08-29, and the symptom was a wrong answer rather than a missing one: with no
+> scope opened for a private function, its parameters resolved to whatever global
+> shared their spelling, so `references_to_global` returned them and a rename would
+> have edited them. Most definitions in a real module are private (ADR-146).
+> `reflect/source-deps` — per top-level form, what it defines and what globals it
+> uses — sits on the same pass, for a live evaluator deciding which forms an edit
+> can reach.
 > • **`textDocument/selectionRange`** (`selection_range.rs`) — smart expand/shrink
 > selection along the CST: symbol → enclosing form → outer form → … → file, read
 > off the node chain at each cursor (trivia and same-extent wrappers skipped so

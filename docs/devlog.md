@@ -727,6 +727,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-29** — arrow decomposition (ADR-292)
 - **2026-08-29** — `BROOD_MONO` had never been run: Tier 1 was miscompiling, and now proves the identity rather than the impl (ADR-294)
 - **2026-08-29** — ability-op runtime contracts (ADR-293), and the discovery that `BROOD_CONTRACTS=1` had been unusable on every cold boot cache — three defects, no end-to-end test (KI-81): an intersection of arrows satisfies what no single arm does, checked against a brute-force model of what an arrow denotes rather than against more property laws
+- **2026-08-29** — KI-87: the inference cycle guard released the symbol it refused (`bool::then_some` builds its argument eagerly, so a refused `InferGuard` was built, dropped, and un-marked the in-flight inference) — `nest run` at 54 GB, three 19 GB test processes; one-line fix, sabotage-verified guards, `ulimit -v` in front of every inference test run
 
 ---
 
@@ -7074,7 +7075,104 @@ Worth keeping: **a type that is true and unusable is still a bug where it is rea
 was unsound about `int | ratio`; it just put "or it could be an int" next to the 3/2 the
 evaluator had already printed. Precision rules earn their keep at the surface that shows them.
 
-## 2026-08-29 (ninth) — §7.1 step 2 measured and rejected; the suspend-host latch it left behind
+## 2026-08-29 (ninth) — re-run what an edit can reach, not everything below it
+
+The playground re-evaluated **every form from the first change down**, on every settle of the
+keyboard. Correct — definitions flow downward, so a later form may have been built on the one
+you just changed — and expensive: editing the second of twenty forms cost nineteen
+evaluations, forever, for a buffer that is mostly independent one-liners. But the honest
+question is not "is this form below the edit?", it is "does this form USE anything the edit
+could have changed?", and nothing in the runtime could answer it.
+
+**`reflect/source-deps`** answers it: per top-level form, `{:defines (…) :references (…)}`,
+over the same CST + scope pass that backs find-references. The playground takes the
+transitive closure of "references something a re-run form defines" — 20 forms, one edited
+call: **1 re-sent instead of 15**; edit a definition three others chain off, and it re-sends
+exactly those. Both the OLD and the new `:defines` count, or renaming `foo` would leave its
+callers sitting on a stale answer instead of the unbound error they now deserve. Two things
+the analysis cannot see are widened rather than guessed at: a `defmodule`/`require` takes the
+whole tail (it changes what names MEAN below it, which is not an edge), and deps that fail to
+line up one-for-one with the forms fall back to the old suffix rule.
+
+**The scope analyser did not know `defn-`.** Found while building the above, and it was a
+wrong answer rather than a missing feature: with no scope opened for a private function, its
+PARAMETERS resolved to whatever global shares their spelling — `references_to_global("n")`
+returned the `n` of `(defn- f (n) n)`, and LSP rename writes exactly those spans. Most
+definitions in a real module are private (ADR-146), so this was most of a module. `def-` was
+missing from the global collector for the same reason. One `matches!` arm each.
+
+Also: **`cargo clippy --all-targets --all-features` was red at HEAD** (an empty line after
+`#[cfg(feature = "jit")]` in `compile/tests.rs`), which per the note in CLAUDE.md means CI's
+Clippy step failing skips every step behind it. Fixed.
+
+Worth keeping: **a dependency edge you cannot see is a reason to widen, not to guess.** Every
+case this analysis is blind to — a macro-introduced name, a side effect, a namespace change —
+resolves to "re-run more", and the fallbacks are what make the fast path safe to take.
+
+## 2026-08-29 (tenth) — three editor-framework primitives, from three things the playground wanted
+
+All three are `std/editor/*` (the framework, in Brood), and all three answer a question the
+editor could previously only guess at.
+
+**`closer-redundant?`** — typing `)` at `(+ 1 2|)` gave `(+ 1 2))`. Emacs's
+`electric-pair-mode` skip, but the condition is about the enclosing FORM, not the next
+character: in `(foo (bar|)` the `)` at point closes `(bar`, so stepping over it is right and
+leaves `(foo` still to close; at top level a stray `)` closes nothing and is typed; `[1 2|)`
+is a mismatch and is typed; and inside a string or a comment a bracket is a character. That
+needed one more bit than `enclosing-open` reports — it clamps its string/comment skips at
+`pos` and so cannot tell a form that encloses you from a string that sits inside one — hence
+`hl-close-scan`, which answers `:text`.
+
+**`symbol-at`** — `symbol-prefix-at`'s sibling and a different question. That one stops dead
+at the cursor (what has been TYPED, for completion); this runs to the end of the token (what
+is being POINTED at, for a doc lookup), with the Emacs rule that just-past-a-token counts.
+
+**`reflect/source-deps`** (kernel, previous entry) plus these two gave the playground: docs
+in the pane for whatever the cursor is on (`modes/brood-doc-at`, a new `:doc-at` mode
+service — the symbol under point, else the head of the call around it, else one level out, so
+the middle of a literal is not a dead spot), and a pane that shows the whole reply rather
+than only the trace.
+
+**Measured while there:** `sexp/top-level-forms` costs **345 µs** on a 40-form buffer and ran
+on EVERY keystroke to find which form the cursor is in; `reflect/source-deps` over the same
+text is 75 µs in Rust. `playground-post-key` now orders its work cheapest-first and only
+re-renders when the docs or the form actually changed.
+
+Worth keeping: **two answers on two clocks want two places, not one.** The pane's report is
+per REPLY and its doc block is per KEYSTROKE, so the doc block lives on the model beside
+`:workings-region` rather than threaded through `refresh` — which would have made every
+caller carry an argument only one of them can fill in.
+
+## 2026-08-29 (eleventh) — a guard that un-guarded: `then_some` and the 54 GB `nest run`
+
+Three sessions in a row ended with the machine swapping: `cargo nextest run -p brood
+types::` at three × 19 GB, and `nest run` on bedit at 54 GB with nothing running. The
+uncommitted work — the demand walk consulting a loaded module's inferred signature
+(`sigs::domain_of_inner`, the last `or_else`) — was the obvious suspect, and it was only the
+trigger. Under `ulimit -v` the run dies in seconds with `stacker … mmap failed to allocate
+stack`, and a trace of every un-memoized `infer_sig` entry showed `require-one` and
+`%require-await` alternating at depth 2 **34 144 times**, with `memo_has=false` every time
+and the same interned symbol id — inside a guard that exists to refuse exactly that.
+
+Tracing the guard's `Drop` gave the answer in one line: `[TRACE-DROP] ->seq` printed right
+*before* `->seq` was re-entered. `InferGuard::enter` ended in `.then_some(InferGuard(sym))`,
+and `bool::then_some` evaluates its argument eagerly — on the refusal path a guard was built
+and dropped at once, removing the OUTER inference's mark from the set. Every cycle refusal
+since 2026-07-07 has un-guarded the symbol it refused; the memo hid it until a walk arrived
+that references the partner twice per body. Fix: `entered.then(|| InferGuard(sym))`. Full
+account in KI-87; guards are sabotage-verified (the mutual-recursion case reproduces the
+exact OOM under the cap when the bug is restored).
+
+Measured after: the `types::` set 431/431 serially at 325 MB peak; bedit's `commands.blsp`
+1.4 s / 180 MB; the zero-warning gate over 342 files 5.0 s with the demand-walk hunk and
+5.0 s without — the uncommitted feature costs nothing and is now committed.
+
+Worth keeping: **`then_some(x)` is `if b { Some(x) } else { drop(x) }`.** For a value with a
+`Drop` that has effects, the else branch is a call. Use `then(|| …)`. And **build uncapped,
+run capped**: `ulimit -v` in front of a test run turns an OOM into a named panic site; the
+same cap in front of `cargo` kills the linker with `LLVM ERROR: out of memory`.
+
+## 2026-08-29 (tenth) — §7.1 step 2 measured and rejected; the suspend-host latch it left behind
 
 The experiment `compute-frontier.md` §7.1 scoped: remove `plan_general_lowering`'s static
 `call-mediated-boxed` bail, flip `BROOD_MKCLO` default-on, widen the spill reserve to

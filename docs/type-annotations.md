@@ -145,7 +145,10 @@ dropped by the parser rather than misparsed.
 Base names map to the same lattice points the predicates imply (`number` =
 `int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, `seqable` =
 `nil∪pair∪vector∪set∪map∪bytes` — every collection the sequence combinators walk, `string`
-excluded — for a polymorphic-sequence parameter without falling back to `any`, …).
+excluded — for a polymorphic-sequence parameter without falling back to `any`, `countable`
+= `seqable∪string∪rope∪table` — what `count`/`get`/`empty?` accept; `numeric` / `ordered` =
+`number` plus every record with a `num/*` / `compare-to` method, the domains of `+` and `<`
+as the registry stands — ADR-299, …).
 
 ### A declaration that cannot be read is reported, not dropped (ADR-259)
 
