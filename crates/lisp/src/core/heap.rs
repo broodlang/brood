@@ -4477,6 +4477,7 @@ impl Heap {
     /// window. `Nil` rather than uninitialised memory deliberately: this slot is reachable
     /// from the returned handle, so a missed store must degrade to a wrong *value* the tests
     /// can catch, never to a garbage word the GC would trace.
+    #[cfg(feature = "jit")]
     pub(crate) fn alloc_vector2_room(&mut self) -> (Value, *mut Value) {
         let idx = alloc_slot!(
             self,

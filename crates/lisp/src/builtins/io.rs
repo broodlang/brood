@@ -426,6 +426,9 @@ pub(super) fn tree_walker_p(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResu
     Ok(Value::boolean(is_tw))
 }
 
+// Registered only under `dev-tools` (mod.rs's DEV block, whose comment says the fn defs
+// are gated to match — this one wasn't).
+#[cfg(feature = "dev-tools")]
 pub(super) fn vm_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pairs = match crate::perf::snapshot() {
         Some(counters) => {
