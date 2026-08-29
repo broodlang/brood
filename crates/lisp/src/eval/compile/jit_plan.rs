@@ -21,7 +21,8 @@
 //! several encode a *negative* result that is invisible in the code that benefits from it:
 //!
 //! - [`codegen::plan_general_lowering`]'s call-mediated gate exists because lowering the
-//!   boxed-call shape measurably regressed `nbody` 15–20%.
+//!   boxed-call shape measurably regressed `nbody` 15–20% — re-verified 2026-08-29, when
+//!   removing it (§7.1 step 2) regressed every measured row, winners included.
 //! - [`codegen::inst_allocates_hot`] is deliberately narrower than
 //!   [`codegen::inst_may_allocate`] because including the table ops cost `sieve` 6%.
 //! - [`jit_spill_reserve`] is liveness-driven because a hardcoded `1` made a two-call recursion
@@ -147,6 +148,12 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
     // cost is already on record — blanket-reserving regressed `spawn` ~1.9x — which is why
     // it stays behind the `chunk_in_jit_subset` gate above and why the change was measured
     // (spawn / fib / collatz / pingpong) rather than reasoned about.
+    // NOTE (§7.1 step 2 postmortem): widening this to every ≥1-call arm (counting
+    // `MakeClosure` as a safepoint, so single-call arms holding a handle got slots
+    // instead of bailing at `call-spill-exhausted`) was tried with the gate experiment
+    // and measured `spawn` +8.6% against a 1.2% floor on its own — bigger frames on
+    // every lowerable arm, the same cost blanket-reserving already has on record. It
+    // belongs with the partial-lowering design, which changes which arms want slots.
     if non_tail_call_count(code) < 2 {
         return 0;
     }
@@ -475,9 +482,11 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // for a measured **+11 ms constant** on every short-lived run (BENCH_N-invariant,
         // so pure fixed cost) and pinned-sweep noise from the busier compiler thread —
         // while the intended winners (nqueens' `solve`, pipeline's steps) still bail on
-        // the `call-mediated-boxed` GATE and gain nothing until §7.1 step 2 revisits it.
-        // Step 1 alone is all cost; flip the default together with step 2, re-measuring
-        // `startup`/`spawn` (the fixed-cost victims) beside the winners.
+        // the `call-mediated-boxed` GATE. §7.1 step 2 (2026-08-29) tried flipping this
+        // default together with removing that gate, and measurement rejected the whole
+        // combination (nqueens +20%, spawn +72% unpinned — see the gate's doc comment),
+        // so the default stays off until partial lowering gives the admitted closures a
+        // way to actually win.
         Inst::MakeClosure { names, .. } => names.len() <= 32 && mkclo_enabled(),
         _ => false,
     })
@@ -855,6 +864,16 @@ pub(super) mod codegen {
     /// scalar path is enabled ([`jit_i64_enabled`]), and it must consult that *before* this.
     /// Bundling the two into one value would invite exactly the mis-ordering above (ADR-011 — a
     /// shape with no reader is a shape that misleads).
+    ///
+    /// **Removing this gate was tried and REJECTED 2026-08-29 (§7.1 step 2).** The hypothesis
+    /// was that deopt feedback (watching every non-loop arm since `8fa9f2f7`) could replace the
+    /// static bail by demoting bad admissions dynamically. Measured, unpinned, interleaved
+    /// best-of-7: nqueens +20.2%, pipeline +18.3%, nbody +12.6%, spawn +71.8%, pingpong +9.6% —
+    /// every intended winner lost too. The mechanism: an admitted call-mediated arm compiles
+    /// *correctly* and never type-deopts, so feedback has no signal — this gate encodes a COST
+    /// model, and no correctness-triggered mechanism can learn it. The design that can beat it
+    /// is partial lowering (exit to the VM at the un-lowerable op, ADR-210's checkpoint
+    /// precedent), not admission-plus-feedback. See docs/compute-frontier.md §7.1.
     pub fn plan_general_lowering(arm: &CompiledArm, slot_tags: &[u8]) -> Result<(), BailReason> {
         let Some(chunk) = arm.chunk.as_ref() else {
             return Ok(()); // no chunk to judge — the lowerer's own pre-bail handles it
@@ -890,7 +909,8 @@ pub(super) mod codegen {
         // compile machinery (macro expansion runs prelude Brood like `%match-count-sym`, `seq`,
         // `fold`) — and admitting those regressed `spawn` 0.08 → 0.3–1.3 s erratic (contention
         // around per-process compile + shared-install under 10k-process fan-out) for zero row
-        // wins.
+        // wins. (Re-verified 2026-08-29: admitting them regressed spawn +71.8% — see the doc
+        // comment above.)
         //
         // The unboxing signals that earn the general lowering:
         //   * a `VectorRef`/`MakeVector` (rules bintree/matmul back in — they lower and win), or

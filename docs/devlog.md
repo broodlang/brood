@@ -7073,3 +7073,44 @@ deep copy that crosses heaps.
 Worth keeping: **a type that is true and unusable is still a bug where it is read.** Nothing
 was unsound about `int | ratio`; it just put "or it could be an int" next to the 3/2 the
 evaluator had already printed. Precision rules earn their keep at the surface that shows them.
+
+## 2026-08-29 (ninth) — §7.1 step 2 measured and rejected; the suspend-host latch it left behind
+
+The experiment `compute-frontier.md` §7.1 scoped: remove `plan_general_lowering`'s static
+`call-mediated-boxed` bail, flip `BROOD_MKCLO` default-on, widen the spill reserve to
+single-call arms, and let deopt feedback demote what tiering gets wrong. Measured pinned and
+unpinned, JIT verified healthy both arms: **every row regressed, the intended winners worst**
+— nqueens +20.2%, pipeline +18.3%, nbody +12.6%, spawn +71.8%, pingpong +9.6% (unpinned,
+interleaved best-of-7). The full table and the postmortem live in §7.1; the one-line lesson:
+**deopt feedback cannot replace a profitability gate, because a bad admission compiles
+correctly and never deopts — a cost model has no correctness signal to ride.** The gate is
+restored verbatim with the rejection recorded in its doc comment; the spill widening was
+independently at fault for `spawn` +8.6% (floor 1.2%) and reverted with a note pointing at
+partial lowering, which is now the only live design for this class.
+
+Kept from the wreckage, measured flat vs HEAD across all seven rows:
+
+- **The suspend-host latch.** A `receive` that parks under a native frame cannot be
+  state-captured, so it dirty-blocks its whole OS worker (§7.4) — and the gate-exempt
+  closure class lowers exactly that shape today (`(fn (x) (+ x (inner)))` where `inner`
+  receives; the `%receive` fence only catches the direct call). Each JIT gateway stamps a
+  per-heap token around its invoke; the mailbox records the innermost-alive token at a dirty
+  park; the gateway that owns the token latches its arm `BAILED` on first occurrence (one
+  park is proof of shape). `live_migration`'s 12-way harness: 28/36 liveness failures
+  without it once those arms lowered, 0/36 with. New observable
+  `process::dirty_receive_block_count()`; regression test `tests/jit_suspend_latch.rs`.
+- **Fast-link arm resolution by keep-alive scan.** The latch's first form resolved the arm
+  via `vm_call_ic_probe` with the pre-call epoch — and a park spans a GC, so the probe
+  declined and 13 dirty parks produced 3 latches. The fix scans `JIT_ARM_KEEPALIVE` for the
+  invoked code pointer (arms with installed code are immortal — bug #2's fix — so the scan
+  is sound), probe as fallback.
+- **Mid-emit bail tracing** (`call-spill-exhausted` and friends) — refusals inside emit
+  used to be silent `None`s — and a `dirty-receive-block gateway-token=` line under
+  `BROOD_JIT_BAIL_TRACE`, whose `token=0` names the unlatchable Rust-HOF-nested class.
+
+Two method notes. (1) The first latch test used `reduce` — whose Rust builtin nests a
+`vm_apply` driver under the receive, so parks dirty-block *with the latch working
+perfectly*; the test read as "latch broken" until the token trace said `token=0`. A capture
+observable needs a capture-SHAPED program. (2) `make ab`'s sweep flagged pingpong +6.9%
+where solo best-of-15 read −1.7% against a 0.9% floor — the drift row doing what its
+CLAUDE.md entry says it does.

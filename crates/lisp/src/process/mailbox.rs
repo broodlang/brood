@@ -1209,6 +1209,29 @@ fn receive_match_timed(
                     heap.truncate_roots(rbase);
                     return Err(LispError::suspend(deadline));
                 }
+                // A green process dirty-blocking (not the root thread): record which
+                // native activation encloses this receive, so that gateway latches its
+                // arm off native — a blocked worker and an unmigratable process are what
+                // the latch heals (see `Heap::blocked_under_gateway`). Two stores on a
+                // path that is about to park a whole OS thread.
+                if crate::process::in_capture_run() {
+                    heap.blocked_under_gateway = heap.cur_native_gateway;
+                    crate::process::scheduler::note_dirty_receive_block();
+                    // Under the JIT's bail-trace flag, name the token too: `token=0` is
+                    // the UNLATCHABLE class — no JIT gateway alive, i.e. the nesting is a
+                    // Rust-native shape (a builtin HOF's `vm_apply` driver, a `try`
+                    // callback), which no latch can heal. Distinguishing that from a
+                    // latchable native host by silence cost a debugging round.
+                    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *TRACE
+                        .get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
+                    {
+                        eprintln!(
+                            "[jit-bail] dirty-receive-block gateway-token={}",
+                            heap.cur_native_gateway
+                        );
+                    }
+                }
                 wait_for_message(&ctx, i, deadline);
                 // Back from the wait → running again. This *block* path (the root thread,
                 // and a native-nested capture receive — §7.4) returns inline without a

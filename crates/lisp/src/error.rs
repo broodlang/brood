@@ -329,6 +329,13 @@ impl LispError {
         matches!(self.control, Some(Control::Kill))
     }
 
+    /// Is this the [`Control::Suspend`] signal (a `receive` parking on an empty
+    /// mailbox)? `jit_suspend_feedback` uses it to latch a native arm that hosted a
+    /// nested suspend back onto the VM — only a clean all-VM stack captures/migrates.
+    pub fn is_suspend_signal(&self) -> bool {
+        matches!(self.control, Some(Control::Suspend { .. }))
+    }
+
     /// Is this a [`Control`] signal (a suspend) rather than a real error? Error-handling
     /// natives test this to **re-raise** it instead of catching/cleaning up.
     pub fn is_control(&self) -> bool {

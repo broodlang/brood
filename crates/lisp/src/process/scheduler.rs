@@ -857,6 +857,24 @@ pub fn migrate_count() -> u64 {
     MIGRATED.load(Ordering::SeqCst)
 }
 
+/// Cumulative green-process `receive`s that DIRTY-BLOCKED their worker thread (the §7.4
+/// carve-out: a native frame between the body driver and the receive means the process
+/// cannot be state-captured, so the whole OS worker waits on the mailbox condvar). This
+/// used to be invisible — a program could quietly lose capture-mode (and migration) for
+/// every parked receive and nothing anywhere said so. The JIT's suspend-latch heals the
+/// JIT-frame cause of it (see `jit_suspend_feedback`), so this figure staying flat after
+/// warmup is the observable that latch is working; the regression test asserts exactly that.
+pub(crate) static DIRTY_RECEIVE_BLOCKS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn note_dirty_receive_block() {
+    DIRTY_RECEIVE_BLOCKS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Total dirty-blocked green `receive`s since program start. See [`DIRTY_RECEIVE_BLOCKS`].
+pub fn dirty_receive_block_count() -> u64 {
+    DIRTY_RECEIVE_BLOCKS.load(Ordering::SeqCst)
+}
+
 /// Cumulative quantum preemptions (a process exhausted its reduction budget
 /// and was re-enqueued) — the scheduler half of the observability timing tier.
 /// Read by `(%)`.

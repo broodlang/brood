@@ -1227,6 +1227,42 @@ constrains both:
    measurable on closure-heavy rows via the HOF path), then the gate experiment. Doing both
    at once makes a regression unattributable.
 
+**Step 2 ATTEMPTED AND REJECTED 2026-08-29 — the gate stays; partial lowering is the only
+path left for this class.** The experiment: remove the static bail entirely, flip
+`BROOD_MKCLO` default-on, widen the spill reserve to ≥1-call arms (single-call arms holding
+a handle bailed silently at `call-spill-exhausted`), and let deopt feedback demote bad
+admissions. Measured pinned (`make ab --floor`) AND unpinned (interleaved best-of-7, the
+protocol for compile-volume changes): **every row lost, winners included** —
+
+| row | pinned | unpinned |
+|---|---|---|
+| nqueens | +44.5% | +20.2% |
+| pipeline | +17.2% | +18.3% |
+| nbody | +27.4% | +12.6% |
+| spawn | +75.6% | +71.8% |
+| pingpong | +8.0% | +9.6% |
+
+JIT healthy throughout (no `CODEGEN-PANICKED`; `fib` normal; nqueens compiles 99 → 262).
+**Why feedback cannot replace the gate:** an admitted call-mediated arm compiles
+*correctly* and never type-deopts, so `deopt_watch` has no signal — the gate encodes a
+COST model, and no correctness-triggered mechanism can learn one. The spill-reserve
+widening was also independently measured: `spawn` +8.6% against a 1.2% floor on its own
+(bigger frames on every lowerable arm — blanket-reserving's known cost), so it was
+reverted too; it belongs with partial lowering, which changes which arms want slots.
+
+**What the experiment left behind (kept, measured flat vs HEAD across all seven rows):**
+the **suspend-host latch** (`jit_latch_suspend_host` + per-heap gateway tokens + the
+`dirty_receive_block_count` observable + `tests/jit_suspend_latch.rs`) — an arm hosting a
+parking `receive` dirty-blocks its OS worker and can never migrate; the gate-EXEMPT
+closure class lowers such arms today (`(fn (x) (+ x (inner)))` where `inner` receives —
+the `%receive` fence only catches a direct call), and `live_migration`'s 12-way harness
+measured 28/36 liveness failures without the latch once those arms lowered. Plus mid-emit
+refusal tracing (`call-spill-exhausted`/`mkclo-spill-exhausted`/`tail-nonempty-stack`
+lines under `BROOD_JIT_BAIL_TRACE`, previously silent `None`s) and a
+`dirty-receive-block gateway-token=` trace line — `token=0` names the UNLATCHABLE class
+(a Rust builtin HOF's nested `vm_apply` driver under the receive), which no JIT-side
+mechanism can heal and which reads identically to a latch failure without the line.
+
 
 ### 7.2 Cranelift's CLIF verifier runs on every release compile — ATTEMPTED AND REJECTED 2026-08-29
 
