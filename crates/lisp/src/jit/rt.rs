@@ -137,38 +137,35 @@ pub unsafe extern "C" fn brood_rt_cons(
     *out = h.alloc_pair(car, cdr);
 }
 
-/// Build a 2-element vector from two `Value`s (each by word-triple), writing the
-/// fresh vector to `*out`. The JIT lowering of a `[a b]` literal (`Inst::MakeVector(2)`,
-/// e.g. bintree's `make`); mirrors [`brood_rt_cons`] — a bump-allocate that never
-/// collects, so the elements need no extra rooting beyond the words passed in.
+/// Allocate a 2-element vector and hand back a pointer to its element storage, for the
+/// emitting arm to write the two elements into directly. Writes the fresh handle to `*out`.
+///
+/// Replaces passing the elements as six `i64` words: four of
+/// them spilled to the caller's stack (SysV has six argument registers and `heap`/`out` take
+/// two), and reloading them was **66% of that function**. Two arguments now, both in
+/// registers, and the arm's stores land in the slab.
 ///
 /// # Safety
-/// `heap`/`out` live; the word triples are bytes the JIT read out of real `Value`s.
+/// `heap` live; `out` writable. The caller must write both elements before anything can
+/// allocate or collect — see [`Heap::alloc_vector2_room`], whose doc carries the invariant.
 #[no_mangle]
-pub unsafe extern "C" fn brood_rt_make_vector2(
+pub unsafe extern "C" fn brood_rt_vec2_room(
     heap: *mut Heap,
     out: *mut crate::core::value::Value,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-) {
-    let h = &mut *heap;
-    let a = words_to_val(a0, a1, a2);
-    let b = words_to_val(b0, b1, b2);
-    *out = h.alloc_vector2(a, b);
+) -> *mut crate::core::value::Value {
+    let (handle, items) = (*heap).alloc_vector2_room();
+    *out = handle;
+    items
 }
 
 /// Build an `n`-element vector from `n` `Value`s staged contiguously at `elems`
 /// (the JIT wrote each element's 3 words into a stack slot it owns), writing the
-/// fresh vector to `*out`. The variadic generalisation of [`brood_rt_make_vector2`]
+/// fresh vector to `*out`. The variadic generalisation of [`brood_rt_vec2_room`]
 /// for a wider `[a b c …]` literal (`Inst::MakeVector(n)`, `n != 2`) — nbody's
 /// `[vx vy vz]` / 7-body rebuild. A fixed Cranelift signature can't take `n×3`
 /// words, so the elements come by pointer instead of by register-triple.
 ///
-/// Like `make_vector2`, `alloc_vector` only *grows* the LOCAL vector slab (an
+/// Like the arity-2 path, `alloc_vector` only *grows* the LOCAL vector slab (an
 /// `alloc_slot!` push — never collects), so the staged elements can't go stale
 /// during the call and need no extra rooting beyond the bytes at `elems`.
 ///

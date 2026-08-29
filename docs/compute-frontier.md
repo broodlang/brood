@@ -1109,3 +1109,56 @@ highest-value generators × 4 engine configs — 0 divergences, 0 crashes.
 > `[jit-bail] … CODEGEN-PANICKED` line on stderr and `.brood_crash_dump` can. **Grep a
 > benchmark run's stderr for `CODEGEN-PANICKED` before believing any number**, or you are
 > timing the interpreter.
+
+## 2k. A correction to §2j, and `MakeVector(2)` builds in place (2026-08-29)
+
+### The correction first: §2j's "−15% warm" was baseline drift
+
+§2j reported the in-place staging change at **−14.9% / −15.8%** (n=2000 / 6000), measured
+against a saved baseline binary. Re-measured today with **all three binaries interleaved in
+one session** — pre-staging (`b277db14`), staging (`d2bade17`), and the working tree — the
+staging change is **−8.5%** at n=2000 and **−9.1%** at n=6000.
+
+The error is exactly the one this repo documents and I quoted while making it: *the same
+baseline binary read 1008 ms in the earlier session and 913 ms today* — ~10% of drift between
+whole invocations, and the "confirmation" at a second size measured that drift twice. A saved
+binary is not a fixed measurement. **Interleave every arm you are comparing inside one
+command**, and prefer three-way (before / middle / after) when there is a chain of changes:
+it is the only form where a bad number is visible as an inconsistency rather than as a result.
+
+The pinned 31-row sweep figure in §2j (**−5.5%**, everything else noise) was interleaved and
+stands. So the honest range for §2j is **−5.5% pinned/short to −9% warm/large**, which is
+still the largest single win on this row — just not what was written.
+
+### `MakeVector(2)` writes its elements into the slab
+
+`brood_rt_make_vector2` took the two elements as **six `i64` words**. SysV has six argument
+registers and `heap`/`out` take two, so four words spilled to the arm's outgoing-args area and
+the callee loaded them straight back: `movaps 0x60(%rsp)` and `movups 0x8(%rsp)` were **34.6%
+and 31.6% of that function**, itself 7.9% of `bintree` at n=4000.
+
+`brood_rt_vec2_room(heap, out) -> *mut Value` bump-allocates the slot, writes the handle to
+`*out`, and returns the slot's `items` — two register arguments, and the arm's stores land in
+the slab. `INLINE_VEC_CAP` is 2, so a 2-element vector is exactly one `VecStore::Inline`.
+
+**Measured (three-way interleaved, best-of-7, image `:live`):** `bintree` **−1% to −2%** —
+−1.7% and −1.4% at n=2000 across two sessions, −1.0% at n=6000, −2.1% on the pinned sweep;
+every other row noise. Depending on the round that is one to three times the base-vs-base
+spread, so: **small, and the honest verdict is "probably ~1.5%"** rather than a figure worth
+quoting to a decimal. It is a third of what the annotation's 66% implied, which is now the
+**third** time on this path that removing the visibly-expensive instructions returned a
+fraction of their share (§2i's arguments, §2j's first attempt, this). Kept as much for the
+simplification: two register arguments instead of eight with four spilled, `brood_rt_make_vector2`
+deleted rather than shimmed, and the slot written once instead of copied twice.
+
+The elements are left `Nil` rather than uninitialised, unlike `push_roots_room`: this slot is
+**reachable from the returned handle**, so a missed store must degrade to a wrong value the
+tests can catch, never to a garbage word the collector would trace as a handle.
+
+### Where that leaves `bintree`
+
+Allocation is still ~15% (`make_vector2`/`vec2_room`, `__memset`, `drop_glue::<Slabs>`, part
+of `__memmove`), and the remaining call-path items — `jit_run_fast_link` ~20% and
+`brood_rt_fast_frame` ~13% at n=4000 — have now resisted four instruction-level attempts.
+`env_get` at 6.7% is **boot residue and not a target**: it disappears entirely at n=4000,
+confirming §2d.
