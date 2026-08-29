@@ -5123,6 +5123,46 @@ fn reduce_fold_bail_when_init_or_callback_unknown() {
     );
 }
 
+// ---- inference terminates on a mutually recursive call graph ----
+
+/// Two loaded functions that call each other, each referencing the partner TWICE. The
+/// cycle guard refuses the first re-entry; the regression was that the refusal itself
+/// released the in-flight mark (`InferGuard::enter` built-and-dropped a guard on the
+/// refusal path), so the second reference re-entered the cycle and the pair nested
+/// without bound — every level a fresh stack segment, until memory ran out (54 GB on a
+/// `nest run`; three 19 GB test processes here). Now: both sigs resolve, and quickly.
+#[test]
+fn mutually_recursive_loaded_functions_infer_in_bounded_time() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defn mutual-a (x) (list (mutual-b x) (mutual-b (string/length x))))")
+        .unwrap();
+    interp
+        .eval_str("(defn mutual-b (x) (list (mutual-a x) (mutual-a (string/length x))))")
+        .unwrap();
+    let started = std::time::Instant::now();
+    let a = super::sigs::sig_of(&interp.heap, value::intern("mutual-a"));
+    let b = super::sigs::sig_of(&interp.heap, value::intern("mutual-b"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "inference diverged"
+    );
+    // The cycle refusal leaves the partner's return unknown, but `string/length`'s own
+    // demand (a primitive: its domain needs no inference) still pins the parameter.
+    for (name, sig) in [("mutual-a", a), ("mutual-b", b)] {
+        let sig = sig.unwrap_or_else(|| panic!("{name}: no sig"));
+        assert_eq!(sig.params.len(), 1, "{name}: {sig}");
+        assert!(sig.params[0].is_subtype(&Ty::of(Tag::Str)), "{name}: {sig}");
+    }
+    // …and a call site is still checked against it.
+    let form = reader::read_one(&mut interp.heap, "(mutual-a 5)").expect("parse");
+    let ws = check_form(&interp.heap, form);
+    assert!(
+        ws.iter().any(|w| w.contains("mutual-a")),
+        "expected an argument warning for mutual-a, got {ws:?}"
+    );
+}
+
 // ---- unused :use import lint (Pass 4.5) ----
 
 #[test]
