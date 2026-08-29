@@ -250,6 +250,21 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             for a in args.iter() {
                 emit_node(a, code)?;
             }
+            // A named head is resolved *from* `head` through the site-keyed call IC, and the
+            // callee was therefore not pushed above — so a named head without a site names a
+            // callee nothing can find. `compile_node` cannot produce that pairing (it
+            // allocates the site in the same match arm that yields a `Global` callee), but a
+            // hand-built `Node::Call` can, and one did: the ADR-294 dispatch rewrite. Below
+            // the tiering threshold it was harmless; once the arm went native the
+            // site-indexed fast-link path read garbage and the call returned nil. Assert the
+            // invariant here, where it is cheap and where the next hand-built node will meet
+            // it, rather than leaving it to be rediscovered as a wrong answer.
+            debug_assert!(
+                head.is_none() || *site != NO_SITE,
+                "call with a named head ({:?}) must carry a call site: the callee is not \
+                 pushed for a named head, so NO_SITE leaves it unresolvable",
+                head.map(crate::core::value::symbol_name)
+            );
             code.push(Inst::Call {
                 argc: args.len(),
                 tail: *tail,

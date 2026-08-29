@@ -95,7 +95,12 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
 ///     the head is a genuine record constructor — a same-named non-record fn is rejected.
 /// The impl set is `*impls*[[ability op]]` resolved by that id then `:default` — the order
 /// `impl-for` uses.
-pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Option<Node> {
+pub(super) fn mono_devirtualize(
+    heap: &Heap,
+    scope: &mut Scope,
+    op: Symbol,
+    args: &[Node],
+) -> Option<Node> {
     // The dispatch identity of arg0, if statically certain.
     let id_kw = mono_arg_identity(heap, args.first()?)?;
     // The head global must be a registered ability op → its ability name symbol.
@@ -157,6 +162,17 @@ pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Optio
     }
     // `((%dispatch *impls* '[ability op] :id) …)` — the id is constant-folded, the
     // resolution stays behind the epoch-guarded cache.
+    //
+    // **The site is not optional.** `emit_node` sets `head = Some(sym)` for a `Node::Global`
+    // callee and then does NOT push the callee — `Inst::Call` resolves it from `head`,
+    // through the call-site IC keyed on `site`. `head = Some` paired with `NO_SITE` is a
+    // combination `compile_node` cannot produce (it allocates the site in the same match
+    // that yields a `Global` callee), so nothing downstream is built for it: the JIT's
+    // fast-link path indexes by site and read garbage, and the call returned nil —
+    // "cannot call non-function: nil", at tier 2 only, above the tiering threshold. Hence
+    // `scope` here, allocated only once the rewrite is certain so a declined site is never
+    // consumed.
+    let dispatch_site = scope.site_alloc();
     Some(Node::Call {
         callee: Box::new(Node::Global(value::intern("%dispatch"))),
         args: Box::new([
@@ -167,7 +183,7 @@ pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Optio
         tail: false,
         pos: None,
         file: None,
-        site: NO_SITE,
+        site: dispatch_site,
         staged: false,
     })
 }

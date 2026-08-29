@@ -1290,7 +1290,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             // A Const callee falls through to the NO_SITE (computed-head) path below.
             if inline::mono_enabled() {
                 if let Node::Global(op) = callee {
-                    if let Some(direct) = inline::mono_devirtualize(heap, op, &args) {
+                    if let Some(direct) = inline::mono_devirtualize(heap, scope, op, &args) {
                         callee = direct;
                     }
                 }
