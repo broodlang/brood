@@ -4,7 +4,64 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.16.0 — 2026-08-29
+
+**BREAKING — the kernel's own bare names, audited for the first time.** Every earlier pass of
+the stdlib surface audit read `std/`; nobody had read the *primitive kernel*. Of 391 registered
+primitives, 285 are `%`-hidden and 63 were already namespaced, leaving **43 bare** against
+which no criterion had ever been applied — two of them `eval` and `load`, as generic as any
+word in the language and unavailable to a user's own top-level `def` only because the kernel
+got there first. Twelve moved (ADR-290), registered under the qualified name in Rust exactly
+as `bit/and` and `proc/register` are:
+
+- `eval` → **`reflect/eval`**, `eval-string` → **`reflect/eval-string`**, `load` →
+  **`reflect/load`**
+- `global-names` → **`reflect/global-names`**, `special-forms` → **`reflect/special-forms`**,
+  `doc-forms` → **`reflect/doc-forms`**, `builtin-modules` → **`reflect/builtin-modules`**,
+  `current-ns` → **`reflect/current-ns`**, `dynamic?` → **`reflect/dynamic?`**, `private?` →
+  **`reflect/private?`**
+- `trap-exit` → **`proc/trap-exit`**, `system-monitor` → **`proc/system-monitor`**
+
+Six prelude names followed (ADR-291): `set-load-path!`/`add-load-path!` → **`reflect/…`**, and
+the lazy seq-view combinators `lmap`/`lfilter`/`lkeep`/`lremove` → **`seq/…`** (an `l` prefix
+is a namespace spelled by hand). Bare kernel primitives **43 → 31**. `(:use reflect)` or
+`(:use seq)` brings a whole surface back bare inside one module.
+
+**What did not move is the more useful half.** The REPL-typed introspection set — `doc`,
+`arglist`, `bound?`, `apropos`, `doc-search`, `macroexpand`/`macroexpand-1` — stays bare,
+because you type it at a REPL. So does the mainstream actor model: `spawn`, `send`, `receive`,
+`self`, `link`, `unlink`, `monitor`, `demonitor`, `exit`. ADR-291 records five rules for what
+must stay bare, each derived from a candidate that looked obvious and was not — a module
+header that already reserves the name; half of an inverse pair; an earmuffed global (whose
+recognition is a *spelling* rule, so qualifying one silently disables its own typing); a name
+a test depends on being bare; and anything in `(special-forms)`, since a qualified name that
+renders as a control keyword is a contradiction.
+
+**Fixed — two lists that had quietly stopped naming anything.** The checker's effectful-guard
+list still held `println`, `print`, `os-cmd`, `run-process`, `halt` and a `kill` that never
+existed, so it had gone silent on guards calling `io/puts`, `os/cmd` and `system/halt`; it now
+names what those modules export. And the KI-72 image-race regression test passed
+`(os/exe-path)` as its runner — under the canonical gate that is the *libtest binary*, which
+reads a positional argument as a test-name filter, so it printed `running 0 tests`, exited 0
+and asserted green **without the race ever running**. Both are the same species: a stale name
+list fails silently, in the direction of doing less.
+
+**Types.** An intersection of arrows can satisfy a required arrow that no single conjunct does,
+since an arrow's domain is contravariant (ADR-292). An ability op's declared return is enforced
+under `BROOD_CONTRACTS` (ADR-293). `BROOD_MONO` devirtualizes on the proven *identity* rather
+than the impl, so a re-registered impl cannot go stale (ADR-294). An arrow parameter's arity is
+exact (ADR-284); a record name is a type and prints as its name; integer division types as
+`int | ratio`; structural complements are exact.
+
+**Added.** Stability metadata — `:since`, `:deprecated`, `:beta` (ADR-283). **Doctests**: a
+project's documented examples run under `nest test`. `./configure --without-stdimage`. A binary
+older than its own `std/` now says so (ADR-287).
+
+**Performance.** A two-argument arm for `math/max`/`math/min` (collatz −38.2%); the JIT's fast
+link outlines its cold outcomes (bintree −4.0%).
+
+**CI.** KI-78 — CI now builds the stdlib image, so the suite exercises the load path users
+actually get rather than only the source path.
 
 **Fixed — `sort` was a silent no-op over maps and sets.** Both fell through to the cross-kind
 tag compare, where two maps rank identically, so `(compare {:a 1} {:a 2})` returned `0` and

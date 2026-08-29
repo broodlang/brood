@@ -145,11 +145,15 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
     (math/positive? 1)    → true"
   (> n 0))
+(sig positive? (number -> bool))
+
 (defn negative? (n)
   "True if `n` is less than zero.
 
     (math/negative? -1)   → true"
   (< n 0))
+(sig negative? (number -> bool))
+
 (defn abs (n)
   "The absolute value of `n`.
 
@@ -159,6 +163,8 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
     (math/abs -3)          → 3"
   (if (< n 0) (- n) n))
+(sig abs (number -> number))
+
 (defn even? (n)
   "True if integer `n` is even.
 
@@ -201,12 +207,15 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
     (math/ceil 1.2)       → 2"
   (- (math/floor (- x))))
+(sig ceil (number -> int))
+
 ;; round half away from zero: floor(x+0.5) for x>=0, mirrored for x<0.
 (defn round (x)
   "Round `x` to the nearest integer (halves away from zero).
 
     (math/round 2.5)       → 3"
   (if (< x 0) (- (math/floor (+ (- x) 0.5))) (math/floor (+ x 0.5))))
+(sig round (number -> int))
 
 ;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
 ;; non-negative exp stays an int (overflow raises, like `*`); a negative exp gives
@@ -222,6 +231,8 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
 (defn pow (base exp)
   "`base` raised to integer `exp`. A negative exponent gives the reciprocal — **exact**
+(sig pow (number int -> number))
+
 (a ratio) for an exact `base`, a float for a float `base`.
 
     (math/pow 2 10)        → 1024"
@@ -272,6 +283,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
   (let (scale (pow 10 places)
         r (/ (round (* x scale)) scale))
     (if (and (float? x) (ratio? r)) (->float r) r)))
+(sig round-to (number int -> number))
 
 ;; (sqrt n) — delegates to `%f64-sqrt` (f64::sqrt) for IEEE 754 correctness on all
 ;; inputs including subnormals. Always returns a Float; a negative argument raises.
@@ -280,6 +292,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 
     (math/sqrt 9)          → 3.0"
   (cond (< n 0) (error "sqrt: negative argument " n) (<= n 0) 0.0 else (%f64-sqrt n)))
+(sig sqrt (number -> float))
 
 (defn clamp (x lo hi)
   "Constrain `x` to the closed range [`lo`, `hi`]: `lo` if `x` is below it, `hi` if above, else `x`.
@@ -291,6 +304,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
     (math/clamp 12 0 10)   → 10
     (math/clamp -1 0 10)   → 0"
   (math/max lo (math/min hi x)))
+(sig clamp (number number number -> number))
 
 ;; ---- transcendental functions -----------------------------------------------
 ;; Thin policy over the `%`-prefixed f64 primitives (mechanism), so they live in the

@@ -35,6 +35,7 @@ a 1-element sequence has population variance 0.0.
     (when (< n 1) (error "stats/variance: empty sequence"))
     (let (m (mean xs))
       (/ (sum-of-squares xs m) n))))
+(sig variance (seqable -> float))
 
 (defn sample-variance (xs)
   "The sample variance (divided by n-1, Bessel's correction) of `xs`. Raises if fewer than 2 elements."
@@ -42,16 +43,19 @@ a 1-element sequence has population variance 0.0.
     (when (< n 2) (error "stats/sample-variance: need at least 2 elements"))
     (let (m (mean xs))
       (/ (sum-of-squares xs m) (- n 1)))))
+(sig sample-variance (seqable -> float))
 
 (defn stddev (xs)
   "The population standard deviation of `xs`.
 
     (stats/stddev [2 2 2])   → 0.0"
   (sqrt (variance xs)))
+(sig stddev (seqable -> float))
 
 (defn sample-stddev (xs)
   "The sample standard deviation of `xs` (Bessel's correction)."
   (sqrt (sample-variance xs)))
+(sig sample-stddev (seqable -> float))
 
 ;; ---- order statistics --------------------------------------------------------
 
@@ -67,6 +71,7 @@ For an even-length sequence, returns the mean of the two middle values.
       (if (= (math/rem n 2) 1)
         (nth sorted mid)
         (/ (+ (nth sorted (- mid 1)) (nth sorted mid)) 2)))))
+(sig median (seqable -> number))
 
 (defn percentile (xs p)
   "The `p`-th percentile (0–100) of `xs` using the nearest-rank method.
@@ -81,12 +86,14 @@ For an even-length sequence, returns the mean of the two middle values.
           rank (math/max 1 (ceil (* (/ p 100.0) n)))
           idx (math/min (- n 1) (- rank 1)))
       (nth sorted idx))))
+(sig percentile (seqable number -> number))
 
 (defn quantile (xs q)
   "The `q`-th quantile (0.0–1.0) of `xs` using the nearest-rank method.
 
     (stats/quantile [1 2 3 4] 0.5)   → 2"
   (percentile xs (* q 100)))
+(sig quantile (seqable number -> number))
 
 ;; ---- range and spread --------------------------------------------------------
 
@@ -96,6 +103,7 @@ For an even-length sequence, returns the mean of the two middle values.
     (stats/min [3 1 2])      → 1"
   (when (empty? xs) (error "stats/min: empty sequence"))
   (reduce math/min xs))
+(sig min (seqable -> number))
 
 (defn max (xs)
   "The largest value in `xs`. Raises on an empty sequence.
@@ -103,6 +111,7 @@ For an even-length sequence, returns the mean of the two middle values.
     (stats/max [3 1 2])      → 3"
   (when (empty? xs) (error "stats/max: empty sequence"))
   (reduce math/max xs))
+(sig max (seqable -> number))
 
 (defn range-of (xs)
   "The range (max − min) of `xs`. Raises on an empty sequence.
@@ -111,6 +120,7 @@ For an even-length sequence, returns the mean of the two middle values.
   ;; Qualified: `max` is now defined in BOTH `math` (variadic over arguments) and here
   ;; (over a collection), so bare is ambiguous inside this module and the compiler says so.
   (- (stats/max xs) (stats/min xs)))
+(sig range-of (seqable -> number))
 
 ;; ---- frequency ---------------------------------------------------------------
 ;; `mode` uses the `seq` library's `frequencies` (a general sequence op, ADR-227);

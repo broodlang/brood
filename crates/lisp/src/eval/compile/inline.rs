@@ -10,11 +10,21 @@ use super::*;
 // uncertainty (arg not literal, head not an ability op, no impl for the id) → **no rewrite**:
 // the dynamic op call is left exactly as-is. Soundness over completeness.
 //
-// The late-binding trade-off (a captured impl fn goes stale if that id's impl is later
-// re-registered) is the reason this is flag-gated: default builds keep 100% dynamic
-// semantics; opting in trades that for speed, like `-O2` assuming no UB (ADR-182). Records
-// (a map literal carrying `:__id__`) are conservatively **excluded** — Tier 1 targets
-// built-in-kind literals only; the nominal-record case is Tier 1's direct-ctor extension.
+// **What is proven is the identity, not the impl** (ADR-294). The rewrite emits
+// `((%dispatch *impls* '[ability op] :id) args…)`: the `identity-of` call is gone, because
+// the id is known at compile time, but resolution still goes through `%dispatch` — the
+// per-op inline cache, which is stamped with `global_epoch()` and therefore invalidated by
+// any `impl`/`%unimpl`. Late binding is fully preserved and there is no stale-impl window.
+//
+// This replaced baking the resolved impl fn as a `Node::Const`. That was unsound in a way
+// its own suite caught the moment the flag was turned on — and nothing ever turned it on:
+// a body is compiled before it runs, so `(do (impl Display rec …) (->string (rec 7)))`
+// captured the impl that existed *before* its own `impl` line executed and called the
+// wrong one. The documented caveat said "stale if later re-registered", which understates
+// it: the window opens before the FIRST registration, inside one compiled body.
+//
+// Records (a map literal carrying `:__id__`) are conservatively **excluded** — Tier 1
+// targets built-in-kind literals only; the nominal-record case is the direct-ctor path.
 
 /// Is compile-time ability devirtualization enabled? Off by default; `BROOD_MONO` opts in.
 /// Cached once (Rust-side), like the JIT levers.
@@ -64,9 +74,9 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
 }
 
 /// If call head `op` is an ability op AND `args[0]` has a statically-provable dispatch
-/// identity with a concrete impl, return `Node::Const(impl_fn)` — the callee for a direct
-/// call that bypasses the op's dispatch body. `None` (leave the dynamic call alone) on ANY
-/// uncertainty.
+/// identity with a concrete impl, return the callee `(%dispatch *impls* '[ability op] :id)`
+/// — the op's own resolution with its `identity-of` step constant-folded away. `None`
+/// (leave the dynamic call alone) on ANY uncertainty.
 ///
 /// Mirrors the runtime dispatch (`identity-of` → `impl-for`) exactly. Two proven arg shapes
 /// (ADR-182, mirroring the checker's `arg_identity`):
@@ -95,30 +105,41 @@ pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Optio
     // `impl-for` does. Iterate rather than build a key — compile-time, not hot; and it
     // avoids depending on freshly-built-vector CHAMP equality.
     let impls = global_map(heap, "*impls*")?;
-    let mut methods_map = None;
+    let mut found = None;
     for (key, methods) in heap.map_entries(impls) {
         if let (Value::Vector(vid), Value::Map(mid)) = (key, methods) {
             let v = heap.vector(vid);
             if matches!((v.first(), v.get(1)),
                 (Some(&Value::Sym(a)), Some(&Value::Sym(o))) if a == ability && o == op_bare)
             {
-                methods_map = Some(mid);
+                // Keep the registry's OWN key vector: it is what `%dispatch` will be handed,
+                // so reusing it avoids rebuilding a vector whose CHAMP equality we would then
+                // have to rely on.
+                found = Some((key, mid));
                 break;
             }
         }
     }
-    let methods_map = methods_map?;
+    let (op_key, methods_map) = found?;
     // Exact id wins, else `:default` — `impl-for`'s exact order. Keyword keys need no alloc.
     let impl_fn = heap
         .map_get(methods_map, id_kw)
         .or_else(|| heap.map_get(methods_map, default_kw))?;
-    // Only a real fn value is safe to call directly.
+    // Only a real fn value is safe to dispatch to. Resolving it here is not what gets
+    // emitted — it is the PROOF that this id has an impl at all, so the rewrite does not
+    // turn a would-be `%no-impl` into a "not callable".
     if !matches!(impl_fn.unpack(), ValueRef::Fn(_)) {
+        return None;
+    }
+    // Both constants must be immovable: they are baked into the chunk, and a LOCAL handle
+    // would go stale at the next collection. `*impls*` is RUNTIME-promoted, so its key
+    // vector holds; keywords are not heap values at all. Belt-and-braces, as in the IC.
+    if crate::core::heap::is_movable(op_key) {
         return None;
     }
     if std::env::var_os("BROOD_MONO_DBG").is_some() {
         eprintln!(
-            "[mono] devirtualized {}/{} for :{} → direct impl call",
+            "[mono] devirtualized {}/{} for :{} → constant-id dispatch",
             value::symbol_name(ability),
             value::symbol_name(op_bare),
             value::symbol_name(match id_kw {
@@ -127,7 +148,21 @@ pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Optio
             }),
         );
     }
-    Some(Node::Const(ConstVal::new(impl_fn)))
+    // `((%dispatch *impls* '[ability op] :id) …)` — the id is constant-folded, the
+    // resolution stays behind the epoch-guarded cache.
+    Some(Node::Call {
+        callee: Box::new(Node::Global(value::intern("%dispatch"))),
+        args: Box::new([
+            Node::Global(value::intern("*impls*")),
+            Node::Const(ConstVal::new(op_key)),
+            Node::Const(ConstVal::new(id_kw)),
+        ]),
+        tail: false,
+        pos: None,
+        file: None,
+        site: NO_SITE,
+        staged: false,
+    })
 }
 
 /// Whitelisted map READ ops (return a value — safe in any position) → Table op.
