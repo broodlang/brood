@@ -97,12 +97,12 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
         m.insert(value::intern(name), sig);
     };
     // Variadic arithmetic. A numeric arg — or a `Num` RECORD, which the kernel's
-    // `%add`/`%sub`/`%mul`/`%div` fallback dispatches to the type's `Num` ability (ADR-172
-    // §7) — so `(+ money money)` is legal. A record is a map, so the domain/result widen to
-    // `number | map`; the RESULT of a pure-numeric call is still typed precisely by
-    // `numeric_call_ty` (int/float), which defers to this sig only once an operand is a
-    // record/unknown — so numeric precision is unaffected, while record arithmetic and its
-    // result (`(get (+ a b) :field)`) type-check cleanly.
+    // `%add`/`%sub`/`%mul`/`%div` fallback dispatches to the `num/*` multimethods (ADR-172
+    // §7, ADR-179) — so `(+ money money)` is legal. These curated entries are the widest
+    // reading, `number | map`; they are SHADOWED by `operator_sig` (ADR-299), which reads
+    // the domain off the registry — `number` plus exactly the records with methods — and
+    // is what every lookup consults first. The RESULT of a pure-numeric call is typed
+    // precisely by `numeric_call_ty` (int/float) either way.
     let num_or_record = num.union(Ty::of(Tag::Map));
     for n in ["+", "-", "*", "/"] {
         put(
@@ -306,6 +306,44 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     m
 });
 
+thread_local! {
+    /// The operator-sugar domains (`protocol::operator_domains`) for the check in progress —
+    /// set at a file check's root from that file's forms + the registry, or derived from the
+    /// registry alone on first use when no file check installed one (a bare fragment).
+    static OPERATOR_DOMAINS: RefCell<Option<HashMap<Symbol, Ty>>> = const { RefCell::new(None) };
+}
+
+/// Install the operator domains for the check in progress (ADR-299).
+pub(super) fn set_operator_domains(domains: HashMap<Symbol, Ty>) {
+    OPERATOR_DOMAINS.with(|d| *d.borrow_mut() = Some(domains));
+}
+
+/// The signature of an arithmetic/comparison operator, its domain read off the multimethod
+/// registry (ADR-299) — `number` plus exactly the records `num/*` / `compare-to` have
+/// methods for — rather than the `number | map` the native declares. `None` for any
+/// other symbol.
+fn operator_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
+    let name = value::symbol_name_ref(sym);
+    let is_arithmetic = matches!(name, "+" | "-" | "*" | "/");
+    let is_comparison = matches!(name, "<" | "<=" | ">" | ">=");
+    if !is_arithmetic && !is_comparison {
+        return None;
+    }
+    let domain = OPERATOR_DOMAINS.with(|d| {
+        let mut slot = d.borrow_mut();
+        if slot.is_none() {
+            let info = super::protocol::build_multi_info(heap, &[]);
+            *slot = Some(super::protocol::operator_domains(&info));
+        }
+        slot.as_ref().and_then(|m| m.get(&sym).cloned())
+    })?;
+    Some(if is_arithmetic {
+        Sig::variadic(domain.clone(), domain)
+    } else {
+        Sig::variadic(domain, Ty::of(Tag::Bool))
+    })
+}
+
 /// The signature of a **primitive** bound to `sym` — read from its `NativeFn`
 /// (contract point #6, enforced). `None` when `sym` has no binding, or its
 /// binding isn't a primitive (a Brood closure goes through [`curated_sig`]
@@ -316,6 +354,9 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
 /// table), but in the prelude-builder / test heap it's a *local* env that
 /// `builtins::register` populated — `env_get` walks both transparently.
 pub(super) fn primitive_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
+    if let Some(sig) = operator_sig(heap, sym) {
+        return Some(sig);
+    }
     match super::deps::obs_global(heap, sym)? {
         Value::Native(id) => Some(heap.native(id).sig.clone()),
         _ => None,
@@ -1395,7 +1436,10 @@ pub(super) fn declared_heap_value_ty(heap: &Heap, sym: Symbol) -> Option<Ty> {
 /// sig *without* kicking off another inference (the rule says inference is one step
 /// deep).
 pub(super) fn sig_of(heap: &Heap, sym: Symbol) -> Option<Sig> {
-    declared_heap_sig(heap, sym)
+    // The operator sugar's registry-derived domain (ADR-299) wins over the widest reading
+    // the native declares, whichever registry that reading arrives through.
+    operator_sig(heap, sym)
+        .or_else(|| declared_heap_sig(heap, sym))
         .or_else(|| primitive_sig(heap, sym))
         .or_else(|| curated_sig(sym))
         .or_else(|| infer_sig(heap, sym))

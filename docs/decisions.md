@@ -210,6 +210,35 @@ out to already exist (`nest check` has always exited 1 on any warning).
 
 ---
 
+## ADR-299 — An operator's domain is what its multimethod covers
+
+**Context.** `+ - * /` and `< <= > >=` are operator sugar: a numeric operand takes the
+fast path, a record operand dispatches to the `num/add`…`num/div` / `compare-to`
+multimethods on both operands' identities (ADR-179). The natives therefore declared their
+domain as `number | map` — a record is a map — and every inferred signature that touched
+arithmetic rendered as `((or map number) -> (or map number))`. ADR-276 counted 237 such
+suggestions and called them noise; the playground's hover showed the same for
+`(defn foo (x) (+ 1 x 1/2))`. Sound, and unreadable: `map` here never meant "a map".
+
+**Decision.** A multimethod's parameter type is **what its methods cover**: the union of
+the nominal shape (`{__id__: :t/usd}`) of every identity with a method at that position —
+`any` if it has a `:default`, `never` if it has no method at all (`MultiInfo::domain_ty`).
+The operator sugar's domain is `number` plus the cover of the multimethods it routes to
+(`protocol::operator_domains`), read off this file's `defmethod`s and the registry at the
+root of every check, and consulted ahead of the native's declaration (`sigs::operator_sig`).
+With no such record loaded, `+` accepts `number` and nothing else; with `usd` loaded it
+accepts `number | t/usd` and says so by name — a record inside a wider term now renders
+by its identity, not as the tag `map`.
+
+The registry is the ground truth here for the same reason it is at runtime: the kernel's
+cold path looks the method up at the call, and a record without one raises `no-method`,
+so the checker's domain and the runtime's are the same set.
+
+**Consequences.** Inferred and suggested signatures over arithmetic read `number`, or
+name the records that take part. A method registered *after* a check widens the domain on
+the next check, which is what an advisory checker over a live image already means. The
+curated `number | map` entries stay as the widest reading behind the derived one.
+
 ## ADR-298 — Strict checking is a launch switch, not a second lattice
 
 **Context.** The gradual relation reads a *dynamic* value — a call result, an inferred or

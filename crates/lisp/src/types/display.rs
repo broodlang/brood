@@ -134,6 +134,22 @@ impl fmt::Display for Ty {
                 return write!(f, "map<{k}, {v}>");
             }
         }
+        // A record shape riding in a wider term — `number | usd`, the domain of `+` once a
+        // record has a `num/add` method. The term's map member IS the record, and only the
+        // `tags == MAP_BIT` branch below knows to render one by name; listing the tags
+        // would print it as the bare `map` and lose the one word that matters. Split the
+        // term into its map projection and everything else, each rendered by its own rule.
+        if self.record_fields().is_some()
+            && self.neg.is_none()
+            && self.tags != MAP_BIT
+            && self.tags & MAP_BIT != 0
+        {
+            let rest = (0..32)
+                .map(|i| 1u32 << i)
+                .filter(|b| self.tags & b != 0 && *b != MAP_BIT)
+                .fold(Ty::NEVER, |acc, b| acc.union(self.project_tag(b)));
+            return write!(f, "{rest} | {}", self.project_tag(MAP_BIT));
+        }
         // A record shape: `{name: string, age?: int}` — `?` marks an
         // optional field. `fields` is keyed by interned `Symbol` (intern
         // order, not alphabetical — same trap `lit` avoids below), so sort
@@ -475,11 +491,50 @@ impl Ty {
                 return Some(format!("(and {})", parts.join(" ")));
             }
         }
+        // A record riding in a wider term (`number | t/usd`, an operator's domain once a
+        // record has a `num/add` method — ADR-299): spell the map member by the record
+        // rule below and the rest by theirs, as one flat `(or …)`.
+        if self.record_fields().is_some()
+            && self.neg.is_none()
+            && self.tags != MAP_BIT
+            && self.tags & MAP_BIT != 0
+        {
+            let rest = (0..32)
+                .map(|i| 1u32 << i)
+                .filter(|b| self.tags & b != 0 && *b != MAP_BIT)
+                .fold(Ty::NEVER, |acc, b| acc.union(self.project_tag(b)));
+            // Both halves may be unions of their own; one flat `(or …)` reads best.
+            fn flat(source: String) -> String {
+                source
+                    .strip_prefix("(or ")
+                    .and_then(|r| r.strip_suffix(')'))
+                    .map(str::to_string)
+                    .unwrap_or(source)
+            }
+            let rest = flat(rest.to_source()?);
+            let record = flat(self.project_tag(MAP_BIT).to_source()?);
+            return Some(format!("(or {rest} {record})"));
+        }
         if self.tags == MAP_BIT {
             if let Some((k, v)) = self.map_kv() {
                 return Some(format!("(map {} {})", k.to_source()?, v.to_source()?));
             }
             if let Some(fields) = self.record_fields() {
+                // A record's NAME is its type in a `sig` (`(sig area (t/circle -> float))`),
+                // so a nominal shape with nothing else pinned is spelled by its ids — the
+                // `:__id__` representation is not something anyone writes.
+                if let Some(names) = nominal_ids(fields) {
+                    let unrefined = fields.iter().all(|(name, (ty, _))| {
+                        value::symbol_name_ref(*name) == "__id__" || *ty == Ty::ANY
+                    });
+                    if unrefined {
+                        return Some(if names.len() == 1 {
+                            names[0].clone()
+                        } else {
+                            format!("(or {})", names.join(" "))
+                        });
+                    }
+                }
                 let open = if self.record_is_open() == Some(true) {
                     " &open"
                 } else {
@@ -526,6 +581,9 @@ impl Ty {
                 }
                 if self.contains_tag(Tag::Vector) {
                     parts.push(format!("(vector {inner})"));
+                }
+                if self.contains_tag(Tag::Set) {
+                    parts.push(format!("(set {inner})"));
                 }
                 return match parts.len() {
                     0 => None,

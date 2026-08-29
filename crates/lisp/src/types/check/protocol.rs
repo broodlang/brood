@@ -1446,6 +1446,36 @@ impl MultiInfo {
     fn is_empty(&self) -> bool {
         self.generics.is_empty()
     }
+
+    /// The type multimethod `name`'s methods COVER at parameter `position` — the union of
+    /// the nominal shape of every identity with a method there. `any` when the multimethod
+    /// has a `:default` (any value may dispatch); `never` when no method exists at all
+    /// (every call would raise `no-method`, so no value is in its domain).
+    ///
+    /// This is a multimethod's parameter type read off the registry rather than declared:
+    /// what `+` accepts beyond numbers is exactly what `num/add` has methods for.
+    pub(super) fn domain_ty(&self, name: &str, position: usize) -> crate::types::Ty {
+        if self.defaults.contains(name) {
+            return crate::types::Ty::ANY;
+        }
+        let ids: Vec<String> = self
+            .methods
+            .get(name)
+            .map(|tuples| {
+                let mut ids: Vec<String> = tuples
+                    .iter()
+                    .filter_map(|t| t.get(position).cloned())
+                    .collect();
+                ids.sort();
+                ids.dedup();
+                ids
+            })
+            .unwrap_or_default();
+        if ids.is_empty() {
+            return crate::types::Ty::NEVER;
+        }
+        super::annot::sealed_members_ty(&ids).unwrap_or(crate::types::Ty::ANY)
+    }
     /// The multimethod name a generic global symbol denotes, if any.
     pub(super) fn generic_of(&self, sym: value::Symbol) -> Option<&String> {
         self.generics.get(&sym)
@@ -1944,4 +1974,31 @@ pub(super) fn check_multi_call_inferred(
             out.push((pos, multi_missing_warning(mname, &tuple)));
         }
     }
+}
+
+/// The domains of the **operator sugar** over the numeric multimethods, derived from what
+/// the registry covers (ADR-299): `+ - * /` accept a number or any record with a method on
+/// `num/add`/`num/sub`/`num/mul`/`num/div` (either position); `< <= > >=` a number or any
+/// record `compare-to` has a method for. With no such record loaded, an operator's domain is
+/// exactly `number` — the `number | map` the natives declare was the widest reading of the
+/// same fact, and it read as noise (`(or map number)`) in every inferred signature.
+pub(super) fn operator_domains(info: &MultiInfo) -> HashMap<value::Symbol, crate::types::Ty> {
+    let mut out = HashMap::new();
+    let mut arithmetic = crate::types::Ty::NUMBER;
+    for op in ["num/add", "num/sub", "num/mul", "num/div"] {
+        for position in 0..2 {
+            arithmetic = arithmetic.union(info.domain_ty(op, position));
+        }
+    }
+    for op in ["+", "-", "*", "/"] {
+        out.insert(value::intern(op), arithmetic.clone());
+    }
+    let mut ordered = crate::types::Ty::NUMBER;
+    for position in 0..2 {
+        ordered = ordered.union(info.domain_ty("compare-to", position));
+    }
+    for op in ["<", "<=", ">", ">="] {
+        out.insert(value::intern(op), ordered.clone());
+    }
+    out
 }
