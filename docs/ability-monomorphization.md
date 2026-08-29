@@ -104,6 +104,12 @@ impl call. Lands the `BROOD_MONO` flag plumbing, op-recognition, the rewrite, an
 validation harness. **Weakness:** does almost nothing for the case that actually costs —
 a variable in a hot loop (`(map area shapes)`), where the arg isn't syntactically known.
 
+> **Scoped differently since 2026-08-29 — see [dispatch-speculation.md](dispatch-speculation.md).**
+> The framing below ("build the checker→compiler channel") put an unsound data source in a
+> load-bearing position, which is exactly how Tier 1 came to miscompile (ADR-294). Behind a
+> runtime **guard**, a static fact is one prior among several and a wrong one costs a deopt,
+> so the guard is what to build first and the channel is optional and last.
+
 **Tier 2 — inferred-variable devirtualization. The real win, the real risk.** Where the
 4.1× loop cost lives. Requires building the checker→compiler channel so a call on a
 `sig`-typed / inferred variable can be devirtualized. This is the miscompile surface:
