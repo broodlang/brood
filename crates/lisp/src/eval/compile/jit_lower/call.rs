@@ -102,20 +102,27 @@ pub(super) fn emit_call(
         worded.push(read_words(b, op, frame));
     }
     // ---- Batch staging (BEAM X-register style) ----
-    // All operands are written into a per-site staging STACK SLOT with plain stores (no
-    // FFI, no roots realloc), then staged onto `roots` with ONE `brood_rt_push_n` — and a
-    // native flat-cell hit below skips the roots staging entirely (the trampoline reads
-    // the slot directly). Layout: [callee?][arg0..arg_{argc-1}], 24 bytes each, third word
-    // zeroed (a whole-Value copy must carry all three words).
-    let stage_cap = (n_ops + 1) as u32; // +1: a tail elided head prepends
-    let stage_ss = b.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        STRIDE as u32 * stage_cap,
-        3,
-    ));
+    // Operands are written **straight into `roots`**: one `brood_rt_push_room` reserves the
+    // block and hands back its address, and the same stores that used to fill a per-site
+    // stack slot now land in place. Layout: [callee?][arg0..arg_{argc-1}], 24 bytes each,
+    // all three words written (a whole-`Value` copy must carry the third).
+    //
+    // It used to go via a stack slot and then one `brood_rt_push_n` block copy. LBR put that
+    // copy at 4.4% of `bintree` on its own — 24-72 bytes per call, so almost entirely libc
+    // `memmove`'s size-class dispatch, ~8M times — with the stack stores on top. Inlining
+    // the copy for small arities was tried first and moved ~1% (inside the floor): the bytes
+    // still had to move. This deletes the copy instead. See docs/compute-frontier.md §2j.
+    //
+    // The reserved slots are live roots holding uninitialised memory until the stores below
+    // complete, so **nothing between here and them may allocate or collect** — they are pure
+    // stores, and `Heap::push_roots_room` documents the invariant.
     // For a free-global tail call, jit_dispatch_tail reads [callee, args…] from roots —
     // but the elided head is never staged. Resolve it via the global IC and put it at slot
     // 0, args after.
+    // The elided-head resolution below is a CALL, so it must happen before the room is
+    // reserved — nothing may run between the reservation and the stores. Its words are held
+    // back and stored with the rest.
+    let mut staged_callee: Option<[cranelift_codegen::ir::Value; 3]> = None;
     let arg_base: i32 = if tail && head.is_some() {
         let sym_v2 = b.ins().iconst(types::I32, call_head as i64);
         let site_v2 = b.ins().iconst(types::I32, call_site as i64);
@@ -132,29 +139,43 @@ pub(super) fn emit_call(
         let cw2 = b
             .ins()
             .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-        b.ins().stack_store(cw0, stage_ss, 0);
-        b.ins().stack_store(cw1, stage_ss, PAYLOAD_OFFSET as i32);
-        b.ins()
-            .stack_store(cw2, stage_ss, PAYLOAD_OFFSET as i32 + 8);
-        1
+        Some([cw0, cw1, cw2])
     } else {
-        0
-    };
-    for (i, w) in worded.iter().enumerate() {
-        let off = (arg_base + i as i32) * STRIDE as i32;
-        b.ins().stack_store(w[0], stage_ss, off);
-        b.ins()
-            .stack_store(w[1], stage_ss, off + PAYLOAD_OFFSET as i32);
-        b.ins()
-            .stack_store(w[2], stage_ss, off + PAYLOAD_OFFSET as i32 + 8);
+        None
     }
-    let stage_ptr = b.ins().stack_addr(ptr_ty, stage_ss, 0);
-    let stage_n = b.ins().iconst(types::I64, (arg_base as i64) + n_ops as i64);
-    // Stage onto roots (`[callee?, args…]`, the VM's `Inst::Call` layout
-    // `brood_rt_call_slow` / `jit_dispatch_tail` / fast_frame read back). The native
-    // flat-cell path re-reads the slot instead, but staging unconditionally here keeps
-    // every fallback path's contract intact.
-    b.ins().call(funcs.pushn, &[heap, stage_ptr, stage_n]);
+    .map_or(0i32, |callee_words| {
+        staged_callee = Some(callee_words);
+        1
+    });
+    // Reserve the block, then store every operand into it — `[callee?, args…]`, the VM's
+    // `Inst::Call` layout that `brood_rt_call_slow` / `jit_dispatch_tail` / the fast frame
+    // all read back.
+    let stage_n_i = (arg_base as i64) + n_ops as i64;
+    let stage_n = b.ins().iconst(types::I64, stage_n_i);
+    let prc = b.ins().call(funcs.pushroom, &[heap, stage_n]);
+    let stage_ptr = b.inst_results(prc)[0];
+    let store_words = |b: &mut FunctionBuilder, slot: i32, w: [cranelift_codegen::ir::Value; 3]| {
+        let off = slot * STRIDE as i32;
+        b.ins().store(MemFlagsData::trusted(), w[0], stage_ptr, off);
+        b.ins().store(
+            MemFlagsData::trusted(),
+            w[1],
+            stage_ptr,
+            off + PAYLOAD_OFFSET as i32,
+        );
+        b.ins().store(
+            MemFlagsData::trusted(),
+            w[2],
+            stage_ptr,
+            off + PAYLOAD_OFFSET as i32 + 8,
+        );
+    };
+    if let Some(cw) = staged_callee {
+        store_words(b, 0, cw);
+    }
+    for (i, w) in worded.iter().enumerate() {
+        store_words(b, arg_base + i as i32, *w);
+    }
     if tail {
         // Tail position: the staged call *is* this arm's result (TCO). It ends the block
         // — nothing may remain on the operand stack below it (a real tail call's stack is
@@ -206,11 +227,8 @@ pub(super) fn emit_call(
         let fl_epoch_off = std::mem::offset_of!(FastLink, epoch) as i32;
         let fl_code_off = std::mem::offset_of!(FastLink, code) as i32;
         let fl_nslots_off = std::mem::offset_of!(FastLink, nslots) as i32;
-        let fl_env_off = std::mem::offset_of!(FastLink, env) as i32;
         let fl_sym_off = std::mem::offset_of!(FastLink, sym) as i32;
         let fl_argc_off = std::mem::offset_of!(FastLink, argc) as i32;
-        let fl_cib_off = std::mem::offset_of!(FastLink, callee_ic_base) as i32;
-        let fl_cgb_off = std::mem::offset_of!(FastLink, callee_gic_base) as i32;
         let len_slot =
             b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
@@ -289,24 +307,15 @@ pub(super) fn emit_call(
         b.ins().brif(nst, error, &[], cont, &[]);
 
         b.switch_to_block(brood_blk);
-        let env_v = b
+        // Pass the **slot pointer**, not its unpacked fields. `brood_rt_fast_frame` used to
+        // take ten arguments — head/argc/nslots/code/env and the two callee IC bases, all
+        // read here and immediately re-pushed on the other side, because SysV only passes
+        // six in registers. Four arguments fit in registers, and the callee's reads are free:
+        // the guard blocks above have just touched that cache line to check the slot's epoch,
+        // sym and argc. See `brood_rt_fast_frame`'s doc.
+        let ffc = b
             .ins()
-            .load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_env_off);
-        // KI-20: the callee's IC-block bases ride in the slot alongside code/nslots/env, so
-        // `jit_run_fast_link` can install the callee's cursors around its native call without
-        // re-reading the table (two extra u32 loads from the same cache line, two extra args).
-        let cib_v = b
-            .ins()
-            .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_cib_off);
-        let cgb_v = b
-            .ins()
-            .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_cgb_off);
-        let ffc = b.ins().call(
-            funcs.fastframe,
-            &[
-                heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v, cib_v, cgb_v,
-            ],
-        );
+            .call(funcs.fastframe, &[heap, out_addr, site_v, slot_ptr]);
         let fst = b.inst_results(ffc)[0];
         // The callee may have relocated `roots`; re-fetch the base.
         let rbc = b.ins().call(funcs.rb, &[heap]);

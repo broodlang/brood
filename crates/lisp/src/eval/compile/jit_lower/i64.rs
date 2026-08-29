@@ -655,6 +655,7 @@ pub(super) fn jit_lower_i64_arm(
     let mut xsig = m.make_signature();
     xsig.params.push(AbiParam::new(ptr_ty)); // heap
     xsig.params.push(AbiParam::new(types::I64)); // base
+    xsig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value (Done result) — see jit_lower.rs
     xsig.returns.push(AbiParam::new(types::I64)); // outcome
     let wrap_id = m
         .declare_function(&format!("brood_jit_i64x_{seq}"), Linkage::Export, &xsig)
@@ -806,6 +807,7 @@ pub(super) fn jit_lower_i64_arm(
         b.seal_block(entry);
         let heap = b.block_params(entry)[0];
         let base = b.block_params(entry)[1];
+        let out_ptr = b.block_params(entry)[2];
         // **No stack limit → do not run the register worker at all.** The worker's only
         // per-level guard is the byte compare against `Heap::jit_stack_limit`, and a `0` limit
         // (the platform could not read the remaining stack) makes that unsigned compare fail
@@ -914,12 +916,11 @@ pub(super) fn jit_lower_i64_arm(
         b.switch_to_block(ovb);
         let o1b = b.ins().iconst(types::I64, 1);
         b.ins().return_(&[o1b]);
-        // Done → box the i64 result as an Int into roots[base], outcome 0.
+        // Done → box the scalar result through the caller's `out` pointer, outcome 0. It
+        // used to go into `roots[base]` and be loaded straight back by the caller; see
+        // `emit::store_result`.
         b.switch_to_block(doneb);
-        let rbc2 = b.ins().call(rb_ref, &[heap]);
-        let rbase2 = b.inst_results(rbc2)[0];
-        let off2 = b.ins().imul_imm(base, STRIDE);
-        let addr2 = b.ins().iadd(rbase2, off2);
+        let addr2 = out_ptr;
         let tagv = b.ins().iconst(types::I64, kind.tag() as i64);
         b.ins().store(MemFlagsData::trusted(), tagv, addr2, 0);
         // Payload: an int as-is; a float's f64 bitcast to its i64 bits ([TAG_FLOAT, bits, 0]).

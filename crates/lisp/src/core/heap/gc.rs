@@ -145,19 +145,34 @@ impl Heap {
         }
     }
 
-    /// Append `n` `Value`s from `src` onto `roots` in one reserve+copy — the batch
-    /// form of [`Self::push_root`] for the JIT's call staging (one FFI + one memcpy
-    /// instead of `brood_rt_push` × argc).
+    /// Reserve `n` fresh slots at the top of `roots` and return a pointer to the first —
+    /// the JIT's per-call argument staging, written **in place** by the caller's own stores.
+    ///
+    /// Replaces the store-to-stack-slot-then-[`push_roots_n`] pair: the JIT used to write
+    /// each argument's three words into a Cranelift stack slot and then copy the block onto
+    /// `roots`, which LBR attribution put at **4.4% of `bintree`** in the copy alone, plus
+    /// the stores feeding it. Handing back the destination lets the same stores land where
+    /// the value is needed, so the copy stops existing rather than getting cheaper — the one
+    /// shape of change that has actually moved this row (docs/compute-frontier.md §2j).
     ///
     /// # Safety
-    /// `src` must point to `n` valid, initialized `Value`s (the JIT's per-site
-    /// staging stack slot, written just before the call).
+    /// The returned slots are **live roots holding uninitialised memory** until the caller
+    /// stores real `Value`s into all `n` of them. Nothing may allocate, collect, or otherwise
+    /// walk `roots` in that window — the caller must emit stores and nothing else. This is
+    /// the same discipline the out-pointer ABIs run under ([`crate::jit::JitArmFn`],
+    /// `brood_rt_cons`), and it holds here for the same reason: the JIT emits pure stores
+    /// between this call and the call that consumes them. Under `debug_assertions` the slots
+    /// are nil-filled first, so a *missing* store shows up as a `nil` argument — a wrong
+    /// answer the tests catch — instead of as garbage with a valid-looking tag.
     #[cfg(feature = "jit")]
-    pub(crate) unsafe fn push_roots_n(&mut self, src: *const Value, n: usize) {
+    pub(crate) unsafe fn push_roots_room(&mut self, n: usize) -> *mut Value {
         let old = self.roots.len();
         self.roots.reserve(n);
-        std::ptr::copy_nonoverlapping(src, self.roots.as_mut_ptr().add(old), n);
+        let dst = self.roots.as_mut_ptr().add(old);
+        #[cfg(debug_assertions)]
+        std::ptr::write_bytes(dst, 0, n);
         self.roots.set_len(old + n);
+        dst
     }
 
     /// Raw base pointer of the operand-stack/`roots` buffer, for JIT'd code to index

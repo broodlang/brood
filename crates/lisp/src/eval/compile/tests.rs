@@ -340,6 +340,17 @@ fn vm_run_bc_captures_and_resumes_a_suspend() {
 /// JIT Stage-1 Step A: lower a straight-line int arm `(+ x 1)` to native code and
 /// run it against a real heap frame — read the arg from `roots[base]`, compute in
 /// registers, box the result back, and match the VM's answer.
+/// Run a lowered arm the way the runtime does: hand it an `out` slot and read the Done
+/// result from there, not from `roots[base]`. Since the ABI is reached by `transmute`, a
+/// test that called it with the old arity would be silent UB rather than a compile error —
+/// which is the reason [`crate::jit::JitArmFn`] is a named type and this is a helper.
+#[cfg(feature = "jit")]
+fn run_arm(f: crate::jit::JitArmFn, heap: &mut Heap, base: usize) -> (i64, Value) {
+    let mut out = Value::Nil;
+    let outcome = f(heap as *mut Heap, base as i64, &mut out as *mut Value);
+    (outcome, out)
+}
+
 #[cfg(feature = "jit")]
 #[test]
 fn jit_lowers_and_runs_a_straight_line_int_arm() {
@@ -403,14 +414,14 @@ fn jit_lowers_and_runs_a_straight_line_int_arm() {
 
     let mut jit = crate::jit::CraneliftBackend::new();
     let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("straight-line int arm should JIT");
-    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(ptr) };
 
     // Frame: x = 41 at roots[base].
     let base = heap.roots_len();
     heap.push_root(Value::int(41));
-    let outcome = f(&mut heap as *mut Heap, base as i64);
+    let (outcome, ret) = run_arm(f, &mut heap, base);
     assert_eq!(outcome, 0, "Done (no deopt — arg is an Int)");
-    match heap.root_at(base).unpack() {
+    match ret.unpack() {
         ValueRef::Int(n) => assert_eq!(n, 42, "JIT-compiled (+ x 1) on x=41"),
         other => panic!("expected Int(42), got tag {:?}", value::tag(other)),
     }
@@ -488,14 +499,15 @@ fn jit_lowers_and_runs_an_if_with_comparison() {
 
     let mut jit = crate::jit::CraneliftBackend::new();
     let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("if/cmp arm should JIT");
-    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(ptr) };
 
     for (x, want) in [(-5i64, 5i64), (3, 3), (0, 0)] {
         let mut heap = Heap::new();
         let base = heap.roots_len();
         heap.push_root(Value::int(x));
-        assert_eq!(f(&mut heap as *mut Heap, base as i64), 0, "Done for x={x}");
-        match heap.root_at(base).unpack() {
+        let (outcome, ret) = run_arm(f, &mut heap, base);
+        assert_eq!(outcome, 0, "Done for x={x}");
+        match ret.unpack() {
             ValueRef::Int(n) => assert_eq!(n, want, "abs({x})"),
             other => panic!(
                 "x={x}: expected Int({want}), got tag {:?}",
@@ -583,7 +595,7 @@ fn jit_lowers_and_runs_a_self_recursive_int_loop() {
 
     let mut jit = crate::jit::CraneliftBackend::new();
     let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("self-recursive int loop should JIT");
-    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(ptr) };
 
     // Prime the reduction budget so these short loops run to completion (the
     // back-edge `brood_rt_tick` would otherwise yield at REDUCTIONS == 0).
@@ -594,8 +606,9 @@ fn jit_lowers_and_runs_a_self_recursive_int_loop() {
         let base = heap.roots_len();
         heap.push_root(Value::int(n)); // i = slot 0
         heap.push_root(Value::int(0)); // acc = slot 1
-        assert_eq!(f(&mut heap as *mut Heap, base as i64), 0, "Done for n={n}");
-        match heap.root_at(base).unpack() {
+        let (outcome, ret) = run_arm(f, &mut heap, base);
+        assert_eq!(outcome, 0, "Done for n={n}");
+        match ret.unpack() {
             ValueRef::Int(r) => assert_eq!(r, want, "sumto({n}, 0)"),
             other => panic!(
                 "n={n}: expected Int({want}), got tag {:?}",
@@ -614,7 +627,7 @@ fn jit_lowers_and_runs_a_self_recursive_int_loop() {
     let base = heap.roots_len();
     heap.push_root(Value::int(1_000_000)); // far more iterations than the budget
     heap.push_root(Value::int(0));
-    let outcome = f(&mut heap as *mut Heap, base as i64);
+    let (outcome, _) = run_arm(f, &mut heap, base);
     crate::process::set_capture_run(false); // restore (cargo test shares threads)
     assert_eq!(
         outcome, 2,
@@ -976,7 +989,7 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         2,
         2,
     );
-    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe {
+    let f: crate::jit::JitArmFn = unsafe {
         std::mem::transmute(jit_lower_arm(&mut jit, &sumto, &[]).expect("fused sumto JITs"))
     };
     crate::process::yield_now(); // prime the reduction budget so the loop completes
@@ -985,12 +998,9 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         let base = heap.roots_len();
         heap.push_root(Value::int(n));
         heap.push_root(Value::int(0));
-        assert_eq!(
-            f(&mut heap as *mut Heap, base as i64),
-            0,
-            "Done for sumto({n})"
-        );
-        match heap.root_at(base).unpack() {
+        let (outcome, ret) = run_arm(f, &mut heap, base);
+        assert_eq!(outcome, 0, "Done for sumto({n})");
+        match ret.unpack() {
             ValueRef::Int(r) => assert_eq!(r, want, "fused sumto({n}, 0)"),
             other => panic!("expected Int, got tag {:?}", value::tag(other)),
         }
@@ -1012,18 +1022,15 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         1,
         1,
     );
-    let g: extern "C" fn(*mut Heap, i64) -> i64 =
+    let g: crate::jit::JitArmFn =
         unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &gt, &[]).expect("(> x 5) JITs")) };
     for (x, want) in [(10i64, 100i64), (3, 200)] {
         let mut heap = Heap::new();
         let base = heap.roots_len();
         heap.push_root(Value::int(x));
-        assert_eq!(
-            g(&mut heap as *mut Heap, base as i64),
-            0,
-            "Done for (> {x} 5)"
-        );
-        match heap.root_at(base).unpack() {
+        let (outcome, ret) = run_arm(g, &mut heap, base);
+        assert_eq!(outcome, 0, "Done for (> {x} 5)");
+        match ret.unpack() {
             ValueRef::Int(r) => {
                 assert_eq!(r, want, "(if (> {x} 5) 100 200) — map must be applied")
             }
@@ -1041,25 +1048,19 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         1,
         1,
     );
-    let s: extern "C" fn(*mut Heap, i64) -> i64 =
+    let s: crate::jit::JitArmFn =
         unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &sq, &[]).expect("(* x x) JITs")) };
     let mut heap = Heap::new();
     let base = heap.roots_len();
     heap.push_root(Value::int(3));
-    assert_eq!(
-        s(&mut heap as *mut Heap, base as i64),
-        0,
-        "(* 3 3) is in range"
-    );
-    assert!(
-        matches!(heap.root_at(base).unpack(), ValueRef::Int(9)),
-        "(* 3 3) = 9"
-    );
+    let (outcome, ret) = run_arm(s, &mut heap, base);
+    assert_eq!(outcome, 0, "(* 3 3) is in range");
+    assert!(matches!(ret.unpack(), ValueRef::Int(9)), "(* 3 3) = 9");
     let mut heap = Heap::new();
     let base = heap.roots_len();
     heap.push_root(Value::int(4_000_000_000)); // 4e9 * 4e9 = 1.6e19 > i64::MAX
     assert_eq!(
-        s(&mut heap as *mut Heap, base as i64),
+        run_arm(s, &mut heap, base).0,
         1,
         "an overflowing (* x x) must deopt to the VM (BigInt), not wrap"
     );
@@ -1167,12 +1168,14 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
         let base = interp.heap.roots_len();
         interp.heap.push_root(Value::int(5)); // i
         interp.heap.push_root(Value::int(0)); // acc
+        let mut ret = Value::Nil;
         let outcome = jit_tier_in_frame(
             &sumto,
             &mut interp.heap,
             base,
             EnvRoot::Stable(EnvId::GLOBAL),
             sumto.nslots,
+            &mut ret as *mut Value,
         );
         match outcome {
             None => {
@@ -1181,7 +1184,7 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
             }
             Some(0) => {
                 ran_native += 1;
-                match interp.heap.root_at(base).unpack() {
+                match ret.unpack() {
                     ValueRef::Int(r) => assert_eq!(r, 15, "JIT'd sumto(5,0)"),
                     other => panic!("expected Int(15), got tag {:?}", value::tag(other)),
                 }
@@ -1220,6 +1223,7 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
                 base,
                 EnvRoot::Stable(EnvId::GLOBAL),
                 bailing.nslots,
+                &mut Value::Nil as *mut Value,
             ),
             None,
             "out-of-subset arm bails"
@@ -1337,6 +1341,7 @@ fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
             base,
             EnvRoot::Stable(EnvId::GLOBAL),
             arm.nslots,
+            &mut Value::Nil as *mut Value,
         );
         interp.heap.truncate_roots(base);
         let code = arm.jit_code.load(Acquire);
@@ -1494,6 +1499,7 @@ fn jit_speedup_vs_vm() {
             b,
             EnvRoot::Stable(EnvId::GLOBAL),
             jit_arm.nslots,
+            &mut Value::Nil as *mut Value,
         );
         interp.heap.truncate_roots(b);
         let c = jit_arm.jit_code.load(Acquire);
@@ -2138,7 +2144,14 @@ fn jit_tier_declines_the_inlined_body_when_the_frame_was_built_small() {
     let env = heap.root_env(heap.global());
 
     assert_eq!(
-        jit_tier_in_frame(&arm, heap, base, env, arm.nslots),
+        jit_tier_in_frame(
+            &arm,
+            heap,
+            base,
+            env,
+            arm.nslots,
+            &mut Value::Nil as *mut Value
+        ),
         None,
         "a frame built to `nslots` must not run an `inline_nslots` native — it raw-writes \
          past the frame top (KI-48 family). Interpret this activation instead."
@@ -2154,7 +2167,14 @@ fn jit_tier_declines_the_inlined_body_when_the_frame_was_built_small() {
     if crate::eval::compile::tier_ceiling() == crate::eval::compile::Tier::Native {
         heap.extend_roots_to_nil(base + arm.inline_nslots);
         assert_eq!(
-            jit_tier_in_frame(&arm, heap, base, env, arm.inline_nslots),
+            jit_tier_in_frame(
+                &arm,
+                heap,
+                base,
+                env,
+                arm.inline_nslots,
+                &mut Value::Nil as *mut Value
+            ),
             Some(0),
             "an `inline_nslots` frame is the layout the inlined native wants; it must run"
         );

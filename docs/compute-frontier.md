@@ -919,6 +919,11 @@ return the callee's result **in a register** instead of through the roots slot. 
 of `bintree` on its own, it is the narrowest possible slice of the convention change, and it is
 testable in isolation.
 
+> **Done — see §2h (2026-08-29).** It landed as an out-pointer rather than a register (a
+> `Value` is 24 bytes and cannot come back in the two SysV return registers), and it was worth
+> **more** than the ~5% estimated here, because the load was only one of *three* copies on the
+> path. The stall mechanism guessed below — store forwarding — was measured and is **wrong**.
+
 **Not attempted here, deliberately.** That is an ABI change spanning `jit_lower.rs`'s Cranelift
 lowering, the `brood_rt_*` callback contract and the VM's expectations of a frame — the
 multi-session redesign FRONTIER describes. Starting it at the end of a long session risks leaving
@@ -930,3 +935,230 @@ and expect ~5% on `bintree`."
 `jit_dispatch_fast_frame`'s per-call cap and `jit_native_headroom_ok` checks — worth reading before
 assuming they are free), and ~19% allocation of which §2f showed the tenure reservation is only
 1.3%.
+
+## 2h. The result no longer returns through memory — `bintree` −7.5%, `collatz` −5.8% (2026-08-29)
+
+§2g's first step, taken. The arm ABI gained a third parameter — `out: *mut Value` — and the
+Done exits write the result **through it** instead of into `roots[base]`.
+
+**What §2g got right and what it got wrong.** Right: that `movups` really is the cost. Under
+`cycles:pp` (precise events, so *not* skid from the `callq` 115 bytes earlier) it was **16.4%
+of `jit_run_fast_link`**. Wrong: the mechanism. The obvious explanation — a 16-byte load
+straddling `store_int`'s 1-byte tag + 8-byte payload cannot store-forward — predicts exactly
+this symptom, and it was tested: widening the callee's Done store to a single 16-byte vector
+store while still going through `roots[base]` left the instruction at **16.4%** and bought
+1.3% of the row against a 1.0% floor. (Note `iconcat` + `store.i128` is *not* that test —
+Cranelift's x64 backend keeps an `i128` in a GPR pair, so it legalizes back into two 8-byte
+`mov`s. That version measured no change, correctly.) The cost is the memory round trip, not
+the width mismatch.
+
+**Why the win is bigger than §2g's ~5% estimate.** The load was only the visible third of it.
+The value was copied **three times** between the callee producing it and the JIT'd caller
+consuming it:
+
+1. the callee stored it into `roots[base]`;
+2. `jit_run_fast_link` loaded it back (the `movups`) and returned `FastLinkOutcome::Done(Value)`
+   — a 32-byte enum, so returned through a hidden pointer (`sret`), i.e. stored again;
+3. `brood_rt_fast_frame` matched on it and did `*out = v` into the caller's slot — stored again.
+
+Handing `out` down to the callee collapses all three: it is written once, into the slot the
+consumer already owns. `FastLinkOutcome::Done` is now payload-free, which is what removes the
+`sret`.
+
+**Measured** (`ab-bench --floor`, base `7acd6a09`):
+
+| row | delta | floor | |
+|---|---|---|---|
+| `bintree` | **−6.5%** | 1.3% | improved |
+| `collatz` | **−5.8%** | 2.2% | improved |
+| the other 28 rows | — | — | noise |
+
+Solo, interleaved base/new/base/new: `bintree` **−8.5%** at n=200 (floor 0.0%) and **−7.5%**
+at n=2000 (floor 0.7%); flat at n=20, where the row is boot. Tier ceiling 1 (`ab-bench --tier 1`,
+the VM's own call path, which this also touches): six rows, all noise. `latency` read +5.2% in
+the pinned sweep and is **not** a regression — unpinned interleaved runs give 2.56 s on both
+binaries with p50 20 vs 20 µs, p99 90 vs 89 µs and identical sustained rps; it is a fixed-schedule
+open-loop row, so its wall time under core pinning is queueing, not throughput.
+
+**The profile after**, same command as §2g (`cycles:pp`, n=800): `jit_run_fast_link` 14.9% →
+**13.1%**, and inside it **no instruction above 6.4%** — the 16.4% load is gone rather than
+cheaper. The native arms are now the top entries.
+
+**The trap this change is built around.** Every caller reaches an arm through
+`mem::transmute` of a raw code pointer, so **an ABI change here is not type-checked**: a caller
+left at the old arity reads `out` from a register nobody set and stores a `Value` through it.
+Two mitigations, both load-bearing:
+
+- `crate::jit::JitArmFn` is now a **named type** used at every transmute, so the arity is a
+  single-site fact rather than nine independent restatements.
+- `out_ptr` lives on `emit::Frame`, not as a parameter to the exit helpers — because there are
+  **two** Done exits (`exit_done` in `jit_lower.rs` and the `t == len` arm of
+  `control::emit_jump`), and the first migration missed the second. Every `if`/loop arm then
+  returned `nil` while the straight-line arms were fine: five unit tests caught it, but a
+  parameter that must be threaded to a site you have not found is exactly the shape that gets
+  missed. On `Frame` the type system asks the question.
+
+**GC:** `out` is not a root, so nothing may allocate between the callee's store and the
+consumer taking the value. The outcome-0 path does none (`set_ic_bases` and the two
+`truncate_*` are `Cell` writes and `Vec::truncate`), and the cold outcomes — which *do* re-enter
+the evaluator — write `out` only after all their allocation. This is the discipline the
+`brood_rt_{cons,car,cdr}` out-pointer ABI has always run under. Verified: full suite 1231/1231
+under both engines (`make test-both`), `make gcstress`, `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`
+on the effect-once torture cases, `BROOD_JIT_VERIFY=1`, all 21 `tests/jit_*_test.blsp`, and the
+fuzz differential across **all 11 generators × 4 engine configs** (tree-walker / VM-no-JIT /
+VM+JIT / GC-stress) — 0 divergences, 0 crashes. Lowering is unchanged (86 vs 85 `[jit-ir]` arms,
+46 vs 46 bails).
+
+**Still open on this row**, and now the ranking to work from: `__memmove` **10.4%** (the frame
+and staging copies — the next-largest single item and the one this change did *not* touch),
+`brood_rt_fast_frame` **8.2%**, and ~19% allocation.
+
+## 2i. `brood_rt_fast_frame` takes four arguments, not ten — and that was not the cost (2026-08-29)
+
+§2h left `brood_rt_fast_frame` at 8.2% as the next item, with the note that its inlined work
+was worth reading before assuming it was free. Annotated (`cycles:pp`), its self time is
+**entirely prologue, epilogue and argument shuffling** — `pushq %r13`, `subq $0x18,%rsp`,
+`pushq 0x70(%rsp)` / `pushq 0x10(%rsp)`, `popq`, `retq`, none above 10% of the function, no
+operation anywhere. It took **ten** parameters (`site`, `head`, `argc`, `nslots`, `code`,
+`env` and the two callee IC bases), SysV passes six in registers, so four spilled to the
+stack and were re-pushed for the inner call.
+
+All ten were fields of the `FastLink` slot the IR had *just* validated, so it now passes the
+**slot pointer** and the callee reads them: four arguments, all register-passed, three fewer
+loads in the IR. Sound because the guard has already proved `site < len`,
+`slot.epoch == global_epoch` and `slot.sym`/`slot.argc` against the site's baked head/arity —
+the reads are the same single-threaded data one call earlier, off a line the guard just
+touched.
+
+**Measured: neutral.** `bintree` −1.3% against a 0.7% floor, `collatz` −0.7%, `fib`/`nqueens`/
+`mandelbrot` noise. `brood_rt_fast_frame` itself went 8.2% → **8.9%** — i.e. unchanged. The
+argument marshalling was not the cost.
+
+**That is the second mechanism guess on this path to be wrong** (§2h's was store forwarding),
+and the pattern is worth stating: on these small, extremely hot callbacks, *self time is not
+decomposable into the named operations you can see in the annotation*. Both times the visible
+instructions were a plausible, specific, testable story, and both times removing them left the
+number where it was. What actually moved `bintree` (§2h, −7.5%) was deleting work rather than
+making it cheaper — three copies that stopped happening. Prefer that shape of change here.
+
+The commit is kept as a **simplification** on those grounds: ten unpacked fields to one
+pointer is a smaller contract for the hottest callback in the runtime, and it is directionally
+positive on the two rows it should touch.
+
+**So the ranking on this row is now:** `__memmove` 10.6% and `brood_rt_make_vector2` 5.4% —
+both allocation, which `ROADMAP`/FRONTIER already call the multi-session item — then
+`jit_run_fast_link` 12.0% and `brood_rt_fast_frame` 8.9%, which two sessions of instruction-level
+work have now failed to decompose. The allocation frontier is where the remaining `bintree` time
+is, and it will not yield to another argument-shuffling change.
+
+## 2j. Argument staging writes in place — `bintree` −15% warm (2026-08-29)
+
+LBR attribution (`perf record --call-graph=lbr`; **fp does not work here** — unwinding through
+JIT frames produces garbage chains, and reported `set_ic_bases` as calling `memmove`) put
+**4.4% of `bintree` in `copy_nonoverlapping<Value>` inside `push_roots_n`**: the JIT's
+per-call argument staging. Each call wrote every operand's three words into a per-site
+Cranelift stack slot, then copied the block onto `roots` with one `brood_rt_push_n`.
+
+**Two attempts, and only the second one is a win — the same lesson as §2i.**
+
+1. *Make the copy cheaper.* At an arity's worth of bytes (24–72) libc's
+   `__memmove_evex_unaligned_erms` is almost entirely its own size-class dispatch, so
+   `push_roots_n` got a `match` on the arity emitting fixed-size moves. `__memmove` fell
+   **10.6% → 3.8%** and `brood_rt_push_n` rose **4.5% → 10.3%** — the work *moved*, ~1% net,
+   inside the floor. The bytes still had to move.
+2. *Delete the copy.* `brood_rt_push_room(heap, n) -> *mut Value` reserves the block on
+   `roots` and hands back its address; the same stores now land in place. The stack slot and
+   the block copy both stop existing.
+
+**Measured, image `:live` on both arms with the same id, JIT warm (86 vs 85 arms lowered):**
+
+| | base | new | delta | floor |
+|---|---|---|---|---|
+| `bintree` n=200 | 156 ms | 138 ms | **−9.8%** | 2.0% |
+| `bintree` n=2000 | 1008 ms | 853 ms | **−14.9%** | 0.6% |
+| `bintree` n=6000 | 2934 ms | 2445 ms | **−15.8%** | 1.1% |
+
+The full 31-row `ab-bench` sweep (pinned, default sizes) reads `bintree` **−5.5%** and every
+other row noise. Both numbers are real and the gap is the point: the sweep pins to one core,
+where the background compiler competes, and runs the *short* size. The win **grows with the
+work** — which is what a per-call saving should do, and the reason to sweep sizes rather than
+quote one.
+
+**The regression this nearly shipped with, and how it was found.** The native flat-cell path
+(`brood_rt_call_native_fl`) gets an args pointer and hands the native a `&[Value]`. That
+pointer now points into `roots`, and a native may push roots — reallocating the buffer and
+dangling the slice mid-call — so the args must be copied. Copying them with
+`SmallVec::from(slice)` cost **`wordcount` +14%**: `copy_from_slice` → libc `memcpy`, i.e.
+exactly the size-class overhead attempt 1 had just measured, reintroduced one call site over.
+A `match` on the arity fixed it (`wordcount` +1.1% against a 1.1% floor). It was caught only
+because the sweep covered a builtin-heavy row; the default 11-row set does not include one.
+
+**GC invariant.** `push_roots_room` returns slots that are **live roots holding uninitialised
+memory** until the caller's stores complete. Nothing may allocate or collect in that window —
+the JIT emits pure stores there, and the elided-head resolution (a call) is deliberately
+sequenced *before* the reservation. Under `debug_assertions` the slots are nil-filled first,
+so a missing store surfaces as a `nil` argument (a wrong answer the tests catch) rather than
+as garbage with a valid-looking tag. Verified: suite 1236/1236, `make gcstress`,
+GC_STRESS+GC_VERIFY, all 21 `jit_*_test.blsp`, and the fuzz differential over the five
+highest-value generators × 4 engine configs — 0 divergences, 0 crashes.
+
+> **A gate gap worth knowing.** The first build of this change forgot to register
+> `brood_rt_push_room` in the Cranelift symbol table. The background compiler thread panicked,
+> the JIT **turned itself off for the whole process**, and every benchmark still printed the
+> right answer — `bintree` included. Correctness gates cannot see this; only the
+> `[jit-bail] … CODEGEN-PANICKED` line on stderr and `.brood_crash_dump` can. **Grep a
+> benchmark run's stderr for `CODEGEN-PANICKED` before believing any number**, or you are
+> timing the interpreter.
+
+## 2k. A correction to §2j, and `MakeVector(2)` builds in place (2026-08-29)
+
+### The correction first: §2j's "−15% warm" was baseline drift
+
+§2j reported the in-place staging change at **−14.9% / −15.8%** (n=2000 / 6000), measured
+against a saved baseline binary. Re-measured today with **all three binaries interleaved in
+one session** — pre-staging (`b277db14`), staging (`d2bade17`), and the working tree — the
+staging change is **−8.5%** at n=2000 and **−9.1%** at n=6000.
+
+The error is exactly the one this repo documents and I quoted while making it: *the same
+baseline binary read 1008 ms in the earlier session and 913 ms today* — ~10% of drift between
+whole invocations, and the "confirmation" at a second size measured that drift twice. A saved
+binary is not a fixed measurement. **Interleave every arm you are comparing inside one
+command**, and prefer three-way (before / middle / after) when there is a chain of changes:
+it is the only form where a bad number is visible as an inconsistency rather than as a result.
+
+The pinned 31-row sweep figure in §2j (**−5.5%**, everything else noise) was interleaved and
+stands. So the honest range for §2j is **−5.5% pinned/short to −9% warm/large**, which is
+still the largest single win on this row — just not what was written.
+
+### `MakeVector(2)` writes its elements into the slab
+
+`brood_rt_make_vector2` took the two elements as **six `i64` words**. SysV has six argument
+registers and `heap`/`out` take two, so four words spilled to the arm's outgoing-args area and
+the callee loaded them straight back: `movaps 0x60(%rsp)` and `movups 0x8(%rsp)` were **34.6%
+and 31.6% of that function**, itself 7.9% of `bintree` at n=4000.
+
+`brood_rt_vec2_room(heap, out) -> *mut Value` bump-allocates the slot, writes the handle to
+`*out`, and returns the slot's `items` — two register arguments, and the arm's stores land in
+the slab. `INLINE_VEC_CAP` is 2, so a 2-element vector is exactly one `VecStore::Inline`.
+
+**Measured (three-way interleaved, best-of-7, image `:live`):** `bintree` **−1% to −2%** —
+−1.7% and −1.4% at n=2000 across two sessions, −1.0% at n=6000, −2.1% on the pinned sweep;
+every other row noise. Depending on the round that is one to three times the base-vs-base
+spread, so: **small, and the honest verdict is "probably ~1.5%"** rather than a figure worth
+quoting to a decimal. It is a third of what the annotation's 66% implied, which is now the
+**third** time on this path that removing the visibly-expensive instructions returned a
+fraction of their share (§2i's arguments, §2j's first attempt, this). Kept as much for the
+simplification: two register arguments instead of eight with four spilled, `brood_rt_make_vector2`
+deleted rather than shimmed, and the slot written once instead of copied twice.
+
+The elements are left `Nil` rather than uninitialised, unlike `push_roots_room`: this slot is
+**reachable from the returned handle**, so a missed store must degrade to a wrong value the
+tests can catch, never to a garbage word the collector would trace as a handle.
+
+### Where that leaves `bintree`
+
+Allocation is still ~15% (`make_vector2`/`vec2_room`, `__memset`, `drop_glue::<Slabs>`, part
+of `__memmove`), and the remaining call-path items — `jit_run_fast_link` ~20% and
+`brood_rt_fast_frame` ~13% at n=4000 — have now resisted four instruction-level attempts.
+`env_get` at 6.7% is **boot residue and not a target**: it disappears entirely at n=4000,
+confirming §2d.
