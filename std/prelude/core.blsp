@@ -732,11 +732,13 @@ for `sig!` that predates `index-of` in the prelude's own load order."
 (defn- %sig-take
   (n xs)
   "The first `n` elements of `xs`. Expansion-time helper for `sig!`, for the same
-reason `%sig-pos` is one: this runs while the PRELUDE is being expanded, and the
-general `take` is `seq/take`, which is not reachable that early. Calling the bare
-name here made `BROOD_CONTRACTS=1` panic — `prelude expand: unbound symbol: take`
-— on every COLD boot cache, i.e. the first run after any rebuild, while a warm
-cache skipped expansion and looked fine (KI-81)."
+reason `%sig-pos` is one: this runs while the PRELUDE is being expanded, and
+`take` is defined in `seq.blsp`, which the prelude concatenates AFTER this file
+(`core → predicates → map → control → match → process → seq → string → tools`).
+So the name is perfectly ordinary at run time and simply does not exist yet here.
+Calling it made `BROOD_CONTRACTS=1` panic — `prelude expand: unbound symbol:
+take` — on every COLD boot cache, i.e. the first run after any rebuild, while a
+warm cache skipped expansion and looked fine (KI-81)."
   (%sig-take-acc n xs nil))
 
 (defn- %sig-nth

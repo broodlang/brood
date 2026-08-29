@@ -6494,8 +6494,9 @@ unreproducible one-shot panic on the strength of twelve clean runs. Twelve warm 
 `touch target/release/brood` reproduces it every time.
 
 The three: `sig!`'s expansion-time code called `take`/`nth`/`map`/`range`/`count`, none
-reachable that early in the prelude's load order — and `take` had left the bare namespace
-entirely in the ADR-290/291 wave with nothing noticing, because nothing expanded that path. The
+defined yet at that point — `sig!` lives in `core.blsp` and `take` in `seq.blsp`, which the
+prelude concatenates later. (I first read this as ADR-290/291 rename rot; it is not, `take` is
+bound at root and never moved — corrected below.) The
 contract shim was `(let (orig name) (fn …))`, a closure over a let-bound local, which the
 prelude's freeze step rejects outright. And `defrecord` emitted its constructor `sig` *above*
 the `defn` it rebinds — fatal under contracts, and therefore fatal for every record in the
