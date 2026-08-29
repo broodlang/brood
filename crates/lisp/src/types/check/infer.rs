@@ -7,7 +7,7 @@ use super::walk::{is_fn_head, list_items};
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Tag, Value};
-use crate::types::Ty;
+use crate::types::{Sig, Ty};
 use std::cell::Cell;
 
 /// The type of an *undeclared* global's current heap value — the cross-file half
@@ -211,6 +211,17 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     None
                 }
                 Some(Value::Sym(s)) => {
+                    // A function LITERAL has an arrow type of its own — `(any… -> R)`, the
+                    // body typed with its parameters unknown. It used to have no type at
+                    // all (`reflect/expr-type` answered nil for every lambda), so it was
+                    // `dynamic()` everywhere. Only when `R` is known: an arrow with an
+                    // unknown result would read as `any` and fail every `⊆` against a
+                    // declared result — a false positive, not a finding. A call site
+                    // checking a lambda AGAINST a declared arrow does better than this
+                    // (walk.rs types the body under the arrow's own domain).
+                    if is_fn_head(s) {
+                        return lambda_arrow(heap, form, ctx);
+                    }
                     if value::symbol_is(s, kw::QUOTE) {
                         return items.get(1).map(|&d| Ty::of_value(d));
                     }
@@ -1018,7 +1029,7 @@ fn list_result(elem: Option<Ty>) -> Option<Ty> {
 /// The lambda case is the only new inference, and it only computes a *forward*
 /// result type — it never *checks* the body, so it doesn't reopen the deferred
 /// guarded-use false-positive class.
-fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Option<Ty> {
+pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Option<Ty> {
     match f {
         // A local binding shadows the global table — its return type isn't known.
         Value::Sym(s) if ctx.is_local(s) => None,
@@ -1033,6 +1044,28 @@ fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opti
         Value::Pair(_) => lambda_ret(heap, f, inputs, ctx),
         _ => None,
     }
+}
+
+/// The arrow type of a **simple** single-clause lambda literal `(fn (p…) body)`: one
+/// `any` parameter per plain-symbol param (a literal declares no domain) and the body's
+/// type as the result. `None` for anything [`lambda_ret`] declines, and when the body's
+/// type is unknown — see the caller for why an unknown result must not become `any`.
+fn lambda_arrow(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
+    let items = list_items(heap, form)?;
+    if items.len() != 3 {
+        return None;
+    }
+    let params = list_items(heap, items[1])?;
+    let plain = params.iter().all(|p| match p {
+        Value::Sym(s) => !value::symbol_name_ref(*s).starts_with('&'),
+        _ => false,
+    });
+    if !plain {
+        return None;
+    }
+    let inputs: Vec<Option<Ty>> = vec![None; params.len()];
+    let ret = lambda_ret(heap, form, &inputs, ctx)?;
+    Some(Ty::arrow(Sig::new(vec![Ty::ANY; params.len()], ret)))
 }
 
 /// The return type of a **simple** single-clause lambda `(fn (p…) body)` —

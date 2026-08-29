@@ -142,7 +142,8 @@ fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity> {
 /// The signature of a callback **argument**, when one is knowable: a named global's
 /// (declared, primitive, curated, or inferred — see [`sigs::sig_of`]), or a file-local
 /// one this check has inferred. `None` for a lexical local (the global table doesn't
-/// describe it) or a lambda literal (the arity check covers those).
+/// describe it) and for a lambda literal — see [`lambda_sig_under`], which types one
+/// against the arrow it is being handed to.
 fn callback_sig(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Sig> {
     match arg {
         Value::Sym(s) if ctx.is_lexical_local(s) => None,
@@ -152,6 +153,27 @@ fn callback_sig(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Sig> {
             .or_else(|| sig_of(heap, s)),
         _ => None,
     }
+}
+
+/// A lambda literal's signature **under the arrow it is being passed as**: its
+/// parameters are taken to be exactly `expected`'s (a literal declares no domain of its
+/// own, and this is what it will be called with), and its result is the body typed with
+/// those inputs — [`infer::callback_ret`], the same inference the HOF rules use.
+///
+/// This is what closed the gap where a lambda callback was never checked at all:
+/// `callback_sig` answered `None` for a literal, so `(g (fn (x) (str x)))` against
+/// `(sig g ((int -> int) -> int))` was silent. Typing the body under the DECLARED domain
+/// is also what keeps it sound: with `x : int`, `(+ x 1)` is `int` (integer-closed) and
+/// passes, where an `(any -> number)` arrow compared by `⊆` would have false-positived.
+/// The caller then applies its disjointness rule to the result, which tolerates the
+/// over-approximation an inferred return carries. `None` when the body cannot be typed.
+fn lambda_sig_under(heap: &Heap, arg: Value, expected: &Sig, ctx: &Ctx) -> Option<Sig> {
+    if !matches!(arg, Value::Pair(_)) {
+        return None;
+    }
+    let inputs: Vec<Option<Ty>> = expected.params.iter().cloned().map(Some).collect();
+    let ret = super::infer::callback_ret(heap, arg, &inputs, ctx)?;
+    Some(Sig::new(expected.params.clone(), ret))
 }
 
 /// True when `head` is a function-literal head — `fn` or its synonym `lambda`.
@@ -1580,7 +1602,9 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                         // Sound with an inferred callback sig too: an inferred parameter
                         // demand is a *superset* of what the function really accepts, so
                         // disjoint-from-the-superset is disjoint from the truth.
-                        if let Some(cb) = callback_sig(heap, arg, ctx) {
+                        if let Some(cb) = callback_sig(heap, arg, ctx)
+                            .or_else(|| lambda_sig_under(heap, arg, expected, ctx))
+                        {
                             for (k, wanted) in expected.params.iter().enumerate() {
                                 let Some(accepts) = cb.param(k) else { continue };
                                 if wanted.is_never()
