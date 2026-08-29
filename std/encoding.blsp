@@ -58,10 +58,12 @@ UTF-8-encodes a string.
 
     (encoding/hex-encode-bytes #b\"hi\")   → \"6869\""
   (encoding-hex-encode-codes bytes encoding-hex-lower-codes))
+(sig hex-encode-bytes ((or bytes seqable) -> string))
 
 (defn hex-encode-bytes-upper (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as uppercase hexadecimal."
   (encoding-hex-encode-codes bytes encoding-hex-upper-codes))
+(sig hex-encode-bytes-upper ((or bytes seqable) -> string))
 
 ;; Codepoint → nibble value (int keys — the decode loop walks a `string->codepoints`
 ;; vector, so lookups hash an int, not a fresh 1-char string per char).
@@ -105,6 +107,7 @@ UTF-8-encodes a string.
     (encoding/hex-decode \"6869\")       → \"hi\""
   (let (bs (encoding-hex-decode-bytelist s))
     (if (= bs :invalid) nil (string/bytes-> bs))))
+(sig hex-decode (string -> (or string nil)))
 
 (defn hex-decode-bytes (s)
   "Decode a hexadecimal string → a `bytes` value, or nil if invalid.
@@ -112,6 +115,7 @@ Byte-faithful: unlike `hex-decode` it never UTF-8-decodes, so it round-trips any
 binary payload (digests, salts, wire bytes)."
   (let (bs (encoding-hex-decode-bytelist s))
     (if (= bs :invalid) nil (bytes bs))))
+(sig hex-decode-bytes (string -> (or bytes nil)))
 
 ;; ---- base64 -----------------------------------------------------------------
 
@@ -180,10 +184,12 @@ standard Base64. The byte-faithful counterpart of `base64-encode`, which first
 UTF-8-encodes a string — so a byte ≥ 0x80 encodes as one byte, not its two-byte
 UTF-8 form."
   (encoding-b64-encode bytes encoding-b64-std-codes))
+(sig base64-encode-bytes ((or bytes seqable) -> string))
 
 (defn base64-url-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as URL-safe Base64."
   (encoding-b64-encode bytes encoding-b64-url-codes))
+(sig base64-url-encode-bytes ((or bytes seqable) -> string))
 
 ;; Reverse lookup: base64 char CODEPOINT → 6-bit value, as a **dense 128-entry vector
 ;; indexed by the codepoint itself**, nil at every non-alphabet slot.
@@ -288,11 +294,13 @@ UTF-8 form."
     (encoding/base64-decode \"aGk=\")    → \"hi\""
   (let (bs (encoding-b64-decode s encoding-b64-std-vals))
     (if (= bs :invalid) nil (string/bytes-> bs))))
+(sig base64-decode (string -> (or string nil)))
 
 (defn base64-url-decode (s)
   "Decode a URL-safe Base64 string → original string, or nil on invalid input."
   (let (bs (encoding-b64-decode s encoding-b64-url-vals))
     (if (= bs :invalid) nil (string/bytes-> bs))))
+(sig base64-url-decode (string -> (or string nil)))
 
 (defn base64-decode-bytes (s)
   "Decode a standard Base64 string → a `bytes` value, or nil on invalid input.
@@ -300,8 +308,10 @@ Byte-faithful: unlike `base64-decode` it never UTF-8-decodes, so it round-trips
 any binary payload (a SCRAM salt, a key, wire bytes)."
   (let (bs (encoding-b64-decode s encoding-b64-std-vals))
     (if (= bs :invalid) nil (bytes bs))))
+(sig base64-decode-bytes (string -> (or bytes nil)))
 
 (defn base64-url-decode-bytes (s)
   "Decode a URL-safe Base64 string → a `bytes` value, or nil on invalid input."
   (let (bs (encoding-b64-decode s encoding-b64-url-vals))
     (if (= bs :invalid) nil (bytes bs))))
+(sig base64-url-decode-bytes (string -> (or bytes nil)))

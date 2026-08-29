@@ -725,6 +725,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-27** — the type system, audited then rebuilt: `sig` fails closed and the definition owns the arity (ADR-259), the walk's totality is gated and found the quasiquote gap (ADR-260), a parameter's type is its domain (ADR-261), a union keeps its terms (ADR-262), `(not T)` (ADR-263)
 - **2026-08-28** — a record is closed, and openness is the type of the keys it doesn't declare (ADR-264) — which is what makes ADR-262's tagged union usable rather than merely representable
 - **2026-08-29** — arrow decomposition (ADR-292)
+- **2026-08-29** — `BROOD_MONO` had never been run: Tier 1 was miscompiling, and now proves the identity rather than the impl (ADR-294)
 - **2026-08-29** — ability-op runtime contracts (ADR-293), and the discovery that `BROOD_CONTRACTS=1` had been unusable on every cold boot cache — three defects, no end-to-end test (KI-81): an intersection of arrows satisfies what no single arm does, checked against a brute-force model of what an arrow denotes rather than against more property laws
 
 ---
@@ -6423,3 +6424,48 @@ it cold-caches deliberately (`XDG_CACHE_HOME` at a fresh temp dir), because with
 passes on a broken build — which is precisely what every other gate did throughout.
 
 946/946 green after the `defrecord` change, which touches every record in the language.
+
+## 2026-08-29 (later still) — the second opt-in flag that had stopped working
+
+Item 7 on the type backlog is Tier-2 monomorphization, which its own design doc calls the
+miscompile surface. Before building on Tier 1, one check — the same one that had just paid off
+for `BROOD_CONTRACTS`: **is anything running with the flag on?**
+
+Nothing was. `BROOD_MONO` appears in this repo only in its own implementation and in a
+describe block that exercises the target *shape* with the flag off. Not CI, not the Makefile,
+not a test. So I turned it on, and `tests/ability_test.blsp` failed on the second try — a test
+written long ago, failing all along, unread, because nobody ever set the variable.
+
+**The bug.** Tier 1 baked the resolved impl *fn value* into the chunk. A body is compiled
+before it runs, so `(do (impl Display rec …) (->string (rec 7)))` captured the impl from before
+its own `impl` line — the `:default` one — and called that forever. ADR-182 had recorded this
+as a late-binding trade-off, "stale if the impl is later re-registered". That understates it:
+the window opens before the *first* registration, inside one compiled body, which is just a
+module registering an impl and using it.
+
+**The fix is smaller than the trade-off it removes** (ADR-294): prove the *identity*, not the
+impl. The rewrite emits `((%dispatch *impls* '[ability op] :id) args…)` — `identity-of` is
+constant-folded away, and resolution stays behind the per-op inline cache, which is stamped
+with `global_epoch()` and so invalidated by every `impl`/`%unimpl`. Late binding is preserved
+outright. The compile-time resolve remains, but only as a proof obligation, so the rewrite
+cannot turn a `%no-impl` into a "not callable".
+
+**A stale binary cost me an hour inside this.** After fixing it, `nest test` still failed —
+I had rebuilt `--bin brood` and not `--bin nest`, and every `nest` run was using the old,
+unsound compiler. The tell was the debug line: it printed my *old* tracer message. That is the
+fourth time this repo has been bitten by a stale binary, and the reason `make green` resolves
+its binaries by sha.
+
+Suite with the flag on, current binaries: **5170/5170**, matching flag off.
+
+Tier 2 stays deferred, now for a better reason than "it is large": it multiplies this exact
+surface across every call site the checker can type. It should not be built on a mechanism
+that was unsound and unexercised. It now has a sound base and a differential gate.
+
+**`sig` adoption, +38 (item 9).** `encoding`, `stats`, `multimap` and `math`, 369 → 407
+declarations. Written by reading each body rather than pasting `--suggest-sigs`, which is
+advice for a reason: an inferred domain over-approximates, so the suggester correctly offers
+`(sig url/url-unreserved? ((or map number) -> bool))` for a character predicate, and adopting
+that would enshrine nonsense as documentation. The payoff is not decorative —
+`(stats/percentile 50 [1 2 3])` now reports on both argument positions, and was silent before.
+Corpus stays at zero warnings; suite 5170/5170.

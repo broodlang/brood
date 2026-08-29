@@ -91,7 +91,7 @@ fn ability_type(name: &str) -> Option<Ty> {
     // which module declared an ability. Before this, a qualified spelling read as an
     // unknown type — silently widening the annotated position to `any` until ADR-259
     // started reporting it.
-    let bare = name.rsplit('/').next().unwrap_or(&name);
+    let bare = name.rsplit('/').next().unwrap_or(name);
     ABILITY_TYPES.with(|m| {
         match m.borrow().get(bare)? {
             // Open ability: permissive — the type checks nothing, but the sig survives.

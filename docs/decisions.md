@@ -18880,3 +18880,66 @@ pointing `XDG_CACHE_HOME` at a fresh temp dir. Without that it passes on a broke
 warm path was green throughout the entire period the mode was unusable, which is the whole
 lesson here. It asserts the boot, both kinds of enforcement, that an op with no declared return
 is left alone, and that with the flag unset nothing raises.
+
+## ADR-294 — Monomorphization proves the identity, not the impl
+
+**Status.** Accepted (2026-08-29). Amends ADR-182.
+
+**Context.** Ability-dispatch monomorphization (`BROOD_MONO`, Tier 1, off by default) rewrote
+an op call whose first argument had a compile-time-provable identity into a **direct call to
+the resolved impl fn**, baked into the chunk as a `Node::Const`. ADR-182 recorded the cost of
+that as a late-binding trade-off — "a captured impl fn goes stale if that id's impl is later
+re-registered" — and said to assert the caveat rather than fix it.
+
+The caveat understated it. A body is compiled **before it runs**, so the window opens before
+the *first* registration, inside a single compiled unit:
+
+```lisp
+(do
+  (impl Display my/rec (->string [r] (str "R" (get r :n))))
+  (->string (my/rec 7)))          ; "R7" dynamically; the DEFAULT rendering under BROOD_MONO
+```
+
+The rewrite resolves at compile time, when the only impl is `:default`, and bakes that. This
+is not an exotic reload scenario — it is a module registering an impl and using it, which is
+what `impl` is for. `tests/ability_test.blsp` has caught it since the day it was written.
+
+**Nothing had ever run with the flag on.** Not CI, not the Makefile, not a test — the flag
+appears in the codebase only in its own implementation and in a describe block that exercises
+the *shape* with the flag off. A pass whose stated risk is "a wrong devirtualization silently
+calls the wrong impl" had no coverage at all.
+
+**Decision.** Prove the **identity**, not the impl. The rewrite now emits
+
+```
+((%dispatch *impls* '[ability op] :id) args…)
+```
+
+— the `identity-of` call is constant-folded away, because the id genuinely is known at compile
+time, and resolution stays behind `%dispatch`, the per-op inline cache (ADR-172) that is
+stamped with `global_epoch()` and therefore invalidated by every `impl` and `%unimpl`. Late
+binding is fully preserved and there is no stale window at all.
+
+The impl is still resolved at compile time, but only as a **proof obligation**: it establishes
+that this id has an impl, so the rewrite cannot turn a would-be `%no-impl` error into a "not
+callable". Both baked constants are checked immovable, as the inline cache does.
+
+This costs the trade-off ADR-182 accepted in exchange for removing the miscompile surface,
+which is the right way round for a pass whose failure mode is a silently wrong answer. What
+remains skipped is the `identity-of` call and the op function's own frame.
+
+**Consequences.** `crates/cli/tests/mono_differential.rs` is the gate the validation plan
+asked for and never got: the ability suite run both ways, byte-identical after stripping
+timings, **plus an assertion that the rewrite actually fired** — a differential in which
+nothing was rewritten is two identical dynamic runs and proves nothing (the ADR-280 lesson).
+A second case pins the regression directly, in both arms. Sabotage-verified: restoring the
+baked-fn emission fails both tests.
+
+Full in-language suite, same binary: **5170/5170 with the flag on**, matching the flag off.
+
+**Tier 2 stays deferred**, and this is a precondition rather than a detour. Tier 2
+(devirtualizing a call on an *inferred* variable) multiplies exactly this surface across every
+call site the checker can type, and needs a checker→compiler channel that does not exist. It
+should not be built on a mechanism that was both unsound and unexercised; it now has a sound
+base and a differential that will catch the next miscompile the same way this one was caught —
+the first time anyone turned the flag on.
