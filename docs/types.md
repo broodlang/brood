@@ -505,7 +505,8 @@ the `match` compiler's vector-pattern lowering `(if (and (vector? m) …) (… (
 m i) …) …)` — so `guard_assertion` now narrows through the **`and` short-circuit
 shape** `(let (g E) (if g _ g))` (the first conjunct holds in the then-branch; `or`'s
 `(if g g _)` deliberately does not), which keeps the guarded `vector-ref` quiet. Zero
-new false positives across `std/` + `tests/`.
+new false positives across `std/` + `tests/`. A set carries the same refinement — `#{1 2}` is `set<1 | 2>`, `#{}` is
+`set<never>`, `conj`/`into` onto a set keep it, and `(set T)` names one in a `sig`.
 
 **✅ Parametric HOF results (third slice).** `map`/`filter` results now carry an
 element type derived from their arguments — `(map f vector<A>) : nil | list<B>`

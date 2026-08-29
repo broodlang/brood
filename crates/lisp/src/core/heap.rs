@@ -2514,6 +2514,13 @@ pub struct Heap {
     /// `usize::MAX` while [`gc_enabled`] is false. See [`rt_gc_floor`] and
     /// [`maybe_runtime_collect`](Self::maybe_runtime_collect).
     rt_gc_threshold: usize,
+    /// A per-heap override of [`rt_gc_floor`] — the process-wide floor is a `OnceLock`
+    /// read from `BROOD_RT_GC_FLOOR` exactly once, so a test that lowered it through the
+    /// environment lowered it for every test that ran after it in the same process.
+    /// `runtime_collector`'s three promotion-count tests read 231 promoted closures for
+    /// 3000 redefs whenever a floor-setting test happened to run first (KI-86). A test
+    /// that wants a low floor says so on ITS heap ([`Heap::set_rt_gc_floor`]).
+    rt_gc_floor_override: Option<usize>,
     /// GC switch. `false` during the prelude *build* (`Heap::new`), `true` for
     /// real process heaps (`Heap::with_regions`); also forced `false` when the
     /// prelude `SharedCode` `Arc` is the default (empty) one, since a missing
@@ -3162,6 +3169,7 @@ impl Heap {
             gc_threshold: usize::MAX,
             park_trim_mark: 0,
             rt_gc_threshold: usize::MAX,
+            rt_gc_floor_override: None,
             gc_enabled: false,
             rt_collect_block: std::cell::Cell::new(0),
             local_epoch: 0,
@@ -3240,6 +3248,7 @@ impl Heap {
             gc_threshold: gc_floor(),
             park_trim_mark: 0,
             rt_gc_threshold: rt_gc_floor(),
+            rt_gc_floor_override: None,
             gc_enabled: true,
             rt_collect_block: std::cell::Cell::new(0),
             local_epoch: 0,
@@ -3860,6 +3869,24 @@ impl Heap {
                     },
                 );
             }
+        }
+    }
+
+    /// The runtime-region GC floor this heap uses: its own override, else the process-wide
+    /// [`rt_gc_floor`].
+    pub(crate) fn floor(&self) -> usize {
+        self.rt_gc_floor_override.unwrap_or_else(rt_gc_floor)
+    }
+
+    /// Set THIS heap's runtime-GC floor — for a test that needs a compaction to trip on a
+    /// small churn. Takes effect immediately: the threshold becomes the floor (as it is at
+    /// construction), and every later re-arm reads the override. Replaces setting
+    /// `BROOD_RT_GC_FLOOR` in a test, which — being read once per process — leaked into
+    /// every test scheduled after it (KI-86).
+    pub fn set_rt_gc_floor(&mut self, floor: usize) {
+        self.rt_gc_floor_override = Some(floor);
+        if self.rt_gc_threshold != usize::MAX {
+            self.rt_gc_threshold = floor;
         }
     }
 

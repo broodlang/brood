@@ -170,6 +170,13 @@ uses `is_disjoint` (refinement-aware — catches record/tuple/literal-set
 conflicts). Verified: `types::` 371/371, `nest check` 0 (no merely-wider false
 positive in the corpus).
 
+**Strict mode (2026-08-29, ADR-298).** The overlap reading for a dynamic argument is a
+choice, not a limit: `nest check --strict` (or `BROOD_CHECK_STRICT=1`) checks a dynamic
+value whose bound is narrower than `any` by inclusion too, so the merely-wider call
+result (`number` into `int`) warns. The mode is a launch switch read once into the
+checker context (`Ctx::strict` → `GradualTy::consistent_with_mode`); the default stays
+the reload-safe overlap.
+
 ## Recommended sequencing (revised after prototyping)
 
 1. **B0 — int/bool/string literal-singleton precision** — ✅ **shipped**.

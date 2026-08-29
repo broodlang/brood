@@ -143,6 +143,17 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 None => Ty::of(Tag::Vector),
             })
         }
+        // A set literal `#{a b …}` — `set<a | b | …>`; `#{}` is `set<never>`, the set
+        // with no element type to speak of, which every `set<T>` admits. An element
+        // whose type is unknown widens the whole set to the unrefined `set`.
+        Value::Set(id) => {
+            let items = heap.set_elems(id);
+            let elems: Option<Vec<Ty>> = items.iter().map(|&it| expr_ty(heap, it, ctx)).collect();
+            Some(match elems {
+                Some(e) => Ty::set_of(e.into_iter().fold(Ty::NEVER, Ty::union)),
+                None => Ty::of(Tag::Set),
+            })
+        }
         // A map literal `{:k v …}` — every keyword-literal key is definitely
         // present (it's data, evaluated once), so infer a record shape: each
         // resolvable `:key value` pair becomes a *required* field (Step 5+,
@@ -684,6 +695,16 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     numeric_result(head, &tys)
 }
 
+/// The **additive** ring operators — `+ - inc dec`, i.e. the ring minus `*`. What sets
+/// them apart for [`numeric_result`] is that shifting a value by whole numbers cannot
+/// change whether it has a denominator, which multiplication can (`(* 2 1/2)` is `1`).
+fn is_additive(head: Symbol) -> bool {
+    value::symbol_is(head, "+")
+        || value::symbol_is(head, "-")
+        || value::symbol_is(head, "inc")
+        || value::symbol_is(head, "dec")
+}
+
 /// What a numeric operator is, for [`numeric_result`]: `(contagious, int_closed, ring,
 /// division)`. `None` for anything that isn't one of these operators.
 fn numeric_op_kind(head: Symbol) -> Option<(bool, bool, bool, bool)> {
@@ -717,6 +738,12 @@ fn numeric_op_kind(head: Symbol) -> Option<(bool, bool, bool, bool)> {
 /// - **Float-contagion**: `+ - * / inc dec` with any operand `⊆ float` → `float`.
 /// - **Ratio-closure**: the ring operators and `/` over operands all `⊆ int | ratio` →
 ///   `int | ratio` (a ratio reduces: `(+ 1/2 1/2)` is the int `1`).
+/// - **Additive int-plus-ratio**: `+ - inc dec` over ints and exactly ONE ratio →
+///   exactly `ratio`. A `Ratio` is kept reduced and is demoted to an `Int` when its
+///   denominator is 1 (`core::value`), so no ratio is ever integral, and shifting one
+///   by whole numbers cannot make it integral: `n ± p/q` is `(nq ± p)/q`, whose
+///   denominator is still `q > 1`. `*` and `/` are excluded — they can land on an int
+///   from the same operands (`(* 2 1/2)` is `1`).
 /// - Otherwise, every operand a number → `number`, still narrower than the operator's
 ///   declared `number | map` (the `Num`-record widening, ADR-172 §7).
 pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
@@ -727,23 +754,40 @@ pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
     let int = Ty::of(Tag::Int);
     let float = Ty::of(Tag::Float);
     let num = Ty::NUMBER;
-    let int_or_ratio = int.clone().union(Ty::of(Tag::Ratio));
+    let ratio = Ty::of(Tag::Ratio);
+    let int_or_ratio = int.clone().union(ratio.clone());
     let mut all_int = true;
     let mut all_int_or_ratio = true;
     let mut any_float = false;
+    // Operands that are provably a ratio and provably not an int — the ones the
+    // additive rule below counts. `int_shifted` is "every OTHER operand is an int".
+    let mut strict_ratios = 0usize;
+    let mut int_shifted = true;
     for t in tys {
         if !t.is_subtype(&num) {
             return None;
         }
-        all_int &= t.is_subtype(&int);
+        let is_int = t.is_subtype(&int);
+        all_int &= is_int;
         all_int_or_ratio &= t.is_subtype(&int_or_ratio);
         any_float |= t.is_subtype(&float);
+        if !is_int && t.is_subtype(&ratio) {
+            strict_ratios += 1;
+        } else if !is_int {
+            int_shifted = false;
+        }
     }
     if is_contagious && any_float {
         return Some(float);
     }
     if is_int_closed && all_int {
         return Some(int);
+    }
+    // `(+ 1 1/2)` is 3/2 and can be nothing else — see the doc comment above. Placed
+    // before the int|ratio fallback, which is the honest answer only once more than one
+    // operand can carry a denominator.
+    if is_additive(head) && int_shifted && strict_ratios == 1 {
+        return Some(ratio);
     }
     // Ratios close over `+ - *` exactly as ints do, and `/` is exact over them too
     // (`(/ 3/2 1/2)` → 3). This used to fall through to the declared signature — widened
@@ -915,9 +959,9 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         });
     }
     // `(into target coll)` — `target`'s kind, holding `target`'s elements and `coll`'s.
-    // Only the kinds whose element story is plain: a vector or list target keeps its
-    // elements and gains `coll`'s; a map or set target is that kind, unrefined (a map's
-    // entries come from pairs, a set has no element refinement in the lattice).
+    // Only the kinds whose element story is plain: a vector, list or set target keeps
+    // its elements and gains `coll`'s; a map target is that kind, unrefined (its
+    // entries come from pairs).
     if value::symbol_is(head, "into") && items.len() == 3 {
         let target = expr_ty(heap, items[1], ctx)?;
         let added = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
@@ -946,12 +990,15 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             return Some(Ty::of(Tag::Map));
         }
         if target.is_subtype(&Ty::of(Tag::Set)) {
-            return Some(Ty::of(Tag::Set));
+            return Some(match joined {
+                Some(e) => Ty::set_of(e),
+                None => Ty::of(Tag::Set),
+            });
         }
         return None;
     }
-    // `(conj coll x …)` — `coll`'s kind, its elements plus the `x`s. A vector or list
-    // carries the elements; a map or set is its kind, unrefined.
+    // `(conj coll x …)` — `coll`'s kind, its elements plus the `x`s. A vector, list or
+    // set carries the elements; a map is its kind, unrefined.
     if value::symbol_is(head, "conj") && items.len() >= 3 {
         let coll = expr_ty(heap, items[1], ctx)?;
         let mut added: Option<Ty> = None;
@@ -967,6 +1014,12 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             return Some(match coll.elem_ty() {
                 Some(e) => Ty::vector_of(e.union(added)),
                 None => Ty::of(Tag::Vector),
+            });
+        }
+        if coll.is_subtype(&Ty::of(Tag::Set)) {
+            return Some(match coll.elem_ty() {
+                Some(e) => Ty::set_of(e.union(added)),
+                None => Ty::of(Tag::Set),
             });
         }
         if coll.is_subtype(&Ty::LIST) {
@@ -993,14 +1046,42 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // right-biased union of theirs, but the lattice's record merge is not written, so
     // the honest answer is the kind — still far from the `any` this used to be.)
     if value::symbol_is(head, "merge") && items.len() >= 2 {
-        let all_maps = items[1..]
+        let tys: Vec<Ty> = items[1..]
             .iter()
-            .all(|&a| expr_ty(heap, a, ctx).is_some_and(|t| t.is_subtype(&Ty::of(Tag::Map))));
-        return if all_maps {
-            Some(Ty::of(Tag::Map))
-        } else {
-            None
-        };
+            .filter_map(|&a| expr_ty(heap, a, ctx))
+            .collect();
+        if tys.len() != items.len() - 1 || !tys.iter().all(|t| t.is_subtype(&Ty::of(Tag::Map))) {
+            return None;
+        }
+        // Every argument a record SHAPE: the result is the right-biased union of the
+        // shapes — a later field wins outright, so its type and required-ness are the
+        // last declaration's — open if any input is open (an undeclared key may then come
+        // from that input). Otherwise just a map.
+        let shapes: Option<Vec<_>> = tys
+            .iter()
+            .map(|t| {
+                t.record_fields()
+                    .map(|f| (f.clone(), t.record_is_open().unwrap_or(true)))
+            })
+            .collect();
+        return Some(match shapes {
+            Some(shapes) => {
+                let mut fields = std::collections::BTreeMap::new();
+                let mut open = false;
+                for (f, o) in shapes {
+                    open |= o;
+                    for (k, v) in f {
+                        fields.insert(k, v);
+                    }
+                }
+                if open {
+                    Ty::record_of_open(fields)
+                } else {
+                    Ty::record_of(fields)
+                }
+            }
+            None => Ty::of(Tag::Map),
+        });
     }
     // `(apply f args…)` — whatever `f` returns: a named global's signature (declared,
     // curated or inferred), or a lambda literal's body with its inputs unknown. The

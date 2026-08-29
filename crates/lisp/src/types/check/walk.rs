@@ -1143,7 +1143,9 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                     let Some(&arg) = items.get(i + 1) else { break };
                     let g = gradual_of(heap, arg, ctx);
                     if !g.bound.is_never()
-                        && !g.clone().consistent_with(relax_param_for_arg(pty))
+                        && !g
+                            .clone()
+                            .consistent_with_mode(relax_param_for_arg(pty), ctx.strict())
                         && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
                     {
                         out.push((
@@ -1547,7 +1549,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                 // what the message reports.
                 let param_relaxed = relax_param_for_arg(&param);
                 if !g.bound.is_never()
-                    && !g.clone().consistent_with(param_relaxed)
+                    && !g.clone().consistent_with_mode(param_relaxed, ctx.strict())
                     && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
                 {
                     let msg = format!(
@@ -1840,7 +1842,7 @@ fn check_fn_seeded(
             // The argument check has carried the same skip, for the same reason, all
             // along.
             if !g.bound.is_never()
-                && !g.consistent_with(s.ret.clone())
+                && !g.consistent_with_mode(s.ret.clone(), ctx.strict())
                 && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
             {
                 let who = name
@@ -1975,7 +1977,9 @@ fn check_one_method_return(
         return;
     };
     let g = gradual_of(heap, ret_form, &scope);
-    if !g.consistent_with(ret.clone()) && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) {
+    if !g.consistent_with_mode(ret.clone(), ctx.strict())
+        && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+    {
         let key_str = key.map(|k| format!(" for {k}")).unwrap_or_default();
         out.push((
             heap.form_pos_only(ret_form),
@@ -2056,7 +2060,9 @@ fn check_one_impl_return(
         return;
     };
     let g = gradual_of(heap, ret_form, &scope);
-    if !g.consistent_with(ret.clone()) && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) {
+    if !g.consistent_with_mode(ret.clone(), ctx.strict())
+        && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+    {
         let id_str = id.map(|i| format!(" for :{i}")).unwrap_or_default();
         out.push((
             heap.form_pos_only(ret_form),
@@ -2429,7 +2435,7 @@ fn check_def(
             .or_else(|| declared_heap_value_ty(heap, name));
         if let Some(t) = declared_value_ty {
             let g = gradual_of(heap, value_form, ctx);
-            if !g.consistent_with(t.clone()) {
+            if !g.consistent_with_mode(t.clone(), ctx.strict()) {
                 out.push((
                     heap.form_pos_only(form),
                     format!(

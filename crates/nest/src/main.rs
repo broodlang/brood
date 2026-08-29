@@ -327,6 +327,13 @@ enum Cmd {
         /// but it is documentation, so it is advice rather than a patch.
         #[arg(long = "suggest-sigs", conflicts_with = "fix_renames")]
         suggest_sigs: bool,
+
+        /// Strict mode: a call result or inferred global with a PRECISE type is checked
+        /// by inclusion, not overlap — `number` handed to an `int` parameter warns. Off
+        /// by default because the overlap rule is what keeps a check quiet across a
+        /// hot reload; also on with BROOD_CHECK_STRICT=1.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
@@ -843,7 +850,11 @@ fn run_main(cli: Cli) {
             fix_renames,
             dry_run,
             suggest_sigs,
+            strict,
         } => {
+            brood::types::set_strict_checking(
+                strict || std::env::var_os("BROOD_CHECK_STRICT").is_some_and(|v| v == "1"),
+            );
             if files.is_empty() && !suggest_sigs {
                 require_project(
                     "check",

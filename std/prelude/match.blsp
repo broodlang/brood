@@ -641,17 +641,29 @@ NON-LINEAR patterns (the same name twice) work.
       else 0)))
 
 ;; Replace each `(k)` call in code tree `form` with `code` (used only when the
-;; duplication is bounded — one use, or a small `code`).
+;; duplication is bounded — one use, or a small `code`). Rebuilds ONLY the spine
+;; above a splice point: a subtree with no `(k)` in it — every clause body the
+;; reader positioned — is returned as the very pair it came in as, so its source
+;; positions survive into the expansion and a checker warning inside a clause
+;; points at the clause, not at the `match` (ADR-297). The worker returns
+;; `[spliced? form]`; `[]` patterns are avoided since `let` destructuring is
+;; itself built on this file.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-splice-fail
+  (defn- %match-splice-fail-in
     (form k code)
     (cond
-      (and (pair? form) (= (first form) k) (nil? (rest form))) code
+      (and (pair? form) (= (first form) k) (nil? (rest form))) [true code]
       (pair? form)
-        (cons (%match-splice-fail (first form) k code)
-          (%match-splice-fail (rest form) k code))
-      else form)))
+        (let (head (%match-splice-fail-in (first form) k code)
+              tail (%match-splice-fail-in (rest form) k code))
+          (if (or (first head) (first tail))
+            [true (cons (second head) (second tail))]
+            [false form]))
+      else [false form])))
+(defn- %match-splice-fail
+  (form k code)
+  (second (%match-splice-fail-in form k code)))
 
 ;; Remaining budget after counting `form`'s pair nodes, or -1 once exhausted —
 ;; an early-exit size probe (big trees aren't walked past the budget).

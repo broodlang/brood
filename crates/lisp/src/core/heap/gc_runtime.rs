@@ -33,7 +33,7 @@ impl Heap {
     /// optimisation, so this cannot affect correctness.
     pub fn rt_gc_rebaseline_all_live(&mut self) {
         let count = self.runtime.cur_code().closures.count();
-        self.rt_gc_threshold = rt_gc_floor().max(count.saturating_mul(2));
+        self.rt_gc_threshold = self.floor().max(count.saturating_mul(2));
     }
 
     /// **RUNTIME-collector exploration (read-only, ADR-076 / `docs/runtime-collector-
@@ -1403,7 +1403,7 @@ impl Heap {
     /// evacuation paths in isolation (otherwise, under `BROOD_GC_STRESS`'s low
     /// floor, the auto-trigger would compact the churn away mid-loop).
     pub fn set_rt_auto_collect(&mut self, on: bool) {
-        self.rt_gc_threshold = if on { rt_gc_floor() } else { usize::MAX };
+        self.rt_gc_threshold = if on { self.floor() } else { usize::MAX };
     }
 
     /// Reclaim the RUNTIME region at the eval safepoint (the shared-code analog of the
@@ -1452,12 +1452,12 @@ impl Heap {
             // still attempted at each doubling (no lost wakeup — completion never needs
             // the free, and a completable drain frees at the next doubling).
             let count = self.runtime.cur_code().closures.count();
-            self.rt_gc_threshold = rt_gc_floor().max(count.saturating_mul(2));
+            self.rt_gc_threshold = self.floor().max(count.saturating_mul(2));
             return;
         }
         match self.runtime_collect_with(extra_roots, extra_envs) {
             Some((_before, after)) => {
-                self.rt_gc_threshold = rt_gc_floor().max(after.saturating_mul(2));
+                self.rt_gc_threshold = self.floor().max(after.saturating_mul(2));
             }
             None => {
                 // Single-process compaction couldn't run (the runtime is shared), so
@@ -1469,11 +1469,11 @@ impl Heap {
                 self.rt_gc_threshold = if self.drain_active() {
                     // A drain is in flight — re-enter at the next safepoint to free it
                     // promptly once every live process has reported clean.
-                    count.max(rt_gc_floor())
+                    count.max(self.floor())
                 } else {
                     self.rt_gc_threshold
                         .max(count.saturating_mul(2))
-                        .max(rt_gc_floor())
+                        .max(self.floor())
                 };
             }
         }
