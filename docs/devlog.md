@@ -7212,3 +7212,37 @@ perfectly*; the test read as "latch broken" until the token trace said `token=0`
 observable needs a capture-SHAPED program. (2) `make ab`'s sweep flagged pingpong +6.9%
 where solo best-of-15 read −1.7% against a 0.9% floor — the drift row doing what its
 CLAUDE.md entry says it does.
+
+## 2026-08-30 — the night's three answers: a folded symbol, a load-bearing "bug", and the image trap taking its toll
+
+**§7.6 answered: `grow_one<TraceFrame>` on `bintree` was never an error trace.** The linker's
+identical-code-folding merges same-layout generic instantiations, and `nm` shows
+`RawVec<TraceFrame>`, `RawVec<VecStore>` and `RawVec<Inst>` sharing ONE address in the release
+binary — perf displays an arbitrary survivor's name. The real grower is `VecStore` (the
+vector slab, under bintree's `[a b]` construction — §7.4's known allocation frontier).
+Method rule now in §7.6: before chasing a generic symbol in a profile, `nm | grep <addr>`
+for address-mates.
+
+**The `call-spill-exhausted` bail on single-call closures is load-bearing profitability.**
+The mid-emit trace revealed the winner rows' gate-exempt HOF-step closures all refuse to
+lower because the spill reserve's `< 2 non-tail calls → 0` rule starves them of slots.
+Unlocking them narrowly (one call + a real handle producer reserves; call-only arms
+untouched) measured — live image both arms, `-b HEAD --floor -n 15` — nqueens +2.2%,
+pipeline +0.0%, startup +0.0%, spawn +4.8% against a 1.2% floor: the unlocked closures are
+call-mediated boxed shapes, so they lower and win nothing, while the wider frames lean on
+spawn. The accidental bail does the profitability gate's job for this class, for free; the
+comment at `jit_spill_reserve` now says so with the numbers.
+
+**The stdimage trap contaminated part of the night.** One `make ab` sweep read startup +32%,
+pipeline +9% on a comment-only delta — the base booted `:live` while the new side's image id
+(moved by the commits) had no image on disk. Rebuilt (`cargo build -p nest` +
+`scripts/build-std-image.sh`), verified `:live` both arms, and the same tree measured flat.
+A caveat was added to §7.1's step-2 table, whose experiment side ran before its image
+existed: the rejection survives arithmetic decontamination (spawn ≈+59%, nqueens ≈+11%), but
+pipeline's +18% may have been image. The discipline line exists in three documents and was
+still skipped in the heat of a session — the cost was ~40 minutes of chasing two phantom
+regressions and one wrong (since-corrected) code comment.
+
+**Also found, not ours to fix here: upstream v0.18.x costs `spawn` ~+7.5%** vs `28bcdce8`
+(solo best-of-15, floor 2.5%, reproduced twice; my change measures +0.0% against the
+0.18.1 tip). Flagged for a look at the type-inference commits between 0952e763 and 0db66c27.
