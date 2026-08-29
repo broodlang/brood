@@ -71,7 +71,7 @@ impl CraneliftBackend {
         builder.symbol("brood_rt_tick_n", brood_rt_tick_n as *const u8);
         builder.symbol("brood_rt_gc_safepoint", brood_rt_gc_safepoint as *const u8);
         builder.symbol("brood_rt_cons", brood_rt_cons as *const u8);
-        builder.symbol("brood_rt_make_vector2", brood_rt_make_vector2 as *const u8);
+        builder.symbol("brood_rt_vec2_room", brood_rt_vec2_room as *const u8);
         builder.symbol(
             "brood_rt_make_vector_n",
             brood_rt_make_vector_n as *const u8,
@@ -79,7 +79,7 @@ impl CraneliftBackend {
         builder.symbol("brood_rt_car", brood_rt_car as *const u8);
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
         builder.symbol("brood_rt_push", brood_rt_push as *const u8);
-        builder.symbol("brood_rt_push_n", brood_rt_push_n as *const u8);
+        builder.symbol("brood_rt_push_room", brood_rt_push_room as *const u8);
         builder.symbol(
             "brood_rt_call_native_fl",
             brood_rt_call_native_fl as *const u8,
@@ -168,7 +168,7 @@ impl CraneliftBackend {
                 ("vector_base", brood_rt_vector_base as *const () as usize),
                 ("tick", brood_rt_tick as *const () as usize),
                 ("gc_safepoint", brood_rt_gc_safepoint as *const () as usize),
-                ("make_vector2", brood_rt_make_vector2 as *const () as usize),
+                ("vec2_room", brood_rt_vec2_room as *const () as usize),
                 (
                     "global_epoch_ptr",
                     brood_rt_global_epoch_ptr as *const () as usize,

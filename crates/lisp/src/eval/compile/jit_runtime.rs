@@ -705,7 +705,11 @@ fn jit_native_reenter<T>(
 /// re-staged for the caller's slow path).
 #[cfg(feature = "jit")]
 pub(crate) enum FastLinkOutcome {
-    Done(Value),
+    /// The call completed; **the result is at the `out` pointer the caller passed in**, not
+    /// carried here. Payload-less on purpose: a `Done(Value)` made this a 32-byte enum that
+    /// returns through hidden-pointer memory (`sret`), so the value was copied again on a
+    /// path whose whole cost was copying. See [`crate::jit::JitArmFn`].
+    Done,
     Error,
     Fallthrough,
 }
@@ -717,8 +721,13 @@ pub(crate) enum FastLinkOutcome {
 /// and [`jit_dispatch_fast_frame`] (the in-IR epoch-guarded path, which reads `code/nslots/
 /// env` from the flat side table instead) funnel through here, so the two can never desync.
 /// `epoch`/`stage_base` are the caller's already-computed values; `code` is a finalized
-/// `extern "C" fn(*mut Heap, i64) -> i64`. On `Fallthrough` the `argc` args are re-staged at
+/// [`crate::jit::JitArmFn`]. On `Fallthrough` the `argc` args are re-staged at
 /// `[stage_base, stage_base+argc)` for the caller's slow path.
+///
+/// `out` is where the result goes on `Done` — passed straight through to the native arm, so
+/// the value is stored once by whoever produced it and never loaded back here. **Only** the
+/// `Done` outcome writes it. See [`crate::jit::JitArmFn`] for why, and for the GC rule
+/// (`out` is not a root; nothing may allocate between the store and the consumer).
 #[cfg(feature = "jit")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn jit_run_fast_link(
@@ -732,6 +741,7 @@ pub(crate) fn jit_run_fast_link(
     nslots: usize,
     callee_env: EnvId,
     callee_bases: (u32, u32),
+    out: *mut Value,
 ) -> FastLinkOutcome {
     heap.truncate_roots(stage_base + argc);
     // DEBUG ONLY: the JIT fast path bypasses `push_frame`, so validate the staged args
@@ -757,7 +767,7 @@ pub(crate) fn jit_run_fast_link(
     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from `jit_lower_arm`,
     // kept for the process in `GLOBAL_JIT`; the frame is at `roots[base..]`. Validated
     // current by the caller's epoch check (the IC fast-link, or the IR's flat-table guard).
-    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code as *mut u8) };
+    let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(code as *mut u8) };
     // Named `native_depth`, not `depth`: the deopt arm below binds a `depth` of its own
     // (the checkpoint's VM stack depth) that would otherwise shadow this one.
     let native_depth = heap.jit_native_depth;
@@ -778,7 +788,7 @@ pub(crate) fn jit_run_fast_link(
     // cache-cold, and `dbg_site_loc` reported the wrong site. The bases arrive as args (they
     // rode in the `FastLink` slot), so this is two `Cell` writes, no table lookup.
     let saved_bases = heap.set_ic_bases(callee_bases);
-    let outcome = f(heap as *mut Heap, base as i64);
+    let outcome = f(heap as *mut Heap, base as i64, out);
     heap.set_ic_bases(saved_bases);
     heap.jit_force_vm = saved_force_vm;
     heap.jit_native_depth = native_depth;
@@ -809,9 +819,9 @@ pub(crate) fn jit_run_fast_link(
     // registers for them on EVERY call, including the ~all of them that just return a value.
     if outcome == 0 {
         crate::perf_bump!(jit_link_done);
-        let result = heap.root_at(base);
+        // The result is already at `*out` — the arm wrote it there. Nothing to load.
         heap.truncate_roots(stage_base);
-        return FastLinkOutcome::Done(result);
+        return FastLinkOutcome::Done;
     }
     jit_fast_link_cold_outcome(
         heap,
@@ -825,6 +835,7 @@ pub(crate) fn jit_run_fast_link(
         nslots,
         native_depth,
         callee_env,
+        out,
     )
 }
 
@@ -849,7 +860,17 @@ fn jit_fast_link_cold_outcome(
     nslots: usize,
     native_depth: u32,
     callee_env: EnvId,
+    out: *mut Value,
 ) -> FastLinkOutcome {
+    // These arms produce their value in Rust (a re-entered `apply_value` / `vm_resume_deopt`),
+    // so they write it through `out` themselves — after all of their allocation, which is what
+    // keeps the un-rooted `out` slot safe (see `crate::jit::JitArmFn`).
+    let done = |v: Value| {
+        // SAFETY: `out` is the caller's slot, valid for the whole call (its frame outlives
+        // this one), and written exactly once on the Done path.
+        unsafe { *out = v };
+        FastLinkOutcome::Done
+    };
     match outcome {
         3 => {
             heap.truncate_roots(stage_base);
@@ -875,7 +896,7 @@ fn jit_fast_link_cold_outcome(
                 return match jit_native_reenter(heap, native_depth, |h| {
                     apply_value(h, staged_callee, &staged_args, g)
                 }) {
-                    Ok(v) => FastLinkOutcome::Done(v),
+                    Ok(v) => done(v),
                     Err(e) => {
                         heap.jit_pending_error = Some(e);
                         FastLinkOutcome::Error
@@ -943,7 +964,7 @@ fn jit_fast_link_cold_outcome(
                         return match jit_native_reenter(heap, native_depth, |h| {
                             vm_resume_deopt(h, resume, base, cenv, rip, depth)
                         }) {
-                            Ok(v) => FastLinkOutcome::Done(v),
+                            Ok(v) => done(v),
                             Err(e) => {
                                 heap.jit_pending_error = Some(e);
                                 FastLinkOutcome::Error
@@ -955,7 +976,7 @@ fn jit_fast_link_cold_outcome(
                 return match jit_native_reenter(heap, native_depth, |h| {
                     vm_apply(h, arm, &argv2, cenv)
                 }) {
-                    Ok(v) => FastLinkOutcome::Done(v),
+                    Ok(v) => done(v),
                     Err(e) => {
                         heap.jit_pending_error = Some(e);
                         FastLinkOutcome::Error
@@ -994,6 +1015,7 @@ pub(crate) fn jit_dispatch_fast_frame(
     code: usize,
     env: u64,
     callee_bases: (u32, u32),
+    out: *mut Value,
 ) -> FastLinkOutcome {
     let n = heap.roots_len();
     let epoch = heap.global_epoch();
@@ -1033,6 +1055,7 @@ pub(crate) fn jit_dispatch_fast_frame(
         nslots,
         callee_env,
         callee_bases,
+        out,
     )
 }
 
@@ -1103,6 +1126,9 @@ pub(crate) fn jit_dispatch_call(
         if let Some((code, nslots, callee_env, callee_bases)) =
             heap.vm_call_ic_fast_link(site, head, argc as u32, epoch)
         {
+            // This entry hands back a `Value`, so it owns the destination: a stack local,
+            // which is where the result would have been copied to anyway.
+            let mut ret = Value::Nil;
             match jit_run_fast_link(
                 heap,
                 argc,
@@ -1114,8 +1140,9 @@ pub(crate) fn jit_dispatch_call(
                 nslots,
                 callee_env,
                 callee_bases,
+                &mut ret as *mut Value,
             ) {
-                FastLinkOutcome::Done(v) => return Some(v),
+                FastLinkOutcome::Done => return Some(ret),
                 FastLinkOutcome::Error => return None,
                 // IC changed under us (astronomically rare): the args were re-staged at
                 // `[stage_base, ..)` — fall through to the slow path below.
@@ -1291,7 +1318,10 @@ pub(crate) fn jit_dispatch_call(
                 // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
                 // `jit_lower_arm`, living for the process in `GLOBAL_JIT`; the frame is set
                 // up at `roots[base..]`.
-                let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code) };
+                let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(code) };
+                // Destination for a Done result — this entry hands back a `Value`, so it is
+                // a stack local (see `crate::jit::JitArmFn`).
+                let mut ret = Value::Nil;
                 // Root callee_env via env_roots so GC tenure inside the callee forwards it.
                 let env_base = heap.env_roots_len();
                 let env_root = heap.root_env(callee_env);
@@ -1320,7 +1350,7 @@ pub(crate) fn jit_dispatch_call(
                 // cursors (fast-link base, IC callbacks) — install it for the call and
                 // restore the caller's around it, like `jit_call_env` above.
                 let saved_bases = heap.set_ic_bases(callee_bases);
-                let outcome = f(heap as *mut Heap, base as i64);
+                let outcome = f(heap as *mut Heap, base as i64, &mut ret as *mut Value);
                 heap.set_ic_bases(saved_bases);
                 heap.jit_force_vm = saved_force_vm;
                 heap.jit_native_depth = depth;
@@ -1346,12 +1376,11 @@ pub(crate) fn jit_dispatch_call(
                 let callee_env = heap.read_root_env(env_root);
                 heap.truncate_env_roots(env_base);
                 match outcome {
-                    // Done: result boxed in `roots[base]`. Take it, drop the frame.
+                    // Done: the arm wrote the result through `ret`. Drop the frame.
                     0 => {
                         crate::perf_bump!(jit_link_done);
-                        let result = heap.root_at(base);
                         heap.truncate_roots(stage_base);
-                        return Some(result);
+                        return Some(ret);
                     }
                     // Error: callee parked it. PROPAGATE — never re-run, or an already-failed
                     // subtree re-errors at every unwinding level (quadratic).
@@ -1905,6 +1934,7 @@ pub(crate) fn jit_tier_in_frame(
     base: usize,
     env: EnvRoot,
     frame_nslots: usize,
+    out: *mut Value,
 ) -> Option<i64> {
     use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
     const THRESHOLD: u32 = 8;
@@ -2268,12 +2298,12 @@ pub(crate) fn jit_tier_in_frame(
     if frame_nslots < arm.inline_nslots && frame_nslots < frame_size_for_code(arm, code) {
         return None;
     }
-    // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base) -> i64` produced by
-    // `jit_lower_arm`, living in the process-lifetime GLOBAL_JIT module. The frame is set
-    // up at `roots[base..]`; the JIT'd arm keeps its own operands in registers (the call
-    // staging grows `roots` only transiently, popped before return), so `heap` stays
-    // valid for the call.
-    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code) };
+    // SAFETY: `code` is a finalized [`crate::jit::JitArmFn`] produced by `jit_lower_arm`,
+    // living in the process-lifetime GLOBAL_JIT module. The frame is set up at
+    // `roots[base..]`; the JIT'd arm keeps its own operands in registers (the call staging
+    // grows `roots` only transiently, popped before return), so `heap` stays valid for the
+    // call.
+    let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(code) };
     // Publish this arm's env for the call/global callbacks, save/restoring the previous
     // value so a JIT'd callee that re-enters another JIT'd arm nests correctly.
     let saved_env = std::mem::replace(&mut heap.jit_call_env, env);
@@ -2287,7 +2317,7 @@ pub(crate) fn jit_tier_in_frame(
     let native_depth = heap.jit_native_depth;
     stamp_stack_limit_if_outermost(heap, native_depth);
     let saved_force_vm = heap.jit_force_vm;
-    let outcome = f(heap as *mut Heap, base as i64);
+    let outcome = f(heap as *mut Heap, base as i64, out);
     heap.jit_force_vm = saved_force_vm;
     heap.jit_call_env = saved_env;
     heap.jit_dbg_fn = saved_fn;

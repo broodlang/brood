@@ -583,6 +583,12 @@ fn jit_lower_arm_inner(
     let mut sig = m.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // heap
     sig.params.push(AbiParam::new(types::I64)); // base (frame index into roots)
+                                                // `out`: where the Done result goes. It used to go to `roots[base]` and be read back by
+                                                // `jit_run_fast_link` — a round trip through the roots stack that `perf` (precise events,
+                                                // so not skid) put at **16.4% of `jit_run_fast_link`** on one `movups`. Handing the
+                                                // destination down lets the callee store once, into the slot the ultimate consumer
+                                                // already owns. See docs/compute-frontier.md §2h.
+    sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value (Done result)
     sig.returns.push(AbiParam::new(types::I64)); // outcome: 0 = Done, 1 = deopt, 2 = preempt
     let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = m
@@ -655,21 +661,20 @@ fn jit_lower_arm_inner(
     let cons_id = m
         .declare_function("brood_rt_cons", Linkage::Import, &cons_sig)
         .ok()?;
-    // brood_rt_make_vector2(heap, out, a 3 words, b 3 words) — same ABI as cons,
-    // builds a 2-element vector (`[a b]` literal, e.g. bintree's `make`).
-    let mut makevec2_sig = m.make_signature();
-    makevec2_sig.params.push(AbiParam::new(ptr_ty)); // heap
-    makevec2_sig.params.push(AbiParam::new(ptr_ty)); // out
-    for _ in 0..6 {
-        makevec2_sig.params.push(AbiParam::new(types::I64)); // elem0 3 words + elem1 3 words
-    }
-    let makevec2_id = m
-        .declare_function("brood_rt_make_vector2", Linkage::Import, &makevec2_sig)
+    // brood_rt_vec2_room(heap, out) -> *mut Value: allocate a 2-element vector (`[a b]`,
+    // e.g. bintree's `make`), write the handle to `*out`, and return its element storage
+    // for the arm to fill in place.
+    let mut vec2room_sig = m.make_signature();
+    vec2room_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    vec2room_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value (the handle)
+    vec2room_sig.returns.push(AbiParam::new(ptr_ty)); // *mut Value (items)
+    let vec2room_id = m
+        .declare_function("brood_rt_vec2_room", Linkage::Import, &vec2room_sig)
         .ok()?;
     // brood_rt_make_vector_n(heap, out, elems: *const Value, n) — builds an n-element
     // vector from `n` `Value`s the JIT staged contiguously at `elems` (a stack slot it
     // owns). The variadic `MakeVector(n != 2)` path; `alloc_vector` never collects, so
-    // the staged bytes stay live across the call (same discipline as make_vector2).
+    // the staged bytes stay live across the call (same discipline as the arity-2 path).
     let mut makevecn_sig = m.make_signature();
     makevecn_sig.params.push(AbiParam::new(ptr_ty)); // heap
     makevecn_sig.params.push(AbiParam::new(ptr_ty)); // out
@@ -751,15 +756,15 @@ fn jit_lower_arm_inner(
     let callslow_id = m
         .declare_function("brood_rt_call_slow", Linkage::Import, &callslow_sig)
         .ok()?;
-    // brood_rt_push_n(heap, src, n): batch-stage `n` Values from the call site's
-    // staging stack slot onto roots — one FFI + memcpy instead of push × argc.
-    let mut pushn_sig = m.make_signature();
-    pushn_sig.params.push(AbiParam::new(ptr_ty)); // heap
-    pushn_sig.params.push(AbiParam::new(ptr_ty)); // src
-    pushn_sig.params.push(AbiParam::new(types::I64)); // n
-    pushn_sig.returns.push(AbiParam::new(types::I64));
-    let pushn_id = m
-        .declare_function("brood_rt_push_n", Linkage::Import, &pushn_sig)
+    // brood_rt_push_room(heap, n) -> *mut Value: reserve n argument slots at the top of
+    // `roots` and hand back the pointer, so the arm's operand stores land in place instead
+    // of going into a stack slot and being copied across. See `Heap::push_roots_room`.
+    let mut pushroom_sig = m.make_signature();
+    pushroom_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    pushroom_sig.params.push(AbiParam::new(types::I64)); // n
+    pushroom_sig.returns.push(AbiParam::new(ptr_ty)); // *mut Value
+    let pushroom_id = m
+        .declare_function("brood_rt_push_room", Linkage::Import, &pushroom_sig)
         .ok()?;
     // brood_rt_call_native_fl(heap, out, func, args, argc): direct builtin call for
     // a native flat-cell hit (nslots == u32::MAX) — no roots staging at all.
@@ -786,17 +791,16 @@ fn jit_lower_arm_inner(
     let flbase_id = m
         .declare_function("brood_rt_fastlink_base", Linkage::Import, &flbase_sig)
         .ok()?;
+    // Four arguments, all register-passed. It took ten — head/argc/nslots/code/env and the
+    // two callee IC bases — which spilled four onto the stack on SysV and made the callee's
+    // profile mostly argument shuffling. They are all fields of the `FastLink` the IR has
+    // just validated, so it passes the slot pointer and the callee reads them. See
+    // `brood_rt_fast_frame`'s doc.
     let mut fastframe_sig = m.make_signature();
     fastframe_sig.params.push(AbiParam::new(ptr_ty)); // heap
     fastframe_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
     fastframe_sig.params.push(AbiParam::new(types::I32)); // site
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // head sym
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // argc
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // nslots
-    fastframe_sig.params.push(AbiParam::new(types::I64)); // code (native entry ptr as u64)
-    fastframe_sig.params.push(AbiParam::new(types::I64)); // env (EnvId raw word)
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // callee_ic_base
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // callee_gic_base
+    fastframe_sig.params.push(AbiParam::new(ptr_ty)); // slot: *const FastLink
     fastframe_sig.returns.push(AbiParam::new(types::I64)); // status
     let fastframe_id = m
         .declare_function("brood_rt_fast_frame", Linkage::Import, &fastframe_sig)
@@ -937,7 +941,7 @@ fn jit_lower_arm_inner(
     let vnbase_ref = m.declare_func_in_func(vnbase_id, b.func);
     let vobase_ref = m.declare_func_in_func(vobase_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
-    let makevec2_ref = m.declare_func_in_func(makevec2_id, b.func);
+    let vec2room_ref = m.declare_func_in_func(vec2room_id, b.func);
     let makevecn_ref = m.declare_func_in_func(makevecn_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
     #[cfg(debug_assertions)]
@@ -950,7 +954,7 @@ fn jit_lower_arm_inner(
     let globprobe_ref = m.declare_func_in_func(globprobe_id, b.func);
     let globic_ref = m.declare_func_in_func(globic_id, b.func);
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
-    let pushn_ref = m.declare_func_in_func(pushn_id, b.func);
+    let pushroom_ref = m.declare_func_in_func(pushroom_id, b.func);
     let natfl_ref = m.declare_func_in_func(natfl_id, b.func);
     let flbase_ref = m.declare_func_in_func(flbase_id, b.func);
     let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
@@ -969,9 +973,9 @@ fn jit_lower_arm_inner(
     let has_cons = code.iter().any(inst_allocates_hot);
 
     // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt. The
-    // Done block (`ip == len`) takes **no** params: the result is returned via
-    // `roots[base]` (each exit stores it there), so it can be a handle, not just an
-    // `i64` block arg. Every other block carries its operand-stack depth as I64 params.
+    // Done block (`ip == len`) takes **no** params: the result is returned through the
+    // caller's `out` pointer (each exit stores it there), so it can be a handle, not just
+    // an `i64` block arg. Every other block carries its operand-stack depth as I64 params.
     let leader_block: Vec<Option<cranelift_codegen::ir::Block>> = (0..=len)
         .map(|ip| {
             if is_leader[ip] {
@@ -1005,6 +1009,7 @@ fn jit_lower_arm_inner(
     b.switch_to_block(entry);
     let heap = b.block_params(entry)[0];
     let base = b.block_params(entry)[1];
+    let out_ptr = b.block_params(entry)[2];
     // `roots_base` is a **Variable**, not a fixed SSA value: a Brood→Brood call's staging
     // pushes (and the callee's own frames) may reallocate `roots`, so the base is re-fetched
     // after each call (`def_var` below). For a call-free arm it keeps its single entry
@@ -1022,6 +1027,7 @@ fn jit_lower_arm_inner(
         .map(|i| slot_tags.get(i).copied() == Some(TAG_INT))
         .collect();
     let frame = emit::Frame {
+        out_ptr,
         rb_var,
         base,
         nslots,
@@ -1497,8 +1503,12 @@ fn jit_lower_arm_inner(
     let store_op = |b: &mut FunctionBuilder, dst: i64, op: Op| emit::store_op(b, dst, op, frame);
     // Return-via-roots: place the single result in `roots[base]` and jump to the
     // param-less Done block. The result is a whole `Value`, so it can be a handle.
+    //
+    // Return **through the caller's `out` pointer**, not through `roots[base]`: the result
+    // is written once, into the slot its consumer already owns, and nobody loads it back.
+    // See `emit::store_result` for the measurement that motivated it.
     let exit_done = |b: &mut FunctionBuilder, op: Op| {
-        store_op(b, 0, op);
+        emit::store_result(b, op, out_ptr, frame);
         b.ins().jump(done_block, &[]);
     };
     // Call a handle op (`brood_rt_{cons,car,cdr}`) with the out-pointer ABI: pass the
@@ -1517,7 +1527,7 @@ fn jit_lower_arm_inner(
         car: car_ref,
         cdr: cdr_ref,
         cons: cons_ref,
-        makevec2: makevec2_ref,
+        vec2room: vec2room_ref,
         makevecn: makevecn_ref,
         thas: thas_ref,
         tget: tget_ref,
@@ -1525,7 +1535,7 @@ fn jit_lower_arm_inner(
         tput: tput_ref,
         rb: rb_ref,
         globic: globic_ref,
-        pushn: pushn_ref,
+        pushroom: pushroom_ref,
         callslow: callslow_ref,
         natfl: natfl_ref,
         flbase: flbase_ref,
@@ -1907,8 +1917,8 @@ fn jit_lower_arm_inner(
         }
     }
 
-    // Done block: the result was already stored into `roots[base]` by the exiting block
-    // (return-via-roots, see `exit_done`), so this just signals normal completion.
+    // Done block: the result was already stored through the `out` pointer by the exiting
+    // block (see `exit_done`), so this just signals normal completion.
     b.switch_to_block(done_block);
     let zero = b.ins().iconst(types::I64, 0);
     b.ins().return_(&[zero]);

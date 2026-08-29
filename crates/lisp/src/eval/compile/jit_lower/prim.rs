@@ -306,7 +306,7 @@ pub(super) fn emit_prim1(
 }
 
 /// `Inst::MakeVector(n)` — build an `n`-element vector literal. `n == 2` bump-allocates
-/// via `make_vector2` (no temp `Vec`); otherwise stages the `n` operands into a per-site
+/// in place via `vec2_room` (no temp `Vec`); otherwise stages the `n` operands into a per-site
 /// stack slot and calls `make_vector_n`.
 pub(super) fn emit_make_vector(
     b: &mut FunctionBuilder,
@@ -319,19 +319,51 @@ pub(super) fn emit_make_vector(
     let heap = funcs.heap;
     let out_slot = funcs.out_slot;
     if n == 2 {
-        // Arity-2 fast path: the same bump-allocate as `cons` via the inline
-        // `alloc_vector2` (no temp `Vec`). Read both operands as words (source order —
-        // `a` deeper, `b` on top), allocate.
+        // Arity-2 fast path: bump-allocate the slot, then write both elements **into it**.
+        //
+        // The elements used to travel as six `i64` arguments to `brood_rt_make_vector2`.
+        // SysV passes six in registers and `heap`/`out` take two of them, so four words
+        // spilled to this arm's outgoing-args area and the callee loaded them straight
+        // back — two stack loads that were **66% of that function**, itself 7.9% of
+        // `bintree`. Same shape as the return value in §2h, same fix: hand back the
+        // destination. `brood_rt_vec2_room` takes two register arguments, returns the
+        // slot's element storage, and the stores below land there.
+        //
+        // The slot is reachable from the handle the moment it is allocated, so **nothing
+        // between the call and these stores may allocate or collect** — they are pure
+        // stores. `alloc_vector2_room` leaves the elements `Nil` rather than uninitialised
+        // precisely because this window exists: a missed store degrades to a wrong value,
+        // never to a word the GC would trace as a handle.
         let (b_op, a_op) = (stack.pop()?, stack.pop()?);
         let aw = read_words(b, a_op, frame);
         let bw = read_words(b, b_op, frame);
-        let h = call_handle(
-            b,
-            funcs.makevec2,
-            &[aw[0], aw[1], aw[2], bw[0], bw[1], bw[2]],
-            funcs,
-        );
-        stack.push(h);
+        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+        let c = b.ins().call(funcs.vec2room, &[heap, out_addr]);
+        let items = b.inst_results(c)[0];
+        for (i, w) in [aw, bw].iter().enumerate() {
+            let off = (i * std::mem::size_of::<crate::core::value::Value>()) as i32;
+            b.ins().store(MemFlagsData::trusted(), w[0], items, off);
+            b.ins().store(
+                MemFlagsData::trusted(),
+                w[1],
+                items,
+                off + PAYLOAD_OFFSET as i32,
+            );
+            b.ins().store(
+                MemFlagsData::trusted(),
+                w[2],
+                items,
+                off + PAYLOAD_OFFSET as i32 + 8,
+            );
+        }
+        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+        let w1 = b
+            .ins()
+            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+        let w2 = b
+            .ins()
+            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+        stack.push(Op::Handle(w0, w1, w2));
     } else {
         // Variadic `[e0 … e{n-1}]` (nbody's `[vx vy vz]` / 7-body rebuild). Pop the `n`
         // operands (pushed in source order: e0 deepest, e{n-1} on top), box each to a

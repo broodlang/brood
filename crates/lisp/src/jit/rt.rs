@@ -137,38 +137,35 @@ pub unsafe extern "C" fn brood_rt_cons(
     *out = h.alloc_pair(car, cdr);
 }
 
-/// Build a 2-element vector from two `Value`s (each by word-triple), writing the
-/// fresh vector to `*out`. The JIT lowering of a `[a b]` literal (`Inst::MakeVector(2)`,
-/// e.g. bintree's `make`); mirrors [`brood_rt_cons`] — a bump-allocate that never
-/// collects, so the elements need no extra rooting beyond the words passed in.
+/// Allocate a 2-element vector and hand back a pointer to its element storage, for the
+/// emitting arm to write the two elements into directly. Writes the fresh handle to `*out`.
+///
+/// Replaces passing the elements as six `i64` words: four of
+/// them spilled to the caller's stack (SysV has six argument registers and `heap`/`out` take
+/// two), and reloading them was **66% of that function**. Two arguments now, both in
+/// registers, and the arm's stores land in the slab.
 ///
 /// # Safety
-/// `heap`/`out` live; the word triples are bytes the JIT read out of real `Value`s.
+/// `heap` live; `out` writable. The caller must write both elements before anything can
+/// allocate or collect — see [`Heap::alloc_vector2_room`], whose doc carries the invariant.
 #[no_mangle]
-pub unsafe extern "C" fn brood_rt_make_vector2(
+pub unsafe extern "C" fn brood_rt_vec2_room(
     heap: *mut Heap,
     out: *mut crate::core::value::Value,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-) {
-    let h = &mut *heap;
-    let a = words_to_val(a0, a1, a2);
-    let b = words_to_val(b0, b1, b2);
-    *out = h.alloc_vector2(a, b);
+) -> *mut crate::core::value::Value {
+    let (handle, items) = (*heap).alloc_vector2_room();
+    *out = handle;
+    items
 }
 
 /// Build an `n`-element vector from `n` `Value`s staged contiguously at `elems`
 /// (the JIT wrote each element's 3 words into a stack slot it owns), writing the
-/// fresh vector to `*out`. The variadic generalisation of [`brood_rt_make_vector2`]
+/// fresh vector to `*out`. The variadic generalisation of [`brood_rt_vec2_room`]
 /// for a wider `[a b c …]` literal (`Inst::MakeVector(n)`, `n != 2`) — nbody's
 /// `[vx vy vz]` / 7-body rebuild. A fixed Cranelift signature can't take `n×3`
 /// words, so the elements come by pointer instead of by register-triple.
 ///
-/// Like `make_vector2`, `alloc_vector` only *grows* the LOCAL vector slab (an
+/// Like the arity-2 path, `alloc_vector` only *grows* the LOCAL vector slab (an
 /// `alloc_slot!` push — never collects), so the staged elements can't go stale
 /// during the call and need no extra rooting beyond the bytes at `elems`.
 ///
@@ -617,21 +614,21 @@ pub unsafe extern "C" fn brood_rt_i64_overflow_ptr(heap: *mut Heap) -> *mut u8 {
     &mut (*heap).jit_i64_overflow as *mut bool as *mut u8
 }
 
-/// Batch arg staging: append `n` staged `Value`s (from the call site's staging
-/// stack slot) onto `roots` in one reserve+memcpy — replacing `brood_rt_push` ×
-/// argc on every Brood→Brood / slow-dispatch call from JIT'd code.
+/// Reserve `n` argument slots at the top of `roots` and hand back a pointer to them, for the
+/// emitting arm to store its operands into directly. The counterpart of
+/// The JIT's argument staging. It used to go
+/// store-into-a-stack-slot then copy-the-block, and the copy alone was 4.4% of `bintree`.
 ///
 /// # Safety
-/// `heap` must be live; `src` must point to `n` valid `Value`s (written by the
-/// emitting arm just before this call, with no intervening safepoint).
+/// `heap` live. The caller must store `n` valid `Value`s into the returned slots **before
+/// anything can allocate or collect** — see [`Heap::push_roots_room`], whose doc carries the
+/// full invariant.
 #[no_mangle]
-pub unsafe extern "C" fn brood_rt_push_n(
+pub unsafe extern "C" fn brood_rt_push_room(
     heap: *mut Heap,
-    src: *const crate::core::value::Value,
     n: i64,
-) -> i64 {
-    (*heap).push_roots_n(src, n as usize);
-    0
+) -> *mut crate::core::value::Value {
+    (*heap).push_roots_room(n as usize)
 }
 
 /// Direct builtin call from the IR fast-link path (the native flat cell): `func`
@@ -647,6 +644,11 @@ pub unsafe extern "C" fn brood_rt_push_n(
 /// # Safety
 /// `heap` live; `out` writable; `func` a valid `NativeFnPtr`; `args` points to
 /// `argc` valid `Value`s.
+/// How many builtin arguments are copied inline before spilling to a `Vec`. Covers every
+/// arity the JIT's native flat-cell path sees in practice; the spill is correctness, not a
+/// path anything hot takes.
+const INLINE_ARGV: usize = 6;
+
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_call_native_fl(
     heap: *mut Heap,
@@ -657,7 +659,43 @@ pub unsafe extern "C" fn brood_rt_call_native_fl(
 ) -> i64 {
     let h = &mut *heap;
     let f: crate::core::value::NativeFnPtr = std::mem::transmute(func as usize);
-    let slice = std::slice::from_raw_parts(args, argc as usize);
+    // COPY, don't borrow: `args` now points into `roots` (the arm stages in place — see
+    // `brood_rt_push_room`), and a native is free to push roots, which reallocates the
+    // buffer and would dangle a borrowed slice mid-call. This is the "a native receives
+    // unrooted copies" contract this path always documented, now actually made.
+    //
+    // **Copied with a `match` on the arity, not `SmallVec::from(slice)`.** That goes through
+    // `copy_from_slice` → libc `memcpy`, and at an arity's worth of bytes (24–72) the
+    // size-class dispatch costs far more than the move: it made `wordcount`, which is
+    // builtin-heavy, **+14%** — the whole in-place-staging win handed back and then some.
+    // Same lesson as the staging copy this replaced, one call site over.
+    let n = argc as usize;
+    let mut buf = [crate::core::value::Value::Nil; INLINE_ARGV];
+    let spill;
+    let slice: &[crate::core::value::Value] = if n <= INLINE_ARGV {
+        match n {
+            0 => {}
+            1 => buf[0] = *args,
+            2 => {
+                buf[0] = *args;
+                buf[1] = *args.add(1);
+            }
+            3 => {
+                buf[0] = *args;
+                buf[1] = *args.add(1);
+                buf[2] = *args.add(2);
+            }
+            _ => {
+                for (i, b) in buf.iter_mut().enumerate().take(n) {
+                    *b = *args.add(i);
+                }
+            }
+        }
+        &buf[..n]
+    } else {
+        spill = std::slice::from_raw_parts(args, n).to_vec();
+        &spill[..]
+    };
     let env = h.read_root_env(h.jit_call_env);
     // The emitting arm batch-staged these argc args onto `roots` too (uniform with
     // every fallback path) — they anchor the arg values for any GC the native
@@ -1033,34 +1071,42 @@ pub unsafe extern "C" fn brood_rt_fastlink_base(
     base
 }
 
-/// Run a JIT'd arm's **non-tail** free-global call via the in-IR fast-link path: the IR has
-/// validated the call site's flat-table entry (`site < len` && epoch-current) and read
-/// `(nslots, code, env, callee_ic_base, callee_gic_base)` from it; this sets up the callee
-/// frame, installs the callee's IC-block cursors around its native call (KI-20 — so it reads
-/// its own inline caches, not the caller's), runs it, and writes the result to `*out`.
-/// Returns the status the IR branches on: `0` = done, `1` = error
-/// (parked for the arm to propagate), `2` = could-not-fast-link (over the native-recursion
-/// cap, or the IC moved) — the IR falls to [`brood_rt_call_slow`] with the args left
-/// staged. See [`crate::eval::compile::jit_dispatch_fast_frame`].
+/// The JIT's in-IR fast call path (Track B / Technique A) — the hottest callback in the
+/// runtime.
+///
+/// **Four arguments, and that is the point.** It used to take ten — `site`, `head`, `argc`,
+/// `nslots`, `code`, `env`, and the two callee IC bases, all of them fields the IR had just
+/// loaded out of the very [`FastLink`] slot it validated. SysV passes six in registers, so
+/// four spilled to the stack, and this function's own profile was almost entirely prologue
+/// and argument shuffling (`pushq 0x70(%rsp)` / `pushq 0x10(%rsp)` re-pushing them for the
+/// inner call): 8.2% of `bintree` with no single operation in it. Passing the **slot
+/// pointer** and reading the fields here instead fits the whole call in registers, and the
+/// reads are free — the IR has just touched that cache line to check the slot's epoch and
+/// identity.
+///
+/// Sound because the guard has already run: the IR only branches here after proving
+/// `site < len`, `slot.epoch == global_epoch`, and that `slot.sym`/`slot.argc` match this
+/// site's baked head/arity. Re-reading them is the same single-threaded data one call
+/// earlier, and nothing between the guard and here can grow or move the table.
 ///
 /// # Safety
-/// `heap`/`out` must be live; the `argc` args are staged on `roots`; `code` is the native
-/// entry pointer the IR read from the (epoch-validated) flat table.
+/// `heap` live; `out` writable for one `Value`; `slot` points at a live `FastLink` in this
+/// process's table, validated by the IR's guard as described above.
 #[no_mangle]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn brood_rt_fast_frame(
     heap: *mut Heap,
     out: *mut crate::core::value::Value,
     site: u32,
-    head: u32,
-    argc: u32,
-    nslots: u32,
-    code: u64,
-    env: u64,
-    callee_ic_base: u32,
-    callee_gic_base: u32,
+    slot: *const crate::core::heap::FastLink,
 ) -> i64 {
     use crate::eval::compile::FastLinkOutcome;
+    // Read once, before anything can run: the callee may grow the table.
+    let fl = &*slot;
+    let (head, argc, nslots, code, env) = (fl.sym, fl.argc, fl.nslots, fl.code, fl.env);
+    let bases = (fl.callee_ic_base, fl.callee_gic_base);
+    // `out` goes straight down to the native callee, which writes the result into it
+    // directly — no store/load round trip through `roots[base]` and no copy here. This is
+    // the path that made the change worth making; see `crate::jit::JitArmFn`.
     match crate::eval::compile::jit_dispatch_fast_frame(
         &mut *heap,
         site,
@@ -1069,12 +1115,10 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
         nslots as usize,
         code as usize,
         env,
-        (callee_ic_base, callee_gic_base),
+        bases,
+        out,
     ) {
-        FastLinkOutcome::Done(v) => {
-            *out = v;
-            0
-        }
+        FastLinkOutcome::Done => 0,
         FastLinkOutcome::Error => 1,
         FastLinkOutcome::Fallthrough => 2,
     }

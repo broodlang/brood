@@ -21,6 +21,7 @@ pub(crate) mod backend;
 pub(crate) mod cranelift;
 pub(crate) mod rt;
 
+pub(crate) use backend::JitArmFn;
 pub(crate) use backend::JitBackend;
 pub(crate) use cranelift::CraneliftBackend;
 

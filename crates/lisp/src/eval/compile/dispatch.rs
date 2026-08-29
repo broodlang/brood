@@ -350,16 +350,24 @@ pub(crate) fn dispatch(
                     // this `CompiledArm` (ADR-215) can swap the inlined body in inside that
                     // window. Telling it the size this frame was built to lets it decline
                     // rather than raw-write past the frame top. See its doc (KI-48 family).
-                    let jit_outcome =
-                        jit_tier_in_frame(arm.arc(), heap, base, env_root, arm.nslots);
+                    // Destination for a Done result: this entry hands one back, so it owns
+                    // a stack local (see `crate::jit::JitArmFn`).
+                    let mut jit_ret = Value::Nil;
+                    let jit_outcome = jit_tier_in_frame(
+                        arm.arc(),
+                        heap,
+                        base,
+                        env_root,
+                        arm.nslots,
+                        &mut jit_ret as *mut Value,
+                    );
                     heap.set_ic_bases(saved_bases);
                     match jit_outcome {
                         Some(0) => {
                             crate::perf_bump!(jit_apply_fast);
-                            let v = heap.root_at(base);
                             heap.truncate_roots(base);
                             heap.truncate_env_roots(env_base);
-                            return Ok(Step::Done(v));
+                            return Ok(Step::Done(jit_ret));
                         }
                         Some(3) => {
                             heap.truncate_roots(base);

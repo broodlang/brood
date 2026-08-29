@@ -2612,11 +2612,13 @@ fn hof_apply_native(
     // The step's native reads its OWN IC block through the heap cursors (ADR-175).
     let saved_bases = heap.set_ic_bases(bases);
     heap.jit_native_depth = depth + 1;
-    // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from `jit_lower_arm`, kept
-    // for the process in `GLOBAL_JIT`; the frame is at `roots[base..]`; validated current by the
+    // SAFETY: `code` is a finalized [`crate::jit::JitArmFn`] from `jit_lower_arm`, kept for
+    // the process in `GLOBAL_JIT`; the frame is at `roots[base..]`; validated current by the
     // epoch check above.
-    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code) };
-    let outcome = f(heap as *mut Heap, base as i64);
+    let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(code) };
+    // Destination for a Done result: this entry hands one back, so a stack local.
+    let mut ret = Value::Nil;
+    let outcome = f(heap as *mut Heap, base as i64, &mut ret as *mut Value);
     heap.jit_native_depth = depth;
     heap.set_ic_bases(saved_bases);
     heap.jit_call_env = saved;
@@ -2680,9 +2682,8 @@ fn hof_apply_native(
     match outcome {
         0 => {
             crate::perf_bump!(jit_link_done);
-            let result = heap.root_at(base);
             heap.truncate_roots(base);
-            Some(Ok(result))
+            Some(Ok(ret))
         }
         3 => {
             heap.truncate_roots(base);

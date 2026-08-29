@@ -668,8 +668,17 @@ pub(crate) fn vm_run_bc(
                         // process can swap the inlined body in between, and running it against
                         // this (small) frame writes past the frame top. Telling it the size the
                         // frame was BUILT to lets it decline instead. See its doc (KI-48 family).
-                        let jit_outcome =
-                            jit_tier_in_frame(cur_arm.arc(), heap, cur_base, cur_env, frame_nslots);
+                        // Destination for a Done result: this entry hands one back, so it
+                        // owns a stack local (see `crate::jit::JitArmFn`).
+                        let mut jit_ret = Value::Nil;
+                        let jit_outcome = jit_tier_in_frame(
+                            cur_arm.arc(),
+                            heap,
+                            cur_base,
+                            cur_env,
+                            frame_nslots,
+                            &mut jit_ret as *mut Value,
+                        );
                         // The deopt-resume decision, taken ONCE and taken HERE, before the
                         // frame is resized below. Reading the journal twice — once to decide
                         // the resize, once to resume — is wrong two ways: the second read
@@ -774,7 +783,7 @@ pub(crate) fn vm_run_bc(
                         }
                         match jit_outcome {
                             // Done: result in `roots[cur_base]` → the `Done` arm retires it.
-                            Some(0) => Ok(ChunkExit::Done(heap.root_at(cur_base))),
+                            Some(0) => Ok(ChunkExit::Done(jit_ret)),
                             // A JIT'd call/global errored — propagate the parked error.
                             Some(3) => Err(jit_take_error(heap)
                                 .expect("JIT error outcome without a parked error")),

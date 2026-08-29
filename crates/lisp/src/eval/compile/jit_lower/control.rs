@@ -5,7 +5,7 @@
 //! caller's inner loop (it's a block terminator) — these fns emit the terminator
 //! and return `Some(())`, or `None` to bail the whole arm to the VM.
 #![cfg(feature = "jit")]
-use super::emit::{as_block_arg, param_repr, store_op, Frame, ParamRepr};
+use super::emit::{as_block_arg, param_repr, store_result, Frame, ParamRepr};
 use super::Op;
 use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL};
 use cranelift_codegen::ir::{condcodes::IntCC, types, Block, BlockArg, InstBuilder, MemFlagsData};
@@ -50,9 +50,10 @@ pub(super) fn emit_jump(
 ) -> Option<()> {
     let deopt = frame.deopt;
     if t == len {
-        // Jump straight to Done: return the single result via roots[base].
+        // Jump straight to Done: return the single result through the caller's `out`
+        // pointer (the second of the arm's two Done exits — see `Frame::out_ptr`).
         if stack.len() == 1 {
-            store_op(b, 0, stack[0], frame);
+            store_result(b, stack[0], frame.out_ptr, frame);
             b.ins().jump(done_block, &[]);
         } else {
             // A reachable Done always leaves exactly one value, so a different stack

@@ -410,7 +410,7 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
                 | PrimOp::MapGet
         )
         // `Cons` is admitted: the lowering calls `brood_rt_cons` (same bump-allocate
-        // path as `brood_rt_make_vector2`, which works) and reads all 3 result words
+        // path as `brood_rt_vec2_room`, which works) and reads all 3 result words
         // back as a `Handle`. The earlier miscompile (surfaced in `jit_cons_test.blsp`)
         // was fixed with the correct lowering; the old bail is no longer needed.
     };
@@ -435,7 +435,7 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
             ..
         } => true,
         // A vector literal `[a …]`. Arity 2 (bintree's `make`) lowers via the inline
-        // `brood_rt_make_vector2`; a wider literal (nbody's `[vx vy vz]` / 7-body
+        // `brood_rt_vec2_room`; a wider literal (nbody's `[vx vy vz]` / 7-body
         // rebuild) stages its elements into a Cranelift stack slot and calls the
         // variadic `brood_rt_make_vector_n`. Capped at 32 so the per-site staging slot
         // stays small (a huge literal in a hot arm is unheard-of; it bails to the VM).
