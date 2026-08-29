@@ -476,8 +476,15 @@ doesn't count as nesting.
 
 Public because it is the one fact an auto-indenter needs — which form am I inside,
 and where does it start — and `enclosing-call` (right below) already computes it for
-signature hints; exposing it beats a second, subtly-different scan in the editor."
-  (hl-enc-scan full 0 pos (string/length full) '()))
+signature hints; exposing it beats a second, subtly-different scan in the editor.
+
+The scan starts at the nearest top-level form start ([[safe-restart]]) rather than offset 0,
+for the reason `enclosing-call` gives and by the same argument: a column-0 open bracket is
+top level, so nothing above it is still open, and every bracket enclosing `pos` is inside
+that form. Sound, and the difference between O(enclosing form) and O(pos) — this scan is
+interpreted, and at offset 600 of a 1.5 KB buffer the O(pos) version cost 1.4 ms, on every
+newline an auto-indenter handles."
+  (hl-enc-scan full (safe-restart full pos) pos (string/length full) '()))
 (sig enclosing-open (string any -> any))
 
 ;; ---- enclosing call (for signature hints) -----------------------------------

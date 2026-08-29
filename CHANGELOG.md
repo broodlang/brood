@@ -4,7 +4,10 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.18.1 — 2026-08-29
+
+Inferred signatures see through `& rest`, `fold`/`reduce`, and their own demands.
+
 
 **Changed — inferred signatures see through `& rest`, `fold`/`reduce`, and their own
 demands.** A `& rest` function's fixed parameters keep their positional demands and the
