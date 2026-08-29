@@ -1243,6 +1243,16 @@ protocol for compile-volume changes): **every row lost, winners included** —
 | pingpong | +8.0% | +9.6% |
 
 JIT healthy throughout (no `CODEGEN-PANICKED`; `fib` normal; nqueens compiles 99 → 262).
+
+> **Caveat found after the fact (2026-08-30): the stdimage discipline was violated in the
+> table above, and the magnitudes carry it.** The experiment side's image id (the tree had
+> a `std/timer.blsp` comment edit) was not built until 23:50, so its rows paid a stale-boot
+> penalty of up to ~10 ms/run that the base may not have paid symmetrically (image mtimes
+> straddle the runs; exact state unreconstructable). Subtracting the full penalty from the
+> experiment side still rejects step 2 — spawn ≈+59%, nqueens ≈+11%, nbody ≈+8% unpinned —
+> but `pipeline`'s +18% may have been largely image. The verdict stands on the surviving
+> rows; the per-row numbers above are upper bounds. Every measurement after this caveat was
+> taken with `(stdimage/status)` read `:live` on both arms, per the discipline section.
 **Why feedback cannot replace the gate:** an admitted call-mediated arm compiles
 *correctly* and never type-deopts, so `deopt_watch` has no signal — the gate encodes a
 COST model, and no correctness-triggered mechanism can learn one. The spill-reserve
@@ -1330,12 +1340,24 @@ the existing epoch/identity guard — the full X-register convention. Multi-sess
 groundwork (`JitArmFn`, the `out` pointer, `Frame::out_ptr`) is the first third; what remains
 is the env/IC-bases install and depth/limit bookkeeping moving into emitted code.
 
-### 7.6 Cheap curiosity: `grow_one<TraceFrame>` at ~3% of `bintree`
+### 7.6 Cheap curiosity: `grow_one<TraceFrame>` at ~3% of `bintree` — ANSWERED 2026-08-30: a folded symbol, not an error trace
 
-An error-trace `Vec` growing on a row that never errors (LBR leaf, so trustworthy even where
-the fp chain above it was not). If it is the two load-time checker warnings, it is boot
-residue that closes itself at scale — confirm with a warning-free variant of the row and
-move on.
+> **The name was a lie told by the linker.** Identical-code-folding merges same-layout
+> generic instantiations, and `nm` shows THREE `grow_one`s at one address in the release
+> binary: `RawVec<TraceFrame>`, `RawVec<VecStore>`, and `RawVec<Inst>` — perf displays an
+> arbitrary survivor. On `bintree` the actual grower is **`VecStore`** — the heap's vector
+> slab, growing under the row's `[a b]` construction (`brood_rt_vec2_room` sits beside it
+> at ~4.4% self) — i.e. §7.4's allocation frontier, already on record, nothing new. No
+> error is raised, no trace is built.
+>
+> Method note for every future profile read: **before chasing a generic symbol
+> (`grow_one<T>`, `drop_in_place<T>`, `clone<T>`), check `nm <bin> | grep <addr>` for
+> address-mates** — a folded name can point at a type the row never touches. This entry
+> burned an investigation round exactly that way.
+
+**The original entry (kept for the record):** an error-trace `Vec` growing on a row that
+never errors (LBR leaf, so trustworthy even where the fp chain above it was not). If it is
+the two load-time checker warnings, it is boot residue that closes itself at scale.
 
 ### 7.7 Crossed off — do not revisit without new evidence
 

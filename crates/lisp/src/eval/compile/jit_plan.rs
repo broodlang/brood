@@ -148,12 +148,25 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
     // cost is already on record — blanket-reserving regressed `spawn` ~1.9x — which is why
     // it stays behind the `chunk_in_jit_subset` gate above and why the change was measured
     // (spawn / fib / collatz / pingpong) rather than reasoned about.
-    // NOTE (§7.1 step 2 postmortem): widening this to every ≥1-call arm (counting
-    // `MakeClosure` as a safepoint, so single-call arms holding a handle got slots
-    // instead of bailing at `call-spill-exhausted`) was tried with the gate experiment
-    // and measured `spawn` +8.6% against a 1.2% floor on its own — bigger frames on
-    // every lowerable arm, the same cost blanket-reserving already has on record. It
-    // belongs with the partial-lowering design, which changes which arms want slots.
+    // **Do not widen the `< 2 → 0` rule below without a profitability case — measured
+    // twice (2026-08-29/30), it buys nothing and costs.** A single-non-tail-call arm
+    // holding a handle below the call (the gate-exempt HOF-step closures on
+    // `nqueens`/`pipeline`, `(… (rest xs) … Call …)`) gets reserve 0 here and bails
+    // mid-emit at `call-spill-exhausted` — which looks like a bug, and unlocking it was
+    // measured (live stdimage BOTH arms, `-b HEAD --floor -n 15`):
+    //
+    //   - §7.1 step 2's blanket widening (MakeClosure as safepoint, `Global`/`GlobalIc`
+    //     as producers): `spawn` +8.6% against a 1.2% floor, on its own — every
+    //     global-reading arm's frame inflated.
+    //   - The narrow form (one call + ≥1 real producer reserves; call-only arms
+    //     untouched): nqueens +2.2% (floor 1.5%), pipeline +0.0%, startup +0.0%,
+    //     spawn +4.8% (floor 1.2%) — the unlocked closures are call-mediated boxed
+    //     shapes, exactly the class `plan_general_lowering` refuses for NAMED arms, so
+    //     they lower and win nothing, while the wider frames lean on `spawn`.
+    //
+    // So the accidental bail does the gate's job for single-call closures, for free. If
+    // partial lowering (§7.1) ever admits these shapes deliberately, it must bring its
+    // own profitability judgement — and then widen this rule with it.
     if non_tail_call_count(code) < 2 {
         return 0;
     }
