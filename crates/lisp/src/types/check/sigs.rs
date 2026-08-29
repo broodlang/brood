@@ -707,9 +707,10 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     // which flows to callers. Infer that (a params-less sig), since arity is checked
     // independently (`arity_of`) and a union of arm returns is a sound over-approximation —
     // a supertype can only *under*-flag a caller, never false-positive.
-    let simple = closure.arms.len() == 1
-        && closure.arms[0].optionals.is_empty()
-        && closure.arms[0].rest.is_none();
+    // A rest binder is fine (its demand becomes a per-argument one, as in
+    // `infer_params_from_form`); optionals are not — a position that may be unfilled has no
+    // checkable demand.
+    let simple = closure.arms.len() == 1 && closure.arms[0].optionals.is_empty();
     if !simple {
         return infer_return_only(heap, cid, self_name);
     }
@@ -719,9 +720,10 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     }
     // Copy out before we ask `sig_of` / `expr_ty` (which borrow the heap again).
     let params: Vec<Symbol> = arm.params.clone();
+    let rest_binder: Option<Symbol> = arm.rest;
 
     // Tier 1: precise params + return from a single known-callee call.
-    if arm.body.len() == 1 {
+    if arm.body.len() == 1 && rest_binder.is_none() {
         if let Some(sig) = infer_from_single_call(heap, arm.body[0], &params, self_name) {
             return Some(sig);
         }
@@ -733,7 +735,17 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     // top-level call, and reaches the guarded uses the old unconditional-demand rule
     // had to ignore. Params nothing constrains stay `ANY`, recovering the return-only
     // behaviour exactly.
-    let param_tys = param_domains(heap, &arm.body, &params, &Ctx::default());
+    let mut names = params.clone();
+    names.extend(rest_binder);
+    let mut param_tys = param_domains(heap, &arm.body, &names, &Ctx::default());
+    let rest = match rest_binder {
+        Some(_) => rest_element_demand(&param_tys.pop()?),
+        None => None,
+    };
+    let demands = ParamDemands {
+        params: param_tys,
+        rest,
+    };
 
     // Tier 2: sound return-only inference. Bind parameters to `ANY` (in scope, no
     // constraint) and read the body tail's type — the return, unconditionally.
@@ -747,17 +759,28 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
         Some(name) => Ctx::default().with_inferring_self(name),
         None => Ctx::default(),
     };
-    for &p in &params {
-        ctx = ctx.bind(p, Some(Ty::ANY));
+    // Each parameter is bound to its DEMAND for the return inference, not to `any`: the
+    // demand is what every call that reaches the body's tail satisfied, so the tail's
+    // type under it is the return type of every successful call — `(fold + x xs)` with
+    // `x` demanded numeric is numeric, not `any`. A call outside the demand raises before
+    // it returns, so nothing is claimed about it.
+    for (index, &p) in names.iter().enumerate() {
+        let bound = if index < demands.params.len() {
+            demands.params[index].clone()
+        } else {
+            Ty::ANY // the rest binder holds a list; its demand was on the elements
+        };
+        ctx = ctx.bind(p, Some(bound));
     }
+    let informative = demands.params.iter().any(|t| *t != Ty::ANY) || demands.rest.is_some();
     match expr_ty(heap, tail, &ctx) {
-        Some(ret) => Some(Sig::new(param_tys, ret)),
+        Some(ret) => Some(demands.into_sig(ret)),
         // The return couldn't be inferred (e.g. the body calls an ability op whose facts aren't
         // on this bare ctx). Still surface the parameter demands with an `ANY` return when a
         // param is actually constrained (ADR-190), so a *cross-file* caller's arguments are
         // checked — sound, since the demands under-constrain. A wholly-unconstrained param set
         // stays deferred (`None`), preserving the prior return-only behaviour exactly.
-        None if param_tys.iter().any(|t| *t != Ty::ANY) => Some(Sig::new(param_tys, Ty::ANY)),
+        None if informative => Some(demands.into_sig(Ty::ANY)),
         None => None,
     }
 }
@@ -861,14 +884,24 @@ pub(super) fn infer_return_from_form(
     if arms.is_empty() {
         return None;
     }
+    // A single-clause fn's parameters are bound to their DEMANDS (see `infer_sig_inner`'s
+    // Tier 2 for why that is the return type of every successful call); a multi-clause
+    // fn's arms have no single demand vector and stay at `any`. The rest binder holds a
+    // list — its demand was on the elements — so it is `any` here too.
+    let demands = (arms.len() == 1)
+        .then(|| infer_params_from_form(heap, fn_form, base_ctx))
+        .flatten()
+        .map(|d| d.params)
+        .unwrap_or_default();
     let mut ret: Option<Ty> = None;
     for (binders, tail) in &arms {
         let mut ctx = match self_name {
             Some(n) => base_ctx.with_inferring_self(n),
             None => base_ctx.clone(),
         };
-        for &p in binders {
-            ctx = ctx.bind(p, Some(Ty::ANY));
+        for (index, &p) in binders.iter().enumerate() {
+            let bound = demands.get(index).cloned().unwrap_or(Ty::ANY);
+            ctx = ctx.bind(p, Some(bound));
         }
         let t = expr_ty(heap, *tail, &ctx)?;
         ret = Some(match ret {
@@ -886,7 +919,64 @@ pub(super) fn infer_return_from_form(
 /// over-approximates (a superset of the true valid-argument type), so an argument disjoint
 /// from it is disjoint from the truth too — it genuinely errors at runtime, never a false
 /// positive. The companion of [`infer_return_from_form`] (which yields the return).
-pub(super) fn infer_params_from_form(heap: &Heap, fn_form: Value, ctx: &Ctx) -> Option<Vec<Ty>> {
+/// What a function's body demands of its parameters, position by position — plus, for a
+/// `& rest` binder, what it demands of EACH rest argument. A rest binder collects the
+/// tail of the call into a list, so a demand on the binder is a demand on that list; its
+/// element type is the per-argument one ([`Sig::rest`]), which is what a call site can
+/// check. `(defn foo (x y & more) (+ (fold + x more) y))` reads
+/// `(numeric numeric & numeric -> …)`.
+pub(super) struct ParamDemands {
+    pub params: Vec<Ty>,
+    pub rest: Option<Ty>,
+}
+
+impl ParamDemands {
+    /// The `Sig` these demands make with return `ret`.
+    pub fn into_sig(self, ret: Ty) -> Sig {
+        match self.rest {
+            Some(rest) => Sig::with_rest(self.params, rest, ret),
+            None => Sig::new(self.params, ret),
+        }
+    }
+}
+
+/// The per-argument demand a demand on a rest BINDER implies: the element type of the
+/// list the binder collects. `None` when the body says nothing about the elements.
+fn rest_element_demand(binder_demand: &Ty) -> Option<Ty> {
+    if binder_demand.is_any() {
+        return None;
+    }
+    binder_demand.elem_ty().filter(|e| !e.is_any())
+}
+
+/// A seqable whose every element is an `elem` — what a collection argument must be for a
+/// callback that demands `elem` of each element. The plain `seqable` when `elem` is `any`;
+/// otherwise the three element-carrying kinds plus the empty list, plus `bytes` when an
+/// int element would do (bytes yield ints) and `map` when a 2-tuple would (a map yields
+/// its entries). A demand must over-approximate, so every kind that could satisfy the
+/// callback stays in.
+fn seqable_of(elem: Ty) -> Ty {
+    if elem.is_any() {
+        return Ty::SEQABLE;
+    }
+    let mut t = Ty::list_of(elem.clone())
+        .union(Ty::vector_of(elem.clone()))
+        .union(Ty::set_of(elem.clone()))
+        .union(Ty::of(Tag::Nil));
+    if !elem.is_disjoint(&Ty::of(Tag::Int)) {
+        t = t.union(Ty::of(Tag::Bytes));
+    }
+    if !elem.is_disjoint(&Ty::of(Tag::Vector)) {
+        t = t.union(Ty::of(Tag::Map));
+    }
+    t
+}
+
+pub(super) fn infer_params_from_form(
+    heap: &Heap,
+    fn_form: Value,
+    ctx: &Ctx,
+) -> Option<ParamDemands> {
     let items = super::walk::list_items(heap, fn_form)?;
     if !matches!(items.first(), Some(&Value::Sym(s)) if super::walk::is_fn_head(s)) {
         return None;
@@ -895,23 +985,24 @@ pub(super) fn infer_params_from_form(heap: &Heap, fn_form: Value, ctx: &Ctx) -> 
         return None; // params vary per clause — no single demand to store
     }
     let plist = *items.get(1)?;
-    // Skip a variadic (`&`) / `&optional` fn: its parameters don't map 1:1 to argument
-    // positions (a rest binder collects the args into a *list*, not each arg), so a
-    // per-position demand can't be soundly checked at a call site — it would flag a valid
-    // `(vf 1 2 3)`. Mirrors `infer_sig`, which already yields a params-less sig for a complex
-    // closure on the loaded path.
+    // An `&optional` fn is still skipped: an optional's position may or may not be filled,
+    // so a per-position demand cannot be checked at a call site. A `& rest` fn is not: its
+    // fixed parameters bind positionally exactly as a plain fn's do, and the rest binder's
+    // demand becomes a per-argument one through `rest_element_demand`.
     let raw = match plist {
         Value::Vector(id) => heap.vector(id).to_vec(),
         _ => super::walk::list_items(heap, plist).unwrap_or_default(),
     };
-    if raw.iter().any(|&it| {
-        matches!(it, Value::Sym(s)
-            if value::symbol_is(s, kw::AMP)
-                || value::symbol_is(s, kw::AMP_OPTIONAL)
-                || value::symbol_is(s, kw::AMP_REST))
-    }) {
+    if raw
+        .iter()
+        .any(|&it| matches!(it, Value::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL)))
+    {
         return None;
     }
+    let rest_at = raw.iter().position(|&it| {
+        matches!(it, Value::Sym(s)
+            if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST))
+    });
     let params = super::walk::fn_params(heap, plist);
     if params.is_empty() {
         return None;
@@ -924,7 +1015,17 @@ pub(super) fn infer_params_from_form(heap: &Heap, fn_form: Value, ctx: &Ctx) -> 
     if body.is_empty() {
         return None;
     }
-    Some(param_domains(heap, &body, &params, ctx))
+    let mut demands = param_domains(heap, &body, &params, ctx);
+    // `fn_params` lists the rest binder last; a `&` with no binder after it leaves the
+    // count at the fixed parameters and nothing to split off.
+    let rest = match rest_at {
+        Some(fixed) if demands.len() == fixed + 1 => rest_element_demand(&demands.pop()?),
+        _ => None,
+    };
+    Some(ParamDemands {
+        params: demands,
+        rest,
+    })
 }
 
 // ---- parameter DOMAINS: the union over a body's possible executions ----
@@ -1224,6 +1325,36 @@ fn domain_of_inner(
             .union(Ty::of(Tag::Native))
             .union(Ty::of(Tag::Keyword));
         acc[pos] = acc[pos].clone().intersect(callable);
+    }
+    // `(fold f init coll)` / `(reduce f init coll)` with a KNOWN `f`: the init is `f`'s
+    // first argument and every element of `coll` its second, so a parameter in either
+    // slot takes `f`'s demand — `(fold + x more)` wants `x` numeric and `more` a seqable
+    // of numerics. This is the callback demand the suggested signatures were missing most.
+    if (value::symbol_is(h, "fold") || value::symbol_is(h, "reduce")) && items.len() == 4 {
+        if let Value::Sym(f) = items[1] {
+            let known =
+                !scope.shadowed.contains(&f) && param_index(items[1], params, scope).is_none();
+            let f_sig = if known {
+                ctx.declared_sig(f)
+                    .or_else(|| primitive_sig(heap, f))
+                    .or_else(|| curated_sig(f))
+                    .or_else(|| declared_heap_sig(heap, f))
+            } else {
+                None
+            };
+            if let Some(f_sig) = f_sig {
+                if let Some(pos) = param_index(items[2], params, scope) {
+                    if let Some(p0) = f_sig.param(0) {
+                        acc[pos] = acc[pos].clone().intersect(p0);
+                    }
+                }
+                if let Some(pos) = param_index(items[3], params, scope) {
+                    if let Some(p1) = f_sig.param(1) {
+                        acc[pos] = acc[pos].clone().intersect(seqable_of(p1));
+                    }
+                }
+            }
+        }
     }
     for (i, &arg) in items[1..].iter().enumerate() {
         if let Some(pos) = param_index(arg, params, scope) {

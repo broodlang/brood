@@ -409,8 +409,8 @@ enclosing `pos`, `-1` at top level, or `:text` when `pos` falls inside a string 
 — where a bracket is a character rather than structure.
 
 The extra answer is why this is not [[enclosing-open]]'s scan: that one clamps its string and
-comment skips at `pos` and so cannot tell "the form encloses you" from "you are inside a
-string that happens to sit in that form"."
+comment skips at `pos`, so it cannot tell a form that encloses `pos` from a string that
+happens to sit inside one."
   (if (>= i pos)
     (if (empty? stack) -1 (first stack))
     (let (c (string/char-at full i))
@@ -558,6 +558,23 @@ cursor sits deep in a large file."
 `start` its offset, `prefix` its text — or `[pos \"\"]` when the cursor isn't on a
 symbol."
   (let (s (hl-sym-start full pos)) [s (string/substring full s pos)]))
+
+(defn symbol-at (full pos)
+  "Return `[start text]` for the whole symbol token **containing** cursor offset `pos`, or
+nil when `pos` is not on one.
+
+[[symbol-prefix-at]]'s sibling, and a different question. That one answers what has been
+TYPED so far — everything back to the token start, stopping dead at the cursor — which is
+what completion needs. This one answers what the cursor is ON, running forward to the end of
+the token as well, which is what a reader hovering over `(ma|p f xs)` is pointing at.
+
+A cursor sitting immediately after a token counts as on it, the way Emacs's `symbol-at-point`
+does — `(map|` reads as `map`, since that is where point lands after typing one."
+  (let (start (hl-sym-start full pos)
+        end (hl-atom-end full pos (string/length full))
+        text (string/substring full start end))
+    (when (not= text "") [start text])))
+(sig symbol-at (string int -> (or nil (vector any))))
 
 (defn- hl-cp2
   (a b)

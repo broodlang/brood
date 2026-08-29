@@ -576,3 +576,15 @@ sound meet cannot use them). Narrowing those needs demand flow across functions 
 polymorphic (`?A`) suggestions — the inference frontier, and where an unsound rule would
 hide, so it wants the brute-force-model verification ADR-292 used, not rules by hand.
 
+## The `any` tail, first cut (2026-08-29)
+
+`(defn foo (x y & more) (+ (fold + x more) y))` suggested `(any any & any -> number)`. Two
+causes, both in demand inference: a `& rest` clause returned no demands at all ("no
+positional signature" — but the fixed parameters bind positionally regardless, and the rest
+binder's demand on its list is a per-argument demand on the list's element type,
+`Sig::rest`); and `fold`/`reduce` typed their *result* through the callback but never handed
+the callback's demands to the init and the collection. With both, `(number number & number
+-> number)`. A third, on the return side: the tail's type was inferred with every parameter
+bound to `any`; it is now inferred under each parameter's demand — what every call that
+reaches the tail satisfied — so `(fold + x xs)` is numeric, not `any`.
+

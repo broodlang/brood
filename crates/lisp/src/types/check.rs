@@ -1350,9 +1350,11 @@ pub fn check_file_mode(
                             // `infer_params_from_form` under-constrains, so a flagged arg is one
                             // that genuinely errors. Params are body-derived (independent of this
                             // fixpoint, which only resolves returns), so recomputing is stable.
-                            let params =
-                                sigs::infer_params_from_form(heap, rhs, &ctx).unwrap_or_default();
-                            ctx.add_inferred_fn_sig(name, crate::types::Sig::new(params, ret));
+                            let sig = match sigs::infer_params_from_form(heap, rhs, &ctx) {
+                                Some(demands) => demands.into_sig(ret),
+                                None => crate::types::Sig::new(Vec::new(), ret),
+                            };
+                            ctx.add_inferred_fn_sig(name, sig);
                             changed = true;
                         }
                     }
@@ -1388,11 +1390,8 @@ pub fn check_file_mode(
             // a resolved return. Runs after the fixpoint, so the return dynamics are untouched.
             for &(name, rhs) in &candidates {
                 if ctx.inferred_fn_sig(name).is_none() {
-                    if let Some(params) = sigs::infer_params_from_form(heap, rhs, &ctx) {
-                        ctx.add_inferred_fn_sig(
-                            name,
-                            crate::types::Sig::new(params, crate::types::Ty::ANY),
-                        );
+                    if let Some(demands) = sigs::infer_params_from_form(heap, rhs, &ctx) {
+                        ctx.add_inferred_fn_sig(name, demands.into_sig(crate::types::Ty::ANY));
                     }
                 }
             }
