@@ -1249,6 +1249,11 @@ fn property_corpus() -> Vec<Ty> {
             .negate()
             .intersect(Ty::of(Tag::Keyword)),
         arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int)),
+        // an intersection of arrows — the shape ADR-292's rule decides
+        Ty::overload_of(vec![
+            Sig::new(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int)),
+            Sig::new(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool)),
+        ]),
         // the callable type every callback parameter infers (ADR-272)
         Ty::of(Tag::Fn)
             .union(Ty::of(Tag::Native))
@@ -1731,4 +1736,55 @@ fn a_product_can_be_covered_by_several_alternatives_together() {
     let pair = Ty::tuple_of(vec![i.clone(), i.clone()]);
     assert!(!one.is_subtype(&pair));
     assert!(!pair.is_subtype(&one));
+}
+
+#[test]
+fn an_intersection_of_arrows_satisfies_a_requirement_together() {
+    // A function that maps `int → int` AND `bool → bool` does map `int|bool → int|bool`,
+    // and neither conjunct says so alone: an arrow's domain is CONTRAVARIANT, so
+    // `(int → int)` is not below `(int|bool → int|bool)` — `int|bool ⊄ int`. Only the two
+    // together cover it, which is the whole reason the arrow rule exists (ADR-292).
+    let i = Ty::of(Tag::Int);
+    let s = Ty::of(Tag::Str);
+    let b = Ty::of(Tag::Bool);
+    let both = Ty::overload_of(vec![
+        Sig::new(vec![i.clone()], i.clone()),
+        Sig::new(vec![b.clone()], b.clone()),
+    ]);
+    let either = i.clone().union(b.clone());
+    assert!(
+        both.is_subtype(&arr(vec![either.clone()], either.clone())),
+        "`{both}` handles int|bool and returns int|bool — together"
+    );
+
+    // The three that must stay FALSE. Getting these wrong trades incompleteness for
+    // unsoundness, which is the only trade this lattice never makes.
+    assert!(
+        !both.is_subtype(&arr(vec![either.clone()], i.clone())),
+        "the bool arm returns a bool for a bool input, which is not an int"
+    );
+    assert!(
+        !both.is_subtype(&arr(vec![s.clone()], s.clone())),
+        "neither arm accepts a string at all"
+    );
+    assert!(
+        !both.is_subtype(&arr(vec![either], s.clone())),
+        "covering the domain does not license a narrower result"
+    );
+
+    // The rest of the arrow relation, unchanged and still right.
+    let ii = arr(vec![i.clone()], i.clone());
+    let is = arr(vec![i.clone()], s.clone());
+    assert!(
+        arr(vec![i.clone().union(b.clone())], s.clone()).is_subtype(&is),
+        "contravariance: a function taking more is usable where less is wanted"
+    );
+    assert!(ii.clone().intersect(ii.clone().negate()).is_never());
+    assert!(!ii
+        .clone()
+        .intersect(arr(vec![b.clone()], b.clone()).negate())
+        .is_never());
+    // A result split across a union is NOT covered — an arrow is like a vector, not like a
+    // tuple: the same function may return an int for one input and a string for another.
+    assert!(!arr(vec![i.clone()], i.clone().union(s)).is_subtype(&is.union(ii)));
 }

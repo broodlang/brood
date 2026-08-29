@@ -1,15 +1,15 @@
 ;; std/tool/grammar.blsp — the editor-grammar generator (ADR-092). It turns the
-;; kernel's canonical `(special-forms)` into a VS Code TextMate grammar (+ an Emacs
+;; kernel's canonical `(reflect/special-forms)` into a VS Code TextMate grammar (+ an Emacs
 ;; list), so editors stop hand-maintaining parallel keyword lists. These tests pin
-;; the data-driven contract: the keyword set is `(special-forms)` minus def-heads,
+;; the data-driven contract: the keyword set is `(reflect/special-forms)` minus def-heads,
 ;; and the emitted grammar is valid JSON of the right shape with that set escaped in —
-;; plus the docstring rules, which are driven by the kernel's `(doc-forms)` so a `def…`
+;; plus the docstring rules, which are driven by the kernel's `(reflect/doc-forms)` so a `def…`
 ;; form's documentation colours apart from a string value in every editor (ADR-265).
 
 (defmodule grammar-test (:use test) (:use grammar) (:use json))
 
-(describe "grammar — editor grammars generated from (special-forms)"
-  (test "special-keywords is exactly (special-forms) minus the def… heads"
+(describe "grammar — editor grammars generated from (reflect/special-forms)"
+  (test "special-keywords is exactly (reflect/special-forms) minus the def… heads"
     (let (kw (special-keywords))
       ;; def-heads get a distinct name-capturing rule, so they're excluded here
       (is (every? (fn (k) (not (string/starts-with? k "def"))) kw))
@@ -22,7 +22,7 @@
       (is (includes? kw "->>"))
       ;; the count matches: the canonical list with def-heads filtered out
       (assert= (count kw)
-        (count (filter (fn (k) (not (string/starts-with? k "def"))) (special-forms))))))
+        (count (filter (fn (k) (not (string/starts-with? k "def"))) (reflect/special-forms))))))
 
   (test "(tmlanguage) is valid JSON of the TextMate shape"
     (let (g (decode (tmlanguage)))
@@ -44,13 +44,13 @@
       (is (not (includes? m "defn")))
       (is (map? (get (get g :repository) :definition)))))
 
-  (test "doc-heads is exactly (doc-forms)'s heads, and fn-doc-heads its function half"
+  (test "doc-heads is exactly (reflect/doc-forms)'s heads, and fn-doc-heads its function half"
     (is (includes? (doc-heads) "defn"))
     (is (includes? (doc-heads) "defmodule"))
     ;; `def` takes no docstring — a string there is the VALUE
     (is (not (includes? (doc-heads) "def")))
     (is (not (includes? (doc-heads) "def-")))
-    (assert= (count (doc-heads)) (count (keys (doc-forms))))
+    (assert= (count (doc-heads)) (count (keys (reflect/doc-forms))))
     ;; a function's lone trailing string is its return value; a module's is its doc
     (is (includes? (fn-doc-heads) "defn"))
     (is (not (includes? (fn-doc-heads) "defmodule"))))

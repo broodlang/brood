@@ -590,7 +590,7 @@ fn collect_register_impls(
     })
 }
 
-/// Collect `(derive-into (quote A) :id (quote (fields)) (current-ns))` forms → `(ability A,
+/// Collect `(derive-into (quote A) :id (quote (fields)) (reflect/current-ns))` forms → `(ability A,
 /// id)` pairs. `defrecord`'s `:derives` emits these; the recipe runs at *load*, not at check
 /// time, so the checker can't see the generated methods directly. Instead it treats a derived
 /// id as implementing **every** op of the ability (ADR-185) — so a derived member satisfies

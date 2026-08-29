@@ -292,7 +292,7 @@ Pure — the listener turns each pair into a stderr warning. Types are the check
         (map (fn (k) [:metadata k]) (telemetry-missing-keys (get schema :metadata) metadata))))))
 
 ;; ---- the runtime event stream (kernel sources → telemetry) -------------------
-;; Policy over the `system-monitor` kernel seam: a watcher process subscribes to
+;; Policy over the `proc/system-monitor` kernel seam: a watcher process subscribes to
 ;; the runtime's own events (GC collections, spawns, exits, JIT deopts) and
 ;; re-emits each as an ordinary telemetry event — so operators observe the
 ;; RUNTIME through the exact same attach/handler seam as their app's events, and
@@ -316,18 +316,18 @@ Pure — the listener turns each pair into a stderr warning. Types are the check
     ([:system kind pid detail] (do
                                  (telemetry-runtime-event kind pid detail)
                                  (telemetry-runtime-loop)))
-    (:stop (do (system-monitor nil) nil))))
+    (:stop (do (proc/system-monitor nil) nil))))
 
 (defn watch-runtime (&optional opts)
   "Arm the kernel system monitor and re-emit its events as telemetry events —
 `[:runtime :gc]` (measurements `{:pause-us :collections :live}`),
 `[:runtime :spawn]`, `[:runtime :exit]`, `[:runtime :deopt]` (each with the pids
-in the metadata). `opts` is passed through to `system-monitor` (nil = every
+in the metadata). `opts` is passed through to `proc/system-monitor` (nil = every
 event; e.g. `{:gc true :gc-min-pause-us 1000}` = only long GCs). Returns the
 watcher pid; `stop-watch-runtime` (or killing the watcher) disarms the kernel
 stream. One system monitor exists at a time — a second call replaces the first."
   (let (watcher (spawn (telemetry-runtime-loop)))
-    (if opts (system-monitor watcher opts) (system-monitor watcher))
+    (if opts (proc/system-monitor watcher opts) (proc/system-monitor watcher))
     watcher))
 
 (defn stop-watch-runtime (watcher)

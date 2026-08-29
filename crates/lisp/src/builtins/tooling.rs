@@ -56,17 +56,22 @@ pub(super) fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> L
     }
 }
 
-/// `(private? 'mod/name)` — whether the global `mod/name` is module-private
+/// `(reflect/private? 'mod/name)` — whether the global `mod/name` is module-private
 /// (ADR-146). Reads the recorded privacy fact (`Heap::is_private`), the single
 /// source of truth every enforcement/import site now consults, rather than
 /// re-deriving anything from the name (a private is spelled like a public since
 /// step 2). Takes the qualified symbol as given, so quote it:
-/// `(private? 'mod/helper)` → true when `mod` defined it with `defn-`/`def-`,
-/// `(private? 'mod/pub)` → false. An undefined name is not private.
+/// `(reflect/private? 'mod/helper)` → true when `mod` defined it with `defn-`/`def-`,
+/// `(reflect/private? 'mod/pub)` → false. An undefined name is not private.
 pub(super) fn private_p(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Sym(s) => Ok(Value::boolean(heap.is_private(s))),
-        other => Err(LispError::wrong_type(heap, "private?", "symbol", other)),
+        other => Err(LispError::wrong_type(
+            heap,
+            "reflect/private?",
+            "symbol",
+            other,
+        )),
     }
 }
 
@@ -224,12 +229,12 @@ pub(super) fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResul
     Ok(heap.list(items))
 }
 
-/// `(global-names)` — a list of every symbol bound in the global table
+/// `(reflect/global-names)` — a list of every symbol bound in the global table
 /// (prelude + user `def`s), sorted by spelling so the order is deterministic
 /// (for completion / workspace-symbol tooling and reproducible doc generation).
 /// Special forms and the core control/binding macros — the keyword-like heads:
 /// the single source of truth for "what reads as a keyword". Read from Brood via
-/// the `(special-forms)` primitive (so `std/editor/highlight.blsp` highlights from this
+/// the `(reflect/special-forms)` primitive (so `std/editor/highlight.blsp` highlights from this
 /// list) and from the LSP (`semantic_tokens` / `completion` import it rather than
 /// keeping a copy), so the runtime and the tooling can't drift. Mirrors
 /// `brood.el`'s `brood-special-forms` plus the `def`-family heads.
@@ -280,7 +285,7 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::WITH_ERR_STR,
 ];
 
-/// `(special-forms)` — the list of special-form / core-macro names (strings) that
+/// `(reflect/special-forms)` — the list of special-form / core-macro names (strings) that
 /// read as keywords, for tooling (the highlighter, completion). Returns the
 /// canonical `SPECIAL_FORMS`, so Brood and the LSP share one list.
 pub(super) fn special_forms(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -291,7 +296,7 @@ pub(super) fn special_forms(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// The `def…` heads whose form carries a DOCSTRING, paired with whether the head
 /// builds a *function*. The single source of truth for "is this string documentation
 /// or a value?", the way [`SPECIAL_FORMS`] is for "does this read as a keyword": read
-/// from Brood via `(doc-forms)` (the REPL/editor highlighter `std/editor/highlight.blsp`
+/// from Brood via `(reflect/doc-forms)` (the REPL/editor highlighter `std/editor/highlight.blsp`
 /// and the generated editor grammars in `std/tool/grammar.blsp`) and from the LSP
 /// (`semantic_tokens`), so no editor keeps its own copy to drift.
 ///
@@ -315,7 +320,7 @@ pub const DOC_FORMS: &[(&str, bool)] = &[
     (kw::DEFABILITY, false),
 ];
 
-/// `(doc-forms)` — a map from `def…` head (string) to `:fn` (the head builds a
+/// `(reflect/doc-forms)` — a map from `def…` head (string) to `:fn` (the head builds a
 /// function, so a lone trailing string is the return value) or `:head` (the docstring
 /// may be the form's last element). The canonical [`DOC_FORMS`], so the highlighter,
 /// the generated grammars and the LSP share one list.

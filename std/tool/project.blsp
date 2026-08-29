@@ -7,7 +7,7 @@
 ;; holds the project's source (added to *load-path*), `tests/` holds tests
 ;; discovered as <name>_test.blsp. A `project.blsp` manifest declares identity
 ;; and may override the conventional paths. Rust supplies only the filesystem
-;; mechanism (file/cwd / file-exists? / dir? / list-dir) and `load`; everything here
+;; mechanism (file/cwd / file-exists? / dir? / list-dir) and `reflect/load`; everything here
 ;; is ordinary Brood.
 
 (defmodule project
@@ -607,14 +607,14 @@ manifest is read, naming the key, not later inside whoever consumes the map."
           (fn (_ f)
             (when (project-should-load? (project-file-feature f) skip-all? before)
               ;; Attribute this file's load-time requires to the ROOT section (KI-37).
-              ;; A file WITH a `(defmodule …)` header sets `current-ns`, which wins and
+              ;; A file WITH a `(defmodule …)` header sets `reflect/current-ns`, which wins and
               ;; keys its edges by its own module. A file WITHOUT one establishes no
               ;; namespace, so its defs are root-level globals that ride the
               ;; always-materialised `""` section — and its requires belong there too,
               ;; or an imaged start restores its functions and never loads what they
               ;; call. `project-install-image` replays the `""` edges.
               (binding (*require-parent* "")
-                (load f))))
+                (reflect/load f))))
           nil
           (collect-sources dir)))
       nil
@@ -734,7 +734,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; The globals the load CREATED: everything bound now that was not bound before it ran.
 (defn- project-image-fresh-names
   (seen)
-  (seq/remove (fn (n) (contains? seen n)) (global-names)))
+  (seq/remove (fn (n) (contains? seen n)) (reflect/global-names)))
 
 ;; The registries the load MUTATED — derived from the funnel, minus the exclusions above,
 ;; minus any that ride their OWN materialised section (writing them here too would double
@@ -816,7 +816,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 
 (defn write-image (root before)
   "Snapshot the bindings this project load produced into `root`'s image, grouped into
-per-module sections. `before` is the `(global-names)` list captured *before* the sources
+per-module sections. `before` is the `(reflect/global-names)` list captured *before* the sources
 were loaded. Returns the entry count."
   (let (dir (path/dirname (image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
@@ -939,7 +939,7 @@ program's and the LSP's protocol channel stays clean."
               _ (io/puts (str "Building " name " (" n " file" (if (= n 1) "" "s") ")")
                   :to *err*)
               t0 (os/now-ns)
-              before (global-names)
+              before (reflect/global-names)
               _ (/apply load-sources (cons root opts))
               t-load (math/quot (- (os/now-ns) t0) 1000000)
               ;; A project whose globals are not all portable — a `table` global is the
@@ -1159,14 +1159,14 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; prior setup's constraint in a long-lived tooling image (`apply` re-sets it,
   ;; but only when a manifest is applied — a bare/manifest-less setup skips that).
   (def *project-brood* nil)
-  ;; Read the manifest as *data* and apply it — rather than `load`ing it, which
+  ;; Read the manifest as *data* and apply it — rather than `reflect/load`ing it, which
   ;; would need the `(project …)` macro bound bare in the (root) manifest file
   ;; (it now lives in this namespace). Manifests stay written `(project …)`.
   (let (mf (path/join root "project.blsp"))
     (when (file/exists? mf) (project-apply-manifest mf)))
   ;; Refuse an incompatible runtime BEFORE doing any project work (ADR-209).
   (project-check-brood-version)
-  (set-load-path! (append (abs-paths root *project-source-paths*) *load-path*))
+  (reflect/set-load-path! (append (abs-paths root *project-source-paths*) *load-path*))
   (project-ensure-deps-on-path root)
   ;; Root-project rooting (ADR-070, Elixir-uniform model): the project's OWN modules
   ;; root under its `:name` — `(defmodule buffer)` in project `myeditor` becomes the
@@ -1256,7 +1256,7 @@ resolve in the advisory checker. Returns the project root."
   ;; also records each dep's modules → the dep's name in `*ns-package*`.
   (let (deps (append *project-dependencies* *project-dev-dependencies*))
     (when deps
-      (set-load-path! (append *load-path* (package/ensure-deps root deps))))))
+      (reflect/set-load-path! (append *load-path* (package/ensure-deps root deps))))))
 
 (defn all-files (root)
   "Every `.blsp` file the project at `root` owns — its source files plus its test files.
@@ -1795,7 +1795,7 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
 ;; each wrote `(def *width* …)` used to share, and clobber, one root binding).
 (defn- project-ambient?
   (head name)
-  (or (= head "defdyn") (dynamic? (symbol name))))
+  (or (= head "defdyn") (reflect/dynamic? (symbol name))))
 
 ;; The namespace a top-level `(defmodule ns …)` node declares (a string), or nil
 ;; if the node isn't a `defmodule`. The file-level shape of `project-def-entry`.
@@ -2428,12 +2428,12 @@ the global table. A scan per name would be O(names × globals) against a table o
             (if (and (contains? wanted bare)
                   ;; A private target cannot be referred to at all, so it is not a
                   ;; candidate — read the recorded privacy fact (ADR-146), not the name.
-                  (not (private? sym))
+                  (not (reflect/private? sym))
                   (not (includes? modname "--")))
               (%map-assoc acc bare (conj (%map-get acc bare #{}) modname))
               acc)))))
     {}
-    (global-names)))
+    (reflect/global-names)))
 
 (defn- project-owned-module?
   (modname pname)
@@ -2765,7 +2765,7 @@ as unchanged (only when some were)."
       ;; Run file-by-file, each in its own rolled-back global scope, so a large
       ;; suite's promoted code + top-level defs are reclaimed per file instead of
       ;; accumulating every file's code in one image (the shared-RUNTIME test-runner
-      ;; leak, docs/devlog.md 2026-07-03). Each loader `load`s one file (registering
+      ;; leak, docs/devlog.md 2026-07-03). Each loader `reflect/load`s one file (registering
       ;; its units) inside the `%isolate` that `run-tests-scoped` wraps it in.
       ;; `BROOD_TEST_NO_SCOPE` reverts to the legacy load-all-then-run-all path (the
       ;; escape hatch, e.g. for a suite that relies on cross-file top-level defs).
@@ -2908,9 +2908,9 @@ as unchanged (only when some were)."
   (files opts)
   (if (os/env "BROOD_TEST_NO_SCOPE")
     (do
-      (fold (fn (_ f) (load f)) nil files)
+      (fold (fn (_ f) (reflect/load f)) nil files)
       (/apply test/run-tests opts))
-    (/apply test/run-tests-scoped (map (fn (f) (fn () (load f))) files) opts)))
+    (/apply test/run-tests-scoped (map (fn (f) (fn () (reflect/load f))) files) opts)))
 
 ;; Structured analogue of `run-tests` — same bootstrap (discovery,
 ;; load, type-check pre-flight) but `(run-tests-structured)` at the end, so
@@ -2928,7 +2928,7 @@ as unchanged (only when some were)."
     (load-sources-cached root)
     (test/reset-units!)
     ; drop any stale registrations so a re-run in a long-lived `nest mcp` image
-    ; (each `load` re-registers, ADR-013) counts each test once, not N times
+    ; (each `reflect/load` re-registers, ADR-013) counts each test once, not N times
     (let (dirs (abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project-collect-tests d))) nil dirs))
       ;; Per-file scoped run (see `run-tests`) — matters most here: `nest mcp`
@@ -2936,9 +2936,9 @@ as unchanged (only when some were)."
       ;; file's promoted code on EVERY run-tests call. `BROOD_TEST_NO_SCOPE` reverts.
       (if (os/env "BROOD_TEST_NO_SCOPE")
         (do
-          (fold (fn (_ f) (load f)) nil files)
+          (fold (fn (_ f) (reflect/load f)) nil files)
           (/apply test/run-tests-structured opts))
-        (/apply test/run-tests-scoped-structured (map (fn (f) (fn () (load f))) files) opts)))))
+        (/apply test/run-tests-scoped-structured (map (fn (f) (fn () (reflect/load f))) files) opts)))))
 
 ;; Resolve a project's entry point to the callable it names, or raise saying why
 ;; not. A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
@@ -2956,7 +2956,7 @@ as unchanged (only when some were)."
     (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
       (when (nil? target)
         (error who ": entry fn '" fname "' is not defined (module '" modname "')"))
-      (let (f (eval target))
+      (let (f (reflect/eval target))
         (unless (fn? f)
           (error who ": entry '" fname "' is not callable (" (type-of f) ")"))
         f))))
@@ -3138,7 +3138,7 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
   ;; `package/ensure-deps` unbound during `nest release` (not exercised by nest check/suite).
   (require-one 'package)
   (let (manifest (file/slurp (path/join root "project.blsp")))
-    ;; Apply the manifest as DATA (not `load`) to learn its source paths + deps,
+    ;; Apply the manifest as DATA (not `reflect/load`) to learn its source paths + deps,
     ;; mirroring `setup`. We don't load any source here — just read it.
     (let (form (reflect/read-first manifest))
       (when (and (pair? form) (= (first form) 'project)) (apply-config (rest form))))
@@ -3428,7 +3428,7 @@ the reserved `--brood-build-info` argument prints."
       (file/spit p *config-default-source*)
       (io/puts (str "Created " p)))
     ;; Read the config as DATA and apply the `(config …)` form directly, rather
-    ;; than `(load)`-ing it as code. `load` evaluates a file at the *root*
+    ;; than `(reflect/load)`-ing it as code. `reflect/load` evaluates a file at the *root*
     ;; namespace with a fresh (empty) import table (ADR-065), so a bare
     ;; `(config …)` written in the user file would not resolve to this module's
     ;; `project/config`. Reading-as-data keeps the user config a clean bare DSL

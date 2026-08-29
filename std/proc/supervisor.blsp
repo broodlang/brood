@@ -2,7 +2,7 @@
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - A supervisor is an ordinary green process running a receive loop. It
-;;    `(trap-exit true)`s and `link`s each child, so a child's death arrives as a
+;;    `(proc/trap-exit true)`s and `link`s each child, so a child's death arrives as a
 ;;    trappable `[:EXIT pid reason]` message (ADR-067) — the bidirectional cousin
 ;;    of `monitor`. There is NO kernel supervisor (ADR-039 was reverted — see
 ;;    docs/supervision.md); this is pure Brood policy over spawn / link / trap-exit
@@ -524,7 +524,7 @@ arrive as `[:EXIT]` messages rather than killing us), start and link every child
 build the initial state, and enter the loop. `parent` is the pid that called
 `start` — if it's a supervisor it linked us in its own `start-child`, so
 its death reaches us as `[:EXIT parent …]` and we shut our subtree down."
-  (trap-exit true)
+  (proc/trap-exit true)
   (let (started (supervisor-start-each children 0 ()))
     (supervisor-loop (supervisor-rebuild {:children {}
                                           :ids {}

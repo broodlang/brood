@@ -440,7 +440,12 @@ verified by probe before the roadmap was updated.
 - **`sig` adoption itself** — mechanical rather than archaeological now (ADR-276 records the
   criteria, and the arithmetic-domain tier was probed rather than guessed in ADR-284's
   batch), but still a judgement call per declaration.
-- **Arrow decomposition** — the one thing deliberately left. `¬(int -> string)` is
-  *represented* exactly, but deciding coverage *between* arrow types still falls back to the
-  single-candidate rule. Contravariance needs its own decomposition rule, and nothing has
-  asked for it: the miss is incompleteness in the safe direction.
+- ~~**Arrow decomposition**~~ — shipped 2026-08-29 (ADR-292), and it was not the safe
+  incompleteness it had been recorded as. `(and (int -> int) (bool -> bool))` really is a
+  `(int|bool -> int|bool)`, the single-candidate rule answered *false*, and multi-arity
+  functions are exactly the intersections of arrows this language is built from. The
+  set-theoretic rule now decides it, reusing ADR-289's product covering for the domain half
+  rather than growing a second covering algorithm. Checked against a brute-force model of
+  what an arrow denotes, not against more property laws — a more permissive relation is the
+  one direction that can be unsound, and laws that check the relation against itself cannot
+  see it: **0 unsound and 0 missed containments across 2 547 216 pairs.**

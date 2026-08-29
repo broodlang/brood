@@ -30,7 +30,6 @@ const EFFECTFUL_IN_GUARD: &[&str] = &[
     "spawn",
     "spawn-link",
     "exit",
-    "kill",
     "link",
     "unlink",
     "monitor",
@@ -40,22 +39,26 @@ const EFFECTFUL_IN_GUARD: &[&str] = &[
     kw::TABLE_INCR,
     kw::TABLE_DELETE,
     kw::TABLE_DROP,
-    // I/O
-    "println",
-    "print",
+    // I/O. These carried the pre-namespacing spellings (`println`, `print`, `os-cmd`,
+    // `run-process`, `halt`) long after the names moved, so the checker had silently
+    // stopped recognising them — a stale entry here is not an error anywhere, it just
+    // stops flagging. Kept as the qualified names the modules actually export.
+    "io/puts",
+    "io/write",
     "file/spit",
     "file/spit-append",
     "file/slurp",
     "read-line",
-    "os-cmd",
-    "run-process",
-    "halt",
+    "os/cmd",
+    "os/run-process",
+    "os/spawn",
+    "system/halt",
     // global rebinding / effectful metaprogramming
     "def",
     "defn",
     "defmacro",
-    "eval",
-    "load",
+    "reflect/eval",
+    "reflect/load",
     "require-one",
 ];
 

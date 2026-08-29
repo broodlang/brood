@@ -13,7 +13,7 @@
 ;;;   - Pattern matching on values of unknown runtime type
 ;;;   - `fold` / `reduce` with a type-polymorphic accumulator function
 ;;;   - `apply` with ill-typed arguments (should raise, not panic)
-;;;   - `eval` of value types that are not self-evaluating
+;;;   - `reflect/eval` of value types that are not self-evaluating
 
 (io/puts "--- the soup: every value type in one list ---")
 

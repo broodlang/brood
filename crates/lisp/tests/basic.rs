@@ -174,7 +174,7 @@ fn maps_structural_keys_and_equality() {
 fn maps_round_trip_through_reader() {
     // pr-str's readable form reads + evals back to an equal map.
     let src = "(def m {:a 1 :b [2 3] :c \"x\" :d {:nested true}}) \
-               (= m (eval (reflect/read-string (pr-str m))))";
+               (= m (reflect/eval (reflect/read-string (pr-str m))))";
     assert_eq!(run(src), "true");
 }
 
@@ -346,7 +346,10 @@ fn unchanged_redefinition_is_deduped() {
 /// `eval` + `reflect/read-string` let the language run code it builds at runtime.
 #[test]
 fn eval_and_read_string() {
-    assert_eq!(run("(eval (reflect/read-string \"(+ 40 2)\"))"), "42");
+    assert_eq!(
+        run("(reflect/eval (reflect/read-string \"(+ 40 2)\"))"),
+        "42"
+    );
 }
 
 #[test]
@@ -374,7 +377,9 @@ fn source_location_records_def_sites_from_a_loaded_file() {
     let p = path.to_string_lossy().replace('\\', "\\\\");
 
     let mut interp = Interp::new();
-    interp.eval_str(&format!("(load \"{p}\")")).expect("load");
+    interp
+        .eval_str(&format!("(reflect/load \"{p}\")"))
+        .expect("load");
     let loc = |interp: &mut Interp, s: &str| {
         let v = interp_eval(interp, s);
         interp.print(v)
@@ -958,7 +963,7 @@ fn hints_name_only_features_that_exist() {
     assert!(hint("(letfn ((f (x) x)) 1)").contains("letrec"));
     // `lazy-seq` names the seq-views that do exist.
     let l = hint("(lazy-seq 1)");
-    assert!(l.contains("lmap") && l.contains("lfilter"), "{l}");
+    assert!(l.contains("seq/lmap") && l.contains("seq/lfilter"), "{l}");
     // The reader owns every `#X` spelling (so the `#` arm above is a backstop). Its
     // `#_` hint predated `comment` and offered only `;`.
     let d = run("(try (reflect/read-string \"(x #_1)\") (catch e (get e :hint)))");
@@ -1017,7 +1022,9 @@ fn unbound_bare_name_suggests_use_of_a_hierarchical_namespace() {
 fn parse_errors_carry_position_in_catch_map() {
     let mut interp = Interp::new();
     let r = interp
-        .eval_str("(try (eval-string \"(unclosed\") (catch e [(get e :kind) (get e :line)]))")
+        .eval_str(
+            "(try (reflect/eval-string \"(unclosed\") (catch e [(get e :kind) (get e :line)]))",
+        )
         .unwrap();
     let printed = interp.print(r);
     assert!(printed.contains(":parse"), "{printed}");
@@ -1189,7 +1196,7 @@ fn located_diagnostic_carries_file_line_col() {
     let p_str = path.to_string_lossy().to_string();
 
     let err = Interp::new()
-        .eval_str(&format!("(load {:?})", p_str))
+        .eval_str(&format!("(reflect/load {:?})", p_str))
         .unwrap_err();
     let line = err.located();
     // PATH:3:1: type error: first: ...
@@ -1367,9 +1374,9 @@ fn dynamic_variables() {
         run("(defdyn *d* 0) (try (binding (*d* 5) (throw \"x\")) (catch e nil)) *d*"),
         "0"
     );
-    // `dynamic?` reports declared dynamics only.
+    // `reflect/dynamic?` reports declared dynamics only.
     assert_eq!(
-        run("(defdyn *d* 0) (list (dynamic? '*d*) (dynamic? 'rd) (dynamic? 42))"),
+        run("(defdyn *d* 0) (list (reflect/dynamic? '*d*) (reflect/dynamic? 'rd) (reflect/dynamic? 42))"),
         "(true false false)"
     );
 }
@@ -1799,7 +1806,7 @@ fn call_site_ic_sees_redefinition_within_a_form() {
             "(def loop-f
                (fn (n)
                  (if (= n 0)
-                   (do (eval '(def f (fn () :new))) (f))
+                   (do (reflect/eval '(def f (fn () :new))) (f))
                    (do (f) (loop-f (- n 1))))))
              (loop-f 50)",
         )

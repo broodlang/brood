@@ -54,9 +54,9 @@
     (assert= (sa-call-reloadable 1) 2))
 
   (test "a closure whose body is built at runtime still runs"
-    ;; `eval` of a constructed form gives a closure whose body may be LOCAL — unkeyable,
+    ;; `reflect/eval` of a constructed form gives a closure whose body may be LOCAL — unkeyable,
     ;; so it takes the no-cache path. It must simply work.
-    (let (f (eval (reflect/read-string "(fn (x) (* x 7))")))
+    (let (f (reflect/eval (reflect/read-string "(fn (x) (* x 7))")))
       (assert= (f 6) 42)))
 
   (test "across processes: a fresh closure per process, run concurrently"

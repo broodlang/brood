@@ -1,4 +1,4 @@
-;; The kernel system monitor (`system-monitor` + telemetry `watch-runtime`):
+;; The kernel system monitor (`proc/system-monitor` + telemetry `watch-runtime`):
 ;; runtime events — :spawn / :exit / :gc / :deopt — pushed to one subscriber as
 ;; `[:system kind subject-pid detail]` messages (the observability event
 ;; stream's kernel sources).
@@ -30,48 +30,48 @@
   (n)
   "Poll until the kernel monitor reads back as nil (the async death-disarm), or
 `n` attempts run out. Returns the final config (nil on success)."
-  (if (or (nil? (system-monitor)) (= n 0))
-    (system-monitor)
+  (if (or (nil? (proc/system-monitor)) (= n 0))
+    (proc/system-monitor)
     (do (sleep 20) (sysmon-wait-disarm (- n 1)))))
 
 (defn- sysmon-done
   ()
   "End-of-test hygiene: disarm, then drain any [:system …] backlog out of this
 worker's mailbox so it can't satisfy a later test's receive."
-  (system-monitor nil)
+  (proc/system-monitor nil)
   (receive ([:system _ _ _] (sysmon-done)) (after 0 nil)))
 
 (describe "system-monitor arming"
   :isolated (test "read / arm / clear round-trip, previous config returned"
     ; unarmed by default
-    (assert= nil (system-monitor))
+    (assert= nil (proc/system-monitor))
     ; arm-all: previous was nil
-    (assert= nil (system-monitor (self)))
-    (let (cfg (system-monitor))
+    (assert= nil (proc/system-monitor (self)))
+    (let (cfg (proc/system-monitor))
       (assert= (self) (get cfg :pid))
       (assert= true (get cfg :gc))
       (assert= true (get cfg :spawn))
       (assert= true (get cfg :exit))
       (assert= true (get cfg :deopt))
       (assert= 0 (get cfg :gc-min-pause-us)))
-    (let (prev (system-monitor nil))
+    (let (prev (proc/system-monitor nil))
       ; clear returns the old config
       (assert= (self) (get prev :pid)))
-    (assert= nil (system-monitor)))
+    (assert= nil (proc/system-monitor)))
 
   (test "an opts map selects exactly its truthy keys"
-    (system-monitor (self) {:exit true :gc-min-pause-us 250})
-    (let (cfg (system-monitor))
+    (proc/system-monitor (self) {:exit true :gc-min-pause-us 250})
+    (let (cfg (proc/system-monitor))
       (assert= false (get cfg :gc))
       (assert= false (get cfg :spawn))
       (assert= true (get cfg :exit))
       (assert= false (get cfg :deopt))
       (assert= 250 (get cfg :gc-min-pause-us)))
-    (system-monitor nil)))
+    (proc/system-monitor nil)))
 
 (describe "system-monitor events"
   :isolated (test "spawn and exit events arrive with pid, parent, and reason"
-    (system-monitor (self) {:spawn true :exit true})
+    (proc/system-monitor (self) {:spawn true :exit true})
     (let (me (self)
           child (spawn :done))
       ; detail = parent pid
@@ -80,7 +80,7 @@ worker's mailbox so it can't satisfy a later test's receive."
     (sysmon-done))
 
   (test "exit events carry the abnormal structured reason"
-    (system-monitor (self) {:exit true})
+    (proc/system-monitor (self) {:exit true})
     (let (child (spawn (error "event stream")))
       (let (reason (sysmon-drain-until :exit child))
         ;; the same [:error {…}] shape monitors and links see
@@ -89,7 +89,7 @@ worker's mailbox so it can't satisfy a later test's receive."
     (sysmon-done))
 
   (test "gc events report the collection with a pause figure"
-    (system-monitor (self) {:gc true})
+    (proc/system-monitor (self) {:gc true})
     (let (worker (spawn (do (sysmon-churn 50000 ()) (dev/gc-collect) :ok)))
       (let (m (sysmon-drain-until :gc worker))
         (is (map? m))
@@ -101,7 +101,7 @@ worker's mailbox so it can't satisfy a later test's receive."
   (test "a gc-min-pause-us threshold suppresses cheap collections"
     ;; 10-minute threshold: no minor collection takes that long, so nothing
     ;; may arrive. Wait for the worker to finish, then prove silence.
-    (system-monitor (self) {:gc true :gc-min-pause-us 600000000})
+    (proc/system-monitor (self) {:gc true :gc-min-pause-us 600000000})
     (let (worker (spawn (do (sysmon-churn 50000 ()) (dev/gc-collect) :ok))
           wm (monitor worker))
       (receive ([:down ^wm ^worker _] :ok) (after *test-wait-ms* :timeout))
@@ -111,10 +111,10 @@ worker's mailbox so it can't satisfy a later test's receive."
   (test "no self-reporting, and the monitor's death disarms the stream"
     ;; a watcher process arms itself, then dies — the kernel must clear the
     ;; config rather than keep charging every event site
-    (let (watcher (spawn (do (system-monitor (self)) (receive (:never nil)))))
+    (let (watcher (spawn (do (proc/system-monitor (self)) (receive (:never nil)))))
       ; let it arm
       (sleep 50)
-      (assert= watcher (get (system-monitor) :pid))
+      (assert= watcher (get (proc/system-monitor) :pid))
       (exit watcher :kill)
       (assert= nil (sysmon-wait-disarm 100)))))
 

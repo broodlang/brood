@@ -11,6 +11,23 @@
 ;; `check-allow` deliberately stays core: it is a source PRAGMA, matched textually out of
 ;; the source by the Rust checker the way `sig` is, and it reads at 42 call sites as part of
 ;; the code rather than as a call into a tool.
+;;
+;; Ten of this module's names are KERNEL primitives, registered under `reflect/` in Rust
+;; the way `bit/and` and `proc/register` are (`crates/lisp/src/builtins/mod.rs`): Rust
+;; supplies the mechanism, the namespace is Brood's. Until 2026-08-28 they were spelled
+;; bare — eval, load, global-names, special-forms, doc-forms, builtin-modules, current-ns,
+;; eval-string, dynamic?, private? (named without backticks here on purpose: those
+;; spellings no longer resolve, and a rename sweep must not "helpfully" requalify a
+;; sentence about the OLD names). Every one takes a file, a source string or a form and is
+;; called by TOOLING, which is this module's charter; and eval and load in particular were
+;; the two most generic words the kernel held, so a user's own top-level `(def load …)`
+;; could not have them. The bare namespace is the scarce resource. `(:use reflect)` brings
+;; the whole surface back bare inside one module.
+;;
+;; A macro that EMITS one of these must emit the root escape — `'/reflect/current-ns`, not
+;; `'reflect/current-ns` — so a consuming module that happens to `(:alias reflect …)`
+;; something else cannot capture the reference. The prelude's `defability`/`defrecord`
+;; expansions do exactly this.
 (defmodule reflect)
 
 (defn reflect/read-string (s)

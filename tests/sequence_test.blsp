@@ -338,7 +338,8 @@
 
 ; worker i folds a fused VIEW over the shared global — same Σ 1..i as seq-reader
 (defn seq-view-reader (parent i)
-  (send parent [:s (->> seq-data (take i) (lfilter (fn (_) true)) (lmap identity) (reduce + 0))]))
+  (send parent
+    [:s (->> seq-data (take i) (seq/lfilter (fn (_) true)) (seq/lmap identity) (reduce + 0))]))
 (defn seq-spawn-view-readers (parent n)
   (when (> n 0) (spawn (seq-view-reader parent n)) (seq-spawn-view-readers parent (- n 1))))
 
@@ -361,55 +362,56 @@
     (assert= (seq-sum 0 10 0) 220)))
 
 ;; ---- lazy, fusing seq-views (compute-frontier lever 3) -----------------------
-;; `lmap`/`lfilter`/`lkeep`/`lremove` return a non-materialising view that fuses
+;; `seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lremove` return a non-materialising view that fuses
 ;; through `fold`; compose them with `->>`. `map`/`filter` stay EAGER (and keep
 ;; running side effects). See ADR lazy-seq-view.
 
 (describe "lazy seq-views"
   (test "lmap/lfilter are views; map/filter stay eager lists"
-    (is (seqview? (lmap inc [1 2 3])))
-    (is (seqview? (lfilter even? (range 5))))
+    (is (seqview? (seq/lmap inc [1 2 3])))
+    (is (seqview? (seq/lfilter even? (range 5))))
     (refute (seqview? (map inc [1 2 3])))
     (refute (seqview? (filter even? (range 5)))))
 
   (test "a view realises to the list it stands for"
-    (assert= (seq (lmap inc [10 20 30])) (list 11 21 31))
-    (assert= (seq (lfilter even? (range 8))) (list 0 2 4 6))
-    (assert= (seq (lkeep (fn (x) (if (even? x) (* x 10) nil)) (range 4))) (list 0 20))
-    (assert= (seq (lremove even? (range 6))) (list 1 3 5)))
+    (assert= (seq (seq/lmap inc [10 20 30])) (list 11 21 31))
+    (assert= (seq (seq/lfilter even? (range 8))) (list 0 2 4 6))
+    (assert= (seq (seq/lkeep (fn (x) (if (even? x) (* x 10) nil)) (range 4))) (list 0 20))
+    (assert= (seq (seq/lremove even? (range 6))) (list 1 3 5)))
 
   (test "fold/reduce/sum/count fuse over a view"
-    (assert= (reduce + 0 (lmap (fn (i) (* i i)) (lfilter odd? (range 10)))) 165)
-    (assert= (sum (lmap inc (range 5))) 15)
-    (assert= (count (lfilter even? (range 100))) 50)
-    (assert= (fold (fn (a x) (cons x a)) nil (lmap inc [1 2 3])) (list 4 3 2)))
+    (assert= (reduce + 0 (seq/lmap (fn (i) (* i i)) (seq/lfilter odd? (range 10)))) 165)
+    (assert= (sum (seq/lmap inc (range 5))) 15)
+    (assert= (count (seq/lfilter even? (range 100))) 50)
+    (assert= (fold (fn (a x) (cons x a)) nil (seq/lmap inc [1 2 3])) (list 4 3 2)))
 
   (test "chained l* stages compose into one fused view"
     (assert= (reduce +
                0
-               (lmap (fn (i) (* i i))
-                 (lfilter (fn (i) (or (= 0 (math/rem i 3)) (= 0 (math/rem i 5)))) (range 20))))
+               (seq/lmap (fn (i) (* i i))
+                 (seq/lfilter (fn (i) (or (= 0 (math/rem i 3)) (= 0 (math/rem i 5)))) (range 20))))
       944)
-    (assert= (seq (lremove even? (lmap inc (range 6)))) (list 1 3 5)))
+    (assert= (seq (seq/lremove even? (seq/lmap inc (range 6)))) (list 1 3 5)))
 
   (test "->> threads l* stages into one fused left-to-right pipeline"
     ;; (even? then inc): 0→1, 2→3, 4→5, 6→7, 8→9 ⇒ 1+3+5+7+9 = 25
-    (assert= (->> (range 10) (lfilter even?) (lmap inc) (reduce + 0)) 25)
-    (assert= (seq (->> (range 3) (lmap inc))) (list 1 2 3))
-    (assert= (->> (range 6) (lfilter odd?) (lmap (fn (i) (* i i))) (sum)) 35)
-    (assert= (into [] (->> (range 8) (lremove even?) (lkeep (fn (x) (if (> x 3) x nil))))) [5 7]))
+    (assert= (->> (range 10) (seq/lfilter even?) (seq/lmap inc) (reduce + 0)) 25)
+    (assert= (seq (->> (range 3) (seq/lmap inc))) (list 1 2 3))
+    (assert= (->> (range 6) (seq/lfilter odd?) (seq/lmap (fn (i) (* i i))) (sum)) 35)
+    (assert= (into [] (->> (range 8) (seq/lremove even?) (seq/lkeep (fn (x) (if (> x 3) x nil)))))
+      [5 7]))
 
   (test "view interop: first/rest/nth/empty?/into/=/join/apply/str"
-    (assert= (first (lmap inc [10 20])) 11)
-    (assert= (rest (lmap inc [10 20 30])) (list 21 31))
-    (assert= (nth (lmap inc (range 100)) 50) 51)
-    (is (empty? (lfilter (fn (_) false) (range 10))))
-    (refute (empty? (lfilter even? (range 10))))
-    (assert= (into [] (lmap inc [1 2 3])) [2 3 4])
-    (assert= (lmap inc [1 2 3]) (list 2 3 4))
-    (assert= (string/join "," (lmap str (range 4))) "0,1,2,3")
-    (assert= (apply + (lmap inc [1 2 3])) 9)
-    (assert= (str (lmap inc [1 2 3])) "(2 3 4)"))
+    (assert= (first (seq/lmap inc [10 20])) 11)
+    (assert= (rest (seq/lmap inc [10 20 30])) (list 21 31))
+    (assert= (nth (seq/lmap inc (range 100)) 50) 51)
+    (is (empty? (seq/lfilter (fn (_) false) (range 10))))
+    (refute (empty? (seq/lfilter even? (range 10))))
+    (assert= (into [] (seq/lmap inc [1 2 3])) [2 3 4])
+    (assert= (seq/lmap inc [1 2 3]) (list 2 3 4))
+    (assert= (string/join "," (seq/lmap str (range 4))) "0,1,2,3")
+    (assert= (apply + (seq/lmap inc [1 2 3])) 9)
+    (assert= (str (seq/lmap inc [1 2 3])) "(2 3 4)"))
 
   (test "reduce with a capturing step closure over a large range is exact (HOF JIT fast-frame + capture fill)"
     ;; Regression guard for the HOF native fast-frame (`hof_apply_native`): a `reduce` step
@@ -430,10 +432,10 @@
     ; eager → runs now
     (assert= (with-out-str (map io/write (range 5))) "01234")
     ; view built, not realised → nothing
-    (assert= (with-out-str (lmap io/write (range 5))) "")
+    (assert= (with-out-str (seq/lmap io/write (range 5))) "")
     ; seq realises → runs
-    (assert= (with-out-str (seq (lmap io/write (range 5)))) "01234")
-    (assert= (with-out-str (reduce (fn (a _) a) nil (lmap io/write (range 5)))) "01234")))
+    (assert= (with-out-str (seq (seq/lmap io/write (range 5)))) "01234")
+    (assert= (with-out-str (reduce (fn (a _) a) nil (seq/lmap io/write (range 5)))) "01234")))
 
 ;; ---- views across processes / network / hot-reload --------------------------
 ;; A view is heap-local: `send` REFUSES to ship one (it references the sender's
@@ -445,11 +447,11 @@
 ; fold realises
 (describe "lazy seq-views across processes and reload"
   :isolated (test "a raw view cannot be sent — it must be realised first (heap-local guard)"
-    (assert-error (send (self) [:v (lmap inc [1 2 3])])))
+    (assert-error (send (self) [:v (seq/lmap inc [1 2 3])])))
 
   (test "a realised view round-trips through a worker as a deep-copied list"
     (let (me (self)
-          _w (spawn (send me [:v (seq (->> (range 5) (lmap inc) (lfilter even?)))])))
+          _w (spawn (send me [:v (seq (->> (range 5) (seq/lmap inc) (seq/lfilter even?)))])))
       (let (got (receive ([:v xs] xs)))
         ; the receiver got a plain list, not a live view
         (refute (seqview? got))
@@ -463,7 +465,7 @@
     ;; The view's fn calls `view-scale` BY NAME; redefining that global before the
     ;; view is realised means the fold sees the NEW definition (late binding).
     (def view-scale (fn (x) (* x 1)))
-    (let (v (lmap (fn (x) (view-scale x)) (range 4)))
+    (let (v (seq/lmap (fn (x) (view-scale x)) (range 4)))
       ; view built, NOT realised
       (def view-scale (fn (x) (* x 10)))
       (assert= (seq v) (list 0 10 20 30)))))

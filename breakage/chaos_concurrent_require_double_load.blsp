@@ -48,7 +48,7 @@
                  k ") (defmodule sec" k ") "
                  "(%registry-update! '*chaos-loads* :cons-new nil (self))")))
         (range files))
-      (eval (list 'def '*chaos-loads* nil))
+      (reflect/eval (list 'def '*chaos-loads* nil))
       (setup root)
       ;; Race `nreq` concurrent requires of each secondary in turn — every requirer of one
       ;; key claims against the same marker, so at most one may load its file.
@@ -59,4 +59,4 @@
                (await-n nreq)))
         (range files))
       ;; One load per file → exactly `files` pids on the list. A double-load makes it more.
-      (assert= files (count (eval '*chaos-loads*))))))
+      (assert= files (count (reflect/eval '*chaos-loads*))))))

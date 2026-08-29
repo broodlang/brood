@@ -188,7 +188,7 @@ mod tests {
         std::fs::write(&path, "(defn greet (who) who)\n").unwrap();
 
         let mut interp = Interp::new();
-        let load = format!("(load \"{}\")", path.display());
+        let load = format!("(reflect/load \"{}\")", path.display());
         interp.eval_str(&load).expect("load the module");
 
         let src = "(greet \"world\")";

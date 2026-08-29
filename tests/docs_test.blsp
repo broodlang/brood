@@ -14,7 +14,7 @@
   (test "the baked-in test module carries a module docstring"
     (is (string/starts-with? (docs/docs-leading-doc (%builtin-module "test")) "A tiny ExUnit"))))
 
-(describe "docs: name attribution (global-names delta)"
+(describe "docs: name attribution (reflect/global-names delta)"
   (test "added names are those in after but not before"
     (assert= (docs/docs-added '(a b) '(a b c d)) '(c d)))
   (test "nothing newly bound is empty" (assert= (docs/docs-added '(a b) '(a b)) nil)))
@@ -64,7 +64,7 @@
   (test "a module model has :module/:doc/:defs; only documentable fns/macros reach :defs"
     (defn model-pub (x) x)
     (def model-val 42)
-    ; the syms arrive qualified (as they do from `global-names`), so eval resolves them;
+    ; the syms arrive qualified (as they do from `reflect/global-names`), so eval resolves them;
     ; the plain value is not documentable and is dropped, the function is kept
     (let (model (docs/docs-module-model "m" "Doc." '(docs-test/model-pub docs-test/model-val)))
       (assert= (get model :module) "m")
@@ -167,7 +167,7 @@
 ;; this asserts the invariant directly, and it is cheap (one `bound?` per entry).
 (describe "doc catalogue: every entry names something that exists"
   (test "no catalogue entry is a name the runtime cannot resolve"
-    (let (forms (into #{} (map (fn (f) (if (pair? f) (first f) f)) (special-forms)))
+    (let (forms (into #{} (map (fn (f) (if (pair? f) (first f) f)) (reflect/special-forms)))
           missing (filter (fn (k)
                             (let (s (string/->symbol k))
                               (not (or (bound? s) (contains? forms s)))))
@@ -192,7 +192,7 @@
 (describe "doc catalogue: every public core name has a category"
   (test "nothing falls through to :other"
     ;; The candidate set is asserted before the violation set. This gate walks
-    ;; `(global-names)` and asserts a FILTERED result is empty, which is the shape that
+    ;; `(reflect/global-names)` and asserts a FILTERED result is empty, which is the shape that
     ;; passes vacuously when the filter stops matching — a bug that made every name look
     ;; private, say, would empty the corpus and the drawer would look clean. ADR-280 is
     ;; the same lesson from the startup image: assert the coverage, not only the verdict.
@@ -201,9 +201,9 @@
                                  (and (not (and i (> i 0)))
                                    (not (includes? nm "--"))
                                    (not (string/starts-with? nm "%"))
-                                   (not (private? s))
-                                   (or (fn? (eval s)) (= (type-of (eval s)) :macro)))))
-                       (global-names)))
+                                   (not (reflect/private? s))
+                                   (or (fn? (reflect/eval s)) (= (type-of (reflect/eval s)) :macro)))))
+                       (reflect/global-names)))
       (assert= true (> (count candidates) 200)))
     (let (uncatalogued (filter
                          (fn (s)
@@ -212,9 +212,9 @@
                                ; not a module function
                                (not (includes? nm "--"))
                                (not (string/starts-with? nm "%")) ; not a kernel primitive
-                               (not (private? s)) ; not an internal helper
-                               (or (fn? (eval s)) (= (type-of (eval s)) :macro))
+                               (not (reflect/private? s)) ; not an internal helper
+                               (or (fn? (reflect/eval s)) (= (type-of (reflect/eval s)) :macro))
                                (= (doc-catalog/category-of nm) :other))))
-                         (global-names)))
+                         (reflect/global-names)))
       ;; Names, not a count — a failure should say WHICH name needs a category.
       (assert= (sort (map ->string uncatalogued)) (list)))))

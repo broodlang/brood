@@ -31,7 +31,7 @@
     (= k 0) nil
     else
       (do
-        (eval (list 'def (symbol (str "nde-fresh-" tag "-" k)) k))
+        (reflect/eval (list 'def (symbol (str "nde-fresh-" tag "-" k)) k))
         (nde-fresh-defs tag (- k 1)))))
 
 (describe "ADR-217: first-time defs leave a hot arm alone; a rebind still invalidates it"

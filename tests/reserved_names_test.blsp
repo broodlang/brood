@@ -14,13 +14,13 @@
 ;; `gen/call` bound (reserved) while `call` stays free.
 (defmodule reserved-names-test (:use test) (:use set) (:use path) (:alias gen))
 
-;; `eval-string` so the rejected forms are compiled at RUNTIME (a literal `(def get
+;; `reflect/eval-string` so the rejected forms are compiled at RUNTIME (a literal `(def get
 ;; …)` in this file would refuse at load and take the whole suite with it).
 ;; The fix-it guidance rides the error's `:hint`, which `error-message` strips — so
 ;; join both, or an assertion about the hint silently can't match.
 (defn rn-detail (e)
   (if (map? e) (str (error-message e) " | " (get e :hint)) (str e)))
-(defn rn-try (src) (try (do (eval-string src) :allowed) (catch e (rn-detail e))))
+(defn rn-try (src) (try (do (reflect/eval-string src) :allowed) (catch e (rn-detail e))))
 (defn rn-refused? (src) (includes? (str (rn-try src)) "reserved name"))
 
 (describe "reserved: what the language ships"
@@ -69,24 +69,24 @@
     (is (rn-refused? "(def gen/start (fn (f s) :hacked))")))
   (test "`gen` is still a reserved PACKAGE name — the namespace belongs to std"
     (is (reserved-package-name? 'gen))
-    (is (includes? (builtin-modules) "gen"))))
+    (is (includes? (reflect/builtin-modules) "gen"))))
 
 (describe "yours: everything else stays redefinable"
   (test "a plain global redefines freely — this IS hot reload"
     (assert= :allowed (rn-try "(def rn-mine (fn () 1))"))
     (assert= :allowed (rn-try "(def rn-mine (fn () 2))"))
-    (assert= 2 (eval-string "(rn-mine)")))
+    (assert= 2 (reflect/eval-string "(rn-mine)")))
   (test "a defn redefines freely, arity change included"
     (assert= :allowed (rn-try "(defn rn-f (x) x)"))
     (assert= :allowed (rn-try "(defn rn-f (x y) (+ x y))"))
-    (assert= 7 (eval-string "(rn-f 3 4)")))
+    (assert= 7 (reflect/eval-string "(rn-f 3 4)")))
   (test "the prelude's own DATA globals stay rebindable — they must"
     ;; `*features*` / `*load-path*` / `*module-docs*` are registries that prelude
     ;; functions rebind with `def` (Brood's one mutation). Reserving them would break
     ;; `require`, `provide` and `defmodule`. The rule is "a shipped FUNCTION is
     ;; reserved", not "a shipped NAME is".
     (is (bound? '*load-path*))
-    (assert= :allowed (rn-try "(add-load-path! \".\")"))
+    (assert= :allowed (rn-try "(reflect/add-load-path! \".\")"))
     (assert= :allowed (rn-try "(require-one 'set)"))))
 
 (describe "a dynamic var is never reserved"
@@ -98,7 +98,7 @@
     ;; this: an output port IS a function, so `*out*`/`*err*` would otherwise have been
     ;; reserved by the function-valued test, leaving only the scoped `binding` form and
     ;; no way to redirect output permanently.
-    (is (dynamic? '*out*))
+    (is (reflect/dynamic? '*out*))
     (is (fn? *out*))
     (assert= :allowed (rn-try "(def *err* %write-err)"))
     (assert= :allowed (rn-try "(def *reload-diagnostics* true)")))
@@ -123,7 +123,7 @@
     ;; `(defn get …)` inside module `m` defines `m/get` — this is why the blast
     ;; radius of the rule is tiny: the namespace system already did the work.
     (assert= :allowed (rn-try "(defmodule rn-mod) (defn get (m k) :mine)"))
-    (assert= :mine (eval-string "(rn-mod/get {} :k)"))
+    (assert= :mine (reflect/eval-string "(rn-mod/get {} :k)"))
     ;; and the root `get` is untouched by that
     (assert= 1 (get {:a 1} :a))))
 
@@ -134,7 +134,7 @@
       (spawn (send me
                [:result
                  (try
-                   (do (eval-string "(def get (fn (a b) :x))") :allowed)
+                   (do (reflect/eval-string "(def get (fn (a b) :x))") :allowed)
                    (catch e :refused))]))
       (assert= :refused (receive ([:result r] r)))))
   (test "and a spawned process can still redefine its own names"
@@ -142,6 +142,6 @@
       (spawn (send me
                [:result
                  (try
-                   (do (eval-string "(def rn-child (fn () 1))") :allowed)
+                   (do (reflect/eval-string "(def rn-child (fn () 1))") :allowed)
                    (catch e :refused))]))
       (assert= :allowed (receive ([:result r] r))))))

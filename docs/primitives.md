@@ -112,10 +112,10 @@ arg silently becoming `nil`.
 | | `now-ns` | 0 | Wall-clock nanoseconds since the Unix epoch (finer-grained than now). |
 | **Memory** | `mem-bytes` | 0 | bytes currently allocated process-wide (from the counting global allocator) |
 | | `mem-peak` | 0 | high-water mark of allocated bytes since process start |
-| **Self-hosting hooks** | `eval` | 1 | evaluate a form in the global env |
+| **Self-hosting hooks** | `reflect/eval` | 1 | evaluate a form in the global env |
 | | `reflect/read-string` | 1 | parse one form from text |
-| | `eval-string` | 1 | read + evaluate every form in a string (string analogue of `load`) |
-| | `load` | 1 | read + evaluate a file |
+| | `reflect/eval-string` | 1 | read + evaluate every form in a string (string analogue of `reflect/load`) |
+| | `reflect/load` | 1 | read + evaluate a file |
 | | `%builtin-module` | 1 | source of a baked-in std module by name, or nil (used by Brood `require`) |
 | | `apply` | ≥2 | call a function with a spliced argument list |
 | | `%run-program-file` | 1 | Run the program file at `path` as its own green process (ADR-135) and block until it finishes; nil, or raises if a top-level form did. |
@@ -127,9 +127,9 @@ arg silently becoming `nil`.
 | | `file/exists?` `file/dir?` | 1 | path exists / is a directory → bool |
 | | `file/ls` | 1 | entry names directly under a directory (sorted) |
 | | `file/mkdir` | 1 | create a directory and parents (`mkdir -p`) |
-| | `file/spit` | 2 | write a string to a file (write-side of `load`) |
-| | `file/slurp` | 1 | read a whole file into a string (read-side of `file/spit`; unlike `load`, does not evaluate) |
-| | `file/mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `load` for hot-reload) |
+| | `file/spit` | 2 | write a string to a file (write-side of `reflect/load`) |
+| | `file/slurp` | 1 | read a whole file into a string (read-side of `file/spit`; unlike `reflect/load`, does not evaluate) |
+| | `file/mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `reflect/load` for hot-reload) |
 | | `file/stat` | 1 | one-stat metadata map `{:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}`, or nil if missing (collapses `file/dir?`+`file/size`+`file/mtime` for a directory lister + a recency sort) |
 | | `file/slurp-bytes` | 1 | Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (file/slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset. |
 | | `file/spit-bytes` | 2 | Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. |
@@ -167,11 +167,11 @@ arg silently becoming `nil`.
 | | `span-runs` | 3–4 | Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. |
 | **Introspection** (editor tooling) | `doc` | 1 | a function/macro's docstring, or nil |
 | | `arglist` | 1 | a function/macro's parameter list (required, `&optional`, `& rest`), or nil |
-| | `global-names` | 0 | every globally bound symbol, sorted by spelling (completion / doc generation) |
-| | `special-forms` | 0 | the special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter (`std/editor/highlight.blsp`) and the LSP |
+| | `reflect/global-names` | 0 | every globally bound symbol, sorted by spelling (completion / doc generation) |
+| | `reflect/special-forms` | 0 | the special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter (`std/editor/highlight.blsp`) and the LSP |
 | | `bound?` | 1 | whether a symbol is bound in scope → bool |
-| | `dynamic?` | 1 | whether a symbol names a dynamic variable (declared via `defdyn`) → bool |
-| | `builtin-modules` | 0 | The names of every module baked into this binary, as a sorted list of strings — what `(require 'name)` resolves without a load-path. Backs `nest` shell completion and lets a name be validated before requiring it. |
+| | `reflect/dynamic?` | 1 | whether a symbol names a dynamic variable (declared via `defdyn`) → bool |
+| | `reflect/builtin-modules` | 0 | The names of every module baked into this binary, as a sorted list of strings — what `(require 'name)` resolves without a load-path. Backs `nest` shell completion and lets a name be validated before requiring it. |
 | | `references-in-source` | 2 | Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded. |
 | | `system/build-id` | 0 | This brood build's identity as "<version>+<git-sha>+<binary-stamp>" (e.g. "0.1.0+dcab7ca+18f2e1a9b3c4d5e6") — the correct staleness stamp for an on-disk cache of anything the kernel computes. |
 | **Errors / control** | `throw` | 1 | raise a value as an error (non-local exit) |
@@ -191,7 +191,7 @@ arg silently becoming `nil`.
 | | `spawn-count` | 0 | green processes spawned since program start |
 | | `peak-threads` | 0 | high-water mark of spawned threads running concurrently (bounded by the CLI's `-j`) |
 | | `worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
-| | `link` | 1 | Symmetrically link the current process and pid, local or remote (Erlang link/1). When either dies, the other gets a [:EXIT pid reason] message if it set (trap-exit true), else dies too on an abnormal reason (propagation cascades through links; :normal does not propagate). |
+| | `link` | 1 | Symmetrically link the current process and pid, local or remote (Erlang link/1). When either dies, the other gets a [:EXIT pid reason] message if it set (proc/trap-exit true), else dies too on an abnormal reason (propagation cascades through links; :normal does not propagate). |
 | | `unlink` | 1 | Drop the symmetric link between the current process and pid (local or remote; best-effort). Returns nil. |
 | **Distributed nodes** ([docs](distribution.md), ADR-034) | `node/start` | 3 | name this runtime (`node`, `"host:port"`, `cookie`), start the acceptor; cookie is the HMAC key for handshake v2 (never on the wire). Returns the node name |
 | | `connect` | 1 | dial `"name@host:port"`, complete the v2 handshake (magic+version, nonce-exchange, HMAC challenge-response). Returns the peer's node name |
@@ -315,9 +315,9 @@ literal — no constructor call.
 |  | `steal-count` | 0 | How many fresh processes the scheduler work-stole across worker threads since program start; 0 means placement-at-spawn kept the pool even. |
 |  | `profile-start` | 0–1 | Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). |
 |  | `profile-stop` | 0 | Disarm the sampling profiler and return the histogram: a list of {:stack (fn-names... innermost-first) :count n} maps, most-sampled first. Empty list if never armed. A sample whose frames were all anonymous appears with :stack ("<anonymous>"). |
-|  | `system-monitor` | 0–2 | Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). |
+|  | `proc/system-monitor` | 0–2 | Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). |
 |  | `proc/flag` | 1–2 | Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). |
-|  | `trap-exit` | 1 | Set the current process's trap_exit flag (Erlang process_flag(trap_exit, …)); returns the previous value. When on, a linked peer's death arrives as a trappable [:EXIT pid reason] message instead of killing this process. |
+|  | `proc/trap-exit` | 1 | Set the current process's trap_exit flag (Erlang process_flag(trap_exit, …)); returns the previous value. When on, a linked peer's death arrives as a trappable [:EXIT pid reason] message instead of killing this process. |
 | **GC / VM stats** | `gc-stats` | 0 | A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the |
 |  | `gc-collect` | 0 | Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded. |
 |  | `gc-trace` | 0–1 | Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE. |

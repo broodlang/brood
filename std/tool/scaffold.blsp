@@ -405,7 +405,7 @@ test discovery, lints, release, config)."
     "and discovery (`apropos`, `all-globals`, `doc-search`) — use the last three to\n"
     "find what exists instead of guessing names.\n" "\n" "## MCP integration\n" "\n"
     "`.mcp.json` points Claude Code at this project's `nest mcp` server, so `cd " nm " && claude`\n"
-    "auto-attaches an agent that can `eval`, `load`, `lookup`, `macroexpand`, `format`,\n"
+    "auto-attaches an agent that can `reflect/eval`, `reflect/load`, `lookup`, `macroexpand`, `format`,\n"
     "and discover the image with `apropos` / `all-globals` / `doc-search`, against the\n"
     "live image (ADR-036, `docs/mcp.md` upstream).\n"))
 

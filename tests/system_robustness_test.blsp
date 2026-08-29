@@ -140,7 +140,7 @@ the write never comes, which is what these cases actually test."
       (is (nil? (table/get t :grand-ran)))))
 
   (test "the isolate still rolls its own global bindings back"
-    (%isolate (fn () (eval '(def isolate-scratch-global 41))))
+    (%isolate (fn () (reflect/eval '(def isolate-scratch-global 41))))
     (is (not (bound? 'isolate-scratch-global)))))
 
 ;;
@@ -154,23 +154,24 @@ the write never comes, which is what these cases actually test."
     ;; assume it. This used to bind nil for the missing value and return 1.
     ;; Declare the var first so the length check is what raises — an undeclared
     ;; name would raise on the not-dynamic check instead and pass either way.
-    (eval '(defdyn *system-robustness-dyn* 1))
+    (reflect/eval '(defdyn *system-robustness-dyn* 1))
     (assert-error (%binding '(*system-robustness-dyn*) [] (fn () 1))))
 
   (test "more values than names is rejected"
-    (eval '(defdyn *system-robustness-dyn* 1))
+    (reflect/eval '(defdyn *system-robustness-dyn* 1))
     (assert-error (%binding '(*system-robustness-dyn*) [1 2] (fn () 1))))
 
   (test "matched lengths still bind, and unwind cleanly"
-    (eval '(defdyn *system-robustness-dyn* 1))
-    (is (= 7 (%binding '(*system-robustness-dyn*) [7] (fn () (eval '*system-robustness-dyn*)))))
+    (reflect/eval '(defdyn *system-robustness-dyn* 1))
+    (is (= 7
+          (%binding '(*system-robustness-dyn*) [7] (fn () (reflect/eval '*system-robustness-dyn*)))))
     ;; The push/pop stayed balanced — the outer value is back.
-    (is (= 1 (eval '*system-robustness-dyn*))))
+    (is (= 1 (reflect/eval '*system-robustness-dyn*))))
 
   (test "a rejected binding leaves the dynamic stack untouched"
-    (eval '(defdyn *system-robustness-dyn2* 5))
+    (reflect/eval '(defdyn *system-robustness-dyn2* 5))
     (assert-error (%binding '(*system-robustness-dyn2*) [] (fn () 1)))
-    (is (= 5 (eval '*system-robustness-dyn2*)))))
+    (is (= 5 (reflect/eval '*system-robustness-dyn2*)))))
 
 ;;
 ;; --- {:name :node} address errors name the operation that raised them ---------
@@ -200,34 +201,34 @@ the write never comes, which is what these cases actually test."
 ;; (`heap::is_sealed` excludes dynamics), so an isolated test could silently change how a
 ;; later module's names resolve.
 ;;
-;; These use `eval-string` rather than a literal `defdyn`, which matters: the whole file
+;; These use `reflect/eval-string` rather than a literal `defdyn`, which matters: the whole file
 ;; is compiled before it runs, and the compile pass registers the mark — so a literal
-;; `(defdyn *p*)` anywhere in this file makes `(dynamic? '*p*)` true before the isolate
+;; `(defdyn *p*)` anywhere in this file makes `(reflect/dynamic? '*p*)` true before the isolate
 ;; ever executes, and the test passes vacuously against the broken build. Verified against
-;; a pristine-HEAD binary: `dynamic?` reads true after the isolate there, false here.
+;; a pristine-HEAD binary: `reflect/dynamic?` reads true after the isolate there, false here.
 (describe "%isolate rolls back the mark registries, not only the bindings"
   :isolated (test "a defdyn inside an isolate does not leak its dynamic mark"
-    (is (not (dynamic? '*isolate-leak-probe*)))
-    (%isolate (fn () (eval-string "(defdyn *isolate-leak-probe* 9)")))
-    (is (not (dynamic? '*isolate-leak-probe*)))
+    (is (not (reflect/dynamic? '*isolate-leak-probe*)))
+    (%isolate (fn () (reflect/eval-string "(defdyn *isolate-leak-probe* 9)")))
+    (is (not (reflect/dynamic? '*isolate-leak-probe*)))
     (is (not (bound? '*isolate-leak-probe*))))
 
   (test "the mark is rolled back on the throwing path too"
     (is (= :caught
           (try
             (%isolate (fn ()
-                        (eval-string "(defdyn *isolate-leak-throw* 1)")
+                        (reflect/eval-string "(defdyn *isolate-leak-throw* 1)")
                         (throw :x)))
             (catch e :caught))))
-    (is (not (dynamic? '*isolate-leak-throw*))))
+    (is (not (reflect/dynamic? '*isolate-leak-throw*))))
 
   (test "a dynamic mark made OUTSIDE an isolate survives it"
     ;; The restore replaces the set wholesale, so it must not drop pre-existing marks.
-    (eval-string "(defdyn *isolate-keep-probe* 1)")
-    (is (dynamic? '*isolate-keep-probe*))
+    (reflect/eval-string "(defdyn *isolate-keep-probe* 1)")
+    (is (reflect/dynamic? '*isolate-keep-probe*))
     (%isolate (fn () 1))
-    (is (dynamic? '*isolate-keep-probe*)))
+    (is (reflect/dynamic? '*isolate-keep-probe*)))
 
   (test "a defn- inside an isolate does not leak its private mark"
-    (%isolate (fn () (eval-string "(defn- isolate-priv-probe () 1)")))
+    (%isolate (fn () (reflect/eval-string "(defn- isolate-priv-probe () 1)")))
     (is (not (bound? 'isolate-priv-probe)))))
