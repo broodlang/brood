@@ -106,14 +106,13 @@ Pure apart from the symbol resolution; testable without a terminal."
   can discover a deferred feature's commands WITHOUT loading it — for a command palette, a
   help listing, or an `M-x`-style by-name runner that would otherwise offer only what
   happens to be in memory. Pure over the keymap data — no dispatch, no eval, no load."
-    (seq/distinct
-      (mapcat (fn (kv)
-                (let ([k v] kv)
-                  (cond
-                    (map? v) (keymap-commands v)
-                    (symbol? v) (list v)
-                    else '())))
-        keymap))))
+    (seq/distinct (mapcat (fn (kv)
+                            (let ([k v] kv)
+                              (cond
+                                (map? v) (keymap-commands v)
+                                (symbol? v) (list v)
+                                else '())))
+                    keymap))))
 
 ;; check-allow: deliberately non-tail — depth = the bound key-sequence length — a few keys.
 (check-allow :non-tail-recursion
