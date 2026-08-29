@@ -7073,3 +7073,37 @@ deep copy that crosses heaps.
 Worth keeping: **a type that is true and unusable is still a bug where it is read.** Nothing
 was unsound about `int | ratio`; it just put "or it could be an int" next to the 3/2 the
 evaluator had already printed. Precision rules earn their keep at the surface that shows them.
+
+## 2026-08-29 (ninth) — re-run what an edit can reach, not everything below it
+
+The playground re-evaluated **every form from the first change down**, on every settle of the
+keyboard. Correct — definitions flow downward, so a later form may have been built on the one
+you just changed — and expensive: editing the second of twenty forms cost nineteen
+evaluations, forever, for a buffer that is mostly independent one-liners. But the honest
+question is not "is this form below the edit?", it is "does this form USE anything the edit
+could have changed?", and nothing in the runtime could answer it.
+
+**`reflect/source-deps`** answers it: per top-level form, `{:defines (…) :references (…)}`,
+over the same CST + scope pass that backs find-references. The playground takes the
+transitive closure of "references something a re-run form defines" — 20 forms, one edited
+call: **1 re-sent instead of 15**; edit a definition three others chain off, and it re-sends
+exactly those. Both the OLD and the new `:defines` count, or renaming `foo` would leave its
+callers sitting on a stale answer instead of the unbound error they now deserve. Two things
+the analysis cannot see are widened rather than guessed at: a `defmodule`/`require` takes the
+whole tail (it changes what names MEAN below it, which is not an edge), and deps that fail to
+line up one-for-one with the forms fall back to the old suffix rule.
+
+**The scope analyser did not know `defn-`.** Found while building the above, and it was a
+wrong answer rather than a missing feature: with no scope opened for a private function, its
+PARAMETERS resolved to whatever global shares their spelling — `references_to_global("n")`
+returned the `n` of `(defn- f (n) n)`, and LSP rename writes exactly those spans. Most
+definitions in a real module are private (ADR-146), so this was most of a module. `def-` was
+missing from the global collector for the same reason. One `matches!` arm each.
+
+Also: **`cargo clippy --all-targets --all-features` was red at HEAD** (an empty line after
+`#[cfg(feature = "jit")]` in `compile/tests.rs`), which per the note in CLAUDE.md means CI's
+Clippy step failing skips every step behind it. Fixed.
+
+Worth keeping: **a dependency edge you cannot see is a reason to widen, not to guess.** Every
+case this analysis is blind to — a macro-introduced name, a side effect, a namespace change —
+resolves to "re-run more", and the fallbacks are what make the fast path safe to take.

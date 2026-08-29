@@ -594,6 +594,44 @@ impl Ty {
             | (1u32 << bit(Tag::Bytes)),
     );
 
+    /// The **countable** union — everything `count`/`get`/`empty?` accept: the seqable
+    /// collections plus the three sized non-sequences, `string`, `rope` and `table`. The
+    /// named type of `count`'s parameter, so a function that counts its argument is
+    /// suggested `(countable -> …)` rather than the six-way union spelled out.
+    pub const COUNTABLE: Ty = Ty::flat(
+        (1u32 << bit(Tag::Nil))
+            | (1u32 << bit(Tag::Pair))
+            | (1u32 << bit(Tag::Vector))
+            | (1u32 << bit(Tag::Set))
+            | (1u32 << bit(Tag::Map))
+            | (1u32 << bit(Tag::Bytes))
+            | (1u32 << bit(Tag::Str))
+            | (1u32 << bit(Tag::Rope))
+            | (1u32 << bit(Tag::Table)),
+    );
+
+    /// Every truthy value — `any ∖ nil ∖ false`: what an `(if x …)` / `(when x …)` /
+    /// `(or x …)` guard leaves of an unknown.
+    pub fn truthy() -> Ty {
+        Ty::ANY
+            .difference(Ty::of(Tag::Nil))
+            .difference(Ty::bool_lit(false))
+    }
+
+    /// Is this type known only by what it is NOT — `any`, or `any` less a guard's
+    /// `nil`/`false`? Such a bound says nothing positive about the value, so strict
+    /// checking (`GradualTy::consistent_with_mode`) keeps the overlap reading for it.
+    pub fn is_known_only_by_exclusion(&self) -> bool {
+        Ty::truthy().is_subtype(self)
+    }
+
+    /// The record identities named by this type's map member (`:t/usd`, …), as spelled
+    /// in a `sig` — `None` when the map member is not a nominal shape.
+    pub fn project_record_ids(&self) -> Option<Vec<String>> {
+        let fields = self.record_fields()?;
+        display::nominal_ids(fields)
+    }
+
     /// A flat (unrefined) type from a raw tag bitset — the internal constructor
     /// every flat `Ty` funnels through. `const` so the named points above can be
     /// `const`; the set operations that combine refinements can't be.
@@ -2572,7 +2610,11 @@ impl GradualTy {
     /// up for reload-safety (docs/type-gating.md, B1): a `number` handed to an `int`
     /// parameter is *consistent* by overlap, and *rejected* strictly.
     pub fn consistent_with_mode(&self, expected: Ty, strict: bool) -> bool {
-        if self.dynamic && strict && !self.bound.is_any() {
+        // Strict applies to a bound that is POSITIVELY known. `any ∖ nil` — what a
+        // `(when x …)` guard leaves — says what the value is not, never what it is; it
+        // is still the unknown, and reading it by inclusion would flag every guarded
+        // use of an untyped parameter.
+        if self.dynamic && strict && !self.bound.is_known_only_by_exclusion() {
             return self.bound.is_subtype(&expected);
         }
         if self.dynamic {

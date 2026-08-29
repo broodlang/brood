@@ -77,17 +77,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // O(1) size and both used to raise. A signature narrower than the function is a
     // false positive on correct code, so this list has to move with the dispatch.
     #[allow(non_upper_case_globals)]
-    const countable: Ty = Ty::of_tags(&[
-        Tag::Str,
-        Tag::Map,
-        Tag::Set,
-        Tag::Nil,
-        Tag::Pair,
-        Tag::Vector,
-        Tag::Bytes,
-        Tag::Rope,
-        Tag::Table,
-    ]);
+    const countable: Ty = Ty::COUNTABLE;
     #[allow(non_upper_case_globals)]
     const str_ty: Ty = Ty::of(Tag::Str);
     #[allow(non_upper_case_globals)]
@@ -318,6 +308,53 @@ pub(super) fn set_operator_domains(domains: HashMap<Symbol, Ty>) {
     OPERATOR_DOMAINS.with(|d| *d.borrow_mut() = Some(domains));
 }
 
+/// The domain installed for operator `op` — filled from the registry on first use when no
+/// file check has installed one (a bare fragment, a `Display` of a type outside a check).
+fn operator_domain(heap: Option<&Heap>, op: &str) -> Option<Ty> {
+    OPERATOR_DOMAINS.with(|d| {
+        let mut slot = d.borrow_mut();
+        if slot.is_none() {
+            let heap = heap?;
+            let info = super::protocol::build_multi_info(heap, &[]);
+            *slot = Some(super::protocol::operator_domains(&info));
+        }
+        slot.as_ref()
+            .and_then(|m| m.get(&value::intern(op)).cloned())
+    })
+}
+
+/// A **named cover** (ADR-299): `numeric` is `number` plus every record `num/*` has a
+/// method for, `ordered` is `number` plus every record `compare-to` has a method for — the
+/// domains of `+` and `<`, under the names a `sig` can write and a suggestion can print
+/// without going stale when another record gains a method. `None` for any other name; with
+/// no domains installed and no heap to read them from, the plain `number` each reduces to.
+pub(crate) fn named_cover(heap: Option<&Heap>, name: &str) -> Option<Ty> {
+    let op = match name {
+        "numeric" => "+",
+        "ordered" => "<",
+        _ => return None,
+    };
+    Some(operator_domain(heap, op).unwrap_or(Ty::NUMBER))
+}
+
+/// The cover name `ty` IS, when it is one of the two and wider than plain `number`, with
+/// the number of records in it — so a renderer can decide between the name and the list.
+pub(crate) fn cover_name_of(ty: &Ty) -> Option<(&'static str, usize)> {
+    for (name, op) in [("numeric", "+"), ("ordered", "<")] {
+        let Some(domain) = operator_domain(None, op) else {
+            continue;
+        };
+        if domain != Ty::NUMBER && *ty == domain {
+            let records = domain
+                .project_record_ids()
+                .map(|ids| ids.len())
+                .unwrap_or(0);
+            return Some((name, records));
+        }
+    }
+    None
+}
+
 /// The signature of an arithmetic/comparison operator, its domain read off the multimethod
 /// registry (ADR-299) — `number` plus exactly the records `num/*` / `compare-to` have
 /// methods for — rather than the `number | map` the native declares. `None` for any
@@ -326,21 +363,16 @@ fn operator_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let name = value::symbol_name_ref(sym);
     let is_arithmetic = matches!(name, "+" | "-" | "*" | "/");
     let is_comparison = matches!(name, "<" | "<=" | ">" | ">=");
-    if !is_arithmetic && !is_comparison {
+    // `%max`/`%min` compare through `compare-to` like `<` and hand back an operand.
+    let is_extremum = matches!(name, "%max" | "%min" | "math/max" | "math/min");
+    if !is_arithmetic && !is_comparison && !is_extremum {
         return None;
     }
-    let domain = OPERATOR_DOMAINS.with(|d| {
-        let mut slot = d.borrow_mut();
-        if slot.is_none() {
-            let info = super::protocol::build_multi_info(heap, &[]);
-            *slot = Some(super::protocol::operator_domains(&info));
-        }
-        slot.as_ref().and_then(|m| m.get(&sym).cloned())
-    })?;
-    Some(if is_arithmetic {
-        Sig::variadic(domain.clone(), domain)
-    } else {
+    let domain = operator_domain(Some(heap), name)?;
+    Some(if is_comparison {
         Sig::variadic(domain, Ty::of(Tag::Bool))
+    } else {
+        Sig::variadic(domain.clone(), domain)
     })
 }
 

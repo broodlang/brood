@@ -25,7 +25,9 @@ fn excluded_of<T: Ord, F: Fn(&T) -> String>(
 /// write in a `sig` — `(sig area (shapes/circle -> float))` — not the keyword the runtime
 /// stores. The FULL path is kept rather than the last segment: two modules may each define
 /// `pt`, and "expects pt, got pt" would be worse than no message at all.
-fn nominal_ids(fields: &std::collections::BTreeMap<Symbol, (Ty, bool)>) -> Option<Vec<String>> {
+pub(super) fn nominal_ids(
+    fields: &std::collections::BTreeMap<Symbol, (Ty, bool)>,
+) -> Option<Vec<String>> {
     let (id_ty, _) = fields.get(&value::intern("__id__"))?;
     let members = id_ty.lit.as_ref()?.members()?;
     if members.is_empty() {
@@ -104,6 +106,16 @@ impl fmt::Display for Ty {
         }
         if *self == Ty::LIST {
             return f.write_str("list");
+        }
+        if *self == Ty::COUNTABLE {
+            return f.write_str("countable");
+        }
+        // A named cover (ADR-299) with two or more records in it reads better as its name
+        // than as the list; with one record, `number | t/usd` says more than `numeric`.
+        if let Some((name, records)) = super::check::cover_name_of(self) {
+            if records >= 2 {
+                return f.write_str(name);
+            }
         }
         if *self == Ty::SEQABLE {
             return f.write_str("seqable");
@@ -239,6 +251,9 @@ impl fmt::Display for Ty {
         // any other tag this type also admits (`:a | nil`). Keywords sorted
         // by name (stable regardless of intern order); ints numerically;
         // bools/strings lexicographically.
+        if let Some(negation) = self.near_universe_negation() {
+            return f.write_str(&negation);
+        }
         if self.lit.is_some()
             || self.lit_int.is_some()
             || self.lit_bool.is_some()
@@ -337,29 +352,8 @@ impl fmt::Display for Ty {
         // A **complement**: a pure tag union that omits only a handful of tags is what
         // negation produces (`¬string`, the else-branch of a `(string? x)` guard), and
         // spelling out the twenty-two tags it *does* admit tells the reader nothing —
-        // `expects string, got nil | bool | number | symbol | keyword | pair | vector |
-        // fn | macro | native | map | ref | pid | rope | socket | subprocess | table |
-        // bytes | set` was a real diagnostic. Say what it is instead: `not string`.
-        // Only for a genuinely small complement (at most three omitted tags, and far
-        // past half the universe), so an ordinary wide union still renders as a union.
-        let missing = UNIVERSE & !self.tags;
-        if self.is_flat()
-            && (1..=3).contains(&missing.count_ones())
-            && self.tags.count_ones() >= TAG_COUNT - 4
-        {
-            let omitted: Vec<&str> = ALL_TAGS
-                .iter()
-                .filter(|&&tag| missing & (1u32 << bit(tag)) != 0)
-                .map(|tag| tag.name())
-                .collect();
-            // Parenthesised, matching the `(not T)` annotation grammar exactly — and
-            // reading as a *name* inside a message ("got (not string)") rather than as
-            // a negated sentence ("got not string").
-            return if omitted.len() == 1 {
-                write!(f, "(not {})", omitted[0])
-            } else {
-                write!(f, "(not ({}))", omitted.join(" | "))
-            };
+        if let Some(negation) = self.near_universe_negation() {
+            return f.write_str(&negation);
         }
         // Factor the `number` alias out of a *larger* pure-tag union: a type that admits
         // every `number` member (int, float, decimal) plus something else — e.g. the
@@ -475,6 +469,14 @@ impl Ty {
         if *self == Ty::LIST {
             return Some("list".to_string());
         }
+        if *self == Ty::COUNTABLE {
+            return Some("countable".to_string());
+        }
+        // A named cover is always spelled by its name in a `sig`: `(or number t/usd)` goes
+        // stale the day another record gains a `num/add` method; `numeric` does not.
+        if let Some((name, _)) = super::check::cover_name_of(self) {
+            return Some(name.to_string());
+        }
         if *self == Ty::SEQABLE {
             return Some("seqable".to_string());
         }
@@ -521,19 +523,19 @@ impl Ty {
             }
             if let Some(fields) = self.record_fields() {
                 // A record's NAME is its type in a `sig` (`(sig area (t/circle -> float))`),
-                // so a nominal shape with nothing else pinned is spelled by its ids — the
-                // `:__id__` representation is not something anyone writes.
+                // so a nominal shape is spelled by its ids — the `:__id__` representation is
+                // not something anyone writes. Field refinements the checker inferred
+                // (`utc-now` returning `datetime{year: int, …}`) are dropped here on
+                // purpose: the name denotes the open `:__id__` shape, a supertype, so the
+                // suggested declaration stays sound, and it is the declaration a reader
+                // would write. `Display` keeps the refinements, where a diagnostic wants
+                // them.
                 if let Some(names) = nominal_ids(fields) {
-                    let unrefined = fields.iter().all(|(name, (ty, _))| {
-                        value::symbol_name_ref(*name) == "__id__" || *ty == Ty::ANY
+                    return Some(if names.len() == 1 {
+                        names[0].clone()
+                    } else {
+                        format!("(or {})", names.join(" "))
                     });
-                    if unrefined {
-                        return Some(if names.len() == 1 {
-                            names[0].clone()
-                        } else {
-                            format!("(or {})", names.join(" "))
-                        });
-                    }
                 }
                 let open = if self.record_is_open() == Some(true) {
                     " &open"
@@ -672,6 +674,8 @@ impl Ty {
         let mut parts: Vec<String> = Vec::new();
         let mut named_tags = 0u32;
         for (named, source) in [
+            // the wider name first: `countable` contains `seqable`
+            (Ty::COUNTABLE, "countable"),
             (Ty::SEQABLE, "seqable"),
             (Ty::NUMBER, "number"),
             (Ty::LIST, "list"),
@@ -761,5 +765,53 @@ impl Sig {
         parts.push("->".to_string());
         parts.push(self.ret.to_source()?);
         Some(format!("({})", parts.join(" ")))
+    }
+}
+
+impl Ty {
+    /// A small complement rendered as what it is — `(not string)`, `(not (nil | false))` —
+    /// see the comment inside; `None` for an ordinary union.
+    fn near_universe_negation(&self) -> Option<String> {
+        // `expects string, got nil | bool | number | symbol | keyword | pair | vector |
+        // fn | macro | native | map | ref | pid | rope | socket | subprocess | table |
+        // bytes | set` was a real diagnostic. Say what it is instead: `not string`.
+        // Only for a genuinely small complement (at most three omitted tags, and far
+        // past half the universe), so an ordinary wide union still renders as a union.
+        let missing = UNIVERSE & !self.tags;
+        // `bool` narrowed to `{true}` is `false` omitted — the truthy half of an
+        // `(or x default)` — and reads as `(not (nil | false))`, not as a 21-tag list.
+        let false_omitted = self
+            .lit_bool
+            .as_ref()
+            .and_then(|set| set.members())
+            .is_some_and(|m| m.len() == 1 && m.contains(&true))
+            && Ty {
+                lit_bool: None,
+                ..self.clone()
+            }
+            .is_flat();
+        let omitted_count = missing.count_ones() + u32::from(false_omitted);
+        if (self.is_flat() || false_omitted)
+            && (1..=3).contains(&omitted_count)
+            && self.tags.count_ones() >= TAG_COUNT - 4
+        {
+            let mut omitted: Vec<&str> = ALL_TAGS
+                .iter()
+                .filter(|&&tag| missing & (1u32 << bit(tag)) != 0)
+                .map(|tag| tag.name())
+                .collect();
+            if false_omitted {
+                omitted.push("false");
+            }
+            // Parenthesised, matching the `(not T)` annotation grammar exactly — and
+            // reading as a *name* inside a message ("got (not string)") rather than as
+            // a negated sentence ("got not string").
+            return Some(if omitted.len() == 1 {
+                format!("(not {})", omitted[0])
+            } else {
+                format!("(not ({}))", omitted.join(" | "))
+            });
+        }
+        None
     }
 }

@@ -351,8 +351,6 @@ fn run_arm(f: crate::jit::JitArmFn, heap: &mut Heap, base: usize) -> (i64, Value
     (outcome, out)
 }
 
-#[cfg(feature = "jit")]
-
 /// The `%receive` fence (see `chunk_in_jit_subset`): a chunk that calls `%receive` must
 /// never enter the JIT subset, because a park inside the native boundary surfaces as an
 /// uncatchable empty `runtime error:` that kills the receiver. The fence used to exist by
