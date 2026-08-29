@@ -41,11 +41,13 @@ look-alike map, and it prints as `#<multimap …>` (`->map` is the plain-map vie
 
     (multimap/empty? (multimap/empty))   → true"
   (= (count (/get mm :entries)) 0))
+(sig empty? (multimap -> bool))
 
 (defn assoc (mm k v)
   "Return a multimap with value `v` added under key `k`."
   (let (entries (/get mm :entries))
     (multimap (/assoc entries k (cons v (/get entries k nil))))))
+(sig assoc (multimap any any -> multimap))
 
 (defn assoc-all (mm k vs)
   "Return a multimap with all values in list `vs` added under key `k`."
@@ -60,22 +62,26 @@ takes the record-FIELD path and silently answers nil for a key that holds values
 
     (multimap/get (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2) :k)   → (2 1)"
   (/get (/get mm :entries) k nil))
+(sig get (multimap any -> (or seqable nil)))
 
 (defn get-all (mm k)
   "All values for key `k` in insertion order (oldest first), or nil if absent.
 
     (multimap/get-all (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2) :k)   → (1 2)"
   (reverse (get mm k)))
+(sig get-all (multimap any -> (or seqable nil)))
 
 (defn contains? (mm k)
   "True if `k` has at least one value in the multimap.
 
     (multimap/contains? (multimap/assoc (multimap/empty) :k 1) :k)   → true"
   (not (nil? (get mm k))))
+(sig contains? (multimap any -> bool))
 
 (defn dissoc (mm k)
   "Return a multimap with all values for key `k` removed."
   (multimap (/dissoc (/get mm :entries) k)))
+(sig dissoc (multimap any -> multimap))
 
 (defn remove-value (mm k v)
   "Return a multimap with the first occurrence of `v` removed from key `k`.
@@ -88,6 +94,7 @@ If no values remain under `k`, the key is dropped."
         (if (nil? new-vs)
           (multimap (/dissoc entries k))
           (multimap (/assoc entries k new-vs)))))))
+(sig remove-value (multimap any any -> multimap))
 
 (defn- remove-first
   (lst v)
@@ -148,6 +155,7 @@ If no values remain under `k`, the key is dropped."
                       (/assoc m k (f k vs))))
               {}
               (%map-pairs (/get mm :entries)))))
+(sig map-vals (multimap fn -> multimap))
 
 (defn ->map (mm)
   "Flatten the multimap to a plain map from key → list-of-values (insertion order)."
@@ -155,6 +163,7 @@ If no values remain under `k`, the key is dropped."
           (/assoc m (first pair) (reverse (second pair))))
     {}
     (%map-pairs (/get mm :entries))))
+(sig ->map (multimap -> map))
 
 ;; `Display` is the O(1) summary (how many keys, how many pairs); `Inspect` shows the
 ;; whole thing — the plain-map view, so a log line reads as data rather than a wrapper.

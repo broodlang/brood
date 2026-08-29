@@ -71,6 +71,16 @@ Recognizing an op fn in the compiler: read the `*abilities*` registry
 access — to know which global names are ability ops; or match the op body's fingerprint
 shape. `*impls*` (`ability.blsp:46`) gives the id → fn value to inline.
 
+> **Superseded in part by ADR-294 (2026-08-29).** The trade-off described in the next section
+> is no longer taken: Tier 1 proves the *identity* and leaves resolution behind the
+> epoch-guarded dispatch cache, so late binding is preserved and there is no stale window. The
+> section is kept because it is the reasoning Tier 2 will have to answer for itself. What
+> forced the change: the "stale if later re-registered" framing understated the window, which
+> opens before the FIRST registration — a body is compiled before it runs, so a module that
+> registers an impl and then uses it in the same body called the wrong one. And nothing had
+> ever run with the flag on, so the suite had been catching it, unread, from the day it was
+> written. `crates/cli/tests/mono_differential.rs` is now the gate.
+
 ## The late-binding trade-off (why it's flag-gated)
 
 Impls are open and late — re-registered from any module, any time (drivers-as-values,
@@ -125,7 +135,10 @@ Closest precedent for a *type-driven* off-by-default gate: `BROOD_CONTRACTS`
 
 - Flag **off**: full suites green, zero behaviour change (the pass is inert). This is the
   safety guarantee — default builds are untouched.
-- Flag **on**: full suites green (correctness of the rewrite), plus a microbenchmark
+- Flag **on**: full suites green (correctness of the rewrite) — ✅ wired 2026-08-29 as
+  `crates/cli/tests/mono_differential.rs`, and it must also assert the rewrite FIRED, since a
+  differential in which nothing was rewritten is two identical dynamic runs (ADR-280). Full
+  in-language suite measured 5170/5170 with the flag on. Plus a microbenchmark
   showing the dispatch-cost win on the covered call shapes. Run the whole broodlang
   fleet (hatch 750, brood-chat, hatch-demo, store-postgres, willem, mylife, mitch) with
   the flag on to catch any real-program miscompile.
