@@ -2396,13 +2396,45 @@ pub(crate) fn build_id_string() -> String {
 fn binary_stamp() -> &'static str {
     static STAMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     STAMP.get_or_init(|| {
+        binary_mtime()
+            .map(|d| format!("{:x}", d.as_nanos()))
+            .unwrap_or_else(|| "unknown".to_string())
+    })
+}
+
+/// This running executable's own last-modified time, computed once per process
+/// (`OnceLock`) since it never changes mid-run. `None` when the executable path or
+/// its metadata can't be read — the same sandbox case [`binary_stamp`] reports as
+/// `"unknown"`.
+fn binary_mtime() -> Option<std::time::Duration> {
+    static MTIME: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *MTIME.get_or_init(|| {
         std::env::current_exe()
             .ok()
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| format!("{:x}", d.as_nanos()))
-            .unwrap_or_else(|| "unknown".to_string())
+    })
+}
+
+/// `(system/build-time)` — when THIS executable was built, as Unix epoch
+/// milliseconds (the unit `os/now` speaks, so `datetime/epoch-ms->` formats it
+/// directly); nil when the platform won't say.
+///
+/// It is the binary's own mtime — the same fact `build_id`'s third field encodes as
+/// an opaque hex stamp, given a unit a human can read. A `build.rs` timestamp would
+/// have been the obvious alternative and is the wrong one: cargo only re-runs a build
+/// script when one of its `rerun-if-changed` paths moves, so a plain source edit and
+/// rebuild leaves the baked-in constant reading whenever the script last ran, which
+/// is precisely the reading nobody wants from a "when was this built" question. The
+/// mtime changes on any rebuild for any reason, with no build-script bookkeeping.
+///
+/// This is the RUNTIME's build time. A `nest release` bundle's own build time is a
+/// different fact, stamped into the bundle at release (`project/build-info`).
+pub(super) fn build_time(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    Ok(match binary_mtime() {
+        Some(d) => Value::int(d.as_millis() as i64),
+        None => Value::Nil,
     })
 }
 

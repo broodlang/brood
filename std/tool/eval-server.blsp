@@ -38,6 +38,9 @@ or `:timeout true`). A request may carry `:trace [\"fn-name\" …]`: those globa
 are boundary-traced (`debug/trace-fn`) for the duration of the request — installed
 as soon as each name becomes a function, so a `defn` and its call in one request
 still trace — and the reply gains `:spy [{:kind :fn :args :value} …]` (bounded).
+`:trace :all` traces every global the SESSION has defined ([[session-globals]] — the
+image diffed against its pristine baseline), which is the only way to catch a helper
+called by your code but never named in the source a client can see.
 `eval-capturing` is the reusable core: evaluate a source string and keep BOTH
 halves a REPL shows — the value and what it printed.")
 
@@ -56,8 +59,9 @@ halves a REPL shows — the value and what it printed.")
 (defn evsrv-encode-request (id src timeout-ms &optional trace)
   "One request line (no trailing newline): `id` an int, `src` the Brood source to
 evaluate (may span lines — it's escaped), `timeout-ms` an int or nil for the
-server default, `trace` an optional vector of fn-name strings to boundary-trace."
-  (pr-str (if (or (nil? trace) (empty? trace))
+server default, `trace` an optional vector of fn-name strings to boundary-trace — or
+`:all` for every global the session has defined, resolved in the server's own image."
+  (pr-str (if (or (nil? trace) (and (not= trace :all) (empty? trace)))
             {:id id :src src :timeout-ms timeout-ms}
             {:id id :src src :timeout-ms timeout-ms :trace trace})))
 
@@ -72,7 +76,7 @@ one bad line must not kill the server) and a present `:trace` a vector."
             (int? (get v :id))
             (string? (get v :src))
             (let (t (get v :timeout-ms)) (or (nil? t) (int? t)))
-            (let (tr (get v :trace)) (or (nil? tr) (vector? tr))))
+            (let (tr (get v :trace)) (or (nil? tr) (vector? tr) (= tr :all))))
         v
         nil))
     (catch _ nil)))
@@ -133,11 +137,63 @@ looking identical to a round-trip that cleaned up after itself."
    :value (when (contains? e :value) (pr-str-bounded (get e :value)))
    :form (when (get e :form) (pr-str-bounded (get e :form)))})
 
+;; The global names that existed before this image ran anything of the user's. A
+;; Rust-backed `table` rather than a `def`: it is written once, from whichever entry point
+;; gets there first, and read on every traced request — the one shape Brood has for
+;; write-once process state that isn't worth a process.
+(def- *baseline-globals* (table/new))
+
+(defn- eval-server-baseline
+  ()
+  ;; The baseline set, captured on first use. On the server path `run` captures it before
+  ;; the banner, so it is a genuinely pristine image; an in-image caller captures it at its
+  ;; first traced request, which is the best that path can do and still correct for the
+  ;; case that matters (a session's own definitions).
+  (or (table/get *baseline-globals* :names)
+    (let (names (into #{} (map ->string (reflect/global-names))))
+      (do (table/put *baseline-globals* :names names) names))))
+
+(defn baseline-globals! ()
+  "Capture the pristine global-name set NOW, so a later `:trace :all` can tell the session's
+own definitions from the language's. Idempotent — the first call wins. [[run]] calls it
+before the banner; anything embedding [[eval-capturing]] should call it at startup, or
+accept a baseline taken at the first traced request."
+  (do (eval-server-baseline) nil))
+
+(defn- eval-server-own-name?
+  (n)
+  ;; A name the SESSION wrote, as opposed to one a module brought with it. Bare only:
+  ;; a module's globals are namespaced (`foo/bar`), so requiring `std/csv` mid-session
+  ;; would otherwise make its whole surface "yours" and trace all of it. `%`-hidden
+  ;; primitives and earmuffed dynvars are excluded for the same reason they are excluded
+  ;; everywhere — neither is a function you called.
+  (and (not (includes? n "/"))
+    (not (string/starts-with? n "%"))
+    (not (and (string/starts-with? n "*") (string/ends-with? n "*")))))
+
+(defn session-globals ()
+  "Every global name defined since the baseline was captured — the session's own top-level
+definitions, with the language's and any later-required module's excluded. What
+`:trace :all` resolves to."
+  (let (base (eval-server-baseline))
+    (into []
+      (filter (fn (n) (and (not (contains? base n)) (eval-server-own-name? n)))
+        (map ->string (reflect/global-names))))))
+
+(defn- eval-server-trace-names
+  (trace)
+  ;; A request's `:trace` as a concrete name vector. `:all` is resolved HERE, at install
+  ;; time, rather than by the client: only this image knows what it has defined, which is
+  ;; exactly why a client asking for "everything I defined" had to guess at it by walking
+  ;; its own source text for call heads — and so never saw a helper the source doesn't name.
+  (if (= trace :all) (session-globals) (or trace [])))
+
 (defn- eval-server-try-traces
   (names)
   ;; Install a boundary trace on every requested name that is a function right now;
   ;; a name that isn't (yet) defined is skipped.
-  (doseq (s names) (try (debug/trace-fn (symbol s)) (catch _ nil))))
+  (doseq (s (eval-server-trace-names names))
+    (try (debug/trace-fn (symbol s)) (catch _ nil))))
 
 (defn- eval-server-definition-form?
   (form)
@@ -179,7 +235,8 @@ Keeps BOTH halves a REPL shows — the value and what was printed — which
 `:output` capped (`*output-cap-chars*` + a truncation marker), so no reply can
 flood the pipe.
 
-With `trace-names` (fn-name strings), each name is boundary-traced for the
+With `trace-names` (a vector of fn-name strings, or `:all` for every global the session
+has defined — see [[session-globals]]), each name is boundary-traced for the
 duration (`debug/trace-fn`, installed once before the first non-definition form,
 restored by `untrace-all` after) and the result carries `:spy` — up to
 `*spy-entry-cap*` collected entries, after which the sink answers `:spy-stop` and
@@ -197,7 +254,9 @@ process's capture stack (later prints are swallowed). Irrelevant on the server
 path — the per-request evaluator process dies — but worth knowing when embedding."
   (let (t0 (os/now)
         pids-before (proc/list)
-        traced (and trace-names (not (empty? trace-names)))
+        ;; `:all` is truthy and not a collection, so it counts as traced without being
+        ;; measured — it resolves to a name list only at install time, in the image.
+        traced (and trace-names (or (= trace-names :all) (not (empty? trace-names))))
         acc (when traced (table/new))
         sink (when traced
                (fn (e)
@@ -310,5 +369,6 @@ process died without answering."
 per stdin line until EOF. This is the child's whole program — a client spawns
 `nest run <script>` where the script references `eval-server/…`
 `(run)`, and drives it over stdin/stdout."
+  (baseline-globals!) ; before the banner: nothing of the user's has run yet
   (io/puts (evsrv-encode-reply {:ready true}))
   (eval-server-loop))

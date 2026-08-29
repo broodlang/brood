@@ -41,7 +41,7 @@ use std::sync::OnceLock;
 /// like "no JIT".
 pub const BUNDLE_BUILD_INFO_ARG: &str = "--brood-build-info";
 /// Load the bundle's embedded modules, resolve `:main`, run **nothing**, exit 0/1 — the
-/// boot check `nest release --smoke` runs against each binary it writes (KI-66).
+/// boot check `nest release` runs against each binary it writes, by default (KI-66).
 pub const BUNDLE_BOOT_CHECK_ARG: &str = "--brood-boot-check";
 
 /// Which reserved command, if any, `args` (a bundle's argv minus argv[0]) asks for.

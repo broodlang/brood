@@ -71,9 +71,11 @@ command for — *does it boot?*, *what is this binary?*, *what moved, and where 
 - [x] **1. A boot check** (KI-66). `nest check` resolves names, `nest test` runs the suite,
       and neither loads `main` — which is where the first outage died (`unbound symbol:
       int->char`, raised *during* `require`). **`nest run --check-boot`** loads every source
-      module the way a bundle does, resolves `:main`, and runs nothing; **`nest release
-      --smoke`** then does it to the binary just written — the artifact, not the tree that
-      produced it, which is the half a source check structurally cannot see.
+      module the way a bundle does, resolves `:main`, and runs nothing; **`nest release`** then does it to the binary just written — the artifact, not the tree that
+      produced it, which is the half a source check structurally cannot see. That second half
+      ran only under an opt-in `--smoke` until 2026-08-29, which is the wrong default for the
+      one question a release has to answer; it is now on unless `--no-smoke`, and a binary
+      that fails it is deleted rather than left for a later upload to find.
       `project/check-boot` / `project/check-bundle-boot`, sharing one entry resolver with
       `run`/`run-bundle` so the check cannot drift from the boot it checks.
       Sabotage-verified in both directions (`crates/nest/tests/boot_check_and_renames.rs`).
@@ -214,17 +216,65 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
 
 **Still open:**
 
-- [ ] **Examples.** 100% docstring coverage; example coverage 4.7% → ~16%, and
-      `tests/doc_examples_test.blsp` *executes* every one, so each written is a test gained.
-      ~1,150 functions remain — a campaign, not a pass
-- [ ] **Ability seams do not reach built-in kinds** (ADR-253). Every seam tests `record?`
-      first, so `rope` and `table` cannot join the bare vocabulary: `(count r)` raises,
-      `(seq r)` silently returns the rope, and `(impl Display :rope …)` registers, resolves
-      when called directly, and is never consulted. The `record?` test is right on the fast
-      path and wrong on the failure path, where falling through is free
-- [ ] **Naming seams:** five verbs for "start a process"; `task/task` and `set/set` stutter;
-      `seq/remove-nth` takes its collection first; `bytes/append` writes to a *file*;
-      `feature?` lives in the string prelude
+> Numbers below **re-measured 2026-08-29** with `scripts/stdlib-audit.blsp` rather than
+> carried forward. Three of this list's claims had gone stale in the reader's favour — an
+> item recorded as open can be *fixed* and still read as work, which is its own cost.
+
+- [ ] **Examples.** `docstring, no example` is **1077**; `documented + example` is **447**;
+      258 more have no docstring slot at all (`def`/`defdyn`/ability ops), so coverage is
+      **447/1524 = 29.3%** — not the 16% recorded here, which predates the doctest work and
+      the 38 core examples. `tests/doc_examples_test.blsp` *executes* every one, so each
+      written is a test gained. A campaign, not a pass
+- [x] **Ability seams: the seqable half is CLOSED (2026-08-29, ADR-295).** `count` and
+      `empty?` now accept a rope and a table — a rope in CHARACTERS, so it agrees with
+      `string/length` for the text it stands for (pinned by a test, multi-byte included); a
+      table by entries. Sized directly rather than through `Seqable`, whose `->seq` is a list
+      view a rope would have to materialise. **`(seq r)` was left alone deliberately: it was
+      never the bug** — a string returns itself from `seq` and raises on `first` too, so a
+      rope doing the same is consistent with the thing it models. The checker's `countable`
+      gained `Rope`/`Table` in step. Superseded text follows:
+- [ ] ~~**Ability seams do not reach built-in kinds** (ADR-253) — **half closed.** `Display`
+      DOES reach a built-in now: `(impl Display :rope (->string [x] …))` is consulted, almost
+      certainly because `->string` became an ability op in v0.15.0. What remains is the
+      *seqable* family: `(count r)`, `(first r)` and `(empty? r)` raise on a rope and on a
+      table, and **`(seq r)` returns the rope unchanged** — a wrong VALUE rather than an
+      error, which is the one worth fixing first. The `record?` test is right on the fast
+      path and wrong on the failure path, where falling through is free~~
+- [x] **Naming seams — CLOSED 2026-08-29: four of the five were not defects.** Each was
+      re-measured rather than scheduled, and only one survived.
+      - ✅ `bytes/append` is gone (`file/spit-bytes-append`; `std/bytes.blsp:39` records it)
+        and `feature?` is `system/feature?`, not the string prelude. Both already fixed.
+      - ❌ **The stutters are not renameable.** All 24 come from `defrecord`, not from a
+        hand-written name: `(defrecord queue (front back size))` inside `(defmodule queue)`
+        emits `queue/queue-front`. Nine are the constructor case (`queue/queue`, `set/set`),
+        which is the normal single-type-module pattern. The other fifteen cannot be
+        shortened — `datetime/datetime-day` → `datetime/day` **collides with an existing
+        polymorphic function** (verified: both answer 29 for the same value) — and cannot be
+        removed or made private either: `std/` references only 5 of its 56 generated
+        accessors (all in tests), but **bedit references 41 of its 46**. A real consumer
+        depends on them. The only lever is a `defrecord` option for accessor naming, which
+        is a feature, not a cleanup.
+      - ❌ **`seq/remove-nth (i coll)` is correct and deliberate.** Index-first is the
+        module-wide convention (`take`, `drop`, `chunk-every`), `std/seq.blsp:133` records
+        it, and `sig`s exist specifically to catch a reversal. This entry had it backwards:
+        `remove-nth`'s move *to* index-first was KI-71, which surfaced as seven unrelated
+        buffer-lifecycle failures. Acting on the entry would have recreated that bug.
+      - 🟡 **The one real residue is narrower than "five verbs".** `spawn`/`spawn-link` are
+        core; `gen/`, `agent/`, `supervisor/` and `node/` each qualify their own, so a call
+        site is never ambiguous. What genuinely reads wrong is that `gen/start`,
+        `gen/start-link` and `gen/start-named` are three one-line wrappers that **do not
+        compose** — there is no `start-link-named`, and `start-named`'s own docstring tells
+        you to register the result of `start-link` yourself. That is a verbs-vs-options
+        question (`(gen/start f state :link true :name :foo)`), not a rename, and it is a
+        breaking change to the gen surface. Deferred deliberately, with the reason recorded
+        so it is not re-derived as "five verbs" again.
+- [ ] **The bare namespace is a FLOW, not a stock — nothing gates a new bare name.** It went
+      268 → **264** across a day in which ADR-290/291 removed 18, because roughly fourteen
+      arrived: of ten sampled, eight (`defbehaviour`, `conj-onto`, `lookup-get`,
+      `lookup-keys`, `->seq`, `assoc-in`, `dissoc-in`, `inspect`) did not exist that morning.
+      Reduction work is cancelled by ordinary feature work at about the rate it is done, so
+      the next audit will re-derive this same list unless adding a bare name has to record a
+      reason. This is the structural item behind all four ADRs
 
 ### Backend seams — swappable JIT / engine + perf legibility (2026-08-11)
 

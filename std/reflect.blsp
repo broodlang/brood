@@ -141,6 +141,20 @@ answers `((render [x]))`."
   (%type-signature name))
 (sig type-signature ((or string symbol) -> (or nil string)))
 
+(defn expr-type (src)
+  "The type the advisory checker infers for the FIRST form in source string `src`, written
+the way a `sig` is — `\"int\"`, `\"(list any)\"`, `\"(int -> int)\"` — or nil when `src`
+doesn't parse or the checker has no opinion.
+
+    (reflect/expr-type \"(+ 1 2)\")   ;=> \"int\"
+
+[[type-signature]] answers this for a NAMED global; this answers it for an anonymous
+expression you just typed, which is what a REPL or a scratch buffer has to work with. Nil
+rather than an error on unparsable input, like [[check-string-structured]]: both get read
+live, from a buffer that is mid-edit half the time."
+  (%expr-type src))
+(sig expr-type (string -> (or nil string)))
+
 (defn form-pos (form)
   "A form's [line col] source position, or nil."
   (%form-pos form))

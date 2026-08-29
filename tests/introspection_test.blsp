@@ -229,6 +229,35 @@
   (test "a never-interned string name is nil, not an error"
     (assert= (reflect/type-signature "definitely-not-a-real-global-42") nil)))
 
+;; expr-type — the same question for an expression with no name. `type-signature` needs a
+;; global to ask about, which leaves a REPL or a scratch buffer nothing to ask with: the
+;; thing you just typed is anonymous. The checker already computes this walking any form;
+;; it simply had no way out.
+(describe "expr-type"
+  ;; A literal types as ITSELF, not as its tag — the checker keeps singleton literal types,
+  ;; which is how it knows `(if true a b)` never takes the second branch. Worth pinning:
+  ;; anything rendering these to a human has to expect `"1"` where it assumed `"int"`.
+  (test "a literal types as the singleton it is; a call types as its result"
+    (assert= (reflect/expr-type "1") "1")
+    (assert= (reflect/expr-type ":score") ":score")
+    (assert= (reflect/expr-type "(+ 1 2)") "int"))
+
+  (test "the type follows the call, not the arguments"
+    (assert= (reflect/expr-type "(str 1 2)") "string"))
+
+  (test "only the FIRST form is typed — the rest are somebody else's question"
+    (assert= (reflect/expr-type "(+ 1 2)\n\"later\"") "int"))
+
+  ;; Both read live from a buffer that is unbalanced half the time, so neither may raise.
+  ;; `check-string-structured` answers () there; the honest analogue for one type is nil.
+  (test "unparsable input is nil, never an error"
+    (assert= (reflect/expr-type "(+ 1") nil)
+    (assert= (reflect/expr-type "") nil)
+    (assert= (reflect/expr-type "   ") nil))
+
+  (test "an expression the checker has no opinion about is nil, not a guess"
+    (assert= (reflect/expr-type "(fn (n) (* n 2))") nil)))
+
 ;; `system/features` / `system/feature?` — asking the BUILD what it can do.
 ;;
 ;; The gap this closes: a builtin from an absent optional feature is still bound

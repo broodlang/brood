@@ -249,7 +249,7 @@ fn an_imaged_start_keeps_what_loading_registered() {
         !warm.contains("SOURCE-LOAD"),
         "precondition: the warm run should be imaged:\n{warm}"
     );
-    for expected in ["multi: 5", "ability: 12", "provenance: 1", "docs: true"] {
+    for expected in ["multi: 5", "ability: 12", "docs: true"] {
         assert!(
             cold.contains(expected),
             "cold run lacks {expected}:\n{cold}"
@@ -259,6 +259,28 @@ fn an_imaged_start_keeps_what_loading_registered() {
             "an imaged start lost a registry — {expected} did not survive:\n{warm}"
         );
     }
+
+    // `*method-from*` is asserted as cold == warm rather than against a literal. It is a
+    // GLOBAL registry, so its size counts the prelude's own methods too and grows whenever
+    // the stdlib gains one: this line read `provenance: 1` when written and reads 4 today,
+    // which failed the test for a reason that has nothing to do with what it checks. What
+    // it checks is that an imaged start does not LOSE the registry — a property the two
+    // runs agreeing states exactly, and stdlib growth cannot rot.
+    let provenance = |out: &str| -> usize {
+        out.lines()
+            .find_map(|l| l.strip_prefix("provenance: "))
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or_else(|| panic!("no `provenance: N` line:\n{out}"))
+    };
+    let (cold_n, warm_n) = (provenance(&cold), provenance(&warm));
+    assert!(
+        cold_n > 0,
+        "cold run recorded no method provenance:\n{cold}"
+    );
+    assert_eq!(
+        cold_n, warm_n,
+        "an imaged start lost method provenance: {cold_n} cold vs {warm_n} imaged\n{warm}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

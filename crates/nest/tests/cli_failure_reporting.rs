@@ -128,6 +128,79 @@ fn check_rejects_a_directory_at_the_boundary() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A release that does not boot must not be reported as a success, and must not
+/// leave an executable behind. The boot check was opt-in (`--smoke`) until
+/// 2026-08-29, so `Wrote app (41 modules, 31.5 MB)` was printed for binaries that
+/// could not start — the one question a release has to answer, asked only if you
+/// remembered to ask it. Nothing upstream covers it: `nest check` resolves names and
+/// `nest test` runs the suite, and NEITHER loads `main` (KI-66).
+///
+/// Deleting it is the second half. An exit code is seen once, by whoever ran the
+/// command; the file outlives it and is what a later `scp`/`docker COPY`/`gh release
+/// upload` picks up.
+///
+/// `/bin/false` stands in for the base runtime: appending the archive to it produces a
+/// well-formed release image that exits nonzero for any argument, so this exercises the
+/// real path with no 2-minute runtime build.
+#[cfg(unix)]
+#[test]
+fn release_deletes_a_binary_that_does_not_boot() {
+    let dir = scratch("relboot");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/main.blsp"),
+        "(defn main () (io/puts \"x\"))\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("project.blsp"),
+        "(project :name |bootless| :main main)\n",
+    )
+    .unwrap();
+
+    let out = nest()
+        .current_dir(&dir)
+        .args(["release", "-o", "app", "--runtime", "/bin/false"])
+        .output()
+        .expect("run nest");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an unbootable release must fail: {err}"
+    );
+    assert!(
+        err.contains("does NOT boot"),
+        "must name what went wrong: {err}"
+    );
+    assert!(
+        !dir.join("app").exists(),
+        "the binary must not survive a failed release: {err}"
+    );
+
+    // …and `--no-smoke` is the documented way out, so it still writes one.
+    let out = nest()
+        .current_dir(&dir)
+        .args([
+            "release",
+            "-o",
+            "app",
+            "--runtime",
+            "/bin/false",
+            "--no-smoke",
+        ])
+        .output()
+        .expect("run nest");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "--no-smoke must skip the check, not fail it: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("app").exists(), "--no-smoke must still write it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The default `nest release` output name is the manifest's `:name` — data from a
 /// project.blsp that may not be ours. `(project :name |../../escaped-app|)` wrote a
 /// 30 MB **executable** two directories above the project root with no `-o` and no

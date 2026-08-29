@@ -2048,6 +2048,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
             gc_stats);
         def(
             heap,
+            "%tree-walker?",
+            Arity::exact(0),
+            Sig::nullary(bool_ty),
+            &[],
+            "True when this run's tier CEILING is the tree-walker (ADR-222) — the differential reference engine. Asks the runtime rather than the environment on purpose: the ceiling is selected by `BROOD_TIER=0` and by its older `BROOD_VM=0` alias, so a test that reads one env var directly silently stops guarding when the other spelling is used. `eval::compile::tier_ceiling` is the single source of truth.",
+            tree_walker_p);
+        def(
+            heap,
             "%vm-stats",
             Arity::exact(0),
             Sig::nullary(map_ty),
@@ -3082,6 +3090,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &["name"],
         "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (reflect/type-signature 'map).",
         type_signature);
+    def(
+        heap,
+        "%expr-type",
+        Arity::exact(1),
+        Sig::new(vec![string], string.union(nil_ty)),
+        &["src"],
+        "The type the advisory checker infers for the FIRST form in source string `src`, written the way a `sig` is (\"int\", \"(list any)\", \"(int -> int)\"), or nil when `src` doesn't parse or the checker has no opinion. reflect/type-signature answers this for a NAMED global; this answers it for an anonymous expression you just typed, which is what a REPL or a scratch/playground buffer has. Nil rather than an error on unparsable input, like %check-string-structured — both get read from a buffer that is mid-edit half the time.",
+        expr_type);
 
     // introspection (editor tooling; see docs/lsp.md) — derive what we can from
     // the bound value (arglist, doc); enumerate the global table for completion.
@@ -3740,6 +3756,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &[],
         "This runtime's semantic version as a string (e.g. \"0.1.0\") — just the semver, without the git-sha/binary-stamp that `system/build-id` carries. What a project's `:brood` manifest constraint is checked against (a project can require `:brood \">= 0.2\"` and `nest` refuses an older runtime with a clear message).",
         brood_version);
+    def(
+        heap,
+        "system/build-time",
+        Arity::exact(0),
+        Sig::nullary(int.union(nil_ty)),
+        &[],
+        "When THIS executable was built, as Unix epoch milliseconds (the unit os/now speaks, so datetime/epoch-ms-> formats it directly); nil when the platform won't say. It is the binary's own mtime — the fact system/build-id's third field encodes as an opaque hex stamp, in a unit a human can read — so it changes on any rebuild, unlike a baked-in build-script constant. This is the RUNTIME's build time; a `nest release` bundle's own is a different fact, stamped at release and read via project/build-info.",
+        build_time);
     def(
         heap,
         "%steal-count",

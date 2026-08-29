@@ -32,8 +32,8 @@
 //! observer process per window. Only Send data crosses (`Op` to the thread,
 //! `Message` to the mailbox); the windows/surfaces/glyph caches never leave the GUI
 //! thread. The whole backend is behind the `gui` cargo feature; without it the
-//! primitives return a clear "rebuild with --features gui" error so the symbols
-//! still exist uniformly.
+//! primitives return an error naming the way to get it back (`./configure --with-gui
+//! && make install`) so the symbols still exist uniformly.
 
 /// A resolved text face: colours as RGB (already mapped from `:fg`/`:bg`
 /// keywords by the caller, which has heap access), the attribute flags, the
@@ -323,7 +323,10 @@ pub struct Mouse {
 }
 
 #[cfg(not(feature = "gui"))]
-const NOT_COMPILED: &str = "gui backend not compiled in; rebuild with `--features gui`";
+const NOT_COMPILED: &str = "gui backend not compiled in — this `brood` was built without it. \
+     From the brood repo: `./configure --with-gui && make install` (note that ./configure starts \
+     from the defaults, so pass every option you want on one line). Building with cargo directly: \
+     `--features gui`.";
 
 #[cfg(not(feature = "gui"))]
 mod disabled {

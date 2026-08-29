@@ -92,11 +92,9 @@ pub(crate) fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>
         PrimOp::BitOr => Value::int(a | b),
         PrimOp::BitXor => Value::int(a ^ b),
         // Handled in the exec arm (they need `&mut Heap` / the heap); never reach here.
-        PrimOp::Cons
-        | PrimOp::VectorRef
-        | PrimOp::TableHas
-        | PrimOp::TableGet
-        | PrimOp::MapGet => return Ok(None),
+        PrimOp::Cons | PrimOp::VectorRef | PrimOp::TableHas | PrimOp::TableGet | PrimOp::MapGet => {
+            return Ok(None)
+        }
     };
     Ok(Some(v))
 }
