@@ -62,6 +62,17 @@ impl CraneliftBackend {
         // The fallback closure yields cranelift's own (large) error in its Err arm,
         // which trips `result_large_err`; it's an external type we don't control and
         // the value is discarded (`|_|`), so the size is irrelevant here.
+        // **The CLIF verifier stays ON, deliberately — do not turn it off for the ~3.5%
+        // compile-thread saving.** Tried 2026-08-29: `("enable_verifier", "false")` made
+        // cranelift-codegen 0.133.1's own `remove_constant_phis` pass fail its internal
+        // `assert_eq!(left: 1, right: 0)` on one of `json`'s arms — CLIF that verifies
+        // clean — which the tiering layer caught and answered by switching the JIT off for
+        // the whole process. Verifier back on, same tree: no panic. So on this Cranelift
+        // the optimize pipeline is only exercised-and-sound WITH the verifier in the loop,
+        // and the "waste" is buying pipeline behaviour we depend on. Re-attempt only on a
+        // Cranelift upgrade, and only with the fuzz differential + every benchmark row's
+        // stderr grepped for CODEGEN-PANICKED (the failure mode is a caught panic and a
+        // silently interpreter-only process, not a wrong answer).
         #[allow(clippy::result_large_err)]
         let mut builder =
             JITBuilder::with_flags(&[("opt_level", "speed")], default_libcall_names())

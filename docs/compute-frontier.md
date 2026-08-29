@@ -1187,7 +1187,21 @@ is all-or-nothing, so one un-lowerable op keeps the whole surrounding loop on th
 the un-lowerable op the way the leaf-splice deopt checkpoints already do (ADR-210 is the
 precedent that a lowered region can carry its own resume point). Largest single class left.
 
-### 7.2 Cranelift's CLIF verifier runs on every release compile
+### 7.2 Cranelift's CLIF verifier runs on every release compile — ATTEMPTED AND REJECTED 2026-08-29
+
+> **Do not retry on this Cranelift.** `("enable_verifier", "false")` made cranelift-codegen
+> 0.133.1's own `remove_constant_phis` pass fail its internal `assert_eq!` on one of `json`'s
+> arms — CLIF that verifies clean — and the tiering layer answered the caught panic by
+> switching the JIT off for the whole process. Verifier back on, same tree: no panic. The
+> optimize pipeline is only exercised-and-sound *with* the verifier in the loop, so the 3.5%
+> is buying behaviour we depend on. Bonus finding from the same session: the panic's
+> `RUST_BACKTRACE=1` print costs ~6% of the run in DWARF symbolication (`miniz_oxide` +
+> `gimli` + `addr2line` on the compile thread) — which is what made the panic visible in a
+> profile at all. Re-attempt only on a Cranelift upgrade, with the fuzz differential plus
+> every row's stderr grepped for `CODEGEN-PANICKED`. The comment in `CraneliftBackend::new`
+> carries the same warning at the flag site.
+
+**The original finding (kept for the record):**
 
 `enable_verifier` defaults **true** (cranelift-codegen 0.133.1 `settings.rs:502`), and
 `CraneliftBackend::new` sets only `opt_level` — so every arm ever compiled, in every release
