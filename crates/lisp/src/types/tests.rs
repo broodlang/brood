@@ -255,6 +255,20 @@ fn lattice_laws_hold() {
     }
 }
 
+// A tuple shape refines the VECTOR member only; a term that also admits a `pair` has
+// unknown elements. Reporting the tuple's elements for the whole term is the accepting
+// direction of unsound — it produced a checker false positive (see `check/tests.rs`,
+// `a_tuple_shape_does_not_leak_onto_a_pair_member_through_first`).
+#[test]
+fn elem_of_a_tuple_shape_unioned_with_a_bare_pair_is_unknown() {
+    let t = Ty::tuple_of(vec![Ty::int_lit(0)]).union(Ty::of(Tag::Pair));
+    assert_eq!(t.elem_ty(), None, "{t}");
+    // vector-only: the tuple's elements ARE the elements
+    assert_eq!(Ty::tuple_of(vec![Ty::int_lit(0)]).elem_ty(), Some(Ty::int_lit(0)));
+    // an explicit elem refinement is scoped to every seq member, so it still answers
+    assert_eq!(Ty::list_of(Ty::of(Tag::Int)).elem_ty(), Some(Ty::of(Tag::Int)));
+}
+
 #[test]
 fn subtyping_is_reflexive_and_transitive() {
     let s = sample_tys();
