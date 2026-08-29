@@ -85,3 +85,73 @@ fn the_kernel_and_the_language_agree_on_every_dispatch_identity() {
         disagreements.join("\n")
     );
 }
+
+/// The exported callback native guard code calls. Declared here rather than imported —
+/// `jit::rt` is `pub(crate)` — which also makes this a test of the symbol that is actually
+/// registered with Cranelift (`jit/cranelift.rs`), not of a Rust-visible copy of it.
+#[cfg(feature = "jit")]
+extern "C" {
+    fn brood_rt_dispatch_identity(
+        heap: *mut std::ffi::c_void,
+        w0: i64,
+        w1: i64,
+        w2: i64,
+    ) -> i64;
+}
+
+#[cfg(feature = "jit")]
+#[test]
+fn the_native_callback_answers_what_the_kernel_answers() {
+    use brood::core::value::Value;
+
+    // The word ABI (`jit/rt.rs`) transmutes a `Value` to `[i64; 3]`. If that ever stops
+    // holding, every callback is passing garbage and this must fail loudly rather than
+    // silently comparing nonsense.
+    assert_eq!(
+        std::mem::size_of::<Value>(),
+        std::mem::size_of::<[i64; 3]>(),
+        "the Value word ABI changed"
+    );
+
+    let mut interp = Interp::new();
+    interp
+        .eval_str("(defrecord native-probe (n))")
+        .expect("define a record");
+
+    // The last case is the one the sentinel exists for: `%identity-of` answers with whatever
+    // truthy value sits under `:__id__`, so a hand-written non-keyword id identifies as that
+    // value. A guard compares keywords, so the callback reports -1 and the site falls back.
+    let cases = ["1", "\"s\"", "{:a 1}", "(native-probe 3)", "{:__id__ 42}"];
+    let mut sentinels = 0;
+    for expr in cases {
+        let value = interp
+            .eval_str(expr)
+            .unwrap_or_else(|e| panic!("evaluating {expr}: {e:?}"));
+        let expected = match interp.heap.dispatch_identity(value) {
+            Value::Keyword(s) => s as i64,
+            _ => -1,
+        };
+        let words: [i64; 3] = unsafe { std::mem::transmute(value) };
+        let got = unsafe {
+            brood_rt_dispatch_identity(
+                (&mut interp.heap) as *mut _ as *mut std::ffi::c_void,
+                words[0],
+                words[1],
+                words[2],
+            )
+        };
+        assert_eq!(
+            got, expected,
+            "the native callback and the kernel disagree on the identity of {expr}"
+        );
+        if got == -1 {
+            sentinels += 1;
+        }
+    }
+    // Not vacuous: if no case reached the non-keyword branch, the loop above only ever
+    // compared two keyword lookups and the sentinel is untested (ADR-280).
+    assert_eq!(
+        sentinels, 1,
+        "expected exactly the hand-written non-keyword id to report the sentinel"
+    );
+}

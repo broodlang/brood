@@ -520,6 +520,39 @@ pub unsafe extern "C" fn brood_rt_global_epoch(heap: *mut Heap) -> i64 {
     (*heap).global_epoch() as i64
 }
 
+/// The **dispatch identity** of a value, as an interned keyword symbol — the read a
+/// speculation guard makes before calling an ability impl directly
+/// (docs/dispatch-speculation.md, phase 2a).
+///
+/// Returns the `Symbol` widened to `i64`, or **-1** when the identity is not a keyword. The
+/// second case is real rather than defensive: `%identity-of` answers with whatever truthy
+/// value sits under `:__id__`, and a hand-written `{:__id__ 42}` therefore identifies as `42`.
+/// A guard compares against a keyword constant, so -1 can never match one and the site falls
+/// back — which is the correct answer for a value the speculation was not about.
+///
+/// This exists as a callback rather than inline code because a record's identity is a CHAMP
+/// field, and reading one is not something native code can do on its own. It delegates to
+/// [`Heap::dispatch_identity`] — the single definition, pinned to the language's
+/// `%identity-of` by `tests/dispatch_identity_agrees.rs`. That pinning is the whole safety
+/// property here: a guard that computes identity differently from the dispatcher passes and
+/// then calls the wrong impl, silently.
+///
+/// # Safety
+/// `heap` must be the live context pointer; the word triple is bytes the JIT read out of a
+/// real `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_dispatch_identity(
+    heap: *mut Heap,
+    w0: i64,
+    w1: i64,
+    w2: i64,
+) -> i64 {
+    match (*heap).dispatch_identity(words_to_val(w0, w1, w2)) {
+        crate::core::value::Value::Keyword(s) => s as i64,
+        _ => -1,
+    }
+}
+
 /// Address of the global-epoch counter, so JIT'd code reads the epoch with a raw load instead
 /// of calling [`brood_rt_global_epoch`] on every loop back-edge / linked call. Fetched once at
 /// arm entry; the address is stable for the process. See [`Heap::global_epoch_ptr`].
