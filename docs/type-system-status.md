@@ -588,3 +588,18 @@ the callback's demands to the init and the collection. With both, `(number numbe
 bound to `any`; it is now inferred under each parameter's demand — what every call that
 reaches the tail satisfied — so `(fold + x xs)` is numeric, not `any`.
 
+## The length fact, carried (2026-08-29)
+
+`(append '(1 2 "foo") '(1 "bar"))` hovered as `nil | list<1 | 2 | string>`. The `nil` was
+the empty-input case, stated for every input; but both inputs here are `list<…>`, which
+since the list-disjointness change is the NON-empty list — so the result cannot be `nil`.
+That one fact (`provably_non_empty`: `⊆ pair`) now flows through every combinator that
+preserves length (`map`, `sort`, `reverse`, `distinct`, `append` with one non-empty
+argument, `into` a list, a literal `range`) and through `first`/`last`, and is withheld from
+every one that can empty a sequence. Sound in the only direction that matters: `nil` is
+dropped exactly where no input can produce it.
+
+The demand walk also consults a module's own inferred signatures now (`ctx.inferred_fn_sig`
+— a table lookup on the fixed-point pass's result, so no recursion): all-`any` parameter
+lists over std went 203 → 182, `-> any` returns 117 → 108.
+

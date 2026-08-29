@@ -4,6 +4,20 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Changed — a non-empty list stays non-empty through the combinators that preserve length.**
+`list<T>` is the non-empty list (the empty list is `nil`), and that fact now carries:
+`(append '(1 2) '(3))`, `(map inc '(1 2))`, `sort`, `reverse`, `distinct`, `into` a list,
+and a literal `(range 5)` are `list<…>` with no `nil |`; `first`/`last` of a `list<T>` are
+`T`. Everything that can empty a sequence (`filter`, `rest`, `nth`, a vector input) keeps
+its `nil`.
+
+**Changed — a module's own inferred signatures feed its demand inference.** A parameter
+handed to a same-file function takes that function's inferred parameter type (the
+fixed-point pass already computes it); most calls in a module are to its own functions, so
+this is where most `any` parameters came from.
+
 ## v0.18.1 — 2026-08-29
 
 Inferred signatures see through `& rest`, `fold`/`reduce`, and their own demands.
