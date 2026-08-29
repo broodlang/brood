@@ -2162,19 +2162,20 @@ fn macroexpand_all_depth_step(heap: &mut Heap, form: Value, env: EnvId, depth: u
 /// are and not descended into. An explicit stack, so a large expansion cannot overflow the
 /// Rust stack; quoted data inside is stamped too, harmlessly (a position on data is unused).
 fn stamp_synthetic(heap: &mut Heap, form: Value, pos: crate::error::Pos) {
+    use std::collections::HashMap;
+    // Pass 1 — every unpositioned pair reachable from `form`, parents before children, not
+    // descending into a positioned pair (the user's own text, or a finished inner
+    // expansion: nothing below it needs a position — which is what keeps the pass linear).
+    let mut order: Vec<Value> = Vec::new();
     let mut stack = vec![form];
     while let Some(v) = stack.pop() {
         match v.unpack() {
             ValueRef::Pair(p) => {
-                // A positioned pair is the user's own text or an already-finished
-                // expansion: nothing below it needs a position. Stopping here is what
-                // keeps the whole pass linear in the size of the expanded program.
                 if heap.form_pos_only(v).is_some() && v.as_pair() != form.as_pair() {
                     continue;
                 }
                 if heap.form_pos_only(v).is_none() {
-                    heap.set_form_pos(v, pos);
-                    heap.mark_synthetic(v);
+                    order.push(v);
                 }
                 let (head, tail) = heap.pair(p);
                 stack.push(head);
@@ -2188,6 +2189,65 @@ fn stamp_synthetic(heap: &mut Heap, form: Value, pos: crate::error::Pos) {
             _ => {}
         }
     }
+    // Pass 2 — children before parents: a pair DERIVES a position from the first element on
+    // its spine that is a form the user wrote (positioned, not synthetic) or a generated
+    // form that itself derived one. So a `match` clause's `(if (%eq m :a) (do body) …)`
+    // derives the clause's line through the `(do …)` its body sits in.
+    let mut derived: HashMap<u64, crate::error::Pos> = HashMap::new();
+    for &v in order.iter().rev() {
+        let mut cur = v;
+        let mut found = None;
+        while let ValueRef::Pair(p) = cur.unpack() {
+            let (head, tail) = heap.pair(p);
+            if let Some(hid) = head.as_pair() {
+                let key = pair_key(hid);
+                let hp = if heap.form_pos_only(head).is_some() && !heap.is_synthetic(head) {
+                    heap.form_pos_only(head)
+                } else {
+                    derived.get(&key).copied()
+                };
+                if hp.is_some() {
+                    found = hp;
+                    break;
+                }
+            }
+            cur = tail;
+        }
+        if let (Some(d), Some(id)) = (found, v.as_pair()) {
+            derived.insert(pair_key(id), d);
+        }
+    }
+    // Pass 3 — parents before children: a pair takes what it derived, else what its
+    // nearest positioned ancestor has, else the form the expansion came from.
+    let mut inherited: HashMap<u64, crate::error::Pos> = HashMap::new();
+    for &v in &order {
+        let Some(id) = v.as_pair() else { continue };
+        let key = pair_key(id);
+        let own = derived
+            .get(&key)
+            .copied()
+            .or_else(|| inherited.get(&key).copied())
+            .unwrap_or(pos);
+        heap.set_form_pos(v, own);
+        heap.mark_synthetic(v);
+        // hand `own` down the spine and to the head, so descendants inherit it
+        let mut cur = v;
+        while let ValueRef::Pair(p) = cur.unpack() {
+            let (head, tail) = heap.pair(p);
+            if let Some(h) = head.as_pair() {
+                inherited.entry(pair_key(h)).or_insert(own);
+            }
+            if let Some(t) = tail.as_pair() {
+                inherited.entry(pair_key(t)).or_insert(own);
+            }
+            cur = tail;
+        }
+    }
+}
+
+/// A pair's identity for the stamp's bookkeeping: region, index and generation packed.
+fn pair_key(id: crate::core::value::PairId) -> u64 {
+    ((id.region() as u64) << 62) | ((id.code_gen() as u64) << 40) | (id.index() as u64)
 }
 
 /// Rebuild `items` into a fresh list, copying the source position of the

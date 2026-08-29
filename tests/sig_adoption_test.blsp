@@ -259,3 +259,51 @@
           "yields float"))
     (refute (warns-about? "(defmodule dv5) (sig f (int -> float)) (defn f (x) (/ x 2.0))"
               "declared return type"))))
+
+;; ---- shifting ONE ratio by whole numbers: exactly a ratio --------------------
+;;
+;; `(+ 1 1/2)` is 3/2 and can be nothing else, but the ratio-closure rule answered
+;; `int | ratio` for it — the union it gives every ring expression over ints and ratios.
+;; True, and useless where it is read: a live evaluator showing a value beside its type puts
+;; "or it could be an int" next to the 3/2 it just printed.
+;;
+;; What makes the narrower answer sound is a representation invariant, so the runtime arms
+;; below are the load-bearing half of this block: a `Ratio` whose denominator is 1 is demoted
+;; to an `Int` when it is CONSTRUCTED, so no ratio is ever integral, and `n ± p/q` is
+;; `(nq ± p)/q` — same denominator, still not 1. Two ratios can cancel (`(+ 1/2 1/2)`), and
+;; multiplication cancels one against a whole number (`(* 2 1/2)`), so both keep the union.
+
+(describe "adding whole numbers to one ratio"
+  (test "the runtime never yields an int from an int shifted by a ratio"
+    (assert= :ratio (type-of (+ 1 1/2)))
+    (assert= :ratio (type-of (- 1 1/2)))
+    (assert= :ratio (type-of (+ 1 2 1/2)))
+    (assert= :ratio (type-of (inc 1/2)))
+    (assert= :ratio (type-of (- 1/2)))
+    ;; the invariant the rule rests on, stated directly
+    (assert= :int (type-of 4/2))
+    (assert= :int (type-of (+ 1/2 1/2))))
+
+  (test "declaring int over it is provably wrong now, not merely wider"
+    (is (warns-about? "(defmodule rt1) (sig a (int -> int)) (defn a (x) (+ x 1/2))"
+          "yields ratio")))
+
+  (test "a second ratio operand can cancel, and keeps the union"
+    (refute (warns-about? "(defmodule rt2) (sig b (ratio -> int)) (defn b (x) (+ x 1/2))"
+              "declared return type"))
+    (refute (warns-about? "(defmodule rt3) (sig c (int -> int)) (defn c (x) (* x 1/2))"
+              "declared return type")))
+
+  ;; Across processes, because a ratio crosses a heap boundary as a deep copy and the
+  ;; invariant has to survive the round trip — a ratio rebuilt with denominator 1 on the
+  ;; far side would make the checker's claim false where it is least visible.
+  (test "the invariant survives a send between processes"
+    (let (parent (self)
+          worker (spawn (fn ()
+                          (receive
+                            ([:go from] (send from [:back (+ 1 1/2) (+ 1/2 1/2)]))))))
+      (send worker [:go parent])
+      (receive
+        ([:back shifted cancelled] (assert= :ratio (type-of shifted))
+          (assert= :int (type-of cancelled))
+          (assert= 3/2 shifted))))))

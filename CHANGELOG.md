@@ -4,6 +4,31 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Added — `nest check --strict` (ADR-298).** A dynamic value with a precise type is checked
+by inclusion, so a `number` call result handed to an `int` parameter warns. Off by default
+(the overlap reading is what keeps a check quiet across a hot reload); `BROOD_CHECK_STRICT=1`
+also turns it on.
+
+**Added — sets carry an element type.** `#{1 2}` is `set<1 | 2>`, `#{}` is `set<never>`,
+`conj`/`into` onto a set keep it, and `(set T)` is accepted in a `sig` (type variables
+included).
+
+**Changed — the checker is more precise where it was provably right to be.** `list<A> ∩
+list<B>` is empty for disjoint `A`/`B` (a non-empty list has a first element), so a list
+that can never hold strings is flagged where `(list string)` is wanted; `(merge {:a 1} {:b
+2})` is `{a: 1, b: 2}`; a type variable may sit inside `(or …)`/`(and …)` in a signature —
+`(or ?A nil)` binds `?A` to the argument with `nil` carved off.
+
+**Fixed — a warning inside a `match` clause pointed at the `match`, not the clause.** The
+macro's fail-continuation splice rebuilt every clause body with `cons`, discarding the
+reader's positions; it now rebuilds only the spine it changes (ADR-297's promise, kept).
+
+**Fixed — the runtime-collector tests no longer arm the collector for every heap in the
+process (KI-86).** The GC floor is a per-heap override (`Heap::set_rt_gc_floor`) instead of
+a leaked environment variable read once into a process-wide `OnceLock`.
+
 ## v0.17.0 — 2026-08-29
 
 **Fixed — the hosted playground could not run its own front-page example (KI-82).** The

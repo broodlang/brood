@@ -3001,6 +3001,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         file_signatures_builtin);
     def(
         heap,
+        "%source-signatures",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        &["src"],
+        "`%file-signatures` for source TEXT rather than a file: the checker's signature for every function `src` defines, as `{:name :sig :declared? :informative?}` maps. `()` when `src` doesn't parse, so a live editor buffer never errors mid-edit. The question `%expr-type` cannot answer — a `(defn …)` form evaluates to its own name, so the type of its VALUE says nothing about the function.",
+        source_signatures);
+    def(
+        heap,
         "%check-file-structured",
         Arity::range(1, 2),
         Sig::with_rest(vec![string], any, list_ty),

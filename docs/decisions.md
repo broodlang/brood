@@ -210,6 +210,31 @@ out to already exist (`nest check` has always exited 1 on any warning).
 
 ---
 
+## ADR-298 — Strict checking is a launch switch, not a second lattice
+
+**Context.** The gradual relation reads a *dynamic* value — a call result, an inferred or
+redefinable global — by overlap: `number` handed to an `int` parameter is *consistent*,
+because some materialisation fits. That is the reload-safe reading (docs/type-gating.md,
+B1) and it is why a project's check stays quiet while it is being edited. It also means the
+checker knows `(h x)` is a `number` and says nothing when an `int` was wanted — the residue
+the corpus keeps turning up as "sound but not what I meant".
+
+**Decision.** `nest check --strict` (or `BROOD_CHECK_STRICT=1`) checks a dynamic value whose
+bound is anything narrower than `any` by **inclusion**, `bound ⊆ expected`, exactly as a
+static value is checked. A bare `dynamic()` — the genuinely unknown — keeps the overlap
+reading in both modes: strictness sharpens what is known, it never invents a verdict.
+
+Strictness is a **launch setting**: the CLI flips one process-wide switch, a file check
+reads it once at its root into the checker context (`Ctx::strict`), and every relation
+call takes it from there (`GradualTy::consistent_with_mode`). Nothing in the walk consults
+the global, so a test passes the mode explicitly (`check_file_mode`) and two tests in
+parallel can never see each other's strictness. The default stays lax: a hot reload must
+not turn a green check red.
+
+**Consequences.** Opt-in precision with no new rule in the lattice — the same `⊆` the
+static branch already runs. The trade is explicit: strict mode warns on the merely-wider,
+and the merely-wider is sometimes what a redefinable global will become after reload.
+
 ## ADR-297 — Synthetic code is located at the form it was expanded from
 
 **Status:** accepted; implemented 2026-08-29 (`eval/macros.rs` `stamp_synthetic`,
@@ -12979,6 +13004,17 @@ reservation cost nothing and broke nothing — the payoff ADR-169 was written to
   so it rejected a ratio — and had always rejected bignums and decimals too. They now coerce
   through the tower-aware `num_to_f64`, and `floor` on a ratio is computed **exactly** rather
   than through f64, so `(floor (/ a b))` stays right past 2^53.
+
+**The demotion is load-bearing for the type checker (2026-08-29).** "A denominator of 1
+demotes to an integer" is not only a normalisation convenience — it is the premise the
+checker's narrowest arithmetic rule rests on. Because no `Ratio` is ever integral, and
+`n ± p/q` is `(nq ± p)/q` with the same denominator, `+ - inc dec` over ints and **exactly
+one** ratio is exactly `ratio`, not the `int | ratio` union every other ring expression
+gets. `*` and `/` keep the union — they cancel a denominator against a whole number
+(`(* 2 1/2)` is `1`) — as does a second ratio operand (`(+ 1/2 1/2)`). So a change that
+ever allowed a ratio with denominator 1 to exist would silently make a *type* wrong, not
+just a printed form ugly; `tests/sig_adoption_test.blsp` asserts the runtime arms beside
+the checker's claim, including across a `send`, for exactly that reason.
 
 **References.** ADR-169 (the digit-led reservation this spends), `docs/language.md`
 §Numbers + §Arithmetic, `docs/spec.md`, `docs/primitives.md`, `tests/ratio_test.blsp`,

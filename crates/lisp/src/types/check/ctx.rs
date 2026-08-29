@@ -43,6 +43,8 @@ pub(super) enum SigTerm {
     ListOf(Box<SigTerm>),
     /// `(vector ?A)` — the element type may be a variable.
     VectorOf(Box<SigTerm>),
+    /// `(set T)` with a variable inside — `set<T>`.
+    SetOf(Box<SigTerm>),
     /// `(record [&open] :k ?A …)` — a field type may be a variable. Declaration order is
     /// kept (a `Vec`, not the shape's `BTreeMap`) only for display stability; binding is
     /// by field NAME. What this exists for: `defrecord`'s constructor signature
@@ -54,6 +56,13 @@ pub(super) enum SigTerm {
         fields: Vec<(Symbol, SigTerm, bool)>,
         open: bool,
     },
+    /// `(or ?A nil)` — a union with a variable in it, the optional-value idiom. Binds the
+    /// variable to the argument MINUS the concrete alternatives (`?A ← T ∖ nil`), which is
+    /// exact when one alternative is a variable and the rest are concrete; with two
+    /// variables in one union nothing binds (ambiguous — they widen to `any`).
+    Or(Vec<SigTerm>),
+    /// `(and …)` — an intersection; every conjunct unifies against the whole argument.
+    And(Vec<SigTerm>),
 }
 
 impl SigTerm {
@@ -80,6 +89,22 @@ impl SigTerm {
                     Ty::vector_of(e)
                 }
             }
+            SigTerm::SetOf(inner) => {
+                let e = inner.resolve(subst);
+                if e == Ty::ANY {
+                    crate::types::Ty::of(crate::core::value::Tag::Set)
+                } else {
+                    Ty::set_of(e)
+                }
+            }
+            SigTerm::Or(alts) => alts
+                .iter()
+                .map(|t| t.resolve(subst))
+                .fold(Ty::NEVER, Ty::union),
+            SigTerm::And(parts) => parts
+                .iter()
+                .map(|t| t.resolve(subst))
+                .fold(Ty::ANY, Ty::intersect),
             SigTerm::RecordOf { fields, open } => {
                 let resolved: std::collections::BTreeMap<Symbol, (Ty, bool)> = fields
                     .iter()
@@ -184,6 +209,32 @@ pub(super) fn unify_term(term: &SigTerm, ty: Ty, subst: &mut HashMap<u32, Ty>) {
                 unify_term(inner, elem.clone(), subst);
             }
         }
+        SigTerm::SetOf(inner) => {
+            if let Some(elem) = ty.elem_ty() {
+                unify_term(inner, elem.clone(), subst);
+            }
+        }
+        SigTerm::Or(alts) => {
+            let vars: Vec<&SigTerm> = alts
+                .iter()
+                .filter(|t| !matches!(t, SigTerm::Ty(_)))
+                .collect();
+            if vars.len() == 1 {
+                let concrete = alts
+                    .iter()
+                    .filter_map(|t| match t {
+                        SigTerm::Ty(c) => Some(c.clone()),
+                        _ => None,
+                    })
+                    .fold(Ty::NEVER, Ty::union);
+                unify_term(vars[0], ty.difference(concrete), subst);
+            }
+        }
+        SigTerm::And(parts) => {
+            for part in parts {
+                unify_term(part, ty.clone(), subst);
+            }
+        }
         SigTerm::RecordOf { fields, .. } => {
             // Bind each variable field from the argument's shape, by name. An argument
             // that is not a record (or lacks the field) binds nothing — the var widens to
@@ -250,6 +301,9 @@ pub(super) enum PathKey {
 
 #[derive(Clone, Default)]
 pub(super) struct Ctx {
+    /// Strict mode (`nest check --strict`): a dynamic value with a PRECISE bound is
+    /// checked by inclusion, not overlap — see [`crate::types::GradualTy::consistent_with_mode`].
+    strict_mode: bool,
     /// Lint categories suppressed in the current subtree (a `(check-allow …)`
     /// scope, ORed as we descend). `0` = nothing suppressed (the common case).
     suppressed: u8,
@@ -499,6 +553,16 @@ impl Ctx {
     /// The function whose signature is being inferred, if this `Ctx` is a return-inference one.
     pub(super) fn inferring_self(&self) -> Option<Symbol> {
         self.inferring_self
+    }
+
+    /// Whether strict mode is on for this check — see [`Ctx::strict`].
+    pub(super) fn strict(&self) -> bool {
+        self.strict_mode
+    }
+
+    /// Turn strict mode on or off (set once, at the root of a file check).
+    pub(super) fn set_strict(&mut self, on: bool) {
+        self.strict_mode = on;
     }
 
     pub(super) fn with_suppressed(&self, mask: u8) -> Ctx {
