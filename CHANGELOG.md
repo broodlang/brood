@@ -4,7 +4,13 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.18.0 — 2026-08-29
+
+The type-system precision release: every warning positioned at the form it came from,
+`nest check --strict`, operator domains derived from the multimethod registry under the
+names `numeric`/`ordered`, `countable`, records spelled by name, set element types — and
+`(< x)` no longer answers `true` for a list.
+
 
 **Changed — an operator's domain is what its multimethod covers (ADR-299).** `+ - * /` and
 `< <= > >=` used to declare `number | map` — a record with a `num/add`/`compare-to` method is

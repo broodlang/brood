@@ -397,6 +397,57 @@ return the matching opener (top of stack) or -1. Skips strings/comments."
             (hl-opener-scan full (inc i) n cp (rest stack)))
         else (hl-opener-scan full (inc i) n cp stack)))))
 
+(defn- hl-closer-of
+  (c)
+  ;; the closing delimiter that pairs with opener `c`, or nil
+  (cond (= c "(") ")" (= c "[") "]" (= c "{") "}" else nil))
+
+(defn- hl-close-scan
+  (full i pos n stack)
+  "Forward scan to `pos` keeping a stack of open-bracket offsets: the innermost opener
+enclosing `pos`, `-1` at top level, or `:text` when `pos` falls inside a string or a comment
+— where a bracket is a character rather than structure.
+
+The extra answer is why this is not [[enclosing-open]]'s scan: that one clamps its string and
+comment skips at `pos` and so cannot tell "the form encloses you" from "you are inside a
+string that happens to sit in that form"."
+  (if (>= i pos)
+    (if (empty? stack) -1 (first stack))
+    (let (c (string/char-at full i))
+      (cond
+        (= c "\"")
+          (let (e (hl-string-end full (inc i) n))
+            (if (> e pos) :text (hl-close-scan full e pos n stack)))
+        (= c ";")
+          (let (e (hl-to-eol full (inc i) n))
+            (if (> e pos) :text (hl-close-scan full e pos n stack)))
+        (hl-open? c) (hl-close-scan full (inc i) pos n (cons i stack))
+        (hl-close? c) (hl-close-scan full (inc i) pos n (rest stack))
+        else (hl-close-scan full (inc i) pos n stack)))))
+
+(defn closer-redundant? (full pos c)
+  "Would typing the closing delimiter `c` at offset `pos` in `full` be redundant — is the
+character already there that same closer, and is it the one closing the innermost form `pos`
+sits in?
+
+The question an editor asks before self-inserting a closer. In `(+ 1 2|)` typing `)` would
+give `(+ 1 2))`, so the useful thing is to move over the one already there — Emacs's
+`electric-pair-mode` skip, paredit's `close-round`.
+
+Answering it needs the enclosing FORM, not just the next character. In `(foo (bar|)` the `)`
+at point closes `(bar`, so moving over it is right and leaves `(foo` still to close; at top
+level a stray `)` closes nothing and must be typed; and `[1 2|)` is a mismatch, where typing
+the character the reader will complain about is more honest than silently stepping over it.
+
+False inside a string or a comment — `\";)\"` is text — and false at the end of the buffer."
+  (and (< pos (string/length full))
+    (= (string/char-at full pos) c)
+    (let (open (hl-close-scan full 0 pos (string/length full) '()))
+      (and (int? open)
+        (>= open 0)
+        (= (hl-closer-of (string/char-at full open)) c)))))
+(sig closer-redundant? (string int string -> bool))
+
 (defn bracket-match (full pos)
   "Given source `full` and cursor offset `pos`, return `[a b]` (the offsets of the
 matched bracket pair, `a` the opener) when the bracket adjacent to the cursor (the
