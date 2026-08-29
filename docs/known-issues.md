@@ -81,7 +81,8 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict |
+| KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict. **Addendum 2026-08-29:** the same defect verbatim in `check-examples`/`check-stress`/`check-corpora` (fixed inline in `green.sh` only), which on a lean `make release` brood additionally reported an absent DEV_MODULE (`reload/on-change`) as *rename rot* — the exact class the gate exists to find. All three now share `scripts/lib/gate-binary.sh`, which resolves by sha and separates "this build lacks the module" from "this name is gone" |
+| KI-79 | **`live_migration::deep_receive_continuations_resume_correctly_across_workers` failed once in CI, on the commit that moved the JIT preempt handler.** The test runs up to 400 bursts and fails unless `migrate_count() > 0` — it asserts a scheduler event was **observed**, not that results are right. In the failing run the per-burst correctness assertion passed **400/400**; only the "was a migration seen" assertion fired, which is the case the test's own message anticipates ("if this is the only failure and the machine was loaded, suspect scheduler starvation"). Suspicious anyway, because `12b31fc2` outlined `jit_run_fast_link`'s cold arms — including the **preempt** outcome that live migration depends on | ⚠️ **WATCHING 2026-08-28** — not reproduced in 18 local runs (10 unpinned + 8 pinned to 2 cores, matching CI's core count). The change is provably a **verbatim** move: a line-by-line diff of the 117 moved lines against the original shows zero semantic differences, and the only new code is `if outcome == 0 { … return }` ahead of the delegation. It also cannot change *when* a preempt happens — the native arm's tick poll decides that, and only the handling moved. Mitigated rather than closed: `live_migration` now carries `retries = 1`, the gap the `distribution` override already documents. **If it recurs, get whether the correctness assertion also failed** — that is the line between starvation and a real capture-machinery bug |
 | KI-78 | **CI never builds a stdlib image, so the entire suite tests the load path users do NOT get.** The image is **default-ON** since v0.15.0 (`f114d01e`), and default-ON is safe by construction: with no image on disk `install` returns nil in ~30 µs and everything loads from source. Nothing in `ci.yml` builds one, so that is exactly what every CI job does — all ~1222 tests exercise the source path, and the shipped default is untested there. Worse than uniformly untested: `image_matches_source.rs` (ADR-280) *does* build one and writes it to `~/.cache/brood`, so any test scheduled after it in the same job runs imaged — nextest gives each case its own process in no guaranteed order, making the coverage **order-dependent and nondeterministic** | ✅ **FIXED 2026-08-28** — nextest's setup scripts now build the image (`scripts/build-std-image.sh`, registered beside `warm-boot-cache`), so `make test` and CI both run the default; ci.yml's tree-walker job sets `BROOD_NO_STDIMAGE=1` — the script's own off switch — so one job keeps deliberate source-path coverage instead of the two paths trading places. Verified both ways at **1222/1222**. Found while fixing the KI-72 guard, which had the same hole one level down (`autoload_race` never built an image either; fixed in `6e52528a`). The suite is *known green imaged* — verified locally at 1218/1218 and 1222/1222 with an image live — so this is a coverage gap, not a suspected failure. The fix is to build the image in nextest's existing setup script (the repo already runs one, `warm-boot-cache`, for KI-38) so `make test` and CI both exercise the default, and to keep one job on the source path so both are covered rather than trading one for the other |
 | KI-77 | **the `loop` benchmark row is ~2-3% slower than v0.14.1, and it survives every check that usually kills such a signal.** `loop` is a pure integer self-tail loop — the simplest JIT'd shape — so a real regression there is wide. Persists **unpinned** (so it is not the background-JIT-on-one-core artifact ADR-175 records) and persists under **interleaved** measurement (so it is not thermal/session drift): +3.4% pinned and +2.8% unpinned interleaved, +3.3% against a base-vs-base floor of 0.0%, +2.2% interleaved vs both v0.14.1 and 464b6c57. `make ab` reports it as `noise` because with a ~0% floor its rule falls back to a 5% absolute threshold, which is arguably too lenient for a row this quiet | ☑️ **NO LONGER REPRODUCES 2026-08-28** — real when filed, gone at v0.15.0 (`e9c54606`): `loop` is now **-2.2%** against v0.14.1 and **-6.4%** against `dfcddc4f`, the very tree the regression was measured on. It was not fixed by chasing it — v0.15.0 carries a ~5-6 ms FIXED per-run saving that lands on every row (`startup` **-16.7%**, 36 -> 30 ms; `loop` -6 ms, `sieve` -6 ms, `fib` -5 ms, `collatz` -5 ms), which swamped it. Not attributed to a commit. Original detail below — not bisected. Localized to `464b6c57..HEAD` only; the intermediate binaries (v0.14.1, 6b172c1d, 464b6c57) are within 1.1% of each other. **The measurement trap that blocks a bisect is the finding here:** this row's ABSOLUTE numbers drift ~3% between measurement sessions — the same `6b172c1d` binary read 90 ms in one interleaved pair and 93 ms in the next — so a single-shot per-step bisect on a 3% signal reads pure noise. Bisect it with *same-session interleaved* pairs only, or not at all |
 | KI-72 | **a stdlib-image section replaced a module's autoload stub before the rest of the module was bound, so a racing process took the real function and died on an unbound helper.** `string/blank?` is public and stubbed; `whitespace?` is `defn-` and is called from its body. Installing the real `blank?` removed the ADR-246 stub — the one door that routes a caller into `require-one` and makes it *wait* — while `whitespace?` was still unbound, so 17 of 24 `spawn`ed children died `unbound symbol: string/whitespace?` and the test's root waited forever for replies that could never total 24. **A wrong answer presenting as a hang.** Two sessions read it as a scheduler/mailbox stall and chased the 5 ms poll, the non-latching condvar, the `code_server` model and the two wake paths — all symptoms. The source path cannot produce it: `load` evaluates in file order, where a helper precedes its caller | ✅ **FIXED 2026-08-28** (ADR-279) — a section now defines names with **no current binding first and already-bound names (the stubs) last**; deferring is enough, atomicity is not needed. Sabotage-verified: deferral off 9/12 hang, on **0/24**. Acceptance load (12 parallel copies at `--test-threads=4`, 90 s): image ON **0/12**, image OFF 0/12, against 12/12 vs 0/12 before. Guarded by ADR-280's `image_matches_source.rs` differential (source vs image must agree on name, kind, privacy and sig — it found a **sixth** divergence on its first run: materialising dropped privacy, 1448 names, 0 after). Two things hid this for two sessions: **libtest captures a test's stderr and discards it when the test never completes**, so the `process N died` line was written and thrown away (`--nocapture` shows it), and the amplifier switches itself off — `BROOD_STDLIB_HASH` covers every `std/**/*.blsp`, so any edit (even someone else's, mid-run) silently turns the image arm into the no-image arm. **Verify the image per run, not once.** **The image is now DEFAULT-ON** (v0.15.0, `f114d01e`; opt out with `BROOD_NO_STDIMAGE=1`) — this fix plus ADR-280's differential is what made that shippable, after the first flip was reverted the same day it landed |
@@ -5064,7 +5065,7 @@ deliberate `<`-vs-`compare` disagreement — plus `float_total_cmp_is_a_total_or
 One test in that file has to compare via `pr-str` rather than `assert=`, because a result
 containing NaN is never `=` to itself — the contract biting the test that checks it.
 
-## KI-76 — `make green` gated on a binary no command refreshes ✅ FIXED 2026-08-28
+## KI-76 — `make green` gated on a binary no command refreshes ✅ FIXED 2026-08-28 (siblings 2026-08-29)
 
 **Symptom.** `./scripts/green.sh` reported the tree NOT green with 8 warnings from the one
 gate that is supposed to be held at zero:
@@ -5134,6 +5135,48 @@ and after `make release`, both `.blsp` gates run and pass. Confirmed in both sta
 gate that names the wrong artifact is not a weaker gate, it is a *different* gate, and it
 reports confidently about something you did not ask. Whenever a script runs a built binary,
 assert the binary's identity — not its existence.
+
+**Addendum 2026-08-29 — the same defect was in three sibling gates, and it hid a second one.**
+`green.sh` was fixed inline, so `check-examples.sh`, `check-stress.sh` and `check-corpora.sh`
+kept the original bug verbatim: all three defaulted to `target/release/…` while their error
+told you to run `make release-brood`, which writes `target/release-fast`. Locally none of the
+three could run at all, and the message named a command that could not fix that — the reason
+this went unnoticed is that CI *does* build `target/release`, so the gate only misbehaved
+where a person would run it.
+
+Pointing them at whichever binary exists then surfaced a **second** wrong answer, and it is
+the more interesting one. `make release` builds `brood` with `RUN_FEATURES`, which is LEAN:
+`--no-default-features` compiles `DEV_MODULES` (`test` `docs` `grammar` `observer` `reload`
+`mcp` `perf` `repl`) out entirely. So `examples/hot-reload/main.blsp` died on
+`unbound symbol: reload/on-change` — reported as an example failure, i.e. **as rename rot**,
+which is exactly the class this gate exists to detect. That is a false positive that costs a
+name hunt through a rename wave; it nearly bought one.
+
+**Fix.** `scripts/lib/gate-binary.sh`, now sourced by all three: `gate_pick` prefers the
+candidate whose `--version` reports HEAD's sha (existence is only a tiebreak),
+`gate_require_fresh` exits 2 with `the gate DID NOT RUN` — carrying over `green.sh`'s
+exemption for a binary whose baked-in `std/`+`crates/` is unchanged, so a docs-only commit
+does not refuse the gate — and `gate_classify` separates the two verdicts. A run whose
+unbound names *all* belong to a module this **tree has and this binary lacks** is reported as
+`skip … (needs reload, absent from this lean build)`, never as a failure. The absent-module
+set is derived from the tree (`std/tool/<ns>.blsp` exists, `(builtin-modules)` does not list
+it) rather than restating the Rust `DEV_MODULES` list, so it cannot drift from it. The
+`stress/*_test.blsp` block skips wholesale on a lean brood for the same reason — `--test`
+needs the `test` module.
+
+**Guard, sabotage-verified.** Four deliberate breaks, all against the LEAN binary:
+
+| sabotage | verdict |
+|---|---|
+| `(bogus/thing 1)` appended to `examples/life.blsp` (module exists nowhere) | `FAIL life` ✅ |
+| `(no-such-function 1)` appended (bare name) | `FAIL life` ✅ |
+| unmodified `hot-reload` on the lean build | `skip … (needs reload, …)`, exit 0 ✅ |
+| `touch crates/lisp/src/lib.rs` | `the gate DID NOT RUN — … is newer than …`, **exit 2** ✅ |
+
+The first two are the ones that matter: the skip path must not be able to swallow real rot,
+and a name whose module exists nowhere is still a failure. With the full-featured binary
+(`cargo build --release -p cli -p nest`) all three gates run clean end to end — examples 9/9,
+stress 28/28, corpora 68 files across four trees.
 
 ## KI-77 — `loop` was ~3% slower than v0.14.1 ☑️ NO LONGER REPRODUCES 2026-08-28 (fixed by v0.15.0)
 
@@ -5352,3 +5395,53 @@ One detail worth knowing: the two *explicitly* imaged arms build and install the
 `%std-image-install`, which is a plain function and does not consult the env var. So they stay
 imaged even in the source-path job — which is what you want, since it means that job covers
 **both** paths rather than losing the imaged one.
+
+## KI-79 — one `live_migration` failure on the commit that moved the JIT preempt handler ⚠️ WATCHING 2026-08-28
+
+**Symptom.** CI on `12b31fc2` (`perf(jit): outline the fast link's cold outcomes`):
+
+```
+FAIL [3.841s] (847/1227) brood::live_migration deep_receive_continuations_resume_correctly_across_workers
+  panicked at crates/lisp/tests/live_migration.rs:118:5
+```
+
+Every other job passed. Line 118 is **not** the correctness assertion — it is
+`assert!(migrated || gc_stress, …)`, which fails unless `process::migrate_count() > 0` after up to
+400 bursts. So the test asserts that a scheduler event **was observed**, and in this run the
+per-burst `assert_eq!` on the computed result passed **400 times out of 400**.
+
+**Why it is suspicious despite that.** `12b31fc2` outlined `jit_run_fast_link`'s cold outcome arms
+into a `#[cold]` helper, and those arms include **outcome 2 — preempt** — which is precisely the
+mechanism live migration rides on. A change that stopped preemption firing would produce exactly
+this signature: right answers, no migration observed.
+
+**Why it is probably not that, with the evidence:**
+
+- **The move is verbatim.** A line-by-line diff of the 117 moved lines against the pre-change file
+  shows **zero semantic differences**. The only new code is `if outcome == 0 { … return … }` ahead
+  of the delegation, which is the same condition the `match` arm had.
+- **It cannot change *when* a preempt happens.** The native arm's tick poll decides that
+  (`emit_self_call` resets the journal immediately before it); only the *handling* of the returned
+  outcome moved.
+- **Unreproduced in 18 runs** — 10 unpinned, and 8 pinned to two cores to match the runner CI
+  describes as sharing 2 cores with the workspace build.
+- **The test's own failure message anticipates this case**: "If this is the only failure and the
+  machine was loaded, suspect scheduler starvation rather than the capture machinery: the per-burst
+  correctness assertion above passed every time."
+
+**The structural gap, which is the actionable part.** This was the last test in the suite asserting
+an *observation of concurrency* with **no retry** — the same gap `.config/nextest.toml`'s
+`distribution` override already documents for real-TCP deadlines. Observing a cross-worker migration
+on two shared cores is exactly the kind of thing that can legitimately not happen. It now carries
+`retries = 1`: a starvation blip stops reddening CI, a deterministic regression still fails both
+attempts, and a pass-on-retry is reported as FLAKY so it cannot be absorbed silently.
+
+**If it recurs, the first thing to establish is whether the per-burst `assert_eq!` also failed.**
+That is the line between scheduler starvation (this entry) and a real capture-machinery bug (a much
+more serious thing, and the class KI-1 lives in). The two look identical in a summary line and
+completely different in the log.
+
+**Not filed as a bug against `12b31fc2`** because nothing in it can produce a wrong answer, and
+nothing did. Recorded because this repo's own rule is that a failure seen once is real until proven
+otherwise — and because a single sighting on the one commit that touched the preempt path is
+precisely the coincidence that deserves writing down rather than explaining away.

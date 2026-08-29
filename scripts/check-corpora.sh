@@ -28,11 +28,13 @@ set -u
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 2
 
-NEST=${NEST:-$root/target/release/nest}
-if [ ! -x "$NEST" ]; then
-  echo "check-corpora: $NEST not found — run \`make release\` first" >&2
-  exit 2
-fi
+# WHICH binary — see `scripts/lib/gate-binary.sh`. This gated on `target/release/nest`
+# while `make release` writes `target/release-fast`, so the command its error named could
+# not fix it (KI-76's class).
+ROOT="$root"
+. "$root/scripts/lib/gate-binary.sh"
+NEST=${NEST:-$(gate_pick nest)}
+gate_require_fresh "$NEST"
 
 shopt -s globstar nullglob
 

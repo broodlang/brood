@@ -32,8 +32,11 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BROOD="${BROOD:-$ROOT/target/release/brood}"
-NEST="${NEST:-$ROOT/target/release/nest}"
+# WHICH binary, and which modules it carries — see `scripts/lib/gate-binary.sh` for both
+# questions and why each one had a wrong answer here (KI-76's class).
+. "$ROOT/scripts/lib/gate-binary.sh"
+BROOD="${BROOD:-$(gate_pick brood)}"
+NEST="${NEST:-$(gate_pick nest)}"
 RUN_SECS="${RUN_SECS:-8}"
 
 # Example PROJECTS whose suite is knowingly red — named here so the skip prints on every
@@ -42,7 +45,8 @@ RUN_SECS="${RUN_SECS:-8}"
 # the real editor project, so the in-repo duplicate was removed rather than kept limping.
 SKIP_PROJECTS="${SKIP_PROJECTS:-}"
 
-[ -x "$BROOD" ] || { echo "no brood binary at $BROOD — run \`make release-brood\` first" >&2; exit 2; }
+gate_require_fresh "$BROOD"
+gate_load_modules "$BROOD"
 
 want=("$@")
 matches() {
@@ -60,14 +64,12 @@ for f in "$ROOT"/examples/*.blsp; do
   name="$(basename "$f" .blsp)"
   matches "$name" || continue
   out="$(cd "$ROOT" && timeout "$RUN_SECS" "$BROOD" "$f" 2>&1)"
-  bad="$(printf '%s\n' "$out" | grep -E 'unbound symbol|unbound error' | head -3)"
-  if [ -n "$bad" ]; then
-    fail=1
-    echo "  FAIL    $name"
-    printf '%s\n' "$bad" | sed 's/^/            /'
-  else
-    echo "  ok      $name"
-  fi
+  gate_classify "$out"
+  case "$GATE_VERDICT" in
+    ok)   echo "  ok      $name" ;;
+    skip) echo "  skip    $name ($GATE_DETAIL)" ;;
+    *)    fail=1; echo "  FAIL    $name"; printf '%s\n' "$GATE_DETAIL" | sed 's/^/            /' ;;
+  esac
 done
 
 # --- examples that live in a SUBDIRECTORY without a project.blsp ------------------------
@@ -81,14 +83,12 @@ for f in "$ROOT"/examples/*/*.blsp; do
   name="$(basename "$dir")/$(basename "$f" .blsp)"
   matches "$(basename "$dir")" || matches "$(basename "$f" .blsp)" || [ ${#want[@]} -eq 0 ] || continue
   out="$(cd "$ROOT" && timeout "$RUN_SECS" "$BROOD" "$f" 2>&1)"
-  bad="$(printf '%s\n' "$out" | grep -E 'unbound symbol|unbound error' | head -3)"
-  if [ -n "$bad" ]; then
-    fail=1
-    echo "  FAIL    $name"
-    printf '%s\n' "$bad" | sed 's/^/            /'
-  else
-    echo "  ok      $name"
-  fi
+  gate_classify "$out"
+  case "$GATE_VERDICT" in
+    ok)   echo "  ok      $name" ;;
+    skip) echo "  skip    $name ($GATE_DETAIL)" ;;
+    *)    fail=1; echo "  FAIL    $name"; printf '%s\n' "$GATE_DETAIL" | sed 's/^/            /' ;;
+  esac
 done
 
 # --- example PROJECTS (a project.blsp + tests/) -----------------------------------------
