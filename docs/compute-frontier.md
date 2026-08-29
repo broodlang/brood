@@ -1208,6 +1208,21 @@ constrains both:
    defns, let feedback demote, and re-measure exactly `nbody`, `spawn`, `spawn-live`,
    `pingpong` (the recorded victims) plus `nqueens`/`pipeline` (the expected winners) — warm
    and cold, pinned and unpinned, image `:live` both arms.
+**Step 1 LANDED 2026-08-29 (`686f480c` + the opt-in follow-up), and it taught two things:**
+
+- **The `%receive` fence.** Every `receive` emits its matcher as a `(fn (msg) …)` literal,
+  so receive-bearing chunks were kept off the JIT *accidentally* by MakeClosure's absence
+  from the subset. Admitting it made `local_send_race`'s collector lower, park inside the
+  native boundary, and die on the nested-run machinery's `Control::Suspend` read as an
+  empty-message error. The fence is now explicit (a `%receive` call excludes the chunk,
+  guarded by `receive_bearing_chunks_stay_out_of_the_jit_subset`) — and §7.3's "receive as a
+  native exit" design must lift it deliberately, not by predicate accident.
+- **Step 1 alone is all cost, so admission is `BROOD_MKCLO=1` opt-in (the BROOD_MONO
+  pattern).** Default-on tiered ~47 extra boot-path closure arms (fib: 83 → 130 compiles)
+  for a measured +11 ms CONSTANT per run (BENCH_N-invariant = pure fixed cost) plus
+  pinned-sweep noise — while the intended winners still bail on the gate. Flip the default
+  with step 2, re-measuring `startup`/`spawn` beside `nqueens`/`pipeline`.
+
 3. **Order matters:** land the `MakeClosure` callback first (subset-only, gate untouched —
    measurable on closure-heavy rows via the HOF path), then the gate experiment. Doing both
    at once makes a regression unattributable.
