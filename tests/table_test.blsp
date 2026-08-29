@@ -273,7 +273,7 @@
 
   (test "an unsendable value (an unrealised lazy seq-view) is rejected as a value"
     (let (t (table/new))
-      (is (threw? (fn () (table/put t :k (lmap inc [1 2 3]))))))))
+      (is (threw? (fn () (table/put t :k (seq/lmap inc [1 2 3]))))))))
 
 ;; ---- scale ------------------------------------------------------------------
 (describe "table: scale"

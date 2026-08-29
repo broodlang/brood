@@ -387,9 +387,9 @@ can restore it, and selecting the newest match (empty query → newest entry)."
 (defn- lineedit-candidates
   (pfx)
   "Sorted global names beginning with `pfx` — the default Tab-completion source.
-Reads the live image (`global-names`), so globals + macros (defn/when/cond/…) are
+Reads the live image (`reflect/global-names`), so globals + macros (defn/when/cond/…) are
 all in (and a new project's own globals, since it's the live runtime)."
-  (sort (filter (fn (s) (string/starts-with? s pfx)) (map str (global-names)))))
+  (sort (filter (fn (s) (string/starts-with? s pfx)) (map str (reflect/global-names)))))
 
 ;; The completion source: a `(fn pfx -> sorted-candidate-strings)`. Defaults to the
 ;; live globals; a project that wants to complete its *own* vocabulary (buffer
@@ -717,10 +717,10 @@ a rebound key or a user's own command can't leave a stale listing on screen."
 (defn- lineedit-arglist-of
   (callee)
   "The arglist of the function/macro named by string `callee` (resolved in the live
-image), or nil if it isn't a bound symbol. A bare-symbol `eval` is just a lookup."
+image), or nil if it isn't a bound symbol. A bare-symbol `reflect/eval` is just a lookup."
   (try
     (let (sym (reflect/read-string callee))
-      (if (and (symbol? sym) (bound? sym)) (arglist (eval sym)) nil))
+      (if (and (symbol? sym) (bound? sym)) (arglist (reflect/eval sym)) nil))
     (catch e nil)))
 
 ;; check-allow: deliberately non-tail — depth = the signature hint's argument count.

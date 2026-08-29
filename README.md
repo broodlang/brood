@@ -197,7 +197,7 @@ from a project directory (`nest new <name>` scaffolds one):
 references, rename, semantic tokens, formatting). Point your editor's LSP client
 at the `brood-lsp` binary for `.blsp` files — see [`docs/lsp.md`](docs/lsp.md).
 
-**Syntax highlighting** is *generated* from the language's own `(special-forms)`,
+**Syntax highlighting** is *generated* from the language's own `(reflect/special-forms)`,
 so the keyword list never drifts. `nest grammar [target]` prints to stdout —
 redirect it into your editor's grammar file:
 
@@ -223,7 +223,7 @@ lists, `[ ]` vectors, immutable `{ }` maps (`get`/`assoc`/`dissoc`/`keys`/`vals`
 destructuring in `let`/`fn`, including Erlang-style **bit syntax** — `(bytes
 (len :u16) (body len) & rest)`), higher-order functions
 (`map`/`filter`/`reduce`/`apply`), and the self-hosting trio
-`eval`/`read-string`/`load`. Parameter lists are written as lists (`(x y)` —
+`reflect/eval`/`reflect/read-string`/`reflect/load`. Parameter lists are written as lists (`(x y)` —
 code is lists; vectors are data) and support `&optional` (with defaults) and
 `& rest`. Code is organised into **modules** (`defmodule`/`:use`/`:as`) with
 enforced privacy — a `foo--internal` name is module-private. **Dynamic
@@ -387,7 +387,7 @@ diverge, and the differences are deliberate:
 
 **Processes** (`spawn`/`send`/`receive`/`self`) run share-nothing as lightweight
 **green threads** on an M:N worker pool (≈`nproc`), with reduction-counted
-preemption, selective `receive` + timeouts, links/monitors and `trap-exit`, and
+preemption, selective `receive` + timeouts, links/monitors and `proc/trap-exit`, and
 registered names (see [`examples/processes.blsp`](examples/processes.blsp)).
 Supervision is a **userland** `std/proc/supervisor.blsp` over `spawn`/`monitor`
 (a kernel-supervisor was tried and reverted). **Distributed nodes** connect over

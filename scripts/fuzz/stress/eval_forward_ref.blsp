@@ -1,11 +1,11 @@
-;; eval_forward_ref — KI-24's reproducer: a definition made by `eval` referencing a name
-;; that a LATER `eval` defines, which ordinary code has always been able to do.
+;; eval_forward_ref — KI-24's reproducer: a definition made by `reflect/eval` referencing a name
+;; that a LATER `reflect/eval` defines, which ordinary code has always been able to do.
 ;;
 ;;   brood scripts/fuzz/stress/eval_forward_ref.blsp
 ;;
 ;; All three lines must read `:ok` / `42` / `42`. Between 97d63eda and the KI-24 fix the
-;; third was `ERROR: unbound symbol: s`: the resolve pass `eval` gained qualifies a bare
-;; reference only on positive evidence its target exists, and `eval` — unlike a file loader
+;; third was `ERROR: unbound symbol: s`: the resolve pass `reflect/eval` gained qualifies a bare
+;; reference only on positive evidence its target exists, and `reflect/eval` — unlike a file loader
 ;; — has no whole-file def-head pre-scan to supply that evidence for a forward reference.
 
 (defmodule fwd-test)
@@ -15,9 +15,9 @@
 (io/puts (str "normal mutual recursion:   "
            (try (str (p 10)) (catch e (str "ERROR: " (get e :message))))))
 ;; eval'd, but the TARGET already exists when the referrer is eval'd (order swapped)
-(eval '(defn y (n) (+ n 1)))
-(eval '(defn x (n) (y n)))
-;; `x` and `r` are defined by `eval`, which the checker cannot see — that invisibility is
+(reflect/eval '(defn y (n) (+ n 1)))
+(reflect/eval '(defn x (n) (y n)))
+;; `x` and `r` are defined by `reflect/eval`, which the checker cannot see — that invisibility is
 ;; the very thing this file exists to exercise, so the unbound lint is opted out here rather
 ;; than "fixed". Without the directive `make check-stress` fails on the harness that proves
 ;; KI-24 stays fixed.
@@ -25,8 +25,8 @@
   (io/puts (str "eval'd, target defined 1st: "
              (try (str (x 41)) (catch e (str "ERROR: " (get e :message)))))))
 ;; eval'd, target defined AFTER the referrer
-(eval '(defn r (n) (s n)))
-(eval '(defn s (n) (+ n 1)))
+(reflect/eval '(defn r (n) (s n)))
+(reflect/eval '(defn s (n) (+ n 1)))
 (check-allow :unbound
   (io/puts (str "eval'd, target defined 2nd: "
              (try (str (r 41)) (catch e (str "ERROR: " (get e :message)))))))

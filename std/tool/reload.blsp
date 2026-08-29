@@ -4,7 +4,7 @@
 ;; `def` promotes new code into the shared RUNTIME region and rebinds the
 ;; global; in-flight calls keep the old closure, the next lookup sees the new
 ;; one — docs/shared-code.md). What's missing for casual use is the *trigger*:
-;; somebody needs to notice the file changed and call `load`. That's policy,
+;; somebody needs to notice the file changed and call `reflect/load`. That's policy,
 ;; and it lives here.
 ;;
 ;; This module is opt-in (`require 'reload`) on purpose. Production programs
@@ -12,7 +12,7 @@
 
 (defmodule reload
   "Hot-reload helpers. A reloader is a green process that polls a file's
-mtime and re-`load`s it when it changes — the running program's globals
+mtime and re-`reflect/load`s it when it changes — the running program's globals
 rebind on the *next* call site (docs/shared-code.md). Opt-in: nothing is
 watched until you call `on-change`.
 
@@ -62,7 +62,7 @@ behind a long-lived loop has changed since it started."
 ;;     (def, defn, defmacro, defmodule, …), not side-effecting calls. This
 ;;     is the difference between hot-reload and re-launch: a watched file
 ;;     containing both `(defn main-loop …)` and `(main-loop 0)` would, with
-;;     plain `load`, re-execute the loop on every save (spawning a
+;;     plain `reflect/load`, re-execute the loop on every save (spawning a
 ;;     duplicate that runs alongside the original, *and* blocking the
 ;;     watcher itself inside the call — observable as "stops updating
 ;;     after the first reload"). `system/reload-defs` refreshes the bindings only;
@@ -161,7 +161,7 @@ behind a long-lived loop has changed since it started."
 ;; The directory watcher loop. Holds the set of files we've already noticed.
 ;; Each scan tick:
 ;;   - re-walk the tree for the current .blsp set;
-;;   - for every path we didn't know about, `load` it (so its defs become
+;;   - for every path we didn't know about, `reflect/load` it (so its defs become
 ;;     live without waiting for a second save) and spawn a per-file watcher
 ;;     for future edits.
 ;; `known` is pre-seeded by `on-change` with the initial scan, so the
@@ -178,7 +178,7 @@ behind a long-lived loop has changed since it started."
         (io/puts "[reload] +" p)
         (try
           (do
-            (reload-in-package-context p (fn () (load p)))
+            (reload-in-package-context p (fn () (reflect/load p)))
             (when on-reload
               (try
                 (on-reload p)
@@ -189,7 +189,7 @@ behind a long-lived loop has changed since it started."
     (reload-dir-loop dir current on-reload)))
 
 (defn on-change (path &optional on-reload)
-  "Watch `path` for changes and `load` it on every modification. Dispatches:
+  "Watch `path` for changes and `reflect/load` it on every modification. Dispatches:
 
   - **File** — spawn one watcher polling `file/mtime` every
     `*reload-poll-ms*` (250 ms).
@@ -216,7 +216,7 @@ use yet)."
     ;;      caller, typically `nest run`'s `run` walk);
     ;;   2. spawn the dir watcher with `known` pre-seeded to that set, so
     ;;      it only fires on files that appear *after* startup, and does
-    ;;      `load` + per-file watcher for each.
+    ;;      `reflect/load` + per-file watcher for each.
     (let (initial (reload-collect-blsp path))
       (dolist (p initial)
         (spawn (reload-loop p (file/mtime p) on-reload)))

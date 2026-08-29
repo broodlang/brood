@@ -1,6 +1,6 @@
 ;; ---- discovery / introspection ----------------------------------------------
 ;; "What's in this image, and where?" — name- and doc-based search over the flat
-;; global table, on top of the `global-names`/`doc` primitives. The first thing
+;; global table, on top of the `reflect/global-names`/`doc` primitives. The first thing
 ;; to reach for when exploring rather than guessing names one at a time.
 
 ;; The candidate set for name-based discovery: every global MINUS the plumbing. A `%`
@@ -8,15 +8,15 @@
 ;; behind the prefix, taking `%` globals from 313 to 521) and a `defn-` name is
 ;; module-private. Neither is something a user should be offered, and before this
 ;; `(apropos "sort")` answered `(%sort-asc %sort-cmp %merge-sort %merge-sort-n sort
-;; sort-by)` — four of six results were internals. `bound?` guards the `private?`
+;; sort-by)` — four of six results were internals. `bound?` guards the `reflect/private?`
 ;; probe against a name in the table with no value yet.
 (defn- %discoverable-names
   ()
   "Every global worth OFFERING to a human: no `%` plumbing, no module-private names."
   (filter (fn (s)
             (and (not (string/starts-with? (->string s) "%"))
-              (not (private? s))))
-    (global-names)))
+              (not (reflect/private? s))))
+    (reflect/global-names)))
 
 (defn apropos (pattern)
   "Every PUBLIC global whose name contains `pattern` (a string, symbol, or keyword), as a
@@ -50,7 +50,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
       (map (fn (e) [(second e) (nth e 2)])
         (sort-by (fn (e) [(- (first e)) (str (second e))])
           (seq/keep (fn (s)
-                      (let (d (try (doc (eval s)) (catch _ nil)))
+                      (let (d (try (doc (reflect/eval s)) (catch _ nil)))
                         (when (string? d)
                           (let (hay (string/lower (str s " " d))
                                 hits (count (filter (fn (t) (includes? hay t)) terms)))
@@ -245,10 +245,10 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 
 ;; The feature whose body is currently being evaluated, or nil. `require-one` attributes
 ;; each edge to it. Dynamic (not a parameter) because the edge is discovered arbitrarily
-;; deep inside `load`ing the parent's source, with no call path to thread it down.
+;; deep inside `reflect/load`ing the parent's source, with no call path to thread it down.
 (defdyn *require-parent* nil)
 
-;; The root setter for the pair above, and it exists for the same reason `set-load-path!`
+;; The root setter for the pair above, and it exists for the same reason `reflect/set-load-path!`
 ;; does: these globals live in the ROOT namespace, so a `(def *image-sections* …)` written
 ;; inside a module defines `mod/*image-sections*` and `%require-force` — root code — goes on
 ;; reading the empty root one. That is not hypothetical: the installer in
@@ -294,17 +294,17 @@ The primary source is consulted first, then `*image-sources*` in install order."
 ;; namespace without the loader losing track of it.
 
 ;; These two STAY BARE, unlike `system/module-doc` and `system/reload-defs`, which moved to
-;; `system` on 2026-08-27. `set-load-path!` `def`s the bare global `*load-path*` that the
+;; `system` on 2026-08-27. `reflect/set-load-path!` `def`s the bare global `*load-path*` that the
 ;; loader reads, and a `def` inside a module defines the MODULE's name — `system/*load-path*`
 ;; — not the root one. A module can READ a root global (`/*load-path*`), but it cannot rebind
 ;; it, so this pair belongs where the variable does.
-(defn set-load-path! (dirs)
+(defn reflect/set-load-path! (dirs)
   "Replace the module search path with `dirs` (a list of directory strings); returns it."
   (def *load-path* dirs)
   *load-path*)
-(defn add-load-path! (& dirs)
+(defn reflect/add-load-path! (& dirs)
   "Prepend `dirs` to the module search path (skipping any already present); returns the new path."
-  (set-load-path! (append (seq/remove (fn (d) (includes? *load-path* d)) dirs) *load-path*)))
+  (reflect/set-load-path! (append (seq/remove (fn (d) (includes? *load-path* d)) dirs) *load-path*)))
 
 ;; Package-rooted namespaces (ADR-070): a *dependency* `foo` providing a module `b`
 ;; is loaded as the rooted global namespace `foo/b`, so two deps can both provide a
@@ -321,7 +321,7 @@ The primary source is consulted first, then `*image-sources*` in install order."
 (def- *module-files* {})
 (def- *package-modules-of* {})
 
-;; The rooted-key setters (root code, like `set-load-path!`): the package manager
+;; The rooted-key setters (root code, like `reflect/set-load-path!`): the package manager
 ;; calls these to register a dependency's modules before its first `require`.
 (defn %register-package-module! (rooted-key path)
   "Record that rooted module `rooted-key` (e.g. \"foo/b\") is provided by file `path`."
@@ -462,7 +462,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
       (filter (fn (c) (and (pair? c) (= (first c) :use))) clauses))))
 
 ;; The forms for one `(:use-internals mod [:only [a b]])` clause — module privacy's
-;; @testable seam (ADR-146): like `(:use mod)` (load + refer publics), PLUS a grant
+;; @testable seam (ADR-146): like `(:use mod)` (reflect/load + refer publics), PLUS a grant
 ;; that lets this file reference `mod`'s module-private `--` names, which is otherwise
 ;; a compile error. `:only [a b]` refers just those names (which may be `--` privates,
 ;; since the grant is in scope) instead of a refer-all — the cycle-safe form when `mod`
@@ -529,7 +529,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; defmodule's top-of-file provide — but ONLY when no `require` is driving the load.
 ;; Under require, the feature is provided when the WHOLE file has evaluated
 ;; (%require-force); providing here, before the module's defs exist, is exactly the
-;; window a concurrent requirer used to slip through. A direct `(load "x.blsp")`
+;; window a concurrent requirer used to slip through. A direct `(reflect/load "x.blsp")`
 ;; (no require in flight) keeps the immediate provide it always had.
 (defn- %defmodule-provide
   (mod)
@@ -736,7 +736,7 @@ binary cannot load would fail the require outright."
       live
       (let (rec (get (or *std-require-edges* {}) key))
         (when rec
-          (let (have (into #{} (map ->string (builtin-modules))))
+          (let (have (into #{} (map ->string (reflect/builtin-modules))))
             (filter (fn (d) (contains? have (->string d))) rec)))))))
 
 (def- *std-impls* nil)
@@ -822,7 +822,7 @@ own, and whichever installs second must not erase the first."
   ;;
   ;; Filtered here rather than at build time on purpose: the image may have been written by
   ;; a different binary from the one reading it, which is the whole point of sharing the key.
-  (let (have (into #{} (map ->string (builtin-modules))))
+  (let (have (into #{} (map ->string (reflect/builtin-modules))))
     (doseq (kv (%map-pairs edges))
       (let ([k deps] kv)
         (when (not (contains? *require-edges* k))
@@ -901,15 +901,15 @@ case `require` keeps loading stdlib modules from source exactly as before."
 
 (defn- %require-record-edge!
   (key)
-  ;; `current-ns` first: it is the module whose FILE is being loaded, which is the accurate
+  ;; `reflect/current-ns` first: it is the module whose FILE is being loaded, which is the accurate
   ;; parent for every require in that file — the `(:use …)` clauses `defmodule` expands and
   ;; any bare top-level `(require …)` alike. It is also the only one that works for the
-  ;; project's own sources, which the bulk loader `load`s directly rather than through
+  ;; project's own sources, which the bulk loader `reflect/load`s directly rather than through
   ;; `%require-force`, so `*require-parent*` is nil for all of them. It reads nil at RUNTIME
   ;; (only a load sets it), which is exactly the requires that are not load-time edges.
   ;; `*require-parent*` is the fallback for a file with no `(defmodule …)` header, which
   ;; establishes no namespace but is still `require`able by its filename.
-  (let (ns (current-ns)
+  (let (ns (reflect/current-ns)
         parent (if ns (->string ns) *require-parent*))
     (when (and parent
             (not (= parent key))
@@ -1049,7 +1049,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
       ;; same literal the source was baked in from, so it can't drift.
       ;; `%load-module-source`, not `%load-string`: a baked-in std module's own defs
       ;; are allowed to bind reserved names and BECOME reserved (ADR-166). A project
-      ;; file (the branch below) goes through the ordinary `load`, so a package's
+      ;; file (the branch below) goes through the ordinary `reflect/load`, so a package's
       ;; names are never reserved.
       ;;
       ;; Load an embedded module. A baked-in std module loads at ROOT: clear any ambient
@@ -1102,7 +1102,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
       (let (path (or (%require-find (str key ".blsp") *load-path*)
                    (%require-find-colocated key)))
         (if path
-          (do (load path) (provide key))
+          (do (reflect/load path) (provide key))
           (error "require: cannot find module '" key "'"))))
     key))
 
@@ -1111,7 +1111,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
 ;; called `net` would provide `tcp` — exactly the baked-in module — and even where
 ;; the rooted names would not collide, a package sharing a stdlib name (`json`, `set`,
 ;; `test`) is a trap. The reserved set is the first path segment of every module baked
-;; into this binary (`(builtin-modules)`). Enforced in THREE layers: at `nest new`
+;; into this binary (`(reflect/builtin-modules)`). Enforced in THREE layers: at `nest new`
 ;; (scaffold) and `nest publish` (package.blsp), and here at LOAD time so a `:path`/`:git`
 ;; dependency that never went through the registry is refused all the same (ADR-166 kin).
 (defn reserved-package-name? (nm)
@@ -1120,7 +1120,7 @@ its first segment names a module baked into this binary, so a package taking it 
 root its own modules onto stdlib namespaces. Backs the `nest new` / `nest publish` /
 load-time (`require`) guards."
   (let (seg (first (string/split (->string nm) "/"))
-        owned (seq/distinct (map (fn (m) (first (string/split m "/"))) (builtin-modules))))
+        owned (seq/distinct (map (fn (m) (first (string/split m "/"))) (reflect/builtin-modules))))
     (includes? owned seg)))
 
 ;; Load a dependency module file `path` under package `key`'s context (ADR-070): set
@@ -1145,7 +1145,7 @@ load-time (`require`) guards."
     (let (modules (get *package-modules-of* (->string prefix))
           prev (%set-package-context prefix modules))
       (try
-        (do (load path) (provide key))
+        (do (reflect/load path) (provide key))
         (catch e
           (do (%set-package-context (first prev) (second prev)) (throw e))))
       (%set-package-context (first prev) (second prev))
@@ -1421,7 +1421,7 @@ stub `%autoload` binds; see there. Raises if loading `mod` leaves `nm` still a s
     (binding (*autoloading* nm)
       (do
         (require-one mod)
-        (apply (eval nm) args)))))
+        (apply (reflect/eval nm) args)))))
 
 (defmacro %autoload (mod & specs)
   "Bind each `(->string arity)` of module `mod` to a stub that loads `mod` on its first call
@@ -1862,7 +1862,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
       (%register-impl aname
         (first m)
         id
-        (eval (cons 'fn (cons (map (fn (s) s) (second m)) (rest (rest m)))))
+        (reflect/eval (cons 'fn (cons (map (fn (s) s) (second m)) (rest (rest m)))))
         from))))
 
 (defn %no-impl (op-key key)
@@ -2013,7 +2013,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
         sealed-ids (if sealed-vec (map %ability-id-kw sealed-vec) nil)
         derive-fn (%defability-derive-fn specs)
         requires-vec (%defability-requires-vec specs)
-        ; pass `(current-ns)` as the owner — evaluated at load in the DEFINING module, so
+        ; pass `(reflect/current-ns)` as the owner — evaluated at load in the DEFINING module, so
         ; `*ability-owner*` records where the ability was declared (ADR-172 precedence).
         ; The specs are stored WITH their bodies so the checker can tell a provided op from
         ; a required one (a body ⇒ provided ⇒ not demanded of a sealed member).
@@ -2021,7 +2021,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
               (append (cons (list '%register-ability
                               (list 'quote aname)
                               (list 'quote ops)
-                              (list '/current-ns))
+                              (list '/reflect/current-ns))
                         (if sealed-ids
                           (list (list '%register-sealed
                                   (list 'quote aname)
@@ -2054,7 +2054,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                                               (list 'quote aname)
                                               (list 'quote (first op))
                                               :default (cons 'fn (cons arg-syms body))
-                                              (list '/current-ns))))))))
+                                              (list '/reflect/current-ns))))))))
                         nil ops)
         op-defs (map
                   (fn (op)
@@ -2121,7 +2121,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
               (list 'quote op-name)
               id-kw
               (cons 'fn (cons arg-syms body))
-              (list 'quote (current-ns)))))
+              (list 'quote (reflect/current-ns)))))
         methods))))
 
 (defmacro %unimpl (aname key & ops)
@@ -2343,7 +2343,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
       (list '%register-method
         (list 'quote mname)
         :default (cons 'fn (cons arglist body))
-        (list '/current-ns))
+        (list '/reflect/current-ns))
     (vector? pattern)
       (do
         (when (not (every? (fn (p) (or (symbol? p) (keyword? p))) pattern))
@@ -2370,7 +2370,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
             (list 'quote mname)
             (list 'quote key)
             (cons 'fn (cons arglist body))
-            (list '/current-ns))))
+            (list '/reflect/current-ns))))
     else
       (error "defmethod "
         mname ": the dispatch pattern must be a vector of ids or " "`:default`, got " pattern)))

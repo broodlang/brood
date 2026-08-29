@@ -1607,7 +1607,7 @@ through every intermediate call.
   on exit — even if the body throws**. Bindings nest; the innermost wins. A
   reference resolves *dynamically*, at the moment it's evaluated, against the
   caller's bindings — not lexically where the function was defined.
-- **`(dynamic? x)`** is true when `x` is a symbol declared with `defdyn`.
+- **`(reflect/dynamic? x)`** is true when `x` is a symbol declared with `defdyn`.
 
 `binding` only accepts a variable previously declared with `defdyn`; rebinding an
 undeclared global is an error (it's almost always a typo, and silently shadowing a
@@ -1632,7 +1632,7 @@ dynamic scope). If a child needs a value, send it explicitly. A process that
 crashes mid-`binding` takes its binding stack down with it and disturbs no one.
 
 `defdyn`/`binding` are Brood macros over a tiny kernel (`%declare-dynamic`,
-`%binding`, `dynamic?`) — no new special form, the `try`/`catch` precedent.
+`%binding`, `reflect/dynamic?`) — no new special form, the `try`/`catch` precedent.
 
 ## Output ports and logging
 
@@ -2039,7 +2039,7 @@ two lifecycle hooks: **`cast`** (body → next state), **`call`** (body →
 `call` — body → reply, state untouched), and **`info`** — a message that is *not*
 a cast/call envelope: a monitor `[:down …]`, a link `[:EXIT …]`, a timer tick, or
 a plain `send`. Optional **`init`** runs once at startup (the place to
-`(trap-exit true)`, `(monitor …)`, arm a timer, or transform the seed) and
+`(proc/trap-exit true)`, `(monitor …)`, arm a timer, or transform the seed) and
 **`terminate`** runs on a clean `(stop pid)`. Envelope clauses are always matched
 before `info` clauses, and **any message matched by no clause is dropped** rather
 than left to pile up in the mailbox (OTP's default `handle_info`).
@@ -2099,7 +2099,7 @@ in Brood.
 `(link pid)` ties the current process and `pid` together **symmetrically**
 (Erlang `link/1`; `(unlink pid)` unties, `spawn-link` spawns pre-linked). When
 either side dies abnormally, the other is notified: a process that set
-`(trap-exit true)` receives a trappable `[:EXIT pid reason]` message; a
+`(proc/trap-exit true)` receives a trappable `[:EXIT pid reason]` message; a
 non-trapping process **dies too** — propagation, cascading through *its* links
 in turn. A `:normal` exit never kills a non-trapping peer. The propagated death
 carries the **originating reason**: if `a` crashes with `[:error {…}]`, a linked
@@ -2125,7 +2125,7 @@ is linked *dead*, and link-to-dead reports `:noproc` — which **replaces** the
 true reason, so a clean `:normal` return arrives looking like a failure.
 
 ```clojure
-(trap-exit true)
+(proc/trap-exit true)
 
 (let (p (spawn-link :ok))                  ; child returns immediately
   (receive ([:EXIT ^p reason] reason)))    ;=> :normal — always
@@ -2284,7 +2284,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 
 > **Where these live:** only a small primitive kernel is implemented in Rust
 > (the `%`-prefixed numeric ops, `cons`/`first`/`rest`, type predicates, I/O,
-> `eval`/`load`, …). The functions below that aren't primitives — `+ - * / <
+> `reflect/eval`/`reflect/load`, …). The functions below that aren't primitives — `+ - * / <
 > = map filter reduce list …` — are defined *in Brood* in `std/prelude.blsp`,
 > the same way you'd define your own. See spec.md §9 for the exact split. From a
 > caller's point of view they're all just functions.
@@ -2493,9 +2493,9 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
 - **Lazy, fusing pipelines.** `map`/`filter`/`keep`/`remove` are **eager** — they
   return a concrete list and run their function immediately (so `(map f xs)` for
   side effects works). When you want a pipeline to **fuse** — fold/reduce in a
-  single pass with no intermediate lists — use the lazy combinators `lmap`,
-  `lfilter`, `lkeep`, `lremove`, threaded with `->>`:
-  `(->> (range n) (lfilter odd?) (lmap sq) (reduce + 0))`. Each returns a **lazy
+  single pass with no intermediate lists — use the lazy combinators `seq/lmap`,
+  `seq/lfilter`, `seq/lkeep`, `seq/lremove`, threaded with `->>`:
+  `(->> (range n) (seq/lfilter odd?) (seq/lmap sq) (reduce + 0))`. Each returns a **lazy
   seq-view** — an O(1) value (like a [lazy range](#lists--sequences)) that stands
   in for the list it would produce. Chaining composes the stages onto one view,
   so the whole pipeline walks the source once, building nothing in between (≈3×
@@ -2823,15 +2823,15 @@ iolist in memory.
   call stack at its next VM frame boundary after every tick: no signals, and
   near-zero cost when off. (A JIT-resident loop is attributed when it yields
   at its reduction-budget preempt; the legacy tree-walker isn't sampled.)
-- `(system-monitor [pid opts])` — the **runtime event stream** (Erlang
+- `(proc/system-monitor [pid opts])` — the **runtime event stream** (Erlang
   `system_monitor/2` shape): the kernel pushes selected runtime events to one
   subscriber process as ordinary `[:system kind subject-pid detail]` mailbox
   messages — `:gc` (a collection finished; detail
   `{:pause-us :collections :live}`, filtered by `:gc-min-pause-us`, BEAM's
   `long_gc`), `:spawn` (detail = parent pid), `:exit` (detail = the structured
   exit reason monitors see), and `:deopt` (detail = the JIT arm's fn name).
-  No args reads the config; `nil` clears; `(system-monitor pid)` arms every
-  event, `(system-monitor pid {:gc true :gc-min-pause-us 1000})` selects
+  No args reads the config; `nil` clears; `(proc/system-monitor pid)` arms every
+  event, `(proc/system-monitor pid {:gc true :gc-min-pause-us 1000})` selects
   exactly the truthy keys. One subscriber at a time (last wins); events about
   the subscriber itself are never sent, and its death disarms the stream. Off,
   the cost is one relaxed flag load per event site. **Policy lives in
@@ -2855,7 +2855,7 @@ iolist in memory.
   suffixes accepted).
 
 ### Metaprogramming / self-hosting
-`eval`  `reflect/read-string`  `reflect/read-all`  `eval-string`  `load`  `macroexpand`  `macroexpand-1`  `gensym`
+`reflect/eval`  `reflect/read-string`  `reflect/read-all`  `reflect/eval-string`  `reflect/load`  `macroexpand`  `macroexpand-1`  `gensym`
 
 There is **no user-facing `require` form** — you load an embedded standard-library
 module by *referencing* it. A qualified reference `name/foo` auto-loads `name` on
@@ -2866,14 +2866,14 @@ used by the `:use` machinery, the runtime bootstrap, and a few dynamic/cycle
 cases — not something you call directly.)
 
 ```clojure
-(eval (reflect/read-string "(+ 40 2)"))  ;=> 42
+(reflect/eval (reflect/read-string "(+ 40 2)"))  ;=> 42
 (reflect/read-all "(a) (b) (c)")         ;=> ((a) (b) (c))  — every form, vs reflect/read-string's first
-(eval-string "(def x 1) (+ x 1)");=> 2  — read+eval all forms, last value wins
-(load "some-file.blsp")          ; evaluate a file into the global environment
+(reflect/eval-string "(def x 1) (+ x 1)");=> 2  — read+eval all forms, last value wins
+(reflect/load "some-file.blsp")          ; evaluate a file into the global environment
 ```
 
 `reflect/read-string` returns the *first* form in a string; `reflect/read-all` returns *all* of
-them as a list (the read-half of `eval-string` without the eval) — the basis for
+them as a list (the read-half of `reflect/eval-string` without the eval) — the basis for
 form-by-form tooling, e.g. an editor evaluating the last sexp before point. Both
 raise on a malformed/incomplete form; `parse-source` is the lossless,
 error-tolerant alternative (it yields a CST, used by the formatter).
@@ -2954,8 +2954,8 @@ Two consequences worth knowing:
 - To let other modules read or set your knob, declare it: `(defdyn *my-knob* v)`.
   A knob only its own module touches needs nothing.
 - A **root** registry can only be rebound by root code, so the prelude exposes
-  setters for the ones tooling extends — `(set-load-path! dirs)` /
-  `(add-load-path! dir…)` for `*load-path*`, `(record-module-doc! key doc)` for
+  setters for the ones tooling extends — `(reflect/set-load-path! dirs)` /
+  `(reflect/add-load-path! dir…)` for `*load-path*`, `(record-module-doc! key doc)` for
   `*module-docs*`. Writing `(def *load-path* …)` inside a module would define
   `mod/*load-path*` and the loader would never see it.
 
@@ -2984,13 +2984,13 @@ import one. Three deliberate doors stay open:
   `quasiquote`, which the privacy walk skips) — the pattern the test
   framework's `describe`/`test` macros rely on.
 
-Reflection (`eval`, `global-names`, `bound?`) still sees the flat table —
+Reflection (`reflect/eval`, `reflect/global-names`, `bound?`) still sees the flat table —
 privacy governs what a module's source may reference, not what the live image
-contains. `(private? 'mod/name)` reports whether a global is private.
+contains. `(reflect/private? 'mod/name)` reports whether a global is private.
 
 Privacy is a **recorded per-module fact**: a `defn-`/`def-` records the qualified
 name in a per-runtime private-set (via the `%mark-private` primitive it emits) that a
-single kernel predicate (`Heap::is_private`, exposed as `private?`) consults. Because
+single kernel predicate (`Heap::is_private`, exposed as `reflect/private?`) consults. Because
 a private name is spelled identically to a public one, **every** privacy check reads
 the record — which means the defining module must be **loaded** to be judged. One
 consequence: a qualified reference into a module that was *never loaded* can't be
@@ -3002,7 +3002,7 @@ code the image has never seen. The prelude's own privates are seeded at build ti
 The advisory checker additionally warns on private names that are
 defined but never called within the file — see
 [Advisory lints](#advisory-lints-non-type-warnings).
-At the REPL the namespace tracks the last `defmodule`; `(current-ns)` reports it.
+At the REPL the namespace tracks the last `defmodule`; `(reflect/current-ns)` reports it.
 
 > Status: landed (ADR-065/066, 2026-05-30). `defmodule` is the single namespace
 > form (`ns` removed); all of `std/` and every test file are namespaced; the
@@ -3014,7 +3014,7 @@ At the REPL the namespace tracks the last `defmodule`; `(current-ns)` reports it
 > time (ADR-070), enforced once the package manager lands (ADR-037).
 
 ### Introspection (editor tooling)
-`doc`  `arglist`  `global-names`  `bound?`  `apropos`  `doc-search`
+`doc`  `arglist`  `reflect/global-names`  `bound?`  `apropos`  `doc-search`
 
 For self-description — the substrate an editor (and the planned language server,
 `docs/lsp.md`) reads for hover, signature help, completion, and "is this name
@@ -3027,7 +3027,7 @@ redefined.
 (arglist add)          ;=> (a b & more)        ; mirrors the source surface
 (bound? 'add)          ;=> true   (quote the name; bound? takes a symbol)
 (bound? 'no-such)      ;=> false
-(includes? (global-names) 'map)  ;=> true      ; every global, for completion
+(includes? (reflect/global-names) 'map)  ;=> true      ; every global, for completion
 ```
 
 **`bound?` is about names, not capabilities** — and for optional build features the
@@ -3050,13 +3050,13 @@ For **discovery** — finding what exists rather than describing a name you
 already know (the answer to "is there an RNG?" in one call):
 
 ```clojure
-(global-names)           ;=> (… sorted list of every global …)
+(reflect/global-names)           ;=> (… sorted list of every global …)
 (apropos "rand")         ;=> (rand-float rand-int rand-seed …)  ; names containing "rand"
 (apropos :shuffle)       ;=> (shuffle shuffle--acc)             ; string/symbol/keyword pattern
 (doc-search "random")    ;=> ([rand-int "…"] [sample "…"] …)    ; matches docstrings, not names
 ```
 
-These three are Brood over `global-names`/`doc` (`std/prelude.blsp`), and are
+These three are Brood over `reflect/global-names`/`doc` (`std/prelude.blsp`), and are
 also exposed as `nest mcp` tools (`apropos`, `all-globals`, `doc-search`) so an
 agent can explore the live image — see `docs/mcp.md`.
 

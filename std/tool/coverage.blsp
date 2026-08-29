@@ -76,28 +76,28 @@ suite, then reports which functions were never entered. Backs `nest test --cover
           (let (location (reflect/source-location sym))
             (if (and (not (nil? location))
                   (coverage-under? (seq/vector-ref location 0) source-dirs)
-                  (= (type-of (eval sym)) :fn))
+                  (= (type-of (reflect/eval sym)) :fn))
               (cons {:name sym :file (seq/vector-ref location 0) :line (seq/vector-ref location 1)}
                 acc)
               acc)))
     nil
-    (global-names)))
+    (reflect/global-names)))
 
 ;; --- instrumenting ------------------------------------------------------------
 
-;; Rebind one global to a shim that records a hit then forwards. Built with `eval`
+;; Rebind one global to a shim that records a hit then forwards. Built with `reflect/eval`
 ;; because the name is computed: `def` takes a literal symbol, so the rebinding
 ;; form is constructed and evaluated. The shim closes over the ORIGINAL value, so
 ;; forwarding can't recurse into itself.
 (defn- coverage-instrument!
   (sym hits)
-  (let (original (eval sym))
-    (eval (list 'def
-            sym
-            (list 'quote
-              (fn (& args)
-                (table/incr hits (->string sym) 1)
-                (apply original args)))))))
+  (let (original (reflect/eval sym))
+    (reflect/eval (list 'def
+                    sym
+                    (list 'quote
+                      (fn (& args)
+                        (table/incr hits (->string sym) 1)
+                        (apply original args)))))))
 
 (defn begin! (source-dirs)
   "Instrument every function this project defines under `source-dirs` and return the hit table. Call once, AFTER the project's sources are loaded and before the suite runs. Sets `*coverage-hits*` / `*coverage-targets*` for the reporter."
@@ -130,7 +130,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 (defn- coverage-covered (results) (filter (fn (r) (> (get r :hits) 0)) results))
 
 ;; Uncovered functions in SOURCE order. The underlying target list comes from
-;; `global-names` (sorted by spelling), so without this the report reads 7, 15, 9 —
+;; `reflect/global-names` (sorted by spelling), so without this the report reads 7, 15, 9 —
 ;; sorting by line is what makes it walk the file top-to-bottom.
 (defn- coverage-uncovered
   (results)
@@ -267,7 +267,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   ;; from the denominator as well as the numerator and the ratio flatters itself: the
   ;; fixture with one deliberately-dead function reported 100%.
   (fold (fn (compiled target)
-          (if (coverage-safely (fn () (%coverage-precompile (eval (get target :name)))))
+          (if (coverage-safely (fn () (%coverage-precompile (reflect/eval (get target :name)))))
             (+ compiled 1)
             compiled))
     0

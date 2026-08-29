@@ -1,6 +1,6 @@
-;; tests/eval_vm_test.blsp — `eval`/`eval-string` run on the compiling VM (deferred.md #9).
+;; tests/eval_vm_test.blsp — `reflect/eval`/`reflect/eval-string` run on the compiling VM (deferred.md #9).
 ;;
-;; `eval` used to walk every form with the tree-walker (a ~14× cliff for runtime-evaluated
+;; `reflect/eval` used to walk every form with the tree-walker (a ~14× cliff for runtime-evaluated
 ;; code); it now takes the same compile→VM path the file loader uses, falling back to the
 ;; tree-walker per-form for anything outside the VM's vocabulary. A miscompile here fails
 ;; SILENTLY (a wrong value, not an error), so this file pins RESULTS across the tricky
@@ -10,99 +10,100 @@
 
 (describe "eval runs on the VM: results are correct"
   (test "arithmetic and nested calls"
-    (assert= 6 (eval '(+ 1 2 3)))
-    (assert= 20 (eval '(* (+ 1 1) (+ 2 3) 2)))
-    (assert= 6 (eval-string "(* 1 2 3)")))
+    (assert= 6 (reflect/eval '(+ 1 2 3)))
+    (assert= 20 (reflect/eval '(* (+ 1 1) (+ 2 3) 2)))
+    (assert= 6 (reflect/eval-string "(* 1 2 3)")))
 
   (test "a tail-recursive loop evaluated via eval runs in O(1) stack (the cliff case)"
     ;; This is the shape that used to time out on the tree-walker eval. 300k iterations
     ;; inside eval must complete — a lost TCO would overflow the green-process stack.
     (assert= :done
-      (eval-string "(defn evm-loop ((0) :done) ((n) (evm-loop (- n 1))))\n(evm-loop 300000)")))
+      (reflect/eval-string "(defn evm-loop ((0) :done) ((n) (evm-loop (- n 1))))\n(evm-loop 300000)")))
 
   (test "a closure built by eval captures the runtime env and stays callable"
-    (assert= 7 ((eval '(fn (x) (+ x 1))) 6))
+    (assert= 7 ((reflect/eval '(fn (x) (+ x 1))) 6))
     ;; a def'd closure over a value, then called later
-    (eval-string "(def evm-adder (let (base 100) (fn (x) (+ base x))))")
-    (assert= 105 (eval '(evm-adder 5))))
+    (reflect/eval-string "(def evm-adder (let (base 100) (fn (x) (+ base x))))")
+    (assert= 105 (reflect/eval '(evm-adder 5))))
 
   (test "special forms and macros expand + evaluate correctly through eval"
-    (assert= :yes (eval '(if (> 2 1) :yes :no)))
-    (assert= 15 (eval '(let (a 5 b 10) (+ a b))))
-    (assert= :b (eval '(cond (= 1 2) :a (= 1 1) :b else :c)))
+    (assert= :yes (reflect/eval '(if (> 2 1) :yes :no)))
+    (assert= 15 (reflect/eval '(let (a 5 b 10) (+ a b))))
+    (assert= :b (reflect/eval '(cond (= 1 2) :a (= 1 1) :b else :c)))
     ;; a macro (when) expands under eval
-    (assert= 42 (eval '(when true 42)))
+    (assert= 42 (reflect/eval '(when true 42)))
     ;; match (a macro lowering to nested ifs)
-    (assert= "two" (eval '(match 2 (1 "one") (2 "two") (_ "other")))))
+    (assert= "two" (reflect/eval '(match 2 (1 "one") (2 "two") (_ "other")))))
 
   (test "quasiquote evaluates correctly through eval"
-    (assert= [1 2 3] (eval '(let (x 2) `[1 ~x 3])))
-    (assert= (list 1 2 3) (eval '(let (xs (list 2)) `(1 ~@xs 3)))))
+    (assert= [1 2 3] (reflect/eval '(let (x 2) `[1 ~x 3])))
+    (assert= (list 1 2 3) (reflect/eval '(let (xs (list 2)) `(1 ~@xs 3)))))
 
   (test "higher-order functions over eval'd forms"
-    (assert= (list 1 4 9) (map (fn (f) (eval f)) (list '(* 1 1) '(* 2 2) '(* 3 3)))))
+    (assert= (list 1 4 9) (map (fn (f) (reflect/eval f)) (list '(* 1 1) '(* 2 2) '(* 3 3)))))
 
   (test "an eval'd definition can forward-reference a name a LATER eval defines (KI-24)"
-    ;; `eval` must NOT run the compile pass's `resolve` step — it qualifies a bare
+    ;; `reflect/eval` must NOT run the compile pass's `resolve` step — it qualifies a bare
     ;; reference only when the target already exists, so a forward reference across
     ;; independent eval calls would be left bare and never match the module-qualified
     ;; global. Both engines resolve the bare reference lazily at runtime, so this works.
     (check-allow :unbound
-      (eval '(defn evm-fwd-r (n) (evm-fwd-s n))) ; refers to evm-fwd-s, not defined yet
-      (eval '(defn evm-fwd-s (n) (+ n 1)))
+      (reflect/eval '(defn evm-fwd-r (n) (evm-fwd-s n))) ; refers to evm-fwd-s, not defined yet
+      (reflect/eval '(defn evm-fwd-s (n) (+ n 1)))
       (assert= 42 (evm-fwd-r 41))))
 
   (test "eval evaluates at the root env (a def is visible afterward)"
     ;; `evm-global` is def'd at RUNTIME via eval, so the static checker can't see it —
     ;; suppress the (correct-for-the-image-but-wrong-here) unbound lint on the bare ref.
     (check-allow :unbound
-      (eval '(def evm-global 99))
+      (reflect/eval '(def evm-global 99))
       (assert= 99 evm-global)
-      (assert= 99 (eval 'evm-global)))))
+      (assert= 99 (reflect/eval 'evm-global)))))
 
 ;; Cross-process: an eval'd closure is deep-copied to another process (proving the
 ;; compiled-on-eval closure round-trips through to_message/from_message + promote).
 (describe "eval on the VM: cross-process"
   :isolated (test "a closure built by eval survives a send and runs on the receiver"
-    (let (f (eval '(fn (x) (* x x)))
+    (let (f (reflect/eval '(fn (x) (* x x)))
           w (spawn (receive ([:go g from] (send from [:r (g 9)])))))
       (send w [:go f (self)])
       (assert= 81 (receive ([:r v] v) (after 1000 :timeout))))))
 
 ;; ---------------------------------------------------------------------------
-;; KI-24: name resolution inside `eval`, from within a namespace.
+;; KI-24: name resolution inside `reflect/eval`, from within a namespace.
 ;;
 ;; A file loader pre-scans every form's def head before compiling any of them, so a
 ;; forward reference inside a file has positive evidence and qualifies to `mod/name`.
-;; `eval` sees ONE form at a time and cannot pre-scan the future, so a reference to a
-;; name a *later* `eval` defines used to be left bare and then miss the qualified
-;; global — breaking mutual recursion defined through `eval`. The resolver now falls
+;; `reflect/eval` sees ONE form at a time and cannot pre-scan the future, so a reference to a
+;; name a *later* `reflect/eval` defines used to be left bare and then miss the qualified
+;; global — breaking mutual recursion defined through `reflect/eval`. The resolver now falls
 ;; back to the current namespace for a name bound nowhere else (`ns_assume_own`).
 ;;
 ;; These run at LOAD time on purpose: `compile_ns` is only set while the file is being
-;; loaded, so an `eval` inside a `test` body (which runs later, in a green process) is
-;; at root and never exercises the resolver at all. Load-time `eval` inside a module is
+;; loaded, so a `reflect/eval` inside a `test` body (which runs later, in a green process) is
+;; at root and never exercises the resolver at all. Load-time `reflect/eval` inside a module is
 ;; the whole bug.
-(eval '(defn evm-fwd-a (n) (evm-fwd-b n)))
-(eval '(defn evm-fwd-b (n) (+ n 1)))
-(eval '(defn evm-mut-x (n) (if (= n 0) :ok (evm-mut-y (- n 1)))))
-(eval '(defn evm-mut-y (n) (if (= n 0) :ok (evm-mut-x (- n 1)))))
-(eval '(defn evm-owned (x) x))
+(reflect/eval '(defn evm-fwd-a (n) (evm-fwd-b n)))
+(reflect/eval '(defn evm-fwd-b (n) (+ n 1)))
+(reflect/eval '(defn evm-mut-x (n) (if (= n 0) :ok (evm-mut-y (- n 1)))))
+(reflect/eval '(defn evm-mut-y (n) (if (= n 0) :ok (evm-mut-x (- n 1)))))
+(reflect/eval '(defn evm-owned (x) x))
 
 ;; The fallback must not swallow the three things that are legitimately NOT ours: a
 ;; root/prelude name, an imported name, and a syntax keyword. `if`/`let`/`do`/`fn` are
 ;; bound in NO environment, so a naive "unbound ⇒ ours" rule rewrites `if` to
 ;; `eval-vm-test/if` and every eval'd conditional dies with an unbound error.
 (def evm-syntax
-  (list (eval '(if true :yes :no))
-    (eval '(let (a 1 b 2) (+ a b)))
-    (eval '(do 1 7))
-    (eval '((fn (x) x) 5))
-    (eval '(cond false :a else :b))
-    (eval '(match 2 (x (* x 2))))))
-(def evm-prelude (list (eval '(count (list 1 2 3))) (eval '(map (fn (x) (* x 2)) (list 1 2)))))
+  (list (reflect/eval '(if true :yes :no))
+    (reflect/eval '(let (a 1 b 2) (+ a b)))
+    (reflect/eval '(do 1 7))
+    (reflect/eval '((fn (x) x) 5))
+    (reflect/eval '(cond false :a else :b))
+    (reflect/eval '(match 2 (x (* x 2))))))
+(def evm-prelude
+  (list (reflect/eval '(count (list 1 2 3))) (reflect/eval '(map (fn (x) (* x 2)) (list 1 2)))))
 ;; `is` arrives from `(:use test)`; the fallback must not turn it into `eval-vm-test/is`.
-(def evm-import-ok (try (do (eval '(is true)) :ok) (catch e (get e :message))))
+(def evm-import-ok (try (do (reflect/eval '(is true)) :ok) (catch e (get e :message))))
 
 (describe "eval resolves names against the enclosing namespace"
   (check-allow :unbound

@@ -306,7 +306,7 @@ suggestions\", never to an error on the user's command line."
   (let (root (complete-root))
     (sort (keys (fold (fn (seen m) (assoc seen m true))
                   {}
-                  (append (or (complete-safely (fn () (builtin-modules)))
+                  (append (or (complete-safely (fn () (reflect/builtin-modules)))
                             nil)
                     (if (nil? root)
                       nil

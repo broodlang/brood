@@ -46,7 +46,7 @@
     (assert= (highlight-spans "x") '())))
 
 ;; A docstring and a string value are the same TOKEN — only position tells them apart —
-;; so these pin the positional rule the kernel's `(doc-forms)` states (ADR-265).
+;; so these pin the positional rule the kernel's `(reflect/doc-forms)` states (ADR-265).
 (describe "highlight-spans — a docstring is not a string value"
   (test "the string after a defn's parameter list is documentation"
     (assert= (highlight-spans "(defn f () \"Doc.\" 1)")
@@ -69,7 +69,7 @@
   (test "a string deeper in the body is a value, whatever its position"
     (assert= (highlight-spans "(defn f () (str \"a\"))")
       (list [1 5 hl-face-special] [12 15 hl-face-function] [16 19 hl-face-string])))
-  (test "doc-form? mirrors the kernel's (doc-forms)"
+  (test "doc-form? mirrors the kernel's (reflect/doc-forms)"
     (is (doc-form? "defn"))
     (is (doc-form? "defmodule"))
     (is (not (doc-form? "def")))

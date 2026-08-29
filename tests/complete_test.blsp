@@ -82,14 +82,14 @@
     (assert= (complete/complete-safely (fn () nil)) nil)))
 
 (describe "complete: baked-in module list"
-  (test "the module list is non-empty" (is (> (count (builtin-modules)) 0)))
-  (test "it contains a known opt-in module" (is (includes? (builtin-modules) "json")))
+  (test "the module list is non-empty" (is (> (count (reflect/builtin-modules)) 0)))
+  (test "it contains a known opt-in module" (is (includes? (reflect/builtin-modules) "json")))
   (test "it contains the completion module itself"
-    (is (includes? (builtin-modules) "complete")))
+    (is (includes? (reflect/builtin-modules) "complete")))
   (test "entries are strings"
-    (is (fold (fn (ok m) (and ok (string? m))) true (builtin-modules))))
+    (is (fold (fn (ok m) (and ok (string? m))) true (reflect/builtin-modules))))
   (test "the list is sorted"
-    (assert= (builtin-modules) (sort (builtin-modules))))
+    (assert= (reflect/builtin-modules) (sort (reflect/builtin-modules))))
   (test "modules include the baked-in set"
     (is (fold (fn (found m) (or found (= m "json"))) false (complete/modules)))))
 
@@ -110,11 +110,11 @@
     (is (includes? (complete/templates) "default")))
   (test "every scaffolder template is offered"
     ;; Compared against the scaffolder's own list rather than a restated one, so a
-    ;; new template is completable with no change here. Reached via `eval` because
+    ;; new template is completable with no change here. Reached via `reflect/eval` because
     ;; `*project-templates*` is an ambient (earmuffed) global from `scaffold`,
     ;; which `complete` auto-loads (its `templates` names a `scaffold`
-    ;; export); read via `eval` since the static checker cannot see the binding.
-    (assert= (count (complete/templates)) (count (eval '*project-templates*))))
+    ;; export); read via `reflect/eval` since the static checker cannot see the binding.
+    (assert= (count (complete/templates)) (count (reflect/eval '*project-templates*))))
   (test "the template kind dispatches"
     (is (includes? (complete/for-kind "template") "gen")))
   (test "the project-module kind dispatches without raising"

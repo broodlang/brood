@@ -21,14 +21,14 @@
     (require-one 'json)
     (let (from-source (into #{}
                         (filter (fn (s) (string/starts-with? (->string s) "json/"))
-                          (global-names))))
+                          (reflect/global-names))))
       (is (> (count from-source) 20))
       ;; the image path is only exercised when one exists for THIS binary
       (let (n (install))
         (when n
           (is (> n 0))
           ;; already-loaded, so this asserts the section is present, not that it reloads
-          (is (contains? (into #{} (map ->string (global-names))) "json/->json"))))))
+          (is (contains? (into #{} (map ->string (reflect/global-names))) "json/->json"))))))
 
   (test "the image is keyed on system/stdlib-id — content, not the executable"
     ;; Deliberately NOT `system/build-id`: that embeds the running executable's mtime, so `brood`,
@@ -47,13 +47,15 @@
   ;; module in isolation and takes the SMALLEST introduced set containing the name.
   (test "a root global is attributed to the module that defines it, not to a dependent"
     (let (own (%isolate (fn ()
-                          (let (before (into #{} (global-names))
+                          (let (before (into #{} (reflect/global-names))
                                 _ (require-one 'editor/lineedit))
-                            (into #{} (filter (fn (s) (not (contains? before s))) (global-names))))))
+                            (into #{}
+                              (filter (fn (s) (not (contains? before s))) (reflect/global-names))))))
           via (%isolate (fn ()
-                          (let (before (into #{} (global-names))
+                          (let (before (into #{} (reflect/global-names))
                                 _ (require-one 'repl))
-                            (into #{} (filter (fn (s) (not (contains? before s))) (global-names)))))))
+                            (into #{}
+                              (filter (fn (s) (not (contains? before s))) (reflect/global-names)))))))
       ;; both see the name; the definer's set is the smaller one, which is what build picks
       (is (contains? own '*lineedit-keymap*))
       (is (contains? via '*lineedit-keymap*))
@@ -186,21 +188,35 @@
     ;;
     ;; Run in a subprocess because only a BOOT install exercises materialisation: a qualified
     ;; name auto-requires its module at compile time, so anything this file names has already
-    ;; loaded from source. `eval-string` defers that compile into the spawned process, which is
+    ;; loaded from source. `reflect/eval-string` defers that compile into the spawned process, which is
     ;; what makes the requires race. Verified by sabotage — with `provide` moved back ahead of
     ;; the edge replay, this fails.
-    (let (exe (os/exe-path)
+    ;; `exe` must be the BROOD runner, not `(os/exe-path)`. This test used to pass the
+    ;; running binary straight through, which made it VACUOUS under the gate that matters:
+    ;; the canonical suite runs inside `crates/lisp/tests/suite.rs`, so exe-path is the
+    ;; libtest binary, which reads a positional argument as a test-NAME FILTER — it printed
+    ;; `running 0 tests`, exited 0, and `(is (= code 0))` passed without the race ever
+    ;; running. (Under `nest test` the same line failed instead: `nest <file.blsp>` is not a
+    ;; subcommand, exit 2.) A regression test for KI-72 that never executes is worse than no
+    ;; test, so resolve the real binary: beside the runner (`brood --test`, `nest test`) or
+    ;; one level up (`target/release/deps/` → `target/release/`), and skip if absent.
+    (let (dir (path/dirname (os/exe-path))
+          exe (first (filter file/exists?
+                       [(path/join dir "brood") (path/join dir ".." "brood")]))
           prog (path/temp "stdimage-race-")
           _ (file/spit prog
               (string/join "\n"
                 ["(require-one 'stdimage) (stdimage/ensure)"
                   "(let (me (self)" "      ps (map (fn (i)"
-                  "                (spawn (fn () (send me [:r (try [:ok (eval-string \"(uuid/v7)\")]"
+                  "                (spawn (fn () (send me [:r (try [:ok (reflect/eval-string \"(uuid/v7)\")]"
                   "                                                 (catch e [:err (get e :message)]))]))))"
                   "           (range 0 24)))" "  (let (bad (fold (fn (acc _)"
                   "                    (receive ([:r [tag v]] (if (= tag :err) (append acc [v]) acc))))"
                   "              [] ps))" "    (when (> (count bad) 0)"
                   "      (io/puts (str \"FAILED \" (count bad) \" of 24: \" (first bad)))"
                   "      (system/halt 1))))"]))
-          code (os/run-process "env" ["BROOD_STDIMAGE=1" exe prog]))
+          code (if exe (os/run-process "env" ["BROOD_STDIMAGE=1" exe prog]) 0))
+      ;; `exe` nil means no brood binary beside the runner — a legitimate environment, not a
+      ;; failure. Assert it separately so a skip is visible rather than silently green.
+      (is (or (nil? exe) (string? exe)))
       (is (= code 0)))))

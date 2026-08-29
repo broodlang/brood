@@ -371,7 +371,7 @@ fn eval_tail_loop(
         //
         // On the rollover the tick also honours a pending hard `:kill`
         // (`tick_reporting_hard_kill`): the tree-walker runs nested behind native
-        // frames (`eval`/`eval-string`), so it can't return a `Killed` outcome — but
+        // frames (`eval`/`reflect/eval-string`), so it can't return a `Killed` outcome — but
         // it can *unwind*, and the untrappable kill signal is converted to process
         // death by the body driver. Without this (and the same check in the
         // `'dispatch` passthrough redirect, where thin-wrapper-heavy loops actually
@@ -1519,8 +1519,8 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         }
         "lazy-seq" | "lazy-cat" => {
             "Brood has no `lazy-seq` thunk. `map`/`filter` are EAGER; for a fusing, \
-             single-pass pipeline use the lazy seq-view combinators `lmap`/`lfilter`/\
-             `lkeep`/`lremove` with `->>` (ADR-111), and `(range n)` is already a \
+             single-pass pipeline use the lazy seq-view combinators `seq/lmap`/`seq/lfilter`/\
+             `seq/lkeep`/`seq/lremove` with `->>` (ADR-111), and `(range n)` is already a \
              lazy O(1) value. For an unbounded/streaming source, a process that \
              `send`s values."
         }
@@ -1660,7 +1660,7 @@ pub(crate) fn passthrough_redirect_ok(inner: Value) -> Result<bool, LispError> {
     // killability exactly as it is for the deadline below: in a tree-walked loop whose
     // operators are thin wrappers (`>`/`-`/`+` are Brood defns over `%`-prims), the
     // hot path ticks *here*, so a check only at the `'tail:` loop top can be starved —
-    // which is how a process spinning inside `eval`/`eval-string` escaped `(exit pid
+    // which is how a process spinning inside `eval`/`reflect/eval-string` escaped `(exit pid
     // :kill)` entirely. The raised control signal is untrappable (`%try` re-raises)
     // and the body driver converts it to process death.
     if crate::process::tick_reporting_hard_kill() {

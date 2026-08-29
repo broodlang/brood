@@ -64,7 +64,9 @@ mod sequence {
     fn pipeline_fused(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(->> (range {n}) (lmap (fn (x) (* x x))) (lfilter even?) (reduce + 0))"),
+            format!(
+                "(->> (range {n}) (seq/lmap (fn (x) (* x x))) (seq/lfilter even?) (reduce + 0))"
+            ),
         );
     }
 }

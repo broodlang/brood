@@ -83,9 +83,9 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
 (def hl-face-error (face :syntax/error))
 
 ;; The names that highlight as a *keyword* (special forms + core macros). Read once
-;; from the `(special-forms)` primitive — the canonical Rust `SPECIAL_FORMS`, shared
+;; from the `(reflect/special-forms)` primitive — the canonical Rust `SPECIAL_FORMS`, shared
 ;; with the LSP — so this can't drift from the runtime / tooling (ADR-052).
-(def- hl-special-forms (special-forms))
+(def- hl-special-forms (reflect/special-forms))
 ;; As a SET (map → true) so `special-form?` is an O(1) hash lookup, not an O(n) list
 ;; scan: it runs on every head-position atom on the fontify hot path.
 (def- hl-special-set (fold (fn (m s) (assoc m s true)) {} hl-special-forms))
@@ -96,10 +96,10 @@ as a keyword. Mirrors the LSP's SPECIAL_FORMS list."
   (= true (get hl-special-set s)))
 
 ;; The `def…` heads that carry a docstring, head -> `:fn` / `:head`. Read from the
-;; kernel's canonical `(doc-forms)` — the same list the LSP's semantic tokens and the
+;; kernel's canonical `(reflect/doc-forms)` — the same list the LSP's semantic tokens and the
 ;; generated VS Code / tree-sitter / Emacs grammars use — so "is this string a doc?"
 ;; has one answer across every editor (ADR-265).
-(def- hl-doc-forms (doc-forms))
+(def- hl-doc-forms (reflect/doc-forms))
 
 (defn doc-form? (s)
   "True if string `s` names a `def…` head whose form carries a docstring. Mirrors the
@@ -223,7 +223,7 @@ not this list's closing bracket."
 (defn- hl-doc?
   (stack toks)
   "True when the string token starting here is a DOCSTRING rather than a string value:
-the enclosing form is a doc-carrying `def…` head (`(doc-forms)`), the string sits right
+the enclosing form is a doc-carrying `def…` head (`(reflect/doc-forms)`), the string sits right
 after the name — or after the parameter list — and, for the heads that build a function,
 more body follows it (a function whose body is a lone string returns that string, which
 is why `\"hello mylife\"` in `(defn greeting () \"Doc.\" \"hello mylife\")` stays a

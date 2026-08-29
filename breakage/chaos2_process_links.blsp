@@ -26,10 +26,10 @@
     (io/puts "P15: still alive after linked :normal exit — correct")))
 
 ;;; ---- P16: error exit cascades through link chain ----
-(io/puts "=== P16: error exit cascades (trap-exit to catch it) ===")
+(io/puts "=== P16: error exit cascades (proc/trap-exit to catch it) ===")
 (let (me (self))
   ;; We trap exits so we can observe the cascade without dying ourselves
-  (trap-exit true)
+  (proc/trap-exit true)
   (let (child (spawn
                 ;; child exits with :badness
                 (exit (self) :badness)))
@@ -39,12 +39,12 @@
                 (after 3000 :timeout)))
       (io/puts "P16: got exit reason:" msg)
       (io/puts "P16-correct:" (= :badness msg)))
-    (trap-exit false)))
+    (proc/trap-exit false)))
 
 ;;; ---- P17: trap-exit converts link-death to message ----
 (io/puts "=== P17: trap-exit shields from link cascade ===")
 (let (me (self))
-  (trap-exit true)
+  (proc/trap-exit true)
   (let (crasher (spawn (error "i crash now")))
     (link crasher)
     ;; Should receive [:EXIT crasher <reason>] not die
@@ -53,7 +53,7 @@
               (after 3000 :timeout)))
       (io/puts "P17: received:" r)
       (io/puts "P17-correct:" (string? r))))
-  (trap-exit false))
+  (proc/trap-exit false))
 
 ;;; ---- P18: monitoring an already-dead process fires :down immediately ----
 (io/puts "=== P18: monitor dead process → immediate :down ===")
@@ -91,7 +91,7 @@
 ;;; ---- P20: double-link, one unlink drops it ----
 (io/puts "=== P20: double link + single unlink ===")
 (let (me (self))
-  (trap-exit true)
+  (proc/trap-exit true)
   (let (child (spawn (do (receive (:go :ok)) (send me :bye))))
     (link child)
     ; linking twice
@@ -106,15 +106,15 @@
                 (after 2000 :timeout)))
       (io/puts "P20: got:" msg)
       (io/puts "P20-correct (bye):" (= :got-bye msg))))
-  (trap-exit false))
+  (proc/trap-exit false))
 
 ;;; ---- P21: exit :kill is untrappable ----
 (io/puts "=== P21: exit :kill cannot be trapped ===")
 (let (me (self))
-  (trap-exit true)
+  (proc/trap-exit true)
   (let (victim (spawn
                  (do
-                   (trap-exit true)
+                   (proc/trap-exit true)
                    (send me :ready)
                    ;; Victim has trap-exit on but :kill still kills it
                    (receive (_ :got-something) (after 5000 :timeout))
@@ -127,12 +127,12 @@
                 (after 2000 :timeout)))
         (io/puts "P21: victim died with reason:" r)
         (io/puts "P21-correct (killed):" (= :killed r)))))
-  (trap-exit false))
+  (proc/trap-exit false))
 
 ;;; ---- P22: monitor + link to same pid: both fire ----
 (io/puts "=== P22: monitor + link to same pid ===")
 (let (me (self))
-  (trap-exit true)
+  (proc/trap-exit true)
   (let (victim (spawn (do (send me :ready) (error "combined-death"))))
     (receive (:ready :ok) (after 2000 :timeout))
     (let (ref (monitor victim))
@@ -153,6 +153,6 @@
             (not (= r1 r2))
             (or (= (first r1) :link) (= (first r1) :monitor))
             (or (= (first r2) :link) (= (first r2) :monitor)))))))
-  (trap-exit false))
+  (proc/trap-exit false))
 
 (io/puts "=== chaos2_process_links DONE ===")

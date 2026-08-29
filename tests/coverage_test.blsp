@@ -70,7 +70,7 @@
       (list 'a)))
   (test "uncovered picks out the never-entered functions"
     (assert= (count (coverage/coverage-uncovered coverage-test-results)) 2))
-  ;; Regression: the target list comes from `global-names` (alphabetical), so
+  ;; Regression: the target list comes from `reflect/global-names` (alphabetical), so
   ;; without an explicit sort the report listed lines out of order (7, 15, 9).
   (test "uncovered is sorted by line, so the report walks the file downwards"
     (assert= (map (fn (r) (get r :line)) (coverage/coverage-uncovered coverage-test-results))

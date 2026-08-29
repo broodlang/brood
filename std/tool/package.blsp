@@ -71,7 +71,7 @@ land in a later slice."
 ;; --- reading a dependency's own manifest -------------------------------------
 ;; A dep declares its own deps in its project.blsp. We read (not eval) the first
 ;; form; if it's a `(project …)` call, pull :dependencies from its plist and
-;; normalise with the manifest parser. Avoids `load`, which would clobber the
+;; normalise with the manifest parser. Avoids `reflect/load`, which would clobber the
 ;; root project's *project-* globals.
 (defn- package-manifest-deps
   (manifest-path)
@@ -1395,7 +1395,7 @@ sha256 pin still holds."
 
 ;; --- the `nest` verbs --------------------------------------------------------
 ;; Read the project manifest as *data* and apply it (populating the `*project-*`
-;; globals, incl. *project-dependencies*), rather than `(load)`-ing it as code:
+;; globals, incl. *project-dependencies*), rather than `(reflect/load)`-ing it as code:
 ;; the manifest's `(project …)` declaration lives in the `project` namespace now
 ;; (ADR-065), so loading it bare wouldn't resolve. Mirrors `project/setup`'s
 ;; own manifest read.

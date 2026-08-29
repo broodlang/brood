@@ -22,9 +22,9 @@
 
 ;; 100-clause version works. Each clause is a (pattern body) list.
 (defn make-100-match (v)
-  (eval `(match ~v
-           ~@(map (fn (i) (list i (str "hit-" i))) (range 100))
-           (_ "miss"))))
+  (reflect/eval `(match ~v
+                   ~@(map (fn (i) (list i (str "hit-" i))) (range 100))
+                   (_ "miss"))))
 
 (io/puts "make-100-match(0):" (make-100-match 0))
 (io/puts "make-100-match(50):" (make-100-match 50))
@@ -34,10 +34,10 @@
 
 ;; Benchmark: compile the match fn ONCE, then call it 100k times
 (def compiled-100-match
-  (eval `(fn (v)
-           (match v
-             ~@(map (fn (i) (list i (str "hit-" i))) (range 100))
-             (_ "miss")))))
+  (reflect/eval `(fn (v)
+                   (match v
+                     ~@(map (fn (i) (list i (str "hit-" i))) (range 100))
+                     (_ "miss")))))
 
 (defn bench-compiled-match (n)
   (if (= n 0)

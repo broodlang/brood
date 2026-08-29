@@ -3386,7 +3386,7 @@ fn unbound_roots_a_bare_name_against_the_current_compile_ns() {
         .eval_str("(%in-ns 'ns1) (defn foo () 1)")
         .expect("defines ns1/foo");
     // `eval_str` resets `compile_ns` on return; re-establish it the way the REPL loop
-    // process holds it across interactive `eval-string`s (which don't reset).
+    // process holds it across interactive `reflect/eval-string`s (which don't reset).
     interp
         .heap
         .set_compile_ns(Some(crate::core::value::intern("ns1")));
@@ -6453,4 +6453,50 @@ fn an_arrow_parameter_has_an_exact_arity() {
             "correct call flagged for `{src}`: {w:?}"
         );
     }
+}
+
+#[test]
+fn a_structural_complement_is_sayable_and_checks() {
+    // ADR-263 made `(not T)` sayable; ADR-268 made it exact for literals. A STRUCTURAL
+    // `T` still widened to its tag — `¬(vector int)` was `any`, so the annotation parsed
+    // and then checked nothing. ADR-288 makes it exact, so it finally rejects.
+    let w = file_warnings(
+        r#"
+        (sig not-int-vec ((not (vector int)) -> any))
+        (defn not-int-vec (v) v)
+        (defn wrong () (not-int-vec [1 2 3]))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("not-int-vec") && s.contains("argument 1")),
+        "a vector of ints is not in `(not (vector int))`: {w:?}"
+    );
+
+    // …and a value that genuinely is in the complement passes.
+    let w = file_warnings(
+        r#"
+        (sig not-int-vec ((not (vector int)) -> any))
+        (defn not-int-vec (v) v)
+        (defn fine () (not-int-vec "hello"))
+        "#,
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("not-int-vec")),
+        "a string IS in `(not (vector int))`: {w:?}"
+    );
+
+    // The same for a tuple shape, intersected with `any` — the `(and …)` spelling.
+    let w = file_warnings(
+        r#"
+        (sig no-pair ((and any (not (tuple int int))) -> any))
+        (defn no-pair (t) t)
+        (defn wrong () (no-pair [1 2]))
+        "#,
+    );
+    assert!(
+        w.iter()
+            .any(|s| s.contains("no-pair") && s.contains("argument 1")),
+        "an int pair is not in `(not (tuple int int))`: {w:?}"
+    );
 }

@@ -29,7 +29,7 @@
   (test "every indented `form → result` example in a docstring holds"
     ;; Load the whole library so the examples of every module are in scope, not just
     ;; whatever the test runner happened to pull in.
-    (doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))
+    (doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))
     ;; Name every offender — a count alone does not say which promise is broken.
     (assert= [] (doctest/failures)))
 

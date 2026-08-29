@@ -26,8 +26,12 @@ fn primitives_do_not_borrow_a_non_module_slash_namespace() {
     // primitive of that module, not a kernel name squatting on a slash. `bit`, `decimal`,
     // `proc` and `system` joined when the 510->298 bare-name refactors gave each family
     // its own module (ADR-251); `math` joined with `floor`/`numerator`/`denominator`, which
-    // are kernel primitives sitting under the real `std/math.blsp` module.
-    let allowed: &[&str] = &["string", "file", "bit", "decimal", "proc", "system", "math"];
+    // are kernel primitives sitting under the real `std/math.blsp` module; `reflect` joined
+    // when the introspection family (`eval`, `load`, `global-names`, `private?`, …) left the
+    // bare root for `std/reflect.blsp`, which owns that namespace the same way.
+    let allowed: &[&str] = &[
+        "string", "file", "bit", "decimal", "proc", "system", "math", "reflect",
+    ];
 
     let interp = Interp::new();
     let mut violations: Vec<String> = Vec::new();

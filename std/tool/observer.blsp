@@ -636,7 +636,7 @@ body height (`(math/max 1 (- rows 5))`, as in `observe-frame`)."
   "Evaluate `src` in THIS runtime and format the result (or error) as a one-line
 string for the minibuffer. The local backend, and what the remote agent runs."
   (try
-    (str "=> " (pr-str (eval-string src)))
+    (str "=> " (pr-str (reflect/eval-string src)))
     (catch e (str "error: " (if (and (map? e) (contains? e :message)) (get e :message) (pr-str e))))))
 
 (defn- observe-command-key

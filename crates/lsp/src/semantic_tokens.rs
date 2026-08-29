@@ -61,13 +61,13 @@ pub fn legend() -> SemanticTokensLegend {
 
 /// Special forms and the core control/binding macros — the keyword-like heads.
 /// Re-exported from the `brood` lib's canonical `SPECIAL_FORMS` (the same list the
-/// `(special-forms)` primitive returns), so the LSP, the runtime, and `std/`
+/// `(reflect/special-forms)` primitive returns), so the LSP, the runtime, and `std/`
 /// tooling share one source and can't drift. Used here and by completion
 /// ([`crate::completion`]).
 pub(crate) use brood::builtins::SPECIAL_FORMS;
 
 /// The `def…` heads that carry a docstring, and where it sits — the same canonical
-/// list the highlighter and the generated editor grammars read via `(doc-forms)`.
+/// list the highlighter and the generated editor grammars read via `(reflect/doc-forms)`.
 use brood::builtins::DOC_FORMS;
 
 /// All semantic tokens for the document, delta-encoded.

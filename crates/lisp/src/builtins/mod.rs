@@ -752,14 +752,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 
     // Which globals the two above have actually written (ADR-218): the derived answer to
     // "what does loading MUTATE rather than create?", which the startup image needs and the
-    // `(global-names)` diff cannot see. Naming them by hand went stale twice, silently.
+    // `(reflect/global-names)` diff cannot see. Naming them by hand went stale twice, silently.
     def(
         heap,
         "%registry-names",
         Arity::exact(0),
         Sig::new(vec![], any),
         &[],
-        "Every global a registry update (%registry-update! / %registry-cas!) has written in this runtime, sorted by spelling. The derived answer to \"which globals does LOADING mutate rather than create?\" — the ones a startup image has to carry deliberately, because the (global-names) diff it is built from cannot see them (ADR-218). Naming them by hand went stale three times, silently; std/tool/project.blsp filters this instead.",
+        "Every global a registry update (%registry-update! / %registry-cas!) has written in this runtime, sorted by spelling. The derived answer to \"which globals does LOADING mutate rather than create?\" — the ones a startup image has to carry deliberately, because the (reflect/global-names) diff it is built from cannot see them (ADR-218). Naming them by hand went stale three times, silently; std/tool/project.blsp filters this instead.",
         registry_names);
 
     // set (the `#{…}` kernel type; the `set` library is Brood over these)
@@ -2091,7 +2091,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // self-hosting — eval/load/etc. take and return arbitrary forms / values.
     def(
         heap,
-        "eval",
+        "reflect/eval",
         Arity::exact(1),
         Sig::new(vec![any], any),
         &["form"],
@@ -2124,7 +2124,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         read_first);
     def(
         heap,
-        "eval-string",
+        "reflect/eval-string",
         Arity::exact(1),
         Sig::new(vec![string], any),
         &["s"],
@@ -2266,7 +2266,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         tree_sitter_forget);
     def(
         heap,
-        "load",
+        "reflect/load",
         Arity::exact(1),
         Sig::new(vec![string], any),
         &["path"],
@@ -2367,7 +2367,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         coverage_reset);
     def(
         heap,
-        "builtin-modules",
+        "reflect/builtin-modules",
         Arity::exact(0),
         Sig::new(vec![], list_ty),
         &[],
@@ -3060,11 +3060,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         source_location);
     def(
         heap,
-        "private?",
+        "reflect/private?",
         Arity::exact(1),
         Sig::new(vec![sym], bool_ty),
         &["name"],
-        "Whether the global `name` is module-private (ADR-146). Quote the qualified symbol: (private? 'mod/helper).",
+        "Whether the global `name` is module-private (ADR-146). Quote the qualified symbol: (reflect/private? 'mod/helper).",
         private_p);
     def(
         heap,
@@ -3105,7 +3105,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "global-names",
+        "reflect/global-names",
         Arity::exact(0),
         Sig::nullary(list_ty),
         &[],
@@ -3114,7 +3114,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "special-forms",
+        "reflect/special-forms",
         Arity::exact(0),
         Sig::nullary(list_ty),
         &[],
@@ -3122,7 +3122,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         special_forms);
     def(
         heap,
-        "doc-forms",
+        "reflect/doc-forms",
         Arity::exact(0),
         Sig::nullary(map_ty),
         &[],
@@ -3238,7 +3238,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "current-ns",
+        "reflect/current-ns",
         Arity::exact(0),
         Sig::new(vec![], sym),
         &[],
@@ -3412,11 +3412,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "dynamic?",
+        "reflect/dynamic?",
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
         &["x"],
-        "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*).",
+        "Whether x is a symbol declared dynamic with defdyn. Quote it: (reflect/dynamic? '*foo*).",
         dynamic_p,
     );
 
@@ -3600,14 +3600,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     // Links (ADR-077): symmetric failure coupling + `trap_exit`, the bidirectional
     // cousin of `monitor`. `link`/`unlink` couple the current process to a pid;
-    // `trap-exit` turns a linked peer's death into a `[:EXIT pid reason]` message.
+    // `proc/trap-exit` turns a linked peer's death into a `[:EXIT pid reason]` message.
     def(
         heap,
         "link",
         Arity::exact(1),
         Sig::new(vec![pid_ty], nil_ty),
         &["pid"],
-        "Symmetrically link the current process and pid, local or remote (Erlang link/1). When either dies, the other gets a [:EXIT pid reason] message if it set (trap-exit true), else dies too on an abnormal reason (propagation cascades through links; :normal does not propagate). A remote link fires :noconnection on net-split; linking an already-dead/unreachable pid notifies the caller (:noproc / :noconnection). Returns nil.",
+        "Symmetrically link the current process and pid, local or remote (Erlang link/1). When either dies, the other gets a [:EXIT pid reason] message if it set (proc/trap-exit true), else dies too on an abnormal reason (propagation cascades through links; :normal does not propagate). A remote link fires :noconnection on net-split; linking an already-dead/unreachable pid notifies the caller (:noproc / :noconnection). Returns nil.",
         link_proc);
     def(
         heap,
@@ -3619,7 +3619,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         unlink_proc);
     def(
         heap,
-        "trap-exit",
+        "proc/trap-exit",
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
         &["on"],
@@ -3667,11 +3667,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         profile_stop);
     def(
         heap,
-        "system-monitor",
+        "proc/system-monitor",
         Arity::range(0, 2),
         Sig::new(vec![any, any], any),
         &["&optional", "pid", "opts"],
-        "Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see), :deopt (detail = the JIT arm's fn name, or nil). No args reads the current config map (nil if unarmed); (system-monitor nil) clears; (system-monitor pid) arms every event at pid; (system-monitor pid {:gc true :gc-min-pause-us 1000 :exit true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long, BEAM's long_gc). Arming/clearing returns the PREVIOUS config. One subscriber at a time (last wins); events about the subscriber itself are never sent (no feedback loops), and the subscriber's death disarms the stream. Policy lives in telemetry/watch-runtime, which re-emits these as telemetry events.",
+        "Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see), :deopt (detail = the JIT arm's fn name, or nil). No args reads the current config map (nil if unarmed); (proc/system-monitor nil) clears; (proc/system-monitor pid) arms every event at pid; (proc/system-monitor pid {:gc true :gc-min-pause-us 1000 :exit true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long, BEAM's long_gc). Arming/clearing returns the PREVIOUS config. One subscriber at a time (last wins); events about the subscriber itself are never sent (no feedback loops), and the subscriber's death disarms the stream. Policy lives in telemetry/watch-runtime, which re-emits these as telemetry events.",
         system_monitor);
     def(
         heap,

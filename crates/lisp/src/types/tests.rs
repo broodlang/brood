@@ -622,27 +622,32 @@ fn negate_of_a_refined_type_is_a_sound_overapproximation() {
 }
 
 #[test]
-fn double_negation_widens_a_refined_type() {
-    // Pins the documented exception the lattice-laws test deliberately can't
-    // exercise (its `sample_tys` is flat-only): for a *refined* type the
-    // widening in `negate` means double-negation does NOT round-trip.
+fn double_negation_round_trips_a_refined_type() {
+    // This test used to pin the opposite, and the opposite was a real loss: a structural
+    // refinement cannot be complemented in place, so `¬(vector int)` widened to `any`,
+    // `¬¬` then collapsed to `never`, and `(vector int) ∩ ¬(vector int)` came out
+    // `(vector int)` — a guard's else branch learning nothing at all.
     //
-    // ¬(vector<int>) keeps the `vector` tag (a vector of non-ints is in the
-    // complement) and adds every non-vector tag → that's `any`. ¬any = never.
-    // So ¬¬(vector<int>) == never, neither the original nor a bare `vector`.
+    // A term subtracts now (ADR-288), so the complement is exact and `¬¬` restores it.
     let vi = Ty::vector_of(Ty::of(Tag::Int));
     let once = vi.clone().negate();
-    assert_eq!(once, Ty::ANY, "¬(vector<int>) widens all the way to any");
-    assert_eq!(once.negate(), Ty::NEVER, "…so ¬¬ collapses to never");
-    assert_ne!(
-        vi.clone().negate().negate(),
-        vi,
-        "double negation does NOT hold"
-    );
-    // The same collapse for an arrow refinement: ¬¬((int)->int) == never.
-    let ai = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
-    assert_eq!(ai.clone().negate(), Ty::ANY);
-    assert_eq!(ai.negate().negate(), Ty::NEVER);
+    assert_ne!(once, Ty::ANY, "¬(vector<int>) is no longer everything");
+    assert_eq!(once.clone().negate(), vi, "¬¬ restores the type");
+
+    // The subtraction is what makes `T ∩ ¬T` empty — the property the widening destroyed.
+    assert!(vi.clone().intersect(once).is_never(), "T ∩ ¬T is empty");
+    assert!(Ty::tuple_of(vec![Ty::of(Tag::Int)])
+        .intersect(Ty::tuple_of(vec![Ty::of(Tag::Int)]).negate())
+        .is_never());
+
+    // …and a DIFFERENT structural type is not removed by it.
+    assert!(!Ty::vector_of(Ty::of(Tag::Str))
+        .intersect(Ty::vector_of(Ty::of(Tag::Int)).negate())
+        .is_never());
+
+    // The empty vector is vacuously a `vector<string>`, so `vector<int>` is NOT inside
+    // `¬vector<string>` — the two share `[]`. Exactness cuts both ways.
+    assert!(!vi.is_subtype(&Ty::vector_of(Ty::of(Tag::Str)).negate()));
 }
 
 #[test]
@@ -1230,6 +1235,13 @@ fn property_corpus() -> Vec<Ty> {
         Ty::vector_of(Ty::of(Tag::Int))
             .union(Ty::vector_of(Ty::of(Tag::Str)))
             .union(Ty::of(Tag::Int)),
+        // a product covered only by SEVERAL alternatives together (the rule above)
+        Ty::tuple_of(vec![Ty::of(Tag::Int).union(Ty::of(Tag::Str))]),
+        // negative STRUCTURAL atoms (ADR-288) — the half a tag flip cannot express
+        Ty::vector_of(Ty::of(Tag::Int)).negate(),
+        Ty::tuple_of(vec![Ty::of(Tag::Int)]).negate(),
+        rec(&[("a", Ty::of(Tag::Int), true)]).negate(),
+        Ty::vector_of(Ty::of(Tag::Str)).intersect(Ty::vector_of(Ty::of(Tag::Int)).negate()),
         // negative literal atoms — the complement half of the lattice
         Ty::keyword_lit(value::intern("ok")).negate(),
         Ty::int_lit(5).negate(),
@@ -1237,6 +1249,11 @@ fn property_corpus() -> Vec<Ty> {
             .negate()
             .intersect(Ty::of(Tag::Keyword)),
         arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int)),
+        // an intersection of arrows — the shape ADR-292's rule decides
+        Ty::overload_of(vec![
+            Sig::new(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int)),
+            Sig::new(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool)),
+        ]),
         // the callable type every callback parameter infers (ADR-272)
         Ty::of(Tag::Fn)
             .union(Ty::of(Tag::Native))
@@ -1672,4 +1689,102 @@ fn the_two_function_members_render_as_the_one_word_the_language_has() {
         back, with_keyword,
         "`{source}` must read back as what it rendered"
     );
+}
+
+#[test]
+fn a_product_can_be_covered_by_several_alternatives_together() {
+    // The one shape where splitting a refinement across a union is sound. A 1-tuple holds
+    // exactly one value, so `(int|string)` lands in `(int)` or in `(string)` — between
+    // them they cover it, though neither does alone. This was the documented remaining
+    // incompleteness in cross-term subtyping, and it costs a FALSE POSITIVE: the checker
+    // warns about a call that is fine.
+    let i = Ty::of(Tag::Int);
+    let s = Ty::of(Tag::Str);
+    let joined = Ty::tuple_of(vec![i.clone().union(s.clone())]);
+    let split = Ty::tuple_of(vec![i.clone()]).union(Ty::tuple_of(vec![s.clone()]));
+    assert!(
+        joined.is_subtype(&split),
+        "`{joined}` is covered by `{split}` — a 1-tuple holds one value, which lands in one \
+         alternative or the other"
+    );
+
+    // …and the two neighbours it must NOT be confused with, both correctly false.
+    //
+    // A **vector** is arbitrary-length, so it can hold one element outside the first
+    // alternative and another outside the second and escape both: `[1 "a"]` is a
+    // `vector<int|string>` and is neither a `vector<int>` nor a `vector<string>`.
+    let vjoined = Ty::vector_of(i.clone().union(s.clone()));
+    let vsplit = Ty::vector_of(i.clone()).union(Ty::vector_of(s.clone()));
+    assert!(
+        !vjoined.is_subtype(&vsplit),
+        "a mixed vector belongs to neither alternative — the fixed arity is what makes the \
+         product case different"
+    );
+
+    // A **2-tuple** is not covered componentwise, which is the classic error: each
+    // component is covered, and `(int, string)` still belongs to neither alternative.
+    let two = Ty::tuple_of(vec![i.clone().union(s.clone()), i.clone().union(s.clone())]);
+    let two_split =
+        Ty::tuple_of(vec![i.clone(), i.clone()]).union(Ty::tuple_of(vec![s.clone(), s.clone()]));
+    assert!(
+        !two.is_subtype(&two_split),
+        "componentwise coverage is not product coverage — `(int, string)` is in neither"
+    );
+
+    // A differing arity shares no value, so it contributes nothing to the covering.
+    let one = Ty::tuple_of(vec![i.clone()]);
+    let pair = Ty::tuple_of(vec![i.clone(), i.clone()]);
+    assert!(!one.is_subtype(&pair));
+    assert!(!pair.is_subtype(&one));
+}
+
+#[test]
+fn an_intersection_of_arrows_satisfies_a_requirement_together() {
+    // A function that maps `int → int` AND `bool → bool` does map `int|bool → int|bool`,
+    // and neither conjunct says so alone: an arrow's domain is CONTRAVARIANT, so
+    // `(int → int)` is not below `(int|bool → int|bool)` — `int|bool ⊄ int`. Only the two
+    // together cover it, which is the whole reason the arrow rule exists (ADR-292).
+    let i = Ty::of(Tag::Int);
+    let s = Ty::of(Tag::Str);
+    let b = Ty::of(Tag::Bool);
+    let both = Ty::overload_of(vec![
+        Sig::new(vec![i.clone()], i.clone()),
+        Sig::new(vec![b.clone()], b.clone()),
+    ]);
+    let either = i.clone().union(b.clone());
+    assert!(
+        both.is_subtype(&arr(vec![either.clone()], either.clone())),
+        "`{both}` handles int|bool and returns int|bool — together"
+    );
+
+    // The three that must stay FALSE. Getting these wrong trades incompleteness for
+    // unsoundness, which is the only trade this lattice never makes.
+    assert!(
+        !both.is_subtype(&arr(vec![either.clone()], i.clone())),
+        "the bool arm returns a bool for a bool input, which is not an int"
+    );
+    assert!(
+        !both.is_subtype(&arr(vec![s.clone()], s.clone())),
+        "neither arm accepts a string at all"
+    );
+    assert!(
+        !both.is_subtype(&arr(vec![either], s.clone())),
+        "covering the domain does not license a narrower result"
+    );
+
+    // The rest of the arrow relation, unchanged and still right.
+    let ii = arr(vec![i.clone()], i.clone());
+    let is = arr(vec![i.clone()], s.clone());
+    assert!(
+        arr(vec![i.clone().union(b.clone())], s.clone()).is_subtype(&is),
+        "contravariance: a function taking more is usable where less is wanted"
+    );
+    assert!(ii.clone().intersect(ii.clone().negate()).is_never());
+    assert!(!ii
+        .clone()
+        .intersect(arr(vec![b.clone()], b.clone()).negate())
+        .is_never());
+    // A result split across a union is NOT covered — an arrow is like a vector, not like a
+    // tuple: the same function may return an int for one input and a string for another.
+    assert!(!arr(vec![i.clone()], i.clone().union(s)).is_subtype(&is.union(ii)));
 }

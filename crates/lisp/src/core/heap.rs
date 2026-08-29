@@ -1494,7 +1494,7 @@ pub struct RuntimeCode {
     ///
     /// It guards a *value*, not `()`: the set of globals a registry update has actually
     /// written, which [`Heap::registry_names`] reports. A registry is precisely a global that
-    /// loading MUTATES rather than creates, so the `(global-names)` diff a startup image is
+    /// loading MUTATES rather than creates, so the `(reflect/global-names)` diff a startup image is
     /// built from cannot see it — and a registry left out of the image is lost with no error
     /// (ADR-218). Naming them by hand went stale three times; this set is derived from the writes
     /// themselves, so a registry added later is carried without anyone remembering to.
@@ -5803,7 +5803,7 @@ impl Heap {
         // in-place UPDATE of an existing registry, not a redefinition, and nothing re-marks
         // afterwards the way a `def-` form does. So a `def-`'d registry silently turned
         // public on its first write: `*impls*`, `*record-ids*` and friends read
-        // `private? = true` at boot and `false` the moment any module registered anything,
+        // `reflect/private? = true` at boot and `false` the moment any module registered anything,
         // which put all of them back on the published core reference.
         let was_private = self.runtime.is_private_recorded(sym);
         self.env_define(root, sym, next);
@@ -5868,7 +5868,7 @@ impl Heap {
     /// Every global a registry update has written in this runtime — the derived answer to
     /// "which globals does *loading* mutate rather than create?".
     ///
-    /// A startup image is built from the `(global-names)` diff across a load (ADR-218), which
+    /// A startup image is built from the `(reflect/global-names)` diff across a load (ADR-218), which
     /// by construction cannot see a global that already existed and was only updated. Those
     /// were named by hand and the list went stale three times, silently: `declared_sigs`
     /// weakened the checker, seven ability/multimethod registries governed dispatch with no
@@ -5877,7 +5877,7 @@ impl Heap {
     /// rather than of anyone's memory. Which of them an image should *carry* stays policy, in
     /// `std/tool/project.blsp`.
     ///
-    /// Sorted by spelling, like `(global-names)` — a set iterates in hash order, and a
+    /// Sorted by spelling, like `(reflect/global-names)` — a set iterates in hash order, and a
     /// caller diffing two runs or asserting on the set wants neither that nor interner order.
     pub fn registry_names(&self) -> Vec<Symbol> {
         let mut names: Vec<Symbol> = self
@@ -6063,7 +6063,7 @@ impl Heap {
     }
 
     /// Every symbol currently bound in the global table (prelude + user `def`s).
-    /// For tooling/introspection — `(global-names)` feeds completion and
+    /// For tooling/introspection — `(reflect/global-names)` feeds completion and
     /// workspace-symbol queries (see `docs/lsp.md`). Returns just the keys, so
     /// no `Value`s are cloned.
     pub fn global_symbols(&self) -> Vec<Symbol> {

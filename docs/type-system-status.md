@@ -409,15 +409,43 @@ lived only in a human's memory; round 3 dropped them automatically.
 The declarations are visible where they are read: `nest doc` renders the type under each
 heading now, for a declared signature and a curated primitive alike.
 
+## The backlog is empty (2026-08-28)
+
+Both remaining lattice items shipped, and they turned out to share one foundation —
+`P ∖ N = ∅` exactly when `P ⊆ ⋃N`, so the emptiness decision and the subtyping decision are
+the same code and cannot disagree.
+
+**A term subtracts** (ADR-288). A tag could be complemented exactly, and since ADR-268 a
+literal set, but not a structure: `¬(vector int)` widened to `any`, `(vector int) ∩ ¬(vector
+int)` came out `(vector int)` rather than `never`, and `¬¬` destroyed the type instead of
+restoring it. A term now denotes `P ∖ ⋃N`, all three are exact, and `(not (vector int))`
+finally *checks* instead of merely parsing. The property laws caught four defects on the way
+— subtraction-blind absorption, short-circuiting disjointness rules, dropped negative
+candidates, and an order-sensitive subtraction list.
+
+**A product can be covered by several alternatives together** (ADR-289). `(tuple (or int
+string))` is contained in `(tuple int) | (tuple string)` — a 1-tuple holds one value, which
+lands in one or the other — and the per-tag rule from ADR-267 answered false, a false
+positive. Decided by the set-theoretic product rule now, with both neighbours pinned as
+tests: componentwise coverage is not product coverage, and an arbitrary-length vector escapes
+both alternatives. Fixed arity is what makes products different.
+
+Two items the roadmap still listed as deferred were found already **done**, closed by this
+session's overload inference rather than by anything aimed at them: per-arm parameter
+checking of a multi-arity callee, and exhaustiveness from an *inferred* scrutinee. Both were
+verified by probe before the roadmap was updated.
+
 ### What's left
 
-- **`sig` adoption itself** — now mechanical rather than archaeological, but still a
-  judgement call per declaration. Note that a domain the checker infers from
-  arithmetic reads as `(or map number)`, not `int`: honest (a record participates
-  through the `Num` ability) and noisier than a human would write.
-- **Negative *structural* atoms** — `(not (tuple int))`. The literal half is done
-  (ADR-268); the structural half needs an emptiness decision procedure over the lattice,
-  since a negated arrow/record/tuple cannot be normalised away the way a negated literal
-  set can.
-- **Complete cross-term subtyping** — the refinement-split direction above. Same
-  procedure, same piece of work.
+- **`sig` adoption itself** — mechanical rather than archaeological now (ADR-276 records the
+  criteria, and the arithmetic-domain tier was probed rather than guessed in ADR-284's
+  batch), but still a judgement call per declaration.
+- ~~**Arrow decomposition**~~ — shipped 2026-08-29 (ADR-292), and it was not the safe
+  incompleteness it had been recorded as. `(and (int -> int) (bool -> bool))` really is a
+  `(int|bool -> int|bool)`, the single-candidate rule answered *false*, and multi-arity
+  functions are exactly the intersections of arrows this language is built from. The
+  set-theoretic rule now decides it, reusing ADR-289's product covering for the domain half
+  rather than growing a second covering algorithm. Checked against a brute-force model of
+  what an arrow denotes, not against more property laws — a more permissive relation is the
+  one direction that can be unsound, and laws that check the relation against itself cannot
+  see it: **0 unsound and 0 missed containments across 2 547 216 pairs.**

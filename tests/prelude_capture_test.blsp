@@ -32,14 +32,14 @@
 
 ;; Every bare root name that is NOT a special form — the set a template could capture.
 (def- capturable
-  (let (sf (into #{} (map ->string (special-forms))))
+  (let (sf (into #{} (map ->string (reflect/special-forms))))
     (into #{}
       (seq/remove (fn (s)
                     (or (string/starts-with? s "%")
                       (includes? s "/")
                       (string/starts-with? s "*")
                       (contains? sf s)))
-        (map ->string (global-names))))))
+        (map ->string (reflect/global-names))))))
 
 ;; Walk a form, collecting head symbols that sit inside a quasiquote template.
 ;; `~`/`~@` holes are caller code (already resolved at the call site) and `quote`

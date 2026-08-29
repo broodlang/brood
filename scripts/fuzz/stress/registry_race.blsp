@@ -20,9 +20,9 @@
 (defn decl (i)
   (if (>= i n)
     :ok (do
-      (eval (list 'defability
-              (symbol (str "A" i))
-              (list (symbol (str "op" i)) ['self] :-> 'any)))
+      (reflect/eval (list 'defability
+                      (symbol (str "A" i))
+                      (list (symbol (str "op" i)) ['self] :-> 'any)))
       (decl (+ i 1)))))
 (decl 0)
 

@@ -1365,7 +1365,7 @@ fn remote_link_death_delivers_exit_to_a_trapping_peer() {
         r#"
 (node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (node/connect "a@127.0.0.1:{port_a}")
-(trap-exit true)
+(proc/trap-exit true)
 (send {{:name :worker :node :a@127.0.0.1}} [:whoami (self)])
 (def w (receive ([:iam p] p) (after 30000 (throw "no whoami"))))
 (unless (pid? w) (throw "whoami reply was not a pid"))
