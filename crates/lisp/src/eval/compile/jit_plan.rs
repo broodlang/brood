@@ -389,6 +389,13 @@ fn non_tail_call_count(code: &[Inst]) -> usize {
 /// per-*chunk*, and the chunk a lowering walks may be a spliced body rather than `arm.chunk`
 /// (the inlined-upgrade path), so it belongs where the chunk is known. Ungated for the same
 /// reason `jit_spill_reserve` is: the frame size depends on it.
+/// Is `Inst::MakeClosure` admitted to the JIT subset? Opt-in via `BROOD_MKCLO=1` — see the
+/// subset predicate's comment for the measured default-off rationale. Read once and cached.
+fn mkclo_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_MKCLO").is_some_and(|v| v == "1"))
+}
+
 pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
     let in_subset_op = |op: &PrimOp| {
         matches!(
@@ -462,7 +469,16 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // `exec_chunk`'s own arm verbatim (captures staged on `roots` exactly as the VM
         // leaves them on its operand stack). Capped like `MakeVector`. NOTE the `%receive`
         // fence above — admitting this is what made it necessary.
-        Inst::MakeClosure { names, .. } => names.len() <= 32,
+        //
+        // **Opt-in (`BROOD_MKCLO=1`), default OFF — the BROOD_MONO pattern.** Admitting it
+        // by default tiered up ~47 extra BOOT-path closure arms (fib: 83 → 130 compiles)
+        // for a measured **+11 ms constant** on every short-lived run (BENCH_N-invariant,
+        // so pure fixed cost) and pinned-sweep noise from the busier compiler thread —
+        // while the intended winners (nqueens' `solve`, pipeline's steps) still bail on
+        // the `call-mediated-boxed` GATE and gain nothing until §7.1 step 2 revisits it.
+        // Step 1 alone is all cost; flip the default together with step 2, re-measuring
+        // `startup`/`spawn` (the fixed-cost victims) beside the winners.
+        Inst::MakeClosure { names, .. } => names.len() <= 32 && mkclo_enabled(),
         _ => false,
     })
 }
