@@ -54,6 +54,13 @@ Everything the audit listed, plus:
 ;; a lambda LITERAL as a callback (KI-85): typed under the arrow's own domain
 (sig g ((int -> int) -> int)) (g (fn (x) (str x)))  ; result string, used as int
 ;; …and the wider-result case stays silent: (g (fn (x) (+ x 1))) is int under x : int
+;; precision without loss of soundness (2026-08-29): exact where provable, deferred otherwise
+(+ 1 2 1/2)                 ; int | ratio — ratios close over + - * and /, like ints
+(reduce + 0 ints)           ; int — a numeric operator folds inside its closure (induction)
+(map inc ints)              ; nil | list<int> — the operator's closure, not its widened sig
+(cons 1 '())                ; list<1> — a nil tail has no elements
+'(1 2) (vec …) (into …) (conj …) (merge …) (apply …) (try …) ((fn …) x) (range n)
+                            ; each typed by what it provably is; all were `any`/nil/bare tags
 ;; the surface itself (ADR-259)
 (sig q1 (strng -> int))                          ; unknown type
 (sig q2 ((tupel int) -> int))                    ; unknown constructor
