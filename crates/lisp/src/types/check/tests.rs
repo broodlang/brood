@@ -362,7 +362,7 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         ("'(1 2)", "list<1 | 2>"),
         ("(vec '(1 2))", "vector<1 | 2>"),
         // a range is a range of integers
-        ("(range 5)", "nil | list<int>"),
+        ("(range 5)", "list<int>"),
         // a numeric operator as a callback / a fold / spread — the same closure rules
         ("(map inc [1 2])", "nil | list<int>"),
         ("(reduce + [1 2])", "int"),
@@ -7197,4 +7197,31 @@ fn a_rest_function_keeps_its_positional_demands_and_fold_hands_down_the_callback
             .any(|w| w.contains("t/foo: argument 4 expects number, got \"four\"")),
         "{ws:?}"
     );
+}
+
+// The one length fact the lattice states — `list<T>` is non-empty (the empty list is `nil`)
+// — carried through every combinator that preserves it. No `nil |` on the result of
+// `append`/`map`/`sort`/`reverse`/`distinct`/`into` over a non-empty list, no `nil |` on its
+// `first`/`last`, a literal `range` that cannot be empty; everything that CAN empty a
+// sequence (`filter`, `rest`, `nth`, a vector input) keeps its `nil`.
+#[test]
+fn length_preserving_combinators_over_a_non_empty_list_drop_the_nil() {
+    assert_eq!(
+        ty_str("(append '(1 2 \"foo\") '(1 \"bar\"))"),
+        "list<1 | 2 | string>"
+    );
+    assert_eq!(ty_str("(append '(1) nil)"), "list<1>");
+    assert_eq!(ty_str("(map inc '(1 2))"), "list<int>");
+    assert_eq!(ty_str("(sort '(3 1))"), "list<1 | 3>");
+    assert_eq!(ty_str("(reverse '(1 2))"), "list<1 | 2>");
+    assert_eq!(ty_str("(first '(1 2))"), "1 | 2");
+    assert_eq!(ty_str("(last '(1 2))"), "1 | 2");
+    assert_eq!(ty_str("(range 5)"), "list<int>");
+    assert_eq!(ty_str("(into '(1) '(2))"), "list<1 | 2>");
+    // …and what may be empty keeps the nil
+    assert!(ty_str("(filter even? '(1 2))").starts_with("nil | "));
+    assert!(ty_str("(rest '(1 2))").starts_with("nil | "));
+    assert!(ty_str("(nth '(1 2) 5)").contains("nil"));
+    assert!(ty_str("(first [1 2])").contains("nil") || ty_str("(first [1 2])") == "1");
+    assert!(ty_str("(map inc [])").starts_with("nil"));
 }

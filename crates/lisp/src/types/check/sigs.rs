@@ -1300,9 +1300,20 @@ fn domain_of_inner(
     // A lexical local shadows the global, so its type is not the declared one; and this
     // stays a table lookup like the three below, never `infer_sig`, so it cannot recurse
     // into the inference that called it.
+    // …and a same-file function's INFERRED sig (Pass 2.8's fixed point) right after: a
+    // table lookup on `ctx`, so still no recursion — and the largest single source of
+    // demands the corpus was missing, since most calls in a module are to its own
+    // functions. Its domain over-approximates the callee's valid arguments, so a caller
+    // intersecting with it keeps over-approximating: sound, and it only narrows across
+    // the iterations.
     let callee_sig = (!scope.shadowed.contains(&h))
         .then(|| ctx.declared_sig(h))
         .flatten()
+        .or_else(|| {
+            (!scope.shadowed.contains(&h))
+                .then(|| ctx.inferred_fn_sig(h))
+                .flatten()
+        })
         .or_else(|| primitive_sig(heap, h))
         .or_else(|| curated_sig(h))
         .or_else(|| declared_heap_sig(heap, h));

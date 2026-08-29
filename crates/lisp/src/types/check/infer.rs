@@ -912,8 +912,16 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             }
         }
         let elem = coll_ty.elem_ty()?;
-        // first/second/third/last/nth yield `nil` on an empty / out-of-range seq.
-        return Some(elem.union(Ty::of(Tag::Nil)));
+        // `first`/`last` of a provably non-empty list is an element, full stop; every
+        // other access (an index that may run off the end, a seq that may be empty)
+        // yields `nil` too.
+        let always_present = provably_non_empty(&coll_ty)
+            && (value::symbol_is(head, "first") || value::symbol_is(head, "last"));
+        return Some(if always_present {
+            elem
+        } else {
+            elem.union(Ty::of(Tag::Nil))
+        });
     }
     // `(filter pred coll)` keeps `coll`'s element type — the result is the items
     // that pass, so `nil | list<A>` for `A = elem(coll)` (ADR-078 parametric
@@ -926,13 +934,19 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // Element-preserving reshapers whose sequence is the *first* argument — the
     // same elements, fewer / reordered: `reverse`, `rest` (drop the head),
     // `but-last`, `distinct` / `dedupe` (drop duplicates). `nil | list<A>`.
+    // `reverse`/`distinct`/`dedupe` keep a non-empty input non-empty; `rest`/`but-last`
+    // may empty it — the two groups differ in exactly the `nil`.
     if value::symbol_is(head, "reverse")
-        || value::symbol_is(head, "rest")
-        || value::symbol_is(head, "but-last")
         || value::symbol_is(head, "distinct")
         // `seq/` since ADR-227; `distinct` stayed in the core protocol.
         || value::symbol_is(head, "seq/dedupe")
     {
+        let coll = *items.get(1)?;
+        let coll_ty = expr_ty(heap, coll, ctx);
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        return list_result_over(coll_ty.as_ref(), a);
+    }
+    if value::symbol_is(head, "rest") || value::symbol_is(head, "but-last") {
         let coll = *items.get(1)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         return list_result(a);
@@ -944,7 +958,15 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let all_int = items[1..]
             .iter()
             .all(|&a| expr_ty(heap, a, ctx).is_some_and(|t| t.is_subtype(&int)));
-        return if all_int {
+        // A literal bound proves the range non-empty: `(range 5)`, `(range 2 5)`.
+        let non_empty = match (items.get(1), items.get(2), items.len()) {
+            (Some(Value::Int(n)), None, 2) => *n > 0,
+            (Some(Value::Int(a)), Some(Value::Int(b)), 3) => a < b,
+            _ => false,
+        };
+        return if all_int && non_empty {
+            Some(Ty::list_of(int))
+        } else if all_int {
             list_result(Some(int))
         } else {
             None
@@ -981,9 +1003,13 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             });
         }
         if target.is_subtype(&Ty::LIST) {
-            return Some(match joined {
-                Some(e) => Ty::list_of(e).union(Ty::of(Tag::Nil)),
-                None => Ty::LIST,
+            // Non-empty if either side is: the target keeps its elements, the source adds.
+            let non_empty = provably_non_empty(&target)
+                || expr_ty(heap, items[2], ctx).is_some_and(|t| provably_non_empty(&t));
+            return Some(match (joined, non_empty) {
+                (Some(e), true) => Ty::list_of(e),
+                (Some(e), false) => Ty::list_of(e).union(Ty::of(Tag::Nil)),
+                (None, _) => Ty::LIST,
             });
         }
         if target.is_subtype(&Ty::of(Tag::Map)) {
@@ -1115,8 +1141,9 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // sequence is always the last argument; element type is preserved unchanged.
     if value::symbol_is(head, "sort") || value::symbol_is(head, "sort-by") {
         let coll = *items.last()?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
-        return list_result(a);
+        let coll_ty = expr_ty(heap, coll, ctx);
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        return list_result_over(coll_ty.as_ref(), a);
     }
     // Element-preserving slices/filters whose sequence is the *second* argument —
     // `take` / `drop` / `take-while` / `drop-while`, `take-last` / `drop-last`, and
@@ -1162,14 +1189,27 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             return Some(Ty::of(Tag::Nil)); // (append) = nil
         }
         let mut acc: Option<Ty> = None;
+        let mut any_non_empty = false;
         for &arg in &items[1..] {
-            let elem = expr_ty(heap, arg, ctx).and_then(|t| t.elem_ty())?;
+            let arg_ty = expr_ty(heap, arg, ctx)?;
+            any_non_empty |= provably_non_empty(&arg_ty);
+            // `nil` — the empty list — contributes no elements at all.
+            let elem = if arg_ty.is_subtype(&Ty::of(Tag::Nil)) {
+                Ty::NEVER
+            } else {
+                arg_ty.elem_ty()?
+            };
             acc = Some(match acc {
                 Some(a) => a.union(elem),
                 None => elem,
             });
         }
-        return list_result(acc);
+        // One non-empty argument makes the whole result non-empty.
+        return if any_non_empty {
+            acc.map(Ty::list_of)
+        } else {
+            list_result(acc)
+        };
     }
     // Map K/V refinement rules — derive result types when the first argument is a
     // `map<K, V>`.  Sound by the usual "widening is conservative" rule: these rules
@@ -1289,9 +1329,10 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "map") {
         let f = *items.get(1)?;
         let coll = *items.get(2)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
+        let coll_ty = expr_ty(heap, coll, ctx);
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
         let b = callback_ret(heap, f, &[a], ctx);
-        return list_result(b);
+        return list_result_over(coll_ty.as_ref(), b);
     }
     // `(keep f coll)` — `map` then drop the `nil` results; `nil | list<B>` for
     // `B` = the callback's return (over-approximated by keeping `nil` in `B`, a
@@ -1364,6 +1405,25 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
 /// the caller falls back to the flat curated `list` (never a too-narrow result).
 fn list_result(elem: Option<Ty>) -> Option<Ty> {
     elem.map(|e| Ty::list_of(e).union(Ty::of(Tag::Nil)))
+}
+
+/// Is `t` a provably NON-EMPTY sequence — a `list<T>` (the `pair` tag alone; the empty list
+/// is `nil`)? The one length fact the lattice states, and the source of every "no `nil`
+/// here" tightening below. A vector or set may be empty whatever its element type.
+fn provably_non_empty(t: &Ty) -> bool {
+    t.is_subtype(&Ty::of(Tag::Pair))
+}
+
+/// [`list_result`] for a combinator that keeps its input's LENGTH class — `map`, `sort`,
+/// `reverse`, `distinct`: a provably non-empty input gives a provably non-empty output, so
+/// the `nil` case is dropped. `(map inc '(1 2))` is `list<int>`, not `nil | list<int>`. An
+/// input that may be empty keeps the `nil`.
+fn list_result_over(input: Option<&Ty>, elem: Option<Ty>) -> Option<Ty> {
+    if input.is_some_and(provably_non_empty) {
+        elem.map(Ty::list_of)
+    } else {
+        list_result(elem)
+    }
 }
 
 /// The return type of a HOF callback `f` whose parameters receive the given
