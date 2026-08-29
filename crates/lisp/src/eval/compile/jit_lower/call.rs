@@ -206,11 +206,8 @@ pub(super) fn emit_call(
         let fl_epoch_off = std::mem::offset_of!(FastLink, epoch) as i32;
         let fl_code_off = std::mem::offset_of!(FastLink, code) as i32;
         let fl_nslots_off = std::mem::offset_of!(FastLink, nslots) as i32;
-        let fl_env_off = std::mem::offset_of!(FastLink, env) as i32;
         let fl_sym_off = std::mem::offset_of!(FastLink, sym) as i32;
         let fl_argc_off = std::mem::offset_of!(FastLink, argc) as i32;
-        let fl_cib_off = std::mem::offset_of!(FastLink, callee_ic_base) as i32;
-        let fl_cgb_off = std::mem::offset_of!(FastLink, callee_gic_base) as i32;
         let len_slot =
             b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
@@ -289,24 +286,15 @@ pub(super) fn emit_call(
         b.ins().brif(nst, error, &[], cont, &[]);
 
         b.switch_to_block(brood_blk);
-        let env_v = b
+        // Pass the **slot pointer**, not its unpacked fields. `brood_rt_fast_frame` used to
+        // take ten arguments — head/argc/nslots/code/env and the two callee IC bases, all
+        // read here and immediately re-pushed on the other side, because SysV only passes
+        // six in registers. Four arguments fit in registers, and the callee's reads are free:
+        // the guard blocks above have just touched that cache line to check the slot's epoch,
+        // sym and argc. See `brood_rt_fast_frame`'s doc.
+        let ffc = b
             .ins()
-            .load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_env_off);
-        // KI-20: the callee's IC-block bases ride in the slot alongside code/nslots/env, so
-        // `jit_run_fast_link` can install the callee's cursors around its native call without
-        // re-reading the table (two extra u32 loads from the same cache line, two extra args).
-        let cib_v = b
-            .ins()
-            .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_cib_off);
-        let cgb_v = b
-            .ins()
-            .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_cgb_off);
-        let ffc = b.ins().call(
-            funcs.fastframe,
-            &[
-                heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v, cib_v, cgb_v,
-            ],
-        );
+            .call(funcs.fastframe, &[heap, out_addr, site_v, slot_ptr]);
         let fst = b.inst_results(ffc)[0];
         // The callee may have relocated `roots`; re-fetch the base.
         let rbc = b.ins().call(funcs.rb, &[heap]);

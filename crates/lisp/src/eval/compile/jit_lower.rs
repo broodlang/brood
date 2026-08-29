@@ -792,17 +792,16 @@ fn jit_lower_arm_inner(
     let flbase_id = m
         .declare_function("brood_rt_fastlink_base", Linkage::Import, &flbase_sig)
         .ok()?;
+    // Four arguments, all register-passed. It took ten — head/argc/nslots/code/env and the
+    // two callee IC bases — which spilled four onto the stack on SysV and made the callee's
+    // profile mostly argument shuffling. They are all fields of the `FastLink` the IR has
+    // just validated, so it passes the slot pointer and the callee reads them. See
+    // `brood_rt_fast_frame`'s doc.
     let mut fastframe_sig = m.make_signature();
     fastframe_sig.params.push(AbiParam::new(ptr_ty)); // heap
     fastframe_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
     fastframe_sig.params.push(AbiParam::new(types::I32)); // site
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // head sym
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // argc
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // nslots
-    fastframe_sig.params.push(AbiParam::new(types::I64)); // code (native entry ptr as u64)
-    fastframe_sig.params.push(AbiParam::new(types::I64)); // env (EnvId raw word)
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // callee_ic_base
-    fastframe_sig.params.push(AbiParam::new(types::I32)); // callee_gic_base
+    fastframe_sig.params.push(AbiParam::new(ptr_ty)); // slot: *const FastLink
     fastframe_sig.returns.push(AbiParam::new(types::I64)); // status
     let fastframe_id = m
         .declare_function("brood_rt_fast_frame", Linkage::Import, &fastframe_sig)
