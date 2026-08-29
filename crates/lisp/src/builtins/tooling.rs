@@ -141,6 +141,59 @@ pub(super) fn references_in_source(args: &[Value], _env: EnvId, heap: &mut Heap)
     Ok(heap.list(occ))
 }
 
+/// The module-private def spellings, which are macros rather than special forms and so are
+/// absent from [`SPECIAL_FORMS`] — still syntax, still not a dependency.
+fn is_private_def_head(name: &str) -> bool {
+    name == kw::DEF_PRIVATE || name == kw::DEFN_PRIVATE
+}
+
+/// `(source-deps src)` — per TOP-LEVEL form of `src`, in document order, what it defines
+/// and what globals it uses: a list of `{:defines (…) :references (…)}` maps of name
+/// strings.
+///
+/// The question a live evaluator has to answer to avoid re-running a whole buffer on every
+/// keystroke: *given that form 2 changed, which of the forms below it could possibly be
+/// affected?* Re-running everything below is the only correct answer without this, and it
+/// makes a buffer of twenty forms cost twenty evaluations per edit. With it the answer is
+/// the transitive closure of "references something a re-run form defines" — usually one
+/// form, and never fewer than is correct.
+///
+/// Syntactic, and read the way find-references reads: locals are excluded (a parameter
+/// named `map` is not a use of `map`), a plain `'…` quote is data rather than a use, and a
+/// quasiquote's contents are counted. Two things it cannot see, both of which belong to the
+/// caller's policy: a name introduced by a macro this pass does not expand, and a side
+/// effect — a `spawn`, a table write, a print — through which one form reaches another
+/// without naming anything.
+///
+/// Pure: it parses the string and holds no project state, exactly like
+/// [`references_in_source`].
+pub(super) fn source_deps(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "source-deps", arg(args, 0))?;
+    let root = cst::parse(&src);
+    let tree = crate::syntax::scope::analyze(&root, &src);
+    let defines_kw = Value::Keyword(value::intern("defines"));
+    let references_kw = Value::Keyword(value::intern("references"));
+    let mut out = Vec::new();
+    for form in root.forms() {
+        let defines: Vec<Value> = crate::syntax::scope::globals_in(form, &src)
+            .into_iter()
+            .map(|b| heap.alloc_string(&b.name))
+            .collect();
+        let references: Vec<Value> = crate::syntax::scope::global_refs_in(&tree, form, &src)
+            .into_iter()
+            // Syntax is not a dependency. `if`, `let`, `defn` and friends resolve as free
+            // symbols here because nothing binds them, and listing them says nothing a
+            // caller can act on — no form defines `defn`.
+            .filter(|n| !SPECIAL_FORMS.contains(&n.as_str()) && !is_private_def_head(n))
+            .map(|n| heap.alloc_string(&n))
+            .collect();
+        let defines = heap.list(defines);
+        let references = heap.list(references);
+        out.push(heap.map_from_pairs(vec![(defines_kw, defines), (references_kw, references)]));
+    }
+    Ok(heap.list(out))
+}
+
 /// Byte offsets of each line start in `src` (line 0 begins at 0). Built once so
 /// repeated byte→line/col lookups in one source are cheap.
 pub(super) fn line_starts(src: &str) -> Vec<usize> {

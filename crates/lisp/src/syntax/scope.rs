@@ -227,11 +227,61 @@ fn head_sym<'s>(node: &Node, src: &'s str) -> Option<&'s str> {
 /// globals those macros *synthesize* (a record's `foo-<field>` accessors, an
 /// ability's op dispatchers) still resolve `Free` — they aren't def heads here —
 /// and reach their site through the runtime def-site table instead.
+/// Every global `node`'s subtree binds — the `def`-family names introduced under it,
+/// wherever they sit (a `def` nested in a macro body still defines globally). The
+/// per-form half of [`analyze`], for a caller asking "what does THIS form define?"
+/// rather than "what is in scope here?".
+pub fn globals_in(node: &Node, src: &str) -> Vec<Binding> {
+    let mut out = Vec::new();
+    collect_globals(node, src, &mut out);
+    out
+}
+
+/// Every symbol occurrence in `node`'s subtree that refers to a GLOBAL — one this
+/// document defines, or one that is free here and so comes from elsewhere — with locals
+/// excluded by the same scoping [`references_to_global`] uses. Resolution is against
+/// `tree`, the whole document's scopes, since a local's binder may sit outside `node`.
+///
+/// Deliberately syntactic. A plain `'…` quote is skipped (its contents are data), but a
+/// quasiquote's are not, and a name a macro introduces is invisible here — so a caller
+/// using this to decide what to re-run should treat it as an over-approximation of uses
+/// and no guarantee about macro-generated ones.
+pub fn global_refs_in(tree: &ScopeTree, node: &Node, src: &str) -> Vec<String> {
+    let mut syms = Vec::new();
+    collect_symbols(node, &mut syms);
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for n in syms {
+        let name = n.text(src);
+        if matches!(
+            tree.resolve(n.span.start, name),
+            Resolution::Defined {
+                kind: BindingKind::Global,
+                ..
+            } | Resolution::Free
+        ) && seen.insert(name.to_string())
+        {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 fn collect_globals(node: &Node, src: &str, out: &mut Vec<Binding>) {
     if let Some(head) = head_sym(node, src) {
+        // The module-private variants belong here with the rest (ADR-146): `def-`/`defn-`
+        // are macros over `def`, so they bind a global exactly as their public spellings do
+        // — and most definitions in a real module are private.
         if matches!(
             head,
-            kw::DEF | kw::DEFN | kw::DEFMACRO | kw::DEFRECORD | kw::DEFABILITY | kw::DEFDYN
+            kw::DEF
+                | kw::DEF_PRIVATE
+                | kw::DEFN
+                | kw::DEFN_PRIVATE
+                | kw::DEFMACRO
+                | kw::DEFRECORD
+                | kw::DEFABILITY
+                | kw::DEFDYN
         ) {
             if let Some(name) = node.forms().nth(1) {
                 if name.kind == NodeKind::Symbol {
@@ -254,8 +304,16 @@ fn build(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
     let opened = match head_sym(node, src) {
         Some(kw::LET) => Some(let_names(node, src)),
         Some(kw::FN) => Some(param_names(node, src, 1)),
-        // defn/defmacro: name at index 1, param list at 2.
-        Some(kw::DEFN) | Some(kw::DEFMACRO) => Some(param_names(node, src, 2)),
+        // defn/defn-/defmacro: name at index 1, param list at 2.
+        //
+        // `defn-` was missing here, and the symptom was not a missing feature but a WRONG
+        // answer: with no scope opened, a private function's parameters resolved to whatever
+        // global shares their spelling, so `references-to-global "n"` returned the `n`
+        // parameter of `(defn- f (n) n)` — and rename, which writes those spans, would have
+        // edited it. Most definitions in a real module are private (ADR-146).
+        Some(kw::DEFN) | Some(kw::DEFN_PRIVATE) | Some(kw::DEFMACRO) => {
+            Some(param_names(node, src, 2))
+        }
         _ => None,
     };
     let scope = match opened {
@@ -494,6 +552,47 @@ mod tests {
         let tree = analyze(&root, src);
         // Only the def name and the `(foo 1)` call — the two `'foo`s are excluded.
         assert_eq!(tree.references_to_global(&root, src, "foo").len(), 2);
+    }
+
+    // `defn-` opened no scope, so a private function's PARAMETERS resolved to whatever
+    // global shared their spelling — and the symptom was a wrong answer, not a missing one:
+    // `references_to_global("n")` returned the `n` of `(defn- f (n) n)`, and rename writes
+    // exactly those spans. Most definitions in a real module are private (ADR-146), so this
+    // was most of a module.
+    #[test]
+    fn a_private_defns_parameters_are_local_like_a_public_ones() {
+        let src = "(def n 1)\n(defn- f (n) n)";
+        let root = cst::parse(src);
+        let tree = analyze(&root, src);
+        let param = src.rfind('n').unwrap() as u32; // the `n` in the body
+        match tree.resolve_at(&root, src, param) {
+            Resolution::Defined { kind, .. } => assert_eq!(kind, BindingKind::Local),
+            r => panic!("expected Local, got {r:?}"),
+        }
+        // …and so the global's reference set does not include them
+        assert_eq!(tree.references_to_global(&root, src, "n").len(), 1);
+    }
+
+    #[test]
+    fn a_private_def_binds_a_global_like_a_public_one() {
+        for src in ["(def- k 1)", "(defn- k () 1)"] {
+            let root = cst::parse(src);
+            let bindings = globals_in(&root, src);
+            let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
+            assert!(names.contains(&"k"), "{src}: {names:?}");
+        }
+    }
+
+    #[test]
+    fn global_refs_exclude_locals_and_keep_free_names() {
+        let src = "(defn f (x) (inc x))";
+        let root = cst::parse(src);
+        let tree = analyze(&root, src);
+        let refs = global_refs_in(&tree, &root, src);
+        assert!(refs.contains(&"inc".to_string()), "{refs:?}");
+        assert!(refs.contains(&"f".to_string()), "{refs:?}");
+        // `x` is a parameter, not a use of any global `x`
+        assert!(!refs.contains(&"x".to_string()), "{refs:?}");
     }
 
     #[test]

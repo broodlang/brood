@@ -543,3 +543,63 @@ name (a record inside a wider term now prints its identity, not the tag `map`). 
 general — `MultiInfo::domain_ty` is any multimethod's parameter type — the operators are
 just its first consumer.
 
+## What was left, measured (2026-08-29)
+
+`nest check --suggest-sigs` over std writes 581 signatures. Tallying what a reader would not
+paste gave the list, in order of yield:
+
+- **73× `(or rope seqable string table)`** — `count`'s domain, a set the checker had under
+  the name `countable` in Rust and could not spell. Now `countable`.
+- **63× the comparison cover**, spelled out — see ADR-299's addendum: `ordered`, `numeric`.
+- **16× `(record :__id__ :datetime/datetime :day number …)`** in return positions: a
+  nominal shape is now spelled by its name in a `sig`, the inferred field refinements
+  dropped (the name denotes the open `:__id__` shape, a supertype — sound to declare, and
+  what a reader writes). `Display` keeps the refinements for diagnostics.
+- **`math/max`/`math/min` returning `(or map number)`** — routed through the operator
+  domain like `<`.
+
+After: 0 raw record shapes, 0 six-way countable unions; `ordered` 61×, `countable` 73×,
+`(or map …)` 13× (all `send`'s `map | pid` target, which is what it is).
+
+**The first `--strict` run over std** (~230 warnings) sorted into families. Two were
+defects in strict, fixed: a bound known only by exclusion — `(not nil)` from a `when`, the
+truthy half of `(or x default)` — kept being read by inclusion (now `is_known_only_by_
+exclusion` keeps the overlap rule), and that truthy half rendered as a 21-tag list (now
+`(not (nil | false))`). The rest are what strict is for: `nil | string` from `nth`/`first`
+handed to a string function, `number` where `int` is declared, a declared `int` return over
+a body that yields `number`. A `sig` on the function is the answer to each.
+
+**What is genuinely left: the `any` tail.** 404 of 581 suggestions contain `any` — a
+parameter only passed through, or whose only demand comes from inside a conditional branch
+(`(>= i n)` runs on every path of `ansi-csi-end`; `(nth v i)` and `(+ i 1)` do not, so a
+sound meet cannot use them). Narrowing those needs demand flow across functions and
+polymorphic (`?A`) suggestions — the inference frontier, and where an unsound rule would
+hide, so it wants the brute-force-model verification ADR-292 used, not rules by hand.
+
+## The `any` tail, first cut (2026-08-29)
+
+`(defn foo (x y & more) (+ (fold + x more) y))` suggested `(any any & any -> number)`. Two
+causes, both in demand inference: a `& rest` clause returned no demands at all ("no
+positional signature" — but the fixed parameters bind positionally regardless, and the rest
+binder's demand on its list is a per-argument demand on the list's element type,
+`Sig::rest`); and `fold`/`reduce` typed their *result* through the callback but never handed
+the callback's demands to the init and the collection. With both, `(number number & number
+-> number)`. A third, on the return side: the tail's type was inferred with every parameter
+bound to `any`; it is now inferred under each parameter's demand — what every call that
+reaches the tail satisfied — so `(fold + x xs)` is numeric, not `any`.
+
+## The length fact, carried (2026-08-29)
+
+`(append '(1 2 "foo") '(1 "bar"))` hovered as `nil | list<1 | 2 | string>`. The `nil` was
+the empty-input case, stated for every input; but both inputs here are `list<…>`, which
+since the list-disjointness change is the NON-empty list — so the result cannot be `nil`.
+That one fact (`provably_non_empty`: `⊆ pair`) now flows through every combinator that
+preserves length (`map`, `sort`, `reverse`, `distinct`, `append` with one non-empty
+argument, `into` a list, a literal `range`) and through `first`/`last`, and is withheld from
+every one that can empty a sequence. Sound in the only direction that matters: `nil` is
+dropped exactly where no input can produce it.
+
+The demand walk also consults a module's own inferred signatures now (`ctx.inferred_fn_sig`
+— a table lookup on the fixed-point pass's result, so no recursion): all-`any` parameter
+lists over std went 203 → 182, `-> any` returns 117 → 108.
+

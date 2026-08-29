@@ -183,3 +183,18 @@
       (assert= a (- b))))
   (test "and the order is stable across calls"
     (assert= (compare :a "a") (compare :a "a"))))
+
+(describe "a one-argument comparison is vacuously true — and still checks its argument"
+  ;; `(< x)` has no pair to compare, so it is true by definition (Clojure agrees). But
+  ;; `true` for `(< '(1 2))` was a silent lie about a list: the lone argument is now
+  ;; compared with itself first, so a value that cannot be ordered raises the same error
+  ;; it would raise beside a second argument.
+  (test "a number, a float, a ratio: true"
+    (is (< 5))
+    (is (> 2.5))
+    (is (<= 1/2))
+    (is (>= -1)))
+  (test "a list, a string, nil: an error, not true"
+    (assert-error (< '(1 2)))
+    (assert-error (> "a"))
+    (assert-error (<= nil))))

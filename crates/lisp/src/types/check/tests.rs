@@ -362,7 +362,7 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         ("'(1 2)", "list<1 | 2>"),
         ("(vec '(1 2))", "vector<1 | 2>"),
         // a range is a range of integers
-        ("(range 5)", "nil | list<int>"),
+        ("(range 5)", "list<int>"),
         // a numeric operator as a callback / a fold / spread — the same closure rules
         ("(map inc [1 2])", "nil | list<int>"),
         ("(reduce + [1 2])", "int"),
@@ -5123,6 +5123,46 @@ fn reduce_fold_bail_when_init_or_callback_unknown() {
     );
 }
 
+// ---- inference terminates on a mutually recursive call graph ----
+
+/// Two loaded functions that call each other, each referencing the partner TWICE. The
+/// cycle guard refuses the first re-entry; the regression was that the refusal itself
+/// released the in-flight mark (`InferGuard::enter` built-and-dropped a guard on the
+/// refusal path), so the second reference re-entered the cycle and the pair nested
+/// without bound — every level a fresh stack segment, until memory ran out (54 GB on a
+/// `nest run`; three 19 GB test processes here). Now: both sigs resolve, and quickly.
+#[test]
+fn mutually_recursive_loaded_functions_infer_in_bounded_time() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defn mutual-a (x) (list (mutual-b x) (mutual-b (string/length x))))")
+        .unwrap();
+    interp
+        .eval_str("(defn mutual-b (x) (list (mutual-a x) (mutual-a (string/length x))))")
+        .unwrap();
+    let started = std::time::Instant::now();
+    let a = super::sigs::sig_of(&interp.heap, value::intern("mutual-a"));
+    let b = super::sigs::sig_of(&interp.heap, value::intern("mutual-b"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "inference diverged"
+    );
+    // The cycle refusal leaves the partner's return unknown, but `string/length`'s own
+    // demand (a primitive: its domain needs no inference) still pins the parameter.
+    for (name, sig) in [("mutual-a", a), ("mutual-b", b)] {
+        let sig = sig.unwrap_or_else(|| panic!("{name}: no sig"));
+        assert_eq!(sig.params.len(), 1, "{name}: {sig}");
+        assert!(sig.params[0].is_subtype(&Ty::of(Tag::Str)), "{name}: {sig}");
+    }
+    // …and a call site is still checked against it.
+    let form = reader::read_one(&mut interp.heap, "(mutual-a 5)").expect("parse");
+    let ws = check_form(&interp.heap, form);
+    assert!(
+        ws.iter().any(|w| w.contains("mutual-a")),
+        "expected an argument warning for mutual-a, got {ws:?}"
+    );
+}
+
 // ---- unused :use import lint (Pass 4.5) ----
 
 #[test]
@@ -7032,6 +7072,17 @@ fn a_record_domain_is_spelled_by_name_in_a_suggested_sig() {
     );
     let usd = Ty::record_of_open(fields);
     assert_eq!(usd.to_source().as_deref(), Some("t/usd"));
+    // an inferred field refinement is dropped from the spelling — the name is the sig
+    let mut refined = std::collections::BTreeMap::new();
+    refined.insert(
+        value::intern("__id__"),
+        (Ty::keyword_lit(value::intern("t/usd")), true),
+    );
+    refined.insert(value::intern("cents"), (Ty::of(Tag::Int), true));
+    assert_eq!(
+        Ty::record_of_open(refined).to_source().as_deref(),
+        Some("t/usd")
+    );
     assert_eq!(
         Ty::NUMBER.union(usd).to_source().as_deref(),
         Some("(or number t/usd)")
@@ -7060,4 +7111,157 @@ fn a_suggested_record_domain_parses_back_as_a_sig() {
         ws[0].contains("t/f: argument 1 expects number | t/usd, got \"s\""),
         "{ws:?}"
     );
+}
+
+// `countable` is a name, not a six-way union: `count`'s parameter is spelled by it in a
+// suggested sig, and a `sig` accepts it back.
+#[test]
+fn countable_is_spelled_by_name() {
+    assert_eq!(Ty::COUNTABLE.to_source().as_deref(), Some("countable"));
+    assert_eq!(Ty::COUNTABLE.to_string(), "countable");
+    let ws = file_warnings(
+        "(defmodule t)\n(sig n (countable -> int))\n(defn n (xs) (count xs))\n(defn bad () (n 5))",
+    );
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].contains("expects countable, got 5"), "{ws:?}");
+}
+
+// `%max`/`%min` (behind `math/max`/`math/min`) route records through `compare-to` exactly as
+// `<` does, so they take the same registry-derived domain — and return it, since the result
+// is one of the operands. No more `(-> (or map number))` on a function that picks a max.
+#[test]
+fn max_and_min_take_and_return_the_ordered_domain() {
+    assert_eq!(ty_str("(%max 1 2)"), "number");
+    assert_eq!(ty_str("(math/min 3 4)"), "number");
+    assert_eq!(ty_str("(math/min 3 4 5)"), "number");
+    let ws = file_warnings("(defmodule t)\n(sig g (string -> int))\n(defn g (s) (%max 1 s))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("%max: argument 2 expects number, got string")),
+        "{ws:?}"
+    );
+}
+
+// The named covers (ADR-299): `ordered` is `number` plus every record `compare-to` covers,
+// `numeric` the same over `num/*`. A `sig` can write them; a suggestion prints them (never
+// the list, which goes stale as the registry grows); a diagnostic prints the name once two
+// or more records are in the cover, and the explicit `number | t/usd` while it is one.
+#[test]
+fn ordered_and_numeric_are_named_covers() {
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord date (d))\n\
+         (defrecord time (t))\n\
+         (defmethod compare-to [date date] (a b) 0)\n\
+         (defmethod compare-to [time time] (a b) 0)\n\
+         (sig before? (ordered ordered -> bool))\n\
+         (defn before? (a b) (< a b))\n\
+         (defn bad () (before? \"x\" 1))",
+    );
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].contains("t/before?: argument 1 expects ordered, got \"x\""),
+        "{ws:?}"
+    );
+    // with a single record in the cover the diagnostic stays explicit
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord date (d))\n\
+         (defmethod compare-to [date date] (a b) 0)\n\
+         (defn bad () (< \"x\" 1))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("expects number | t/date")),
+        "{ws:?}"
+    );
+}
+
+// Strict mode reads a bound by inclusion only when the bound is POSITIVELY known. The
+// `(not nil)` a `when` guard leaves on an untyped parameter says nothing about what the
+// value is, so it stays consistent by overlap — else every guarded use of every untyped
+// parameter in std would warn.
+#[test]
+fn strict_mode_keeps_the_overlap_reading_for_a_bound_that_is_only_a_subtraction() {
+    let src = "\
+         (defmodule t)\n\
+         (defn f (xs) (when xs (first xs)))\n\
+         (defn g (x) (first (or x [])))";
+    let strict = file_warnings_mode(src, true);
+    assert!(
+        strict.iter().all(|w| !w.contains("argument 1")),
+        "{strict:?}"
+    );
+}
+
+// The truthy half of `(or x default)` — `any` less `nil` and `false` — is a guard's
+// leftover, not a 21-tag union: it renders as `(not (nil | false))`.
+#[test]
+fn a_guards_truthy_leftover_renders_as_a_negation() {
+    assert_eq!(Ty::truthy().to_string(), "(not (nil | false))");
+    assert_eq!(
+        Ty::ANY.difference(Ty::of(Tag::Nil)).to_string(),
+        "(not nil)"
+    );
+    assert!(Ty::truthy().is_known_only_by_exclusion());
+    assert!(!Ty::of(Tag::Str).is_known_only_by_exclusion());
+}
+
+// A `& rest` function's fixed parameters bind positionally like any other's, so they keep
+// their demands; the rest binder's demand becomes a per-argument one. And a known callback
+// hands its demands to `fold`/`reduce`'s init and collection. Together:
+// `(defn foo (x y & more) (+ (fold + x more) y))` is `(number number & number -> number)`.
+#[test]
+fn a_rest_function_keeps_its_positional_demands_and_fold_hands_down_the_callbacks() {
+    let mut interp = crate::Interp::new();
+    let form = reader::read_one(&mut interp.heap, "(fn (x y & more) (+ (fold + x more) y))")
+        .expect("parse");
+    let demands =
+        super::sigs::infer_params_from_form(&interp.heap, form, &Ctx::default()).expect("demands");
+    let params: Vec<String> = demands.params.iter().map(Ty::to_string).collect();
+    assert_eq!(params, vec!["number", "number"]);
+    assert_eq!(
+        demands.rest.map(|t| t.to_string()).as_deref(),
+        Some("number")
+    );
+    // a call site checks each rest argument against that element demand
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defn foo (x y & more) (+ (fold + x more) y))\n\
+         (defn bad () (foo 1 2 3 \"four\"))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("t/foo: argument 4 expects number, got \"four\"")),
+        "{ws:?}"
+    );
+}
+
+// The one length fact the lattice states — `list<T>` is non-empty (the empty list is `nil`)
+// — carried through every combinator that preserves it. No `nil |` on the result of
+// `append`/`map`/`sort`/`reverse`/`distinct`/`into` over a non-empty list, no `nil |` on its
+// `first`/`last`, a literal `range` that cannot be empty; everything that CAN empty a
+// sequence (`filter`, `rest`, `nth`, a vector input) keeps its `nil`.
+#[test]
+fn length_preserving_combinators_over_a_non_empty_list_drop_the_nil() {
+    assert_eq!(
+        ty_str("(append '(1 2 \"foo\") '(1 \"bar\"))"),
+        "list<1 | 2 | string>"
+    );
+    assert_eq!(ty_str("(append '(1) nil)"), "list<1>");
+    assert_eq!(ty_str("(map inc '(1 2))"), "list<int>");
+    assert_eq!(ty_str("(sort '(3 1))"), "list<1 | 3>");
+    assert_eq!(ty_str("(reverse '(1 2))"), "list<1 | 2>");
+    assert_eq!(ty_str("(first '(1 2))"), "1 | 2");
+    assert_eq!(ty_str("(last '(1 2))"), "1 | 2");
+    assert_eq!(ty_str("(range 5)"), "list<int>");
+    assert_eq!(ty_str("(into '(1) '(2))"), "list<1 | 2>");
+    // …and what may be empty keeps the nil
+    assert!(ty_str("(filter even? '(1 2))").starts_with("nil | "));
+    assert!(ty_str("(rest '(1 2))").starts_with("nil | "));
+    assert!(ty_str("(nth '(1 2) 5)").contains("nil"));
+    assert!(ty_str("(first [1 2])").contains("nil") || ty_str("(first [1 2])") == "1");
+    assert!(ty_str("(map inc [])").starts_with("nil"));
 }

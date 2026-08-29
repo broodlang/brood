@@ -6,11 +6,60 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed — a non-empty list stays non-empty through the combinators that preserve length.**
+`list<T>` is the non-empty list (the empty list is `nil`), and that fact now carries:
+`(append '(1 2) '(3))`, `(map inc '(1 2))`, `sort`, `reverse`, `distinct`, `into` a list,
+and a literal `(range 5)` are `list<…>` with no `nil |`; `first`/`last` of a `list<T>` are
+`T`. Everything that can empty a sequence (`filter`, `rest`, `nth`, a vector input) keeps
+its `nil`.
+
+**Changed — a module's own inferred signatures feed its demand inference.** A parameter
+handed to a same-file function takes that function's inferred parameter type (the
+fixed-point pass already computes it); most calls in a module are to its own functions, so
+this is where most `any` parameters came from.
+
+## v0.18.1 — 2026-08-29
+
+Inferred signatures see through `& rest`, `fold`/`reduce`, and their own demands.
+
+
+**Changed — inferred signatures see through `& rest`, `fold`/`reduce`, and their own
+demands.** A `& rest` function's fixed parameters keep their positional demands and the
+rest binder's demand becomes a per-argument one (`(defn foo (x y & more) (+ (fold + x more)
+y))` is `(number number & number -> number)`, not `(any any & any -> number)`); a known
+callback hands its demands to `fold`/`reduce`'s init and collection; and the return type is
+inferred with each parameter bound to its demand rather than `any`, so `(fold + x xs)` is
+numeric, not `any`.
+
+## v0.18.0 — 2026-08-29
+
+The type-system precision release: every warning positioned at the form it came from,
+`nest check --strict`, operator domains derived from the multimethod registry under the
+names `numeric`/`ordered`, `countable`, records spelled by name, set element types — and
+`(< x)` no longer answers `true` for a list.
+
+
 **Changed — an operator's domain is what its multimethod covers (ADR-299).** `+ - * /` and
 `< <= > >=` used to declare `number | map` — a record with a `num/add`/`compare-to` method is
 a map — so every inferred signature over arithmetic read `((or map number) -> (or map
 number))`. The domain is now derived from the registry: `number` plus exactly the records
 with methods, by name (`number | t/usd`), and plain `number` when none is loaded.
+
+**Added — named types `countable`, `numeric`, `ordered`.** `countable` is what `count`/`get`
+accept (`seqable` plus `string`, `rope`, `table`); `numeric` and `ordered` are the domains of
+`+` and `<` — `number` plus the records with `num/*` / `compare-to` methods — under names a
+`sig` can write and a suggestion can print without going stale. A suggested signature spells
+a record by its name (`datetime/datetime`, never `(record :__id__ …)`), and `math/max`/`min`
+take and return the ordered domain.
+
+**Changed — strict mode reads a bound by inclusion only when it is positively known.** The
+`(not nil)` a `when` guard leaves on an untyped parameter, or the truthy half of `(or x
+default)`, says nothing about what the value is and keeps the overlap reading; that truthy
+half now renders as `(not (nil | false))` instead of a 21-tag list.
+
+**Fixed — `(< x)` checked nothing.** A one-argument comparison is vacuously true, and it
+answered `true` for a list, a string, `nil`. The lone argument is now compared with itself
+first, so a value that cannot be ordered raises exactly as it would beside a second one.
 
 **Added — `nest check --strict` (ADR-298).** A dynamic value with a precise type is checked
 by inclusion, so a `number` call result handed to an `int` parameter warns. Off by default

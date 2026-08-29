@@ -256,6 +256,8 @@ fn base_ty(name: &str) -> Option<Ty> {
         // vector caller is no longer false-flagged by a `(list T)` annotation. Mirrors the
         // internal `seq` domain the curated combinator sigs already use.
         "seqable" => Ty::SEQABLE,
+        "countable" => Ty::COUNTABLE,
+        "numeric" | "ordered" => super::sigs::named_cover(None, name)?,
         // `bytes` and `decimal` are runtime tags (`type-of` returns them, and
         // `bytes?`/`decimal?` narrow to them) that had no *spelling* here — so no
         // signature could mention a bytes value, which is most of what

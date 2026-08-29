@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-87 | **The checker diverged — `nest run` at 54 GB, three 19 GB `types::` test processes.** `InferGuard::enter` ended in `.then_some(InferGuard(sym))`; `bool::then_some` builds its argument eagerly, so a REFUSED entry built and dropped a guard whose `Drop` removed the in-flight symbol's mark — every cycle refusal un-guarded the symbol it refused (latent since 2026-07-07). The demand walk consulting a callee's inferred sig (`0f64f600`) made `require-one` ⇄ `%require-await` nest without bound, one stack segment per level | ✅ **FIXED 2026-08-29** — the guard is constructed only on the success path (`entered.then(\|\| InferGuard(sym))`). Guards sabotage-verified: a refused third `enter` stays refused, and the mutually recursive pair reproduces the exact `mmap failed to allocate stack` OOM under `ulimit -v` with the bug restored. Build uncapped, run capped |
 | KI-86 | **`runtime_collector`'s three promotion tests failed under `cargo test`** — `expected ≥3000 promoted closures, got total=231`, with the count-based collector switched OFF by the test and one closure promoted per iteration | ⚠️ **WATCHING 2026-08-29** — precondition removed, mechanism inferred: `BROOD_RT_GC_FLOOR` is read once per process (`OnceLock`), two tests in the binary `set_var` it to 128/256, and under plain `cargo test` the leaked floor armed the `Interp`'s scheduler WORKER heaps (which share the runtime region) — a worker safepoint aged the runtime and the main heap's `cur_code()` count dropped. Fix: `Heap::set_rt_gc_floor` per test heap, no env. Not reproducible on demand on a quiet box (a worker has to wake); 4/4 green under load since |
 | KI-85 | **The checker produced a FALSE POSITIVE — its one hard invariant.** `(takes-str (first (fold (fn (a x) (cons x a)) [0] ["t"])))` warned `expects string, got 0` on a value that was the string `"t"` at runtime. A tuple shape (`[0]` → `(tuple 0)`) refines the VECTOR member only, but once the fold's result merged into one `pair \| vector` term, `elem_ty`/`tuple_elems` reported the tuple's elements for the whole term, pair member included | ✅ **FIXED 2026-08-29** — both accessors answer only for a term whose seq members the shape actually describes (`tuple_elems` only on a pure vector — a `nil` member makes `first` nil, a `pair` member makes it unknown). Found by an adversarial probe of the set-theoretic model; the same session closed a second gap the probe exposed — a lambda LITERAL passed as a callback was never checked at all (`callback_sig` answered `None`), so `(g (fn (x) (str x)))` against `((int -> int) -> int)` was silent; it is now typed under the arrow's own domain and the existing result-disjointness rule catches it, with no `⊆`-on-an-inferred-return false positives (`(+ x 1)` under `x : int` is `int`). Guards sabotage-verified |
 | KI-84 | **An imaged start of a project lost every buffer type's layers** — `nest test` in bedit: the run that WROTE `.brood/image.bin` passed 1306/1306, every run that READ it failed 99 (`*git-status*` not read-only, `.blsp` buffers not in brood-mode, gutters gone). `editor/layers/*type-layers*` was `{}` at module-load time on a warm start | ✅ **FIXED 2026-08-29** — the **stdlib** image's `editor/layers` section carries the module's registries as their pristine seeds (`{}`), and materialising an embedded module was a raw define: it overwrote the 26-entry registry the PROJECT image had just restored. A source load runs `defonce` there and keeps the binding; the image did not. Fix: with `reserve` (an embedded module from the pristine image) a bound DATA global keeps its binding; a bound FUNCTION (an ADR-246 stub, KI-72) is still replaced, and a project image (later state) still overwrites. Guard sabotage-verified |
@@ -202,6 +203,54 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-87 — the checker's cycle guard released the symbol it refused: `nest run` at 54 GB, three 19 GB test processes ✅ FIXED 2026-08-29
+
+**Symptom.** `nest run` on bedit sat at 100% CPU with nothing running, RSS climbing past
+54 GB until the OOM killer took it; `cargo nextest run -p brood types::` put three test
+processes at ~19 GB each and swapped the machine to a halt three sessions in a row. Under a
+memory cap the same runs die cleanly with `stacker … mmap failed to allocate stack: Cannot
+allocate memory` inside the advisory checker: `types::check::tests::unused_use_import_is_flagged`
+(it `:use`s `io`, so a loaded module's functions are in play) and `nest check src/commands.blsp`
+in bedit both reproduce in ~3–10 s.
+
+**Cause.** `sigs::InferGuard::enter` — the re-entry guard that breaks a recursive or mutually
+recursive inference chain — ended in `.then_some(InferGuard(sym))`. `bool::then_some` builds
+its argument **eagerly**, so on the refusal path (symbol already in flight, or the depth cap) a
+guard was constructed and dropped at once, and its `Drop` removed `sym` from the in-flight set
+— the *outer* inference's mark. The refusal un-guarded the very symbol it refused. Latent since
+`aadd10c1` (2026-07-07): a body referencing its partner once was refused and moved on, and the
+memo eventually bounded the re-walks. `0f64f600` made the parameter-demand walk consult a
+callee's inferred signature, which turned every mutually recursive pair whose bodies reference
+each other *twice* — `require-one` ⇄ `%require-await` in the prelude — into unbounded nesting:
+refusal, un-mark, second reference re-enters, each level a fresh 1 MB stack segment, until
+memory ran out. The trace that found it: `[TRACE-DROP] ->seq` immediately before `->seq` was
+re-entered at the same depth, with the same interned symbol id.
+
+**Fix.** Construct the guard only on the success path (`entered.then(|| InferGuard(sym))`).
+Nothing may drop a guard that was never entered. No other `then_some` in the tree carries a
+`Drop` type.
+
+**Guard.** `sigs::guard_tests::a_refused_enter_does_not_release_the_in_flight_mark` (a third
+`enter` after a refusal must still be refused) and `…the_depth_cap_refuses_without_releasing_anything`;
+`check/tests.rs` `mutually_recursive_loaded_functions_infer_in_bounded_time` — two loaded
+functions referencing each other twice, both sigs resolved and a call site still flagged.
+Sabotage-verified by restoring `then_some` under `ulimit -v 4000000`:
+
+```
+a_refused_enter_does_not_release_the_in_flight_mark ... FAILED
+    the refusal released the in-flight mark (the eager-drop bug)
+mutually_recursive_loaded_functions_infer_in_bounded_time ... FAILED
+    mmap failed to allocate stack: Cannot allocate memory (os error 12)
+```
+
+Restored: the whole `types::` set 431/431 serially at 325 MB peak; bedit's `commands.blsp`
+checks in 1.4 s at 180 MB; `nest check std/ tests/` (342 files) zero warnings in 5.0 s.
+
+**Method note.** Put `ulimit -v` in front of any test run that exercises inference — it turns
+a machine-swapping OOM into a ten-second clean failure with the panic site named. And don't
+let the cap leak into a *build*: the linker inherited it and died with `LLVM ERROR: out of
+memory`. Build uncapped, run capped.
 
 ## KI-86 — `runtime_collector`'s three promotion tests failed under `cargo test` ⚠️ WATCHING 2026-08-29 (precondition removed; mechanism inferred, not reproduced on demand)
 
