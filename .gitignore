@@ -35,6 +35,13 @@ tests/corpus/*/full/
 # against its original. See tests/corpus/gabriel/README.md.
 tests/corpus/gabriel/reference/
 
+# A single-binary bundle `nest release` (ADR-038) wrote into the repo root. The bundle is
+# named after the project, and this project is `brood`, so it lands here as `./brood` — 23 MB,
+# stripped, and easy to mistake for the CLI. It is not: it carries an app image and fails with
+# `cannot find module 'main'` when run. Anchored with a leading slash so it ignores only this
+# path, never a `brood` file or directory elsewhere in the tree.
+/brood
+
 # Local debug artifacts (never commit)
 .brood_crash_dump
 .brood-skip-blsp-check
