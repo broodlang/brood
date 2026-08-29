@@ -1187,6 +1187,32 @@ is all-or-nothing, so one un-lowerable op keeps the whole surrounding loop on th
 the un-lowerable op the way the leaf-splice deopt checkpoints already do (ADR-210 is the
 precedent that a lowered region can carry its own resume point). Largest single class left.
 
+**Scoped 2026-08-29 (read before starting).** Two independent pieces, and the gate's history
+constrains both:
+
+1. **`MakeClosure` is not in the JIT subset at all** — `nqueens`' `solve` shows BOTH
+   `lowering-returned-none` (subset) and `call-mediated-boxed` (gate), so fixing either alone
+   changes nothing. The tractable shape for the subset half is the `vec2room` pattern: a
+   `brood_rt_make_closure(heap, out, arm_const, env)` callback — `build_closure` is an arm
+   clone + env attach, and the closure alloc is a slab push (never collects), so it runs
+   under the same out-pointer discipline as `cons`/`vec2_room`. One callback per
+   `MakeClosure`, no new GC rules.
+2. **The profitability gate** (`plan_general_lowering`) bails any *named* defn with ≥1
+   non-tail call and no vector op / non-float self-loop. Its two recorded regressions are
+   the constraint: `nbody` −15–20% (boxed f64 through calls — native entry + FFI per op the
+   VM doesn't pay) and `spawn` 0.08 → 0.3–1.3 s erratic (per-process compile + shared-install
+   contention under 10k-process fan-out; pre-ADR-215, so the sharing may have changed this).
+   The gate's own comment says closures are exempt *because deopt feedback self-heals them* —
+   and as of `8fa9f2f7` the watch covers **every** non-loop arm, so the dynamic mechanism the
+   exemption relied on now covers named defns too. The experiment writes itself: admit named
+   defns, let feedback demote, and re-measure exactly `nbody`, `spawn`, `spawn-live`,
+   `pingpong` (the recorded victims) plus `nqueens`/`pipeline` (the expected winners) — warm
+   and cold, pinned and unpinned, image `:live` both arms.
+3. **Order matters:** land the `MakeClosure` callback first (subset-only, gate untouched —
+   measurable on closure-heavy rows via the HOF path), then the gate experiment. Doing both
+   at once makes a regression unattributable.
+
+
 ### 7.2 Cranelift's CLIF verifier runs on every release compile — ATTEMPTED AND REJECTED 2026-08-29
 
 > **Do not retry on this Cranelift.** `("enable_verifier", "false")` made cranelift-codegen
