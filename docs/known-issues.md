@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-82 | **The monomorphization differential compared TIMING CHATTER as if it were an answer.** Under full-suite load, `cli::mono_differential` failed with "monomorphization changed an ANSWER" while both arms reported `92 tests, 92 passed, 0 failed` — the diff was one line: the framework's per-test slow annotation (`concurrent impl registration (KI-22) › … 13.9s`), printed only when a test crosses `*test-slow-ms*` (1 s), which under 4-way nextest parallelism one arm's nested run did and the other's did not. `without_timings` stripped only `ms wall`/`Slow tests` lines | ✅ **FIXED 2026-08-29** — the filter now also drops any line whose last token is a duration (`13.9s`, `2ms`); a real divergence in such a line is theoretically maskable, but a *failing* test already fails the `*_ok` asserts before the comparison runs. Sabotage-verified offline on the exact captured outputs: the old comparison fails on them, the new one passes, and a `92 passed`→`91 passed` mutation still diverges. Same species as [KI-80](#ki-80): a nested suite run under load emitting load-dependent output that an outer gate treats as signal |
 | KI-81 | **`BROOD_CONTRACTS=1` was unusable on a cold boot cache** — one run panicked in prelude expansion — `prelude expand: unbound error: unbound symbol: take` (`lib.rs:359`), on a file using `defability`/`impl`/`sig`. `take` genuinely left the bare namespace in ADR-290/291, and `std/prelude/tools.blsp:2301` (`defmulti`) still calls it bare — but that line is reached at *expansion* and every later run expands it fine | ✅ **FIXED 2026-08-29** (ADR-293) — **never a flake**: `touch target/release/brood` reproduces it 100%, because the boot cache is keyed on the executable's mtime, so the first run after any rebuild is cold and every run after replays the cache without executing the macro bodies. The twelve clean runs were twelve warm ones, and the image hypothesis was wrong. THREE independent cold-only defects: `sig!`'s expansion-time `take`/`nth`/`map`/`range`/`count` (unreachable that early, and `take` had left the bare namespace); the shim closing over a **let-bound local**, which the prelude's freeze step rejects; and `defrecord` emitting its constructor `sig` **above** the `defn` it rebinds, making every record fatal in that mode. Root cause of all three: the mode had **no end-to-end test**, so `crates/cli/tests/contracts_mode.rs` now cold-caches deliberately via `XDG_CACHE_HOME` — without that it passes on a broken build |
 | KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
 | KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict. **Addendum 2026-08-29:** the same defect verbatim in `check-examples`/`check-stress`/`check-corpora` (fixed inline in `green.sh` only), which on a lean `make release` brood additionally reported an absent DEV_MODULE (`reload/on-change`) as *rename rot* — the exact class the gate exists to find. All three now share `scripts/lib/gate-binary.sh`, which resolves by sha and separates "this build lacks the module" from "this name is gone" |
@@ -5015,6 +5016,46 @@ rather than the summary line; libtest's summary alone cannot answer it.
 
 **Next step if it recurs:** get the case name, then decide. Until then this entry exists so a
 second sighting is recognised as a second sighting rather than a first.
+
+## KI-82 — the mono differential failed over a slow-test timing line ✅ FIXED 2026-08-29
+
+**Symptom.** One `make test` run: `cli::mono_differential monomorphization_computes_what_the_
+dynamic_path_computes` failed with `the two arms disagree — monomorphization changed an ANSWER`.
+Read side by side, both arms end `92 tests, 92 passed, 0 failed (0 failed assertions, 4
+isolated)`; the entire diff is one line present in one arm only:
+
+```
+  concurrent impl registration (KI-22) › no impl is lost when many processes register at once 13.9s
+```
+
+**Cause.** The test framework prints a per-test annotation for any test slower than
+`*test-slow-ms*` (default 1 s) — informational, load-dependent. The differential runs the
+ability suite twice (dynamic vs `BROOD_MONO=1`) and compares **raw stdout** after a
+`without_timings` filter that stripped only lines containing `ms wall` or `Slow tests` — not
+this per-test line. Under full-suite nextest parallelism, one arm's nested KI-22 stress case
+crossed the 1 s threshold and the other's did not. Standalone, the same test passes in ~0.4 s;
+the 13.9 s was contention, which is exactly when the annotation appears.
+
+**Why it survived.** The filter was written against the outputs the author had seen — quiet
+runs, where no test crosses 1 s and the annotation never prints. The line only exists under
+load, and the differential had only ever run on a lightly loaded machine.
+
+**Fix.** `without_timings` also drops any line whose last whitespace-separated token is a
+duration (`13.9s`, `2ms`). A real divergence that manifests *only* in such a line is
+theoretically maskable, but a failing arm already fails the `plain_ok`/`mono_ok` asserts
+before the comparison runs, so the comparison only ever sees two passing runs' chatter.
+
+**Guard, sabotage-verified** (offline, on the exact captured outputs from the failure): the
+old filter leaves the two arms unequal (reproduces the false alarm); the new filter makes them
+equal; and mutating one arm's summary `92 passed` → `91 passed` still diverges under the new
+filter — so it cannot mask a real answer change in the summary. `cargo test -p cli --release
+--test mono_differential` green after the fix.
+
+**Same species as [KI-80](#ki-80)** (a nested suite emitting load-dependent output that an
+outer gate reads as signal), one gate over — and the general rule both point at: **a
+differential must compare answers, not transcripts.** Anything a harness prints conditionally
+on timing, load, or environment must be normalised out before an equality check is allowed to
+mean anything.
 
 ## KI-81 — `BROOD_CONTRACTS=1` was unusable on a cold boot cache ✅ FIXED 2026-08-29
 

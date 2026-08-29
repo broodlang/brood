@@ -25,7 +25,7 @@ in `compute-frontier.md` §2h–§2k; three method lessons are recorded there an
   Cranelift symbol registration panicked the compiler thread, the JIT switched itself off
   for the whole process, and every benchmark still printed the right answer.
 
-**The next performance list, priority-ordered, each item measured not guessed** (profiles
+**The next performance list — the durable copy is [`compute-frontier.md` §7](compute-frontier.md), this one is the summary** (profiles
 2026-08-29, `cycles:pp`, default row sizes unless noted; LBR for call graphs — **fp unwinding
 through JIT frames produces garbage** and once reported `set_ic_bases` calling memmove):
 

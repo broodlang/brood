@@ -6723,3 +6723,41 @@ cases, all 21 `jit_*_test.blsp`, fuzz differential over three generators × 4 en
 
 Honest running total on `bintree` for the day, all interleaved: **−7.5%** (return slot),
 neutral (argument count), **−8.5%** (staging in place), **~−1.5%** (vector in place).
+
+## 2026-08-29 (fifth) — the list gets a durable home, and the review pass
+
+**The performance list is now `compute-frontier.md` §7** — measured items only, with §4
+marked partially superseded; `handoff.md` keeps a summary that points there. (It was first
+written into handoff alone, which is replaced each session — a standing work list in an
+ephemeral document is how good findings evaporate.)
+
+**Then the soundness review of the day's three unsafe windows**, which the perf work had
+earned:
+
+- *Staging (`push_roots_room`)*: emitted order verified — all operand reads, then the
+  elided-head resolution (a call, deliberately before the reservation), then the reservation,
+  then pure stores. The SSA-values-across-the-globic-call exposure is identical to the old
+  stack-slot code, not new. The compile-time `return None` after partial emission is a
+  lowering bail (the arm is discarded), not a runtime path.
+- *`vec2_room`*: call → pure stores → handle load, no intervening safepoint; slab growth in
+  the callback cannot move element values (indices), and the items pointer is derived after
+  the push.
+- *`fast_frame`'s slot pointer*: tightened from `&*slot` to `std::ptr::read(slot)`. The
+  reference was sound — NLL ends the borrow at its last use, before the dispatch that can
+  reallocate the table — but that is a *positional* guarantee one refactor away from UB; the
+  by-value copy makes it structural.
+
+Also fixed while reading: rt.rs's module header said `Value` is a 16-byte enum; the layout
+test pins 24. One word, but it is the number the whole ABI section reasons from.
+
+**The battery on the final tree:** `make test-both` 1236/1236 × 2 engines, breakage suite all
+green, `make gcstress` green, fuzz differential over **all 11 generators** × 4 engine configs
+(0 divergences, 0 crashes), clippy on CI's flags, all local gates.
+
+**And the battery caught one real thing — KI-82.** `mono_differential` failed under suite
+load with "monomorphization changed an ANSWER" while both arms said `92 passed`: the diff was
+the framework's per-test slow annotation (`… 13.9s`), printed only when a nested test crosses
+1 s, which under 4-way parallelism one arm did. The `without_timings` filter now drops any
+line ending in a duration; sabotage-verified on the exact captured outputs (old filter fails
+them, new passes, a `92→91 passed` mutation still diverges). Same species as KI-80, and the
+rule both point at: **a differential must compare answers, not transcripts.**

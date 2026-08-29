@@ -7,9 +7,9 @@
 //! JIT is swappable at all (`docs/backend-seams.md` §1). Every function is `extern "C"`
 //! and `#[no_mangle]` so a backend can resolve it by name.
 //!
-//! ## The ABI (ADR-101 §6.2, adapted for the kept 16-byte enum `Value`)
+//! ## The ABI (ADR-101 §6.2, adapted for the kept 24-byte enum `Value`)
 //!
-//! Brood keeps `Value` as a 16-byte enum — the measured decision in
+//! Brood keeps `Value` as a 24-byte enum — the measured decision in
 //! [`docs/value-repr.md`](../../../docs/value-repr.md): a single-word `Value` gave
 //! ~zero tier-1 speedup on the compute loops, so NaN-boxing isn't worth its
 //! wide-scalar cost. Consequently a `Value` **never rides in a register**. Tier-1
@@ -1028,8 +1028,12 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
     slot: *const crate::core::heap::FastLink,
 ) -> i64 {
     use crate::eval::compile::FastLinkOutcome;
-    // Read once, before anything can run: the callee may grow the table.
-    let fl = &*slot;
+    // Copy the whole slot BY VALUE before anything can run: the dispatch below can compile
+    // and publish, which grows `vm_fast_links` and reallocates the buffer `slot` points
+    // into. A `&*slot` reference here would be sound today only because NLL ends the borrow
+    // at its last use — one refactor that moves a read past the dispatch away from UB. The
+    // copy makes the discipline structural instead of positional.
+    let fl: FastLink = std::ptr::read(slot);
     let (head, argc, nslots, code, env) = (fl.sym, fl.argc, fl.nslots, fl.code, fl.env);
     let bases = (fl.callee_ic_base, fl.callee_gic_base);
     // `out` goes straight down to the native callee, which writes the result into it
