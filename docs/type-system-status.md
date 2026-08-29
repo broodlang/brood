@@ -51,6 +51,9 @@ Everything the audit listed, plus:
 (sig r ((or (record :a int) (record :b int)) -> any))  (r {:z 1})
 (sig v ((or (vector int) (vector string)) -> any))     (v [true])
 
+;; a lambda LITERAL as a callback (KI-85): typed under the arrow's own domain
+(sig g ((int -> int) -> int)) (g (fn (x) (str x)))  ; result string, used as int
+;; …and the wider-result case stays silent: (g (fn (x) (+ x 1))) is int under x : int
 ;; the surface itself (ADR-259)
 (sig q1 (strng -> int))                          ; unknown type
 (sig q2 ((tupel int) -> int))                    ; unknown constructor

@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-85 | **The checker produced a FALSE POSITIVE — its one hard invariant.** `(takes-str (first (fold (fn (a x) (cons x a)) [0] ["t"])))` warned `expects string, got 0` on a value that was the string `"t"` at runtime. A tuple shape (`[0]` → `(tuple 0)`) refines the VECTOR member only, but once the fold's result merged into one `pair \| vector` term, `elem_ty`/`tuple_elems` reported the tuple's elements for the whole term, pair member included | ✅ **FIXED 2026-08-29** — both accessors answer only for a term whose seq members the shape actually describes (`tuple_elems` only on a pure vector — a `nil` member makes `first` nil, a `pair` member makes it unknown). Found by an adversarial probe of the set-theoretic model; the same session closed a second gap the probe exposed — a lambda LITERAL passed as a callback was never checked at all (`callback_sig` answered `None`), so `(g (fn (x) (str x)))` against `((int -> int) -> int)` was silent; it is now typed under the arrow's own domain and the existing result-disjointness rule catches it, with no `⊆`-on-an-inferred-return false positives (`(+ x 1)` under `x : int` is `int`). Guards sabotage-verified |
 | KI-84 | **An imaged start of a project lost every buffer type's layers** — `nest test` in bedit: the run that WROTE `.brood/image.bin` passed 1306/1306, every run that READ it failed 99 (`*git-status*` not read-only, `.blsp` buffers not in brood-mode, gutters gone). `editor/layers/*type-layers*` was `{}` at module-load time on a warm start | ✅ **FIXED 2026-08-29** — the **stdlib** image's `editor/layers` section carries the module's registries as their pristine seeds (`{}`), and materialising an embedded module was a raw define: it overwrote the 26-entry registry the PROJECT image had just restored. A source load runs `defonce` there and keeps the binding; the image did not. Fix: with `reserve` (an embedded module from the pristine image) a bound DATA global keeps its binding; a bound FUNCTION (an ADR-246 stub, KI-72) is still replaced, and a project image (later state) still overwrites. Guard sabotage-verified |
 | KI-83 | **The monomorphization differential compared TIMING CHATTER as if it were an answer.** Under full-suite load, `cli::mono_differential` failed with "monomorphization changed an ANSWER" while both arms reported `92 tests, 92 passed, 0 failed` — the diff was one line: the framework's per-test slow annotation (`concurrent impl registration (KI-22) › … 13.9s`), printed only when a test crosses `*test-slow-ms*` (1 s), which under 4-way nextest parallelism one arm's nested run did and the other's did not. `without_timings` stripped only `ms wall`/`Slow tests` lines | ✅ **FIXED 2026-08-29** — the filter now also drops any line whose last token is a duration (`13.9s`, `2ms`); a real divergence in such a line is theoretically maskable, but a *failing* test already fails the `*_ok` asserts before the comparison runs. Sabotage-verified offline on the exact captured outputs: the old comparison fails on them, the new one passes, and a `92 passed`→`91 passed` mutation still diverges. Same species as [KI-80](#ki-80): a nested suite run under load emitting load-dependent output that an outer gate treats as signal |
 | KI-82 | **The hosted playground cannot run its own front-page example.** `https://brood.fly.dev` — the pipeline snippet returned `recursion too deep: used 14021552 bytes of stack, over the 12582912-byte budget` three frames deep, trace `{:fn %require-force-in} {:fn %require-force}` — wasm-only (native answers `165`) | ✅ **FIXED 2026-08-29** (`b6706120`) — not `require` and not ADR-290/291: `WORKER_STACK_BYTES` was a hard-coded 16 MiB (a native worker's stack) while wasm runs on a ~1 MiB shadow stack, so a bogus 13.4 MiB reading landed in the gap between the budget (raised) and the stale-base backstop (never fired). Both are now target-aware; reproduced deterministically via the page's own `completions()`-then-`run()` sequence, verified red-then-green on native, lean-native and wasm32+node. **Residual:** the deployed site answers wrong until hive redeploys with `BROOD_REF` ≥ `b6706120` — a deploy step, not a runtime bug |
@@ -199,6 +200,66 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-85 — the checker false-positived: a tuple shape leaked onto a `pair` member ✅ FIXED 2026-08-29
+
+**Symptom.** With `(sig takes-str (string -> any))`:
+
+```brood
+(takes-str (first (fold (fn (a x) (cons x a)) [0] ["t"])))
+;; warning: takes-str: argument 1 expects string, got 0 (…)
+;; at runtime: (first …) => "t"
+```
+
+`reflect/expr-type` on the fold showed why: `(list | vector)<0>` — a sequence whose every
+element is `0`, for a value whose first element is a string. The system's governing
+invariant is "the checker is advisory and sound — it warns only on a *provable* misuse and
+never false-positives" (docs/type-system-status.md). This is a false positive.
+
+**Cause.** `[0]` types as the tuple `(tuple 0)` — a refinement of the VECTOR member. The
+fold's result is `init ∪ step`; the step `(cons x a)` with the accumulator over-approximated
+as `any` is a bare `pair` (unknown elements). `union_term` merged the two into ONE term with
+tags `pair | vector`, keeping the tuple refinement (correctly — it still describes the vector
+member). But `Ty::elem_ty` fell back to the tuple's elements when no `elem` refinement was
+set, and `Ty::tuple_elems` returned the shape unconditionally — so both answered `0` for a
+term whose `pair` member could hold anything. `first` then typed as exactly `0` (the tuple
+rule deliberately drops `nil` for an in-range position), a precise literal, and the `⊆`
+check against `string` fired.
+
+**Why it survived.** The lattice corpus tests (`lattice_laws_hold`, `subtyping_agrees…`)
+check the RELATIONS against each other, and every relation here was self-consistent — the
+defect is in an *accessor* that projects a per-tag refinement onto the whole term, which
+no relation-vs-relation test exercises. `std/` and `tests/` at zero warnings could not see
+it either: the shape needs a tuple literal as a fold init *and* a later positional read,
+which the corpus never does. And the checker's probe corpus (type-system-status.md) is
+built from misuses that should warn, not from valid programs that must stay silent — the
+direction this bug lives in.
+
+**Fix.** `elem_ty` answers the tuple fold only when the term's seq members are exactly the
+vector (`tags & SEQ_BITS == VECTOR_BIT`); `tuple_elems` answers only for a pure-vector term
+(`tags == VECTOR_BIT`) — a `nil` member makes `first` nil, a `pair` member makes it unknown,
+and unknown is the sound answer. A second gap the same probe exposed was closed alongside:
+a lambda literal passed as a callback was never checked (`callback_sig` → `None`, "the arity
+check covers those"), so its result was never compared. `lambda_sig_under` now types the
+literal's body under the arrow's *declared domain* and hands the existing disjointness rule
+a signature — sound because disjointness tolerates an over-approximated return, where the
+obvious alternative (an inferred `(any -> R)` arrow compared by `⊆`) would false-positive on
+`(fn (x) (+ x 1))` (`number ⊄ int`, though `int` under `x : int`).
+
+**Guard.** `types/tests.rs` `elem_of_a_tuple_shape_unioned_with_a_bare_pair_is_unknown`;
+`check/tests.rs` `a_tuple_shape_does_not_leak_onto_a_pair_member_through_first` (the exact
+program, asserting NO warnings), `a_lambda_callback_whose_result_is_disjoint_is_flagged`
+and `a_lambda_callback_with_a_merely_wider_result_is_not_flagged`. Sabotage-verified by
+removing both accessor guards and the `lambda_sig_under` wiring:
+
+```
+a_lambda_callback_whose_result_is_disjoint_is_flagged ... FAILED
+a_tuple_shape_does_not_leak_onto_a_pair_member_through_first ... FAILED
+elem_of_a_tuple_shape_unioned_with_a_bare_pair_is_unknown ... FAILED
+test result: FAILED. 403 passed; 3 failed
+```
+
+Restored: 406/406; `nest check std/ tests/` still at zero warnings.
 
 ## KI-84 — an imaged start lost every buffer type's layers (the stdlib image reset a registry the project image had restored) ✅ FIXED 2026-08-29
 

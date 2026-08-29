@@ -255,8 +255,16 @@
     (assert= (reflect/expr-type "") nil)
     (assert= (reflect/expr-type "   ") nil))
 
+  ;; A lambda has an arrow type of its own now (KI-85 closed the gap where it had none):
+  ;; `any` per parameter, the body's type as the result.
+  (test "a lambda literal types as an arrow"
+    (assert= (reflect/expr-type "(fn (n) (str n))") "(any) -> string"))
+
+  ;; …but only when the result is knowable. Identity returns whatever it was handed, and
+  ;; a call to a name the checker cannot see is unknown — nil, never a guess.
   (test "an expression the checker has no opinion about is nil, not a guess"
-    (assert= (reflect/expr-type "(fn (n) (* n 2))") nil)))
+    (assert= (reflect/expr-type "(fn (x) x)") nil)
+    (assert= (reflect/expr-type "(no-such-fn-anywhere 1)") nil)))
 
 ;; `system/features` / `system/feature?` — asking the BUILD what it can do.
 ;;
