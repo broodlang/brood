@@ -38,7 +38,10 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BROOD="${BROOD:-$ROOT/target/release/brood}"
+# WHICH binary, and which modules it carries — see `scripts/lib/gate-binary.sh` for both
+# questions and why each one had a wrong answer here (KI-76's class).
+. "$ROOT/scripts/lib/gate-binary.sh"
+BROOD="${BROOD:-$(gate_pick brood)}"
 RUN_SECS="${RUN_SECS:-12}"
 TEST_SECS="${TEST_SECS:-180}"
 
@@ -52,7 +55,8 @@ STRESS_SKIP="${STRESS_SKIP:-}"
 # defaults these itself, so the names it does not read are simply ignored.
 STRESS_ENV="N=5 CHUNKS=5 SIZE=8 ITER=2 ROUNDS=2 SECS=1 PROCS=4"
 
-[ -x "$BROOD" ] || { echo "no brood binary at $BROOD — run \`make release-brood\` first" >&2; exit 2; }
+gate_require_fresh "$BROOD"
+gate_load_modules "$BROOD"
 
 want=("$@")
 matches() {
@@ -66,6 +70,11 @@ fail=0
 echo ">>> checking stress harnesses with $BROOD (${RUN_SECS}s each, tests ${TEST_SECS}s)"
 
 # --- stress/*_test.blsp: real tests, held to actually passing ---------------------------
+# `--test` needs the `test` module, which a lean (`--no-default-features`) brood compiles
+# away — so on that build this whole block cannot run, and saying so once beats 12 identical
+# failures that look like rot.
+have_test=1
+gate_absent_module test && have_test=0
 for f in "$ROOT"/stress/*_test.blsp; do
   [ -f "$f" ] || continue
   name="stress/$(basename "$f" .blsp)"
@@ -74,6 +83,9 @@ for f in "$ROOT"/stress/*_test.blsp; do
   case " $STRESS_SKIP " in *" $short "*)
     echo "  skip    $name (named in STRESS_SKIP)"; continue ;;
   esac
+  if [ "$have_test" = 0 ]; then
+    echo "  skip    $name (needs the \`test\` module, absent from this lean build)"; continue
+  fi
   out="$(cd "$ROOT" && timeout "$TEST_SECS" "$BROOD" --test "$f" 2>&1)"
   if printf '%s\n' "$out" | grep -qE '0 failed'; then
     echo "  ok      $name ($(printf '%s\n' "$out" | grep -oE '[0-9]+ tests, [0-9]+ passed' | head -1))"
@@ -100,14 +112,12 @@ for f in "$ROOT"/stress/*.blsp "$ROOT"/scripts/fuzz/stress/*.blsp; do
     echo "  skip    $name (named in STRESS_SKIP)"; continue ;;
   esac
   out="$(cd "$ROOT" && env $STRESS_ENV timeout "$RUN_SECS" "$BROOD" "$f" 2>&1)"
-  bad="$(printf '%s\n' "$out" | grep -E 'unbound symbol|unbound error' | head -3)"
-  if [ -n "$bad" ]; then
-    fail=1
-    echo "  FAIL    $name"
-    printf '%s\n' "$bad" | sed 's/^/            /'
-  else
-    echo "  ok      $name"
-  fi
+  gate_classify "$out"
+  case "$GATE_VERDICT" in
+    ok)   echo "  ok      $name" ;;
+    skip) echo "  skip    $name ($GATE_DETAIL)" ;;
+    *)    fail=1; echo "  FAIL    $name"; printf '%s\n' "$GATE_DETAIL" | sed 's/^/            /' ;;
+  esac
 done
 
 echo

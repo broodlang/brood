@@ -6122,6 +6122,38 @@ it is not re-litigated from scratch.
 Worth keeping as method: "would this false-positive?" is an empirical question, and a
 throwaway 10-line experiment answers it better than a third round of reasoning.
 
+### `perf` works now, and the call protocol is confirmed — after boot faked two findings
+
+`scripts/enable-perf.sh` + `make perf-symbols` (both added today) made per-symbol profiling
+possible for the first time. `--call-graph dwarf` produced no usable chains; frame pointers
+(`-C force-frame-pointers=yes`) do, and that is what resolved the attribution.
+
+**Boot is ~47 ms, and it produced two confident wrong answers before I sized the runs properly.**
+`bintree` at its benchmark size is 160 ms, so 29% of that profile is boot — appearing as
+`Heap::env_get` 14.4% and `eval_tail_loop` 4.25%, which reads exactly like "this JIT'd row is 18%
+interpreted". I reported that. At n=2000 both symbols vanish, and the tree-walked form count is
+*identical* at n=3 and n=6 (13,253 either way): fixed startup work, zero per-node.
+
+The real profiles:
+
+- **`bintree` (n=2000):** `jit_run_fast_link` **24.0%**, native arms 25.1%, `__memmove` 11.4%,
+  `brood_rt_fast_frame` **10.7%**, `make_vector2` 5.7%, `push_n`/`fastlink_base`/`roots_base` 8.9%.
+  **Call protocol ≈ 44%, real work 25%, allocation ≈ 21%.**
+- **`pipeline` (N=10M):** `dispatch` 13.5%, `jit_dispatch_call` 7.9%, `vm_cache_arm_handle` 5.7%,
+  `passthrough_arm` 5.4%, **SmallVec staging 9.9%**, `Heap::closure` 4.9%, `push_frame` 4.3%.
+  **~50% call plumbing.**
+
+So FRONTIER's call-protocol framing is vindicated on both rows, and `jit_run_fast_link` alone costs
+as much as all of `bintree`'s native compute. Starting there rather than at argument staging: 24% +
+10.7% on one row beats 9.9% on another.
+
+**Two of my own answers withdrawn, both from reasoning rather than measuring.** That argument
+staging must be cheap because `SmallVec<[Value; 4]>` keeps ≤4 args inline — true, and irrelevant,
+because the cost is the copy (9.9%, and FRONTIER's old ~8% was right). And that `env_get` was the
+top cost — a boot artifact. Five contaminations in one day across three different tools, all one
+cause, so the rule is now written at the top of [benchmarking.md](benchmarking.md): **measure at
+two sizes and keep only what scales.** Two runs instead of one, and it is the whole difference.
+
 ## 2026-08-28 — the bare namespace, read on the Rust side for the first time
 
 The stdlib surface audit (ADR-250/251/252) took bare names 510 → 268, but every pass of it
@@ -6271,6 +6303,50 @@ observation, not a claim). Three runs on a HEAD worktree for comparison: **zero*
 earlier today, and the `stdimage` fidelity test flakes at baseline too. The tree is strictly
 better than the baseline it started from.
 
+## 2026-08-29 — three gates that could not run, and one that read a missing feature as rot
+
+Picking up an interrupted session whose working tree held a half-fix to `check-examples.sh`
+and `check-stress.sh`. The finish is recorded as an addendum to [KI-76](known-issues.md#ki-76),
+because it is that bug, three more times.
+
+**`green.sh` was fixed inline, so its three siblings kept the original defect verbatim.**
+`check-examples.sh`, `check-stress.sh` and `check-corpora.sh` each defaulted to
+`target/release/…` while their own error told you to run `make release-brood` — which writes
+`target/release-fast`. Locally none of the three could run at all, and the remedy they named
+could not fix that. It stayed invisible because CI *does* build `target/release`: the gate
+only misbehaved where a person would run it, which is the half nobody gets a red build for.
+
+**Pointing them at a binary that exists then produced a worse answer than not running.**
+`make release` builds `brood` with `RUN_FEATURES` — lean, so `--no-default-features` compiles
+the `DEV_MODULES` out entirely — and `examples/hot-reload/main.blsp` promptly died on
+`unbound symbol: reload/on-change`. The gate reported that as an example failure, i.e. as
+**rename rot**, which is precisely the class it exists to detect. A missing *feature* and a
+dead *name* are indistinguishable in the diagnostic and call for opposite responses; this one
+nearly bought a hunt through a rename wave.
+
+**The fix is one shared resolver, `scripts/lib/gate-binary.sh`.** `gate_pick` prefers the
+candidate whose `--version` reports HEAD's sha (existence is only a tiebreak — `std/` is
+`include_str!`'d, so a binary from another commit is answering about another tree);
+`gate_require_fresh` exits 2 with `the gate DID NOT RUN`, carrying over `green.sh`'s exemption
+for a binary whose baked-in `std/`+`crates/` is unchanged so a docs-only commit does not
+refuse the gate; and `gate_classify` splits the two verdicts. A run whose unbound names *all*
+name a module **this tree has and this binary lacks** is a `skip`, not a failure. That set is
+derived — `std/tool/<ns>.blsp` exists and `(builtin-modules)` does not list it — rather than
+restating the Rust `DEV_MODULES` list, so it cannot drift from it.
+
+**Sabotage-verified, and the two that matter are the negative ones.** Against the lean binary:
+`(bogus/thing 1)` in `examples/life.blsp` → `FAIL` (module exists nowhere, so still rot);
+`(no-such-function 1)` → `FAIL`; unmodified `hot-reload` → `skip (needs reload, …)`, exit 0;
+`touch crates/lisp/src/lib.rs` → `the gate DID NOT RUN`, exit **2**. A skip path that can
+swallow real rot would be worse than the false positive it replaces, so that is the assertion
+worth writing down. With a full-featured binary all three gates then run clean end to end —
+examples 9/9, stress 28/28, corpora 68 files across four trees — and `make green` is green
+(the one `FAIL` in its CI list is `12b31fc2`, which is KI-79's watched `live_migration`
+sighting, already mitigated on `4fec7fa2`).
+
+The lesson is KI-68/69/70/76's, with one clause added. A gate must assert *what it is gating*
+— and when the same assertion is needed in four scripts, three of them will not get it if the
+first one is fixed in place.
 ## 2026-08-29 — the arrow rule, and testing a relation against something other than itself
 
 Picked up the one item `docs/type-system-status.md` had recorded as deliberately left:

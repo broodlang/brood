@@ -434,6 +434,57 @@ size-swept it is a one-off warm-up cost.
 calls" from a counter rather than a stopwatch. So `bintree` really is one allocation and ~four
 calls per node, and the call-convention work is aimed at the right row.
 
+## 2d. `perf` profiles, 2026-08-28 — the call protocol confirmed, and the boot trap that nearly hid it
+
+First real per-symbol profiles (see [benchmarking.md](benchmarking.md) for the two blockers:
+`perf_event_paranoid` and `strip = true`). Frame-pointer call graphs — `--call-graph dwarf`
+produced no usable chains; `-C force-frame-pointers=yes` does.
+
+**Read the size caveat first.** Boot is **~47 ms** on this tree. `bintree` at its benchmark size
+(n=200) runs 160 ms, so **29% of that profile is boot** — and boot is macro-expansion-heavy, so it
+shows up as `Heap::env_get` (14.4%) and `eval_tail_loop` (4.25%), which reads exactly like "the row
+is partly interpreted". It is not: at n=2000 both symbols **vanish entirely**. The tree-walked form
+count is identical at n=3 and n=6 (13,253 both), i.e. fixed startup work, zero per-node. Profile
+below ~1 s and you are largely profiling boot.
+
+### `bintree`, n=2000 (boot ~4%)
+
+| % | symbol | group |
+|---|---|---|
+| **24.03** | `jit_runtime::jit_run_fast_link` | call |
+| 12.73 + 12.37 | `brood_jit_arm_53` / `_54` | **the real work — 25.1%** |
+| 11.38 | `__memmove_evex_unaligned_erms` | copying |
+| **10.67** | `brood_rt_fast_frame` | call |
+| 5.66 | `brood_rt_make_vector2` | alloc |
+| 3.95 / 2.78 / 2.15 | `brood_rt_push_n` / `fastlink_base` / `roots_base` | call |
+| 2.15 / 1.97 | `drop_glue::<Slabs>` / `__memset` | alloc |
+
+**Call protocol ≈ 44%, real work 25%, allocation ≈ 21%.** So the entry's "~77 ns per node over
+four non-tail calls" is right, and the counters agreed independently (3.85 links/node).
+
+### `pipeline`, N=10M (boot <2%)
+
+`dispatch` 13.48 · `jit_dispatch_call` 7.90 · `vm_cache_arm_handle` 5.74 · `passthrough_arm` 5.35 ·
+**SmallVec staging 5.22 + 2.80 + 1.92 = 9.94** · `Heap::closure` 4.89 · `push_frame` 4.29 ·
+`apply_value` 3.02 · `code_gen_pinned` 2.87 · `capture_value` 2.67 · `compiled_arm_for` 2.60 ·
+`hof_apply_step` 2.44 · `select_arm`'s `max_by_key` fold 2.01.
+
+**~50% call plumbing**, matching the older profile, with argument staging ~10%.
+
+### Ranked, and two of my own wrong answers on the way
+
+1. **`jit_run_fast_link` 24% + `brood_rt_fast_frame` 10.7% of `bintree`** — 35% between them, and
+   `jit_run_fast_link` alone costs as much as all the native compute. Plus 11% `memmove` that is
+   very likely the same frame/roots copying. **Start here.**
+2. `dispatch` 13.5% of `pipeline` — the interpreted-side call path.
+3. Argument staging ~10% of `pipeline`. Real, but a third the size of (1).
+
+**Withdrawn on the way here, both from reasoning instead of measuring:** that argument staging
+must be cheap because `SmallVec<[Value; 4]>` keeps ≤4 args inline (true, and irrelevant — the cost
+is the *copy*, 9.9%); and that `env_get` was the top cost and the row was partly interpreted (a
+boot artifact, gone at n=2000). Neither survived a profile. The rule that keeps surviving:
+**measure at two sizes and keep only what scales.**
+
 ## 3. The remaining gaps are data-structure-specific (measured 2026-06-14)
 
 Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_IR`.
@@ -744,3 +795,138 @@ The throughline: where I earlier called a row "representation-bound" or "foundat
 capped payoff," immutability often supplies a *contained* path (hoist-and-inline, share-by-
 handle) a mutable language would need a full optimizing pass to justify. The hard residual
 is the boxed 24-byte `Value` itself (§2) — which immutability does *not* fix.
+
+## 2e. `jit_run_fast_link` outlined — `bintree` −4.0% (2026-08-28)
+
+The first change taken off §2d's ranking. `perf` put `jit_run_fast_link` at **24% of `bintree`**,
+as much as all of that row's native compute, and instruction-level annotation showed why: the cost
+was **spread thin across the prologue and epilogue** — register saves (`pushq %r15`/`%rbx`), spills
+at `-0x158`/`-0x160(%rbp)` — with no single hot operation. That is the signature of a large
+function on a hot path, not of expensive work.
+
+It was **201 lines**. Outcome 0 — return the value — is **6** of them; the deopt, preempt,
+tail-chain and error arms are the other ~120, and they need several `SmallVec`s and many live
+values. So the compiler sized a ~350-byte frame and saved the registers for arms that almost never
+run, on **every** call.
+
+Outcome 0 is now handled inline and the rest moved to a `#[cold] #[inline(never)]`
+`jit_fast_link_cold_outcome`. **Pure code layout — the cold code is the same code, same order,
+same comments.**
+
+| measurement | base | new | delta | floor |
+|---|---|---|---|---|
+| `make ab`, best-of-11 | 157 ms | 150 ms | −4.5% | 0.0% |
+| interleaved, min-of-13, n=200 | 155 ms | 150 ms | **−3.2%** | 1.3% |
+| interleaved, min-of-7, **n=2000** | 1021 ms | 980 ms | **−4.0%** | **0.2%** |
+
+Measured at two sizes deliberately (§2d's rule): the win is *larger* at n=2000, because boot is 29%
+of the n=200 run and dilutes it. 20× the floor at the long size.
+
+`fib` −0.9%, `nqueens` −0.7%, `ackermann` −0.5%, `collatz` −1.4%, `pipeline`/`loop`/`sort` flat —
+no row regressed.
+
+**Verified beyond the suite**, because this function owns the deopt/preempt/tail paths where a
+mistake is a *silently repeated side effect* rather than a crash: `--test jit` 40/40, the
+deopt/tier/fast_link/inline/preempt selection 33/33, `tests/jit_effect_once_test.blsp` 6/6 (the
+KI-18 duplicated-effect guard), and `--test jit` again under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` 40/40 — the frame this function builds is GC-visible.
+
+**What is left on this row**, from the same profile: `brood_rt_fast_frame` 10.7% (the next call-path
+item) and ~21% allocation, of which the 11.4% `__memmove` is **not** the call protocol —
+frame-pointer chains put it at `Vec<VecStore>::push` → `RawVecInner::finish_grow`, i.e. the value
+slab reallocating as the row allocates 8.19M node vectors. That is the allocation frontier and a
+separate lever: a segmented slab would never move existing elements. Handles are indices, so
+nothing in the language observes the difference.
+
+## 2f. The tenure reservation, re-measured — 1.3%, and its justifying numbers are stale
+
+§2d's `bintree` profile put **11.4% in `__memmove`**, and frame-pointer chains put that at
+`brood_rt_make_vector2` → `Vec<VecStore>::push` → `RawVecInner::finish_grow` — the value slab
+reallocating. The obvious suspect was the tenure path in `minor_collect`, which installs
+`Slabs::default()` (zero capacity) for the new nursery while the flip path beside it uses
+`Slabs::with_capacity_like`. That asymmetry is **deliberate and documented**: reserving there
+"holds a peak-sized allocation the next cycle may never touch", and the comment cites `sort`
+peaking at 191 MB against .NET's 30 MB as the reason. `BROOD_GC_TENURE_RESERVE=1` exists to A/B it.
+
+**Measured, both arms, this tree:**
+
+| row | reserve OFF (default) | reserve ON | |
+|---|---|---|---|
+| `bintree` n=200 | 149 ms · 115.8 MB | 149 ms · **107.9 MB** | time equal, memory *better* with reserve |
+| `bintree` n=2000 | 987 ms | **974 ms** | **−1.3%** |
+| `sort` | 134 ms · 252.4 MB | 134 ms · 252.1 MB | indistinguishable |
+
+Three things follow, and the first two are corrections to the comment rather than to the code:
+
+1. **`sort` is 252 MB on this tree, not 191 MB**, and it measures the same with the reservation
+   on or off. Whatever made the reservation expensive for `sort` no longer does — so the memory
+   argument that decided this trade-off no longer reproduces as written. **Do not re-cite the
+   191 MB figure without re-measuring it.**
+2. **The prize is ~1.3%, not 11.4%.** The tenure ladder is a small part of that memmove; most of
+   it is elsewhere (the `major_collect` path still uses `Slabs::default()`, and first-time growth
+   is genuine). My hypothesis was mostly wrong and the measurement is the only reason it is not
+   recorded as a win.
+3. **The default was NOT flipped.** On these two rows `ON` is equal-or-better on both time and
+   memory, which looks like a free win — but that is two rows, the original decision rested on
+   evidence this measurement cannot reconstruct, and a GC memory policy is the wrong thing to
+   change on a narrow sample. Worth revisiting with the full row set and a peak-RSS sweep;
+   `BROOD_GC_TENURE_RESERVE=1` makes that a one-flag experiment.
+
+The remaining call-path item from §2d is `brood_rt_fast_frame` (10.7%) — same family as §2e's
+win, and a better next target than this at 1.3%.
+
+## 2g. Re-profiled after §2e, and the call convention now has a price tag on one instruction
+
+Re-profiled deliberately rather than continuing against §2d's numbers — §2e changed the very
+function that was 24%, so the ranking had moved.
+
+**`bintree` n=2000, after the outlining:**
+
+| % | symbol | vs §2d |
+|---|---|---|
+| **22.17** | `jit_run_fast_link` | 24.03 → 22.17 |
+| 12.56 + 12.47 | `brood_jit_arm_43`/`_44` (the real work) | ~unchanged at 25% |
+| 10.16 | `__memmove` | 11.38 → 10.16 |
+| **9.12** | `brood_rt_fast_frame` | 10.67 → 9.12 |
+| 5.02 / 4.75 | `make_vector2` / `push_n` | |
+| 2.73 | `env_get` | boot residue at this size |
+
+The ~2-point drop in `jit_run_fast_link` matches §2e's −4% wall-clock. It is **still the top item**,
+so the next question is what remains inside it.
+
+### One instruction is 23.5% of the function
+
+Instruction-level annotation is unambiguous this time — where §2d found cost *spread thin* across
+the prologue (which is what outlining fixed), what is left is concentrated:
+
+```
+23.50 :  movups (%rax,%rcx,8), %xmm0
+ 3.28 :  movq   0x170(%r15), %rax        # the roots pointer
+```
+
+A 16-byte load from the roots stack (scale 8 with the index pre-multiplied by 3 = 24-byte
+`Value` stride). 23.5% of a function that is 22.17% of the row is **~5.2% of `bintree` on a single
+load**, and it sits shortly after the `callq *%rdx` that runs the callee's native code.
+
+**The mechanism, stated with the confidence the evidence supports:** the callee writes its result
+into `roots[base]` and the caller loads it straight back out — a store-to-load round trip through
+memory across the native call boundary. A load that close behind a call, at that share, is a
+store-forwarding/latency stall rather than expensive work. (Perf skid means the exact source line
+is not certain; the *instruction* and its cost are.)
+
+**So the X-register call convention now has a measured price tag and a first concrete step**:
+return the callee's result **in a register** instead of through the roots slot. That is worth ~5%
+of `bintree` on its own, it is the narrowest possible slice of the convention change, and it is
+testable in isolation.
+
+**Not attempted here, deliberately.** That is an ABI change spanning `jit_lower.rs`'s Cranelift
+lowering, the `brood_rt_*` callback contract and the VM's expectations of a frame — the
+multi-session redesign FRONTIER describes. Starting it at the end of a long session risks leaving
+a half-migrated ABI, which is the one state worse than not starting. The finding is the valuable
+part: it turns "redesign the call convention" into "make the return value come back in a register,
+and expect ~5% on `bintree`."
+
+**Also still open on this row:** `brood_rt_fast_frame` 9.12% (whose inlined work is
+`jit_dispatch_fast_frame`'s per-call cap and `jit_native_headroom_ok` checks — worth reading before
+assuming they are free), and ~19% allocation of which §2f showed the tenure reservation is only
+1.3%.
