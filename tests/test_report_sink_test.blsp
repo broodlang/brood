@@ -8,7 +8,7 @@
           tuple (list "adds" (fn () '()) {:tags [] :file "f.blsp" :line 1 :skip false})
           r (binding (*test-report-sink* (fn (rr) (send me [:reported rr])))
               (run "math" tuple)))
-      (let (reported (receive ([:reported rr] rr) (after 1000 :timeout)))
+      (let (reported (receive ([:reported rr] rr) (after *test-wait-ms* :timeout)))
         (assert= "math" (r-group reported))
         (assert= "adds" (r-name reported))
         (assert= r reported))))

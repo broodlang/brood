@@ -7003,3 +7003,42 @@ printed its backtrace (~6% of a run), and the process is silently interpreter-on
 **§7.6 resolved.** The "TraceFrame growth" on bintree was debuginfo misattribution: the LBR
 chain lands in `push_mut<VecStore>` inside `alloc_vector2_room` — the vectors-slab Vec
 regrowing. It is §7.4's allocation family, not an error-path leak.
+
+## 2026-08-29 (seventh) — KI-80 was never a timeout: three defects under one flake
+
+The user asked for KI-80 fixed. The second sighting's kept output rewrote the entry before
+any code moved: the "timeout under load" try contains **62 F's** in runs (46 + 12 + singles)
+— mass test failures, with the 300 s cap merely hiding the names — and its stderr names the
+class: spawned processes dying `unbound symbol: editor/serve/serve-manager` after their
+file's `%isolate` rollback. Pulling that thread found three defects, one of them a kernel
+race that failed a test **deterministically, 4-for-4, at v0.16.0 too** — sitting in a file
+nobody runs standalone.
+
+**1. The deadline class (test suite).** 74 hardcoded 1–3 s positive waits across 41 files —
+`(after 2000 :none)` on receives that *expect* a message — the exact class `*test-wait-ms*`
+(20 s) was created for; the knob existed, the sweep had never been done. All 74 converted;
+each site reviewed first, and the two shapes that must NOT convert (collect-until-lull
+terminators, sub-second negative asserts) checked individually — `proc-test-drain`'s lull
+looked like one and is not (its timeout only fires on an already-broken stream).
+
+**2. `%isolate`'s reap "join" was a spin.** `for _ in 0..10_000 { yield_now() }` — and
+`yield_now` is `std::thread::yield_now`, a hint. On the root thread (`brood --test` runs
+`:isolated` units there) the loop burns through in microseconds while a parked victim's kill
+still needs a scheduler worker, so the "join" returned with the corpses mid-death and the
+next test raced them. Now wall-clock-bounded (5 s), yield-then-micro-sleep. The reproducer
+that pinned it is 12 lines (`serve-spawns` inside `%isolate`, then again after — `:t2`).
+
+**3. Retirement order.** `deregister` removed the pid from REGISTRY, *then* swept NAMES in
+`retire_pid_tail` — so any join on REGISTRY-absence could return while the dead pid was
+still name-registered, and `serve-spawns`' idempotence check saw the corpse as "already
+serving": every subsequent `node/spawn` was sent to a dead mailbox, silently (no ADR-232
+warn — the name resolved). NAMES is now swept first; the invariant is REGISTRY-absent ⇒
+NAMES-absent.
+
+**Verified:** `remote_spawn_test` standalone 0/4 → 6/6; the full suite under the sighting's
+own load (4-core spin + concurrent nextest loop) green in 99 s where it produced the 62-F
+TMT; suite 1250/1250; gcstress green. KI-80 closed with all three mechanisms in the entry.
+
+Worth keeping: **a flake entry that says "timeout" is a claim about the cap, not the
+failure.** Both KI-74 and KI-80 dissolved the moment the killed try's own output was read —
+and both had been watched politely for days while the output was one `--nocapture` away.

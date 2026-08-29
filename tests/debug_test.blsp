@@ -233,8 +233,8 @@
       (let (r (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
                 (tfn-square 7)))
         (assert= 49 r)
-        (let (call (receive ([:spy-entry e] e) (after 1000 :timeout))
-              ret (receive ([:spy-entry e] e) (after 1000 :timeout)))
+        (let (call (receive ([:spy-entry e] e) (after *test-wait-ms* :timeout))
+              ret (receive ([:spy-entry e] e) (after *test-wait-ms* :timeout)))
           (assert= :call (get call :spy))
           (assert= 'debug-test/tfn-square (get call :fn))
           (assert= (list 7) (get call :args))
@@ -300,7 +300,7 @@
         (assert= (list 6) (get (get snap :vals) :args)))
       (assert= (list 6) (eval-at dbg 1 "args"))
       (resume-all dbg)
-      (assert= 36 (receive ([:result r] r) (after 1000 :timeout)))
+      (assert= 36 (receive ([:result r] r) (after *test-wait-ms* :timeout)))
       (untrace-fn 'debug-test/tfn-square)
       (dbg-stop dbg))))
 
@@ -356,8 +356,8 @@
         (binding (*spy-sink* (fn (e) (send me [:spy-entry e]) nil))
           (tfn-square 9)))
       (untrace-fn 'debug-test/tfn-square)
-      (assert= :call (:spy (receive ([:spy-entry e] e) (after 1000 :timeout))))
-      (assert= :return (:spy (receive ([:spy-entry e] e) (after 1000 :timeout)))))))
+      (assert= :call (:spy (receive ([:spy-entry e] e) (after *test-wait-ms* :timeout))))
+      (assert= :return (:spy (receive ([:spy-entry e] e) (after *test-wait-ms* :timeout)))))))
 
 (describe "debugger — step parks carry an eval-at-able :vals map"
   :isolated (test "eval-at resolves `value` at a step park (the :vals shape matches break's)"
@@ -379,7 +379,7 @@
                          else :done)))
         (sleep 20)
         (drive 100))
-      (assert= 6 (receive ([:result r] r) (after 1000 :timeout)))
+      (assert= 6 (receive ([:result r] r) (after *test-wait-ms* :timeout)))
       (dbg-stop dbg))))
 
 ;; The `,resume` / `,step` REPL meta-command handlers (driven by `pry` through the REPL
@@ -448,7 +448,8 @@
       ;; and a computed expression over several of them
       (assert= 84 (eval-at dbg 1 "(* sum prod)"))
       (resume-all dbg)
-      (assert= [:result 7 12] (receive ([:result s p] [:result s p]) (after 1000 :timeout)))
+      (assert= [:result 7 12]
+        (receive ([:result s p] [:result s p]) (after *test-wait-ms* :timeout)))
       (dbg-stop dbg)))
 
   (test "an explicitly-named val overrides a captured local of the same name"
@@ -475,6 +476,6 @@
       (spawn (with-debugger dbg
                (fn () (let (x 5) (break-when (< x 0) "neg") (send me [:ok])))))
       ;; it should reach :ok without ever parking
-      (assert= [:ok] (receive ([:ok] [:ok]) (after 1000 :timeout)))
+      (assert= [:ok] (receive ([:ok] [:ok]) (after *test-wait-ms* :timeout)))
       (assert= 0 (count (paused dbg)))
       (dbg-stop dbg))))

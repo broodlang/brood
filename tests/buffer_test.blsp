@@ -602,9 +602,9 @@
     (let (bp (spawn-buffer (make-buffer "x")))
       (subscribe-buffer bp buffer-text)
       ; drain the seed
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
+      (receive ([:buffer-updated _bp _ _ _] nil) (after *test-wait-ms* nil))
       (buffer-edit-value bp (fn (b) [(insert b "!") :done]) :me)
-      (assert= (receive ([:buffer-updated _bp _ _ o] o) (after 2000 :none)) :me)
+      (assert= (receive ([:buffer-updated _bp _ _ o] o) (after *test-wait-ms* :none)) :me)
       (stop-buffer bp)))
 
   ;; PIPELINED same-origin splices: keystroke 2 is sent before keystroke 1's echo
@@ -645,9 +645,9 @@
     (let (bp (spawn-buffer (make-buffer "ab")))
       (subscribe-buffer bp buffer-text)
       ; drain the seed
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
+      (receive ([:buffer-updated _bp _ _ _] nil) (after *test-wait-ms* nil))
       (send bp [:write "cd"])
-      (let (view (receive ([:buffer-updated _bp _ v _] v) (after 2000 :none)))
+      (let (view (receive ([:buffer-updated _bp _ v _] v) (after *test-wait-ms* :none)))
         (assert= (get view :splice) [2 2 "cd"]))
       (stop-buffer bp)))
 
@@ -753,16 +753,18 @@
   :isolated (test "a subscriber is seeded, then pushed each edit with a bumped version"
     (let (bp (spawn-buffer (make-buffer "hi")))
       (subscribe-buffer bp buffer-text)
-      (assert= (receive ([:buffer-updated _bp v txt _] [v txt]) (after 2000 :none)) [0 "hi"])
+      (assert= (receive ([:buffer-updated _bp v txt _] [v txt]) (after *test-wait-ms* :none))
+        [0 "hi"])
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "!")))
-      (assert= (receive ([:buffer-updated _bp v txt _] [v txt]) (after 2000 :none)) [1 "hi!"])
+      (assert= (receive ([:buffer-updated _bp v txt _] [v txt]) (after *test-wait-ms* :none))
+        [1 "hi!"])
       (stop-buffer bp)))
 
   (test "unsubscribe-buffer stops the pushes"
     (let (bp (spawn-buffer (make-buffer "x")))
       (subscribe-buffer bp buffer-text)
       ; drain the seed
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
+      (receive ([:buffer-updated _bp _ _ _] nil) (after *test-wait-ms* nil))
       (unsubscribe-buffer bp)
       ; let the unsubscribe land
       (receive (after 200 nil))
@@ -773,7 +775,8 @@
   (test "a nil projection pushes a bare notification (nil view)"
     (let (bp (spawn-buffer (make-buffer "a")))
       (subscribe-buffer bp nil)
-      (assert= (receive ([:buffer-updated _bp v view _] [v view]) (after 2000 :none)) [0 nil])
+      (assert= (receive ([:buffer-updated _bp v view _] [v view]) (after *test-wait-ms* :none))
+        [0 nil])
       (stop-buffer bp)))
 
   (test "two subscribers both receive an edit — the point of buffers-as-processes"
@@ -793,12 +796,12 @@
     (let (bp (spawn-buffer (make-buffer "hi")))
       (subscribe-buffer bp buffer-text)
       ; drain the seed
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
+      (receive ([:buffer-updated _bp _ _ _] nil) (after *test-wait-ms* nil))
       ;; untagged edit → nil origin; tagged edit → the tag comes back with the push
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "!")))
-      (assert= (receive ([:buffer-updated _bp _ _ o] o) (after 2000 :none)) nil)
+      (assert= (receive ([:buffer-updated _bp _ _ o] o) (after *test-wait-ms* :none)) nil)
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "?")) :me-the-editor)
-      (assert= (receive ([:buffer-updated _bp _ txt o] [txt o]) (after 2000 :none))
+      (assert= (receive ([:buffer-updated _bp _ txt o] [txt o]) (after *test-wait-ms* :none))
         ["hi!?" :me-the-editor])
       (stop-buffer bp)))
 
@@ -831,12 +834,12 @@
     (let (bp (spawn-buffer (make-buffer "hello")))
       (subscribe-buffer bp buffer-text)
       ; drain the seed
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
+      (receive ([:buffer-updated _bp _ _ _] nil) (after *test-wait-ms* nil))
       ;; a structured splice: the push carries [lo hi repl] + markers, not the text
       (buffer-splice bp 5 5 "!" :alice)
       (let ([v view o] (receive
                          ([:buffer-updated _bp v view o] [v view o])
-                         (after 2000 [:none :none :none])))
+                         (after *test-wait-ms* [:none :none :none])))
         (assert= (get view :splice) [5 5 "!"])
         (assert= o :alice))
       (assert= (buffer-query bp buffer-text) "hello!")
@@ -844,7 +847,7 @@
       (buffer-marker-move bp :alice 3 :alice)
       (let ([_ view _] (receive
                          ([:buffer-updated _bp v view o] [v view o])
-                         (after 2000 [:none :none :none])))
+                         (after *test-wait-ms* [:none :none :none])))
         (is (nil? (get view :splice)))
         (assert= (get (get view :markers) :alice) 3))
       (stop-buffer bp)))
@@ -857,7 +860,7 @@
     (let (bp (spawn-buffer (make-buffer "hello")))
       (subscribe-buffer bp buffer-markers)
       ; drain our seed
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
+      (receive ([:buffer-updated _bp _ _ _] nil) (after *test-wait-ms* nil))
       ;; a second participant: subscribes, plants its pid-keyed cursor, then dies
       ; a beat, then a normal exit
       (spawn (let (me (self))
@@ -865,10 +868,14 @@
                (buffer-edit bp (fn (b) (buffer-marker-set b me 3)))
                (receive (after 100 nil))))
       ;; we see its cursor arrive …
-      (let ([_ marks] (receive ([:buffer-updated _bp v mk _] [v mk]) (after 2000 [:none :none])))
+      (let ([_ marks] (receive
+                        ([:buffer-updated _bp v mk _] [v mk])
+                        (after *test-wait-ms* [:none :none])))
         (assert= (count marks) 1))
       ;; … and vanish again when it dies (the cleanup push)
-      (let ([_ marks] (receive ([:buffer-updated _bp v mk _] [v mk]) (after 2000 [:none :none])))
+      (let ([_ marks] (receive
+                        ([:buffer-updated _bp v mk _] [v mk])
+                        (after *test-wait-ms* [:none :none])))
         (assert= marks {}))
       (assert= (buffer-query bp buffer-markers) {})
       (stop-buffer bp))))

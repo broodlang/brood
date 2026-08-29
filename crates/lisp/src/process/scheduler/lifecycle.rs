@@ -38,8 +38,22 @@ fn deregister_timed(pid: u64, reason: Message, heap: &Heap) {
         crate::process::sysmon::emit_exit(pid, &reason);
         crate::process::sysmon::clear_if(pid);
     }
-    // The three tables are taken **sequentially**, not nested: REGISTRY first,
-    // released, then NAMES, released, then MONITORS. `add_monitor` and
+    // **NAMES is swept BEFORE the REGISTRY removal, and the order is load-bearing.**
+    // The invariant it buys: a pid absent from REGISTRY is already absent from NAMES.
+    // `%isolate`'s reap joins on REGISTRY-absence (`list_local_pids`), and with the old
+    // order (REGISTRY first, NAMES later in `retire_pid_tail`) that join returned while
+    // the dead pid was STILL name-registered — so the very next `(node/serve-spawns)`
+    // saw `:remote-spawn` "already registered", declined to restart it, and every
+    // subsequent `node/spawn` was sent to a corpse and silently dropped.
+    // `tests/remote_spawn_test.blsp` failed 4/4 standalone on exactly this (its first
+    // test is `:isolated`; the second ran inside the gap), and the same window under
+    // suite load is a KI-80 contributor. The reporter's `proc_descr` reads the name
+    // before `deregister` is called, so it still prints. The sweep in
+    // `retire_pid_tail` stays (idempotent) for the `retire_root_ctx` path that shares
+    // the tail.
+    crate::dist::unregister_dead_pid(pid);
+    // The three tables are taken **sequentially**, not nested: NAMES first (above),
+    // released, then REGISTRY, released, then MONITORS. `add_monitor` and
     // `spawn_or_get` take REGISTRY *nested* inside MONITORS / NAMES
     // respectively for their own atomic check-and-modify steps — both are
     // deadlock-free precisely because `deregister` never holds an outer

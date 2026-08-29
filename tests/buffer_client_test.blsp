@@ -116,14 +116,14 @@
       ;; seed
       (let ([l0 a0] (receive
                       ([:buffer-updated _bp v w o] (link-fold (link-init bp (self)) v w o))
-                      (after 2000 [:none :none])))
+                      (after *test-wait-ms* [:none :none])))
         (assert= a0 [:text "hello"])
         ;; our own edit: propagate, then its echo comes back suppressed
         (let (l1 (link-propagate l0 "hello" "hello!"))
           (assert= (count (get l1 :pending)) 1)
           (let ([l2 a2] (receive
                           ([:buffer-updated _bp v w o] (link-fold l1 v w o))
-                          (after 2000 [:none :none])))
+                          (after *test-wait-ms* [:none :none])))
             ; echo suppressed
             (assert= a2 :noop)
             (assert= (get l2 :pending) ())
@@ -131,7 +131,7 @@
             (buffer-splice bp 0 0 ">" :someone-else)
             (let ([l3 a3] (receive
                             ([:buffer-updated _bp v w o] (link-fold l2 v w o))
-                            (after 2000 [:none :none])))
+                            (after *test-wait-ms* [:none :none])))
               (assert= a3 [:splice [0 0 ">"]])
               (assert= (buffer-query bp buffer-text) ">hello!")))))
       (stop-buffer bp))))

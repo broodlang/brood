@@ -67,7 +67,7 @@
     (let (f (reflect/eval '(fn (x) (* x x)))
           w (spawn (receive ([:go g from] (send from [:r (g 9)])))))
       (send w [:go f (self)])
-      (assert= 81 (receive ([:r v] v) (after 1000 :timeout))))))
+      (assert= 81 (receive ([:r v] v) (after *test-wait-ms* :timeout))))))
 
 ;; ---------------------------------------------------------------------------
 ;; KI-24: name resolution inside `reflect/eval`, from within a namespace.

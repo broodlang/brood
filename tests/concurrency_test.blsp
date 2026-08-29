@@ -93,7 +93,7 @@
     (let (me (self) _w (spawn (timed-worker me))) (assert= (receive) :timed)))
 
   (test "a message arriving before the deadline wins over the timeout"
-    (defn race-worker (parent) (send parent (receive (:go :got) (after 1000 :timed))))
+    (defn race-worker (parent) (send parent (receive (:go :got) (after *test-wait-ms* :timed))))
     (let (me (self) w (spawn (race-worker me)))
       (send w :go)
       ; well inside the 1000ms window
@@ -145,10 +145,10 @@
     ;; clause whose binding (or whose body's value) is nil must not be mistaken
     ;; for the deadline firing.
     (send (self) [:v nil])
-    (assert= (receive ([:v x] (if (nil? x) :bound-nil :other)) (after 1000 :timed))
+    (assert= (receive ([:v x] (if (nil? x) :bound-nil :other)) (after *test-wait-ms* :timed))
       :bound-nil)
     (send (self) :quiet)
-    (assert= (receive (:quiet nil) (after 1000 :timed)) nil))
+    (assert= (receive (:quiet nil) (after *test-wait-ms* :timed)) nil))
 
   (test "a tail-recursive receive loop runs in O(1) stack"
     ;; The body sits in tail position at the call site, so `drain`'s self-call is

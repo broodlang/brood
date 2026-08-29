@@ -22,7 +22,7 @@
     acc
     (receive
       ([:proc ^p d] (proc-test-drain p want (str acc d)))
-      (after 3000 acc))))
+      (after *test-wait-ms* acc))))
 
 (describe "proc: handle + type-of"
   :isolated (test "os/spawn returns a distinct :subprocess handle"

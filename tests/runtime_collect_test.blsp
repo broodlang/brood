@@ -42,7 +42,7 @@
     ;; making the test prove its own premise, not lean on the suite's other processes.
     (let (me (self)
           parked (spawn (do (send me [:ready]) (receive (_ :never)))))
-      (assert= (receive ([:ready] :ready) (after 2000 :no-ready)) :ready)
+      (assert= (receive ([:ready] :ready) (after *test-wait-ms* :no-ready)) :ready)
       (rc-churn 'rc-f-gate 0 200)
       (let (r (dev/runtime-collect))
         (is (= (get r :ran) false))

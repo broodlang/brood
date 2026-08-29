@@ -78,7 +78,7 @@
   (test "a macro can emit a pin — the reason for the change"
     ;; A pin used to BE `(unquote expr)`, so the quasiquote walker consumed it and
     ;; this template was impossible to write.
-    (defmacro sf-await (tag) `(receive ([:reply ^~tag v] v) (after 1000 :timeout)))
+    (defmacro sf-await (tag) `(receive ([:reply ^~tag v] v) (after *test-wait-ms* :timeout)))
     (let (me (self) t (ref))
       (send me [:reply t 99])
       (assert= (sf-await t) 99)))
