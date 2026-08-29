@@ -120,30 +120,46 @@ is what keeps a stale splice from being lowered in the first place.)
 
 **So the inlining prize is inherently a JIT-tier optimization**, and Phase 2 must be native.
 
-### Phase 2a — the native guard, on the ids we already prove (do this next)
+### Phase 2a — the native guard on already-proven ids ❌ ABANDONED (2026-08-29)
 
-**The guard does not have to wait for profiling.** Phase 1 was sequenced before Phase 2 on the
-assumption that speculation needs a profile to supply a candidate identity. It does not need
-one *yet*: the syntactically-proven sites already carry a constant id today. Since ADR-294
-they lower to `((%dispatch *impls* '[ability op] :id) args…)`, where `:id` is a compile-time
-constant — the JIT can recognise that shape, resolve the impl at lower time (the epoch is
-current then), and emit
+Proposed and withdrawn the same day, on contact with the code. Recorded because the two
+reasons it fails are load-bearing for everything below, and both were assumed rather than
+checked when the phase was written.
 
-```
-guard: dispatch_identity(a0) == :id ?  direct call to the impl  :  deopt
-```
+**1. A proven identity needs no guard.** `mono_arg_identity` proves an id only from a literal
+or a direct record-constructor call. In both cases the identity is *certain* — Phase 0 even
+gated the constructor half of that assumption. A guard there re-verifies something already
+known, and for a record it does so by reading `:__id__`, a CHAMP lookup the constant-id
+dispatch avoids entirely. It is pure added cost.
 
-which is a **known callee**, hence inlinable — the actual prize — with no profiling
-infrastructure at all. It also gives the guard a real consumer, which is what makes it
-testable; built in isolation it would be dead code.
+**2. A constant callee is not an inlinable callee — it is the opposite.** The whole
+justification was "a known callee can be inlined". That is false as the code stands:
 
-What it needs: an rt callback over `Heap::dispatch_identity` (trivial now that one definition
-exists — Phase 0), the Cranelift emission, and recognition of the constant-id dispatch shape
-in lowering.
+- `call_head_sym` (`inline.rs`) returns a callee only for `Node::Global`/`GlobalIc`. The leaf
+  inliner is keyed on a **symbol**; a `Node::Const` callee is never spliced.
+- Worse, `leaf_inline_probe` rejects a caller body for which `node_has_rt_handles` is true,
+  and a baked impl **is** an RT handle (`Node::Const(ConstVal::Handle{..})`, since `*impls*`
+  is RUNTIME-promoted). So baking an impl does not merely fail to inline — it disqualifies
+  the entire enclosing body from leaf inlining.
 
-Phase 1 then stops being a prerequisite and becomes what it should be: **widening the source
-of candidate ids** from "what syntax proves" to "what this site actually sees", which is where
-`(map area shapes)` lives.
+So the guard belongs where the identity is a **guess**, which is Phase 1's profiled sites, and
+the original `0 → 1 → 2` sequencing was right.
+
+### The real blocker for the prize: impl fns are anonymous
+
+Point 2 above is not a detail about speculation; it is the constraint
+[ability-monomorphization.md](ability-monomorphization.md) already lists as hard constraint #2
+and which nothing since has addressed: `impl` registers each method as a bare `(fn …)` value in
+`*impls*`, so **no global symbol names it**. The existing leaf inliner keys on symbols.
+
+That makes "give impls global names" a lever that is independent of every phase here, cheaper
+than all of them, and a **precondition** for the inlining prize rather than a nice-to-have: if
+an impl were `def`'d under a generated global, the ordinary machinery — the call-site IC, the
+leaf inliner — would apply to a devirtualized call with no guards, no profiling and no
+channel at all.
+
+It should be evaluated before any further speculation work, because if it works, most of what
+follows is unnecessary, and if it does not, the reason will shape what does.
 
 ### Phase 1 — per-call-site identity profiling
 
@@ -208,8 +224,12 @@ thing profiling structurally cannot do, and it is the strongest argument for the
 
 ## Sequencing
 
-`0 → 2a → 1 → 2 → 3(a) → 3(b) → 3(c)` (revised 2026-08-29 — 2a needs no profile, and gives
-the guard the consumer it needs to be testable).
+**Named impls first**, then `0 → 1 → 2 → 3(a) → 3(b) → 3(c)`.
+
+Phase 0 is done. 2a was proposed and abandoned the same day (see above) — the guard has no
+job where the identity is already proven, so it belongs with the profiling that makes the
+identity a guess. Before resuming, settle whether naming impl fns unlocks the existing leaf
+inliner, because that is the only part of this plan the prize actually depends on.
 
 Phases 0–2 are the mechanism and deliver the win. **3(a) and 3(b) may capture most of the
 static value without building a channel at all** — which is the recommendation: build the
