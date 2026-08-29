@@ -174,6 +174,9 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
 /// tag-checks and *deopts* rather than corrupting. Growing every frame instead was measured
 /// and rejected: it costs +2–7% on nearly every benchmark row, because `max_leader_depth`
 /// counts int/bool merges that need no slot at all (`not`, `int?`, `inc`).
+// Callers are the (gated) Cranelift lowering and the gated `codegen` tests; the VM sizes
+// frames without it, so a no-jit build has no user.
+#[cfg(feature = "jit")]
 pub(crate) fn blockarg_spill_window(
     code: &[Inst],
     reserve: usize,
