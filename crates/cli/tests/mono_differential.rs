@@ -133,7 +133,11 @@ fn an_impl_registered_after_compile_time_is_still_the_one_called() {
         support::dies_with_parent(&mut cmd);
         let out = cmd.output().expect("run brood");
         let text = String::from_utf8_lossy(&out.stdout).to_string();
-        let how = if mono { "BROOD_MONO=1" } else { "the dynamic path" };
+        let how = if mono {
+            "BROOD_MONO=1"
+        } else {
+            "the dynamic path"
+        };
         assert!(
             text.contains("same-body: R7"),
             "under {how}, an impl registered earlier in the SAME compiled body must be the \
