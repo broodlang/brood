@@ -198,12 +198,12 @@ this tree green?"; do not hand-read the run list).
 **Where to look next**, in rough value order — see `ROADMAP.md` and `docs/roadmap-for-v1.md`:
 
 - **The 1.0 language surface is freeze-ready** (all four pre-freeze items shipped, ADR-170
-  ratified). The one remaining non-language release blocker is **`nest format --check`'s
-  comment *hoisting*** — a style verdict nobody has made, not a defect hunt. ~40% of the red
-  is the formatter moving a same-line trailing comment onto its own line, which is intended,
-  documented behaviour that this tree's authors do not write for. Decide hoisting first;
-  `roadmap-for-v1.md` has the measurement, and says not to run the formatter tree-wide before
-  that call. (Re-measure: a format sweep landed 2026-08-19 and the figure predates it.)
+  ratified), and as of 2026-08-29 the **non-language release blockers are all closed too**.
+  The formatter one had been closed in the code since `f0082dc7` (2026-07-31, hoisting
+  dropped) — `roadmap-for-v1.md`'s measurement predates that fix by a day and nobody ticked
+  it, so "decide hoisting first, do not run the formatter tree-wide" was still being read as
+  live guidance a month later. The tree is 414/414 clean; verify with a `nest` rebuilt from
+  the current `std/`, never a stale one.
 - **The stdlib surface audit's residue** (ADR-250–253): example coverage ~16% of ~1,150
   functions (each example written is a test gained — `tests/doc_examples_test.blsp` executes
   them), ability seams that cannot reach `rope`/`table`, and the naming seams.
