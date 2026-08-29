@@ -531,3 +531,15 @@ regression of the ring rule and was the *additive int-plus-ratio* rule doing its
 reduced ratio shifted by whole numbers keeps its denominator. The two tests that expected
 `int | ratio` predated the rule.
 
+## `(or map number)`, retired (2026-08-29)
+
+The one output the review kept tripping over: `(defn foo (x) (+ 1 x 1/2))` hovered as
+`((or map number) -> (or map number))`. It was the `Num`-record widening — `+` accepts a
+record with a `num/add` method, and a record is a map — stated as the widest thing that
+was true. ADR-299 states it as the exact thing that is true: an operator's domain is
+`number` plus the cover of the multimethods it routes to, read off the registry at the root
+of each check. No record loaded → `number`; `usd` loaded → `number | t/usd`, rendered by
+name (a record inside a wider term now prints its identity, not the tag `map`). The rule is
+general — `MultiInfo::domain_ty` is any multimethod's parameter type — the operators are
+just its first consumer.
+

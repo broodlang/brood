@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Changed — an operator's domain is what its multimethod covers (ADR-299).** `+ - * /` and
+`< <= > >=` used to declare `number | map` — a record with a `num/add`/`compare-to` method is
+a map — so every inferred signature over arithmetic read `((or map number) -> (or map
+number))`. The domain is now derived from the registry: `number` plus exactly the records
+with methods, by name (`number | t/usd`), and plain `number` when none is loaded.
+
 **Added — `nest check --strict` (ADR-298).** A dynamic value with a precise type is checked
 by inclusion, so a `number` call result handed to an `int` parameter warns. Off by default
 (the overlap reading is what keeps a check quiet across a hot reload); `BROOD_CHECK_STRICT=1`
