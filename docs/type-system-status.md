@@ -55,7 +55,11 @@ Everything the audit listed, plus:
 (sig g ((int -> int) -> int)) (g (fn (x) (str x)))  ; result string, used as int
 ;; …and the wider-result case stays silent: (g (fn (x) (+ x 1))) is int under x : int
 ;; precision without loss of soundness (2026-08-29): exact where provable, deferred otherwise
-(+ 1 2 1/2)                 ; int | ratio — ratios close over + - * and /, like ints
+(+ 1/2 1/2) (* 2 1/2)       ; int | ratio — ratios close over + - * and /, like ints,
+                            ;   and either shape can cancel a denominator away
+(+ 1 2 1/2)                 ; ratio — but `+ - inc dec` over ints and exactly ONE ratio
+                            ;   cannot: no ratio is integral (denominator 1 demotes to Int
+                            ;   on construction), and a whole-number shift keeps q
 (reduce + 0 ints)           ; int — a numeric operator folds inside its closure (induction)
 (map inc ints)              ; nil | list<int> — the operator's closure, not its widened sig
 (cons 1 '())                ; list<1> — a nil tail has no elements
@@ -253,6 +257,13 @@ signature is documentation and deserves a reader. The mechanism is a new primiti
 definition — `:informative?` decided on the *types*, since the rendered text cannot be
 tested for it (`(string any -> any)` contains the text of the uninformative
 `(any -> any)` and is worth declaring).
+
+**`reflect/source-signatures`** (2026-08-29) is the same question for source *text* — an
+editor buffer mid-edit, or the one form a live evaluator just ran, neither of which is a
+file. Same maps, same checker pass, one shared renderer; `()` rather than an error on
+unparsable input, matching `check-string-structured`. It exists because `expr-type` cannot
+answer for a definition at all: a `(defn …)` form evaluates to its own *name*, so the type
+of its value is the type of a symbol and says nothing about the function.
 
 **A module-private function had no inferred signature at all.** `defn-` expands to
 `(do (def name (fn …)) (%mark-private 'name))`, and every inference pass keyed on a
@@ -483,3 +494,40 @@ verified by probe before the roadmap was updated.
   what an arrow denotes, not against more property laws — a more permissive relation is the
   one direction that can be unsound, and laws that check the relation against itself cannot
   see it: **0 unsound and 0 missed containments across 2 547 216 pairs.**
+
+## Six precision items, and the position a macro threw away (2026-08-29)
+
+Six items from the soundness review, each a tightening in the safe direction; all six are
+pinned by tests in `types::check::tests`.
+
+1. **A warning inside a `match` clause points at the clause** (ADR-297's promise, kept
+   for the one macro that broke it). `%match-splice-fail` inlined the fail continuation by
+   rebuilding the *whole* compiled tree with `cons` — every clause body included — so the
+   reader's pairs, and their positions, never reached the expansion; the stamp could only
+   inherit the `match`'s line. It now rebuilds only the spine above a splice point and
+   returns an untouched subtree as the very pair it came in as. A rewrite should rebuild
+   what it changes and nothing else — that is what keeps positions (and sharing) alive
+   through expansion.
+2. **`nest check --strict`** (ADR-298) — a dynamic value with a precise bound is checked by
+   inclusion. Off by default; `BROOD_CHECK_STRICT=1` also turns it on.
+3. **`list<A> ∩ list<B>` is empty for disjoint `A`, `B`.** A `list<T>` is the `pair` tag
+   alone (the empty list is `nil`), so every value has a first element and no first element
+   is both an `int` and a `string`: `list<never>` is uninhabited (`term_is_never`), and
+   `is_disjoint_term` answers the same — the argument check (`!is_disjoint`) and the lattice
+   used to contradict each other here, which is why `(want-strs (list [:a 1]))` was silent.
+   `vector<never>` and `set<never>` stay inhabited (the empty vector, the empty set).
+4. **`merge` keeps the shapes.** `(merge {:a 1} {:b 2})` is `{a: 1, b: 2}`, not `map`; the
+   later map's fields win, exactly as the value does.
+5. **A type variable inside `or`/`and`.** `(or ?A nil)` binds `?A` to the argument *minus*
+   the concrete alternatives, so `(or-default n 1)` under `((or ?A nil) ?A -> ?A)` is the
+   `int` `n` was, with `nil` carved off; `(and …)` unifies each part.
+6. **Sets carry an element type** — `set<E>`, with the same `elem` refinement lists and
+   vectors use (`SEQ_BITS` gained `Set`): the literal `#{1 2}` is `set<1 | 2>`, `#{}` is
+   `set<never>`, `conj`/`into` onto a set keep it, and `(set T)` is accepted in a `sig`,
+   variables included.
+
+One diagnosis on the way is worth keeping: `(+ 1 1/2)` typing as `ratio` looked like a
+regression of the ring rule and was the *additive int-plus-ratio* rule doing its job — a
+reduced ratio shifted by whole numbers keeps its denominator. The two tests that expected
+`int | ratio` predated the rule.
+

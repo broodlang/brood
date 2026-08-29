@@ -276,7 +276,52 @@
   ;; a call to a name the checker cannot see is unknown — nil, never a guess.
   (test "an expression the checker has no opinion about is nil, not a guess"
     (assert= (reflect/expr-type "(fn (x) x)") nil)
-    (assert= (reflect/expr-type "(no-such-fn-anywhere 1)") nil)))
+    (assert= (reflect/expr-type "(no-such-fn-anywhere 1)") nil))
+
+  ;; The question expr-type structurally cannot answer, and the reason `source-signatures`
+  ;; below exists: a definition form evaluates to its own NAME, so the type of its value is
+  ;; the type of a symbol and says nothing about the function.
+  (test "a definition is not an expression about its function"
+    (assert= (reflect/expr-type "(defn ixt-two (n) (* 2 n))") nil)))
+
+;; source-signatures — `file-signatures` for text that is not a file. An editor buffer
+;; mid-edit is not on disk, and neither is one form a live evaluator just ran.
+(describe "source-signatures"
+  (test "a definition's inferred signature, in source syntax"
+    (let (sigs (reflect/source-signatures "(defn ixs-len (s) (string/length s))")
+          hit (first sigs))
+      (assert= (count sigs) 1)
+      (assert= (:name hit) "ixs-len")
+      (assert= (:sig hit) "(string -> int)")
+      (assert= (:declared? hit) false)
+      (assert= (:informative? hit) true)))
+
+  ;; The same widening `file-signatures` reports, and the reason this is worth pinning: an
+  ;; all-`any` arrow is a signature the checker CAN write and which says nothing, so a
+  ;; caller showing hints has to be able to tell the two apart.
+  (test "an arrow that says nothing is marked uninformative rather than withheld"
+    (let (hit (first (reflect/source-signatures "(defn ixs-id (n) (quot n 2))")))
+      (assert= (:sig hit) "(any -> any)")
+      (assert= (:informative? hit) false)))
+
+  (test "a declared sig is reported as declared, and wins"
+    (let (hit (first (reflect/source-signatures "(sig ixs-d (int -> int))\n(defn ixs-d (x) x)")))
+      (assert= (:sig hit) "(int -> int)")
+      (assert= (:declared? hit) true)))
+
+  (test "every definition in the text, in order"
+    (assert= (map :name
+               (reflect/source-signatures "(defn ixs-a (n) n)\n(defn ixs-b (n) n)"))
+      (list "ixs-a" "ixs-b")))
+
+  (test "text that defines nothing has no signatures"
+    (assert= (reflect/source-signatures "(+ 1 2)") '()))
+
+  ;; Same discipline as expr-type and check-string-structured: read live, from a buffer
+  ;; that is unbalanced half the time, so it must not raise.
+  (test "unparsable input is (), never an error"
+    (assert= (reflect/source-signatures "(defn broken (x") '())
+    (assert= (reflect/source-signatures "") '())))
 
 ;; `system/features` / `system/feature?` — asking the BUILD what it can do.
 ;;

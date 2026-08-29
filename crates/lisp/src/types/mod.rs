@@ -91,7 +91,8 @@ const FN_BITS: u32 = (1u32 << bit(Tag::Fn)) | (1u32 << bit(Tag::Native));
 
 /// The sequence tags an element-type refinement applies to — a list (`pair`;
 /// `nil` is the empty list, no elements) or a `vector`.
-const SEQ_BITS: u32 = (1u32 << bit(Tag::Pair)) | (1u32 << bit(Tag::Vector));
+const SEQ_BITS: u32 =
+    (1u32 << bit(Tag::Pair)) | (1u32 << bit(Tag::Vector)) | (1u32 << bit(Tag::Set));
 
 /// The map tag — the one tag a key/value refinement applies to.
 const MAP_BIT: u32 = 1u32 << bit(Tag::Map);
@@ -910,6 +911,13 @@ impl Ty {
     /// be `nil` widens to plain `list` at the join.
     pub fn list_of(elem: Ty) -> Ty {
         Ty::seq_of(1u32 << bit(Tag::Pair), elem)
+    }
+
+    /// `set<elem>` — a set every element of which is an `elem`. Like a vector (and
+    /// unlike a list, whose empty case is `nil`), the empty set inhabits every
+    /// `set<T>`, so `set<never>` is the type of `#{}` and never uninhabited.
+    pub fn set_of(elem: Ty) -> Ty {
+        Ty::seq_of(1u32 << bit(Tag::Set), elem)
     }
 
     /// The element-type refinement, if this sequence type carries one (or can
@@ -1809,6 +1817,19 @@ impl Ty {
                 }
             }
         }
+        // Two NON-EMPTY lists are provably disjoint when their element types are: a
+        // `list<T>` is the `pair` tag alone — the empty list is `nil`, a separate tag —
+        // so every value of `list<int>` has a first element, and no first element is
+        // both an `int` and a `string`. The same fact `intersect` states by making
+        // `list<int> ∩ list<string>` the uninhabited `list<never>`; the two must agree
+        // or the argument check (`!is_disjoint`) and the lattice contradict each other.
+        if shared == (1u32 << bit(Tag::Pair)) {
+            if let (Some(a), Some(b)) = (self.elem_ty(), other.elem_ty()) {
+                if a.is_disjoint(&b) {
+                    return true;
+                }
+            }
+        }
         // Two record shapes are provably disjoint if they both constrain some
         // field, that field is **required** on at least one side (so any value
         // must carry it — an optional-on-both field could just be absent), and
@@ -1885,6 +1906,15 @@ impl Ty {
     /// emptiness decision and the subtyping decision cannot disagree by construction.
     fn term_is_never(&self) -> bool {
         if self.tags == 0 {
+            return true;
+        }
+        // A `pair` has a head, so a pair-only term whose elements are `never` has no
+        // inhabitant. This is what makes `list<A> ∩ list<B>` EMPTY for disjoint `A`/`B`:
+        // `list_of` is pair-only (the empty list is `nil`, a separate tag), so the old
+        // reading — "the empty list is in both" — was wrong, and it hid every misuse of a
+        // list-typed call result against a list parameter (the `∩ ≠ ⊥` relation could
+        // never fire). `nil | list<never>` is still just `nil`, as it should be.
+        if self.tags == (1u32 << bit(Tag::Pair)) && self.elem.as_deref().is_some_and(Ty::is_never) {
             return true;
         }
         match &self.neg {
@@ -2482,6 +2512,22 @@ pub struct GradualTy {
 mod sig;
 pub use sig::Sig;
 
+/// The process-wide strict switch `nest check --strict` flips before it runs the
+/// checker; a file check reads it once, at its root (`check_file_ext`), into the
+/// checker context — so it is a launch setting, never something the walk consults.
+static STRICT_CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn strict checking on or off for this process — see
+/// [`GradualTy::consistent_with_mode`].
+pub fn set_strict_checking(on: bool) {
+    STRICT_CHECKING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Is strict checking on for this process?
+pub fn strict_checking() -> bool {
+    STRICT_CHECKING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl GradualTy {
     /// A purely static gradual type — exactly the set `t`, no `?`.
     pub const fn stat(t: Ty) -> GradualTy {
@@ -2515,6 +2561,20 @@ impl GradualTy {
     /// type be used where `expected` is wanted?". Static: `bound ⊆ expected`.
     /// Dynamic: some inhabited materialisation fits, `bound ∩ expected ≠ ⊥`.
     pub fn consistent_with(&self, expected: Ty) -> bool {
+        self.consistent_with_mode(expected, false)
+    }
+
+    /// [`consistent_with`](Self::consistent_with) with the **strict** switch (`nest check
+    /// --strict`). Strict mode keeps the dynamic reading only for the genuinely unknown —
+    /// a bare `dynamic()` (`any`) — and checks a dynamic value whose bound is anything
+    /// narrower by inclusion, `bound ⊆ expected`, exactly like a static one. That is the
+    /// "warn on the merely-wider" precision the gradual overlap rule deliberately gives
+    /// up for reload-safety (docs/type-gating.md, B1): a `number` handed to an `int`
+    /// parameter is *consistent* by overlap, and *rejected* strictly.
+    pub fn consistent_with_mode(&self, expected: Ty, strict: bool) -> bool {
+        if self.dynamic && strict && !self.bound.is_any() {
+            return self.bound.is_subtype(&expected);
+        }
         if self.dynamic {
             // Some inhabited materialisation fits — i.e. `bound` is not *provably
             // disjoint* from `expected`. Uses [`Ty::is_disjoint`], not

@@ -82,7 +82,33 @@ pub(super) fn file_signatures_builtin(args: &[Value], _env: EnvId, heap: &mut He
     })?;
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
-    let signatures = crate::types::check::file_signatures(heap, &just_forms);
+    Ok(signatures_of(heap, &just_forms))
+}
+
+/// `(source-signatures src)` — [`file_signatures_builtin`] for source text that is not a
+/// file. Same maps, same checker pass; `()` when `src` doesn't parse.
+///
+/// The case a file cannot cover: an editor buffer mid-edit, or a single form a live
+/// evaluator just ran. `%expr-type` answers for an *expression*, whose type is the type
+/// of its value — but a `(defn …)` form evaluates to its own name, so asking it what the
+/// FUNCTION is typed as has no answer to give. This does, for every definition in the
+/// text, and shares one code path with the file variant so a buffer and the file it will
+/// be saved as can never disagree.
+pub(super) fn source_signatures(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "source-signatures", arg(args, 0))?;
+    let forms = match reader::read_all_positioned(heap, &src) {
+        Ok(fs) => fs,
+        // unparsable (e.g. mid-edit) — no signatures rather than an error, matching
+        // `%check-string-structured` and `%expr-type`
+        Err(_) => return Ok(heap.list(Vec::new())),
+    };
+    let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
+    Ok(signatures_of(heap, &just_forms))
+}
+
+/// The `{:name :sig :declared? :informative?}` list both signature builtins return.
+fn signatures_of(heap: &mut Heap, forms: &[Value]) -> Value {
+    let signatures = crate::types::check::file_signatures(heap, forms);
     let mut out = Vec::with_capacity(signatures.len());
     for signature in &signatures {
         let name = heap.alloc_string(&signature.name);
@@ -110,7 +136,7 @@ pub(super) fn file_signatures_builtin(args: &[Value], _env: EnvId, heap: &mut He
         ]);
         out.push(entry);
     }
-    Ok(heap.list(out))
+    heap.list(out)
 }
 
 /// `(%register-meta 'name (list :since "0.9.0" :deprecated "0.14.0" :use 'other :beta "why"))`

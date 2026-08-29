@@ -136,7 +136,9 @@ one server that owns the language knowledge.
 > `reflect/file-signatures` primitive both surfaces sit on. Since 2026-08-28 all
 > three see **module-private** functions, which the underlying inference had never
 > covered — `defn-` expands to a `do`, and most definitions in a real module are
-> private (ADR-266).
+> private (ADR-266). A fourth surface sits on the same pass without a file at all:
+> `reflect/source-signatures` answers for source *text*, which is what an editor
+> buffer mid-edit or a live evaluator's single form actually has (2026-08-29).
 > • **`textDocument/selectionRange`** (`selection_range.rs`) — smart expand/shrink
 > selection along the CST: symbol → enclosing form → outer form → … → file, read
 > off the node chain at each cursor (trivia and same-extent wrappers skipped so

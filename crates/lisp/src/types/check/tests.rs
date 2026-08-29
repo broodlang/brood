@@ -78,12 +78,16 @@ fn warnings_expanded(src: &str) -> Vec<String> {
 /// fragment), this enables operand / value-slot unbound checking and threads
 /// file-local def names, so it exercises the strict, file-mode behaviour.
 fn file_warnings(src: &str) -> Vec<String> {
+    file_warnings_mode(src, false)
+}
+
+fn file_warnings_mode(src: &str, strict: bool) -> Vec<String> {
     let interp = crate::Interp::new();
     let mut heap =
         crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
     heap.set_global(crate::core::value::EnvId::GLOBAL);
     let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
-    check_file(&mut heap, &forms)
+    check_file_mode(&mut heap, &forms, &[], strict)
         .into_iter()
         .map(|(_, m)| m)
         .collect()
@@ -276,7 +280,7 @@ fn integer_division_yields_int_or_ratio() {
     );
 }
 
-// Ratios close over `+ - *` exactly as ints do: `(+ 1 2 1/2)` is 7/2 and `(+ 1/2 1/2)` is 1.
+// Ratios close over `+ - *` exactly as ints do: `(+ 1/2 1/2)` is 1 and `(* 2 1/2)` is 1.
 // The case used to defer to `+`'s declared signature, which is widened to `number | map`
 // for `Num` records — sound, and noise as the answer to an all-numeric expression.
 #[test]
@@ -285,7 +289,7 @@ fn ring_arithmetic_over_ints_and_ratios_yields_int_or_ratio() {
         "\
          (defmodule t)\n\
          (sig c (int -> float))\n\
-         (defn c (x) (+ x 1/2))",
+         (defn c (x) (* x 1/2))",
     );
     assert!(
         ws.iter()
@@ -293,11 +297,40 @@ fn ring_arithmetic_over_ints_and_ratios_yields_int_or_ratio() {
         "{ws:?}"
     );
     // …and it stays deferred in the merely-wider direction, like division does.
-    let ws = file_warnings("(defmodule t)\n(sig d (int -> int))\n(defn d (x) (* x 1/2))");
+    let ws = file_warnings("(defmodule t)\n(sig d (int -> int))\n(defn d (x) (/ x 1/2))");
     assert!(ws.is_empty(), "{ws:?}");
     // a float operand still wins: contagion is checked first
     let ws = file_warnings("(defmodule t)\n(sig e (int -> int))\n(defn e (x) (+ x 1/2 0.5))");
     assert!(ws.iter().any(|w| w.contains("float")), "{ws:?}");
+}
+
+// A ratio SHIFTED by whole numbers is exactly a ratio — no `int` arm. `Ratio` is demoted to
+// `Int` on construction when its denominator is 1 (`core::value`), so no ratio is integral,
+// and `n ± p/q` is `(nq ± p)/q`, whose denominator is still `q`. The old answer, `int | ratio`,
+// was sound and useless: it is the answer `(+ 1 1/2)` — which is 3/2 and cannot be anything
+// else — got from a live evaluator asking the checker what it had just computed.
+#[test]
+fn adding_whole_numbers_to_one_ratio_is_exactly_a_ratio() {
+    assert_eq!(ty_str("(+ 1 1/2)"), "ratio");
+    assert_eq!(ty_str("(- 1 1/2)"), "ratio");
+    assert_eq!(ty_str("(+ 1 2 1/2)"), "ratio");
+    assert_eq!(ty_str("(inc 1/2)"), "ratio");
+    assert_eq!(ty_str("(- 1/2)"), "ratio");
+    // Two operands can each carry a denominator, and then they can cancel: `(+ 1/2 1/2)`
+    // is the int 1. Multiplication cancels one against a whole number too — `(* 2 1/2)`.
+    assert_eq!(ty_str("(+ 1/2 1/2)"), "int | ratio");
+    assert_eq!(ty_str("(* 2 1/2)"), "int | ratio");
+    assert_eq!(ty_str("(/ 1 1/2)"), "int | ratio");
+    // and the rules above it still win in order: float contagion first, then int closure
+    assert_eq!(ty_str("(+ 1.0 1/2)"), "float");
+    assert_eq!(ty_str("(+ 1 2)"), "int");
+    // A declared `int` over it is now provably wrong, where before it was merely wider.
+    let ws = file_warnings("(defmodule t)\n(sig f (int -> int))\n(defn f (x) (+ x 1/2))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("declared return type int") && w.contains("ratio")),
+        "{ws:?}"
+    );
 }
 
 /// The checker's type of one expression, rendered — for pinning the answers the
@@ -316,7 +349,7 @@ fn ty_str(src: &str) -> String {
 fn precision_rules_give_the_exact_type_where_it_is_provable() {
     for (src, want) in [
         // ratios close over the ring, and `/` is exact over them
-        ("(+ 1 2 1/2)", "int | ratio"),
+        ("(+ 1 2 1/2)", "ratio"),
         ("(- 1/2 1/2)", "int | ratio"),
         ("(/ 3/2 3)", "int | ratio"),
         // a decimal operand: every operand a number, nothing narrower provable — but never
@@ -342,8 +375,8 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         ("(into {} [[:a 1]])", "map"),
         ("(conj [1] 2)", "vector<1 | 2>"),
         ("(conj (list 1) 2)", "list<1 | 2>"),
-        ("(conj #{1} 2)", "set"),
-        ("(merge {:a 1} {:b 2})", "map"),
+        ("(conj #{1} 2)", "set<1 | 2>"),
+        ("(merge {:a 1} {:b 2})", "{a: 1, b: 2}"),
         // control flow and application that had no type
         ("(try 1 (catch e 2))", "1 | 2"),
         ("(try 1 \"a\" (catch e \"b\"))", "\"a\" | \"b\""),
@@ -457,6 +490,31 @@ fn a_generated_let_stays_exempt_from_the_unused_lint_inside_a_module() {
     assert!(
         ws.iter().any(|w| w.contains("unused let binding: x")),
         "{ws:?}"
+    );
+}
+
+// Generated code sits on the most specific honest line: a `match` clause's expansion holds
+// the clause's own body (a form the user wrote), so an unreachable-clause warning lands on
+// the CLAUSE, not on the `match`. (Item 1 of the 2026-08-29 review.)
+#[test]
+fn a_warning_inside_a_match_clause_points_at_the_clause() {
+    let src = "(defn dead (x)\n  (match x\n    (:a (inc 1))\n    (:a (inc 2))\n    (_ 3)))";
+    let mut interp = crate::Interp::new();
+    let forms = reader::read_all_positioned(&mut interp.heap, src)
+        .expect("parse")
+        .into_iter()
+        .map(|(f, _)| f)
+        .collect::<Vec<_>>();
+    let ws = super::check_file(&mut interp.heap, &forms);
+    let (pos, msg) = ws
+        .iter()
+        .find(|(_, m)| m.contains("unreachable clause"))
+        .expect("the duplicate :a clause is reported");
+    let pos = pos.expect("positioned");
+    assert!(
+        pos.line >= 3,
+        "expected a clause line (≥3), got line {} for {msg}",
+        pos.line
     );
 }
 
@@ -6805,5 +6863,116 @@ fn a_structural_complement_is_sayable_and_checks() {
         w.iter()
             .any(|s| s.contains("no-pair") && s.contains("argument 1")),
         "an int pair is not in `(not (tuple int int))`: {w:?}"
+    );
+}
+
+// `list<A> ∩ list<B>` is empty when `A` and `B` are disjoint — an argument list whose
+// elements can never be strings is a bug, not "consistent" with `list<string>`. The
+// empty list is `nil` in Brood, not a pair, so `list<T>` is the NON-empty list and the
+// intersection of two non-empty lists over disjoint elements is genuinely uninhabited.
+#[test]
+fn lists_over_disjoint_element_types_do_not_intersect() {
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig want-strs ((list string) -> int))\n\
+         (defn want-strs (xs) 0)\n\
+         (defn call () (want-strs (list [:a 1])))",
+    );
+    assert!(ws.iter().any(|w| w.contains("want-strs")), "{ws:?}");
+    // …while a list that MAY hold strings stays consistent (gradual: overlap suffices).
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig want-strs ((list string) -> int))\n\
+         (defn want-strs (xs) 0)\n\
+         (defn call (x) (want-strs (list x)))",
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+// A type variable inside `or`/`and`: `(or ?A nil)` binds `?A` to the argument MINUS the
+// concrete alternatives, so the result type is the argument with `nil` carved off.
+#[test]
+fn a_type_variable_inside_or_binds_to_the_rest_of_the_argument() {
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig or-default ((or ?A nil) ?A -> ?A))\n\
+         (defn or-default (x d) (if (nil? x) d x))\n\
+         (sig g (int -> string))\n\
+         (defn g (n) (or-default n 1))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("declared return type string") && w.contains("int")),
+        "{ws:?}"
+    );
+}
+
+// Strict mode (`nest check --strict`): a dynamic value with a precise bound is checked by
+// inclusion. `(h x)` is `dynamic(number)` — consistent with `int` by overlap (the default,
+// reload-safe reading), rejected strictly. A bare `dynamic()` (`any`) stays consistent in
+// both modes: strictness sharpens what is known, it never invents a verdict.
+#[test]
+fn strict_mode_checks_a_precise_dynamic_bound_by_inclusion() {
+    let src = "\
+         (defmodule t)\n\
+         (sig f (int -> int))\n\
+         (defn f (x) x)\n\
+         (sig h (int -> number))\n\
+         (defn h (x) x)\n\
+         (defn g (x) (f (h x)))\n\
+         (defn k (y) (f (undeclared-thing y)))";
+    let lax = file_warnings_mode(src, false);
+    assert!(lax.iter().all(|w| !w.contains("argument 1")), "{lax:?}");
+    let strict = file_warnings_mode(src, true);
+    assert!(
+        strict
+            .iter()
+            .any(|w| w.contains("t/f: argument 1 expects int, got number")),
+        "{strict:?}"
+    );
+    assert_eq!(
+        strict.iter().filter(|w| w.contains("argument 1")).count(),
+        1,
+        "{strict:?}"
+    );
+}
+
+// Sets carry an element type, exactly as vectors and lists do (`set<E>`): the literal,
+// `conj`/`into` onto one, and `(set T)` in a signature — including one with a type
+// variable inside. `#{}` is `set<never>`, which every `set<T>` admits.
+#[test]
+fn sets_carry_their_element_type() {
+    assert_eq!(ty_str("#{1 2}"), "set<1 | 2>");
+    assert_eq!(ty_str("#{}"), "set<never>");
+    assert_eq!(ty_str("(conj #{1} :a)"), "set<:a | 1>");
+    assert_eq!(ty_str("(into #{1} (list :a))"), "set<:a | 1>");
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig want-ints ((set int) -> int))\n\
+         (defn want-ints (xs) 0)\n\
+         (defn ok () (want-ints #{}))\n\
+         (defn bad () (want-ints #{:a}))",
+    );
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].contains("want-ints") && ws[0].contains("set<int>"),
+        "{ws:?}"
+    );
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig pick ((set ?A) -> ?A))\n\
+         (defn pick (xs) (first xs))\n\
+         (sig g (int -> string))\n\
+         (defn g (n) (pick #{1 2}))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("declared return type string") && w.contains("1 | 2")),
+        "{ws:?}"
     );
 }

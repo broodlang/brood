@@ -7042,3 +7042,34 @@ TMT; suite 1250/1250; gcstress green. KI-80 closed with all three mechanisms in 
 Worth keeping: **a flake entry that says "timeout" is a claim about the cap, not the
 failure.** Both KI-74 and KI-80 dissolved the moment the killed try's own output was read —
 and both had been watched politely for days while the output was one `--nocapture` away.
+
+## 2026-08-29 (eighth) — a live evaluator's two questions: what is this typed as, and why is `(+ 1 1/2)` maybe an int?
+
+Both came from bedit's new playground buffer, which shows `=> value : type` beside every
+top-level form as you type. Two things it could not do.
+
+**1. A definition had no type to show.** `(defn foo (x) …)` evaluates to its own *name*, so
+the buffer had `=> foo` and nothing else — and `foo` is a value, not a type. `expr-type`
+structurally cannot help here: the type of that form's value is the type of a symbol. The
+checker already knows the answer (`file_signatures`, the LSP's inlay-hint path, ADR-259/261)
+and could only be asked about a **file** — while a buffer mid-edit is not on disk and one
+form a live evaluator just ran never will be. New primitive **`reflect/source-signatures`**:
+`file-signatures` over source text, same `{:name :sig :declared? :informative?}` maps, `()`
+on unparsable input like its `check-string-structured` neighbour. One shared renderer with
+the file variant, so a buffer and the file it will be saved as cannot disagree.
+
+**2. `(+ 1 1/2)` typed as `int | ratio`.** It is 3/2 and can be nothing else. The
+ratio-closure rule (ADR-196's follow-on) answers with the union for every ring expression
+over ints and ratios, which is right for `(+ 1/2 1/2)` — that *is* the int 1 — and wrong
+here. What makes the narrow answer sound is a representation invariant: a `Ratio` whose
+denominator is 1 is demoted to an `Int` **on construction**, so no ratio is ever integral,
+and `n ± p/q` is `(nq ± p)/q` — same denominator, still not 1. So `+ - inc dec` over ints
+and **exactly one** ratio is exactly `ratio`. `*` and `/` keep the union: they cancel a
+denominator against a whole number (`(* 2 1/2)` is 1). A declared `int` over such a body is
+now provably wrong rather than merely wider, and the in-language tests assert the *runtime*
+arms beside the claim — including across a `send`, since the invariant has to survive the
+deep copy that crosses heaps.
+
+Worth keeping: **a type that is true and unusable is still a bug where it is read.** Nothing
+was unsound about `int | ratio`; it just put "or it could be an int" next to the 3/2 the
+evaluator had already printed. Precision rules earn their keep at the surface that shows them.
