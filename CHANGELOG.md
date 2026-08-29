@@ -4,6 +4,71 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.17.0 — 2026-08-29
+
+**Fixed — the hosted playground could not run its own front-page example (KI-82).** The
+pipeline snippet on `brood.fly.dev` returned `recursion too deep: used 14021552 bytes of
+stack, over the 12582912-byte budget` on a program three frames deep. `WORKER_STACK_BYTES`
+was a hard-coded 16 MiB — a *native worker's* stack — while wasm runs on a ~1 MiB shadow
+stack, so a stale-base reading of 13.4 MiB landed exactly in the gap: over the budget, so it
+raised, and under the "implausibly large ⇒ rebase" backstop, so it was never recognised as
+bogus. Both the constant and the budget margin are now target-aware, and a test pins
+`0 < stack_budget() < WORKER_STACK_BYTES` with a `const` assertion for the margin — that half
+fails the build on wasm32, which a host test can never reach.
+
+**Fixed — an imaged start of a project lost every buffer type's layers (KI-84).** A
+downstream project (bedit) passed its suite on the run that *wrote* `.brood/image.bin` and
+failed 99 tests on every run that *read* it. Two images, and the older one won: the project
+image restored `editor/layers/*type-layers*` with everything the app had registered, and the
+first reference to `editor/layers` then materialised that module from the **stdlib** image —
+which carries the module's registries as their pristine seeds (`{}`) — over the top of it. A
+source load runs `defonce` there and keeps the binding; materialising was a raw define. Now,
+when an embedded module materialises from the pristine image, a global that is already bound
+to **data** keeps its binding (an autoload stub, being a function, is still replaced — KI-72 —
+and a project image, describing a later state, still overwrites). Sabotage-verified guard in
+`tests/startup_image_test.blsp`.
+
+**Added — `reflect/expr-type`, `:trace :all`, `system/build-time`, `keymap-commands`,
+`narrow-to`.** `(reflect/expr-type src)` is the checker's inferred type for an anonymous
+expression (`type-signature` needed a global to ask about). The eval server's `:trace :all`
+boundary-traces every global the *session* defined, resolved in its own image — a client
+walking its source for call heads structurally cannot see a helper the source never names.
+`(system/build-time)` is the runtime's own build instant, and `project/build-info` now dates a
+from-source run by the newer of HEAD's commit and the tree's last edit, marking it `+ edits`;
+`nest release` stamps `:built-at`/`:built-with` into the bundle manifest.
+`editor/keymap/keymap-commands` enumerates every command a keymap binds, so an app can offer
+a deferred module's commands by name without loading it. And `editor/buffer` replaces
+protected *spans* with **narrowing** — `narrow-to` / `widen` / `editable-regions` store what
+is *editable*; read-only is narrowed-to-nothing — because a complement cannot say where an
+insert between two characters is allowed, and an emptied region had no spelling at all.
+
+**`count` and `empty?` accept a rope and a table** (ADR-295). A rope counts in CHARACTERS, so
+it agrees with `string/length` for the text it stands for; a table counts its entries. Sized
+directly rather than through `Seqable`, whose `->seq` is a list view a rope would have to
+materialise. `(seq rope)` is deliberately unchanged — a string returns itself from `seq` and
+raises on `first` too, so a rope doing the same is consistent with what it models.
+
+**A map read is a primitive** — `PrimOp::MapGet`, opt-in (ADR-296). Vectors and the mutable
+table already had one; maps did not, so while every map read compiled to a *call*, no body
+that read a field could be leaf-inlined — not a `defrecord` accessor, not an ability impl,
+not the map-shaped helpers that are most of Brood.
+
+**JIT.** The call result stops returning through memory (bintree −7.5%, collatz −5.8%); call
+arguments are staged in place (bintree −15% warm); `MakeVector(2)` builds in place;
+`brood_rt_fast_frame` takes four arguments rather than ten. Dispatch identity has one
+definition shared by the kernel and the language (ADR-294 and its addendum).
+
+**Added.** `(%tree-walker?)` reports the engine from `tier_ceiling()` rather than from an
+environment variable — two spellings select tier 0 (`BROOD_TIER=0` and its `BROOD_VM=0`
+alias) and a guard that reads one of them silently stops guarding under the other, which is
+how `observability_test` came to assert the sampling profiler had collected frames the
+tree-walker never produces. `editor/keymap-commands` lists every command a keymap binds.
+
+**Two tests that had stopped testing.** `an_imaged_start_keeps_what_loading_registered`
+asserted `provenance: 1` against `*method-from*`, a GLOBAL registry that counts the prelude's
+methods too and now reads 4 — it asserts cold == warm now, which is the property it exists to
+check and which stdlib growth cannot rot.
+
 ## v0.16.0 — 2026-08-29
 
 **BREAKING — the kernel's own bare names, audited for the first time.** Every earlier pass of
