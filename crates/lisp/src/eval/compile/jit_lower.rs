@@ -661,21 +661,20 @@ fn jit_lower_arm_inner(
     let cons_id = m
         .declare_function("brood_rt_cons", Linkage::Import, &cons_sig)
         .ok()?;
-    // brood_rt_make_vector2(heap, out, a 3 words, b 3 words) — same ABI as cons,
-    // builds a 2-element vector (`[a b]` literal, e.g. bintree's `make`).
-    let mut makevec2_sig = m.make_signature();
-    makevec2_sig.params.push(AbiParam::new(ptr_ty)); // heap
-    makevec2_sig.params.push(AbiParam::new(ptr_ty)); // out
-    for _ in 0..6 {
-        makevec2_sig.params.push(AbiParam::new(types::I64)); // elem0 3 words + elem1 3 words
-    }
-    let makevec2_id = m
-        .declare_function("brood_rt_make_vector2", Linkage::Import, &makevec2_sig)
+    // brood_rt_vec2_room(heap, out) -> *mut Value: allocate a 2-element vector (`[a b]`,
+    // e.g. bintree's `make`), write the handle to `*out`, and return its element storage
+    // for the arm to fill in place.
+    let mut vec2room_sig = m.make_signature();
+    vec2room_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    vec2room_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value (the handle)
+    vec2room_sig.returns.push(AbiParam::new(ptr_ty)); // *mut Value (items)
+    let vec2room_id = m
+        .declare_function("brood_rt_vec2_room", Linkage::Import, &vec2room_sig)
         .ok()?;
     // brood_rt_make_vector_n(heap, out, elems: *const Value, n) — builds an n-element
     // vector from `n` `Value`s the JIT staged contiguously at `elems` (a stack slot it
     // owns). The variadic `MakeVector(n != 2)` path; `alloc_vector` never collects, so
-    // the staged bytes stay live across the call (same discipline as make_vector2).
+    // the staged bytes stay live across the call (same discipline as the arity-2 path).
     let mut makevecn_sig = m.make_signature();
     makevecn_sig.params.push(AbiParam::new(ptr_ty)); // heap
     makevecn_sig.params.push(AbiParam::new(ptr_ty)); // out
@@ -938,7 +937,7 @@ fn jit_lower_arm_inner(
     let vnbase_ref = m.declare_func_in_func(vnbase_id, b.func);
     let vobase_ref = m.declare_func_in_func(vobase_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
-    let makevec2_ref = m.declare_func_in_func(makevec2_id, b.func);
+    let vec2room_ref = m.declare_func_in_func(vec2room_id, b.func);
     let makevecn_ref = m.declare_func_in_func(makevecn_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
     #[cfg(debug_assertions)]
@@ -1523,7 +1522,7 @@ fn jit_lower_arm_inner(
         car: car_ref,
         cdr: cdr_ref,
         cons: cons_ref,
-        makevec2: makevec2_ref,
+        vec2room: vec2room_ref,
         makevecn: makevecn_ref,
         thas: thas_ref,
         tget: tget_ref,

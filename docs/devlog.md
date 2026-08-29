@@ -6684,3 +6684,42 @@ Grep a benchmark run's stderr for `CODEGEN-PANICKED` before believing a number.
 
 Running total for the day on `bintree`: §2h (return through the caller's slot) −7.5%, §2i
 (argument count, neutral, kept as simplification), §2j (staging in place) −15% warm.
+
+## 2026-08-29 (fourth) — a wrong number of my own, and MakeVector(2) in place
+
+**The correction first, because it is the more useful half.** The previous entry reported the
+in-place staging change at −14.9% / −15.8%. It is **−8.5% / −9.1%**. I measured the new binary
+against a *saved* baseline binary from an earlier session, and that same baseline reads 913 ms
+today where it read 1008 ms then — ~10% of between-invocation drift, which the second size
+then confirmed by measuring twice. `CLAUDE.md` documents this trap almost word for word
+("`make ab`'s baseline wandered 209 → 230 ms across the day; the 'confirmation' was measuring
+drift twice"), and I quoted it earlier in the same session while walking into it.
+
+What the method should have been, and now is: **interleave every arm inside one command**, and
+when there is a chain of changes, run all three binaries — before, middle, after — in one
+loop. Three-way is what caught this: a chain claiming −15% then −16% has to be wrong, and the
+inconsistency was visible immediately where two separate two-way comparisons had each looked
+plausible. The pinned 31-row sweep figure (−5.5%) was interleaved and was right all along; the
+gap between it and the "warm" number was the tell I explained away.
+
+**`MakeVector(2)`.** `brood_rt_make_vector2` took the two elements as six `i64` words; SysV
+has six argument registers and `heap`/`out` take two, so four spilled and the callee loaded
+them back — `movaps 0x60(%rsp)` at 34.6% and `movups 0x8(%rsp)` at 31.6% of that function.
+`brood_rt_vec2_room` returns the slot's element storage instead, so the arm's stores land in
+the slab: two register arguments, one write instead of two copies.
+
+**About −1.5%** (−1.7% and −1.4% at n=2000 across two sessions, −1.0% at n=6000, −2.1%
+pinned) — which is one to three times the spread depending on the round, so small enough that
+the right way to state it is "probably ~1.5%", not a decimal. And *a third of what the
+annotation implied* — the third time on this path that removing the visibly expensive
+instructions returned a fraction of their share. Kept for the simplification as much as the
+speed. Elements are left `Nil` rather than uninitialised, unlike the roots staging: this slot
+is reachable from the handle, so a missed store must be a wrong value the tests catch, never a
+word the GC would trace.
+
+Verified: suite 1236/1236, `make gcstress`, GC_STRESS+GC_VERIFY on the cons/vector-alloc
+cases, all 21 `jit_*_test.blsp`, fuzz differential over three generators × 4 engine configs —
+0 divergences, 0 crashes.
+
+Honest running total on `bintree` for the day, all interleaved: **−7.5%** (return slot),
+neutral (argument count), **−8.5%** (staging in place), **~−1.5%** (vector in place).

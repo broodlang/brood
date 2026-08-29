@@ -35,8 +35,9 @@ pub(super) struct Funcs {
     pub cdr: FuncRef,
     /// `brood_rt_cons` — pair allocation.
     pub cons: FuncRef,
-    /// `brood_rt_make_vector2` / `brood_rt_make_vector_n` — vector literal builders.
-    pub makevec2: FuncRef,
+    /// `brood_rt_vec2_room(heap, out) -> *mut Value` — allocate a 2-element vector and
+    /// return its element storage, so the arm writes the elements in place.
+    pub vec2room: FuncRef,
     pub makevecn: FuncRef,
     /// `brood_rt_table_has` / `_get2` / `_put` — the table primitives (FFI fallback).
     pub thas: FuncRef,

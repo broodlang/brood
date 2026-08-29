@@ -4460,6 +4460,39 @@ impl Heap {
         Value::vector(VecId::local_gen(idx, self.local_epoch))
     }
 
+    /// Allocate a 2-element vector whose elements the **caller** writes, in place: returns
+    /// the fresh handle and a pointer to the slot's `items`.
+    ///
+    /// The counterpart of [`alloc_vector2`](Self::alloc_vector2) for JIT-compiled code, and
+    /// the reason it exists is the ABI. `brood_rt_make_vector2` took the two elements as
+    /// **six `i64` words**; SysV passes six arguments in registers and this call also needs
+    /// `heap` and `out`, so four words spilled to the caller's stack and the callee loaded
+    /// them straight back. Those two loads were **66% of `brood_rt_make_vector2`**, itself
+    /// 7.9% of `bintree` — the same store-to-load-across-a-call shape as the return value in
+    /// §2h. Handing back the destination lets the arm's own stores land in the slab.
+    ///
+    /// # Safety
+    /// The returned slot's elements are **live heap data holding whatever `Value::Nil`
+    /// leaves there** until the caller writes both. Nothing may allocate or collect in that
+    /// window. `Nil` rather than uninitialised memory deliberately: this slot is reachable
+    /// from the returned handle, so a missed store must degrade to a wrong *value* the tests
+    /// can catch, never to a garbage word the GC would trace.
+    pub(crate) fn alloc_vector2_room(&mut self) -> (Value, *mut Value) {
+        let idx = alloc_slot!(
+            self,
+            vectors,
+            VecStore::Inline {
+                len: 2,
+                items: [Value::nil(), Value::nil()],
+            }
+        );
+        let ptr = match &mut self.local.vectors[idx] {
+            VecStore::Inline { items, .. } => items.as_mut_ptr(),
+            VecStore::Spill { .. } => unreachable!("just pushed an Inline"),
+        };
+        (Value::vector(VecId::local_gen(idx, self.local_epoch)), ptr)
+    }
+
     /// Allocate a lazy integer range `lo..hi` by `step`. Returns `Nil` when the
     /// range is empty (so a `Value::Range` always has ≥1 element), otherwise a
     /// `Value::Range` backed by a 3-element `[lo hi step]` vector. `step` must be
