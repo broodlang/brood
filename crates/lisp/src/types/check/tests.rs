@@ -7167,3 +7167,34 @@ fn a_guards_truthy_leftover_renders_as_a_negation() {
     assert!(Ty::truthy().is_known_only_by_exclusion());
     assert!(!Ty::of(Tag::Str).is_known_only_by_exclusion());
 }
+
+// A `& rest` function's fixed parameters bind positionally like any other's, so they keep
+// their demands; the rest binder's demand becomes a per-argument one. And a known callback
+// hands its demands to `fold`/`reduce`'s init and collection. Together:
+// `(defn foo (x y & more) (+ (fold + x more) y))` is `(number number & number -> number)`.
+#[test]
+fn a_rest_function_keeps_its_positional_demands_and_fold_hands_down_the_callbacks() {
+    let mut interp = crate::Interp::new();
+    let form = reader::read_one(&mut interp.heap, "(fn (x y & more) (+ (fold + x more) y))")
+        .expect("parse");
+    let demands =
+        super::sigs::infer_params_from_form(&interp.heap, form, &Ctx::default()).expect("demands");
+    let params: Vec<String> = demands.params.iter().map(Ty::to_string).collect();
+    assert_eq!(params, vec!["number", "number"]);
+    assert_eq!(
+        demands.rest.map(|t| t.to_string()).as_deref(),
+        Some("number")
+    );
+    // a call site checks each rest argument against that element demand
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defn foo (x y & more) (+ (fold + x more) y))\n\
+         (defn bad () (foo 1 2 3 \"four\"))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("t/foo: argument 4 expects number, got \"four\"")),
+        "{ws:?}"
+    );
+}

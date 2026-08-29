@@ -194,6 +194,61 @@
     ;; (str ")" 1) — the ) inside the string must not match the leading (
     (assert= (bracket-match "(str \")\" 1)" 1) [0 10])))
 
+(describe "symbol-at — what the cursor is ON"
+  ;; `symbol-prefix-at`'s sibling and a different question: that one stops dead at the cursor
+  ;; (what has been TYPED, which is what completion needs), this one runs to the end of the
+  ;; token (what is being POINTED at, which is what a doc lookup needs).
+  (test "the whole token, wherever in it the cursor sits"
+    (assert= (symbol-at "(map f xs)" 1) [1 "map"])
+    (assert= (symbol-at "(map f xs)" 2) [1 "map"])
+    (assert= (symbol-at "(map f xs)" 4) [1 "map"]))
+
+  ;; A cursor immediately AFTER a token counts as on it, the way Emacs's `symbol-at-point`
+  ;; does — that is where point lands the moment you finish typing one.
+  (test "just past a token still counts as on it"
+    (assert= (symbol-at "(map f xs)" 4) [1 "map"]))
+
+  (test "between delimiters is on no symbol"
+    (assert= (symbol-at "(map f xs)" 0) nil)
+    (assert= (symbol-at "(map f xs)" 10) nil)
+    (assert= (symbol-at "( )" 1) nil))
+
+  (test "operators are symbols too"
+    (assert= (symbol-at "(+ 1 2)" 1) [1 "+"])))
+
+(describe "closer-redundant? — is this closer already there"
+  ;; The question an editor asks before self-inserting a closing delimiter: with point at
+  ;; `(+ 1 2|)`, typing `)` should move over the one already there rather than make
+  ;; `(+ 1 2))` — Emacs's `electric-pair-mode` skip, paredit's `close-round`.
+  (test "the closer of the form you are in is redundant"
+    (is (closer-redundant? "(+ 1 2)" 6 ")"))
+    (is (closer-redundant? "[1 2]" 4 "]"))
+    (is (closer-redundant? "{:a 1}" 5 "}")))
+
+  ;; The condition is about the enclosing FORM, not the next character — which is what stops
+  ;; it eating a delimiter you meant. In `(foo (bar|)` the `)` closes `(bar`, so stepping
+  ;; over it is right and leaves `(foo` still to close.
+  (test "an inner form's closer is redundant; the outer one still has to be typed"
+    (is (closer-redundant? "(foo (bar)" 9 ")"))
+    (refute (closer-redundant? "(foo (bar)" 10 ")")))
+
+  (test "a stray closer at top level closes nothing and is typed"
+    (refute (closer-redundant? ")" 0 ")"))
+    (refute (closer-redundant? "(+ 1 2)" 7 ")")))
+
+  ;; Typing the character the reader will complain about is more honest than silently
+  ;; stepping over a mismatch.
+  (test "a mismatched closer is typed"
+    (refute (closer-redundant? "[1 2)" 4 ")")))
+
+  ;; Inside a string or a comment a bracket is a character, not structure.
+  (test "text is text"
+    (refute (closer-redundant? "(str \";)\")" 6 ")"))
+    (refute (closer-redundant? "(a) ;; )" 7 ")")))
+
+  (test "an unterminated string swallows the rest, so nothing in it is redundant"
+    (refute (closer-redundant? "(str \")" 6 ")"))))
+
 (describe "enclosing-call — the call around the cursor"
   (test "callee and arg index"
     (assert= (enclosing-call "(map f " 7) ["map" 1])

@@ -7107,3 +7107,37 @@ Clippy step failing skips every step behind it. Fixed.
 Worth keeping: **a dependency edge you cannot see is a reason to widen, not to guess.** Every
 case this analysis is blind to — a macro-introduced name, a side effect, a namespace change —
 resolves to "re-run more", and the fallbacks are what make the fast path safe to take.
+
+## 2026-08-29 (tenth) — three editor-framework primitives, from three things the playground wanted
+
+All three are `std/editor/*` (the framework, in Brood), and all three answer a question the
+editor could previously only guess at.
+
+**`closer-redundant?`** — typing `)` at `(+ 1 2|)` gave `(+ 1 2))`. Emacs's
+`electric-pair-mode` skip, but the condition is about the enclosing FORM, not the next
+character: in `(foo (bar|)` the `)` at point closes `(bar`, so stepping over it is right and
+leaves `(foo` still to close; at top level a stray `)` closes nothing and is typed; `[1 2|)`
+is a mismatch and is typed; and inside a string or a comment a bracket is a character. That
+needed one more bit than `enclosing-open` reports — it clamps its string/comment skips at
+`pos` and so cannot tell a form that encloses you from a string that sits inside one — hence
+`hl-close-scan`, which answers `:text`.
+
+**`symbol-at`** — `symbol-prefix-at`'s sibling and a different question. That one stops dead
+at the cursor (what has been TYPED, for completion); this runs to the end of the token (what
+is being POINTED at, for a doc lookup), with the Emacs rule that just-past-a-token counts.
+
+**`reflect/source-deps`** (kernel, previous entry) plus these two gave the playground: docs
+in the pane for whatever the cursor is on (`modes/brood-doc-at`, a new `:doc-at` mode
+service — the symbol under point, else the head of the call around it, else one level out, so
+the middle of a literal is not a dead spot), and a pane that shows the whole reply rather
+than only the trace.
+
+**Measured while there:** `sexp/top-level-forms` costs **345 µs** on a 40-form buffer and ran
+on EVERY keystroke to find which form the cursor is in; `reflect/source-deps` over the same
+text is 75 µs in Rust. `playground-post-key` now orders its work cheapest-first and only
+re-renders when the docs or the form actually changed.
+
+Worth keeping: **two answers on two clocks want two places, not one.** The pane's report is
+per REPLY and its doc block is per KEYSTROKE, so the doc block lives on the model beside
+`:workings-region` rather than threaded through `refresh` — which would have made every
+caller carry an argument only one of them can fill in.

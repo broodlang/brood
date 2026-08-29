@@ -4,6 +4,16 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Changed — inferred signatures see through `& rest`, `fold`/`reduce`, and their own
+demands.** A `& rest` function's fixed parameters keep their positional demands and the
+rest binder's demand becomes a per-argument one (`(defn foo (x y & more) (+ (fold + x more)
+y))` is `(number number & number -> number)`, not `(any any & any -> number)`); a known
+callback hands its demands to `fold`/`reduce`'s init and collection; and the return type is
+inferred with each parameter bound to its demand rather than `any`, so `(fold + x xs)` is
+numeric, not `any`.
+
 ## v0.18.0 — 2026-08-29
 
 The type-system precision release: every warning positioned at the form it came from,
