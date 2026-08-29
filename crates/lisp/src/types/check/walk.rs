@@ -2776,6 +2776,7 @@ fn check_let(
             && rhs_ty.as_ref().is_some_and(|t| !t.is_never())
             && !is_gensym_sym(name)
             && heap.form_pos_only(form).is_some()
+            && !heap.is_synthetic(form)
         {
             scope.mark_dead_clause_local(name);
         }
@@ -2840,13 +2841,16 @@ fn check_let(
                         .any(|&f| sym_appears_in(heap, f, name));
                     let body_used = items[2..].iter().any(|&f| sym_appears_in(heap, f, name));
                     if !preceding_used && !following_used && !body_used {
-                        // Only warn for user-written `let`s (those the reader
-                        // assigned a source position). Compiler-generated lets
-                        // (from match/pattern expansion) have no position and
-                        // are exempt: their names are user-chosen but the
-                        // "unused" status is an expansion artifact.
-                        if let Some(pos) = heap.form_pos_only(form) {
-                            out.push((Some(pos), format!("unused let binding: {}", nm)));
+                        // Only warn for user-written `let`s. Compiler-generated lets (from
+                        // match/pattern expansion) are exempt: their names are user-chosen
+                        // but the "unused" status is an expansion artifact. They used to be
+                        // told apart by having no source position; the expander now gives
+                        // generated code the position of the form it came from, so the
+                        // question is asked directly (`is_synthetic`).
+                        if !heap.is_synthetic(form) {
+                            if let Some(pos) = heap.form_pos_only(form) {
+                                out.push((Some(pos), format!("unused let binding: {}", nm)));
+                            }
                         }
                     }
                 }

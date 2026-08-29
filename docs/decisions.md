@@ -210,6 +210,39 @@ out to already exist (`nest check` has always exited 1 on any warning).
 
 ---
 
+## ADR-297 — Synthetic code is located at the form it was expanded from
+
+**Status:** accepted; implemented 2026-08-29 (`eval/macros.rs` `stamp_synthetic`,
+`Heap::mark_synthetic` / `is_synthetic`).
+
+**Context.** Source positions are recorded by the reader, on the pairs it builds. A macro's
+result — and the expander's own desugars (pattern binders to `match*`) — are pairs the
+reader never saw, so they carried no position. Every consumer of positions inherited the
+hole: the checker's match-exhaustiveness and unreachable-clause lints, and an argument
+check inside a destructuring `let`, printed `file: warning: …` with nothing to jump to;
+a runtime error raised from generated code had no location. The one mechanism that
+existed (`rebuild_list`) copied a position only for a list the expansion walk itself
+rebuilt — a macro's output got nothing. And one lint (the unused-`let` exemption for
+match-generated bindings) had come to *rely* on the hole, reading "no position" as "is
+generated".
+
+**Decision.** After every expansion step, every unpositioned pair reachable from the
+result takes the position of the form the step expanded — the rule every mature Lisp
+uses (Racket's srcloc propagation, Clojure's meta inheritance). Sub-forms the user wrote
+are the same pair values and keep their exact positions; the walk stops at any positioned
+pair, which keeps the pass linear (children are expanded before their parent, so a
+positioned subtree is already finished). "Is generated" becomes an explicit fact —
+`Heap::mark_synthetic`, set by the same stamp — rather than an inference from a missing
+position, and the two lints that asked the inferred question now ask the fact.
+
+**Consequences.** Every checker warning carries a `line:col` (guard:
+`every_warning_carries_a_position`), coarse for generated code — the enclosing user form,
+which is the honest answer — and exact for the user's own text. Runtime errors from inside
+expansions gain a location for free. The checker's interim backfill (which had placed a
+positionless warning at its top-level form) is gone: one mechanism, in the expander, where
+the information is created. A position on quoted data inside an expansion is harmless and
+unused.
+
 ## ADR-001 — Implement the runtime in Rust (not C or Zig)
 
 **Status:** accepted.

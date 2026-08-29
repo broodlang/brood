@@ -946,7 +946,7 @@ impl Heap {
             // entry re-hashed and re-allocated the tenured ones on *every* collection,
             // which is O(all positions recorded so far) per minor rather than O(nursery).
             // Retain in place, and reinsert only the entries whose slab index moved.
-            let mut moved: Vec<(u64, (crate::error::Pos, Option<Arc<str>>))> = Vec::new();
+            let mut moved: Vec<(u64, crate::core::heap::FormPos)> = Vec::new();
             let cold = self.cold_mut();
             cold.form_pos.retain(|&key, pos| {
                 if (key >> 32) & 1 == 1 {
@@ -1088,7 +1088,7 @@ impl Heap {
         // (`minor_collect`) has always retained in place correctly; this mirrors it, which
         // also drops the O(all positions recorded so far) rehash the `take` cost per major.
         if self.cold.is_some() {
-            let mut moved: Vec<(u64, (crate::error::Pos, Option<Arc<str>>))> = Vec::new();
+            let mut moved: Vec<(u64, crate::core::heap::FormPos)> = Vec::new();
             let cold = self.cold_mut();
             cold.form_pos.retain(|&key, pos| {
                 if (key >> 32) & 1 == 0 {
