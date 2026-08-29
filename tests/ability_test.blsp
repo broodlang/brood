@@ -453,6 +453,29 @@
     ;; `(str …)` yields a string → :string impl (count), NOT any record path.
     (assert= (size (str "ab" "cd")) 4)))
 
+(describe "dispatch identity: the mapping devirtualization depends on"
+  ;; `inline::mono_arg_identity` proves a direct-constructor call's identity by taking the
+  ;; constructor's resolved global name and keywording it — `(circle 2)` → `:mod/circle` —
+  ;; then confirming that keyword is a registered record id. That is sound only if a record's
+  ;; baked `:__id__` really IS its constructor's qualified name, and until now that was
+  ;; asserted by a comment. It matters more under speculative dispatch
+  ;; (docs/dispatch-speculation.md): a guard compares this identity and then calls an impl
+  ;; directly, so a divergence is a silently wrong impl rather than a slow path.
+  (test "a record's identity round-trips to its own constructor"
+    (let (id (%identity-of (circle 1)))
+      (is (contains? *record-ids* id))
+      (assert= circle (reflect/eval (symbol (->string id))))))
+
+  (test "every registered record id names a bound constructor"
+    ;; Over the whole image, not just this file's records — the property has to hold for
+    ;; every `defrecord` the compiler might meet, including the stdlib's.
+    (let (ids (keys *record-ids*)
+          orphans (filter (fn (id) (not (bound? (symbol (->string id))))) ids))
+      ;; Not vacuous: an empty or near-empty registry would satisfy the assertion below
+      ;; while checking nothing (ADR-280). This file alone defines several records.
+      (is (>= (count ids) 3))
+      (assert= nil (seq orphans)))))
+
 (describe "typed ability op parameters: (->string T) in an op spec (ADR-180)"
   (test "a bad argument to a typed op param is flagged"
     (is (abt-warns-about? "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn bad () (sc 5 \"x\"))"
