@@ -18880,11 +18880,15 @@ whatsoever**, and building this on top of it revealed it had rotted into unusabl
 are cold-boot-cache-only, which is why every warm run looked fine — a warm cache replays an
 already-expanded prelude and never executes the macro bodies below:
 
-1. `sig!`'s expansion-time code called `take`, `nth`, `map`, `range` and `count`. Those are not
-   reachable that early in the prelude's own load order, and `take` had left the bare namespace
-   entirely (ADR-290/291) with nothing noticing, because nothing expanded that path. Replaced
-   with `%sig-take` / `%sig-nth` / `%sig-gensyms`, siblings of the `%sig-pos` that already
-   existed for exactly this reason.
+1. `sig!`'s expansion-time code called `take`, `nth`, `map`, `range` and `count`, none of which
+   exist yet at that point: the prelude concatenates `core → predicates → map → control →
+   match → process → seq → string → tools`, and `sig!` lives in `core.blsp` while `take` is
+   defined in `seq.blsp`. Replaced with `%sig-take` / `%sig-nth` / `%sig-gensyms`, siblings of
+   the `%sig-pos` that already existed for exactly this reason. (**Corrected 2026-08-29:** this
+   first said `take` had left the bare namespace in ADR-290/291. It had not — `take` is bound
+   at root and never moved. The fault is load order alone, and `defmulti`'s bare `take` in
+   `tools.blsp`, named here as a second latent site, is fine because `tools` is concatenated
+   after `seq`.)
 2. The contract shim was `(let (orig name) (fn …))` — a closure over a **let-bound local** —
    and the prelude's freeze step rejects precisely that (`shared closures must capture the
    global env`). Arming contracts over the prelude's own sigs aborted the boot. The original is

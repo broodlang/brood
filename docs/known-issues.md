@@ -82,7 +82,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | # | What | Status |
 |---|---|---|
 | KI-82 | **The hosted playground cannot run its own front-page example.** `https://brood.fly.dev` — `(->> (range 1 11) (map (fn (n) (* n n))) (filter math/odd?) (reduce +))` returns `recursion too deep: used 14021552 bytes of stack, over the 12582912-byte budget`, trace `{:fn %require-force-in} {:fn %require-force}` at `std/math.blsp:19`. So the auto-require of `math` (inferred from the qualified `math/odd?`) recurses in the **wasm** build | ⚠️ **OPEN 2026-08-29** — **wasm-only**: the identical snippet on the native 0.16.0 binary answers `165`. Not yet attributed. The playground wasm is built during the hive deploy from `BROOD_REF`, which moved `d3a2cdfa` → `d12dc5d0` (v0.16.0) today, so the v0.16.0 bump is the prime suspect and ADR-290/291 is the part of it that touched `require`: it put qualified `reflect/…` references into the PRELUDE, and a qualified reference is what infers a require. **Ruled out:** the playground's own preload line (`crates/playground/src/lib.rs`), which I also renamed — it is the *autocomplete* `Interp`, not the eval path. **Fastest mitigation if the site matters more than the diagnosis:** repin `BROOD_REF` to `d3a2cdfa` in `hive/Dockerfile` and redeploy; the reference page reverts to documenting 0.15.0 with it. **First thing to try:** reproduce under `wasm32` locally (`crates/playground`) rather than through a deploy |
-| KI-81 | **`BROOD_CONTRACTS=1` was unusable on a cold boot cache** — one run panicked in prelude expansion — `prelude expand: unbound error: unbound symbol: take` (`lib.rs:359`), on a file using `defability`/`impl`/`sig`. `take` genuinely left the bare namespace in ADR-290/291, and `std/prelude/tools.blsp:2301` (`defmulti`) still calls it bare — but that line is reached at *expansion* and every later run expands it fine | ✅ **FIXED 2026-08-29** (ADR-293) — **never a flake**: `touch target/release/brood` reproduces it 100%, because the boot cache is keyed on the executable's mtime, so the first run after any rebuild is cold and every run after replays the cache without executing the macro bodies. The twelve clean runs were twelve warm ones, and the image hypothesis was wrong. THREE independent cold-only defects: `sig!`'s expansion-time `take`/`nth`/`map`/`range`/`count` (unreachable that early, and `take` had left the bare namespace); the shim closing over a **let-bound local**, which the prelude's freeze step rejects; and `defrecord` emitting its constructor `sig` **above** the `defn` it rebinds, making every record fatal in that mode. Root cause of all three: the mode had **no end-to-end test**, so `crates/cli/tests/contracts_mode.rs` now cold-caches deliberately via `XDG_CACHE_HOME` — without that it passes on a broken build |
+| KI-81 | **`BROOD_CONTRACTS=1` was unusable on a cold boot cache** — one run panicked in prelude expansion — `prelude expand: unbound error: unbound symbol: take` (`lib.rs:359`), on a file using `defability`/`impl`/`sig`. the cause is prelude LOAD ORDER, not a rename: `sig!` lives in `core.blsp` and `take` is defined in `seq.blsp`, which is concatenated later | ✅ **FIXED 2026-08-29** (ADR-293) — **never a flake**: `touch target/release/brood` reproduces it 100%, because the boot cache is keyed on the executable's mtime, so the first run after any rebuild is cold and every run after replays the cache without executing the macro bodies. The twelve clean runs were twelve warm ones, and the image hypothesis was wrong. THREE independent cold-only defects: `sig!`'s expansion-time `take`/`nth`/`map`/`range`/`count` (not yet defined that early — `core.blsp` expands before `seq.blsp` is concatenated); the shim closing over a **let-bound local**, which the prelude's freeze step rejects; and `defrecord` emitting its constructor `sig` **above** the `defn` it rebinds, making every record fatal in that mode. Root cause of all three: the mode had **no end-to-end test**, so `crates/cli/tests/contracts_mode.rs` now cold-caches deliberately via `XDG_CACHE_HOME` — without that it passes on a broken build |
 | KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
 | KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict. **Addendum 2026-08-29:** the same defect verbatim in `check-examples`/`check-stress`/`check-corpora` (fixed inline in `green.sh` only), which on a lean `make release` brood additionally reported an absent DEV_MODULE (`reload/on-change`) as *rename rot* — the exact class the gate exists to find. All three now share `scripts/lib/gate-binary.sh`, which resolves by sha and separates "this build lacks the module" from "this name is gone" |
 | KI-79 | **`live_migration::deep_receive_continuations_resume_correctly_across_workers` failed once in CI, on the commit that moved the JIT preempt handler.** The test runs up to 400 bursts and fails unless `migrate_count() > 0` — it asserts a scheduler event was **observed**, not that results are right. In the failing run the per-burst correctness assertion passed **400/400**; only the "was a migration seen" assertion fired, which is the case the test's own message anticipates ("if this is the only failure and the machine was loaded, suspect scheduler starvation"). Suspicious anyway, because `12b31fc2` outlined `jit_run_fast_link`'s cold arms — including the **preempt** outcome that live migration depends on | ⚠️ **WATCHING 2026-08-28** — not reproduced in 18 local runs (10 unpinned + 8 pinned to 2 cores, matching CI's core count). The change is provably a **verbatim** move: a line-by-line diff of the 117 moved lines against the original shows zero semantic differences, and the only new code is `if outcome == 0 { … return }` ahead of the delegation. It also cannot change *when* a preempt happens — the native arm's tick poll decides that, and only the handling moved. Mitigated rather than closed: `live_migration` now carries `retries = 1`, the gap the `distribution` override already documents. **If it recurs, get whether the correctness assertion also failed** — that is the line between starvation and a real capture-machinery bug |
@@ -5018,6 +5018,37 @@ rather than the summary line; libtest's summary alone cannot answer it.
 **Next step if it recurs:** get the case name, then decide. Until then this entry exists so a
 second sighting is recognised as a second sighting rather than a first.
 
+## KI-82 — the hosted playground cannot run its own front-page example ⚠️ OPEN 2026-08-29
+
+**What happens.** On `https://brood.fly.dev`, the snippet the front page ships as its example
+
+```lisp
+(->> (range 1 11) (map (fn (n) (* n n))) (filter math/odd?) (reduce +))
+```
+
+answers `recursion too deep: used 14021552 bytes of stack, over the 12582912-byte budget`, with
+`{:fn %require-force-in} {:fn %require-force}` in the trace at `std/math.blsp:19`. So the
+**auto-require of `math`** — inferred from the qualified `math/odd?` — recurses in the wasm
+build.
+
+**Wasm-only.** The identical snippet on the native 0.16.0 binary answers `165`.
+
+**Not yet attributed.** The playground wasm is built during the hive deploy from `BROOD_REF`,
+which moved `d3a2cdfa` → `d12dc5d0` (v0.16.0) that day, so the v0.16.0 bump is the prime
+suspect — and ADR-290/291 is the part of it that touched `require`: it put qualified
+`reflect/…` references into the **prelude**, and a qualified reference is what infers a
+require.
+
+**Ruled out:** the playground's own preload line (`crates/playground/src/lib.rs`), renamed in
+the same wave. That is the *autocomplete* `Interp`, not the eval path.
+
+**Fastest mitigation, if the site matters more than the diagnosis:** repin `BROOD_REF` to
+`d3a2cdfa` in `hive/Dockerfile` and redeploy. The reference page reverts to documenting 0.15.0
+with it.
+
+**First thing to try:** reproduce under `wasm32` locally (`crates/playground`) rather than
+through a deploy.
+
 ## KI-81 — `BROOD_CONTRACTS=1` was unusable on a cold boot cache ✅ FIXED 2026-08-29
 
 **Filed as an unreproducible one-shot panic. It was never a flake.** The trigger is
@@ -5028,11 +5059,18 @@ ones. Reproduces 100% cold.
 
 **Three independent defects, all cold-only** (full reasoning in ADR-293):
 
-1. `sig!`'s expansion-time code called `take`/`nth`/`map`/`range`/`count`, none reachable that
-   early in the prelude's load order — and `take` had left the bare namespace entirely in
-   ADR-290/291 with nothing noticing, since nothing expanded that path. Now `%sig-take` /
-   `%sig-nth` / `%sig-gensyms`, siblings of the `%sig-pos` that already existed for this
-   reason.
+1. `sig!`'s expansion-time code called `take`/`nth`/`map`/`range`/`count`, none of which exist
+   yet at that point: the prelude concatenates `core → predicates → map → control → match →
+   process → seq → string → tools`, and `sig!` lives in `core.blsp` while `take` is defined in
+   `seq.blsp`. Now `%sig-take` / `%sig-nth` / `%sig-gensyms`, siblings of the `%sig-pos` that
+   already existed for exactly this reason.
+
+   **Corrected 2026-08-29:** this entry first blamed ADR-290/291 for moving `take` out of the
+   bare namespace, and named `std/prelude/tools.blsp`'s `defmulti` as a second latent call
+   site. Both were wrong. `take` is bound at root (`(bound? 'take)` → true) and never moved;
+   the fault is purely load order. And `tools.blsp` is concatenated *after* `seq.blsp`, so
+   `defmulti`'s bare `take` resolves and needs no fix. The fix above was right; the reason
+   given for it was not.
 2. The shim was `(let (orig name) (fn …))` — a closure over a **let-bound local** — which the
    prelude's freeze step rejects outright (`shared closures must capture the global env`). The
    original now lives in a gensym'd global, so the shim captures only globals.
