@@ -6954,3 +6954,52 @@ the framework's per-test slow annotation (`… 13.9s`), printed only when a nest
 line ending in a duration; sabotage-verified on the exact captured outputs (old filter fails
 them, new passes, a `92→91 passed` mutation still diverges). Same species as KI-80, and the
 rule both point at: **a differential must compare answers, not transcripts.**
+
+## 2026-08-29 (sixth) — the soundness hunt: two real bugs, a rejected optimization, and KI-74 closed
+
+A deliberate bug/leak/JIT-miss hunt over the whole runtime, at the user's request. Everything
+below was found by pointing an existing diagnostic somewhere nobody had pointed it.
+
+**Feature-gate rot (3 fixes).** `cargo clippy --no-default-features -- -D warnings` — a
+configuration CI's `--all-features` clippy structurally cannot cover — was red on three
+dead-code errors: my `alloc_vector2_room`, plus the pre-existing `blockarg_spill_window` and
+`vm_stats`, all fns whose only callers are feature-gated while they were not. All three now
+carry their callers' cfg.
+
+**The deopt thrash (`BROOD_DEOPT_TRACE` across every row).** mandelbrot's `->float` deopted
+**275,007 times in one run** — native entry + guard + deopt + full VM re-run, per call,
+forever — because the deopt-feedback watch predicate required ≥1 non-tail call and `->float`
+has none. Watch is now every non-SelfCall arm; it latches after 16 as designed. Sweep: all
+noise (the win is the class, not a row). Left in §7: regex's loop arm deopts 17.7k times AT
+ENTRY, which the SelfCall exclusion mis-serves.
+
+**The promote leak (`BROOD_TRACE_PROMOTE` on a spawn workload).** ~1 RUNTIME-region promotion
+per spawned process — the const-closure promote fired on the *second* sighting of a
+capture-free literal, and a worker that evaluates a `receive` twice sights its matcher twice.
+Per-process growth of the append-only shared region, the exact shape frontier A3 rejects at
+541 MB/800k ops. The template cache now counts sightings and the promote fires on the 8th:
+4000 spawns went from 3830 promotes to 0, RSS 130.8 → 124.9 MB, hot literal loops unaffected
+(on the VM they were const-folded at compile time all along — which is also why the
+concurrency rows measure flat). Ruled out on the way: the RUNTIME collector (floor at 100M
+changed nothing).
+
+**KI-74 reproduced, named, closed.** 40 × `cargo test -p brood --lib` under a 4-core spin:
+1-in-40, and the full output names `jit_tier_compiles_a_hot_arm_then_runs_native` — a 400×2 ms
+poll for the background compiler, i.e. an ~0.8 s deadline a loaded box misses, amplified by
+libtest's shared process queueing every other test's compiles ahead of it. nextest under the
+same load: 30/30, which is why only libtest ever saw it. Both polls are now 60 s wall-clock
+bounds. The entry's cache-race hypothesis was wrong; the entry also had no index row (added).
+First loop attempt was garbage — I edited the tree under it, and 25/25 of another loop's
+"failures" were my own script's wrong package name. Reproduction loops get a quiet tree.
+
+**§7.2 attempted and REJECTED — the CLIF verifier is load-bearing.** `enable_verifier=false`
+(the measured ~3.5% compile-thread saving) makes cranelift-codegen 0.133.1's own
+`remove_constant_phis` fail its internal assert on one of json's arms — CLIF that verifies
+clean — and the caught panic switches the JIT off for the whole process. Verifier back on,
+same tree: clean. Recorded at the flag site and in §7.2. Two signatures worth knowing: heavy
+`gimli`/`addr2line`/`miniz_oxide` on the brood-jit thread means a caught codegen panic
+printed its backtrace (~6% of a run), and the process is silently interpreter-only after.
+
+**§7.6 resolved.** The "TraceFrame growth" on bintree was debuginfo misattribution: the LBR
+chain lands in `push_mut<VecStore>` inside `alloc_vector2_room` — the vectors-slab Vec
+regrowing. It is §7.4's allocation family, not an error-path leak.
