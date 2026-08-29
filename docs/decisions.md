@@ -18831,3 +18831,52 @@ to decline. Before excluding them the residue is 690 396, and 97% of it is the f
 Asserting completeness makes this test brittle on purpose. If a later fix must decline more in
 order to stay sound, that trade is the right one — take it, and record in the test what it
 costs; a silent loss of precision here is worth a conversation.
+
+## ADR-293 — An ability op's declared return is enforced at run time under `BROOD_CONTRACTS=1`
+
+**Status.** Accepted (2026-08-29). Closes ADR-180's deferred item (c).
+
+**Context.** `defability` has always let an op declare a return — `(size [self] :-> int)` — and
+the checker reports an impl whose body visibly contradicts it. What it could not report is the
+half a static reader cannot see: an impl that yields the wrong type only for some inputs, and
+an impl registered at run time from a value the checker never read. `sig` had the matching
+runtime enforcement (`BROOD_CONTRACTS=1`) and ability ops did not, so the two halves of the
+same declaration were checked to different depths.
+
+**Decision.** Under `BROOD_CONTRACTS=1`, `impl` wraps each method whose op declares a `:-> RET`
+so the result is checked at every call, throwing `Size/size: result expected int, got …` on a
+mismatch. The declared return is read at **expansion** time from the ability registry (the
+ability is registered by the time an `impl` for it expands), and the flag is read there too —
+so with the flag unset the shim is not emitted at all and a default build is byte-for-byte
+what it was. An op that declares no return is untouched; parameters are not checked, because
+an op spec does not carry parameter types.
+
+**Consequences, and the three defects the gate found.** The mode had **no end-to-end coverage
+whatsoever**, and building this on top of it revealed it had rotted into unusable. All three
+are cold-boot-cache-only, which is why every warm run looked fine — a warm cache replays an
+already-expanded prelude and never executes the macro bodies below:
+
+1. `sig!`'s expansion-time code called `take`, `nth`, `map`, `range` and `count`. Those are not
+   reachable that early in the prelude's own load order, and `take` had left the bare namespace
+   entirely (ADR-290/291) with nothing noticing, because nothing expanded that path. Replaced
+   with `%sig-take` / `%sig-nth` / `%sig-gensyms`, siblings of the `%sig-pos` that already
+   existed for exactly this reason.
+2. The contract shim was `(let (orig name) (fn …))` — a closure over a **let-bound local** —
+   and the prelude's freeze step rejects precisely that (`shared closures must capture the
+   global env`). Arming contracts over the prelude's own sigs aborted the boot. The original is
+   now held in a gensym'd **global**, so the shim captures only globals.
+3. `defrecord` emitted its constructor `sig` **before** the constructor's `defn`, while its
+   accessor sigs correctly came after theirs. A `sig` above its definition is a hard error
+   under contracts — it installs a contract by rebinding the name, so there must be something
+   to rebind — which made **every record in the language** fatal in that mode. `std/io.blsp`'s
+   `standard-port` took the whole boot down as soon as anything required `io`.
+
+Recorded as KI-81, which was filed the day before as an unreproducible one-shot panic. It was
+never a flake: `touch target/release/brood` reproduces it 100%, because the boot cache is keyed
+on the executable's mtime, so the first run after **any** rebuild is the cold one.
+
+`crates/cli/tests/contracts_mode.rs` is the gate, and it **cold-caches deliberately** by
+pointing `XDG_CACHE_HOME` at a fresh temp dir. Without that it passes on a broken build — the
+warm path was green throughout the entire period the mode was unusable, which is the whole
+lesson here. It asserts the boot, both kinds of enforcement, that an op with no declared return
+is left alone, and that with the flag unset nothing raises.

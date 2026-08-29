@@ -412,7 +412,14 @@ this clause was an expansion error."
                                 (list '/reflect/current-ns)))
                          derives)
                        nil))
-    `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs ~@derive-calls (%record-register ~id '~rec) nil)))
+    ;; The constructor's `sig` follows its `defn`, exactly as the accessor sigs already
+    ;; follow theirs. Placement is load-bearing under `BROOD_CONTRACTS=1`: a `sig` above its
+    ;; definition is a hard error there (it installs a contract by REBINDING the name, so
+    ;; there must be something to rebind), and emitting it first made every `defrecord` in
+    ;; the language fatal in that mode — `std/io.blsp`'s `standard-port` took the whole boot
+    ;; down as soon as anything required `io`. The checker is order-insensitive here, which
+    ;; is why the accessor sigs have always been able to come last.
+    `(do ~ctor ~ctor-sig ~@accs ~@acc-sigs ~@derive-calls (%record-register ~id '~rec) nil)))
 
 (defn- %repeat-acc (n x acc) (if (<= n 0) acc (%repeat-acc (dec n) x (cons x acc))))
 (defn repeat (n x)

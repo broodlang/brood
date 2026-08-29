@@ -724,7 +724,8 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-28** — the capture hazard behind that rename: prelude templates, and finishing the `/name` root escape (KI-73)
 - **2026-08-27** — the type system, audited then rebuilt: `sig` fails closed and the definition owns the arity (ADR-259), the walk's totality is gated and found the quasiquote gap (ADR-260), a parameter's type is its domain (ADR-261), a union keeps its terms (ADR-262), `(not T)` (ADR-263)
 - **2026-08-28** — a record is closed, and openness is the type of the keys it doesn't declare (ADR-264) — which is what makes ADR-262's tagged union usable rather than merely representable
-- **2026-08-29** — arrow decomposition (ADR-292): an intersection of arrows satisfies what no single arm does, checked against a brute-force model of what an arrow denotes rather than against more property laws
+- **2026-08-29** — arrow decomposition (ADR-292)
+- **2026-08-29** — ability-op runtime contracts (ADR-293), and the discovery that `BROOD_CONTRACTS=1` had been unusable on every cold boot cache — three defects, no end-to-end test (KI-81): an intersection of arrows satisfies what no single arm does, checked against a brute-force model of what an arrow denotes rather than against more property laws
 
 ---
 
@@ -6382,3 +6383,43 @@ uninhabited result denoting no function at all.
 
 Sabotaged (accept unconditionally), the gate reports 1 467 176 forbidden containments, so it
 can fail.
+
+## 2026-08-29 (later) — two small items, and a mode that had quietly stopped working
+
+Took items 6 and 8 off the type-system backlog. Both were listed "Small"; one was smaller than
+listed and the other was a lot bigger.
+
+**Item 6 was mostly already done.** In a project check, `Shape` and `shapes/Shape` both
+resolve — `ability_type` reads the last `/` segment, since the registry is keyed by bare
+CamelCase name (ADR-255). The real defect was in the *loose single-file* fallback, where
+neither can resolve and the checker falls back to "a capitalised unknown name is an ability
+from a module I did not load". That test read the whole spelling, so `shapes/Shape` — starting
+with a lowercase `s` — reported `unknown type` while the bare form was silently accepted.
+Naming the module an ability comes from should not be the thing that manufactures a
+diagnostic. One `rsplit('/')`, mirroring what `ability_type` already did.
+
+**Item 8 was one macro change sitting on top of a mode that no longer worked.** Wrapping an
+`impl` method to enforce its op's declared `:-> RET` is small (ADR-293). Testing it was not,
+because `BROOD_CONTRACTS=1` aborted the interpreter before running a line — and had been doing
+so for some time.
+
+**The reason nobody knew is the thing worth writing down.** All three defects are
+**cold-boot-cache-only**. A warm cache replays an already-expanded prelude and never executes
+the macro bodies at fault, and the cache is keyed on the executable's mtime — so the *only*
+run that exercises them is the first one after a rebuild. KI-81 was filed the day before as an
+unreproducible one-shot panic on the strength of twelve clean runs. Twelve warm runs.
+`touch target/release/brood` reproduces it every time.
+
+The three: `sig!`'s expansion-time code called `take`/`nth`/`map`/`range`/`count`, none
+reachable that early in the prelude's load order — and `take` had left the bare namespace
+entirely in the ADR-290/291 wave with nothing noticing, because nothing expanded that path. The
+contract shim was `(let (orig name) (fn …))`, a closure over a let-bound local, which the
+prelude's freeze step rejects outright. And `defrecord` emitted its constructor `sig` *above*
+the `defn` it rebinds — fatal under contracts, and therefore fatal for every record in the
+language; `std/io.blsp`'s `standard-port` took the boot down the moment anything required `io`.
+
+Root cause of all three is the same: **the mode had no end-to-end test**. It has one now, and
+it cold-caches deliberately (`XDG_CACHE_HOME` at a fresh temp dir), because without that it
+passes on a broken build — which is precisely what every other gate did throughout.
+
+946/946 green after the `defrecord` change, which touches every record in the language.
