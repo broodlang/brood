@@ -5,6 +5,84 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**As of 2026-08-29 (the perf session — the call path mined, and the next list drawn up).**
+Tree green (suite 1236/1236 both engines, all local gates, clippy on CI's flags), everything
+pushed on both repos. The day's work: `bintree` **−7.5%** (arm results return through the
+caller's slot, not `roots[base]` — `c25e386f`), **−8.5%** (call arguments staged in place via
+`brood_rt_push_room` — `269b31d0`), **~−1.5%** (`MakeVector(2)` builds into the slab —
+`87ecb283`), plus one neutral simplification (`brood_rt_fast_frame` 10 args → 4). Full story
+in `compute-frontier.md` §2h–§2k; three method lessons are recorded there and in the devlog:
+
+- **Interleave every arm in ONE command, three-way when there is a chain.** §2j was first
+  reported at −15% against a *saved baseline binary* whose own reading had drifted 10%
+  between sessions; the three-way re-run corrected it to −8.5%. A saved binary is not a
+  fixed measurement.
+- **On small hot callbacks, an annotation says *where*, never *why*.** Three specific,
+  testable mechanism guesses (store-forwarding, argument spilling, the 66%-of-make_vector2
+  loads) each returned a fraction of their apparent share. The only changes that moved the
+  row **deleted work** (copies that stopped existing) rather than making work cheaper.
+- **Grep benchmark stderr for `CODEGEN-PANICKED` before believing any number.** A missing
+  Cranelift symbol registration panicked the compiler thread, the JIT switched itself off
+  for the whole process, and every benchmark still printed the right answer.
+
+**The next performance list, priority-ordered, each item measured not guessed** (profiles
+2026-08-29, `cycles:pp`, default row sizes unless noted; LBR for call graphs — **fp unwinding
+through JIT frames produces garbage** and once reported `set_ic_bases` calling memmove):
+
+1. **The `call-mediated-boxed` bail class — a benchmark's own hot arm runs interpreted
+   forever.** `nqueens`' `solve` bails (`Local Local MakeClosure Const GlobalIc Call Call` —
+   it builds a closure and hands it to a HOF), so the row's driver never lowers: 10.9%
+   `exec_chunk` + 7.2% `hof_apply_step`. `pipeline` is the same class (~50% call plumbing,
+   §2c). This is FRONTIER's "capturing-closure fast-link" item, now with named victims.
+   Check first: `BROOD_JIT_BAIL_TRACE=1` per row, count arms whose ops contain `MakeClosure`.
+   The design question is partial lowering — an arm that bails on one op keeps its whole loop
+   on the VM.
+2. **Cranelift's CLIF verifier runs on EVERY release compile.** `enable_verifier` defaults
+   `true` (verified in cranelift-codegen 0.133.1 settings.rs:502) and `CraneliftBackend::new`
+   sets only `opt_level`; the verifier showed at **3.5% of the `json` run's cycles** on the
+   compile thread. Pure compile-latency waste — warmup, and core competition on every pinned
+   row. Two-line fix (`("enable_verifier", "false")` in release; keep it armed under
+   `debug_assertions`), but measure warm boot + a compile-heavy row before/after, and re-read
+   CLAUDE.md's pinned-core note: this is exactly the class `make ab`'s pinning exaggerates.
+3. **Message rows are ~15–17% interpreter.** `pingpong` 15.0% / `ring` 17.2% `exec_chunk`,
+   and their hot arms do NOT appear in the bail trace — a `receive` loop is *structurally*
+   outside the JIT subset (receive suspends). Same partial-lowering family as item 1: can the
+   code around a receive lower, with the receive itself as an exit? Also there:
+   `receive_match` 8–9% and `pool::run_one` 5–8% — the per-message fixed cost
+   `runtime-frontier.md` already names, whose next step is **M2 shared IC tables** (664
+   B/proc + a warm start; lock-free design + TSAN/loom — the high-risk high-value item).
+4. **`sort` is a GC row, and the kernel is 5.6% of it.** `flush_value_grown` 9.1% +
+   `promote_in_grown` 6.6% + `Heap::pair` 5.0% + `kernel_init_pages` **5.6%** (page-fault
+   zeroing — the slab growth pattern). The allocation frontier, with a cheap first question:
+   are slabs being regrown from scratch each collection where they could be reused (the
+   `MIMALLOC_PURGE_DELAY` note in CLAUDE.md is adjacent)? `bintree`'s residual ~15%
+   allocation is the same family.
+5. **`bintree`'s call-path residue is structural now.** `jit_run_fast_link` ~20% +
+   `brood_rt_fast_frame` ~13% at n=4000 have resisted four instruction-level attempts
+   (§2h–§2k). The next lever is not shaving the trampoline but **removing it**: emit the
+   native→native call inline in CLIF behind the existing epoch/identity guard — the full
+   X-register convention. Multi-session; §2h's ABI groundwork (`JitArmFn`, `out` pointer,
+   `Frame::out_ptr`) is the first third of it.
+6. **Cheap curiosity, possibly nothing:** LBR showed ~3% of `bintree` in
+   `grow_one<TraceFrame>` (error-trace `Vec` growth) on a row that never errors. Find who
+   pushes trace frames on the happy path; if it is the two load-time checker warnings, it is
+   boot residue and closes itself at scale — confirm and move on.
+7. **Crossed off, don't revisit:** `ackermann` is 92.9% inside the scalar-register i64
+   worker — already optimal shape, its cost is the algorithm. `env_get` (6.7% of `bintree`
+   at n=800) is boot residue — gone entirely at n=4000. `latency`'s pinned-sweep readings
+   are queueing artifacts (fixed-schedule open-loop row); judge it unpinned via its own
+   p50/p99 metrics.
+
+**Measurement discipline for all of the above** (each burned someone this week): image
+`:live` on BOTH arms verified per run (`stdimage/status` — any commit invalidates every
+image); JIT warm and engaged (`BROOD_JIT_DUMP_IR` arm counts on both arms); stderr grepped
+for `CODEGEN-PANICKED`; interleaved three-way for chains; floors measured, and a delta under
+~2× floor reported as noise.
+
+---
+
+**Previous session's entry follows.**
+
 **As of 2026-08-28 (the green-again session).** The previous session's work — `092ba281`
 (three require/process defects) and its merge — had been **committed but never pushed**, and
 `origin/main` was red in three CI jobs. All of it is fixed and verified; see the devlog entry
