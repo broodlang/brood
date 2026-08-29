@@ -6152,3 +6152,48 @@ because the cost is the copy (9.9%, and FRONTIER's old ~8% was right). And that 
 top cost — a boot artifact. Five contaminations in one day across three different tools, all one
 cause, so the rule is now written at the top of [benchmarking.md](benchmarking.md): **measure at
 two sizes and keep only what scales.** Two runs instead of one, and it is the whole difference.
+
+## 2026-08-29 — three gates that could not run, and one that read a missing feature as rot
+
+Picking up an interrupted session whose working tree held a half-fix to `check-examples.sh`
+and `check-stress.sh`. The finish is recorded as an addendum to [KI-76](known-issues.md#ki-76),
+because it is that bug, three more times.
+
+**`green.sh` was fixed inline, so its three siblings kept the original defect verbatim.**
+`check-examples.sh`, `check-stress.sh` and `check-corpora.sh` each defaulted to
+`target/release/…` while their own error told you to run `make release-brood` — which writes
+`target/release-fast`. Locally none of the three could run at all, and the remedy they named
+could not fix that. It stayed invisible because CI *does* build `target/release`: the gate
+only misbehaved where a person would run it, which is the half nobody gets a red build for.
+
+**Pointing them at a binary that exists then produced a worse answer than not running.**
+`make release` builds `brood` with `RUN_FEATURES` — lean, so `--no-default-features` compiles
+the `DEV_MODULES` out entirely — and `examples/hot-reload/main.blsp` promptly died on
+`unbound symbol: reload/on-change`. The gate reported that as an example failure, i.e. as
+**rename rot**, which is precisely the class it exists to detect. A missing *feature* and a
+dead *name* are indistinguishable in the diagnostic and call for opposite responses; this one
+nearly bought a hunt through a rename wave.
+
+**The fix is one shared resolver, `scripts/lib/gate-binary.sh`.** `gate_pick` prefers the
+candidate whose `--version` reports HEAD's sha (existence is only a tiebreak — `std/` is
+`include_str!`'d, so a binary from another commit is answering about another tree);
+`gate_require_fresh` exits 2 with `the gate DID NOT RUN`, carrying over `green.sh`'s exemption
+for a binary whose baked-in `std/`+`crates/` is unchanged so a docs-only commit does not
+refuse the gate; and `gate_classify` splits the two verdicts. A run whose unbound names *all*
+name a module **this tree has and this binary lacks** is a `skip`, not a failure. That set is
+derived — `std/tool/<ns>.blsp` exists and `(builtin-modules)` does not list it — rather than
+restating the Rust `DEV_MODULES` list, so it cannot drift from it.
+
+**Sabotage-verified, and the two that matter are the negative ones.** Against the lean binary:
+`(bogus/thing 1)` in `examples/life.blsp` → `FAIL` (module exists nowhere, so still rot);
+`(no-such-function 1)` → `FAIL`; unmodified `hot-reload` → `skip (needs reload, …)`, exit 0;
+`touch crates/lisp/src/lib.rs` → `the gate DID NOT RUN`, exit **2**. A skip path that can
+swallow real rot would be worse than the false positive it replaces, so that is the assertion
+worth writing down. With a full-featured binary all three gates then run clean end to end —
+examples 9/9, stress 28/28, corpora 68 files across four trees — and `make green` is green
+(the one `FAIL` in its CI list is `12b31fc2`, which is KI-79's watched `live_migration`
+sighting, already mitigated on `4fec7fa2`).
+
+The lesson is KI-68/69/70/76's, with one clause added. A gate must assert *what it is gating*
+— and when the same assertion is needed in four scripts, three of them will not get it if the
+first one is fixed in place.
