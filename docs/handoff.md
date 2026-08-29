@@ -5,6 +5,16 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**Addendum 2026-08-29 (late) — KI-87, the checker divergence.** Three sessions ended in a
+machine-swapping OOM (`nest run` on bedit at 54 GB; `types::` tests at 3 × 19 GB). Cause: the
+inference cycle guard `sigs::InferGuard::enter` ended in `.then_some(InferGuard(sym))`, which
+builds-and-drops a guard on the REFUSAL path and so un-marked the in-flight symbol — latent since
+July, made unbounded by the demand walk consulting a callee's inferred sig. One-line fix, guards
+sabotage-verified, the demand-walk hunk (`domain_of_inner`'s last `or_else`) committed with it —
+it costs nothing (zero-warning gate 5.0 s either way). **Method:** put `ulimit -v 4000000` in
+front of any test run that exercises inference — the OOM becomes a ten-second named panic — but
+never in front of a `cargo` build (the linker inherits it and dies). Full account in KI-87.
+
 **As of 2026-08-29 (the perf session — the call path mined, and the next list drawn up).**
 Tree green (suite 1236/1236 both engines, all local gates, clippy on CI's flags), everything
 pushed on both repos. The day's work: `bintree` **−7.5%** (arm results return through the

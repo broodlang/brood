@@ -492,15 +492,22 @@ const MAX_INFER_DEPTH: usize = 8;
 struct InferGuard(Symbol);
 impl InferGuard {
     fn enter(sym: Symbol) -> Option<InferGuard> {
-        INFERRING
-            .with(|s| {
-                let mut set = s.borrow_mut();
-                if set.len() >= MAX_INFER_DEPTH {
-                    return false;
-                }
-                set.insert(sym)
-            })
-            .then_some(InferGuard(sym))
+        let entered = INFERRING.with(|s| {
+            let mut set = s.borrow_mut();
+            if set.len() >= MAX_INFER_DEPTH {
+                return false;
+            }
+            set.insert(sym)
+        });
+        // Construct the guard ONLY on the success path. `bool::then_some(InferGuard(sym))`
+        // builds its argument eagerly, so on the refusal path a guard was built and dropped
+        // at once — and its `Drop` removed `sym` from the set while the *outer* inference
+        // of `sym` was still in flight. That un-guarded every cycle the guard refused: the
+        // next reference to `sym` re-entered it, and a mutually recursive pair
+        // (`require-one` ⇄ `%require-await`) re-inferred each other without bound, each
+        // level growing the stack, until the checker exhausted memory (54 GB on a `nest
+        // run`). Nothing may drop a guard that was never entered.
+        entered.then(|| InferGuard(sym))
     }
 }
 impl Drop for InferGuard {
@@ -1316,7 +1323,18 @@ fn domain_of_inner(
         })
         .or_else(|| primitive_sig(heap, h))
         .or_else(|| curated_sig(h))
-        .or_else(|| declared_heap_sig(heap, h));
+        .or_else(|| declared_heap_sig(heap, h))
+        // …and last, a LOADED module's inferred sig (`sig_of` → `infer_sig`): memoized, and
+        // `InferGuard` answers `None` on re-entry, so the inference that called this walk
+        // can never be re-entered through it. A caller's parameter handed to another
+        // module's function takes that function's inferred demand — the last mechanical
+        // source of `any` the corpus had. Not for this file's own names: those are on
+        // `ctx` above, and the heap may hold a stale copy.
+        .or_else(|| {
+            (!scope.shadowed.contains(&h) && !ctx.is_file_global(h))
+                .then(|| sig_of(heap, h))
+                .flatten()
+        });
     // Ability-op occurrence typing (ADR-190): a call to a *sealed* ability op demands
     // its first argument be a member of that ability.
     let op_domain = super::protocol::sealed_op_domain(h);
@@ -1663,4 +1681,55 @@ pub(super) fn arity_str(a: Arity) -> String {
 /// just because the checker can't say much about the binding's *shape*.
 pub(super) fn is_globally_bound(heap: &Heap, sym: Symbol) -> bool {
     super::deps::obs_global(heap, sym).is_some()
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    /// The contract every cycle break rests on: a refused `enter` must leave the in-flight
+    /// entry alone. The regression: `bool::then_some(InferGuard(sym))` built the guard on the
+    /// refusal path too, and dropping it removed the *outer* inference's mark — so the very
+    /// next reference re-entered the cycle, without bound (54 GB on a `nest run`).
+    #[test]
+    fn a_refused_enter_does_not_release_the_in_flight_mark() {
+        let sym = crate::core::value::intern("guard-test/in-flight");
+        let outer = InferGuard::enter(sym).expect("first entry is admitted");
+        assert!(
+            InferGuard::enter(sym).is_none(),
+            "re-entry is a cycle: refused"
+        );
+        // Refusing must not have un-marked `sym` — a THIRD attempt is refused too.
+        assert!(
+            InferGuard::enter(sym).is_none(),
+            "the refusal released the in-flight mark (the eager-drop bug)"
+        );
+        assert!(INFERRING.with(|s| s.borrow().contains(&sym)));
+        drop(outer);
+        assert!(!INFERRING.with(|s| s.borrow().contains(&sym)));
+        assert!(
+            InferGuard::enter(sym).is_some(),
+            "released once the real guard drops"
+        );
+    }
+
+    /// The depth cap refuses without touching any mark either.
+    #[test]
+    fn the_depth_cap_refuses_without_releasing_anything() {
+        let guards: Vec<InferGuard> = (0..MAX_INFER_DEPTH)
+            .map(|i| {
+                InferGuard::enter(crate::core::value::intern(&format!("guard-test/depth-{i}")))
+                    .expect("under the cap")
+            })
+            .collect();
+        let extra = crate::core::value::intern("guard-test/over-the-cap");
+        assert!(InferGuard::enter(extra).is_none(), "at the cap: refused");
+        assert_eq!(
+            INFERRING.with(|s| s.borrow().len()),
+            MAX_INFER_DEPTH,
+            "cap refusal left every mark"
+        );
+        drop(guards);
+        assert_eq!(INFERRING.with(|s| s.borrow().len()), 0);
+    }
 }

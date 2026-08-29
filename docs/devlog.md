@@ -727,6 +727,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-29** — arrow decomposition (ADR-292)
 - **2026-08-29** — `BROOD_MONO` had never been run: Tier 1 was miscompiling, and now proves the identity rather than the impl (ADR-294)
 - **2026-08-29** — ability-op runtime contracts (ADR-293), and the discovery that `BROOD_CONTRACTS=1` had been unusable on every cold boot cache — three defects, no end-to-end test (KI-81): an intersection of arrows satisfies what no single arm does, checked against a brute-force model of what an arrow denotes rather than against more property laws
+- **2026-08-29** — KI-87: the inference cycle guard released the symbol it refused (`bool::then_some` builds its argument eagerly, so a refused `InferGuard` was built, dropped, and un-marked the in-flight inference) — `nest run` at 54 GB, three 19 GB test processes; one-line fix, sabotage-verified guards, `ulimit -v` in front of every inference test run
 
 ---
 
@@ -7141,3 +7142,32 @@ Worth keeping: **two answers on two clocks want two places, not one.** The pane'
 per REPLY and its doc block is per KEYSTROKE, so the doc block lives on the model beside
 `:workings-region` rather than threaded through `refresh` — which would have made every
 caller carry an argument only one of them can fill in.
+
+## 2026-08-29 (eleventh) — a guard that un-guarded: `then_some` and the 54 GB `nest run`
+
+Three sessions in a row ended with the machine swapping: `cargo nextest run -p brood
+types::` at three × 19 GB, and `nest run` on bedit at 54 GB with nothing running. The
+uncommitted work — the demand walk consulting a loaded module's inferred signature
+(`sigs::domain_of_inner`, the last `or_else`) — was the obvious suspect, and it was only the
+trigger. Under `ulimit -v` the run dies in seconds with `stacker … mmap failed to allocate
+stack`, and a trace of every un-memoized `infer_sig` entry showed `require-one` and
+`%require-await` alternating at depth 2 **34 144 times**, with `memo_has=false` every time
+and the same interned symbol id — inside a guard that exists to refuse exactly that.
+
+Tracing the guard's `Drop` gave the answer in one line: `[TRACE-DROP] ->seq` printed right
+*before* `->seq` was re-entered. `InferGuard::enter` ended in `.then_some(InferGuard(sym))`,
+and `bool::then_some` evaluates its argument eagerly — on the refusal path a guard was built
+and dropped at once, removing the OUTER inference's mark from the set. Every cycle refusal
+since 2026-07-07 has un-guarded the symbol it refused; the memo hid it until a walk arrived
+that references the partner twice per body. Fix: `entered.then(|| InferGuard(sym))`. Full
+account in KI-87; guards are sabotage-verified (the mutual-recursion case reproduces the
+exact OOM under the cap when the bug is restored).
+
+Measured after: the `types::` set 431/431 serially at 325 MB peak; bedit's `commands.blsp`
+1.4 s / 180 MB; the zero-warning gate over 342 files 5.0 s with the demand-walk hunk and
+5.0 s without — the uncommitted feature costs nothing and is now committed.
+
+Worth keeping: **`then_some(x)` is `if b { Some(x) } else { drop(x) }`.** For a value with a
+`Drop` that has effects, the else branch is a call. Use `then(|| …)`. And **build uncapped,
+run capped**: `ulimit -v` in front of a test run turns an OOM into a named panic site; the
+same cap in front of `cargo` kills the linker with `LLVM ERROR: out of memory`.
