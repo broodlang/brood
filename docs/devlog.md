@@ -6231,3 +6231,51 @@ covers, caught this time by the warning rather than by a wrong verdict. After th
 every `std/`, `std/tool/` and `std/editor/` file), tree still 414/414 clean.
 
 With this the 1.0 release-blocker list in `roadmap-for-v1.md` is empty.
+
+## 2026-08-29 — 38 executed examples, and the audit that measures them could not run
+
+Picking up the stdlib example backlog (`roadmap-for-v1.md`: "each example written is a test
+gained"). `tests/doc_examples_test.blsp` **executes** every indented `form → result` line in a
+docstring, so an example is a test and a wrong one fails the build.
+
+**The measurement first, and the tool for it was dead.** `scripts/stdlib-audit.blsp` is the
+standing audit of the library's surface; it died on `unbound symbol: name` — ADR-258's
+`name` → `->string` left two call sites behind. `scripts/*.blsp` is outside `check-corpora`,
+so nothing had ever looked. `release-ecosystem.blsp` and `suggest-renames.blsp` were dead the
+same way (`os/getenv` → `os/env` too). **`scripts` is now its own corpus in `check-corpora`.**
+That is the fifth instance of the KI-42/43/44/45 pattern in this repo: a rename wave covers
+what the gates cover, and everything else rots silently.
+
+Worth knowing when reading the audit's output: its `example?` accepts `e.g.` prose and `=>`
+as well as ` → `, so it reports **412** where the number of examples the harness actually
+*executes* is **356**. The looser number is the one that was being quoted.
+
+**38 examples, core-first.** `<core>` (the unnamespaced surface every program touches) went
+**77/211 → 115/211**; the library total **318 → 356**. Written into `core.blsp` (`<=` `>` `>=`
+`and` `or` `cond` `when` `unless` `seq` `macroexpand` `type-matches?` `comment`),
+`predicates.blsp` (nine type predicates and constructors), `seq.blsp` (`conj` `disj` `for`,
+the three lazy `l*` combinators, the three `do*` iteration forms) and `control.blsp`
+(`cond->>` `some->>` `doto` `tap` `then` `run!` `with-err-str` `error`).
+
+**One promise was already wrong, which is the whole argument for the file.** `conj`'s
+docstring said `(conj {:a 1} [:b 2]) → {:a 1 :b 2}`; the actual `pr-str` is `{:b 2, :a 1}`,
+because map order is the trie's, not insertion order. It survived because it sat inline after
+`e.g.` rather than indented, so nothing evaluated it. Promoting it to an indented case is what
+found it.
+
+**Two of the new examples printed into the test run.** `(tap 5 io/write)` and
+`(run! io/write …)` were evaluated for their return value, and their side effect went to
+stdout — `1235` in the middle of the suite's dots. An example the harness *runs* must have no
+visible effect: those now pass a no-op fn, with the captured `with-out-str` form beside them
+showing the effect.
+
+**And the freshness rule written this morning cried wolf by lunchtime.** It asked the sha
+before the mtime, so a binary built from a dirty tree and then committed reads as stale while
+being exactly current — the sha it recorded is the parent's. mtime is now primary (a binary
+newer than every source baked what is on disk, which is stronger than any sha match) and the
+sha is the rescue for the case mtime cannot judge, a checkout that rewrites mtimes without
+changing content. Ported to `green.sh` too, along with the same bug in candidate *selection*:
+with no sha matching HEAD, both pickers took "first that exists" and chose a 15-commit-old
+`release-fast/nest` over a `release/nest` built minutes earlier. The fallback is now the
+newest candidate. Filed as a second KI-76 addendum, because it is that entry's own lesson
+turned back on the fix for it.

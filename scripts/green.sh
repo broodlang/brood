@@ -120,26 +120,47 @@ if [ "$do_local" = 1 ]; then
   nest=""
   for cand in "$root/target/release-fast/nest" "$root/target/release/nest"; do
     [ -x "$cand" ] || continue
-    [ -n "$nest" ] || nest="$cand"                                   # first that exists
     if [ "$(binary_sha "$cand")" = "$head_sha" ]; then nest="$cand"; break; fi
+  # No sha match: keep the NEWEST candidate, not the first one that exists. A binary built
+  # from a dirty tree records its PARENT's sha, so a fixed order can hand you a genuinely old
+  # binary over a current one — which is what it did on 2026-08-29 (release-fast from
+  # adc5c775 chosen over a release built minutes earlier).
+    { [ -z "$nest" ] || [ "$cand" -nt "$nest" ]; } && nest="$cand"
   done
 
-  # Is the binary's std/ the tree's std/? A binary from a DIFFERENT commit is still valid if
-  # nothing it bakes in changed since — std/ is include_str!'d and crates/ *is* the binary — so
-  # when `git diff` over those two paths is empty between the binary's commit and HEAD, its
-  # verdict is current. Without this exemption every docs-only commit refuses the gate, and the
-  # reflex becomes to stop believing it: the same trap the pre-push hook records for a stale
-  # formatter ("a stale gate that refuses correct work is worse than no gate").
+  # Is the binary's std/ the tree's std/?
+  #
+  # **mtime decides, not the sha.** A binary newer than every `std/`+`crates/` source baked
+  # exactly what is on disk now — stronger than any sha comparison, and the actual property
+  # this gate needs. Asking the sha first refuses correct work in a case that happens
+  # constantly here: build from a dirty tree (the binary records the sha of the HEAD it was
+  # built AT), then commit, and the sha now names the parent while the contents are current.
+  # That refused a sibling gate on 2026-08-29 — and a gate that cries wolf stops being read,
+  # which is the same trap the pre-push hook records for a stale formatter ("a stale gate that
+  # refuses correct work is worse than no gate").
+  #
+  # The sha is the RESCUE for the one case mtime cannot judge: a `git checkout` or fresh clone
+  # rewrites mtimes without changing content, so every source looks newer than a binary that
+  # is in fact current. Then, and only then, ask git whether anything it bakes in moved.
+  # `crates/*/tests/` is excluded throughout: an integration test compiles into its OWN test
+  # binary, never into `nest`, so it cannot change what the two .blsp gates below see.
   bin_sha=$(binary_sha "$nest" 2>/dev/null)
   stale=0
   equiv=""
-  if [ -n "$nest" ] && [ "$bin_sha" != "$head_sha" ]; then
-    if [ -n "$bin_sha" ] && git cat-file -e "${bin_sha}^{commit}" 2>/dev/null &&
-       [ -z "$(git diff --name-only "$bin_sha" HEAD -- std crates \
-                 ':(exclude)crates/*/tests/*' 2>/dev/null)" ]; then
-      equiv="built at $bin_sha, not HEAD ($head_sha) — but nothing it bakes in changed between them (std/ and crates/, excluding test dirs)"
-    else
-      stale=1
+  newer=""
+  if [ -n "$nest" ]; then
+    newer=$(find std crates \( -name '*.blsp' -o -name '*.rs' \) \
+              -not -path 'crates/*/tests/*' -newer "$nest" -print -quit 2>/dev/null)
+    if [ -n "$newer" ]; then
+      if [ -n "$bin_sha" ] && [ "$bin_sha" != "$head_sha" ] &&
+         git cat-file -e "${bin_sha}^{commit}" 2>/dev/null &&
+         [ -z "$(git diff --name-only "$bin_sha" HEAD -- std crates \
+                   ':(exclude)crates/*/tests/*' 2>/dev/null)" ] &&
+         [ -z "$(git status --porcelain -- std crates 2>/dev/null)" ]; then
+        equiv="built at $bin_sha and older than $newer, but nothing it bakes in changed (std/ and crates/, excluding test dirs)"
+      else
+        stale=1
+      fi
     fi
   fi
 
@@ -150,18 +171,8 @@ if [ "$do_local" = 1 ]; then
   if [ -z "$nest" ]; then
     note "no nest in target/release-fast or target/release — run \`make release\`; skipping the .blsp gates"
   elif [ "$stale" = 1 ]; then
-    red "the .blsp gates DID NOT RUN — $nest is built from ${bin_sha:-an unknown commit}, HEAD is $head_sha"
+    red "the .blsp gates DID NOT RUN — $newer is newer than $nest (built from ${bin_sha:-an unknown commit}, HEAD is $head_sha)"
     note "  rebuild with \`make release\`, then re-run. A stale binary bakes in a stale std/."
-  # `crates/*/tests/` is excluded: an integration test compiles into its OWN test binary, never
-  # into `nest`, so it cannot change what the two .blsp gates below see. Including it only
-  # refuses correct work — the same way requiring an exact sha refused every docs-only commit
-  # until the check above was added, and with the same consequence: a gate that cries wolf on
-  # changes it is not measuring stops being read.
-  elif newer=$(find std crates \( -name '*.blsp' -o -name '*.rs' \) \
-                 -not -path 'crates/*/tests/*' -newer "$nest" -print -quit 2>/dev/null);
-       [ -n "$newer" ]; then
-    red "the .blsp gates DID NOT RUN — $newer is newer than $nest (uncommitted work)"
-    note "  rebuild with \`make release\`, then re-run."
   else
     [ -n "$equiv" ] && note "$nest is $equiv, so the two gates below are current"
 
