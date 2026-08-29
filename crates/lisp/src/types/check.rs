@@ -1007,6 +1007,18 @@ pub fn check_file_ext(
     forms: &[Value],
     extra_required: &[String],
 ) -> Vec<(Option<Pos>, String)> {
+    check_file_mode(heap, forms, extra_required, super::strict_checking())
+}
+
+/// [`check_file_ext`] with the strict switch passed explicitly rather than read from the
+/// process-wide setting — what a test uses, so strictness never leaks between tests
+/// running in parallel.
+pub fn check_file_mode(
+    heap: &mut Heap,
+    forms: &[Value],
+    extra_required: &[String],
+    strict: bool,
+) -> Vec<(Option<Pos>, String)> {
     let mut out = Vec::new();
     // Block the copying GC for the whole check: this fn holds LOCAL handles in
     // Rust `Vec`s (`forms`/`expanded`) *across* the `eval` of `(require …)` forms
@@ -1156,6 +1168,7 @@ pub fn check_file_ext(
         // global once it runs, so the checker honours that). `defmacro` stays a
         // special form (it doesn't expand to `def`), so we match it too.
         let mut ctx = Ctx::default();
+        ctx.set_strict(strict);
         // Whole-file mode: enable operand / value-slot unbound checking (every
         // top-level def is accumulated below, and the project image is loaded, so an
         // unresolved operand is genuinely unbound — not the ambiguous free variable a

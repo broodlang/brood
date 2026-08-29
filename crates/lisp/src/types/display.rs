@@ -196,21 +196,24 @@ impl fmt::Display for Ty {
         }
         if let Some(elem) = self.elem_ty() {
             if self.tags & !(SEQ_BITS | (1u32 << bit(Tag::Nil))) == 0 {
-                let has_vec = self.contains_tag(Tag::Vector);
-                let has_pair = self.contains_tag(Tag::Pair);
-                let nil = if self.contains_tag(Tag::Nil) && (has_vec || has_pair) {
+                let kinds: Vec<&str> = [
+                    (Tag::Pair, "list"),
+                    (Tag::Vector, "vector"),
+                    (Tag::Set, "set"),
+                ]
+                .iter()
+                .filter(|(tag, _)| self.contains_tag(*tag))
+                .map(|(_, name)| *name)
+                .collect();
+                let nil = if self.contains_tag(Tag::Nil) && !kinds.is_empty() {
                     "nil | "
                 } else {
                     ""
                 };
-                if has_vec && !has_pair {
-                    return write!(f, "{nil}vector<{elem}>");
-                }
-                if has_pair && !has_vec {
-                    return write!(f, "{nil}list<{elem}>");
-                }
-                if has_vec && has_pair {
-                    return write!(f, "{nil}(list | vector)<{elem}>");
+                match kinds.as_slice() {
+                    [] => {}
+                    [one] => return write!(f, "{nil}{one}<{elem}>"),
+                    many => return write!(f, "{nil}({})<{elem}>", many.join(" | ")),
                 }
             }
         }

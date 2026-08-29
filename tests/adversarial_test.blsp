@@ -333,8 +333,10 @@
       (is (not (empty? ws)))
       (dolist (w ws)
         (is (not (nil? (:line w)))))
-      ;; and it points at `fac`, which is the definition on line 5
-      (assert= (:line (first ws)) 5)))
+      ;; and it points at the non-tail call itself — `(* n (fac (- n 1)))` on line 7.
+      ;; (It pointed at the `defn` on line 5 until the match lowering stopped rebuilding
+      ;; clause bodies, which had thrown the reader's positions away — ADR-297.)
+      (assert= (:line (first ws)) 7)))
 
   (test "REGRESSION: one fault, one diagnostic"
     ;; the lowering repeats the body across dispatch paths, so a single non-tail

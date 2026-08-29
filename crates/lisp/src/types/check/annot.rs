@@ -340,6 +340,9 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             if value::symbol_is(head, "vector") && items.len() == 2 {
                 return Some(Ty::vector_of(parse_type(heap, items[1])?));
             }
+            if value::symbol_is(head, "set") && items.len() == 2 {
+                return Some(Ty::set_of(parse_type(heap, items[1])?));
+            }
             // (or A B …) — a union.
             if value::symbol_is(head, "or") && items.len() >= 2 {
                 let mut acc: Option<Ty> = None;
@@ -697,6 +700,10 @@ fn parse_type_term(heap: &Heap, form: Value, vars: &mut HashMap<String, u32>) ->
                 let inner = parse_type_term(heap, items[1], vars)?;
                 return Some(SigTerm::VectorOf(Box::new(inner)));
             }
+            if value::symbol_is(head, "set") && items.len() == 2 {
+                let inner = parse_type_term(heap, items[1], vars)?;
+                return Some(SigTerm::SetOf(Box::new(inner)));
+            }
             // `(record [&open] :k T …)` with a `?var` in some field: the same grammar
             // `parse_type` accepts, each field parsed as a term. With no variable anywhere
             // it is the concrete shape, exactly as before.
@@ -729,8 +736,27 @@ fn parse_type_term(heap: &Heap, form: Value, vars: &mut HashMap<String, u32>) ->
                 }
                 return parse_type(heap, form).map(SigTerm::Ty);
             }
+            // `(or …)` / `(and …)` with a variable inside: each alternative a term. Without
+            // one, the concrete type as before.
+            if value::symbol_is(head, "or") || value::symbol_is(head, "and") {
+                let mut parts = Vec::with_capacity(items.len() - 1);
+                let mut any_var = false;
+                for &it in &items[1..] {
+                    let t = parse_type_term(heap, it, vars)?;
+                    any_var |= !matches!(t, SigTerm::Ty(_));
+                    parts.push(t);
+                }
+                if any_var {
+                    return Some(if value::symbol_is(head, "or") {
+                        SigTerm::Or(parts)
+                    } else {
+                        SigTerm::And(parts)
+                    });
+                }
+                return parse_type(heap, form).map(SigTerm::Ty);
+            }
             // Compound forms without inner-var support — delegate to parse_type
-            // (type vars inside `or`/`and`/`map` widen to Ty::ANY there).
+            // (a type var inside `map` widens to Ty::ANY there).
             parse_type(heap, form).map(SigTerm::Ty)
         }
         _ => parse_type(heap, form).map(SigTerm::Ty),

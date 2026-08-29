@@ -50,7 +50,7 @@ arrow  ::= ( type* -> type )                   ; fixed arity
          | ( type* & type -> type )            ; fixed leading params + variadic rest
          | ( type* &optional type* -> type )   ; fixed params + optional (ADR-127)
          | ( type* &optional type* & type -> type ) ; + a trailing rest too
-seq    ::= (list type) | (vector type)         ; element type checked at runtime
+seq    ::= (list type) | (vector type) | (set type) ; element type checked at runtime
 map-kv ::= (map key-type val-type)             ; key/val checked at runtime
 union  ::= (or type type+)
 inter  ::= (and type+)                         ; intersection; (and) = any

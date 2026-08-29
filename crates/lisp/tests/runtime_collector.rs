@@ -278,10 +278,12 @@ fn auto_safepoint_collect_bounds_runtime_region() {
 fn isolate_is_safe_against_a_runtime_compaction_inside_the_thunk() {
     LazyLock::force(&MEM_GUARD);
     // A low RT floor so the ~500 defs inside the isolate reliably trip a compaction
-    // mid-thunk (the bug's precondition) regardless of build profile. Per-test process
-    // under nextest, so this env set doesn't leak to other tests.
-    std::env::set_var("BROOD_RT_GC_FLOOR", "128");
+    // mid-thunk (the bug's precondition) regardless of build profile. Set on THIS heap,
+    // not through `BROOD_RT_GC_FLOOR`: the env var is read once per process, so under
+    // plain `cargo test` (one process, parallel threads) it leaked into whichever tests
+    // ran after it — the promotion-count tests then read a 128 floor and failed (KI-86).
     let mut interp = Interp::new();
+    interp.heap.set_rt_gc_floor(128);
     // A 0-arg global defined BEFORE the isolate; its resolution must survive intact.
     interp
         .eval_str(
@@ -307,7 +309,6 @@ fn isolate_is_safe_against_a_runtime_compaction_inside_the_thunk() {
         "42",
         "a pre-isolate global misdispatched after %isolate — a RUNTIME compaction relocated the snapshot's handles",
     );
-    std::env::remove_var("BROOD_RT_GC_FLOOR");
 }
 
 /// Regression for the test-runner leak fix (docs/devlog.md 2026-07-03): running each
@@ -321,8 +322,8 @@ fn isolate_is_safe_against_a_runtime_compaction_inside_the_thunk() {
 #[test]
 fn per_isolate_scoping_bounds_runtime_region_growth() {
     LazyLock::force(&MEM_GUARD);
-    std::env::set_var("BROOD_RT_GC_FLOOR", "256");
     let mut interp = Interp::new();
+    interp.heap.set_rt_gc_floor(256);
     interp
         .eval_str(
             "(defn defmany (fi i n) \
@@ -345,7 +346,6 @@ fn per_isolate_scoping_bounds_runtime_region_growth() {
         "per-%isolate scoping should bound the RUNTIME region — got {count} promoted closures \
          after 300×200 distinct defs (unscoped accumulates ~60000, the leak)",
     );
-    std::env::remove_var("BROOD_RT_GC_FLOOR");
 }
 
 /// Regression (bug #2 sibling): `declared_sigs` holds promoted RUNTIME type-expression

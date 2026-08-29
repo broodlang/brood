@@ -86,6 +86,21 @@ answers `((render [x]))`."
   (%file-signatures path))
 (sig file-signatures (string -> list))
 
+(defn source-signatures (src)
+  "[[file-signatures]] for source TEXT rather than a file: the checker's signature for every
+function `src` defines, same `{:name :sig :declared? :informative?}` maps. `()` when `src`
+doesn't parse, so a live editor buffer never errors mid-edit.
+
+    (reflect/source-signatures \"(defn twice (n) (* 2 n))\")
+    ;=> ({:name \"twice\" :sig \"(int -> int)\" :declared? false :informative? true})
+
+The question [[expr-type]] cannot answer. A `(defn …)` form evaluates to its own NAME, so
+the type of its value says nothing about the function — which is why a live evaluator
+showing `=> foo` for a definition has nothing to put beside it. Shares one checker pass
+with [[file-signatures]], so a buffer and the file it will be saved as cannot disagree."
+  (%source-signatures src))
+(sig source-signatures (string -> list))
+
 (defn check-string-structured (src)
   "Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics."
   (%check-string-structured src))
