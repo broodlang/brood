@@ -145,7 +145,48 @@ justification was "a known callee can be inlined". That is false as the code sta
 So the guard belongs where the identity is a **guess**, which is Phase 1's profiled sites, and
 the original `0 → 1 → 2` sequencing was right.
 
-### The real blocker for the prize: impl fns are anonymous
+### The real blocker, measured: a map read is not a primitive operation
+
+**Superseding the section below.** "Impl fns are anonymous" is true and was my answer for
+about an hour; the named-impls experiment (2026-08-29) says it is not the blocker. Naming an
+impl gives the leaf inliner a symbol, and the inliner still refuses — because of what the body
+*contains*.
+
+`leaf_body_qualifies` accepts only a **call-free** body: any `Node::Call`, `Global`,
+`MakeClosure` or `TryCatch` disqualifies it. Measured, holding everything else fixed:
+
+| body | leaf-inlined? |
+|---|---|
+| `(* n 2)` | ✅ |
+| `(if (= n 0) 1 2)` | ✅ |
+| `(* (first v) 2)` | ✅ |
+| `(* (nth v 0) 2)` | ✅ |
+| `(* (get x :r) 2)` | ❌ |
+| `(* (%map-get x :r nil) 2)` | ❌ |
+
+A 2×2 over {arithmetic, field-read} × {local arg, global arg} confirms it is the **body**, not
+the argument. And the last row is the giveaway: even calling the primitive directly fails,
+because a call to a native is still a `Node::Call`.
+
+The cause is in the IR. The binary prim set is `Add Sub Mul Lt Le Eq Rem Div Quot Cons
+VectorRef Max Min BitAnd BitOr BitXor TableHas TableGet` — **there is no `MapGet`**. Vectors
+have `VectorRef`; the mutable `Table` has `TableGet` and `TableHas`; the CHAMP map, which is
+the language's primary data structure and the representation of every record, has nothing. So
+every map read compiles to a call, and **no body that reads a field can ever be leaf-inlined**
+— not an ability impl, not a `defrecord` accessor, not any of the ordinary map-shaped helpers
+that make up most Brood code.
+
+That makes the lever a `MapGet` prim rather than anything in this document, and the template
+already exists a few lines away in `resolve_prim`: `nth` is special-cased by head symbol,
+guarded on the callee being the PRELUDE closure (so a user `(def nth …)` cleanly disables it),
+lowered to `PrimOp::VectorRef`, and **deopts to the real `nth`** for the list / out-of-range /
+explicit-default cases. A 2-arity `(get m k)` wants exactly that shape.
+
+It is worth more than everything scoped here: it is not an ability optimization at all, it
+lands on every map read in the language, and it is the precondition the inlining prize
+actually has. Speculation should wait behind it.
+
+### The earlier answer: impl fns are anonymous
 
 Point 2 above is not a detail about speculation; it is the constraint
 [ability-monomorphization.md](ability-monomorphization.md) already lists as hard constraint #2
@@ -224,7 +265,8 @@ thing profiling structurally cannot do, and it is the strongest argument for the
 
 ## Sequencing
 
-**Named impls first**, then `0 → 1 → 2 → 3(a) → 3(b) → 3(c)`.
+**A `MapGet` prim first** (see above — measured, and not an ability optimization at all), then
+reconsider whether any of `0 → 1 → 2 → 3` is still worth doing.
 
 Phase 0 is done. 2a was proposed and abandoned the same day (see above) — the guard has no
 job where the identity is already proven, so it belongs with the profiling that makes the
