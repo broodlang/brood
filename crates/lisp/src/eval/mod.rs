@@ -1832,14 +1832,26 @@ pub(crate) fn make_closure_cached(heap: &mut Heap, rest: Value, env: EnvId) -> L
             return Ok(c);
         }
     }
-    let (closure, seen_before) = if let Some(tpl) = heap.lookup_closure_template(key) {
-        (build_closure(heap, None, &tpl, env), true)
+    // Promote on the Nth sighting, not the second. "Seen twice" was meant to mean "a
+    // literal in a loop", but a spawned process that evaluates a `receive` twice also sees
+    // its matcher twice — so every short-lived worker promoted its matcher into the
+    // append-only RUNTIME region, one entry per process (measured: ~1 promote per spawn on
+    // a 4k-spawn workload; `runtime-frontier.md` A3 rejects exactly this growth shape at
+    // 541 MB / 800k ops). A genuinely hot literal loop crosses 8 sightings in microseconds
+    // and still gets its stable promoted handle; a worker that parses, receives twice and
+    // dies now costs the region nothing.
+    const PROMOTE_AFTER_SIGHTINGS: u32 = 8;
+    let (closure, promote_now) = if let Some((tpl, seen)) = heap.lookup_closure_template(key) {
+        (
+            build_closure(heap, None, &tpl, env),
+            seen >= PROMOTE_AFTER_SIGHTINGS,
+        )
     } else {
         let tpl = std::sync::Arc::new(parse_closure_template(heap, rest)?);
         heap.store_closure_template(key, std::sync::Arc::clone(&tpl));
         (build_closure(heap, None, &tpl, env), false)
     };
-    if is_const && seen_before {
+    if is_const && promote_now {
         let promoted = heap.promote(closure);
         heap.store_const_closure(key, promoted);
         return Ok(promoted);

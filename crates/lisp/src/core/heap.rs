@@ -1379,9 +1379,11 @@ pub type SymbolMap<V> = HashMap<Symbol, V, std::hash::BuildHasherDefault<SymbolH
 pub type VmCacheMap<V> = HashMap<VmCacheKey, V, std::hash::BuildHasherDefault<SymbolHasher>>;
 
 /// The [`Heap::lookup_closure_template`] cache map: `fn_rest` [`PairId`] → parsed
-/// [`ClosureTemplate`], on the fast [`SymbolHasher`] (a `PairId` writes one `u64`).
+/// [`ClosureTemplate`] plus a **sighting count**, on the fast [`SymbolHasher`] (a `PairId`
+/// writes one `u64`). The count is what gates the const-closure promote — see
+/// [`Heap::lookup_closure_template`].
 type ClosureTemplateMap =
-    HashMap<PairId, Arc<ClosureTemplate>, std::hash::BuildHasherDefault<SymbolHasher>>;
+    HashMap<PairId, (Arc<ClosureTemplate>, u32), std::hash::BuildHasherDefault<SymbolHasher>>;
 
 /// The [`Heap::lookup_const_closure`] cache map: a capture-free `(fn …)` literal's
 /// `fn_rest` [`PairId`] → the **promoted RUNTIME closure handle** built for it once.
@@ -5135,21 +5137,40 @@ impl Heap {
     /// `gen_version` bump (the only event that relocates the RUNTIME AST handles the
     /// arms carry) clears the whole cache first, so any hit is current-generation.
     /// `None` on a miss — the caller parses once and calls [`store_closure_template`].
-    pub(crate) fn lookup_closure_template(&self, key: PairId) -> Option<Arc<ClosureTemplate>> {
+    /// Returns the memoised template **and how many times this key has now been seen**
+    /// (this lookup included, first parse not counted — so the first hit reports 2).
+    /// The count gates [`make_closure_cached`]'s const-promote: promoting into the
+    /// append-only RUNTIME region on the *second* sighting meant every spawned process
+    /// that evaluated a `receive` twice promoted its matcher closure into shared code —
+    /// one region entry **per process**, the exact per-operation growth
+    /// `docs/runtime-frontier.md` A3 measures at 541 MB per 800k ops and rejects. A
+    /// mass-spawned worker sees its matcher a handful of times; a genuinely hot literal
+    /// loop crosses any small threshold in microseconds — so the count separates them
+    /// where "seen before" could not.
+    ///
+    /// [`make_closure_cached`]: crate::eval::make_closure_cached
+    pub(crate) fn lookup_closure_template(
+        &self,
+        key: PairId,
+    ) -> Option<(Arc<ClosureTemplate>, u32)> {
         let ver = self.runtime.gen_version.load(Ordering::Acquire);
         if self.closure_tpl_ver.get() != ver {
             self.closure_tpl_cache.borrow_mut().clear();
             self.closure_tpl_ver.set(ver);
             return None;
         }
-        self.closure_tpl_cache.borrow().get(&key).cloned()
+        let mut cache = self.closure_tpl_cache.borrow_mut();
+        cache.get_mut(&key).map(|(tpl, seen)| {
+            *seen = seen.saturating_add(1);
+            (Arc::clone(tpl), *seen)
+        })
     }
 
     /// Memoise a freshly-parsed [`ClosureTemplate`] under its `fn_rest` key. Call only
     /// right after a [`lookup_closure_template`] miss (which synced the version this
     /// creation), so the insert lands against the current generation.
     pub(crate) fn store_closure_template(&self, key: PairId, tpl: Arc<ClosureTemplate>) {
-        self.closure_tpl_cache.borrow_mut().insert(key, tpl);
+        self.closure_tpl_cache.borrow_mut().insert(key, (tpl, 1));
     }
 
     /// Look up the memoised **promoted RUNTIME closure** for a capture-free `(fn …)`
