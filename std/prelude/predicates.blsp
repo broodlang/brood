@@ -27,9 +27,17 @@
     (string? \"a\")   → true
     (string? :a)    → false"
   (%eq (type-of x) :string))
-(defn bytes? (x) "True if `x` is a bytes value." (%eq (type-of x) :bytes))
+(defn bytes? (x)
+  "True if `x` is a bytes value.
+
+    (bytes? (bytes [1 2]))   → true
+    (bytes? \"ab\")             → false   ; a string is not bytes"
+  (%eq (type-of x) :bytes))
 (defn decimal? (x)
-  "True if `x` is an exact base-10 decimal (e.g. `1.50M`)."
+  "True if `x` is an exact base-10 decimal (e.g. `1.50M`).
+
+    (decimal? 1.50M)   → true
+    (decimal? 1.5)     → false   ; a float is inexact"
   (%eq (type-of x) :decimal))
 (defn ratio? (x)
   "True if `x` is an exact rational (e.g. `1/2`).
@@ -62,13 +70,29 @@
 
     (set? #{1})    → true"
   (%eq (type-of x) :set))
-(defn ref? (x) "True if `x` is a `(ref)` token (a unique reference)." (%eq (type-of x) :ref))
-(defn pid? (x) "True if `x` is a process id (from `self`/`spawn`)." (%eq (type-of x) :pid))
+(defn ref? (x)
+  "True if `x` is a `(ref)` token (a unique reference).
+
+    (ref? (ref))   → true
+    (ref? :r)      → false"
+  (%eq (type-of x) :ref))
+(defn pid? (x)
+  "True if `x` is a process id (from `self`/`spawn`).
+
+    (pid? (self))   → true
+    (pid? 5)        → false"
+  (%eq (type-of x) :pid))
 (defn rope? (x)
-  "True if `x` is a rope (editor buffer text from `text/from-string`)."
+  "True if `x` is a rope (editor buffer text from `text/from-string`).
+
+    (rope? (text/from-string \"hi\"))   → true
+    (rope? \"hi\")                      → false   ; a plain string is not a rope"
   (%eq (type-of x) :rope))
 (defn table? (x)
-  "True if `x` is an in-memory table (from `(table/new)`) — Brood's shared mutable ETS store."
+  "True if `x` is an in-memory table (from `(table/new)`) — Brood's shared mutable ETS store.
+
+    (table? (table/new))   → true
+    (table? {})            → false   ; a map is immutable, and a different kind"
   (%eq (type-of x) :table))
 ;; Copy an immutable map into a fresh mutable table. Used only by the compiler's
 ;; linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed the
@@ -96,7 +120,10 @@ private table, and never surfaced to user code — reach for `table/new` instead
   (or (int? x) (float? x) (decimal? x) (ratio? x)))
 (defn ->float (x)
   "The number `x` as an (inexact) float — the escape hatch from an exact ratio or
-decimal to fast float math (`(->float 1/2)` → `0.5`)."
+decimal to fast float math.
+
+    (->float 1/2)   → 0.5
+    (->float 3)     → 3.0"
   (* 1.0 x))
 (defn list? (x)
   "True if `x` is a proper list (`nil` or a pair).
@@ -107,7 +134,12 @@ decimal to fast float math (`(->float 1/2)` → `0.5`)."
   (or (nil? x) (pair? x)))
 
 ;; ---- list accessors ----
-(defn list (& xs) "A list of the given arguments." xs)
+(defn list (& xs)
+  "A list of the given arguments.
+
+    (list 1 2 3)   → (1 2 3)
+    (list)         → nil   ; the empty list is nil"
+  xs)
 (defn second (coll)
   "The second item of `coll`.
 
@@ -184,7 +216,10 @@ and a set its elements, as everywhere else `seq` applies.
 ;; using `%reverse-onto` directly — it is that function with the arguments flipped.
 (defn- %append-onto (acc lst) (%reverse-onto lst acc))
 (defn append (& lists)
-  "Concatenate any number of lists into one, left to right."
+  "Concatenate any number of lists into one, left to right.
+
+    (append '(1 2) '(3) '(4 5))   → (1 2 3 4 5)
+    (append)                      → nil"
   ;; O(total length) and fully tail-recursive — so `mapcat` (via `apply append`)
   ;; stays stack-safe on many/long lists. The previous left fold of `%append-two`
   ;; re-reversed the growing accumulator each step, making it O(lists²).

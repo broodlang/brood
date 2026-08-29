@@ -24,7 +24,7 @@
   "Every public global the runtime can see, minus the `%` primitives (mechanism, not
 vocabulary) and minus anything a module marked private."
   (sort (filter (fn (s)
-                  (let (n (name s))
+                  (let (n (->string s))
                     (and (not (string/starts-with? n "%")) (not (private? s)))))
           (global-names))))
 
@@ -76,7 +76,7 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
   (doseq (chunk (partition 6 (sort xs)))
     (io/puts "   " (reduce (fn (a b) (if (= a "") b (str a "  " b))) "" chunk))))
 
-(let (names (map name (public-names))
+(let (names (map ->string (public-names))
       qualified (filter (fn (n) (module-of n)) names)
       bare (filter (fn (n) (not (module-of n))) names)
       stutter (filter stutters? qualified)
