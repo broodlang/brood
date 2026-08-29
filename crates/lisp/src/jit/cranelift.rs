@@ -79,7 +79,7 @@ impl CraneliftBackend {
         builder.symbol("brood_rt_car", brood_rt_car as *const u8);
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
         builder.symbol("brood_rt_push", brood_rt_push as *const u8);
-        builder.symbol("brood_rt_push_n", brood_rt_push_n as *const u8);
+        builder.symbol("brood_rt_push_room", brood_rt_push_room as *const u8);
         builder.symbol(
             "brood_rt_call_native_fl",
             brood_rt_call_native_fl as *const u8,

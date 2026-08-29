@@ -1050,3 +1050,62 @@ both allocation, which `ROADMAP`/FRONTIER already call the multi-session item �
 `jit_run_fast_link` 12.0% and `brood_rt_fast_frame` 8.9%, which two sessions of instruction-level
 work have now failed to decompose. The allocation frontier is where the remaining `bintree` time
 is, and it will not yield to another argument-shuffling change.
+
+## 2j. Argument staging writes in place — `bintree` −15% warm (2026-08-29)
+
+LBR attribution (`perf record --call-graph=lbr`; **fp does not work here** — unwinding through
+JIT frames produces garbage chains, and reported `set_ic_bases` as calling `memmove`) put
+**4.4% of `bintree` in `copy_nonoverlapping<Value>` inside `push_roots_n`**: the JIT's
+per-call argument staging. Each call wrote every operand's three words into a per-site
+Cranelift stack slot, then copied the block onto `roots` with one `brood_rt_push_n`.
+
+**Two attempts, and only the second one is a win — the same lesson as §2i.**
+
+1. *Make the copy cheaper.* At an arity's worth of bytes (24–72) libc's
+   `__memmove_evex_unaligned_erms` is almost entirely its own size-class dispatch, so
+   `push_roots_n` got a `match` on the arity emitting fixed-size moves. `__memmove` fell
+   **10.6% → 3.8%** and `brood_rt_push_n` rose **4.5% → 10.3%** — the work *moved*, ~1% net,
+   inside the floor. The bytes still had to move.
+2. *Delete the copy.* `brood_rt_push_room(heap, n) -> *mut Value` reserves the block on
+   `roots` and hands back its address; the same stores now land in place. The stack slot and
+   the block copy both stop existing.
+
+**Measured, image `:live` on both arms with the same id, JIT warm (86 vs 85 arms lowered):**
+
+| | base | new | delta | floor |
+|---|---|---|---|---|
+| `bintree` n=200 | 156 ms | 138 ms | **−9.8%** | 2.0% |
+| `bintree` n=2000 | 1008 ms | 853 ms | **−14.9%** | 0.6% |
+| `bintree` n=6000 | 2934 ms | 2445 ms | **−15.8%** | 1.1% |
+
+The full 31-row `ab-bench` sweep (pinned, default sizes) reads `bintree` **−5.5%** and every
+other row noise. Both numbers are real and the gap is the point: the sweep pins to one core,
+where the background compiler competes, and runs the *short* size. The win **grows with the
+work** — which is what a per-call saving should do, and the reason to sweep sizes rather than
+quote one.
+
+**The regression this nearly shipped with, and how it was found.** The native flat-cell path
+(`brood_rt_call_native_fl`) gets an args pointer and hands the native a `&[Value]`. That
+pointer now points into `roots`, and a native may push roots — reallocating the buffer and
+dangling the slice mid-call — so the args must be copied. Copying them with
+`SmallVec::from(slice)` cost **`wordcount` +14%**: `copy_from_slice` → libc `memcpy`, i.e.
+exactly the size-class overhead attempt 1 had just measured, reintroduced one call site over.
+A `match` on the arity fixed it (`wordcount` +1.1% against a 1.1% floor). It was caught only
+because the sweep covered a builtin-heavy row; the default 11-row set does not include one.
+
+**GC invariant.** `push_roots_room` returns slots that are **live roots holding uninitialised
+memory** until the caller's stores complete. Nothing may allocate or collect in that window —
+the JIT emits pure stores there, and the elided-head resolution (a call) is deliberately
+sequenced *before* the reservation. Under `debug_assertions` the slots are nil-filled first,
+so a missing store surfaces as a `nil` argument (a wrong answer the tests catch) rather than
+as garbage with a valid-looking tag. Verified: suite 1236/1236, `make gcstress`,
+GC_STRESS+GC_VERIFY, all 21 `jit_*_test.blsp`, and the fuzz differential over the five
+highest-value generators × 4 engine configs — 0 divergences, 0 crashes.
+
+> **A gate gap worth knowing.** The first build of this change forgot to register
+> `brood_rt_push_room` in the Cranelift symbol table. The background compiler thread panicked,
+> the JIT **turned itself off for the whole process**, and every benchmark still printed the
+> right answer — `bintree` included. Correctness gates cannot see this; only the
+> `[jit-bail] … CODEGEN-PANICKED` line on stderr and `.brood_crash_dump` can. **Grep a
+> benchmark run's stderr for `CODEGEN-PANICKED` before believing any number**, or you are
+> timing the interpreter.

@@ -545,21 +545,21 @@ pub unsafe extern "C" fn brood_rt_i64_overflow_ptr(heap: *mut Heap) -> *mut u8 {
     &mut (*heap).jit_i64_overflow as *mut bool as *mut u8
 }
 
-/// Batch arg staging: append `n` staged `Value`s (from the call site's staging
-/// stack slot) onto `roots` in one reserve+memcpy — replacing `brood_rt_push` ×
-/// argc on every Brood→Brood / slow-dispatch call from JIT'd code.
+/// Reserve `n` argument slots at the top of `roots` and hand back a pointer to them, for the
+/// emitting arm to store its operands into directly. The counterpart of
+/// The JIT's argument staging. It used to go
+/// store-into-a-stack-slot then copy-the-block, and the copy alone was 4.4% of `bintree`.
 ///
 /// # Safety
-/// `heap` must be live; `src` must point to `n` valid `Value`s (written by the
-/// emitting arm just before this call, with no intervening safepoint).
+/// `heap` live. The caller must store `n` valid `Value`s into the returned slots **before
+/// anything can allocate or collect** — see [`Heap::push_roots_room`], whose doc carries the
+/// full invariant.
 #[no_mangle]
-pub unsafe extern "C" fn brood_rt_push_n(
+pub unsafe extern "C" fn brood_rt_push_room(
     heap: *mut Heap,
-    src: *const crate::core::value::Value,
     n: i64,
-) -> i64 {
-    (*heap).push_roots_n(src, n as usize);
-    0
+) -> *mut crate::core::value::Value {
+    (*heap).push_roots_room(n as usize)
 }
 
 /// Direct builtin call from the IR fast-link path (the native flat cell): `func`
@@ -575,6 +575,11 @@ pub unsafe extern "C" fn brood_rt_push_n(
 /// # Safety
 /// `heap` live; `out` writable; `func` a valid `NativeFnPtr`; `args` points to
 /// `argc` valid `Value`s.
+/// How many builtin arguments are copied inline before spilling to a `Vec`. Covers every
+/// arity the JIT's native flat-cell path sees in practice; the spill is correctness, not a
+/// path anything hot takes.
+const INLINE_ARGV: usize = 6;
+
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_call_native_fl(
     heap: *mut Heap,
@@ -585,7 +590,43 @@ pub unsafe extern "C" fn brood_rt_call_native_fl(
 ) -> i64 {
     let h = &mut *heap;
     let f: crate::core::value::NativeFnPtr = std::mem::transmute(func as usize);
-    let slice = std::slice::from_raw_parts(args, argc as usize);
+    // COPY, don't borrow: `args` now points into `roots` (the arm stages in place — see
+    // `brood_rt_push_room`), and a native is free to push roots, which reallocates the
+    // buffer and would dangle a borrowed slice mid-call. This is the "a native receives
+    // unrooted copies" contract this path always documented, now actually made.
+    //
+    // **Copied with a `match` on the arity, not `SmallVec::from(slice)`.** That goes through
+    // `copy_from_slice` → libc `memcpy`, and at an arity's worth of bytes (24–72) the
+    // size-class dispatch costs far more than the move: it made `wordcount`, which is
+    // builtin-heavy, **+14%** — the whole in-place-staging win handed back and then some.
+    // Same lesson as the staging copy this replaced, one call site over.
+    let n = argc as usize;
+    let mut buf = [crate::core::value::Value::Nil; INLINE_ARGV];
+    let spill;
+    let slice: &[crate::core::value::Value] = if n <= INLINE_ARGV {
+        match n {
+            0 => {}
+            1 => buf[0] = *args,
+            2 => {
+                buf[0] = *args;
+                buf[1] = *args.add(1);
+            }
+            3 => {
+                buf[0] = *args;
+                buf[1] = *args.add(1);
+                buf[2] = *args.add(2);
+            }
+            _ => {
+                for (i, b) in buf.iter_mut().enumerate().take(n) {
+                    *b = *args.add(i);
+                }
+            }
+        }
+        &buf[..n]
+    } else {
+        spill = std::slice::from_raw_parts(args, n).to_vec();
+        &spill[..]
+    };
     let env = h.read_root_env(h.jit_call_env);
     // The emitting arm batch-staged these argc args onto `roots` too (uniform with
     // every fallback path) — they anchor the arg values for any GC the native

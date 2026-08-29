@@ -46,8 +46,9 @@ pub(super) struct Funcs {
     pub rb: FuncRef,
     /// `brood_rt_global_ic` — resolve a free global through the per-site inline cache.
     pub globic: FuncRef,
-    /// `brood_rt_push_n` — batch-stage `n` staged args onto `roots`.
-    pub pushn: FuncRef,
+    /// `brood_rt_push_room(heap, n) -> *mut Value` — reserve n argument slots on `roots`
+    /// and return them, so operands are stored in place rather than copied across.
+    pub pushroom: FuncRef,
     /// `brood_rt_call_slow` — the general Brood→Brood dispatch (the fast-link miss path).
     pub callslow: FuncRef,
     /// `brood_rt_call_native_fl` — direct builtin call for a native flat-cell hit.

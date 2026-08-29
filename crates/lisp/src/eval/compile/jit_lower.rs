@@ -757,15 +757,15 @@ fn jit_lower_arm_inner(
     let callslow_id = m
         .declare_function("brood_rt_call_slow", Linkage::Import, &callslow_sig)
         .ok()?;
-    // brood_rt_push_n(heap, src, n): batch-stage `n` Values from the call site's
-    // staging stack slot onto roots — one FFI + memcpy instead of push × argc.
-    let mut pushn_sig = m.make_signature();
-    pushn_sig.params.push(AbiParam::new(ptr_ty)); // heap
-    pushn_sig.params.push(AbiParam::new(ptr_ty)); // src
-    pushn_sig.params.push(AbiParam::new(types::I64)); // n
-    pushn_sig.returns.push(AbiParam::new(types::I64));
-    let pushn_id = m
-        .declare_function("brood_rt_push_n", Linkage::Import, &pushn_sig)
+    // brood_rt_push_room(heap, n) -> *mut Value: reserve n argument slots at the top of
+    // `roots` and hand back the pointer, so the arm's operand stores land in place instead
+    // of going into a stack slot and being copied across. See `Heap::push_roots_room`.
+    let mut pushroom_sig = m.make_signature();
+    pushroom_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    pushroom_sig.params.push(AbiParam::new(types::I64)); // n
+    pushroom_sig.returns.push(AbiParam::new(ptr_ty)); // *mut Value
+    let pushroom_id = m
+        .declare_function("brood_rt_push_room", Linkage::Import, &pushroom_sig)
         .ok()?;
     // brood_rt_call_native_fl(heap, out, func, args, argc): direct builtin call for
     // a native flat-cell hit (nslots == u32::MAX) — no roots staging at all.
@@ -951,7 +951,7 @@ fn jit_lower_arm_inner(
     let globprobe_ref = m.declare_func_in_func(globprobe_id, b.func);
     let globic_ref = m.declare_func_in_func(globic_id, b.func);
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
-    let pushn_ref = m.declare_func_in_func(pushn_id, b.func);
+    let pushroom_ref = m.declare_func_in_func(pushroom_id, b.func);
     let natfl_ref = m.declare_func_in_func(natfl_id, b.func);
     let flbase_ref = m.declare_func_in_func(flbase_id, b.func);
     let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
@@ -1530,7 +1530,7 @@ fn jit_lower_arm_inner(
         tput: tput_ref,
         rb: rb_ref,
         globic: globic_ref,
-        pushn: pushn_ref,
+        pushroom: pushroom_ref,
         callslow: callslow_ref,
         natfl: natfl_ref,
         flbase: flbase_ref,
