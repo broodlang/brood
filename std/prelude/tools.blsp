@@ -1004,6 +1004,10 @@ case `require` keeps loading stdlib modules from source exactly as before."
           ;; which the source branch below reaches `%load-module-source`, which is what makes
           ;; a std module's functions reserved (ADR-166). A project's own image must not
           ;; reserve its functions: the program is allowed to redefine those.
+          ;; That same flag also means "this image is PRISTINE, older than the heap": an
+          ;; embedded module's registry that is already bound (restored by a project image,
+          ;; or accumulated by a running program) keeps its binding rather than being reset
+          ;; to the image's empty seed — the `defonce` a source load would have run.
           (%image-load-section img-path (first sec) (second sec) (not (nil? src)))
           (when (%getenv "BROOD_IMAGE_TRACE") (%eprint (str "[image] " (->string key) "\n")))
           ;; Materialising defines this module's bindings but evaluates nothing, so the
