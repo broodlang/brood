@@ -61,7 +61,11 @@ const PROGRAM: &str = "\
 /// Run the program with a **fresh** cache dir, so the prelude is expanded from source rather
 /// than replayed — the only configuration in which either KI-81 cause is reachable.
 fn run(contracts: bool) -> (String, bool) {
-    let dir = temp_dir(if contracts { "contracts-on" } else { "contracts-off" });
+    let dir = temp_dir(if contracts {
+        "contracts-on"
+    } else {
+        "contracts-off"
+    });
     let program = dir.path.join("program.blsp");
     std::fs::write(&program, PROGRAM).expect("write program");
     let cache = dir.path.join("cache");
