@@ -102,11 +102,48 @@ decides their shape.
 `(if (= (%identity-of x) :circle) (<impl> …) (<dynamic> …))` — is tempting: it needs no
 Cranelift, works at every tier, and is sound as a conditional. It does not work, because the
 identity is not the only thing that can go stale. Baking the impl also requires the resolution
-to still be current, and `global_epoch` bumps on **every** `def`. A baked epoch constant would
-therefore fail permanently after the first unrelated `def`, leaving every site on the slow
-path forever. The JIT is the only tier that can *re-derive* on an epoch change rather than
-fall back — which is exactly what `LeafInline::epoch` already does. **So the inlining prize is
-inherently a JIT-tier optimization**, and Phase 2 must be native.
+to still be current, and `global_epoch` bumps on **every** `def`.
+
+The difference is what each tier does when the epoch moves. Baked into **bytecode**, a
+constant has no invalidation at all: the guard would have to compare a baked epoch at every
+call and would fail permanently after the first unrelated `def`, leaving the site slow
+forever. In the **JIT**, an epoch bump *invalidates the arm* (`jit_runtime.rs`: "a `def` that
+rebound the name … bumps the epoch and invalidates the arm"), so the arm drops to the VM and
+tiers again at the new epoch, re-resolving as it goes. Nothing stale survives and nothing is
+permanently lost.
+
+(Not to be confused with `LeafInline::epoch`, which is a *derivation* stamp: that derivation
+is made once at arm-compile time — the only moment a `&Heap` can resolve the callee symbols —
+and `jit_lower_inlined_arm` simply **refuses to lower** at any other epoch. It does not
+re-derive. The invalidation above is what makes the whole scheme correct; the derivation stamp
+is what keeps a stale splice from being lowered in the first place.)
+
+**So the inlining prize is inherently a JIT-tier optimization**, and Phase 2 must be native.
+
+### Phase 2a — the native guard, on the ids we already prove (do this next)
+
+**The guard does not have to wait for profiling.** Phase 1 was sequenced before Phase 2 on the
+assumption that speculation needs a profile to supply a candidate identity. It does not need
+one *yet*: the syntactically-proven sites already carry a constant id today. Since ADR-294
+they lower to `((%dispatch *impls* '[ability op] :id) args…)`, where `:id` is a compile-time
+constant — the JIT can recognise that shape, resolve the impl at lower time (the epoch is
+current then), and emit
+
+```
+guard: dispatch_identity(a0) == :id ?  direct call to the impl  :  deopt
+```
+
+which is a **known callee**, hence inlinable — the actual prize — with no profiling
+infrastructure at all. It also gives the guard a real consumer, which is what makes it
+testable; built in isolation it would be dead code.
+
+What it needs: an rt callback over `Heap::dispatch_identity` (trivial now that one definition
+exists — Phase 0), the Cranelift emission, and recognition of the constant-id dispatch shape
+in lowering.
+
+Phase 1 then stops being a prerequisite and becomes what it should be: **widening the source
+of candidate ids** from "what syntax proves" to "what this site actually sees", which is where
+`(map area shapes)` lives.
 
 ### Phase 1 — per-call-site identity profiling
 
@@ -171,7 +208,8 @@ thing profiling structurally cannot do, and it is the strongest argument for the
 
 ## Sequencing
 
-`0 → 1 → 2 → 3(a) → 3(b) → 3(c)`.
+`0 → 2a → 1 → 2 → 3(a) → 3(b) → 3(c)` (revised 2026-08-29 — 2a needs no profile, and gives
+the guard the consumer it needs to be testable).
 
 Phases 0–2 are the mechanism and deliver the win. **3(a) and 3(b) may capture most of the
 static value without building a channel at all** — which is the recommendation: build the
