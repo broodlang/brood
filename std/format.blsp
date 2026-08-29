@@ -458,9 +458,10 @@ delimiter has to break to its own line so it isn't swallowed (`;; note)` would c
 out the `)` and leave the file unparseable).
 
 The last non-ws child being a comment is now both necessary AND sufficient: since a
-same-line trailing comment is left in place rather than hoisted above its form, a
-comment that is last in the source is last in the output either way. That is what
-retired the `comment-on-own-line?` distinction this used to need."
+same-line trailing comment is left in place rather than hoisted above its form
+(`f0082dc7`), a comment that is last in the source is last in the output either way.
+That retired the `comment-on-own-line?` pair this used to need, and they are gone —
+if you are reintroducing hoisting, they are what you have to write back."
   (last-nonws-comment?-at kids (dec (seq/vector-length kids))))
 (sig last-nonws-comment? (vector -> bool))
 (defn- last-nonws-comment?-at
@@ -470,31 +471,6 @@ retired the `comment-on-own-line?` distinction this used to need."
     (whitespace? (seq/vector-ref kids i)) (last-nonws-comment?-at kids (dec i))
     (comment? (seq/vector-ref kids i)) true
     else false))
-;; Scanning backward from `i`, was the comment that follows on its own line —
-;; i.e. NOT a same-line trailing comment that the body walker hoists above its
-;; form? A comment is hoisted (and so is *not* emitted last) only when it sits on
-;; the same line right after a FORM: the gap before it is whitespace without a
-;; newline, and the node before that gap is a structural form. Every other case
-;; is own-line and stays last: a newline in the preceding whitespace, a comment
-;; right after `(`, or a comment following another comment (each comment node
-;; carries its own trailing newline, so the separating whitespace is just
-;; indentation with no newline of its own).
-(defn- comment-on-own-line?
-  (kids i)
-  (cond
-    (< i 0) true
-    (and (whitespace? (seq/vector-ref kids i)) (includes? (node-text (seq/vector-ref kids i)) "\n"))
-      true
-    ;; skip one newline-free whitespace gap, then look at what precedes it
-    (whitespace? (seq/vector-ref kids i)) (comment-on-own-line?-prev kids (dec i))
-    else (comment-on-own-line?-prev kids i)))
-(defn- comment-on-own-line?-prev
-  (kids i)
-  (cond
-    (< i 0) true
-    (comment? (seq/vector-ref kids i)) true
-    else false))
-
 ;; True if a comment appears in `kids` between the head (first structural form)
 ;; and the first argument (second structural form). Such a comment would be
 ;; dropped by the generic-call head-ride (which jumps from the head straight to

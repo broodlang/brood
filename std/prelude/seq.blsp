@@ -242,9 +242,13 @@ Always true for `n` <= 0.
   "Add element(s) to `coll` at its natural insertion point (Clojure-style):
 APPEND to a vector, PREPEND to a list (`nil` counts as an empty list), ADD to a
 set (a duplicate is a no-op), and `assoc` a `[k v]` pair — or merge a map — into
-a map. Returns a fresh collection; `coll` is untouched. e.g. (conj [1 2] 3) →
-[1 2 3]; (conj '(2 3) 1) → (1 2 3); (conj #{1} 2) → #{1 2};
-(conj {:a 1} [:b 2]) → {:a 1 :b 2}.
+a map. Returns a fresh collection; `coll` is untouched.
+
+    (conj [1 2] 3)      → [1 2 3]   ; a vector appends
+    (conj '(2 3) 1)     → (1 2 3)   ; a list prepends
+    (conj nil 1)        → (1)       ; nil is the empty list
+    (conj #{1} 2)       → #{1 2}
+    (conj {} [:b 2])    → {:b 2}
 
 `disj` is the inverse and lives beside it — both stay core rather than in `std/set`
 so a set works with the collection protocol without an import."
@@ -254,7 +258,10 @@ so a set works with the collection protocol without an import."
   "A fresh set like `s` with each of `xs` removed (removing an absent element is a
 no-op). The set counterpart of `dissoc`, and `conj`'s inverse — both live here
 rather than in `std/set` so a set works with the collection protocol without an
-import (and so `(:use set)` can't shadow them)."
+import (and so `(:use set)` can't shadow them).
+
+    (disj #{1 2 3} 2)   → #{1 3}
+    (disj #{1} 9)       → #{1}   ; removing what isn't there is a no-op"
   (fold %set-remove s xs))
 
 ;; ---- more sequence operations -----------------------------------------------
@@ -540,15 +547,21 @@ iterating for side effects.
   (%seqview-wrap coll (%xmap f)))
 
 (defn seq/lfilter (pred coll)
-  "Lazy, fusing `filter` — see `seq/lmap`."
+  "Lazy, fusing `filter` — see `seq/lmap`.
+
+    (seq (seq/lfilter math/even? [1 2 3 4]))   → (2 4)   ; `seq` realises the view"
   (%seqview-wrap coll (%xfilter pred)))
 
 (defn seq/lkeep (f coll)
-  "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `seq/lmap`."
+  "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `seq/lmap`.
+
+    (seq (seq/lkeep (fn (x) (when (math/even? x) (* x 10))) [1 2 3 4]))   → (20 40)"
   (%seqview-wrap coll (%xkeep f)))
 
 (defn seq/lremove (pred coll)
-  "Lazy, fusing `remove` — see `seq/lmap`."
+  "Lazy, fusing `remove` — see `seq/lmap`.
+
+    (seq (seq/lremove math/even? [1 2 3 4]))   → (1 3)"
   (%seqview-wrap coll (%xremove pred)))
 
 ;; ---- iteration combinators --------------------------------------------------
@@ -606,7 +619,11 @@ iterating for side effects.
     else (%for-check-binds (rest (rest binds)))))
 
 (defmacro for (binds & body)
-  "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure. Multiple body forms are evaluated in order and the LAST one is collected (like `let`/`when`/`doseq`) — `for` took exactly one body form until 2026-07-26, the only iteration form that did."
+  "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure. Multiple body forms are evaluated in order and the LAST one is collected (like `let`/`when`/`doseq`) — `for` took exactly one body form until 2026-07-26, the only iteration form that did.
+
+    (for (x [1 2 3]) (* x x))                  → (1 4 9)
+    (for (x (range 5) :when (math/even? x)) x)   → (0 2 4)
+    (for (x '(1 2) y '(:a :b)) [x y])          → ([1 :a] [1 :b] [2 :a] [2 :b])"
   (do
     (when (vector? binds)
       (error "for: bindings must be a list, not a vector: write (for (x xs) expr)."
@@ -623,7 +640,10 @@ iterating for side effects.
 ;; returning nil. Just `for` run for effect (the result list is discarded). The
 ;; param is `bind`, not `binding` — the latter is the dynamic-variable form.
 (defmacro doseq (bind & body)
-  "Run `body` for its side effects over each item of the binding (like `for`, but discards the result and returns `nil`)."
+  "Run `body` for its side effects over each item of the binding (like `for`, but discards the result and returns `nil`).
+
+    (with-out-str (doseq (x [1 2 3]) (io/write x)))   → \"123\"
+    (doseq (x [1 2]) x)                               → nil"
   `(do (for ~bind (do ~@body)) nil))
 
 ;; (dotimes (i n) body...) — run `body` for `i` = 0, 1, …, n-1; returns nil. The
@@ -631,7 +651,10 @@ iterating for side effects.
 ;; (unlike `doseq`, which routes through `for`/`mapcat`). For effects only.
 (defn- %dotimes-loop (n f i) (when (< i n) (f i) (%dotimes-loop n f (+ i 1))))
 (defmacro dotimes (bind & body)
-  "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`."
+  "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`.
+
+    (with-out-str (dotimes (i 3) (io/write i)))   → \"012\"
+    (dotimes (i 3) i)                             → nil"
   (if (not (and (pair? bind) (pair? (rest bind))))
     (error "dotimes: bind must be (var n), got "
       (pr-str bind)
@@ -644,7 +667,10 @@ iterating for side effects.
 ;; for `dolist` for the common "do this for each item" loop.
 (defn- %dolist-loop (xs f) (when (not (nil? xs)) (f (first xs)) (%dolist-loop (rest xs) f)))
 (defmacro dolist (bind & body)
-  "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`."
+  "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`.
+
+    (with-out-str (dolist (x '(1 2 3)) (io/write x)))   → \"123\"
+    (dolist (x '(1 2)) x)                               → nil   ; the value is discarded"
   (if (not (and (pair? bind) (pair? (rest bind))))
     (error "dolist: bind must be (var coll), got "
       (pr-str bind)

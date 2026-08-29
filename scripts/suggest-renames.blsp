@@ -24,9 +24,9 @@
   "Every public global whose LOCAL part is exactly `n` — i.e. the places `n` could have
 moved to. A `%`-prefixed primitive counts: several names became mechanism rather than
 vocabulary, and the caller still needs to know."
-  (sort (map name
+  (sort (map ->string
           (filter (fn (s)
-                    (let (full (name s)
+                    (let (full (->string s)
                           i (index-of full "/"))
                       (and i (> i 0) (= (string/substring full (inc i) (count full)) n))))
             (reflect/global-names)))))
