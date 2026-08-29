@@ -26,9 +26,12 @@ pub(crate) fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
         // Cons needs heap alloc; Div may return Float — both handled by prim_apply.
         // VectorRef needs the heap (slab index) and its operands aren't (Int, Int);
         // handled directly in prim2_inline_exec.
-        PrimOp::Cons | PrimOp::Div | PrimOp::VectorRef | PrimOp::TableHas | PrimOp::TableGet => {
-            None
-        }
+        PrimOp::Cons
+        | PrimOp::Div
+        | PrimOp::VectorRef
+        | PrimOp::TableHas
+        | PrimOp::TableGet
+        | PrimOp::MapGet => None,
     }
 }
 
@@ -89,7 +92,11 @@ pub(crate) fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>
         PrimOp::BitOr => Value::int(a | b),
         PrimOp::BitXor => Value::int(a ^ b),
         // Handled in the exec arm (they need `&mut Heap` / the heap); never reach here.
-        PrimOp::Cons | PrimOp::VectorRef | PrimOp::TableHas | PrimOp::TableGet => return Ok(None),
+        PrimOp::Cons
+        | PrimOp::VectorRef
+        | PrimOp::TableHas
+        | PrimOp::TableGet
+        | PrimOp::MapGet => return Ok(None),
     };
     Ok(Some(v))
 }
@@ -220,6 +227,23 @@ pub(crate) fn prim2_inline_exec(
                 if n >= 0 && (n as usize) < heap.vector(id).len() {
                     crate::perf_bump!(prim2_inline);
                     return Ok(Some(heap.vector(id)[n as usize]));
+                }
+            }
+            Ok(None)
+        }
+        // `(get m k)` on a map: one CHAMP probe, no call. Inline ONLY a present, non-nil
+        // value — an absent key and a stored `nil` are indistinguishable to the caller here,
+        // and both must reach `get`'s `%lookup-miss`, which resolves a record whose contents
+        // are not its fields through the `Lookup` ability. A non-map receiver defers too, so
+        // the set / string / integer-index branches and every type error stay in Brood, and
+        // this stays a fast path rather than a second implementation of `get`.
+        None if op == PrimOp::MapGet => {
+            if let ValueRef::Map(id) = x.unpack() {
+                if let Some(v) = heap.map_get(id, y) {
+                    if !matches!(v, Value::Nil) {
+                        crate::perf_bump!(prim2_inline);
+                        return Ok(Some(v));
+                    }
                 }
             }
             Ok(None)

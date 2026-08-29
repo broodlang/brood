@@ -407,6 +407,7 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
                 | PrimOp::BitXor
                 | PrimOp::TableHas
                 | PrimOp::TableGet
+                | PrimOp::MapGet
         )
         // `Cons` is admitted: the lowering calls `brood_rt_cons` (same bump-allocate
         // path as `brood_rt_make_vector2`, which works) and reads all 3 result words
@@ -659,6 +660,11 @@ pub(super) mod codegen {
             Inst::Prim2 { op, .. }
             | Inst::Prim2SlotSlot { op, .. }
             | Inst::Prim2SlotInt { op, .. } => {
+                // `MapGet` is deliberately absent: `Heap::map_get` takes `&self`, so a CHAMP
+                // probe provably neither allocates nor collects — it returns a `Value`
+                // already stored in the map rather than reconstructing one, which is what
+                // puts the table reads on this list. Listing it would cost the vector-base
+                // hoist around every map read for nothing.
                 matches!(
                     op,
                     PrimOp::Cons | PrimOp::TableGet | PrimOp::TableHas | PrimOp::VectorRef

@@ -108,6 +108,7 @@ impl CraneliftBackend {
             "brood_rt_dispatch_identity",
             brood_rt_dispatch_identity as *const u8,
         );
+        builder.symbol("brood_rt_map_get", brood_rt_map_get as *const u8);
         builder.symbol(
             "brood_rt_i64_overflow_ptr",
             brood_rt_i64_overflow_ptr as *const u8,

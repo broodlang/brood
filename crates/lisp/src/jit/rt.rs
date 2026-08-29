@@ -520,6 +520,45 @@ pub unsafe extern "C" fn brood_rt_global_epoch(heap: *mut Heap) -> i64 {
     (*heap).global_epoch() as i64
 }
 
+/// `(get m k)` on a CHAMP map — the native half of [`PrimOp::MapGet`].
+///
+/// Status protocol, matching [`brood_rt_table_get2`]: **0** = a present, non-nil value is in
+/// `*out`; **1** = decline. Never 2 — a map probe raises nothing, so there is no error to
+/// park.
+///
+/// Declines for a non-map receiver, an absent key, or a stored `nil`, which is exactly the
+/// VM's rule in `prim2_inline_exec`. The last two look the same from here and must: both have
+/// to reach `get`'s `%lookup-miss`, where a record whose contents are not its fields resolves
+/// through the `Lookup` ability. Keeping that in Brood is the point — this is a fast path for
+/// the hit, not a second implementation of `get`.
+///
+/// # Safety
+/// `heap`/`out` live; the word triples are bytes the JIT read out of real `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_map_get(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    m0: i64,
+    m1: i64,
+    m2: i64,
+    k0: i64,
+    k1: i64,
+    k2: i64,
+) -> i64 {
+    use crate::core::value::Value;
+    let h = &mut *heap;
+    let Value::Map(id) = words_to_val(m0, m1, m2) else {
+        return 1;
+    };
+    match h.map_get(id, words_to_val(k0, k1, k2)) {
+        Some(v) if !matches!(v, Value::Nil) => {
+            *out = v;
+            0
+        }
+        _ => 1,
+    }
+}
+
 /// The **dispatch identity** of a value, as an interned keyword symbol — the read a
 /// speculation guard makes before calling an ability impl directly
 /// (docs/dispatch-speculation.md, phase 2a).
