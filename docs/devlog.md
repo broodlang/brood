@@ -6197,3 +6197,37 @@ sighting, already mitigated on `4fec7fa2`).
 The lesson is KI-68/69/70/76's, with one clause added. A gate must assert *what it is gating*
 — and when the same assertion is needed in four scripts, three of them will not get it if the
 first one is fixed in place.
+
+## 2026-08-29 — a release blocker that had been closed for a month, and 24 lines of dead formatter
+
+`docs/handoff.md` and `docs/roadmap-for-v1.md` both named `nest format --check`'s comment
+**hoisting** as the one remaining non-language 1.0 release blocker: a style verdict nobody
+had made, with the standing instruction "do not run the formatter tree-wide before that call
+is made". The tree is **414/414 clean** and has been for some time.
+
+**The call was made on 2026-07-31 and nothing ticked the box.** `f0082dc7` ("leave a
+same-line trailing comment where the author put it") dropped hoisting — the ≈69 hunks that
+were 40% of the red, and the behaviour that "destroyed the alignment that makes a column of
+trailing comments readable". The roadmap's measurement is dated 2026-07-30 at `56c2501`, one
+day earlier. So the entry was never wrong when written; it was overtaken the next day by a
+fix aimed at something else, and an item resolved *as a side effect* gets no ceremony — no
+commit says "closes the formatter blocker", so nothing prompts anyone to update the doc. A
+month later the stale instruction was still being read as live.
+
+**It left dead code behind, and no gate can see that class.** Once nothing hoists,
+`comment-on-own-line?` and `comment-on-own-line?-prev` are unreachable — `last-nonws-comment?`
+even documents why ("the last non-ws child being a comment is now both necessary AND
+sufficient"), yet the two functions stayed. Nothing flags an unreferenced private `defn`:
+`nest check` is at zero warnings, clippy does not see `.blsp`, and the formatter's own 88
+tests pass with or without them. They were found by grepping for the name the docstring
+mentioned. Deleted (24 lines); the docstring now says they are gone and that reintroducing
+hoisting means writing them back.
+
+Verified against a `nest` **and** a `brood` rebuilt from the edited `std/` — the first run of
+`tests/format_test.blsp` used a stale `brood` and the runtime said so
+(`this binary's baked-in std/ is OLDER than …`), which is the same wrong-artifact trap KI-76
+covers, caught this time by the warning rather than by a wrong verdict. After the rebuild:
+`format_test` 72/72, `stress/formatter_test` 16/16 (semantic preservation + idempotency over
+every `std/`, `std/tool/` and `std/editor/` file), tree still 414/414 clean.
+
+With this the 1.0 release-blocker list in `roadmap-for-v1.md` is empty.
