@@ -620,7 +620,34 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
         done += 1;
     }
     // …and now the deferred entry points, every other binding in the section being live.
+    //
+    // With `reserve` — an EMBEDDED module materialising from the stdlib image — an entry
+    // whose name is already bound to DATA keeps its binding. The stdlib image is pristine:
+    // it was written before any program ran, so a module's registries are in it as their
+    // empty seeds (`editor/layers/*type-layers*` as `{}`). Loading the same module from
+    // SOURCE runs `defonce`, which leaves an existing registry alone; a raw define here did
+    // not, and clobbered the registry a project image had just restored — every buffer type
+    // lost its layers on every imaged start, and only on the runs that read the image (the
+    // run that wrote it had loaded the module from source first). An imaged start must be
+    // indistinguishable from a source start, and `defonce` is part of the source start.
+    //
+    // Only DATA, and only for the pristine image. A pre-existing FUNCTION binding is an
+    // autoload stub (ADR-246) that must be replaced with the real thing — the whole reason
+    // this pass exists (KI-72). And a PROJECT image describes a later state than the heap
+    // it restores into, so it may overwrite (the "basic" test in startup_image_test.blsp
+    // writes 41, redefines to :clobbered, and expects 41 back).
     for (kind, sym, v) in deferred {
+        if reserve {
+            let existing_is_data = !matches!(
+                heap.env_get(global, sym).map(|e| e.unpack()),
+                Some(value::ValueRef::Fn(_))
+                    | Some(value::ValueRef::Macro(_))
+                    | Some(value::ValueRef::Native(_))
+            );
+            if existing_is_data {
+                continue;
+            }
+        }
         define_image_entry(heap, global, kind, sym, v, reserve)?;
     }
     // Everything just promoted is bound to a global, so it is all live. Tell the RUNTIME

@@ -51,6 +51,37 @@
       (assert= 41 si-a)
       (assert= 6 (si-f 5))))
 
+  ;; The stdlib image is PRISTINE — written before any program ran — so a std module's
+  ;; registries are in it as empty seeds. Materialising with `reserve` (how an embedded module
+  ;; loads from that image) must therefore leave an already-bound DATA global alone, exactly
+  ;; as the `defonce` in the module's source would. Without this, `editor/layers/*type-layers*`
+  ;; came back `{}` on every imaged start of a project: the run that WROTE the image passed
+  ;; (the module had loaded from source, so `defonce` ran) and every run that READ it lost
+  ;; every buffer type's layers.
+  (test "a pristine (reserve) materialise keeps a bound data global; a stub is still replaced"
+    (def si-reg {})
+    (def si-stub (fn (_) :real))
+    (let (p (img-tmp "pristine"))
+      (%image-write p [["" ['startup-image-test/si-reg 'startup-image-test/si-stub]]] "fp-pr")
+      ;; the program has since accumulated into the registry, and a stub stands in for the fn
+      (def si-reg {:brood [1 2 3]})
+      (def si-stub (fn (_) :stub))
+      (let (idx (%image-index p "fp-pr")
+            sec (get idx ""))
+        (%image-load-section p (first sec) (second sec) true)
+        (assert= {:brood [1 2 3]} si-reg) ; the registry survived
+        (assert= :real (si-stub 0))))) ; the stub was replaced by the imaged fn
+  ;; …and WITHOUT `reserve` — a project's own image, which describes a LATER state than the
+  ;; heap it restores into — a bound data global is overwritten, as the `basic` test expects.
+  (test "a project (non-reserve) materialise still overwrites a bound data global"
+    (def si-later 1)
+    (let (p (img-tmp "later"))
+      (%image-write p [["" ['startup-image-test/si-later]]] "fp-later")
+      (def si-later 2)
+      (let (sec (get (%image-index p "fp-later") ""))
+        (%image-load-section p (first sec) (second sec))
+        (assert= 1 si-later))))
+
   ;; A `defdyn` var written into an image (v5) must open without error and stay a *dynamic* var:
   ;; `binding` on it must work, not raise "not a dynamic variable". The dynamic mark lives in a
   ;; process-wide static that an imaged start would otherwise miss (it skips the module load that
