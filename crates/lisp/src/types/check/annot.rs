@@ -467,6 +467,14 @@ pub(super) const TYPE_HEADS: [&str; 8] = [
 /// carries what the file itself declares. Ability names are capitalised (they are
 /// named like records) and no base type is, so the split is exact for
 /// well-named code and false-positive-free for the rest.
+///
+/// The test reads the symbol's **last `/` segment**, not the whole spelling, because
+/// `shapes/Shape` and `Shape` name the same ability — the registry is keyed by the bare
+/// CamelCase name (ADR-255) and [`ability_type`] resolves through `rsplit('/')` for exactly
+/// that reason. Testing the whole spelling gave one ability two verdicts: in a project check
+/// both forms resolve and neither warns, but in a loose single-file check the bare form fell
+/// into this silence while the qualified form reported `unknown type` — a diagnostic that
+/// appeared only when the module the ability actually comes from was named.
 pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
     if parse_type(heap, form).is_some() {
         return None;
@@ -474,7 +482,8 @@ pub(super) fn type_expr_problem(heap: &Heap, form: Value) -> Option<String> {
     match form {
         Value::Sym(s) => {
             let name = value::symbol_name(s);
-            if name.starts_with(|c: char| c.is_uppercase()) {
+            let bare = name.rsplit('/').next().unwrap_or(&name);
+            if bare.starts_with(|c: char| c.is_uppercase()) {
                 return None; // an ability from a module this check didn't load
             }
             Some(format!("unknown type `{name}`"))

@@ -2098,6 +2098,41 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                   ops))
     (cons 'do (append reg (append op-defs provided-defs)))))
 
+(defn- %op-declared-ret
+  (specs op-name)
+  "The `:-> RET` form `defability` declared for `op-name` among `specs`, or nil when the op
+declares no return. Read at `impl` EXPANSION time — the ability is registered by the time an
+`impl` for it expands — so the shim below can check what the ability promised.
+
+Written as explicit recursion over `first`/`rest` rather than with `filter`, for the same
+load-order reason `%sig-pos` exists: this runs while the prelude is being expanded, and the
+prelude implements abilities of its own (`(impl Port :native …)`)."
+  (cond
+    (nil? specs) nil
+    (%eq (first (first specs)) op-name)
+      (let (tail (rest (rest (first specs))))
+        (if (%eq (first tail) :->) (first (rest tail)) nil))
+    else (%op-declared-ret (rest specs) op-name)))
+
+(defn- %contract-check-op-result
+  (aname op ret value)
+  "Enforce an ability op's declared return at run time, under `BROOD_CONTRACTS=1`. The
+checker reports a *statically* visible violation already; this catches the ones it cannot
+see — an impl whose body only yields the wrong type for some inputs, and an impl registered
+at run time from a value the checker never read. Returns `value` so it can wrap a body."
+  (if (type-matches? ret value)
+    value
+    (throw (str aname
+             "/"
+             op
+             ": result expected "
+             ret
+             ", got "
+             (type-of value)
+             " ("
+             (pr-str value)
+             ")"))))
+
 (defmacro impl (aname key & methods)
   "Register implementations of ability `aname` for dispatch id `key` — a `type-of`
   keyword (`:int`, `:map`, …), a record's nominal id (`geometry/circle`), or `:default`.
@@ -2108,19 +2143,31 @@ which is meaningless for a rope, so falling through unconditionally would swap a
     (impl Size geometry/circle  (size [c] (get c :r)))"
   ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
   ; keyworded to match what `%identity-of` produces; a built-in id (`:int`) is already one.
-  (let (id-kw (%ability-id-kw key))
+  ; Under BROOD_CONTRACTS=1, an op with a declared `:-> RET` gets its result checked at every
+  ; call (ADR-180 deferred item c). Decided at EXPANSION time, like `sig`'s own contract
+  ; switch, so an unset flag costs a default build nothing at all — the shim is not emitted.
+  (let (id-kw (%ability-id-kw key)
+        specs (if (%eq (%getenv "BROOD_CONTRACTS") "1") (%ability-ops aname) nil))
     (cons 'do
       (map
         (fn (m)
           (let (op-name (first m)
                 ; arg vector → list
                 arg-syms (map (fn (s) s) (second m))
-                body (rest (rest m)))
+                body (rest (rest m))
+                ret (%op-declared-ret specs op-name)
+                checked (if (nil? ret)
+                          body
+                          (list (list '%contract-check-op-result
+                                  (list 'quote aname)
+                                  (list 'quote op-name)
+                                  (list 'quote ret)
+                                  (cons 'do body)))))
             (list '%register-impl
               (list 'quote aname)
               (list 'quote op-name)
               id-kw
-              (cons 'fn (cons arg-syms body))
+              (cons 'fn (cons arg-syms checked))
               (list 'quote (reflect/current-ns)))))
         methods))))
 

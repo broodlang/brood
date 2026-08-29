@@ -63,38 +63,57 @@ Everything the audit listed, plus:
 
 ### Still missed ❌
 
+All four items that stood here on 2026-08-28 now behave — verified by probe, not by reading
+the code (`(get r :ok)` over a tagged union, `(not (tuple int))` against `[1]`, a callback
+whose result is wrong, and a product covered jointly by two alternatives). What is left in
+this position is not a missing rule but a deliberate **reporting policy**:
+
 ```lisp
-;; 1. a refinement accessor reports nothing for a union, so a *field* of a
-;;    tagged-union value is not resolved — the relations improved, not the lookups
-(sig f ((or (record :ok int) (record :error string)) -> int))
-(defn f (r) (string/length (get r :ok)))          ; silent
-
-;; 2. the complement of a refined type widens to its tag
-(sig f ((not (tuple int)) -> any))  (f [1])       ; silent
-
-;; 3. a callback's *result* is never checked (an inferred return over-approximates)
-(sig g ((int -> string) -> int))  (defn h (n) (+ n 1))  (g h)   ; silent
-
-;; 4. subtyping across terms is sound, not complete: a value covered jointly by
-;;    two alternatives but by neither alone reads as "not a subtype" — it defers
+;; an argument the checker cannot prove is right, but cannot rule out either,
+;; is NOT reported when its type is dynamic (ADR-110's gradual relation)
+(sig takes-int (int -> any))
+(sig maybe (int -> (or int bool)))
+(takes-int (maybe 1))          ; silent — a call result is dynamic, so `∩ ≠ ⊥` decides
+(defn outer (x) (takes-int x)) ; WARNS when x is a sig-typed param, i.e. precise, so `⊆` decides
 ```
+
+A **precise** argument (a literal, a `sig`-typed parameter, integer-closed arithmetic) is
+checked with `⊆`, so a merely-wider misuse is caught. A **dynamic** one (a call result, a
+redefinable global) is checked with `∩ ≠ ⊥`, so only an argument that *cannot possibly* fit is
+reported. That asymmetry is the reload-safety guarantee, not an oversight: warning on
+merely-not-guaranteed would fire on every `(or T nil)` flowing into a `T` parameter, and a
+`def` must always be able to win. See `check/walk.rs` and docs/type-gating.md "B1".
 
 ## What's left
 
 Eight of the nine items the audit ranked shipped the same day (ADR-259..263); what follows is
 what they left behind, plus the items that were deferred on ADR-011 grounds and still are.
 
+**Re-probed 2026-08-29.** Items 1-4 — the whole *lattice* backlog — are now shipped, and each
+was verified by running it rather than by reading the code. What remains is deliberately not
+lattice work: two small wiring gaps (6, 8), two large design items that need bidirectional
+inference or a compiler channel (5, 7), and adoption (9), which is ongoing by nature.
+
 | # | Item | Why it is left | Cost |
 |---|---|---|---|
 | ~~1~~ | ~~A field lookup on a tagged union~~ | **Shipped** (ADR-264): records are closed by default, with `&open` as the marked case and openness modelled as the type of the undeclared keys, so `(get r :ok)` over `{ok: int} \| {error: string}` resolves to `int \| nil` and the two arms are provably disjoint | ✅ |
-| 2 | **The complement of a refined term** — `(not (tuple int))` widens to `vector` | Needs negative structural atoms (the full BDD), i.e. terms that say "not this shape" — a second representation change, with emptiness-checking to match | Large |
-| 3 | **A callback's result** is never checked | An inferred return over-approximates, so comparing results false-positives at every call site; needs a "this return is precise" distinction the sig sources do not carry today | Medium |
-| 4 | **Subtyping across terms is incomplete** — a value covered jointly by two alternatives but by neither alone defers | The complete rule needs a distributivity/emptiness decision procedure; the incompleteness is in the safe direction (it defers, never warns) | Large |
+| ~~2~~ | ~~The complement of a refined term~~ | **Shipped** (ADR-288): a term carries `neg`, a list of subtracted types, and emptiness is decided by the identity `P ∖ N = ∅ ⟺ P ⊆ ⋃N` — so one routine serves both emptiness and subtyping. `(not (tuple int))` is exact | ✅ |
+| ~~3~~ | ~~A callback's result is never checked~~ | **Shipped** — a parameter in call-head position is intersected with the callable type (ADR-272), and a callback whose result is wrong now reports at the call site | ✅ |
+| ~~4~~ | ~~Subtyping across terms is incomplete~~ | **Shipped** (ADR-289): the set-theoretic product rule over subsets of the alternatives, so `(tuple int\|string, int)` is proven under `(tuple int int) \| (tuple string int)`. Extended to arrows by ADR-292, where an intersection satisfies a requirement no single arm does — checked against a brute-force model of what an arrow denotes, 0 unsound and 0 missed in 2.5M pairs | ✅ |
 | 5 | **Return-type dispatch** — selecting an impl by expected return | Needs bidirectional inference. The long-standing open item in [protocol-dispatch-design.md](protocol-dispatch-design.md) | Large |
-| 6 | **Qualified cross-module ability type names** (`mod/Ability` in a `sig`) | Ability type names resolve by bare name; this is also what makes ADR-259's capitalised-name silence necessary | Small |
-| 7 | **Tier-2 monomorphization** — devirtualizing an *inferred-variable* op call | The real hot-loop win, and the miscompile surface; needs the checker→compiler channel plus whole-fleet validation. See [ability-monomorphization.md](ability-monomorphization.md) | Large |
-| 8 | **Runtime contracts for ability ops** under a `BROOD_CONTRACTS`-style flag | Checker-only today, matching `sig`'s default (ADR-180 deferred item c) | Small |
-| 9 | **`sig` adoption across std** — 34 declarations over 2828 `defn`s | Every one now buys more than it did: a declared sig is what the reversed-args gate (KI-71) reads, and inference is checked against it (ADR-259) | Ongoing |
+| ~~6~~ | ~~Qualified cross-module ability type names~~ | **Shipped 2026-08-29** — and the headline was already done: in a PROJECT check both `Shape` and `shapes/Shape` resolve, because `ability_type` reads the last `/` segment (the registry is keyed by bare CamelCase name, ADR-255). What was broken was the loose single-file fallback, where neither can resolve and the checker falls back to "capitalised means an ability I cannot see" — that test read the WHOLE spelling, so `shapes/Shape` reported `unknown type` while bare `Shape` was accepted. Naming the module an ability comes from must not be what manufactures a diagnostic | ✅ |
+| 7 | **Tier-2 monomorphization** — devirtualizing an *inferred-variable* op call | Still deferred, and now for a better-founded reason. Turning `BROOD_MONO` on for the first time (2026-08-29 — **nothing in the repo had ever set it**) found Tier 1 miscompiling: it baked the resolved impl *value*, and a body compiles before it runs, so a module registering an impl and using it in the same body called the wrong one. Fixed by proving the identity and leaving resolution behind the epoch-guarded cache (ADR-294), and gated by a differential. Tier 2 multiplies that surface across every call site the checker can type and still needs the checker→compiler channel — but it now has a sound base and a gate that catches a miscompile the first time the flag goes on | Large |
+| ~~8~~ | ~~Runtime contracts for ability ops~~ | **Shipped 2026-08-29** (ADR-293): `impl` wraps a method whose op declares `:-> RET`, decided at expansion time so an unset flag emits nothing. Building it revealed `BROOD_CONTRACTS=1` had rotted into *unusable* — three cold-boot-cache-only defects, none of which any gate could see, because the mode had no end-to-end test at all (KI-81) | ✅ |
+| 9 | **`sig` adoption across std** — **407** declarations over **2942** `defn`s (369 earlier on 2026-08-29; 34/2828 on 2026-08-28) | Every one now buys more than it did: a declared sig is what the reversed-args gate (KI-71) reads, and inference is checked against it (ADR-259) | Ongoing |
+
+**On adopting in bulk (2026-08-29).** `nest check --suggest-sigs` prints what the checker
+would infer, and it is advice rather than a patch for a good reason: an inferred domain
+over-approximates, so pasting it verbatim enshrines nonsense as documentation —
+`(sig url/url-unreserved? ((or map number) -> bool))` for a character predicate is the
+suggester working correctly and the declaration being wrong. The batch that landed
+(`encoding`, `stats`, `multimap`, `math`, +38) was written by reading each body. The payoff is
+concrete rather than decorative: `(stats/percentile 50 [1 2 3])` now reports on **both**
+argument positions, where before it was silent.
 
 **Precision residues, still sound to leave.** The *merely-wider* residue — a body typed
 exactly `number` declared `int` (e.g. `(/ x 2)`) — needs occurrence/range analysis to pin and

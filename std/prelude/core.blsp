@@ -718,6 +718,48 @@ for `sig!` that predates `index-of` in the prelude's own load order."
     (%eq (first xs) x) n
     else (%sig-pos (rest xs) x (%add n 1))))
 
+(defn- %sig-rev
+  (xs acc)
+  "`xs` reversed onto `acc`. Expansion-time helper — see `%sig-take`."
+  (if (nil? xs) acc (%sig-rev (rest xs) (cons (first xs) acc))))
+
+(defn- %sig-take-acc
+  (n xs acc)
+  (if (or (%le n 0) (nil? xs))
+    (%sig-rev acc nil)
+    (%sig-take-acc (%sub n 1) (rest xs) (cons (first xs) acc))))
+
+(defn- %sig-take
+  (n xs)
+  "The first `n` elements of `xs`. Expansion-time helper for `sig!`, for the same
+reason `%sig-pos` is one: this runs while the PRELUDE is being expanded, and the
+general `take` is `seq/take`, which is not reachable that early. Calling the bare
+name here made `BROOD_CONTRACTS=1` panic — `prelude expand: unbound symbol: take`
+— on every COLD boot cache, i.e. the first run after any rebuild, while a warm
+cache skipped expansion and looked fine (KI-81)."
+  (%sig-take-acc n xs nil))
+
+(defn- %sig-nth
+  (xs n)
+  "The `n`th element of `xs`, or nil. Expansion-time helper for `sig!` — see
+`%sig-take` for why the general `nth` cannot be called here."
+  (cond
+    (nil? xs) nil
+    (%le n 0) (first xs)
+    else (%sig-nth (rest xs) (%sub n 1))))
+
+(defn- %sig-gensyms-acc
+  (n acc)
+  (if (%le n 0) acc (%sig-gensyms-acc (%sub n 1) (cons (gensym "arg") acc))))
+
+(defn- %sig-gensyms
+  (n)
+  "A list of `n` fresh argument symbols. Expansion-time helper for `sig!`,
+replacing `(map (fn (_) (gensym \"arg\")) (range (count ptypes)))` — `map`,
+`range` and `count` are all as unreachable during prelude expansion as `take`
+was."
+  (%sig-gensyms-acc n nil))
+
 (defmacro sig! (name type)
   "Like `(sig …)` but also installs a *runtime* contract: each argument and the
 result are checked at every call and a mismatch throws (an opt-in 'strong
@@ -731,19 +773,26 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   `(do
      (%register-sig '~name '~type)
      ~(let (i (%sig-pos type '-> 0))
-        (if (< i 0)
+        (if (%lt i 0)
           ; not a (… -> …) type — nothing to enforce
           nil
-          (let (ptypes (take i type)
-                rtype (nth type (inc i))
+          (let (ptypes (%sig-take i type)
+                rtype (%sig-nth type (%add i 1))
                 amp-pos (%sig-pos ptypes '& 0))
-            (if (< amp-pos 0)
+            (if (%lt amp-pos 0)
               ;; fixed arity
-              (let (params (map (fn (_) (gensym "arg")) (range (count ptypes)))
+              (let (params (%sig-gensyms i)
                     orig (gensym "orig")
                     r (gensym "ret"))
-                `(def ~name
-                   (let (~orig ~name)
+                ;; Hold the original in a GLOBAL, not a `let`-bound local. A shim written
+                ;; as `(let (orig name) (fn …))` closes over a local frame, and the prelude's
+                ;; freeze step rejects exactly that ("shared closures must capture the global
+                ;; env") — so arming contracts over the prelude's own sigs aborted the boot
+                ;; before this could check anything. The name is a gensym, so nothing can
+                ;; reach or rebind it, and the shim now captures only globals (KI-81).
+                `(do
+                   (def ~orig ~name)
+                   (def ~name
                      (fn (~@params)
                        (%contract-check-args '~name '~ptypes (list ~@params) 1)
                        (let (~r (~orig ~@params))
@@ -758,14 +807,16 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                                     ")")))
                          ~r)))))
               ;; variadic: (fixed… & rest-type -> ret)
-              (let (fixed-ptypes (take amp-pos ptypes)
-                    rest-ptype (nth ptypes (inc amp-pos))
-                    fixed-params (map (fn (_) (gensym "arg")) (range amp-pos))
+              (let (fixed-ptypes (%sig-take amp-pos ptypes)
+                    rest-ptype (%sig-nth ptypes (%add amp-pos 1))
+                    fixed-params (%sig-gensyms amp-pos)
                     rest-param (gensym "rest")
                     orig (gensym "orig")
                     r (gensym "ret"))
-                `(def ~name
-                   (let (~orig ~name)
+                ;; Same global-capture reasoning as the fixed-arity shim above.
+                `(do
+                   (def ~orig ~name)
+                   (def ~name
                      (fn (~@fixed-params & ~rest-param)
                        (%contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
                        (%contract-check-rest '~name '~rest-ptype ~rest-param)
