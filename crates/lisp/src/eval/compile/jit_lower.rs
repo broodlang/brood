@@ -583,6 +583,12 @@ fn jit_lower_arm_inner(
     let mut sig = m.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // heap
     sig.params.push(AbiParam::new(types::I64)); // base (frame index into roots)
+                                                // `out`: where the Done result goes. It used to go to `roots[base]` and be read back by
+                                                // `jit_run_fast_link` — a round trip through the roots stack that `perf` (precise events,
+                                                // so not skid) put at **16.4% of `jit_run_fast_link`** on one `movups`. Handing the
+                                                // destination down lets the callee store once, into the slot the ultimate consumer
+                                                // already owns. See docs/compute-frontier.md §2h.
+    sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value (Done result)
     sig.returns.push(AbiParam::new(types::I64)); // outcome: 0 = Done, 1 = deopt, 2 = preempt
     let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = m
@@ -964,9 +970,9 @@ fn jit_lower_arm_inner(
     let has_cons = code.iter().any(inst_allocates_hot);
 
     // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt. The
-    // Done block (`ip == len`) takes **no** params: the result is returned via
-    // `roots[base]` (each exit stores it there), so it can be a handle, not just an
-    // `i64` block arg. Every other block carries its operand-stack depth as I64 params.
+    // Done block (`ip == len`) takes **no** params: the result is returned through the
+    // caller's `out` pointer (each exit stores it there), so it can be a handle, not just
+    // an `i64` block arg. Every other block carries its operand-stack depth as I64 params.
     let leader_block: Vec<Option<cranelift_codegen::ir::Block>> = (0..=len)
         .map(|ip| {
             if is_leader[ip] {
@@ -1000,6 +1006,7 @@ fn jit_lower_arm_inner(
     b.switch_to_block(entry);
     let heap = b.block_params(entry)[0];
     let base = b.block_params(entry)[1];
+    let out_ptr = b.block_params(entry)[2];
     // `roots_base` is a **Variable**, not a fixed SSA value: a Brood→Brood call's staging
     // pushes (and the callee's own frames) may reallocate `roots`, so the base is re-fetched
     // after each call (`def_var` below). For a call-free arm it keeps its single entry
@@ -1017,6 +1024,7 @@ fn jit_lower_arm_inner(
         .map(|i| slot_tags.get(i).copied() == Some(TAG_INT))
         .collect();
     let frame = emit::Frame {
+        out_ptr,
         rb_var,
         base,
         nslots,
@@ -1492,8 +1500,12 @@ fn jit_lower_arm_inner(
     let store_op = |b: &mut FunctionBuilder, dst: i64, op: Op| emit::store_op(b, dst, op, frame);
     // Return-via-roots: place the single result in `roots[base]` and jump to the
     // param-less Done block. The result is a whole `Value`, so it can be a handle.
+    //
+    // Return **through the caller's `out` pointer**, not through `roots[base]`: the result
+    // is written once, into the slot its consumer already owns, and nobody loads it back.
+    // See `emit::store_result` for the measurement that motivated it.
     let exit_done = |b: &mut FunctionBuilder, op: Op| {
-        store_op(b, 0, op);
+        emit::store_result(b, op, out_ptr, frame);
         b.ins().jump(done_block, &[]);
     };
     // Call a handle op (`brood_rt_{cons,car,cdr}`) with the out-pointer ABI: pass the
@@ -1901,8 +1913,8 @@ fn jit_lower_arm_inner(
         }
     }
 
-    // Done block: the result was already stored into `roots[base]` by the exiting block
-    // (return-via-roots, see `exit_done`), so this just signals normal completion.
+    // Done block: the result was already stored through the `out` pointer by the exiting
+    // block (see `exit_done`), so this just signals normal completion.
     b.switch_to_block(done_block);
     let zero = b.ins().iconst(types::I64, 0);
     b.ins().return_(&[zero]);

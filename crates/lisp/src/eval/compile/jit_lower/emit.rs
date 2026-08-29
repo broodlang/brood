@@ -79,6 +79,14 @@ pub(super) const TICK_BATCH: i64 = 128;
 pub(super) struct Frame<'a> {
     pub rb_var: Variable,
     pub base: cranelift_codegen::ir::Value,
+    /// Where a Done result is written — the caller's `out` pointer (arm ABI parameter 2, see
+    /// [`crate::jit::JitArmFn`]). It lives on `Frame` rather than being threaded to the exit
+    /// helpers because there is **more than one Done exit** (`exit_done` in `jit_lower.rs`
+    /// and the `t == len` arm of [`control::emit_jump`]), and the first migration of this ABI
+    /// missed the second one: the `if`/loop arms kept writing `roots[base]` that nobody read
+    /// any more, and every such arm returned `nil`. Carrying it here makes "which exits must
+    /// be updated" a question the type system answers.
+    pub out_ptr: cranelift_codegen::ir::Value,
     pub nslots: usize,
     pub deopt: cranelift_codegen::ir::Block,
     pub carry_vars: &'a [Option<(Variable, bool)>],
@@ -734,71 +742,88 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
 /// a slot-copy inherits the source's flags; the comparison-`i8` case marks
 /// `slot_bool` (block-arg representation). The `slot_f64_cache` is updated in lock
 /// step — a float store caches the SSA `f64`, every other store invalidates.
+/// Record what kind of value now sits in slot `dst`, so a later read of it picks the right
+/// representation. Pure metadata — emits no code. Extracted from [`store_op`] so the return
+/// exit ([`store_result`]) can keep the identical bookkeeping without restating the per-`Op`
+/// mapping; two copies of this mapping would be a silent-divergence hazard.
+pub(super) fn set_slot_flags(b: &FunctionBuilder, dst: i64, op: Op, f: Frame) {
+    let (is_float, is_bool, f64v) = match op {
+        // A comparison `i8` (`store_int`/`box_scalar` boxes it as `Value::Bool`) marks the
+        // slot bool; a real `i64` int does not.
+        Op::Int(v) => (false, b.func.dfg.value_type(v) == types::I8, None),
+        Op::Float(v) => (true, false, Some(v)),
+        Op::Bool(_) => (false, true, None),
+        Op::Slot(k) => (
+            f.slot_float.borrow().get(k).copied().unwrap_or(false),
+            f.slot_bool.borrow().get(k).copied().unwrap_or(false),
+            f.slot_f64_cache.borrow().get(k).copied().flatten(),
+        ),
+        Op::Handle(..) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => (false, false, None),
+    };
+    set_slot_float(dst, is_float, f);
+    set_slot_bool(dst, is_bool, f);
+    if let Some(s) = f.slot_f64_cache.borrow_mut().get_mut(dst as usize) {
+        *s = f64v;
+    }
+}
+
+/// The arm's **return** store: write the single result `Value` to `addr` as one 16-byte
+/// vector store of `[tag, payload]` plus an 8-byte store of the third word.
+///
+/// `addr` is the caller-supplied `out` pointer, not a frame slot. Returning through
+/// `roots[base]` and having `jit_run_fast_link` load it straight back cost **16.4% of that
+/// function** on a single `movups` — measured with `cycles:pp`, so it is the load and not
+/// skid from the `callq` before it (docs/compute-frontier.md §2h).
+///
+/// **The obvious explanation is wrong, and it was tested.** A 16-byte load straddling
+/// `store_int`'s 1-byte tag + 8-byte payload cannot store-forward, which predicts exactly
+/// this symptom — but widening the store to a single 16-byte vector store while still going
+/// through `roots[base]` left the instruction at 16.4% (from 16.4%) and bought 1.3% of the
+/// row, against a 1.0% floor. So the cost is the memory round trip itself, not the width
+/// mismatch. The wide store is kept because it matches the consumer's width for free.
+pub(super) fn store_result(
+    b: &mut FunctionBuilder,
+    op: Op,
+    addr: cranelift_codegen::ir::Value,
+    f: Frame,
+) {
+    let [w0, w1, w2] = read_words(b, op, f);
+    // An `I64X2` vector store, NOT `iconcat` + `store.i128`: Cranelift's x64 backend keeps
+    // an `i128` in a GPR *pair*, so that form legalizes back into two 8-byte `mov`s and the
+    // load still straddles them (measured: no change). A vector store is one `movups`.
+    // Lane 0 lands at +0 and lane 1 at PAYLOAD_OFFSET on little-endian, which is the layout
+    // `repr(C, u8)` gives every `Value` (see `jit_layout`).
+    let v0 = b.ins().scalar_to_vector(types::I64X2, w0);
+    let pair = b.ins().insertlane(v0, w1, 1);
+    b.ins().store(MemFlagsData::trusted(), pair, addr, 0);
+    b.ins()
+        .store(MemFlagsData::trusted(), w2, addr, PAYLOAD_OFFSET as i32 + 8);
+}
+
 pub(super) fn store_op(b: &mut FunctionBuilder, dst: i64, op: Op, f: Frame) {
     match op {
-        Op::Int(v) => {
-            // A comparison `i8` (`store_int`/`box_scalar` boxes it as `Value::Bool`) marks
-            // the slot bool; a real `i64` int does not.
-            let is_b = b.func.dfg.value_type(v) == types::I8;
-            store_int(b, dst, v, f);
-            set_slot_float(dst, false, f);
-            set_slot_bool(dst, is_b, f);
-            if let Some(s) = f.slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = None;
-            }
-        }
+        Op::Int(v) => store_int(b, dst, v, f),
         Op::Float(v) => {
             let bits = b.ins().bitcast(types::I64, MemFlagsData::new(), v);
             let tag = b.ins().iconst(types::I64, TAG_FLOAT as i64);
             let zero = b.ins().iconst(types::I64, 0);
             store_words(b, dst, [tag, bits, zero], f);
-            set_slot_float(dst, true, f);
-            set_slot_bool(dst, false, f);
-            if let Some(s) = f.slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = Some(v);
-            }
         }
         Op::Bool(v) => {
             let tag = b.ins().iconst(types::I64, TAG_BOOL as i64);
             let zero = b.ins().iconst(types::I64, 0);
             store_words(b, dst, [tag, v, zero], f);
-            set_slot_float(dst, false, f);
-            set_slot_bool(dst, true, f);
-            if let Some(s) = f.slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = None;
-            }
         }
-        Op::Slot(k) => {
-            copy_value(b, k as i64, dst, f);
-            // Read both source flags and f64 cache into locals *before* mutating (a held
-            // `borrow()` would double-borrow with `set_slot_*`'s `borrow_mut()`).
-            let fl = f.slot_float.borrow().get(k).copied().unwrap_or(false);
-            let bl = f.slot_bool.borrow().get(k).copied().unwrap_or(false);
-            let fv = f.slot_f64_cache.borrow().get(k).copied().flatten();
-            set_slot_float(dst, fl, f);
-            set_slot_bool(dst, bl, f);
-            if let Some(s) = f.slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = fv;
-            }
-        }
-        Op::Handle(w0, w1, w2) => {
-            store_words(b, dst, [w0, w1, w2], f);
-            set_slot_float(dst, false, f);
-            set_slot_bool(dst, false, f);
-            if let Some(s) = f.slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = None;
-            }
-        }
-        Op::HoistedVec { w0, w1, w2, .. } | Op::HoistedTable { w0, w1, w2, .. } => {
-            // Stored as a whole `Value` (its entry-resolved words), like a `Handle`.
-            store_words(b, dst, [w0, w1, w2], f);
-            set_slot_float(dst, false, f);
-            set_slot_bool(dst, false, f);
-            if let Some(s) = f.slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = None;
-            }
+        Op::Slot(k) => copy_value(b, k as i64, dst, f),
+        Op::Handle(w0, w1, w2)
+        | Op::HoistedVec { w0, w1, w2, .. }
+        | Op::HoistedTable { w0, w1, w2, .. } => {
+            // A hoisted global vector/table used as a whole `Value` stores its
+            // entry-resolved words verbatim, exactly like a `Handle`.
+            store_words(b, dst, [w0, w1, w2], f)
         }
     }
+    set_slot_flags(b, dst, op, f);
 }
 
 /// Call a handle op (`brood_rt_{cons,car,cdr}`) with the out-pointer ABI: pass the
