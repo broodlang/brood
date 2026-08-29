@@ -320,6 +320,42 @@ fn division_with_a_float_operand_is_still_contagious() {
 }
 
 #[test]
+fn a_qualified_ability_name_is_read_like_its_bare_spelling() {
+    // `shapes/Shape` and `Shape` name the same ability — the registry is keyed by the bare
+    // CamelCase name (ADR-255). In a PROJECT check both resolve and neither warns; this is
+    // the loose single-file case, where neither can resolve because the defining module was
+    // never loaded, and the checker falls back to "capitalised means an ability I can't see".
+    // That fallback read the whole spelling, so `shapes/Shape` — starting with a lowercase
+    // `s` — reported `unknown type` while the bare form was accepted silently. Naming the
+    // module the ability comes from is not a mistake, and must not be the thing that
+    // manufactures a diagnostic.
+    let ws = file_warnings(
+        "\
+         (defmodule loose)\n\
+         (sig a (Shape -> float))\n\
+         (defn a (s) 1.0)\n\
+         (sig b (shapes/Shape -> float))\n\
+         (defn b (s) 1.0)",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("unknown type")),
+        "neither spelling of an unloaded ability may warn — {ws:?}"
+    );
+    // The silence is still keyed on capitalisation, not on merely containing a slash: a
+    // qualified LOWERCASE name is an ordinary unknown type and must still be reported.
+    let ws = file_warnings(
+        "\
+         (defmodule loose)\n\
+         (sig c (shapes/strng -> float))\n\
+         (defn c (s) 1.0)",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("unknown type `shapes/strng`")),
+        "a qualified lowercase name is still an unknown type — {ws:?}"
+    );
+}
+
+#[test]
 fn a_record_name_is_a_type_in_a_sig() {
     // A record is the language's nominal type and `defrecord` already emits one in its own
     // constructor sig — but the NAME could not be written in type position, so the natural
