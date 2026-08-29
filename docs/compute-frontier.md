@@ -1273,6 +1273,16 @@ lines under `BROOD_JIT_BAIL_TRACE`, previously silent `None`s) and a
 (a Rust builtin HOF's nested `vm_apply` driver under the receive), which no JIT-side
 mechanism can heal and which reads identically to a latch failure without the line.
 
+**Two follow-ons (2026-08-30).** (1) The latch is LATENT on the shipped tree — the shapes
+that would host a receive natively are fenced by the gate (a `def`-named closure carries
+`dbg_name`) or by the spill rule (a 1-call anonymous closure gets no slots), so both latch
+tests self-report vacuous and re-arm under any future admission. (2) One refusal is still
+UNNAMED: a named arm that passes the gate on a vector-op signal with the receive one call
+down (`(+ (nth v 0) (inner))`, ops `Prim2SlotInt Call Prim2`) prints
+`lowering-returned-none` with no mid-emit reason — whoever picks up partial lowering
+should name that `None` first (the mid-emit trace covers `call.rs`; this one is elsewhere
+in the emit).
+
 
 ### 7.2 Cranelift's CLIF verifier runs on every release compile — ATTEMPTED AND REJECTED 2026-08-29
 

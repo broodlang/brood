@@ -810,9 +810,19 @@ pub(crate) fn jit_run_fast_link(
     // race the scan can miss (an inlined-upgrade swap between invoke and here).
     if heap.blocked_under_gateway == gw_seq {
         heap.blocked_under_gateway = 0;
+        // Shed THIS site's fast link first, unconditionally: the latch stores `BAILED`
+        // into `arm.jit_code`, but the FastLink mirror's hit path (and the raw load JIT'd
+        // callers emit) never re-reads `jit_code` — so without this, a long-lived process
+        // whose site is already populated keeps entering the latched native and parking
+        // dirty forever. The IC bases were restored above, so `site` resolves against the
+        // caller's block exactly as the lookup that entered here did.
+        heap.vm_fast_link_clear_site(site);
         let scanned = {
             use std::sync::atomic::Ordering::Acquire;
-            let reg = JIT_ARM_KEEPALIVE.lock().unwrap();
+            // Poison-tolerant like the two push sites: a codegen panic (the
+            // CODEGEN-PANICKED path) may have poisoned this mutex, and the latch must
+            // not turn that into a worker-thread crash.
+            let reg = JIT_ARM_KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner());
             reg.iter()
                 .find(|a| std::ptr::eq(a.jit_code.load(Acquire), code as *mut u8))
                 .cloned()
@@ -1899,11 +1909,14 @@ pub(crate) fn vm_resume_deopt(
 ///
 /// Found during the §7.1 step 2 experiment (admitting named defns to the general
 /// lowering), where `live_migration`'s 12-way load harness went 28/36 liveness failures
-/// without it, 0/36 with. Step 2 was measured and rejected, but the latch stays: the
-/// profitability gate EXEMPTS closure/HOF-step arms, so an arm whose receive sits one
-/// call down (`(fn (acc _) (+ acc (inner)))` where `inner` receives) lowers today — the
-/// `%receive` fence only catches a direct `%receive` call — and the spill-reserve fix
-/// landed with this change lets more single-call closure arms lower than before.
+/// without it, 0/36 with. Step 2 was measured and rejected, and on today's tree the
+/// latch is mostly LATENT: the `%receive` fence only catches a direct `%receive` call,
+/// but the shapes that would host one indirectly are fenced by other means — a `def`-
+/// named closure gate-bails like any named defn, and a single-non-tail-call anonymous
+/// closure gets no spill slots (`jit_spill_reserve`'s measured-load-bearing rule) and
+/// bails mid-emit. The latch stays as the scheduler's safety net for any future
+/// admission (partial lowering, a wider subset): whatever lowers a receive-hosting arm
+/// next will find the liveness failure already guarded rather than rediscovering it.
 #[cfg(feature = "jit")]
 pub(crate) fn jit_latch_suspend_host(arm: &CompiledArm) {
     use std::sync::atomic::Ordering::Release;

@@ -2851,6 +2851,7 @@ pub struct Heap {
     /// latched, never a native that merely ran later in the same quantum (in a gen-server,
     /// that would be the hot post-receive handler). `0` = none. A block with no live JIT
     /// gateway (a Rust-native shape, `map`/`try` callbacks) records 0 and latches nothing.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))] // only JIT gateways bump it
     pub(crate) native_gateway_seq: u64,
     pub(crate) cur_native_gateway: u64,
     pub(crate) blocked_under_gateway: u64,
