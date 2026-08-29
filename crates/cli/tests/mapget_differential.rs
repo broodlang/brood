@@ -118,8 +118,16 @@ fn the_prim_is_what_makes_a_field_reading_body_inlinable() {
 (defn hot (n acc) (if (= n 0) acc (hot (- n 1) (+ acc (body rec)))))\n\
 (io/puts (str (hot 300000 0)))\n";
     let (_dir, file) = fixture("mapget-inline", source);
-    let off = run(&file, false, &[("BROOD_INLINE_DBG", "1")]);
-    let on = run(&file, true, &[("BROOD_INLINE_DBG", "1")]);
+    // Pin the tier ceiling to Native. This asserts a JIT derivation happened, and the
+    // `differential (tree-walker)` CI job runs the whole suite under `BROOD_VM=0` — where
+    // nothing ever lowers, so `[leaf …]` cannot print and the assertion fails for a reason
+    // that has nothing to do with the prim (KI-69's class, and its fix: a JIT-asserting
+    // test names the ceiling it needs rather than inheriting the job's). `BROOD_TIER` wins
+    // over the job's `BROOD_VM`/`BROOD_NO_JIT` by the ADR-222 precedence, so this test
+    // checks the same thing on every job.
+    let env = &[("BROOD_INLINE_DBG", "1"), ("BROOD_TIER", "2")];
+    let off = run(&file, false, env);
+    let on = run(&file, true, env);
     assert!(
         !off.contains("leaf probe hot "),
         "without the prim a field-reading body must NOT be inlinable — if this starts \
