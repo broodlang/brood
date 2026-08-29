@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
 | KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict. **Addendum 2026-08-29:** the same defect verbatim in `check-examples`/`check-stress`/`check-corpora` (fixed inline in `green.sh` only), which on a lean `make release` brood additionally reported an absent DEV_MODULE (`reload/on-change`) as *rename rot* — the exact class the gate exists to find. All three now share `scripts/lib/gate-binary.sh`, which resolves by sha and separates "this build lacks the module" from "this name is gone" |
 | KI-79 | **`live_migration::deep_receive_continuations_resume_correctly_across_workers` failed once in CI, on the commit that moved the JIT preempt handler.** The test runs up to 400 bursts and fails unless `migrate_count() > 0` — it asserts a scheduler event was **observed**, not that results are right. In the failing run the per-burst correctness assertion passed **400/400**; only the "was a migration seen" assertion fired, which is the case the test's own message anticipates ("if this is the only failure and the machine was loaded, suspect scheduler starvation"). Suspicious anyway, because `12b31fc2` outlined `jit_run_fast_link`'s cold arms — including the **preempt** outcome that live migration depends on | ⚠️ **WATCHING 2026-08-28** — not reproduced in 18 local runs (10 unpinned + 8 pinned to 2 cores, matching CI's core count). The change is provably a **verbatim** move: a line-by-line diff of the 117 moved lines against the original shows zero semantic differences, and the only new code is `if outcome == 0 { … return }` ahead of the delegation. It also cannot change *when* a preempt happens — the native arm's tick poll decides that, and only the handling moved. Mitigated rather than closed: `live_migration` now carries `retries = 1`, the gap the `distribution` override already documents. **If it recurs, get whether the correctness assertion also failed** — that is the line between starvation and a real capture-machinery bug |
 | KI-78 | **CI never builds a stdlib image, so the entire suite tests the load path users do NOT get.** The image is **default-ON** since v0.15.0 (`f114d01e`), and default-ON is safe by construction: with no image on disk `install` returns nil in ~30 µs and everything loads from source. Nothing in `ci.yml` builds one, so that is exactly what every CI job does — all ~1222 tests exercise the source path, and the shipped default is untested there. Worse than uniformly untested: `image_matches_source.rs` (ADR-280) *does* build one and writes it to `~/.cache/brood`, so any test scheduled after it in the same job runs imaged — nextest gives each case its own process in no guaranteed order, making the coverage **order-dependent and nondeterministic** | ✅ **FIXED 2026-08-28** — nextest's setup scripts now build the image (`scripts/build-std-image.sh`, registered beside `warm-boot-cache`), so `make test` and CI both run the default; ci.yml's tree-walker job sets `BROOD_NO_STDIMAGE=1` — the script's own off switch — so one job keeps deliberate source-path coverage instead of the two paths trading places. Verified both ways at **1222/1222**. Found while fixing the KI-72 guard, which had the same hole one level down (`autoload_race` never built an image either; fixed in `6e52528a`). The suite is *known green imaged* — verified locally at 1218/1218 and 1222/1222 with an image live — so this is a coverage gap, not a suspected failure. The fix is to build the image in nextest's existing setup script (the repo already runs one, `warm-boot-cache`, for KI-38) so `make test` and CI both exercise the default, and to keep one job on the source path so both are covered rather than trading one for the other |
@@ -5013,6 +5014,41 @@ rather than the summary line; libtest's summary alone cannot answer it.
 
 **Next step if it recurs:** get the case name, then decide. Until then this entry exists so a
 second sighting is recognised as a second sighting rather than a first.
+
+## KI-80 — `brood_suite_passes` flaked once under load, and the output was thrown away ⚠️ WATCHING 2026-08-29
+
+**What was seen.** One `cargo nextest run -p brood --test-threads 4` ended
+`888 tests run: 888 passed (1 slow, 1 flaky)`, the flaky row being `brood::suite
+brood_suite_passes` — failed on try 1, passed on try 2. It was the first run that included a
+new CPU-heavy test (`arrow_subtyping_is_sound`, ADR-292).
+
+**Why there is no diagnosis.** The failure output was discarded **at the terminal, not by the
+tooling**: nextest names a flaky case and prints its `---- … stdout ----` block, and the
+command piped the run through `tail -5`. So the summary line survived and the one thing worth
+having — *which in-language case failed* — did not. That is exactly the trap already recorded
+as `never-truncate-test-output`, and it is the substance of this entry: the tooling was not
+the gap.
+
+**Not reproduced.** Ten runs since, all `888 passed`: six loaded 4-thread runs with
+`--retries 0`, three solo runs of `--test suite`, and one loaded run before the fix below.
+
+**The one contributing factor found.** The new test rebuilt a `Ty` and recomputed a
+denotation inside its inner loop — 1596 redundant rebuilds of each, ~2.5M times over.
+Precomputing both took it from 3.4s to 2.0s. That is real contention removed from a
+`--test-threads 4` window, though nothing ties it to the sighting.
+
+**Why a watch and not an open bug.** It matches, verbatim, the class this binary's
+`retries = 1` was added for — `.config/nextest.toml` records it: the in-language suite
+contains timing-sensitive cases that talk to a local node, they run inside this single
+wrapper case, and one blown deadline under a loaded runner reddens all ~1200 of them
+(observed 2026-07-25, passing 3/3 standalone immediately after). The mitigation is already in
+place and a pass-on-retry is deliberately reported as FLAKY rather than absorbed, which is why
+this sighting was visible at all.
+
+**Next step if it recurs:** capture the entire run to a file and read the failing case's
+stdout block. Which `.blsp` case failed is the whole question; if it is a node round-trip
+(`tests/remote_spawn_test.blsp` and friends) this is the known class and can be closed, and if
+it is anything else it is a new bug that this sighting cannot distinguish.
 
 ## KI-75 — `compare` called unequal values equal, and `sort` inherited it ✅ FIXED 2026-08-28
 
