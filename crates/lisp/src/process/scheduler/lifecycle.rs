@@ -369,6 +369,16 @@ pub fn spawn_root_program(
     let runtime = heap.runtime_arc();
     let mut child = Heap::with_regions(prelude, runtime);
     child.set_global(EnvId::GLOBAL);
+    // The program's file must be CURRENT before the read, not merely recorded in
+    // `ProgramState` for error rendering: the reader stamps every form's position record
+    // with `current_file_arc` at read time, and without this every form of a
+    // `brood script.blsp` program was born `file=None`. That stayed invisible for months
+    // because the expander's list rebuilds re-stamped positions with the ambient file
+    // during eval (right by coincidence), until ADR-297 made rebuilds copy the original
+    // record faithfully — faithfully preserving the hole, which broke coverage/attribution
+    // for every directly-run program (`std_attribution` + four `coverage_lines` tests,
+    // 2026-08-29).
+    child.set_current_file(file.clone());
 
     // Read the program into the child heap and pin every form on its root stack — the
     // driver re-fetches each by index so a collection between forms relocates them safely.

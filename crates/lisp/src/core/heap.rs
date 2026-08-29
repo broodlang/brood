@@ -3893,6 +3893,35 @@ impl Heap {
     /// Mark a LOCAL list form as expander-built (see [`FormPos`]). The form must already
     /// have a position — the expander stamps one first — so the mark rides that entry and
     /// `promote` carries both together.
+    /// Set a LOCAL list form's position **with an explicit file**, bypassing
+    /// `current_file_arc`. The expander's synthetic stamp needs this: it runs not only at
+    /// load time but at LAZY expansion — an arm compiled at first call, a
+    /// `%coverage-precompile`, a hot reload — where the file *currently being loaded* is a
+    /// different file, or none. Stamping the ambient file there produced records whose
+    /// position came from one file and whose file named another, which is how a nested
+    /// `reflect/load`'s functions were coverage-attributed to the OUTER script
+    /// (`std_attribution` + four `coverage_lines` tests red, 2026-08-29). The file must
+    /// travel WITH the position it was derived from.
+    pub fn set_form_pos_in_file(
+        &mut self,
+        v: Value,
+        pos: crate::error::Pos,
+        file: Option<Arc<str>>,
+    ) {
+        if let Some(id) = v.as_pair() {
+            if id.region() == crate::core::value::LOCAL {
+                self.cold_mut().form_pos.insert(
+                    form_pos_key(id),
+                    FormPos {
+                        pos,
+                        file,
+                        synthetic: false,
+                    },
+                );
+            }
+        }
+    }
+
     pub fn mark_synthetic(&mut self, v: Value) {
         if let Some(id) = v.as_pair() {
             if id.region() == crate::core::value::LOCAL {
