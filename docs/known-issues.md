@@ -229,6 +229,27 @@ exactly what the driver would show as "not promoted".
 
 **Guard.** The three tests themselves; they are red today.
 
+**Non-reproduction evidence (2026-08-29, second session).** Attempted with the entry's own
+command on the exact filed commit and could not make it fail:
+
+- `cargo test -p brood --test runtime_collector` on a pristine worktree of **`70549e80`**
+  (the commit the entry says reproduces): **20/20, and 0-for-10 in a loop.**
+- Same on `origin/main` (`802bf33d`), both the default test profile and `--release`, and
+  under `BROOD_VM=0`, `BROOD_NO_JIT=1`, `BROOD_NO_STDIMAGE=1`, `BROOD_TIER=1`: all 20/20.
+- The suspect the entry names (`8fa9f2f7`, deopt feedback) does not touch promotion, and the
+  other candidate from that day — the promote-on-8th-sighting change `7979c7a4` — is on a
+  path this test never takes: its `fn` forms are freshly-consed LOCAL lists, which
+  `make_closure_cached` refuses to key on (non-RUNTIME `fn_rest`), so each `def` RHS goes
+  through the uncached parse and `def`'s own promote-and-dedup, unchanged by that commit.
+
+**A confound worth knowing when re-attempting:** this machine's root filesystem hit **100%**
+during this day's sessions (17 GB of `make ab` worktrees; `make ab-clean` freed it), and in
+that same window an unrelated `make test` produced ten phantom in-language failures plus a
+TLS-serve failure that all vanished with disk space. If the 231-of-3000 runs happened in that
+window, ENOSPC is a candidate environment for it. **If it recurs on a healthy disk:** capture
+the `RUNTIME-GC estimate` stderr lines (they carry total/live/baseline) and the full env, and
+loop it — 0-for-10 here says one clean pass is not enough to close the question either way.
+
 ## KI-85 — the checker false-positived: a tuple shape leaked onto a `pair` member ✅ FIXED 2026-08-29
 
 **Symptom.** With `(sig takes-str (string -> any))`:
