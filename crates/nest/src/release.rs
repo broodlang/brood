@@ -17,7 +17,7 @@ const EMBEDDED_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embedd
 const HOST_TRIPLE: &str = env!("NEST_HOST_TRIPLE");
 
 /// The triple this `nest` runs on — the one `--target` whose artifact can actually
-/// be executed here, so the only one `nest release --smoke` can boot-check.
+/// be executed here, so the only one `nest release`'s boot check can run.
 pub(crate) fn host_triple() -> &'static str {
     HOST_TRIPLE
 }

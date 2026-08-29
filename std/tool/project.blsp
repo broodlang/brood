@@ -2961,6 +2961,45 @@ as unchanged (only when some were)."
           (error who ": entry '" fname "' is not callable (" (type-of f) ")"))
         f))))
 
+;; Why the entry point is missing, phrased as the thing the user can act on.
+;; `require`'s own answer is `cannot find module 'main'` — a true fact about a
+;; module they never wrote, named after a default they never typed. The question
+;; behind it is always one of three, and which one it is decides the fix.
+(defn- project-no-entry-advice
+  (modname)
+  (let (name (->string modname)
+        where (string/join ", " *project-source-paths*))
+    (cond
+      *project-main-override*
+        (str "no entry point: `--main` names module '"
+          name "', which does not exist" " (looked in " where ")")
+      ;; A manifest with no `:main` never assigns `*project-main*`, so the default
+      ;; standing means "nothing was declared" — the same advice either way.
+      (= *project-main* (list 'main 'main))
+        (str "no entry point: this project declares no `:main`, and there is no module"
+          " `main` to fall back on. Declare one — `:main app` in project.blsp (module"
+          " `app`, fn `main`) — or add "
+          (or (first *project-source-paths*) "src")
+          "/main.blsp with a `(defn main (args) …)`")
+      else
+        (str "no entry point: `:main` names module '"
+          name "', which does not exist" " (looked in " where ")"))))
+
+;; Require the entry MODULE, rewriting the one failure whose generic message is a
+;; dead end. Only that failure: an error raised while LOADING the entry module is
+;; the entry module's own error and is re-thrown untouched — loading it is the point.
+;; The match is on the exact message for THIS module name, so a nested `require`
+;; of some other missing module still reports itself.
+(defn- project-require-entry
+  (who modname entry)
+  (try
+    (require-one modname)
+    (catch e
+      (if (= (error-message e)
+            (str "require: cannot find module '" (->string modname) "'"))
+        (error who ": " (project-no-entry-advice (first entry)))
+        (throw e)))))
+
 ;; (run args) — find the project from the cwd, set it up (which may
 ;; override *project-main* via the manifest), `require` the entry module, and
 ;; call its entry fn with `args` (a list of strings from the CLI). The default
@@ -2989,7 +3028,7 @@ as unchanged (only when some were)."
       ;; load — which builds one, so the next run is fast.
       (when (nil? (setup-lazy-image root))
         (load-sources-cached root))
-      (require-one modname)
+      (project-require-entry "run" modname entry)
       ;; Advisory pre-flight over the entry point's REQUIRE-CLOSURE, not the whole
       ;; tree: warnings for the code about to execute. Checking is ~3.7 ms/file and
       ;; verdicts are deliberately not cached, so whole-project checking is ~60-120 s
@@ -3196,8 +3235,28 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
         ;; the same module, or a root-project module keyed identically to a dep's rooted name —
         ;; a loud stop beats the silent last-embedded-wins clobber.
         (bundle-reject-duplicate-names (map first pairs))
+        (bundle-reject-missing-entry (map first pairs))
         (cons (bundle-augment-manifest manifest dep-packages)
           (fold (fn (acc p) (cons (first p) (cons (second p) acc))) nil pairs))))))
+
+;; A bundle whose entry module was never collected is a 22 MB binary that cannot boot,
+;; and nothing before the user's first run says so: `nest release` reported success, and
+;; `nest check`/`nest test` never load `main` at all (KI-66). `--smoke` catches it by
+;; running the artifact — but it is opt-in, and this costs one list lookup, so the
+;; cheap half of that check is not left optional. Found by `nest release` succeeding in
+;; the brood repo itself, which has no Brood app and therefore no entry point.
+(defn- bundle-reject-missing-entry
+  (names)
+  (let (entry (or *project-main-override* *project-main*)
+        modname (->string (first entry)))
+    (unless (or (includes? names modname)
+              ;; A baked-in std module as the entry is odd but not this guard's business
+              ;; to refuse — it is embedded in every runtime, so the bundle would boot.
+              (includes? (map ->string (reflect/builtin-modules)) modname))
+      (error "release: "
+        (project-no-entry-advice (first entry))
+        ". A release bundle boots by calling its entry fn, so one that names no"
+        " reachable module would be an executable that cannot start."))))
 
 ;; The package segment of a rooted bundle key: `store/repo` -> `store`, `hatch/web/router`
 ;; -> `hatch`, and a bare key (a root-project module) -> itself.
@@ -3209,13 +3268,23 @@ dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not i
 ;; transitive included) added, so `run-bundle` roots all of them — not just the direct deps
 ;; `:dependencies` names. Serialised as DATA: the embedded manifest is only ever read back with
 ;; `reflect/read-first` + `apply`, so dropping comments/formatting is fine.
+;;
+;; This is also where a release gets DATED. `:built-at` (epoch ms) and `:built-with` (the
+;; `build-id` of the runtime that ran `nest release`) are stamped in here rather than into a
+;; new archive field precisely because the manifest is already an opaque string in the bundle
+;; format — so "when was this built, and by which brood" costs no format-version bump, and
+;; `apply-config` ignores keys it doesn't know. Nothing writes them to the on-disk
+;; project.blsp: a build stamp is a fact about an artifact, not about the source.
 (defn- bundle-augment-manifest
   (manifest dep-packages)
   (let (form (reflect/read-first manifest))
     (if (and (pair? form) (= (first form) 'project))
       (pr-str (cons 'project
                 (append (rest form)
-                  (list :bundled-packages (/apply vector dep-packages)))))
+                  (list :bundled-packages
+                    (/apply vector dep-packages)
+                    :built-at (os/now)
+                    :built-with (system/build-id)))))
       manifest)))
 
 ;; True if `path` (an absolute .blsp file) lives under one of `dep-dirs` (the bundled
@@ -3345,36 +3414,125 @@ which is what `nest release --smoke` does to the binary it just wrote."
 ;; module: this has to answer on a bundle that is broken, since "is this even the right
 ;; build?" is the first question asked when one is.
 
-(defn build-info ()
-  "A map describing THIS executable — `:brood-version`, `:build-id`, `:features` (the
-optional build features, so `:jit` present or absent is a fact rather than a guess), and
-`:bundled?`. For a `nest release` bundle it also carries the app it is shipping: `:app`,
-`:app-version` and `:module-count`.
+;; What a from-source run has instead of a release stamp. `nest run` builds nothing, so
+;; there is no build to date — HEAD's commit date is the closest honest answer, and the
+;; short hash beside it says which tree is running. Best-effort by construction: no repo,
+;; no `git` on PATH, or a shallow/empty history all yield nils rather than an error,
+;; because "what am I running" must still answer on a source tree that is not a checkout.
+(defn- project-source-stamp
+  (root)
+  (let (result (try (os/cmd "git" ["-C" root "log" "-1" "--format=%ct %h"]) (catch e nil))
+        line (if (and result (os/cmd-ok? result)) (os/cmd-out result) "")
+        parts (if (= line "") nil (string/split line " "))
+        secs (and parts (string/->number (first parts))))
+    (if (int? secs) [(* secs 1000) (second parts)] [nil nil])))
 
-Loads no module, so it answers on a bundle whose modules are broken — which is when it is
-asked. See [[build-info-report]] for the printed form."
+(defn- project-source-mtime
+  (root)
+  ;; The newest mtime across the project's own sources, or nil when none can be read. This is
+  ;; what "built" MEANS for a run from source: `nest run` compiles nothing, so the only honest
+  ;; answer to "how old is the code I am running" is when that code last changed.
+  (let (times (seq/keep (fn (f) (file/mtime f)) (try (source-files root) (catch _ '()))))
+    (if (empty? times) nil (fold (fn (a b) (if (> b a) b a)) 0 times))))
+
+(defn build-info ()
+  "A map describing THIS executable — `:brood-version`, `:build-id`, `:brood-built-at`
+(when the runtime binary itself was built, epoch ms), `:features` (the optional build
+features, so `:jit` present or absent is a fact rather than a guess), and `:bundled?`.
+
+It also carries the app it is shipping: `:app`, `:app-version` and `:built-at` (epoch
+milliseconds, nil when unknown). A `nest release` bundle reads those from the manifest
+stamped in at release and adds `:built-with` (the `build-id` of the runtime that built it)
+and `:module-count`; a from-source run reads them from the on-disk `project.blsp` and dates
+itself by the git HEAD commit, naming the tree in `:commit`. So an app can state its own
+version and vintage in development as well as once shipped — [[build-stamp-text]] words
+the two cases.
+
+Loads no project module, so it answers on a bundle whose modules are broken — which is when
+it is asked. See [[build-info-report]] for the printed form."
   (let (base {:brood-version (system/brood-version)
               :build-id (system/build-id)
+              :brood-built-at (system/build-time)
               :features (system/features)
               :bundled? (%bundled?)})
-    (if (not (%bundled?))
-      base
+    (if (%bundled?)
       (let (form (reflect/read-first (%bundle-manifest))
             opts (if (and (pair? form) (= (first form) 'project)) (rest form) nil))
         (assoc base
           :app (plist-get opts :name)
           :app-version (plist-get opts :version)
-          :module-count (count (%bundle-module-names)))))))
+          :built-at (plist-get opts :built-at)
+          :built-with (plist-get opts :built-with)
+          :module-count (count (%bundle-module-names))))
+      (let (root (or *project-root* (find-root (file/cwd))))
+        (if (nil? root)
+          base
+          (let (form (try
+                       (reflect/read-first (file/slurp (path/join root "project.blsp")))
+                       (catch e nil))
+                opts (if (and (pair? form) (= (first form) 'project)) (rest form) nil)
+                [head-at commit] (project-source-stamp root)
+                edited-at (project-source-mtime root)
+                ;; The LATER of the two. Both are real answers to different halves of the
+                ;; question, and the newer one describes the code that is actually running.
+                ;; HEAD's commit date alone was wrong in the way that matters daily: edit a
+                ;; file, `nest run` again, and the reported build time never moved — it said
+                ;; the code was two hours old while you were looking at what you had just
+                ;; typed. A source tree's build time has to track the tree.
+                dirty? (and head-at edited-at (> edited-at head-at))
+                built-at (cond
+                           (nil? head-at) edited-at
+                           (nil? edited-at) head-at
+                           dirty? edited-at
+                           else head-at))
+            (assoc base
+              :app (plist-get opts :name)
+              :app-version (plist-get opts :version)
+              :built-at built-at
+              :commit commit
+              ;; Edited since the commit it names, so the hash says where this code came
+              ;; FROM rather than what it is. Reporting `a5e2405` flat for a modified tree
+              ;; names a commit whose code is not the code that just ran.
+              :modified? (= dirty? true))))))))
+
+(defn build-stamp-text (info)
+  "The human `built` line for a [[build-info]] map: `\"2026-08-29 14:03 UTC\"` for a release
+bundle, `\"2026-08-29 07:13 UTC (a5e2405, from source)\"` for a run out of a clean working
+tree, `\"2026-08-29 08:40 UTC (a5e2405 + edits, from source)\"` for one with uncommitted
+changes, and `\"unknown\"` when nothing could be read.
+
+The one place those cases are worded, so `--brood-build-info` and an app's own about/version
+screen never drift apart on what \"built\" means. Both carry a TIME, not just a date — two
+builds of one afternoon are the pair anyone comparing versions actually has, and a date alone
+cannot tell them apart. What distinguishes the cases is the parenthetical: a bundle's stamp is
+when `nest release` ran, a source run's is when HEAD was committed, and the second says so
+rather than passing itself off as a build."
+  (let (ms (get info :built-at)
+        commit (get info :commit)
+        at (when ms (str (datetime/format (datetime/epoch-ms-> ms) "%Y-%m-%d %H:%M") " UTC")))
+    (cond
+      (nil? at) (if commit (str "from source (" commit ")") "unknown")
+      (get info :bundled?) at
+      else
+        (str at
+          (cond
+            (and commit (get info :modified?)) (str " (" commit " + edits, from source)")
+            commit (str " (" commit ", from source)")
+            else " (from source)")))))
 
 (defn build-info-report ()
   "Print [[build-info]] as aligned `key: value` lines and return 0. What a bundle run with
 the reserved `--brood-build-info` argument prints."
   (let (info (build-info))
-    (when (get info :bundled?)
+    (when (get info :app)
       (io/puts (str "app:      "
                  (or (get info :app) "(unnamed)")
                  (let (v (get info :app-version)) (if v (str " " v) ""))))
-      (io/puts (str "modules:  " (get info :module-count))))
+      (io/puts (str "built:    " (build-stamp-text info))))
+    (when (get info :bundled?)
+      (io/puts (str "modules:  " (get info :module-count)))
+      (let (with (get info :built-with))
+        (when with (io/puts (str "built-by: " with)))))
     (io/puts (str "brood:    " (get info :brood-version)))
     (io/puts (str "build-id: " (get info :build-id)))
     (io/puts (str "features: "

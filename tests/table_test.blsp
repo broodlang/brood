@@ -387,3 +387,39 @@
         (assert= (get m 1) 10)
         (assert= (get m 3) 30)
         (assert= (count m) 2)))))
+
+;; ---- a table is a sized collection (ADR-253) ----------------------------------
+;; `count` and `empty?` used to raise `empty?: expected collection, got table`, so a
+;; table could not join the bare collection vocabulary: you had to reach for
+;; `table/count` where every other collection answers `count`.
+(describe "a table counts and tests empty like any other collection"
+  (test "count matches table/count, and tracks mutation"
+    (let (t (table/new))
+      (assert= (count t) 0)
+      (table/put t :a 1)
+      (table/put t :b 2)
+      (assert= (count t) 2)
+      (assert= (count t) (table/count t))
+      (table/delete t :a)
+      (assert= (count t) 1)))
+
+  (test "empty? is true only for an empty table"
+    (let (t (table/new))
+      (is (empty? t))
+      (table/put t :k :v)
+      (is (not (empty? t)))
+      (table/delete t :k)
+      (is (empty? t))))
+
+  (test "across processes: a table is shared, so both see one count"
+    ;; a table is the one identity-mutable value, so the writer's puts are visible
+    ;; to the reader through `count` — the property `count` must not paper over
+    (let (t (table/new)
+          me (self)
+          _ (spawn (fn ()
+                     (table/put t :from-child 1)
+                     (send me [:wrote (count t) (empty? t)])))
+          reply (receive ([:wrote n e] [n e])))
+      (assert= reply [1 false])
+      (assert= (count t) 1)
+      (is (not (empty? t))))))

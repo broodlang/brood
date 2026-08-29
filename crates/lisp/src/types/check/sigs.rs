@@ -73,7 +73,9 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     const bool_ty: Ty = Ty::of(Tag::Bool);
     // `count` accepts a string, map, bytes, or sequence (the prelude
     // `count` dispatches string?/map?/else-fold, and bytes counts its octets) —
-    // but not a number/keyword/etc.
+    // but not a number/keyword/etc. Rope and Table joined in ADR-253: both have an
+    // O(1) size and both used to raise. A signature narrower than the function is a
+    // false positive on correct code, so this list has to move with the dispatch.
     #[allow(non_upper_case_globals)]
     const countable: Ty = Ty::of_tags(&[
         Tag::Str,
@@ -83,6 +85,8 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
         Tag::Pair,
         Tag::Vector,
         Tag::Bytes,
+        Tag::Rope,
+        Tag::Table,
     ]);
     #[allow(non_upper_case_globals)]
     const str_ty: Ty = Ty::of(Tag::Str);

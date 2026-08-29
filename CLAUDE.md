@@ -247,9 +247,9 @@ Emacs — generated from `(special-forms)`, ADR-092), the package-manager comman
 `fetch`/`update`/`tree`/`add`/`remove` (ADR-037) plus `publish`/`search` against a
 **hosted** registry (the `hive` tarball service, ADR-147/211 — *not* a git-backed
 index) and `key` (generate/manage the ed25519 signing keypair `nest publish` uses,
-ADR-212), `release` (single-binary bundling, ADR-038; `--smoke` boot-checks each binary it
-just wrote — the *artifact*, which carries a dependency snapshot no source-tree check can
-see), and `update-tooling` (re-drop
+ADR-212), `release` (single-binary bundling, ADR-038; boot-checks each binary it just wrote — the
+*artifact*, which carries a dependency snapshot no source-tree check can see — and **deletes
+it + fails** if it does not boot. On by default since 2026-08-29; `--no-smoke` opts out), and `update-tooling` (re-drop
 the AI-assistant files `nest new` scaffolds — the `docs/brood-for-claude.md`
 reference and the `writing-brood` skill — from the current binary, so they don't
 drift as the language evolves).

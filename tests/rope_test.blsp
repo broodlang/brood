@@ -157,3 +157,43 @@
       (assert= (receive) ">> hello world")
       (send buf [:stop me])
       (assert= (receive) :stopped))))
+
+;; ---- a rope is a sized collection (ADR-253) -----------------------------------
+;; `count` and `empty?` used to raise `empty?: expected collection, got rope` — the
+;; seam that kept ropes out of the bare vocabulary. A rope counts in CHARACTERS, so
+;; it agrees with the string it stands for; that agreement is the property worth
+;; pinning, since the two must never disagree about the same text.
+(describe "a rope counts and tests empty like the string it stands for"
+  (test "count is the character count, and agrees with string/length"
+    (assert= (count (text/from-string "hello")) 5)
+    (assert= (count (text/from-string "")) 0)
+    (let (s "hello world, a longer one")
+      (assert= (count (text/from-string s)) (string/length s))))
+
+  (test "count agrees with the string after an edit, not just at construction"
+    (let (r (text/insert (text/from-string "hello") 5 " world"))
+      (assert= (count r) (string/length (text/->string r)))))
+
+  (test "a multi-byte character counts once, as a character"
+    ;; the failure this guards: counting BYTES would make a rope disagree with
+    ;; `string/length` on any non-ASCII text
+    (let (s "héllo")
+      (assert= (count (text/from-string s)) (string/length s))
+      (assert= (count (text/from-string s)) 5)))
+
+  (test "empty? is true only for the empty rope"
+    (is (empty? (text/from-string "")))
+    (is (not (empty? (text/from-string "x")))))
+
+  (test "across processes: a rope built in a spawned process counts there"
+    ;; a rope is process-local, so the COUNT crosses, not the rope
+    (let (me (self)
+          _ (spawn (fn ()
+                     (let (r (text/from-string "hello world"))
+                       (send me
+                         [:counted
+                           (count r)
+                           (empty? r)
+                           (empty? (text/from-string ""))]))))
+          reply (receive ([:counted n e1 e2] [n e1 e2])))
+      (assert= reply [11 false true]))))

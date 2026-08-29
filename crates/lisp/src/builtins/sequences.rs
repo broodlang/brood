@@ -278,6 +278,21 @@ pub(super) fn is_empty(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResul
         Value::Bytes(id) => Ok(Value::boolean(heap.bytes(id).as_bytes().is_empty())),
         Value::Map(id) => Ok(Value::boolean(heap.map_size(id) == 0)),
         Value::Set(id) => Ok(Value::boolean(heap.map_size(id) == 0)),
+        // A rope and a table are collections with an O(1) size, and both answered
+        // `empty?: expected collection` (ADR-253). They are sized here rather than
+        // routed through `Seqable`: `->seq` is a LIST view, so a rope would have to
+        // materialise every character to answer a question its length already
+        // answers — and a rope is on the editor's hot path. A rope sizes in
+        // characters, which is what `count` and `string/length` already report for
+        // the string it stands for.
+        Value::Rope(_) => {
+            let r = expect_rope_ref(heap, "empty?", x)?;
+            Ok(Value::boolean(r.len_chars() == 0))
+        }
+        Value::Table(_) => {
+            let id = super::io::expect_table(heap, "empty?", x)?;
+            Ok(Value::boolean(crate::core::table::count(id)? == 0))
+        }
         _ => Err(LispError::wrong_type(heap, "empty?", "collection", x)),
     }
 }

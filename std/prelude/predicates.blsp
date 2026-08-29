@@ -248,6 +248,14 @@ and a set its elements, as everywhere else `seq` applies.
     ;; raw map, which would include the internal `:__id__`. `%map-get` distinguishes it.
     (map? coll) (if (%map-get coll :__id__ nil) (count (->seq coll)) (%map-count coll))
     (set? coll) (%set-count coll)
+    ;; A rope and a table have an O(1) size and used to raise here (ADR-253). Sized
+    ;; directly rather than through `Seqable`, whose `->seq` is a LIST view: a rope
+    ;; would have to materialise every character to answer what its length already
+    ;; knows, and a rope is on the editor's hot path. A rope counts in CHARACTERS,
+    ;; matching `string/length` for the string it stands for — so `(count r)` and
+    ;; `(count (rope->string r))` agree.
+    (rope? coll) (%rope-length coll)
+    (table? coll) (%table-count coll)
     ;; Lists and nil are what `%count-acc` is for. Anything else reaching here has no
     ;; native count — a rope, a table — and used to die inside `%count-acc` with
     ;; `empty?: expected collection`. Consult `Seqable` where an impl exists for that

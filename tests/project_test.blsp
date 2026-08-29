@@ -63,6 +63,49 @@
     ;; reflects the live value the runner would use.
     (assert= *project-main* '(main main))))
 
+;; `require`'s own answer to a missing entry point is `cannot find module 'main'` —
+;; a module the user never wrote, named after a default they never typed. These
+;; assert the three questions behind it are answered distinctly, because the fix
+;; differs: declare a `:main`, fix the one you declared, or fix `--main`.
+;; `:isolated` — each case clobbers the *project-* globals (ADR-017).
+(describe "project: the missing-entry-point diagnostic"
+  :isolated (test "no :main declared: says so, and names both fixes"
+    (def *project-main* '(main main))
+    (def *project-main-override* nil)
+    (def *project-source-paths* (list "src"))
+    (let (msg (project/project-no-entry-advice 'main))
+      (is (includes? msg "declares no `:main`"))
+      (is (includes? msg "`:main app` in project.blsp"))
+      (is (includes? msg "src/main.blsp"))))
+  (test "a declared :main that names nothing reports the name and where it looked"
+    (def *project-main* '(app start))
+    (def *project-main-override* nil)
+    (def *project-source-paths* (list "lib" "gen"))
+    (let (msg (project/project-no-entry-advice 'app))
+      (is (includes? msg "`:main` names module 'app'"))
+      (is (includes? msg "lib, gen"))
+      ;; not the no-:main advice — the manifest DOES declare one
+      (is (not (includes? msg "declares no `:main`")))))
+  (test "a --main override is blamed on --main, not on the manifest"
+    (def *project-main* '(main main))
+    (def *project-main-override* '(app main))
+    (let (msg (project/project-no-entry-advice 'app))
+      (is (includes? msg "`--main` names module 'app'"))
+      (is (not (includes? msg "project.blsp")))))
+  ;; The guard that stops `nest release` writing a binary that cannot boot.
+  (test "bundle collection refuses an entry module it did not collect"
+    (def *project-main* '(main main))
+    (def *project-main-override* nil)
+    (let (msg (try
+                (project/bundle-reject-missing-entry (list "util" "web"))
+                (catch e (error-message e))))
+      (is (includes? msg "release: no entry point"))
+      (is (includes? msg "cannot start"))))
+  (test "an entry module that WAS collected passes"
+    (def *project-main* '(main main))
+    (def *project-main-override* nil)
+    (assert= nil (project/bundle-reject-missing-entry (list "util" "main")))))
+
 (describe "project: :dependencies parsing (ADR-037)"
   ;; A parsed dep is a RECORD, one per manifest kind — its identity *is* its kind, so
   ;; the package manager dispatches the `Dependency` ability on it instead of reading a
@@ -491,8 +534,10 @@
       (file/mkdir root)
       (file/mkdir (path/join root "src"))
       (let (src (path/join root "src"))
+        ;; `:main lib` — bundle-collect refuses a project with no reachable entry
+        ;; module, and this fixture ships only `lib`.
         (file/spit (path/join root "project.blsp")
-          "(project :name \"coloc\" :source-paths [\"src\"])\n")
+          "(project :name \"coloc\" :source-paths [\"src\"] :main lib)\n")
         (file/spit (path/join src "lib.blsp")
           (str "(defmodule lib (:use test))\n"
             "(defn shipped () 1)\n" "(describe \"lib\" (test \"t\" (assert= 1 (shipped))))\n"))
@@ -872,15 +917,87 @@
       ;; is reported rather than inferred from what happens to be bound.
       (is (vector? (get info :features)))))
   ;; It has to answer on a binary whose app is broken — that is when it is asked — so it
-  ;; must not be able to reach a module load. Nothing here is app state.
-  (test "an unbundled binary carries no app fields"
+  ;; must not be able to reach a module load. Reading a manifest and asking git for a date
+  ;; are both file/process work, not a load, so the source fallback keeps that property.
+  (test "an unbundled binary has no MODULE COUNT — only a bundle can count its modules"
+    (is (nil? (get (project/build-info) :module-count))))
+  ;; The suite runs inside the brood repo, so the unbundled path finds a real manifest and
+  ;; a real git HEAD. That is the whole point of the fallback: an app run from source can
+  ;; state its version too, instead of only once shipped.
+  (test "an unbundled binary in a checkout reads its app from project.blsp and dates it by git"
     (let (info (project/build-info))
-      (is (nil? (get info :app)))
-      (is (nil? (get info :module-count)))))
+      (assert= (get info :app) "brood")
+      (assert= (get info :app-version) *project-version*)
+      (is (int? (get info :built-at)))
+      (is (not (nil? (get info :commit))))
+      ;; `built-at` is the newer of HEAD's commit and the newest source mtime, so it is
+      ;; never older than the tree — the property that makes an edit show up.
+      (is (>= (get info :built-at) 0))
+      ;; A bundle stamp records who built it; a working tree has no builder to name.
+      (is (nil? (get info :built-with)))))
+  (test "the runtime dates itself from its own binary, in a unit datetime can format"
+    (let (ms (get (project/build-info) :brood-built-at))
+      (is (int? ms))
+      (assert= (datetime/format (datetime/epoch-ms-> ms) "%Y")
+        (datetime/format (datetime/epoch-ms-> (os/now)) "%Y"))))
   (test "the printed report names every field and returns 0"
     (let (out (with-out-str (assert= (project/build-info-report) 0)))
       (is (includes? out "brood:"))
       (is (includes? out "build-id:"))
       (is (includes? out "features:"))
-      ;; No app line without an app — the report describes what is there, not a template.
-      (refute (includes? out "app:")))))
+      (is (includes? out "app:      brood "))
+      (is (includes? out "built:")))))
+
+;; How the two cases are WORDED. A release stamp is a real instant; a source run's is a
+;; commit date. Rendering the second to the minute would dress a working tree up as a
+;; build, so the shapes differ deliberately and this pins the difference.
+(describe "project: build-stamp-text"
+  (test "a bundle: the stamped instant, to the minute, in UTC"
+    (assert= (project/build-stamp-text {:bundled? true :built-at 1788012180000})
+      "2026-08-29 14:03 UTC"))
+  ;; The time, not just the date: two builds of one afternoon are the pair anyone comparing
+  ;; versions actually has, and a date alone cannot tell them apart.
+  (test "a source run: the commit TIME, naming the tree it came from"
+    (assert= (project/build-stamp-text {:bundled? false :built-at 1788012180000 :commit "a5e2405"})
+      "2026-08-29 14:03 UTC (a5e2405, from source)"))
+  (test "a source run outside git: still says where it came from, without a hash"
+    (assert= (project/build-stamp-text {:bundled? false :built-at 1788012180000})
+      "2026-08-29 14:03 UTC (from source)"))
+  ;; The daily case: you edit a file and run again. Reporting HEAD's commit time flat said the
+  ;; code was hours old while you were looking at what you had just typed — and named a commit
+  ;; whose code is not what ran. The time tracks the tree; the hash says where it came FROM.
+  (test "a modified tree dates itself by the edit, and marks the hash as a starting point"
+    (assert= (project/build-stamp-text {:bundled? false
+                                        :built-at 1788012180000
+                                        :commit "a5e2405"
+                                        :modified? true})
+      "2026-08-29 14:03 UTC (a5e2405 + edits, from source)"))
+  ;; No date at all is the shallow-clone / no-git case. Naming the tree is still worth
+  ;; something, and "unknown" beats a blank where a date should be.
+  (test "a commit but no date"
+    (assert= (project/build-stamp-text {:bundled? false :commit "a5e2405"})
+      "from source (a5e2405)"))
+  (test "nothing readable at all"
+    (assert= (project/build-stamp-text {:bundled? false}) "unknown")))
+
+;; Where a release gets dated. The stamp goes into the manifest COPY embedded in the
+;; bundle — never the on-disk project.blsp, which describes source, not an artifact.
+(describe "bundle: the release stamp"
+  (test "adds :built-at and :built-with, and the result still parses as a manifest"
+    (let (src "(project :name \"app\" :version \"1.2.3\" :main (app main))"
+          stamped (project/bundle-augment-manifest src [])
+          opts (rest (reflect/read-first stamped)))
+      (assert= (plist-get opts :name) "app")
+      (assert= (plist-get opts :version) "1.2.3")
+      (is (int? (plist-get opts :built-at)))
+      (assert= (plist-get opts :built-with) (system/build-id))))
+  ;; `apply-config` reads the embedded manifest back with `apply`, so a key it does not
+  ;; know must pass through harmlessly rather than error — that is what makes stamping
+  ;; the manifest cheaper than a new archive field (no bundle format bump).
+  (test "a stamped manifest still applies as config"
+    (let (src "(project :name \"app\" :version \"1.2.3\")"
+          opts (rest (reflect/read-first (project/bundle-augment-manifest src []))))
+      (assert= (apply-config opts) "app")))
+  (test "a manifest that is not a (project …) form is passed through untouched"
+    (assert= (project/bundle-augment-manifest "(something :else 1)" [])
+      "(something :else 1)")))

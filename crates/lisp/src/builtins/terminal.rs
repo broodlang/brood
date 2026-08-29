@@ -634,8 +634,8 @@ pub(super) fn clamp_extent(n: i64) -> u16 {
 // (behind the `gui` feature); these primitives just translate Brood `Value`s ⇄
 // the plain `gui::Op`/`gui::Key`/`gui::Face` the backend speaks. A composite
 // "broadcast" display in std/tool/observer.blsp drives term + gui (+ remote later)
-// from one frame — so the frontends can't drift. Without `--features gui` the
-// backend functions return a clear "rebuild with --features gui" error.
+// from one frame — so the frontends can't drift. Without the `gui` feature the
+// backend functions return an error naming how to build it in (see `gui::NOT_COMPILED`).
 
 /// A face colour keyword (`:red`, `:dark-grey`, …) to an RGB triple for the GUI
 /// framebuffer. The same palette `color_of` maps to crossterm `Color`s, so the

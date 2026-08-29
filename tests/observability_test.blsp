@@ -42,9 +42,11 @@
     (obs-churn 800000 ())
     (let (prof (dev/profile-stop))
       ;; samples come from the VM driver's frame boundaries — the legacy
-      ;; tree-walker (BROOD_VM=0) is by design not sampled, so the content
-      ;; assertions only apply on the default engine
-      (when (not= (os/env "BROOD_VM") "0")
+      ;; tree-walker is by design not sampled, so the content assertions only apply on
+      ;; the default engine. The guard must recognise BOTH spellings: `BROOD_TIER=0` is
+      ;; the canonical one (ADR-222) and `BROOD_VM=0` its alias, and testing only the
+      ;; alias made this fail under `BROOD_TIER=0` — the same engine, unrecognised.
+      (when (not (%tree-walker?))
         (is (> (count prof) 0))
         ;; every entry is {:stack (...) :count n}
         (let (e (first prof))
