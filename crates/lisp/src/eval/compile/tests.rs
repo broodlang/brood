@@ -1163,7 +1163,14 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
     // compiler time to land the code, and assert it eventually runs native.
     crate::process::yield_now(); // prime the reduction budget (short loops)
     let mut ran_native = 0;
-    for _ in 0..400 {
+    // A generous WALL-CLOCK bound, not an iteration deadline. The 400 × 2 ms version gave
+    // the background compiler ~0.8 s to schedule, which is plenty on a quiet box and not
+    // under load — this was KI-74: 1-in-40 failures under a 4-core spin + parallel libtest
+    // (whose single shared process also queues every other test's compiles ahead of this
+    // one; nextest's process-per-test never sees it). A compiler that never lands the code
+    // still fails, just on a bound a loaded box can meet — the KI-43 stopwatch lesson.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         crate::process::yield_now(); // keep the budget topped up across calls
         let base = interp.heap.roots_len();
         interp.heap.push_root(Value::int(5)); // i
@@ -1330,7 +1337,10 @@ fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
     let mut interp = crate::Interp::new();
     crate::process::yield_now();
     let mut tiered = false;
-    for _ in 0..400 {
+    // Wall-clock bound, not an iteration deadline — same KI-74 hazard as the tiering test
+    // above (see its comment): 400 x 2 ms starves under load in libtest's shared process.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         crate::process::yield_now();
         let base = interp.heap.roots_len();
         interp.heap.push_root(Value::int(5));
