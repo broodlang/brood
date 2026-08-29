@@ -135,7 +135,12 @@ this by implementing the `Display` ability, which takes over this name below.
 ;; `type-of`, `%map-pairs`) because `fold` calls it before the `map?` predicate /
 ;; `cond` macro are available.
 (defn seq (coll)
-  "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; a bytes value becomes its list of ints; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
+  "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; a bytes value becomes its list of ints; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection.
+
+    (seq (range 3))   → (0 1 2)     ; realised
+    (seq {:a 1})      → ([:a 1])    ; a map becomes its [k v] pairs
+    (seq [1 2 3])     → [1 2 3]     ; already a sequence — passes through
+    (seq nil)         → nil"
   (if (range? coll)
     (%range->list coll)
     (if (seqview? coll)
@@ -380,15 +385,26 @@ fewer than two items.
     (< 1 1)     → false"
   ((a b) (%lt a b))
   ((& xs) (%chain? %lt xs)))
-(defn > "True if the arguments are in strictly decreasing order."
+(defn > "True if the arguments are in strictly decreasing order.
+
+    (> 3 1)     → true
+    (> 3 3)     → false
+    (> 3 2 1)   → true    ; chained, i.e. each neighbouring pair in turn"
   ((a b) (%lt b a))
   ((& xs) (%chain? %cmp-gt xs)))
-(defn <= "True if the arguments are in non-decreasing order."
+(defn <= "True if the arguments are in non-decreasing order.
+
+    (<= 1 2)     → true
+    (<= 1 1 2)   → true    ; equal neighbours are allowed
+    (<= 2 1)     → false"
   ;; 2-arg body is a direct primitive call (a <= b) so the ADR-069 thin-wrapper
   ;; elision reaches it — the old `(not (%lt b a))` was a nested call it couldn't.
   ((a b) (%le a b))
   ((& xs) (%chain? %cmp-le xs)))
-(defn >= "True if the arguments are in non-increasing order."
+(defn >= "True if the arguments are in non-increasing order.
+
+    (>= 2 2)   → true
+    (>= 1 2)   → false"
   ;; a >= b  ==  b <= a — still a single passthrough (%le with args swapped).
   ((a b) (%le b a))
   ((& xs) (%chain? %cmp-ge xs)))
@@ -413,11 +429,17 @@ fewer than two items.
 ;; keeps the stack O(1)) or processes.
 
 (defmacro when (test & body)
-  "Evaluate `body` (returning the last) when `test` is truthy, else `nil`."
+  "Evaluate `body` (returning the last) when `test` is truthy, else `nil`.
+
+    (when true :yes)    → :yes
+    (when false :yes)   → nil"
   `(if ~test (do ~@body) nil))
 
 (defmacro unless (test & body)
-  "Evaluate `body` (returning the last) when `test` is falsy, else `nil`."
+  "Evaluate `body` (returning the last) when `test` is falsy, else `nil`.
+
+    (unless false :yes)   → :yes
+    (unless true :yes)    → nil"
   `(if ~test nil (do ~@body)))
 
 ;; `defonce` — define only if the name is not already bound. The point is
@@ -460,7 +482,9 @@ binding `def` writes — a bare `(bound? '~name)` would read at root and miss it
 (defmacro comment (& _body)
   "Ignore the body entirely and return nil — a scratch block for examples and
 disabled snippets. The body is still *read*, so it must be balanced sexps; use
-`;` for prose or anything that wouldn't parse."
+`;` for prose or anything that wouldn't parse.
+
+    (comment (this is never evaluated))   → nil"
   nil)
 
 ;; `(sig name (params… -> ret))` — a type-signature declaration the advisory
@@ -557,7 +581,10 @@ no-op; the marker is read only by the type checker (`nest check`)."
 ; unknown base name → accept
 (defn type-matches? (t v)
   "True if value `v` inhabits the (sig …) type-expression `t`. Unknown type
-names accept anything, so a contract never throws on a type it can't interpret."
+names accept anything, so a contract never throws on a type it can't interpret.
+
+    (type-matches? 'int 5)      → true
+    (type-matches? 'string 5)   → false"
   (cond
     (nil? t) (nil? v)
     ; the `nil` type reads as the nil literal
@@ -757,7 +784,11 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
 ;; each subexpression evaluated at most once (a gensym holds it across the test).
 (defmacro and (& xs)
-  "Logical AND: evaluate left-to-right, short-circuiting on the first falsy value (which it returns); `true` if none. Each argument is evaluated at most once."
+  "Logical AND: evaluate left-to-right, short-circuiting on the first falsy value (which it returns); `true` if none. Each argument is evaluated at most once.
+
+    (and 1 2)       → 2      ; the last value, when nothing is falsy
+    (and 1 nil 3)   → nil    ; the falsy value itself — 3 is never evaluated
+    (and)           → true"
   (if (empty? xs)
     true
     (if (empty? (rest xs))
@@ -765,7 +796,11 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
       (let (g (gensym "and")) `(let (~g ~(first xs)) (if ~g (and ~@(rest xs)) ~g))))))
 
 (defmacro or (& xs)
-  "Logical OR: evaluate left-to-right, short-circuiting on the first truthy value (which it returns); `nil` if none. Each argument is evaluated at most once."
+  "Logical OR: evaluate left-to-right, short-circuiting on the first truthy value (which it returns); `nil` if none. Each argument is evaluated at most once.
+
+    (or nil :fallback)   → :fallback
+    (or false 0)         → 0     ; 0 is truthy — only nil and false are falsy
+    (or nil nil)         → nil"
   (if (empty? xs)
     nil
     (if (empty? (rest xs))
@@ -793,7 +828,11 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
       (%cond-orphan (rest (rest clauses))))))
 
 (defmacro cond (& clauses)
-  "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` test always matches; `nil` if none do."
+  "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` test always matches; `nil` if none do.
+
+    (cond (> 2 1) :yes else :no)   → :yes
+    (cond false :a else :b)        → :b
+    (cond false :a)                → nil   ; nothing matched, and no else"
   (let (orphan (%cond-orphan clauses))
     (if (and (not (nil? orphan)) (not (%eq orphan 'else)))
       (error "cond: odd number of clauses — expected test/expression pairs. "
@@ -829,5 +868,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
       (if (= stepped form) form (%macroexpand-loop stepped (- n 1))))))
 
 (defn macroexpand (form)
-  "Repeatedly expand `form`'s head macro until the head is no longer a macro call."
+  "Repeatedly expand `form`'s head macro until the head is no longer a macro call.
+
+    (macroexpand '(when true 1))   → (if true (do 1) nil)"
   (%macroexpand-loop form %macroexpand-max-rounds))
