@@ -61,6 +61,21 @@ pub enum PrimOp {
     // bitops above), and the JIT lowers them as a single runtime-callback call.
     TableHas,
     TableGet,
+    /// `(get m k)` on a **CHAMP map** — the one collection read with no primitive.
+    /// Vectors have [`PrimOp::VectorRef`] and the mutable table has [`PrimOp::TableGet`];
+    /// a map read compiled to an ordinary call, which is why no body that reads a field
+    /// could ever be leaf-inlined (`leaf_body_qualifies` requires a call-free body) — not
+    /// a `defrecord` accessor, not an ability impl, not the map-shaped helpers that are
+    /// most of Brood. `get`'s own source calls its map branch "the hottest path in the
+    /// language (4796 call sites)".
+    ///
+    /// Inlines **only a present, non-nil value**; a non-map receiver, an absent key and a
+    /// stored `nil` all defer to the real `get`, which owns the set / string / integer-index
+    /// branches and the `%lookup-miss` path (a record whose contents are not its fields
+    /// resolves its miss through the `Lookup` ability — policy that stays in Brood).
+    ///
+    /// Opt-in while it proves itself: see `mapget_enabled`.
+    MapGet,
 }
 
 /// A 3-ary inlinable primitive — the `PrimOp` family's arity-3 sibling. One member

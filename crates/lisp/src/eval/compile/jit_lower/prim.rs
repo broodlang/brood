@@ -668,6 +668,15 @@ pub(super) fn emit_prim2(
             let h = table_prim(b, fref, tbl, key, frame, funcs);
             stack.push(h);
         }
+    } else if matches!(op, PrimOp::MapGet) {
+        // `(get m k)` on a map: `map` is always `[0,1]` here (`resolve_prim` returns only
+        // that for `get`), so source 0 is the map and source 1 the key. Status 1 — a
+        // non-map receiver, an absent key, or a stored `nil` — deopts, and the VM re-runs
+        // the real `get`, which owns those branches and `%lookup-miss`.
+        let m = read_words(b, aa_op, frame);
+        let k = read_words(b, bb_op, frame);
+        let h = table_prim(b, funcs.mget, m, k, frame, funcs);
+        stack.push(h);
     } else if matches!(op, PrimOp::VectorRef) {
         // `(vector-ref v i)` / inlined `(nth v i)`: map is `[0,1]`, so source 0 (`aa`)
         // is the vector, source 1 (`bb`) the index.
@@ -782,6 +791,12 @@ pub(super) fn emit_prim2_slot_slot(
             funcs.tget
         };
         let h = table_prim(b, fref, tbl, key, frame, funcs);
+        stack.push(h);
+    } else if matches!(op, PrimOp::MapGet) {
+        // `(get slot_a slot_b)` on a map — the slot/slot twin of the operand form above.
+        let m = read_words(b, Op::Slot(slot_a), frame);
+        let k = read_words(b, Op::Slot(slot_b), frame);
+        let h = table_prim(b, funcs.mget, m, k, frame, funcs);
         stack.push(h);
     } else if matches!(op, PrimOp::VectorRef) {
         // `(nth slot_a slot_b)`: source 0 = vector slot, source 1 = index slot (map `[0,1]`).

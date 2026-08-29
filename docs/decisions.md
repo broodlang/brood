@@ -19041,3 +19041,71 @@ work had drifted: one was fixed by an unrelated change, one described the wrong 
 one was consistent behaviour mistaken for a bug. **An item recorded as open can be fixed and
 still read as work**, and the cost is paid twice — once in a to-do that never shrinks, and
 once when someone "fixes" behaviour that was correct. Re-measure before scheduling.
+
+## ADR-296 — A map read is a primitive (`PrimOp::MapGet`)
+
+**Status.** Accepted (2026-08-29), **opt-in** behind `BROOD_MAPGET=1` while it proves itself.
+
+**Context.** The IR's binary primitive set was `Add Sub Mul Lt Le Eq Rem Div Quot Cons
+VectorRef Max Min BitAnd BitOr BitXor TableHas TableGet`. A vector read is `VectorRef`; the
+mutable table has `TableGet` and `TableHas`; the **CHAMP map — the language's primary data
+structure, and the representation of every record — had nothing.** Every map read compiled to
+an ordinary call.
+
+That is not merely a missing fast path. `leaf_body_qualifies` requires a **call-free** body, so
+while a field read is a call, no body that reads a field can ever be leaf-inlined. Measured,
+holding everything else fixed:
+
+| body | leaf-inlined? |
+|---|---|
+| `(* n 2)` | ✅ |
+| `(if (= n 0) 1 2)` | ✅ |
+| `(* (first v) 2)` | ✅ |
+| `(* (nth v 0) 2)` | ✅ |
+| `(* (get x :r) 2)` | ❌ |
+
+A 2×2 over {arithmetic, field-read} × {local arg, global arg} confirms it is the body, not the
+argument. So no `defrecord` accessor, no ability impl over a record, and none of the
+map-shaped helpers that are most of Brood could be inlined — and `get`'s own source calls its
+map branch "the hottest path in the language (4796 call sites)", noting that a refactor which
+merely moved its kind test behind a call cost **1.8×**.
+
+**How this was found is worth keeping.** It came out of asking whether *naming* anonymous impl
+fns would let the leaf inliner reach them (the monomorphization doc's hard constraint #2). It
+would not: naming supplies a symbol, and the body is rejected anyway. The blocker was never
+about abilities.
+
+**Decision.** `(get m k)` lowers to `PrimOp::MapGet`, following `nth` → `VectorRef` exactly:
+matched by head symbol, accepted only while the global still resolves to the PRELUDE closure
+(so a user `(def get …)` disables it cleanly, and each `Prim2`'s epoch guard re-validates on a
+redefinition), two arguments only — the 3-arity `(get m k default)` never reaches
+`resolve_prim`, and the variadic fold path admits `Add`/`Mul` alone.
+
+**It inlines only a present, non-nil value.** A non-map receiver, an absent key and a stored
+`nil` all defer to the real `get`. That is not conservatism for its own sake: the last two are
+indistinguishable here and both must reach `%lookup-miss`, where a record whose contents are
+not its fields resolves through the `Lookup` ability. The polymorphic branches — set, string,
+integer index — and every type error stay in Brood. This is a fast path for the hit, never a
+second implementation of `get`.
+
+Native lowering rides the existing table-read machinery: `brood_rt_map_get` has the same
+`(heap, out, 3 words, 3 words) -> status` shape as `brood_rt_table_get2` and is driven by the
+same `table_prim` helper, where status 1 deopts to the VM. It is deliberately **absent from
+`inst_may_allocate`**: `Heap::map_get` takes `&self`, so a CHAMP probe provably neither
+allocates nor collects, and listing it would disable the vector-base hoist around every map
+read for nothing.
+
+**Why opt-in, when the correctness case is strong.** The risk is not answers, it is *tiering*.
+The native path deopts when the probe declines, and sixteen deopts in a row mark an arm
+`BAILED` — so a miss-heavy loop could end up interpreted where today it is compiled. Nothing in
+the suite would notice that, and this project does not benchmark in-session. The flag is what
+lets the question be answered before it is anyone's default; the obvious refinement, if it
+bites, is to emit the real `get` through the existing slow-call path instead of deopting.
+
+**Consequences.** In-language suite **5206/5206 with the flag on**, byte-identical to off.
+`crates/cli/tests/mapget_differential.rs` gates every branch of `get` — hit, stored `nil`,
+absent, explicit default, vector, string, set, `nil` receiver, record — plus hot loops that
+cross the tiering threshold on both the hit and miss paths, run at every `BROOD_TIER`. Its
+second test is the non-vacuity check and states the purpose: a field-reading body is **not**
+leaf-inlinable without the prim and **is** with it, asserted through `BROOD_INLINE_DBG`. Both
+sabotage-verified.

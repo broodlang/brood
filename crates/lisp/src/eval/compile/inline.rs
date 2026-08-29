@@ -33,6 +33,20 @@ pub(crate) fn mono_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_MONO").is_some())
 }
 
+/// Is the `(get m k)` → [`PrimOp::MapGet`] lowering enabled? **Opt-in** (`BROOD_MAPGET=1`)
+/// while it proves itself, so a default build is byte-for-byte what it was.
+///
+/// Opt-in rather than opt-out because the risk is not correctness but *tiering*: the native
+/// lowering deopts when the probe declines (a non-map receiver, an absent key, a stored
+/// `nil`), and sixteen deopts in a row mark an arm `BAILED`. A miss-heavy loop could
+/// therefore end up interpreted where today it is compiled — a regression in a shape nothing
+/// in the suite would notice. The flag is what lets that be measured before it is anyone's
+/// default. Cached once, like the other levers.
+pub(crate) fn mapget_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_MAPGET").is_some())
+}
+
 /// A global whose value is a CHAMP map (`*op-ability*`, `*impls*`), or `None`.
 fn global_map(heap: &Heap, name: &str) -> Option<MapId> {
     match heap.env_get(heap.global(), value::intern(name))? {

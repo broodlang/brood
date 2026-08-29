@@ -265,8 +265,11 @@ thing profiling structurally cannot do, and it is the strongest argument for the
 
 ## Sequencing
 
-**A `MapGet` prim first** (see above — measured, and not an ability optimization at all), then
-reconsider whether any of `0 → 1 → 2 → 3` is still worth doing.
+**A `MapGet` prim first** — ✅ shipped 2026-08-29 as ADR-296, opt-in behind `BROOD_MAPGET=1`.
+A field-reading body is now leaf-inlinable, which no `defrecord` accessor or ability impl ever
+was. Next: measure whether the deopt-on-decline path costs anything real, then decide the
+default — and only then reconsider whether any of `0 → 1 → 2 → 3` is still worth doing, since
+the prize it was chasing may now be reachable without any of it.
 
 Phase 0 is done. 2a was proposed and abandoned the same day (see above) — the guard has no
 job where the identity is already proven, so it belongs with the profiling that makes the

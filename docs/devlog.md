@@ -6715,3 +6715,32 @@ Three things came out of that, and the last is the point: the site is now alloca
 differential crosses the tiering threshold. `CLAUDE.md` already says to measure a tiered
 runtime at both call counts — that discipline applies to *correctness*, not just to
 benchmarks, and this is what it costs to skip it.
+
+**A map read is now a primitive (ADR-296).** The named-impls experiment said no — naming an
+impl gives the leaf inliner a symbol and it still refuses, because `leaf_body_qualifies` wants
+a **call-free** body and every map read was a call. Measured, holding everything else fixed:
+`(* n 2)`, `(if (= n 0) 1 2)`, `(* (first v) 2)` and `(* (nth v 0) 2)` all inline;
+`(* (get x :r) 2)` does not. A 2×2 over {arithmetic, field-read} × {local, global} argument
+confirms it is the body.
+
+The cause was one absent enum variant. Vectors had `VectorRef`, the mutable table had
+`TableGet` and `TableHas`, and the CHAMP map — the primary data structure, and every record —
+had nothing. So no `defrecord` accessor, no ability impl, and none of the map-shaped helpers
+that are most of Brood could ever be inlined, while `get`'s own source calls its map branch
+"the hottest path in the language (4796 call sites)".
+
+`PrimOp::MapGet` follows `nth` → `VectorRef` exactly, inlines only a present non-nil value, and
+defers everything else to the real `get` so the set / string / integer-index branches and
+`%lookup-miss`'s `Lookup` dispatch stay in Brood. The native half reuses the table-read
+machinery verbatim.
+
+Opt-in, and the reason is worth stating: the correctness case is strong (5206/5206 with the
+flag on, byte-identical, at every tier), but the *tiering* case is untested — the native path
+deopts when the probe declines, sixteen in a row mark an arm `BAILED`, and a miss-heavy loop
+could end up interpreted where it is compiled today. Nothing in the suite would notice, and we
+do not benchmark here. So the flag exists to let that be answered before it is anyone's
+default.
+
+The gate asserts the *purpose*, not just the answers: a field-reading body is not
+leaf-inlinable without the prim and is with it. A differential on answers alone would have
+passed happily while the optimization did nothing at all.
