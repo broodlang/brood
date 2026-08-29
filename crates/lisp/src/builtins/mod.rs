@@ -886,7 +886,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "string/split",
         Arity::exact(2),
-        Sig::new(vec![string, string], list_ty),
+        // the pieces are strings, and there is always at least one (`""` splits to `("")`)
+        Sig::new(vec![string, string], Ty::list_of(string)),
         &["s", "sep"],
         "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters.",
         string_split);

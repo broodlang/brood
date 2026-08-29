@@ -188,6 +188,18 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     }
                 }
             }
+            // **Immediate application** `((fn (x) …) 1)`: the lambda's body typed with the
+            // actual argument types — the same inference a callback gets from a HOF.
+            if let Some(&head @ Value::Pair(_)) = items.first() {
+                let is_lambda = list_items(heap, head)
+                    .and_then(|l| l.first().copied())
+                    .is_some_and(|h| matches!(h, Value::Sym(s) if is_fn_head(s)));
+                if is_lambda {
+                    let inputs: Vec<Option<Ty>> =
+                        items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+                    return lambda_ret(heap, head, &inputs, ctx);
+                }
+            }
             match items.first().copied() {
                 // **Keyword accessor** `(:key coll [default])` (ADR-165) — the same
                 // record-field rule the `(get m :k)` case below applies, so the two
@@ -223,7 +235,20 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         return lambda_arrow(heap, form, ctx);
                     }
                     if value::symbol_is(s, kw::QUOTE) {
-                        return items.get(1).map(|&d| Ty::of_value(d));
+                        // A quoted LIST is data whose every element is right there: type it
+                        // as `list<e1 | e2 | …>` (`'()` is `nil`), the way a vector literal
+                        // already gets its per-element shape. Elements that are themselves
+                        // lists/symbols type through `of_value` (a symbol is a `symbol`).
+                        let d = *items.get(1)?;
+                        if let Value::Pair(_) = d {
+                            let elems = list_items(heap, d)?;
+                            let mut acc = Ty::NEVER;
+                            for &e in &elems {
+                                acc = acc.union(quoted_datum_ty(heap, e));
+                            }
+                            return Some(Ty::list_of(acc));
+                        }
+                        return Some(Ty::of_value(d));
                     }
                     // Control-flow forms whose value is one of their sub-forms —
                     // typed by unioning the possible result positions, but *only*
@@ -385,6 +410,36 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
             3 => Some(expr_ty(heap, items[2], ctx)?.union(Ty::of(Tag::Nil))),
             _ => None,
         };
+    }
+    // `(try body… (catch e handler…))` → ty(last body) | ty(last handler); with no catch
+    // it is a `do`. After expansion it is `(%try (fn () body…) (fn (e) handler…))`, whose
+    // value is one of the two thunks' results — the same union.
+    if value::symbol_is(head, kw::TRY) {
+        let body = &items[1..];
+        let (init, catch) = match body.last().copied() {
+            Some(last) if is_catch_clause(heap, last) => (&body[..body.len() - 1], Some(last)),
+            _ => (body, None),
+        };
+        let normal = init
+            .last()
+            .map_or(Some(Ty::of(Tag::Nil)), |&f| expr_ty(heap, f, ctx))?;
+        return match catch {
+            None => Some(normal),
+            Some(c) => {
+                let clause = list_items(heap, c)?;
+                let handler = if clause.len() >= 3 {
+                    expr_ty(heap, *clause.last()?, ctx)?
+                } else {
+                    Ty::of(Tag::Nil)
+                };
+                Some(normal.union(handler))
+            }
+        };
+    }
+    if value::symbol_is(head, kw::TRY_PRIM) && items.len() == 3 {
+        let normal = lambda_ret(heap, items[1], &[], ctx)?;
+        let handler = lambda_ret(heap, items[2], &[None], ctx)?;
+        return Some(normal.union(handler));
     }
     // `(do … last)` → ty(last). Empty `(do)` is `nil`.
     if value::symbol_is(head, kw::DO) {
@@ -567,9 +622,8 @@ fn let_bindings(heap: &Heap, form: Value) -> Option<Vec<Value>> {
 /// proves neither all-int nor any-float, or zero operands (a bare `(+)`). Deferring
 /// is always sound: the wider `number` never narrows below what the value can be.
 fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Option<Ty> {
-    let int = Ty::of(Tag::Int);
-    let float = Ty::of(Tag::Float);
     let num = Ty::NUMBER;
+    let float = Ty::of(Tag::Float);
 
     // Always-float unary math: `sqrt`/`sin`/`cos`/`tan` return a float even for a
     // perfect square / whole-number argument (`(sqrt 4)` → `2.0`). Only fires on a
@@ -588,37 +642,73 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         let t = expr_ty(heap, arg, ctx)?;
         return t.is_subtype(&num).then_some(float);
     }
-
-    let is_division = value::symbol_is(head, "/");
-    let is_contagious = value::symbol_is(head, "+")
-        || value::symbol_is(head, "-")
-        || value::symbol_is(head, "*")
-        || is_division;
-    let is_int_closed = value::symbol_is(head, "+")
-        || value::symbol_is(head, "-")
-        || value::symbol_is(head, "*")
-        || value::symbol_is(head, "quot")
-        || value::symbol_is(head, "rem")
-        || value::symbol_is(head, "mod")
-        // `math/` since ADR-227 — see the `math/sqrt` note above.
-        || value::symbol_is(head, "math/abs");
-    if !is_contagious && !is_int_closed {
-        return None;
-    }
+    numeric_op_kind(head)?;
     // Every operand must be a known numeric type; one non-numeric / unknown defers.
     // (Zero operands — e.g. a bare `(+)` — also defers, leaving the curated sig.)
     let args = items.get(1..)?;
     if args.is_empty() {
         return None;
     }
-    let mut all_int = true;
-    let mut any_float = false;
+    let mut tys = Vec::with_capacity(args.len());
     for &arg in args {
-        let t = expr_ty(heap, arg, ctx)?;
+        tys.push(expr_ty(heap, arg, ctx)?);
+    }
+    numeric_result(head, &tys)
+}
+
+/// What a numeric operator is, for [`numeric_result`]: `(contagious, int_closed, ring,
+/// division)`. `None` for anything that isn't one of these operators.
+fn numeric_op_kind(head: Symbol) -> Option<(bool, bool, bool, bool)> {
+    let is_division = value::symbol_is(head, "/");
+    // `inc`/`dec` are `(+ n 1)` / `(- n 1)` in the prelude, so they close exactly as `+`
+    // and `-` do — over ints, over floats (contagion), over ratios.
+    let is_ring = value::symbol_is(head, "+")
+        || value::symbol_is(head, "-")
+        || value::symbol_is(head, "*")
+        || value::symbol_is(head, "inc")
+        || value::symbol_is(head, "dec");
+    let is_contagious = is_ring || is_division;
+    let is_int_closed = is_ring
+        || value::symbol_is(head, "quot")
+        || value::symbol_is(head, "rem")
+        || value::symbol_is(head, "mod")
+        // `math/` since ADR-227 — see the `math/sqrt` note above.
+        || value::symbol_is(head, "math/abs");
+    (is_contagious || is_int_closed).then_some((is_contagious, is_int_closed, is_ring, is_division))
+}
+
+/// The result type of numeric operator `head` applied to operands of types `tys` — the
+/// operand logic of [`numeric_call_ty`] over TYPES rather than forms, so a callback
+/// (`(map inc xs)`) and a fold (`(reduce + 0 xs)`) can share it. `None` whenever a rule
+/// can't fire with certainty: a non-numeric operand, or nothing more specific than
+/// `number` provable for a non-contagious operator. Deferring is always sound: the wider
+/// type never narrows below what the value can be.
+///
+/// - **Int-closure** (`+ - * quot rem mod math/abs inc dec`): every operand `⊆ int` →
+///   exactly `int`. `/` is excluded: integer division is exact and yields a ratio.
+/// - **Float-contagion**: `+ - * / inc dec` with any operand `⊆ float` → `float`.
+/// - **Ratio-closure**: the ring operators and `/` over operands all `⊆ int | ratio` →
+///   `int | ratio` (a ratio reduces: `(+ 1/2 1/2)` is the int `1`).
+/// - Otherwise, every operand a number → `number`, still narrower than the operator's
+///   declared `number | map` (the `Num`-record widening, ADR-172 §7).
+pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
+    let (is_contagious, is_int_closed, is_ring, is_division) = numeric_op_kind(head)?;
+    if tys.is_empty() {
+        return None;
+    }
+    let int = Ty::of(Tag::Int);
+    let float = Ty::of(Tag::Float);
+    let num = Ty::NUMBER;
+    let int_or_ratio = int.clone().union(Ty::of(Tag::Ratio));
+    let mut all_int = true;
+    let mut all_int_or_ratio = true;
+    let mut any_float = false;
+    for t in tys {
         if !t.is_subtype(&num) {
             return None;
         }
         all_int &= t.is_subtype(&int);
+        all_int_or_ratio &= t.is_subtype(&int_or_ratio);
         any_float |= t.is_subtype(&float);
     }
     if is_contagious && any_float {
@@ -627,21 +717,16 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     if is_int_closed && all_int {
         return Some(int);
     }
-    // `/` is the one contagious operator that is NOT int-closed, and it used to fall through
-    // to `None` here — so the checker made **no claim at all** about `(/ x 2)`, the single
-    // most ordinary arithmetic expression there is.
-    //
-    // It is not int-closed because Brood's division is EXACT: it yields an `int` when it
-    // divides evenly and a `ratio` when it does not — `(/ 4 2)` → 2, `(/ 3 2)` → 3/2 — and
-    // never a float, at any arity (unary `(/ 2)` → 1/2, `(/ 12 5 3)` → 4/5) or width (a
-    // bigint numerator gives a bigint-backed ratio). So the sound claim is exactly
-    // `int | ratio`, which is narrower than the `number` the roadmap assumed and narrow
-    // enough to be useful: it catches `(sig f (int -> float))` over `(/ x 2)`, and a result
-    // fed somewhere non-numeric, without touching the *merely-wider* case that stays
-    // deferred (a body of `int | ratio` DECLARED `int` is not flagged — for an even
-    // numerator it is right, and proving that needs range analysis; ADR-011).
-    if is_division && all_int {
-        return Some(int.union(Ty::of(Tag::Ratio)));
+    // Ratios close over `+ - *` exactly as ints do, and `/` is exact over them too
+    // (`(/ 3/2 1/2)` → 3). This used to fall through to the declared signature — widened
+    // to `number | map` for `Num` records — which is a true type for the operator and
+    // noise as the answer for an all-numeric expression. `quot`/`rem`/`mod` are integer
+    // operations and stay int-only.
+    if (is_ring || is_division) && all_int_or_ratio {
+        return Some(int_or_ratio);
+    }
+    if is_contagious {
+        return Some(num);
     }
     None
 }
@@ -780,6 +865,143 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         return list_result(a);
     }
+    // `(range …)` is "a range of integers" (its own docstring): every argument an int
+    // means every element is one. Empty ranges are `nil`.
+    if value::symbol_is(head, "range") && items.len() >= 2 {
+        let int = Ty::of(Tag::Int);
+        let all_int = items[1..]
+            .iter()
+            .all(|&a| expr_ty(heap, a, ctx).is_some_and(|t| t.is_subtype(&int)));
+        return if all_int {
+            list_result(Some(int))
+        } else {
+            None
+        };
+    }
+    // `(vec coll)` — the same elements, as a vector. Unknown elements → a bare vector.
+    if value::symbol_is(head, "vec") && items.len() == 2 {
+        let elem = expr_ty(heap, items[1], ctx).and_then(|t| t.elem_ty());
+        return Some(match elem {
+            Some(e) => Ty::vector_of(e),
+            None => Ty::of(Tag::Vector),
+        });
+    }
+    // `(into target coll)` — `target`'s kind, holding `target`'s elements and `coll`'s.
+    // Only the kinds whose element story is plain: a vector or list target keeps its
+    // elements and gains `coll`'s; a map or set target is that kind, unrefined (a map's
+    // entries come from pairs, a set has no element refinement in the lattice).
+    if value::symbol_is(head, "into") && items.len() == 3 {
+        let target = expr_ty(heap, items[1], ctx)?;
+        let added = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
+        let own = if target.is_subtype(&Ty::of(Tag::Nil)) {
+            Some(Ty::NEVER)
+        } else {
+            target.elem_ty()
+        };
+        let joined = match (own, added) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            _ => None,
+        };
+        if target.is_subtype(&Ty::of(Tag::Vector)) {
+            return Some(match joined {
+                Some(e) => Ty::vector_of(e),
+                None => Ty::of(Tag::Vector),
+            });
+        }
+        if target.is_subtype(&Ty::LIST) {
+            return Some(match joined {
+                Some(e) => Ty::list_of(e).union(Ty::of(Tag::Nil)),
+                None => Ty::LIST,
+            });
+        }
+        if target.is_subtype(&Ty::of(Tag::Map)) {
+            return Some(Ty::of(Tag::Map));
+        }
+        if target.is_subtype(&Ty::of(Tag::Set)) {
+            return Some(Ty::of(Tag::Set));
+        }
+        return None;
+    }
+    // `(conj coll x …)` — `coll`'s kind, its elements plus the `x`s. A vector or list
+    // carries the elements; a map or set is its kind, unrefined.
+    if value::symbol_is(head, "conj") && items.len() >= 3 {
+        let coll = expr_ty(heap, items[1], ctx)?;
+        let mut added: Option<Ty> = None;
+        for &x in &items[2..] {
+            let t = expr_ty(heap, x, ctx)?;
+            added = Some(match added {
+                Some(a) => a.union(t),
+                None => t,
+            });
+        }
+        let added = added?;
+        if coll.is_subtype(&Ty::of(Tag::Vector)) {
+            return Some(match coll.elem_ty() {
+                Some(e) => Ty::vector_of(e.union(added)),
+                None => Ty::of(Tag::Vector),
+            });
+        }
+        if coll.is_subtype(&Ty::LIST) {
+            // onto nil: a list of the items; onto a list: that list plus the items
+            let own = if coll.is_subtype(&Ty::of(Tag::Nil)) {
+                Some(Ty::NEVER)
+            } else {
+                coll.elem_ty()
+            };
+            return Some(match own {
+                Some(e) => Ty::list_of(e.union(added)),
+                None => Ty::of(Tag::Pair),
+            });
+        }
+        if coll.is_subtype(&Ty::of(Tag::Map)) {
+            return Some(Ty::of(Tag::Map));
+        }
+        if coll.is_subtype(&Ty::of(Tag::Set)) {
+            return Some(Ty::of(Tag::Set));
+        }
+        return None;
+    }
+    // `(merge m …)` — a map. (Two records merge into a record whose shape is the
+    // right-biased union of theirs, but the lattice's record merge is not written, so
+    // the honest answer is the kind — still far from the `any` this used to be.)
+    if value::symbol_is(head, "merge") && items.len() >= 2 {
+        let all_maps = items[1..]
+            .iter()
+            .all(|&a| expr_ty(heap, a, ctx).is_some_and(|t| t.is_subtype(&Ty::of(Tag::Map))));
+        return if all_maps {
+            Some(Ty::of(Tag::Map))
+        } else {
+            None
+        };
+    }
+    // `(apply f args…)` — whatever `f` returns: a named global's signature (declared,
+    // curated or inferred), or a lambda literal's body with its inputs unknown. The
+    // spread arguments are not typed (their count is not even known), so this is the
+    // flat return, never an input-resolved one.
+    if value::symbol_is(head, "apply") && items.len() >= 3 {
+        return match items[1] {
+            // A numeric operator spread over a sequence of known elements stays in the
+            // operator's closure over those elements — `(apply + ints)` is an `int`.
+            Value::Sym(f)
+                if !ctx.is_local(f) && numeric_op_kind(f).is_some() && items.len() == 3 =>
+            {
+                let elem = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
+                match elem {
+                    Some(e) => numeric_result(f, &[e]),
+                    None => sig_of(heap, f).map(|sig| sig.ret),
+                }
+            }
+            Value::Sym(f) if !ctx.is_local(f) => sig_of(heap, f).map(|sig| sig.ret),
+            Value::Pair(_) => {
+                let n = list_items(heap, items[1])
+                    .and_then(|l| l.get(1).copied())
+                    .and_then(|ps| list_items(heap, ps))
+                    .map(|ps| ps.len())?;
+                lambda_ret(heap, items[1], &vec![None; n], ctx)
+            }
+            _ => None,
+        };
+    }
     // `(sort coll)` / `(sort less? coll)` and `(sort-by key-fn coll)` — the
     // sequence is always the last argument; element type is preserved unchanged.
     if value::symbol_is(head, "sort") || value::symbol_is(head, "sort-by") {
@@ -808,7 +1030,15 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // a `pair` (not nil), so we return `list<E>` without the `nil` variant.
     if value::symbol_is(head, "cons") && items.len() == 3 {
         let hd_ty = expr_ty(heap, items[1], ctx);
-        let tail_elem = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
+        // A `nil` tail (`'()`, `nil`) contributes no elements at all, so the list's
+        // elements are exactly the head's — `(cons 1 '())` is `list<1>`, not a bare `pair`.
+        let tail_elem = expr_ty(heap, items[2], ctx).and_then(|t| {
+            if t.is_subtype(&Ty::of(Tag::Nil)) {
+                Some(Ty::NEVER)
+            } else {
+                t.elem_ty()
+            }
+        });
         return match (hd_ty, tail_elem) {
             (Some(h), Some(e)) => Some(Ty::list_of(h.union(e))),
             _ => Some(Ty::of(Tag::Pair)), // one side unknown → unrefined pair
@@ -1001,6 +1231,16 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             _ => return None,
         };
         let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
+        // A numeric operator folded over a numeric sequence stays inside the operator's
+        // closure: by induction the accumulator is `init` at first and `(op acc x)` after,
+        // so with `init` and every element in a closed set the result is in it too —
+        // `(reduce + 0 ints)` is an `int`, not the `number | map` the accumulator-as-`any`
+        // path below produces from `+`'s declared signature.
+        if let (Value::Sym(fs), Some(i), Some(e)) = (f, &init_ty, &elem) {
+            if let Some(t) = numeric_result(fs, &[i.clone(), e.clone()]) {
+                return Some(t);
+            }
+        }
         let b = callback_ret(heap, f, &[Some(Ty::ANY), elem], ctx);
         return match (init_ty, b) {
             (Some(i), Some(b)) => Some(i.union(b)),
@@ -1034,6 +1274,14 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
         // A local binding shadows the global table — its return type isn't known.
         Value::Sym(s) if ctx.is_local(s) => None,
         Value::Sym(s) => {
+            // A numeric operator as the callback — `(map inc xs)`, `(reduce + 0 xs)` — with
+            // every input known: the same closure rules a direct call gets, instead of the
+            // operator's declared signature (widened to `number | map` for `Num` records).
+            if let Some(tys) = inputs.iter().cloned().collect::<Option<Vec<Ty>>>() {
+                if let Some(t) = numeric_result(s, &tys) {
+                    return Some(t);
+                }
+            }
             // An overloaded callback (ADR-116) — resolve per matching arm from
             // `inputs` instead of a single flat `ret`, same as the call-form case.
             if let Some(sigs) = declared_heap_overload(heap, s) {
@@ -1044,6 +1292,31 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
         Value::Pair(_) => lambda_ret(heap, f, inputs, ctx),
         _ => None,
     }
+}
+
+/// The type of one quoted datum: a nested list recurses (`'((1) (2))` is `list<list<1|2>>`),
+/// an empty list is `nil`, anything else is its `of_value` singleton/tag.
+fn quoted_datum_ty(heap: &Heap, d: Value) -> Ty {
+    match d {
+        Value::Pair(_) => match list_items(heap, d) {
+            Some(elems) => {
+                let mut acc = Ty::NEVER;
+                for &e in &elems {
+                    acc = acc.union(quoted_datum_ty(heap, e));
+                }
+                Ty::list_of(acc)
+            }
+            None => Ty::of(Tag::Pair),
+        },
+        other => Ty::of_value(other),
+    }
+}
+
+/// Is `form` a `(catch e handler…)` clause — the tail of a surface `try`?
+fn is_catch_clause(heap: &Heap, form: Value) -> bool {
+    list_items(heap, form)
+        .and_then(|l| l.first().copied())
+        .is_some_and(|h| matches!(h, Value::Sym(s) if value::symbol_is(s, kw::CATCH)))
 }
 
 /// The arrow type of a **simple** single-clause lambda literal `(fn (p…) body)`: one
