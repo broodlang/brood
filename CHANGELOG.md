@@ -12,6 +12,22 @@ a map — so every inferred signature over arithmetic read `((or map number) -> 
 number))`. The domain is now derived from the registry: `number` plus exactly the records
 with methods, by name (`number | t/usd`), and plain `number` when none is loaded.
 
+**Added — named types `countable`, `numeric`, `ordered`.** `countable` is what `count`/`get`
+accept (`seqable` plus `string`, `rope`, `table`); `numeric` and `ordered` are the domains of
+`+` and `<` — `number` plus the records with `num/*` / `compare-to` methods — under names a
+`sig` can write and a suggestion can print without going stale. A suggested signature spells
+a record by its name (`datetime/datetime`, never `(record :__id__ …)`), and `math/max`/`min`
+take and return the ordered domain.
+
+**Changed — strict mode reads a bound by inclusion only when it is positively known.** The
+`(not nil)` a `when` guard leaves on an untyped parameter, or the truthy half of `(or x
+default)`, says nothing about what the value is and keeps the overlap reading; that truthy
+half now renders as `(not (nil | false))` instead of a 21-tag list.
+
+**Fixed — `(< x)` checked nothing.** A one-argument comparison is vacuously true, and it
+answered `true` for a list, a string, `nil`. The lone argument is now compared with itself
+first, so a value that cannot be ordered raises exactly as it would beside a second one.
+
 **Added — `nest check --strict` (ADR-298).** A dynamic value with a precise type is checked
 by inclusion, so a `number` call result handed to an `int` parameter warns. Off by default
 (the overlap reading is what keeps a check quiet across a hot reload); `BROOD_CHECK_STRICT=1`

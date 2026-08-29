@@ -543,3 +543,36 @@ name (a record inside a wider term now prints its identity, not the tag `map`). 
 general — `MultiInfo::domain_ty` is any multimethod's parameter type — the operators are
 just its first consumer.
 
+## What was left, measured (2026-08-29)
+
+`nest check --suggest-sigs` over std writes 581 signatures. Tallying what a reader would not
+paste gave the list, in order of yield:
+
+- **73× `(or rope seqable string table)`** — `count`'s domain, a set the checker had under
+  the name `countable` in Rust and could not spell. Now `countable`.
+- **63× the comparison cover**, spelled out — see ADR-299's addendum: `ordered`, `numeric`.
+- **16× `(record :__id__ :datetime/datetime :day number …)`** in return positions: a
+  nominal shape is now spelled by its name in a `sig`, the inferred field refinements
+  dropped (the name denotes the open `:__id__` shape, a supertype — sound to declare, and
+  what a reader writes). `Display` keeps the refinements for diagnostics.
+- **`math/max`/`math/min` returning `(or map number)`** — routed through the operator
+  domain like `<`.
+
+After: 0 raw record shapes, 0 six-way countable unions; `ordered` 61×, `countable` 73×,
+`(or map …)` 13× (all `send`'s `map | pid` target, which is what it is).
+
+**The first `--strict` run over std** (~230 warnings) sorted into families. Two were
+defects in strict, fixed: a bound known only by exclusion — `(not nil)` from a `when`, the
+truthy half of `(or x default)` — kept being read by inclusion (now `is_known_only_by_
+exclusion` keeps the overlap rule), and that truthy half rendered as a 21-tag list (now
+`(not (nil | false))`). The rest are what strict is for: `nil | string` from `nth`/`first`
+handed to a string function, `number` where `int` is declared, a declared `int` return over
+a body that yields `number`. A `sig` on the function is the answer to each.
+
+**What is genuinely left: the `any` tail.** 404 of 581 suggestions contain `any` — a
+parameter only passed through, or whose only demand comes from inside a conditional branch
+(`(>= i n)` runs on every path of `ansi-csi-end`; `(nth v i)` and `(+ i 1)` do not, so a
+sound meet cannot use them). Narrowing those needs demand flow across functions and
+polymorphic (`?A`) suggestions — the inference frontier, and where an unsound rule would
+hide, so it wants the brute-force-model verification ADR-292 used, not rules by hand.
+

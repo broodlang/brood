@@ -106,6 +106,28 @@ with [[file-signatures]], so a buffer and the file it will be saved as cannot di
   (%check-string-structured src))
 (sig check-string-structured (string -> list))
 
+(defn source-deps (src)
+  "Per TOP-LEVEL form of `src`, in document order, what it defines and what globals it uses:
+a list of `{:defines (…) :references (…)}` maps of name strings.
+
+    (reflect/source-deps \"(defn twice (n) (* 2 n))\\n(twice 4)\")
+    ;=> ({:defines (\"twice\") :references (\"defn\" \"*\")}
+    ;    {:defines () :references (\"twice\")})
+
+The question a live evaluator has to answer to avoid re-running a whole buffer on every
+keystroke: given that one form changed, which of the forms below it could possibly be
+affected? Without this the only correct answer is \"all of them\", so a buffer of twenty
+forms costs twenty evaluations per edit; with it, the transitive closure of \"references
+something a re-run form defines\" — usually one form, and never fewer than is correct.
+
+Syntactic, and read the way find-references reads: locals are excluded (a parameter named
+`map` is not a use of `map`) and a plain `'…` quote is data rather than a use. Two things it
+cannot see, both the caller's policy to decide: a name a macro introduces, and a side effect
+— a `spawn`, a table write, a print — through which one form reaches another without naming
+anything."
+  (%source-deps src))
+(sig source-deps (string -> list))
+
 (defn references-in-source (name source)
   "Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded."
   (%references-in-source name source))

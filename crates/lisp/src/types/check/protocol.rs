@@ -1997,7 +1997,7 @@ pub(super) fn operator_domains(info: &MultiInfo) -> HashMap<value::Symbol, crate
     for position in 0..2 {
         ordered = ordered.union(info.domain_ty("compare-to", position));
     }
-    for op in ["<", "<=", ">", ">="] {
+    for op in ["<", "<=", ">", ">=", "%max", "%min", "math/max", "math/min"] {
         out.insert(value::intern(op), ordered.clone());
     }
     out

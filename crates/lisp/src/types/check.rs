@@ -128,6 +128,7 @@ mod infer;
 mod protocol;
 mod recursion;
 mod sigs;
+pub(crate) use sigs::cover_name_of;
 mod walk;
 
 use std::collections::{HashMap, HashSet};

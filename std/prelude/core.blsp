@@ -382,8 +382,12 @@ fewer than two items.
 (defn < "True if the arguments are in strictly increasing order.
 
     (< 1 2 3)   → true
-    (< 1 1)     → false"
+    (< 1 1)     → false
+
+A single argument is vacuously in order — `(< x)` is true — but `x` is still checked to be
+something that CAN be ordered: `(< '(1 2))` raises rather than silently answering true."
   ((a b) (%lt a b))
+  ((a) (do (%lt a a) true))
   ((& xs) (%chain? %lt xs)))
 (defn > "True if the arguments are in strictly decreasing order.
 
@@ -391,6 +395,7 @@ fewer than two items.
     (> 3 3)     → false
     (> 3 2 1)   → true    ; chained, i.e. each neighbouring pair in turn"
   ((a b) (%lt b a))
+  ((a) (do (%lt a a) true))
   ((& xs) (%chain? %cmp-gt xs)))
 (defn <= "True if the arguments are in non-decreasing order.
 
@@ -400,6 +405,7 @@ fewer than two items.
   ;; 2-arg body is a direct primitive call (a <= b) so the ADR-069 thin-wrapper
   ;; elision reaches it — the old `(not (%lt b a))` was a nested call it couldn't.
   ((a b) (%le a b))
+  ((a) (do (%le a a) true))
   ((& xs) (%chain? %cmp-le xs)))
 (defn >= "True if the arguments are in non-increasing order.
 
@@ -407,6 +413,7 @@ fewer than two items.
     (>= 1 2)   → false"
   ;; a >= b  ==  b <= a — still a single passthrough (%le with args swapped).
   ((a b) (%le b a))
+  ((a) (do (%le a a) true))
   ((& xs) (%chain? %cmp-ge xs)))
 (defn = "True if all arguments are structurally equal.
 

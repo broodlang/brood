@@ -3093,6 +3093,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         references_in_source);
     def(
         heap,
+        "%source-deps",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        &["src"],
+        "Per TOP-LEVEL form of `src`, in document order, what it defines and what globals it uses: a list of `{:defines (…) :references (…)}` maps of name strings. What a live evaluator needs to re-run only the forms an edit could affect instead of everything below it. Syntactic, read the way find-references reads: locals are excluded, a quoted `'…` is data. It cannot see a name a macro introduces, nor a side effect through which one form reaches another without naming anything.",
+        source_deps);
+    def(
+        heap,
         "%type-signature",
         Arity::exact(1),
         Sig::new(vec![sym.union(string)], string.union(nil_ty)),

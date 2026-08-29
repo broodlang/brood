@@ -323,6 +323,46 @@
     (assert= (reflect/source-signatures "(defn broken (x") '())
     (assert= (reflect/source-signatures "") '())))
 
+;; source-deps — what each top-level form defines and uses. The question a live evaluator
+;; has to answer to re-run only the forms an edit could affect: without it, "everything
+;; below the edit" is the only correct answer, and a buffer of twenty forms costs twenty
+;; evaluations per keystroke-settling.
+(describe "source-deps"
+  (defn deps-of (src) (reflect/source-deps src))
+
+  (test "one entry per top-level form, in document order"
+    (let (d (deps-of "(defn ixd-twice (n) (* 2 n))\n(ixd-twice 4)\n"))
+      (assert= (count d) 2)
+      (assert= (:defines (first d)) (list "ixd-twice"))
+      (is (includes? (:references (second d)) "ixd-twice"))
+      (assert= (:defines (second d)) '())))
+
+  ;; The edge that makes the answer usable: a parameter is not a use of the global that
+  ;; shares its name, or every form would depend on every other.
+  (test "locals are not references"
+    (let (d (first (deps-of "(defn ixd-f (n) (inc n))")))
+      (is (includes? (:references d) "inc"))
+      (is (not (includes? (:references d) "n")))))
+
+  (test "syntax is not a dependency — no form defines `defn`"
+    (let (r (:references (first (deps-of "(defn ixd-g (x) (if x 1 2))"))))
+      (is (not (includes? r "defn")))
+      (is (not (includes? r "if")))))
+
+  ;; Private definitions are most of a real module (ADR-146) and bind globals like any
+  ;; other; their parameters are local like any other.
+  (test "a private definition defines, and scopes its parameters"
+    (let (d (first (deps-of "(defn- ixd-h (n) (inc n))")))
+      (assert= (:defines d) (list "ixd-h"))
+      (is (not (includes? (:references d) "n")))))
+
+  (test "a quoted symbol is data, not a use"
+    (is (not (includes? (:references (first (deps-of "(list 'ixd-nope)"))) "ixd-nope"))))
+
+  (test "text with no forms has no entries"
+    (assert= (reflect/source-deps "") '())
+    (assert= (reflect/source-deps ";; just a comment\n") '())))
+
 ;; `system/features` / `system/feature?` — asking the BUILD what it can do.
 ;;
 ;; The gap this closes: a builtin from an absent optional feature is still bound

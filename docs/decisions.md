@@ -234,6 +234,15 @@ The registry is the ground truth here for the same reason it is at runtime: the 
 cold path looks the method up at the call, and a record without one raises `no-method`,
 so the checker's domain and the runtime's are the same set.
 
+**Addendum — the covers have names.** Once std's `datetime` registers `compare-to`, every
+function that compares got `(or number datetime/datetime datetime/date datetime/time-of-day)`
+— correct, and 63 times over, unreadable. The derived sets are now **named types**:
+`numeric` (the domain of `+`) and `ordered` (the domain of `<`), parsed in a `sig`
+(`annot`), always spelled by name in a suggestion — the listed form goes stale the day
+another record gains a method, the name does not — and by name in a diagnostic once two or
+more records are in the cover (with one, `number | t/usd` says more). `countable` joins them
+for `count`/`get`'s domain, a set the checker already had and could not spell.
+
 **Consequences.** Inferred and suggested signatures over arithmetic read `number`, or
 name the records that take part. A method registered *after* a check widens the domain on
 the next check, which is what an advisory checker over a live image already means. The
