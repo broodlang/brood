@@ -276,6 +276,98 @@ fn integer_division_yields_int_or_ratio() {
     );
 }
 
+// Ratios close over `+ - *` exactly as ints do: `(+ 1 2 1/2)` is 7/2 and `(+ 1/2 1/2)` is 1.
+// The case used to defer to `+`'s declared signature, which is widened to `number | map`
+// for `Num` records — sound, and noise as the answer to an all-numeric expression.
+#[test]
+fn ring_arithmetic_over_ints_and_ratios_yields_int_or_ratio() {
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig c (int -> float))\n\
+         (defn c (x) (+ x 1/2))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("declared return type float") && w.contains("int | ratio")),
+        "{ws:?}"
+    );
+    // …and it stays deferred in the merely-wider direction, like division does.
+    let ws = file_warnings("(defmodule t)\n(sig d (int -> int))\n(defn d (x) (* x 1/2))");
+    assert!(ws.is_empty(), "{ws:?}");
+    // a float operand still wins: contagion is checked first
+    let ws = file_warnings("(defmodule t)\n(sig e (int -> int))\n(defn e (x) (+ x 1/2 0.5))");
+    assert!(ws.iter().any(|w| w.contains("float")), "{ws:?}");
+}
+
+/// The checker's type of one expression, rendered — for pinning the answers the
+/// precision rules give. Wrapped in `(list …)` so the position-keyed query has a call to
+/// anchor on; `arg_ty_at` then types item 1, the expression itself.
+fn ty_str(src: &str) -> String {
+    arg_ty_of(&format!("(list {src})"), "(list", 1)
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "<unknown>".into())
+}
+
+// Sound-but-uninformative answers an expression corpus turned up, each replaced by the
+// exact type the value provably has. Every rule here is a tightening in the safe
+// direction: the old answer contained the new one.
+#[test]
+fn precision_rules_give_the_exact_type_where_it_is_provable() {
+    for (src, want) in [
+        // ratios close over the ring, and `/` is exact over them
+        ("(+ 1 2 1/2)", "int | ratio"),
+        ("(- 1/2 1/2)", "int | ratio"),
+        ("(/ 3/2 3)", "int | ratio"),
+        // a decimal operand: every operand a number, nothing narrower provable — but never
+        // the declared `number | map` (the `Num`-record widening) for numeric operands
+        ("(+ 1 1.5M)", "number"),
+        // a nil tail contributes no elements
+        ("(cons 1 '())", "list<1>"),
+        ("(cons 1 nil)", "list<1>"),
+        // a quoted list is data with its elements in view
+        ("'(1 2)", "list<1 | 2>"),
+        ("(vec '(1 2))", "vector<1 | 2>"),
+        // a range is a range of integers
+        ("(range 5)", "nil | list<int>"),
+        // a numeric operator as a callback / a fold / spread — the same closure rules
+        ("(map inc [1 2])", "nil | list<int>"),
+        ("(reduce + [1 2])", "int"),
+        ("(reduce + 0 [1 2])", "int"),
+        ("(apply + [1 2])", "int"),
+        ("(reduce + 0.5 [1 2])", "float"),
+        // reshapers with no signature at all used to be `any`
+        ("(vec [1 2])", "vector<1 | 2>"),
+        ("(into [] (list 1))", "vector<1>"),
+        ("(into {} [[:a 1]])", "map"),
+        ("(conj [1] 2)", "vector<1 | 2>"),
+        ("(conj (list 1) 2)", "list<1 | 2>"),
+        ("(conj #{1} 2)", "set"),
+        ("(merge {:a 1} {:b 2})", "map"),
+        // control flow and application that had no type
+        ("(try 1 (catch e 2))", "1 | 2"),
+        ("((fn (x) (str x)) 1)", "string"),
+        ("(->string :a)", "string"),
+        ("(string/split \"a b\" \" \")", "list<string>"),
+    ] {
+        assert_eq!(ty_str(src), want, "{src}");
+    }
+}
+
+// …and the rules must NOT claim more than they can prove: the operands that defeat each
+// closure keep the wider answer.
+#[test]
+fn precision_rules_defer_where_nothing_narrower_is_provable() {
+    for (src, want) in [
+        ("(+ 1 2.5)", "float"),           // contagion wins over the ring
+        ("(quot 7/2 2)", "<unknown>"),    // quot is int-only: a ratio operand defers
+        ("(vec (identity 1))", "vector"), // unknown elements → a bare vector
+        ("(range 0 1 0.5)", "list"),      // a non-int argument: only range's own inferred type
+    ] {
+        assert_eq!(ty_str(src), want, "{src}");
+    }
+}
+
 #[test]
 fn integer_division_does_not_flag_the_merely_wider_case() {
     // The residue that stays deferred (ADR-011): a body of `int | ratio` DECLARED `int` is

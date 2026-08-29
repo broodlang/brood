@@ -246,7 +246,8 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     //                    (unrefined list — list<string> would warn on (first …) = nil).
     put("string/join", Sig::new(vec![any, seq], str_ty));
     put("string/capitalize", Sig::new(vec![str_ty], str_ty));
-    put("string/split", Sig::new(vec![str_ty, str_ty], Ty::LIST));
+    // `->string` renders ANY value as text (ADR-258's rename of `name`): always a string.
+    put("->string", Sig::new(vec![Ty::ANY], str_ty));
     // Equality: `=`/`not=` are multi-arm closures; infer_sig bails on multi-arm.
     // Pin the bool result so `(+ 1 (= x y))` is caught.
     for n in ["=", "not="] {
