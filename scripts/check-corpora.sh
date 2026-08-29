@@ -41,11 +41,21 @@ shopt -s globstar nullglob
 # Each tree checked separately: a name resolves against the files loaded WITH it, so a
 # per-tree pass keeps one corpus from accidentally satisfying another's references — and it
 # makes the output say which tree is rotten.
-trees="examples stress scripts/fuzz/stress breakage"
+# `scripts` is the TOP LEVEL only: its `fuzz/stress` subtree is its own corpus above, and
+# folding them together would let one satisfy the other's references. It was added
+# 2026-08-29 after `scripts/stdlib-audit.blsp` — the standing audit of the library's own
+# surface — turned out to be dead on ADR-258's `name` → `->string`, with two more scripts
+# rotted the same way. Nothing had ever looked at them: `scripts/*.blsp` sat outside every
+# gate, which is precisely the pattern KI-42/43/44/45 record for `breakage/`, `examples/`
+# and the benchmarks repo.
+trees="examples stress scripts/fuzz/stress breakage scripts"
 fail=0
 
 for tree in $trees; do
-  files=("$tree"/**/*.blsp)
+  case "$tree" in
+    scripts) files=(scripts/*.blsp) ;;
+    *)       files=("$tree"/**/*.blsp) ;;
+  esac
   if [ "${#files[@]}" -eq 0 ]; then
     echo "  -- $tree (no .blsp files — did the tree move?)"
     continue
