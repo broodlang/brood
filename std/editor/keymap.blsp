@@ -48,7 +48,7 @@ testable without a terminal."
   (let (sym (get keymap key))
     (if (or (nil? sym) (map? sym))
       (fallback state key)
-      (try ((eval sym) state key) (catch e state)))))
+      (try ((reflect/eval sym) state key) (catch e state)))))
 
 (defn keymap-step (keymap pending state key fallback)
   "One keystroke through a (possibly chorded) `keymap`, returning `[state' pending']`
@@ -72,7 +72,7 @@ Pure apart from the symbol resolution; testable without a terminal."
       (nil? binding) (if (nil? pending)
                        [(fallback state key) nil]
                        [state nil])
-      else [(try ((eval binding) state key) (catch e state)) nil])))
+      else [(try ((reflect/eval binding) state key) (catch e state)) nil])))
 
 ;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
 (check-allow :non-tail-recursion

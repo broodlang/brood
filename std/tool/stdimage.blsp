@@ -208,16 +208,16 @@ since the prelude is always present."
             _ (when (not (file/dir? dir)) (file/mkdir dir))
             ;; Drop older images before writing this one — see `prune!`.
             _ (prune! dir path)
-            names (or modules (builtin-modules))
+            names (or modules (reflect/builtin-modules))
             probed (fold (fn (acc m)
                            (%map-assoc acc
                              (->string m)
                              (%isolate (fn ()
-                                         (let (before (into #{} (global-names))
+                                         (let (before (into #{} (reflect/global-names))
                                                _ (try (require-one m) (catch _ nil)))
                                            (into #{}
                                              (filter (fn (s) (not (contains? before s)))
-                                               (global-names))))))))
+                                               (reflect/global-names))))))))
                      {}
                      names)
             ;; now load them for real, so the globals being imaged are live in THIS heap
@@ -233,7 +233,8 @@ since the prelude is always present."
             ;; dispatchable, and the failure surfaces at `(send-response r)`, not at load.
             _ (%set-std-impls! (%std-impls-by-module))
             _ (%set-std-regs! (%std-regs-by-module))
-            roots (filter (fn (s) (not (prefixed-by-any? (->string s) names))) (global-names))
+            roots (filter (fn (s) (not (prefixed-by-any? (->string s) names)))
+                    (reflect/global-names))
             owner-of (fold (fn (acc g)
                              (let (best (fold (fn (winner m)
                                                 (let (probe (%map-get probed (->string m) nil))
@@ -255,7 +256,7 @@ since the prelude is always present."
                            (let (mn (->string m)
                                  pfx (str mn "/")
                                  owned (filter (fn (s) (string/starts-with? (->string s) pfx))
-                                         (global-names))
+                                         (reflect/global-names))
                                  mine (filter (fn (g) (= (%map-get owner-of g nil) mn)) roots)
                                  syms (apply vector (append owned mine)))
                              ;; A module contributing nothing would image as materialisable-but-empty,

@@ -1,7 +1,17 @@
 ;; std/proc.blsp — the non-mainstream process surface: green-process introspection/control
 ;; plus OS subprocesses. Policy over the %-prefixed primitives, so it lives under proc/*
 ;; rather than the bare core. (The mainstream actor model — spawn/send/receive/self/link/
-;; monitor/register — stays bare in the prelude.)
+;; unlink/monitor/demonitor/exit — stays bare in the prelude. `register`/`unregister`/
+;; `whereis`/`alive?` moved HERE in ADR-252 and are kernel primitives registered under
+;; `proc/`; this line claimed they were still bare until 2026-08-28.)
+;;
+;; `proc/trap-exit` and `proc/system-monitor` joined them 2026-08-28, also as Rust-registered
+;; primitives. Neither is mainstream actor vocabulary: `proc/trap-exit` is a per-process FLAG, so
+;; it belongs beside `proc/flag` rather than reading as a verb you send a message with, and
+;; `proc/system-monitor` is a kernel observability stream, not something an ordinary process
+;; touches. `link`/`unlink` and `monitor`/`demonitor` stayed bare TOGETHER — splitting an
+;; inverse pair across namespaces is the seam ADR-252 fixed for `register`, not one to
+;; reintroduce.
 (defmodule proc)
 
 (defn info (pid)

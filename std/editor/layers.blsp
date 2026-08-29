@@ -135,7 +135,7 @@ core knows nothing about buffers."
 ;; Any key on a layer is a facet an app can collect; two vocabulary entries are
 ;; worth standardising because more than one app wants the same seam:
 ;;
-;;   * services — a facet holding a fn SYMBOL the app `eval`s at use (late-bound,
+;;   * services — a facet holding a fn SYMBOL the app `reflect/eval`s at use (late-bound,
 ;;     hot-swappable), e.g. an editor's `:fontify`/`:indent`/`:complete-at`. The
 ;;     app defines the signature; layers supply implementations.
 ;;   * `:post-key` — a GUARD run after key dispatch: `(fn (ctx-before ctx-after
@@ -166,7 +166,7 @@ core knows nothing about buffers."
   (layer)
   "A layer reference → its map. A map is itself; a symbol is resolved (late-bound,
 so redefining the layer hot-swaps it), like a keymap command."
-  (if (map? layer) layer (eval layer)))
+  (if (map? layer) layer (reflect/eval layer)))
 
 (defn- layers-name-of
   (layer)
@@ -217,7 +217,7 @@ primitive — `activate-layer` is the hook-firing version."
   (hook ctx)
   "Run one hook — a fn symbol resolved late and applied as `(ctx) -> ctx`. A throw
 leaves `ctx` unchanged, so a bad hook can't crash the loop."
-  (try ((eval hook) ctx) (catch e ctx)))
+  (try ((reflect/eval hook) ctx) (catch e ctx)))
 
 (defn- layers-run-hooks
   (ctx hooks)

@@ -242,7 +242,7 @@
     (assert= (pr-str {:a 1}) "{:a 1}")
     (assert= (pr-str {}) "{}"))
   (test "a map round-trips through reflect/read-string + eval"
-    (let (m {:a 1 :b [2 3] :c "x"}) (assert= (eval (reflect/read-string (pr-str m))) m)))
+    (let (m {:a 1 :b [2 3] :c "x"}) (assert= (reflect/eval (reflect/read-string (pr-str m))) m)))
   (test "str uses the display form of values" (assert= (str {:a "hi"}) "{:a hi}")))
 
 (describe "maps at scale"
@@ -383,13 +383,13 @@
     (assert-error (:name "str"))
     (assert-error (:name 5)))
   (test "a wrong arity names both valid forms"
-    (let (msg (try (eval-string "(:name)") (catch e (error-message e))))
+    (let (msg (try (reflect/eval-string "(:name)") (catch e (error-message e))))
       (is (includes? msg "1 or 2 arguments")))
-    (assert-error (eval-string "(:name {:a 1} 1 2)")))
+    (assert-error (reflect/eval-string "(:name {:a 1} 1 2)")))
   (test "no OTHER data is callable — map/vector/set keep their hints"
-    (assert-error (eval-string "({:a 1} :a)"))
-    (assert-error (eval-string "([10 20] 1)"))
-    (assert-error (eval-string "(#{1 2} 1)"))))
+    (assert-error (reflect/eval-string "({:a 1} :a)"))
+    (assert-error (reflect/eval-string "([10 20] 1)"))
+    (assert-error (reflect/eval-string "(#{1 2} 1)"))))
 
 ;; ---- explicit concurrency / parallelism (spawn, send, copy-on-send) ----------
 ;; :isolated so these run against a private globals copy and don't contend with

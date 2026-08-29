@@ -528,7 +528,7 @@ enum Cmd {
     /// mismatch.
     Doctest,
 
-    /// Generate an editor syntax grammar from the language's own `(special-forms)`
+    /// Generate an editor syntax grammar from the language's own `(reflect/special-forms)`
     /// — one source of truth, no hand-maintained keyword lists (ADR-092). Prints to
     /// stdout; redirect to the editor's grammar file.
     ///
@@ -1576,7 +1576,7 @@ fn cmd_run(
         // a nested program-process spawn+block would native-nest, so it keeps the
         // inline `load` there.
         Some(path) if !wrap => brood::introspect::call_form("%run-program-file", &[path]),
-        Some(path) => brood::introspect::call_form("load", &[path]),
+        Some(path) => brood::introspect::call_form("reflect/load", &[path]),
     };
     // `--main module/fn` overrides the manifest's `:main` for this run only.
     // It applies to the project-entry path (no FILE); with a FILE we run that
@@ -1634,7 +1634,7 @@ fn cmd_run(
             ),
             None => String::new(),
         };
-        // `%spawn-link` + `trap-exit`, NOT `%spawn` + `monitor`: the two-step form has a
+        // `%spawn-link` + `proc/trap-exit`, NOT `%spawn` + `monitor`: the two-step form has a
         // race the kernel already names on `%spawn-link` itself ("no spawn->link :noproc
         // race", ADR-067). If the program finishes before `(monitor p)` runs, monitoring an
         // already-dead pid fires a synthetic `:noproc`, `(= :noproc :normal)` is false, and a
@@ -1646,10 +1646,10 @@ fn cmd_run(
         // *crashed* before the monitor attached is indistinguishable, and the exit-nonzero
         // contract above is exactly what this wrapper exists to enforce. So make it atomic
         // instead. The link is established before the child runs, so its real reason always
-        // arrives; `trap-exit` turns that into a trappable `[:EXIT pid reason]` message
+        // arrives; `proc/trap-exit` turns that into a trappable `[:EXIT pid reason]` message
         // rather than killing this driver, which is what `monitor` was chosen for.
         format!(
-            "(let (_ (trap-exit true) \
+            "(let (_ (proc/trap-exit true) \
                    p (%spawn-link (fn () {}))) \
                   (receive ([:EXIT ^p reason] (io/puts \"[exit]\" reason) (= reason :normal)) {}))",
             run_form, after_clause
@@ -1830,7 +1830,7 @@ fn cmd_doctest(interp: &mut Interp) {
 }
 
 /// `nest grammar [TARGET]` — emit an editor syntax grammar generated from the
-/// language's own `(special-forms)` + `(doc-forms)` (ADR-092), to stdout. `tmlanguage`
+/// language's own `(reflect/special-forms)` + `(reflect/doc-forms)` (ADR-092), to stdout. `tmlanguage`
 /// (default) is a VS Code TextMate grammar (JSON); `emacs` the font-lock defconsts.
 /// Pure Brood — `std/tool/grammar.blsp` — so adding a special form updates every
 /// editor's highlighting from one place.

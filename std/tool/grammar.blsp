@@ -1,47 +1,47 @@
 ;; std/tool/grammar.blsp — generate editor syntax grammars from the language's own
 ;; introspection. `grammar/…` (loads on reference) / `nest grammar`.
 ;;
-;; One source of truth: `(special-forms)` — the kernel's canonical special-form +
+;; One source of truth: `(reflect/special-forms)` — the kernel's canonical special-form +
 ;; core-macro list, already shared by the LSP and the REPL highlighter. This tool
 ;; turns it into a VS Code **TextMate** grammar and an **Emacs** font-lock list, so
 ;; editor integrations stop hand-maintaining (and drifting) parallel keyword lists.
 ;; A future tree-sitter target is the same `special-keywords` over a new emitter.
 ;;
 ;; Two things are data-driven: the special-form *keyword alternation* and the
-;; *doc-carrying `def…` heads* (`(doc-forms)`), which is how a DOCSTRING gets coloured
+;; *doc-carrying `def…` heads* (`(reflect/doc-forms)`), which is how a DOCSTRING gets coloured
 ;; apart from a string value. The rest of a grammar (comments, strings, the `def…`-head
 ;; rule, `:keywords`, numbers) is fixed structure.
-;; Macros that aren't in `(special-forms)` (e.g. `spawn`) are coloured by the LSP's
+;; Macros that aren't in `(reflect/special-forms)` (e.g. `spawn`) are coloured by the LSP's
 ;; semantic tokens, not this static keyword list — so the static list stays exactly
 ;; the canonical set.
 
 (defmodule grammar
-  "Generate editor syntax grammars from `(special-forms)` — one source of truth, no
+  "Generate editor syntax grammars from `(reflect/special-forms)` — one source of truth, no
 drift across editors. `(tmlanguage)` emits a VS Code TextMate grammar (JSON text);
 `(emacs-special-forms)` emits the Emacs `brood-special-forms` defconst. The `nest
 grammar` subcommand prints them (redirect to the editor's grammar file). Pure Brood
-over `(special-forms)` + `encode`."
+over `(reflect/special-forms)` + `encode`."
   (:use json))
 
 ;; ---- the source of truth -----------------------------------------------------
 
 (defn doc-heads ()
   "The `def…` heads whose form carries a docstring — the keys of the kernel's canonical
-`(doc-forms)`, the same list the LSP's semantic tokens and `std/editor/highlight.blsp`
+`(reflect/doc-forms)`, the same list the LSP's semantic tokens and `std/editor/highlight.blsp`
 read. The shared input to every grammar's docstring rule."
-  (keys (doc-forms)))
+  (keys (reflect/doc-forms)))
 
 (defn fn-doc-heads ()
   "The subset of `doc-heads` that build a FUNCTION — where a lone trailing string is
 the return value rather than documentation."
-  (filter (fn (h) (= :fn (get (doc-forms) h))) (doc-heads)))
+  (filter (fn (h) (= :fn (get (reflect/doc-forms) h))) (doc-heads)))
 
 (defn special-keywords ()
   "The special-form / core-macro names to highlight as control keywords:
-`(special-forms)` minus the `def…` heads (those get a distinct name-capturing rule,
+`(reflect/special-forms)` minus the `def…` heads (those get a distinct name-capturing rule,
 so they must not also land in the keyword alternation). The shared input to every
 grammar target."
-  (filter (fn (k) (not (string/starts-with? k "def"))) (special-forms)))
+  (filter (fn (k) (not (string/starts-with? k "def"))) (reflect/special-forms)))
 
 ;; ---- regex helpers (TextMate uses the Oniguruma engine) ----------------------
 
@@ -172,21 +172,21 @@ LSP's semantic tokens (which parse) correct that wherever the server runs."
 
 (defn tmlanguage ()
   "The VS Code TextMate grammar as JSON text (the `.tmLanguage.json` file body),
-generated from `(special-forms)`. Redirect `nest grammar` to the grammar file."
+generated from `(reflect/special-forms)`. Redirect `nest grammar` to the grammar file."
   (encode (tmlanguage-grammar)))
 
 ;; ---- tree-sitter highlight query ---------------------------------------------
 
 (defn tree-sitter-highlights ()
   "The tree-sitter highlight query (`queries/highlights.scm` for `tree-sitter-brood`,
-the Neovim/Helix/Zed/GitHub grammar) generated from `(special-forms)` + `(doc-forms)`.
+the Neovim/Helix/Zed/GitHub grammar) generated from `(reflect/special-forms)` + `(reflect/doc-forms)`.
 The static node→capture rules (the grammar's node names are stable) plus the two
 data-driven rules: the special-form head, emitted with a `#any-of?` predicate over
 `special-keywords` (literal node-text, so no regex escaping), and the docstring, which
 a query CAN state precisely — child anchors give it the position a regex grammar has to
 approximate. Emitted last so it overrides the blanket `(string) @string` above."
   (str ";; tree-sitter-brood highlight query.\n"
-    ";; GENERATED from (special-forms) + (doc-forms) by `nest grammar tree-sitter` —\n"
+    ";; GENERATED from (reflect/special-forms) + (reflect/doc-forms) by `nest grammar tree-sitter` —\n"
     ";; do not hand-edit.\n\n"
     "(comment) @comment\n"
     "(string) @string\n"
@@ -200,12 +200,12 @@ approximate. Emitted last so it overrides the blanket `(string) @string` above."
     ";; def… heads: the head reads as a keyword, the defined name as a definition.\n"
     "((list . (symbol) @keyword (symbol) @function)\n"
     " (#match? @keyword \"^def\"))\n\n"
-    ";; special forms + core macros in head position (the canonical (special-forms)).\n"
+    ";; special forms + core macros in head position (the canonical (reflect/special-forms)).\n"
     "((list . (symbol) @keyword.control)\n"
     " (#any-of? @keyword.control "
     (string/join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
     "))\n\n"
-    ";; docstrings: in a doc-carrying def… form ((doc-forms)) the string right after the\n"
+    ";; docstrings: in a doc-carrying def… form ((reflect/doc-forms)) the string right after the\n"
     ";; name — or after the parameter list — DOCUMENTS the definition rather than being a\n"
     ";; value, so it reads as documentation, not as a string.\n"
     "((list . (symbol) @_doc-head . (symbol) . (string) @string.documentation)\n"
@@ -227,7 +227,7 @@ approximate. Emitted last so it overrides the blanket `(string) @string` above."
     (grammar-quoted (special-keywords))
     ")\n"
     "  \"Brood special forms and core macros to highlight.\n"
-    "Generated from `(special-forms)` by `nest grammar emacs` — do not edit by hand.\")\n"))
+    "Generated from `(reflect/special-forms)` by `nest grammar emacs` — do not edit by hand.\")\n"))
 
 (defn emacs-doc-forms ()
   "The Emacs `brood-doc-forms` defconst (elisp text) — the `def…` heads that carry a
@@ -237,12 +237,12 @@ docstring with `font-lock-doc-face` instead of the string face."
   (str "(defconst brood-doc-forms\n"
     "  '("
     (string/join " "
-      (map (fn (h) (str "(\"" h "\" . " (->string (get (doc-forms) h)) ")")) (doc-heads)))
+      (map (fn (h) (str "(\"" h "\" . " (->string (get (reflect/doc-forms) h)) ")")) (doc-heads)))
     ")\n"
     "  \"Brood `def…' heads whose form carries a docstring, as (HEAD . KIND).\n"
     "KIND is `fn\' when the head builds a function — there a lone trailing string is the\n"
     "return value, not documentation — or `head\' when the docstring may be the form\'s\n"
-    "last element.  Generated from `(doc-forms)\' by `nest grammar emacs\' — do not edit\n"
+    "last element.  Generated from `(reflect/doc-forms)\' by `nest grammar emacs\' — do not edit\n"
     "by hand.\")\n"))
 
 (defn emacs ()

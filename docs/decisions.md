@@ -18645,3 +18645,189 @@ truth, worse than the widening it replaced. `Display` and `to_source` both write
 represented exactly, while deciding coverage *between* arrow types still falls back to the
 single-candidate rule. Contravariance needs its own decomposition, and nothing yet asks for
 it.
+
+## ADR-290 — Twelve tooling primitives leave the bare namespace for `reflect/` and `proc/`
+
+**Status:** accepted (2026-08-28)
+
+**Context.** ADR-250/251/252 shrank the bare namespace from 510 names to 268 by moving
+prelude functions behind `%` or into modules, but that sweep never looked at the RUST side.
+The kernel registers 391 primitives; 285 are `%`-hidden and 63 already namespaced
+(`bit/`, `decimal/`, `file/`, `string/`, `proc/`, `math/`, `system/`), which left **43 bare
+primitives** that no audit had read against the criteria the Brood-side sweep used. Two of
+them were `eval` and `load` — as generic as any word in the language, and unavailable to a
+user's own top-level `def` purely because the kernel got there first.
+
+**Decision.** Twelve move, ten to `reflect/` and two to `proc/`:
+
+- `reflect/eval` `reflect/eval-string` `reflect/load` `reflect/global-names`
+  `reflect/special-forms` `reflect/doc-forms` `reflect/builtin-modules`
+  `reflect/current-ns` `reflect/dynamic?` `reflect/private?`
+- `proc/trap-exit` `proc/system-monitor`
+
+They are registered under the qualified name in Rust exactly as `bit/and` and
+`proc/register` are: Rust supplies the mechanism, the namespace is Brood's, and the `.blsp`
+module file declares and documents the surface. `(:use reflect)` brings the whole set back
+bare inside one module.
+
+**What did NOT move, and why.** Both target modules already carried a written decision, and
+both are honoured:
+
+- `std/reflect.blsp` reserves `doc`, `arglist`, `bound?`, `apropos`, `doc-search` and
+  `macroexpand` as bare because you type them at a REPL, where namespacing taxes the most
+  common exploratory use. `macroexpand-1` stays bare **with** `macroexpand` — moving half a
+  pair is worse than moving neither.
+- `std/proc.blsp` reserves the mainstream actor model — `spawn`/`send`/`receive`/`self`/
+  `link`/`monitor`/`exit`. `unlink` and `demonitor` therefore stay bare too: they are the
+  inverses of `link` and `monitor`, and splitting an inverse pair across namespaces is
+  precisely the seam ADR-252 closed when it gave `register` a `proc/unregister`.
+
+The ten that did move all satisfy `reflect`'s stated charter — each takes a file, a source
+string or a form and is called by tooling — or, for the two `proc/` names, are demonstrably
+not actor vocabulary: `trap-exit` is a per-process FLAG that belongs beside `proc/flag`, and
+`system-monitor` is a kernel observability stream.
+
+**A macro emitting one of these must emit the ROOT ESCAPE.** The prelude's `defability` and
+`defrecord` expansions emit `(list '/current-ns)`, not `'current-ns` — a leading `/` resolves
+to the bare root binding and, critically, returns *before* the alias table is consulted, so a
+consuming module that happens to `(:alias reflect …)` something else cannot capture the
+reference. These became `'/reflect/current-ns`. This is the one edit a boundary-aware rename
+tool will not make for you, because a correct tool refuses to match a name preceded by `/`.
+
+**Consequences.** 43 bare primitives → 31. Two latent defects surfaced and were fixed with
+it, both of the same species — a list of names that had quietly stopped naming anything:
+
+1. `EFFECTFUL_IN_GUARD` (`types/check/guard_effects.rs`) still listed `println`, `print`,
+   `os-cmd`, `run-process`, `halt` and a `kill` that never existed. A stale entry there is
+   not an error anywhere; it just stops flagging, so the checker had silently gone quiet on
+   effectful guards calling `io/puts`, `os/cmd`, `os/run-process` and `system/halt`.
+2. `tests/stdimage_test.blsp`'s KI-72 regression test passed `(os/exe-path)` as the runner.
+   Under the canonical gate (`crates/lisp/tests/suite.rs`) that is the **libtest binary**,
+   which reads a positional argument as a test-name filter — it printed `running 0 tests`,
+   exited 0, and the assertion passed **without the race ever running**. Under `nest test`
+   the same line failed outright (`nest <file.blsp>` is not a subcommand, exit 2). The test
+   now resolves the real `brood` binary beside the runner or one level up, and is
+   sabotage-verified: a deliberately broken race body exits 1 and reddens it.
+
+## ADR-291 — Six more bare names, and five rules for what must stay bare
+
+**Status:** accepted (2026-08-28)
+
+**Context.** ADR-290 moved twelve kernel primitives. The same sweep continued into the 180
+bare names the PRELUDE defines. Far fewer moved than the roadmap's "~15 more bare names"
+estimated — not because the work stalled, but because most candidates turned out to have a
+reason, and the reasons generalise.
+
+**Decision — six move.** `reflect/set-load-path!` `reflect/add-load-path!` (module-loading
+tooling, `reflect`'s charter) and `seq/lmap` `seq/lfilter` `seq/lkeep` `seq/lremove` (the
+lazy seq-view combinators — an `l` prefix is a namespace spelled by hand). Defined in the
+PRELUDE under their qualified names, the way `string/->symbol` already is, rather than moved
+into the module file: the prelude is the boot image, and relocating a definition changes boot
+order for no gain.
+
+**Five rules for what stays bare.** Each was derived from a concrete near-miss in this sweep;
+together they explain why the residue is small and stop the next pass re-deriving them.
+
+1. **A name whose module header already reserves it.** `std/reflect.blsp` reserves the
+   REPL-typed introspection set; `std/proc.blsp` reserves the mainstream actor model and
+   states outright that `offload` stays a bare prelude wrapper. These decisions live in
+   file-header prose and are invisible to any grep for definitions. **Read the target
+   module's header first.**
+2. **Half of an inverse pair.** `link`/`unlink`, `monitor`/`demonitor`, `pr-str`/
+   `pr-str-bounded`: if one stays bare the other does. Splitting a pair across namespaces is
+   the seam ADR-252 closed by giving `register` a `proc/unregister`.
+3. **An earmuffed global.** `is_earmuffed` (`types/check/infer.rs`) is a pure spelling rule —
+   `starts_with('*') && ends_with('*')` — so `io/*print-length*` would **silently stop being
+   recognised as ambient** and the checker would start typing it by its load-time value,
+   reintroducing exactly the false positive the earmuffed-global rule was added to fix. There
+   is also no namespaced dynamic anywhere in `std/`. Earmuffed globals stay bare.
+4. **A name a test depends on being bare.** `reserved-package-name?` is what
+   `crates/lisp/tests/autoload_race.rs` calls, *chosen* because it is bare-named and its body
+   reaches an autoload stub — the KI-72 guard. Qualifying it would have left the test passing
+   while no longer testing the thing it names.
+5. **A name in `(special-forms)`.** `for`, `doseq`, `dolist`, `dotimes`, `with-out-str`,
+   `with-err-str` are all in the canonical keyword list that drives the highlighter,
+   `nest grammar` (VS Code/Emacs/tree-sitter), the LSP's semantic tokens and `brood.el`. A
+   namespaced name that renders as a control keyword is a contradiction: either it is
+   language (bare) or it is library (qualified). They are control flow, siblings of
+   `when`/`unless`/`cond`/`and`/`or`/`case`, and they stay bare.
+
+**Consequences.** Bare prelude names 180 → 174; with ADR-290, bare kernel primitives 43 → 31.
+The remaining roadmap item shrinks accordingly: of the "~15", `builtin-modules` went with
+ADR-290, `reload-defs` and `module-doc` were **already** `system/`-qualified (the roadmap
+entry was stale), `reserved-package-name?` is held bare by rule 4, and the loader itself
+(`require-one`, `provide`, `*autoloading*`, `*require-parent*`, `*load-path*`) is mechanism,
+not tooling — `require-one` is even resolved by name from Rust (`eval/derive.rs`). What is
+actually left is closer to zero than fifteen.
+
+## ADR-292 — Arrow decomposition: an intersection of arrows can satisfy a requirement no single arm does
+
+**Status.** Accepted (2026-08-29).
+
+**Context.** The lattice could represent `¬(int -> string)` exactly (ADR-288) and could
+decide when several alternatives *together* cover a product (ADR-289), but deciding coverage
+between **arrow** types still fell back to the single-candidate rule: `A <: B` held only if
+some one arm of `A` was, on its own, a subtype of `B`. For a plain function that is the whole
+story. For an **intersection** of arrows it is wrong, and demonstrably so — the multi-arity
+functions this language is built out of are exactly intersections of arrows:
+
+```
+(and (int -> int) (bool -> bool))  <:  (int|bool -> int|bool)
+```
+
+is true — hand it an `int` and the first arm returns an `int`, hand it a `bool` and the second
+returns a `bool`, so every result is in `int|bool` — and the checker answered **false**,
+because neither conjunct satisfies the requirement alone. The gap was known and deliberately
+left when the subtraction representation landed: the value claim had not been tested, and
+nothing had asked for it. Asking the question directly is what settled it — the wrong answer
+above is a two-line probe, and once seen it is not a hypothetical, it is a function type the
+prelude can write.
+
+**Decision.** Decide the requirement by the set-theoretic arrow rule (Frisch/Castagna), in
+`arrows_cover`:
+
+```
+⋀_{i∈P}(Sᵢ → Tᵢ)  ≤  (S → T)   ⟺   ∀ S' ⊊ P :  S ⊆ ⋃_{i∈P∖S'} Sᵢ   or   ⋂_{i∈S'} Tᵢ ⊆ T
+```
+
+Read operationally: for every way of splitting the arms into those we lean on and those we do
+not, either the argument cannot reach the ones we set aside, or the ones we kept already give
+a result inside `T`. The domain half is a covering question over a product, so it reuses
+ADR-289's `tuple_covered_by` verbatim rather than growing a second covering algorithm — which
+is the reason this rule is short. It is consulted only after the existing single-arm check
+declines, so nothing that decided before decides differently now.
+
+Two deliberate refusals. An arm with `&optional` or a rest parameter is not decomposed (its
+domain is not a fixed product, and the rule as stated does not apply), and the arm count is
+capped at 6 — the subset walk is `2ⁿ`, and a function with seven arities is not the case this
+exists for. Both decline, which costs precision and never soundness.
+
+**Why a semantic test, not another property law.** This change makes the relation *more
+permissive*, which is the one direction that can be unsound, and the property corpus cannot
+catch that: transitivity, the union bounds and disjointness-against-intersection all check the
+relation against itself, so a rule that is uniformly too permissive satisfies every one of
+them. So `crates/lisp/tests/arrow_subtyping_is_sound.rs` checks it against the *semantics*
+instead. Over a three-value universe an arrow is a finite set of functions — `(A → B)` is
+exactly those `f` with `f(v) ∈ B` for all `v ∈ A` — an intersection is the intersection of
+those sets, and containment is plain subset containment computed by brute force, with no
+reference to any checker rule. 1596 candidate types, ~2.5M ordered pairs, a few seconds.
+
+The soundness direction survives the small universe: every arrow built there has its domain
+inside `{int, bool, string}`, so membership on either side depends only on behaviour there,
+and a witness extends to a real function (send everything else to `int`) that witnesses the
+same failure in the full 23-tag lattice. A finite model cannot prove the rule for all types.
+It can refute it, which is what it is for — sabotaged to accept unconditionally, it reports
+1 467 176 forbidden containments.
+
+**Consequences.** Zero unsound claims across 2 547 216 pairs. The test asserts *completeness*
+as well, and that is exact — **0 missed containments of 905 709 judgeable pairs**. Two classes
+are excluded from the completeness claim only (never from soundness), because they are
+artifacts of a finite universe rather than facts about the rule: an arrow with an uninhabited
+result denotes no function at all and is therefore bottom, which the checker does not treat as
+bottom; and a requirement whose result names every tag is vacuously `any` *there* while
+`int | bool | string` is a genuine constraint in the real lattice, where the checker is right
+to decline. Before excluding them the residue is 690 396, and 97% of it is the first.
+
+Asserting completeness makes this test brittle on purpose. If a later fix must decline more in
+order to stay sound, that trade is the right one — take it, and record in the test what it
+costs; a silent loss of precision here is worth a conversation.

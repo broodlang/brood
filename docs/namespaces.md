@@ -27,7 +27,7 @@
 > never namespaced — are those *declared* with `defdyn` (ADR-151, superseding the
 > original earmuff-spelling rule), which keeps `defdyn` knobs reachable unqualified
 > from any ns. Prelude registries (`*load-path*`, `*features*`, `*module-docs*`) are
-> plain root globals with root setters (`set-load-path!`, `record-module-doc!`).
+> plain root globals with root setters (`reflect/set-load-path!`, `record-module-doc!`).
 >
 > **Fully complete.** The former cosmetic remainders all landed:
 > namespace-qualified workspace symbols (ns as container), semantic-token ns
@@ -143,9 +143,9 @@ over the existing flat table** — the core never grows a namespace axis:
   field** (`compile_ns: Option<Symbol>`, set by the `%in-ns` primitive the
   `defmodule` macro emits), *not* a shared global. A global would race across green
   processes (`RuntimeCode` is shared); the per-process field mirrors the existing
-  `current_file` slot and `dynamics` stack. File/module loaders (`load`,
+  `current_file` slot and `dynamics` stack. File/module loaders (`reflect/load`,
   `%load-string`, `eval_source`) reset it to root per file and restore the
-  caller's after; the interactive `eval-string` path leaves it **sticky** so a
+  caller's after; the interactive `reflect/eval-string` path leaves it **sticky** so a
   REPL `(defmodule foo)` persists across entries. A file may open **more than one**
   `(defmodule …)` (ADR-223 Phase 1): each opens a *region* running to the next
   `defmodule` or EOF, and a bare reference qualifies against the module it is inside

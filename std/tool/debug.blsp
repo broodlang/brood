@@ -195,14 +195,14 @@ are just a Brood predicate, so no recompile and no cost on the false path. (A ma
   ;; The pre-instrumentation fn for `sym`: the registry entry when already traced
   ;; (re-tracing must not capture a wrapper as the original), else the live value.
   (or (get *traced-fns* sym)
-    (if (bound? sym) (eval sym) (error "trace-fn: unbound symbol " sym))))
+    (if (bound? sym) (reflect/eval sym) (error "trace-fn: unbound symbol " sym))))
 
 (defn- debug-rebind
   (sym replacement)
   ;; Rebind global `sym` to the fn value `replacement` — built as data and eval'd,
   ;; so the module-privacy walk (which reads hand-written source) is not in play and
   ;; a qualified name rebinds like it does from the REPL.
-  (eval (list 'def sym replacement))
+  (reflect/eval (list 'def sym replacement))
   nil)
 
 (defn trace-fn (sym)
@@ -548,7 +548,7 @@ the Nth if a number is given (`,resume 2`). No-op note when no session is active
         (if (= r "")
           (io/puts (str "resumed " (resume-all dbg) " parked"))
           (let (entries (vec (get (dbg-state dbg) :paused)))
-            (io/puts (debug-resume-nth dbg entries (try (eval-string r) (catch _ nil))))))))))
+            (io/puts (debug-resume-nth dbg entries (try (reflect/eval-string r) (catch _ nil))))))))))
 
 (defn- debug-repl-step
   (rest)
@@ -633,7 +633,7 @@ no raw-terminal setup and works when piped."
                 (if (> (count parts) 1)
                   (io/puts (debug-resume-nth dbg
                              entries
-                             (try (eval-string (second parts)) (catch _ nil))))
+                             (try (reflect/eval-string (second parts)) (catch _ nil))))
                   (do (resume-all dbg) (io/puts "resumed all")))
                 ; let a resumed process reach its next break before redraw
                 (sleep 30)
@@ -641,7 +641,7 @@ no raw-terminal setup and works when piped."
             else
               (do
                 (try
-                  (io/puts (str "=> " (pr-str-bounded (eval-string line))))
+                  (io/puts (str "=> " (pr-str-bounded (reflect/eval-string line))))
                   (catch e (io/puts (str "! " (pr-str-bounded e)))))
                 (repl-session dbg))))))))
 (sig repl-session ((or map pid) -> any))

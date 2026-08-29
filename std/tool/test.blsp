@@ -88,7 +88,7 @@ docs/testing.md for the full guide.")
 ;; Empty the registry. A `describe`/`test` form REGISTERS by consing onto
 ;; `*units*`; in a fresh process that starts at nil, so a one-shot `nest test`
 ;; never double-counts. But a long-lived image (the `nest mcp` session, ADR-013)
-;; that `load`s the same test file twice would register every unit twice and
+;; that `reflect/load`s the same test file twice would register every unit twice and
 ;; report inflated counts. The project test runner calls this right before it
 ;; (re)loads the test files, so each run owns a clean registry regardless of how
 ;; many times the image has loaded them before.
@@ -1297,7 +1297,7 @@ the test rather than hanging the run."
         iso (filter (fn (u) (= (first u) :isolated)) units))
     (drain-runner iso par)))
 
-;; Run each `loader` (a 0-arg thunk that `load`s one test file) in its OWN global
+;; Run each `loader` (a 0-arg thunk that `reflect/load`s one test file) in its OWN global
 ;; scope and return the concatenated raw results. Wrapping a file's reset+load+run in
 ;; `%isolate` rolls back that file's top-level `def`s (and lets the next safepoint
 ;; reclaim the promoted code) once its tests finish — so a large suite's shared
@@ -1386,12 +1386,12 @@ the test rather than hanging the run."
 ;; loading every file up front and running the whole registry together. Prints the
 ;; summary + raises exactly like `run-tests`. Backs `nest test`.
 (defn run-tests-scoped (loaders & opts)
-  "Run a suite file-by-file, each file in its own rolled-back global scope so its top-level defs + promoted code are reclaimed after its tests finish — bounding a large suite's memory. `loaders` is a list of 0-arg thunks that each `load` one test file. Aggregates results, prints the summary, and raises if any failed — like `run-tests`. Backs `nest test`."
+  "Run a suite file-by-file, each file in its own rolled-back global scope so its top-level defs + promoted code are reclaimed after its tests finish — bounding a large suite's memory. `loaders` is a list of 0-arg thunks that each `reflect/load` one test file. Aggregates results, prints the summary, and raises if any failed — like `run-tests`. Backs `nest test`."
   (test-apply-opts opts)
   (test-repeat (opt-val :repeat opts 1) (fn () (run-tests-scoped-pass loaders opts))))
 
 ;; One pass of a scoped (file-by-file) suite. Split out so `:repeat` can re-run
-;; it — each pass re-`load`s every file in its own rolled-back scope, so a
+;; it — each pass re-`reflect/load`s every file in its own rolled-back scope, so a
 ;; repeated run is genuinely independent rather than replaying one registry.
 (defn- run-tests-scoped-pass
   (loaders opts)

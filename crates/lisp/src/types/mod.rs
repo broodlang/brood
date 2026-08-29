@@ -1635,9 +1635,15 @@ impl Ty {
             if !other_candidates.is_empty() {
                 let self_candidates = candidate_sigs(self);
                 for req in &other_candidates {
-                    if !self_candidates.iter().any(|s| s.is_subtype(req)) {
-                        return false;
+                    if self_candidates.iter().any(|s| s.is_subtype(req)) {
+                        continue;
                     }
+                    // No single arm satisfies the requirement — which is not the end of
+                    // the question for an INTERSECTION of arrows (ADR-292).
+                    if arrows_cover(&self_candidates, req) {
+                        continue;
+                    }
+                    return false;
                 }
             }
         }
@@ -2017,6 +2023,68 @@ fn union_negs(a: &Option<Arc<Vec<Ty>>>, b: &Option<Arc<Vec<Ty>>>) -> Option<Arc<
             Some(Arc::new(out))
         }
     }
+}
+
+/// Does an **intersection of arrows** satisfy a required arrow together, when no single one
+/// of them does (ADR-292)?
+///
+/// A function that maps `int → int` *and* `bool → bool` does map `int|bool → int|bool`, but
+/// neither conjunct says so alone: `(int → int)` is not below `(int|bool → int|bool)`,
+/// because an arrow's domain is **contravariant** and `int|bool ⊄ int`. Only the two
+/// together cover it. That is the whole reason the arrow rule exists.
+///
+/// ```text
+/// ⋀_{i∈P} (Sᵢ → Tᵢ)  ≤  (S → T)   ⟺   ∀ S' ⊆ P:
+///     S ⊆ ⋃_{i∈P∖S'} Sᵢ      or      ⋂_{i∈S'} Tᵢ ⊆ T
+/// ```
+///
+/// — read as: for any way the arms divide, either the ones you set aside still cover the
+/// required domain, or the ones you kept already agree on a result inside the required one.
+/// The empty intersection is the top type, so an `S'` of nothing demands the domain be
+/// covered by every arm together.
+///
+/// The domains are **products** (a signature takes several parameters), so this reuses
+/// [`tuple_covered_by`] rather than inventing a second covering rule — the same question
+/// asked of the same shape, which is what keeps the two answers from drifting.
+///
+/// Conservative where the shape is not a plain fixed arity: an `&optional` or `&` rest on
+/// either side declines, which can only refuse a true containment, never accept a false one.
+fn arrows_cover(candidates: &[Sig], req: &Sig) -> bool {
+    if !req.optional.is_empty() || req.rest.is_some() {
+        return false;
+    }
+    let arms: Vec<&Sig> = candidates
+        .iter()
+        .filter(|c| c.params.len() == req.params.len() && c.optional.is_empty() && c.rest.is_none())
+        .collect();
+    // A different arity accepts a different call, so it cannot help cover this one.
+    if arms.is_empty() || arms.len() > 6 {
+        return false;
+    }
+    for mask in 0..(1u32 << arms.len()) {
+        // The arms NOT kept must still cover the required domain…
+        let set_aside: Vec<Vec<Ty>> = arms
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) == 0)
+            .map(|(_, c)| c.params.clone())
+            .collect();
+        if tuple_covered_by(&req.params, &set_aside) {
+            continue;
+        }
+        // …or the arms kept must agree on a result inside the required one. The empty
+        // intersection is `any`, which is inside the requirement only if it asks for `any`.
+        let kept = arms
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .fold(Ty::ANY, |acc, (_, c)| acc.intersect(c.ret.clone()));
+        if kept.is_subtype(&req.ret) {
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 /// Is a **product** contained in a union of products? — the set-theoretic rule for tuples.

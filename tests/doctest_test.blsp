@@ -37,7 +37,29 @@
     (assert= nil (doctest/check "p" "    (assoc {:a 1} :b 2)   → {:b 2, :a 1}"))
     (assert= nil (doctest/check "p" "    (assoc {:a 1} :b 2)   → {:a 1, :b 2}")))
   (test "a raising example is matched on its RAISED text, never silently accepted"
-    (is (not (nil? (doctest/check "p" "    (/ 1 0)   → 0"))))))
+    (is (not (nil? (doctest/check "p" "    (/ 1 0)   → 0")))))
+  ;; A line the selector CALLS an example must not then be dropped in silence — that is an
+  ;; unchecked promise wearing the shape of a checked one. A second arrow is the typo that
+  ;; used to buy it.
+  (test "a line that looks like an example but does not parse is reported, not dropped"
+    (let (m (doctest/check "p" "    (+ 1 1)   → 2 → 3"))
+      (is (not (nil? m)))
+      (is (includes? m "malformed example"))))
+  (test "but a line that is not an example at all stays nil"
+    (assert= nil (doctest/check "p" "    (+ 1 1)"))
+    (assert= nil (doctest/check "p" "not indented   → 2"))))
+
+(describe "the selector and the parser agree"
+  ;; They disagreed: `example-lines` tested the RAW line for the arrow while `case-of`
+  ;; stripped the trailing comment first, so a line whose only arrow sat inside a comment was
+  ;; selected as an example and then silently dropped. One line in std/ hit it.
+  (test "an arrow that only appears inside a comment is not an example"
+    (assert= []
+      (apply vector
+        (doctest/example-lines "    (defrecord c (r))   ; (c 2) → {:r 2}"))))
+  (test "an arrow outside the comment still is, comment and all"
+    (assert= 1 (count (doctest/example-lines "    (+ 1 1)   → 2  ; two")))
+    (assert= nil (doctest/check "p" "    (+ 1 1)   → 2  ; two"))))
 
 (describe "failures-under"
   (test "scopes to a prefix, so one package's gate ignores every other"

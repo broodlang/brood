@@ -154,7 +154,7 @@
           [2 5 "hello" (bytes 33)])))
   (test "an unknown spec keyword is a clean expand-time error"
     (is (= (try
-             (eval '(match (bytes 1) ((bytes (x :u3)) x) (_ :no)))
+             (reflect/eval '(match (bytes 1) ((bytes (x :u3)) x) (_ :no)))
              (catch e :bad-spec))
           :bad-spec))))
 

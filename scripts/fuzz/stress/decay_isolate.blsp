@@ -76,7 +76,7 @@
       (let (pid (start-child sup
                   {:id (math/mod n 8) :start start-crashy :restart :permanent}))
         (do (send pid :die) (terminate-child sup (math/mod n 8))))
-    (= mode "reload") (eval (list 'def 'decay-target n))
+    (= mode "reload") (reflect/eval (list 'def 'decay-target n))
     ;; supervisor-free: separate spawn-link from the CRASH and from the error VALUE
     ;; supervisor cycle WITHOUT a crash: start-child + terminate-child only. Separates
     ;; "sending the spec across the boundary" from "the restart after a crash".
@@ -139,6 +139,6 @@
           (run (+ n 1) (+ w 1) (os/now))))
       (run (+ n 1) w wstart))))
 
-(trap-exit true)
+(proc/trap-exit true)
 (io/puts (str "mode=" mode " window=" window " secs=" secs))
 (run 0 0 (os/now))

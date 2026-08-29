@@ -1289,7 +1289,7 @@
       (pkg-write-project app-dir
         "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
       (let (dirs (ensure-deps app-dir (list (dep-path 'greeter "../greeter"))))
-        (set-load-path! (append *load-path* dirs))
+        (reflect/set-load-path! (append *load-path* dirs))
         (require-one 'greeter)
         ;; greeter is a `(defmodule greeter)`, so its `greet` is `greeter/greet`
         (assert= (greeter/greet "you") "hi you")))))
@@ -1307,7 +1307,7 @@
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (let (dirs (ensure-deps app-dir
                      (list (dep-git 'salutation url "v1.0.0" nil))))
-          (set-load-path! (append *load-path* dirs))
+          (reflect/set-load-path! (append *load-path* dirs))
           (require-one 'salutation)
           (assert= (salutation/hi "you") "yo you")
           ;; and the clone + lock landed under the app

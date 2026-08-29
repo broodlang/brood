@@ -205,7 +205,7 @@ fn a_path_dependency_is_imaged_and_its_edits_invalidate() {
 }
 
 /// Loading MUTATES registries (`*impls*`, `*methods*`, `*method-from*`, `*module-docs*`, …)
-/// rather than creating them, so the `(global-names)` diff an image is built from cannot
+/// rather than creating them, so the `(reflect/global-names)` diff an image is built from cannot
 /// see them and each has to be carried deliberately. They were named by hand and the list
 /// went stale repeatedly — silently, because a lost registry is a wrong answer with no
 /// error. The set is derived from the registry funnel now (`%registry-names`), and this is

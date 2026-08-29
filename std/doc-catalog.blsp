@@ -56,7 +56,7 @@
    ">=" :math
    "%ability-id-kw" :meta
    "%ability-qualify-op" :meta
-   "add-load-path!" :meta
+   "reflect/add-load-path!" :meta
    "and" :control
    "any?" :predicates
    "append" :collections
@@ -93,7 +93,7 @@
    "bound?" :meta
    "system/brood-version" :meta
    "system/build-id" :meta
-   "builtin-modules" :meta
+   "reflect/builtin-modules" :meta
    "bytes" :bytes
    "bytes?" :predicates
    "string/capitalize" :strings
@@ -129,7 +129,7 @@
    "file/cp" :filesystem
    "count" :collections
    "%count-acc" :collections
-   "current-ns" :meta
+   "reflect/current-ns" :meta
    "file/cwd" :filesystem
    "dec" :math
    "decimal/of" :convert
@@ -176,7 +176,7 @@
    "string/display-width" :strings
    "dissoc" :maps
    "doc" :meta
-   "doc-forms" :meta
+   "reflect/doc-forms" :meta
    "doc-search" :meta
    "%doc-search-terms" :meta
    "dolist" :control
@@ -186,13 +186,13 @@
    "%dotimes-loop" :control
    "doto" :control
    "drop" :collections
-   "dynamic?" :meta
+   "reflect/dynamic?" :meta
    "empty?" :predicates
    "string/ends-with?" :predicates
    "error" :errors
    "error-message" :errors
-   "eval" :meta
-   "eval-string" :meta
+   "reflect/eval" :meta
+   "reflect/eval-string" :meta
    "every?" :predicates
    "exit" :processes
    "system/feature?" :predicates
@@ -218,7 +218,7 @@
    "get-in" :maps
    "%get-in-walk" :maps
    "%get-unanswerable" :maps
-   "global-names" :meta
+   "reflect/global-names" :meta
    "string/grapheme-at" :strings
    "string/grapheme-count" :strings
    "identity" :functions
@@ -237,10 +237,10 @@
    "string/int->char" :strings
    "int?" :predicates
    "into" :collections
-   "lfilter" :collections
-   "lkeep" :collections
-   "lmap" :collections
-   "lremove" :collections
+   "seq/lfilter" :collections
+   "seq/lkeep" :collections
+   "seq/lmap" :collections
+   "seq/lremove" :collections
    "string/join" :strings
    "keys" :maps
    "keyword" :convert
@@ -251,7 +251,7 @@
    "string/list->" :strings
    "file/ls" :filesystem
    "list?" :predicates
-   "load" :meta
+   "reflect/load" :meta
    "string/lower" :strings
    "macroexpand" :meta
    "multi-return-type" :meta
@@ -309,7 +309,7 @@
    "%pr-safely" :io
    "pr-str" :io
    "pr-str-bounded" :io
-   "private?" :meta
+   "reflect/private?" :meta
    "provide" :meta
    "math/quot" :math
    "range" :collections
@@ -367,7 +367,7 @@
    "send" :processes
    "seq" :collections
    "seqview?" :predicates
-   "set-load-path!" :meta
+   "reflect/set-load-path!" :meta
    "set?" :predicates
    "%show-args" :io
    "%show-print-hook" :meta
@@ -386,7 +386,7 @@
    "%spawn-body-thunk" :processes
    "spawn-link" :processes
    "%spawn-thunk-form?" :predicates
-   "special-forms" :meta
+   "reflect/special-forms" :meta
    "file/spit" :filesystem
    "file/spit-append" :filesystem
    "file/spit-bytes" :filesystem
@@ -420,7 +420,7 @@
    "string/substring-graphemes" :strings
    "symbol" :convert
    "symbol?" :predicates
-   "system-monitor" :meta
+   "proc/system-monitor" :meta
    "table?" :predicates
    "take" :collections
    "%take-acc" :collections
@@ -429,7 +429,7 @@
    "math/->fixed" :strings
    "->seq" :meta
    "->string" :convert
-   "trap-exit" :processes
+   "proc/trap-exit" :processes
    "string/trim" :strings
    "string/triml" :strings
    "string/trimr" :strings

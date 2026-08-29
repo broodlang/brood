@@ -7,7 +7,7 @@
 ;;   3. BARE       — is a core (unnamespaced) name one that has earned staying bare?
 ;;
 ;; Written in Brood because the library it audits is Brood: the introspection it needs
-;; (`global-names`, `doc`, `arglist`, `private?`) is the language's own, so the audit is a
+;; (`reflect/global-names`, `doc`, `arglist`, `reflect/private?`) is the language's own, so the audit is a
 ;; program in the thing being audited rather than a script that parses it from outside.
 ;;
 ;;   brood scripts/stdlib-audit.blsp
@@ -17,7 +17,7 @@
 (require-one 'seq)
 
 ;; Load everything so the audit sees the whole surface, not just what boot happens to pull.
-(doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))
+(doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))
 
 (defn- public-names
   ()
@@ -25,8 +25,8 @@
 vocabulary) and minus anything a module marked private."
   (sort (filter (fn (s)
                   (let (n (name s))
-                    (and (not (string/starts-with? n "%")) (not (private? s)))))
-          (global-names))))
+                    (and (not (string/starts-with? n "%")) (not (reflect/private? s)))))
+          (reflect/global-names))))
 
 (defn- module-of
   (n)
@@ -80,9 +80,10 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
       qualified (filter (fn (n) (module-of n)) names)
       bare (filter (fn (n) (not (module-of n))) names)
       stutter (filter stutters? qualified)
-      no-doc (filter (fn (n) (nil? (try (doc (eval (string/->symbol n))) (catch _ nil)))) names)
+      no-doc (filter (fn (n) (nil? (try (doc (reflect/eval (string/->symbol n))) (catch _ nil))))
+               names)
       no-example (filter (fn (n)
-                           (let (d (try (doc (eval (string/->symbol n))) (catch _ nil)))
+                           (let (d (try (doc (reflect/eval (string/->symbol n))) (catch _ nil)))
                              (and d (not (example? d)))))
                    names))
   (io/puts "stdlib audit — "

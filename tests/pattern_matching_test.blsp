@@ -12,7 +12,7 @@
 ;; top-level form is loaded, so a malformed pattern written directly in a test
 ;; body would fail at *load* time (before the test runs). To catch those errors
 ;; at runtime, we trigger expansion explicitly with `(macroexpand 'form)` (for
-;; `match`) or `(eval (reflect/read-string "…"))` (for `let`/`fn`, which lower in the
+;; `match`) or `(reflect/eval (reflect/read-string "…"))` (for `let`/`fn`, which lower in the
 ;; compile pass, not the `macroexpand` builtin).
 
 (defmodule pattern-matching-test (:use test))
@@ -257,7 +257,7 @@
     (assert= :zero (fhg-sign 0)))
   (test ":when combined with &optional/& in one fn is rejected"
     (is (try
-          (do (eval '(fn ((r) :when (> r 0) r) ((& xs) :bad))) false)
+          (do (reflect/eval '(fn ((r) :when (> r 0) r) ((& xs) :bad))) false)
           (catch e (includes? (str (error-message e)) "guard-dispatched")))))
   (test "across processes: a guarded fn dispatches correctly in spawned workers"
     (let (me (self)
@@ -449,7 +449,7 @@
                (catch e (match e ([:match-error ctx val pats] (list ctx val)) (_ :other))))
       (list :let [:err 404])))
   (test "malformed let pattern is a compile-time error"
-    (assert-error (eval (reflect/read-string "(let ((a & b c) (list 1)) a)")))))
+    (assert-error (reflect/eval (reflect/read-string "(let ((a & b c) (list 1)) a)")))))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; fn / defn — multi-clause dispatch and pattern parameters  (:serial: defs globals)

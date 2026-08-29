@@ -84,12 +84,12 @@
     (assert= (try (binding (*dt* 5) (throw :raised)) (catch e e)) :raised))
 
   (test "dynamic? reports declared dynamics only"
-    (is (dynamic? '*dt*))
-    (is (dynamic? '*dt2*))
-    (refute (dynamic? 'dt-read))
+    (is (reflect/dynamic? '*dt*))
+    (is (reflect/dynamic? '*dt2*))
+    (refute (reflect/dynamic? 'dt-read))
     ; an ordinary global fn
-    (refute (dynamic? 'never-declared))
-    (refute (dynamic? 42)))
+    (refute (reflect/dynamic? 'never-declared))
+    (refute (reflect/dynamic? 42)))
   ; a non-symbol is simply not dynamic
 
   (test "binding a non-dynamic variable is an error"
@@ -101,12 +101,12 @@
   ;; spellings fail loudly instead of being reinterpreted. (A vector *inside* a
   ;; binding position is still destructuring.)
   (test "a vector binding container is rejected, like let's"
-    (assert-error (eval (reflect/read-string "(binding [*dt* 8] *dt*)")))
+    (assert-error (reflect/eval (reflect/read-string "(binding [*dt* 8] *dt*)")))
     (assert= (binding (*dt* 8) *dt*) 8))
 
   (test "an odd-length binding list is rejected"
     ;; (read at runtime so the bad form doesn't fail the file's own compile pass)
-    (assert-error (eval (reflect/read-string "(binding (*dt*) *dt*)"))))
+    (assert-error (reflect/eval (reflect/read-string "(binding (*dt*) *dt*)"))))
 
   (test "binding survives a locally-shadowed `list`/`map` (macro hygiene)"
     ;; The expansion uses only `quote`/`fn` (special forms) and literals, never a

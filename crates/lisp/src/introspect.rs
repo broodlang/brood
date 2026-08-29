@@ -1,7 +1,7 @@
 //! Introspection queries answered by a project `Interp`. Asks the *language's*
 //! globals (prelude + builtins + anything the project has loaded) — completion
 //! candidates, the arglist + docstring of a name under the cursor, etc. They
-//! run by `eval`ing the introspection primitives (`global-names` / `arglist` /
+//! run by `eval`ing the introspection primitives (`reflect/global-names` / `arglist` /
 //! `doc`, ADR-025), never user buffer text.
 //!
 //! Two clients consume this: `brood-lsp` (hover/completion/signature, never
@@ -22,7 +22,7 @@ use crate::error::Pos;
 use crate::Interp;
 
 /// Every global the interpreter knows (prelude + builtins), sorted by spelling
-/// (`global-names` sorts) — the completion candidate pool.
+/// (`reflect/global-names` sorts) — the completion candidate pool.
 pub fn global_names(interp: &mut Interp) -> Vec<String> {
     // The result is a list of *every* global (hundreds of symbols), and this
     // runs on every completion keystroke. `eval_str` keeps its result in LOCAL,
@@ -30,7 +30,7 @@ pub fn global_names(interp: &mut Interp) -> Vec<String> {
     // a long server session leaks a fresh list per request. (Safe: `symbol_name`
     // reads the interner, not LOCAL, so `names` holds no LOCAL handle.)
     let cp = interp.heap.checkpoint();
-    let names = match interp.eval_str("(global-names)") {
+    let names = match interp.eval_str("(reflect/global-names)") {
         Ok(v) => interp
             .heap
             .list_to_vec(v)
@@ -689,7 +689,7 @@ mod tests {
         let names = global_names(&mut interp);
         assert!(names.contains(&"map".to_string()), "prelude `map` missing");
         assert!(names.contains(&"+".to_string()), "builtin `+` missing");
-        // `global-names` sorts, so the pool is in deterministic order.
+        // `reflect/global-names` sorts, so the pool is in deterministic order.
         assert!(names.windows(2).all(|w| w[0] <= w[1]), "not sorted");
     }
 

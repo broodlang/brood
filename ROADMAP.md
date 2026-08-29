@@ -175,8 +175,36 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
       `proc`, so `proc/spawn` started an OS process while the bare `spawn` special form
       started a green one. `spawn` cannot be namespaced (it is a special form), so the OS
       half moved to `os/spawn` / `os/write` / `os/close` / `os/set-binary`
-- [ ] ~15 more bare names: the module-tooling group (`set-load-path!`, `reload-defs`,
-      `builtin-modules`, `module-doc`, `reserved-package-name?`) belongs in `reflect`
+- [x] **The kernel's own bare names, read for the first time (2026-08-28, ADR-290).** Every
+      pass above read `std/`; nobody had read the RUST side. Of 391 registered primitives,
+      285 are `%`-hidden and 63 already namespaced, leaving **43 bare** against which no
+      criterion had ever been applied — two of them `eval` and `load`. Twelve moved:
+      `reflect/eval` `reflect/eval-string` `reflect/load` `reflect/global-names`
+      `reflect/special-forms` `reflect/doc-forms` `reflect/builtin-modules`
+      `reflect/current-ns` `reflect/dynamic?` `reflect/private?`, plus `proc/trap-exit` and
+      `proc/system-monitor`. **43 bare primitives → 31.** What did NOT move was decided by
+      the target modules' own headers, which both already reserved a set: `reflect` keeps the
+      REPL-typed group (`doc`, `arglist`, `bound?`, `apropos`, `doc-search`, `macroexpand`
+      — and `macroexpand-1` stays with it), `proc` keeps the mainstream actor model, so
+      `unlink`/`demonitor` stay bare beside `link`/`monitor` rather than splitting an inverse
+      pair. Two latent defects fell out: `EFFECTFUL_IN_GUARD` had six names that no longer
+      named anything, and the KI-72 regression test was **vacuous under the CI gate** (it
+      passed `os/exe-path`, which there is the libtest binary — `running 0 tests`, exit 0)
+- [x] **The "~15 more bare names" item, resolved — it was closer to zero (2026-08-28,
+      ADR-291).** Six moved (`reflect/set-load-path!` `reflect/add-load-path!`, and the lazy
+      seq-views `seq/lmap` `seq/lfilter` `seq/lkeep` `seq/lremove`); bare prelude names
+      180 → 174. The rest of the estimate dissolved on inspection: `builtin-modules` went
+      with ADR-290, **`reload-defs` and `module-doc` were already `system/`-qualified** (this
+      entry was stale), and the loader itself (`require-one`, `provide`, `*load-path*`,
+      `*autoloading*`, `*require-parent*`) is mechanism rather than tooling — `require-one` is
+      resolved by name from Rust in `eval/derive.rs`. ADR-291 records **five rules for what
+      stays bare**, each from a near-miss here: a module header that already reserves the
+      name; half of an inverse pair; an earmuffed global (`is_earmuffed` is a spelling rule,
+      so qualifying one silently disables its own typing); a name a test depends on being
+      bare (`reserved-package-name?` is the KI-72 `autoload_race` probe); and anything in
+      `(special-forms)`, since a namespaced name that renders as a control keyword is a
+      contradiction — which is why `for`/`doseq`/`dolist`/`dotimes`/`with-out-str`/
+      `with-err-str` stay bare
 
 **Process framework** (ADR-252):
 

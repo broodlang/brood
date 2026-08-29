@@ -78,7 +78,7 @@ recovers), so it answers over source someone is mid-typing — which form contai
 point, where each form ends — without a completeness gate; whether the text
 *evaluates* is a separate `reflect/read-all` question. Note recovery means a node may be
 `:kind :error` (e.g. an unterminated string swallowing the rest of the text) —
-fine for position queries, but don't feed the returned spans to `eval` unchecked.
+fine for position queries, but don't feed the returned spans to `reflect/eval` unchecked.
 
     (count (sexp/top-level-forms \"(a)\n(b)\n\"))   → 2"
   (forms-of (tree text)))

@@ -226,14 +226,14 @@ foo->bar      ; conversion (string/->number, string/int->char); a module-rooted
 definition or any call site. A hand-written cross-module qualified reference to a
 private is a compile error without `(:use-internals mod)`; call it bare (same module)
 or `mod/name` (granted). There is no marker to spell and none to read, so ask the
-image: `(private? 'mod/name)`. The old `--`-in-name convention (`append--onto`) was
+image: `(reflect/private? 'mod/name)`. The old `--`-in-name convention (`append--onto`) was
 **deleted** in favour of this — if you meet it in older code or a stale doc, it no
 longer means anything. There is no `defmacro-`/`defserver-`: private macros and
 processes were rare enough that they simply stay public.
 
 A trailing `!` is **rare and not a mutation warning** — nothing mutates, so the
 Scheme/Clojure reading is vacuous here and `!` is per-context by decision (ADR-163):
-`sig!` = a signature *enforced* at runtime, `set-load-path!` / `clipboard-set!` = the
+`sig!` = a signature *enforced* at runtime, `reflect/set-load-path!` / `clipboard-set!` = the
 few root/OS-state setters, `(! pid payload)` = the Erlang-style cast in `gen`.
 **Don't add a `!` to a name of your own.**
 
@@ -564,10 +564,10 @@ intermediate collections (one pass, no throwaway lists). Thread them with `->>`:
 ;; eager: builds two throwaway lists of ~1000 / ~500 elements
 (reduce + 0 (map sq (filter math/even? (range 1000))))
 ;; fused: one pass, no intermediate lists (≈3× faster on large inputs)
-(->> (range 1000) (lfilter math/even?) (lmap sq) (reduce + 0))
+(->> (range 1000) (seq/lfilter math/even?) (seq/lmap sq) (reduce + 0))
 ```
 
-`lmap`/`lfilter`/`lkeep`/`lremove` each return a lazy **seq-view** — a
+`seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lremove` each return a lazy **seq-view** — a
 non-materialising value carrying the transform over a source. Chaining composes
 the transforms onto one view, so the whole pipeline folds/reduces in a single
 pass. Consume with `fold`/`reduce`/`sum`/`count`/`into`/`string/join`/`seq`; `seq`/
@@ -685,11 +685,11 @@ does *not*: a child that exits inside that gap is linked dead and reports
 `:noproc`, silently **replacing** its real reason, so a fast `:normal` return
 reads as a crash. Links are symmetric (either side's abnormal death takes the
 other down, or arrives as a trappable `[:EXIT pid reason]` after
-`(trap-exit true)`), and `spawn-link` takes one expression like `spawn` — no
+`(proc/trap-exit true)`), and `spawn-link` takes one expression like `spawn` — no
 named form.
 
 ```lisp
-(trap-exit true)
+(proc/trap-exit true)
 (let (p (spawn-link (worker)))                     ; linked before the child runs
   (receive ([:EXIT ^p :normal] :done)              ; true reason, never :noproc
            ([:EXIT ^p reason]  (restart reason))))
@@ -888,7 +888,7 @@ inline as a plain script — no reload, throws exit.
 ### Running a loop for a bounded time (`nest run --for DURATION`)
 
 An infinite loop or full-screen TUI never returns, which makes it awkward
-to exercise (you can't `eval` it). `nest run --for DURATION` runs the
+to exercise (you can't `reflect/eval` it). `nest run --for DURATION` runs the
 program for at most that long, then exits **cleanly** — the first-class
 form of `timeout Ns nest run`:
 
@@ -1019,16 +1019,16 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   stream from any int (e.g. `(now)`) with `rand-seed`. Carry `next-seed` in your
   loop/process state like any other value.
 - **meta / eval**: `apply` (call a fn with a list of args — the only way to
-  splat) `eval` `reflect/read-string` `eval-string` `gensym` (fresh symbol, for macros)
+  splat) `reflect/eval` `reflect/read-string` `reflect/eval-string` `gensym` (fresh symbol, for macros)
 - **discovery / introspection**: `doc` `arglist` `bound?` `source-location`;
-  and to *find* what exists rather than guess names — `global-names`,
+  and to *find* what exists rather than guess names — `reflect/global-names`,
   `apropos` (name substring, e.g. `(apropos "rand")`), `doc-search` (matches
   docstrings). The same three are `nest mcp` tools (the name-list tool is called
   `all-globals` there). Reach for these instead of
   probing names one at a time.
 - **timing**: `now` (ms since epoch) `now-ns` (ns since epoch) `bench`
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
-- **I/O**: `io/write` `io/puts` `io/inspect` `file/slurp` `file/spit` `load` `eval-string`
+- **I/O**: `io/write` `io/puts` `io/inspect` `file/slurp` `file/spit` `reflect/load` `reflect/eval-string`
   `reflect/read-string`. `io/puts` is the everyday one (newline); `io/write` omits it and
   `io/inspect` prints the re-readable form. Each takes an optional trailing `:to <port>`
   (`(io/puts "boom" :to *err*)`), which is how stderr is written — there is no separate
@@ -1049,10 +1049,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `std/display`.)
 - **Filesystem (stat-class)**: `file/exists?` `file/dir?` `file/ls` `file/mtime` `file/stat`
 - **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`) `spawn-link`
-  `send` `receive` `self` `ref` `monitor` `demonitor` `link` `unlink` `trap-exit`
+  `send` `receive` `self` `ref` `monitor` `demonitor` `link` `unlink` `proc/trap-exit`
   `proc/register` `proc/whereis`
   — plus the **`gen`** framework below
-- **lazy fusing views**: `lmap` `lfilter` `lkeep` `lremove` (thread with `->>`;
+- **lazy fusing views**: `seq/lmap` `seq/lfilter` `seq/lkeep` `seq/lremove` (thread with `->>`;
   realise with `seq`/`into`) plus `comp` for function composition
 
 ## Pitfalls when generating Brood code

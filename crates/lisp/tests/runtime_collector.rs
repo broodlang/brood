@@ -31,21 +31,35 @@ fn superseded_global_versions_are_reclaimable() {
     // unchanged-redef dedup, ADR-042, can't skip the append) — exactly the
     // hot-reload churn that leaks today.
     const N: usize = 3000;
+    // Define the driver and force the modules its body names to load BEFORE the baseline is
+    // taken. `reflect/eval` is a QUALIFIED reference, so it auto-loads `std/reflect.blsp`,
+    // and every `def` in that module promotes into the RUNTIME region. Those closures are
+    // legitimately live and have nothing to do with the churn under test — counting them
+    // turned this assertion into a measure of how much of `std/` the driver happens to pull
+    // in, which is why moving `eval` under `reflect/` broke it at 111 with no leak involved.
     interp
-        .eval_str(&format!(
+        .eval_str(
             "(defn redef (i n) \
                (if (= i n) :done \
-                 (do (eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
+                 (do (reflect/eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
                      (redef (+ i 1) n)))) \
-             (redef 0 {N})"
-        ))
+             (reflect/eval (quote 1))",
+        )
+        .expect("driver setup errored");
+    // Everything reachable before any churn: the prelude's promotions, the driver, and
+    // whatever `std/` the driver loaded. The churn is measured against this.
+    let baseline = interp.heap.runtime_live_closure_count();
+    interp
+        .eval_str(&format!("(redef 0 {N})"))
         .expect("redef loop errored");
 
     let total = interp.heap.runtime_closure_count();
     let live = interp.heap.runtime_live_closure_count();
     let reclaimable = total.saturating_sub(live);
     eprintln!(
-        "RUNTIME-GC estimate after {N} redefs: total={total} live={live} reclaimable={reclaimable}"
+        "RUNTIME-GC estimate after {N} redefs: total={total} live={live} \
+         (baseline={baseline}, churn-live={}) reclaimable={reclaimable}",
+        live.saturating_sub(baseline)
     );
 
     // Only the current `f` (+ `redef` itself + a handful) is reachable from the
@@ -55,8 +69,9 @@ fn superseded_global_versions_are_reclaimable() {
         "expected the {N} redefs to have promoted ≥{N} RUNTIME closures, got total={total}",
     );
     assert!(
-        live < 50,
-        "live RUNTIME closures should be a small constant (current f + redef + few), got {live}",
+        live.saturating_sub(baseline) < 50,
+        "the churn should leave a small constant live (current f + a few), got {live} \
+         against a pre-churn baseline of {baseline}",
     );
     assert!(
         reclaimable >= N - 50,
@@ -79,18 +94,34 @@ fn evacuation_copies_only_live_code_and_verifies() {
     // Measure the manual path in isolation — keep churn from being auto-collected.
     interp.heap.set_rt_auto_collect(false);
     const N: usize = 3000;
+    // Define the driver and force the modules its body names to load BEFORE the baseline is
+    // taken. `reflect/eval` is a QUALIFIED reference, so it auto-loads `std/reflect.blsp`,
+    // and every `def` in that module promotes into the RUNTIME region. Those closures are
+    // legitimately live and have nothing to do with the churn under test — counting them
+    // turned this assertion into a measure of how much of `std/` the driver happens to pull
+    // in, which is why moving `eval` under `reflect/` broke it at 111 with no leak involved.
     interp
-        .eval_str(&format!(
+        .eval_str(
             "(defn redef (i n) \
                (if (= i n) :done \
-                 (do (eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
+                 (do (reflect/eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
                      (redef (+ i 1) n)))) \
-             (redef 0 {N})"
-        ))
+             (reflect/eval (quote 1))",
+        )
+        .expect("driver setup errored");
+    // Everything reachable before any churn: the prelude's promotions, the driver, and
+    // whatever `std/` the driver loaded. The churn is measured against this.
+    let baseline = interp.heap.runtime_live_closure_count();
+    interp
+        .eval_str(&format!("(redef 0 {N})"))
         .expect("redef loop errored");
 
     let (total, live, verified) = interp.heap.runtime_evacuate_check();
-    eprintln!("RUNTIME-GC 2a evacuate: total={total} live={live} verified={verified}");
+    eprintln!(
+        "RUNTIME-GC 2a evacuate: total={total} live={live} (baseline={baseline}, \
+         churn-live={}) verified={verified}",
+        live.saturating_sub(baseline)
+    );
 
     assert!(
         verified,
@@ -106,8 +137,9 @@ fn evacuation_copies_only_live_code_and_verifies() {
         "expected ≥{N} promoted closures, got total={total}"
     );
     assert!(
-        live < 50,
-        "live should be a small constant, got {live} (total {total})"
+        live.saturating_sub(baseline) < 50,
+        "the churn should leave a small constant live, got {live} against a pre-churn \
+         baseline of {baseline} (total {total})"
     );
 
     // The program is unchanged by the (out-of-place) evacuation — `f` still works.
@@ -136,7 +168,7 @@ fn in_place_collect_reclaims_and_preserves_correctness() {
         .eval_str(&format!(
             "(defn redef (i n) \
                (if (= i n) :done \
-                 (do (eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
+                 (do (reflect/eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
                      (redef (+ i 1) n)))) \
              (redef 0 {N})"
         ))
@@ -201,7 +233,7 @@ fn auto_safepoint_collect_bounds_runtime_region() {
         .eval_str(&format!(
             "(defn redef (i n) \
                (if (= i n) :done \
-                 (do (eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
+                 (do (reflect/eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
                      (redef (+ i 1) n)))) \
              (redef 0 {N})"
         ))
@@ -256,7 +288,7 @@ fn isolate_is_safe_against_a_runtime_compaction_inside_the_thunk() {
             "(defn probe () 42) \
              (defn defmany (i n) \
                (if (= i n) :done \
-                 (do (eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) 'x))) \
+                 (do (reflect/eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) 'x))) \
                      (defmany (+ i 1) n))))",
         )
         .expect("setup defs errored");
@@ -295,7 +327,7 @@ fn per_isolate_scoping_bounds_runtime_region_growth() {
         .eval_str(
             "(defn defmany (fi i n) \
                (if (= i n) :done \
-                 (do (eval (list 'def (symbol (str \"z-\" fi \"-\" i)) (list 'fn '(x) (list '+ 'x i)))) \
+                 (do (reflect/eval (list 'def (symbol (str \"z-\" fi \"-\" i)) (list 'fn '(x) (list '+ 'x i)))) \
                      (defmany fi (+ i 1) n)))) \
              (defn loopf (f i n) (if (= i n) :done (do (f i) (loopf f (+ i 1) n))))",
         )
@@ -331,7 +363,7 @@ fn declared_sigs_survive_a_runtime_compaction() {
     // Churn distinct defs, then compact the RUNTIME region (relocates handles).
     interp
         .eval_str(
-            "(defn redef (i n) (if (= i n) :done (do (eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) i))) (redef (+ i 1) n)))) (redef 0 3000)",
+            "(defn redef (i n) (if (= i n) :done (do (reflect/eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) i))) (redef (+ i 1) n)))) (redef 0 3000)",
         )
         .expect("churn");
     interp.heap.set_rt_auto_collect(true);
@@ -357,7 +389,7 @@ fn manual_runtime_collect_inside_isolate_is_a_noop() {
     interp
         .eval_str(
             "(%isolate (fn () \
-               (defn dm (i n) (if (= i n) :done (do (eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) 'x))) (dm (+ i 1) n)))) \
+               (defn dm (i n) (if (= i n) :done (do (reflect/eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) 'x))) (dm (+ i 1) n)))) \
                (dm 0 300) \
                (dev/runtime-collect)))",
         )

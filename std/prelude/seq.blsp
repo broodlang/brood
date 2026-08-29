@@ -298,7 +298,7 @@ import (and so `(:use set)` can't shadow them)."
 root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
 bakes a record's `:__id__`) and `%ability-id-kw` (an impl's bare id) so the two AGREE — a
 record built at root and an impl for it at root must land on the same dispatch id."
-  (let (ns (current-ns))
+  (let (ns (reflect/current-ns))
     (if ns (keyword (str (->string ns) "/" nm)) (keyword nm))))
 
 ;; The `(sig …)` forms for an all-typed record: the constructor arrow, then one
@@ -397,7 +397,7 @@ this clause was an expansion error."
                              (%defrecord-ftype f)))))
                      fields)
                    nil)
-        ;; `:derives [A …]` → one `(%derive-into 'A id 'fields (current-ns))` per ability. The
+        ;; `:derives [A …]` → one `(%derive-into 'A id 'fields (reflect/current-ns))` per ability. The
         ;; recipe is run at LOAD (not expansion), because the checker expands this `defrecord`
         ;; WITHOUT first evaluating the ability's `defability`, so the recipe isn't registered
         ;; at expand time. `%derive-into` registers the impls at load; the checker reads these
@@ -409,7 +409,7 @@ this clause was an expansion error."
                                 (list 'quote a)
                                 id
                                 (list 'quote fnames)
-                                (list '/current-ns)))
+                                (list '/reflect/current-ns)))
                          derives)
                        nil))
     `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs ~@derive-calls (%record-register ~id '~rec) nil)))
@@ -425,13 +425,13 @@ this clause was an expansion error."
 ;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
 ;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
 ;; running them for side effects (`(map require-one mods)`, `(map run ts)`)
-;; works as it always has. Fusion is **opt-in**, via `lmap`/`lfilter`/`lkeep`/
-;; `lremove` composed with `->>`. Each returns a lazy seq-view (`%seqview`): a
+;; works as it always has. Fusion is **opt-in**, via `seq/lmap`/`seq/lfilter`/`seq/lkeep`/
+;; `seq/lremove` composed with `->>`. Each returns a lazy seq-view (`%seqview`): a
 ;; non-materialising value carrying a transducer over a source. Chaining
 ;; composes the transducers onto one view, so a `->>` pipeline folds/reduces in
 ;; a **single pass with no intermediate lists**:
 ;;
-;;   (->> xs (lmap sq) (lfilter even?) (reduce + 0))   ; one pass, no temp lists
+;;   (->> xs (seq/lmap sq) (seq/lfilter even?) (reduce + 0))   ; one pass, no temp lists
 ;;
 ;; Consume a view with `fold`/`reduce`/`sum`/`count`/`into`/`join`/`seq`/`nth`/
 ;; `first`/`rest`; `seq`/`into`/`str`/`=` materialise it to a concrete value. A
@@ -481,7 +481,7 @@ for a higher-order op that wants a fixed answer.
 ;; Internal stateless transducer constructors — the fused stages behind the
 ;; `l*` combinators. A transducer is `(xf rf) -> rf'`; composing them (`comp`)
 ;; fuses a pipeline into one per-step reducing function. Named `%x*` because they
-;; are plumbing: the public surface is `lmap`/`lfilter`/`lkeep`/`lremove`, not
+;; are plumbing: the public surface is `seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lremove`, not
 ;; raw transducers. Fixed-arity (no rest-list) so they keep the fast call path.
 ;; The four built-in stages. Internal: the `l*` combinators below build on them and
 ;; the prelude cannot `require` a module. Published as `seq/xmap` … (ADR-251) — the
@@ -522,26 +522,26 @@ view, compose `xf` onto its transducer (same source) so the stages fuse."
       (%seqview (%vector-ref parts 0) (comp (%vector-ref parts 1) xf)))
     (%seqview coll xf)))
 
-(defn lmap (f coll)
+(defn seq/lmap (f coll)
   "Lazy, fusing `map`: a seq-view of `(f x)` for each `x` in `coll`. Composes with
 adjacent `l*` stages (thread them with `->>`) and folds/reduces in one pass with
 no intermediate lists. Realise with `seq`/`into`, or just consume it
 (`fold`/`reduce`/`count`/…). Use eager `map` when you want a concrete list or are
 iterating for side effects.
 
-    (->> [1 2 3] (lmap inc) (into []))   → [2 3 4]"
+    (->> [1 2 3] (seq/lmap inc) (into []))   → [2 3 4]"
   (%seqview-wrap coll (%xmap f)))
 
-(defn lfilter (pred coll)
-  "Lazy, fusing `filter` — see `lmap`."
+(defn seq/lfilter (pred coll)
+  "Lazy, fusing `filter` — see `seq/lmap`."
   (%seqview-wrap coll (%xfilter pred)))
 
-(defn lkeep (f coll)
-  "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `lmap`."
+(defn seq/lkeep (f coll)
+  "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `seq/lmap`."
   (%seqview-wrap coll (%xkeep f)))
 
-(defn lremove (pred coll)
-  "Lazy, fusing `remove` — see `lmap`."
+(defn seq/lremove (pred coll)
+  "Lazy, fusing `remove` — see `seq/lmap`."
   (%seqview-wrap coll (%xremove pred)))
 
 ;; ---- iteration combinators --------------------------------------------------

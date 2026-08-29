@@ -6,7 +6,7 @@
 (defmodule keymap-test (:use test) (:use editor/keymap))
 
 ;; Commands are `(state key) -> state`; we accumulate a string so the path is
-;; visible. Stored in keymaps as **qualified** symbols (resolved by `eval` at
+;; visible. Stored in keymaps as **qualified** symbols (resolved by `reflect/eval` at
 ;; dispatch time), matching how `std/lineedit` stores its bindings.
 (defn km-cmd-e (s k) (str s "E"))
 (defn km-cmd-x (s k) (str s "X"))

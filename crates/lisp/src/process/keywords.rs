@@ -23,15 +23,15 @@
 
 /// `[:down mref pid reason]` — a `monitor`ed process went down.
 pub const DOWN: &str = "down";
-/// `[:EXIT pid reason]` — a `link`ed (and `trap-exit`ing) peer exited.
+/// `[:EXIT pid reason]` — a `link`ed (and `proc/trap-exit`ing) peer exited.
 pub const EXIT: &str = "EXIT";
 /// `[:nodedown name]` — a `monitor-node`'d node link dropped.
 pub const NODEDOWN: &str = "nodedown";
 
 // --- System-monitor event tags (`[:system <kind> <subject-pid> <detail>]`,
-// delivered to the `(system-monitor pid opts)` subscriber — `sysmon.rs`). ---
+// delivered to the `(proc/system-monitor pid opts)` subscriber — `sysmon.rs`). ---
 
-/// The leading tag of every system-monitor event.
+/// The leading tag of every proc/system-monitor event.
 pub const SYSTEM: &str = "system";
 /// `[:system :gc pid {:pause-us … :collections … :live …}]` — a collection ran.
 pub const SYS_GC: &str = "gc";

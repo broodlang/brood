@@ -421,7 +421,7 @@ fewer than two items.
   `(if ~test nil (do ~@body)))
 
 ;; `defonce` — define only if the name is not already bound. The point is
-;; hot-reload: re-evaluating a file (via `system/reload-defs` or `load`) re-runs every
+;; hot-reload: re-evaluating a file (via `system/reload-defs` or `reflect/load`) re-runs every
 ;; `def…` form, which would reset top-level state and re-create singletons (a
 ;; fresh `(spawn …)`, a reopened connection) on every save. `defonce` makes the
 ;; init run *once* — the value survives reload, exactly like Emacs `defvar`.
@@ -435,11 +435,11 @@ fewer than two items.
 ;; `def` writes, and inside a module `(def *x* v)` writes `mod/*x*` while a bare quoted
 ;; `'*x*` is data the resolver never rewrites (it would read at root, never see the
 ;; binding, and re-def every reload — the bug this fixes). Computed at LOAD time, where
-;; `current-ns` is the module being loaded; a bare/root context (no current-ns) or an
+;; `reflect/current-ns` is the module being loaded; a bare/root context (no current-ns) or an
 ;; already-qualified name passes through, matching `def`.
 (defn- %defonce-qualified-name
   (sym)
-  (let (ns (current-ns))
+  (let (ns (reflect/current-ns))
     (if (or (nil? ns) (includes? (str sym) "/"))
       sym
       (symbol (str (->string ns) "/" (str sym))))))
@@ -542,7 +542,7 @@ for variadic tails."
 (defmacro check-allow (category & body)
   "Suppress an advisory checker lint over the wrapped forms. `category` is a
 keyword: `:non-tail-recursion`, `:unreachable-clause`, `:type-mismatch`, or
-`:unbound` (globals defined at runtime — an `eval`-driven `def`, the wasm
+`:unbound` (globals defined at runtime — a `reflect/eval`-driven `def`, the wasm
 `use-native` binding — that the checker cannot see in source). A runtime
 no-op; the marker is read only by the type checker (`nest check`)."
   `(%lint-allow ~category (do ~@body)))

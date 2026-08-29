@@ -327,7 +327,7 @@ its printed form.
 ;; on error). A reference to the var resolves to the innermost active `binding`,
 ;; else the default. Bindings are per-process — they do NOT reach a `spawn`ed
 ;; child (it starts from the defaults). The kernel supplies only `%declare-dynamic`,
-;; `%binding`, and `dynamic?`; the surface is these two macros (the `try` precedent).
+;; `%binding`, and `reflect/dynamic?`; the surface is these two macros (the `try` precedent).
 
 ;; (defdyn *x* 10) => declare *x* dynamic, then def its default.
 (defmacro defdyn (name default)
@@ -338,7 +338,7 @@ its printed form.
     ;; namespaces AFTER macroexpansion — so the mark has to exist before the `def`
     ;; head below is qualified, or `(defdyn *x* 0)` inside a module would define
     ;; `mod/*x*` while `binding` and every reader looked for bare `*x*`. The runtime
-    ;; `%declare-dynamic` stays for a `defdyn` form built and `eval`'d dynamically.
+    ;; `%declare-dynamic` stays for a `defdyn` form built and `reflect/eval`'d dynamically.
     (%declare-dynamic name)
     `(do (%declare-dynamic '~name) (def ~name ~default))))
 

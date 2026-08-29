@@ -28,7 +28,7 @@
       (call1)
       (spawn (hot i))
       (when (and (> every 0) (= 0 (math/mod i every)))
-        (eval (list 'def 'g (+ 2 (math/mod i 3)))))
+        (reflect/eval (list 'def 'g (+ 2 (math/mod i 3)))))
       (churn (+ i 1) acc))))
 (dev/gc-collect)
 (def r0 (rss-kb))

@@ -17,7 +17,7 @@
 (require-one 'string)
 (require-one 'seq)
 
-(doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))
+(doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))
 
 (defn- candidates
   (n)
@@ -29,7 +29,7 @@ vocabulary, and the caller still needs to know."
                     (let (full (name s)
                           i (index-of full "/"))
                       (and i (> i 0) (= (string/substring full (inc i) (count full)) n))))
-            (global-names)))))
+            (reflect/global-names)))))
 
 (defn- split-candidate
   (n)

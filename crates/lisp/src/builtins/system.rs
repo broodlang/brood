@@ -26,7 +26,7 @@ pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
     // dispatches into the VM, where a callee's arm compiles and tail-recurses in O(1) stack)
     // stops being interpreted.
     //
-    // The full `compile` pass, matching `eval-string` and the file loader — so an eval'd
+    // The full `compile` pass, matching `reflect/eval-string` and the file loader — so an eval'd
     // form gets namespace resolution, `(:use …)` imports, `(:alias …)`, privacy enforcement
     // and static-quasiquote lowering, and an eval'd `defn` inside a module defines
     // `mod/name` rather than leaking a bare ROOT global.
@@ -60,7 +60,7 @@ pub(super) fn read_first(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 
 /// `(reflect/read-all s)` — parse *every* form in `s` and return them as a list (empty for
 /// blank/comment-only input). The all-forms sibling of `reflect/read-string` (which
-/// returns only the first), and the read-half of `eval-string` without the eval —
+/// returns only the first), and the read-half of `reflect/eval-string` without the eval —
 /// so form-manipulating Brood (an editor evaluating the last sexp before point,
 /// say) can isolate individual forms. Raises on a malformed/incomplete form, like
 /// `reflect/read-string`; use `parse-source` for lossless, error-tolerant parsing.
@@ -565,7 +565,7 @@ pub(super) fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
 }
 
 pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let path = expect_string(heap, "load", arg(args, 0))?;
+    let path = expect_string(heap, "reflect/load", arg(args, 0))?;
     let src = std::fs::read_to_string(&path).map_err(|e| {
         LispError::runtime(format!("load: cannot read {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
@@ -661,12 +661,12 @@ pub(super) fn run_program_file(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     }
 }
 
-/// `(eval-string "src")` — read and evaluate every form in a string against the
+/// `(reflect/eval-string "src")` — read and evaluate every form in a string against the
 /// global environment. Inherits the current namespace (ADR-065): the REPL evaluates
 /// each entry through here, so a `(ns foo)` typed at the REPL sticks to later
 /// entries. To load a *module* source at the root namespace, use `%load-string`.
 pub(super) fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let src = expect_string(heap, "eval-string", arg(args, 0))?;
+    let src = expect_string(heap, "reflect/eval-string", arg(args, 0))?;
     eval_string_inner(heap, env, &src, false)
 }
 
@@ -725,7 +725,7 @@ pub(super) fn load_module_source(args: &[Value], env: EnvId, heap: &mut Heap) ->
     result
 }
 
-/// Shared body of `eval-string` / `%load-string`. When `reset_ns`, the current
+/// Shared body of `reflect/eval-string` / `%load-string`. When `reset_ns`, the current
 /// namespace is reset to root for the duration and the caller's restored after.
 pub(super) fn eval_string_inner(
     heap: &mut Heap,
@@ -736,7 +736,7 @@ pub(super) fn eval_string_inner(
     let root = heap.env_root(env);
     let forms = reader::read_all(heap, src)?;
     // When loading a module (`reset_ns`), bracket the namespace at root and
-    // pre-scan its def heads for forward references; the plain `eval-string` (REPL,
+    // pre-scan its def heads for forward references; the plain `reflect/eval-string` (REPL,
     // inline) inherits the current namespace and does neither (ADR-065).
     let (prev_ns, prev_known, prev_by_module, prev_imports) = if reset_ns {
         let pn = heap.set_compile_ns(None);
@@ -1302,7 +1302,7 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     // Doc generation (`nest doc`) — tooling, not runtime.
     embedded_module!("docs", "std/tool/docs.blsp"),
     // Generate editor syntax grammars (VS Code TextMate, Emacs font-lock) from the
-    // language's own `(special-forms)` — one source of truth, no drift (ADR-092).
+    // language's own `(reflect/special-forms)` — one source of truth, no drift (ADR-092).
     embedded_module!("grammar", "std/tool/grammar.blsp"),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
     embedded_module!("observer", "std/tool/observer.blsp"),
@@ -1317,7 +1317,7 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     // *developing* a program, and a shipped app has no use for it.
     embedded_module!("perf", "std/tool/perf.blsp"),
     // The read-eval-print loop itself, written in Brood (`(require 'repl)`):
-    // policy over the `read-line`/`eval-string`/`pr-str` primitives. The Rust
+    // policy over the `read-line`/`reflect/eval-string`/`pr-str` primitives. The Rust
     // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`. A shipped
     // app runs its own `:main`, never the REPL.
     embedded_module!("repl", "std/tool/repl.blsp"),
@@ -1488,7 +1488,7 @@ pub(super) fn builtin_doc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     lookup_embedded(args, heap, EMBEDDED_DOCS, "%builtin-doc", "doc name")
 }
 
-/// `(builtin-modules)` — the names of every module baked into this binary, as a
+/// `(reflect/builtin-modules)` — the names of every module baked into this binary, as a
 /// sorted list of strings. The module table is a Rust static, so the language has
 /// no other way to see it; `std/tool/complete.blsp` uses it to offer `nest doc`
 /// candidates, and it is generally useful for validating a module name before
@@ -1731,7 +1731,7 @@ pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     }
 }
 
-/// `(trap-exit on)` — set the current process's `trap_exit` flag; return the
+/// `(proc/trap-exit on)` — set the current process's `trap_exit` flag; return the
 /// previous value. Only `nil`/`false` are falsy (the language truthiness rule).
 pub(super) fn trap_exit_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     let on = !matches!(arg(args, 0), Value::Nil | Value::Bool(false));
@@ -2217,7 +2217,7 @@ pub(super) fn profile_stop(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(heap.list(items))
 }
 
-/// The `(system-monitor)` return shape: the armed config as a map, or nil.
+/// The `(proc/system-monitor)` return shape: the armed config as a map, or nil.
 fn sysmon_config_map(heap: &mut Heap, m: Option<crate::process::sysmon::SysMon>) -> Value {
     match m {
         None => Value::nil(),
@@ -2238,7 +2238,7 @@ fn sysmon_config_map(heap: &mut Heap, m: Option<crate::process::sysmon::SysMon>)
     }
 }
 
-/// `(system-monitor [pid opts])` — read, arm, or clear the kernel **system
+/// `(proc/system-monitor [pid opts])` — read, arm, or clear the kernel **system
 /// monitor**: runtime events (`:gc`/`:spawn`/`:exit`/`:deopt`) delivered to one
 /// subscriber process as `[:system kind subject-pid detail]` messages (BEAM
 /// `system_monitor` shape; see `process/sysmon.rs`). No args reads the current
@@ -2285,7 +2285,7 @@ pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
                     other => {
                         return Err(LispError::wrong_type(
                             heap,
-                            "system-monitor",
+                            "proc/system-monitor",
                             "options map or nil",
                             other,
                         ))
@@ -2297,7 +2297,7 @@ pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
         other => {
             return Err(LispError::wrong_type(
                 heap,
-                "system-monitor",
+                "proc/system-monitor",
                 "local pid or nil",
                 other,
             ))
@@ -2629,7 +2629,7 @@ pub(super) fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResu
 // declaration, the scoped rebind, and the predicate.
 
 /// `(%declare-dynamic 'name)` — mark a symbol as a dynamic variable, so
-/// `binding` will accept it (and `dynamic?` reports it). `defdyn` expands to
+/// `binding` will accept it (and `reflect/dynamic?` reports it). `defdyn` expands to
 /// this plus a plain `def` of the default value.
 pub(super) fn declare_dynamic(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let sym = expect_symbol(heap, "%declare-dynamic", arg(args, 0))?;
@@ -2691,7 +2691,7 @@ pub(super) fn set_package_context(args: &[Value], _: EnvId, heap: &mut Heap) -> 
     Ok(heap.alloc_vector(vec![prefix_val, list]))
 }
 
-/// `(current-ns)` — the namespace currently being compiled into (a symbol), or
+/// `(reflect/current-ns)` — the namespace currently being compiled into (a symbol), or
 /// `nil` at root. Reflection + a handle for tests (ADR-065).
 pub(super) fn current_ns(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.compile_ns().map(Value::Sym).unwrap_or(Value::nil()))
@@ -2926,7 +2926,7 @@ pub(super) fn alias(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::nil())
 }
 
-/// `(dynamic? x)` — true when `x` is a symbol declared dynamic with `defdyn`.
+/// `(reflect/dynamic? x)` — true when `x` is a symbol declared dynamic with `defdyn`.
 /// A non-symbol is simply not dynamic (no error), so it composes in predicates.
 pub(super) fn dynamic_p(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::boolean(

@@ -1,6 +1,6 @@
 ;; tests/repl_test.blsp — the Brood-hosted REPL (std/repl.blsp).
 ;;
-;; The REPL itself is an IO loop over `read-line`/`eval-string` (driven by the
+;; The REPL itself is an IO loop over `read-line`/`reflect/eval-string` (driven by the
 ;; `brood` / `nest repl` binaries, exercised manually), so these tests cover the
 ;; pure decisions it's built from: datum detection (`repl/repl-content?`), the
 ;; incomplete-input signal that drives multi-line reads (`repl/repl-incomplete?`, off

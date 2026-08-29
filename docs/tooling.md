@@ -65,7 +65,7 @@ examples/tour.blsp:12:5: parse error: unclosed list (opened here)
 
 If no position is known the CLI falls back to `FILE: message` (file still
 clickable, no line). `LispError` carries optional `error::Pos { line, col }` and
-`file`; `Interp::eval_source` and `load` tag the *enclosing top-level form*'s
+`file`; `Interp::eval_source` and `reflect/load` tag the *enclosing top-level form*'s
 position as a fallback (an error with no inner pos takes that), and the eval
 loop's per-call annotation refines it to the innermost LOCAL form. The REPL
 path (`eval_str`) leaves `file` unset, but `pos` is still attached so
@@ -95,7 +95,7 @@ when a function calls *itself* outside tail position (e.g. `(* n (fact (- n 1)))
 — `fact` is an argument, so non-tail). Conservative: it stops at nested closures
 (a different frame) and only warns when certain, preferring a miss to a false
 positive. The same diagnostics flow through the LSP (published on every
-keystroke) and the `nest mcp` `check` / `load` tools.
+keystroke) and the `nest mcp` `check` / `reflect/load` tools.
 
 ## Test output: a structured block per failure
 
@@ -168,7 +168,7 @@ same pass runs in `nest test` (via `check-project`).
 
 ### Bounded runs: `nest run --for DURATION`
 
-An infinite loop or full-screen TUI never returns, so it can't be `eval`'d and
+An infinite loop or full-screen TUI never returns, so it can't be `reflect/eval`'d and
 is awkward to verify. `nest run --for DURATION` runs the program for at most
 that long, then exits **cleanly** — a first-class `timeout Ns nest run`:
 
@@ -363,7 +363,7 @@ list of non-function bindings.
 
 Policy is Brood (`std/tool/docs.blsp`); Rust supplies only the mechanism. The tool
 **loads the module and introspects it** rather than parsing source: it snapshots
-`(global-names)`, loads the module, and the new names are what it defined — read
+`(reflect/global-names)`, loads the module, and the new names are what it defined — read
 back via the existing `(doc f)` / `(arglist f)`. The module docstring is read
 from source with `file/slurp` + `reflect/read-string` (a leading string form is discarded on
 load, so it can't be recovered by introspection). This reuses the canonical

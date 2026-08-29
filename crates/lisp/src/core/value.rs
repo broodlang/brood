@@ -146,7 +146,7 @@ pub fn symbol_first_char(sym: Symbol) -> Option<char> {
 // lives in a `static` rather than the runtime's global table. Reads never touch
 // this set (a dynamic value resolves through the per-process binding stack in
 // `Heap`); it exists only so `binding` can reject an undeclared var and so
-// `dynamic?` can report. See `docs/language.md` (Dynamic variables).
+// `reflect/dynamic?` can report. See `docs/language.md` (Dynamic variables).
 
 static DYNAMICS: LazyLock<RwLock<HashSet<Symbol>>> = LazyLock::new(|| RwLock::new(HashSet::new()));
 

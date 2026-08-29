@@ -198,12 +198,12 @@
 (defdyn *p55-declared* :yes)
 (def p55-not-dynamic 42)
 
-(io/puts "P55: dynamic? *p55-declared*:" (dynamic? '*p55-declared*))
-(io/puts "P55: dynamic? p55-not-dynamic:" (dynamic? 'p55-not-dynamic))
-(io/puts "P55: dynamic? unbound-sym:" (dynamic? 'totally-unbound-xyz))
+(io/puts "P55: dynamic? *p55-declared*:" (reflect/dynamic? '*p55-declared*))
+(io/puts "P55: dynamic? p55-not-dynamic:" (reflect/dynamic? 'p55-not-dynamic))
+(io/puts "P55: dynamic? unbound-sym:" (reflect/dynamic? 'totally-unbound-xyz))
 (io/puts "P55-correct:"
-  (and (= true (dynamic? '*p55-declared*))
-    (= false (dynamic? 'p55-not-dynamic))
-    (= false (dynamic? 'totally-unbound-xyz))))
+  (and (= true (reflect/dynamic? '*p55-declared*))
+    (= false (reflect/dynamic? 'p55-not-dynamic))
+    (= false (reflect/dynamic? 'totally-unbound-xyz))))
 
 (io/puts "=== chaos2_dynamic_vars DONE ===")

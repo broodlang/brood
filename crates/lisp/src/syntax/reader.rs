@@ -74,7 +74,7 @@ pub fn read_one_complete(heap: &mut Heap, src: &str) -> Result<Value, LispError>
     if !parser.s.at_end() {
         return Err(parser.err(
             "unexpected trailing content after the form — reflect/read-string reads a single \
-             form; use reflect/read-all (or eval-string) for input with more than one",
+             form; use reflect/read-all (or reflect/eval-string) for input with more than one",
         ));
     }
     Ok(form)
@@ -91,7 +91,7 @@ struct Parser<'a> {
 /// instead of growing the native Rust stack (which would abort the process
 /// — see `docs/devlog.md` 2026-05-28 hardening). 256 is comfortably above any
 /// hand-written program; pathological deeply-nested input from disk, the LSP,
-/// or `eval-string` is rejected with `LispError::parse`.
+/// or `reflect/eval-string` is rejected with `LispError::parse`.
 ///
 /// The printer's cap is derived from this one (`printer::MAX_DEPTH`), so that
 /// everything the reader accepts still prints readably.

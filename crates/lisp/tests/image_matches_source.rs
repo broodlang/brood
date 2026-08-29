@@ -49,15 +49,15 @@ const INSTALL_BOOKKEEPING: [&str; 6] = [
 /// the two arms are comparable line by line and a diff names the offender.
 const SNAPSHOT: &str = r#"
     (do
-      (doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))
+      (doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))
       (apply str
         (map (fn (s)
                (str (->string s)
-                    " " (->string (type-of (eval s)))
-                    (if (private? s) " private" "")
+                    " " (->string (type-of (reflect/eval s)))
+                    (if (reflect/private? s) " private" "")
                     " :: " (or (try (reflect/type-signature s) (catch _ nil)) "-")
                     "\n"))
-          (sort (global-names)))))
+          (sort (reflect/global-names)))))
 "#;
 
 fn snapshot(install_image: bool) -> String {

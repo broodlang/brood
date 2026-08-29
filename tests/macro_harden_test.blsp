@@ -18,11 +18,11 @@
 
 (defn expand-error (form)
   "Expand `form` at runtime and return the error string, or nil on success."
-  (error-of (eval form)))
+  (error-of (reflect/eval form)))
 
 (defn expand-ok? (form)
   "True when `form` expands and evaluates without error."
-  (nil? (error-of (eval form))))
+  (nil? (error-of (reflect/eval form))))
 
 ;; ── 1. cond — odd clause count ────────────────────────────────────────────────
 
@@ -57,16 +57,16 @@
   (test "else as sole clause does not raise (returns nil)"
     ;; (cond else) is degenerate but tolerated — else has no expression and
     ;; expands to nil. Not worth erroring; the oddness guard exempts else.
-    (assert= (eval '(cond else)) nil))
+    (assert= (reflect/eval '(cond else)) nil))
 
   (test ":else is no longer a blessed spelling — only `else` is"
     ;; A keyword is self-evaluating and truthy, so `:else` never needed a special
     ;; case: as an ordinary test it still catches (like `true` or `42` would).
-    (assert= (eval '(cond false 1 :else :caught)) :caught)
-    (assert= (eval '(cond false 1 42 :caught)) :caught)
+    (assert= (reflect/eval '(cond false 1 :else :caught)) :caught)
+    (assert= (reflect/eval '(cond false 1 42 :caught)) :caught)
     ;; …but the oddness guard exempts only `else`, so a lone `:else` is now the
     ;; missing-expression error it always was for any other test.
-    (assert-error (eval '(cond :else)))))
+    (assert-error (reflect/eval '(cond :else)))))
 
 ;; ── 2. %defseq — non-string docstring ─────────────────────────────────────────
 
@@ -217,8 +217,8 @@
       (assert= (receive (:x :ok) (after *test-wait-ms* :timed-out)) :ok))))
 
 ;; ── 7. describe — keyword group name ─────────────────────────────────────────
-;; `describe` is defined in the `test` module. When testing via `eval`, we must
-;; use the qualified name `test/describe` because `eval` resolves bare symbols
+;; `describe` is defined in the `test` module. When testing via `reflect/eval`, we must
+;; use the qualified name `test/describe` because `reflect/eval` resolves bare symbols
 ;; from the global (root) namespace, not from the current module's imports.
 
 (describe "describe — wrong syntax"
@@ -227,18 +227,18 @@
     :ok)
 
   (test "keyword group name raises a clear error"
-    (let (msg (error-of (eval '(test/describe :my-group (test/test "t" :ok)))))
+    (let (msg (error-of (reflect/eval '(test/describe :my-group (test/test "t" :ok)))))
       (is (string? msg))
       (is (includes? msg "describe"))
       (is (includes? msg "keyword"))))
 
   (test "error shows the bad keyword"
-    (let (msg (error-of (eval '(test/describe :serial (test/test "t" :ok)))))
+    (let (msg (error-of (reflect/eval '(test/describe :serial (test/test "t" :ok)))))
       (is (includes? msg ":serial"))))
 
   (test "common mistake: :isolated as group name raises"
-    (let (msg (error-of (eval '(test/describe :isolated (test/test "t" :ok)))))
+    (let (msg (error-of (reflect/eval '(test/describe :isolated (test/test "t" :ok)))))
       (is (includes? msg "describe"))))
 
   (test "correct string name does NOT raise"
-    (is (nil? (error-of (eval '(test/describe "valid group" (test/test "t" :ok))))))))
+    (is (nil? (error-of (reflect/eval '(test/describe "valid group" (test/test "t" :ok))))))))

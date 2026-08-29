@@ -56,7 +56,7 @@
 (io/puts "P31: loading fresh (should print SIDE-EFFECT)...")
 (def p31-printed false)
 ;; We can't easily capture stdout mid-test, so we verify via the def value
-(load p31-tmpfile)
+(reflect/load p31-tmpfile)
 ;; `p31-reloaded-val` is defined by LOADING the tempfile written above, so the checker
 ;; cannot see it — that invisibility is what this case exercises. Same class as
 ;; `scripts/fuzz/stress/eval_forward_ref.blsp`; opt out rather than "fix".
