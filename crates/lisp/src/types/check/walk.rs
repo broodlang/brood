@@ -2234,6 +2234,27 @@ fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option<GradualTy>
             }
             None => (ctx.clone(), ctx.clone()),
         };
+        // A LITERAL condition selects its branch (only nil/false are falsy; every other
+        // literal is truthy), the same fold `infer::control_flow_ty` applies — so the
+        // argument check sees `1`, not `1 | "a"`, for `(if true 1 "a")`.
+        match items.get(1) {
+            Some(Value::Nil) | Some(Value::Bool(false)) => {
+                return Some(match items.len() {
+                    4 => gradual_of(heap, items[3], &else_ctx),
+                    _ => GradualTy::stat(NIL_TY),
+                });
+            }
+            Some(Value::Bool(true))
+            | Some(Value::Int(_))
+            | Some(Value::Float(_))
+            | Some(Value::Keyword(_))
+            | Some(Value::Str(_)) => {
+                if items.len() == 3 || items.len() == 4 {
+                    return Some(gradual_of(heap, items[2], &then_ctx));
+                }
+            }
+            _ => {}
+        }
         return match items.len() {
             4 => Some(
                 gradual_of(heap, items[2], &then_ctx).union(gradual_of(heap, items[3], &else_ctx)),

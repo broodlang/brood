@@ -286,6 +286,17 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                                 items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
                             return Some(sv.resolve_ret(&arg_tys));
                         }
+                        // …and the same for a sig a LOADED module declared (the live image:
+                        // hover, `reflect/expr-type`, a cross-module call). Skipped for a
+                        // name this file redefines — the heap describes the old binding
+                        // (ADR-123: a def always wins).
+                        if !ctx.is_file_global(s) {
+                            if let Some(sv) = super::sigs::declared_heap_sig_with_vars(heap, s) {
+                                let arg_tys: Vec<Option<Ty>> =
+                                    items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+                                return Some(sv.resolve_ret(&arg_tys));
+                            }
+                        }
                         // An overloaded sig (ADR-116) — `(and (int -> int)
                         // (bool -> bool))` — resolves per matching arm instead
                         // of a single flat `ret`.
@@ -405,9 +416,26 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     // `(if test then else)` → ty(then) | ty(else). A two-arm `(if test then)`
     // (no else) can also yield `nil`.
     if value::symbol_is(head, kw::IF) {
-        return match items.len() {
-            4 => branch_union(heap, &[items[2], items[3]], ctx),
-            3 => Some(expr_ty(heap, items[2], ctx)?.union(Ty::of(Tag::Nil))),
+        // A LITERAL condition selects its branch: `(if true a b)` is `a`, `(if nil a b)` /
+        // `(if false a b)` is `b`. Only nil and false are falsy in Brood and every other
+        // literal is truthy, so this is exact. Without it `(s-int (if true 1 "a"))` warned
+        // on a program that is right — the union `1 | "a"` is precise, so it was checked by
+        // `⊆`, and a string is no int.
+        let taken = match items.get(1) {
+            Some(Value::Nil) | Some(Value::Bool(false)) => Some(false),
+            Some(Value::Bool(true))
+            | Some(Value::Int(_))
+            | Some(Value::Float(_))
+            | Some(Value::Keyword(_))
+            | Some(Value::Str(_)) => Some(true),
+            _ => None,
+        };
+        return match (items.len(), taken) {
+            (4, Some(true)) | (3, Some(true)) => expr_ty(heap, items[2], ctx),
+            (4, Some(false)) => expr_ty(heap, items[3], ctx),
+            (3, Some(false)) => Some(Ty::of(Tag::Nil)),
+            (4, None) => branch_union(heap, &[items[2], items[3]], ctx),
+            (3, None) => Some(expr_ty(heap, items[2], ctx)?.union(Ty::of(Tag::Nil))),
             _ => None,
         };
     }
@@ -1354,9 +1382,13 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
     if !is_fn_head(head) {
         return None;
     }
-    // Exactly `(fn <param-list> <body>)` — one param list + one body expression.
+    // `(fn <param-list> body…)` — a param list and at least one body form. The RESULT is
+    // the last form's type; earlier forms run for effect and contribute nothing to it, so
+    // typing only the last is exactly as sound as typing a single-form body. (A docstring
+    // is just an earlier form here.) `try`'s expansion is the case that needed this:
+    // `(%try (fn () a b) …)` used to be untypeable because the thunk had two forms.
     let parts = &items[1..];
-    if parts.len() != 2 {
+    if parts.len() < 2 {
         return None;
     }
     let params = list_items(heap, parts[0])?;
@@ -1370,5 +1402,5 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
         };
         sub = sub.bind(*p, input.clone());
     }
-    expr_ty(heap, parts[1], &sub)
+    expr_ty(heap, *parts.last()?, &sub)
 }
