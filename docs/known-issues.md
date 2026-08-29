@@ -5228,6 +5228,32 @@ it) rather than restating the Rust `DEV_MODULES` list, so it cannot drift from i
 `stress/*_test.blsp` block skips wholesale on a lean brood for the same reason — `--test`
 needs the `test` module.
 
+**Addendum 2026-08-29 (same day, second pass) — the freshness rule itself cried wolf, and
+`scripts/*.blsp` was a fifth ungated corpus.**
+
+*The rule.* `gate_require_fresh` asked the **sha first** and the mtime second, so it refused a
+binary that was in fact current: build from a dirty tree (the binary records the sha of the
+HEAD it was built **at**), then commit, and the sha now names the parent while the contents
+are exactly what is on disk. It refused `check-corpora` minutes after being written. **mtime
+is now the primary test and the sha is only the rescue** — a binary newer than every
+`std/`+`crates/` source baked what is on disk, which is a *stronger* property than any sha
+match; the sha exemption is kept for the one case mtime cannot judge (a `git checkout` or
+fresh clone rewrites mtimes without changing content). The same reordering was ported to
+`green.sh`, which had the defect inline. Candidate *selection* had the same bug in miniature:
+with no sha matching HEAD both pickers fell back to "first that exists", which chose a
+`release-fast/nest` from 15 commits back over a `release/nest` built minutes earlier — the
+fallback is now the **newest** candidate.
+
+*The corpus.* `scripts/*.blsp` sat outside `check-corpora` (which covered `examples/`,
+`stress/`, `scripts/fuzz/stress/`, `breakage/`), and all three non-trivial ones were dead:
+`scripts/stdlib-audit.blsp` — the standing audit of the library's own surface — plus
+`release-ecosystem.blsp` and `suggest-renames.blsp`, on ADR-258's `name` → `->string` and
+`os/getenv` → `os/env`. The audit had been unrunnable for long enough that nobody noticed the
+number it produces was unobtainable. `scripts` is now its own tree in `check-corpora` (top
+level only — `scripts/fuzz/stress` stays a separate corpus, since a name resolves against the
+files loaded *with* it). Sabotage-verified: restoring `(name s)` in the audit turns the
+`scripts` row red.
+
 **Guard, sabotage-verified.** Four deliberate breaks, all against the LEAN binary:
 
 | sabotage | verdict |

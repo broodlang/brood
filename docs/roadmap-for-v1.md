@@ -287,32 +287,35 @@ All purely additive — deferring costs a version number and nothing else.
 ## Not language, but 1.0 release blockers
 
 Tracked in [`ROADMAP.md`](../ROADMAP.md); listed here so a release checklist doesn't
-miss them.
+miss them. **All three are now closed** (2026-08-29) — the last one had been closed in the
+code since 2026-07-31 and only this entry did not know it, which is its own lesson: an item
+resolved *as a side effect* of a fix aimed at something else gets no ceremony, so nothing
+prompts anyone to tick it.
 
 - ✅ **The conformance red — fixed 2026-07-27 (KI-14).** It was not the documents: the
   RUNTIME collector re-walked a deep process's whole root stack at every safepoint, so
   cost scaled with loaded code, not test size. Full `nest test` including conformance is
   **3592 tests in ~90 s**; `cargo nextest run` is 877/877.
-- ⬜ **`nest format --check` is red on 26 files** — down from 52, measured 2026-07-30 at
-  `56c2501` (319 considered, 26 rewritten). A whole-tree pass (run in a throwaway
-  worktree) produces **+570/−380 across 175 hunks**, and the diff is two distinct things:
-  - **≈69 hunks (40%) are comment *hoisting*** — a same-line trailing comment moved onto
-    its own line above the form, so `nil ; one un-taggable clause disables the filter`
-    becomes two lines. This is **intended, documented behaviour**, not a bug
-    (`std/format.blsp:476`, and `last-nonws-comment?` at `:369` exists to keep a closing
-    paren from landing inside a hoisted comment). The tree's authors do not write that
-    way, which is the entire disagreement.
-  - **The remainder splits multi-arg `error`/`str`/`println` calls** at points that read
-    worse than the hand-written source (`(str "match: (record " ⏎ (pr-str name) …)`), plus
-    a residue of legitimately unformatted new code (`ratio_test.blsp`,
-    `ability_test.blsp`, written the same day).
+- ✅ **`nest format --check` — resolved 2026-07-31, confirmed clean 2026-08-29.** The tree
+  is **414/414 clean**, verified against a `nest` rebuilt from the current `std/` (`std/` is
+  `include_str!`'d, so a stale binary answers about a different tree).
 
-  So this is **a style verdict, not a defect hunt** — which is why it stays ⬜. Decide
-  hoisting first: keep it and take one deliberate whole-tree pass (accepting the loss of
-  aligned trailing comments), or drop it — teach `format.blsp` to leave a same-line
-  comment in place, which also simplifies `last-nonws-comment?`/`comment-on-own-line?` —
-  and re-measure, because 40% of the red goes away with it. Do not run the formatter
-  tree-wide before that call is made.
+  The style verdict this entry asked for was **made, and hoisting lost**. `f0082dc7`
+  ("leave a same-line trailing comment where the author put it") stopped moving a same-line
+  trailing comment onto its own line above its form — the ≈69 hunks that were 40% of the red,
+  and the change that "destroyed the alignment that makes a column of trailing comments
+  readable". The remaining red was then swept file by file. This entry's measurement is dated
+  2026-07-30 at `56c2501`, **one day before that fix**, and nothing updated it afterwards;
+  its instruction "do not run the formatter tree-wide before that call is made" was still
+  being read as live guidance a month later.
+
+  The predicted simplification came with it: `comment-on-own-line?` and its `-prev` helper
+  became unreachable the moment nothing hoisted, and `last-nonws-comment?` no longer needs
+  the distinction ("the last non-ws child being a comment is now both necessary AND
+  sufficient"). They sat dead for a month — no lint sees an unreferenced private `defn` — and
+  were deleted 2026-08-29. **If you ever reintroduce hoisting, they are what you have to
+  write back.**
+
 - ✅ **The `nest::registry` tests — resolved.** They now build their temp repos with
   `-c commit.gpgsign=false -c tag.gpgsign=false` (`crates/nest/tests/registry.rs:75`),
   so `git commit` no longer reaches `op-ssh-sign` and the result no longer tracks whether
