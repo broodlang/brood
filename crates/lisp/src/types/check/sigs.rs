@@ -1336,6 +1336,16 @@ fn infer_from_single_call(
 /// (walk.rs) still wins ahead of this for a bare file; this is the store that makes
 /// a declared sig authoritative where the file-local ctx misses (a qualified
 /// intra-module call, or a cross-module caller).
+/// The [`SigWithVars`] a loaded module declared for `sym`, when its declaration carries
+/// type variables — the live-image counterpart of `Ctx::declared_sig_with_vars`.
+pub(super) fn declared_heap_sig_with_vars(
+    heap: &Heap,
+    sym: Symbol,
+) -> Option<super::ctx::SigWithVars> {
+    let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
+    annot::parse_arrow_type_with_vars(heap, type_value)
+}
+
 pub(super) fn declared_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
     annot::parse_type(heap, type_value)?.as_arrow().cloned()

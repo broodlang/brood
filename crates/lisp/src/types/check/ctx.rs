@@ -43,6 +43,17 @@ pub(super) enum SigTerm {
     ListOf(Box<SigTerm>),
     /// `(vector ?A)` — the element type may be a variable.
     VectorOf(Box<SigTerm>),
+    /// `(record [&open] :k ?A …)` — a field type may be a variable. Declaration order is
+    /// kept (a `Vec`, not the shape's `BTreeMap`) only for display stability; binding is
+    /// by field NAME. What this exists for: `defrecord`'s constructor signature
+    /// `(sig pt (?x ?y -> (record :__id__ :pt :x ?x :y ?y)))`, so that `(pt 1 2)` is the
+    /// shape `{__id__: :pt, x: 1, y: 2}` at the call and `(:x (pt 1 2))` is `1` — where a
+    /// concrete `x: any` in the signature made every field of every constructed record
+    /// unknown.
+    RecordOf {
+        fields: Vec<(Symbol, SigTerm, bool)>,
+        open: bool,
+    },
 }
 
 impl SigTerm {
@@ -67,6 +78,17 @@ impl SigTerm {
                     crate::types::Ty::of(crate::core::value::Tag::Vector)
                 } else {
                     Ty::vector_of(e)
+                }
+            }
+            SigTerm::RecordOf { fields, open } => {
+                let resolved: std::collections::BTreeMap<Symbol, (Ty, bool)> = fields
+                    .iter()
+                    .map(|(name, term, required)| (*name, (term.resolve(subst), *required)))
+                    .collect();
+                if *open {
+                    Ty::record_of_open(resolved)
+                } else {
+                    Ty::record_of(resolved)
                 }
             }
         }
@@ -160,6 +182,18 @@ pub(super) fn unify_term(term: &SigTerm, ty: Ty, subst: &mut HashMap<u32, Ty>) {
         SigTerm::VectorOf(inner) => {
             if let Some(elem) = ty.elem_ty() {
                 unify_term(inner, elem.clone(), subst);
+            }
+        }
+        SigTerm::RecordOf { fields, .. } => {
+            // Bind each variable field from the argument's shape, by name. An argument
+            // that is not a record (or lacks the field) binds nothing — the var widens to
+            // `any` at resolve, which is the conservative reading.
+            if let Some(shape) = ty.record_fields() {
+                for (name, term, _) in fields {
+                    if let Some((fty, _)) = shape.get(name) {
+                        unify_term(term, fty.clone(), subst);
+                    }
+                }
             }
         }
     }

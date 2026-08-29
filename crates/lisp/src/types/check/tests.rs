@@ -346,12 +346,27 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         ("(merge {:a 1} {:b 2})", "map"),
         // control flow and application that had no type
         ("(try 1 (catch e 2))", "1 | 2"),
+        ("(try 1 \"a\" (catch e \"b\"))", "\"a\" | \"b\""),
         ("((fn (x) (str x)) 1)", "string"),
         ("(->string :a)", "string"),
         ("(string/split \"a b\" \" \")", "list<string>"),
     ] {
         assert_eq!(ty_str(src), want, "{src}");
     }
+}
+
+// The expanded path too: `try` becomes `(%try (fn () a b) (fn (e) h))`, and a multi-form
+// thunk used to be untypeable — so a checked file saw nothing where the unexpanded query did.
+#[test]
+fn a_multi_form_try_types_through_its_expansion() {
+    let ws = file_warnings(
+        "(sig s-int (int -> int))\n(defn s-int (x) x)\n(defn f () (s-int (try 1 \"a\" (catch e \"b\"))))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("expects int") && w.contains("\"a\"")),
+        "{ws:?}"
+    );
 }
 
 // …and the rules must NOT claim more than they can prove: the operands that defeat each
@@ -366,6 +381,60 @@ fn precision_rules_defer_where_nothing_narrower_is_provable() {
     ] {
         assert_eq!(ty_str(src), want, "{src}");
     }
+}
+
+// A `defrecord` constructor's signature used to declare every undeclared field `any`, so
+// `(pt 1 2)` was the bare id type and `(:x (pt 1 2))` was `any` — a record you had just
+// built with `1` in it could not be typed at all. The signature now carries a type variable
+// per undeclared field (`?x`), bound at each call.
+#[test]
+fn a_record_constructor_call_carries_its_argument_types_in_its_fields() {
+    let src = "(defrecord pt (x y))\n(list (:x (pt 1 2)) (:y (pt 1 \"s\")))";
+    let x = arg_ty_of(src, "(list", 1).expect("typed");
+    let y = arg_ty_of(src, "(list", 2).expect("typed");
+    assert_eq!(x.to_string(), "1");
+    assert_eq!(y.to_string(), "\"s\"");
+    // …and a declared field type is still a contract, not a variable
+    let ws = file_warnings("(defrecord money ((amount int) cur))\n(defn m () (money \"s\" :usd))");
+    assert!(
+        ws.iter().any(|w| w.contains("money") && w.contains("int")),
+        "{ws:?}"
+    );
+}
+
+// Every warning must be somewhere: a lint over the macro-EXPANDED tree (match exhaustiveness,
+// an unreachable clause, an argument inside a destructuring `let`) reported at a pair the
+// reader never positioned, and printed as `file: warning: …` with nothing to jump to.
+#[test]
+fn every_warning_carries_a_position() {
+    let src = "(sig s-str (string -> string))\n(defn s-str (x) x)\n\
+               (sig e1 ((or :a :b :c) -> int))\n(defn e1 (x) (match x (:a 1) (:b 2)))\n\
+               (defn dead (x) (match x (:a 1) (:a 2) (_ 3)))\n\
+               (defn p1 (v) (let ([a b] v) (s-str (+ a b))))";
+    let mut interp = crate::Interp::new();
+    let forms = reader::read_all_positioned(&mut interp.heap, src)
+        .expect("parse")
+        .into_iter()
+        .map(|(f, _)| f)
+        .collect::<Vec<_>>();
+    let ws = super::check_file(&mut interp.heap, &forms);
+    assert!(ws.len() >= 3, "{ws:?}");
+    for (pos, msg) in &ws {
+        assert!(pos.is_some(), "positionless warning: {msg}");
+    }
+}
+
+// A literal condition selects its branch: `(if true 1 "a")` is `1`, and passing it where an
+// int is wanted is right, not a warning. (`(if c 1 "a")` for an unknown `c` stays `1 | "a"`.)
+#[test]
+fn a_literal_if_condition_folds_to_its_branch() {
+    assert_eq!(ty_str("(if true 1 \"a\")"), "1");
+    assert_eq!(ty_str("(if nil 1 \"a\")"), "\"a\"");
+    assert_eq!(ty_str("(if false 1)"), "nil");
+    let ws = file_warnings(
+        "(sig s-int (int -> int))\n(defn s-int (x) x)\n(defn l1 () (s-int (if true 1 \"a\")))",
+    );
+    assert!(ws.is_empty(), "{ws:?}");
 }
 
 #[test]
@@ -5972,7 +6041,12 @@ fn a_bare_local_test_narrows_by_truthiness() {
     );
     // …and `(not v)` must NOT read as "v is nil": that inversion reported live code
     // as dead when the guard was two-sided.
-    let ws = warnings_expanded("(let (s (if true true false)) (let (v (not s)) (if v 1 2)))");
+    // (The condition is a real predicate, not a literal: `(if true …)` now folds to its
+    // then-branch, so `s` would be exactly `true`, `v` exactly `false`, and the then-branch
+    // of `(if v 1 2)` REALLY dead — which the lint is right to say.)
+    let ws = warnings_expanded(
+        "(fn (x) (let (s (if (int? x) true false)) (let (v (not s)) (if v 1 2))))",
+    );
     assert!(!ws.iter().any(|w| w.contains("unreachable")), "{ws:?}");
 }
 
