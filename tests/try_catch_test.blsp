@@ -97,7 +97,7 @@
     (is (try (/ 1 0) false (catch _ true))))
 
   (test "unbound symbol error is catchable"
-    (is (try (eval 'no-such-symbol-xyz) false (catch _ true))))
+    (is (try (reflect/eval 'no-such-symbol-xyz) false (catch _ true))))
 
   (test "parse error from reflect/read-string is catchable"
     (is (try (reflect/read-string "(1 2") false (catch _ true))))
@@ -232,17 +232,17 @@
   (test "(try body (fn (e) handler)) raises a clear compile error"
     ;; Using eval + a quoted form forces macro expansion at runtime, so
     ;; error-of can intercept the compile-time error.
-    (let (msg (error-of (eval '(try (+ 1 2) (fn (e) :caught)))))
+    (let (msg (error-of (reflect/eval '(try (+ 1 2) (fn (e) :caught)))))
       (is (string? msg))
       (is (includes? msg "try:"))
       (is (includes? msg "(catch"))))
 
   (test "error message names the fn form that was passed"
-    (let (msg (error-of (eval '(try (+ 1 2) (fn (x) (* x 2))))))
+    (let (msg (error-of (reflect/eval '(try (+ 1 2) (fn (x) (* x 2))))))
       (is (includes? msg "(fn"))))
 
   (test "error message suggests the right param name from the fn"
-    (let (msg (error-of (eval '(try (throw :x) (fn (err) err)))))
+    (let (msg (error-of (reflect/eval '(try (throw :x) (fn (err) err)))))
       (is (includes? msg "err"))))
 
   (test "correct syntax (catch e ...) does NOT trigger the guard"
@@ -322,7 +322,7 @@
 
   (test "multiple assert-error in one test"
     (assert-error (first 5))
-    (assert-error (eval 'undefined-xyz-99))
+    (assert-error (reflect/eval 'undefined-xyz-99))
     (assert-error (reflect/read-string "(("))))
 
 ;; ── 11. error stack traces (:trace) ──────────────────────────────────────────

@@ -21,7 +21,7 @@
 ;; [:down …], a link [:EXIT …], a timer tick, a raw send; body is the next state). State is
 ;; immutable, so a clause returns the state to carry forward; to leave it unchanged in a
 ;; `call`, return the state parameter. Two optional lifecycle clauses run outside the loop:
-;; INIT (once at startup — the place to `(trap-exit true)`/`(monitor …)`/arm a timer) and
+;; INIT (once at startup — the place to `(proc/trap-exit true)`/`(monitor …)`/arm a timer) and
 ;; TERMINATE (on a clean `(stop pid)`). An implicit `(stop pid)` ends the loop; a message
 ;; matched by no clause is dropped (it does not pile up in the mailbox).
 ;;

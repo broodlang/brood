@@ -472,9 +472,9 @@ pub(crate) fn tick_capture_n(n: u32) -> bool {
 /// redirect, and a *nested* VM run behind `eval`/`try`/an HOF native — used plain
 /// [`tick`], which is pure accounting: on rollover, `preempt()` refreshes the budget
 /// and the loop keeps going. Nothing on those paths ever looked at the kill flag, so
-/// a process evaluating code via `eval`/`eval-string` was **unkillable**: `(exit pid
+/// a process evaluating code via `eval`/`reflect/eval-string` was **unkillable**: `(exit pid
 /// :kill)` latched the flag and the target spun forever. (Measured: a spinning child
-/// died from a direct call but survived the identical loop under `eval-string`. The
+/// died from a direct call but survived the identical loop under `reflect/eval-string`. The
 /// decisive routing detail: the loop's `>`/`-` are thin-wrapper passthroughs, so the
 /// hot path ticks in `passthrough_redirect_ok` — the same spot the eval *deadline*
 /// once escaped through, and for the same reason.)

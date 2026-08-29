@@ -5,11 +5,11 @@
 ;;; to build more programs. Cycles eval→build→eval up to bizarre depths.
 ;;;
 ;;; Targets:
-;;;   - `eval` / `eval-string` on dynamically generated programs
+;;;   - `reflect/eval` / `reflect/eval-string` on dynamically generated programs
 ;;;   - `read-string` on large, deeply nested source strings
 ;;;   - Quasiquote splicing of large lists
 ;;;   - The compile pass (macro expansion + pattern lowering) on generated code
-;;;   - Recursive `eval` inside an `eval`'d expression
+;;;   - Recursive `reflect/eval` inside a `reflect/eval`'d expression
 ;;;   - Symtable growth from thousands of dynamically `def`'d globals
 
 (io/puts "--- eval-string: fibonacci program as a string ---")
@@ -18,8 +18,8 @@
 (def fib-src
   "(defn chaos-fib (n a b) (if (< n 1) a (chaos-fib (- n 1) b (+ a b))))")
 
-(eval-string fib-src)
-;; `chaos-fib` is defined by the `eval-string` above — invisible to the checker by
+(reflect/eval-string fib-src)
+;; `chaos-fib` is defined by the `reflect/eval-string` above — invisible to the checker by
 ;; construction, which is the point of this file. Opt out, do not rewrite.
 (check-allow :unbound
   (io/puts "chaos-fib(0):" (chaos-fib 0 0 1))
@@ -35,20 +35,20 @@
 (def terms-100 (range 1 101))
 (def nested-add-100 (build-nested-add terms-100))
 ;; The generated AST is `(+ 100 (+ 99 ... (+ 1 0) ...))`
-(io/puts "nested-add-100 result:" (eval nested-add-100))
-(io/puts "expected 5050:" (= 5050 (eval nested-add-100)))
+(io/puts "nested-add-100 result:" (reflect/eval nested-add-100))
+(io/puts "expected 5050:" (= 5050 (reflect/eval nested-add-100)))
 
 ;; CRASH FOUND: 10000-term nested-add overflows the Rust eval stack (SIGABRT).
 ;; The evaluator is recursive (each `(+ a b)` recurses into b before returning).
 ;; No depth limit → host stack overflow. 1000 terms are safe; 10k are not.
 ;; (def nested-add-10k (build-nested-add (range 1 10001)))   ← DO NOT EVAL
-;; (io/puts "nested-add-10k result:" (eval nested-add-10k))  ← stack overflow!
+;; (io/puts "nested-add-10k result:" (reflect/eval nested-add-10k))  ← stack overflow!
 (io/puts "SKIP: 10k nested-add crashes eval (Rust stack overflow, no depth limit)")
 
 (io/puts "--- quasiquote splicing: generate a (list 1 2 3 ... 10000) call ---")
 
 (def big-list-expr `(list ~@(range 1 10001)))
-(def big-list (eval big-list-expr))
+(def big-list (reflect/eval big-list-expr))
 (io/puts "big-list count:" (count big-list))
 (io/puts "big-list sum:" (reduce + 0 big-list))
 
@@ -58,12 +58,12 @@
 ;; Then sum all chaos-fn-N(N) = sum of N+N = 2 * sum(0..999) = 999000
 
 (dotimes (i 1000)
-  (eval `(defn ~(symbol (str "chaos-fn-" i)) (x) (+ x ~i))))
+  (reflect/eval `(defn ~(symbol (str "chaos-fn-" i)) (x) (+ x ~i))))
 
 (def fn-sum
   (fold (fn (acc i)
           (let (fn-name (symbol (str "chaos-fn-" i)))
-            (+ acc ((eval fn-name) i))))
+            (+ acc ((reflect/eval fn-name) i))))
     0
     (range 1000)))
 
@@ -87,8 +87,8 @@
 (io/puts "first of form:" (first big-do-form))
 
 ;; Eval the form — defines 500 globals
-(eval big-do-form)
-;; The 500 `chaos-var-N` globals are created by the `eval` above.
+(reflect/eval big-do-form)
+;; The 500 `chaos-var-N` globals are created by the `reflect/eval` above.
 (check-allow :unbound
   (io/puts "chaos-var-0:" chaos-var-0)
   (io/puts "chaos-var-499:" chaos-var-499))
@@ -98,21 +98,21 @@
 ;; A self-referential program: it reads a Brood expression, evals it, and returns
 ;; the result — all inside an eval'd string.
 (def meta-src
-  "(eval-string \"(+ 1 (eval-string \\\"(* 6 7)\\\"))\")")
+  "(reflect/eval-string \"(+ 1 (reflect/eval-string \\\"(* 6 7)\\\"))\")")
 ; should be 43
-(io/puts "meta-eval result:" (eval-string meta-src))
+(io/puts "meta-eval result:" (reflect/eval-string meta-src))
 ;; Go three levels deep
 (def deep-meta-src
-  "(eval-string \"(+ 1 (eval-string \\\"(+ 10 (eval-string \\\\\\\"(* 2 3)\\\\\\\"))\\\"))\")")
+  "(reflect/eval-string \"(+ 1 (reflect/eval-string \\\"(+ 10 (reflect/eval-string \\\\\\\"(* 2 3)\\\\\\\"))\\\"))\")")
 ; 1 + (10 + 6) = 17
-(io/puts "3-level meta-eval result:" (eval-string deep-meta-src))
+(io/puts "3-level meta-eval result:" (reflect/eval-string deep-meta-src))
 (io/puts "--- quasiquote: build a match expression with 500 clauses ---")
 
 ;; Generate: (match x (0 "zero") (1 "one") ... (_ "unknown"))
 ;; CRASH FOUND: 500 clauses overwhelm the recursive pattern compiler
 ;; (green-thread stack budget exhausted compiling the clause tree).
 ;; 100 clauses are safe; 500 are not.
-;; (def big-match-fn (eval (build-big-match 500)))  ← stack overflow in eval
+;; (def big-match-fn (reflect/eval (build-big-match 500)))  ← stack overflow in eval
 (io/puts "SKIP: 500-clause match crashes eval (recursion too deep in pattern compiler)")
 
 (defn build-big-match (n)
@@ -120,7 +120,7 @@
     `(fn (x) (match x ~@clauses (_ "unknown")))))
 
 ;; Safe with 100 clauses
-(def big-match-fn (eval (build-big-match 100)))
+(def big-match-fn (reflect/eval (build-big-match 100)))
 (io/puts "big-match(0):" (big-match-fn 0))
 (io/puts "big-match(50):" (big-match-fn 50))
 (io/puts "big-match(99):" (big-match-fn 99))

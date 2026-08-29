@@ -6,10 +6,10 @@ the definitions it adds to the global table.
 `(generate)` documents the whole project (every source file under it);
 `(generate name)` documents a single module — a baked-in std module, or one
 found as <name>.blsp on `*load-path*`. This is policy built on the introspection
-primitives (`doc` / `arglist` / `global-names`), `file/slurp`, and the project model
+primitives (`doc` / `arglist` / `reflect/global-names`), `file/slurp`, and the project model
 in `std/tool/project.blsp`; Rust supplies only that mechanism (ADR-006).
 
-Attribution uses a `(global-names)` delta around loading the module, so it can't
+Attribution uses a `(reflect/global-names)` delta around loading the module, so it can't
 document a module already loaded before the snapshot (the delta is empty). For
 that reason `project` is required lazily, inside `document-project`, rather than
 at the top — keeping it out of the snapshot when it is itself the doc target.
@@ -57,7 +57,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; --- which names a module defines (global-table delta) -----------------------
 
 ;; Names present in `after` but not `before` — the bindings a module introduced
-;; between two (global-names) snapshots. global-names is sorted, so this is too.
+;; between two (reflect/global-names) snapshots. global-names is sorted, so this is too.
 (defn- docs-added (before after) (filter (fn (s) (not (includes? before s))) after))
 
 ;; --- rendering ---------------------------------------------------------------
@@ -67,8 +67,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 ;; Module-private, as the image recorded it at the def form (`defn-`/`def-`,
 ;; ADR-146). These are skipped by (:use) refer-all and omitted from generated docs.
-;; `sym` is already the qualified name, which is what `private?` keys on.
-(defn- docs-private? (sym) (private? sym))
+;; `sym` is already the qualified name, which is what `reflect/private?` keys on.
+(defn- docs-private? (sym) (reflect/private? sym))
 
 ;; One definition's Markdown: a `### (->string args…)` heading (with a *(macro)* tag
 ;; for macros) followed by its docstring, or a placeholder when undocumented.
@@ -112,7 +112,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- docs-section-defs
   (syms)
   (let (defs (filter (fn (s)
-                       (and (docs-documentable? (eval s))
+                       (and (docs-documentable? (reflect/eval s))
                          (not (docs-private? s))))
                syms))
     (if (empty? defs)
@@ -121,13 +121,14 @@ module's namespace-rooted globals (ADR-070) back to it."
       ;; accumulator per entry, so a module's Definitions section was O(output²) in the
       ;; markdown it generates — the same shape that made `write-lines` take 1888 ms for
       ;; 16 000 lines (std/file.blsp).
-      (str "## Definitions\n\n" (apply str (map (fn (s) (str (docs-entry s (eval s)) "\n")) defs))))))
+      (str "## Definitions\n\n"
+        (apply str (map (fn (s) (str (docs-entry s (reflect/eval s)) "\n")) defs))))))
 
 ;; The "Variables" section: public names the module bound to non-function values.
 (defn- docs-section-vars
   (syms)
   (let (vars (filter (fn (s)
-                       (and (not (docs-documentable? (eval s)))
+                       (and (not (docs-documentable? (reflect/eval s)))
                          (not (docs-private? s))))
                syms))
     (if (empty? vars)
@@ -151,20 +152,22 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn document-file (path)
   "The Markdown documentation for the module in the file at `path`: load it and document
   the definitions in its own namespace. Attribution is by namespace (`project-file-feature`,
-  ADR-070 rooting), like `model-file` — a `(global-names)` delta mis-credits a module already
+  ADR-070 rooting), like `model-file` — a `(reflect/global-names)` delta mis-credits a module already
   bound (transitively loaded, or materialised from a startup image, ADR-218) and modules the
   file's own load pulls in. Files with no module header, or read outside a project, fall back
   to the delta."
   (let (src (file/slurp path)
         declared (docs-module-name src)
         feature (try (project/project-file-feature path) (catch _ nil))
-        before (global-names))
-    (load path)
+        before (reflect/global-names))
+    (reflect/load path)
     (if feature
       (docs-render (or declared (docs-basename path))
         (docs-leading-doc src)
         (docs-namespace-syms feature))
-      (docs-render (docs-basename path) (docs-leading-doc src) (docs-added before (global-names))))))
+      (docs-render (docs-basename path)
+        (docs-leading-doc src)
+        (docs-added before (reflect/global-names))))))
 (sig document-file (string -> string))
 
 ;; Markdown for a module named `modname` (symbol or string): resolve its source
@@ -174,9 +177,9 @@ module's namespace-rooted globals (ADR-070) back to it."
   "The Markdown documentation for the module named `modname` (a symbol or string), resolved baked-in or on `*load-path*`. Errors if it can't be found."
   (let (key (->string modname) src (docs-source key))
     (when (nil? src) (error "doc: cannot find module '" key "'"))
-    (let (before (global-names))
+    (let (before (reflect/global-names))
       (require-one modname)
-      ;; Attribute by NAMESPACE, not by a `(global-names)` delta — the same correction
+      ;; Attribute by NAMESPACE, not by a `(reflect/global-names)` delta — the same correction
       ;; `document-file` already carries, for the same reason. The delta credits a module
       ;; with only the names its own `require` happened to add, so a module ALREADY bound
       ;; — transitively loaded by the tool's own bootstrap, or materialised from a startup
@@ -187,7 +190,7 @@ module's namespace-rooted globals (ADR-070) back to it."
       ;; The delta stays as the fallback for a module whose names are not under its own
       ;; namespace (a bare-rooted module), where the prefix filter finds nothing.
       (let (owned (docs-namespace-syms key)
-            syms (if (empty? owned) (docs-added before (global-names)) owned))
+            syms (if (empty? owned) (docs-added before (reflect/global-names)) owned))
         (docs-render key (docs-leading-doc src) syms)))))
 
 ;; Markdown for the whole project: find it from the cwd, put its sources on the
@@ -218,7 +221,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 (defn document-all ()
   "The Markdown reference for every *public* global currently bound in the image — each builtin and prelude function/macro with its signature and one-line summary. The complete primitive reference (`nest doc --all`); read this once instead of probing names one at a time. Opt-in std modules (`display`, `buffer`, `ansi`, …) aren't loaded here — `nest doc <module>` documents those."
-  (let (syms (filter docs-public? (global-names)))
+  (let (syms (filter docs-public? (reflect/global-names)))
     (str "# Brood — global reference\n\n"
       "Every public global bound in a fresh image: the Rust builtins plus the "
       "`std/prelude` functions and macros — i.e. everything callable without a "
@@ -257,8 +260,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- docs-def-records
   (syms)
   (apply vector
-    (map (fn (s) (docs-def-record s (eval s)))
-      (filter (fn (s) (and (docs-documentable? (eval s)) (not (docs-private? s)))) syms))))
+    (map (fn (s) (docs-def-record s (reflect/eval s)))
+      (filter (fn (s) (and (docs-documentable? (reflect/eval s)) (not (docs-private? s)))) syms))))
 
 ;; One module entry of the doc model: `{:module :doc :defs :qualified?}`. `:qualified? true`
 ;; — a project/library module IS a namespace, so its defs render as their call form
@@ -278,12 +281,12 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 ;; Every global bound in module `modname`'s namespace (`modname/…`). Order-independent,
 ;; so a module's own definitions are attributed to it no matter what loaded first — the
-;; robust alternative to a `(global-names)` delta, which mis-credits transitively-loaded
+;; robust alternative to a `(reflect/global-names)` delta, which mis-credits transitively-loaded
 ;; dependencies to whichever file pulled them in.
 (defn- docs-namespace-syms
   (modname)
   (let (prefix (str modname "/"))
-    (filter (fn (s) (string/starts-with? (->string s) prefix)) (global-names))))
+    (filter (fn (s) (string/starts-with? (->string s) prefix)) (reflect/global-names))))
 
 (defn model-file (path)
   "The doc-model module entry for the file at `path`: load it, then collect its module's
@@ -296,13 +299,13 @@ module's namespace-rooted globals (ADR-070) back to it."
   (let (src (file/slurp path)
         declared (docs-module-name src)
         feature (try (project/project-file-feature path) (catch _ nil))
-        before (global-names))
-    (load path)
+        before (reflect/global-names))
+    (reflect/load path)
     (if feature
       (docs-module-model (or declared feature) (docs-leading-doc src) (docs-namespace-syms feature))
       (docs-module-model (docs-basename path)
         (docs-leading-doc src)
-        (docs-added before (global-names))))))
+        (docs-added before (reflect/global-names))))))
 (sig model-file (string -> (record :defs any :doc any :module any :qualified? true)))
 
 (defn model-module (modname)
@@ -310,9 +313,9 @@ module's namespace-rooted globals (ADR-070) back to it."
   resolved baked-in or on `*load-path*`. Errors if it can't be found."
   (let (key (->string modname) src (docs-source key))
     (when (nil? src) (error "docs: cannot find module '" key "'"))
-    (let (before (global-names))
+    (let (before (reflect/global-names))
       (require-one modname)
-      (docs-module-model key (docs-leading-doc src) (docs-added before (global-names))))))
+      (docs-module-model key (docs-leading-doc src) (docs-added before (reflect/global-names))))))
 
 (defn model-project ()
   "The whole-project doc model — `{:name :version :modules […]}` — found from the cwd,
@@ -341,7 +344,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   ;; module binding has no def-site, ADR-218.)
   (let (namespaced? (fn (nm) (let (i (index-of nm "/")) (and i (> i 0))))
         language? (fn (s) (and (docs-public? s) (not (namespaced? (->string s)))))
-        syms (filter language? (global-names))
+        syms (filter language? (reflect/global-names))
         category-of (fn (s) (doc-catalog/category-of (docs-bare s))))
     {:name "Brood"
      :version (try (system/brood-version) (catch _ nil))
@@ -563,8 +566,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- run-one-doctest
   (expr-str expected-str)
   (try
-    (let (actual (eval (reflect/read-first expr-str))
-          expected (eval (reflect/read-first expected-str)))
+    (let (actual (reflect/eval (reflect/read-first expr-str))
+          expected (reflect/eval (reflect/read-first expected-str)))
       (if (= actual expected) [:ok] [:fail actual expected]))
     (catch e [:error (error-message e)])))
 
@@ -576,7 +579,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   (fold (fn (acc sym)
           (if (not (string/starts-with? (->string sym) prefix))
             acc
-            (let (v (try (eval sym) (catch _ nil))
+            (let (v (try (reflect/eval sym) (catch _ nil))
                   d (when v (try (doc v) (catch _ nil))))
               (if (and (string? d) (includes? d ";=>"))
                 (append acc
@@ -584,7 +587,7 @@ module's namespace-rooted globals (ADR-070) back to it."
                     (doctests-in d)))
                 acc))))
     nil
-    (global-names)))
+    (reflect/global-names)))
 
 (defn- doctest-report
   (results)

@@ -12,7 +12,7 @@
 ;;; ---- P61: 3-hop link cascade ----
 (io/puts "=== P61: A→B→C link cascade, C errors ===")
 (let (me (self))
-  (trap-exit true)
+  (proc/trap-exit true)
   (let (c-pid (spawn (do (receive (:crash :ok) (after 5000 :ok)) (error "cascade-error")))
         b-pid (spawn (do (link c-pid) (receive (:quit :ok) (after 10000 :ok))))
         a-pid (spawn (do (link b-pid) (receive (:quit :ok) (after 10000 :ok)))))
@@ -26,14 +26,14 @@
       (io/puts "P61: cascade reached us, reason:" r)
       ;; reason propagated as the original error
       (io/puts "P61-correct (got exit, not timeout):" (not (= :timeout r)))))
-  (trap-exit false))
+  (proc/trap-exit false))
 
 ;;; ---- P62: mixed trap-exit in chain ----
 (io/puts "=== P62: B traps, C doesn't — C dies, B gets [:EXIT] message ===")
 (let (me (self))
   (let (c-pid (spawn (do (receive (:crash :ok) (after 5000 :ok)) (error "partial-cascade")))
         b-pid (spawn (do
-                       (trap-exit true)
+                       (proc/trap-exit true)
                        (link c-pid)
                        (send me :b-ready)
                        (let (msg (receive
@@ -50,14 +50,14 @@
 ;;; ---- P63: exit :normal to linked process does not kill it ----
 (io/puts "=== P63: exit :normal to linked process ===")
 (let (me (self))
-  (trap-exit true)
+  (proc/trap-exit true)
   (let (child (spawn (receive (:quit :ok) (after 10000 :ok))))
     (link child)
     ;; Send :normal exit — should not kill the child or propagate to us
     (exit child :normal)
     ;; Child receives :normal as a trappable [:EXIT] message (not a kill)
     ;; Or — if child has trap-exit false — :normal exit signal is just ignored
-    ;; For us (trap-exit true): if we get a [:EXIT child :normal], it means
+    ;; For us (proc/trap-exit true): if we get a [:EXIT child :normal], it means
     ;; the child died normally. That is expected behavior.
     (let (r (receive
               ([:EXIT _ :normal] :got-normal)
@@ -68,7 +68,7 @@
       (io/puts "P63-correct (we're alive):" true))
     ;; Cleanup
     (send child :quit))
-  (trap-exit false))
+  (proc/trap-exit false))
 
 ;;; ---- P64: huge error reason (BigInt) in :down message ----
 (io/puts "=== P64: BigInt in exit reason round-trips via monitor ===")
@@ -115,7 +115,7 @@
 ;;; ---- P66: 100-process linked chain crash cascade ----
 (io/puts "=== P66: 100-process linked chain crash ===")
 (let (me (self))
-  (trap-exit true)
+  (proc/trap-exit true)
   ;; Build a linked chain: process 0 links to process 1, ..., process 99
   ;; Crash process 99 — the exit signal should propagate back to us
   (defn build-chain (n parent-pid me)
@@ -145,7 +145,7 @@
               (after 30000 :timeout)))
       (io/puts "P66: cascade reason reached us:" r)
       (io/puts "P66-correct:" (not (= :timeout r)))))
-  (trap-exit false))
+  (proc/trap-exit false))
 
 ;;; ---- P67: spawn inside try/catch — inner crash is caught ----
 (io/puts "=== P67: spawn + crash, outer try/catch is unaffected ===")

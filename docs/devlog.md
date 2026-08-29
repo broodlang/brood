@@ -724,6 +724,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-28** — the capture hazard behind that rename: prelude templates, and finishing the `/name` root escape (KI-73)
 - **2026-08-27** — the type system, audited then rebuilt: `sig` fails closed and the definition owns the arity (ADR-259), the walk's totality is gated and found the quasiquote gap (ADR-260), a parameter's type is its domain (ADR-261), a union keeps its terms (ADR-262), `(not T)` (ADR-263)
 - **2026-08-28** — a record is closed, and openness is the type of the keys it doesn't declare (ADR-264) — which is what makes ADR-262's tagged union usable rather than merely representable
+- **2026-08-29** — arrow decomposition (ADR-292): an intersection of arrows satisfies what no single arm does, checked against a brute-force model of what an arrow denotes rather than against more property laws
 
 ---
 
@@ -6153,6 +6154,155 @@ top cost — a boot artifact. Five contaminations in one day across three differ
 cause, so the rule is now written at the top of [benchmarking.md](benchmarking.md): **measure at
 two sizes and keep only what scales.** Two runs instead of one, and it is the whole difference.
 
+## 2026-08-28 — the bare namespace, read on the Rust side for the first time
+
+The stdlib surface audit (ADR-250/251/252) took bare names 510 → 268, but every pass of it
+read `std/`. Nobody had read the **kernel**: 391 registered primitives, of which 285 are
+`%`-hidden and 63 already namespaced, leaving **43 bare** that no criterion had been applied
+to. Two were `eval` and `load`.
+
+Twelve moved (ADR-290) — ten to `reflect/`, two to `proc/`. What is worth recording is not
+the move but the three things that made it non-mechanical.
+
+**The repo already held the answer, in a comment, and it disagreed with the plan.** The
+opening proposal had `doc`/`arglist`/`bound?`/`apropos` going to `reflect/` and
+`link`/`monitor`/`exit` going to `proc/`. Both target modules open with a written decision
+against exactly that: `std/reflect.blsp` reserves the REPL-typed introspection set,
+`std/proc.blsp` reserves the mainstream actor model. Neither is discoverable by grepping for
+definitions — they are prose at the top of a file. Both were honoured. The lesson is cheap
+and repeatable: **before a namespacing wave, read the target module's header**, because a
+module that has already thought about its own boundary will say so there and nowhere else.
+(Deciding the pair rule fell out of the same reading: `unlink`/`demonitor` stay bare with
+`link`/`monitor`, since splitting an inverse pair across namespaces is the seam ADR-252
+closed for `register`.)
+
+**A boundary-aware rename tool gets four classes wrong, and each one bit.** Matching on the
+Brood identifier boundary (the `scripts/stale-names.sh` rule) is necessary and nowhere near
+sufficient:
+
+1. **Prose.** A first pass rewrote 911 occurrences; restricting it to CODE — skipping `;`
+   comments and string literals — gave 332. The other 579 were English: "at load time",
+   "defined once at load", "reload/load".
+2. **Definition heads.** `std/wasm.blsp` has `(defn load (path) …)` inside `(defmodule wasm)`
+   — that defines `wasm/load`, and rewriting the head would have corrupted it. A rename must
+   never match the name position of a `def…` form.
+3. **Root escapes.** The prelude's `defability`/`defrecord` expansions emit
+   `(list '/current-ns)`. A correct tool refuses to match a name preceded by `/` (that is how
+   it avoids touching `wasm/load`), so it skips these — and skipping them is a **boot
+   failure**: `prelude: unbound error: unbound symbol: current-ns`. The escape has to move
+   too, to `'/reflect/current-ns`, and it must stay an escape: a leading `/` returns before
+   the alias table is consulted, so a module that `(:alias reflect …)` something else cannot
+   capture the reference.
+4. **Brood embedded in a string.** Two sites, both executable: a program `file/spit`s into a
+   temp file in `tests/stdimage_test.blsp`, and the nested `eval-string` literals in
+   `breakage/chaos_eval_wormhole.blsp`. `scripts/stale-names.sh` exists for exactly this and
+   found them; the suite would otherwise have reported them as a mysterious concurrency
+   failure, which is precisely what it did until they were fixed.
+
+**Two lists had quietly stopped naming anything.** `EFFECTFUL_IN_GUARD` still listed
+`println`, `print`, `os-cmd`, `run-process`, `halt` and a `kill` that never existed — the
+names moved in the `os`/`system` redraw and a stale entry there is not an error anywhere, it
+just stops flagging. And `tests/stdimage_test.blsp`'s KI-72 regression test — the
+sabotage-verified guard on the image race that cost three sessions — passed `(os/exe-path)`
+as the runner. Under the canonical gate that is the **libtest binary**, which reads a
+positional argument as a test-name filter: `running 0 tests`, exit 0, assertion green, race
+never run. Under `nest test` the same line failed instead (exit 2, `nest <file.blsp>` is not
+a subcommand), which is how it surfaced at all — the failure I spent an hour trying to
+attribute to my own change was the test telling me it had never worked. It now resolves the
+real `brood` binary beside the runner or one level up, and `nest test` is 5166/5166 for the
+first time.
+
+Both defects are the same species, and it is the species this repo keeps finding: **a list of
+names that no longer names anything fails silently, in the direction of doing less.** A gate
+that stops gating looks exactly like a gate that passes.
+
+## 2026-08-28 — a review pass over the rename sweep: three gates, and one silence in my own module
+
+Reviewing the tree mid-`reflect/` sweep. Everything below lands *with* that sweep — each fix
+is meaningless without it, and committing any of them first would break the committed tree.
+
+**Three gates hadn't followed the rename.**
+
+- `std/doc-catalog.blsp` named twelve primitives that no longer resolve. Requalified, but
+  **not** with one prefix: ten went to `reflect/`, and `system-monitor`/`trap-exit` went to
+  **`proc/`**. A blanket edit got those two wrong; checking each of the twelve with `bound?`
+  caught it. Worth the thirty seconds — a catalogue entry pointing at the wrong namespace is
+  exactly as broken as one pointing at nothing, and only one of those two failures is loud.
+- `primitive_naming` rejects a kernel primitive under a slash namespace unless the prefix is
+  a real module. `std/reflect.blsp` is one, so `reflect` joins `bit`/`decimal`/`proc`/`math`
+  in the allow-list — the ADR-251 pattern, and the fix the test's own message prescribes.
+- **`runtime_collector` × 2 — and the interesting one.** Both assert `live < 50` after 3000
+  redefinitions. They failed at **111**, which looks exactly like a retention regression in
+  the shared code region. It is not. `reflect/eval` is a *qualified* reference, so the test's
+  driver now auto-loads `std/reflect.blsp`, and every `def` in that module legitimately
+  promotes into the RUNTIME region.
+
+  The tell is in the decomposition the test was not reporting: **baseline 110, churn-live 1**.
+  Three thousand redefinitions leave exactly one live closure. The collector is perfect; the
+  assertion was measuring how much of `std/` the driver happens to pull in. Fixed by taking a
+  baseline before the churn and asserting the *delta* — which is what "live should be a small
+  constant (current f + a few)" always meant — and by printing the decomposition, so the next
+  shift is legible instead of alarming. **Not** by raising the threshold: moving a GC number
+  to turn a red green is how a real leak would have been buried here.
+
+  Attribution was worth doing properly first — a worktree at HEAD passed 20/20 while the
+  working tree failed 2, and removing my own new std module changed nothing (111 either way).
+
+**And one silence in `std/tool/doctest.blsp`, which is mine.** `example-lines` tested the RAW
+line for ` → ` while `case-of` stripped the trailing comment first. So a line whose only arrow
+sits *inside a comment* was selected as an example and then dropped without a word — the two
+functions disagreed about what an example is, and the disagreement was spent as silence. One
+line in `std/` hit it (`defrecord`'s), harmlessly, which is why it survived.
+
+Both halves fixed: the selector now strips the comment too, so the two agree; and a line that
+IS selected but does not parse is now **reported** rather than dropped — a second arrow used
+to remove a case from the gate with nothing said. A line that is not an example at all still
+returns nil, so the contract is unchanged. Measured before changing it: exactly one
+selected-but-dropped line across all of `std/`, so reporting them costs no false positives.
+
+Suite 1229/1229, checker gate zero-warning, `nest format --check` clean, clippy
+`--all-targets --all-features` clean.
+
+## 2026-08-28 (later) — the prelude half, and why the residue was small
+
+ADR-291. Six bare prelude names moved (`reflect/set-load-path!`, `reflect/add-load-path!`,
+`seq/lmap`/`lfilter`/`lkeep`/`lremove`); the roadmap's "~15 more" turned out to be closer to
+zero once each candidate was actually examined, and two of the fifteen (`reload-defs`,
+`module-doc`) had **already** been `system/`-qualified — the entry was stale.
+
+The useful output is not the six names, it is five rules, now in the ADR, each derived from a
+candidate that looked obvious and wasn't:
+
+- **`io/*print-length*` would have broken its own type rule.** `is_earmuffed` is literally
+  `starts_with('*') && ends_with('*')`, so qualifying an ambient global stops it being
+  recognised as ambient and the checker starts typing it by its load-time value — the exact
+  false positive the earmuffed-global rule exists to prevent. There is also no namespaced
+  dynamic anywhere in `std/`, which should have been the tell.
+- **`reserved-package-name?` is load-bearing *because* it is bare.**
+  `crates/lisp/tests/autoload_race.rs` picked it as the KI-72 probe — a bare-named function
+  whose body reaches an autoload stub. Qualifying it leaves the test green while it no longer
+  tests what it names. Same species as the vacuous-gate bug fixed earlier today, and it would
+  have been introduced rather than found.
+- **`for`/`doseq`/`dolist`/`dotimes`/`with-out-str`/`with-err-str` are in `(special-forms)`.**
+  That list drives the highlighter, `nest grammar` for VS Code/Emacs/tree-sitter, the LSP's
+  semantic tokens and `brood.el`. A qualified name that renders as a control keyword is a
+  contradiction, so the choice was never "rename or not" but "rename *and* stop being a
+  keyword" — a product-visible change for six names, declined.
+
+**On measurement.** The boot path was checked properly rather than assumed: base-vs-new with
+`BROOD_NO_STDIMAGE=1` on **both** arms (the working tree has a current stdlib image and no git
+ref ever does — the trap that produced the retracted 17% win). New 9.5–9.9 ms against a base
+that itself ranged 9.5–10.7 ms across three samples, so the arms are inside the base-vs-base
+floor: **neutral**, no KI-61-style namespacing tax, and nothing to claim in the other
+direction either.
+
+**On the suite.** Seven `nest test` runs on the new tree: six green, one with three unrelated
+CSV conformance failures (no mechanism links CSV to any renamed name; recorded as an
+observation, not a claim). Three runs on a HEAD worktree for comparison: **zero** green — the
+`stdimage` exe-path test fails there every time, which is the deterministic failure fixed
+earlier today, and the `stdimage` fidelity test flakes at baseline too. The tree is strictly
+better than the baseline it started from.
+
 ## 2026-08-29 — three gates that could not run, and one that read a missing feature as rot
 
 Picking up an interrupted session whose working tree held a half-fix to `check-examples.sh`
@@ -6197,6 +6347,41 @@ sighting, already mitigated on `4fec7fa2`).
 The lesson is KI-68/69/70/76's, with one clause added. A gate must assert *what it is gating*
 — and when the same assertion is needed in four scripts, three of them will not get it if the
 first one is fixed in place.
+## 2026-08-29 — the arrow rule, and testing a relation against something other than itself
+
+Picked up the one item `docs/type-system-status.md` had recorded as deliberately left:
+deciding coverage *between* arrow types. The honest reason it was left is that the value
+claim had not been tested — so the first move was to test it rather than argue about it, and
+the second probe came back wrong:
+
+```
+(and (int -> int) (bool -> bool))  <:  (int|bool -> int|bool)   =>  false     (truth: true)
+```
+
+That is not an exotic type. Multi-arity functions *are* intersections of arrows, so this is a
+shape the prelude can write. The set-theoretic rule (ADR-292) decides it, and reuses ADR-289's
+product covering for the domain half instead of growing a second covering algorithm.
+
+**The part worth keeping.** This change makes the subtype relation more *permissive*, and the
+property corpus cannot check that direction — transitivity, the union bounds and
+disjointness-against-intersection all check the relation against itself, so a rule that is
+uniformly too permissive satisfies every law we have. Passing them is not evidence here. The
+gate that is evidence is a brute-force model of the semantics: over a three-value universe an
+arrow is a finite set of functions, an intersection is the intersection of those sets, and
+containment is plain subset containment computed with no reference to any checker rule. 2 547
+216 ordered pairs, **0 unsound**.
+
+Two things it also bought. The test asserts completeness as well, and that came back **0
+missed of 905 709 judgeable pairs** — the rule is exact, not merely safe. And the two classes
+excluded from the completeness claim had to be *understood* before they could be excluded:
+every sampled miss turned out to have a requirement whose result named every tag, i.e. an
+accidental `any` that exists only because the universe is three values wide. That is the model
+being unfaithful, not the checker being imprecise, and reading the samples is what
+distinguished the two — 97% of the residue was the other artifact, an arrow with an
+uninhabited result denoting no function at all.
+
+Sabotaged (accept unconditionally), the gate reports 1 467 176 forbidden containments, so it
+can fail.
 
 ## 2026-08-29 — a release blocker that had been closed for a month, and 24 lines of dead formatter
 

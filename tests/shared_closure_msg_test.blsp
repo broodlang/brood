@@ -133,7 +133,7 @@
       (assert= :ok
         (fold (fn (_ i)
                 (do
-                  (eval (list 'def (symbol (str "scm-churn-" i)) (fn () i)))
+                  (reflect/eval (list 'def (symbol (str "scm-churn-" i)) (fn () i)))
                   (assert= 42 (call-through srv shared-thunk))
                   :ok))
           :ok (range 40)))

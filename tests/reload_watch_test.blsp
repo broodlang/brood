@@ -32,15 +32,15 @@
         (file/mkdir dir)
         (let (f (path/join dir "w.blsp"))
           (file/spit f "(def rwt-val 1)\n")
-          (load f)
+          (reflect/load f)
           (on-change f (fn (p) (io/puts "[reload-watch-test] on-reload fired" p)))
           ;; `file-mtime` is millisecond-resolution; without a gap here the two
           ;; `spit`s can land in the same millisecond and the watcher correctly
           ;; sees no change at all (not a watcher bug — a race in the test).
           (sleep 100)
           (file/spit f "(def rwt-val 2)\n")
-          (is (reload-watch-test-wait (fn () (= (eval 'rwt-val) 2)) 3000))
-          (assert= (eval 'rwt-val) 2)))))
+          (is (reload-watch-test-wait (fn () (= (reflect/eval 'rwt-val) 2)) 3000))
+          (assert= (reflect/eval 'rwt-val) 2)))))
 
   (test "on-reload's own errors are caught, never propagated to the watcher"
     ;; The watcher announces each reload on stdout, and this test deliberately
@@ -54,16 +54,16 @@
         (file/mkdir dir)
         (let (f (path/join dir "w2.blsp"))
           (file/spit f "(def rwt-val2 1)\n")
-          (load f)
+          (reflect/load f)
           ;; A callback that always throws — the def must still take effect
           ;; (on-reload runs *after* system/reload-defs already succeeded) and the
           ;; watcher must survive to reload again on a later edit.
           (on-change f (fn (_p) (throw "boom")))
           (sleep 100)
           (file/spit f "(def rwt-val2 2)\n")
-          (is (reload-watch-test-wait (fn () (= (eval 'rwt-val2) 2)) 3000))
-          (assert= (eval 'rwt-val2) 2)
+          (is (reload-watch-test-wait (fn () (= (reflect/eval 'rwt-val2) 2)) 3000))
+          (assert= (reflect/eval 'rwt-val2) 2)
           (sleep 100)
           (file/spit f "(def rwt-val2 3)\n")
-          (is (reload-watch-test-wait (fn () (= (eval 'rwt-val2) 3)) 3000))
-          (assert= (eval 'rwt-val2) 3))))))
+          (is (reload-watch-test-wait (fn () (= (reflect/eval 'rwt-val2) 3)) 3000))
+          (assert= (reflect/eval 'rwt-val2) 3))))))

@@ -39,6 +39,31 @@ fn nominal_ids(fields: &std::collections::BTreeMap<Symbol, (Ty, bool)>) -> Optio
     )
 }
 
+/// Render a term's **subtractions**, if any: `(not X)` when the positive part is the whole
+/// universe, `(and P (not X))` otherwise.
+///
+/// Not optional. A subtraction that renders as its positive part is a message that says
+/// `vector` for a type that excludes every `vector<int>` — the reader is told the opposite
+/// of the truth, which is worse than the widening this replaced.
+fn render_subtraction(positive: &str, negs: &[Ty], universe: bool) -> String {
+    let inner = if negs.len() == 1 {
+        negs[0].to_string()
+    } else {
+        format!(
+            "({})",
+            negs.iter()
+                .map(Ty::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )
+    };
+    if universe {
+        format!("(not {inner})")
+    } else {
+        format!("({positive} and (not {inner}))")
+    }
+}
+
 impl fmt::Display for Ty {
     /// A readable rendering for diagnostics: the named lattice points where they
     /// apply (`never`, `any`, `number`, `list`), a single tag by its `type-of`
@@ -51,6 +76,20 @@ impl fmt::Display for Ty {
         if let Some(terms) = self.alt_terms() {
             let rendered: Vec<String> = terms.iter().map(Ty::to_string).collect();
             return f.write_str(&rendered.join(" | "));
+        }
+        // A term that SUBTRACTS (ADR-288) renders as what it is. Falling through would
+        // print the positive part alone — `vector` for a type that excludes every
+        // `vector<int>` — telling the reader the opposite of the truth.
+        if let Some(negs) = self.subtracted() {
+            if self.term_is_empty_for_display() {
+                return f.write_str("never");
+            }
+            let positive = self.positive_for_display();
+            return f.write_str(&render_subtraction(
+                &positive.to_string(),
+                negs,
+                positive.is_any(),
+            ));
         }
         // Named points (compared by value — `Arc` isn't structural, so these
         // can't be `match` patterns).
@@ -376,6 +415,27 @@ impl Ty {
     /// [`Display`] is the diagnostic rendering and deliberately reads differently
     /// (`vector<int>`, `{a: int}`); this is the one that has to parse.
     pub fn to_source(&self) -> Option<String> {
+        // A term that SUBTRACTS (ADR-288) is written with the `(not …)` the grammar
+        // already has. Falling through would emit the positive part alone, which is
+        // strictly WIDER than the type — and ADR-271's rule is that a suggestion must
+        // never claim a different type than the checker meant.
+        if let Some(negs) = self.subtracted() {
+            if self.term_is_empty_for_display() {
+                return Some("never".to_string());
+            }
+            let inner = if negs.len() == 1 {
+                negs[0].to_source()?
+            } else {
+                let parts: Vec<String> =
+                    negs.iter().map(Ty::to_source).collect::<Option<Vec<_>>>()?;
+                format!("(or {})", parts.join(" "))
+            };
+            let positive = self.positive_for_display();
+            if positive.is_any() {
+                return Some(format!("(not {inner})"));
+            }
+            return Some(format!("(and {} (not {inner}))", positive.to_source()?));
+        }
         // A union of terms: `(or …)` over each.
         if let Some(terms) = self.alt_terms() {
             let parts: Vec<String> = terms

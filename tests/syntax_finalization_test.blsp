@@ -1,7 +1,7 @@
 ;; The syntax-finalisation rules (ADR-149/150/151/152): each of these spellings was
 ;; once accepted and *reinterpreted* into a different working program. They must now
 ;; be rejected, with a hint naming the fix — and the idiomatic spelling must still
-;; work. Every "must fail" case goes through `(eval (reflect/read-string …))` so the bad form
+;; work. Every "must fail" case goes through `(reflect/eval (reflect/read-string …))` so the bad form
 ;; doesn't fail this file's own compile pass.
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test, via
@@ -16,11 +16,11 @@
 
 (defn err-of (src)
   "The message of the error raised by reading+evaluating `src`, or nil if it ran."
-  (try (do (eval (reflect/read-string src)) nil) (catch e (error-message e))))
+  (try (do (reflect/eval (reflect/read-string src)) nil) (catch e (error-message e))))
 
 (defn hint-of (src)
   "The :hint of the error raised by reading+evaluating `src`, or nil."
-  (try (do (eval (reflect/read-string src)) nil) (catch e (get e :hint))))
+  (try (do (reflect/eval (reflect/read-string src)) nil) (catch e (get e :hint))))
 
 ;; ---- ADR-149: a binding container is a list ---------------------------------
 
@@ -98,8 +98,8 @@
       (let (fa (path/join dir "sfa.blsp") fb (path/join dir "sfb.blsp"))
         (file/spit fa "(defmodule sfa)\n(def *sf-width* 10)\n(defn w () *sf-width*)\n")
         (file/spit fb "(defmodule sfb)\n(def *sf-width* 999)\n(defn w () *sf-width*)\n")
-        (load fa)
-        (load fb)
+        (reflect/load fa)
+        (reflect/load fb)
         (assert= (sfa/w) 10)
         (assert= (sfb/w) 999)
         ;; …and neither leaked to root
@@ -113,7 +113,7 @@
         (defdyn *sf-knob* 1)
         (file/spit f
           "(defmodule sfc)\n(defn read-knob () *sf-knob*)\n(defn bump () (def *sf-knob* 42))\n")
-        (load f)
+        (reflect/load f)
         (assert= (sfc/read-knob) 1)
         (sfc/bump)
         (assert= *sf-knob* 42)
@@ -121,9 +121,9 @@
 
   (test "dynamic? reports the declaration, and binding still requires one"
     (defdyn *sf-declared* 0)
-    (is (dynamic? '*sf-declared*))
-    (refute (dynamic? '*sf-never-declared*))
-    (assert-error (eval (reflect/read-string "(binding (*sf-never-declared* 1) nil)")))))
+    (is (reflect/dynamic? '*sf-declared*))
+    (refute (reflect/dynamic? '*sf-never-declared*))
+    (assert-error (reflect/eval (reflect/read-string "(binding (*sf-never-declared* 1) nil)")))))
 
 ;; ---- ADR-152: reject the shape, never reinterpret it ------------------------
 

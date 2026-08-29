@@ -340,9 +340,9 @@ load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 - maps `hash-map %map-get %map-assoc %map-dissoc map-keys map-vals map-contains?`
 - strings `string-length substring upper lower string->number`
 - reflection/checking `type-of check`; value↔text & IO `str pr-str print stdout-tty?`
-- self-hosting `eval reflect/read-string eval-string load %builtin-module apply`; macros `macroexpand macroexpand-1 gensym`
+- self-hosting `reflect/eval reflect/read-string reflect/eval-string reflect/load %builtin-module apply`; macros `macroexpand macroexpand-1 gensym`
 - filesystem/system `cwd file-exists? dir? list-dir make-dir spit slurp getenv run-process`
-- symbols/tooling `name form-pos current-file doc arglist global-names bound?`
+- symbols/tooling `name form-pos current-file doc arglist reflect/global-names bound?`
 - time/memory `now mem-bytes mem-peak`; errors/control `throw %try %isolate`
 - processes `spawn send %receive self ref monitor demonitor spawn-count peak-threads worker-threads`
 
@@ -383,7 +383,7 @@ The features this section once listed have all shipped: **dynamic variables**
 tries), **modules / namespaces** (`defmodule`), a **per-process tracing GC**
 (ADR-035 and its successors), **rest-parameter notation in `(sig …)`** (`&` /
 `&optional`, ADR-127), **records** (`defrecord` — pure sugar over closed maps,
-ADR-130), **fusing lazy seq-views** (`lmap`/`lfilter`/`lkeep`/`lremove` threaded
+ADR-130), **fusing lazy seq-views** (`seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lremove` threaded
 with `->>`, ADR-111), a **first-class set** kind with the `#{…}` literal
 (ADR-060 — `type-of` reports `:set` and a set is never `=` to a map),
 **callable keywords** (ADR-165/167) and **abilities** — open generic functions

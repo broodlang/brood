@@ -57,8 +57,8 @@
   (test "bound? wants a symbol" (assert-error (bound? 42)))
   (test "global-names includes prelude and user definitions"
     (defn another-name () nil)
-    (is (includes? (global-names) 'map))
-    (is (includes? (global-names) 'introspection-test/another-name))))
+    (is (includes? (reflect/global-names) 'map))
+    (is (includes? (reflect/global-names) 'introspection-test/another-name))))
 
 ;; source-location (ADR-031; docs/lsp.md §Cross-file): loading a file records
 ;; where each *top-level* def/defn/defmacro was defined, so tooling can answer
@@ -115,11 +115,11 @@
   ;; landing between them fails it. Found by a repeat-until-failure baseline (2026-08-05):
   ;; it failed on iteration 2 at two seeds, which is the timing shift, not a re-run bug.
   (test "all-globals lists every global and includes the prelude"
-    :isolated (let (g (global-names))
+    :isolated (let (g (reflect/global-names))
       (is (> (count g) 100))
       (is (includes? g 'map))
       (is (includes? g 'rand/int))
-      (assert= g (global-names))))
+      (assert= g (reflect/global-names))))
   (test "doc-search finds globals whose docstring mentions a word"
     (let (names (map first (doc-search "uniformly random")))
       (is (includes? names 'seq/shuffle))

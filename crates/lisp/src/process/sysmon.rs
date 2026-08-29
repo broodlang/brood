@@ -82,7 +82,7 @@ pub fn install(m: Option<SysMon>) -> Option<SysMon> {
     prev
 }
 
-/// The current configuration (for the `(system-monitor)` read form).
+/// The current configuration (for the `(proc/system-monitor)` read form).
 pub fn current() -> Option<SysMon> {
     *crate::core::sync::lock(&MONITOR)
 }

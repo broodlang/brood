@@ -6,7 +6,7 @@
 ;; written for `std/` were already wrong when this machinery was first applied there.
 ;;
 ;; The engine lived as six private functions inside `tests/doc_examples_test.blsp`, hard-wired
-;; to `builtin-modules`, so it could gate the standard library and nothing else. It is the
+;; to `reflect/builtin-modules`, so it could gate the standard library and nothing else. It is the
 ;; same code here, made public and pointed at whichever names you ask for — which is what
 ;; `nest test` needs to gate a *project's* docstrings the way this repo gates its own.
 
@@ -33,10 +33,17 @@ the sentence.
   ;; `line` up to a trailing `;`, so `→ :x  ; note` compares against `:x`.
   (let (i (index-of line ";")) (if (and i (>= i 0)) (string/substring line 0 i) line)))
 
+(defn- example-line?
+  (l)
+  ;; Indented, and carrying the arrow OUTSIDE any trailing comment. Testing the raw line
+  ;; instead let a line whose only arrow sits in a comment be selected as an example and then
+  ;; silently dropped by `case-of`, which strips the comment first — the two disagreed about
+  ;; what an example is, and the disagreement was spent as silence.
+  (and (string/starts-with? l "    ") (includes? (strip-comment l) " → ")))
+
 (defn example-lines (d)
   "The indented ` → ` lines of docstring `d` — the example cases it carries."
-  (filter (fn (l) (and (string/starts-with? l "    ") (includes? l " → ")))
-    (string/split (str d) "\n")))
+  (filter example-line? (string/split (str d) "\n")))
 
 (defn- case-of
   (line)
@@ -66,46 +73,59 @@ the sentence.
     (if parsed (= value (second parsed)) (= (pr-str value) expected))))
 
 (defn check (name-str line)
-  "nil when the example on `line` holds, else a description of how it failed.
+  "nil when `line` is not an example at all, or when the example it carries holds; else a
+description of how it failed — a wrong result, or a line that looks like an example and does
+not parse as one.
 
 `name-str` only labels the message — it is the name the example was found on."
-  (let (c (case-of line))
-    (when c
-      (let ([src expected] c
-            outcome (try
-                      [:ok (eval (reflect/read-string src))]
-                      (catch e [:raised (str "RAISED " (error-message e))]))
-            ok (if (= (first outcome) :raised)
-                 (= (second outcome) expected)
-                 (holds? (second outcome) expected)))
-        (when (not ok)
-          (str name-str
-            ": "
-            src
-            "  → got "
-            (if (= (first outcome) :raised) (second outcome) (pr-str (second outcome)))
-            ", documented "
-            expected))))))
+  (when (example-line? line)
+    (let (c (case-of line))
+      (if (nil? c)
+        ;; Selected as an example — indented, with an arrow outside any comment — but it does
+        ;; not split. That is a MALFORMED example, not prose, and saying so is the difference
+        ;; between an unchecked promise and a known one. Silence here is how a typo'd second
+        ;; arrow removes a case from the gate without anyone noticing.
+        (str name-str ": " (string/trim line) "  → malformed example: expected exactly one ` → `")
+        (let ([src expected] c
+              outcome (try
+                        [:ok (reflect/eval (reflect/read-string src))]
+                        (catch e [:raised (str "RAISED " (error-message e))]))
+              ok (if (= (first outcome) :raised)
+                   (= (second outcome) expected)
+                   (holds? (second outcome) expected)))
+          (when (not ok)
+            (str name-str
+              ": "
+              src
+              "  → got "
+              (if (= (first outcome) :raised) (second outcome) (pr-str (second outcome)))
+              ", documented "
+              expected)))))))
 
 (defn- documented?
   (s)
-  (let (d (try (doc (eval s)) (catch _ nil)))
+  (let (d (try (doc (reflect/eval s)) (catch _ nil)))
     (and d (not (empty? (example-lines d))))))
+
+(defn documented-names-under (prefix)
+  "Every public name starting with `prefix` whose docstring carries at least one indented
+example — `\"myapp/\"` for one package's own surface. A nil `prefix` means every public name."
+  ;; Narrow by PREFIX before looking for examples, not after: `documented?` evaluates a
+  ;; global to read its docstring, so filtering last makes a scoped run pay that for every
+  ;; one of the thousands of names it is about to discard.
+  (let (public (filter (fn (s) (not (reflect/private? s))) (reflect/global-names))
+        scoped (if (nil? prefix)
+                 public
+                 (filter (fn (s) (string/starts-with? (->string s) prefix)) public)))
+    (filter documented? scoped)))
 
 (defn documented-names ()
   "Every public name in the image whose docstring carries at least one indented example."
-  (filter documented? (filter (fn (s) (not (private? s))) (global-names))))
-
-(defn documented-names-under (prefix)
-  "As `documented-names`, restricted to names starting with `prefix` — `\"myapp/\"` for one
-package's own surface. A nil `prefix` means every public name."
-  (if (nil? prefix)
-    (documented-names)
-    (filter (fn (s) (string/starts-with? (->string s) prefix)) (documented-names))))
+  (documented-names-under nil))
 
 (defn- failures-of
   (s)
-  (let (d (doc (eval s)))
+  (let (d (doc (reflect/eval s)))
     (filter (fn (x) (not (nil? x))) (map (fn (l) (check (->string s) l)) (example-lines d)))))
 
 (defn failures-under (prefix)

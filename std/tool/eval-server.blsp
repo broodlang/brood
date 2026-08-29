@@ -3,7 +3,7 @@
 ;; eval requests over stdin, one per line; each reply comes back on stdout, one per
 ;; line. The parent gets REPL-grade evaluation — value, captured output, errors,
 ;; per-request timeout — without ever exposing its own global table to the code
-;; being evaluated. This is the missing middle between in-image `eval-string`
+;; being evaluated. This is the missing middle between in-image `reflect/eval-string`
 ;; (fast, but a stray `def` rewrites the live parent — unacceptable for evaluating
 ;; *untrusted-by-construction* text like an editor playground) and spawn-per-run
 ;; subprocesses (safe, but a full runtime start per eval).
@@ -148,7 +148,7 @@ looking identical to a round-trip that cleaned up after itself."
 
 (defn- eval-server-eval-traced
   (src names)
-  ;; Evaluate `src` form by form (not `eval-string`), installing the requested traces
+  ;; Evaluate `src` form by form (not `reflect/eval-string`), installing the requested traces
   ;; EXACTLY ONCE — immediately before the first form that isn't a definition, i.e.
   ;; after `(defn fac …)` has landed and before `(fac 5)` runs.
   ;;
@@ -163,8 +163,8 @@ looking identical to a round-trip that cleaned up after itself."
         result (fold (fn (acc form)
                        (let ([installed _] acc)
                          (if (or installed (eval-server-definition-form? form))
-                           [installed (eval form)]
-                           (do (eval-server-try-traces names) [true (eval form)]))))
+                           [installed (reflect/eval form)]
+                           (do (eval-server-try-traces names) [true (reflect/eval form)]))))
                  [false nil]
                  forms))
     (second result)))
@@ -217,7 +217,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
                 {:ok true
                  :value (pr-str-bounded (if traced
                                           (eval-server-eval-traced src trace-names)
-                                          (eval-string src)))}
+                                          (reflect/eval-string src)))}
                 (catch e {:ok false :error (error-message e)})))
         _ (%capture-begin)
         r (if traced (binding (*spy-sink* sink) (run)) (run))

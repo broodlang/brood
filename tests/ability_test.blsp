@@ -375,7 +375,7 @@
 (defn abt-conc-name (i) (symbol (str "AbtConc" i)))
 (defn abt-conc-op (i) (symbol (str "abt-conc-op" i)))
 (defn abt-conc-declare (i)
-  (eval (list 'defability (abt-conc-name i) (list (abt-conc-op i) ['self] :-> 'any))))
+  (reflect/eval (list 'defability (abt-conc-name i) (list (abt-conc-op i) ['self] :-> 'any))))
 (defn abt-conc-registered? (i)
   (not (nil? (%impl-for [(abt-conc-name i) (abt-conc-op i)] :int))))
 
@@ -558,9 +558,9 @@
     (assert= (ncols (crgb 1 2 3)) 3))
   (test "deriving a non-derivable ability (no :derive-record) is a loud error"
     (let (e (try
-              (eval '(do
-                       (defability NoRecipe (nr [self] :-> int))
-                       (defrecord derr (q) :derives [NoRecipe])))
+              (reflect/eval '(do
+                               (defability NoRecipe (nr [self] :-> int))
+                               (defrecord derr (q) :derives [NoRecipe])))
               (catch e (error-message e))))
       (is (includes? e "not derivable")))))
 

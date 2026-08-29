@@ -267,7 +267,7 @@ sums the squares of the odd numbers, allocating nothing in between.
 
 Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter p)
 (xmap f))` filters before mapping — because each stage wraps the next one's reducer.
-`lmap`/`lfilter`/… are the ergonomic front end over the same machinery; use
+`seq/lmap`/`seq/lfilter`/… are the ergonomic front end over the same machinery; use
 `transduce` when the stage stack is computed, reused, or your own."
   (fold (xform rf) init coll))
 (sig transduce ((or fn keyword) any any seqable -> any))
@@ -300,7 +300,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
 ;; This helper lived in the PRELUDE as `%distinct-step` until 2026-08-27, with its only
 ;; caller here — one of four helpers stranded there when their public functions moved out.
 ;; A prelude-resident helper that only a module uses costs boot-image size and reads as a
-;; core primitive in `global-names`; it belongs beside its caller.
+;; core primitive in `reflect/global-names`; it belongs beside its caller.
 (defn- distinct-step
   (state x)
   ;; the "seen" map only ever stores `true`, so a single `%map-get` (default `false`)
@@ -482,7 +482,7 @@ The pairwise sibling of `zip-with`, which combines instead of pairing.
 
 (defn xmap (f)
   "The `map` stage as a transducer: `(f x)` for each input. Compose with `comp`, run
-with `transduce`, or reach for `lmap` when you just want a fusing pipeline.
+with `transduce`, or reach for `seq/lmap` when you just want a fusing pipeline.
 
     (seq/transduce (comp (seq/xmap inc) (seq/xfilter math/even?)) + 0 [1 2 3])   → 6"
   (%xmap f))

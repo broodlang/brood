@@ -7,9 +7,10 @@
 ;; keeping them out of the core namespace stops nineteen diagnostic counters from reading
 ;; as core language vocabulary.
 ;;
-;; `system-monitor` deliberately stays core: it arms the kernel event stream that
-;; `telemetry/watch-runtime` re-emits, which is production observability rather than a
-;; developer counter.
+;; `proc/system-monitor` deliberately stays OUT of `dev`: it arms the kernel event stream
+;; that `telemetry/watch-runtime` re-emits, which is production observability rather than a
+;; developer counter. It was bare until 2026-08-28 and is now a `proc/` primitive (ADR-290)
+;; — a process-level facility, not a diagnostic counter.
 (defmodule dev)
 
 (defn mem-bytes ()

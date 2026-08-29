@@ -61,7 +61,8 @@ fn every_curated_signature_names_something_that_exists() {
     let mut interp = Interp::new();
     // The curated names span modules (`math/…`, `string/…`), and a bare image holds only
     // the prelude, so load everything before asking.
-    let _ = interp.eval_str("(doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))");
+    let _ = interp
+        .eval_str("(doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))");
 
     let mut stale = Vec::new();
     for name in &names {

@@ -39,7 +39,7 @@
 
 ;; 200 levels work fine:
 (def nested-let-src (build-nested-let-src 200))
-(def nested-let-fn (eval-string nested-let-src))
+(def nested-let-fn (reflect/eval-string nested-let-src))
 ;; Call it: result is sum of i^2 for i in [0, 200)
 (def nested-result (nested-let-fn))
 (io/puts "200-deep nested-let result:" nested-result)

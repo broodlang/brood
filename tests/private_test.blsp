@@ -16,11 +16,11 @@
 
 (defmodule private-test (:use test))
 
-;; A worker that reports `(private? sym)` for a symbol it is sent — used to prove
+;; A worker that reports `(reflect/private? sym)` for a symbol it is sent — used to prove
 ;; the recorded private-set (ADR-146) is visible to a *spawned* process through the
 ;; shared runtime `Arc`, not just the process that made the definitions.
 (defn priv-refl-worker (parent)
-  (receive (sym (send parent (private? sym)))))
+  (receive (sym (send parent (reflect/private? sym)))))
 
 (describe "module privacy (ADR-146)"
   ;; :serial — every test here `%load-string`s whole MODULES into the shared module
@@ -65,7 +65,7 @@
              (catch e :refused))
           :refused)))
   (test "top-level (no module) code may reach privates — the live-hacking hatch"
-    (assert= (eval (reflect/read-string "(priv-vault/secret)")) 41))
+    (assert= (reflect/eval (reflect/read-string "(priv-vault/secret)")) 41))
   (test "an unquoted private ref inside a quasiquote is still an evaluated ref — blocked"
     ;; `(x ~(other/priv)) — the ~ brings the ref back to the evaluated context,
     ;; so wrapping it in a quasiquote is not a bypass (ADR-146 level-aware walk).
@@ -89,15 +89,15 @@
     (%load-string "(defmodule priv-mac) (defn- mac-h (x) (* x 2)) (defmacro dbl (x) `(mac-h ~x)) (defn use () (dbl 21))")
     (assert= (priv-mac/use) 42))
 
-  ;; ---- `private?` reflection over the recorded private-set (ADR-146) -----------
+  ;; ---- `reflect/private?` reflection over the recorded private-set (ADR-146) -----------
   ;; Privacy is a recorded per-module fact (`Heap::is_private`), populated where the
-  ;; `defn-`/`def-` runs and consulted via `private?`.
+  ;; `defn-`/`def-` runs and consulted via `reflect/private?`.
   (test "private? reports a recorded private true; a public or undefined name false"
     (%load-string "(defmodule priv-refl) (defn- helper () 1) (defn pub () 2) (def- k 3)")
-    (and (is (private? 'priv-refl/helper))
-      (is (private? 'priv-refl/k))
-      (refute (private? 'priv-refl/pub))
-      (refute (private? 'priv-refl/never-defined))))
+    (and (is (reflect/private? 'priv-refl/helper))
+      (is (reflect/private? 'priv-refl/k))
+      (refute (reflect/private? 'priv-refl/pub))
+      (refute (reflect/private? 'priv-refl/never-defined))))
   (test "the recorded private-set is visible to a spawned process (shared runtime Arc)"
     (%load-string "(defmodule priv-refl2) (defn- helper () 1) (defn pub () 2)")
     (let (me (self) worker (spawn (priv-refl-worker me)))
@@ -113,8 +113,8 @@
     ;; back: `env_define` clears the mark on every def, `%mark-private` re-adds it
     ;; only for `defn-`/`def-`.
     (%load-string "(defmodule priv-flip) (defn- x () 1)")
-    (is (private? 'priv-flip/x))
+    (is (reflect/private? 'priv-flip/x))
     (%load-string "(defmodule priv-flip) (defn x () 2)") ; redefine PUBLIC
-    (refute (private? 'priv-flip/x))
+    (refute (reflect/private? 'priv-flip/x))
     (%load-string "(defmodule priv-flip) (defn- x () 3)") ; redefine PRIVATE
-    (is (private? 'priv-flip/x))))
+    (is (reflect/private? 'priv-flip/x))))

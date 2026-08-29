@@ -20,7 +20,7 @@
 
 (defn expand-error (form)
   "Return the error string when `form` raises via eval, or nil if it succeeds."
-  (error-of (eval form)))
+  (error-of (reflect/eval form)))
 
 ;; ── 1. Calling non-functions ──────────────────────────────────────────────────
 
@@ -216,15 +216,15 @@
     (assert= nil (do)))
 
   (test "(if) with no args returns nil"
-    (assert= nil (eval '(if))))
+    (assert= nil (reflect/eval '(if))))
 
   (test "(if cond) with no branches: false cond → nil, true cond with no then → nil"
-    (assert= nil (eval '(if nil)))
+    (assert= nil (reflect/eval '(if nil)))
     (assert= :yes (if true :yes))
     (assert= nil (if nil :yes)))
 
   (test "(quote) with no args returns nil"
-    (assert= nil (eval '(quote))))
+    (assert= nil (reflect/eval '(quote))))
 
   (test "(-> x) with no threading steps returns x"
     (assert= 42 (-> 42)))
@@ -248,7 +248,7 @@
     (is (string? (expand-error '(let (x) x)))))
 
   (test "let with integer as binding name raises match error"
-    (assert-error (eval '(let (1 :val) 1))))
+    (assert-error (reflect/eval '(let (1 :val) 1))))
 
   (test "quote with multiple args raises arity error"
     (is (string? (expand-error '(quote a b)))))

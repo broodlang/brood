@@ -15,17 +15,17 @@
 (defmodule chaos3-apply-seqview-uag-test (:use test))
 
 ;; callee is a FRESH local closure each call (a relocatable LOCAL handle), the
-;; tail arg is an unrealised lazy seq-view (`lmap` over a range).
+;; tail arg is an unrealised lazy seq-view (`seq/lmap` over a range).
 (defn count-via-apply (n)
   (let (callee (fn (& xs) (count xs)))
     ; fresh closure handle
-    (apply callee (lmap inc (range n)))))
+    (apply callee (seq/lmap inc (range n)))))
 
 ;; leading-arg variant: a fresh local list rides as a non-spliced leading arg, so
 ;; it too is held across the realise (the stored-handle / heap-verifier variant).
 (defn lead-via-apply (n)
   (let (pre (list :a :b :c))
-    (count (apply list pre (lmap inc (range n))))))
+    (count (apply list pre (seq/lmap inc (range n))))))
 
 (defn hammer (i acc f n)
   (if (= i 0) acc (hammer (- i 1) (+ acc (f n)) f n)))

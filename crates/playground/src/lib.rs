@@ -139,7 +139,7 @@ pub fn highlight(source: &str) -> String {
 }
 
 /// Completions for `prefix`: globally-bound names (builtins + prelude) that start with
-/// it, newline-separated, capped at 30. Sourced from the runtime's own `global-names`,
+/// it, newline-separated, capped at 30. Sourced from the runtime's own `reflect/global-names`,
 /// computed once and cached — a fresh interpreter's globals never change.
 #[wasm_bindgen]
 pub fn completions(prefix: &str) -> String {
@@ -163,19 +163,19 @@ fn globals() -> &'static Vec<String> {
     GLOBALS.get_or_init(|| {
         let mut interp = Interp::new();
         // Load every bundled module first. A bare `Interp` holds only the prelude, so
-        // `(global-names)` returned no `math/…`, `string/…` or `json/…` at all — typing
+        // `(reflect/global-names)` returned no `math/…`, `string/…` or `json/…` at all — typing
         // `math/ze` matched nothing, and the completion list could only ever offer core
         // names. The reference documents the whole library, so the playground offering a
         // fraction of it is the site disagreeing with itself.
-        let _ =
-            interp.eval_str("(doseq (m (builtin-modules)) (try (require-one m) (catch _ nil)))");
-        // Public names only. Raw `(global-names)` includes private helpers, so the menu
+        let _ = interp
+            .eval_str("(doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))");
+        // Public names only. Raw `(reflect/global-names)` includes private helpers, so the menu
         // offered `map-get`, `macroexpand-loop`, `%map-pairs` and friends — internals that
         // appear in no documentation and that a user has no business calling.
-        let query = "(filter (fn (s) (not (private? s))) (global-names))";
+        let query = "(filter (fn (s) (not (reflect/private? s))) (reflect/global-names))";
         let mut names: Vec<String> = match interp.eval_str(query) {
             Ok(value) => {
-                // `(global-names)` prints as a bare list `(a b c …)`; symbols never contain
+                // `(reflect/global-names)` prints as a bare list `(a b c …)`; symbols never contain
                 // whitespace or parens, so splitting the trimmed body recovers the names.
                 let printed = interp.print(value);
                 printed

@@ -229,7 +229,7 @@
     (assert= [0 1 2] (seq/transduce (erg-xtake-while (fn (n) (< n 3))) conj [] (range 6))))
   (test "the l* combinators share the machinery and agree"
     (assert= (seq/transduce (comp (seq/xfilter odd?) (seq/xmap inc)) + 0 (range 10))
-      (reduce + 0 (->> (range 10) (lfilter odd?) (lmap inc))))))
+      (reduce + 0 (->> (range 10) (seq/lfilter odd?) (seq/lmap inc))))))
 
 (describe "dissoc-in"
   (test "removes a nested key, leaving the rest"

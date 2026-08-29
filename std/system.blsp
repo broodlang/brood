@@ -65,7 +65,7 @@ to degrade rather than fail asks the build."
 ;; Where modules load from, and what the image knows about them. Runtime configuration,
 ;; so it belongs here rather than bare.
 ;;
-;; `builtin-modules` and `reserved-package-name?` deliberately did NOT come along: they are
+;; `reflect/builtin-modules` and `reserved-package-name?` deliberately did NOT come along: they are
 ;; called from `%merge-require-edges!` and `%require-force-package` — the module-LOADING
 ;; path itself — so moving them here would mean loading `system` requires `system`.
 

@@ -41,7 +41,7 @@
     ;; Splicing into an unordered collection is ill-defined — the point is that it
     ;; says so instead of building something odd.
     (assert= :error
-      (try (eval (list 'quasiquote (reflect/read-string "#{~@xs}"))) (catch e :error))))
+      (try (reflect/eval (list 'quasiquote (reflect/read-string "#{~@xs}"))) (catch e :error))))
 
   (test "auto-gensym works inside a set template"
     ;; `has_autogensym` skipped sets, so a set template was expanded STATICALLY
@@ -107,27 +107,27 @@
     (is (not (nil? (index-of (str (nest-list 400 1)) "…"))))))
 
 (describe "quote and quasiquote take at most one form"
-  ;; Built as data and `eval`ed so the malformed shapes are values, not source
+  ;; Built as data and `reflect/eval`ed so the malformed shapes are values, not source
   ;; the file's own compile pass has to survive.
   (test "(quasiquote a b) raises rather than returning a and dropping b"
     ;; `quote` grew this rejection so a stray form can't vanish without a peep;
     ;; quasiquote had the same trap and silently returned `a`.
-    (assert= :error (try (eval (list 'quasiquote 'a 'b)) (catch e :error))))
+    (assert= :error (try (reflect/eval (list 'quasiquote 'a 'b)) (catch e :error))))
 
   (test "quote does the same"
-    (assert= :error (try (eval (list 'quote 'a 'b)) (catch e :error))))
+    (assert= :error (try (reflect/eval (list 'quote 'a 'b)) (catch e :error))))
 
   (test "the degenerate no-operand forms agree with each other, and with (do)/(if)"
     ;; Nothing is being *dropped* here, so both follow the house rule for a
     ;; missing operand (tests/malformed_test.blsp §degenerate special forms).
-    (assert= nil (eval (list 'quote)))
-    (assert= nil (eval (list 'quasiquote)))
-    (assert= nil (eval (list 'do)))
-    (assert= nil (eval (list 'if))))
+    (assert= nil (reflect/eval (list 'quote)))
+    (assert= nil (reflect/eval (list 'quasiquote)))
+    (assert= nil (reflect/eval (list 'do)))
+    (assert= nil (reflect/eval (list 'if))))
 
   (test "the well-formed one-argument forms are untouched"
-    (assert= 'a (eval (list 'quote 'a)))
-    (assert= '(1 2) (eval (list 'quasiquote (list 1 2))))))
+    (assert= 'a (reflect/eval (list 'quote 'a)))
+    (assert= '(1 2) (reflect/eval (list 'quasiquote (list 1 2))))))
 
 (describe "def checks the name before it runs the value"
   (test "a reserved-name def does NOT run its right-hand side"
@@ -136,13 +136,13 @@
     ;; run concurrently in separate processes over one shared global table.)
     (assert= :error
       (try
-        (eval '(def map (do (def def-rhs-must-not-run 1) 2)))
+        (reflect/eval '(def map (do (def def-rhs-must-not-run 1) 2)))
         (catch e :error)))
     (is (not (bound? 'def-rhs-must-not-run))))
 
   (test "an ordinary def still evaluates its value"
-    (eval '(def def-rhs-ordinary 3))
-    (assert= 3 (eval 'def-rhs-ordinary))))
+    (reflect/eval '(def def-rhs-ordinary 3))
+    (assert= 3 (reflect/eval 'def-rhs-ordinary))))
 
 (describe "reader diagnostics for a misplaced dot"
   (test "EOF after a dotted tail is INCOMPLETE input, not a syntax error"
@@ -198,7 +198,7 @@
 
 (describe "an improper argument list is reported like every other call-shape error"
   (test "it carries a source position and a hint"
-    (let (e (try (eval '(list 1 . 2)) (catch e e)))
+    (let (e (try (reflect/eval '(list 1 . 2)) (catch e e)))
       (assert= "improper argument list in call" (get e :message))
       (is (not (nil? (get e :line))))
       (is (not (nil? (get e :col)))))))
