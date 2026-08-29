@@ -6643,3 +6643,44 @@ annotation as evidence about *where*, never about *why*.
 So the remaining `bintree` time is where FRONTIER always said it was: `__memmove` 10.6% plus
 `make_vector2` 5.4% — allocation — and that is the multi-session item, not another shuffling
 change.
+
+## 2026-08-29 (third) — the staging copy stops existing: bintree −15% warm
+
+Down the ranking to `__memmove`. First finding is a tooling one: **fp call-graph unwinding is
+useless on this workload** — it walks through JIT frames into garbage and confidently reported
+`set_ic_bases` as calling `memmove`. `perf record --call-graph=lbr` works, and named it in one
+shot: **4.4% of `bintree` in `copy_nonoverlapping<Value>` inside `push_roots_n`**, the JIT's
+per-call argument staging (operands → a per-site Cranelift stack slot → one block copy onto
+`roots`).
+
+Two attempts, and the shape of the difference is now a pattern three sessions deep:
+
+1. **Make it cheaper.** At an arity's worth of bytes (24–72), libc's memmove is almost all
+   size-class dispatch, so `push_roots_n` got fixed-size moves. `__memmove` 10.6% → 3.8%,
+   `brood_rt_push_n` 4.5% → 10.3%. The work *moved*. ~1% net, inside the floor.
+2. **Delete it.** `brood_rt_push_room` reserves the block on `roots` and returns its address;
+   the same stores land in place. Stack slot and copy both gone, and the old path deleted
+   rather than kept as a shim.
+
+Warm, with the image `:live` on both arms and the JIT engaged: **−9.8% / −14.9% / −15.8%** at
+n=200 / 2000 / 6000. The 31-row pinned sweep says −5.5%, everything else noise. Both are true
+and the gap is informative — the sweep pins to one core (background compiler competing) at the
+short size, and this win *grows with the work*, as a per-call saving should.
+
+**It nearly shipped with `wordcount` +14%.** The native flat-cell path hands a builtin a
+`&[Value]`; that pointer now points into `roots`, which a native may reallocate, so the args
+must be copied — and `SmallVec::from(slice)` does `copy_from_slice` → libc memcpy, which is
+*the exact overhead attempt 1 had just measured*, reintroduced one call site over. A `match`
+on the arity fixed it. It was caught only because I swept a builtin-heavy row; the default
+11-row set has none. That is worth remembering when a change touches a shared call path.
+
+**And a gate gap that would have wasted a day.** The first build forgot to register
+`brood_rt_push_room` in Cranelift's symbol table. The background compiler thread panicked, the
+JIT **switched itself off for the whole process**, and every benchmark still printed the right
+answer — `bintree` included, 1638200. No correctness gate can see this; only
+`[jit-bail] … CODEGEN-PANICKED` on stderr and `.brood_crash_dump` say so. Had I not run a row
+that happened to surface it, I would have "measured" a JIT change against the interpreter.
+Grep a benchmark run's stderr for `CODEGEN-PANICKED` before believing a number.
+
+Running total for the day on `bintree`: §2h (return through the caller's slot) −7.5%, §2i
+(argument count, neutral, kept as simplification), §2j (staging in place) −15% warm.
