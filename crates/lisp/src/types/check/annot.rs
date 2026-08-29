@@ -697,6 +697,38 @@ fn parse_type_term(heap: &Heap, form: Value, vars: &mut HashMap<String, u32>) ->
                 let inner = parse_type_term(heap, items[1], vars)?;
                 return Some(SigTerm::VectorOf(Box::new(inner)));
             }
+            // `(record [&open] :k T …)` with a `?var` in some field: the same grammar
+            // `parse_type` accepts, each field parsed as a term. With no variable anywhere
+            // it is the concrete shape, exactly as before.
+            if value::symbol_is(head, "record") {
+                let mut rest = &items[1..];
+                let open = matches!(rest.first(), Some(&Value::Sym(m))
+                    if value::symbol_is(m, "&open"));
+                if open {
+                    rest = &rest[1..];
+                }
+                if rest.len() % 2 != 0 {
+                    return None;
+                }
+                let mut fields: Vec<(value::Symbol, SigTerm, bool)> = Vec::new();
+                let mut any_var = false;
+                for pair in rest.as_chunks::<2>().0 {
+                    let Value::Keyword(name) = pair[0] else {
+                        return None;
+                    };
+                    let (field_form, required) = match unwrap_optional(heap, pair[1]) {
+                        Some(inner) => (inner, false),
+                        None => (pair[1], true),
+                    };
+                    let term = parse_type_term(heap, field_form, vars)?;
+                    any_var |= !matches!(term, SigTerm::Ty(_));
+                    fields.push((name, term, required));
+                }
+                if any_var {
+                    return Some(SigTerm::RecordOf { fields, open });
+                }
+                return parse_type(heap, form).map(SigTerm::Ty);
+            }
             // Compound forms without inner-var support — delegate to parse_type
             // (type vars inside `or`/`and`/`map` widen to Ty::ANY there).
             parse_type(heap, form).map(SigTerm::Ty)
@@ -744,6 +776,23 @@ fn parse_arrow_with_vars(
 /// least one type variable (`?A`, `?B` …), return `(name, sig_with_vars)`.
 /// Returns `None` for non-`sig` forms, non-arrow type-exprs, or arrows with
 /// no variables — the plain [`parse_sig_decl`] path handles those.
+/// An arrow TYPE expression (the value part of a `(sig name type)`) as a [`SigWithVars`],
+/// or `None` when it declares no variable at all — a plain [`Sig`] then serves. The
+/// type-level half of [`parse_sig_decl_with_vars`], so the heap-recorded raw type value a
+/// loaded module registered (`declared_heap_sig_with_vars`) resolves per call exactly as a
+/// same-file declaration does — otherwise a constructor's `?x` fields read as `any` from
+/// hover and `reflect/expr-type` while `nest check` on the file got them right.
+pub(super) fn parse_arrow_type_with_vars(heap: &Heap, type_value: Value) -> Option<SigWithVars> {
+    let ty_items = list_items(heap, type_value)?;
+    let pos = ty_items.iter().position(|v| is_arrow_marker(*v))?;
+    let mut vars: HashMap<String, u32> = HashMap::new();
+    let sig = parse_arrow_with_vars(heap, &ty_items, pos, &mut vars)?;
+    if vars.is_empty() {
+        return None;
+    }
+    Some(sig)
+}
+
 pub(super) fn parse_sig_decl_with_vars(heap: &Heap, form: Value) -> Option<(Symbol, SigWithVars)> {
     let items = list_items(heap, form)?;
     if items.len() != 3 {
@@ -758,14 +807,7 @@ pub(super) fn parse_sig_decl_with_vars(heap: &Heap, form: Value) -> Option<(Symb
     let Value::Sym(name) = items[1] else {
         return None;
     };
-    let ty_items = list_items(heap, items[2])?;
-    let pos = ty_items.iter().position(|v| is_arrow_marker(*v))?;
-    let mut vars: HashMap<String, u32> = HashMap::new();
-    let sig = parse_arrow_with_vars(heap, &ty_items, pos, &mut vars)?;
-    if vars.is_empty() {
-        return None;
-    }
-    Some((name, sig))
+    Some((name, parse_arrow_type_with_vars(heap, items[2])?))
 }
 
 /// The `(name, type-form)` of any `(sig name T)` / `(sig! name T)` declaration,
