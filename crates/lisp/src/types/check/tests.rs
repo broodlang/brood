@@ -6976,3 +6976,88 @@ fn sets_carry_their_element_type() {
         "{ws:?}"
     );
 }
+
+// An operator's domain is what the multimethod registry covers (ADR-299): a number, plus
+// exactly the records `num/*` (or `compare-to`) have methods for. With none loaded, `+`
+// accepts `number` and nothing else — no more `number | map`, which read as "a map can be
+// added" when it meant "a record with a `num/add` method can".
+#[test]
+fn an_operator_accepts_a_number_or_exactly_the_records_its_multimethod_covers() {
+    let ws = file_warnings("(defmodule t)\n(sig g (string -> int))\n(defn g (s) (+ 1 s))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("+: argument 2 expects number, got string")),
+        "{ws:?}"
+    );
+    let ws = file_warnings("(defmodule t)\n(sig g (string -> bool))\n(defn g (s) (< 1 s))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("<: argument 2 expects number, got string")),
+        "{ws:?}"
+    );
+    // …and a record with a `num/add` method is in the domain, BY NAME.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord usd (cents))\n\
+         (defmethod num/add [usd usd] (a b) (usd (+ (get a :cents) (get b :cents))))\n\
+         (sig g (string -> int))\n\
+         (defn g (s) (+ (usd 1) s))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("+: argument 2 expects number | t/usd, got string")),
+        "{ws:?}"
+    );
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord usd (cents))\n\
+         (defmethod num/add [usd usd] (a b) (usd (+ (get a :cents) (get b :cents))))\n\
+         (defn total (a b) (+ a b))",
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+// The sig spelling of a domain that names records (ADR-299): a nominal shape is spelled by
+// its id — the name a `sig` takes — and the numeric half as `number`, one flat `(or …)`; a
+// set carries its element type in that spelling too. This is what `--suggest-sigs` prints,
+// so it must be something a reader would paste.
+#[test]
+fn a_record_domain_is_spelled_by_name_in_a_suggested_sig() {
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert(
+        value::intern("__id__"),
+        (Ty::keyword_lit(value::intern("t/usd")), true),
+    );
+    let usd = Ty::record_of_open(fields);
+    assert_eq!(usd.to_source().as_deref(), Some("t/usd"));
+    assert_eq!(
+        Ty::NUMBER.union(usd).to_source().as_deref(),
+        Some("(or number t/usd)")
+    );
+    assert_eq!(
+        Ty::set_of(Ty::of(Tag::Int)).to_source().as_deref(),
+        Some("(set int)")
+    );
+}
+
+// …and the spelling round-trips: the suggested `(or number t/usd)` is accepted back as a
+// declaration, and means the same thing (a string is rejected, a `usd` is not).
+#[test]
+fn a_suggested_record_domain_parses_back_as_a_sig() {
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord usd (cents))\n\
+         (sig f ((or number t/usd) -> int))\n\
+         (defn f (x) 0)\n\
+         (defn ok () (f (usd 1)))\n\
+         (defn bad () (f \"s\"))",
+    );
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].contains("t/f: argument 1 expects number | t/usd, got \"s\""),
+        "{ws:?}"
+    );
+}

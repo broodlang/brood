@@ -745,7 +745,7 @@ fn numeric_op_kind(head: Symbol) -> Option<(bool, bool, bool, bool)> {
 ///   denominator is still `q > 1`. `*` and `/` are excluded — they can land on an int
 ///   from the same operands (`(* 2 1/2)` is `1`).
 /// - Otherwise, every operand a number → `number`, still narrower than the operator's
-///   declared `number | map` (the `Num`-record widening, ADR-172 §7).
+///   declared domain (`number`, or `number | <the records with num/* methods>` — ADR-299).
 pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
     let (is_contagious, is_int_closed, is_ring, is_division) = numeric_op_kind(head)?;
     if tys.is_empty() {
