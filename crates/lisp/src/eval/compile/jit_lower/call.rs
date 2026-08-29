@@ -26,6 +26,20 @@ pub(super) enum Flow {
     Break,
 }
 
+/// Report a mid-emit refusal under `BROOD_JIT_BAIL_TRACE=1`, same line shape as
+/// `jit_lower`'s `trace_lower_bail` so one grep covers both. These sites used to return
+/// `None` silently, and the runtime's generic `lowering-returned-none` line cannot say
+/// *which* instruction refused — `call-spill-exhausted` on nqueens' `solve` cost a whole
+/// bisect to find (the spill reserve undercounted; see `jit_spill_reserve`). The arm name
+/// is not in scope here; the generic line that follows carries it.
+fn trace_call_bail<T>(reason: &'static str) -> Option<T> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        eprintln!("[jit-bail] (mid-emit) reason={reason}");
+    }
+    None
+}
+
 /// `Inst::MakeClosure` — a `(fn …)` literal. The callback runs `exec_chunk`'s arm verbatim,
 /// so this only has to put the world in the shape that arm expects: the `ncap` capture
 /// values staged on top of `roots` (where the VM's operand stack leaves them), then one
@@ -58,7 +72,7 @@ pub(super) fn emit_make_closure(
     for d in 0..below {
         if matches!(stack[d], Op::Handle(..)) {
             if *spill_next >= reserve {
-                return None;
+                return trace_call_bail("mkclo-spill-exhausted");
             }
             let slot = spill_base + *spill_next;
             *spill_next += 1;
@@ -175,7 +189,7 @@ pub(super) fn emit_call(
     for d in 0..below {
         if matches!(stack[d], Op::Handle(..)) {
             if *spill_next >= reserve {
-                return None;
+                return trace_call_bail("call-spill-exhausted");
             }
             let slot = spill_base + *spill_next;
             *spill_next += 1;
@@ -276,7 +290,7 @@ pub(super) fn emit_call(
         // exactly `[callee, args]`). Return outcome 4; `vm_run_bc` dispatches the staged
         // call with `tail = true` and reuses this frame, so the native stack never grows.
         if !stack.is_empty() {
-            return None;
+            return trace_call_bail("tail-nonempty-stack");
         }
         b.ins().jump(tailcall, &[]);
         return Some(Flow::Break);

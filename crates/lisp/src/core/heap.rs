@@ -2840,6 +2840,20 @@ pub struct Heap {
     /// error); the arm returns the error outcome and [`vm_run_bc`] takes this to propagate.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_pending_error: Option<crate::error::LispError>,
+    /// Suspend-host attribution (see `jit_suspend_feedback`). When THIS process's
+    /// `receive` dirty-blocks its worker (the §7.4 carve-out: a native frame between the
+    /// body driver and the receive means no state capture, so the worker thread waits on
+    /// the condvar), the mailbox records WHICH native activation was innermost-alive:
+    /// `blocked_under_gateway = cur_native_gateway`. Each JIT gateway stamps a fresh
+    /// `native_gateway_seq` into `cur_native_gateway` around its invoke (save/restore,
+    /// like `jit_dbg_fn`), and after the invoke latches its arm `BAILED` iff the recorded
+    /// token is ITS OWN — so only the arm that actually enclosed the blocking receive is
+    /// latched, never a native that merely ran later in the same quantum (in a gen-server,
+    /// that would be the hot post-receive handler). `0` = none. A block with no live JIT
+    /// gateway (a Rust-native shape, `map`/`try` callbacks) records 0 and latches nothing.
+    pub(crate) native_gateway_seq: u64,
+    pub(crate) cur_native_gateway: u64,
+    pub(crate) blocked_under_gateway: u64,
     /// Overflow sentinel for the unboxed-`i64` fast path (the register calling convention for
     /// int-only recursive arms). That path carries args/results as raw `i64` in registers and
     /// uses overflow-checked arithmetic; on an overflow (or a non-`Int` at the boxed entry) it
@@ -3213,6 +3227,9 @@ impl Heap {
             jit_force_vm: false,
             jit_dbg_fn: u32::MAX,
             jit_pending_error: None,
+            native_gateway_seq: 0,
+            cur_native_gateway: 0,
+            blocked_under_gateway: 0,
             jit_i64_overflow: false,
         }
     }
@@ -3292,6 +3309,9 @@ impl Heap {
             jit_force_vm: false,
             jit_dbg_fn: u32::MAX,
             jit_pending_error: None,
+            native_gateway_seq: 0,
+            cur_native_gateway: 0,
+            blocked_under_gateway: 0,
             jit_i64_overflow: false,
         }
     }

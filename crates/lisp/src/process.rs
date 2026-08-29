@@ -78,7 +78,8 @@ pub(crate) use scheduler::pump_until_quiescent;
 pub use scheduler::{
     begin_capture, capture_append, current_pid, deadline_exceeded, deregister_root_ctx,
     deregister_root_ctx_of, exit, exit_count, free_drained_gen, gc_block_depth, in_green_process,
-    live_pids, macro_block_active, migrate_count, native_stack_headroom_ok, old_gen_drained,
+    dirty_receive_block_count, live_pids, macro_block_active, migrate_count,
+    native_stack_headroom_ok, old_gen_drained,
     parent_of, peak_threads, pid_value, preempt_count, report_drain_liveness, self_mailbox_seq,
     self_pid, set_deadline, set_max_parallel, set_test_no_workers, shutdown_runtime_parked, spawn,
     spawn_count, spawn_linked, spawn_root_program, stack_budget, stack_overflow_check, steal_count,

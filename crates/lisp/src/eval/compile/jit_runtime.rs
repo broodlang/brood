@@ -788,13 +788,43 @@ pub(crate) fn jit_run_fast_link(
     // cache-cold, and `dbg_site_loc` reported the wrong site. The bases arrive as args (they
     // rode in the `FastLink` slot), so this is two `Cell` writes, no table lookup.
     let saved_bases = heap.set_ic_bases(callee_bases);
+    heap.native_gateway_seq += 1;
+    let gw_seq = heap.native_gateway_seq;
+    let saved_gw = std::mem::replace(&mut heap.cur_native_gateway, gw_seq);
     let outcome = f(heap as *mut Heap, base as i64, out);
+    heap.cur_native_gateway = saved_gw;
     heap.set_ic_bases(saved_bases);
     heap.jit_force_vm = saved_force_vm;
     heap.jit_native_depth = native_depth;
     heap.jit_call_env = saved;
     heap.jit_dbg_fn = saved_fn;
     heap.truncate_env_roots(env_base);
+    // Suspend-host latch (see `jit_latch_suspend_host`). The fast link carries no arm
+    // reference, so resolve one — only on the token match, which happens at most once
+    // per arm ever (cold); the steady-state cost is this one u64 compare. Resolution is
+    // by the invoked code pointer against the keep-alive registry (every arm with
+    // installed native code is in it, immortally — bug #2's fix), NOT the call IC: the
+    // park usually spans a GC, whose epoch bump makes `vm_call_ic_probe` with the
+    // pre-call `epoch` decline — measured as 13 dirty parks producing 3 latches, i.e.
+    // a latch that mostly failed to hold. The probe stays as the fallback for the one
+    // race the scan can miss (an inlined-upgrade swap between invoke and here).
+    if heap.blocked_under_gateway == gw_seq {
+        heap.blocked_under_gateway = 0;
+        let scanned = {
+            use std::sync::atomic::Ordering::Acquire;
+            let reg = JIT_ARM_KEEPALIVE.lock().unwrap();
+            reg.iter()
+                .find(|a| std::ptr::eq(a.jit_code.load(Acquire), code as *mut u8))
+                .cloned()
+        };
+        if let Some(arm) = scanned.or_else(|| {
+            heap.vm_call_ic_probe(site, head, argc as u32, epoch)
+                .and_then(|(_, a)| a)
+                .map(|(arm, _, _)| arm.arc().clone())
+        }) {
+            jit_latch_suspend_host(&arm);
+        }
+    }
     // KI-11. Three of the outcome arms below re-enter the evaluator — the outcome-4
     // tail-chain follow-through (`apply_value`), and the deopt/preempt re-runs
     // (`vm_resume_deopt` / `vm_apply`). All of them run on THIS native frame, which is
@@ -1350,7 +1380,12 @@ pub(crate) fn jit_dispatch_call(
                 // cursors (fast-link base, IC callbacks) — install it for the call and
                 // restore the caller's around it, like `jit_call_env` above.
                 let saved_bases = heap.set_ic_bases(callee_bases);
+                heap.native_gateway_seq += 1;
+                let gw_seq = heap.native_gateway_seq;
+                let saved_gw = std::mem::replace(&mut heap.cur_native_gateway, gw_seq);
                 let outcome = f(heap as *mut Heap, base as i64, &mut ret as *mut Value);
+                heap.cur_native_gateway = saved_gw;
+                jit_suspend_feedback(heap, &arm, outcome, gw_seq);
                 heap.set_ic_bases(saved_bases);
                 heap.jit_force_vm = saved_force_vm;
                 heap.jit_native_depth = depth;
@@ -1852,6 +1887,60 @@ pub(crate) fn vm_resume_deopt(
     }
 }
 
+/// Latch `arm` off the native tier because it hosted a parked `receive`. A process
+/// suspended at `receive` under a native frame cannot be state-captured — the mailbox's
+/// capture path requires a clean all-VM stack ("only a clean top-level receive captures,
+/// and can migrate") — so it dirty-blocks its whole OS worker thread instead (§7.4). An
+/// arm that hosts a parking receive therefore belongs on the VM: latch it `BAILED` on the
+/// FIRST occurrence (one park is proof of shape, unlike a type-deopt, which needs 16 to
+/// separate thrash from noise). Arms are shared (ADR-215), so one latch heals every
+/// process; a park under a native→native chain latches the innermost enclosing arm per
+/// occurrence and converges outward over successive parks.
+///
+/// Found during the §7.1 step 2 experiment (admitting named defns to the general
+/// lowering), where `live_migration`'s 12-way load harness went 28/36 liveness failures
+/// without it, 0/36 with. Step 2 was measured and rejected, but the latch stays: the
+/// profitability gate EXEMPTS closure/HOF-step arms, so an arm whose receive sits one
+/// call down (`(fn (acc _) (+ acc (inner)))` where `inner` receives) lowers today — the
+/// `%receive` fence only catches a direct `%receive` call — and the spill-reserve fix
+/// landed with this change lets more single-call closure arms lower than before.
+#[cfg(feature = "jit")]
+pub(crate) fn jit_latch_suspend_host(arm: &CompiledArm) {
+    use std::sync::atomic::Ordering::Release;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        let name = arm
+            .dbg_name
+            .map(crate::core::value::symbol_name_ref)
+            .unwrap_or("<closure>");
+        eprintln!("[jit-bail] arm={name} reason=suspend-latched");
+    }
+    arm.jit_code.store(crate::jit::BAILED, Release);
+}
+
+/// Post-invoke suspend check for a native gateway that has its arm in hand: latch if the
+/// mailbox recorded a dirty-block under THIS activation's token (see
+/// [`Heap::blocked_under_gateway`] — an exact match, so a native that merely ran later in
+/// the same quantum is never blamed), or — belt-and-braces — if a suspend signal crossed
+/// this arm on the error channel as outcome 3 (no known flow does this today; the mailbox
+/// blocks instead of raising when a native frame is above it).
+#[cfg(feature = "jit")]
+fn jit_suspend_feedback(heap: &mut Heap, arm: &CompiledArm, outcome: i64, gw_seq: u64) {
+    let blocked = heap.blocked_under_gateway == gw_seq && gw_seq != 0;
+    if blocked {
+        heap.blocked_under_gateway = 0;
+    }
+    if blocked
+        || (outcome == 3
+            && heap
+                .jit_pending_error
+                .as_ref()
+                .is_some_and(|e| e.is_suspend_signal()))
+    {
+        jit_latch_suspend_host(arm);
+    }
+}
+
 #[cfg(feature = "jit")]
 pub(crate) fn jit_deopt_feedback(arm: &CompiledArm) {
     use std::sync::atomic::Ordering::{Relaxed, Release};
@@ -2317,10 +2406,15 @@ pub(crate) fn jit_tier_in_frame(
     let native_depth = heap.jit_native_depth;
     stamp_stack_limit_if_outermost(heap, native_depth);
     let saved_force_vm = heap.jit_force_vm;
+    heap.native_gateway_seq += 1;
+    let gw_seq = heap.native_gateway_seq;
+    let saved_gw = std::mem::replace(&mut heap.cur_native_gateway, gw_seq);
     let outcome = f(heap as *mut Heap, base as i64, out);
+    heap.cur_native_gateway = saved_gw;
     heap.jit_force_vm = saved_force_vm;
     heap.jit_call_env = saved_env;
     heap.jit_dbg_fn = saved_fn;
+    jit_suspend_feedback(heap, arm, outcome, gw_seq);
     // Outcome 5 = the unboxed-i64 worker hit its native-recursion depth cap. Register recursion
     // can't drain to the VM mid-stack, so permanently switch this fn to the boxed path (which
     // drains deep recursion gracefully via `jit_native_depth`/`jit_force_vm`): mark it too-deep,

@@ -33,10 +33,12 @@ through JIT frames produces garbage** and once reported `set_ic_bases` calling m
    forever.** `nqueens`' `solve` bails (`Local Local MakeClosure Const GlobalIc Call Call` —
    it builds a closure and hands it to a HOF), so the row's driver never lowers: 10.9%
    `exec_chunk` + 7.2% `hof_apply_step`. `pipeline` is the same class (~50% call plumbing,
-   §2c). This is FRONTIER's "capturing-closure fast-link" item, now with named victims.
-   Check first: `BROOD_JIT_BAIL_TRACE=1` per row, count arms whose ops contain `MakeClosure`.
-   The design question is partial lowering — an arm that bails on one op keeps its whole loop
-   on the VM.
+   §2c). **§7.1 step 2 (drop the gate, let deopt feedback demote) was measured and REJECTED
+   2026-08-29** — every row lost, winners included (nqueens +20%, spawn +72% unpinned),
+   because a bad admission compiles correctly and never deopts: a cost model has no
+   correctness signal. Partial lowering — an arm that bails on one op keeps its whole loop
+   on the VM today — is the only live design; see compute-frontier §7.1 for the numbers and
+   what the experiment left behind (the suspend-host latch, kept).
 2. **Cranelift's CLIF verifier runs on EVERY release compile.** `enable_verifier` defaults
    `true` (verified in cranelift-codegen 0.133.1 settings.rs:502) and `CraneliftBackend::new`
    sets only `opt_level`; the verifier showed at **3.5% of the `json` run's cycles** on the

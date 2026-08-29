@@ -2621,11 +2621,21 @@ fn hof_apply_native(
     let f: crate::jit::JitArmFn = unsafe { std::mem::transmute(code) };
     // Destination for a Done result: this entry hands one back, so a stack local.
     let mut ret = Value::Nil;
+    heap.native_gateway_seq += 1;
+    let gw_seq = heap.native_gateway_seq;
+    let saved_gw = std::mem::replace(&mut heap.cur_native_gateway, gw_seq);
     let outcome = f(heap as *mut Heap, base as i64, &mut ret as *mut Value);
+    heap.cur_native_gateway = saved_gw;
     heap.jit_native_depth = depth;
     heap.set_ic_bases(saved_bases);
     heap.jit_call_env = saved;
     heap.jit_dbg_fn = saved_fn;
+    // Suspend-host latch (see `jit_latch_suspend_host` / `Heap::blocked_under_gateway`):
+    // a HOF step arm can enclose a parking receive too.
+    if heap.blocked_under_gateway == gw_seq {
+        heap.blocked_under_gateway = 0;
+        jit_runtime::jit_latch_suspend_host(arm);
+    }
     // Deopt feedback (see `jit_deopt_feedback`): the HOF step arm is the canonical
     // watched shape (nqueens' reduce closure).
     if outcome == 1 {

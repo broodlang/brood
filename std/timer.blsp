@@ -5,9 +5,9 @@
 ;; process's pid: inspectable with `proc/info`, cancellable with `timer/cancel`.
 ;;
 ;; `sleep` deliberately does NOT live here. It parks the CURRENT process rather than
-;; scheduling a message — a peer of `receive`, not of these — and it is load-bearing inside
-;; the module loader itself (`%require-await` sleeps between polls). Rooting it here would
-;; mean the loader auto-requires `timer` while a require is already in flight.
+;; scheduling a message — a peer of `receive`, not of these. (It was also once load-bearing
+;; inside the module loader, whose `%require-await` slept between polls; the loader now
+;; blocks on a completion message instead, but the peer-of-`receive` argument stands.)
 
 (defmodule timer
   "Scheduled sends: `send-after` fires once, `send-interval` repeats, `cancel` stops
