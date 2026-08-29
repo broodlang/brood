@@ -26,6 +26,100 @@ pub(super) enum Flow {
     Break,
 }
 
+/// `Inst::MakeClosure` — a `(fn …)` literal. The callback runs `exec_chunk`'s arm verbatim,
+/// so this only has to put the world in the shape that arm expects: the `ncap` capture
+/// values staged on top of `roots` (where the VM's operand stack leaves them), then one
+/// `brood_rt_make_closure(heap, out, inst)` call, then the fresh closure read back from
+/// `out` as a `Handle`.
+///
+/// The callback is a **safepoint** (it allocates, and `make_closure_cached` can promote),
+/// so it takes the same two disciplines a non-tail `Call` does: every live `Handle` deeper
+/// on the operand stack is spilled to a reserved frame slot first (GC-visible; `jit_spill_reserve`
+/// counts `MakeClosure` as a producer, so the reserve exists), and the roots base is
+/// re-fetched after the call (the staging `push_room` may have reallocated `roots`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_make_closure(
+    b: &mut FunctionBuilder,
+    stack: &mut Vec<Op>,
+    spill_next: &mut usize,
+    ncap: usize,
+    inst: *const crate::eval::compile::Inst,
+    spill_base: usize,
+    reserve: usize,
+    frame: Frame,
+    funcs: Funcs,
+) -> Option<()> {
+    let ptr_ty = funcs.ptr_ty;
+    let heap = funcs.heap;
+    let out_slot = funcs.out_slot;
+    // Spill deeper live Handles across the safepoint — same loop, same reasoning as
+    // `emit_call` above.
+    let below = stack.len().checked_sub(ncap)?;
+    for d in 0..below {
+        if matches!(stack[d], Op::Handle(..)) {
+            if *spill_next >= reserve {
+                return None;
+            }
+            let slot = spill_base + *spill_next;
+            *spill_next += 1;
+            store_op(b, slot as i64, stack[d], frame);
+            stack[d] = Op::Slot(slot);
+        }
+    }
+    // Pop the captures (top of stack = last in source order), read all words BEFORE the
+    // staging push (push_room may realloc `roots`, so no slot read after it).
+    let mut ops: Vec<Op> = Vec::with_capacity(ncap);
+    for _ in 0..ncap {
+        ops.push(stack.pop()?);
+    }
+    ops.reverse(); // back to `names` order — the order exec_chunk reads them in
+    let mut worded: Vec<[Value; 3]> = Vec::with_capacity(ncap);
+    for &op in &ops {
+        worded.push(read_words(b, op, frame));
+    }
+    if ncap > 0 {
+        let stage_n = b.ins().iconst(types::I64, ncap as i64);
+        let prc = b.ins().call(funcs.pushroom, &[heap, stage_n]);
+        let stage_ptr = b.inst_results(prc)[0];
+        for (i, w) in worded.iter().enumerate() {
+            let off = (i * STRIDE as usize) as i32;
+            b.ins().store(MemFlagsData::trusted(), w[0], stage_ptr, off);
+            b.ins().store(
+                MemFlagsData::trusted(),
+                w[1],
+                stage_ptr,
+                off + PAYLOAD_OFFSET as i32,
+            );
+            b.ins().store(
+                MemFlagsData::trusted(),
+                w[2],
+                stage_ptr,
+                off + PAYLOAD_OFFSET as i32 + 8,
+            );
+        }
+    }
+    let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+    let inst_v = b.ins().iconst(ptr_ty, inst as i64);
+    let c = b.ins().call(funcs.mkclo, &[heap, out_addr, inst_v]);
+    let status = b.inst_results(c)[0];
+    // The callback (and the staging push before it) may have reallocated `roots`.
+    let rbc = b.ins().call(funcs.rb, &[heap]);
+    b.def_var(frame.rb_var, b.inst_results(rbc)[0]);
+    let cont = b.create_block();
+    b.ins().brif(status, funcs.error, &[], cont, &[]);
+    b.seal_block(cont);
+    b.switch_to_block(cont);
+    let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+    let w1 = b
+        .ins()
+        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+    let w2 = b
+        .ins()
+        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+    stack.push(Op::Handle(w0, w1, w2));
+    Some(())
+}
+
 /// `Inst::Call` — a general combination. Spills any live `Handle` below the call's
 /// operands into reserved frame slots (GC-visible across the callee's safepoint), stages
 /// the operands into a per-site stack slot + `roots`, then either returns via the

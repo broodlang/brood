@@ -95,6 +95,8 @@ pub(crate) fn block_analysis(code: &[Inst], len: usize) -> (Vec<bool>, Vec<Optio
                 // `let`/`do` plumbing: a binder stores the top into a frame slot, a
                 // non-final `do` form discards it — both pop one.
                 Inst::Pop | Inst::SetLocal(_) => cur -= 1,
+                // Pops its staged captures, pushes the closure.
+                Inst::MakeClosure { names, .. } => cur += 1 - names.len() as i32,
                 _ => break, // unreachable (pre-bailed)
             }
             j += 1;

@@ -99,6 +99,7 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
                 i,
                 Inst::Call { tail: false, .. }
                     | Inst::MakeVector(_)
+                    | Inst::MakeClosure { .. }
                     | Inst::Prim1 {
                         op: PrimOp1::First | PrimOp1::Rest,
                         ..
@@ -417,8 +418,22 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // back as a `Handle`. The earlier miscompile (surfaced in `jit_cons_test.blsp`)
         // was fixed with the correct lowering; the old bail is no longer needed.
     };
+    // `%receive` fences the whole chunk out of the subset. A `receive` is just a `Call` to
+    // this primitive, and it SUSPENDS: the nested-run machinery re-raises the park as a
+    // `Control::Suspend` (an empty-message `LispError`), which the JIT's outcome-3 path
+    // takes as a plain parked error — the process dies with `runtime error: ` (empty).
+    // Before `MakeClosure` joined the subset this fence existed BY ACCIDENT: every
+    // `receive` emits its matcher as a `(fn (msg) …)` literal, so every receive-bearing
+    // chunk carried a `MakeClosure` and never lowered. Admitting `MakeClosure` removed the
+    // accidental fence and `local_send_race`'s collector arm lowered, parked inside the
+    // native boundary, and died — deterministically by round 4 on a 2-worker pool. This is
+    // the fence made explicit; lifting it is §7.3's design work (the receive as a native
+    // exit point), not a predicate tweak. Guarded by
+    // `receive_bearing_chunks_stay_out_of_the_jit_subset` (compile/tests.rs).
+    let receive_sym = crate::core::value::intern("%receive");
     code.iter().all(|inst| match inst {
         Inst::Const(_) => true,
+        Inst::Call { head: Some(h), .. } if *h == receive_sym => false,
         Inst::Local(_)
         | Inst::Jump(_)
         | Inst::JumpIfFalse(_)
@@ -443,6 +458,11 @@ pub(super) fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // variadic `brood_rt_make_vector_n`. Capped at 32 so the per-site staging slot
         // stays small (a huge literal in a hot arm is unheard-of; it bails to the VM).
         Inst::MakeVector(n) => *n <= 32,
+        // A `(fn …)` literal — lowered as one `brood_rt_make_closure` callback that runs
+        // `exec_chunk`'s own arm verbatim (captures staged on `roots` exactly as the VM
+        // leaves them on its operand stack). Capped like `MakeVector`. NOTE the `%receive`
+        // fence above — admitting this is what made it necessary.
+        Inst::MakeClosure { names, .. } => names.len() <= 32,
         _ => false,
     })
 }

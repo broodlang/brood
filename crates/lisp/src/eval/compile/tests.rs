@@ -352,6 +352,60 @@ fn run_arm(f: crate::jit::JitArmFn, heap: &mut Heap, base: usize) -> (i64, Value
 }
 
 #[cfg(feature = "jit")]
+
+/// The `%receive` fence (see `chunk_in_jit_subset`): a chunk that calls `%receive` must
+/// never enter the JIT subset, because a park inside the native boundary surfaces as an
+/// uncatchable empty `runtime error:` that kills the receiver. The fence used to exist by
+/// accident (every receive's matcher is a `MakeClosure`, which was out of subset); admitting
+/// `MakeClosure` made it load-bearing on its own. Deterministic where the runtime repro
+/// (`local_send_race` on a 2-worker pool) is contention-shaped: this asserts the predicate
+/// itself, on a real compiled receive-bearing arm — and, non-vacuously, that the SAME arm
+/// with the receive removed IS in the subset (so a predicate that rejects everything cannot
+/// fake a pass).
+#[cfg(feature = "jit")]
+#[test]
+fn receive_bearing_chunks_stay_out_of_the_jit_subset() {
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(def rcv (fn (want acc) (if (= want 0) acc (receive (m (rcv (- want 1) (+ acc m)))))))")
+        .expect("define rcv");
+    let f = interp.eval_str("rcv").expect("read rcv back");
+    let heap = &mut interp.heap;
+    let id = match f.unpack() {
+        crate::core::value::ValueRef::Fn(id) => id,
+        other => panic!(
+            "expected a closure, got {:?}",
+            crate::core::value::tag(other)
+        ),
+    };
+    let arm = compiled_arm_for(heap, id, 2).expect("rcv/2 compiles");
+    let chunk = arm.chunk.as_ref().expect("rcv has a chunk");
+    assert!(
+        !crate::eval::compile::jit_plan::chunk_in_jit_subset(&chunk.code),
+        "a %receive-bearing chunk entered the JIT subset — a native park kills the process"
+    );
+
+    // Non-vacuity: the same shape minus the receive is in the subset.
+    interp
+        .eval_str("(def norcv (fn (want acc) (if (= want 0) acc (norcv (- want 1) (+ acc 1)))))")
+        .expect("define norcv");
+    let g = interp.eval_str("norcv").expect("read norcv back");
+    let heap = &mut interp.heap;
+    let gid = match g.unpack() {
+        crate::core::value::ValueRef::Fn(id) => id,
+        other => panic!(
+            "expected a closure, got {:?}",
+            crate::core::value::tag(other)
+        ),
+    };
+    let garm = compiled_arm_for(heap, gid, 2).expect("norcv/2 compiles");
+    let gchunk = garm.chunk.as_ref().expect("norcv has a chunk");
+    assert!(
+        crate::eval::compile::jit_plan::chunk_in_jit_subset(&gchunk.code),
+        "the receive-free control arm should be in the subset — the fence test would be vacuous"
+    );
+}
+
 #[test]
 fn jit_lowers_and_runs_a_straight_line_int_arm() {
     let mut heap = Heap::new();
