@@ -1235,6 +1235,11 @@ pub fn check_file_mode(
         // Which ids are records — the tiebreak for an unqualified sealed member that also
         // spells a built-in kind (`ratio`, `map`, …). See `annot::sealed_members_ty`.
         annot::set_record_ids(protocol::record_id_names(heap, &expanded));
+        // ADR-299: the operator sugar's domains — `number` plus the records `num/*` /
+        // `compare-to` have methods for — from this file's `defmethod`s + the registry.
+        sigs::set_operator_domains(protocol::operator_domains(&protocol::build_multi_info(
+            heap, &expanded,
+        )));
         // ADR-190: build the ability facts + the sealed-op occurrence-typing domains HERE —
         // before any pass runs `sig_of` (Gap A, Pass 2.8, the body walk) — so an imported
         // function's inferred sig is never cached *without* the sealed-op demand. Keyed by op
