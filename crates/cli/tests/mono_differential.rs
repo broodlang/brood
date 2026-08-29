@@ -65,9 +65,26 @@ fn split_trace(text: &str) -> (Vec<String>, String) {
 }
 
 /// Timings differ run to run and say nothing about correctness.
+///
+/// This must also drop the framework's **per-test slow annotation** — a test slower than
+/// `*test-slow-ms*` (1 s) prints `  group › name   13.9s`, and whether a given test crosses
+/// that threshold depends on machine load, not on the code under test. Under full-suite
+/// parallelism one arm's nested run crossed it and the other's did not, and this
+/// differential reported "monomorphization changed an ANSWER" over a timing line while both
+/// arms said `92 passed` (2026-08-29). So: any line whose last token is a duration
+/// (`13.9s`, `2ms`) is timing chatter. A real divergence that only manifests in such a line
+/// is theoretically maskable, but failures already fail the `*_ok` asserts before this
+/// comparison runs.
 fn without_timings(text: &str) -> String {
+    fn ends_with_duration(l: &str) -> bool {
+        let Some(tok) = l.trim_end().rsplit(char::is_whitespace).next() else {
+            return false;
+        };
+        let num = tok.strip_suffix("ms").or_else(|| tok.strip_suffix('s'));
+        matches!(num, Some(n) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    }
     text.lines()
-        .filter(|l| !l.contains("ms wall") && !l.contains("Slow tests"))
+        .filter(|l| !l.contains("ms wall") && !l.contains("Slow tests") && !ends_with_duration(l))
         .collect::<Vec<_>>()
         .join("\n")
 }

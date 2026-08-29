@@ -717,6 +717,10 @@ function being compiled and recurse into `emit_body` with a depth limit.
 
 ## 4. Recommendation & priority
 
+> **Partially superseded by §7 (2026-08-29)** — the standing list below predates the §2b–§2k
+> call-path work; §7 is the current measured priority order. This section is kept for the
+> per-item design notes (§3a–§3h), which §7 references.
+
 These are **foundational, multi-session bets with capped payoff** (Brood's boxed/immutable/
 lightweight design means none will reach .NET/Node on raw numeric throughput). Brood's
 actual standouts — **memory** (~14 MB base, lightest in `pfib` at ~16 MB), **concurrency**
@@ -1162,3 +1166,89 @@ of `__memmove`), and the remaining call-path items — `jit_run_fast_link` ~20% 
 `brood_rt_fast_frame` ~13% at n=4000 — have now resisted four instruction-level attempts.
 `env_get` at 6.7% is **boot residue and not a target**: it disappears entirely at n=4000,
 confirming §2d.
+
+## 7. The standing list, re-derived 2026-08-29 — measured, priority-ordered
+
+Written after the §2h–§2k session. Every item below was profiled (`cycles:pp`, default row
+sizes; **LBR for call graphs** — fp unwinding through JIT frames produces garbage and once
+reported `set_ic_bases` calling `memmove`), not inferred from an older table. The ephemeral
+copy in `handoff.md` points here.
+
+### 7.1 The `call-mediated-boxed` bail class — a row's own hot arm interpreted forever
+
+`nqueens`' `solve` bails with `call-mediated-boxed`
+(`Local Local MakeClosure Const GlobalIc Call Call` — it builds a closure and hands it to a
+HOF), so the benchmark's driver never lowers: **10.9% `exec_chunk` + 7.2% `hof_apply_step`**
+on that row. `pipeline` is the same class (§2c: ~50% call plumbing). The profitability gate
+is all-or-nothing, so one un-lowerable op keeps the whole surrounding loop on the VM.
+
+*Check first:* `BROOD_JIT_BAIL_TRACE=1` per row; count hot arms whose ops contain
+`MakeClosure`. *The design question:* partial lowering — lower the loop, exit to the VM at
+the un-lowerable op the way the leaf-splice deopt checkpoints already do (ADR-210 is the
+precedent that a lowered region can carry its own resume point). Largest single class left.
+
+### 7.2 Cranelift's CLIF verifier runs on every release compile
+
+`enable_verifier` defaults **true** (cranelift-codegen 0.133.1 `settings.rs:502`), and
+`CraneliftBackend::new` sets only `opt_level` — so every arm ever compiled, in every release
+binary, is verified. Measured at **3.5% of the `json` run's cycles** on the compile thread.
+Pure compile-latency waste: warmup, and core competition on every pinned row.
+
+*Fix:* `("enable_verifier", "false")` beside `opt_level` in release; keep it armed under
+`debug_assertions` (it is a real miscompile net — KI-64's class). *Measure:* warm boot, a
+compile-heavy row pinned and unpinned — this is exactly the class `make ab`'s single-core
+pinning exaggerates (CLAUDE.md's ADR-175 note).
+
+### 7.3 Message rows are 15–17% interpreter, and their arms are NOT in the bail trace
+
+`pingpong` 15.0% / `ring` 17.2% `exec_chunk`, and the receive loops never appear in
+`BROOD_JIT_BAIL_TRACE` — a `receive` suspends, so the arm is *structurally* outside the
+subset, not refused. Same partial-lowering family as §7.1 (the receive as an exit point).
+Beside it on those rows: `receive_match` 8–9%, `pool::run_one` 5–8% — the per-message fixed
+cost `runtime-frontier.md` names, whose next concrete step is **M2 shared IC tables**
+(largest remaining per-process item, 664 B + a warm start; lock-free design + TSAN/loom).
+
+### 7.4 `sort` is a GC row and the kernel is 5.6% of it
+
+`flush_value_grown` 9.1% + `promote_in_grown` 6.6% + `Heap::pair` 5.0% +
+`kernel_init_pages` **5.6%** — that last one is the kernel zeroing freshly faulted pages,
+i.e. slab growth re-faulting memory. *Cheap first question:* are slabs regrown from scratch
+each collection where they could be reused? (`MIMALLOC_PURGE_DELAY`'s "hold freed pages"
+behaviour in CLAUDE.md is the adjacent fact.) `bintree`'s residual ~15% allocation is the
+same family. This is the multi-session allocation frontier; start with the question, not a
+design.
+
+### 7.5 `bintree`'s call-path residue is structural
+
+`jit_run_fast_link` ~20% + `brood_rt_fast_frame` ~13% at n=4000, after four instruction-level
+attempts (§2h–§2k) whose lesson is recorded in §2i: on these callbacks, self time does not
+decompose into the visible instructions, and only *deleting work* has moved the row. The next
+lever is deleting the trampoline itself: **emit the native→native call inline in CLIF** behind
+the existing epoch/identity guard — the full X-register convention. Multi-session. §2h's ABI
+groundwork (`JitArmFn`, the `out` pointer, `Frame::out_ptr`) is the first third; what remains
+is the env/IC-bases install and depth/limit bookkeeping moving into emitted code.
+
+### 7.6 Cheap curiosity: `grow_one<TraceFrame>` at ~3% of `bintree`
+
+An error-trace `Vec` growing on a row that never errors (LBR leaf, so trustworthy even where
+the fp chain above it was not). If it is the two load-time checker warnings, it is boot
+residue that closes itself at scale — confirm with a warning-free variant of the row and
+move on.
+
+### 7.7 Crossed off — do not revisit without new evidence
+
+- **`ackermann`**: 92.9% inside the scalar-register i64 worker. Already optimal shape; the
+  cost is the algorithm.
+- **`env_get`** (6.7% of `bintree` at n=800): boot residue — gone entirely at n=4000,
+  confirming §2d.
+- **`latency` under the pinned sweep**: queueing artifact of a fixed-schedule open-loop row.
+  Judge it unpinned, via its own p50/p99/rps metrics.
+
+### The measurement discipline (each of these burned someone this week)
+
+Image `:live` on **both** arms, verified per run (`(stdimage/status)` — any commit
+invalidates every image). JIT warm and engaged on both (`BROOD_JIT_DUMP_IR` arm counts).
+Stderr grepped for `CODEGEN-PANICKED` — the JIT can switch itself off and every answer stays
+right. **Interleave every arm in one command, three-way when there is a chain** — §2k exists
+because a saved baseline binary drifted 10% between sessions. Floors measured; a delta under
+~2× floor is noise.
