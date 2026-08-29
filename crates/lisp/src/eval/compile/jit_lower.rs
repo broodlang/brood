@@ -825,6 +825,10 @@ fn jit_lower_arm_inner(
     let tget_id = m
         .declare_function("brood_rt_table_get2", Linkage::Import, &vref_sig)
         .ok()?;
+    // brood_rt_map_get: the same (heap, out, map 3w, key 3w) -> status signature.
+    let mget_id = m
+        .declare_function("brood_rt_map_get", Linkage::Import, &vref_sig)
+        .ok()?;
     // brood_rt_table_put: (heap, out, table 3w, key 3w, val 3w) -> status.
     let mut tput_sig = m.make_signature();
     tput_sig.params.push(AbiParam::new(ptr_ty)); // heap
@@ -958,6 +962,7 @@ fn jit_lower_arm_inner(
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let thas_ref = m.declare_func_in_func(thas_id, b.func);
     let tget_ref = m.declare_func_in_func(tget_id, b.func);
+    let mget_ref = m.declare_func_in_func(mget_id, b.func);
     let tput_ref = m.declare_func_in_func(tput_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
     let tdbase_ref = m.declare_func_in_func(tdbase_id, b.func);
@@ -1526,6 +1531,7 @@ fn jit_lower_arm_inner(
         makevecn: makevecn_ref,
         thas: thas_ref,
         tget: tget_ref,
+        mget: mget_ref,
         tput: tput_ref,
         rb: rb_ref,
         globic: globic_ref,

@@ -126,6 +126,69 @@
       (assert= (get r :output) "")
       (assert= (get r :ok) true))))
 
+;; `:trace :all` — the answer to "trace whatever this actually calls". A client cannot
+;; compute that list: it can only walk the source it has, which by construction never
+;; mentions a helper defined in an earlier request. Only the image knows what it defines,
+;; so the resolution happens here.
+(describe "boundary tracing (:trace :all)"
+  (test "a request may carry :all, and it survives the wire"
+    (let (req (evsrv-decode-request (evsrv-encode-request 3 "(f 1)" nil :all)))
+      (assert= (get req :trace) :all)))
+
+  (test "an empty trace vector is still omitted, but :all is never mistaken for one"
+    (is (not (includes? (evsrv-encode-request 1 "1" nil []) ":trace")))
+    (is (includes? (evsrv-encode-request 1 "1" nil :all) ":trace :all")))
+
+  (test "session-globals excludes the language, and a module required mid-session"
+    (baseline-globals!)
+    (eval-capturing "(defn evsrv-sg-mine (x) x)")
+    (let (names (session-globals))
+      (is (includes? names "evsrv-sg-mine"))
+      ;; the language itself is baseline, never "yours"
+      (is (not (includes? names "map")))
+      (is (not (includes? names "fold")))
+      ;; and a namespaced name belongs to whatever module brought it, not to the session
+      (is (empty? (filter (fn (n) (includes? n "/")) names)))))
+
+  ;; The whole point, in one test: request 3's source names only `evsrv-all-top`, and the
+  ;; trace still shows `evsrv-all-helper` underneath it. A source-walking client (which is
+  ;; what every client was reduced to) sees one frame here and reports it as the whole story.
+  :isolated (test ":all traces a helper the source never mentions"
+    (baseline-globals!)
+    (eval-capturing "(defn evsrv-all-helper (n) (* n 2))")
+    (eval-capturing "(defn evsrv-all-top (n) (evsrv-all-helper (+ n 1)))")
+    (let (r (eval-capturing "(evsrv-all-top 3)" :all)
+          traced (into #{} (map (fn (e) (get e :fn)) (get r :spy))))
+      (assert= (get r :value) "8")
+      (is (contains? traced "evsrv-all-top"))
+      (is (contains? traced "evsrv-all-helper"))))
+
+  :isolated (test "naming the caller alone sees only the caller — what :all is for"
+    (eval-capturing "(defn evsrv-named-helper (n) (* n 2))")
+    (eval-capturing "(defn evsrv-named-top (n) (evsrv-named-helper (+ n 1)))")
+    (let (r (eval-capturing "(evsrv-named-top 3)" ["evsrv-named-top"])
+          traced (into #{} (map (fn (e) (get e :fn)) (get r :spy))))
+      (assert= (get r :value) "8")
+      (is (contains? traced "evsrv-named-top"))
+      (is (not (contains? traced "evsrv-named-helper")))))
+
+  ;; The cap is the safety net for `:all` more than for a name list: a session can define
+  ;; a lot, and tracing all of it must still bound what comes back.
+  ;;
+  ;; Bounded, not exact. `untrace-all` clears a registry that `%isolate` does not roll back
+  ;; (isolation copies global BINDINGS), so a neighbouring traced test can pull this one's
+  ;; wrapper mid-recursion and the entry count lands anywhere below the cap — the same
+  ;; shared-registry hazard the `:isolated` note at the top of the section describes. The
+  ;; claim that matters here is that `:all` cannot flood a reply, and `<=` is that claim;
+  ;; asserting a specific number would be asserting the scheduler.
+  :isolated (test ":all traces, and cannot exceed the spy cap"
+    (baseline-globals!)
+    (let (r (eval-capturing "(defn evsrv-all-chat ((0) 1) ((n) (* n (evsrv-all-chat (- n 1)))))\n(evsrv-all-chat 200)"
+              :all))
+      (assert= (get r :ok) true)
+      (is (> (count (get r :spy)) 0)) ; it really traced
+      (is (<= (count (get r :spy)) eval-server/*spy-entry-cap*)))))
+
 (describe "boundary tracing (:trace)"
   ;; :isolated — tracing rebinds globals and `untrace-all` clears a SHARED registry,
   ;; so these must not run beside each other (concurrently they flipped each other's

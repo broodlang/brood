@@ -594,6 +594,10 @@ enum Cmd {
     /// dependency sources) to a copy of the prebuilt `brood` runtime. The result
     /// runs `:main` on any compatible machine with no interpreter, project dir,
     /// or source files alongside — just the one binary. `tests/` is excluded.
+    ///
+    /// Every binary written is then RUN with the reserved `--brood-boot-check`
+    /// argument to prove it starts; one that does not is deleted and the release
+    /// fails. `--no-smoke` skips that.
     Release {
         /// Output path for the binary. Defaults to the project's `:name`; with
         /// `--target` the name gets a per-target suffix (e.g. `app-macos-arm64`).
@@ -614,12 +618,14 @@ enum Cmd {
         #[arg(long = "target", value_name = "TRIPLE")]
         targets: Vec<String>,
 
-        /// After writing each binary, run it to prove it boots: load every
-        /// embedded module, resolve `:main`, run nothing. Fails the release if
-        /// it doesn't. Skipped for a non-host `--target` (that binary cannot run
-        /// here); the skip is reported, never silent.
-        #[arg(long = "smoke")]
-        smoke: bool,
+        /// Skip the boot check. By default every binary written is run with the
+        /// reserved `--brood-boot-check` argument to prove it boots — load every
+        /// embedded module, resolve `:main`, run nothing — and a binary that does
+        /// not boot fails the release and is deleted. Skipped for a non-host
+        /// `--target` (that binary cannot run here); the skip is reported, never
+        /// silent. Use this only when you cannot run the artifact at all.
+        #[arg(long = "no-smoke")]
+        no_smoke: bool,
     },
 
     /// Manage the package signing key (ADR-212).
@@ -1094,13 +1100,13 @@ fn run_main(cli: Cli) {
             output,
             runtime,
             targets,
-            smoke,
+            no_smoke,
         } => cmd_release(
             &mut interp,
             output.as_deref(),
             runtime.as_deref(),
             &targets,
-            smoke,
+            !no_smoke,
         ),
     }
 }
@@ -1999,6 +2005,8 @@ fn cmd_release(
     output: Option<&str>,
     runtime: Option<&str>,
     targets: &[String],
+    // Prove each binary boots before calling the release a success — the default;
+    // `--no-smoke` clears it. See `smoke_test`.
     smoke: bool,
 ) {
     use brood::core::value::Value;
@@ -2135,15 +2143,26 @@ fn cmd_release(
     }
 }
 
-/// `nest release --smoke` — run the binary just written with the reserved
+/// The release's boot check — run the binary just written with the reserved
 /// `--brood-boot-check` argument, so the ARTIFACT is proven to load its modules and
 /// resolve `:main` before the release is called a success (KI-66).
 ///
-/// Checking the source tree is not the same act: the bundle carries a *snapshot* of
-/// every dependency, so a dependency updated on disk since the last `nest fetch`, a
+/// **On by default**, and `--no-smoke` is the only way out. It was opt-in until
+/// 2026-08-29, which is the wrong default for the one question a release has to
+/// answer: "does the thing I just wrote start?" Nothing upstream answers it —
+/// `nest check` resolves names and `nest test` runs the suite, and NEITHER loads
+/// `main` — so an unbootable binary was reported as `Wrote app (41 modules, 31.5 MB)`
+/// and discovered by whoever ran it. Running it costs one process and a module load.
+///
+/// Checking the source tree is not the same act either: the bundle carries a *snapshot*
+/// of every dependency, so a dependency updated on disk since the last `nest fetch`, a
 /// module outside `:source-paths`, or a `:main` naming a module that was never
 /// collected are invisible upstream and fatal here. This is the only gate that runs
 /// the thing that ships.
+///
+/// A binary that fails the check is **deleted**. A release that failed must not leave
+/// an executable behind for a later `scp`/`docker COPY`/`gh release upload` to pick up:
+/// the exit code is seen once, by whoever ran the command, while the file outlives it.
 fn smoke_test(out: &std::path::Path, triple: Option<&str>) {
     // A cross-target binary cannot execute here. Say so — a smoke test that
     // quietly does nothing is the gate-that-cannot-fail shape (KI-68/70).
@@ -2167,21 +2186,40 @@ fn smoke_test(out: &std::path::Path, triple: Option<&str>) {
         Ok(s) if s.success() => println!("  smoke: boots"),
         Ok(s) => {
             eprintln!(
-                "nest release: {} was written but does NOT boot (exit {})",
+                "nest release: {} does NOT boot (exit {}) — the failure is above, from the \
+                 binary itself",
                 out.display(),
                 s.code()
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "signal".to_string())
             );
+            discard_unbootable(&path, out);
             std::process::exit(1);
         }
         Err(e) => {
             eprintln!(
-                "nest release: cannot run {} for the smoke test: {e}",
+                "nest release: cannot run {} for the boot check: {e}",
                 out.display()
             );
+            eprintln!("  Pass --no-smoke to write the binary without proving it boots.");
             std::process::exit(1);
         }
+    }
+}
+
+/// Remove a binary that failed its boot check, reporting either way. Best-effort:
+/// a removal that fails is *said*, not swallowed — the point of deleting it is that
+/// nobody ships it by accident, so "I could not" has to be as loud as "I did".
+fn discard_unbootable(path: &std::path::Path, out: &std::path::Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => eprintln!(
+            "  removed {} (a release that fails is not an artifact)",
+            out.display()
+        ),
+        Err(e) => eprintln!(
+            "  WARNING: {} does not boot and could not be removed ({e}) — delete it by hand",
+            out.display()
+        ),
     }
 }
 

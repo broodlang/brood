@@ -1,0 +1,152 @@
+//! **The kernel's dispatch identity must equal the language's.**
+//!
+//! `%identity-of` (`std/prelude/tools.blsp`) is what ability dispatch keys on, and it is
+//! written in Brood. `Heap::dispatch_identity` is the kernel's copy, added so the compiler's
+//! devirtualization and — under speculative dispatch (docs/dispatch-speculation.md) — native
+//! guard code can ask the same question without each re-deriving the answer. Before it, the
+//! compiler re-derived it by hand and said so in a comment: *"mirrors `identity-of`"*. A
+//! comment is not a mechanism.
+//!
+//! Why this matters more than it looks: a speculation guard compares the identity it computes
+//! against the one it expects, and then calls an impl directly. If the guard's notion of
+//! identity ever diverges from the dispatcher's, the guard passes and **the wrong impl runs**
+//! — no crash, no error, a different answer. So the two definitions agreeing is the whole
+//! safety property that phase rests on, and it is asserted here rather than assumed.
+//!
+//! The subtle cases are the ones a re-derivation gets wrong, and each is covered below: a
+//! plain map is `:map`, but a map carrying a truthy `:__id__` is that record; a map whose
+//! `:__id__` is `nil` or `false` is a plain map again (matching `record?`); and every
+//! non-map answers with its `type-of` kind.
+
+use brood::Interp;
+
+/// Evaluate `expr`, then ask BOTH definitions for its dispatch identity: the language's, by
+/// calling `%identity-of` on the same expression, and the kernel's, by handing the evaluated
+/// value to `Heap::dispatch_identity`. Returns `(language, kernel)` as printed strings.
+fn both(interp: &mut Interp, expr: &str) -> (String, String) {
+    let language = interp
+        .eval_str(&format!("(%identity-of {expr})"))
+        .map(|v| interp.print(v))
+        .unwrap_or_else(|e| panic!("evaluating (%identity-of {expr}): {e:?}"));
+    let value = interp
+        .eval_str(expr)
+        .unwrap_or_else(|e| panic!("evaluating {expr}: {e:?}"));
+    let kernel = interp.print(interp.heap.dispatch_identity(value));
+    (language, kernel)
+}
+
+#[test]
+fn the_kernel_and_the_language_agree_on_every_dispatch_identity() {
+    let mut interp = Interp::new();
+    // A record, so the nominal-identity path is exercised against a real `defrecord`.
+    interp
+        .eval_str("(defrecord ident-probe (n))")
+        .expect("define a record");
+
+    let cases = [
+        // Non-maps answer with their `type-of` kind.
+        "1",
+        "2.5",
+        "\"s\"",
+        ":kw",
+        "true",
+        "nil",
+        "[1 2]",
+        "(list 1 2)",
+        "(fn (x) x)",
+        // A plain map is `:map` — NOT a record.
+        "{}",
+        "{:a 1}",
+        // A real record answers with its nominal id.
+        "(ident-probe 3)",
+        // The three cases a re-derivation gets wrong. A hand-written `:__id__` decides
+        // identity if truthy; a falsy one leaves the value a plain map, which is exactly
+        // what `record?` documents and what a naive `map_get(:__id__)` would miss.
+        "{:__id__ :hand/written}",
+        "{:__id__ nil :a 1}",
+        "{:__id__ false :a 1}",
+    ];
+
+    let mut disagreements = Vec::new();
+    for expr in cases {
+        let (language, kernel) = both(&mut interp, expr);
+        if language != kernel {
+            disagreements.push(format!(
+                "  {expr}\n    %identity-of      → {language}\n    dispatch_identity → {kernel}"
+            ));
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "the kernel's dispatch identity disagrees with the language's on {} case(s). A guard \
+         built on the kernel's answer would pass and call the impl the dispatcher would NOT \
+         have chosen:\n{}",
+        disagreements.len(),
+        disagreements.join("\n")
+    );
+}
+
+// The exported callback native guard code calls. Declared here rather than imported —
+// `jit::rt` is `pub(crate)` — which also makes this a test of the symbol that is actually
+// registered with Cranelift (`jit/cranelift.rs`), not of a Rust-visible copy of it.
+#[cfg(feature = "jit")]
+extern "C" {
+    fn brood_rt_dispatch_identity(heap: *mut std::ffi::c_void, w0: i64, w1: i64, w2: i64) -> i64;
+}
+
+#[cfg(feature = "jit")]
+#[test]
+fn the_native_callback_answers_what_the_kernel_answers() {
+    use brood::core::value::Value;
+
+    // The word ABI (`jit/rt.rs`) transmutes a `Value` to `[i64; 3]`. If that ever stops
+    // holding, every callback is passing garbage and this must fail loudly rather than
+    // silently comparing nonsense.
+    assert_eq!(
+        std::mem::size_of::<Value>(),
+        std::mem::size_of::<[i64; 3]>(),
+        "the Value word ABI changed"
+    );
+
+    let mut interp = Interp::new();
+    interp
+        .eval_str("(defrecord native-probe (n))")
+        .expect("define a record");
+
+    // The last case is the one the sentinel exists for: `%identity-of` answers with whatever
+    // truthy value sits under `:__id__`, so a hand-written non-keyword id identifies as that
+    // value. A guard compares keywords, so the callback reports -1 and the site falls back.
+    let cases = ["1", "\"s\"", "{:a 1}", "(native-probe 3)", "{:__id__ 42}"];
+    let mut sentinels = 0;
+    for expr in cases {
+        let value = interp
+            .eval_str(expr)
+            .unwrap_or_else(|e| panic!("evaluating {expr}: {e:?}"));
+        let expected = match interp.heap.dispatch_identity(value) {
+            Value::Keyword(s) => s as i64,
+            _ => -1,
+        };
+        let words: [i64; 3] = unsafe { std::mem::transmute(value) };
+        let got = unsafe {
+            brood_rt_dispatch_identity(
+                (&mut interp.heap) as *mut _ as *mut std::ffi::c_void,
+                words[0],
+                words[1],
+                words[2],
+            )
+        };
+        assert_eq!(
+            got, expected,
+            "the native callback and the kernel disagree on the identity of {expr}"
+        );
+        if got == -1 {
+            sentinels += 1;
+        }
+    }
+    // Not vacuous: if no case reached the non-keyword branch, the loop above only ever
+    // compared two keyword lookups and the sentinel is untested (ADR-280).
+    assert_eq!(
+        sentinels, 1,
+        "expected exactly the hand-written non-keyword id to report the sentinel"
+    );
+}

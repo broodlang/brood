@@ -792,6 +792,27 @@ fn resolve_prim(heap: &Heap, h: Symbol) -> Option<(PrimOp, [usize; 2])> {
     // to a non-PRELUDE closure, which fails this check, so the inline cleanly
     // disables (and the same epoch guard that protects every other inlined prim
     // re-validates here on a redefinition).
+    // `(get m k)` on a map — the read that had no primitive. Same shape as `nth` below:
+    // matched by head symbol, and accepted only when the global still resolves to the
+    // PRELUDE closure, so a user `(def get …)` cleanly disables the inline (and the epoch
+    // guard every `Prim2` carries re-validates on a redefinition). Two args only: the
+    // 3-arity `(get m k default)` never reaches here, and the variadic fold path below
+    // accepts `Add`/`Mul` alone, so it cannot be folded either.
+    //
+    // The op inlines only a present, non-nil value; everything else defers to the real
+    // `get`, which keeps the set / string / integer-index branches and `%lookup-miss` in
+    // Brood. See [`PrimOp::MapGet`].
+    if value::symbol_is(h, "get") {
+        if !inline::mapget_enabled() {
+            return None;
+        }
+        return match v.unpack() {
+            ValueRef::Fn(id) if id.region() == crate::core::value::PRELUDE => {
+                Some((PrimOp::MapGet, [0, 1]))
+            }
+            _ => None,
+        };
+    }
     if value::symbol_is(h, "nth") {
         return match v.unpack() {
             ValueRef::Fn(id) if id.region() == crate::core::value::PRELUDE => {
@@ -1290,7 +1311,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             // A Const callee falls through to the NO_SITE (computed-head) path below.
             if inline::mono_enabled() {
                 if let Node::Global(op) = callee {
-                    if let Some(direct) = inline::mono_devirtualize(heap, op, &args) {
+                    if let Some(direct) = inline::mono_devirtualize(heap, scope, op, &args) {
                         callee = direct;
                     }
                 }

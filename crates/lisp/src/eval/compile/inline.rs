@@ -33,6 +33,20 @@ pub(crate) fn mono_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_MONO").is_some())
 }
 
+/// Is the `(get m k)` → [`PrimOp::MapGet`] lowering enabled? **Opt-in** (`BROOD_MAPGET=1`)
+/// while it proves itself, so a default build is byte-for-byte what it was.
+///
+/// Opt-in rather than opt-out because the risk is not correctness but *tiering*: the native
+/// lowering deopts when the probe declines (a non-map receiver, an absent key, a stored
+/// `nil`), and sixteen deopts in a row mark an arm `BAILED`. A miss-heavy loop could
+/// therefore end up interpreted where today it is compiled — a regression in a shape nothing
+/// in the suite would notice. The flag is what lets that be measured before it is anyone's
+/// default. Cached once, like the other levers.
+pub(crate) fn mapget_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_MAPGET").is_some())
+}
+
 /// A global whose value is a CHAMP map (`*op-ability*`, `*impls*`), or `None`.
 fn global_map(heap: &Heap, name: &str) -> Option<MapId> {
     match heap.env_get(heap.global(), value::intern(name))? {
@@ -42,7 +56,8 @@ fn global_map(heap: &Heap, name: &str) -> Option<MapId> {
 }
 
 /// The statically-provable dispatch identity of a call's first-argument `Node`, or `None`
-/// when it isn't certain. Mirrors `identity-of`: a non-record literal → its `type-of` kind;
+/// when it isn't certain. Defers to [`Heap::dispatch_identity`] for the literal case rather
+/// than re-deriving it: a non-record literal → its `type-of` kind;
 /// a direct record-constructor call → the record's baked `:module/name` id. Every other
 /// shape (a variable, a non-record call, a map literal that *could* be a record) → `None`.
 fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
@@ -54,7 +69,13 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
             if matches!(v.unpack(), ValueRef::Map(_)) {
                 return None;
             }
-            Some(Value::keyword(value::tag(v).keyword()))
+            // The shared definition (`Heap::dispatch_identity`), not a local re-derivation.
+            // For a non-map this is exactly the old `keyword(tag(v))`, so nothing changes
+            // here yet; what changes is that there is now one function to keep honest
+            // instead of a comment claiming two agree. The map exclusion above stays for
+            // now — `dispatch_identity` answers a record literal correctly, so lifting it
+            // is a behaviour change and belongs with the speculation work, not here.
+            Some(heap.dispatch_identity(v))
         }
         // A direct constructor call `(circle 2)`. Its baked id is `:<qualified-ctor-name>`,
         // i.e. `keyword(ctor)`. It is a record constructor iff that id is registered in
@@ -88,7 +109,12 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
 ///     the head is a genuine record constructor — a same-named non-record fn is rejected.
 /// The impl set is `*impls*[[ability op]]` resolved by that id then `:default` — the order
 /// `impl-for` uses.
-pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Option<Node> {
+pub(super) fn mono_devirtualize(
+    heap: &Heap,
+    scope: &mut Scope,
+    op: Symbol,
+    args: &[Node],
+) -> Option<Node> {
     // The dispatch identity of arg0, if statically certain.
     let id_kw = mono_arg_identity(heap, args.first()?)?;
     // The head global must be a registered ability op → its ability name symbol.
@@ -150,6 +176,17 @@ pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Optio
     }
     // `((%dispatch *impls* '[ability op] :id) …)` — the id is constant-folded, the
     // resolution stays behind the epoch-guarded cache.
+    //
+    // **The site is not optional.** `emit_node` sets `head = Some(sym)` for a `Node::Global`
+    // callee and then does NOT push the callee — `Inst::Call` resolves it from `head`,
+    // through the call-site IC keyed on `site`. `head = Some` paired with `NO_SITE` is a
+    // combination `compile_node` cannot produce (it allocates the site in the same match
+    // that yields a `Global` callee), so nothing downstream is built for it: the JIT's
+    // fast-link path indexes by site and read garbage, and the call returned nil —
+    // "cannot call non-function: nil", at tier 2 only, above the tiering threshold. Hence
+    // `scope` here, allocated only once the rewrite is certain so a declined site is never
+    // consumed.
+    let dispatch_site = scope.site_alloc();
     Some(Node::Call {
         callee: Box::new(Node::Global(value::intern("%dispatch"))),
         args: Box::new([
@@ -160,7 +197,7 @@ pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Optio
         tail: false,
         pos: None,
         file: None,
-        site: NO_SITE,
+        site: dispatch_site,
         staged: false,
     })
 }

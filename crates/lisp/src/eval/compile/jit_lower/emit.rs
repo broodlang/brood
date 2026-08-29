@@ -43,6 +43,11 @@ pub(super) struct Funcs {
     pub thas: FuncRef,
     pub tget: FuncRef,
     pub tput: FuncRef,
+    /// `brood_rt_map_get` — the CHAMP probe behind [`PrimOp::MapGet`]. Same
+    /// `(heap, out, 3 words, 3 words) -> status` shape as the table reads, and the same
+    /// `table_prim` helper drives it: status 0 hands back the value, status 1 deopts to the
+    /// VM, which owns every branch of `get` this declines.
+    pub mget: FuncRef,
     /// `brood_rt_roots_base` — re-fetch the frame base after a call may realloc `roots`.
     pub rb: FuncRef,
     /// `brood_rt_global_ic` — resolve a free global through the per-site inline cache.
@@ -280,6 +285,9 @@ pub(super) fn emit_arith(
         // Table ops: not an int-arith op — lowered as a runtime callback in the
         // Inst::Prim2 arm below (never through this integer emitter).
         PrimOp::TableHas | PrimOp::TableGet => return None,
+        // CHAMP probe through the runtime callback, like the table ops — not integer
+        // arithmetic, so it is lowered in `prim.rs`, not here.
+        PrimOp::MapGet => return None,
     })
 }
 

@@ -348,6 +348,35 @@ pub(super) fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap
     Ok(heap.list(out))
 }
 
+/// `(%expr-type src)` — the type the advisory checker infers for the FIRST form in
+/// `src`, rendered the way a `sig` is written (`"int"`, `"(list any)"`,
+/// `"(int -> int)"`), or nil when `src` doesn't parse or the checker has no opinion.
+///
+/// The checker computes this for every expression it walks in order to produce its
+/// warnings; nothing could ask it for one. `%type-signature` answers the question for a
+/// NAMED global, which leaves the case a REPL or a playground actually has — an anonymous
+/// expression you just typed, whose name is nothing. Nil rather than an error for
+/// unparsable input, matching `%check-string-structured`: both are read live, from a
+/// buffer that is mid-edit half the time.
+pub(super) fn expr_type(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "expr-type", arg(args, 0))?;
+    let forms = match reader::read_all_positioned(heap, &src) {
+        Ok(fs) => fs,
+        // unparsable (e.g. mid-edit) — no opinion rather than an error
+        Err(_) => return Ok(Value::nil()),
+    };
+    let Some((form, _)) = forms.into_iter().next() else {
+        return Ok(Value::nil());
+    };
+    match crate::types::check::expr_ty_of(heap, form) {
+        Some(ty) => {
+            let rendered = ty.to_string();
+            Ok(heap.alloc_string(&rendered))
+        }
+        None => Ok(Value::nil()),
+    }
+}
+
 /// `(check-string-structured src)` — the source-string counterpart of
 /// `check-file-structured`: advisory type-check the Brood source string `src` and
 /// return a list of `{:line :col :message}` maps (1-based positions; no `:file`).

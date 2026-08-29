@@ -161,7 +161,20 @@ impl Drop for GcBlockGuard {
 /// their root thread onto a stack of this same size (see `cli`/`nest` `main`), so
 /// the budget below is uniform and safe on both the root thread and workers.
 /// Tunable; bump if a feature lands with heavier frames.
+///
+/// **wasm32 is not a worker.** There are no OS threads there and no 16 MiB stack — the
+/// module runs on a shadow stack in linear memory, ~1 MiB by default. Both consumers of
+/// this constant are wrong at 16 MiB on that target: the budget below it can never be
+/// reached (the host traps first), and — the one that bit — the "implausibly large ⇒
+/// stale base" backstop in [`stack_overflow_check`] cannot recognise a bogus reading.
+/// That is KI-82: a stale `STACK_BASE` yielded `used = 14021552`, which is over the
+/// 12 MiB budget and under the 16 MiB backstop, so the guard raised
+/// `recursion too deep` on a program three frames deep. Sizing this to the real stack
+/// makes the backstop fire and rebase instead, which is what it exists to do.
+#[cfg(not(target_arch = "wasm32"))]
 pub const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(target_arch = "wasm32")]
+pub const WORKER_STACK_BYTES: usize = 1024 * 1024;
 
 /// Native-stack reserve kept free for one more *nested activation* — see
 /// [`native_stack_headroom_ok`]. Enough for the deepest single re-entry chain
@@ -220,7 +233,13 @@ pub fn native_stack_headroom_ok() -> bool {
 /// frame we're in plus the error-construction path (`format!` + `LispError`)
 /// without itself overflowing. Override with `BROOD_STACK_BUDGET=<size>`
 /// (e.g. `6M`); `0` or malformed falls back to the default.
+#[cfg(not(target_arch = "wasm32"))]
 const STACK_BUDGET_MARGIN: usize = 4 * 1024 * 1024;
+/// A quarter of the wasm shadow stack, in the same spirit as the native quarter: enough
+/// to build and unwind the error without itself overflowing. A 4 MiB margin against a
+/// 1 MiB stack would saturate the budget to **zero** and fire the guard on every eval.
+#[cfg(target_arch = "wasm32")]
+const STACK_BUDGET_MARGIN: usize = 256 * 1024;
 
 /// The active stack budget in bytes, read once from `BROOD_STACK_BUDGET` (or
 /// derived from [`WORKER_STACK_BYTES`]). Cached so the per-`eval` check is a load
@@ -303,4 +322,49 @@ pub fn stack_overflow_check(sp: usize) -> Option<usize> {
 #[inline]
 pub(super) fn stack_base_set(n: usize) {
     STACK_BASE.with(|b| b.set(n));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The byte guard has two thresholds and they must stay ordered:
+    ///
+    ///   0 < stack_budget() < WORKER_STACK_BYTES
+    ///
+    /// `stack_budget()` is where a runaway is reported; `WORKER_STACK_BYTES` is where
+    /// [`stack_overflow_check`] decides a reading is too large to be real and rebases a
+    /// stale base instead of raising. Collapse either end and the guard breaks *silently*
+    /// in one direction or the other — which is KI-82, where wasm32 kept the native 16 MiB
+    /// while its shadow stack is ~1 MiB, so a bogus 13.4 MiB reading landed in the gap:
+    /// above the budget (so it raised) and below the backstop (so it was never recognised
+    /// as stale). The playground then failed its own front-page example.
+    ///
+    /// This runs on the host, so it cannot execute the wasm arm — but it pins the shape
+    /// for whatever target it is compiled for, and the wasm arm is a `cfg` of the same two
+    /// constants. It also catches the subtler half: a margin larger than the stack
+    /// saturates the budget to **zero** and fires the guard on every eval, which is what a
+    /// naive "just shrink the stack for wasm" edit produces.
+    #[test]
+    fn the_stack_guard_thresholds_are_ordered_and_non_degenerate() {
+        let budget = stack_budget();
+        assert!(
+            budget > 0,
+            "budget saturated to zero — margin exceeds the stack"
+        );
+        assert!(
+            budget < WORKER_STACK_BYTES,
+            "budget {budget} >= stack {WORKER_STACK_BYTES}: the stale-base backstop can \
+             never fire, so a bogus reading raises instead of rebasing"
+        );
+    }
+
+    /// The margin/stack relation is decidable at COMPILE time, so it is checked there —
+    /// a `const` assertion fails the build on every target it is compiled for, including
+    /// wasm32, which a `#[test]` on the host can never reach. This is the half that
+    /// saturates `stack_budget()` to zero when it is wrong.
+    const _: () = assert!(
+        STACK_BUDGET_MARGIN < WORKER_STACK_BYTES,
+        "the stack-budget margin must be smaller than the stack it is subtracted from"
+    );
 }

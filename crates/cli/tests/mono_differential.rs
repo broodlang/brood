@@ -167,3 +167,61 @@ fn an_impl_registered_after_compile_time_is_still_the_one_called() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_devirtualized_call_stays_correct_after_it_tiers_to_native() {
+    // **The differential above cannot catch a JIT bug.** It runs the ability suite, where no
+    // devirtualized call is executed often enough to tier past the bytecode VM — so the whole
+    // native path was uncovered, and a rewrite that only misbehaves once lowered read as
+    // green. That is exactly what happened: the emitted dispatch call carried
+    // `head = Some(%dispatch)` with `site = NO_SITE`, a pairing `compile_node` cannot
+    // produce, and the JIT's site-indexed fast-link path read garbage. Below the tiering
+    // threshold: correct. Above it: `cannot call non-function: nil`.
+    //
+    // So this case exists to cross that threshold. `CLAUDE.md` already insists a tiered
+    // runtime be measured at both call counts; the same is true of *correctness*, and this
+    // is the cheap way to hold that line.
+    let dir = std::env::temp_dir().join(format!("brood-mono-hot-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let file = dir.join("hot.blsp");
+    std::fs::write(
+        &file,
+        "(defrecord cir (r))\n\
+         (defability Sz (asize [self] :-> int))\n\
+         (impl Sz cir (asize [x] (* (get x :r) 2)))\n\
+         (impl Sz :default (asize [x] 0))\n\
+         ;; a direct-constructor arg, so the devirt fires, in a loop long enough to tier\n\
+         (defn hot (n acc) (if (= n 0) acc (hot (- n 1) (+ acc (asize (cir n))))))\n\
+         (io/puts (str \"hot: \" (hot 300000 0)))\n",
+    )
+    .expect("write fixture");
+
+    let mut results = Vec::new();
+    for mono in [false, true] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+        cmd.arg(&file);
+        if mono {
+            cmd.env("BROOD_MONO", "1");
+        } else {
+            cmd.env_remove("BROOD_MONO");
+        }
+        support::dies_with_parent(&mut cmd);
+        let out = cmd.output().expect("run brood");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("hot: 90000300000"),
+            "the {} run must compute the loop correctly after it tiers — got:\n{text}",
+            if mono { "monomorphized" } else { "dynamic" }
+        );
+        results.push(text);
+    }
+    assert_eq!(
+        results[0], results[1],
+        "the two arms disagree once the arm is native"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
