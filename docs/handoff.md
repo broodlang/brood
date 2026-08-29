@@ -249,7 +249,8 @@ twice; neither outage was a language bug, both were gaps in what the toolchain c
 before you shipped. Three of the five were a question nothing had a command for:
 
 1. **Does it boot?** `nest run --check-boot` loads every source module and resolves `:main`,
-   running nothing; `nest release --smoke` then does it to the **binary just written**. That
+   running nothing; `nest release` then does it to the **binary just written** (by default since
+   2026-08-29 — `--no-smoke` opts out — and a binary that fails is deleted). That
    second half is the one that matters — a bundle carries a *snapshot* of every dependency,
    so a dep updated on disk since the last `nest fetch` is invisible to any source-tree check
    and fatal in the artifact. All four entry paths share one entry resolver, so the check

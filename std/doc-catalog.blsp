@@ -93,6 +93,8 @@
    "bound?" :meta
    "system/brood-version" :meta
    "system/build-id" :meta
+   "system/build-time" :meta
+   "reflect/expr-type" :meta
    "reflect/builtin-modules" :meta
    "bytes" :bytes
    "bytes?" :predicates

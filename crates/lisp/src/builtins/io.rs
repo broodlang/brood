@@ -409,6 +409,23 @@ pub(super) fn gc_stats_map(heap: &mut Heap) -> Value {
 /// every green process. The data behind the bytecode-lowering gate (ADR-096): is
 /// the VM dispatch-, env-, or alloc-bound? A *counting* tool, not a timing one.
 #[cfg(feature = "dev-tools")]
+/// `(%tree-walker?)` — is this run's tier ceiling the tree-walker (ADR-222)?
+///
+/// Exists so a test can ask the RUNTIME which engine it is on instead of re-deriving it
+/// from an environment variable. Two spellings select tier 0 — `BROOD_TIER=0` and the
+/// older `BROOD_VM=0` alias — and a guard written against one of them silently stops
+/// guarding under the other: `tests/observability_test.blsp` asserted the sampling
+/// profiler had collected frames, which the tree-walker never produces, and failed under
+/// `BROOD_TIER=0` because it only recognised `BROOD_VM`. Same engine, unrecognised
+/// spelling. `tier_ceiling` is the one place that decides.
+pub(super) fn tree_walker_p(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    let is_tw = matches!(
+        crate::eval::compile::tier_ceiling(),
+        crate::eval::compile::Tier::TreeWalk
+    );
+    Ok(Value::boolean(is_tw))
+}
+
 pub(super) fn vm_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pairs = match crate::perf::snapshot() {
         Some(counters) => {

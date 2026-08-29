@@ -6494,8 +6494,9 @@ unreproducible one-shot panic on the strength of twelve clean runs. Twelve warm 
 `touch target/release/brood` reproduces it every time.
 
 The three: `sig!`'s expansion-time code called `take`/`nth`/`map`/`range`/`count`, none
-reachable that early in the prelude's load order — and `take` had left the bare namespace
-entirely in the ADR-290/291 wave with nothing noticing, because nothing expanded that path. The
+defined yet at that point — `sig!` lives in `core.blsp` and `take` in `seq.blsp`, which the
+prelude concatenates later. (I first read this as ADR-290/291 rename rot; it is not, `take` is
+bound at root and never moved — corrected below.) The
 contract shim was `(let (orig name) (fn …))`, a closure over a let-bound local, which the
 prelude's freeze step rejects outright. And `defrecord` emitted its constructor `sig` *above*
 the `defn` it rebinds — fatal under contracts, and therefore fatal for every record in the
@@ -6724,6 +6725,198 @@ cases, all 21 `jit_*_test.blsp`, fuzz differential over three generators × 4 en
 Honest running total on `bintree` for the day, all interleaved: **−7.5%** (return slot),
 neutral (argument count), **−8.5%** (staging in place), **~−1.5%** (vector in place).
 
+## 2026-08-29 (evening) — a missing entry point answered with a module the user never wrote
+
+`nest release` in the brood repo itself reported `Wrote brood (9 modules, 22.0 MB)`, and the
+`nest run` after it died with:
+
+```
+1:24: error: require: cannot find module 'main'
+    at require-one (2992:7)
+    at project/run
+```
+
+Both are wrong, in opposite directions, for the same reason: this repo has no Brood app, so it
+has no `:main` and no `main` module. `run`'s message is a true fact about a module nobody wrote,
+named after a *default* nobody typed, reported three frames inside `require` — it describes the
+mechanism, not the situation. And `release` had just written a 22 MB executable that cannot
+start, calling it success.
+
+Two fixes, both in `std/tool/project.blsp`:
+
+- **`project-no-entry-advice`** phrases the actual question, which is one of three and decides
+  the fix: no `:main` declared (declare one, or add `src/main.blsp`), a declared `:main` naming
+  nothing (with the source paths it looked in), or a `--main` override naming nothing.
+  `project-require-entry` wraps `run`'s entry `require-one` and rewrites **only** that failure,
+  matched on the exact message for that module name — an error raised *while loading* the entry
+  module is the entry module's own error and is re-thrown untouched.
+- **`bundle-reject-missing-entry`** stops `bundle-collect` when the entry module is not among the
+  modules collected. `nest release --smoke` already caught this by *running* the artifact
+  (KI-66), but it is opt-in; the cheap half of that check costs one list lookup, so it is not
+  left optional. A baked-in std module as the entry still passes — it ships in every runtime.
+
+Deliberately **not** applied to `run-bundle`/`check-bundle-boot`: the collect-time guard makes a
+fresh bundle's entry present by construction, and "add `src/main.blsp`" is developer advice with
+no meaning inside a shipped app's binary.
+
+Guarded by five cases in `tests/project_test.blsp` (the three advice branches plus the bundle
+guard both ways). One existing fixture — the ADR-225 co-located-test-stripping test, which calls
+`bundle-collect` on a project shipping only `lib` — now declares `:main lib`. 118/118 in that
+file; `nest format --check` clean, checker gate at zero warnings.
+
+## 2026-08-29 (evening, cont.) — the release boot check is on by default, and why bedit stopped booting
+
+Follow-on from the entry above, and the same shape twice: a gate that only fires if you
+remember to ask for it, and a setting that reverts if you don't repeat it.
+
+**`nest release` now boot-checks by default.** `--smoke` was opt-in, so `Wrote app (41
+modules, 31.5 MB)` was printed for binaries nobody had asked to start. That is the wrong
+default for the *one* question a release has to answer, and nothing else answers it: `nest
+check` resolves names, `nest test` runs the suite, and **neither loads `main`** (KI-66).
+The flag is now `--no-smoke`, and the check runs otherwise. It costs one process and a
+module load against a release that already spends minutes assembling 30 MB.
+
+A binary that fails is **deleted**. An exit code is seen once, by whoever ran the command;
+the file outlives the terminal and is what a later `scp`/`docker COPY`/`gh release upload`
+picks up. A removal that itself fails is said loudly rather than swallowed. Covered by
+`release_deletes_a_binary_that_does_not_boot` in `crates/nest/tests/cli_failure_reporting.rs`,
+which uses `/bin/false` as the base runtime — appending the archive to it yields a
+well-formed release image that exits nonzero for any argument, so the real path is exercised
+with no 2-minute runtime build. Both directions asserted, including that `--no-smoke` still
+writes one. ADR-257 amended.
+
+**Why bedit could not boot: the installed runtime had no GUI.** Not a bedit bug and not a
+brood bug — `config.mk` read `WITH_GUI := 0`, so `main`'s `(gui-display …)` died at
+`gui/open`. The cause is that **`./configure` starts from the defaults every time** (the
+autotools contract), so `./configure --with-audio` on a tree configured `--with-gui` turns
+the GUI back off and says nothing. `WITH_AUDIO := 1` against a default of 0 is the
+fingerprint of exactly that run.
+
+Keeping configure stateless is right; keeping it silent is not. It now diffs against the
+`config.mk` it is about to replace and warns for every option the run turns OFF:
+
+```
+configure: WARNING — this run turns OFF what the previous config.mk had ON:
+    WITH_GUI := 0   (was 1)
+  ./configure starts from the defaults every time, so pass EVERY option you
+  want on one line — e.g. ./configure --with-gui --with-audio
+```
+
+The error itself was also giving cargo advice to someone using this repo's build:
+`gui backend not compiled in; rebuild with --features gui`. It now names
+`./configure --with-gui && make install` first, with the cargo spelling after it.
+
+**The gap this leaves, stated plainly.** The release boot check resolves `:main`; it does
+not check that the runtime carries the *features* the app needs. A bundle can pass the boot
+check and still die at its first frame on `gui backend not compiled in`, because a feature
+gate belongs to the runtime the app was appended to, not to the app's modules. (`nest
+release` builds a lean **+gui** runtime, so the released bedit is fine — it is a
+`make install` runtime that can be short.) Not addressed today.
+
+## 2026-08-29 — the stdlib backlog, re-measured: one real fix and three items that were not defects
+
+Asked what was left of the standard-library audit, I measured the three open items instead of
+reciting them. **Two turned out to be already fixed, one described the wrong culprit, and one
+was correct behaviour mistaken for a bug.** The single genuine defect took a dozen lines.
+
+**What shipped (ADR-295).** `count` and `empty?` accept a rope and a table. Both used to raise
+`empty?: expected collection`, which is why neither kind could join the bare collection
+vocabulary. A rope counts in CHARACTERS so it agrees with `string/length` for the text it
+stands for — pinned by a test including a multi-byte case, where counting bytes would diverge.
+Sized directly rather than through `Seqable`: `->seq` is a *list* view, so routing `count`
+through it would make a rope materialise every character to answer what its length already
+knows, on the editor's hot path. The checker's `countable` gained `Rope`/`Table` in the same
+change; it had already begun warning `count: argument 1 expects … got rope` against the new
+arm, which is the gate doing its job.
+
+**`(seq rope)` returning the rope was never a bug.** The entry called it the worst of the
+three — a wrong value rather than an error. But a **string does exactly the same**:
+`(seq "abc")` → `"abc"`, and `(first "abc")` raises. A rope stands for a string, so passing
+through is the consistent answer, and "fixing" it would have made a rope less like the thing
+it models. Measured before touching it, which is the only reason it survived.
+
+**The 24 "stutters" cannot be renamed.** They are not hand-written names: `defrecord` emits
+them, so `(defrecord queue (front back size))` inside `(defmodule queue)` produces
+`queue/queue-front`. Nine are the constructor case and fine. The other fifteen cannot be
+shortened — `datetime/datetime-day` → `datetime/day` collides with an existing polymorphic
+function (both answer 29 for the same value) — and cannot be deleted or made private either.
+That last one is the interesting measurement: `std/` uses **5 of its 56** generated accessors,
+all in tests, which reads like dead API — but **bedit uses 41 of its 46**. A library's own
+suite is not evidence about its consumers.
+
+**`seq/remove-nth (i coll)` was the near-miss.** The entry said it "takes its collection
+first" and I was one edit from reversing it. `std/seq.blsp:133` records that index-first is
+the module-wide convention (`take`, `drop`, `chunk-every`), that `sig`s exist specifically to
+catch a reversal, and that `remove-nth`'s move *to* index-first is KI-71 — which surfaced as
+seven unrelated buffer-lifecycle failures downstream. Acting on the backlog item would have
+reintroduced a bug the repo had already paid for. The comment above the `sig`s is what
+stopped it.
+
+**The pattern.** An item recorded as open can be *fixed*, or *wrong*, and still read as work.
+The cost is paid twice: once in a backlog that never shrinks, and once when someone
+implements the stale description. Three of four here were in that state after roughly three
+days. Re-measure before scheduling — and prefer a comment at the definition site to a line in
+a backlog, because the comment is what was actually read at the moment it mattered.
+
+**Phase 0 of speculative dispatch, and a bug in yesterday's fix.** Started the identity guard
+and it turned into something better first: there was no shared definition of *dispatch
+identity* to guard against. `%identity-of` is Brood, the compiler re-derived it by hand under
+a comment saying "mirrors identity-of", and the checker reasons about `:__id__` separately —
+three expressions of one rule, none checked against another, with native code about to become
+a fourth. `Heap::dispatch_identity` is now the one definition, `kw::RECORD_ID` the one
+spelling, and two sabotage-verified gates pin them together, including the case a naive
+`map_get(:__id__)` gets wrong (a falsy id is a plain map, not a record).
+
+Then the guard itself was abandoned, twice over. A **proven** identity needs no guard — and
+`mono_arg_identity` only ever proves one — so guarding there re-verifies what is known and
+adds a CHAMP read. And the premise underneath the whole plan turned out false: a constant
+callee is not inlinable. `call_head_sym` accepts only a *symbol*, and worse,
+`leaf_inline_probe` rejects any caller body containing an RT-handle const — which a baked impl
+is — so baking one **disqualifies the enclosing body from leaf inlining entirely**. The real
+blocker for the prize is that impl fns are anonymous, which is hard constraint #2 in the
+monomorphization doc and has been sitting there unaddressed.
+
+**And chasing that found a live bug in ADR-294**, committed the day before. The rewrite built
+a `Node::Call` with `head = Some(%dispatch)` and `site = NO_SITE`. `emit_node` does not push
+the callee for a named head — `Inst::Call` resolves it through the site-keyed IC — so the
+JIT's fast-link path read garbage and the call returned nil. Only at tier 2, only past ~5000
+iterations. The suite, the corpus and my own differential were all green on it, because none
+of them runs a devirtualized ability call hot enough to tier.
+
+Three things came out of that, and the last is the point: the site is now allocated properly;
+`emit_node` asserts the invariant, which was load-bearing and written down nowhere; and the
+differential crosses the tiering threshold. `CLAUDE.md` already says to measure a tiered
+runtime at both call counts — that discipline applies to *correctness*, not just to
+benchmarks, and this is what it costs to skip it.
+
+**A map read is now a primitive (ADR-296).** The named-impls experiment said no — naming an
+impl gives the leaf inliner a symbol and it still refuses, because `leaf_body_qualifies` wants
+a **call-free** body and every map read was a call. Measured, holding everything else fixed:
+`(* n 2)`, `(if (= n 0) 1 2)`, `(* (first v) 2)` and `(* (nth v 0) 2)` all inline;
+`(* (get x :r) 2)` does not. A 2×2 over {arithmetic, field-read} × {local, global} argument
+confirms it is the body.
+
+The cause was one absent enum variant. Vectors had `VectorRef`, the mutable table had
+`TableGet` and `TableHas`, and the CHAMP map — the primary data structure, and every record —
+had nothing. So no `defrecord` accessor, no ability impl, and none of the map-shaped helpers
+that are most of Brood could ever be inlined, while `get`'s own source calls its map branch
+"the hottest path in the language (4796 call sites)".
+
+`PrimOp::MapGet` follows `nth` → `VectorRef` exactly, inlines only a present non-nil value, and
+defers everything else to the real `get` so the set / string / integer-index branches and
+`%lookup-miss`'s `Lookup` dispatch stay in Brood. The native half reuses the table-read
+machinery verbatim.
+
+Opt-in, and the reason is worth stating: the correctness case is strong (5206/5206 with the
+flag on, byte-identical, at every tier), but the *tiering* case is untested — the native path
+deopts when the probe declines, sixteen in a row mark an arm `BAILED`, and a miss-heavy loop
+could end up interpreted where it is compiled today. Nothing in the suite would notice, and we
+do not benchmark here. So the flag exists to let that be answered before it is anyone's
+default.
+
+The gate asserts the *purpose*, not just the answers: a field-reading body is not
+leaf-inlinable without the prim and is with it. A differential on answers alone would have
+passed happily while the optimization did nothing at all.
 ## 2026-08-29 (fifth) — the list gets a durable home, and the review pass
 
 **The performance list is now `compute-frontier.md` §7** — measured items only, with §4
@@ -6754,7 +6947,7 @@ test pins 24. One word, but it is the number the whole ABI section reasons from.
 green, `make gcstress` green, fuzz differential over **all 11 generators** × 4 engine configs
 (0 divergences, 0 crashes), clippy on CI's flags, all local gates.
 
-**And the battery caught one real thing — KI-82.** `mono_differential` failed under suite
+**And the battery caught one real thing — KI-83** (filed as KI-82, renumbered same-day: a parallel session's KI-82 was already cited upstream). `mono_differential` failed under suite
 load with "monomorphization changed an ANSWER" while both arms said `92 passed`: the diff was
 the framework's per-test slow annotation (`… 13.9s`), printed only when a nested test crosses
 1 s, which under 4-way parallelism one arm did. The `without_timings` filter now drops any

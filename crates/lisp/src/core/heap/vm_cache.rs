@@ -567,6 +567,34 @@ impl Heap {
         }
     }
 
+    /// **The dispatch identity of `v` — the one definition.**
+    ///
+    /// Mirrors `%identity-of` (`std/prelude/tools.blsp`) exactly: an identity-carrying record
+    /// answers with its nominal `:__id__` keyword, everything else with its `type-of` kind. A
+    /// map whose `:__id__` is absent or falsy is a plain map and dispatches as `:map` — the
+    /// distinction `record?` documents, and the reason this cannot be a bare `map_get`.
+    ///
+    /// It exists as a shared function because until now it did not: the identity was written
+    /// out once in Brood and **re-derived by hand** in the compiler's devirtualization
+    /// (`inline::mono_arg_identity`, whose doc comment says "mirrors `identity-of`" — a claim,
+    /// not a mechanism), with the checker reasoning about `:__id__` shapes independently
+    /// beside them. Speculative dispatch (docs/dispatch-speculation.md) adds a fourth reader
+    /// in native code, and a guard is only as sound as the agreement between the identity it
+    /// compares and the one dispatch actually uses. Divergence there is not a slow path — it
+    /// is the wrong impl, silently. So: one definition, and `identity_agreement.rs` pins it to
+    /// the Brood one.
+    pub fn dispatch_identity(&self, v: Value) -> Value {
+        if let Value::Map(mid) = v {
+            let key = Value::keyword(crate::core::value::intern(kw::RECORD_ID));
+            if let Some(id) = self.map_get(mid, key) {
+                if crate::eval::truthy(id) {
+                    return id;
+                }
+            }
+        }
+        Value::keyword(crate::core::value::tag(v).keyword())
+    }
+
     /// The pure resolution `impl-for` does: `impls[op-key][id]`, else `[:default]`, else nil.
     fn dispatch_resolve(&self, impls: Value, op_key: Value, id: Value) -> Value {
         let impls_id = match impls {
