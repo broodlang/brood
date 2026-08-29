@@ -6464,3 +6464,65 @@ with no sha matching HEAD, both pickers took "first that exists" and chose a 15-
 `release-fast/nest` over a `release/nest` built minutes earlier. The fallback is now the
 newest candidate. Filed as a second KI-76 addendum, because it is that entry's own lesson
 turned back on the fix for it.
+
+## 2026-08-29 — the call result stops returning through memory: bintree −7.5%, collatz −5.8%
+
+Picking up §2g's parting finding, which had left the next step named and priced: on `bintree`,
+one `movups` inside `jit_run_fast_link` was 23.5% of that function, and the note asked for the
+narrowest slice of the X-register call convention — "make the return value come back in a
+register, expect ~5%".
+
+**The load is real; the mechanism guessed for it is not.** Re-profiled with `cycles:pp`
+(precise events) first, because a load 115 bytes behind a `callq` is exactly what skid looks
+like: still 16.4% of the function, so it is genuinely that instruction. Then tested the obvious
+cause — a 16-byte load straddling `store_int`'s 1-byte tag + 8-byte payload cannot store-forward
+— by widening the callee's Done store to a single 16-byte vector store, still through
+`roots[base]`. The instruction stayed at **16.4%** and the row moved 1.3% against a 1.0% floor.
+Not forwarding: the memory round trip itself. (A first attempt used `iconcat` + `store.i128`,
+which measured nothing at all — Cranelift's x64 backend keeps an `i128` in a GPR *pair*, so it
+legalizes straight back into two 8-byte `mov`s. Worth knowing before reaching for I128 to get a
+wide store.)
+
+**So: hand the destination down.** The arm ABI gains `out: *mut Value` and the Done exits write
+through it. `brood_rt_fast_frame` passes the JIT'd caller's own slot straight to the callee, so
+the value is written **once**, by the code that produced it, into the slot that wants it.
+
+The win is bigger than the estimate because the load was one of *three* copies: the callee
+stored to `roots[base]`; `jit_run_fast_link` loaded it and returned `FastLinkOutcome::Done(Value)`,
+a 32-byte enum that returns via `sret` (stored again); `brood_rt_fast_frame` then did `*out = v`
+(stored again). All three are gone — `Done` is payload-free now, which is what kills the `sret`.
+`bintree` **−6.5%** and `collatz` **−5.8%** in the sweep (floors 1.3% / 2.2%), every other row
+noise; solo interleaved, `bintree` −8.5% at n=200 and −7.5% at n=2000, flat at n=20 where the row
+is boot. Ceiling-1 (`ab-vm`) all noise. After: no instruction in `jit_run_fast_link` above 6.4%.
+
+**`latency` read +5.2% and is not a regression** — it is a fixed-schedule open-loop row, so its
+wall time under `make ab`'s core pinning is queueing. Unpinned and interleaved: 2.56 s on both,
+p50 20 vs 20 µs, p99 90 vs 89 µs, identical sustained rps. The documented trap, one row over.
+
+**The part worth carrying: this ABI is not type-checked.** Every caller reaches an arm through
+`mem::transmute` of a raw code pointer, so adding a parameter compiled cleanly with nine callers
+still passing two arguments — the callee would read `out` from a register nobody set and store a
+`Value` through it. Two things now stand between that and a future change: `crate::jit::JitArmFn`
+is a **named type** used at every transmute, and `out_ptr` lives on `emit::Frame` rather than
+being threaded to the exit helpers. The second one is not tidiness — there are **two** Done
+exits (`exit_done`, and the `t == len` arm of `control::emit_jump`), the first migration updated
+one, and every `if`/loop arm then returned `nil` while straight-line arms were fine. Five unit
+tests caught it, but "a parameter you must remember to thread to a site you have not found" is
+the shape that gets missed; on `Frame` the compiler asks instead.
+
+Correctness, given `out` is not a GC root: suite 1231/1231 on both engines (`make test-both`),
+`make gcstress`, GC_STRESS+GC_VERIFY on the effect-once torture cases, `BROOD_JIT_VERIFY=1`, all
+21 `jit_*_test.blsp`, and the fuzz differential over **all 11 generators × 4 engine configs** —
+0 divergences, 0 crashes. Lowering unchanged (86 vs 85 arms, 46 vs 46 bails). The invariant is
+the one the `brood_rt_{cons,car,cdr}` out-pointer ABI already lives under: nothing allocates
+between the store and the consumer, and the cold outcomes write `out` after all of theirs.
+
+**One casualty found on the way:** the `pipeline` benchmark row was dead — this morning's
+ADR-290/291 wave moved `lmap`/`lfilter` to `seq/`, and `brood-benchmarks` is outside this repo's
+gates, so nothing saw it (KI-44's pattern, one repo over). `ab-bench` reported it as a baseline
+timeout rather than a broken program, which is how a dead row hides. Fixed there; it now runs and
+reads −1.6% against a 3.1% floor.
+
+**Next on this row**, from the after-profile: `__memmove` **10.4%** — the frame/staging copies,
+now the largest single item and untouched by this — then `brood_rt_fast_frame` 8.2%, then ~19%
+allocation.

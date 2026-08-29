@@ -989,6 +989,9 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
     callee_gic_base: u32,
 ) -> i64 {
     use crate::eval::compile::FastLinkOutcome;
+    // `out` goes straight down to the native callee, which writes the result into it
+    // directly — no store/load round trip through `roots[base]` and no copy here. This is
+    // the path that made the change worth making; see `crate::jit::JitArmFn`.
     match crate::eval::compile::jit_dispatch_fast_frame(
         &mut *heap,
         site,
@@ -998,11 +1001,9 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
         code as usize,
         env,
         (callee_ic_base, callee_gic_base),
+        out,
     ) {
-        FastLinkOutcome::Done(v) => {
-            *out = v;
-            0
-        }
+        FastLinkOutcome::Done => 0,
         FastLinkOutcome::Error => 1,
         FastLinkOutcome::Fallthrough => 2,
     }

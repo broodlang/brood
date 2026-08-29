@@ -13,10 +13,12 @@
 //!    profitability gate, frame/checkpoint layout, and unboxing eligibility are all
 //!    backend-independent decisions made above it (`eval/compile/jit_lower.rs` today; see
 //!    `docs/backend-seams.md` §3 for the move that hoists them out).
-//! 2. **Output** — `extern "C" fn(heap: *mut Heap, base: i64) -> i64`. The compiled fn
-//!    reads its frame slots from `roots[base..]`, computes in registers, and **boxes its
-//!    result into `roots[base]`**. Returning `None` from [`JitBackend::lower_arm`] means
-//!    "out of my subset, keep running the VM" — never a failure.
+//! 2. **Output** — [`JitArmFn`], i.e.
+//!    `extern "C" fn(heap: *mut Heap, base: i64, out: *mut Value) -> i64`. The compiled fn
+//!    reads its frame slots from `roots[base..]`, computes in registers, and on Done
+//!    **writes its result through `out`** — the caller's slot, not `roots[base]`. Returning
+//!    `None` from [`JitBackend::lower_arm`] means "out of my subset, keep running the VM" —
+//!    never a failure.
 //! 3. **Outcome codes** — the returned `i64` is `0` Done, `1` deopt, `2` preempt, `3` error
 //!    (parked on the heap for `jit_take_error`), `4` tail (the callee tail-called; its
 //!    `[callee, args…]` are staged in `roots` above the frame), and `5` **depth bail** — the
@@ -81,6 +83,26 @@ use crate::eval::compile::CompiledArm;
 /// configuration hook. Each of those is a knob with no caller today, and per ADR-011 an
 /// additive feature costs nothing to defer — whoever adds a second backend adds the ones
 /// that turn out to be needed, with their actual uses.
+/// The ABI of a JIT-compiled arm: `(heap, base, out) -> outcome`.
+///
+/// **This alias exists because the compiler cannot check this ABI.** Every caller reaches a
+/// lowered arm through `mem::transmute` of a raw code pointer, so a signature that drifts
+/// from what the backend emitted is not a type error — it is silent UB (an argument read
+/// from a register nobody set, i.e. a store through a garbage pointer). Naming the type once
+/// makes the arity and the parameter kinds a single-site fact.
+///
+/// `out` is where the Done result goes. It is deliberately *not* `roots[base]`: returning
+/// through the roots stack meant the caller loaded back what the callee had just stored, and
+/// `perf` (precise events) put that one `movups` at 16.4% of `jit_run_fast_link`. The caller
+/// passes the slot it actually wants the value in, so the value is written once. `out` is
+/// only written on outcome 0; every other outcome leaves it untouched.
+///
+/// **GC:** `out` is *not* a root. Nothing may allocate between the callee's store and the
+/// consumer taking the value — the same discipline the `brood_rt_{cons,car,cdr}` out-pointer
+/// ABI already runs under (`emit::call_handle`), and the outcome-0 path does no allocation.
+pub(crate) type JitArmFn =
+    extern "C" fn(*mut crate::core::heap::Heap, i64, *mut crate::core::value::Value) -> i64;
+
 pub(crate) trait JitBackend {
     /// Lower `arm` to native code, or `None` to bail to the VM (obligations 1–3).
     fn lower_arm(&mut self, arm: &CompiledArm, slot_tags: &[u8]) -> Option<*const u8>;
