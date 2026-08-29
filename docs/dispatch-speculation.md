@@ -57,15 +57,56 @@ source after it is cheap and safe to add.** The two designs compose; they were n
 Each is independently shippable, and the order is chosen so that nothing is built on an
 unguarded base.
 
-### Phase 0 — the identity guard (enabling; no win on its own)
+### Phase 0 — one definition of dispatch identity ✅ (2026-08-29)
 
-Emit, in lowered code: read the value's dispatch identity, compare against a constant keyword,
-deopt on mismatch. Two shapes, because `%identity-of` has two cases — a record-shaped map
-answers with its `:__id__` field, everything else with its `type-of` keyword.
+**Revised on contact, and the revision is the finding.** The phase was written as "emit the
+guard in Cranelift". Two facts moved it:
 
-*Gate:* extend `crates/cli/tests/mono_differential.rs`; sabotage the guard and confirm it
-fails. *Risk:* low — this is `as_f64` one level up, and it changes nothing until Phase 2 uses
-it.
+1. **A native guard cannot be built yet.** `jit/rt.rs` has no map-read callback — `brood_rt_*`
+   can read globals, the epoch, pairs and tables, but nothing reads a CHAMP field. A record's
+   identity *is* a CHAMP field, so the guard needs a new rt callback before it needs any
+   Cranelift.
+2. **A guard is only as sound as the identity it compares.** And there was no shared
+   definition to compare against: `%identity-of` is written in Brood, the compiler's
+   `mono_arg_identity` **re-derived it by hand** under a comment reading *"mirrors
+   `identity-of`"*, and the checker reasons about `:__id__` shapes separately beside them.
+   Three expressions of one rule, none checked against another, with native code about to
+   become a fourth. If a guard's notion of identity diverges from the dispatcher's, the guard
+   *passes* and the wrong impl runs — silently.
+
+So Phase 0 became the foundation the guard rests on rather than the guard itself:
+
+- **`Heap::dispatch_identity`** (`core/heap/vm_cache.rs`, beside `vm_dispatch`) — the kernel's
+  one definition, mirroring `%identity-of` including the case a naive `map_get(:__id__)` gets
+  wrong: a map whose `:__id__` is `nil`/`false` is a plain map, not a record.
+- **`kw::RECORD_ID`** — the `__id__` spelling now lives in `core/keywords.rs` with the other
+  spellings that several layers independently recognise, so a fourth reader cannot invent a
+  fifth spelling.
+- **The compiler defers to it** instead of re-deriving (behaviour-identical: for a non-map the
+  old expression was exactly this one).
+
+*Gates, both sabotage-verified:*
+`crates/lisp/tests/dispatch_identity_agrees.rs` asserts the kernel's answer equals the
+language's across records, plain maps, falsy-`:__id__` maps and every non-map kind — dropping
+the truthy check makes it fail naming both cases. And in `tests/ability_test.blsp`, two tests
+pin the mapping `mono_arg_identity` actually depends on and which was previously asserted only
+by comment: a record's identity round-trips to its own constructor
+(`(reflect/eval (symbol (->string id)))`), and every registered record id names a bound
+constructor — with a non-vacuity assertion on the registry size.
+
+*Still to do for the guard proper, in Phase 2 where it has a consumer:* the rt callback and
+the Cranelift emission. Writing them now would be dead code, and the epoch question below
+decides their shape.
+
+**The epoch finding, which rules out the simpler design.** An IR-level guard —
+`(if (= (%identity-of x) :circle) (<impl> …) (<dynamic> …))` — is tempting: it needs no
+Cranelift, works at every tier, and is sound as a conditional. It does not work, because the
+identity is not the only thing that can go stale. Baking the impl also requires the resolution
+to still be current, and `global_epoch` bumps on **every** `def`. A baked epoch constant would
+therefore fail permanently after the first unrelated `def`, leaving every site on the slow
+path forever. The JIT is the only tier that can *re-derive* on an epoch change rather than
+fall back — which is exactly what `LeafInline::epoch` already does. **So the inlining prize is
+inherently a JIT-tier optimization**, and Phase 2 must be native.
 
 ### Phase 1 — per-call-site identity profiling
 

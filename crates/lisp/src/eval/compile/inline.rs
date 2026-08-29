@@ -42,7 +42,8 @@ fn global_map(heap: &Heap, name: &str) -> Option<MapId> {
 }
 
 /// The statically-provable dispatch identity of a call's first-argument `Node`, or `None`
-/// when it isn't certain. Mirrors `identity-of`: a non-record literal → its `type-of` kind;
+/// when it isn't certain. Defers to [`Heap::dispatch_identity`] for the literal case rather
+/// than re-deriving it: a non-record literal → its `type-of` kind;
 /// a direct record-constructor call → the record's baked `:module/name` id. Every other
 /// shape (a variable, a non-record call, a map literal that *could* be a record) → `None`.
 fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
@@ -54,7 +55,13 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
             if matches!(v.unpack(), ValueRef::Map(_)) {
                 return None;
             }
-            Some(Value::keyword(value::tag(v).keyword()))
+            // The shared definition (`Heap::dispatch_identity`), not a local re-derivation.
+            // For a non-map this is exactly the old `keyword(tag(v))`, so nothing changes
+            // here yet; what changes is that there is now one function to keep honest
+            // instead of a comment claiming two agree. The map exclusion above stays for
+            // now — `dispatch_identity` answers a record literal correctly, so lifting it
+            // is a behaviour change and belongs with the speculation work, not here.
+            Some(heap.dispatch_identity(v))
         }
         // A direct constructor call `(circle 2)`. Its baked id is `:<qualified-ctor-name>`,
         // i.e. `keyword(ctor)`. It is a record constructor iff that id is registered in
