@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-81 | **one `BROOD_CONTRACTS=1` run panicked in prelude expansion** — `prelude expand: unbound error: unbound symbol: take` (`lib.rs:359`), on a file using `defability`/`impl`/`sig`. `take` genuinely left the bare namespace in ADR-290/291, and `std/prelude/tools.blsp:2301` (`defmulti`) still calls it bare — but that line is reached at *expansion* and every later run expands it fine | ⚠️ **WATCHING 2026-08-29** — **not reproduced in 12 runs** (8 imaged, 4 with `BROOD_NO_STDIMAGE=1`), same file, same binary. The sighting landed moments after a `nest check` that printed `+28ms image`, i.e. while the stdlib image for HEAD was being *written*, and `(stdimage/status)` showed the on-disk images keyed to an older commit at the time — so a partially-visible image during prelude construction is the hypothesis. **Unverified**: nothing ties the panic to the image, and the bare `take` at `tools.blsp:2301` is a real latent call site either way. **If it recurs, check `(stdimage/status)` and whether an image write was in flight** — and fix the bare `take` regardless, since a call site that only resolves because expansion usually reaches it late is not a call site anyone should rely on |
 | KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
 | KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict. **Addendum 2026-08-29:** the same defect verbatim in `check-examples`/`check-stress`/`check-corpora` (fixed inline in `green.sh` only), which on a lean `make release` brood additionally reported an absent DEV_MODULE (`reload/on-change`) as *rename rot* — the exact class the gate exists to find. All three now share `scripts/lib/gate-binary.sh`, which resolves by sha and separates "this build lacks the module" from "this name is gone" |
 | KI-79 | **`live_migration::deep_receive_continuations_resume_correctly_across_workers` failed once in CI, on the commit that moved the JIT preempt handler.** The test runs up to 400 bursts and fails unless `migrate_count() > 0` — it asserts a scheduler event was **observed**, not that results are right. In the failing run the per-burst correctness assertion passed **400/400**; only the "was a migration seen" assertion fired, which is the case the test's own message anticipates ("if this is the only failure and the machine was loaded, suspect scheduler starvation"). Suspicious anyway, because `12b31fc2` outlined `jit_run_fast_link`'s cold arms — including the **preempt** outcome that live migration depends on | ⚠️ **WATCHING 2026-08-28** — not reproduced in 18 local runs (10 unpinned + 8 pinned to 2 cores, matching CI's core count). The change is provably a **verbatim** move: a line-by-line diff of the 117 moved lines against the original shows zero semantic differences, and the only new code is `if outcome == 0 { … return }` ahead of the delegation. It also cannot change *when* a preempt happens — the native arm's tick poll decides that, and only the handling moved. Mitigated rather than closed: `live_migration` now carries `retries = 1`, the gap the `distribution` override already documents. **If it recurs, get whether the correctness assertion also failed** — that is the line between starvation and a real capture-machinery bug |
@@ -5014,6 +5015,40 @@ rather than the summary line; libtest's summary alone cannot answer it.
 
 **Next step if it recurs:** get the case name, then decide. Until then this entry exists so a
 second sighting is recognised as a second sighting rather than a first.
+
+## KI-81 — one `BROOD_CONTRACTS=1` run panicked expanding the prelude ⚠️ WATCHING 2026-08-29
+
+**What was seen.** `BROOD_CONTRACTS=1 brood <file>` panicked with
+`prelude expand: unbound error: unbound symbol: take` at `crates/lisp/src/lib.rs:359`, on a
+file combining `defability`, `impl` and `sig`. Exit was a Rust panic, not a Brood error.
+
+**The real call site it names.** `take` left the bare namespace in the ADR-290/291 wave, and
+`std/prelude/tools.blsp:2301` — inside `defmulti`, computing `opts` — still calls it bare:
+
+```lisp
+opts (if ret-pos (take ret-pos opts) opts)
+```
+
+That line is unchanged by the wave and present in `HEAD`. It is reached at *macro expansion*
+time, and every subsequent run expands it without complaint, so something about ordering or
+timing decides whether the bare name still resolves. **The call site should be fixed
+regardless of this entry** — a reference that resolves only because expansion usually reaches
+it at the right moment is not one to depend on.
+
+**Not reproduced.** Twelve runs of the identical file and binary: eight with the image live,
+four under `BROOD_NO_STDIMAGE=1`. All clean.
+
+**The hypothesis, explicitly unverified.** The sighting landed immediately after a `nest
+check` that printed `+28ms image` — it was *writing* the stdlib image — and `(stdimage/status)`
+at the time listed only images keyed to older commits, so the id for `HEAD` was being created
+in that window. A partially-visible image during prelude construction is the shape that would
+explain a name resolving on one run and not the next, and it is the same family as KI-72 (an
+image section replacing a stub before its helpers were bound). Nothing ties the panic to the
+image; this is written down as the thing to check first, not as a diagnosis.
+
+**Next step if it recurs:** capture `(stdimage/status)` and whether an image write was in
+flight, and keep the full stderr. Fixing `tools.blsp:2301` to `seq/take` is worth doing on its
+own and would remove the only bare name the message could have been about.
 
 ## KI-80 — `brood_suite_passes` flaked once under load, and the output was thrown away ⚠️ WATCHING 2026-08-29
 
