@@ -1834,17 +1834,20 @@ fn compile_arm(
         Some(d) => ((scope.max + spill_reserve) as u32, 1 + d),
         None => (u32::MAX, 0),
     };
-    // Deopt-feedback watch (see the field doc): any non-loop arm with ≥1 non-tail
-    // call. Vector-op arms are watched too — nbody's `advance-body` (calls +
-    // `nth`s + a vector literal) deopted on ~100% of activations and only
-    // feedback can catch that; a healthy vec arm (bintree's `check`) never
-    // deopts, so it pays one relaxed load per native completion.
-    let deopt_watch = chunk.as_ref().is_some_and(|c| {
-        c.code
-            .iter()
-            .any(|i| matches!(i, Inst::Call { tail: false, .. }))
-            && !c.code.iter().any(|i| matches!(i, Inst::SelfCall { .. }))
-    });
+    // Deopt-feedback watch (see the field doc): every non-loop arm. The one exclusion
+    // that has a rationale is `SelfCall` loops — their deopt follows productive native
+    // iterations (an overflow at the end of a long int loop), so counting activations
+    // would mis-bail them. The predicate used to ALSO require ≥1 non-tail call (the shape
+    // nbody's `advance-body` had), which left a **call-free** arm with no thrash
+    // protection at all: mandelbrot's `->float` — one multiply, no calls — deopted
+    // **275,007 times in one run** (native entry + guard + deopt + full VM re-run per
+    // call, watch=false), the exact pathology this mechanism exists to stop, invisible
+    // to every gate because the answers are right. A healthy arm pays one relaxed load
+    // per native completion; an arm that deopts 16 times consecutively was not being
+    // served by its native code, calls or no calls.
+    let deopt_watch = chunk
+        .as_ref()
+        .is_some_and(|c| !c.code.iter().any(|i| matches!(i, Inst::SelfCall { .. })));
     let nslots_total = scope.max + spill_reserve + ckpt_reserve;
     let uid = next_arm_uid();
     let site_pos = std::mem::take(&mut scope.site_pos).into_boxed_slice();
