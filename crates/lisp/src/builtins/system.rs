@@ -472,9 +472,17 @@ pub(super) fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
         LispError::runtime(format!("reload-defs: cannot read {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
-    let root = heap.env_root(env);
+    // File current BEFORE the read — the reader stamps records with the ambient file;
+    // see `load` above (the same ordering bug broke attribution there).
     let prev = heap.set_current_file(Some(path.clone()));
+    let forms = match reader::read_all_positioned(heap, &src) {
+        Ok(f) => f,
+        Err(e) => {
+            heap.set_current_file(prev);
+            return Err(e.or_file(path.clone()));
+        }
+    };
+    let root = heap.env_root(env);
     // Namespace bracketing + forward-ref pre-scan, like `load` (ADR-065): a reloaded
     // namespaced file re-establishes its own namespace (its `(defmodule …)` form is
     // re-evaluated below) so its re-saved defs are qualified correctly. `NsLoadScope`
@@ -570,14 +578,24 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         LispError::runtime(format!("load: cannot read {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
+    // The file must be CURRENT before the READ, not just before the eval: the reader
+    // stamps every form's position record with `current_file_arc` at read time, so a
+    // read-then-set ordering gave every loaded form the CALLER's file (or none) at birth.
+    // Invisible for months because the expander's rebuilds re-stamped positions with the
+    // by-then-correct ambient file during eval — until ADR-297 made rebuilds copy the
+    // original record faithfully, which faithfully preserved the wrong birth record and
+    // broke coverage/attribution for loaded modules (`coverage_lines`, 2026-08-29).
+    let prev = heap.set_current_file(Some(path.clone()));
     // Read positioned so errors point at a line; tag every error with the file
     // (`FILE:LINE:COL:`, see docs/tooling.md).
-    let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
+    let forms = match reader::read_all_positioned(heap, &src) {
+        Ok(f) => f,
+        Err(e) => {
+            heap.set_current_file(prev);
+            return Err(e.or_file(path.clone()));
+        }
+    };
     let root = heap.env_root(env);
-    // Expose the file to Brood (`(current-file)`) for the duration of the load,
-    // so the test macros can record each test's source location; restore the
-    // previous file afterward since loads nest.
-    let prev = heap.set_current_file(Some(path.clone()));
     // A loaded file starts at the ROOT namespace; its own `(defmodule …)` sets the
     // namespace for the rest of the file (ADR-065). `NsLoadScope` resets compile-ns +
     // imports + this file's forward-ref pre-scan + assume-own, and restores the

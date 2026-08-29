@@ -2007,8 +2007,12 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
     // Linear, not quadratic, because the walk stops at a positioned pair: children are
     // expanded before their parent, so a positioned subtree was already finished.
     if out.as_pair() != form.as_pair() {
-        if let Some(pos) = heap.form_pos_only(form) {
-            stamp_synthetic(heap, out, pos);
+        // The whole record — the position AND ITS FILE. The stamp also runs at lazy
+        // expansion (an arm compiled at first call, `%coverage-precompile`, hot reload),
+        // where `current_file` is a different file or none, so the ambient file is wrong
+        // by construction there; the file must travel with the position it belongs to.
+        if let Some((pos, file)) = heap.form_pos(form) {
+            stamp_synthetic(heap, out, pos, file);
         }
     }
     Ok(out)
@@ -2161,7 +2165,12 @@ fn macroexpand_all_depth_step(heap: &mut Heap, form: Value, env: EnvId, depth: u
 /// one (the user's own sub-forms, or a finished inner expansion) are left exactly as they
 /// are and not descended into. An explicit stack, so a large expansion cannot overflow the
 /// Rust stack; quoted data inside is stamped too, harmlessly (a position on data is unused).
-fn stamp_synthetic(heap: &mut Heap, form: Value, pos: crate::error::Pos) {
+fn stamp_synthetic(
+    heap: &mut Heap,
+    form: Value,
+    pos: crate::error::Pos,
+    file: Option<std::sync::Arc<str>>,
+) {
     use std::collections::HashMap;
     // Pass 1 — every unpositioned pair reachable from `form`, parents before children, not
     // descending into a positioned pair (the user's own text, or a finished inner
@@ -2193,18 +2202,21 @@ fn stamp_synthetic(heap: &mut Heap, form: Value, pos: crate::error::Pos) {
     // its spine that is a form the user wrote (positioned, not synthetic) or a generated
     // form that itself derived one. So a `match` clause's `(if (%eq m :a) (do body) …)`
     // derives the clause's line through the `(do …)` its body sits in.
-    let mut derived: HashMap<u64, crate::error::Pos> = HashMap::new();
+    type PosFile = (crate::error::Pos, Option<std::sync::Arc<str>>);
+    let mut derived: HashMap<u64, PosFile> = HashMap::new();
     for &v in order.iter().rev() {
         let mut cur = v;
-        let mut found = None;
+        let mut found: Option<PosFile> = None;
         while let ValueRef::Pair(p) = cur.unpack() {
             let (head, tail) = heap.pair(p);
             if let Some(hid) = head.as_pair() {
                 let key = pair_key(hid);
+                // Derive the position AND ITS FILE from the same record, so a stamp at
+                // lazy-expansion time cannot pair one file's line with another's path.
                 let hp = if heap.form_pos_only(head).is_some() && !heap.is_synthetic(head) {
-                    heap.form_pos_only(head)
+                    heap.form_pos(head)
                 } else {
-                    derived.get(&key).copied()
+                    derived.get(&key).cloned()
                 };
                 if hp.is_some() {
                     found = hp;
@@ -2219,26 +2231,26 @@ fn stamp_synthetic(heap: &mut Heap, form: Value, pos: crate::error::Pos) {
     }
     // Pass 3 — parents before children: a pair takes what it derived, else what its
     // nearest positioned ancestor has, else the form the expansion came from.
-    let mut inherited: HashMap<u64, crate::error::Pos> = HashMap::new();
+    let mut inherited: HashMap<u64, PosFile> = HashMap::new();
     for &v in &order {
         let Some(id) = v.as_pair() else { continue };
         let key = pair_key(id);
         let own = derived
             .get(&key)
-            .copied()
-            .or_else(|| inherited.get(&key).copied())
-            .unwrap_or(pos);
-        heap.set_form_pos(v, own);
+            .cloned()
+            .or_else(|| inherited.get(&key).cloned())
+            .unwrap_or_else(|| (pos, file.clone()));
+        heap.set_form_pos_in_file(v, own.0, own.1.clone());
         heap.mark_synthetic(v);
         // hand `own` down the spine and to the head, so descendants inherit it
         let mut cur = v;
         while let ValueRef::Pair(p) = cur.unpack() {
             let (head, tail) = heap.pair(p);
             if let Some(h) = head.as_pair() {
-                inherited.entry(pair_key(h)).or_insert(own);
+                inherited.entry(pair_key(h)).or_insert_with(|| own.clone());
             }
             if let Some(t) = tail.as_pair() {
-                inherited.entry(pair_key(t)).or_insert(own);
+                inherited.entry(pair_key(t)).or_insert_with(|| own.clone());
             }
             cur = tail;
         }
