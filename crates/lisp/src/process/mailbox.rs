@@ -1223,9 +1223,7 @@ fn receive_match_timed(
                     // callback), which no latch can heal. Distinguishing that from a
                     // latchable native host by silence cost a debugging round.
                     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                    if *TRACE
-                        .get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some())
-                    {
+                    if *TRACE.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
                         eprintln!(
                             "[jit-bail] dirty-receive-block gateway-token={}",
                             heap.cur_native_gateway
