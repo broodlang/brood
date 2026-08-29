@@ -5430,6 +5430,53 @@ fn a_small_complement_renders_as_not_rather_than_a_tag_dump() {
 // A `sig`-declared higher-order parameter was annotated and then not checked:
 // `(sig g ((int -> int) -> int))` accepted `string/length` in silence.
 
+// A lambda LITERAL was never checked as a callback: `callback_sig` answered `None` for
+// one, so the parameter and result rules both skipped it and `(g (fn (x) (str x)))`
+// against `((int -> int) -> int)` was silent. The literal is now typed under the arrow's
+// own domain, and the existing result-disjointness rule catches it.
+#[test]
+fn a_lambda_callback_whose_result_is_disjoint_is_flagged() {
+    let ws = file_warnings(
+        "(sig g ((int -> int) -> int))\n(defn g (f) (f 1))\n(defn c () (g (fn (x) (str x))))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("callback whose result is used as int") && w.contains("string")),
+        "{ws:?}"
+    );
+}
+
+// …and the reason the body is typed under the DECLARED domain rather than as a free
+// `(any -> R)` arrow compared by `⊆`: with `x` unknown `(+ x 1)` is `number`, which is
+// not a subtype of `int` — a false positive on a perfectly valid callback. Under `x :
+// int` it is `int`, and identity is whatever it was handed.
+#[test]
+fn a_lambda_callback_with_a_merely_wider_result_is_not_flagged() {
+    for body in ["(+ x 1)", "x", "(if (> x 0) x 0)"] {
+        let ws = file_warnings(&format!(
+            "(sig g ((int -> int) -> int))\n(defn g (f) (f 1))\n(defn c () (g (fn (x) {body})))"
+        ));
+        assert!(
+            !ws.iter().any(|w| w.contains("callback whose result")),
+            "{body}: {ws:?}"
+        );
+    }
+}
+
+// A FALSE POSITIVE the lattice produced: `(tuple 0) ∪ pair` — a fold whose init is `[0]`
+// and whose step conses — merged into one term whose `elem_ty` reported the TUPLE's
+// elements for the whole thing, pair member included. `first` then typed as `0`, and
+// passing it where a string is wanted warned, while the runtime value was the string
+// "t". The invariant is "never false-positives", so this must stay silent.
+#[test]
+fn a_tuple_shape_does_not_leak_onto_a_pair_member_through_first() {
+    let ws = file_warnings(
+        "(sig takes-str (string -> any))\n(defn takes-str (s) s)\n\
+         (defn fp () (takes-str (first (fold (fn (a x) (cons x a)) [0] [\"t\"]))))",
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
 #[test]
 fn a_callback_that_cannot_accept_what_it_is_handed_is_flagged() {
     let ws = file_warnings(

@@ -807,7 +807,16 @@ impl Ty {
     /// bridge the checker reads to flow `(nth t i)`/`(first t)` to the exact
     /// per-position type.
     pub fn tuple_elems(&self) -> Option<&Vec<Ty>> {
-        self.single()?.tuple.as_deref()
+        let this = self.single()?;
+        // Positional access is exact ONLY on a term that is nothing but a vector of this
+        // shape: a consumer reads "position 0 is `0`, and never nil". A term that also
+        // admits a `pair` (unknown elements) or `nil` (`first` is nil) has no positional
+        // answer at all — reporting the tuple's was how `(tuple 0) ∪ pair` typed `first`
+        // as `0` on a value that was a string.
+        if this.tags != VECTOR_BIT {
+            return None;
+        }
+        this.tuple.as_deref()
     }
 
     /// A keyword-literal (singleton) type — exactly the keyword `sym`. Unions of
@@ -916,11 +925,21 @@ impl Ty {
     /// case anyway.
     pub fn elem_ty(&self) -> Option<Ty> {
         let this = self.single()?;
-        this.elem.as_deref().cloned().or_else(|| {
-            this.tuple
-                .as_ref()
-                .map(|elems| elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t)))
-        })
+        if let Some(e) = this.elem.as_deref() {
+            return Some(e.clone());
+        }
+        // A tuple shape refines the VECTOR member only. When the term also admits a
+        // `pair`, that member's elements are unknown, so the term's are — and reporting
+        // the tuple's elements for the whole term was a FALSE POSITIVE: `(tuple 0) ∪ pair`
+        // (a fold whose init is `[0]` and whose step conses strings) answered `0` for
+        // `first`, and `(takes-str (first …))` warned "expects string, got 0" on a value
+        // that was the string "t" at runtime. Unknown is the only sound answer here.
+        if this.tags & SEQ_BITS != VECTOR_BIT {
+            return None;
+        }
+        this.tuple
+            .as_ref()
+            .map(|elems| elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t)))
     }
 
     /// The type of a concrete value — the bridge from a runtime value to its type.
