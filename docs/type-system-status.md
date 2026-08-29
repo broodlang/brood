@@ -61,6 +61,11 @@ Everything the audit listed, plus:
 (cons 1 '())                ; list<1> — a nil tail has no elements
 '(1 2) (vec …) (into …) (conj …) (merge …) (apply …) (try …) ((fn …) x) (range n)
                             ; each typed by what it provably is; all were `any`/nil/bare tags
+;; a constructed record knows its fields (2026-08-29): `defrecord` declares `?field` vars
+(defrecord pt (x y))  (:x (pt 1 2))      ; 1 — was `any`
+;; every warning has a position: a lint over the expanded tree (match exhaustiveness,
+;; an unreachable clause, an argument inside a destructuring let) is placed at its
+;; enclosing top-level form when the expansion left it none
 ;; the surface itself (ADR-259)
 (sig q1 (strng -> int))                          ; unknown type
 (sig q2 ((tupel int) -> int))                    ; unknown constructor

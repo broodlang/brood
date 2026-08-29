@@ -373,13 +373,20 @@ this clause was an expansion error."
                fields)
         ;; the record-shaped constructor sig (always — this is the dispatch-inference
         ;; seam): each field keeps its declared type, else `any`.
-        arg-tys (map (fn (f) (or (%defrecord-ftype f) 'any)) fields)
+        ;; An undeclared field type is a TYPE VARIABLE named after the field (`?x`), not
+        ;; `any`: the checker binds it to the argument at each constructor call, so
+        ;; `(pt 1 2)` is the shape `{__id__: :pt, x: 1, y: 2}` and `(:x (pt 1 2))` is `1`.
+        ;; With `any` every field of every constructed record was unknown at the call.
+        ;; A declared type stays declared — it is a contract, checked at the call.
+        field-ty (fn (f)
+                   (or (%defrecord-ftype f)
+                     (symbol (str "?" (->string (%defrecord-fname f))))))
+        arg-tys (map field-ty fields)
         rec-ty (cons 'record
                  (cons :__id__
                    (cons id
                      (mapcat (fn (f)
-                               (list (keyword (->string (%defrecord-fname f)))
-                                 (or (%defrecord-ftype f) 'any)))
+                               (list (keyword (->string (%defrecord-fname f))) (field-ty f)))
                        fields))))
         ctor-sig (list '/sig rec (append arg-tys (list '-> rec-ty)))
         ;; per-accessor sigs only when every field is typed (else an accessor call on a

@@ -846,6 +846,28 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
 /// A form whose macroexpansion fails (a malformed macro call) falls back to
 /// its un-expanded shape — the eval path will surface the same parse-time
 /// error later anyway, so the checker just stays quiet there.
+/// Give every positionless warning produced while walking top-level `form` that form's
+/// own position.
+///
+/// A lint that runs over the macro-EXPANDED tree — match exhaustiveness and redundancy
+/// (which see the `(if (%eq …))` chain and its `throw`), an argument inside a destructuring
+/// `let` — reports at a pair the reader never saw, so `form_pos_only` on it is `None` and
+/// the warning printed as `file: warning: …` with nothing to jump to. Expansion stamps only
+/// the ROOT of an expansion with the original's position (`macros.rs`, `set_form_pos`), so
+/// the enclosing top-level form always has one. Coarse — it points at the `defn`, not the
+/// clause — but a warning an editor can open beats one it cannot, and the exact position
+/// is recoverable later by threading an ancestor position through the walk.
+fn backfill_positions(heap: &Heap, form: Value, out: &mut [(Option<Pos>, String)]) {
+    let Some(pos) = heap.form_pos_only(form) else {
+        return;
+    };
+    for w in out {
+        if w.0.is_none() {
+            w.0 = Some(pos);
+        }
+    }
+}
+
 pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
     check_file_ext(heap, forms, &[])
 }
@@ -1104,7 +1126,12 @@ pub fn check_file_ext(
                 // qualified references (ADR-227 follow-up), and that module load can
                 // collect at any depth, so `f` captured above is stale on the error path.
                 Err(err) => {
-                    out.push((err.pos, format!("does not compile: {}", err.message)));
+                    // A macro's own `(error …)` during expansion carries no position; the
+                    // form it was expanding does. Report there rather than nowhere.
+                    out.push((
+                        err.pos.or_else(|| heap.form_pos_only(forms[j])),
+                        format!("does not compile: {}", err.message),
+                    ));
                     heap.root_at(roots_base + j)
                 }
             };
@@ -1421,18 +1448,25 @@ pub fn check_file_ext(
             let mut guarded = HashSet::new();
             collect_bound_guards(heap, form, &mut guarded);
             ctx.set_bound_guarded(guarded);
+            let before = out.len();
             check_into(heap, form, &ctx, &mut out);
+            backfill_positions(heap, form, &mut out[before..]);
         }
         ctx.set_bound_guarded(HashSet::new()); // the exemption is per-form; don't leak it
                                                // Pass 3.5: flag non-tail self-recursion (overflow footgun — Brood loops
                                                // must be tail-recursive). Walks the same expanded tree.
         for &form in &expanded {
+            let before = out.len();
             recursion::check_recursion(heap, form, &mut out);
+            backfill_positions(heap, form, &mut out[before..]);
         }
         // Pass 3.6: sealed-`match` exhaustiveness (ADR-187 part 2). Reads the *un-expanded*
         // forms (a `match` survives only pre-expansion) with `ctx` carrying the file's sigs
         // and abilities, so a scrutinee typed as a sealed ability resolves to its record-id
         // set. Sound: anything it can't prove total defers to silence.
+        // (No backfill here: this pass reads the UN-expanded forms and positions each warning
+        // at its `match`, which the reader positioned. A backfill from "some top-level form"
+        // would put a wrong location on a warning, which is worse than none.)
         exhaustive::check_matches(heap, &forms, &ctx, &mut out);
         // Pass 3.7: guard purity (advisory) — flag an effectful primitive in a `:when`
         // guard. Also reads the *un-expanded* forms (a `:when` guard lowers to a plain

@@ -70,8 +70,15 @@ a full Hindley-Milner fixpoint.
 | `(list ?A)` | `nil\|pair` (bare list) | nothing — unknown element |
 | `(list ?A)` | `list<T>` | `?A → T` |
 | `(vector ?A)` | `vector<T>` | `?A → T` |
+| `(record :k ?A …)` | a record shape with field `k : T` | `?A → T` (by field name; `&open` and optional fields as in `parse_type`) |
 | `(?A -> ?B)` | arrow `S → R` | `?A → S`, `?B → R` |
 | `(or ?A int)` | `T` | `?A → T` (widen the union; skip — see below) |
+
+`defrecord` is the main producer of a record-with-variables signature: every field with no
+declared type is a variable named after it — `(defrecord pt (x y))` declares
+`(sig pt (?x ?y -> (record :__id__ :pt :x ?x :y ?y)))` — so a constructor call carries
+its argument types in its fields and `(:x (pt 1 2))` is `1`. A declared field type is a
+contract and stays concrete.
 
 Union/intersection params containing type vars are treated as **opaque** (no
 binding extracted) — a union `(or ?A int)` can't pin `?A` from a single concrete
