@@ -2591,14 +2591,37 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
             crate::process::unlink_self(pid);
             crate::process::exit(pid, kill.clone());
         }
-        for _ in 0..10_000 {
+        // The join must WAIT, not spin. `yield_now` is `std::thread::yield_now` — a hint
+        // the OS is free to ignore — so the old `for _ in 0..10_000 { yield }` could burn
+        // through in microseconds while a parked victim's kill still needed a scheduler
+        // worker to process it, and the "join" returned with the corpses mid-death. On the
+        // ROOT thread (where `brood --test` runs `:isolated` units) that was deterministic:
+        // `tests/remote_spawn_test.blsp` failed 4/4 because the reaped `:remote-spawn`
+        // server was still name-registered when the next test's `serve-spawns` checked —
+        // it saw "already serving", declined to restart, and every spawn request went to
+        // the corpse. So: yield briefly (cheap when the deaths are already processed),
+        // then back off to real micro-sleeps under a wall-clock bound. A short sleep on a
+        // green worker is acceptable — the victims retire on OTHER workers; the one victim
+        // a sleep cannot help (pinned to THIS worker) was equally beyond the spin loop,
+        // and the bound keeps a wedged orphan from hanging the run either way.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut spins = 0u32;
+        loop {
             if !crate::process::list_local_pids()
                 .into_iter()
                 .any(|p| spawned.contains(&p))
             {
                 break;
             }
-            crate::process::yield_now();
+            if std::time::Instant::now() >= deadline {
+                break; // give up on a wedged orphan; the bound is the point
+            }
+            if spins < 64 {
+                spins += 1;
+                crate::process::yield_now();
+            } else {
+                std::thread::sleep(std::time::Duration::from_micros(500));
+            }
         }
     }
     heap.restore_globals(saved);

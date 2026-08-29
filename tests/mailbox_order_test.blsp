@@ -108,7 +108,7 @@
       (send me [:noise])
       ;; THE ASSERTION: the reply is in this mailbox, and the pinned receive must find it.
       (let (r (table/get box :ref))
-        (assert= (receive ([:reply ^r v] v) (after 2000 :LOST-THE-REPLY)) :ok))
+        (assert= (receive ([:reply ^r v] v) (after *test-wait-ms* :LOST-THE-REPLY)) :ok))
       ;; And nothing the perturbed scan touched was dropped or duplicated.
       (assert= (receive ([:junk n] n) (after 500 :LOST-JUNK)) 3)
       (assert= (receive ([:go] :got-go) (after 500 :LOST-GO)) :got-go)

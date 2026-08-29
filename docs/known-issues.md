@@ -5296,7 +5296,7 @@ is now that gate, and it cold-caches deliberately (`XDG_CACHE_HOME` at a fresh t
 without that it passes on a broken build, which is exactly what every other check did for the
 entire period this was unusable.
 
-## KI-80 — `brood_suite_passes` flaked once under load, and the output was thrown away ⚠️ WATCHING 2026-08-29
+## KI-80 — `brood_suite_passes` flaked once under load, and the output was thrown away ✅ FIXED 2026-08-29
 
 **What was seen.** One `cargo nextest run -p brood --test-threads 4` ended
 `888 tests run: 888 passed (1 slow, 1 flaky)`, the flaky row being `brood::suite
@@ -5339,6 +5339,40 @@ answer, and the 300 s budget (5× the quiet-box 66 s) was exceeded only under fu
 adversarial contention no CI runner should see. The retry + FLAKY reporting is the designed
 handling working. Stays ⚠️ only because the *original* sighting's output is gone; if a third
 sighting is also a TMT line, close this as understood.
+
+**DIAGNOSED AND FIXED (2026-08-29, third pass).** The second sighting's TMT try-1 stdout was
+not thrown away this time, and it rewrote the entry: the dots stream contains **62 F's in
+runs (46, 12, and singles) before the timeout** — the "timeout under load" was mass test
+failures under load, with the cap merely hiding the names. Its stderr names the class:
+dozens of spawned processes dying `unbound symbol: editor/serve/serve-manager` (and bare
+`ui-run`) **after their file's `%isolate` rolled the globals back**. Three defects, each
+fixed:
+
+1. **74 hardcoded 1–3 s positive-wait deadlines** across 41 test files (`(after 2000
+   :none)` on receives that *expect* a message) — the exact class `*test-wait-ms*` was
+   created for, never swept. Under saturation a serve round-trip legitimately exceeds 2 s,
+   and the serve/editor cluster fails in blocks. All 74 now use `*test-wait-ms*` (20 s);
+   the collect-until-lull terminators and sub-second negative asserts were checked
+   individually and left alone.
+2. **`%isolate`'s reap "join" was a spin, not a wait** (`for _ in 0..10_000 { yield_now }`
+   — a thread-yield hint the OS may ignore, burnable in microseconds while a parked
+   victim's kill still needs a scheduler worker). On the ROOT thread — where `brood
+   --test` runs `:isolated` units — this was **deterministic**: `tests/remote_spawn_test.blsp`
+   failed 4/4 standalone (also at v0.16.0 — latent, not new), because the reaped
+   `:remote-spawn` server was still registered when the next test's `serve-spawns` checked,
+   so it declined to restart and every spawn request went to the corpse, silently. The join
+   is now wall-clock-bounded (5 s) with yield-then-micro-sleep backoff. 6/6 green after.
+3. **Retirement swept NAMES after removing the pid from REGISTRY**, so any join on
+   REGISTRY-absence could return while the dead pid was still name-registered.
+   `deregister` now sweeps NAMES first — the invariant is *REGISTRY-absent ⇒
+   NAMES-absent* (the sweep in `retire_pid_tail` stays, idempotent, for the root-ctx
+   path).
+
+**Verified:** the full suite under the second sighting's own load (4-core spin + a
+concurrent nextest loop) runs **green in 99 s** where it produced the 62-F TMT before;
+`remote_spawn_test` standalone 6/6 (was 0/4); suite 1250/1250; gcstress green. The
+original sighting's discarded output is permanently unknowable, but every mechanism the
+kept output exposed is closed.
 
 ## KI-75 — `compare` called unequal values equal, and `sort` inherited it ✅ FIXED 2026-08-28
 
