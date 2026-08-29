@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-86 | **`runtime_collector`'s three promotion tests fail on `main`.** `in_place_collect_reclaims_and_preserves_correctness`, `superseded_global_versions_are_reclaimable`, `evacuation_copies_only_live_code_and_verifies`: `expected ≥3000 promoted closures, got total=231` after 3000 `(reflect/eval (list 'def 'f (list 'fn …)))` redefs — the loop itself completes (`:done`, no error), so ~2900 of the closures are never promoted, or are not counted | ⚠️ **OPEN 2026-08-29** — reproduced on a clean stash of `70549e80`, so it predates the day's type-system work. **Why it was invisible:** `cargo test -p brood` prints 36 `test result` lines and a `\| head -14` on that output read as "782 passed, 0 failed" — the truncation cut the failing binary off the end; a summary of a summary is not a verdict (see `never-truncate-test-output`). **First thing to try:** `cargo test -p brood --test runtime_collector` on the commits around the JIT deopt-feedback change (`8fa9f2f7`) and ADR-296 — the redef loop's `fn` closures are exactly what a changed promotion/inlining policy would stop materialising |
 | KI-85 | **The checker produced a FALSE POSITIVE — its one hard invariant.** `(takes-str (first (fold (fn (a x) (cons x a)) [0] ["t"])))` warned `expects string, got 0` on a value that was the string `"t"` at runtime. A tuple shape (`[0]` → `(tuple 0)`) refines the VECTOR member only, but once the fold's result merged into one `pair \| vector` term, `elem_ty`/`tuple_elems` reported the tuple's elements for the whole term, pair member included | ✅ **FIXED 2026-08-29** — both accessors answer only for a term whose seq members the shape actually describes (`tuple_elems` only on a pure vector — a `nil` member makes `first` nil, a `pair` member makes it unknown). Found by an adversarial probe of the set-theoretic model; the same session closed a second gap the probe exposed — a lambda LITERAL passed as a callback was never checked at all (`callback_sig` answered `None`), so `(g (fn (x) (str x)))` against `((int -> int) -> int)` was silent; it is now typed under the arrow's own domain and the existing result-disjointness rule catches it, with no `⊆`-on-an-inferred-return false positives (`(+ x 1)` under `x : int` is `int`). Guards sabotage-verified |
 | KI-84 | **An imaged start of a project lost every buffer type's layers** — `nest test` in bedit: the run that WROTE `.brood/image.bin` passed 1306/1306, every run that READ it failed 99 (`*git-status*` not read-only, `.blsp` buffers not in brood-mode, gutters gone). `editor/layers/*type-layers*` was `{}` at module-load time on a warm start | ✅ **FIXED 2026-08-29** — the **stdlib** image's `editor/layers` section carries the module's registries as their pristine seeds (`{}`), and materialising an embedded module was a raw define: it overwrote the 26-entry registry the PROJECT image had just restored. A source load runs `defonce` there and keeps the binding; the image did not. Fix: with `reserve` (an embedded module from the pristine image) a bound DATA global keeps its binding; a bound FUNCTION (an ADR-246 stub, KI-72) is still replaced, and a project image (later state) still overwrites. Guard sabotage-verified |
 | KI-83 | **The monomorphization differential compared TIMING CHATTER as if it were an answer.** Under full-suite load, `cli::mono_differential` failed with "monomorphization changed an ANSWER" while both arms reported `92 tests, 92 passed, 0 failed` — the diff was one line: the framework's per-test slow annotation (`concurrent impl registration (KI-22) › … 13.9s`), printed only when a test crosses `*test-slow-ms*` (1 s), which under 4-way nextest parallelism one arm's nested run did and the other's did not. `without_timings` stripped only `ms wall`/`Slow tests` lines | ✅ **FIXED 2026-08-29** — the filter now also drops any line whose last token is a duration (`13.9s`, `2ms`); a real divergence in such a line is theoretically maskable, but a *failing* test already fails the `*_ok` asserts before the comparison runs. Sabotage-verified offline on the exact captured outputs: the old comparison fails on them, the new one passes, and a `92 passed`→`91 passed` mutation still diverges. Same species as [KI-80](#ki-80): a nested suite run under load emitting load-dependent output that an outer gate treats as signal |
@@ -201,6 +202,32 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-86 — `runtime_collector`'s three promotion tests fail on `main` ⚠️ OPEN 2026-08-29
+
+**Symptom.** `cargo test -p brood --test runtime_collector`: 17 pass, 3 fail —
+`in_place_collect_reclaims_and_preserves_correctness` (`expected ≥2000 promoted, got 239`),
+`superseded_global_versions_are_reclaimable` and `evacuation_copies_only_live_code_and_verifies`
+(`expected ≥3000 promoted closures, got total=231`; the test's own line reads
+`RUNTIME-GC estimate after 3000 redefs: total=231 live=112 (baseline=111, churn-live=1)`).
+
+**Cause.** Not attributed. The driver — 3000 rounds of `(reflect/eval (list 'def 'f (list 'fn
+'(x) …)))` — runs to completion and returns `:done` under the installed `nest`, so the closures
+are being defined; either they are no longer promoted into the RUNTIME region at `def`, or
+`runtime_closure_count` no longer sees them. Reproduced on a clean stash of `70549e80`, so
+it is independent of the day's type-system and expander work.
+
+**Why it survived.** The crate-wide run's summary was read through `| head -14`: 36 test
+binaries print 36 `test result` lines, and the failing one was past the cut — the run
+reported "782 passed, 0 failed" from the 14 lines it kept. A truncated summary is not a
+verdict; `never-truncate-test-output` already records this trap and it was walked into again.
+
+**Fix.** None yet. **First thing to try:** bisect `runtime_collector` across the JIT
+commits of 2026-08-29 (`8fa9f2f7` deopt feedback, ADR-296 `MapGet`, the call-path
+staging) — a promotion or inlining policy that stops materialising a short `fn` closure is
+exactly what the driver would show as "not promoted".
+
+**Guard.** The three tests themselves; they are red today.
 
 ## KI-85 — the checker false-positived: a tuple shape leaked onto a `pair` member ✅ FIXED 2026-08-29
 

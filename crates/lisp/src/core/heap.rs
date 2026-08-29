@@ -1589,7 +1589,7 @@ pub struct RuntimeCode {
     /// generation's leftovers aliased newly-minted pairs at reused indices and
     /// accumulated forever. Keying by generation fixes the first and lets the free purge
     /// exactly its own entries (the KI-7/KI-8 class).
-    positions: RwLock<HashMap<u64, (crate::error::Pos, Option<Arc<str>>)>>,
+    positions: RwLock<HashMap<u64, FormPos>>,
     /// Shared JIT native-code cache (ADR-101, the spawn lever): maps a simple
     /// fixed-arity RUNTIME/PRELUDE closure arm's `(closure_id, argc)` key (see
     /// `CompiledArm::share_key`) to its compiled native code as
@@ -2100,11 +2100,7 @@ impl RuntimeCode {
     }
     /// RUNTIME-form source position + file by `(code_gen, slab index)`, or `None`.
     /// See [`Self::positions`].
-    fn position_of(
-        &self,
-        idx: usize,
-        code_gen: usize,
-    ) -> Option<(crate::error::Pos, Option<Arc<str>>)> {
+    fn position_of(&self, idx: usize, code_gen: usize) -> Option<FormPos> {
         self.positions
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -2112,17 +2108,11 @@ impl RuntimeCode {
             .cloned()
     }
     /// Record a RUNTIME-form source position + file (called by `promote`). See [`Self::positions`].
-    fn set_position(
-        &self,
-        idx: usize,
-        code_gen: usize,
-        pos: crate::error::Pos,
-        file: Option<Arc<str>>,
-    ) {
+    fn set_position(&self, idx: usize, code_gen: usize, entry: FormPos) {
         self.positions
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(rt_pos_key(idx, code_gen), (pos, file));
+            .insert(rt_pos_key(idx, code_gen), entry);
     }
 
     fn def_sites_write(&self) -> RwLockWriteGuard<'_, HashMap<Symbol, SourceLoc>> {
@@ -2182,7 +2172,7 @@ pub(crate) struct ColdHeap {
     /// Nesting depth of an embedded-module load (ADR-166). See `Heap::in_module_load`.
     pub(crate) module_load_depth: u32,
     /// Source position of LOCAL list forms, keyed by [`form_pos_key`].
-    pub(crate) form_pos: HashMap<u64, (crate::error::Pos, Option<Arc<str>>)>,
+    pub(crate) form_pos: HashMap<u64, FormPos>,
     /// The file currently being `load`ed, exposed via `(current-file)`.
     pub(crate) current_file: Option<String>,
     /// `current_file` pre-shared as an `Arc<str>`, kept in step by
@@ -2889,6 +2879,19 @@ fn form_pos_key(id: PairId) -> u64 {
 /// age bit at the same offset), and for the same reason: the two RUNTIME generations
 /// share one index space, so a bare index conflates them (see `positions`). Slab
 /// indices are bounded by `GEN_SHIFT` bits, so the low 32 bits always suffice.
+/// What the two position tables hold for a list form: where it is, which file, and whether
+/// the EXPANDER built it (a macro's result, a pattern-binder desugar) rather than the reader.
+/// One record for both tables — LOCAL (`ColdHeap::form_pos`) and RUNTIME
+/// (`RuntimeCode::positions`) — so `promote` carries the whole fact across, not a subset:
+/// the synthetic mark once lived in a side set beside the LOCAL table, and a promoted form
+/// silently lost it (the checker then warned on generated `let`s it should have exempted).
+#[derive(Clone, Debug)]
+pub(crate) struct FormPos {
+    pub(crate) pos: crate::error::Pos,
+    pub(crate) file: Option<Arc<str>>,
+    pub(crate) synthetic: bool,
+}
+
 #[inline]
 pub(crate) fn rt_pos_key(idx: usize, code_gen: usize) -> u64 {
     debug_assert!(code_gen < 2, "RUNTIME code generation must be 0 or 1");
@@ -3848,8 +3851,76 @@ impl Heap {
                 // `ColdHeap::current_file_arc`.
                 let cold = self.cold_mut();
                 let file = cold.current_file_arc.clone();
-                cold.form_pos.insert(form_pos_key(id), (pos, file));
+                cold.form_pos.insert(
+                    form_pos_key(id),
+                    FormPos {
+                        pos,
+                        file,
+                        synthetic: false,
+                    },
+                );
             }
+        }
+    }
+
+    /// Mark a LOCAL list form as expander-built (see [`FormPos`]). The form must already
+    /// have a position — the expander stamps one first — so the mark rides that entry and
+    /// `promote` carries both together.
+    pub fn mark_synthetic(&mut self, v: Value) {
+        if let Some(id) = v.as_pair() {
+            if id.region() == crate::core::value::LOCAL {
+                if let Some(e) = self.cold_mut().form_pos.get_mut(&form_pos_key(id)) {
+                    e.synthetic = true;
+                }
+            }
+        }
+    }
+
+    /// Copy `from`'s whole position record — position, file AND synthetic mark — onto the
+    /// LOCAL list form `to`. What a REBUILD of a form must do (`macros::rebuild_list`): the
+    /// rebuilt list is the same logical form, so it must answer "where are you" and "did the
+    /// expander make you" exactly as the original did. Copying the position alone is how
+    /// a namespace-rooted rebuild under `(defmodule …)` came to shed the synthetic mark, and
+    /// the unused-`let` lint then warned on every destructured name in a module.
+    pub fn copy_form_pos(&mut self, from: Value, to: Value) {
+        let Some(from_id) = from.as_pair() else {
+            return;
+        };
+        let entry = match from_id.region() {
+            crate::core::value::LOCAL => self
+                .cold()
+                .and_then(|c| c.form_pos.get(&form_pos_key(from_id)).cloned()),
+            crate::core::value::RUNTIME => self
+                .runtime
+                .position_of(from_id.index(), from_id.code_gen()),
+            _ => None,
+        };
+        let (Some(entry), Some(to_id)) = (entry, to.as_pair()) else {
+            return;
+        };
+        if to_id.region() == crate::core::value::LOCAL {
+            self.cold_mut().form_pos.insert(form_pos_key(to_id), entry);
+        }
+    }
+
+    /// Was this list form built by the expander rather than read from source? A form
+    /// the user wrote — even one an expansion spliced in unchanged — answers false. Read
+    /// from whichever table holds the form, so a promoted form answers the same as it
+    /// did while LOCAL.
+    pub fn is_synthetic(&self, v: Value) -> bool {
+        let Some(id) = v.as_pair() else {
+            return false;
+        };
+        match id.region() {
+            crate::core::value::LOCAL => self
+                .cold()
+                .and_then(|c| c.form_pos.get(&form_pos_key(id)))
+                .is_some_and(|e| e.synthetic),
+            crate::core::value::RUNTIME => self
+                .runtime
+                .position_of(id.index(), id.code_gen())
+                .is_some_and(|e| e.synthetic),
+            _ => false,
         }
     }
 
@@ -3866,13 +3937,17 @@ impl Heap {
                 crate::core::value::LOCAL => {
                     return self
                         .cold()
-                        .and_then(|c| c.form_pos.get(&form_pos_key(id)).cloned())
+                        .and_then(|c| c.form_pos.get(&form_pos_key(id)))
+                        .map(|e| (e.pos, e.file.clone()))
                 }
                 // Read with the handle's OWN generation: the two RUNTIME generations
                 // share an index space, so an index-only lookup answers with whichever
                 // generation last wrote that slot (see `RuntimeCode::positions`).
                 crate::core::value::RUNTIME => {
-                    return self.runtime.position_of(id.index(), id.code_gen())
+                    return self
+                        .runtime
+                        .position_of(id.index(), id.code_gen())
+                        .map(|e| (e.pos, e.file))
                 }
                 _ => {}
             }
@@ -4784,11 +4859,11 @@ impl Heap {
         let cur_gen = self.runtime.cur_gen();
         for (src, head) in nodes.into_iter().rev() {
             let idx = self.runtime.cur_code().pairs.push((head, acc));
-            if let Some((pos, file)) = self
+            if let Some(entry) = self
                 .cold()
                 .and_then(|c| c.form_pos.get(&form_pos_key(src)).cloned())
             {
-                self.runtime.set_position(idx, cur_gen, pos, file);
+                self.runtime.set_position(idx, cur_gen, entry);
             }
             acc = Value::pair(PairId::runtime_gen(idx, cur_gen));
         }
@@ -6582,6 +6657,30 @@ mod rt_position_tests {
     /// second write silently clobbered the first, and `(form-pos …)` — plus every error
     /// message and test-framework line lookup that goes through it — reported a
     /// stranger's position for still-live old-generation code.
+    // The synthetic mark (ADR-297) rides the position record, so `promote` carries it: it
+    // once lived in a side set beside the LOCAL table, and a promoted form silently lost
+    // it — the checker then warned "unused let binding" on destructured names in every
+    // loaded file while the LOCAL-heap unit test stayed green.
+    #[test]
+    fn the_synthetic_mark_survives_promotion() {
+        let mut h = Heap::new();
+        let pos = Pos { line: 3, col: 7 };
+        let generated = h.alloc_pair(Value::int(1), Value::nil());
+        h.set_form_pos(generated, pos);
+        h.mark_synthetic(generated);
+        let written = h.alloc_pair(Value::int(2), Value::nil());
+        h.set_form_pos(written, pos);
+        assert!(h.is_synthetic(generated));
+        assert!(!h.is_synthetic(written));
+        let (rg, rw) = (h.promote(generated), h.promote(written));
+        assert_eq!(h.form_pos_only(rg), Some(pos), "the position still travels");
+        assert!(h.is_synthetic(rg), "…and so does the mark");
+        assert!(
+            !h.is_synthetic(rw),
+            "a form the user wrote stays not-synthetic"
+        );
+    }
+
     #[test]
     fn runtime_form_positions_are_keyed_by_generation() {
         let mut h = Heap::new();

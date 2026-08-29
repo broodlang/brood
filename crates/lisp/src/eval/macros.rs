@@ -1995,6 +1995,26 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
 }
 
 fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -> LispResult {
+    let out = macroexpand_all_depth_step(heap, form, env, depth)?;
+    // **Synthetic code is located at the form it was expanded from.** Whatever this step
+    // produced — a macro's result (built by its body: quasiquote, `list`, `cons`), a
+    // pattern-binder desugar, a rebuilt list — its new pairs were never seen by the reader
+    // and carry no position, while the sub-forms the user WROTE are the same pair values
+    // and keep their exact positions. Stamp the original form's position onto every
+    // unpositioned pair of the result. Every consumer of positions is served at once: a
+    // checker lint that fires inside a `match`'s expansion reports at the `match` rather
+    // than nowhere, and a runtime error raised from generated code has a location.
+    // Linear, not quadratic, because the walk stops at a positioned pair: children are
+    // expanded before their parent, so a positioned subtree was already finished.
+    if out.as_pair() != form.as_pair() {
+        if let Some(pos) = heap.form_pos_only(form) {
+            stamp_synthetic(heap, out, pos);
+        }
+    }
+    Ok(out)
+}
+
+fn macroexpand_all_depth_step(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -> LispResult {
     // Block GC during the expansion: this walk holds partially-built LOCAL forms
     // in Rust locals and recurses into macro applications via `eval`, whose
     // safepoint would otherwise sweep them. The runtime evaluator roots its
@@ -2136,6 +2156,40 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
     }
 }
 
+/// Give every LOCAL pair reachable from `form` that has no source position the position
+/// `pos` — the position of the macro call it was expanded from. Pairs that already have
+/// one (the user's own sub-forms, or a finished inner expansion) are left exactly as they
+/// are and not descended into. An explicit stack, so a large expansion cannot overflow the
+/// Rust stack; quoted data inside is stamped too, harmlessly (a position on data is unused).
+fn stamp_synthetic(heap: &mut Heap, form: Value, pos: crate::error::Pos) {
+    let mut stack = vec![form];
+    while let Some(v) = stack.pop() {
+        match v.unpack() {
+            ValueRef::Pair(p) => {
+                // A positioned pair is the user's own text or an already-finished
+                // expansion: nothing below it needs a position. Stopping here is what
+                // keeps the whole pass linear in the size of the expanded program.
+                if heap.form_pos_only(v).is_some() && v.as_pair() != form.as_pair() {
+                    continue;
+                }
+                if heap.form_pos_only(v).is_none() {
+                    heap.set_form_pos(v, pos);
+                    heap.mark_synthetic(v);
+                }
+                let (head, tail) = heap.pair(p);
+                stack.push(head);
+                stack.push(tail);
+            }
+            ValueRef::Vector(id) => {
+                for e in heap.vector(id).to_vec() {
+                    stack.push(e);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Rebuild `items` into a fresh list, copying the source position of the
 /// `original` pair (if any). The compile pass goes through this on every list
 /// it expands, so source positions survive macroexpansion — diagnostics from
@@ -2143,11 +2197,10 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
 /// enclosing top-level form's start. No-op for non-LOCAL originals (see
 /// [`Heap::form_pos`](crate::core::heap::Heap::form_pos)).
 fn rebuild_list(heap: &mut Heap, original: Value, items: Vec<Value>) -> Value {
-    let pos = heap.form_pos_only(original);
     let new_list = heap.list(items);
-    if let Some(p) = pos {
-        heap.set_form_pos(new_list, p);
-    }
+    // The whole record — position AND the synthetic mark — not the position alone: a
+    // rebuilt list is the same logical form (ADR-297).
+    heap.copy_form_pos(original, new_list);
     new_list
 }
 
