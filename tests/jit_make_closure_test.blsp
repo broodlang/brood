@@ -1,0 +1,111 @@
+;; `Inst::MakeClosure` in the JIT subset (compute-frontier §7.1 step 1): a `(fn …)` literal
+;; inside a JIT'd arm lowers as one `brood_rt_make_closure` callback that runs exec_chunk's
+;; own arm verbatim. What must hold, and what each case pins:
+;;
+;;   * each iteration's closure captures ITS OWN values (the staging must read the current
+;;     operands, not a stale slot) — the summing loop;
+;;   * a captured value survives the closure escaping the arm (promote/freeze round-trip
+;;     via send, GC across many iterations);
+;;   * `letrec` self-recursion (`self_name`) still binds the closure into its own frame;
+;;   * an error raised INSIDE closure construction's consumer routes cleanly (outcome 3).
+;;
+;; Loops run past the tiering threshold so the arm actually goes native; correctness is the
+;; JIT==VM answer (the fuzz differential covers the same ground broadly).
+
+(defmodule jit-make-closure-test (:use test))
+
+;; A hot arm that builds a capturing closure PER ITERATION and consumes it immediately.
+;; If staging read a stale slot, sums diverge instantly.
+(defn mkc-sum (i acc)
+  (if (= i 0)
+    acc
+    (let (f (fn (x) (+ x i)))
+      ; captures i — a fresh value each iteration
+      (mkc-sum (dec i) (+ acc (f 10))))))
+
+;; The closure ESCAPES: collected into a list, applied after the loop — captured values
+;; must survive arbitrary GC between creation and use.
+(defn mkc-collect (i acc)
+  (if (= i 0)
+    acc
+    (mkc-collect (dec i) (cons (fn () (* i 2)) acc))))
+
+(defn mkc-apply-all (fs acc)
+  (if (nil? fs) acc (mkc-apply-all (rest fs) (+ acc ((first fs))))))
+
+(describe "JIT MakeClosure"
+
+  (test "a per-iteration capturing closure captures its own value (hot loop)"
+    ;; sum over i=1..N of (10 + i) = 10N + N(N+1)/2
+    (let (n 60000)
+      (assert= (+ (* 10 n) (/ (* n (inc n)) 2)) (mkc-sum n 0))))
+
+  (test "escaped closures keep their captures across GC (hot loop, applied later)"
+    ;; sum over i=1..N of 2i = N(N+1)
+    (let (n 30000)
+      (assert= (* n (inc n)) (mkc-apply-all (mkc-collect n nil) 0))))
+
+  (test "a captured closure round-trips a send (promote/freeze path)"
+    (let (me (self) n 5000)
+      (spawn
+        (fn ()
+          ;; letrec: `ship` recurses via its own let binder
+          (let (ship (fn (i)
+                       (when (> i 0)
+                         (let (k i) (send me [:f (fn () (* k 3))]))
+                         (ship (dec i)))))
+            (ship n))))
+      (let (recv (fn (left acc)
+                   (if (= left 0)
+                     acc
+                     (receive
+                       ([:f f] (recv (dec left) (+ acc (f))))
+                       (after *test-wait-ms* acc)))))
+        ;; sum over i=1..N of 3i, arrival order irrelevant
+        (assert= (* 3 (/ (* n (inc n)) 2)) (recv n 0)))))
+
+  (test "letrec self-name still works when the enclosing arm is hot"
+    (defn mkc-letrec-sum (i acc)
+      (if (= i 0)
+        acc
+        ;; `fact` references its own let binder — the MakeClosure `self_name` case
+        (let (fact (fn (m) (if (= m 0) 1 (* m (fact (dec m))))))
+          (mkc-letrec-sum (dec i) (+ acc (fact 5))))))
+    (let (n 20000)
+      (assert= (* 120 n) (mkc-letrec-sum n 0)))))
+
+;; The %receive fence: a receive-bearing self-loop arm must NOT lower — before the fence
+;; was explicit, `MakeClosure` joining the subset let exactly this shape go native, and a
+;; park inside the native boundary surfaced as an uncatchable empty `runtime error:` that
+;; killed the receiver (found via local_send_race's collector, deterministic by round 4).
+;; This runs the collector shape hot (past the tiering threshold, across rounds) and
+;; asserts every round still totals correctly.
+(describe "JIT receive fence"
+  (test "a hot receive-bearing arm keeps receiving correctly (never lowers into a park)"
+    (defn mkc-collect2 (root want acc)
+      (if (= want 0)
+        (send root [:total acc])
+        (receive
+          ([:m id i] (mkc-collect2 root want (+ acc (+ id i))))
+          ([:done _] (mkc-collect2 root (dec want) acc)))))
+    (defn mkc-blast2 (dst id i n)
+      (if (>= i n)
+        (send dst [:done id])
+        (do (send dst [:m id i]) (mkc-blast2 dst id (inc i) n))))
+    (defn mkc-spawn2 (dst k n)
+      (when (> k 0) (spawn (mkc-blast2 dst k 0 n)) (mkc-spawn2 dst (dec k) n)))
+    (defn mkc-burst2 (root k n)
+      (let (dst (spawn (mkc-collect2 root k 0)))
+        (mkc-spawn2 dst k n)
+        (receive ([:total t] t) (after *test-wait-ms* :timeout))))
+    (defn mkc-rounds2 (root r k n expect)
+      (when (> r 0)
+        (assert= expect (mkc-burst2 root k n))
+        (mkc-rounds2 root (dec r) k n expect)))
+    ;; expected per round: sum over id=1..k of (id*n + n(n-1)/2)
+    (let (k 4 n 60)
+      (mkc-rounds2 (self)
+        14
+        k
+        n
+        (+ (* (/ (* k (inc k)) 2) n) (* k (/ (* n (dec n)) 2)))))))

@@ -671,6 +671,18 @@ fn jit_lower_arm_inner(
     let vec2room_id = m
         .declare_function("brood_rt_vec2_room", Linkage::Import, &vec2room_sig)
         .ok()?;
+    // brood_rt_make_closure(heap, out, inst) -> status: build a `(fn …)` literal's closure,
+    // running exec_chunk's own arm verbatim (captures staged on `roots`); 0 = ok (closure at
+    // `*out`), 1 = error parked. `inst` is a baked pointer into the arm's chunk — the
+    // `brood_rt_const_load` contract (the permanent keep-alive pins the chunk).
+    let mut mkclo_sig = m.make_signature();
+    mkclo_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    mkclo_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
+    mkclo_sig.params.push(AbiParam::new(ptr_ty)); // inst: *const Inst (baked)
+    mkclo_sig.returns.push(AbiParam::new(types::I64)); // status
+    let mkclo_id = m
+        .declare_function("brood_rt_make_closure", Linkage::Import, &mkclo_sig)
+        .ok()?;
     // brood_rt_make_vector_n(heap, out, elems: *const Value, n) — builds an n-element
     // vector from `n` `Value`s the JIT staged contiguously at `elems` (a stack slot it
     // owns). The variadic `MakeVector(n != 2)` path; `alloc_vector` never collects, so
@@ -942,6 +954,7 @@ fn jit_lower_arm_inner(
     let vobase_ref = m.declare_func_in_func(vobase_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
     let vec2room_ref = m.declare_func_in_func(vec2room_id, b.func);
+    let mkclo_ref = m.declare_func_in_func(mkclo_id, b.func);
     let makevecn_ref = m.declare_func_in_func(makevecn_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
     #[cfg(debug_assertions)]
@@ -1528,6 +1541,7 @@ fn jit_lower_arm_inner(
         cdr: cdr_ref,
         cons: cons_ref,
         vec2room: vec2room_ref,
+        mkclo: mkclo_ref,
         makevecn: makevecn_ref,
         thas: thas_ref,
         tget: tget_ref,
@@ -1731,6 +1745,22 @@ fn jit_lower_arm_inner(
                         call::Flow::Break => break,
                         call::Flow::Fall => {}
                     }
+                }
+                Inst::MakeClosure { names, .. } => {
+                    // One runtime callback that runs exec_chunk's MakeClosure arm verbatim.
+                    // The `inst` pointer is baked (the keep-alive pins the chunk — the
+                    // `const_load` contract); captures are staged on `roots`.
+                    call::emit_make_closure(
+                        &mut b,
+                        &mut stack,
+                        &mut spill_next,
+                        names.len(),
+                        &code[j] as *const Inst,
+                        spill_base,
+                        reserve,
+                        frame,
+                        funcs,
+                    )?;
                 }
                 Inst::Pop => {
                     // A non-final `do` form, evaluated for effect: drop its value.

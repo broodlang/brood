@@ -38,6 +38,9 @@ pub(super) struct Funcs {
     /// `brood_rt_vec2_room(heap, out) -> *mut Value` — allocate a 2-element vector and
     /// return its element storage, so the arm writes the elements in place.
     pub vec2room: FuncRef,
+    /// `brood_rt_make_closure(heap, out, inst) -> status` — build a `(fn …)` literal's
+    /// closure (exec_chunk's arm verbatim; captures staged on `roots`).
+    pub mkclo: FuncRef,
     pub makevecn: FuncRef,
     /// `brood_rt_table_has` / `_get2` / `_put` — the table primitives (FFI fallback).
     pub thas: FuncRef,
