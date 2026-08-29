@@ -94,6 +94,27 @@ Pure apart from the symbol resolution; testable without a terminal."
                   else '())))
       keymap)))
 
+;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
+(check-allow :non-tail-recursion
+  (defn keymap-commands (keymap)
+    "Every command symbol `keymap` binds, anywhere in it — prefixes walked, deduplicated, in
+  no particular order. The other inverse of `keymap-bind`: [[keymap-where-is]] asks \"which
+  keys run this command?\", this asks \"which commands does this keymap know about?\".
+
+  What it is FOR: a keymap binds commands by SYMBOL, late-bound, so it can name a command
+  whose module has not been loaded yet. That makes the keymap the one place an application
+  can discover a deferred feature's commands WITHOUT loading it — for a command palette, a
+  help listing, or an `M-x`-style by-name runner that would otherwise offer only what
+  happens to be in memory. Pure over the keymap data — no dispatch, no eval, no load."
+    (seq/distinct
+      (mapcat (fn (kv)
+                (let ([k v] kv)
+                  (cond
+                    (map? v) (keymap-commands v)
+                    (symbol? v) (list v)
+                    else '())))
+        keymap))))
+
 ;; check-allow: deliberately non-tail — depth = the bound key-sequence length — a few keys.
 (check-allow :non-tail-recursion
   (defn keymap-bind (keymap keys command)
