@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-84 | **An imaged start of a project lost every buffer type's layers** — `nest test` in bedit: the run that WROTE `.brood/image.bin` passed 1306/1306, every run that READ it failed 99 (`*git-status*` not read-only, `.blsp` buffers not in brood-mode, gutters gone). `editor/layers/*type-layers*` was `{}` at module-load time on a warm start | ✅ **FIXED 2026-08-29** — the **stdlib** image's `editor/layers` section carries the module's registries as their pristine seeds (`{}`), and materialising an embedded module was a raw define: it overwrote the 26-entry registry the PROJECT image had just restored. A source load runs `defonce` there and keeps the binding; the image did not. Fix: with `reserve` (an embedded module from the pristine image) a bound DATA global keeps its binding; a bound FUNCTION (an ADR-246 stub, KI-72) is still replaced, and a project image (later state) still overwrites. Guard sabotage-verified |
 | KI-83 | **The monomorphization differential compared TIMING CHATTER as if it were an answer.** Under full-suite load, `cli::mono_differential` failed with "monomorphization changed an ANSWER" while both arms reported `92 tests, 92 passed, 0 failed` — the diff was one line: the framework's per-test slow annotation (`concurrent impl registration (KI-22) › … 13.9s`), printed only when a test crosses `*test-slow-ms*` (1 s), which under 4-way nextest parallelism one arm's nested run did and the other's did not. `without_timings` stripped only `ms wall`/`Slow tests` lines | ✅ **FIXED 2026-08-29** — the filter now also drops any line whose last token is a duration (`13.9s`, `2ms`); a real divergence in such a line is theoretically maskable, but a *failing* test already fails the `*_ok` asserts before the comparison runs. Sabotage-verified offline on the exact captured outputs: the old comparison fails on them, the new one passes, and a `92 passed`→`91 passed` mutation still diverges. Same species as [KI-80](#ki-80): a nested suite run under load emitting load-dependent output that an outer gate treats as signal |
 | KI-82 | **The hosted playground cannot run its own front-page example.** `https://brood.fly.dev` — the pipeline snippet returned `recursion too deep: used 14021552 bytes of stack, over the 12582912-byte budget` three frames deep, trace `{:fn %require-force-in} {:fn %require-force}` — wasm-only (native answers `165`) | ✅ **FIXED 2026-08-29** (`b6706120`) — not `require` and not ADR-290/291: `WORKER_STACK_BYTES` was a hard-coded 16 MiB (a native worker's stack) while wasm runs on a ~1 MiB shadow stack, so a bogus 13.4 MiB reading landed in the gap between the budget (raised) and the stale-base backstop (never fired). Both are now target-aware; reproduced deterministically via the page's own `completions()`-then-`run()` sequence, verified red-then-green on native, lean-native and wasm32+node. **Residual:** the deployed site answers wrong until hive redeploys with `BROOD_REF` ≥ `b6706120` — a deploy step, not a runtime bug |
 | KI-81 | **`BROOD_CONTRACTS=1` was unusable on a cold boot cache** — one run panicked in prelude expansion — `prelude expand: unbound error: unbound symbol: take` (`lib.rs:359`), on a file using `defability`/`impl`/`sig`. the cause is prelude LOAD ORDER, not a rename: `sig!` lives in `core.blsp` and `take` is defined in `seq.blsp`, which is concatenated later | ✅ **FIXED 2026-08-29** (ADR-293) — **never a flake**: `touch target/release/brood` reproduces it 100%, because the boot cache is keyed on the executable's mtime, so the first run after any rebuild is cold and every run after replays the cache without executing the macro bodies. The twelve clean runs were twelve warm ones, and the image hypothesis was wrong. THREE independent cold-only defects: `sig!`'s expansion-time `take`/`nth`/`map`/`range`/`count` (not yet defined that early — `core.blsp` expands before `seq.blsp` is concatenated); the shim closing over a **let-bound local**, which the prelude's freeze step rejects; and `defrecord` emitting its constructor `sig` **above** the `defn` it rebinds, making every record fatal in that mode. Root cause of all three: the mode had **no end-to-end test**, so `crates/cli/tests/contracts_mode.rs` now cold-caches deliberately via `XDG_CACHE_HOME` — without that it passes on a broken build |
@@ -198,6 +199,75 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-84 — an imaged start lost every buffer type's layers (the stdlib image reset a registry the project image had restored) ✅ FIXED 2026-08-29
+
+**Symptom.** In bedit, `nest test` passed 1306/1306 on the run that wrote `.brood/image.bin`
+and failed 99 on every run that read it, deterministically, with sources untouched. The
+failures were one thing wearing many faces: `special-mode's :activate hook makes the buffer
+read-only` (`(is (read-only? (typed :git-status)))` → `false`), every language-mode test
+(`a .ex buffer is in elixir-mode…`), the gutter tests, the tutorial's read-only prose. Probed
+at module-load time: `editor/layers/*type-layers*` held **26** entries on a cold start and
+**0** on a warm one. `BROOD_NO_STDIMAGE=1` made it pass. Minimal repro, in a bare process:
+
+```brood
+(def zz-alias editor/layers/*type-layers*)               ; the same 26-entry map
+(%image-write "/tmp/x.bin" (list ["" (list 'editor/layers/*type-layers* 'zz-alias)]) "FP")
+;; new process, load the section, then read both:
+;;   restored qualified: 0     restored alias: 26
+```
+
+**Cause.** Two images, and the older one won. The **project** image's root section restores
+`editor/layers/*type-layers*` with everything the app registered. Later, the first reference
+to `editor/layers` materialises that module from the **stdlib** image — whose writer puts
+every global under the module's prefix into its section, so the three registries are in it as
+their pristine seeds (`{}`, `()`, the values at stdlib-build time, before any program ran).
+`image_load_section` then `env_define`d the seed over the restored registry. Loading the same
+module from **source** runs `(defonce *type-layers* {})`, which leaves an existing binding
+alone; materialising had no `defonce`. The alias survived because a map is immutable and only
+the *binding* was overwritten — which is why the repro reads as "a namespaced global does not
+image" and why every value-shape experiment round-tripped perfectly.
+
+**Why it survived.** Every gate that ran loaded `editor/layers` from source *before* any
+registration, so `defonce` ran and the seed never landed on top of anything: the cold run of
+any suite, `nest check`, `brood_suite_passes` in this repo (whose own registries are written
+*after* the module loads). The brood repo has no project image of its own to read back, so
+the two-image interaction never occurred here at all. The only place it could show was a
+downstream project's *second* run — and `nest test`'s own "run it again" loop reports the
+same test names, so a red second run read as flakiness, not as a different program. Three
+earlier hypotheses were each ruled out by experiment before this one was found: a value shape
+that does not round-trip (a synthetic keyword→list-of-symbols map round-trips), a `defonce`
+that resolves the wrong name on the imaged path (an explicit qualified `bound?` guard changed
+nothing), and the KI-72 deferral parking heap `Value`s in an unrooted `Vec` (a real latent
+hazard, but switching it to defer the Rust-owned `Message` changed nothing either).
+
+**Fix.** `image_load_section`'s deferred pass — the entries whose name is already bound —
+now keeps an existing **data** binding when `reserve` is set. `reserve` is already passed
+exactly when an embedded module materialises from the stdlib image (`%require-force-in`,
+`(not (nil? src))`), which is the same fact: this image is pristine, older than the heap it
+restores into, so a binding that already exists is later state and must win. A pre-existing
+**function** is an ADR-246 autoload stub and is still replaced — the whole reason the
+deferred pass exists (KI-72). A **project** image passes no `reserve` and still overwrites:
+it describes a later state than the fresh process, and the `basic` test (`def` 41 → `def`
+`:clobbered` → restore → 41) depends on that. Two `defonce`-shaped registries in bedit
+(`interactive/*commands*`, found the same day) were a separate reset-on-reload of the same
+family and are fixed there.
+
+**Guard.** `tests/startup_image_test.blsp` — `a pristine (reserve) materialise keeps a bound
+data global; a stub is still replaced`, plus its converse `a project (non-reserve)
+materialise still overwrites a bound data global`. Sabotage-verified by deleting the
+`if reserve { … continue }` block and rebuilding:
+
+```
+tests/startup_image_test.blsp:62: test failed: … a pristine (reserve) materialise keeps a bound data global; a stub is still replaced
+    assert: (assert= {:brood [1 2 3]} si-reg)
+    actual: {:brood [1 2 3]}
+    expect: {}
+19 tests, 18 passed, 1 failed
+```
+
+Restored: 19/19. End to end: bedit `rm .brood/image.bin; nest test` ×4 — cold write then
+three warm reads — 1306/1306 each, where run 2 onward previously failed 99.
 
 ## KI-50 — the JIT leaf inliner miscompiled the ordinary counting loop ✅ FIXED 2026-08-24
 
