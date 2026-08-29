@@ -961,34 +961,39 @@ pub unsafe extern "C" fn brood_rt_fastlink_base(
     base
 }
 
-/// Run a JIT'd arm's **non-tail** free-global call via the in-IR fast-link path: the IR has
-/// validated the call site's flat-table entry (`site < len` && epoch-current) and read
-/// `(nslots, code, env, callee_ic_base, callee_gic_base)` from it; this sets up the callee
-/// frame, installs the callee's IC-block cursors around its native call (KI-20 — so it reads
-/// its own inline caches, not the caller's), runs it, and writes the result to `*out`.
-/// Returns the status the IR branches on: `0` = done, `1` = error
-/// (parked for the arm to propagate), `2` = could-not-fast-link (over the native-recursion
-/// cap, or the IC moved) — the IR falls to [`brood_rt_call_slow`] with the args left
-/// staged. See [`crate::eval::compile::jit_dispatch_fast_frame`].
+/// The JIT's in-IR fast call path (Track B / Technique A) — the hottest callback in the
+/// runtime.
+///
+/// **Four arguments, and that is the point.** It used to take ten — `site`, `head`, `argc`,
+/// `nslots`, `code`, `env`, and the two callee IC bases, all of them fields the IR had just
+/// loaded out of the very [`FastLink`] slot it validated. SysV passes six in registers, so
+/// four spilled to the stack, and this function's own profile was almost entirely prologue
+/// and argument shuffling (`pushq 0x70(%rsp)` / `pushq 0x10(%rsp)` re-pushing them for the
+/// inner call): 8.2% of `bintree` with no single operation in it. Passing the **slot
+/// pointer** and reading the fields here instead fits the whole call in registers, and the
+/// reads are free — the IR has just touched that cache line to check the slot's epoch and
+/// identity.
+///
+/// Sound because the guard has already run: the IR only branches here after proving
+/// `site < len`, `slot.epoch == global_epoch`, and that `slot.sym`/`slot.argc` match this
+/// site's baked head/arity. Re-reading them is the same single-threaded data one call
+/// earlier, and nothing between the guard and here can grow or move the table.
 ///
 /// # Safety
-/// `heap`/`out` must be live; the `argc` args are staged on `roots`; `code` is the native
-/// entry pointer the IR read from the (epoch-validated) flat table.
+/// `heap` live; `out` writable for one `Value`; `slot` points at a live `FastLink` in this
+/// process's table, validated by the IR's guard as described above.
 #[no_mangle]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn brood_rt_fast_frame(
     heap: *mut Heap,
     out: *mut crate::core::value::Value,
     site: u32,
-    head: u32,
-    argc: u32,
-    nslots: u32,
-    code: u64,
-    env: u64,
-    callee_ic_base: u32,
-    callee_gic_base: u32,
+    slot: *const crate::core::heap::FastLink,
 ) -> i64 {
     use crate::eval::compile::FastLinkOutcome;
+    // Read once, before anything can run: the callee may grow the table.
+    let fl = &*slot;
+    let (head, argc, nslots, code, env) = (fl.sym, fl.argc, fl.nslots, fl.code, fl.env);
+    let bases = (fl.callee_ic_base, fl.callee_gic_base);
     // `out` goes straight down to the native callee, which writes the result into it
     // directly — no store/load round trip through `roots[base]` and no copy here. This is
     // the path that made the change worth making; see `crate::jit::JitArmFn`.
@@ -1000,7 +1005,7 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
         nslots as usize,
         code as usize,
         env,
-        (callee_ic_base, callee_gic_base),
+        bases,
         out,
     ) {
         FastLinkOutcome::Done => 0,

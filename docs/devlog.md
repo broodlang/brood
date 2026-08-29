@@ -6612,3 +6612,34 @@ reads −1.6% against a 3.1% floor.
 **Next on this row**, from the after-profile: `__memmove` **10.4%** — the frame/staging copies,
 now the largest single item and untouched by this — then `brood_rt_fast_frame` 8.2%, then ~19%
 allocation.
+
+## 2026-08-29 (later) — ten arguments become four, and the second wrong mechanism guess in a row
+
+Continuing down §2h's ranking. `brood_rt_fast_frame` was 8.2% of `bintree` and its annotation
+is unambiguous about *what* those cycles are: prologue, epilogue and argument shuffling —
+`pushq %r13`, `subq $0x18,%rsp`, `pushq 0x70(%rsp)`, `popq`, `retq` — with no operation
+anywhere in it. It took **ten** parameters; SysV passes six in registers, so four spilled to
+the stack and got re-pushed for the inner call.
+
+Every one of those ten was a field of the `FastLink` slot the IR had *just* validated, so it
+now passes the slot pointer and the callee reads them. Four arguments, all in registers, three
+fewer loads in the IR. Sound because the guard has already proved `site < len`, the epoch, and
+`sym`/`argc` against the site's baked head/arity — the same single-threaded data, one call
+earlier, off a line the guard has just touched.
+
+**And it is neutral.** `bintree` −1.3% against a 0.7% floor, `collatz` −0.7%, the rest noise,
+and `brood_rt_fast_frame` itself went 8.2% → 8.9%, i.e. unchanged. Kept as a simplification —
+one pointer instead of ten unpacked fields is a smaller contract for the runtime's hottest
+callback — but not as a win.
+
+**Worth writing down: that is two mechanism guesses wrong in a row on this path.** §2h's was
+store forwarding (tested: no), this one was stack-argument spilling (tested: no). Both times
+the annotation offered a specific, plausible, falsifiable story, and both times removing the
+thing left the number where it was. The one change that *did* move the row — §2h, −7.5% —
+deleted work rather than making it cheaper: three copies that stopped happening. On small hot
+callbacks, self time does not decompose into the named instructions you can see; treat an
+annotation as evidence about *where*, never about *why*.
+
+So the remaining `bintree` time is where FRONTIER always said it was: `__memmove` 10.6% plus
+`make_vector2` 5.4% — allocation — and that is the multi-session item, not another shuffling
+change.

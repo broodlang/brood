@@ -1012,3 +1012,41 @@ VM+JIT / GC-stress) — 0 divergences, 0 crashes. Lowering is unchanged (86 vs 8
 **Still open on this row**, and now the ranking to work from: `__memmove` **10.4%** (the frame
 and staging copies — the next-largest single item and the one this change did *not* touch),
 `brood_rt_fast_frame` **8.2%**, and ~19% allocation.
+
+## 2i. `brood_rt_fast_frame` takes four arguments, not ten — and that was not the cost (2026-08-29)
+
+§2h left `brood_rt_fast_frame` at 8.2% as the next item, with the note that its inlined work
+was worth reading before assuming it was free. Annotated (`cycles:pp`), its self time is
+**entirely prologue, epilogue and argument shuffling** — `pushq %r13`, `subq $0x18,%rsp`,
+`pushq 0x70(%rsp)` / `pushq 0x10(%rsp)`, `popq`, `retq`, none above 10% of the function, no
+operation anywhere. It took **ten** parameters (`site`, `head`, `argc`, `nslots`, `code`,
+`env` and the two callee IC bases), SysV passes six in registers, so four spilled to the
+stack and were re-pushed for the inner call.
+
+All ten were fields of the `FastLink` slot the IR had *just* validated, so it now passes the
+**slot pointer** and the callee reads them: four arguments, all register-passed, three fewer
+loads in the IR. Sound because the guard has already proved `site < len`,
+`slot.epoch == global_epoch` and `slot.sym`/`slot.argc` against the site's baked head/arity —
+the reads are the same single-threaded data one call earlier, off a line the guard just
+touched.
+
+**Measured: neutral.** `bintree` −1.3% against a 0.7% floor, `collatz` −0.7%, `fib`/`nqueens`/
+`mandelbrot` noise. `brood_rt_fast_frame` itself went 8.2% → **8.9%** — i.e. unchanged. The
+argument marshalling was not the cost.
+
+**That is the second mechanism guess on this path to be wrong** (§2h's was store forwarding),
+and the pattern is worth stating: on these small, extremely hot callbacks, *self time is not
+decomposable into the named operations you can see in the annotation*. Both times the visible
+instructions were a plausible, specific, testable story, and both times removing them left the
+number where it was. What actually moved `bintree` (§2h, −7.5%) was deleting work rather than
+making it cheaper — three copies that stopped happening. Prefer that shape of change here.
+
+The commit is kept as a **simplification** on those grounds: ten unpacked fields to one
+pointer is a smaller contract for the hottest callback in the runtime, and it is directionally
+positive on the two rows it should touch.
+
+**So the ranking on this row is now:** `__memmove` 10.6% and `brood_rt_make_vector2` 5.4% —
+both allocation, which `ROADMAP`/FRONTIER already call the multi-session item — then
+`jit_run_fast_link` 12.0% and `brood_rt_fast_frame` 8.9%, which two sessions of instruction-level
+work have now failed to decompose. The allocation frontier is where the remaining `bintree` time
+is, and it will not yield to another argument-shuffling change.
