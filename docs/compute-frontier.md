@@ -1222,7 +1222,18 @@ Beside it on those rows: `receive_match` 8–9%, `pool::run_one` 5–8% — the 
 cost `runtime-frontier.md` names, whose next concrete step is **M2 shared IC tables**
 (largest remaining per-process item, 664 B + a warm start; lock-free design + TSAN/loom).
 
-### 7.4 `sort` is a GC row and the kernel is 5.6% of it
+### 7.4 `sort` is a GC row and the kernel is 5.6% of it — the cheap question is ANSWERED (2026-08-29)
+
+> **The page-fault theory is dead; don't re-chase it.** `perf stat -e page-faults` on the
+> whole `sort` row counts **~920 faults total**, identical under `MIMALLOC_PURGE_DELAY` of
+> default / 1000 / 100000, with wall time flat — so pages are NOT being purged and re-faulted
+> per GC cycle; mimalloc holds and reuses them as its defaults promise. The
+> `kernel_init_pages` 5.6% is first-touch on a 130 ms row (mostly startup), a fixed cost that
+> vanishes at scale. What remains is the real thing: `flush_value_grown` 9.1% +
+> `promote_in_grown` 6.6% + `Heap::pair` 5.0% are the collector's actual copy work — the
+> multi-session allocation frontier, with no cheap prefix.
+
+**The original entry (kept for the record):**
 
 `flush_value_grown` 9.1% + `promote_in_grown` 6.6% + `Heap::pair` 5.0% +
 `kernel_init_pages` **5.6%** — that last one is the kernel zeroing freshly faulted pages,
