@@ -15,8 +15,17 @@
 //! increments it; a captured park does not. Phase 1 drives rounds until one dirty block
 //! is seen (proof the arm ran native and the flag path fired); phase 2 asserts the count
 //! then stays (near-)flat — the latch put the arm back on the VM, so later parks capture.
-//! Vacuous (phase 1 never fires, test returns early) only in a configuration where the
-//! arm never goes native at all — a no-JIT build or a lowered tier ceiling.
+//!
+//! **Currently vacuous by default (2026-08-30), and each test says so on stderr.** On
+//! today's tree the receive-hosting shapes these tests build do not lower: the
+//! spill-reserve rule gives a single-non-tail-call arm no slots (measured as load-bearing
+//! — see `jit_spill_reserve`), and a `def`-named closure is gate-bailed like any named
+//! defn. The latch itself was validated when the §7.1 step 2 experiment admitted these
+//! shapes (dirty park → `suspend-latched` → later parks captured; `live_migration`'s
+//! 12-way harness 28/36 liveness failures without it, 0/36 with) and stays as protection
+//! for any future admission — partial lowering, or a wider subset. If phase 1 fires again
+//! under a future tree, these tests arm themselves and the phase-2 assertions bite; the
+//! `42` round-trip assertions check parked-receive correctness either way.
 
 use brood::{process, Interp};
 
@@ -93,5 +102,91 @@ fn an_arm_hosting_a_parked_receive_latches_and_later_parks_capture() {
         extra <= 3,
         "the suspend latch is not holding: {extra} of 12 post-latch parks still \
          dirty-blocked their worker (a native frame kept enclosing the receive)"
+    );
+}
+
+/// The long-lived-process variant — the gen-server shape the latch exists for. A fresh
+/// process (the test above) respects a latch because its first dispatch re-reads
+/// `jit_code` and sees `BAILED`; a LONG-LIVED process that already holds a populated
+/// [`FastLink`] to the arm keeps entering the latched native through the mirror's hit
+/// path (and the raw load in JIT'd callers), which never consults `jit_code` — so without
+/// `vm_fast_link_clear_site` in the fast-link gateway's latch path, every later park in
+/// that process dirty-blocks forever. Latent on today's tree for the same reason the
+/// module doc gives (the shapes here no longer lower, so this runs vacuously and says so);
+/// under the §7.1 step 2 window, the un-shed fast link measured 12 of 12 post-latch parks
+/// still dirty.
+#[test]
+fn a_long_lived_process_sheds_its_stale_fast_link_after_the_latch() {
+    let mut interp = Interp::new();
+    let setup = r#"
+        (def root (self))
+        (defn inner () (receive (v v)))
+        (def host (fn (x) (+ x (inner))))
+        (defn hot (i acc) (if (= i 0) acc (hot (- i 1) (+ acc (host 0)))))
+        (defn feed (k) (when (> k 0) (do (send (self) 1) (feed (- k 1)))))
+        ;; ONE worker serves every round, so its fast link at the [:go] call site
+        ;; survives between rounds — the state the latch must shed.
+        (defn wloop ()
+          (receive
+            ([:heat k] (do (feed k) (hot k 0) (send root [:heated]) (wloop)))
+            ([:go]     (do (send root [:r (host 41)]) (wloop)))
+            ([:stop]   :done)))
+        (def w (spawn (wloop)))
+        (defn round ()
+          (do (send w [:go])
+              (sleep 150)
+              (send w 1)
+              (receive ([:r n] n) (after 30000 :timeout))))
+    "#;
+    interp.eval_str(setup).expect("setup errored");
+    // Tier `host` inside the worker itself, with its receives pre-fed so none park.
+    interp
+        .eval_str("(send w [:heat 200000])")
+        .expect("heat send errored");
+    let v = interp
+        .eval_str("(receive ([:heated] :ok) (after 60000 :timeout))")
+        .expect("heat wait errored");
+    assert_eq!(interp.print(v), ":ok", "worker never finished heating");
+
+    // Phase 1: rounds until one park dirty-blocks (host native, worker parked under it).
+    let mut saw_dirty = false;
+    let dirty = process::dirty_receive_block_count();
+    for _ in 0..40 {
+        let v = interp.eval_str("(round)").expect("round errored");
+        assert_eq!(interp.print(v), "42", "the parked worker resumed wrongly");
+        if process::dirty_receive_block_count() > dirty {
+            saw_dirty = true;
+            break;
+        }
+        interp
+            .eval_str("(send w [:heat 50000])")
+            .expect("re-heat send errored");
+        interp
+            .eval_str("(receive ([:heated] :ok) (after 60000 :timeout))")
+            .expect("re-heat wait errored");
+    }
+    if !saw_dirty {
+        eprintln!("jit_suspend_latch: no dirty block observed — nothing tiered; vacuous");
+        interp.eval_str("(send w [:stop])").ok();
+        return;
+    }
+    // Settling: the latch converges one arm per park; give the chain a few rounds.
+    for _ in 0..6 {
+        let v = interp.eval_str("(round)").expect("settling round errored");
+        assert_eq!(interp.print(v), "42", "the parked worker resumed wrongly");
+    }
+    // Phase 2: the SAME worker's later parks must capture — the latch stored BAILED and
+    // the gateway shed the site's fast link, so nothing re-enters the latched native.
+    let before = process::dirty_receive_block_count();
+    for _ in 0..12 {
+        let v = interp.eval_str("(round)").expect("round errored");
+        assert_eq!(interp.print(v), "42", "the parked worker resumed wrongly");
+    }
+    let extra = process::dirty_receive_block_count() - before;
+    interp.eval_str("(send w [:stop])").ok();
+    assert!(
+        extra <= 3,
+        "the stale fast link is not being shed: {extra} of 12 post-latch parks in the \
+         same long-lived process still dirty-blocked its worker"
     );
 }

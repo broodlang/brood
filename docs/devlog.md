@@ -7246,3 +7246,20 @@ regressions and one wrong (since-corrected) code comment.
 **Also found, not ours to fix here: upstream v0.18.x costs `spawn` ~+7.5%** vs `28bcdce8`
 (solo best-of-15, floor 2.5%, reproduced twice; my change measures +0.0% against the
 0.18.1 tip). Flagged for a look at the type-inference commits between 0952e763 and 0db66c27.
+
+### 2026-08-30, later — correction: the latch is LATENT on the shipped tree, and the tests say so
+
+The entry above claims the gate-exempt closure class lowers receive-hosting arms today.
+Chased to ground, it does not: a `def`-named closure carries `dbg_name` and gate-bails like
+any named defn (file-loaded; `eval_str` happens to leave it anonymous, which is why the
+test armed at all mid-session), and a single-non-tail-call anonymous closure is starved of
+spill slots by the same `< 2 → 0` rule the night measured as load-bearing. A named arm
+that PASSES the gate on a vector-op signal with the receive one call down
+(`(+ (nth v 0) (inner))`) gets through both fences and then dies on an UNNAMED
+`lowering-returned-none` (ops `Prim2SlotInt Call Prim2`, no mid-emit reason) — a still-
+silent refusal path, left as the open lead in §7.1. So: the suspend latch is validated
+mechanism, currently latent; both latch tests self-report vacuous on stderr and re-arm
+automatically if a future admission lowers these shapes. Kept beside them, non-latent: the
+`vm_fast_link_clear_site` shed (a latched arm's populated fast link otherwise re-enters
+the native forever in a long-lived process), the poison-tolerant keepalive lock in the
+fast-link latch path, and the no-jit `dead_code` attr on `native_gateway_seq`.

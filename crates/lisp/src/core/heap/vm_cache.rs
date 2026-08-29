@@ -914,6 +914,22 @@ impl Heap {
         }
     }
 
+    /// Clear ONE call site's [`FastLink`] mirror slot (relative `site`, resolved against
+    /// the current IC base like every probe). For the suspend-host latch: a latched arm's
+    /// `jit_code` goes `BAILED`, but the mirror's hit path — and the raw load emitted into
+    /// JIT'd callers — never consult `jit_code`, so an already-populated slot keeps
+    /// steering a LONG-LIVED process into the latched native until an epoch bump. The
+    /// gateway that latches clears the one site it was entered through; other sites to
+    /// the same arm converge the same way, each on its own next parked receive.
+    #[cfg(feature = "jit")]
+    pub(crate) fn vm_fast_link_clear_site(&self, site: u32) {
+        let abs = (self.cur_ic_base.get() + site) as usize;
+        let mut fls = self.vm_fast_links.borrow_mut();
+        if let Some(fl) = fls.get_mut(abs) {
+            *fl = FastLink::EMPTY;
+        }
+    }
+
     /// Push a live compiled arm onto the execution-stack registry; returns its depth
     /// (the index to [`live_arm_truncate`](Self::live_arm_truncate) back to on return).
     /// See [`live_vm_arms`](Self::live_vm_arms).
