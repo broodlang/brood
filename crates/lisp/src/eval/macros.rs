@@ -975,6 +975,28 @@ fn expand_static_quasiquotes(heap: &mut Heap, form: Value) -> Value {
 /// Returns `(rewritten, changed)` — `changed` avoids rebuilding an unchanged list
 /// (Value has no cheap identity compare), so a quasiquote-free tree is returned as-is.
 fn expand_qq_rec(heap: &mut Heap, form: Value) -> (Value, bool) {
+    // A VECTOR literal is an atom to `list_to_vec`, but its elements are
+    // unevaluated forms — so a quasiquote nested inside one (`[a b \`(do ~@xs)]`,
+    // the shape `%receive-split` returns) was invisible to this walk, the raw
+    // `quasiquote` special form survived into the arm, and the WHOLE arm deferred
+    // to the tree-walker — transitively tree-walking everything it called, since
+    // the tree-walker's `apply_closure` never re-enters the VM. Found 2026-08-30
+    // chasing pingpong's ~83 M-instruction load-time expansion constant (§7.3).
+    if let ValueRef::Vector(vid) = form.unpack() {
+        let items = heap.vector(vid).to_vec();
+        let mut out = Vec::with_capacity(items.len());
+        let mut changed = false;
+        for it in items {
+            let (e, c) = expand_qq_rec(heap, it);
+            changed |= c;
+            out.push(e);
+        }
+        return if changed {
+            (heap.alloc_vector(out), true)
+        } else {
+            (form, false)
+        };
+    }
     let items = match heap.list_to_vec(form) {
         Ok(i) => i,
         Err(_) => return (form, false), // atom / improper list — nothing to walk
