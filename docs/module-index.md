@@ -44,16 +44,16 @@ Resolution and location are re-derived in many places, each answering one slice 
 "where does this name live":
 
 - **Filename bijection** — `module foo → foo.blsp`, resolved by `%require-force-in`
-  (`std/prelude.blsp`) walking `*load-path*` with `file/exists?` probes. Simple, always
+  (`std/prelude/tools.blsp`) walking `*load-path*` with `file/exists?` probes. Simple, always
   fresh, human-computable — but it *is* why only one module may live per file (the name
   is the address, so a second module in a file has no file of its own name to be found
   by).
-- **`*package-module-files*`** (`std/prelude.blsp`) — a rooted module name (`"foo/b"`) →
+- **`*package-module-files*`** (`std/prelude/tools.blsp`) — a rooted module name (`"foo/b"`) →
   its `.blsp` path. Deps and the root project's own rooted modules already resolve by
   *index*, not by filename.
 - **`%builtin-module`** — baked-in std modules, keyed by module name → embedded source.
   A *build-time* index already (the binary is its artifact directory).
-- **`*features*`** / **`*require-edges*`** (`std/prelude.blsp`) — runtime load-state: what
+- **`*features*`** / **`*require-edges*`** (`std/prelude/tools.blsp`) — runtime load-state: what
   is loaded, and the require-edge graph used to materialize an image.
 - **The startup image** — an imaged prelude + modules with a manifest of what it holds.
 - **The incremental `nest check` cache** (ADR-129) — check results keyed by file.

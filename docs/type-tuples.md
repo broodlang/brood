@@ -108,7 +108,7 @@ than erroring).
 
 ## Runtime contract (`sig!` / `BROOD_CONTRACTS=1`)
 
-`type-matches?` (`std/prelude.blsp`) gained a `tuple` case alongside `record`:
+`type-matches?` (`std/prelude/core.blsp`) gained a `tuple` case alongside `record`:
 checks the value is a vector, checks the arity matches exactly, then checks
 each position against its declared type. See `tests/contract_test.blsp`'s
 "tuple type contracts" section.

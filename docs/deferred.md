@@ -56,7 +56,7 @@ order-independent (XOR-fold of element hashes is the standard trick) so
 
 **Why deferred.** Stack-safe tail recursion already covers most "evolving
 state" cases through the `name--at`/`name--loop` accumulator idiom that
-runs throughout `std/prelude.blsp`. The friction is genuinely real — every
+runs throughout `std/prelude/*.blsp`. The friction is genuinely real — every
 state-evolution program reinvents `--at` — but it's a duplication tax, not
 a missing capability. A real lazy-sequence type is a new `Value` kind, a
 new GC story (the thunk closes over an env), new seqable rules, and a
@@ -83,7 +83,7 @@ force just to compare); printing shows `#<lazy>` unrealised.
   measurable hot-path cost.
 
 **Workaround today.** Bounded `seq/iterate-times` already exists in
-`std/prelude.blsp` for the "n successive states" case. For unbounded
+`std/prelude/*.blsp` for the "n successive states" case. For unbounded
 evolution, write a tail-recursive `--at`/`--loop` helper — the pattern is
 mechanical (state + step → next state, in tail position) and stays O(1)
 stack.

@@ -63,7 +63,7 @@ each node from root to the touched leaf — cloning the node's `data`/`children`
 nodes plus the matching GC churn. This is the dominant cost in `map_from_pairs`
 (`heap.rs:1676`) and in every prelude builder that folds `%map-assoc`/`assoc`
 (`into`, `zipmap`, `frequencies`, `merge`, `update-vals`, `group-by`,
-`distinct`, `select-keys` — all in `std/prelude.blsp`).
+`distinct`, `select-keys` — all in `std/prelude/*.blsp`).
 
 The downstream report from `brood-life` measured ~12 µs/op on this path and
 proposed two fixes: (1) a native `%life-step` primitive, and (2) Clojure-style
@@ -303,7 +303,7 @@ it — the global-immutability simplicity is worth a lot.
    (initial-map + sequence → map) over the new builder; it reads the seq into
    `Vec<(Value, Value)>` then builds. (Same `def(heap, name, arity, sig, fn_ptr)`
    pattern as the existing `map_assoc`/`hash-map` entries.)
-3. `std/prelude.blsp`: re-point `into` (map branch), `zipmap`, `select-keys` at
+3. `std/prelude/*.blsp`: re-point `into` (map branch), `zipmap`, `select-keys` at
    `%map-from-pairs`. Leave `frequencies`/`group-by`/`merge-with` unchanged
    (deferred scope above).
 4. Tests:

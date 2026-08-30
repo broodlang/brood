@@ -327,7 +327,7 @@ holds iff every adjacent pair is equal.
 
 ## 9. The kernel / library split
 
-Almost the entire language is written in Brood (`std/prelude.blsp`). Rust
+Almost the entire language is written in Brood (`std/prelude/*.blsp`). Rust
 supplies only an **irreducible primitive kernel**. This split is a deliberate,
 load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 

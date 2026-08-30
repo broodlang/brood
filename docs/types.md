@@ -182,7 +182,7 @@ one-step-deep inferencer** that now covers control-flow, recursion, and complex 
   but that matter: `+ - * / < <= > >= mod`, `map`, `filter`, `reduce`, `fold`,
   plus common helpers with branchy or nested-param bodies — `even? odd? abs`
   (numeric), `not zero?` (any → bool, for the result type), `count length`
-  (string|map|seq → int). Hand-vetted against `std/prelude.blsp`, so sound; the
+  (string|map|seq → int). Hand-vetted against `std/prelude/*.blsp`, so sound; the
   domains are kept to the widest type the body accepts so a tighter sig never
   false-positives. This is what makes `(+ 1 "x")` and `(even? "x")` catchable
   even though both are plain Brood closures.
