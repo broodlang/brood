@@ -7555,3 +7555,15 @@ The lesson is the one CLAUDE.md already states: a routing change that makes *mor
 reach an engine is a test of every latent assumption in that engine, and "the suite is
 green" measures only the shapes the suite reaches. The breakage suite is what caught it —
 `make green` reads it; the run list did not.
+
+**Ecosystem verify for v0.19.1: `store`, `s3` verified; `store-postgres` HANGS in
+`tests/stress_test.blsp:153`** ("200 concurrent checkouts on a 3-connection pool") — the
+verify sat in it for two hours, because a hang is the one outcome "stop at the first
+failure" cannot see. Bisected per test: every other case in the file passes. It hangs the
+same way under a v0.19.0 `nest` built from the tag, and under `BROOD_NO_RECV_MARK=1` and
+`BROOD_NO_HANDOFF=1`, so it is not a v0.19.1 regression and not the receive-mark or the
+handoff policy; it is a pre-existing downstream hang (pool `run` loop + 200 spawned
+clients each parked in `(receive ([:reply ^r pid] pid))`). Open on the store-postgres
+side; the twelve repos behind it in the train were not reached. Two things the script
+should learn from this: a per-step timeout, and running the apps' `nest test` before the
+one package whose suite needs a live database.
