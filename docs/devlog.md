@@ -7808,6 +7808,107 @@ Recorded as dormant, not fixed: many sightings, no root cause, so the router sta
 `BROOD_TW_REENTRY=1` with its 60×/−6.9% wins waiting. The ledger and the whole per-pid
 lifecycle kit ship in-tree so the NEXT sighting starts from instruments, not from
 archaeology — and the KI's first instruction now is: preserve the binary.
+## 2026-08-30 — `nest run` launches warm; one symbol boundary for completion; a chain of cache-fingerprint bugs
+
+**Launch.** `nest run`'s pre-flight (`check-run-closure`) is now cached in its own
+manifest (`checks-run`), reusing a file's verdict on mtime alone — the fingerprint
+discipline stays `nest check`'s (`strict?` on `project-check-files-cached`). Measured on
+bedit with the installed binary: cold 2.6 s, **warm 0.3 s**, 0.7 s after editing one
+file (2.2 s every launch before). Getting there exposed three reasons a verdict cache
+could never hit across processes, each fixed on its own merits: the dependency recorder
+stored **gensyms** (`and__5844` — a different counter every process; `Heap::rec_check_dep_sym`
+skips them now); the declared-sig fact hashed the sig with `hash_value`, i.e. by **interned
+symbol id**, which follows interning order (`deps::fact_of_sym` hashes the printed form);
+and `project-require-closures` handed the cache an **unsorted** closure vector whose set
+order also followed interning (sorted now). `nest check`'s own cache is stable across
+processes for the first time. Two more: `check-run-closure` honours `BROOD_NO_CHECK`, and
+`specialize_call` skips typing a call's operands for a name already known to have no
+re-typeable arms (`NO_ARMS`): bedit uncached check 13.8 s → 8.5 s.
+
+**Completion.** `symbol-char?` in `std/editor/highlight` is the one word-boundary rule —
+`symbol-prefix-at` (the REPL's and brood-mode's) now stops at the reader-macro prefixes
+`' \` ~ ^ @ #` as well, so `'foo` completes `foo`. bedit's buffer-word and LSP sources use
+it too; before, three predicates disagreed and `complete-at` dropped every source that
+did not agree with the first on where the prefix started — the buffer-word source, the
+only one that knows a function written but not yet evaluated, went missing exactly when
+it mattered. bedit's Tab is Emacs' now: unique → insert; else the longest common prefix;
+the popup only when nothing more expands; candidates alphabetical, not fuzzy
+(`tests/complete_test.blsp`, 10 cases).
+
+## 2026-08-30 — `!` means "raises" (ADR-302); `$` places a threaded value (ADR-303)
+
+Groundwork for a coherent error convention. The trigger was `(string/->number "1 1 +")`
+returning **nil** — absence and failure spelled the same way — but before any function can be
+renamed to a raising mirror, `!` has to mean one thing. It meant two: **four** raising bangs
+(`tempo/new!` `parse!` `parse-span!`, and `sig!`, whose docstring already says "a mismatch
+throws") against **37** effectful ones (`gui/title!`, `run!`, `coverage/begin!`,
+`project-write-failed!`). ADR-302 takes `!` for raising and renames the rest — 38 names, 37
+files, 15 of them file-private and free. The Scheme reading was already vacuous: `!` marks
+*mutation* there, and Brood has none (ADR-026), so every effectful bang was marking "does
+I/O", which the name says anyway. `run!` could not simply drop its `!` — six modules define
+their own `run`, which would shadow a bare prelude one — so it is **`each`**.
+
+Then the arity question, from the same pipeline: `(->> exp (string/split " ") (map
+string/->number) first)` expands to `(string/split " " exp)`, which splits the *separator*
+and yields nil rather than raising. Brood inherited Clojure's two argument conventions and
+with them two threading macros, but **not Clojure's reason for them**: Clojure's `map` is
+variadic in collections (`(map f c1 c2)`), so they must come last, while `conj`/`assoc` are
+variadic in items, so the collection must come first — cornered into two pipes. Brood's `map`
+is strictly `(f coll)`; `(map + [1 2] [10 20])` is an arity error. Only the collection-first
+half is forced here. The collection-last half is inherited style, and `->` already outnumbers
+`->>` in-tree **82 : 18**.
+
+ADR-303 adds `$` as a placeholder in `->`/`->>` (and, through the shared placement helpers,
+`some->`/`cond->` and the thread-last variants): a step naming `$` — at any depth, inside
+vector and map literals — receives the value there instead of first or last. Bound once to a
+gensym, so `(-> (expensive) (+ $ $))` calls `expensive` once; `'$` stays the symbol. Purely
+additive. It is not a migration crutch — the subject is genuinely not first in `(- 100 $)` or
+`(cons $ xs)`, a gap Elixir papers over with `then/2` — and it keeps the tree readable while
+the data-first move is half-landed. Next: data-first (`map coll f`), after which `->>`,
+`some->>` and `cond->>` are deleted.
+
+## 2026-08-30 — the formatter shifted every `cond` clause after a comment inside a pair
+
+Reported from bedit: after today's tree-wide `nest format` (c8184ab3), a `cond` in
+`src/playground.blsp` came out with `else` two columns *right* of the tests and its `let` body
+back at the test column. The trigger was a comment sitting between a test and its result —
+`(not (= gen …))` / `;; Logged, never silent …` / `(do …)`. `render-body-pairs-at` paired a
+test with the *next form*, and when a comment intervened it emitted the test alone and then
+paired the result with the following test, so every clause after the comment was off by one.
+The renderer's own comment admitted the case "won't render ideally"; it was not ideal, it was
+wrong, and `std/prelude/core.blsp`'s `type-matches?` had already been mangled by it (an `else`
+at value indent, `(%eq h\n 'tuple)` split across lines). Fixed with a `pending?` state carried
+across the comment: test, comment, then the result on its own line at the value indent (+2),
+and the clauses after it pair as written.
+
+Second defect in the same emitter: the "does `test result` fit on one line?" check used the
+result's *flat* form while `render` honours the author's line breaks, so a short-but-broken
+result was glued to the test with its body hanging beneath — `else (let (x 1)\n           x)`.
+The fit decision is now made on the rendered result. Reflowed under both fixes: 29 files in
+brood, 11 in bedit; three regression tests in `tests/format_test.blsp`, each also asserting
+idempotence.
+
+One note from verifying this: `tests/regex_test.blsp` fails under the `ulimit -v 4000000` cap
+with `table: reserving the dense slot region failed` (`core/table.rs:195`) — a table's virtual
+reservation collides with the address-space cap. Same on the installed HEAD binary; passes
+uncapped. Not a formatter matter, but the cap the CLAUDE.md prescribes now hits a test that
+uses a table.
+
+### 2026-08-30, ninth — C-M-f / C-M-b from inside an atom
+
+Reported as "the ghost output interferes with M- navigation": in a playground buffer C-M-b
+sometimes jumped up one expression and C-M-f sometimes did nothing. The ghost text was
+innocent — it is display-only, anchored to the blank line under a form, and never in the
+text the motions read (verified: bedit's Brood buffers route to `sexp/forward`, not
+tree-sitter, and the pure motions were right at every between-forms point). What the
+evaluation changes is where the POINT is: inside `calc/eval` or inside `"1 1 +"`. The
+sibling walks in `std/tool/sexp.blsp` consider only forms starting after / ending before
+the point, so an atom straddling it was invisible — from inside the string forward stayed
+put and backward landed before `calc/eval`; from inside the symbol forward skipped the
+rest of it and the whole string, backward stayed put. `sexp-atom-around` now answers the
+straddling non-container form and the motions go to its edge, the way Emacs and paredit
+do; `forward-list` inside a symbol still skips to the next list (the rule respects the
+motion's filter). Four cases in `tests/sexp_test.blsp`, sabotage-verified.
 
 ### 2026-08-30, ninth — §7.1's "unnamed refusal" was named all along; the trace's line shape hid it
 
