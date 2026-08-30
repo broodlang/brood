@@ -866,6 +866,11 @@ pub(crate) fn jit_run_fast_link(
     )
 }
 
+/// §7.5 hot re-lowering: the largest frame the inline-blob re-compile is worth — see
+/// the profitability comment at the `xcall_relower` gate in `jit_tier`.
+#[cfg(feature = "jit")]
+const XCALL_RELOWER_MAX_NSLOTS: usize = 8;
+
 /// The suspend-host latch resolution for a fast link whose callee dirty-blocked its
 /// worker (`blocked_under_gateway` came back equal to the gateway token). Shared by
 /// [`jit_run_fast_link`] and the inline fast-frame path's `brood_rt_xcall_latch`
@@ -2312,6 +2317,16 @@ pub(crate) fn jit_tier_in_frame(
     let xcall_relower = arm.inline_name.is_none()
         && arm.leaf.is_none()
         && arm.dbg_name.is_some()
+        // Profitability, measured 2026-08-30: the inline blob adds ~90 CLIF lines and
+        // several blocks PER CALL SITE, and every value live across a call is pressured
+        // through that extra CFG — so an arm carrying lots of live state pays in its own
+        // loop code what the calls save. `nslots` is that live state's size. bintree's
+        // winners (`check-node` 3, `make` 4: −15% wall) sit far below nbody's loser
+        // (`advance-body`, 20 slots, 8 call sites, float-unboxed: relowered body +32%
+        // CLIF / +36% blocks, row +8%). The cut is between 5 and 20; 8 keeps every
+        // measured winner (`run` at 5 included) and excludes the measured loser with
+        // margin on both sides.
+        && arm.nslots <= XCALL_RELOWER_MAX_NSLOTS
         && super::xcall_relower_enabled()
         && *arm.xcall_wanted.get_or_init(|| {
             arm.chunk.as_ref().is_some_and(|c| {
