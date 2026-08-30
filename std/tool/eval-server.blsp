@@ -298,7 +298,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
   ;; queued is NOT recalled), so without this every successful request would leak
   ;; one forever and every later selective receive would scan the pile.
   (receive
-    ([:evsrv-result _ _] (eval-server-flush-stale))
+    ([:evsrv-result _ _ _] (eval-server-flush-stale))
     ([:down _ _ _] (eval-server-flush-stale))
     (after 0 nil)))
 
@@ -315,17 +315,29 @@ process died without answering."
         timeout (if (int? raw-timeout) raw-timeout *default-timeout-ms*)
         trace (get req :trace)
         me (self)
+        ;; The compile namespace is PER PROCESS, and every request evaluates in a
+        ;; fresh one: without this hand-over a `(defmodule calc)` request set the
+        ;; namespace of a child that then exited, the next request's `(defn eval …)`
+        ;; defined a bare `eval`, and `(calc/eval …)` was unbound — form-at-a-time
+        ;; evaluation from an editor could never build a module. The child adopts
+        ;; the session's namespace before it evaluates and reports where it ended;
+        ;; the loop process adopts that below, so the next child inherits it (the
+        ;; REPL's `%in-ns`-in-the-loop-process discipline, spread over two processes).
+        session-ns (reflect/current-ns)
         _ (eval-server-flush-stale)
-        child (spawn (send me [:evsrv-result id (eval-capturing src trace)]))
+        child (spawn (do
+                       (when (symbol? session-ns) (%in-ns session-ns))
+                       (send me [:evsrv-result id (eval-capturing src trace) (reflect/current-ns)])))
         ref (monitor child))
     (receive
-      ([:evsrv-result ^id r]
+      ([:evsrv-result ^id r ns]
         (do
           (demonitor ref)
           ;; the child dies :normal right after its send, so its DOWN is usually
           ;; already queued when we demonitor — drain it now (flush-stale is the
           ;; belt for the delivery-mid-demonitor sliver)
           (receive ([:down ^ref _ _] nil) (after 0 nil))
+          (when (symbol? ns) (%in-ns ns))
           (assoc r :id id)))
       ([:down ^ref ^child reason] (do
                                     (debug/untrace-all)
