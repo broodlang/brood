@@ -173,7 +173,7 @@ pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard
     if items.len() != 2 {
         return None;
     }
-    let ty = Ty::tested_by(&head_name)?;
+    let ty = predicate_guard_ty(heap, None, head)?;
     let (base, keys) = path_of(heap, items[1])?;
     if keys.is_empty() {
         return None; // a bare variable — `guard_assertion` handles that
@@ -306,7 +306,7 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
     if items.len() != 2 {
         return None;
     }
-    let ty = Ty::tested_by(&head_name)?;
+    let ty = predicate_guard_ty(heap, Some(ctx), head)?;
     match items[1] {
         Value::Sym(s) => Some(Guard {
             sym: s,
@@ -315,6 +315,24 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
         }),
         _ => None,
     }
+}
+
+/// What a truthy `(head x)` proves about `x`: the built-in predicates' table
+/// (`Ty::tested_by`), else a DECLARED type guard (ADR-301) — a sig whose result is
+/// `(is T)`, read from this file's declarations when a `ctx` is at hand, else from the
+/// loaded image (`sig_of`, which also covers the prelude's own). A local shadowing the
+/// name is not the predicate.
+pub(super) fn predicate_guard_ty(heap: &Heap, ctx: Option<&Ctx>, head: Symbol) -> Option<Ty> {
+    let head_name = value::symbol_name(head);
+    if let Some(t) = Ty::tested_by(&head_name) {
+        return Some(t);
+    }
+    if ctx.is_some_and(|c| c.is_local(head)) {
+        return None;
+    }
+    ctx.and_then(|c| c.declared_sig(head))
+        .or_else(|| super::sigs::sig_of(heap, head))
+        .and_then(|sig| sig.guard)
 }
 
 /// Recognise the `and`-expansion `(let (g E) (if g _ g))` and return the guard
