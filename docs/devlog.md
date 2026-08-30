@@ -7747,3 +7747,17 @@ layer tonight.
 
 The default path (router opt-in) passes the full suite, the entire breakage suite, and
 the wake-sensitive loop ×5 with all of this in.
+
+### 2026-08-30, eighth — the eval server lost `defmodule` between requests
+
+Asked why `(calc/eval "1 1 +")` was unbound in an editor buffer whose two previous
+forms were `(defmodule calc)` and `(defn eval (exp) exp)` — the inline result for the
+`defn` read `=> eval`, bare. As a file, in the REPL and under the checker the same three
+forms are fine; through the eval server (`std/tool/eval-server.blsp`) they are not:
+`answer` evaluates every request in a fresh `spawn`, and the compile namespace is **per
+process**, so `defmodule` set the namespace of a child that then exited and the next
+request's `defn` landed in the root. Form-at-a-time evaluation could never build a
+module. The child now adopts the session's namespace before evaluating and reports where
+it ended; the loop process adopts that, so the next child inherits it — the REPL's
+"`%in-ns` runs in the loop process" discipline, spread over two processes. Regression
+test in `tests/eval_server_test.blsp`; editors pick it up on the next `make install`.
