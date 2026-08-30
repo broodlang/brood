@@ -20,14 +20,16 @@
 
 (defn xr-poly (x) (+ x 1))
 (defn xr-flip (i acc)
-  (if (= i 0) acc
-      (xr-flip (- i 1) (+ acc (xr-poly (if (> i 50000) 1 1.5))))))
+  (if (= i 0)
+    acc
+    (xr-flip (- i 1) (+ acc (xr-poly (if (> i 50000) 1 1.5))))))
 
 (defn xr-thrower (x) (if (= x -1) (throw :boom) x))
 (defn xr-throwy (i acc)
-  (if (= i 0) acc
-      (xr-throwy (- i 1)
-        (+ acc (try (xr-thrower (if (= (math/rem i 1000) 0) -1 1)) (catch e 0))))))
+  (if (= i 0)
+    acc
+    (xr-throwy (- i 1)
+      (+ acc (try (xr-thrower (if (= (math/rem i 1000) 0) -1 1)) (catch e 0))))))
 
 (def xr-t (table/new))
 (defn xr-effect (k) (do (table/put xr-t :n (+ 1 (table/get xr-t :n 0))) k))
