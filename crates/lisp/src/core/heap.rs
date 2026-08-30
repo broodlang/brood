@@ -2742,6 +2742,19 @@ pub struct Heap {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_deopt_reason: std::cell::Cell<u32>,
     vm_call_ics: RefCell<Vec<Option<CallIcEntry>>>,
+    /// Next IC-block base to hand out for [`Self::vm_call_ics`] / [`Self::vm_global_ics`]
+    /// (M2b, 2026-08-30). `vm_arm_block` used to take `base = table.len()` and
+    /// `resize_with(base + nsites)` — materialising an `Option<CallIcEntry>` slot for
+    /// every site of every ACTIVATED arm, entered or not, which for a spawn-once
+    /// process is nearly all of them. Bases now come from these counters and the
+    /// tables grow **on publish** (`vm_call_ic_put` / `vm_global_ic_put`), the same
+    /// lazy-by-its-only-writer pattern the `vm_fast_links` mirror proved on
+    /// 2026-08-18. Every reader already tolerates a short table (`.get(abs)` — a
+    /// missing slot reads exactly like an unpublished one). Reset to 0 in lockstep
+    /// with the table clears + `arm_ic_blocks`, preserving ADR-096's site-id
+    /// recycling semantics exactly (the sym/argc guards on every probe exist for it).
+    next_ic_base: std::cell::Cell<u32>,
+    next_gic_base: std::cell::Cell<u32>,
     /// **IR-readable mirror** of the fast-link memo (Track B / Technique A): a flat,
     /// `#[repr(C)]` side table indexed by the same call-site id as [`Self::vm_call_ics`],
     /// so JIT'd code can read a site's `(epoch, code, nslots, env)` with a raw load + an
@@ -3222,6 +3235,8 @@ impl Heap {
             live_vm_arms: Vec::new(),
             jit_deopt_reason: std::cell::Cell::new(0),
             vm_call_ics: RefCell::new(Vec::new()),
+            next_ic_base: std::cell::Cell::new(0),
+            next_gic_base: std::cell::Cell::new(0),
             vm_fast_links: RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
@@ -3304,6 +3319,8 @@ impl Heap {
             live_vm_arms: Vec::new(),
             jit_deopt_reason: std::cell::Cell::new(0),
             vm_call_ics: RefCell::new(Vec::new()),
+            next_ic_base: std::cell::Cell::new(0),
+            next_gic_base: std::cell::Cell::new(0),
             vm_fast_links: RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
