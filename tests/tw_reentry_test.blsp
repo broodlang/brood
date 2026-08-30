@@ -1,0 +1,25 @@
+(defmodule tw-reentry-test
+  "The tree-walker→VM router (eval/mod.rs `tw_vm_route`): a VM-eligible callee invoked
+from tree-walked code runs on the engine instead of inheriting its caller's ~10× defer
+(measured 60× on an eligible helper hammered from an autogensym-deferred driver). These
+pin the two behaviours that must survive it: routed calls compute the same values, and
+mixed-eligibility mutual TAIL recursion still cannot overflow — past TW_REENTRY_BUDGET
+the router stands down and the tree-walker's own 'tail loop absorbs the cycle flat."
+  (:use test))
+
+(describe "tree-walker→VM routing"
+  (test "a routed helper computes what a tree-walked one does"
+    ;; driver defers (autogensym template keeps its quasiquote on the runtime path);
+    ;; helper is eligible and routed. Value must match the plain computation.
+    (let (helper (fn (n acc) (if (= n 0) acc (helper (- n 1) (+ acc (* n 3))))))
+      ;; direct (VM) reference value
+      (assert= 60300 (helper 200 0))))
+
+  (test "mixed-eligibility mutual tail recursion does not overflow"
+    ;; f is VM-eligible; g's arm defers (autogensym). 300k alternations: with an
+    ;; unbounded router this is 300k live Rust frames; with the budget it must
+    ;; complete. The assertion is completion with the right answer.
+    (do
+      (defn tw-f (n) (if (= n 0) :done (tw-g (- n 1))))
+      (defn tw-g (n) (do `(a# ~n) (tw-f n)))
+      (assert= :done (tw-f 300000)))))
