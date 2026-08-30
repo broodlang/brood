@@ -6,6 +6,13 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Added — type-guard signatures (ADR-301).** `(sig datetime? (any -> (is datetime)))`
+declares what a truthy result proves: `(if (datetime? x) …)` narrows `x` to `datetime` in
+the then-branch and to `(not datetime)` in the else, exactly as the built-in `int?`/
+`string?` guards do — through a bare local or an access path, and across modules. The
+prelude's record predicates (`queue?`, `pq?`, `multimap?`, `datetime?`, `date?`,
+`time-of-day?`) are declared. A runtime contract reads `(is T)` as "a bool".
+
 ## v0.19.0 — 2026-08-30
 
 The strict release: `nest check --strict` is at zero over the standard library and is a CI

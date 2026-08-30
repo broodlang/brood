@@ -1084,7 +1084,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   its parameters, or an honest nil default (`(or (nth parts 1) "")`, `(nth xs i default)`
   — the default IS the absence case). A record name in a sig is an open shape: a key it
   does not declare reads as unknown, so go through a declared accessor. A user predicate
-  (`datetime?`) does not narrow; the built-in `int?`/`string?`/… do.
+  narrows once it is DECLARED a guard — `(sig order? (any -> (is order)))` — exactly like
+  the built-in `int?`/`string?`; an undeclared one proves nothing.
 - **A `(record …)` is CLOSED** (ADR-264) — it names every key, and one it doesn't
   declare reads as `nil`. Write `(record &open :k T)` when a value may carry more,
   which is what a *parameter* usually wants. Closedness is what makes a tagged union
