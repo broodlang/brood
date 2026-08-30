@@ -1506,6 +1506,27 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 return Some(t);
             }
         }
+        // Seed the accumulator from `init` and take one step to a fixpoint: with `acc₁ =
+        // init ∪ f(init, e)`, if `f(acc₁, e) ⊆ acc₁` then by induction every iterate is in
+        // `acc₁` — `(fold (fn (h c) (bit/xor (* h 31) …)) 5381 s)` is an int, where seeding
+        // `h` as `any` read `(* h 31)` as `number`. Not stable → the `any`-seeded reading
+        // (sound: the accumulator is over-approximated).
+        // An unknown element is `any` here — still sound, and the accumulator's own closure
+        // (`(fn (m s) (math/max m (string/length s)))` over an untyped `lines`) is what
+        // matters.
+        if let Some(i) = &init_ty {
+            let e = elem.clone().unwrap_or(Ty::ANY);
+            if let Some(step) = callback_ret(heap, f, &[Some(i.clone()), Some(e.clone())], ctx) {
+                let acc = i.clone().union(step);
+                if let Some(again) =
+                    callback_ret(heap, f, &[Some(acc.clone()), Some(e.clone())], ctx)
+                {
+                    if again.is_subtype(&acc) {
+                        return Some(acc);
+                    }
+                }
+            }
+        }
         let b = callback_ret(heap, f, &[Some(Ty::ANY), elem], ctx);
         return match (init_ty, b) {
             (Some(i), Some(b)) => Some(i.union(b)),

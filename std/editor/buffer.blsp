@@ -185,10 +185,12 @@ or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
   "Point moved to char index `n`, clamped to [0, length]."
   (assoc buf :point (buffer-clamp 0 (buffer-length buf) n)))
 
+(sig forward-char (buffer &optional int -> buffer))
 (defn forward-char (buf &optional (n 1))
   "Point moved `n` characters forward (clamped)."
   (goto-char buf (+ (get buf :point) n)))
 
+(sig backward-char (buffer &optional int -> buffer))
 (defn backward-char (buf &optional (n 1))
   "Point moved `n` characters backward (clamped)."
   (goto-char buf (- (get buf :point) n)))
@@ -204,6 +206,7 @@ or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
         line (text/char->line rope (get buf :point)))
     (goto-char buf (+ (text/line->char rope line) (buffer-line-end-col buf line)))))
 
+(sig forward-line (buffer &optional int -> buffer))
 (defn forward-line (buf &optional (n 1))
   "Point moved `n` lines forward (negative = backward), keeping the column where
 the target line is long enough. Clamps to the buffer's line range."
@@ -215,6 +218,7 @@ the target line is long enough. Clamps to the buffer's line range."
         line-start (text/line->char rope target))
     (goto-char buf (+ line-start (math/min col (buffer-line-end-col buf target))))))
 
+(sig backward-line (buffer &optional int -> buffer))
 (defn backward-line (buf &optional (n 1))
   "Point moved `n` lines backward (see `forward-line`)."
   (forward-line buf (- n)))
@@ -1014,6 +1018,7 @@ insertion point shift with the text. Throws if `buf` is read-only."
         (string/length s)))))
 (sig insert (any string -> any))
 
+(sig delete-char (buffer &optional int -> buffer))
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
 no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
@@ -1030,6 +1035,7 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
                                   :delete p end)
           :delete p end)))))
 
+(sig delete-backward-char (buffer &optional int -> buffer))
 (defn delete-backward-char (buf &optional (n 1))
   "Delete `n` characters *before* point (backspace); point moves back with it.
 Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-only."
@@ -1167,12 +1173,14 @@ line's start does **not** pull that trailing line in (Emacs's line-wise conventi
     (buffer-ws-run-start txt (dec i))
     i))
 
+(sig buffer-ws-run-end (string int int -> int))
 (defn- buffer-ws-run-end
   (txt i n)
   (if (and (< i n) (buffer-horizontal-space? (string/char-at txt i)))
     (buffer-ws-run-end txt (inc i) n)
     i))
 
+(sig whitespace-run-at (buffer -> (tuple int int)))
 (defn whitespace-run-at (buf)
   "The span of spaces/tabs SURROUNDING point, as `[lo hi]` (`hi` exclusive; `[p p]` when
 point is not in or beside one). Scans both directions but never across a newline, so it

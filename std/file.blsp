@@ -61,12 +61,12 @@ primitives. The kernel also provides the always-available file primitives
 (defn list-files (dir)
   "The names of regular files directly under `dir` (excluding subdirectories), sorted."
   (filter (fn (e) (not (file/dir? (path/join dir e)))) (file/ls dir)))
-(sig list-files (string -> (list string)))
+(sig list-files (string -> (or (list string) nil)))
 
 (defn list-dirs (dir)
   "The names of subdirectories directly under `dir`, sorted."
   (filter (fn (e) (file/dir? (path/join dir e))) (file/ls dir)))
-(sig list-dirs (string -> (list string)))
+(sig list-dirs (string -> (or (list string) nil)))
 
 (defn walk-files (dir)
   "Every file path under `dir`, recursively (full paths, depth-first). nil if `dir` is not a directory."
