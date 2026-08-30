@@ -7512,3 +7512,46 @@ autogensym-deferred driver: 5,048 → 84 ms), `startup` **−6.9%** (floor 0.0%)
 rows neutral (pingpong solo +1.0% wall with instructions −9 M — the drift row drifting).
 `BROOD_NO_TW_REENTRY=1` is the lever; `BROOD_DEFER_DBG`'s line now reads "tree-walks its
 OWN body", which is the new truth.
+
+### 2026-08-30, later still — the router found a VM bug that had been waiting: self-tail resets dropped the capture slots
+
+The breakage suite went red on the first CI run after the tree-walker→VM router
+(`f0bf90e2`): `chaos2_tcp_stress` P40, a spawned drainer that recurses over its socket
+and then `(send me …)` to a captured pid — `send: target must be a pid`. Deterministic,
+3/3 locally; `BROOD_NO_TW_REENTRY=1` passes; the v0.19.1 binary passes.
+
+The minimal shape needs no spawn and no receive:
+
+```lisp
+(let (me :captured)
+  (defn s (n acc) (if (= n 0) (pr-str me) (s (- n 1) (list acc n))))
+  (s 3 nil))            ; => "nil" — the capture is gone after one iteration
+```
+
+`me` is a **capture slot** (#3 lexical addressing: `push_frame` copies the enclosing
+lexicals into frame slots right after the params, so the body reads them as `Local`).
+Both in-place self-tail resets — the IC fast path for `(defn f … (f …))` in `exec_chunk`
+and `Inst::SelfCall` — nil-ed **every** slot and refilled only the params. The capture
+slots were never touched again, so the loop's second iteration read `nil`.
+
+Why it never showed: the IC path requires `cur_env == cenv`, and a `defn` inside a `let`
+was, until the router, only ever *called from tree-walked code* (a top-level `let`, a
+spawn body, a `do` with a `defn` in it all defer) and so tree-walked throughout. The
+router put that closure on the VM for the first time. The `letrec` helper — the
+`SelfCall` path's usual customer — refills its frame through `push_frame` and captures
+nothing across a `letrec`, so that path was clean by luck too. The deferring argument
+(`list`, `str` — variadic prelude defns) is what keeps the loop on the IC path rather than
+the `Tail` exit; the same loop with `(+ acc 1)` for an argument rebuilt its frame through
+`push_frame` every iteration and read the capture fine, which is the shape every existing
+self-tail test used.
+
+Fix: `reset_frame_keep_captures` — nil the body slots, refill the params, **leave the
+capture slots alone** (same arm, same env, same values). Both reset sites use it. The
+native tier was already right (a hot 400k-iteration captured loop reads its capture on
+every tier). Regression tests in `tests/tw_reentry_test.blsp`: the routed entry, the VM
+entry with both argument shapes, the hot loop, and the P40 shape itself.
+
+The lesson is the one CLAUDE.md already states: a routing change that makes *more* code
+reach an engine is a test of every latent assumption in that engine, and "the suite is
+green" measures only the shapes the suite reaches. The breakage suite is what caught it —
+`make green` reads it; the run list did not.
