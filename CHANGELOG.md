@@ -6,12 +6,46 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.19.1 — 2026-08-30
+
+Type-guard signatures, the first real deprecation, and 218 signatures moved to where
+contracts mode can load them.
+
 **Added — type-guard signatures (ADR-301).** `(sig datetime? (any -> (is datetime)))`
 declares what a truthy result proves: `(if (datetime? x) …)` narrows `x` to `datetime` in
 the then-branch and to `(not datetime)` in the else, exactly as the built-in `int?`/
 `string?` guards do — through a bare local or an access path, and across modules. The
 prelude's record predicates (`queue?`, `pq?`, `multimap?`, `datetime?`, `date?`,
 `time-of-day?`) are declared. A runtime contract reads `(is T)` as "a bool".
+
+**Changed — `not=` is deprecated (ADR-300).** It buys a spelling, not a capability: its body
+*is* `(not (= a b))`, the written-out form is the faster one (its nested call defeats both
+the elision and the leaf inliner — 218 vs 132 ms native on a 5M loop), and `(not= 1 2 1)`
+is `true`, not "pairwise different". Marked `(meta not= :deprecated "0.19.1" :use 'not)`;
+`nest check` warns; all in-tree uses rewritten, including the divide-by-zero hint strings.
+
+**Fixed — `(meta …)` never reached a prelude name (ADR-283).** `RuntimeCode::seeded`
+started the meta map empty and the prelude is inserted, not re-evaluated, so
+`(%meta-of 'not=)` was nil everywhere. Now carried over the same seam privacy uses
+(`name_meta_snapshot` → `SharedBundle::meta`). `nest doc` strikes a deprecated heading
+through as well as annotating it.
+
+**Fixed — 218 `sig`s sat above their definitions, and contracts mode could not load them.**
+A `sig` is a declaration by default and an *action* under `BROOD_CONTRACTS=1`, so a forward
+one took the whole module down (KI-81's shape, 211 times across `std/`). All moved below
+their `defn`; `crates/lisp/tests/sig_placement.rs` now asserts the rule textually over every
+`.blsp`. Fallout fixed on the way: `sig!` read `&optional` as a fixed parameter and armed a
+4-arity shim over a 2-3-arity function — the shim is variadic now and keeps the callee's own
+defaults.
+
+**Changed — `index-of` is filed as a collection op.** Moved from the string prelude file to
+the sequence one beside `includes?`, catalogue category `:collections`; the name stays bare
+(ADR-230: its subject is any collection). No behaviour change.
+
+**Fixed — a quasiquote inside a vector literal deferred the whole arm to the tree-walker.**
+`expand_static_quasiquotes` treated a vector as an atom, so `%receive-split`'s shape (every
+`receive`/`match` expansion) tree-walked transitively. The rewrite now descends vector
+literals; `BROOD_DEFER_DBG=1` names each deserting closure.
 
 ## v0.19.0 — 2026-08-30
 
