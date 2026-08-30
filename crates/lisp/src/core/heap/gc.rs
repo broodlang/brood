@@ -1204,7 +1204,7 @@ impl Heap {
         for &v in self.msg_roots.iter().flat_map(|t| t.iter()) {
             work.push(W::V(v, 0));
         }
-        for &v in &self.roots {
+        for &v in self.roots.iter() {
             work.push(W::V(v, 0));
         }
         for &e in &self.env_roots {

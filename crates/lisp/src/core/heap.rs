@@ -2507,7 +2507,9 @@ pub struct Heap {
     /// because every one of these is filled through `&self` — which is exactly why M1
     /// left them inline.
     check: RefCell<Option<Box<CheckHeap>>>,
-    roots: Vec<Value>,
+    /// The GC root stack. A [`roots_buf::RootsBuf`], not a `Vec<Value>`, so its
+    /// (ptr, len, cap) header sits at fixed offsets for the JIT (§7.5); same semantics.
+    roots: roots_buf::RootsBuf,
     /// The env half of the operand stack (ADR-061): LOCAL [`EnvId`]s an eval
     /// frame still needs across a nested `eval` (its `scope`/`env`). Relocated in
     /// place by [`arena_flip`](Self::arena_flip) alongside `roots`; re-read via
@@ -3055,6 +3057,7 @@ mod equality;
 mod gc;
 mod gc_runtime;
 mod map_ops;
+mod roots_buf;
 mod vm_cache;
 // `stall_guard` is used by the RUNTIME compactor (`gc_runtime`) and the GUI paint
 // path, so it's re-exported unconditionally; `stall_guard_pid` by the scheduler.
@@ -3220,7 +3223,7 @@ impl Heap {
             msg_roots: None,
             cold: None,
             check: RefCell::new(None),
-            roots: Vec::new(),
+            roots: roots_buf::RootsBuf::new(),
             env_roots: Vec::new(),
             gc_threshold: usize::MAX,
             park_trim_mark: 0,
@@ -3305,7 +3308,7 @@ impl Heap {
             msg_roots: None,
             cold: None,
             check: RefCell::new(None),
-            roots: Vec::new(),
+            roots: roots_buf::RootsBuf::new(),
             env_roots: Vec::new(),
             gc_threshold: gc_floor(),
             park_trim_mark: 0,

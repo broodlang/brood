@@ -7934,3 +7934,30 @@ the arm's one non-tail call, and `jit_spill_reserve`'s `< 2 → 0` rule — meas
 2026-08-29/30, widening it buys nothing and costs (`jit_plan.rs` has the numbers) —
 reserves no spill slot for a single-call arm. Suite 1296/1296; clippy on CI's flags clean.
 §7.1's follow-on (2) in `docs/compute-frontier.md` updated to RESOLVED.
+
+### 2026-08-30, tenth — §7.5 re-ordered ahead of partial lowering, and the RootsBuf groundwork lands
+
+The plan said partial lowering next; the evidence said otherwise. §7.1's step-2 rejection
+is not just an experiment result — it is evidence about the *thesis*: a fully-lowered
+call-mediated arm lost on every row because the native call boundary costs more than VM
+dispatch, and partial lowering crosses the same boundary per iteration. The nqueens flat
+profile shows the asymmetry directly: VM driving, native leaves below — the VM→native
+boundary is 1.1% of the row; on `bintree`, where natives call natives, the same pair
+(`jit_run_fast_link` + `brood_rt_fast_frame`) is ~33%. The boundary is the frontier, so
+§7.5 (inline native→native calls) goes first, and §7.1 gets re-measured after it. Checked
+for cheap deletions in the ceremony before committing to the ladder: none — `root_env`
+already inlines the GLOBAL-env case, the IC bases cannot be constants (shared arms,
+per-process IC blocks, ADR-215), and §2i showed the cost does not decompose. The full
+increment ladder is in `docs/compute-frontier.md` §7.5.
+
+Increment 1 shipped: `Heap.roots` is now a `RootsBuf` — a `#[repr(C)]` buffer with its
+(ptr, len, cap) header at fixed offsets (0/8/16, pinned by a test), so emitted code can
+eventually read and adjust the frame extent directly. Semantically the same `Vec<Value>`
+(Deref to slice; push/truncate/reserve/set_len/shrink_to_fit; `realloc`-based growth, the
+same call `Vec` makes). Deliberately raw-allocated rather than Box-backed: a cached
+pointer derived from a `Box` field goes stale under stacked borrows when the struct moves,
+and a `Heap` moves inside its `Box<Process>`. Validated: suite 1299/1299;
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` on the chaos/JIT-GC/spawn/scheduler tests under a
+debug-assertions release build (tripwire armed) all green; `make ab --floor` flat on
+startup/spawn/bintree/sort/fib (startup wobbled ±3.4% at its own floor — `perf stat`
+instructions settled it: 196.7M base vs 195.2M new, i.e. flat with a hair fewer).
