@@ -441,12 +441,28 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
             | Some(Value::Str(_)) => Some(true),
             _ => None,
         };
+        // Each branch is typed in the scope its test proves (`guards::branch_scopes`) — the
+        // same narrowing the walk and `gradual_of` apply, so `(let (g E) (if g g d))` (what
+        // `or` expands to) reads `g` as truthy in the then-branch.
+        let test = items.get(1).copied().unwrap_or(Value::nil());
+        let (then_ctx, else_ctx) = super::guards::branch_scopes(heap, test, ctx);
         return match (items.len(), taken) {
-            (4, Some(true)) | (3, Some(true)) => expr_ty(heap, items[2], ctx),
-            (4, Some(false)) => expr_ty(heap, items[3], ctx),
+            (4, Some(true)) | (3, Some(true)) => expr_ty(heap, items[2], &then_ctx),
+            (4, Some(false)) => expr_ty(heap, items[3], &else_ctx),
             (3, Some(false)) => Some(Ty::of(Tag::Nil)),
-            (4, None) => branch_union(heap, &[items[2], items[3]], ctx),
-            (3, None) => Some(expr_ty(heap, items[2], ctx)?.union(Ty::of(Tag::Nil))),
+            (4, None) => {
+                let t = branch_union(heap, &[items[2]], &then_ctx);
+                let e = branch_union(heap, &[items[3]], &else_ctx);
+                match (t, e) {
+                    // A self-call branch contributes ⊥ (see `branch_union`); if both did,
+                    // defer.
+                    (Some(a), Some(b)) => Some(a.union(b)),
+                    (Some(a), None) if is_inferring_self_call(heap, items[3], ctx) => Some(a),
+                    (None, Some(b)) if is_inferring_self_call(heap, items[2], ctx) => Some(b),
+                    _ => None,
+                }
+            }
+            (3, None) => Some(expr_ty(heap, items[2], &then_ctx)?.union(Ty::of(Tag::Nil))),
             _ => None,
         };
     }
@@ -577,19 +593,45 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     // to itself, so any operand can be the value). `(or a b … last)` likewise.
     // Empty `(and)` → true; empty `(or)` → nil. Surface forms (post-expansion both
     // are `let`+`if`, handled above); kept for fragments.
+    // Exactly, not "any operand": an operand that is NOT the last one is the value only
+    // when it short-circuits — falsy for `and`, truthy for `or` — so it contributes that
+    // half of its type alone. `(or (string/->number s) -1)` is `number`, never `nil`; the
+    // `nil` that made every `(or x default)` read as maybe-nil under `--strict` was this
+    // union being taken over the whole operand.
     if value::symbol_is(head, kw::AND) {
         if items.len() == 1 {
             return Some(Ty::of(Tag::Bool));
         }
-        return branch_union(heap, &items[1..], ctx);
+        return short_circuit_union(heap, &items[1..], ctx, Ty::truthy().negate());
     }
     if value::symbol_is(head, kw::OR) {
         if items.len() == 1 {
             return Some(Ty::of(Tag::Nil));
         }
-        return branch_union(heap, &items[1..], ctx);
+        return short_circuit_union(heap, &items[1..], ctx, Ty::truthy());
     }
     None
+}
+
+/// The value of `(and …)` / `(or …)`: every operand but the last is the result only when
+/// it short-circuits, so it contributes `ty ∩ short` (the falsy slice for `and`, the truthy
+/// one for `or`); the last operand contributes its whole type. `None` if any operand is
+/// unknown, as [`branch_union`].
+fn short_circuit_union(heap: &Heap, operands: &[Value], ctx: &Ctx, short: Ty) -> Option<Ty> {
+    let mut acc: Option<Ty> = None;
+    for (i, &f) in operands.iter().enumerate() {
+        let t = expr_ty(heap, f, ctx)?;
+        let t = if i + 1 < operands.len() {
+            t.intersect(short.clone())
+        } else {
+            t
+        };
+        acc = Some(match acc {
+            Some(a) => a.union(t),
+            None => t,
+        });
+    }
+    acc
 }
 
 /// The union of the types of several branch result forms, or `None` if *any* of

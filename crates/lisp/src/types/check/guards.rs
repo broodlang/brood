@@ -381,6 +381,40 @@ fn chain_shape(heap: &Heap, test: Value, want_then_g: bool) -> Option<(Value, Va
     None
 }
 
+/// The two scopes an `(if test …)` branches into: the then-branch narrowed by what a truthy
+/// `test` proves (a single guard, every conjunct of an `and`-expansion, a same-variable
+/// `or`-union), the else-branch by the complement of what is biconditional (a plain guard,
+/// a same-variable `or`; never a `then_only` `and`-conjunct — a falsy `and` may have failed
+/// on a later conjunct). The one construction the checker's three `if` readers share —
+/// `check_if` (the walk), `gradual_of` (the checked value type) and `expr_ty` (the inferred
+/// type, which drives a function's inferred return) — so all three see the same branch
+/// types. `expr_ty` used to union both branches under the UNnarrowed scope, so
+/// `(or (string/->number s) -1)` inferred `nil | number`: the truthy half of an `or` is the
+/// one case this reads every time, and every `--strict` caller of such a function paid
+/// for the `nil` that cannot occur.
+pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
+    let (mut then_ctx, mut else_ctx) = match guard_assertion(heap, test, ctx) {
+        Some(g) => {
+            let then_ctx = ctx.narrow(g.sym, g.ty.clone());
+            let else_ctx = if g.then_only {
+                ctx.clone()
+            } else {
+                ctx.narrow(g.sym, g.ty.negate())
+            };
+            (then_ctx, else_ctx)
+        }
+        None => (ctx.clone(), ctx.clone()),
+    };
+    for g in and_conjunct_guards(heap, test, ctx) {
+        then_ctx = then_ctx.narrow(g.sym, g.ty);
+    }
+    if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
+        then_ctx = then_ctx.narrow(sym, union.clone());
+        else_ctx = else_ctx.narrow(sym, union.negate());
+    }
+    (then_ctx, else_ctx)
+}
+
 /// Every conjunct guard of an `and`-expansion test — a truthy `and` proves **all**
 /// conjuncts hold, so each narrows the *then*-branch (each `then_only`: a falsy `and`
 /// proves nothing). `[]` when `test` is not an and-expansion (so a plain guard, already

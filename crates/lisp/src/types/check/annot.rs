@@ -50,6 +50,20 @@ pub(super) fn set_record_ids(ids: std::collections::HashSet<String>) {
     RECORD_IDS.with(|m| *m.borrow_mut() = ids);
 }
 
+thread_local! {
+    /// THIS file's records' declared field types, by record id — read by [`record_ty`]
+    /// ahead of the heap, because the file is checked before it is loaded, so its own
+    /// constructors' sigs are not on the heap yet. Populated from the `%register-sig`
+    /// forms `defrecord` expands to (`check_file`), cleared per file with the tables above.
+    static RECORD_FIELD_TYPES: RefCell<HashMap<String, BTreeMap<Symbol, (Ty, bool)>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Install this file's records' declared field types (see [`RECORD_FIELD_TYPES`]).
+pub(super) fn set_record_field_types(map: HashMap<String, BTreeMap<Symbol, (Ty, bool)>>) {
+    RECORD_FIELD_TYPES.with(|m| *m.borrow_mut() = map);
+}
+
 /// Install this file's ability-type table (call before parsing sigs). Overwrites any prior
 /// file's table.
 pub(super) fn set_ability_types(map: HashMap<String, Option<Vec<String>>>) {
@@ -60,6 +74,7 @@ pub(super) fn set_ability_types(map: HashMap<String, Option<Vec<String>>>) {
 pub(super) fn clear_ability_types() {
     ABILITY_TYPES.with(|m| m.borrow_mut().clear());
     RECORD_IDS.with(|m| m.borrow_mut().clear());
+    RECORD_FIELD_TYPES.with(|m| m.borrow_mut().clear());
 }
 
 /// Install this file's sealed-op occurrence-typing domains (ADR-190). Overwrites the prior
@@ -204,7 +219,33 @@ pub(super) fn sealed_members_ty(members: &[String]) -> Option<Ty> {
 /// registered record ends in that segment: two modules may each define `pt`, and choosing
 /// between them would produce a *wrong* type where declining produces a missing one. Sound,
 /// not complete — the ADR-181 discipline.
-fn record_ty(name: &str) -> Option<Ty> {
+fn record_ty(heap: &Heap, name: &str) -> Option<Ty> {
+    let id = record_id_for(name)?;
+    // The record's DECLARED field types travel with the name (2026-08-30). `defrecord` puts
+    // them on the constructor's sig (`(sig pt (int int -> (record :__id__ :pt :x int …)))`),
+    // and a `(sig f (pt -> …))` that resolved to the bare `:__id__` shape lost every one of
+    // them at the parameter: `(get dt :hour 0)` on a `datetime` read as `any`, and a body
+    // over its fields could not close over `int`. The shape stays OPEN for the reason given
+    // above (`(assoc (pt 1 2) :z 3)` is still a `pt`); only the declared keys are typed. An
+    // undeclared field is a `?var` on the constructor, which parses as `any` — the same
+    // reading the open rest gives it, so nothing is narrowed that was not declared.
+    let declared = RECORD_FIELD_TYPES
+        .with(|m| m.borrow().get(&id).cloned())
+        .or_else(|| {
+            super::sigs::declared_heap_sig(heap, value::intern(&id))
+                .and_then(|sig| sig.ret.record_fields().cloned())
+        });
+    let mut fields = declared.unwrap_or_default();
+    fields.insert(
+        value::intern("__id__"),
+        (Ty::keyword_lit(value::intern(&id)), true),
+    );
+    Some(Ty::record_of_open(fields))
+}
+
+/// The registered record id `name` denotes — `name` itself when registered, else the one
+/// registered id ending in `/name` (two candidates decline: see [`record_ty`]).
+fn record_id_for(name: &str) -> Option<String> {
     RECORD_IDS.with(|m| {
         let ids = m.borrow();
         let id = if ids.contains(name) {
@@ -218,12 +259,7 @@ fn record_ty(name: &str) -> Option<Ty> {
             }
             first
         };
-        let mut fields = BTreeMap::new();
-        fields.insert(
-            value::intern("__id__"),
-            (Ty::keyword_lit(value::intern(&id)), true),
-        );
-        Some(Ty::record_of_open(fields))
+        Some(id)
     })
 }
 
@@ -307,7 +343,7 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             // syntax.
             base_ty(&name)
                 .or_else(|| ability_type(&name))
-                .or_else(|| record_ty(&name))
+                .or_else(|| record_ty(heap, &name))
         }
         // `nil` reads as the literal `Value::Nil`, not a symbol — so a type-expr
         // like `(or int nil)` lands here, not in `base_ty`.
