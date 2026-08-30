@@ -37,7 +37,39 @@
       -98765432109876543210987654321)
     ;; the round-trip that used to silently round through f64
     (assert= (string/->number (str 98765432109876543210987654321))
-      98765432109876543210987654321)))
+      98765432109876543210987654321))
+
+  ;; The radix argument is the ONLY way to read hex/octal/binary: ADR-169 reserved
+  ;; `0x1F`/`0b1010`/`0o17` as syntax rather than names because this covers it at
+  ;; runtime, and the reader's own hint says to call `(string/->number "1F" 16)`. It
+  ;; took one argument until 2026-08-30, so the hint named a call that raised.
+  (test "a radix reads hex, octal and binary"
+    (assert= (string/->number "1F" 16) 31)
+    (assert= (string/->number "1f" 16) 31)
+    (assert= (string/->number "17" 8) 15)
+    (assert= (string/->number "1010" 2) 10)
+    (assert= (string/->number "zz" 36) 1295)
+    (assert= (string/->number "-ff" 16) -255)
+    ;; the exact call the reader's reserved-numeric hint prints
+    (assert= (string/->number "1F" 16) 31))
+  (test "a radix parse is integer-only, and takes the digits alone"
+    ;; A radix describes an integer notation — "3.5" in any base is not a number
+    ;; anyone means — and the `0x` prefix is the syntax this argument replaces.
+    (assert= (string/->number "3.5" 10) nil)
+    (assert= (string/->number "0x1f" 16) nil)
+    (assert= (string/->number "gg" 16) nil)
+    (assert= (string/->number "" 16) nil)
+    ;; base 10 with an explicit radix is still integer-only, deliberately
+    (assert= (string/->number "42" 10) 42))
+  (test "a radix past i64 is a bignum, like the base-10 path"
+    (assert= (string/->number "ffffffffffffffffffff" 16)
+      1208925819614629174706175))
+  (test "a radix outside 2-36 raises — it is a caller bug, not unparseable text"
+    ;; nil would be indistinguishable from "the text did not parse".
+    (is (includes? (try (do (string/->number "1" 1) "no raise") (catch e (error-message e)))
+          "radix must be between 2 and 36"))
+    (is (includes? (try (do (string/->number "1" 37) "no raise") (catch e (error-message e)))
+          "radix must be between 2 and 36"))))
 
 (describe "characters & lists"
   (test "char-at is char-indexed"
@@ -484,9 +516,7 @@
     (let (me (self))
       (spawn (send me [:codes (string/->codepoints "héλ🙂")]))
       (receive
-        ([:codes v] (do
-                      (assert= v [104 233 955 128578])
-                      (assert= "héλ🙂" (string/codepoints-> v))))))))
+        ([:codes v] (do (assert= v [104 233 955 128578]) (assert= "héλ🙂" (string/codepoints-> v))))))))
 
 (describe "string-span / string-span-until (native char-class scanners)"
   ; at end → end
@@ -531,8 +561,7 @@
 
 ;; Every occurrence of `needle`, by char index — one `index-of` per hit with a rising
 ;; `from`, which is the shape whose conversion cost the index removes.
-(defn- mb-scan
-  (s needle i acc)
+(defn- mb-scan (s needle i acc)
   (let (j (index-of s needle i))
     (if (< j 0) (reverse acc) (mb-scan s needle (inc j) (cons j acc)))))
 
@@ -574,10 +603,7 @@
                  :sub (string/substring mb-text 400 405)
                  :last (string/last-index-of mb-text "漢")]))
       (receive
-        ([:idx i :sub s :last l] (do
-                                   (assert= i 403)
-                                   (assert= s mb-unit)
-                                   (assert= l 497)))))))
+        ([:idx i :sub s :last l] (do (assert= i 403) (assert= s mb-unit) (assert= l 497)))))))
 
 (describe "string/->bytes + string/bytes->"
   (test "to-bytes returns a bytes value"

@@ -7568,6 +7568,44 @@ side; the twelve repos behind it in the train were not reached. Two things the s
 should learn from this: a per-step timeout, and running the apps' `nest test` before the
 one package whose suite needs a live database.
 
+### 2026-08-30, later still — the hint pointed at a call that raised
+
+Asked how to convert a string to a number, and the honest answer had to be assembled from
+three unrelated places. Chasing why turned up something worse than a doc gap: the reader's
+own reserved-numeric hint (`syntax/atom.rs`, `reserved_numeric_hint`) tells you
+
+    `0x1F` is reserved syntax — parse at runtime with `(string/->number "1F" 16)`
+
+and `string/->number` was `Arity::exact(1)`, so that call raised. ADR-169 reserved
+`0x1F`/`0b1010`/`0o17` *on the grounds that this function covers the need at runtime*, and
+the function never grew the argument — so **Brood could not read hex, octal or binary at
+all**, while both the runtime and `docs/language.md` said it could.
+
+The radix argument now exists: 2–36, **integer-only in every base** (a radix describes an
+integer notation; `"3.5"` in base 16 is not a number anyone means), digits alone with no
+`0x` prefix (the prefix is the syntax it replaces), bignum past i64 like the base-10 path,
+and a radix outside 2–36 **raises** rather than answering `nil` — which would be
+indistinguishable from text that did not parse.
+
+**And the catalogue gate had been checking half the language.** `std/doc-catalog.blsp`
+drives `nest doc --all` and hive's hosted reference; `tests/docs_test.blsp` gates it in
+both directions. The reverse gate — every public name has a category — skipped any name
+containing a `/`, which after the namespace waves (ADR-227/230/251/290/291) is most of the
+library. It was green while **145 public names had no category**: every `string/->…`
+bridge, all of `math/`, `path/`, `io/`, `file/`, `reflect/`, `map/` and most of `seq/`.
+`string/->number` — the answer to "how do I parse a number?" — rendered under "Other".
+
+All 145 catalogued, and the gate widened on the rule **a namespace the catalogue covers,
+it covers completely**, with the covered set read off the catalogue itself rather than
+hardcoded, so it follows the file. The forward gate needed a companion fix: it used
+`bound?`, which cannot tell an autoloaded-on-demand name from a stale entry, so it now
+loads the catalogued namespaces first. Sabotage-verified by deleting one entry.
+
+`docs/language.md` gained a **Text → number** section — the three functions, why
+`string/->number` picks the type from the digits, and why it answers `nil` where
+`decimal/of` throws (a parse failing is data; a constructor failing is a bug). The pocket
+reference gained the same in one paragraph.
+
 ## 2026-08-30 (sixth) — two bugs under one breakage failure; the router waits for KI-88
 
 CI's red on the merged tree unravelled into two distinct bugs, one fixed and one filed:

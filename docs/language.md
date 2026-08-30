@@ -2691,7 +2691,9 @@ another type, so they are **not** string-library ops:
 - `string/->number` is a **strict** parse — int if it is one, else float, else
   `nil`; it rejects partial input (`(string/->number "3abc")` → `nil`) and
   surrounding whitespace (`string/trim` first if needed). `str` is its inverse
-  (the textual form of a number).
+  (the textual form of a number). An optional **radix** reads hex/octal/binary:
+  `(string/->number "1F" 16)` → `31`. See [Text → number](#text--number) for the
+  whole conversion story, including decimals.
 - `index-of` returns the first char index of a substring or `-1`;
   `includes?` is the boolean form. `string/join` puts a separator between strings;
   `string/split` is its inverse (an empty separator splits into characters).
@@ -2742,6 +2744,65 @@ char→byte index built on the string's first conversion (ADR-213), so it is a
 lookup plus a bounded walk. `string/substring` is therefore O(result) rather than
 O(index), and a `string/char-at` loop or an `index-of` scan with a rising `from` is
 linear on any text.
+
+### Text → number
+
+Three functions, and which one you want depends on the *type you need*, not on the text:
+
+```clojure
+(string/->number "42")      ;=> 42      an int
+(string/->number "3.14")    ;=> 3.14    a float
+(decimal/of "1.50")         ;=> 1.50M   an exact decimal
+```
+
+**`string/->number` decides int-vs-float from the digits**, so `"3"` gives you an `int`
+even when you wanted a float. Force it with `->float`; go the other way with `math/floor`
+or `math/round`, which both return an `int` (there is no `trunc` — `math/floor` of `-42.9`
+is `-43`):
+
+```clojure
+(->float (string/->number "3"))          ;=> 3.0
+(math/round (string/->number "42.5"))    ;=> 43
+```
+
+**A radix reads the notations the reader will not.** Brood has no `0x1F`/`0b1010`/`0o17`
+literals — ADR-169 reserved that syntax rather than defining it — so this is how you read
+one. With a radix the parse is integer-only (in every base, 10 included), and it takes the
+digits alone, no prefix:
+
+```clojure
+(string/->number "1F" 16)     ;=> 31
+(string/->number "1010" 2)    ;=> 10
+(string/->number "-ff" 16)    ;=> -255
+(string/->number "0x1f" 16)   ;=> nil   ; the prefix is the syntax this replaces
+```
+
+A radix outside 2–36 **raises** — that is a bug in the caller, and `nil` could not be told
+apart from text that simply did not parse.
+
+**`decimal/of` for money and anything that must not round.** `1.50M` is the literal form,
+so reach for the function when the digits arrive as data:
+
+```clojure
+(+ (decimal/of "0.1") (decimal/of "0.2"))   ;=> 0.3M
+(+ 0.1 0.2)                                 ;=> 0.30000000000000004
+```
+
+**The two fail differently, on purpose.** `string/->number` answers `nil` for anything it
+cannot parse and never throws — a parse failing is data, and `(or (string/->number s) 0)`
+is the idiom. `decimal/of` **throws** on malformed input, because a constructor handed
+something that is not a number is a bug, not an outcome. Both are strict about the *whole*
+string:
+
+```clojure
+(string/->number "  7 ")   ;=> nil   ; trim first
+(string/->number "1/2")    ;=> nil   ; a ratio literal is not a parse
+(string/->number "")       ;=> nil
+```
+
+Its signature is `(string -> number | nil)`, so handing the result straight to something
+that needs a number is what `nest check --strict` flags. The answer is the `or` default
+above or a `nil?` guard.
 
 ### I/O
 `io/write`  `io/puts`  `io/inspect`  `with-out-str`  `with-err-str`
