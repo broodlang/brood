@@ -135,7 +135,7 @@ fn mono_enabled() -> bool {
 ```
 
 Closest precedent for a *type-driven* off-by-default gate: `BROOD_CONTRACTS`
-(`std/prelude.blsp:262-296`), which gates `(sig …)` runtime enforcement.
+(the `sig` macro in `std/prelude/core.blsp`), which gates `(sig …)` runtime enforcement.
 
 ## Validation plan
 
@@ -163,7 +163,7 @@ Closest precedent for a *type-driven* off-by-default gate: `BROOD_CONTRACTS`
 - `impl-for` / `*impls*` / anonymous impl fns: `std/ability.blsp:124-128`, `214-238`
 - Static proof already computed by the checker: `types/check/protocol.rs:529`
   (`arg_identity`), `818-838` (`check_ability_call_inferred`), `559-610` (`AbilityInfo`)
-- Flag patterns: `eval/compile/mod.rs:1710` (`BROOD_NO_HOF`), `std/prelude.blsp:262-296`
+- Flag patterns: `eval/compile/mod.rs:1710` (`BROOD_NO_HOF`), the `sig` macro in `std/prelude/core.blsp`
   (`BROOD_CONTRACTS`)
 - Related: [protocol-dispatch-design.md](protocol-dispatch-design.md) (the facility this
   optimizes), [language.md §Polymorphism](language.md) (reference docs).

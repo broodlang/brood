@@ -1068,6 +1068,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   literal.)
 - **Bare symbols in patterns *bind*.** Match a literal symbol with `'foo`;
   match a runtime value with `~expr`.
+- **A `(sig …)` goes BELOW the `defn` it describes**, always. A signature reads as
+  documentation and documentation goes above, which is exactly why this gets written
+  wrong — and it is not a style point: `BROOD_CONTRACTS=1` turns every `sig` into a
+  rebinding of the name, so a forward one fails and takes the whole module's load down.
+  It has been broken in bulk twice; `crates/lisp/tests/sig_placement.rs` now fails the
+  build on any `(sig …)` above its own definition, naming the line.
 - **A wrong `(sig …)` is a warning, not a shrug** (ADR-259). A misspelled type or
   constructor (`strng`, `(tupel int)`), a sig whose arity contradicts its `defn`,
   and a sig for a name the file never defines are all reported — a declaration used
@@ -1093,6 +1099,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `int | nil`, since the other alternative says `:ok` is absent.
 - **`=` is structural** and recursive — two unrelated structures that look the
   same compare equal.
+- **Write `(not (= a b))`, not `not=`** — `not=` is deprecated (ADR-300, 0.19.1) and
+  every use is an advisory warning. It only ever spelled the same thing: its body *is*
+  `(not (= a b))`, the long form is the faster one (the short one defeats both the
+  thin-wrapper elision and the leaf inliner), and past two arguments the name misleads —
+  `(not= 1 2 1)` is `true`, because it negates the whole `=` chain rather than meaning
+  "pairwise different".
 - **Variadic operators**: `(+ a b c)` works. The fast 2-arg primitives, when
   you really need them, are `%add` `%sub` `%mul` `%div` `%lt` `%eq`.
 - **No commas in maps**: `{:a 1 :b 2}` — spaces only.
@@ -1209,7 +1221,10 @@ time and exit cleanly.
 
 ## When in doubt
 
-`std/prelude.blsp` is the canonical example of idiomatic Brood — almost
+`std/prelude/*.blsp` is the canonical example of idiomatic Brood — almost
 everything below the kernel is written there in the language itself; read it.
+(Nine files — `core`, `predicates`, `map`, `control`, `match`, `process`, `seq`,
+`string`, `tools` — concatenated in that order; older docs still say
+`std/prelude.blsp`, which no longer exists.)
 Deep references: `docs/language.md` (full reference), `docs/spec.md` (the
 formal spec), `docs/pattern-matching.md` (the pattern grammar in detail).

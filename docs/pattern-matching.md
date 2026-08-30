@@ -1,7 +1,7 @@
 # Pattern matching
 
 > Status: **implemented** (ADR-021). Erlang/Elixir-style pattern matching, built
-> to fit the project's rules: the compiler is written in Brood (`std/prelude.blsp`),
+> to fit the project's rules: the compiler is written in Brood (`std/prelude/match.blsp`),
 > there is no new special form, and one mechanism is reused at every binding site.
 > Subsumes two roadmap items — "Destructuring in `let`/`fn`" and "`case`" (see
 > [`../ROADMAP.md`](../ROADMAP.md) Tier 2). The `let`/`fn` pattern surfaces are
@@ -403,7 +403,7 @@ would let the printed line be a bare sentence; not needed for v1.
 ## `receive` (implemented — selective)
 
 `receive` is the fourth surface over the pattern compiler. It is a macro
-(`std/prelude.blsp`) that reuses **`%match-build-from`** with the no-match
+(`std/prelude/match.blsp`) that reuses **`%match-build-from`** with the no-match
 continuation set to `nil` (instead of the structured throw), wrapping each clause
 body in a thunk. The result is a *matcher* function — given a message it returns
 the body-as-a-thunk on a match, or `nil` otherwise — which the `%receive`

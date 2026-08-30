@@ -48,33 +48,6 @@ pub(crate) fn exec_chunk(
     // (see there). A `def` bumps the epoch, so an unchanged value means no rebinding can
     // have happened since, and the loop takes its zero-lookup fast path.
     let mut self_epoch = heap.global_epoch();
-    /// Nil the frame's slots for a self-tail back-edge — EXCEPT the capture slots,
-    /// which are frame-invariant (both inline self-call paths require the same arm and
-    /// the same captured env, so the values `push_frame` filled from `cenv` are still
-    /// exactly right). Wiping them was a wrong-ANSWER bug: a local-capturing global
-    /// closure (`(let (me (self)) (defn drain … (send me …) … (drain …)))` — the
-    /// spawned-server idiom) read `nil` for every capture from its second iteration on.
-    /// The tree-walker and the JIT's emitted back-edge (which writes only param slots)
-    /// were both already correct; only these two VM resets wiped. Found 2026-08-30 by
-    /// `breakage/chaos2_tcp_stress` the moment the tree-walker→VM router let the shape
-    /// reach the VM at all. The capture-free hot case (loop/collatz/fib) takes the
-    /// branchless wipe it always had.
-    fn reset_frame_slots(heap: &mut Heap, arm: &CompiledArm, base: usize) {
-        let ncap = arm.capture_names.len();
-        if ncap == 0 {
-            for i in 0..arm.nslots {
-                heap.set_root_at(base + i, Value::nil());
-            }
-            return;
-        }
-        let cap_base = arm.nrequired + arm.noptional + arm.rest_slot.is_some() as usize;
-        for i in 0..cap_base {
-            heap.set_root_at(base + i, Value::nil());
-        }
-        for i in (cap_base + ncap)..arm.nslots {
-            heap.set_root_at(base + i, Value::nil());
-        }
-    }
     while *ip < chunk.code.len() {
         let inst = &chunk.code[*ip];
         *ip += 1;
@@ -605,10 +578,7 @@ pub(crate) fn exec_chunk(
                         {
                             crate::perf_bump!(self_tail);
                             heap.truncate_roots(base + arm.nslots);
-                            reset_frame_slots(heap, arm, base);
-                            for i in 0..arm.nrequired {
-                                heap.set_root_at(base + i, argv[i]);
-                            }
+                            reset_frame_keep_captures(heap, arm, base, &argv);
                             *ip = 0;
                             if let Some(used) = crate::core::alloc::soft_limit_hit() {
                                 return Err(crate::eval::memory_limit_error(used));
@@ -788,10 +758,7 @@ pub(crate) fn exec_chunk(
                 }
                 // Reset frame in place (same as the old outer-loop SelfTail handler).
                 heap.truncate_roots(base + arm.nslots);
-                reset_frame_slots(heap, arm, base);
-                for i in 0..arm.nrequired {
-                    heap.set_root_at(base + i, argv[i]);
-                }
+                reset_frame_keep_captures(heap, arm, base, &argv);
                 *ip = 0;
                 if let Some(used) = crate::core::alloc::soft_limit_hit() {
                     return Err(crate::eval::memory_limit_error(used));
@@ -985,5 +952,34 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
             file,
             pos,
         });
+    }
+}
+
+/// Reset a frame in place for a self-tail iteration: params take the new args, the
+/// body's `let`/`letrec` slots go back to nil, and the **capture slots stay**.
+///
+/// The capture slots (`#3 lexical addressing`, right after the params — both self-tail
+/// paths require no optionals and no rest, so they begin at `nrequired`) hold the
+/// closure's enclosing lexicals, filled once by `push_frame` from the captured env. A
+/// self-tail iteration re-enters the same arm under the same env, so those values are
+/// still exactly right — and nil-ing them is not a reset, it is a loss: the next read of
+/// a captured name in the loop body sees `nil`. Found 2026-08-30 when the tree-walker→VM
+/// router (`tw_vm_route`) let a `defn`-inside-`let` loop reach the VM for the first time
+/// (`(let (me (self)) (defn drain (sock acc) … (send me …) … (drain sock …)))` — the
+/// breakage suite's P40 — sent to `nil` after one iteration). Neither self-tail path had
+/// ever run a captured arm: a `letrec` helper fills its captures on every `push_frame`,
+/// and the IC fast path's `cur_env == cenv` condition was, until then, only met by
+/// closures with nothing to capture.
+#[inline]
+fn reset_frame_keep_captures(heap: &mut Heap, arm: &CompiledArm, base: usize, argv: &[Value]) {
+    let capture_lo = arm.nrequired;
+    let capture_hi = capture_lo + arm.capture_names.len();
+    for i in 0..arm.nslots {
+        if i < capture_lo || i >= capture_hi {
+            heap.set_root_at(base + i, Value::nil());
+        }
+    }
+    for (i, &a) in argv.iter().enumerate().take(arm.nrequired) {
+        heap.set_root_at(base + i, a);
     }
 }

@@ -22,4 +22,55 @@ the router stands down and the tree-walker's own 'tail loop absorbs the cycle fl
     (do
       (defn tw-f (n) (if (= n 0) :done (tw-g (- n 1))))
       (defn tw-g (n) (do `(a# ~n) (tw-f n)))
-      (assert= :done (tw-f 300000)))))
+      (assert= :done (tw-f 300000))))
+
+  ;; The router let a `defn`-inside-`let` loop reach the VM for the first time, and the
+  ;; VM's two in-place self-tail resets (the IC fast path for `(defn f … (f …))`, and
+  ;; `Inst::SelfCall`) nil-ed EVERY frame slot and refilled only the params — so the
+  ;; capture slots holding the enclosing lexicals were gone after one iteration. The
+  ;; breakage suite's P40 (`(let (me (self)) (spawn … (defn drain (sock acc) … (send me …)
+  ;; … (drain sock …))))`) sent to `nil`. Before the router the same shape was reached
+  ;; only from tree-walked callers and tree-walked throughout, which is why nothing had
+  ;; ever exercised a captured arm on either reset path. The deferring argument
+  ;; (`list`/`str`, a variadic prelude defn) is what keeps the loop on the IC path.
+  (test "a captured lexical survives the VM's self-tail frame reset (routed entry)"
+    (let (k :captured)
+      (defn tw-cap-routed (n acc)
+        (if (= n 0) [acc k] (tw-cap-routed (- n 1) (list acc n))))
+      (assert= :captured (second (tw-cap-routed 3 nil)))))
+
+  (test "a captured lexical survives the VM's self-tail frame reset (VM entry, both arg shapes)"
+    (do
+      (defn tw-cap-mk (deferring?)
+        (let (k :captured)
+          (defn tw-cap-vm (n acc)
+            (if (= n 0)
+              k
+              (tw-cap-vm (- n 1) (if deferring? (list acc n) (+ 0 1)))))
+          (tw-cap-vm 3 nil)))
+      (assert= :captured (tw-cap-mk true))
+      (assert= :captured (tw-cap-mk false))))
+
+  (test "a captured lexical survives a HOT self-tail loop (tiers through the VM into native)"
+    (do
+      (defn tw-cap-hot-mk ()
+        (let (k 7)
+          (defn tw-cap-hot (n acc) (if (= n 0) acc (tw-cap-hot (- n 1) (+ (first (list acc k)) k))))
+          (tw-cap-hot 200000 0)))
+      (assert= 1400000 (tw-cap-hot-mk))))
+
+  (test "the P40 shape: a spawned drainer reports to a captured pid after recursing"
+    (let (me (self))
+      (def w
+        (spawn (do
+                 (defn tw-cap-drain (sock acc)
+                   (let (event (receive ([:d d] [:data d]) ([:done] :done) (after 3000 :timeout)))
+                     (if (= :done event)
+                       (send me [:tw-cap-got acc])
+                       (tw-cap-drain sock (str acc (second event))))))
+                 (tw-cap-drain :sock ""))))
+      (send w [:d "a"])
+      (send w [:d "b"])
+      (send w [:d "c"])
+      (send w [:done])
+      (assert= "abc" (receive ([:tw-cap-got acc] acc) (after 4000 :timeout))))))

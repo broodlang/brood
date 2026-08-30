@@ -7513,6 +7513,61 @@ rows neutral (pingpong solo +1.0% wall with instructions −9 M — the drift ro
 `BROOD_NO_TW_REENTRY=1` is the lever; `BROOD_DEFER_DBG`'s line now reads "tree-walks its
 OWN body", which is the new truth.
 
+### 2026-08-30, later still — the router found a VM bug that had been waiting: self-tail resets dropped the capture slots
+
+The breakage suite went red on the first CI run after the tree-walker→VM router
+(`f0bf90e2`): `chaos2_tcp_stress` P40, a spawned drainer that recurses over its socket
+and then `(send me …)` to a captured pid — `send: target must be a pid`. Deterministic,
+3/3 locally; `BROOD_NO_TW_REENTRY=1` passes; the v0.19.1 binary passes.
+
+The minimal shape needs no spawn and no receive:
+
+```lisp
+(let (me :captured)
+  (defn s (n acc) (if (= n 0) (pr-str me) (s (- n 1) (list acc n))))
+  (s 3 nil))            ; => "nil" — the capture is gone after one iteration
+```
+
+`me` is a **capture slot** (#3 lexical addressing: `push_frame` copies the enclosing
+lexicals into frame slots right after the params, so the body reads them as `Local`).
+Both in-place self-tail resets — the IC fast path for `(defn f … (f …))` in `exec_chunk`
+and `Inst::SelfCall` — nil-ed **every** slot and refilled only the params. The capture
+slots were never touched again, so the loop's second iteration read `nil`.
+
+Why it never showed: the IC path requires `cur_env == cenv`, and a `defn` inside a `let`
+was, until the router, only ever *called from tree-walked code* (a top-level `let`, a
+spawn body, a `do` with a `defn` in it all defer) and so tree-walked throughout. The
+router put that closure on the VM for the first time. The `letrec` helper — the
+`SelfCall` path's usual customer — refills its frame through `push_frame` and captures
+nothing across a `letrec`, so that path was clean by luck too. The deferring argument
+(`list`, `str` — variadic prelude defns) is what keeps the loop on the IC path rather than
+the `Tail` exit; the same loop with `(+ acc 1)` for an argument rebuilt its frame through
+`push_frame` every iteration and read the capture fine, which is the shape every existing
+self-tail test used.
+
+Fix: `reset_frame_keep_captures` — nil the body slots, refill the params, **leave the
+capture slots alone** (same arm, same env, same values). Both reset sites use it. The
+native tier was already right (a hot 400k-iteration captured loop reads its capture on
+every tier). Regression tests in `tests/tw_reentry_test.blsp`: the routed entry, the VM
+entry with both argument shapes, the hot loop, and the P40 shape itself.
+
+The lesson is the one CLAUDE.md already states: a routing change that makes *more* code
+reach an engine is a test of every latent assumption in that engine, and "the suite is
+green" measures only the shapes the suite reaches. The breakage suite is what caught it —
+`make green` reads it; the run list did not.
+
+**Ecosystem verify for v0.19.1: `store`, `s3` verified; `store-postgres` HANGS in
+`tests/stress_test.blsp:153`** ("200 concurrent checkouts on a 3-connection pool") — the
+verify sat in it for two hours, because a hang is the one outcome "stop at the first
+failure" cannot see. Bisected per test: every other case in the file passes. It hangs the
+same way under a v0.19.0 `nest` built from the tag, and under `BROOD_NO_RECV_MARK=1` and
+`BROOD_NO_HANDOFF=1`, so it is not a v0.19.1 regression and not the receive-mark or the
+handoff policy; it is a pre-existing downstream hang (pool `run` loop + 200 spawned
+clients each parked in `(receive ([:reply ^r pid] pid))`). Open on the store-postgres
+side; the twelve repos behind it in the train were not reached. Two things the script
+should learn from this: a per-step timeout, and running the apps' `nest test` before the
+one package whose suite needs a live database.
+
 ## 2026-08-30 (sixth) — two bugs under one breakage failure; the router waits for KI-88
 
 CI's red on the merged tree unravelled into two distinct bugs, one fixed and one filed:

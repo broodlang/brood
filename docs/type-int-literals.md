@@ -82,7 +82,7 @@ no change — it already delegates any head it doesn't special-case (which
 includes a bare `Value::Int`, since that's not even a `Value::Pair`) straight
 to `parse_type`.
 
-## Runtime (`std/prelude.blsp`'s `type-matches?`)
+## Runtime (`std/prelude/core.blsp`'s `type-matches?`)
 
 One new branch, next to the keyword one:
 
