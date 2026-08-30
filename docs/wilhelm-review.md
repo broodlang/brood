@@ -193,3 +193,10 @@ rather than reasoning about them.
       `:derive-record` recipe)" for an ability that is not loaded at all — which sends you
       looking for a recipe on something that does not exist. The two cases now read
       differently.
+- [ ] **`(but-last '(1 1 2))` is typed `nil | list<1 | 2>`, but the argument is a literal
+      three-element list — the result cannot be empty.** A precision gap, not a soundness
+      one: list types carry an element type and no length, so after `(rest …)` the checker
+      cannot tell "two left" from "none left" and widens to maybe-nil (the empty list IS
+      `nil`). Closing it is a lattice change — a non-empty refinement that literals, `cons`
+      and `reverse` preserve and `rest` peels one level of — same family as the exact record
+      complements (2026-08-30 plan, item 3). Recorded 2026-08-30.
