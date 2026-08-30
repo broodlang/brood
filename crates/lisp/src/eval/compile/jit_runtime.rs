@@ -201,6 +201,9 @@ pub(crate) fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) 
 /// traces, so without this the only visible evidence is the arm silently being BAILED.
 #[cfg(feature = "jit")]
 fn trace_lower_declined(arm: &CompiledArm, inlined: bool) {
+    // Take (and clear) any mid-emit reason regardless of the trace flag, so a reason
+    // recorded under a flagless run cannot leak into a later flagged one.
+    let reason = super::take_mid_emit_reason().unwrap_or("lowering-returned-none");
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
         let name = arm
@@ -216,7 +219,7 @@ fn trace_lower_declined(arm: &CompiledArm, inlined: bool) {
             .map(crate::eval::compile::jit_plan::codegen::inst_opcode_name)
             .collect();
         eprintln!(
-            "[jit-bail] arm={name} reason=lowering-returned-none inlined={inlined} nslots={} ops=[{}]",
+            "[jit-bail] arm={name} reason={reason} inlined={inlined} nslots={} ops=[{}]",
             arm.nslots,
             ops.join(" ")
         );
