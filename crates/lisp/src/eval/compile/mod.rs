@@ -2921,6 +2921,15 @@ pub(crate) struct Suspended {
     pub(crate) deadline: Option<web_time::Instant>,
 }
 
+impl Suspended {
+    /// One-line park/resume descriptor for `BROOD_SCHED_DBG` (KI-88's ip-trace probe):
+    /// the current frame's ip + pending frame count, enough to spot a resume whose
+    /// continuation does not match any recorded park.
+    pub(crate) fn dbg_line(&self) -> String {
+        format!("ip={} frames={}", self.cur.ip, self.frames.len())
+    }
+}
+
 /// What a [`vm_run_bc`] call produced (ADR-100 §8). A real error is the `Err` of the
 /// enclosing `Result`. A **nested** run (`vm_apply`, `top_level=false`) only ever
 /// produces `Done` (it can't capture across the native boundary); the other three are
