@@ -72,6 +72,21 @@
 ;; O(neighbouring forms), not O(buffer). These pin that the narrowed answer equals the
 ;; whole-buffer one, including deep in a file with many preceding top-level forms (where
 ;; the un-narrowed walk is what made `forward-sexp` stall for a second).
+(describe "sexp navigation from INSIDE an atom"
+  ;; `(calc/eval "1 1 +")` — the playground's reported case: after an eval the point sits
+  ;; inside a symbol or a string, and C-M-f/C-M-b behaved as if that atom were not there.
+  (test "forward from inside a symbol ends the symbol, not the next form"
+    (let (src "(calc/eval \"1 1 +\")")
+      (assert= (point-forward src 3) 10) ; calc/eval ends at 10
+      (assert= (point-forward src 10) 18))) ; then the string
+  (test "forward from inside a string ends the string"
+    (assert= (point-forward "(calc/eval \"1 1 +\")" 14) 18))
+  (test "backward from inside a symbol / a string starts it"
+    (assert= (point-backward "(calc/eval \"1 1 +\")" 6) 1)
+    (assert= (point-backward "(calc/eval \"1 1 +\")" 14) 11))
+  (test "forward-list from inside a symbol still skips to the next LIST"
+    (assert= (point-list-forward "(f abc (x) y)" 4) 10)))
+
 (describe "sexp navigation narrows without changing the answer"
   ;; brute-force references: the same queries over the WHOLE-buffer CST, un-narrowed.
   (defn bf-enc (text point) (enclosing (tree text) point))
