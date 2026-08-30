@@ -21,7 +21,7 @@
 //! `arity_of` is independent: it works for any callable (primitive or
 //! closure) without needing a sig.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -472,6 +472,368 @@ thread_local! {
 pub(super) fn clear_sig_memo() {
     SIG_MEMO.with(|m| m.borrow_mut().clear());
     OVERLOAD_MEMO.with(|m| m.borrow_mut().clear());
+    SPECIAL_MEMO.with(|m| m.borrow_mut().clear());
+    SPECIAL_FUEL.with(|f| f.set(MAX_SPECIAL_FUEL));
+    // The operator domains are a file's too (`set_operator_domains`); a fragment checked
+    // after a file must derive its own from the registry, not read that file's.
+    OPERATOR_DOMAINS.with(|m| *m.borrow_mut() = None);
+}
+
+thread_local! {
+    /// Names whose body is currently being re-typed under call-site argument types
+    /// ([`specialized_ret`]) — the re-entry guard for that path, separate from
+    /// [`INFERRING`] so the two do not compete for one depth budget. Same discipline:
+    /// a refusal never constructs a guard (KI-87).
+    static SPECIALIZING: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
+    /// Arm re-typings [`specialized_ret`] may still do in this file check — the bound on
+    /// its total work. The memo makes a REPEATED question free, but a question refused
+    /// by the guard (a name in flight, the depth cap) has no answer to memoize, and the
+    /// walker asks it again at every enclosing level: the `(:use io)` header of a
+    /// two-line file drove 933k specializations of `require-one` (2026-08-30) and timed
+    /// out. Past the budget the answer is `None` — the flat signature stands, sound —
+    /// and the file check finishes. Reset per file by [`clear_sig_memo`].
+    static SPECIAL_FUEL: Cell<u32> = const { Cell::new(MAX_SPECIAL_FUEL) };
+    /// How many call-site argument typings for specialization are nested right now —
+    /// `(f (g (h x)))` types `f`'s operand `(g …)` to specialize `f`, which would type
+    /// `(h x)` to specialize `g`, and so on down. Unbounded, `expr_ty` of a call form
+    /// walks the call's whole subtree, and the file walker asks `expr_ty` at every
+    /// enclosing level: `tests/maps_test.blsp` went from 0.15 s to 7.7 s (15 M `expr_ty`
+    /// calls) the day this landed. Past [`MAX_SPEC_ARG_NEST`] a nested call keeps its
+    /// flat signature, so one call form costs O(operands), not O(subtree). Reset to 0
+    /// while an arm body is re-typed — that work is bounded by the depth cap and fuel.
+    static SPEC_ARG_NEST: Cell<u8> = const { Cell::new(0) };
+
+    /// Completed specializations for this check pass, keyed by `(name, argument types)`.
+    /// Per-thread, cleared per file by [`clear_sig_memo`]; a deliberate `None` is stored
+    /// too, so an unhelpful shape is not re-typed at every call site.
+    static SPECIAL_MEMO: RefCell<HashMap<(Symbol, Vec<Option<Ty>>), Option<Ty>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// How many specializations may be live at once on this thread. Each level is one
+/// `expr_ty` walk of a body; the walk has its own depth guard, so this only bounds the
+/// chain of *functions* re-typed inside one another.
+const MAX_SPECIALIZE_DEPTH: usize = 2;
+
+/// [`SPECIAL_FUEL`]'s per-file budget, in arm re-typings. A normal file spends a few
+/// hundred; the pathological shape above spent it in under a second.
+const MAX_SPECIAL_FUEL: u32 = 20_000;
+
+/// Would [`specialized_ret`] even consider `sym` right now — fuel left, `sym` not in
+/// flight, depth under the cap? The call site asks this BEFORE typing the call's
+/// arguments, which is the re-walk a refusal would otherwise have paid for nothing.
+fn specialization_open(sym: Symbol) -> bool {
+    SPECIAL_FUEL.with(|f| f.get() > 0)
+        && SPECIALIZING.with(|s| {
+            let s = s.borrow();
+            s.len() < MAX_SPECIALIZE_DEPTH && !s.contains(&sym)
+        })
+}
+
+/// [`SPEC_ARG_NEST`]'s bound: `(f (g x))` specializes both, `(f (g (h x)))` leaves `h`
+/// flat.
+const MAX_SPEC_ARG_NEST: u8 = 1;
+
+/// [`specialized_ret`] for a call form's operands: types `args` only once specialization
+/// is open for `sym` (see [`specialization_open`]), so a refused question costs nothing,
+/// and only [`MAX_SPEC_ARG_NEST`] deep in nested operand typing.
+pub(super) fn specialize_call(heap: &Heap, sym: Symbol, args: &[Value], ctx: &Ctx) -> Option<Ty> {
+    if SPEC_ARG_NEST.with(|n| n.get()) > MAX_SPEC_ARG_NEST || !specialization_open(sym) {
+        return None;
+    }
+    SPEC_ARG_NEST.with(|n| n.set(n.get() + 1));
+    let inputs: Vec<Option<Ty>> = args.iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+    SPEC_ARG_NEST.with(|n| n.set(n.get() - 1));
+    specialized_ret(heap, sym, &inputs, ctx)
+}
+
+/// The memo's size cap per file. A `reduce` site asks twice with two accumulator types,
+/// so a hot combinator over many callees can grow this; past the cap new tuples are
+/// computed but not remembered.
+const MAX_SPECIAL_MEMO: usize = 4096;
+
+struct SpecializeGuard(Symbol);
+
+impl SpecializeGuard {
+    fn enter(sym: Symbol) -> Option<SpecializeGuard> {
+        let entered = SPECIALIZING.with(|s| {
+            let mut set = s.borrow_mut();
+            if set.len() >= MAX_SPECIALIZE_DEPTH {
+                return false;
+            }
+            set.insert(sym)
+        });
+        // Lazily, so a refusal never builds — and drops — a guard for a name still in
+        // flight (KI-87's shape).
+        entered.then(|| SpecializeGuard(sym))
+    }
+}
+
+impl Drop for SpecializeGuard {
+    fn drop(&mut self) {
+        SPECIALIZING.with(|s| {
+            s.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+/// One fixed-arity arm of a function, ready to re-type: its parameter names and the tail
+/// form whose type is the arm's result.
+struct FixedArm {
+    /// One head per position — a parameter symbol, or (for a clause arm) a pattern.
+    heads: Vec<Value>,
+    tail: Value,
+}
+
+/// The fixed-arity arms of `sym`'s definition — same-file form first (the file is not
+/// loaded, and its heap binding, if any, is the OLD one), else the loaded closure. An arm
+/// with `&optional` or a rest binder is left out: its frame fill differs per call, so
+/// binding parameters positionally to argument types would be wrong.
+/// `(arms, stable)` — `stable` when the arms came from the LOADED image, whose bodies and
+/// signatures do not move during a file check, so a `None` answer for them can be
+/// memoized; a same-file body's answer depends on the Pass 2.8 fixpoint and cannot be.
+fn fixed_arms_of(heap: &Heap, sym: Symbol, ctx: &Ctx) -> Option<(Vec<FixedArm>, bool)> {
+    // A same-file multi-clause `defn`: its expanded form is one variadic `fn` over
+    // `match*` and has no fixed arms; the un-expanded clauses are the arms.
+    if let Some(clauses) = ctx.clause_arms(sym) {
+        let mut out = Vec::with_capacity(clauses.len());
+        for &clause in clauses {
+            let arm = clause_arm(heap, clause)?;
+            if arm.heads.iter().any(|&h| {
+                matches!(h, Value::Sym(s)
+                    if value::symbol_is(s, kw::AMP)
+                        || value::symbol_is(s, kw::AMP_OPTIONAL)
+                        || value::symbol_is(s, kw::AMP_REST))
+            }) {
+                continue;
+            }
+            let Some(&tail) = arm.body.last() else {
+                continue;
+            };
+            out.push(FixedArm {
+                heads: arm.heads,
+                tail,
+            });
+        }
+        return Some((out, false));
+    }
+    if let Some(form) = ctx.fn_form(sym) {
+        return fixed_arms_of_form(heap, form).map(|arms| (arms, false));
+    }
+    if ctx.is_file_global(sym) {
+        return None;
+    }
+    let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
+        return None;
+    };
+    let closure = heap.closure(cid);
+    let mut out = Vec::with_capacity(closure.arms.len());
+    for arm in closure.arms.iter() {
+        if !arm.optionals.is_empty() || arm.rest.is_some() {
+            continue;
+        }
+        let Some(&tail) = arm.body.last() else {
+            continue;
+        };
+        out.push(FixedArm {
+            heads: arm.params.iter().map(|&p| Value::Sym(p)).collect(),
+            tail,
+        });
+    }
+    Some((out, true))
+}
+
+/// Does `form` mention `sym` anywhere — as a call head or an operand, at any depth?
+/// Conservative on purpose: a function whose body names itself is treated as recursive.
+fn form_mentions(heap: &Heap, form: Value, sym: Symbol) -> bool {
+    let mut work = vec![form];
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Sym(s) if s == sym => return true,
+            Value::Pair(_) => {
+                if let Some(items) = list_items(heap, v) {
+                    work.extend(items);
+                }
+            }
+            Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// [`fixed_arms_of`] for a `(fn …)` form: a single-clause fn, or each clause of a
+/// multi-arity one. A parameter list with a `&`/`&optional` marker or a destructuring
+/// pattern is skipped.
+fn fixed_arms_of_form(heap: &Heap, fn_form: Value) -> Option<Vec<FixedArm>> {
+    let items = list_items(heap, fn_form)?;
+    if !matches!(items.first(), Some(&Value::Sym(s)) if super::walk::is_fn_head(s)) {
+        return None;
+    }
+    let plain_params = |plist: Value| -> Option<Vec<Value>> {
+        let raw = match plist {
+            Value::Vector(id) => heap.vector(id).to_vec(),
+            Value::Nil | Value::Pair(_) => list_items(heap, plist)?,
+            _ => return None,
+        };
+        for p in &raw {
+            match p {
+                Value::Sym(s) if !value::symbol_name_ref(*s).starts_with('&') => {}
+                _ => return None,
+            }
+        }
+        Some(raw)
+    };
+    let mut arms = Vec::new();
+    if crate::eval::macros::fn_is_arity_multi_clause(heap, &items) {
+        let clauses = match items.get(1..) {
+            Some([Value::Str(_), rest @ ..]) if !rest.is_empty() => rest,
+            Some(rest) => rest,
+            None => return None,
+        };
+        for &clause in clauses {
+            let citems = list_items(heap, clause)?;
+            if citems.len() < 2 {
+                continue;
+            }
+            let Some(params) = plain_params(*citems.first()?) else {
+                continue;
+            };
+            arms.push(FixedArm {
+                heads: params,
+                tail: *citems.last()?,
+            });
+        }
+    } else {
+        let plist = *items.get(1)?;
+        let body_start = match (items.get(2), items.get(3)) {
+            (Some(Value::Str(_)), Some(_)) => 3,
+            _ => 2,
+        };
+        let tail = *items.get(body_start..).and_then(|b| b.last())?;
+        if let Some(params) = plain_params(plist) {
+            arms.push(FixedArm {
+                heads: params,
+                tail,
+            });
+        }
+    }
+    Some(arms)
+}
+
+/// **Call-site specialization**: the return type of `sym` when called with arguments of
+/// types `inputs` (`None` = unknown), computed by re-typing its body with each parameter
+/// bound to the corresponding argument type — what [`infer::lambda_ret`] already does for
+/// an inline `(fn …)`, extended to a named function. Closes the gap where a function whose
+/// parameter nothing in its own body constrains reads as `(any -> any)`: `(defn wrap (x)
+/// … x)` called with an int IS an int, and `(defn step (acc v) (conj acc (f v)))` handed
+/// an empty-list accumulator by `reduce` builds a list. Reach for it only after the flat
+/// answer (a declaration, an inferred sig) has come back `any` or nothing.
+///
+/// Sound for the reason `lambda_ret` is: this is FORWARD result typing under the call's
+/// actual argument types, never a check of the body, so it opens no false-positive
+/// class; and a self-recursive branch is skipped via `with_inferring_self`, so a
+/// tail-recursive function types from its base cases. Multi-arm: the union over every
+/// fixed-arity arm of the call's arity, an over-approximation. `None` when nothing can be
+/// learned — no argument type known, no fixed arm of that arity, a body that cannot be
+/// typed, a cycle, or the depth cap.
+pub(super) fn specialized_ret(
+    heap: &Heap,
+    sym: Symbol,
+    inputs: &[Option<Ty>],
+    ctx: &Ctx,
+) -> Option<Ty> {
+    if inputs.iter().all(Option::is_none) {
+        return None;
+    }
+    let key = (sym, inputs.to_vec());
+    if let Some(hit) = SPECIAL_MEMO.with(|m| m.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    if !SPECIAL_FUEL.with(|f| f.get() > 0) {
+        return None;
+    }
+    let _guard = SpecializeGuard::enter(sym)?;
+    let Some((arms, stable)) = fixed_arms_of(heap, sym, ctx) else {
+        // Nothing to re-type. For a builtin or an unknown name that is a fact about the
+        // image; for a SAME-FILE global it is a fact about the moment — Pass 2.8 has not
+        // recorded its form yet, and a memoized `None` here would outlive the fixpoint
+        // that records it (the bug: `step`'s first call, typed before its `defn`, pinned
+        // every later specialization of it to `None`).
+        // `ctx` may be a bare `Ctx::default()` — `infer_sig`'s body walk — which knows
+        // no file globals, so "not a file global" is not enough: the answer is memoized
+        // only for a name the IMAGE binds (a builtin, a loaded non-closure).
+        if !ctx.is_file_global(sym) && super::deps::obs_global(heap, sym).is_some() {
+            memo_specialization(key, None);
+        }
+        return None;
+    };
+    // A SELF-RECURSIVE body is not specialized. Binding its parameters to the first
+    // call's argument types and skipping the recursive branch (`with_inferring_self`)
+    // would type an accumulator loop from its FIRST base case — `(sum-acc xs 0)` as `0`,
+    // where later iterations return the `number` the accumulator has grown into. The
+    // sound answer needs a fixpoint over the recursive calls' argument types; until that
+    // exists the flat inference (parameters at their demands) stands.
+    if arms.iter().any(|a| form_mentions(heap, a.tail, sym)) {
+        if stable {
+            memo_specialization(key, None);
+        }
+        return None;
+    }
+    let mut ret: Option<Ty> = None;
+    let mut matched = false;
+    for arm in arms.iter().filter(|a| a.heads.len() == inputs.len()) {
+        // An arm whose head pattern cannot admit a known argument does not run for this
+        // call (`match*` tries the next clause), so it contributes nothing.
+        let admits = arm.heads.iter().zip(inputs).all(|(&h, input)| match input {
+            Some(t) => !t.clone().intersect(pattern_domain(heap, h)).is_never(),
+            None => true,
+        });
+        if !admits {
+            continue;
+        }
+        matched = true;
+        // One unit of the file's budget per arm re-typed; past it, defer (`None`).
+        if !SPECIAL_FUEL.with(|f| {
+            let n = f.get();
+            f.set(n.saturating_sub(1));
+            n > 0
+        }) {
+            return None;
+        }
+        let mut sub = ctx.with_inferring_self(sym);
+        for (&h, input) in arm.heads.iter().zip(inputs) {
+            sub = bind_head(heap, sub, h, input.clone());
+        }
+        // The body is a fresh question, not an operand of the call that asked it.
+        let outer_nest = SPEC_ARG_NEST.with(|n| n.replace(0));
+        // One untypeable arm makes the union an under-approximation — defer instead.
+        let typed = super::infer::with_fresh_depth(|| expr_ty(heap, arm.tail, &sub));
+        SPEC_ARG_NEST.with(|n| n.set(outer_nest));
+        let t = typed?;
+        ret = Some(match ret {
+            Some(a) => a.union(t),
+            None => t,
+        });
+    }
+    let out = if matched { ret } else { None };
+    // A positive answer is always memoized. A `None` only for a LOADED body: for a
+    // same-file one it is a fact about the moment — an arm whose tail names a function
+    // Pass 2.8 has not recorded yet — and the fixpoint that follows may turn it into an
+    // answer. (An in-flight cycle's `None` never reaches this line: `?` returns above.)
+    if out.is_some() || stable {
+        memo_specialization(key, out.clone());
+    }
+    out
+}
+
+fn memo_specialization(key: (Symbol, Vec<Option<Ty>>), out: Option<Ty>) {
+    SPECIAL_MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() < MAX_SPECIAL_MEMO {
+            m.insert(key, out);
+        }
+    });
 }
 
 /// Max cross-function depth for return-type inference. Tier-2 inference recurses
@@ -617,7 +979,7 @@ fn infer_overload_inner(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
         let ret = arm
             .body
             .last()
-            .and_then(|&tail| expr_ty(heap, tail, &ctx))
+            .and_then(|&tail| super::infer::with_fresh_depth(|| expr_ty(heap, tail, &ctx)))
             .unwrap_or(Ty::ANY);
         sigs.push(Sig::new(param_tys, ret));
     }
@@ -656,51 +1018,143 @@ pub(super) fn infer_overload_from_clauses(
 ) -> Option<Vec<Sig>> {
     let mut sigs = Vec::with_capacity(clauses.len());
     for &clause in clauses {
-        let parts = super::walk::list_items(heap, clause)?;
-        let plist = *parts.first()?;
-        // Same restriction as the loaded path: a variadic/optional arm has no
-        // positional signature, and one unreadable arm makes the set unusable.
-        let raw = match plist {
-            Value::Vector(id) => heap.vector(id).to_vec(),
-            _ => super::walk::list_items(heap, plist).unwrap_or_default(),
-        };
-        if raw.iter().any(|&it| {
-            matches!(it, Value::Sym(s)
+        // One unreadable arm makes the set unusable — a missing arm would make a call
+        // "no arm admits" that the runtime accepts.
+        let arm = clause_arm(heap, clause)?;
+        // A variadic/optional arity head has no positional signature.
+        if arm.heads.iter().any(|&h| {
+            matches!(h, Value::Sym(s)
                 if value::symbol_is(s, kw::AMP)
                     || value::symbol_is(s, kw::AMP_OPTIONAL)
                     || value::symbol_is(s, kw::AMP_REST))
         }) {
             return None;
         }
-        let params = super::walk::fn_params(heap, plist);
+        // Per position: a plain-symbol head is a parameter the body's demands can
+        // narrow (`param_domains`), a pattern head is what the pattern itself admits
+        // (`pattern_domain`). A position that is a pattern is given a fresh, unreferenced
+        // name for the domain walk, so it reads `any` there and the pattern's domain is
+        // what remains after the meet.
+        let names: Vec<Symbol> = arm
+            .heads
+            .iter()
+            .map(|&h| match h {
+                Value::Sym(s) => s,
+                _ => match value::gensym("pat") {
+                    Value::Sym(g) => g,
+                    _ => value::intern("%pattern-position"),
+                },
+            })
+            .collect();
+        let mut param_tys = param_domains(heap, &arm.body, &names, ctx);
+        let pattern_tys: Vec<Ty> = arm.heads.iter().map(|&h| pattern_domain(heap, h)).collect();
+        param_tys = meet(param_tys, pattern_tys);
         // A `:when` guard on the clause head (ADR-226) — `(params :when guard body…)`.
         // The clause runs only for arguments its guard admits, so that is exactly the
         // clause's domain, intersected with whatever its body demands. This is where a
         // guarded multi-clause `defn` gets its argument types from, with no annotation:
         // each clause contributes its guard, and a call no clause admits raises
         // `match*`'s no-match at run time.
-        let guarded = matches!(parts.get(1), Some(&Value::Keyword(k))
-            if value::symbol_name_ref(k) == "when");
-        let (guard, body): (Option<Value>, Vec<Value>) = if guarded {
-            (parts.get(2).copied(), parts.get(3..)?.to_vec())
-        } else {
-            (None, parts[1..].to_vec())
-        };
-        if body.is_empty() {
-            return None;
-        }
-        let mut param_tys = param_domains(heap, &body, &params, ctx);
-        if let Some(g) = guard {
+        if let Some(g) = arm.guard {
             let scope = DomainScope {
                 shadowed: HashSet::new(),
                 aliases: HashMap::new(),
             };
-            let (then_slice, _) = guard_slices(heap, g, &params, &scope, ctx);
+            let (then_slice, _) = guard_slices(heap, g, &names, &scope, ctx);
             param_tys = meet(param_tys, then_slice);
         }
-        sigs.push(Sig::new(param_tys, Ty::ANY));
+        // The arm's return: its tail typed with every binder in scope — a symbol head at
+        // its domain, a pattern head's binders at what the pattern's domain implies for
+        // them. `any` when the tail cannot be typed, as before (the params still count).
+        let mut sub = ctx.clone();
+        for (&h, ty) in arm.heads.iter().zip(&param_tys) {
+            sub = bind_head(heap, sub, h, Some(ty.clone()));
+        }
+        let ret = arm
+            .body
+            .last()
+            .and_then(|&tail| expr_ty(heap, tail, &sub))
+            .unwrap_or(Ty::ANY);
+        sigs.push(Sig::new(param_tys, ret));
     }
     (sigs.len() >= 2).then_some(sigs)
+}
+
+/// One clause of a multi-clause `fn`/`defn`, read from the UN-EXPANDED form:
+/// `(heads [:when guard] body…)`, where each head is a plain parameter symbol or a
+/// pattern (a literal, a list/vector pattern, `_`).
+pub(super) struct ClauseArm {
+    pub(super) heads: Vec<Value>,
+    pub(super) guard: Option<Value>,
+    pub(super) body: Vec<Value>,
+}
+
+/// Read one clause (see [`ClauseArm`]); `None` for a clause with no head list or no body.
+pub(super) fn clause_arm(heap: &Heap, clause: Value) -> Option<ClauseArm> {
+    let parts = list_items(heap, clause)?;
+    let plist = *parts.first()?;
+    let heads = match plist {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Nil => Vec::new(),
+        _ => list_items(heap, plist)?,
+    };
+    let guarded = matches!(parts.get(1), Some(&Value::Keyword(k))
+        if value::symbol_name_ref(k) == "when");
+    let (guard, body): (Option<Value>, Vec<Value>) = if guarded {
+        (parts.get(2).copied(), parts.get(3..)?.to_vec())
+    } else {
+        (None, parts.get(1..)?.to_vec())
+    };
+    if body.is_empty() {
+        return None;
+    }
+    Some(ClauseArm { heads, guard, body })
+}
+
+/// What one clause-head PATTERN admits — the runtime test the `match` lowering emits for
+/// it (`std/prelude/match.blsp`), read as a type: a binder or `_` admits anything; a
+/// literal, its own type; a non-empty list pattern tests `pair?` (so never nil); the
+/// empty list pattern tests `nil?`; a vector pattern tests `vector?`. An over-approximation
+/// wherever it is not exact (an element pattern inside a list is not read), which is the
+/// sound direction for a domain: a call outside it genuinely fails to match.
+pub(super) fn pattern_domain(heap: &Heap, pat: Value) -> Ty {
+    match pat {
+        Value::Sym(_) => Ty::ANY,
+        Value::Nil => Ty::of(Tag::Nil),
+        Value::Pair(_) => match list_items(heap, pat) {
+            // `(quote x)` / `(record …)` / `(or …)` heads carry match-language forms whose
+            // domains are not read here — anything, soundly.
+            Some(items)
+                if matches!(items.first(), Some(Value::Sym(s))
+                    if matches!(value::symbol_name_ref(*s), "quote" | "record" | "or" | "and" | "not" | "%pin" | "unquote")) =>
+            {
+                Ty::ANY
+            }
+            Some(_) => Ty::of(Tag::Pair),
+            None => Ty::ANY,
+        },
+        Value::Vector(_) => Ty::of(Tag::Vector),
+        other => Ty::of_value(other),
+    }
+}
+
+/// Bring one clause head's binders into scope under the type its position holds: a symbol
+/// head is bound to it directly; a pattern head's binders get what the pattern's shape
+/// implies for them from that type (`walk::pattern_bindings` — element type for the
+/// positional binders, a list of it for a `& rest`), or `None` where the type says nothing.
+pub(super) fn bind_head(heap: &Heap, ctx: Ctx, head: Value, ty: Option<Ty>) -> Ctx {
+    match head {
+        Value::Sym(s) if value::symbol_name_ref(s) == "_" => ctx,
+        Value::Sym(s) => ctx.bind(s, ty),
+        Value::Pair(_) | Value::Vector(_) | Value::Nil => {
+            let mut out = ctx;
+            for (name, bound) in super::walk::pattern_bindings(heap, head, ty.as_ref()) {
+                out = out.bind(name, bound);
+            }
+            out
+        }
+        _ => ctx,
+    }
 }
 
 fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
@@ -780,7 +1234,7 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
         ctx = ctx.bind(p, Some(bound));
     }
     let informative = demands.params.iter().any(|t| *t != Ty::ANY) || demands.rest.is_some();
-    match expr_ty(heap, tail, &ctx) {
+    match super::infer::with_fresh_depth(|| expr_ty(heap, tail, &ctx)) {
         Some(ret) => Some(demands.into_sig(ret)),
         // The return couldn't be inferred (e.g. the body calls an ability op whose facts aren't
         // on this bare ctx). Still surface the parameter demands with an `ANY` return when a
@@ -834,7 +1288,7 @@ fn infer_return_only(
         for &p in binders {
             ctx = ctx.bind(p, Some(Ty::ANY));
         }
-        let t = expr_ty(heap, *tail, &ctx)?;
+        let t = super::infer::with_fresh_depth(|| expr_ty(heap, *tail, &ctx))?;
         ret = Some(match ret {
             Some(a) => a.union(t),
             None => t,

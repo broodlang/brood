@@ -228,8 +228,12 @@ fn register_declared_sig(heap: &Heap, ctx: &mut Ctx, file_ns: Option<&str>, form
 }
 
 /// A surface `(defn name clause…)` / `(defn- name clause…)` whose tail is entirely
-/// arity clauses — returning the name and those clauses. `None` for a single-clause
-/// definition (which the ordinary parameter inference already reads) or any other form.
+/// clauses — arity clauses `((a b) …)` or pattern clauses `(((x y & acc) "+") …)` —
+/// returning the name and those clauses. `None` for a single-clause definition (which
+/// the ordinary parameter inference already reads) or any other form. A clause is a list
+/// whose head is a list (`is_clause`'s shape; a vector head is Clojure's spelling and is
+/// rejected by the expander), which is why `(defn f ([a b]) body)` — one destructuring
+/// clause followed by a body form — is not two clauses.
 fn defn_clauses(heap: &Heap, form: Value) -> Option<(Symbol, Vec<Value>)> {
     let items = list_items(heap, form)?;
     let Some(&Value::Sym(head)) = items.first() else {
@@ -249,11 +253,11 @@ fn defn_clauses(heap: &Heap, form: Value) -> Option<(Symbol, Vec<Value>)> {
         Some(Value::Str(_)) if rest.len() > 1 => &rest[1..],
         _ => rest,
     };
-    if rest.len() < 2
-        || !rest
-            .iter()
-            .all(|&f| crate::eval::macros::is_arity_clause(heap, f))
-    {
+    let is_clause = |f: Value| -> bool {
+        list_items(heap, f)
+            .is_some_and(|items| matches!(items.first(), Some(Value::Pair(_)) | Some(Value::Nil)))
+    };
+    if rest.len() < 2 || !rest.iter().all(|&f| is_clause(f)) {
         return None;
     }
     Some((name, rest.to_vec()))
@@ -824,6 +828,9 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
     // leak a stale table into a `(check 'form)` — defensive: an ability type is sound
     // regardless, but an empty table here is unambiguously so.
     annot::clear_ability_types();
+    // …and the inference memos, whose entries were computed against that file's Ctx
+    // tables (`fn_form`, `clause_arms`) — `signature_string` already does this.
+    sigs::clear_sig_memo();
     let mut out = Vec::new();
     check_into(heap, form, &Ctx::default(), &mut out);
     out
@@ -991,14 +998,31 @@ fn capture_file_signatures(heap: &Heap, expanded: &[Value], ctx: &Ctx) {
 /// arm returns and the shape a reader is actually looking at.
 fn inferred_signature(ctx: &Ctx, name: Symbol) -> Option<Sig> {
     let single = ctx.inferred_fn_sig(name);
-    let Some(arm) = ctx.inferred_overload(name).and_then(|a| a.first().cloned()) else {
+    let Some(arms) = ctx.inferred_overload(name).filter(|a| !a.is_empty()) else {
         return single;
     };
+    // Parameters: the position-wise union over every arm of the FIRST arm's arity — the
+    // shape a reader is looking at, and a sound over-approximation of what those arms
+    // admit. Return: the union of the arms' returns when the clause inference typed them,
+    // else the params-less union the expanded tree gave.
+    let arity = arms[0].params.len();
+    let same_arity: Vec<&Sig> = arms.iter().filter(|a| a.params.len() == arity).collect();
+    let params: Vec<Ty> = (0..arity)
+        .map(|i| {
+            same_arity
+                .iter()
+                .fold(Ty::NEVER, |acc, a| acc.union(a.params[i].clone()))
+        })
+        .collect();
+    let arm_ret = arms
+        .iter()
+        .fold(Ty::NEVER, |acc, a| acc.union(a.ret.clone()));
     let ret = match &single {
-        Some(s) if s.params.is_empty() => s.ret.clone(),
-        _ => arm.ret.clone(),
+        _ if !arm_ret.is_any() => arm_ret,
+        Some(s) => s.ret.clone(),
+        None => arm_ret,
     };
-    Some(Sig::new(arm.params, ret))
+    Some(Sig::new(params, ret))
 }
 
 /// [`check_file`] with an explicit **KI-17 reachability set** — the file's *transitive*
@@ -1362,6 +1386,29 @@ pub fn check_file_mode(
                     .then_some((name, rhs))
                 })
                 .collect();
+            // Keep each candidate's form reachable for call-site specialization
+            // (`sigs::specialized_ret`): a call whose flat inferred return is `any` re-types
+            // the body under the call's own argument types.
+            for &(name, rhs) in &candidates {
+                ctx.add_fn_form(name, rhs);
+            }
+            // A multi-clause `defn`'s clauses — read from the UN-EXPANDED form, the only
+            // place a pattern- or `:when`-dispatched definition still has clauses (it lowers
+            // to one variadic `fn` over `match*`, ADR-226) — go in BEFORE the fixpoint: a
+            // same-file caller typed inside it (a `reduce` over the clauses' function)
+            // needs the arms to be there. The per-arm signatures are derived again after
+            // the fixpoint, when every callee's return is final.
+            let mut clause_defs: Vec<(Symbol, Vec<Value>)> = Vec::new();
+            for &form in &forms {
+                if let Some((name, clauses)) = defn_clauses(heap, form) {
+                    let qn = qualify_decl_name(&ctx, file_ns_name.as_deref(), name);
+                    if let Some(arms) = sigs::infer_overload_from_clauses(heap, &clauses, &ctx) {
+                        ctx.add_inferred_overload(qn, arms);
+                    }
+                    ctx.add_clause_arms(qn, clauses.clone());
+                    clause_defs.push((qn, clauses));
+                }
+            }
             // Iterate to a fixed point; break as soon as a pass records nothing new. The cap
             // bounds a pathological deep chain (the tail just stays deferred — sound).
             for _ in 0..16 {
@@ -1395,17 +1442,11 @@ pub fn check_file_mode(
                     ctx.add_inferred_overload(name, arms);
                 }
             }
-            // …and from the **un-expanded** `defn`, which is the only place a
-            // `:when`-guarded multi-clause definition still has clauses: it lowers to a
-            // single variadic `fn` over `match*` (ADR-226), so the expanded tree shows a
-            // rest-list being destructured and nothing about what each clause takes.
-            for &form in &forms {
-                let Some((name, clauses)) = defn_clauses(heap, form) else {
-                    continue;
-                };
-                if let Some(arms) = sigs::infer_overload_from_clauses(heap, &clauses, &ctx) {
-                    let qn = qualify_decl_name(&ctx, file_ns_name.as_deref(), name);
-                    ctx.add_inferred_overload(qn, arms);
+            // …and from the **un-expanded** `defn` clauses recorded above, now that the
+            // fixpoint has settled every same-file return an arm's tail may name.
+            for (qn, clauses) in &clause_defs {
+                if let Some(arms) = sigs::infer_overload_from_clauses(heap, clauses, &ctx) {
+                    ctx.add_inferred_overload(*qn, arms);
                 }
             }
             // A candidate whose return stayed **deferred** (e.g. it returns an ability op the

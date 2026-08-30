@@ -7629,6 +7629,96 @@ session. Until then the router follows the BROOD_MKCLO pattern: `BROOD_TW_REENTR
 opt-in, its measured wins (60×/startup −6.9%) parked behind the flag, the full breakage
 suite green either way.
 
+### 2026-08-30, sixth — call-site specialization for named callbacks, and the two ways it nearly did not ship
+
+The checker's `(reduce step '() xs)` read as `any` when `step` was a *named* same-file
+function while the same body inline (`(fn (acc v) (conj acc …))`) typed precisely: an
+inline lambda is re-typed under what the combinator hands over, a name was looked up
+flat, and `step`'s flat signature is `(any string -> any)` because nothing in its body
+constrains `acc`. Now a call — direct or through `map`/`reduce`/`filter` — whose flat
+return is `any` **re-types the callee's arms under the call's argument types**
+(`sigs::specialized_ret`), from the same-file `(fn …)` form or the un-expanded clauses of
+a pattern-dispatched `defn` (recorded before Pass 2.8's fixpoint so a caller typed inside
+it finds them), or a loaded closure's arms. `calc : (string -> (or nil number))` through
+a three-clause tokenizer; a pass-through `wrap` answers `int` at `(wrap 3)`. A
+self-recursive body is declined (its first base case is not its result — `sum-acc`
+specialized to `0`), a lexical local is never a callee, a variadic arm is skipped, and
+`nest check` over `std/` + `tests/` stays at zero.
+
+The session that built it crashed (signal 9) mid-edit, and the resumed tree had three
+faults worth recording:
+
+- **A memoized `None` that outlived its truth.** The first `(step …)` call is typed
+  before Pass 2.8 records `step`'s form; `fixed_arms_of` answers `None`, and that was
+  memoized as "a fact about the image". For a same-file name it is a fact about the
+  *moment*. Memoize it for builtins and unknown names only.
+- **A frame-size overflow the depth cap could not see.** `expr_ty` caps its recursion at
+  128 but never grew the stack itself; the fatter frame overflowed the walker's 1 MB
+  stacker segment at exactly 128 — `checker_survives_pathologically_deep_forms` aborted.
+  `expr_ty` now `maybe_grow`s, so the cap is the only limit.
+- **Exponential re-typing.** Two shapes. The `(:use io)` header of a two-line file made
+  **933k** specializations of `require-one`: a guard refusal (name in flight, depth cap)
+  has no answer to memoize and the walker re-asks at every enclosing level — a per-file
+  **fuel** (20k arm re-typings) bounds it, and a call site checks fuel/guards *before*
+  typing its operands. Then `tests/maps_test.blsp` went 0.15 s → 7.7 s (15 M `expr_ty`
+  calls): `expr_ty` of an `any`-returning call used to return at once, and now walked the
+  call's whole subtree, under a walker that asks at every level. Nested operand typing
+  for specialization is bounded to one level (`(f (g x))` specializes both, `h` in
+  `(f (g (h x)))` stays flat): `json` 0.28 s, `maps_test` 0.21 s, `buffer` 0.94 s.
+
+The lesson for the next inference feature: `expr_ty` is asked O(depth) times per node,
+so anything that turns it from shallow to deep for a common form multiplies by the
+file's nesting — measure `nest check` on `tests/maps_test.blsp` and `std/editor/buffer.blsp`
+with `BROOD_NO_CHECK_CACHE=1` before and after, not only the unit tests.
+
+### 2026-08-30, seventh — the checker audited for the sixth entry's three fault classes
+
+A read-only sweep of `types/check/*` for the shapes the previous entry fixed — a memo
+outliving its truth, a recursion with a cap but no stack growth, and un-memoized
+re-typing that multiplies with the walker's per-level re-descent. What it found, and what
+changed:
+
+- **`SPECIAL_MEMO` could still pin a same-file `None`** through `infer_sig`'s body walk,
+  which runs under a bare `Ctx::default()` that knows no file globals, so the
+  `is_file_global` guard was inert there. A `None` is memoized only for a name the image
+  binds.
+- **A depth-capped body walk was memoized as the callee's signature.** `expr_ty`'s depth
+  counter was inherited by `infer_sig`'s walk of a callee body, so a deep enough first
+  ask tripped the cap *inside the callee*, and `SIG_MEMO` kept the widened answer for the
+  rest of the file — diagnostics depended on form order. A callee body is a fresh
+  question: `infer::with_fresh_depth` (the `SPEC_ARG_NEST` discipline, applied to depth).
+  Pinned by `a_depth_capped_body_walk_is_not_memoized_as_the_callees_signature`, which
+  took four attempts to make bite: a single-call body is answered by Tier 1 without a
+  walk, a bare top-level form is walked but never *typed* from the outside in (a `def`'s
+  right-hand side is), and call-site specialization re-derived the poisoned return at the
+  misuse — the test's `g` now has a rest parameter, which specialization skips.
+- **Seven unguarded recursive walkers**, each the `expr_ty` frame-size class one function
+  over: `path_of` (asked at `expr_ty`'s first level for every form — now a capped loop,
+  32 keys), `path_guard_assertion`, `guard_assertion` (3 677 frames on the negated-guard
+  test; the audit missed this one, the test found it), `quoted_datum_ty`,
+  `sym_appears_in` (recursed on the cdr — now a worklist), `find_redundant_clause` (now a
+  loop), `collect_arity`, `effectful_head`. One test per shape.
+- **`expr_ty` was 2^depth on `(first (first … x))`.** `seq_aware_call_ty` answers `None`
+  for an unknown collection via `?`, and the declared-sig fallbacks then type the same
+  operand again — every duplicate operand typing inside `expr_ty` doubles per level, and
+  only the 128 cap ended it. Pre-existing; a 40-deep accessor chain hung `nest check` at
+  HEAD. The general fix is a **per-walk `expr_ty` memo** keyed on `(form, Ctx identity)`:
+  `Ctx` mints a fresh id on every clone/default (`ctx::CtxId`), so "same id" is "same
+  bindings" for the walk's duration; the outermost `expr_ty` frame owns the table and
+  clears it on return. The 8k access-path test runs in 6 s (the walker's O(n·128)).
+- Per-file tables that outlived the file on the single-form path: `SEALED_OP_DOMAINS`
+  (not cleared by `clear_ability_types`), `OPERATOR_DOMAINS` (never cleared), and the sig
+  memos in `check_located`. All cleared.
+
+Left as follow-ups, all pre-existing and measured acceptable at HEAD: the walker's own
+duplicate operand typings (`check_into`'s per-argument `gradual_of` beside the overload
+check's `expr_ty`, `check_let` typing each RHS twice, `fold_callback_seed` typing the
+enclosing form), the `reduce`/`fold` handler's three `callback_ret` asks, and the Pass 2.8
+fixpoint re-deriving stated-stable parameter demands each iteration. The per-walk memo
+absorbs the ones inside `expr_ty`; the walker-level ones are O(n · depth), not
+exponential. And the `INFERRING` depth budget (8) still shapes what a caller's memoized
+sig saw of its callees — precision only, order-dependent, not fixed.
+
 ## 2026-08-30 (seventh) — KI-88 session 2: the latch, the router fence, and a wedge that enters mid-body
 
 Three findings, two of them shipped hardening, one a sharpened mystery:
