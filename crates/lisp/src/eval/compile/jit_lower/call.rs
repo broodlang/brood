@@ -26,6 +26,52 @@ pub(super) enum Flow {
     Break,
 }
 
+/// §7.5: emit the Brood fast-frame **hit path inline** — the call ceremony
+/// `jit_run_fast_link` performs in Rust (field save/restore, frame window, the indirect
+/// call) becomes direct CLIF loads/stores, deleting the `brood_rt_fast_frame` →
+/// `jit_dispatch_fast_frame` → `jit_run_fast_link` frames from the steady state.
+///
+/// **Opt-in (`BROOD_XCALL=1`), emitted in every general-lowered body.** Two refinements
+/// were tried and rejected on 2026-08-30 before settling here:
+/// - *Default-on gated to the inlined-upgrade body* (riding the deferred compile so
+///   short runs never pay the fatter IR): free, but winless — the upgrade body's
+///   callees are spliced, so its residual call sites are few, and the arms that make
+///   the millions of fast-frame calls (`bintree`'s `check-node`, two non-tail
+///   self-calls) never derive an upgrade at all. Measured warmed, same binary:
+///   bintree ±0.3%.
+/// - *Emitted everywhere by default*: bintree −11.4% wall (unpinned, script-warmed),
+///   but a ~115M-instruction per-run compile CONSTANT (fib +6% at default N, +2% at
+///   N=38 — fixed, not per-call: the step-1 MKCLO cost class) and spawn +19% through
+///   contention on the fatter compiles.
+/// The shipped shape is the **hot re-lowering stage** (`hot = true`): recompile the SAME
+/// small body with this blob on the deferred queue once the arm's small native is
+/// installed and it activates again — zero compile cost to short runs (the deferred
+/// queue drains only after every initial tier), the full win for long-running arms; the
+/// deferred inlined-upgrade bodies carry it too. `BROOD_NO_XCALL=1` kills all of it.
+/// Excluded wherever the callback path carries diagnostics the inline path does not
+/// replicate (debug builds' staged-arg validation, `BROOD_JIT_VERIFY`/`_FN`'s scans,
+/// `perf-stats`' counters).
+///
+/// **Measurement trap (cost a wrong conclusion today):** the first `perf stat -r N`
+/// batch after ANY rebuild pays the build-id-keyed boot-cache rebuild (~215M
+/// instructions smeared into the average) — warm each binary once before an A/B, the
+/// way `scripts/ab-bench.sh` footgun 4 already prescribes.
+pub(super) fn xcall_emit(hot: bool) -> bool {
+    // Master enable: the diagnostics exclusions + the BROOD_NO_XCALL kill switch.
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // BROOD_XCALL=1: additionally arm EVERY body (the experiment/A-B lever) — the
+    // measured per-run compile constant makes this unsuitable as a default.
+    static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let ok = *OK.get_or_init(|| {
+        std::env::var_os("BROOD_NO_XCALL").is_none()
+            && !cfg!(debug_assertions)
+            && !cfg!(feature = "perf-stats")
+            && !crate::eval::compile::inline::jit_verify_active()
+            && std::env::var_os("BROOD_JIT_VERIFY_FN").is_none()
+    });
+    ok && (hot || *ALL.get_or_init(|| std::env::var_os("BROOD_XCALL").is_some_and(|v| v == "1")))
+}
+
 /// Report a mid-emit refusal under `BROOD_JIT_BAIL_TRACE=1`, same line shape as
 /// `jit_lower`'s `trace_lower_bail` so one grep covers both. These sites used to return
 /// `None` silently, and the runtime's generic `lowering-returned-none` line cannot say
@@ -420,6 +466,247 @@ pub(super) fn emit_call(
         b.ins().brif(nst, error, &[], cont, &[]);
 
         b.switch_to_block(brood_blk);
+        if funcs.xcall {
+            // ---- §7.5 BROOD_XCALL: the inline fast-frame hit path ----
+            // Preconditions the callback path re-derives are guarded here; ANY failure
+            // falls to `ff_blk` (the unchanged callback), which re-checks everything —
+            // so a fall-through is only ever slower, never wrong.
+            use crate::core::heap::FastLink;
+            let offs = crate::core::heap::jit_ceremony_offsets();
+            let fl_env_off = std::mem::offset_of!(FastLink, env) as i32;
+            let fl_icb_off = std::mem::offset_of!(FastLink, callee_ic_base) as i32;
+            let fl_gicb_off = std::mem::offset_of!(FastLink, callee_gic_base) as i32;
+            let roots_ptr_off = offs.roots as i32;
+            let roots_len_off = offs.roots as i32 + 8;
+            let roots_cap_off = offs.roots as i32 + 16;
+            let ff_blk = b.create_block();
+
+            // Guard 1: the callee's env is GLOBAL (a named defn capturing the global
+            // env — the case with no env rooting and a constant `jit_call_env` value).
+            let env_v = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_env_off);
+            let env_glob = b.ins().icmp_imm(IntCC::Equal, env_v, -1);
+            let xc_depth = b.create_block();
+            b.ins().brif(env_glob, xc_depth, &[], ff_blk, &[]);
+
+            // Guard 2: `1 <= depth < 64` in one unsigned compare (`depth-1 <u 63`).
+            // depth 0 would need the stack-limit stamp; depth >= 64 the stacker
+            // headroom probe (JIT_HEADROOM_PROBE_FROM) — both live on the callback path.
+            b.switch_to_block(xc_depth);
+            let depth = b.ins().load(
+                types::I32,
+                MemFlagsData::trusted(),
+                heap,
+                offs.jit_native_depth as i32,
+            );
+            let dm1 = b.ins().iadd_imm(depth, -1);
+            let d_ok = b.ins().icmp_imm(IntCC::UnsignedLessThan, dm1, 63);
+            let xc_cap = b.create_block();
+            b.ins().brif(d_ok, xc_cap, &[], ff_blk, &[]);
+
+            // Guard 3: the callee frame fits the roots capacity (growth is the
+            // callback's job — one call per high-water mark, then never again).
+            b.switch_to_block(xc_cap);
+            let len = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, roots_len_off);
+            let cap = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, roots_cap_off);
+            let stage_base = b.ins().iadd_imm(len, -(argc as i64));
+            let nslots64 = b.ins().uextend(types::I64, nslots_v);
+            let raw_end = b.ins().iadd(stage_base, nslots64);
+            // `umax` guards the nslots < argc degenerate (frame smaller than the staged
+            // args): the Rust path's `extend_roots_to_nil` debug-asserts it can't happen,
+            // and a raw `len = frame_end` store here would silently drop staged args in
+            // release if it ever did. One register op buys the same never-shrink floor.
+            let frame_end = b.ins().umax(raw_end, len);
+            let fits = b.ins().icmp(IntCC::UnsignedLessThanOrEqual, frame_end, cap);
+            let xc_fill = b.create_block();
+            b.append_block_param(xc_fill, types::I64); // cur
+            b.ins()
+                .brif(fits, xc_fill, &[BlockArg::Value(len)], ff_blk, &[]);
+
+            // Nil-fill the local slots `[len, frame_end)` — `extend_roots_to_nil`'s fill,
+            // zero bytes being `Value::Nil` (the same `write_bytes(0)` the Rust side does).
+            b.switch_to_block(xc_fill);
+            let cur = b.block_params(xc_fill)[0];
+            let fill_done = b
+                .ins()
+                .icmp(IntCC::UnsignedGreaterThanOrEqual, cur, frame_end);
+            let xc_fill_body = b.create_block();
+            let xc_call = b.create_block();
+            b.ins().brif(fill_done, xc_call, &[], xc_fill_body, &[]);
+            b.switch_to_block(xc_fill_body);
+            let rp = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, roots_ptr_off);
+            let byte_off = b.ins().imul_imm(cur, STRIDE);
+            let addr = b.ins().iadd(rp, byte_off);
+            let zfill = b.ins().iconst(types::I64, 0);
+            b.ins().store(MemFlagsData::trusted(), zfill, addr, 0);
+            b.ins()
+                .store(MemFlagsData::trusted(), zfill, addr, PAYLOAD_OFFSET as i32);
+            b.ins().store(
+                MemFlagsData::trusted(),
+                zfill,
+                addr,
+                PAYLOAD_OFFSET as i32 + 8,
+            );
+            let nxt = b.ins().iadd_imm(cur, 1);
+            b.ins().jump(xc_fill, &[BlockArg::Value(nxt)]);
+
+            // The ceremony + the call, mirroring `jit_run_fast_link` top to bottom.
+            b.switch_to_block(xc_call);
+            // Frame extent: len = frame_end (the roots must cover the callee frame
+            // before its first safepoint).
+            b.ins()
+                .store(MemFlagsData::trusted(), frame_end, heap, roots_len_off);
+            // Saves. `jit_call_env` is two opaque words (EnvRoot, repr(C, u8), pinned);
+            // the callee's value is Stable(GLOBAL) = (0, u64::MAX) by guard 1.
+            let env_off = offs.jit_call_env as i32;
+            let senv0 = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, env_off);
+            let senv1 = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, env_off + 8);
+            let z64 = b.ins().iconst(types::I64, 0);
+            let neg1 = b.ins().iconst(types::I64, -1);
+            b.ins().store(MemFlagsData::trusted(), z64, heap, env_off);
+            b.ins()
+                .store(MemFlagsData::trusted(), neg1, heap, env_off + 8);
+            let dbgfn_off = offs.jit_dbg_fn as i32;
+            let sfn = b
+                .ins()
+                .load(types::I32, MemFlagsData::trusted(), heap, dbgfn_off);
+            b.ins()
+                .store(MemFlagsData::trusted(), head_v, heap, dbgfn_off);
+            let d1 = b.ins().iadd_imm(depth, 1);
+            b.ins().store(
+                MemFlagsData::trusted(),
+                d1,
+                heap,
+                offs.jit_native_depth as i32,
+            );
+            let force_off = offs.jit_force_vm as i32;
+            let sforce = b
+                .ins()
+                .load(types::I8, MemFlagsData::trusted(), heap, force_off);
+            let ic_off = offs.cur_ic_base as i32;
+            let gic_off = offs.cur_gic_base as i32;
+            let sic = b
+                .ins()
+                .load(types::I32, MemFlagsData::trusted(), heap, ic_off);
+            let sgic = b
+                .ins()
+                .load(types::I32, MemFlagsData::trusted(), heap, gic_off);
+            let cic = b
+                .ins()
+                .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_icb_off);
+            let cgic = b
+                .ins()
+                .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_gicb_off);
+            b.ins().store(MemFlagsData::trusted(), cic, heap, ic_off);
+            b.ins().store(MemFlagsData::trusted(), cgic, heap, gic_off);
+            let seq_off = offs.native_gateway_seq as i32;
+            let curgw_off = offs.cur_native_gateway as i32;
+            let seq = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, seq_off);
+            let gw = b.ins().iadd_imm(seq, 1);
+            b.ins().store(MemFlagsData::trusted(), gw, heap, seq_off);
+            let scur = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, curgw_off);
+            b.ins().store(MemFlagsData::trusted(), gw, heap, curgw_off);
+            // Shared constants for the cold blocks (created here so they dominate both).
+            let site_head_c = b.ins().iconst(
+                types::I64,
+                ((call_site as i64) << 32) | (call_head as u64 as i64 & 0xffff_ffff),
+            );
+            let argc_c = b.ins().iconst(types::I64, argc as i64);
+            let argc_shifted = b.ins().iconst(types::I64, (argc as i64) << 32);
+            // The call itself — straight into the callee's native code.
+            let icall =
+                b.ins()
+                    .call_indirect(funcs.armfn_sig, code_v, &[heap, stage_base, out_addr]);
+            let outcome = b.inst_results(icall)[0];
+            // Restores, in `jit_run_fast_link`'s order.
+            b.ins()
+                .store(MemFlagsData::trusted(), scur, heap, curgw_off);
+            b.ins().store(MemFlagsData::trusted(), sic, heap, ic_off);
+            b.ins().store(MemFlagsData::trusted(), sgic, heap, gic_off);
+            b.ins()
+                .store(MemFlagsData::trusted(), sforce, heap, force_off);
+            b.ins().store(
+                MemFlagsData::trusted(),
+                depth,
+                heap,
+                offs.jit_native_depth as i32,
+            );
+            b.ins().store(MemFlagsData::trusted(), senv0, heap, env_off);
+            b.ins()
+                .store(MemFlagsData::trusted(), senv1, heap, env_off + 8);
+            b.ins().store(MemFlagsData::trusted(), sfn, heap, dbgfn_off);
+            // The callee may have grown/moved `roots` — refetch the base inline.
+            let rb2 = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, roots_ptr_off);
+            b.def_var(rb_var, rb2);
+            // Suspend-host latch: one compare; the resolution is cold (once per arm ever).
+            let bl = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                heap,
+                offs.blocked_under_gateway as i32,
+            );
+            let latched = b.ins().icmp(IntCC::Equal, bl, gw);
+            let xc_latch = b.create_block();
+            let xc_out = b.create_block();
+            b.ins().brif(latched, xc_latch, &[], xc_out, &[]);
+            b.switch_to_block(xc_latch);
+            b.ins()
+                .call(funcs.xlatch, &[heap, code_v, site_head_c, argc_c, gep]);
+            b.ins().jump(xc_out, &[]);
+            // Outcome dispatch: 0 (the overwhelmingly common case) inline; the rest cold.
+            b.switch_to_block(xc_out);
+            let ok = b.ins().icmp_imm(IntCC::Equal, outcome, 0);
+            let xc_done = b.create_block();
+            let xc_cold = b.create_block();
+            b.ins().brif(ok, xc_done, &[], xc_cold, &[]);
+            b.switch_to_block(xc_done);
+            // truncate_roots(stage_base): min-guarded, like Vec::truncate.
+            let len2 = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, roots_len_off);
+            let trunc = b.ins().umin(len2, stage_base);
+            b.ins()
+                .store(MemFlagsData::trusted(), trunc, heap, roots_len_off);
+            b.ins().jump(cont, &[]);
+            b.switch_to_block(xc_cold);
+            let an = b.ins().bor(argc_shifted, nslots64);
+            let coldc = b.ins().call(
+                funcs.xcold,
+                &[heap, outcome, out_addr, site_head_c, an, gep, stage_base],
+            );
+            let cst = b.inst_results(coldc)[0];
+            // The cold arms can allocate/collect — refetch the base again.
+            let rb3 = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), heap, roots_ptr_off);
+            b.def_var(rb_var, rb3);
+            let cold_err = b.ins().icmp_imm(IntCC::Equal, cst, 1);
+            let xc_ne = b.create_block();
+            b.ins().brif(cold_err, error, &[], xc_ne, &[]);
+            b.switch_to_block(xc_ne);
+            let cold_slow = b.ins().icmp_imm(IntCC::Equal, cst, 2);
+            b.ins().brif(cold_slow, miss, &[], cont, &[]);
+
+            // Everything below emits the unchanged callback path into `ff_blk`.
+            b.switch_to_block(ff_blk);
+        }
         // Pass the **slot pointer**, not its unpacked fields. `brood_rt_fast_frame` used to
         // take ten arguments — head/argc/nslots/code/env and the two callee IC bases, all
         // read here and immediately re-pushed on the other side, because SysV only passes

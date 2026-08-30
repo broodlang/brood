@@ -326,7 +326,15 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                 let t0 = web_time::Instant::now();
                 let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if inlined {
-                        jit.lower_inlined_arm(arm, slot_tags)
+                        // A deferred item is the inlined upgrade when a derivation
+                        // exists; otherwise it is the xcall RE-LOWERING of the arm's
+                        // own body (same chunk/frame/checkpoint, hot emission armed —
+                        // §7.5). Same staging slot (`inline_code`), same swap channel.
+                        if arm.inline_name.is_some() || arm.leaf.is_some() {
+                            jit.lower_inlined_arm(arm, slot_tags)
+                        } else {
+                            jit.lower_arm_hot(arm, slot_tags)
+                        }
                     } else {
                         jit.lower_arm(arm, slot_tags)
                     }
@@ -812,31 +820,7 @@ pub(crate) fn jit_run_fast_link(
     // a latch that mostly failed to hold. The probe stays as the fallback for the one
     // race the scan can miss (an inlined-upgrade swap between invoke and here).
     if heap.blocked_under_gateway == gw_seq {
-        heap.blocked_under_gateway = 0;
-        // Shed THIS site's fast link first, unconditionally: the latch stores `BAILED`
-        // into `arm.jit_code`, but the FastLink mirror's hit path (and the raw load JIT'd
-        // callers emit) never re-reads `jit_code` — so without this, a long-lived process
-        // whose site is already populated keeps entering the latched native and parking
-        // dirty forever. The IC bases were restored above, so `site` resolves against the
-        // caller's block exactly as the lookup that entered here did.
-        heap.vm_fast_link_clear_site(site);
-        let scanned = {
-            use std::sync::atomic::Ordering::Acquire;
-            // Poison-tolerant like the two push sites: a codegen panic (the
-            // CODEGEN-PANICKED path) may have poisoned this mutex, and the latch must
-            // not turn that into a worker-thread crash.
-            let reg = JIT_ARM_KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner());
-            reg.iter()
-                .find(|a| std::ptr::eq(a.jit_code.load(Acquire), code as *mut u8))
-                .cloned()
-        };
-        if let Some(arm) = scanned.or_else(|| {
-            heap.vm_call_ic_probe(site, head, argc as u32, epoch)
-                .and_then(|(_, a)| a)
-                .map(|(arm, _, _)| arm.arc().clone())
-        }) {
-            jit_latch_suspend_host(&arm);
-        }
+        jit_latch_dirty_blocked(heap, code, site, head, argc, epoch);
     }
     // KI-11. Three of the outcome arms below re-enter the evaluator — the outcome-4
     // tail-chain follow-through (`apply_value`), and the deopt/preempt re-runs
@@ -880,6 +864,88 @@ pub(crate) fn jit_run_fast_link(
         callee_env,
         out,
     )
+}
+
+/// The suspend-host latch resolution for a fast link whose callee dirty-blocked its
+/// worker (`blocked_under_gateway` came back equal to the gateway token). Shared by
+/// [`jit_run_fast_link`] and the inline fast-frame path's `brood_rt_xcall_latch`
+/// callback (§7.5, `BROOD_XCALL=1`) — cold by construction (at most once per arm ever).
+#[cfg(feature = "jit")]
+#[cold]
+#[inline(never)]
+pub(crate) fn jit_latch_dirty_blocked(
+    heap: &mut Heap,
+    code: usize,
+    site: u32,
+    head: Symbol,
+    argc: usize,
+    epoch: u64,
+) {
+    heap.blocked_under_gateway = 0;
+    // Shed THIS site's fast link first, unconditionally: the latch stores `BAILED`
+    // into `arm.jit_code`, but the FastLink mirror's hit path (and the raw load JIT'd
+    // callers emit) never re-reads `jit_code` — so without this, a long-lived process
+    // whose site is already populated keeps entering the latched native and parking
+    // dirty forever. The IC bases were restored above, so `site` resolves against the
+    // caller's block exactly as the lookup that entered here did.
+    heap.vm_fast_link_clear_site(site);
+    let scanned = {
+        use std::sync::atomic::Ordering::Acquire;
+        // Poison-tolerant like the two push sites: a codegen panic (the
+        // CODEGEN-PANICKED path) may have poisoned this mutex, and the latch must
+        // not turn that into a worker-thread crash.
+        let reg = JIT_ARM_KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner());
+        reg.iter()
+            .find(|a| std::ptr::eq(a.jit_code.load(Acquire), code as *mut u8))
+            .cloned()
+    };
+    if let Some(arm) = scanned.or_else(|| {
+        heap.vm_call_ic_probe(site, head, argc as u32, epoch)
+            .and_then(|(_, a)| a)
+            .map(|(arm, _, _)| arm.arc().clone())
+    }) {
+        jit_latch_suspend_host(&arm);
+    }
+}
+
+/// The cold-outcome funnel for the **inline** fast-frame path (§7.5, `BROOD_XCALL=1`):
+/// emitted code has already run the ceremony restores, so this is exactly
+/// [`jit_fast_link_cold_outcome`] with the caller context read back off the heap.
+/// The callee env is `GLOBAL` by the inline path's own guard.
+#[cfg(feature = "jit")]
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+pub(crate) fn jit_xcall_cold_outcome(
+    heap: &mut Heap,
+    outcome: i64,
+    argc: usize,
+    site: u32,
+    head: Symbol,
+    epoch: u64,
+    stage_base: usize,
+    nslots: usize,
+    out: *mut Value,
+) -> i64 {
+    let native_depth = heap.jit_native_depth;
+    match jit_fast_link_cold_outcome(
+        heap,
+        outcome,
+        argc,
+        site,
+        head,
+        epoch,
+        stage_base,
+        stage_base,
+        nslots,
+        native_depth,
+        EnvId::GLOBAL,
+        out,
+    ) {
+        FastLinkOutcome::Done => 0,
+        FastLinkOutcome::Error => 1,
+        FastLinkOutcome::Fallthrough => 2,
+    }
 }
 
 /// The deopt / preempt / tail-chain / error outcomes of a native fast link — everything
@@ -2238,7 +2304,30 @@ pub(crate) fn jit_tier_in_frame(
     // i64-eligible arms skip the two-stage inline upgrade entirely: their small native IS the
     // unboxed-i64 register worker (`jit_lower_i64_arm`), which already recurses to full depth in
     // registers — the boxed depth-2 inlined upgrade would only swap in inferior code.
-    if arm.inline_name.is_some()
+    // §7.5 hot RE-LOWERING: an arm with NO inline derivation whose chunk has a non-tail
+    // named call re-lowers its OWN body (same chunk, frame and checkpoint) with the
+    // inline fast-frame emission, on the same deferred channel. The chunk scan runs once
+    // per arm (`xcall_wanted` is a OnceLock); `dbg_name` is required because the swap
+    // re-points this process's fast links by callee name.
+    let xcall_relower = arm.inline_name.is_none()
+        && arm.leaf.is_none()
+        && arm.dbg_name.is_some()
+        && super::xcall_relower_enabled()
+        && *arm.xcall_wanted.get_or_init(|| {
+            arm.chunk.as_ref().is_some_and(|c| {
+                c.code.iter().any(|inst| {
+                    matches!(
+                        inst,
+                        Inst::Call {
+                            tail: false,
+                            head: Some(_),
+                            ..
+                        }
+                    )
+                })
+            })
+        });
+    if (arm.inline_name.is_some() || xcall_relower)
         && !arm.inline_installed.load(Acquire)
         && !ActiveBackend::declines_inline_upgrade(arm)
     {
@@ -2251,7 +2340,7 @@ pub(crate) fn jit_tier_in_frame(
             // branch below swaps it in with OUR (deterministic, identical) `inline_nslots`.
             // This is what lets a short parallel fan-out (`pfib`) pick up the inlined win —
             // one compile serves every process instead of each racing its own to completion.
-            if let Some(key) = arm.share_key {
+            if let Some(key) = arm.share_key.filter(|_| arm.inline_name.is_some()) {
                 if let Some((ptr, epoch)) = heap.jit_inline_lookup(key) {
                     if epoch == heap.global_epoch()
                         && !ptr.is_null()
@@ -2291,6 +2380,37 @@ pub(crate) fn jit_tier_in_frame(
                 }
             }
         } else if ic != crate::jit::BAILED && ic != crate::jit::QUEUED {
+            if xcall_relower {
+                // The re-lowered body is ready — a PLAIN pointer swap: same chunk, same
+                // frame size, same checkpoint, so none of the inlined swap's machinery
+                // applies. `inline_installed` stays false (frame sizing stays `nslots`,
+                // which both codes want), and the staging slot is nulled FIRST so
+                // `frame_size_for_code` can never match the new pointer against
+                // `inline_nslots` mid-swap (which is floored to `nslots` anyway — belt
+                // and braces). A peer's stale FastLink (old pointer + `nslots`) stays a
+                // self-consistent snapshot — the old code remains correct, just thinner —
+                // so only this process's links are re-pointed. `inline_queued` stays
+                // true, which is the once-per-epoch latch against re-enqueueing.
+                arm.inline_code.store(std::ptr::null_mut(), Release);
+                arm.jit_code.store(ic, Release);
+                if let Some(sym) = arm.dbg_name {
+                    heap.invalidate_fast_links_for(sym);
+                }
+                {
+                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                        let name = arm
+                            .dbg_name
+                            .map(crate::core::value::symbol_name_ref)
+                            .unwrap_or("<closure>");
+                        eprintln!(
+                            "[jit-ir] arm={name} xcall-relower-installed nslots={}",
+                            arm.nslots
+                        );
+                    }
+                }
+                return None; // one VM activation across the swap, like the inlined path
+            }
             // The inlined upgrade is ready — swap it in. Store `inline_installed` BEFORE
             // `jit_code` so that any reader which Acquire-loads `jit_code = inline_code` is
             // guaranteed (by the Release-Acquire chain) to also see `inline_installed = true`

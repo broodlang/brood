@@ -1976,6 +1976,8 @@ fn compile_arm(
                                     #[cfg(feature = "jit")]
                                     inline_installed: std::sync::atomic::AtomicBool::new(false),
                                     #[cfg(feature = "jit")]
+                                    xcall_wanted: std::sync::OnceLock::new(),
+                                    #[cfg(feature = "jit")]
                                     leaf: None,
                                 };
                                 // Load-bearing for the deopt-resume swap in `vm_run_bc`,
@@ -2062,17 +2064,18 @@ fn compile_arm(
         // The leaf path has already applied this floor (its resume arm must agree with
         // the frame size), so `max` is idempotent there.
         #[cfg(feature = "jit")]
-        inline_nslots: if inline_name.is_some() {
-            inline_nslots.max(nslots_total)
-        } else {
-            inline_nslots
-        },
+        // Floored to the frame size even with NO derivation: the xcall re-lowering
+        // (same body, same frame) parks its compiled pointer in `inline_code`, and a
+        // racing `frame_size_for_code` that matches it must answer `nslots`, not 0.
+        inline_nslots: inline_nslots.max(nslots_total),
         #[cfg(feature = "jit")]
         inline_code: AtomicPtr::new(std::ptr::null_mut()),
         #[cfg(feature = "jit")]
         inline_queued: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "jit")]
+        xcall_wanted: std::sync::OnceLock::new(),
         #[cfg(feature = "jit")]
         leaf,
     })
@@ -3036,6 +3039,8 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 #[cfg(feature = "jit")]
                 inline_installed: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "jit")]
+                xcall_wanted: std::sync::OnceLock::new(),
+                #[cfg(feature = "jit")]
                 leaf: None,
             });
             let arm_slot = if arm.has_runtime_handles {
@@ -3108,7 +3113,10 @@ use jit_plan::{jit_ckpt_depth, jit_spill_reserve};
 #[cfg(feature = "jit")]
 mod jit_lower;
 #[cfg(feature = "jit")]
-pub(crate) use jit_lower::{jit_lower_arm, jit_lower_inlined_arm, take_mid_emit_reason};
+pub(crate) use jit_lower::{
+    jit_lower_arm, jit_lower_arm_hot, jit_lower_inlined_arm, take_mid_emit_reason,
+    xcall_relower_enabled,
+};
 // Reached by `jit::cranelift`'s `JitBackend` tiering advisories, which is the only way the
 // tiering glue is allowed to ask "have I demoted this fn off the register worker?" — it used to
 // call straight into the Cranelift backend's i64 submodule (ADR-221's one remaining hole).
