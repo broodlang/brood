@@ -561,7 +561,8 @@
 
 ;; Every occurrence of `needle`, by char index — one `index-of` per hit with a rising
 ;; `from`, which is the shape whose conversion cost the index removes.
-(defn- mb-scan (s needle i acc)
+(defn- mb-scan
+  (s needle i acc)
   (let (j (index-of s needle i))
     (if (< j 0) (reverse acc) (mb-scan s needle (inc j) (cons j acc)))))
 

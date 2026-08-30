@@ -352,7 +352,7 @@ is unspecified — sort by `:id` (or `:reductions` to find the busiest)
 if you need stability."
   {:processes (process-infos)})
 
-(defn proc/info-tool (args)
+(defn process-info-tool (args)
   "`proc/info` — the full stat map for a single process by `:id` (an
 integer from a `processes` listing). Returns the `(proc/info pid)`
 map (`{:id :pid :node :name :status :mailbox :memory :collections
@@ -713,7 +713,7 @@ Brood pattern, `std/tool/explain.blsp`)."
               :properties {:id {:type "integer"
                                 :description "The numeric process id (as shown in `processes`)"}}
               :required ["id"]}
-     :handler proc/info-tool}
+     :handler process-info-tool}
     {:name "node"
      :description "Runtime-wide stats (the observer's header): node name, scheduler worker count, peak concurrency, total spawned, current live-process count, current/peak memory, connected peers. Returns {:node :workers :peak-threads :spawned :process-count :mem-bytes :mem-peak :peers}."
      :schema {:type "object" :properties {}}
