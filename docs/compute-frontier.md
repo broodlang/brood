@@ -1174,7 +1174,21 @@ sizes; **LBR for call graphs** — fp unwinding through JIT frames produces garb
 reported `set_ic_bases` calling `memmove`), not inferred from an older table. The ephemeral
 copy in `handoff.md` points here.
 
-### 7.1 The `call-mediated-boxed` bail class — a row's own hot arm interpreted forever
+### 7.1 The `call-mediated-boxed` bail class — CLOSED 2026-08-31: correctly rejected, three ways
+
+> **Verdict: the gate's cost model is right, and this section is no longer a lead.** Three
+> independent experiments admitted these arms to native and every one lost: (1) step 2's
+> full-blob admission (below — every row regressed); (2) hot ADMISSION (`BROOD_XADMIT=1`):
+> gate-refused arms compiled at the deferred stage with the §7.5 inline call blob and the
+> frame cap — nqueens +5.6%/+7.6% instr/cycles, pipeline +7.4%/+7.6%, the two intended
+> winners; while (3) the hot RE-LOWERING of gate-PASSING arms (§7.5 increment 3) won
+> bintree −13%. The discriminator is the gate itself: a call-dominated boxed arm is better
+> interpreted even on the cheapest native call path built so far. Re-test (one env var,
+> `BROOD_XADMIT=1`) when §7.5 increment 4 — the X-register convention — changes what a
+> native call costs; until then, partial lowering for this class is a dead end and is not
+> planned.
+
+**The original entry (kept for the record):** a row's own hot arm interpreted forever
 
 `nqueens`' `solve` bails with `call-mediated-boxed`
 (`Local Local MakeClosure Const GlobalIc Call Call` — it builds a closure and hands it to a
