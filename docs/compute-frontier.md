@@ -1372,6 +1372,47 @@ the existing epoch/identity guard — the full X-register convention. Multi-sess
 groundwork (`JitArmFn`, the `out` pointer, `Frame::out_ptr`) is the first third; what remains
 is the env/IC-bases install and depth/limit bookkeeping moving into emitted code.
 
+**Scoped 2026-08-30 — and re-ordered AHEAD of §7.1's partial lowering.** The step-2
+rejection is evidence about §7.1's thesis, not just its experiment: a fully-lowered
+call-mediated arm lost on every row *because the native call boundary costs more than VM
+dispatch* — and partial lowering crosses the same boundary per iteration. The nqueens flat
+profile confirms the asymmetry: with the VM driving and native leaves below
+(`brood_jit_arm_50` 11.2%), the VM→native boundary (`jit_run_fast_link`) is 1.1% — while
+`bintree`, where natives call natives, pays ~20% + 13% in the same pair. So the boundary,
+not the lowering coverage, is the frontier: **fix §7.5 first, then re-measure whether
+§7.1's class is even still a class.**
+
+The per-call ceremony (read `jit_run_fast_link` top to bottom) is ~30–40 instructions of
+field save/restore (jit_call_env, jit_dbg_fn, jit_native_depth, jit_force_vm, the two IC
+bases, the gateway seq, the latch compare) plus two Vec len adjustments and 2–3 Rust
+frames. Checked for cheap deletions 2026-08-30: none left — `root_env` already inlines the
+GLOBAL/PRELUDE case (no push for a named defn's env), the IC bases cannot be baked into
+the native code (shared arms, per-process IC blocks — ADR-215), and §2i already showed the
+cost does not decompose. Only wholesale inlining deletes it, and inlining the frame-extent
+management needs the roots length at a fixed offset — a `Vec<Value>`'s (ptr,len,cap) has
+no stable layout.
+
+The increment ladder:
+1. **`RootsBuf` groundwork** (no behavior change): replace `Heap.roots`' `Vec<Value>`
+   with a `#[repr(C)]` buffer — Box-owned storage, a (ptr,len,cap) header at fixed
+   offsets — so emitted code can read/write the frame extent directly. Contained: ~33
+   direct `.roots` touches, all but two in `gc.rs`, which already manipulates the buffer
+   raw (`set_len`/`as_mut_ptr`/`write_bytes`). Validate under `BROOD_GC_STRESS` +
+   `BROOD_GC_VERIFY` + the full suite; measure flat (it must be).
+2. **Inline the Brood fast-frame hit path** behind `BROOD_XCALL=1` (the BROOD_MONO/MKCLO
+   pattern): in `emit_call`'s `brood_blk`, guard `FastLink.env == GLOBAL` (the named-defn
+   case; other envs keep the callback), then emit the ceremony as direct stores at
+   `Heap` field offsets, the frame window (truncate + nil-extend) against the RootsBuf
+   header with a cold-grow callback, the indirect call to `code`, restores, and the
+   status branch. Debug builds and `BROOD_JIT_VERIFY` keep the callback path (they hook
+   the staged-arg scans there).
+3. Sweep the seven rows (± pinned, short + long, image `:live` both arms) and flip the
+   default; delete the callback path's now-dead half if the sweep holds.
+4. **Register args** for int-typed cross-arm calls — extend the i64 worker's convention
+   (args/results in registers, no roots staging) to non-self calls behind the same
+   epoch/identity guard. This is where the multiplier lives (the worker measured ~5× on
+   self-recursion); everything above is the substrate that makes it expressible.
+
 ### 7.6 Cheap curiosity: `grow_one<TraceFrame>` at ~3% of `bintree` — ANSWERED 2026-08-30: a folded symbol, not an error trace
 
 > **The name was a lie told by the linker.** Identical-code-folding merges same-layout
