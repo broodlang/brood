@@ -72,6 +72,10 @@ pub(super) struct Funcs {
     /// The [`crate::jit::JitArmFn`] signature `(heap, base, out) -> outcome`, for the
     /// inline path's `call_indirect` straight into a callee's native code.
     pub armfn_sig: cranelift_codegen::ir::SigRef,
+    /// Emit the inline fast-frame path in THIS lowering (§7.5): the flag is armed and
+    /// this body is one whose compile cost is already deferred (the inlined upgrade) —
+    /// the small first body keeps the callback so short runs never pay the fatter IR.
+    pub xcall: bool,
     /// `brood_rt_gc_safepoint` / `brood_rt_tick_n` — the self-loop back-edge callbacks.
     pub sp: FuncRef,
     pub tickn: FuncRef,
