@@ -7628,3 +7628,45 @@ exposed it rather than caused it. Scheduler-liveness class (KI-1 family), gets i
 session. Until then the router follows the BROOD_MKCLO pattern: `BROOD_TW_REENTRY=1`
 opt-in, its measured wins (60×/startup −6.9%) parked behind the flag, the full breakage
 suite green either way.
+
+### 2026-08-30, sixth — call-site specialization for named callbacks, and the two ways it nearly did not ship
+
+The checker's `(reduce step '() xs)` read as `any` when `step` was a *named* same-file
+function while the same body inline (`(fn (acc v) (conj acc …))`) typed precisely: an
+inline lambda is re-typed under what the combinator hands over, a name was looked up
+flat, and `step`'s flat signature is `(any string -> any)` because nothing in its body
+constrains `acc`. Now a call — direct or through `map`/`reduce`/`filter` — whose flat
+return is `any` **re-types the callee's arms under the call's argument types**
+(`sigs::specialized_ret`), from the same-file `(fn …)` form or the un-expanded clauses of
+a pattern-dispatched `defn` (recorded before Pass 2.8's fixpoint so a caller typed inside
+it finds them), or a loaded closure's arms. `calc : (string -> (or nil number))` through
+a three-clause tokenizer; a pass-through `wrap` answers `int` at `(wrap 3)`. A
+self-recursive body is declined (its first base case is not its result — `sum-acc`
+specialized to `0`), a lexical local is never a callee, a variadic arm is skipped, and
+`nest check` over `std/` + `tests/` stays at zero.
+
+The session that built it crashed (signal 9) mid-edit, and the resumed tree had three
+faults worth recording:
+
+- **A memoized `None` that outlived its truth.** The first `(step …)` call is typed
+  before Pass 2.8 records `step`'s form; `fixed_arms_of` answers `None`, and that was
+  memoized as "a fact about the image". For a same-file name it is a fact about the
+  *moment*. Memoize it for builtins and unknown names only.
+- **A frame-size overflow the depth cap could not see.** `expr_ty` caps its recursion at
+  128 but never grew the stack itself; the fatter frame overflowed the walker's 1 MB
+  stacker segment at exactly 128 — `checker_survives_pathologically_deep_forms` aborted.
+  `expr_ty` now `maybe_grow`s, so the cap is the only limit.
+- **Exponential re-typing.** Two shapes. The `(:use io)` header of a two-line file made
+  **933k** specializations of `require-one`: a guard refusal (name in flight, depth cap)
+  has no answer to memoize and the walker re-asks at every enclosing level — a per-file
+  **fuel** (20k arm re-typings) bounds it, and a call site checks fuel/guards *before*
+  typing its operands. Then `tests/maps_test.blsp` went 0.15 s → 7.7 s (15 M `expr_ty`
+  calls): `expr_ty` of an `any`-returning call used to return at once, and now walked the
+  call's whole subtree, under a walker that asks at every level. Nested operand typing
+  for specialization is bounded to one level (`(f (g x))` specializes both, `h` in
+  `(f (g (h x)))` stays flat): `json` 0.28 s, `maps_test` 0.21 s, `buffer` 0.94 s.
+
+The lesson for the next inference feature: `expr_ty` is asked O(depth) times per node,
+so anything that turns it from shallow to deep for a common form multiplies by the
+file's nesting — measure `nest check` on `tests/maps_test.blsp` and `std/editor/buffer.blsp`
+with `BROOD_NO_CHECK_CACHE=1` before and after, not only the unit tests.

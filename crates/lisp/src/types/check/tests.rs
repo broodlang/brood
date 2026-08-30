@@ -6375,6 +6375,99 @@ fn file_signatures_covers_guarded_clauses_and_skips_non_functions() {
 }
 
 #[test]
+fn file_signatures_reads_pattern_clauses() {
+    // A PATTERN-dispatched multi-clause `defn` lowers to one variadic `fn` over `match*`,
+    // which used to read as an arity-0 `(-> any)`; the un-expanded clauses say what each
+    // position admits (a non-empty list pattern is `pair`, a literal its own type) and
+    // the position-wise union over the arms is the signature a reader sees.
+    let sigs = signatures(
+        "(defn token
+           (((x y & acc) \"+\") (conj acc (+ y x)))
+           (((x y & acc) \"-\") (conj acc (- y x)))
+           ((acc val) (conj acc (string/->number val))))",
+    );
+    assert_eq!(sigs.len(), 1, "{sigs:?}");
+    assert_eq!(sigs[0].1, "(any, string) -> any", "{sigs:?}");
+    // Two arms that agree on a position keep it: a literal head pins its type. The return
+    // stays `any` — `(conj acc …)` over an unconstrained `acc` says nothing flat; it is the
+    // call-site specialization test below that types it from what a combinator hands over.
+    let sigs = signatures("(defn op ((acc \"+\") (conj acc 1)) ((acc \"-\") (conj acc 2)))");
+    assert_eq!(sigs[0].1, "(any, string) -> any", "{sigs:?}");
+}
+
+#[test]
+fn a_named_same_file_callback_flows_its_result_under_the_combinators_inputs() {
+    // The reducer's own signature is `(any string -> any)` — nothing in its body
+    // constrains `acc` — so its flat return said nothing. `reduce` knows the accumulator
+    // it hands over (`'()`), and re-typing the body under that (call-site specialization,
+    // what an inline `fn` always got) makes the fold precise.
+    let sigs = signatures(
+        "(defn step (acc val) (conj acc (string/->number val)))
+         (defn run (xs) (first (reduce step '() xs)))",
+    );
+    let run = sigs.iter().find(|s| s.0 == "run").expect("run");
+    assert_eq!(run.1, "(seqable) -> nil | number", "{sigs:?}");
+    // …and through a pattern-dispatched reducer, whose arms are chosen per input: the
+    // list-pattern arms cannot admit the empty accumulator, the plain one can.
+    let sigs = signatures(
+        "(defn token
+           (((x y & acc) \"+\") (conj acc (+ y x)))
+           ((acc val) (conj acc (string/->number val))))
+         (defn calc (input) (first (reduce token '() (string/split input \" \"))))",
+    );
+    let calc = sigs.iter().find(|s| s.0 == "calc").expect("calc");
+    assert_eq!(calc.1, "(string) -> nil | number", "{sigs:?}");
+    // `map` with a named callback flows its return the same way.
+    let sigs = signatures(
+        "(defn g (v) (string/->number v))
+(defn h (xs) (first (map g xs)))",
+    );
+    let h = sigs.iter().find(|s| s.0 == "h").expect("h");
+    assert_eq!(h.1, "(seqable) -> nil | number", "{sigs:?}");
+}
+
+#[test]
+fn a_pass_through_parameter_specializes_at_the_call_site() {
+    // `wrap` is `(any -> any)` on its own; a call hands it an int and gets one back.
+    let sigs = signatures(
+        "(defn wrap (x) (io/puts x) x)
+(defn w () (wrap 3))",
+    );
+    let w = sigs.iter().find(|s| s.0 == "w").expect("w");
+    assert_eq!(w.1, "() -> 3", "{sigs:?}");
+}
+
+#[test]
+fn a_declared_callback_signature_is_honoured_by_the_combinators() {
+    // A `(sig …)` on the callback used to buy nothing under `map`: the callback path
+    // consulted only the loaded image. The same-file declaration is authoritative.
+    let sigs = signatures(
+        "(sig g (string -> int))
+(defn g (v) (string/length v))
+         (defn h (xs) (first (map g xs)))",
+    );
+    let h = sigs.iter().find(|s| s.0 == "h").expect("h");
+    assert_eq!(h.1, "(seqable) -> nil | int", "{sigs:?}");
+}
+
+#[test]
+fn specialization_declines_a_lexical_local_callback_and_a_variadic_arm() {
+    // A `let`-bound callback is not the global of that name (the guard rails
+    // `reduce_fold_bail_when_init_or_callback_unknown` pins), and a variadic arm has no
+    // positional binding to specialize under — both stay flat.
+    let sigs = signatures(
+        "(defn step (acc val) (conj acc val))
+         (defn run (xs) (let (step (fn (a v) a)) (reduce step '() xs)))
+         (defn vstep (acc & vals) (conj acc (count vals)))
+         (defn vrun (xs) (reduce vstep '() xs))",
+    );
+    let run = sigs.iter().find(|s| s.0 == "run").expect("run");
+    assert!(!run.1.contains("list"), "{sigs:?}");
+    let vrun = sigs.iter().find(|s| s.0 == "vrun").expect("vrun");
+    assert!(vrun.1.ends_with("-> any"), "{sigs:?}");
+}
+
+#[test]
 fn file_signatures_costs_nothing_when_unarmed() {
     // The capture is a no-op on the ordinary checking path — pinned because it runs
     // inside `check_file`, which every diagnostic request goes through.
