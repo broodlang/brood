@@ -27,10 +27,35 @@
 //! under a future tree, these tests arm themselves and the phase-2 assertions bite; the
 //! `42` round-trip assertions check parked-receive correctness either way.
 
+use brood::eval::compile::{tier_ceiling, Tier};
 use brood::{process, Interp};
+
+/// True when this run can never observe a dirty block, so the phase-1 hunt is pointless.
+///
+/// A dirty block is a park under a NATIVE frame; with the ceiling below [`Tier::Native`]
+/// (`BROOD_TIER=0|1`, `BROOD_VM=0`, `BROOD_NO_JIT=1`) no arm ever lowers, so phase 1's
+/// forty rounds — a 150 ms sleep plus a 50 000-iteration re-heat each — can only walk to
+/// the vacuous exit the long way. On the tree-walker that walk is the whole 120 s nextest
+/// budget: the `BROOD_VM=0` differential job timed out on this file from 2026-08-30 06:57Z
+/// until this guard, while the same test passed vacuously in the default job. Asks the
+/// runtime rather than the environment (the ceiling has three spellings — see
+/// `tier_ceiling`).
+fn ceiling_below_native() -> bool {
+    if tier_ceiling() < Tier::Native {
+        eprintln!(
+            "jit_suspend_latch: tier ceiling is {:?} — nothing can lower; vacuous",
+            tier_ceiling()
+        );
+        return true;
+    }
+    false
+}
 
 #[test]
 fn an_arm_hosting_a_parked_receive_latches_and_later_parks_capture() {
+    if ceiling_below_native() {
+        return;
+    }
     let mut interp = Interp::new();
     let setup = r#"
         (def root (self))
@@ -117,6 +142,9 @@ fn an_arm_hosting_a_parked_receive_latches_and_later_parks_capture() {
 /// still dirty.
 #[test]
 fn a_long_lived_process_sheds_its_stale_fast_link_after_the_latch() {
+    if ceiling_below_native() {
+        return;
+    }
     let mut interp = Interp::new();
     let setup = r#"
         (def root (self))

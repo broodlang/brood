@@ -7458,3 +7458,33 @@ Two things fell out of it:
   it, because `nest check` could no longer load what it imported. **`nest format --check`
   names the unparseable file; `nest check` blames the innocent one.** Reach for the formatter
   first when warnings appear in a file you did not touch.
+
+### 2026-08-30, later still — v0.19.1, and the tree-walker differential job that had been red since 06:57Z
+
+**v0.19.1 tagged** (type-guard signatures ADR-301, `not=` deprecated ADR-300, the ADR-283
+meta seam reaching prelude names, 218 sigs below their definitions). Installed, tooling
+re-dropped across the seventeen siblings, hive re-pinned to `e238a884`.
+
+**Then the CI check the release recipe asks for** (`make green`, not the run list) found the
+tree-walker differential job red on every completed run since `fe0a1494` — six in a row, all
+the same line: `TIMEOUT [120s] brood::jit_suspend_latch
+an_arm_hosting_a_parked_receive_latches_and_later_parks_capture`. Not visible from the run
+list, where every one of those runs was also cancelled-or-superseded by the next push.
+
+The cause is in the test's own module doc: it is **vacuous by default** today (the shapes it
+builds no longer lower), and it discovers that the slow way — forty phase-1 rounds of a 150 ms
+sleep plus a 50 000-iteration re-heat, before printing "nothing tiered; vacuous". On the VM
+that walk is ~8 s; on the tree-walker it measured **42.8 s here** and past 120 s on the CI
+runner. It went red when the strict-over-std sweep landed, which added enough prelude work to
+push the runner over the cap — the sweep did not break anything, it moved a test that was
+already spending its whole budget on a foregone conclusion.
+
+Fix: both tests ask `eval::compile::tier_ceiling()` first and exit vacuous when it is below
+`Native` — under that ceiling no arm can lower, so a dirty block is impossible by
+construction and the hunt has nothing to find. 0.006 s on the tree-walker now; the default
+run is unchanged (8.5 s, still walking to its own vacuous exit, which is the point of the
+test remaining armed). Asks the runtime, not the environment: the ceiling has three spellings.
+
+Also confirmed on the way: the two other failures in that window were the mangled
+multi-line sigs (`image_matches_source` parse error at line 852, the suite's "failed to
+load") — fixed by the sweep — and one `observe_attach` KI-38 listen stall at 20 s.
