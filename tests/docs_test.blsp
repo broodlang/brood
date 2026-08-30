@@ -171,7 +171,8 @@
 ;; The namespaces the catalogue covers, read off the catalogue itself: every entry's
 ;; qualifier. Derived rather than listed so the gate follows the file — the first
 ;; `table/…` entry someone adds opts the whole `table/` namespace into the check.
-(defn- doc-catalog-prefixes ()
+(defn- doc-catalog-prefixes
+  ()
   (into #{}
     (seq/keep (fn (k)
                 (let (i (string/last-index-of k "/"))
