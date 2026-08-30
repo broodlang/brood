@@ -61,10 +61,10 @@
 
   (test "prose, delimiters and region COUNT all do"
     (let (a boxed)
-      (is (not= (skeleton a (boxes a))
-            (let (b (string/replace a "prose" "PROSE")) (skeleton b (boxes b)))))
-      (is (not= (skeleton a (boxes a))
-            (let (b (string/replace a ">>>\ntail" ">>>x\ntail")) (skeleton b (boxes b)))))))
+      (is (not (= (skeleton a (boxes a))
+                 (let (b (string/replace a "prose" "PROSE")) (skeleton b (boxes b))))))
+      (is (not (= (skeleton a (boxes a))
+                 (let (b (string/replace a ">>>\ntail" ">>>x\ntail")) (skeleton b (boxes b))))))))
 
   (test "no regions: the skeleton is the whole text"
     (assert= (skeleton "abc" ()) "abc")))

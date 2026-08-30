@@ -24,49 +24,6 @@
 ;; 4k/16k/64k chars: ASCII 6/7/27 ms (ratios 1.16, 3.85) vs non-ASCII 2/21/242 ms (10.50,
 ;; 11.52). Either way the rope/buffer engine (M2) is still the home for large-text editing.
 
-(defn- %index-of-seq-from
-  (coll x i from)
-  ;; scan from the head; only start matching once the running index reaches `from`
-  (cond
-    (empty? coll) -1
-    (and (>= i from) (= (first coll) x)) i
-    else (%index-of-seq-from (rest coll) x (inc i) from)))
-(defn index-of (coll x &optional from)
-  "The 0-based index of `x` in `coll` at or after `from` (default 0), or -1 if absent.
-For a string, `x` is a substring (multi-char ok; the empty string matches at `from`);
-for a list or vector, `x` is an element compared structurally. The `from` offset is
-what incremental search rides on (formerly the separate `index-of`).
-
-    (index-of \"hello\" \"ll\")     → 2
-    (index-of \"hello\" \"zz\")     → -1
-    (index-of [:a :b :c] :b)     → 1
-    (index-of \"abab\" \"ab\" 1)    → 2   ; search resumes at `from`"
-  (let (start (or from 0))
-    (cond
-      ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood
-      ;; scan would be O(n²) (char indexing is O(index)), which is too slow for
-      ;; whole-namespace `doc-search`/`apropos` use. The `from` offset goes to the
-      ;; primitive, which searches in place. It used to be `(%str-index-of (string/substring
-      ;; coll s0 n) x)` — which COPIED the suffix on every call, so the incremental
-      ;; search this offset exists for was itself quadratic. `last-index-of` is where that
-      ;; measurably mattered (540 ms → 1 ms at 6400 matches); `fuzzy-next` also calls it
-      ;; per query char per candidate, but making the scan cheap barely moved ranking —
-      ;; see the note there before assuming this is anyone's bottleneck. The empty needle
-      ;; still matches at `from`, and a `from` past the end still finds nothing.
-      (string? coll) (%str-index-of coll x (%max 0 start))
-      else (%index-of-seq-from coll x 0 start))))
-
-(defn includes? (coll x)
-  "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), and maps (membership among values — use `contains?` for keys).
-
-    (includes? [1 2 3] 2)         → true
-    (includes? \"hello\" \"ell\")     → true
-    (includes? {:a 1} 1)          → true    ; VALUES, not keys
-    (includes? {:a 1} :a)         → false   ; use contains? for that"
-  (cond
-    (map? coll) (includes? (vals coll) x)
-    else (>= (index-of coll x) 0)))
-
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
 ;; recursively, reversed), then build the string in one `apply str` pass.
 
@@ -90,10 +47,10 @@ what incremental search rides on (formerly the separate `index-of`).
 ;;
 ;; Index of the last `/` in `s`, scanning down from `i`, or -1 if none. (Brood has
 ;; no char accessor yet; paths are short, so a substring scan is fine.)
-(sig %path-last-slash (string int -> int))
 (defn- %path-last-slash
   (s i)
   (cond (< i 0) -1 (= (string/substring s i (inc i)) "/") i else (%path-last-slash s (dec i))))
+(sig %path-last-slash (string int -> int))
 
 ;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
 ;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.

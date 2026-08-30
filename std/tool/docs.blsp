@@ -48,12 +48,12 @@ module's namespace-rooted globals (ADR-070) back to it."
       else nil)))
 
 ;; The bare module title from a file path: "a/b/foo.blsp" -> "foo".
-(sig docs-basename (string -> string))
 (defn- docs-basename
   (path)
   (let (i (%path-last-slash path (dec (string/length path)))
         file (if (< i 0) path (string/substring path (inc i) (string/length path))))
     (if (string/ends-with? file ".blsp") (string/substring file 0 (- (string/length file) 5)) file)))
+(sig docs-basename (string -> string))
 
 ;; --- which names a module defines (global-table delta) -----------------------
 

@@ -60,8 +60,8 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
 (defdyn *resolver-max-steps* 2000000)
 
 ;; The step counter, read as the int it is — `table/get` itself types as `any`.
-(sig resolver-step-count (table -> int))
 (defn- resolver-step-count (steps) (table/get steps :n 0))
+(sig resolver-step-count (table -> int))
 
 (defn- resolver-tick
   (ctx)

@@ -36,6 +36,13 @@
     (assert= (docs/docs-basename "foo.blsp") "foo")
     (assert= (docs/docs-basename "foo") "foo")))
 
+;; Fixtures for the deprecated-heading case. Top level, not inside a test body: `(meta …)`
+;; resolves its name the way a `def` head does, so written in a body it would key off
+;; whatever namespace is current there rather than this module's.
+(defn doc-kept (x) "The new way." x)
+(defn doc-gone (x) "The old way." x)
+(meta doc-gone :deprecated "0.19.0" :use 'doc-kept)
+
 (describe "docs: rendering one definition"
   (test "a documented function renders its signature and docstring"
     (defn doc-squared (x) "Return x times itself." (* x x))
@@ -46,7 +53,17 @@
     (assert= (docs/docs-entry 'doc-inc! doc-inc!) "### `(doc-inc! x)`  *(macro)*\n\nAdd one.\n"))
   (test "an undocumented function gets a placeholder"
     (defn doc-bare (x) (* x x))
-    (assert= (docs/docs-entry 'doc-bare doc-bare) "### `(doc-bare x)`\n\n_Undocumented._\n")))
+    (assert= (docs/docs-entry 'doc-bare doc-bare) "### `(doc-bare x)`\n\n_Undocumented._\n"))
+  (test "a deprecated definition is STRUCK THROUGH, not merely annotated"
+    ;; The note tells a reader who already opened the entry; the strikethrough is what
+    ;; tells one who is skimming the module not to reach for the name at all.
+    (assert= (docs/docs-entry 'docs-test/doc-gone docs-test/doc-gone)
+      (str "### ~~`(docs-test/doc-gone x)`~~\n\n"
+        "> **Deprecated** since 0.19.0 — use `doc-kept` instead.\n\n" "`(any) -> any`\n\n"
+        "The old way.\n"))
+    ;; …and an ordinary name keeps its plain heading.
+    (assert= (docs/docs-entry 'docs-test/doc-kept docs-test/doc-kept)
+      "### `(docs-test/doc-kept x)`\n\n`(any) -> any`\n\nThe new way.\n")))
 
 (describe "docs: structured model (nest docs)"
   (test "docs-bare strips the module namespace to the last segment"

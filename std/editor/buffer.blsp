@@ -44,19 +44,19 @@ never the buffer itself. Drive it with `buffer-edit` / `buffer-query`."
 
 ;; ---- helpers ----------------------------------------------------------------
 
-(sig buffer-clamp (int int int -> int))
 (defn- buffer-clamp
   (lo hi x)
   "Clamp `x` into the inclusive range [lo, hi]."
   (math/max lo (math/min hi x)))
+(sig buffer-clamp (int int int -> int))
 
-(sig buffer-line-end-col (any int -> int))
 (defn- buffer-line-end-col
   (buf line)
   "The column at the end of `line` — its length excluding any trailing newline.
 Where `end-of-line` lands and the rightmost column point can hold on that line."
   (let (lt (text/line (get buf :rope) line))
     (if (string/ends-with? lt "\n") (dec (string/length lt)) (string/length lt))))
+(sig buffer-line-end-col (any int -> int))
 
 ;; ---- construction -----------------------------------------------------------
 ;;
@@ -147,23 +147,23 @@ unsaved buffer rather than erroring."
   "The 0-based line index that point is on."
   (text/char->line (get buf :rope) (get buf :point)))
 
-(sig buffer-column (buffer -> int))
 (defn buffer-column (buf)
   "The 0-based column of point — characters from the start of its line."
   (let (rope (get buf :rope))
     (- (get buf :point) (text/line->char rope (text/char->line rope (get buf :point))))))
+(sig buffer-column (buffer -> int))
 
-(sig buffer-char-after (buffer -> (or string nil)))
 (defn buffer-char-after (buf)
   "The single-character string just after point, or nil at end of buffer."
   (let (p (get buf :point))
     (if (< p (buffer-length buf)) (text/slice (get buf :rope) p (inc p)) nil)))
+(sig buffer-char-after (buffer -> (or string nil)))
 
-(sig buffer-char-before (buffer -> (or string nil)))
 (defn buffer-char-before (buf)
   "The single-character string just before point, or nil at start of buffer."
   (let (p (get buf :point))
     (if (> p 0) (text/slice (get buf :rope) (dec p) p) nil)))
+(sig buffer-char-before (buffer -> (or string nil)))
 
 (defn buffer-region-bounds (buf)
   "The region's char bounds as `[lo hi]` (lo ≤ hi, point and mark in either order),
@@ -185,15 +185,15 @@ or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
   "Point moved to char index `n`, clamped to [0, length]."
   (assoc buf :point (buffer-clamp 0 (buffer-length buf) n)))
 
-(sig forward-char (buffer &optional int -> buffer))
 (defn forward-char (buf &optional (n 1))
   "Point moved `n` characters forward (clamped)."
   (goto-char buf (+ (get buf :point) n)))
+(sig forward-char (buffer &optional int -> buffer))
 
-(sig backward-char (buffer &optional int -> buffer))
 (defn backward-char (buf &optional (n 1))
   "Point moved `n` characters backward (clamped)."
   (goto-char buf (- (get buf :point) n)))
+(sig backward-char (buffer &optional int -> buffer))
 
 (defn beginning-of-line (buf)
   "Point moved to the first character of its current line."
@@ -206,7 +206,6 @@ or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
         line (text/char->line rope (get buf :point)))
     (goto-char buf (+ (text/line->char rope line) (buffer-line-end-col buf line)))))
 
-(sig forward-line (buffer &optional int -> buffer))
 (defn forward-line (buf &optional (n 1))
   "Point moved `n` lines forward (negative = backward), keeping the column where
 the target line is long enough. Clamps to the buffer's line range."
@@ -217,11 +216,12 @@ the target line is long enough. Clamps to the buffer's line range."
                  (+ (text/char->line rope (get buf :point)) n))
         line-start (text/line->char rope target))
     (goto-char buf (+ line-start (math/min col (buffer-line-end-col buf target))))))
+(sig forward-line (buffer &optional int -> buffer))
 
-(sig backward-line (buffer &optional int -> buffer))
 (defn backward-line (buf &optional (n 1))
   "Point moved `n` lines backward (see `forward-line`)."
   (forward-line buf (- n)))
+(sig backward-line (buffer &optional int -> buffer))
 
 (defn beginning-of-buffer (buf) "Point moved to the start of the buffer." (goto-char buf 0))
 (defn end-of-buffer (buf)
@@ -250,19 +250,19 @@ line editor's M-f/M-b notion of a word."
          (= c ";")
          (= c ","))))
 
-(sig buffer-scan-fwd (string int int fn -> int))
 (defn- buffer-scan-fwd
   (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
   (if (or (>= i n) (not (pred (string/char-at text i)))) i (buffer-scan-fwd text (inc i) n pred)))
+(sig buffer-scan-fwd (string int int fn -> int))
 
-(sig buffer-scan-bwd (string int fn -> int))
 (defn- buffer-scan-bwd
   (text i pred)
   "Largest index ≤ `i` (down to 0) whose preceding char fails `pred` — retreat while `pred`."
   (if (or (<= i 0) (not (pred (string/char-at text (dec i)))))
     i
     (buffer-scan-bwd text (dec i) pred)))
+(sig buffer-scan-bwd (string int fn -> int))
 
 (defn forward-word (buf)
   "Point moved to the end of the next word forward (skip non-word chars, then the word)."
@@ -301,7 +301,6 @@ the line is blank or all whitespace."
   "True if buffer `line` is empty or whitespace-only (a paragraph separator)."
   (string/blank? (buffer-line-at buf line)))
 
-(sig buffer-scan-lines (any int int int bool -> int))
 (defn- buffer-scan-lines
   (buf line n step want-blank?)
   "First line index walking from `line` by `step` (±1, within `[0, n)`) whose
@@ -309,6 +308,7 @@ blankness differs from `want-blank?`; stops at the buffer edge."
   (if (or (< line 0) (>= line n) (not (= (buffer-line-blank? buf line) want-blank?)))
     line
     (buffer-scan-lines buf (+ line step) n step want-blank?)))
+(sig buffer-scan-lines (any int int int bool -> int))
 
 (defn forward-paragraph (buf)
   "Point moved to the start of the next blank line after the current paragraph (end of
@@ -344,7 +344,6 @@ buffer if none) — Emacs `forward-paragraph` (M-})."
 
 (defn- buffer-sentence-space? (c) (or (= c " ") (= c "\t") (= c "\n")))
 
-(sig buffer-sentence-closers-end (string int int -> int))
 (defn- buffer-sentence-closers-end
   (text i n)
   "Index past the run of closing quotes/brackets at `i` — what may sit between a
@@ -352,6 +351,7 @@ sentence's terminator and the whitespace after it (`he said \"stop.\"`)."
   (if (or (>= i n) (not (includes? buffer-sentence-closers (string/char-at text i))))
     i
     (buffer-sentence-closers-end text (inc i) n)))
+(sig buffer-sentence-closers-end (string int int -> int))
 
 (defn- buffer-sentence-end-at
   (text i n)
@@ -566,7 +566,6 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
 ;; Granularity is the LINE (that is the unit a line diff — and the user's "these
 ;; lines" — speaks in); a whole-buffer region reproduces a plain undo exactly.
 
-(sig undo-common-prefix (string string int -> int))
 (defn- undo-common-prefix
   (a b i)
   ;; how many leading chars `a` and `b` share — bounds the char diff to what changed
@@ -575,8 +574,8 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
         (not (= (string/char-at a i) (string/char-at b i))))
     i
     (undo-common-prefix a b (inc i))))
+(sig undo-common-prefix (string string int -> int))
 
-(sig undo-common-suffix (string string int int -> int))
 (defn- undo-common-suffix
   (a b lo k)
   ;; how many trailing chars they share, never eating into the shared prefix `lo`
@@ -586,6 +585,7 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
           (not (= (string/char-at a (- la k 1)) (string/char-at b (- lb k 1)))))
       k
       (undo-common-suffix a b lo (inc k)))))
+(sig undo-common-suffix (string string int int -> int))
 
 (def *undo-region-char-budget* 4000)
 ;; The largest changed SPAN (in chars) a region undo will diff character-by-character.
@@ -616,7 +616,6 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
         emit (if overlap dels adds))
     [(+ n na) (cons emit out)]))
 
-(sig undo-region-restore (string string int int -> string))
 (defn- undo-region-restore
   (old new lo hi)
   "The text you get by undoing, in `new`, only the changes (vs `old`) that OVERLAP the
@@ -659,6 +658,7 @@ the diff only ever runs over the span that actually changed."
               [n out hunk] r
               [_ out2] (undo-flush-chunk hunk n lo hi out))
           (str head (apply str (reverse out2)) tail)))))
+(sig undo-region-restore (string string int int -> string))
 
 (defn- undo-region-candidate
   (buf lo hi snaps depth)
@@ -1018,7 +1018,6 @@ insertion point shift with the text. Throws if `buf` is read-only."
         (string/length s)))))
 (sig insert (any string -> any))
 
-(sig delete-char (buffer &optional int -> buffer))
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
 no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
@@ -1034,8 +1033,8 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
                                                          :mark nil)
                                   :delete p end)
           :delete p end)))))
+(sig delete-char (buffer &optional int -> buffer))
 
-(sig delete-backward-char (buffer &optional int -> buffer))
 (defn delete-backward-char (buf &optional (n 1))
   "Delete `n` characters *before* point (backspace); point moves back with it.
 Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-only."
@@ -1052,6 +1051,7 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
                                                          :mark nil)
                                   :delete start p)
           :delete start p)))))
+(sig delete-backward-char (buffer &optional int -> buffer))
 
 (defn delete-region (buf)
   "Delete the text between point and mark; point moves to the region start and
@@ -1075,13 +1075,13 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
                                       :delete lo hi)
               :delete lo hi)))))))
 
-(sig replace-region (buffer int int string -> buffer))
 (defn replace-region (buf start end s)
   "Replace the characters in `[start, end)` with string `s`, leaving point just after
 the inserted text. The splice primitive: completion-at-point, comment toggling,
 query-replace, re-indentation, and transpose are all this. Composes `delete-char` +
 `insert`, so range clamping and undo behave exactly as those do."
   (insert (delete-char (goto-char buf start) (- end start)) s))
+(sig replace-region (buffer int int string -> buffer))
 
 ;; ---- public marker API ------------------------------------------------------
 
@@ -1166,21 +1166,20 @@ line's start does **not** pull that trailing line in (Emacs's line-wise conventi
   ;; horizontal only: a newline is a line boundary, never whitespace to squeeze
   (or (= c " ") (= c "\t")))
 
-(sig buffer-ws-run-start (string int -> int))
 (defn- buffer-ws-run-start
   (txt i)
   (if (and (> i 0) (buffer-horizontal-space? (string/char-at txt (dec i))))
     (buffer-ws-run-start txt (dec i))
     i))
+(sig buffer-ws-run-start (string int -> int))
 
-(sig buffer-ws-run-end (string int int -> int))
 (defn- buffer-ws-run-end
   (txt i n)
   (if (and (< i n) (buffer-horizontal-space? (string/char-at txt i)))
     (buffer-ws-run-end txt (inc i) n)
     i))
+(sig buffer-ws-run-end (string int int -> int))
 
-(sig whitespace-run-at (buffer -> (tuple int int)))
 (defn whitespace-run-at (buf)
   "The span of spaces/tabs SURROUNDING point, as `[lo hi]` (`hi` exclusive; `[p p]` when
 point is not in or beside one). Scans both directions but never across a newline, so it
@@ -1193,6 +1192,7 @@ the original text out of it before touching anything."
   (let (txt (buffer-text buf)
         p (buffer-point buf))
     [(buffer-ws-run-start txt p) (buffer-ws-run-end txt p (string/length txt))]))
+(sig whitespace-run-at (buffer -> (tuple int int)))
 
 (defn collapse-whitespace (buf seq/keep)
   "The run of spaces/tabs SURROUNDING point replaced by `keep` — `\" \"` for Emacs's

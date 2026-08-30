@@ -2388,8 +2388,18 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   the bitwise primitives (`std/prelude.blsp`).
 
 ### Comparison & logic
-`=`  `not=`  `<`  `<=`  `>`  `>=`  `not`
+`=`  ~~`not=`~~  `<`  `<=`  `>`  `>=`  `not`
 
+- ~~`not=`~~ is **deprecated since 0.19.0 — write `(not (= a b))`.** It never bought a
+  capability, only a spelling: its definition *is* `(not (= a b))`, and no part of the
+  kernel, the compiler or the checker knows the name. It is also the slower of the two,
+  structurally — `=`'s body is a direct primitive call, so the ADR-069 thin-wrapper elision
+  collapses it, and `not`'s body is a leaf the inliner splices, while `not=`'s nested-call
+  body is reachable by neither and stays a boxed call (measured 1.65x native, 1.38x on the
+  VM, on a 5M-iteration loop). And its variadic reading misleads: `(not= 1 2 1)` is `true`
+  — `=` chains pairwise and `not=` negates the whole chain, so the name reads "pairwise
+  different" but means "not all equal". Every use is an *advisory* checker warning; the
+  name still works and nothing is gated by it.
 - `=` is structural and variadic (`(= 1 1 1)` → `true`). Numbers compare within
   their type (`(= 1 1.0)` is `false`); use `<`/`>` for cross-type numeric order.
   Integers compare exactly (no precision loss past 2^53), and floats compare by

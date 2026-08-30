@@ -25,7 +25,6 @@
 
 ;; ---- internal helpers -------------------------------------------------------
 
-(sig path-last-sep (string int -> int))
 (defn- path-last-sep
   (s i)
   (if (< i 0)
@@ -33,8 +32,8 @@
     (if (= (string/char-at s i) "/")
       i
       (path-last-sep s (- i 1)))))
+(sig path-last-sep (string int -> int))
 
-(sig path-last-dot (string int -> int))
 (defn- path-last-dot
   (s i)
   (if (< i 0)
@@ -42,6 +41,7 @@
     (if (= (string/char-at s i) ".")
       i
       (path-last-dot s (- i 1)))))
+(sig path-last-dot (string int -> int))
 
 ;; Join a non-empty list of components in order, inserting / between them.
 (defn- path-glue

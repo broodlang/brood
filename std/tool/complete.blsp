@@ -170,7 +170,6 @@ suggestions\", never to an error on the user's command line."
 ;; Scans for the literal `:tags` then takes what is between the following `[` and
 ;; `]`. A `:tags` inside a string or comment would be picked up — harmless, since
 ;; the worst case is one spurious suggestion.
-(sig complete-tags-in (string any int -> any))
 (defn- complete-tags-in
   (text acc from)
   (let (i (index-of-from text ":tags" from))
@@ -195,15 +194,16 @@ suggestions\", never to an error on the user's command line."
             (complete-tags-in text
               (append acc (complete-keywords (string/substring text (+ open 1) close)))
               (+ close 1)))))))
+(sig complete-tags-in (string any int -> any))
 
 ;; `index-of` has no start offset, so scan a suffix and re-base the result.
-(sig index-of-from (string string int -> int))
 (defn- index-of-from
   (text needle from)
   (if (>= from (string/length text))
     -1
     (let (i (index-of (string/substring text from (string/length text)) needle))
       (if (< i 0) -1 (+ from i)))))
+(sig index-of-from (string string int -> int))
 
 ;; Is index `i` inside a string literal? Checked within `i`'s own LINE, using native
 ;; string ops only (this runs per `:tags` occurrence, on a keypress budget).
@@ -212,16 +212,15 @@ suggestions\", never to an error on the user's command line."
 ;; which is exactly what this module's own tests are full of — was being harvested as
 ;; real tags, offering names like `a` and `unit` that no test actually carries. A
 ;; multi-line string could fool the line-local check; that costs one wrong hint.
-(sig complete-line-start (string int -> int))
 (defn- complete-line-start (text i) (complete-line-start-walk text i 0))
+(sig complete-line-start (string int -> int))
 
-(sig complete-line-start-walk (string int int -> int))
 (defn- complete-line-start-walk
   (text i at)
   (let (nl (index-of-from text "\n" at))
     (if (or (< nl 0) (>= nl i)) at (complete-line-start-walk text i (+ nl 1)))))
+(sig complete-line-start-walk (string int int -> int))
 
-(sig complete-in-string? (string int -> bool))
 (defn- complete-in-string?
   (text i)
   (let (prefix (string/substring text (complete-line-start text i) i)
@@ -229,6 +228,7 @@ suggestions\", never to an error on the user's command line."
         cleaned (string/replace prefix "\\\"" ""))
     ;; Odd number of quotes before the position ⇒ still inside one.
     (= 1 (math/rem (- (count (string/split cleaned "\"")) 1) 2))))
+(sig complete-in-string? (string int -> bool))
 (sig complete-in-string? (string int -> bool))
 
 ;; The bare names of the `:keyword`s in a whitespace-separated fragment.

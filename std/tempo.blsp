@@ -72,7 +72,6 @@ Adapted from Tempo (Kip Cole, Apache-2.0); see PORTING.md.")
 
 (defn- tp-unit? (u) (>= (tp-rank u) 0))
 
-(sig finer (keyword -> (or keyword nil)))
 
 (defn finer (u)
   "The unit one step finer than `u`, or nil when `u` is `:ms`. Throws when `u` is not a
@@ -83,8 +82,8 @@ time unit — nil means \"nothing finer\", never \"no such unit\".
   (let (r (tp-rank u))
     (when (< r 0) (error (str "tempo/finer: not a time unit: " (str u))))
     (if (< r 6) (nth unit-order (+ r 1)) nil)))
+(sig finer (keyword -> (or keyword nil)))
 
-(sig coarser (keyword -> (or keyword nil)))
 
 (defn coarser (u)
   "The unit one step coarser than `u`, or nil when `u` is `:year`. Throws when `u` is not a
@@ -92,6 +91,7 @@ time unit — nil means \"nothing coarser\", never \"no such unit\"."
   (let (r (tp-rank u))
     (when (< r 0) (error (str "tempo/coarser: not a time unit: " (str u))))
     (if (> r 0) (nth unit-order (- r 1)) nil)))
+(sig coarser (keyword -> (or keyword nil)))
 
 ;; Fixed-width units, in ms. Years and months are NOT here — they vary, and are
 ;; advanced by field arithmetic instead.
@@ -208,13 +208,13 @@ negative year emits a leading `-` and is not interchange-safe.
   (let (r (new m))
     (if (= (nth r 0) :ok) (nth r 1) (error (nth r 1)))))
 
-(sig resolution (map -> keyword))
 
 (defn resolution (t)
   "The finest unit present in `t` — the width of the span it denotes.
 
     (tempo/resolution (tempo/parse! \"2026-06\"))   → :month"
   (tempo-res t))
+(sig resolution (map -> keyword))
 
 (defn unit (t u)
   "The value of unit `u` in `t`, or nil when `t` is coarser than `u`. Throws when `u` is not
@@ -270,12 +270,12 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
     (every? (fn (i) (>= (index-of "0123456789" (string/char-at s i)) 0))
       (range 0 (string/length s)))))
 
-(sig tp-int ((or string nil) -> (or int nil)))
 
 (defn- tp-int
   (s)
   (let (n (if (string? s) (string/->number s) nil))
     (if (int? n) n nil)))
+(sig tp-int ((or string nil) -> (or int nil)))
 
 (defn- tp-frac->ms
   (frac)
@@ -283,7 +283,6 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
   (let (padded (str frac "000"))
     (tp-int (str (string/char-at padded 0) (string/char-at padded 1) (string/char-at padded 2)))))
 
-(sig tp-parse-date-parts (string -> (or map nil)))
 
 (defn- tp-parse-date-parts
   (s)
@@ -293,8 +292,8 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
       (let (y {:year (tp-int (nth parts 0))}
             ym (if (> (count parts) 1) (assoc y :month (tp-int (nth parts 1))) y))
         (if (> (count parts) 2) (assoc ym :day (tp-int (nth parts 2))) ym)))))
+(sig tp-parse-date-parts (string -> (or map nil)))
 
-(sig tp-parse-time-parts (string -> (or map nil)))
 
 (defn- tp-parse-time-parts
   (s)
@@ -314,6 +313,7 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
             hm (if (> (count parts) 1) (assoc h :minute (tp-int (nth parts 1))) h)
             hms-map (if (> (count parts) 2) (assoc hm :second (tp-int (nth parts 2))) hm))
         (if frac (assoc hms-map :ms (tp-frac->ms frac)) hms-map)))))
+(sig tp-parse-time-parts (string -> (or map nil)))
 
 (defn parse (s)
   "Parse an ISO 8601 value at any precision → `[:ok t]` or `[:error message]`.
@@ -359,15 +359,14 @@ worse.
 ;; \"1 July\" adjacent rather than overlapping, and why no `end-of-day` helper
 ;; appears anywhere in this module.
 
-(sig tp-field (map keyword int -> int))
 
 (defn- tp-field
   (m k default)
   ;; A unit of a validated tempo's unit map, which `tp-validate` has already
   ;; pinned to an int — this is where the checker learns that.
   (get m k default))
+(sig tp-field (map keyword int -> int))
 
-(sig tp-dt (int int int int int int int -> datetime))
 
 (defn- tp-dt
   (y mo d h mi s ms)
@@ -375,8 +374,8 @@ worse.
   ;; its fields with `get`, so a plain map would work — but relying on that
   ;; would make this module depend on an undocumented duck-typing contract.
   (datetime/datetime y mo d h mi s ms))
+(sig tp-dt (int int int int int int int -> datetime))
 
-(sig tp-floor-dt (map -> datetime))
 
 (defn- tp-floor-dt
   (t)
@@ -388,14 +387,14 @@ worse.
       (get m :minute 0)
       (get m :second 0)
       (get m :ms 0))))
+(sig tp-floor-dt (map -> datetime))
 
-(sig from-ms (map -> int))
 
 (defn from-ms (t)
   "The instant `t` opens, in Unix epoch milliseconds (inclusive)."
   (datetime/->epoch-ms (tp-floor-dt t)))
+(sig from-ms (map -> int))
 
-(sig to-ms (map -> int))
 
 (defn to-ms (t)
   "The instant `t` closes, in Unix epoch milliseconds (**exclusive**)."
@@ -410,6 +409,7 @@ worse.
           (datetime/->epoch-ms (tp-dt (+ y 1) 1 1 0 0 0 0))
           (datetime/->epoch-ms (tp-dt y (+ mo 1) 1 0 0 0 0)))
       else (+ (from-ms t) (tp-unit-ms u)))))
+(sig to-ms (map -> int))
 
 ;; The four types that span out of the box. A `date` is the day it names and a
 ;; `datetime` the millisecond it names — exactly the reading tempo gives them,
@@ -612,7 +612,6 @@ value yields a one-element vector."
   (let (ss (spans x))
     (if (empty? ss) nil (span (span-from (nth ss 0)) (span-to (last ss))))))
 
-(sig tp-width-acc (int seqable -> int))
 
 (defn- tp-width-acc
   (acc ss)
@@ -622,8 +621,8 @@ value yields a one-element vector."
     acc
     (let (s (first ss))
       (tp-width-acc (+ acc (- (span-to s) (span-from s))) (rest ss)))))
+(sig tp-width-acc (int seqable -> int))
 
-(sig total-width (map -> int))
 
 (defn total-width (x)
   "The total time `x` covers in milliseconds, **excluding** gaps. The free/busy
@@ -631,6 +630,7 @@ answer: how much time is actually taken.
 
     (tempo/total-width (tempo/gaps workday meetings))   ;; ms genuinely free"
   (tp-width-acc 0 (spans x)))
+(sig total-width (map -> int))
 
 (defn union (a b)
   "Everything covered by `a` or `b`, as an interval set. Unlike `between`, a gap
@@ -777,7 +777,6 @@ wrong. February yields 28 or 29 parts because the calendar says so.
              :ms (get dt :ms 0)})
     (tempo (tp-restrict all u) u)))
 
-(sig shift (map int -> map))
 
 (defn shift (t n)
   "`t` moved `n` steps of its own resolution — negative to go back. Calendar
@@ -796,6 +795,7 @@ arithmetic for years and months, exact millisecond arithmetic below that.
               mo (+ (- total (* y 12)) 1))
           (new! {:year y :month mo}))
       else (tp-of-datetime (datetime/epoch-ms-> (+ (from-ms t) (* n (tp-unit-ms u)))) u))))
+(sig shift (map int -> map))
 
 (defn next (t) "`t` advanced one step of its own resolution." (shift t 1))
 (defn prev (t) "`t` moved back one step of its own resolution." (shift t -1))
@@ -815,15 +815,14 @@ arithmetic for years and months, exact millisecond arithmetic below that.
 
 ;; ---- formatting -------------------------------------------------------------
 
-(sig tp-pad-digits (int int -> string))
 
 (defn- tp-pad-digits
   (n w)
   (let (s (str n)
         need (- w (string/length s)))
     (if (> need 0) (str (string/repeat "0" need) s) s)))
+(sig tp-pad-digits (int int -> string))
 
-(sig tp-pad (int int -> string))
 
 (defn- tp-pad
   (n w)
@@ -832,8 +831,8 @@ arithmetic for years and months, exact millisecond arithmetic below that.
   ;; years can be negative here, and ISO 8601's expanded form wants four digits
   ;; after the sign (`-0044`), not three.
   (if (< n 0) (str "-" (tp-pad-digits (- n) w)) (tp-pad-digits n w)))
+(sig tp-pad (int int -> string))
 
-(sig ->iso (map -> string))
 
 (defn ->iso (t)
   "`t` as an ISO 8601 string at its own precision — no more, no less. A month
@@ -872,8 +871,8 @@ prints as a month; nothing is padded out to a full timestamp.
                         "."
                         (tp-pad (get m :ms) 3))))
         (str date "T" clock "Z")))))
+(sig ->iso (map -> string))
 
-(sig ->iso-span (span -> string))
 
 (defn ->iso-span (s)
   "A span as an ISO 8601 interval, `start/end`, at millisecond precision. The
@@ -881,13 +880,14 @@ end is the exclusive endpoint, so `parse-span` reads back what this writes."
   (str (datetime/->iso (datetime/epoch-ms-> (span-from s)))
     "/"
     (datetime/->iso (datetime/epoch-ms-> (span-to s)))))
+(sig ->iso-span (span -> string))
 
-(sig ->iso-set (map -> string))
 
 (defn ->iso-set (x)
   "An interval set as its spans in ISO 8601 interval form, comma-separated. An
 empty set renders as the empty string."
   (string/join "," (map ->iso-span (spans x))))
+(sig ->iso-set (map -> string))
 
 ;; `Temporal` is `datetime`'s ability for "renders as ISO 8601". Joining it from HERE keeps
 ;; the dependency pointing one way — `:sealed` is an exhaustiveness checklist, not access

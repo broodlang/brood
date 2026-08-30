@@ -22,8 +22,8 @@
   (test "a pid is equal to itself; distinct processes differ"
     (assert= (self) (self))
     (let (w1 (spawn (receive (:go nil))) w2 (spawn (receive (:go nil))))
-      (is (not= w1 w2))
-      (is (not= w1 (self)))))
+      (is (not (= w1 w2)))
+      (is (not (= w1 (self))))))
 
   (test "a pid survives a message round-trip unchanged (sent to self)"
     (let (me (self))

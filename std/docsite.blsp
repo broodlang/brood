@@ -49,7 +49,6 @@
                  (escape segment))))
         (seq/zip (range (count parts)) parts)))))
 
-(sig leading-space-count (string int -> int))
 (defn- leading-space-count
   (line i)
   "The number of leading space/tab characters in `line`, scanning from `i`."
@@ -57,6 +56,7 @@
         (let (c (string/substring line i (+ i 1))) (or (= c " ") (= c "\t"))))
     (leading-space-count line (+ i 1))
     i))
+(sig leading-space-count (string int -> int))
 
 (defn- code-block?
   (block)
@@ -69,10 +69,10 @@
 ;; The smallest leading indentation across `lines`. A `fold` over `math/min` rather than
 ;; `(apply min …)`, whose result the checker can only call `ordered`; the block's own length
 ;; bounds every line's indent, so it is an inert seed.
-(sig common-indent (string (list string) -> int))
 (defn- common-indent
   (block lines)
   (fold (fn (acc l) (math/min acc (leading-space-count l 0))) (string/length block) lines))
+(sig common-indent (string (list string) -> int))
 
 (defn- dedent
   (block)

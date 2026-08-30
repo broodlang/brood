@@ -284,7 +284,7 @@
   (test "unpredictable and unique — never the same path twice"
     (let (a (path/temp "x-") b (path/temp "x-"))
       (is (string/starts-with? a "/tmp/x-"))
-      (is (not= a b))
+      (is (not (= a b)))
       ;; long enough that it cannot be guessed and pre-created as a symlink by
       ;; another user on the machine — the reason a fixed /tmp name is unsafe
       (is (>= (- (string/length a) (string/length "/tmp/x-")) 32))))

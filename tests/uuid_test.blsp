@@ -18,7 +18,7 @@
     (is (uuid/valid? (uuid/v4))))
   (test "generates unique values"
     (let (a (uuid/v4) b (uuid/v4))
-      (is (not= a b)))))
+      (is (not (= a b))))))
 
 (describe "uuid/zero"
   (test "is the zero UUID"
@@ -50,7 +50,7 @@
       (is (uuid/all-hex? ts 0 12))))
   (test "generates unique values"
     (let (a (uuid/v7) b (uuid/v7))
-      (is (not= a b)))))
+      (is (not (= a b))))))
 
 (describe "uuid-v3"
   (test "produces a 36-character string"
@@ -66,8 +66,8 @@
     (assert= (uuid/v3 uuid/ns-dns "python.org")
       (uuid/v3 uuid/ns-dns "python.org")))
   (test "different names give different UUIDs"
-    (is (not= (uuid/v3 uuid/ns-dns "a.com")
-          (uuid/v3 uuid/ns-dns "b.com"))))
+    (is (not (= (uuid/v3 uuid/ns-dns "a.com")
+               (uuid/v3 uuid/ns-dns "b.com")))))
   (test "RFC 4122 test vector: uuid-v3(ns-dns, python.org)"
     (assert= "6fa459ea-ee8a-3ca4-894e-db77e160355e"
       (uuid/v3 uuid/ns-dns "python.org"))))
@@ -86,11 +86,11 @@
     (assert= (uuid/v5 uuid/ns-dns "python.org")
       (uuid/v5 uuid/ns-dns "python.org")))
   (test "different names give different UUIDs"
-    (is (not= (uuid/v5 uuid/ns-dns "a.com")
-          (uuid/v5 uuid/ns-dns "b.com"))))
+    (is (not (= (uuid/v5 uuid/ns-dns "a.com")
+               (uuid/v5 uuid/ns-dns "b.com")))))
   (test "v3 and v5 differ for same input"
-    (is (not= (uuid/v3 uuid/ns-dns "python.org")
-          (uuid/v5 uuid/ns-dns "python.org"))))
+    (is (not (= (uuid/v3 uuid/ns-dns "python.org")
+               (uuid/v5 uuid/ns-dns "python.org")))))
   (test "RFC 4122 test vector: uuid-v5(ns-dns, python.org)"
     (assert= "886313e1-3b8a-5372-9b90-0c9aee199e5d"
       (uuid/v5 uuid/ns-dns "python.org"))))

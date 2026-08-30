@@ -185,11 +185,11 @@ returned unchanged — you can't delete the only one."
 ;; A rect is `[x y w h]` in cells (x = column origin, y = row origin). A point (from
 ;; a `[:mouse … row col]` event) is `[row col]`.
 
-(sig pane-clampi (int int int -> int))
 (defn- pane-clampi
   (v lo hi)
   "Clamp integer `v` into `[lo hi]`."
   (math/max lo (math/min hi v)))
+(sig pane-clampi (int int int -> int))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion

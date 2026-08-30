@@ -167,7 +167,6 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
       (let (n (string/->number v))
         (if (and (int? n) (>= n 0)) n 0)))))
 
-(sig parse-request ((or bytes string) -> map))
 
 (defn parse-request (raw)
   "Parse a raw HTTP request (`bytes`, from `read-request`) into
@@ -190,6 +189,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
      :version (nth req 2 "HTTP/1.0")
      :headers (http-parse-headers (rest lines))
      :body body}))
+(sig parse-request ((or bytes string) -> map))
 
 ;; ---- responses --------------------------------------------------------------
 (def *http-status-text*
@@ -440,7 +440,6 @@ place — `url/parse-url` (the full parser); a scheme-less input is treated as a
         port (or (/get u :port) (if (= scheme "https") 443 80)))
     {:scheme scheme :host (/get u :host) :port port :path path :query (/get u :query)}))
 
-(sig parse-response ((or bytes string) -> response))
 
 (defn parse-response (raw)
   "Parse a raw HTTP response (`bytes`, from the transport; a string is accepted
@@ -457,6 +456,7 @@ keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
     (response (let (n (string/->number (or (nth status 1) "0"))) (if (nil? n) 0 n))
       (http-parse-headers (rest lines))
       body)))
+(sig parse-response ((or bytes string) -> response))
 
 (defn body-text (resp)
   "The `:body` of a response (or parsed request) decoded as UTF-8 text. A string
@@ -473,11 +473,11 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
 ;; chunks are strings (both land byte-faithfully through the iolist `bytes-concat`
 ;; below), so measure by type. `string-length` (codepoints) slightly under-counts
 ;; a multibyte string, which only loosens the cap — fine for a DoS bound.
-(sig http-chunk-size ((or string bytes) -> int))
 
 (defn- http-chunk-size
   (d)
   (if (string? d) (string/length d) (bytes/length d)))
+(sig http-chunk-size ((or string bytes) -> int))
 
 ;; Collect the response delivered as messages until close; [:ok bytes] or
 ;; [:error msg]. `acc` is the chunks in reverse, `have` their running byte total;

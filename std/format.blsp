@@ -375,7 +375,6 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       true
     else (had-author-newlines-scan kids (inc i) n)))
 
-(sig render-break (vector int string string -> string))
 (defn- render-break
   (kids indent open close)
   ;; Multi-line list emit. The output is:
@@ -452,6 +451,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
               body-text
               (if (last-nonws-comment? kids) (str "\n" (indent-of indent)) "")
               close))))))
+(sig render-break (vector int string string -> string))
 
 (defn last-nonws-comment? (kids)
   "True if the body's LAST emitted block is a comment — the case where a closing
@@ -568,7 +568,6 @@ if you are reintroducing hoisting, they are what you have to write back."
       (and one (<= (+ indent (string/length one)) (width))) one
       else (render-pair-break (node-children n) indent "(" ")"))))
 
-(sig render-pair-break (vector int string string -> string))
 (defn- render-pair-break
   (kids indent open close)
   ;; The close delimiter drops to its own line when the last emitted item is a comment —
@@ -582,6 +581,7 @@ if you are reintroducing hoisting, they are what you have to write back."
       (render-pair-walk kids 0 (seq/vector-length kids) pair-ind 0 "")
       (if (last-nonws-comment? kids) (str "\n" (indent-of pair-ind)) "")
       close)))
+(sig render-pair-break (vector int string string -> string))
 
 ;; The separator before the next emitted item: nothing for the very first pair
 ;; (it sits right after the `(`), else a newline (blank line preserved when the
@@ -594,7 +594,6 @@ if you are reintroducing hoisting, they are what you have to write back."
     (>= nl 2) (str "\n\n" (indent-of pair-ind))
     else (str "\n" (indent-of pair-ind))))
 
-(sig render-pair-walk (vector int int int int string -> string))
 (defn- render-pair-walk
   (kids i n pair-ind nl acc)
   ;; Walk kids, emitting one name+value pair per line and each comment in place.
@@ -655,18 +654,18 @@ if you are reintroducing hoisting, they are what you have to write back."
                       pair-body
                       " "
                       (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc)))))))))))))
+(sig render-pair-walk (vector int int int int string -> string))
 
 ;; ---- pair body emit (cond / case clauses) -----------------------------------
 ;; Like render-body but consumes two structural forms per emission, joined by
 ;; one space, one pair per line. Comments preserved on their own lines (a
 ;; comment between the two members of a pair is rare and won't render ideally;
 ;; the common case — a comment above a clause — works correctly).
-(sig render-body-pairs (vector int int -> string))
 (defn- render-body-pairs
   (kids start-idx body-ind)
   (render-body-pairs-at kids start-idx (seq/vector-length kids) body-ind 0 ""))
+(sig render-body-pairs (vector int int -> string))
 
-(sig render-body-pairs-at (vector int int int int string -> string))
 (defn- render-body-pairs-at
   (kids i n body-ind nl acc)
   (if (= i n)
@@ -758,13 +757,14 @@ if you are reintroducing hoisting, they are what you have to write back."
                       pair-str
                       " "
                       (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc)))))))))))))
+(sig render-body-pairs-at (vector int int int int string -> string))
 
 ;; Next non-WHITESPACE child at or after `i` (comments are NOT skipped — a
 ;; comment is a meaningful boundary the pair emitter must not pair across).
-(sig kids-next-nonws (vector int int -> int))
 (defn- kids-next-nonws
   (kids i n)
   (cond (= i n) n (whitespace? (seq/vector-ref kids i)) (kids-next-nonws kids (inc i) n) else i))
+(sig kids-next-nonws (vector int int -> int))
 
 ;; "Trailing same-line comment" detection. After emitting a structural form,
 ;; peek through any following whitespace. If that whitespace contains no newline
@@ -772,9 +772,8 @@ if you are reintroducing hoisting, they are what you have to write back."
 ;; as the form in the source. Each render site **hoists** such a comment onto its
 ;; own line *above* the form (a trailing comment never stays after the code on the
 ;; same line). Returns the index of that comment, or nil if there is none.
-(sig trailing-comment-at (vector int int -> (or int nil)))
 (defn- trailing-comment-at (kids start n) (trailing-comment-at-scan kids start n))
-(sig trailing-comment-at-scan (vector int int -> (or int nil)))
+(sig trailing-comment-at (vector int int -> (or int nil)))
 (defn- trailing-comment-at-scan
   (kids i n)
   (cond
@@ -785,6 +784,7 @@ if you are reintroducing hoisting, they are what you have to write back."
         (trailing-comment-at-scan kids (inc i) n))
     (comment? (seq/vector-ref kids i)) i
     else nil))
+(sig trailing-comment-at-scan (vector int int -> (or int nil)))
 
 ;; True if any structural body arg (from start-idx) is itself a container — then
 ;; fill is the wrong layout (containers read best one per line, CL `:linear`).
@@ -824,7 +824,6 @@ if you are reintroducing hoisting, they are what you have to write back."
   ;; to force a fresh line (start of body, after a comment, after a multi-line arg).
   (render-body-at kids start-idx (seq/vector-length kids) body-ind 0 "" fill? nil))
 
-(sig render-body-at (vector int int int int string any (or int nil) -> string))
 (defn- render-body-at
   (kids i n body-ind nl acc fill? col)
   (if (= i n)
@@ -933,6 +932,7 @@ if you are reintroducing hoisting, they are what you have to write back."
                     (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc-idx))))
                   fill?
                   nil)))))))
+(sig render-body-at (vector int int int int string any (or int nil) -> string))
 
 ;; ---- top-level walk ---------------------------------------------------------
 ;; `source src` parses src, renders the root, and ensures exactly one
@@ -962,7 +962,6 @@ if you are reintroducing hoisting, they are what you have to write back."
 ;; emitted block and the cursor. Whitespace adds its newline count; a comment
 ;; resets to 1 (its own trailing `\n` is the start of the gap to the next
 ;; block); a form resets to 0. Two-or-more newlines between blocks → blank line.
-(sig format-cst-root-walk (vector int int int list -> list))
 (defn- format-cst-root-walk
   (kids i n nl acc)
   (if (= i n)
@@ -1000,6 +999,7 @@ if you are reintroducing hoisting, they are what you have to write back."
                   (str form-block
                     " "
                     (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc-idx))))))))))))
+(sig format-cst-root-walk (vector int int int list -> list))
 
 ;; `acc` is the reversed chunk list, so gluing is two `cons`es instead of a full recopy.
 ;; The empty case is deliberately `(if (= block "") acc …)` rather than a plain `(list
