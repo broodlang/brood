@@ -168,7 +168,7 @@ everything (the \"no release yet\" placeholder a registry starts from).
 (defn- digit-start?
   (s)
   (let (cps (string/->codepoints s))
-    (and (not (empty? cps)) (>= (first cps) 48) (<= (first cps) 57))))
+    (let (c (first cps)) (and c (>= c 48) (<= c 57)))))
 
 (defn- split-constraint
   (constraint)

@@ -209,7 +209,7 @@ UTF-8 form."
   (alpha)
   (let (cs (string/->codepoints alpha)
         empty-128 (apply vector (map (fn (_) nil) (range 128))))
-    (fold (fn (v i) (%vector-assoc v (nth cs i) i))
+    (fold (fn (v i) (let (c (nth cs i)) (if c (%vector-assoc v c i) v)))
       empty-128
       (range 64))))
 
@@ -220,6 +220,7 @@ UTF-8 form."
 ;; input. As with hex, `:invalid` (not nil) keeps an empty valid input distinct
 ;; from a failure; the public wrappers map `:invalid` → nil.
 ;; The length of `s` with its TRAILING '=' run removed.
+(sig encoding-b64-body-length (string int -> int))
 (defn- encoding-b64-body-length
   (s n)
   (if (and (> n 0) (= (string/char-at s (- n 1)) "="))
@@ -263,6 +264,7 @@ UTF-8 form."
 ;; against a vector that is exactly 128 long. Measured on the `base64` benchmark's
 ;; 50 000-byte payload, warm best-of-5 in one process: **29.4 ms → 15.5 ms**. The dense
 ;; vector alone was worth ~7%; the rest is not calling `nth`.
+(sig encoding-b64-dec-loop (vector int int vector list -> any))
 (defn- encoding-b64-dec-loop
   (s i n vals acc)
   (if (>= i n)

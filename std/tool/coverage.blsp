@@ -139,6 +139,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; Percentage as a whole number, rounded to nearest. An empty denominator is 100%
 ;; (nothing to cover is not a failure), which keeps a source-less project from
 ;; reporting 0% and failing a `--cover-min` gate.
+(sig coverage-percent (int int -> int))
 (defn- coverage-percent
   (covered total)
   (if (= total 0) 100 (math/quot (+ (* covered 200) total) (* total 2))))
@@ -297,11 +298,27 @@ suite, then reports which functions were never entered. Backs `nest test --cover
                 :missing missing}))
         files))))
 
+;; Typed accessors over a per-file result map — its `:total`/`:covered` are counts, which a
+;; bare `get` cannot say (and a sum of them is then an int, as `coverage-percent` requires).
+(sig coverage-result-total (map -> int))
+(defn- coverage-result-total (r) (get r :total))
+(sig coverage-result-covered (map -> int))
+(defn- coverage-result-covered (r) (get r :covered))
+
+;; Sum `(key-of r)` over the results with an int accumulator — a `fold` cannot say its
+;; accumulator stays an int, and `coverage-percent` requires one.
+(sig coverage-sum ((map -> int) any int -> int))
+(defn- coverage-sum
+  (key-of results acc)
+  (if (empty? results)
+    acc
+    (coverage-sum key-of (rest results) (+ acc (key-of (first results))))))
+
 (defn line-report (root source-dirs)
   "Print the line-coverage report — a per-file percentage, then each file's uncovered lines — and return the total percentage (an int 0-100)."
   (let (results (line-results source-dirs)
-        total (fold (fn (n r) (+ n (get r :total))) 0 results)
-        covered (fold (fn (n r) (+ n (get r :covered))) 0 results))
+        total (coverage-sum coverage-result-total results 0)
+        covered (coverage-sum coverage-result-covered results 0))
     (if (empty? results)
       (do
         (io/puts "")
@@ -458,8 +475,8 @@ files under `source-dirs` are measured; files with no branches are omitted."
 (both edges taken), then each file's half-covered branches — and return the total
 percentage (an int 0-100)."
   (let (results (branch-results source-dirs)
-        total (fold (fn (n r) (+ n (get r :total))) 0 results)
-        covered (fold (fn (n r) (+ n (get r :covered))) 0 results))
+        total (coverage-sum coverage-result-total results 0)
+        covered (coverage-sum coverage-result-covered results 0))
     (if (empty? results)
       (do
         (io/puts "")

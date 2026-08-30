@@ -90,6 +90,7 @@ what incremental search rides on (formerly the separate `index-of`).
 ;;
 ;; Index of the last `/` in `s`, scanning down from `i`, or -1 if none. (Brood has
 ;; no char accessor yet; paths are short, so a substring scan is fine.)
+(sig %path-last-slash (string int -> int))
 (defn- %path-last-slash
   (s i)
   (cond (< i 0) -1 (= (string/substring s i (inc i)) "/") i else (%path-last-slash s (dec i))))

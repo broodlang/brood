@@ -638,7 +638,20 @@ impl Ty {
     /// `nil`/`false`? Such a bound says nothing positive about the value, so strict
     /// checking (`GradualTy::consistent_with_mode`) keeps the overlap reading for it.
     pub fn is_known_only_by_exclusion(&self) -> bool {
-        Ty::truthy().is_subtype(self)
+        if Ty::truthy().is_subtype(self) {
+            return true;
+        }
+        // `any ∖ (a finite literal set)` — what a failed `(= x 0)` / `(= tag :done)` leaves
+        // of an unknown: it says which values `x` is NOT, and nothing it is. Reading
+        // `(not 0)` by inclusion flagged `(- i 1)` in every loop that tested `(= i 0)` first.
+        let excluded = Ty::ANY.difference(self.clone());
+        let without_falsy = excluded
+            .difference(Ty::of(Tag::Nil))
+            .difference(Ty::of(Tag::Bool));
+        without_falsy.is_never()
+            || without_falsy.as_lit().is_some()
+            || without_falsy.as_lit_int().is_some()
+            || without_falsy.as_lit_str().is_some()
     }
 
     /// The record identities named by this type's map member (`:t/usd`, …), as spelled

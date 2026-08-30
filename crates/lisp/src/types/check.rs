@@ -1241,13 +1241,6 @@ pub fn check_file_mode(
         sigs::set_operator_domains(protocol::operator_domains(&protocol::build_multi_info(
             heap, &expanded,
         )));
-        // ADR-190: build the ability facts + the sealed-op occurrence-typing domains HERE —
-        // before any pass runs `sig_of` (Gap A, Pass 2.8, the body walk) — so an imported
-        // function's inferred sig is never cached *without* the sealed-op demand. Keyed by op
-        // name off `AbilityInfo`, which sees this file's abilities AND imported ones (via the
-        // heap registries), so the demand fires for a same- or other-file sealed op alike.
-        let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
-        annot::set_sealed_op_domains(protocol::build_sealed_op_domains(&ability_info));
         // Reconstruct a `(sig name type)` form from each `%register-sig` in the expanded
         // tree (building forms needs `&mut heap`, so collect first, register after — GC
         // is blocked for the whole check, so the handles stay live).
@@ -1274,6 +1267,13 @@ pub fn check_file_mode(
             }
             annot::set_record_field_types(field_types);
         }
+        // ADR-190: build the ability facts + the sealed-op occurrence-typing domains HERE —
+        // before any pass runs `sig_of` (Gap A, Pass 2.8, the body walk) — so an imported
+        // function's inferred sig is never cached *without* the sealed-op demand. Keyed by op
+        // name off `AbilityInfo`, which sees this file's abilities AND imported ones (via the
+        // heap registries), so the demand fires for a same- or other-file sealed op alike.
+        let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
+        annot::set_sealed_op_domains(protocol::build_sealed_op_domains(&ability_info));
         for &form in &forms {
             register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
         }

@@ -34,7 +34,7 @@ a 1-element sequence has population variance 0.0.
   (let (n (count xs))
     (when (< n 1) (error "stats/variance: empty sequence"))
     (let (m (mean xs))
-      (/ (sum-of-squares xs m) n))))
+      (/ (* 1.0 (sum-of-squares xs m)) n))))
 (sig variance (seqable -> float))
 
 (defn sample-variance (xs)
@@ -42,7 +42,7 @@ a 1-element sequence has population variance 0.0.
   (let (n (count xs))
     (when (< n 2) (error "stats/sample-variance: need at least 2 elements"))
     (let (m (mean xs))
-      (/ (sum-of-squares xs m) (- n 1)))))
+      (/ (* 1.0 (sum-of-squares xs m)) (- n 1)))))
 (sig sample-variance (seqable -> float))
 
 (defn stddev (xs)

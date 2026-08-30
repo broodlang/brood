@@ -26,6 +26,7 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
 
 ;; ---- scanning helpers -------------------------------------------------------
 
+(sig env-lead-ws (string int int -> int))
 (defn- env-lead-ws
   (line i n)
   "The column where `line`'s leading whitespace (spaces / tabs) ends."
@@ -33,6 +34,7 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
     (env-lead-ws line (inc i) n)
     i))
 
+(sig env-find (string int int string -> int))
 (defn- env-find
   (line i n ch)
   "The offset of the next single-char `ch` at or after `i` in `line`, or -1."
@@ -44,12 +46,14 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
   (or (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" c)
     (= c "_")
     (= c ".")))
+(sig env-key-end (string int int -> int))
 (defn- env-key-end
   (line i n)
   (if (and (< i n) (env-key-char? (string/char-at line i))) (env-key-end line (inc i) n) i))
 
 ;; ---- per-line spans ---------------------------------------------------------
 
+(sig env-value-spans (string int int int -> list))
 (defn- env-value-spans
   (line base v n)
   "A one-element string span for a quoted value starting at offset `v` (to its closing
@@ -61,6 +65,7 @@ quote, or end of line if unclosed); `()` for an unquoted value (the default face
       (list [(+ base v) (+ base e) env-face-string]))
     '()))
 
+(sig env-assign-spans (string int int int -> list))
 (defn- env-assign-spans
   (line base lead n)
   "Spans for a `KEY=value` line (offsets shifted by `base`): an `export` keyword when
@@ -75,6 +80,7 @@ present, the key, and a quoted value. `()` when the line isn't an assignment."
           (env-value-spans line base (inc ke) n)))
       '())))
 
+(sig env-line-spans (string int -> list))
 (defn- env-line-spans
   (line base)
   "The spans for one `line` starting at offset `base`: a `#` comment whole, else the
@@ -85,6 +91,7 @@ assignment spans (key / export / quoted value), else none."
       (= (string/char-at line lead) "#") (list [(+ base lead) (+ base n) env-face-comment])
       else (env-assign-spans line base lead n))))
 
+(sig env-lex (string int int list -> list))
 (defn- env-lex
   (src i n acc)
   "Tail-recursive line walker: classify each line (`env-line-spans`), accumulating

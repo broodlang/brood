@@ -88,7 +88,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
   ;; Native O(n) split. A per-char `(string/substring s i (inc i))` loop is O(n^2) —
   ;; `substring` walks to char boundary `i` each call.
   (dec (count (string/split s "\n"))))
-(sig count-newlines (string -> number))
+(sig count-newlines (string -> int))
 
 ;; (`string-repeat` is the prelude's — it used to be redefined here with an
 ;; accumulator that did `(str acc s)` each step (O(total length²)); the prelude's
@@ -375,6 +375,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       true
     else (had-author-newlines-scan kids (inc i) n)))
 
+(sig render-break (vector int string string -> string))
 (defn- render-break
   (kids indent open close)
   ;; Multi-line list emit. The output is:
@@ -567,6 +568,7 @@ if you are reintroducing hoisting, they are what you have to write back."
       (and one (<= (+ indent (string/length one)) (width))) one
       else (render-pair-break (node-children n) indent "(" ")"))))
 
+(sig render-pair-break (vector int string string -> string))
 (defn- render-pair-break
   (kids indent open close)
   ;; The close delimiter drops to its own line when the last emitted item is a comment —
@@ -592,6 +594,7 @@ if you are reintroducing hoisting, they are what you have to write back."
     (>= nl 2) (str "\n\n" (indent-of pair-ind))
     else (str "\n" (indent-of pair-ind))))
 
+(sig render-pair-walk (vector int int int int string -> string))
 (defn- render-pair-walk
   (kids i n pair-ind nl acc)
   ;; Walk kids, emitting one name+value pair per line and each comment in place.
@@ -658,10 +661,12 @@ if you are reintroducing hoisting, they are what you have to write back."
 ;; one space, one pair per line. Comments preserved on their own lines (a
 ;; comment between the two members of a pair is rare and won't render ideally;
 ;; the common case — a comment above a clause — works correctly).
+(sig render-body-pairs (vector int int -> string))
 (defn- render-body-pairs
   (kids start-idx body-ind)
   (render-body-pairs-at kids start-idx (seq/vector-length kids) body-ind 0 ""))
 
+(sig render-body-pairs-at (vector int int int int string -> string))
 (defn- render-body-pairs-at
   (kids i n body-ind nl acc)
   (if (= i n)
@@ -756,6 +761,7 @@ if you are reintroducing hoisting, they are what you have to write back."
 
 ;; Next non-WHITESPACE child at or after `i` (comments are NOT skipped — a
 ;; comment is a meaningful boundary the pair emitter must not pair across).
+(sig kids-next-nonws (vector int int -> int))
 (defn- kids-next-nonws
   (kids i n)
   (cond (= i n) n (whitespace? (seq/vector-ref kids i)) (kids-next-nonws kids (inc i) n) else i))
@@ -766,7 +772,9 @@ if you are reintroducing hoisting, they are what you have to write back."
 ;; as the form in the source. Each render site **hoists** such a comment onto its
 ;; own line *above* the form (a trailing comment never stays after the code on the
 ;; same line). Returns the index of that comment, or nil if there is none.
+(sig trailing-comment-at (vector int int -> (or int nil)))
 (defn- trailing-comment-at (kids start n) (trailing-comment-at-scan kids start n))
+(sig trailing-comment-at-scan (vector int int -> (or int nil)))
 (defn- trailing-comment-at-scan
   (kids i n)
   (cond
@@ -798,7 +806,7 @@ if you are reintroducing hoisting, they are what you have to write back."
   (when (= (node-kind (seq/vector-ref kids i)) :keyword)
     (let (j (kids-next-nonws kids (inc i) n))
       (when (and (< j n) (not (comment? (seq/vector-ref kids j)))) j))))
-(sig keyword-value-at (vector int any -> any))
+(sig keyword-value-at (vector int int -> (or int nil)))
 
 (defn- render-body
   (kids start-idx body-ind fill?)
@@ -816,6 +824,7 @@ if you are reintroducing hoisting, they are what you have to write back."
   ;; to force a fresh line (start of body, after a comment, after a multi-line arg).
   (render-body-at kids start-idx (seq/vector-length kids) body-ind 0 "" fill? nil))
 
+(sig render-body-at (vector int int int int string any (or int nil) -> string))
 (defn- render-body-at
   (kids i n body-ind nl acc fill? col)
   (if (= i n)
@@ -893,7 +902,8 @@ if you are reintroducing hoisting, they are what you have to write back."
                   0
                   (str acc " " form-rendr)
                   fill?
-                  (+ col 1 w))
+                  ;; `can-fill` proved `col` non-nil; the `or` only says so to the checker.
+                  (+ (or col 0) 1 w))
               (nil? tc-idx)
                 (render-body-at kids
                   (inc i)
@@ -952,6 +962,7 @@ if you are reintroducing hoisting, they are what you have to write back."
 ;; emitted block and the cursor. Whitespace adds its newline count; a comment
 ;; resets to 1 (its own trailing `\n` is the start of the gap to the next
 ;; block); a form resets to 0. Two-or-more newlines between blocks → blank line.
+(sig format-cst-root-walk (vector int int int list -> list))
 (defn- format-cst-root-walk
   (kids i n nl acc)
   (if (= i n)
@@ -1170,7 +1181,7 @@ that does not parse is reported and skipped, never rewritten."
 (defn- format-changed-blsp
   (root)
   (let (changed (%git-changed-files root))
-    (if (= changed :not-a-repo)
+    (if (keyword? changed)
       :not-a-repo (let (project (format-set-of (format-every-blsp root)))
         (filter (fn (p) (contains? project p))
           (filter (fn (p) (string/ends-with? p ".blsp")) changed))))))
@@ -1181,7 +1192,7 @@ under the current project — the git-aware narrower scope of `nest format`
 (`--changed`). Falls back to the whole project if not in a git repo. Returns the
 number of files rewritten."
   (let (root (format-require-root) changed (format-changed-blsp root))
-    (if (= changed :not-a-repo)
+    (if (keyword? changed)
       (do
         (io/puts "format: not a git repository — formatting the whole project.")
         (project))

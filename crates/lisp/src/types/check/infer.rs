@@ -451,17 +451,24 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
             (4, Some(false)) => expr_ty(heap, items[3], &else_ctx),
             (3, Some(false)) => Some(Ty::of(Tag::Nil)),
             (4, None) => {
-                let t = branch_union(heap, &[items[2]], &then_ctx);
-                let e = branch_union(heap, &[items[3]], &else_ctx);
+                // A dead branch (`Ctx::is_dead`) or a self-call branch contributes ⊥ (see
+                // `branch_union`); if both did, defer.
+                let t = (!then_ctx.is_dead()).then(|| branch_union(heap, &[items[2]], &then_ctx));
+                let e = (!else_ctx.is_dead()).then(|| branch_union(heap, &[items[3]], &else_ctx));
                 match (t, e) {
-                    // A self-call branch contributes ⊥ (see `branch_union`); if both did,
-                    // defer.
-                    (Some(a), Some(b)) => Some(a.union(b)),
-                    (Some(a), None) if is_inferring_self_call(heap, items[3], ctx) => Some(a),
-                    (None, Some(b)) if is_inferring_self_call(heap, items[2], ctx) => Some(b),
+                    (Some(Some(a)), Some(Some(b))) => Some(a.union(b)),
+                    (Some(Some(a)), None) => Some(a),
+                    (None, Some(Some(b))) => Some(b),
+                    (Some(Some(a)), Some(None)) if is_inferring_self_call(heap, items[3], ctx) => {
+                        Some(a)
+                    }
+                    (Some(None), Some(Some(b))) if is_inferring_self_call(heap, items[2], ctx) => {
+                        Some(b)
+                    }
                     _ => None,
                 }
             }
+            (3, None) if then_ctx.is_dead() => Some(Ty::of(Tag::Nil)),
             (3, None) => Some(expr_ty(heap, items[2], &then_ctx)?.union(Ty::of(Tag::Nil))),
             _ => None,
         };
@@ -523,13 +530,17 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         let mut scope = ctx.clone();
         let mut i = 0;
         while i < binds.len() {
-            let Value::Sym(name) = binds[i] else {
-                // A destructuring binding — we can't pin the names; the body may
-                // depend on them, so defer the whole form.
-                return None;
-            };
             let rhs_ty = expr_ty(heap, binds[i + 1], &scope);
-            scope = scope.bind(name, rhs_ty);
+            match binds[i] {
+                Value::Sym(name) => scope = scope.bind(name, rhs_ty),
+                // A destructuring binding: each positional binder takes the element type
+                // (`super::walk::pattern_bindings`), unknown where it can't be pinned.
+                pat => {
+                    for (sym, ty) in super::walk::pattern_bindings(heap, pat, rhs_ty.as_ref()) {
+                        scope = scope.bind(sym, ty);
+                    }
+                }
+            }
             i += 2;
         }
         let last = *items.last()?;
@@ -931,6 +942,18 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "vector") {
         return element_union(heap, &items[1..], ctx).map(Ty::vector_of);
     }
+    // `%vector-ref` is what a destructuring `let`/`match` lowers a `[x y w h]` binder to,
+    // behind a length check; out of range it throws rather than yielding nil, so it is
+    // exactly the element (a tuple position when the index is literal).
+    if value::symbol_is(head, "%vector-ref") && items.len() == 3 {
+        let coll_ty = expr_ty(heap, items[1], ctx)?;
+        if let (Some(elems), Value::Int(n)) = (coll_ty.tuple_elems(), items[2]) {
+            if n >= 0 {
+                return elems.get(n as usize).cloned();
+            }
+        }
+        return coll_ty.elem_ty();
+    }
     if value::symbol_is(head, "first")
         || value::symbol_is(head, "last")
         || value::symbol_is(head, "nth")
@@ -977,13 +1000,19 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let elem = coll_ty.elem_ty()?;
         // `first`/`last` of a provably non-empty list is an element, full stop; every
         // other access (an index that may run off the end, a seq that may be empty)
-        // yields `nil` too.
+        // yields `nil` too — except `(nth coll i default)`, whose absent case IS the
+        // default, exactly as `get`'s (`(nth parts 1 "0")` is a string, never nil).
         let always_present = provably_non_empty(&coll_ty)
             && (value::symbol_is(head, "first") || value::symbol_is(head, "last"));
+        let absent = if value::symbol_is(head, "nth") && items.len() == 4 {
+            expr_ty(heap, items[3], ctx)
+        } else {
+            None
+        };
         return Some(if always_present {
             elem
         } else {
-            elem.union(Ty::of(Tag::Nil))
+            elem.union(absent.unwrap_or(Ty::of(Tag::Nil)))
         });
     }
     // `(filter pred coll)` keeps `coll`'s element type — the result is the items
@@ -991,8 +1020,12 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // results). `None` element → fall through to the flat curated `list`.
     if value::symbol_is(head, "filter") {
         let coll = *items.get(2)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
-        return list_result(a);
+        let coll_ty = expr_ty(heap, coll, ctx);
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        // `filter` builds a LIST whatever it is handed (a vector in, a list out), so with
+        // the element type unknown the result is still `list`, not the curated `seqable` —
+        // `(filter pred (file/ls d))` declared `(list string)` is not "seqable ⊄ list".
+        return list_result(a).or_else(|| coll_ty.map(|_| Ty::LIST));
     }
     // Element-preserving reshapers whose sequence is the *first* argument — the
     // same elements, fewer / reordered: `reverse`, `rest` (drop the head),

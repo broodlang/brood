@@ -112,7 +112,7 @@ NON-LINEAR patterns (the same name twice) work.
     (%match-record-pattern? pat) (let (mp (first (rest (rest pat)))) (if mp (%pattern-vars mp) nil))
     (pair? pat) (%match-seq-vars pat)
     (vector? pat) (%match-seq-vars (%match-vec->list pat))
-    (%match-map-pattern? pat) (%match-map-vars pat)
+    (map? pat) (%match-map-vars pat)
     else nil))
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
@@ -158,7 +158,7 @@ NON-LINEAR patterns (the same name twice) work.
     ; (record name {…}): a defrecord value of nominal id `name`, then a map pattern
     (pair? pat) (%match-compile-list pat target bound success fail)
     (vector? pat) (%match-compile-vector pat target bound success fail)
-    (%match-map-pattern? pat) (%match-compile-map pat target bound success fail)
+    (map? pat) (%match-compile-map pat target bound success fail)
     else `(if (%eq ~target ~pat) ~success ~fail)))
 ; literal (number/string/keyword/bool/nil)
 

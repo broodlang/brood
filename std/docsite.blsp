@@ -49,6 +49,7 @@
                  (escape segment))))
         (seq/zip (range (count parts)) parts)))))
 
+(sig leading-space-count (string int -> int))
 (defn- leading-space-count
   (line i)
   "The number of leading space/tab characters in `line`, scanning from `i`."
@@ -63,7 +64,15 @@
   whitespace. Such a block's newlines are significant (each example on its own line), so it must
   render as `<pre>` rather than a `<p>` whose newlines HTML would collapse into one run-on line."
   (let (lines (filter (fn (l) (not (= (string/trim l) ""))) (string/split block "\n")))
-    (and (not (empty? lines)) (> (leading-space-count (first lines) 0) 0))))
+    (let (line (first lines)) (and line (> (leading-space-count line 0) 0)))))
+
+;; The smallest leading indentation across `lines`. A `fold` over `math/min` rather than
+;; `(apply min …)`, whose result the checker can only call `ordered`; the block's own length
+;; bounds every line's indent, so it is an inert seed.
+(sig common-indent (string (list string) -> int))
+(defn- common-indent
+  (block lines)
+  (fold (fn (acc l) (math/min acc (leading-space-count l 0))) (string/length block) lines))
 
 (defn- dedent
   (block)
@@ -71,7 +80,7 @@
   code example renders flush-left in its `<pre>` rather than doubly indented."
   (let (lines (string/split block "\n")
         non-blank (filter (fn (l) (not (= (string/trim l) ""))) lines)
-        n (if (empty? non-blank) 0 (apply min (map (fn (l) (leading-space-count l 0)) non-blank))))
+        n (if (empty? non-blank) 0 (common-indent block non-blank)))
     (string/join "\n"
       (map (fn (l) (if (>= (string/length l) n) (string/substring l n (string/length l)) l)) lines))))
 

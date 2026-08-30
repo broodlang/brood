@@ -124,6 +124,8 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
 
 ;; Index of the first "@" in s, or -1. No string-split primitive — and a node
 ;; spec only ever has the one separator — so a small char scan is plenty.
+(sig node-at (string int int -> int))
+
 (defn- node-at
   (s i n)
   (cond
@@ -133,6 +135,8 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
 
 ;; Last index of `:` in s (or -1) — needed to split "name@host:port" into the
 ;; node name "name@host" and the port, IPv6-host-safe (the port colon is last).
+(sig node-last-colon (string int int int -> int))
+
 (defn- node-last-colon
   (s i n last)
   (cond

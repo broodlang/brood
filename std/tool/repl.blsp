@@ -220,6 +220,7 @@ registration order, the new one last). The extension seam tools use to add comma
     (let ([cmd _] (repl-meta-parts (string/substring line 1)))
       (not (nil? (repl-command-for cmd))))))
 
+(sig repl-pad (string int -> string))
 (defn- repl-pad
   (s n)
   "Right-pad string `s` with spaces to at least width `n`."

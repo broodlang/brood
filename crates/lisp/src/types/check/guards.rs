@@ -256,7 +256,10 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
     // machinery threads the narrowing back to `x`). Variadic `=` reaches us
     // pre-expanded as `%eq` calls when arities are 2, so we only need to
     // recognise the primitive shape.
-    if items.len() == 3 && head_name == kw::EQ_PRIM {
+    // `(= a b)` reaches the checker unexpanded (`=` is a Brood variadic over `%eq`), and
+    // with two operands it IS `%eq` — so a `cond` clause `(= item :done)` narrows the
+    // clauses below it exactly as the primitive spelling does.
+    if items.len() == 3 && (head_name == kw::EQ_PRIM || head_name == "=") {
         if let Some((sym, ty)) =
             literal_eq_guard(items[1], items[2]).or_else(|| literal_eq_guard(items[2], items[1]))
         {
