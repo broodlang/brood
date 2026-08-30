@@ -355,7 +355,7 @@ written over the kernel above.
 the macros `defn`, `when`/`unless`/`cond`/`and`/`or`, `->`/`->>`, `match`/`match*`,
 `receive`, and `try`/`catch`; `error`; the full arithmetic/comparison family
 (`+ - * / < <= > >= = inc dec mod abs max min sum product` — plus ~~`not=`~~,
-deprecated since 0.19.0 in favour of `(not (= a b))` — plus the float
+deprecated since 0.19.1 in favour of `(not (= a b))` — plus the float
 ops `ceil round quot pow sqrt`); the type-tag predicates (`nil? pair? int? float?
 bool? string? symbol? keyword? vector? map? fn?`, over `type-of`); the map surface
 (`get assoc dissoc keys vals contains?`); the sequence library (`range take drop

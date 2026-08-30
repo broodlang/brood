@@ -19250,7 +19250,7 @@ Two things sharpen that from "redundant" to "worse":
   Written out, the scope of the negation is on the page. (The honest "all different" op would
   be a `distinct?`, which does not exist and would be a real capability.)
 
-**Decision.** Mark it, don't remove it: `(meta not= :deprecated "0.19.0" :use 'not)` beside
+**Decision.** Mark it, don't remove it: `(meta not= :deprecated "0.19.1" :use 'not)` beside
 the definition, the docstring leading with the replacement, and all 41 in-tree uses (13 in
 `std/`, 28 in `tests/`) rewritten to `(not (= …))` — including the divide-by-zero hint strings
 in `builtins/numeric.rs`, which were teaching the deprecated form in an error message. The
