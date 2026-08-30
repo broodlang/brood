@@ -126,11 +126,14 @@ decimal to fast float math.
     (->float 3)     → 3.0"
   (* 1.0 x))
 (defn list? (x)
-  "True if `x` is a proper list (`nil` or a pair).
+  "True if `x` is a list — `nil` or a pair. An O(1) tag test, which is the type `list`
+itself (a type is a set of runtime tags): it does not walk the tail, so an improper list
+`(cons 1 2)` is a list too. There is no proper-list predicate.
 
     (list? (list 1))  → true
     (list? [1])       → false   ; a vector is not a list
-    (list? nil)       → true    ; the empty list IS nil"
+    (list? nil)       → true    ; the empty list IS nil
+    (list? (cons 1 2)) → true   ; a pair, whatever its tail"
   (or (nil? x) (pair? x)))
 
 ;; ---- list accessors ----
