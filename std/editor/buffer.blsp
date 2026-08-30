@@ -169,6 +169,7 @@ or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
 `delete-region`/`buffer-region` act on."
   (let (m (get buf :mark))
     (if (nil? m) nil (let (p (get buf :point)) [(math/min p m) (math/max p m)]))))
+(sig buffer-region-bounds (buffer -> (or nil (vector int))))
 
 (defn buffer-region (buf)
   "The text between point and mark (in either order), or nil if no mark is set."
@@ -182,6 +183,7 @@ or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
 (defn goto-char (buf n)
   "Point moved to char index `n`, clamped to [0, length]."
   (assoc buf :point (buffer-clamp 0 (buffer-length buf) n)))
+(sig goto-char (buffer int -> buffer))
 
 (defn forward-char (buf &optional (n 1))
   "Point moved `n` characters forward (clamped)."
@@ -493,6 +495,7 @@ the editor restarts it whenever the previous command wasn't an undo.)"
       (assoc buf
         :undo (cons (buffer-snapshot buf) (or (get buf :undo) ()))
         :undo-amalgamate false)))
+(sig buffer-push-undo (buffer -> buffer))
 
 (defn disable-undo (buf)
   "Turn off undo recording for `buf` and drop any existing history. For a log / output
@@ -886,6 +889,7 @@ width."
                      (let ([lo hi] r)
                        [(if (>= lo b) (- lo d) lo) (if (>= hi b) (- hi d) hi)]))
                 regions)))))))
+(sig buffer-adjust-editable (buffer keyword int int -> buffer))
 
 ;; ---- the complement view (compatibility) ------------------------------------
 ;; `read-only-spans` was the old vocabulary and still reads fine as a QUERY — "which ranges
@@ -961,6 +965,7 @@ inside the range collapses to `lo`, one at/after `hi` moves left by the deleted 
         :markers (if (= kind :insert)
                    (buffer-markers-insert m a b)
                    (buffer-markers-delete m a b))))))
+(sig buffer-adjust-markers (buffer keyword int int -> buffer))
 
 (defn insert (buf s)
   "Insert string `s` at point; point advances past it. Recorded for undo. Markers after the
@@ -979,7 +984,7 @@ insertion point shift with the text. Throws if `buf` is read-only."
                                 (string/length s))
         :insert p
         (string/length s)))))
-(sig insert (any string -> any))
+(sig insert (buffer string -> buffer))
 
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a

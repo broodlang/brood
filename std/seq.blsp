@@ -403,6 +403,7 @@ contradiction; it is public here, where its callers can reach it.
   (let (a (get m i)
         b (get m j))
     (assoc (assoc m i b) j a)))
+(sig shuffle-swap (map int int -> map))
 
 (defn- shuffle-at (m i state)
   ;; Descending Fisher–Yates: draw j in 0..i, swap it into slot i, move left.
