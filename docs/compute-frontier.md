@@ -1440,10 +1440,20 @@ The increment ladder:
    "gated win" measurement was boot-cache contamination (see the trap in
    `jit_lower/call.rs::xcall_emit`'s doc: the first `perf stat -r N` batch after any
    rebuild pays the boot-cache rebuild).
-4. **Register args** for int-typed cross-arm calls — extend the i64 worker's convention
+4. **Register args** for cross-arm calls — extend the i64 worker's convention
    (args/results in registers, no roots staging) to non-self calls behind the same
-   epoch/identity guard. This is where the multiplier lives (the worker measured ~5× on
-   self-recursion); everything above is the substrate that makes it expressible.
+   epoch/identity guard. **Groundwork measured 2026-08-31, and it reshapes this step:**
+   a tier-time survey of every generally-lowered arm's param tags (bintree, nqueens,
+   pipeline, sort, wordcount, json) found only ~10–14% int-only-param arms, and most of
+   those are zero-arg shells — the hot cross-arm callees take HANDLES (bintree's
+   `check-node` a vector, sort/json/wordcount likewise). A handle argument must be
+   GC-rooted in the callee frame across the callee's safepoints, so "no roots staging"
+   is not available for the dominant class — at best the stores move from caller to
+   callee prologue. The scalar form of this step is therefore thin, and the real design
+   space is a handle-aware convention (register-carried words + callee-prologue rooting,
+   or arity-specialized entry stubs) — a design session, not a mechanical extension of
+   the worker. Do not start it as "increment 4 of this ladder"; it is its own project
+   with this paragraph as its opening question.
 
 ### 7.6 Cheap curiosity: `grow_one<TraceFrame>` at ~3% of `bintree` — ANSWERED 2026-08-30: a folded symbol, not an error trace
 
