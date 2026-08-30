@@ -2,46 +2,46 @@
 
 (describe "chunk-every"
   (test "even split"
-    (assert= [[1 2] [3 4] [5 6]] (into [] (map (fn (x) (into [] x)) (chunk-every 2 [1 2 3 4 5 6])))))
+    (assert= [[1 2] [3 4] [5 6]] (into [] (map (chunk-every [1 2 3 4 5 6] 2) (fn (x) (into [] x))))))
   (test "trailing chunk kept"
-    (assert= [[1 2] [3]] (into [] (map (fn (x) (into [] x)) (chunk-every 2 [1 2 3])))))
+    (assert= [[1 2] [3]] (into [] (map (chunk-every [1 2 3] 2) (fn (x) (into [] x))))))
   (test "larger than collection"
-    (assert= [[1 2 3]] (into [] (map (fn (x) (into [] x)) (chunk-every 5 [1 2 3])))))
+    (assert= [[1 2 3]] (into [] (map (chunk-every [1 2 3] 5) (fn (x) (into [] x))))))
   (test "empty collection"
-    (assert= nil (chunk-every 3 nil)))
+    (assert= nil (chunk-every nil 3)))
   (test "chunk size 1"
-    (assert= [[1] [2] [3]] (into [] (map (fn (x) (into [] x)) (chunk-every 1 [1 2 3]))))))
+    (assert= [[1] [2] [3]] (into [] (map (chunk-every [1 2 3] 1) (fn (x) (into [] x)))))))
 
 (describe "chunk-by"
   (test "groups consecutive equal values"
     (assert= [[1 1] [2] [1 1 1]]
-      (into [] (map (fn (x) (into [] x)) (chunk-by identity [1 1 2 1 1 1])))))
+      (into [] (map (chunk-by [1 1 2 1 1 1] identity) (fn (x) (into [] x))))))
   (test "by key function"
-    (let (r (chunk-by even? [2 4 1 3 6]))
-      (assert= [[2 4] [1 3] [6]] (into [] (map (fn (x) (into [] x)) r)))))
+    (let (r (chunk-by [2 4 1 3 6] even?))
+      (assert= [[2 4] [1 3] [6]] (into [] (map r (fn (x) (into [] x)))))))
   (test "empty"
-    (assert= nil (chunk-by identity nil)))
+    (assert= nil (chunk-by nil identity)))
   (test "all same"
-    (assert= [[1 1 1]] (into [] (map (fn (x) (into [] x)) (chunk-by identity [1 1 1]))))))
+    (assert= [[1 1 1]] (into [] (map (chunk-by [1 1 1] identity) (fn (x) (into [] x)))))))
 
 (describe "scan"
   (test "running sum"
-    (assert= '(0 1 3 6 10) (scan + 0 '(1 2 3 4))))
+    (assert= '(0 1 3 6 10) (scan '(1 2 3 4) 0 +)))
   (test "empty collection"
-    (assert= '(0) (scan + 0 nil)))
+    (assert= '(0) (scan nil 0 +)))
   (test "single element"
-    (assert= '(0 1) (scan + 0 '(1))))
+    (assert= '(0 1) (scan '(1) 0 +)))
   (test "reductions alias"
-    (assert= (scan + 0 '(1 2 3)) (scan + 0 '(1 2 3)))))
+    (assert= (scan '(1 2 3) 0 +) (scan '(1 2 3) 0 +))))
 
 (describe "mapcat"
   (test "basic mapcat"
-    (assert= '(1 2 2 4 3 6) (mapcat (fn (x) (list x (* x 2))) '(1 2 3))))
+    (assert= '(1 2 2 4 3 6) (mapcat '(1 2 3) (fn (x) (list x (* x 2))))))
   (test "empty"
-    (assert= nil (mapcat (fn (x) (list x)) nil)))
+    (assert= nil (mapcat nil (fn (x) (list x)))))
   (test "same as mapcat"
-    (assert= (mapcat (fn (x) (list x x)) '(1 2 3))
-      (mapcat (fn (x) (list x x)) '(1 2 3)))))
+    (assert= (mapcat '(1 2 3) (fn (x) (list x x)))
+      (mapcat '(1 2 3) (fn (x) (list x x))))))
 
 (describe "zip-with"
   (test "addition of pairs"
@@ -55,78 +55,77 @@
 
 (describe "intersperse"
   (test "basic"
-    (assert= '(1 0 2 0 3) (interpose 0 '(1 2 3))))
+    (assert= '(1 0 2 0 3) (interpose '(1 2 3) 0)))
   (test "single element unchanged"
-    (assert= '(1) (interpose 0 '(1))))
+    (assert= '(1) (interpose '(1) 0)))
   (test "empty"
-    (assert= nil (interpose 0 nil)))
+    (assert= nil (interpose nil 0)))
   (test "alias for interpose"
-    (assert= (interpose :x '(a b c)) (interpose :x '(a b c)))))
+    (assert= (interpose '(a b c) :x) (interpose '(a b c) :x))))
 
 (describe "min-by"
   (test "by string length"
-    (assert= "a" (min-by string/length '("ccc" "bb" "a"))))
+    (assert= "a" (min-by '("ccc" "bb" "a") string/length)))
   (test "by identity"
-    (assert= 1 (min-by identity '(3 1 2))))
+    (assert= 1 (min-by '(3 1 2) identity)))
   (test "by negative"
-    (assert= 5 (min-by (fn (n) (- n)) '(3 1 5 2)))))
+    (assert= 5 (min-by '(3 1 5 2) (fn (n) (- n))))))
 
 (describe "max-by"
   (test "by string length"
-    (assert= "ccc" (max-by string/length '("ccc" "bb" "a"))))
+    (assert= "ccc" (max-by '("ccc" "bb" "a") string/length)))
   (test "by identity"
-    (assert= 3 (max-by identity '(3 1 2))))
+    (assert= 3 (max-by '(3 1 2) identity)))
   (test "by negative"
-    (assert= 1 (max-by (fn (n) (- n)) '(3 1 5 2)))))
+    (assert= 1 (max-by '(3 1 5 2) (fn (n) (- n))))))
 
 (describe "reduce-while"
   (test "halts early when the reducer returns :halt"
-    (assert= 105 (reduce-while (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)])) 0 (range 1000))))
+    (assert= 105 (reduce-while (range 1000) 0 (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)])))))
   (test "all :cont behaves like fold"
-    (assert= 15 (reduce-while (fn (a x) [:cont (+ a x)]) 0 [1 2 3 4 5])))
+    (assert= 15 (reduce-while [1 2 3 4 5] 0 (fn (a x) [:cont (+ a x)]))))
   (test "halts on the first element"
-    (assert= :seed (reduce-while (fn (a x) [:halt a]) :seed [1 2 3])))
+    (assert= :seed (reduce-while [1 2 3] :seed (fn (a x) [:halt a]))))
   (test "empty collection yields the init unchanged"
-    (assert= :init (reduce-while (fn (a x) [:cont x]) :init [])))
+    (assert= :init (reduce-while [] :init (fn (a x) [:cont x]))))
   (test "finds the first element over a threshold"
-    (assert= 4 (reduce-while (fn (a x) (if (> x 3) [:halt x] [:cont a])) nil [1 2 3 4 5])))
+    (assert= 4 (reduce-while [1 2 3 4 5] nil (fn (a x) (if (> x 3) [:halt x] [:cont a])))))
   (test "folds a map's [k v] pairs"
-    (assert= 6 (reduce-while (fn (a [k v]) [:cont (+ a v)]) 0 {:a 1 :b 2 :c 3})))
+    (assert= 6 (reduce-while {:a 1 :b 2 :c 3} 0 (fn (a [k v]) [:cont (+ a v)]))))
   (test "errors on a return that is neither [:cont acc] nor [:halt acc]"
-    (is (try (do (reduce-while (fn (a x) 42) 0 [1]) false) (catch _ true))))
+    (is (try (do (reduce-while [1] 0 (fn (a x) 42)) false) (catch _ true))))
   (test "across processes: the reduced value round-trips through send"
     :isolated (let (me (self)
           n 6
-          expected (reduce-while (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)])) 0 (range 1000)))
-      (map (fn (_)
-             (spawn (fn ()
-                      (send me
-                        (reduce-while (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)]))
-                          0
-                          (range 1000))))))
-        (range n))
-      (let (results (fold (fn (acc _) (cons (receive) acc)) nil (range n)))
+          expected (reduce-while (range 1000) 0 (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)]))))
+      (map (range n)
+        (fn (_)
+          (spawn (fn ()
+                   (send me
+                     (reduce-while (range 1000)
+                       0
+                       (fn (a x) (if (> a 100) [:halt a] [:cont (+ a x)]))))))))
+      (let (results (fold (range n) nil (fn (acc _) (cons (receive) acc))))
         (assert= n (count results))
-        (is (every? (fn (r) (= r expected)) results))))))
+        (is (every? results (fn (r) (= r expected))))))))
 
 (describe "distinct-by"
   (test "keeps the first item for each distinct key, order-preserving"
-    (assert= (list [1 :a] [2 :c]) (distinct-by (fn (p) (nth p 0)) [[1 :a] [1 :b] [2 :c] [1 :d]])))
+    (assert= (list [1 :a] [2 :c]) (distinct-by [[1 :a] [1 :b] [2 :c] [1 :d]] (fn (p) (nth p 0)))))
   (test "identity key behaves like distinct"
-    (assert= (list 1 2 3) (distinct-by (fn (x) x) [1 1 2 2 3 1])))
+    (assert= (list 1 2 3) (distinct-by [1 1 2 2 3 1] (fn (x) x))))
   (test "keeps nil/false-valued keys distinctly"
-    (assert= (list nil false 0) (distinct-by (fn (x) x) [nil nil false false 0 0])))
+    (assert= (list nil false 0) (distinct-by [nil nil false false 0 0] (fn (x) x))))
   (test "empty input"
-    (assert= nil (distinct-by (fn (x) x) [])))
+    (assert= nil (distinct-by [] (fn (x) x))))
   (test "reachable qualified as seq/distinct-by"
-    (assert= (list 1 2) (seq/distinct-by (fn (x) (math/mod x 2)) [1 3 2 4])))
+    (assert= (list 1 2) (seq/distinct-by [1 3 2 4] (fn (x) (math/mod x 2)))))
   (test "across processes: the deduped value round-trips through send"
     :isolated (let (me (self)
           n 6
           input [[1 :a] [1 :b] [2 :c] [3 :d] [3 :e] [2 :f]]
-          expected (distinct-by (fn (p) (nth p 0)) input))
-      (map (fn (_) (spawn (fn () (send me (distinct-by (fn (p) (nth p 0)) input)))))
-        (range n))
-      (let (results (fold (fn (acc _) (cons (receive) acc)) nil (range n)))
+          expected (distinct-by input (fn (p) (nth p 0))))
+      (map (range n) (fn (_) (spawn (fn () (send me (distinct-by input (fn (p) (nth p 0))))))))
+      (let (results (fold (range n) nil (fn (acc _) (cons (receive) acc))))
         (assert= n (count results))
-        (is (every? (fn (r) (= r expected)) results))))))
+        (is (every? results (fn (r) (= r expected))))))))

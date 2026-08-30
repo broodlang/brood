@@ -68,9 +68,7 @@ UTF-8-encodes a string.
 (def- encoding-hex-val
   (let (lower (string/->codepoints "0123456789abcdef")
         upper (string/->codepoints "0123456789ABCDEF"))
-    (fold (fn (m i) (assoc (assoc m (nth lower i) i) (nth upper i) i))
-      {}
-      (range 16))))
+    (fold (range 16) {} (fn (m i) (assoc (assoc m (nth lower i) i) (nth upper i) i)))))
 
 ;; Decode hex `s` to a list of byte ints (reversed during accumulation, returned
 ;; in order), or the `:invalid` sentinel on a bad/odd input. `:invalid` rather
@@ -201,10 +199,8 @@ UTF-8 form."
 ;; with the map.
 (defn- encoding-b64-val-vec (alpha)
   (let (cs (string/->codepoints alpha)
-        empty-128 (apply vector (map (fn (_) nil) (range 128))))
-    (fold (fn (v i) (let (c (nth cs i)) (if c (%vector-assoc v c i) v)))
-      empty-128
-      (range 64))))
+        empty-128 (apply vector (map (range 128) (fn (_) nil))))
+    (fold (range 64) empty-128 (fn (v i) (let (c (nth cs i)) (if c (%vector-assoc v c i) v))))))
 
 (def- encoding-b64-std-vals (encoding-b64-val-vec encoding-b64-std))
 (def- encoding-b64-url-vals (encoding-b64-val-vec encoding-b64-url))

@@ -70,16 +70,18 @@ server default, `trace` an optional vector of fn-name strings to boundary-trace 
 stray print). A request must carry an int `:id` and a string `:src`; a present
 `:timeout-ms` must be an int (a malformed field is a nil, never a raise later —
 one bad line must not kill the server) and a present `:trace` a vector."
-  (try
-    (let (v (reflect/read-string line))
-      (if (and (map? v)
-            (int? (get v :id))
-            (string? (get v :src))
-            (let (t (get v :timeout-ms)) (or (nil? t) (int? t)))
-            (let (tr (get v :trace)) (or (nil? tr) (vector? tr) (= tr :all))))
-        v
-        nil))
-    (catch _ nil)))
+  ;; check-allow :discarded-catch — a line that is not the expected map, or a not-yet-defined trace target, is skipped
+  (check-allow :discarded-catch
+    (try
+      (let (v (reflect/read-string line))
+        (if (and (map? v)
+              (int? (get v :id))
+              (string? (get v :src))
+              (let (t (get v :timeout-ms)) (or (nil? t) (int? t)))
+              (let (tr (get v :trace)) (or (nil? tr) (vector? tr) (= tr :all))))
+          v
+          nil))
+      (catch _ nil))))
 
 (defn evsrv-encode-reply (reply)
   "One reply line (no trailing newline) for `reply`, a map. The boot banner
@@ -89,10 +91,12 @@ one bad line must not kill the server) and a present `:trace` a vector."
 (defn evsrv-decode-reply (line)
   "The reply map in `line`, or nil when the line isn't one — a client skips nil
 lines (see the module preamble on stray output)."
-  (try
-    (let (v (reflect/read-string line))
-      (if (map? v) v nil))
-    (catch _ nil)))
+  ;; check-allow :discarded-catch — a line that is not the expected map, or a not-yet-defined trace target, is skipped
+  (check-allow :discarded-catch
+    (try
+      (let (v (reflect/read-string line))
+        (if (map? v) v nil))
+      (catch _ nil))))
 
 ;; ---- the evaluation core ------------------------------------------------------
 
@@ -124,7 +128,7 @@ would be worse than saying nothing. What survives is the half worth showing anyw
 `(spawn (receive …))` that parks forever reads as `1 still running` instead of
 looking identical to a round-trip that cleaned up after itself."
   (let (after (proc/list))
-    {:alive (count (filter (fn (p) (not (includes? before p))) after))}))
+    {:alive (count (filter after (fn (p) (not (includes? before p)))))}))
 
 (defn- eval-server-spy-entry (e)
   ;; One collected `*spy-sink*` entry, display-bounded for the wire.
@@ -146,10 +150,10 @@ looking identical to a round-trip that cleaned up after itself."
   ;; first traced request, which is the best that path can do and still correct for the
   ;; case that matters (a session's own definitions).
   (or (table/get *baseline-globals* :names)
-    (let (names (into #{} (map ->string (reflect/global-names))))
+    (let (names (into #{} (map (reflect/global-names) ->string)))
       (do (table/put *baseline-globals* :names names) names))))
 
-(defn baseline-globals! ()
+(defn baseline-globals ()
   "Capture the pristine global-name set NOW, so a later `:trace :all` can tell the session's
 own definitions from the language's. Idempotent — the first call wins. [[run]] calls it
 before the banner; anything embedding [[eval-capturing]] should call it at startup, or
@@ -172,8 +176,8 @@ definitions, with the language's and any later-required module's excluded. What
 `:trace :all` resolves to."
   (let (base (eval-server-baseline))
     (into []
-      (filter (fn (n) (and (not (contains? base n)) (eval-server-own-name? n)))
-        (map ->string (reflect/global-names))))))
+      (filter (map (reflect/global-names) ->string)
+        (fn (n) (and (not (contains? base n)) (eval-server-own-name? n)))))))
 
 (defn- eval-server-trace-names (trace)
   ;; A request's `:trace` as a concrete name vector. `:all` is resolved HERE, at install
@@ -186,35 +190,27 @@ definitions, with the language's and any later-required module's excluded. What
   ;; Install a boundary trace on every requested name that is a function right now;
   ;; a name that isn't (yet) defined is skipped.
   (doseq (s (eval-server-trace-names names))
-    (try (debug/trace-fn (symbol s)) (catch _ nil))))
-
-(defn- eval-server-definition-form? (form)
-  ;; A top-level DEFINITION (as opposed to something that runs): the forms whose
-  ;; whole job is to bind a name.
-  (and (pair? form)
-    (includes? ['def 'defn 'defmacro 'defdyn 'defrecord 'defability] (first form))))
+    ;; check-allow :discarded-catch — a line that is not the expected map, or a not-yet-defined trace target, is skipped
+    (check-allow :discarded-catch (try (debug/trace-fn (symbol s)) (catch _ nil)))))
 
 (defn- eval-server-eval-traced (src names)
-  ;; Evaluate `src` form by form (not `reflect/eval-string`), installing the requested traces
-  ;; EXACTLY ONCE — immediately before the first form that isn't a definition, i.e.
-  ;; after `(defn fac …)` has landed and before `(fac 5)` runs.
-  ;;
-  ;; Why not per-form: `trace-fn` keeps the pre-instrumentation value in a registry so
-  ;; re-tracing can't capture its own wrapper, and `debug-original` prefers that entry.
-  ;; So tracing a name a SECOND time after the source redefined it resurrects the
-  ;; registry's older function and the wrapper calls that instead — the redefinition is
-  ;; silently discarded. In a tutorial that made a fixed exercise report the old
-  ;; answer (and a broken one report the fixed answer), depending on history.
-  ;; Why not up front: the function usually doesn't exist until its `defn` has run.
-  (let (forms (reflect/read-all src)
-        result (fold (fn (acc form)
-                       (let ([installed _] acc)
-                         (if (or installed (eval-server-definition-form? form))
-                           [installed (reflect/eval form)]
-                           (do (eval-server-try-traces names) [true (reflect/eval form)]))))
-                 [false nil]
-                 forms))
-    (second result)))
+  ;; Evaluate `src` form by form (not `reflect/eval-string`), (re)installing the requested
+  ;; traces before EVERY form. `trace-fn` is generation-aware: a name already wrapped is
+  ;; left alone, a name the previous form REDEFINED is wrapped afresh around its new
+  ;; body, and a name that does not exist yet is skipped until the form that defines it
+  ;; has run. So `(defn f …) (f 5)` traces `f`, and so does `(defn f …)` in one request
+  ;; followed by `(f 5)` in the next, whatever the definition form was spelled — this
+  ;; used to hinge on a list of definition heads, and the day `defn-` was not on it a
+  ;; playground evaluated the previous definition of every private function it traced.
+  ;; …and once more AFTER the last form: a request whose final form redefined a traced
+  ;; name would otherwise hand `untrace-all` a moved generation, which it (rightly)
+  ;; refuses to restore over — and reports. Re-wrapping the new body first makes the
+  ;; teardown an ordinary restore, so an edit to a traced function is not a warning.
+  (let (value (fold (reflect/read-all src)
+                nil
+                (fn (_ form) (do (eval-server-try-traces names) (reflect/eval form)))))
+    (eval-server-try-traces names)
+    value))
 
 (defn eval-capturing (src &optional trace-names)
   "Evaluate source string `src` (all its forms, in order) with stdout captured;
@@ -375,6 +371,6 @@ process died without answering."
 per stdin line until EOF. This is the child's whole program — a client spawns
 `nest run <script>` where the script references `eval-server/…`
 `(run)`, and drives it over stdin/stdout."
-  (baseline-globals!) ; before the banner: nothing of the user's has run yet
+  (baseline-globals) ; before the banner: nothing of the user's has run yet
   (io/puts (evsrv-encode-reply {:ready true}))
   (eval-server-loop))

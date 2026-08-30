@@ -44,7 +44,7 @@ primitives. The kernel also provides the always-available file primitives
   ;; comment at `:67` already warns about for `append`.
   ;; The empty guard matters: `(string/join "\n" ())` is "", and an unguarded trailing "\n" would
   ;; write a one-byte file where the fold wrote an empty one.
-  (file/spit path (if (empty? lines) "" (str (string/join "\n" lines) "\n"))))
+  (file/spit path (if (empty? lines) "" (str (string/join lines "\n") "\n"))))
 ;; `lines` is `seqable`, not `(list string)` — `fold` accepts a list, vector, set or range,
 ;; so the broader domain checks the argument (a non-seqable is flagged) without false-flagging
 ;; a vector caller the way `(list string)` would.
@@ -60,12 +60,12 @@ primitives. The kernel also provides the always-available file primitives
 ;; --- directory listing ------------------------------------------------------
 (defn list-files (dir)
   "The names of regular files directly under `dir` (excluding subdirectories), sorted."
-  (filter (fn (e) (not (file/dir? (path/join dir e)))) (file/ls dir)))
+  (filter (file/ls dir) (fn (e) (not (file/dir? (path/join dir e))))))
 (sig list-files (string -> (or (list string) nil)))
 
 (defn list-dirs (dir)
   "The names of subdirectories directly under `dir`, sorted."
-  (filter (fn (e) (file/dir? (path/join dir e))) (file/ls dir)))
+  (filter (file/ls dir) (fn (e) (file/dir? (path/join dir e)))))
 (sig list-dirs (string -> (or (list string) nil)))
 
 (defn walk-files (dir)
@@ -75,11 +75,11 @@ primitives. The kernel also provides the always-available file primitives
     ;; `cons` a file (O(1)); `%append-two` a subdir's list (copies the small list, SHARES
     ;; `acc`). A plain `(append acc …)` recopies the growing accumulator per entry → O(files²)
     ;; on a large tree. Order is reversed (prepend) — fine for an unordered file set.
-    (fold (fn (acc e)
-            (let (p (path/join dir e))
-              (if (file/dir? p) (%append-two (walk-files p) acc) (cons p acc))))
+    (fold (file/ls dir)
       nil
-      (file/ls dir))))
+      (fn (acc e)
+        (let (p (path/join dir e))
+          (if (file/dir? p) (%append-two (walk-files p) acc) (cons p acc)))))))
 (sig walk-files (string -> (list string)))
 
 ;; Pure path-string helpers (extension, stem, basename, …) live in the `path`

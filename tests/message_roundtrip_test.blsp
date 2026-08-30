@@ -34,8 +34,9 @@
           else (str "s" (math/rem s 100000)))
         (cond
           (= c 3) (if (= (math/rem s 2) 0) :kw-a :kw-b)
-          (= c 4) (list (rand-val (lcg s) (- depth 1))
-                    (rand-val (lcg (lcg s)) (- depth 1)))
+          (= c 4)
+            (list (rand-val (lcg s) (- depth 1))
+              (rand-val (lcg (lcg s)) (- depth 1)))
           (= c 5) [(rand-val (lcg s) (- depth 1)) (rand-val (lcg (lcg s)) (- depth 1))]
           else
             {(math/rem s 10) (rand-val (lcg s) (- depth 1))

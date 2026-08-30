@@ -23,12 +23,12 @@
   "Every public global whose LOCAL part is exactly `n` — i.e. the places `n` could have
 moved to. A `%`-prefixed primitive counts: several names became mechanism rather than
 vocabulary, and the caller still needs to know."
-  (sort (map ->string
-          (filter (fn (s)
-                    (let (full (->string s)
-                          i (index-of full "/"))
-                      (and i (> i 0) (= (string/substring full (inc i) (count full)) n))))
-            (reflect/global-names)))))
+  (sort (map (filter (reflect/global-names)
+               (fn (s)
+                 (let (full (->string s)
+                       i (index-of full "/"))
+                   (and i (> i 0) (= (string/substring full (inc i) (count full)) n)))))
+          ->string)))
 
 (defn- split-candidate (n)
   "`mod/rest` when the bare name `n` is `mod-rest` and that qualified name exists.
@@ -40,18 +40,18 @@ all along. Tries each hyphen left to right, so `editor-buffer-put` finds `editor
 before giving up."
   (let (parts (string/split n "-"))
     (when (> (count parts) 1)
-      (first (filter (fn (q) (bound? (string/->symbol q)))
-               (map (fn (i)
-                      (str (reduce (fn (a b) (if (= a "") b (str a "-" b))) "" (take i parts))
-                        "/"
-                        (reduce (fn (a b) (if (= a "") b (str a "-" b))) "" (drop i parts))))
-                 (range 1 (count parts))))))))
+      (first (filter (map (range 1 (count parts))
+                       (fn (i)
+                         (str (reduce (take parts i) "" (fn (a b) (if (= a "") b (str a "-" b))))
+                           "/"
+                           (reduce (drop parts i) "" (fn (a b) (if (= a "") b (str a "-" b)))))))
+               (fn (q) (bound? (string/->symbol q))))))))
 
 (defn- stdin-lines (acc)
   ;; `read-line` is the only stdin door (there is no bulk reader); nil marks EOF.
   (let (l (read-line)) (if (nil? l) (reverse acc) (stdin-lines (cons l acc)))))
 
-(let (lines (filter (fn (l) (not (= (string/trim l) ""))) (stdin-lines nil)))
+(let (lines (filter (stdin-lines nil) (fn (l) (not (= (string/trim l) "")))))
   (doseq (raw lines)
     (let (n (string/trim raw)
           cs (candidates n))
@@ -62,4 +62,4 @@ before giving up."
         ;; `gui-size` → `gui/size`: the hyphen was the namespace.
         (and (empty? cs) (split-candidate n)) (io/puts n " " (split-candidate n))
         (empty? cs) (io/puts "# " n " — no candidate; removed or renamed outright")
-        else (io/puts "# " n " — AMBIGUOUS: " (reduce (fn (a b) (str a " " b)) "" cs))))))
+        else (io/puts "# " n " — AMBIGUOUS: " (reduce cs "" (fn (a b) (str a " " b))))))))

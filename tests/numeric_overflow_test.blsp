@@ -84,7 +84,7 @@
   (test "deep in the trie, not just at the root"
     ;; 64 keys forces real CHAMP nodes, so the check is exercised on the branch
     ;; path rather than only on a root data slot.
-    (let (m (fold (fn (acc i) (assoc acc i I64-MAX)) {} (%range->list (%range 0 64 1))))
+    (let (m (fold (%range->list (%range 0 64 1)) {} (fn (acc i) (assoc acc i I64-MAX))))
       (assert-error (%map-int-add m 63 1))
       (assert-error (%map-int-add m 0 2))
       (assert= (get (%map-int-add m 63 -1) 63) (- I64-MAX 1))))
@@ -241,13 +241,15 @@
           decs (list 0.5M
                  -0.5M 0.333333M 1e-20M -1e-20M 1e20M -1e20M 0M 14.2857142857M
                  1763668414462081127.142857M)
-          bad (fold (fn (acc r)
-                      (fold (fn (acc2 d)
-                              (if (and (= (< r d) (< (- r d) 0)) (= (> r d) (> (- r d) 0)))
-                                acc2
-                                (cons (list r d) acc2)))
-                        acc decs))
-                nil ratios))
+          bad (fold ratios
+                nil
+                (fn (acc r)
+                  (fold decs
+                    acc
+                    (fn (acc2 d)
+                      (if (and (= (< r d) (< (- r d) 0)) (= (> r d) (> (- r d) 0)))
+                        acc2
+                        (cons (list r d) acc2)))))))
       (assert= bad nil))))
 
 ;; ---------------------------------------------------------------------------

@@ -117,7 +117,7 @@ dirty one ships bytes that are in no commit — untraceable afterwards to anythi
              root
              "\n"))
   (let (results (run-all root publish? *repos* nil)
-        failed (filter failure? results))
+        failed (filter results failure?))
     (io/puts "\n=== summary")
     (doseq (r results) (io/puts (str "  " (get r :repo) ": " (->string (get r :status)))))
     (let (skipped (- (count *repos*) (count results)))

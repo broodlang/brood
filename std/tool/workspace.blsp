@@ -9,10 +9,10 @@
   (:use file))
 
 (defn- brood-repos ()
-  (filter (fn (dir)
-            (and (file/dir? (str dir "/.git"))
-              (or (= dir "../brood") (file/exists? (str dir "/project.blsp")))))
-    (map (fn (n) (str "../" n)) (file/ls ".."))))
+  (filter (map (file/ls "..") (fn (n) (str "../" n)))
+    (fn (dir)
+      (and (file/dir? (str dir "/.git"))
+        (or (= dir "../brood") (file/exists? (str dir "/project.blsp")))))))
 
 (defn- repo-name (dir) (last (string/split dir "/")))
 
@@ -25,8 +25,8 @@
   (os/run-process "git" (cons "-C" (cons dir git-args))))
 
 (defn- dirty-count (dir)
-  (count (filter (fn (l) (not (string/blank? l)))
-           (string/split (git-out dir (list "status" "--short")) "\n"))))
+  (count (filter (string/split (git-out dir (list "status" "--short")) "\n")
+           (fn (l) (not (string/blank? l))))))
 
 (defn- ahead-count (dir)
   (let (a (git-out dir (list "rev-list" "--count" "@{u}..HEAD")))

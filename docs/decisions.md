@@ -19353,3 +19353,256 @@ gap Elixir papers over with `then/2`.
 
 **Next.** Data-first (`map coll f`), after which `->>`, `some->>` and `cond->>` are
 deleted.
+
+## ADR-304 — `nest run` refuses an unbound symbol, and a rename ledger says where the name went
+
+**Status:** accepted (2026-08-30). Implemented: the launch gate in `project/run` (`--no-check`
+opts out), the ledger in `crates/lisp/src/renames.rs` (`%renames` / `std/tool/renames.blsp`
+as its Brood view), the ` — renamed to <new> (<ADR>)` suffix on both the runtime `unbound
+symbol` error and the checker's unbound diagnostic, and `nest check --fix-renames` consulting
+the ledger before its image-search heuristic.
+
+**Context.** ADR-302 renamed 38 names. bedit — launched by `nest run` all day — kept calling
+ten of the old ones (`gui/font!`, `os/clipboard-set!`, …), each inside a blanket
+`(try … (catch e nil))` meant for "no GUI build". The pre-flight checker printed all ten
+warnings on every launch, and the launch proceeded; the editor came up unfonted and with
+every kill un-mirrored to the OS clipboard, and nothing said why. Two gaps, not one: the
+warning did not *stop* anything, and neither the warning nor the runtime error said where
+the name had gone — that fact lived only in `docs/decisions.md`.
+
+**Decision.**
+1. **An unbound symbol refuses the launch.** `nest run` already checks the entry point's
+   require-closure (ADR-129's cached path, so it is ~free warm); it now exits 1 with one
+   line — `nest run: N unbound symbol(s) — the program cannot call these; fix them or run
+   with --no-check` — when any diagnostic in that closure is an unbound symbol. Only that
+   category gates: it is the one warning that is not advice, because the program *cannot*
+   call the name. Every other warning prints and does not block, as before. `--no-check`
+   skips the pre-flight. `--check-boot` is untouched: it asks a different question (does
+   it load?), and its answer is not made of warnings.
+2. **A rename ledger, in Rust, single source.** `renames::RENAMES` is `(old, new, adr)` for
+   every deliberate public rename still worth pointing at, seeded with ADR-302's. It is
+   Rust because its two first readers are Rust and fire before any Brood module can be
+   consulted: `eval::unbound_error` and `check::walk::unbound_msg` both append
+   ` — renamed to gui/font (ADR-302)` from it. The pointer goes on the **message**, not
+   the error's hint, because `error-message` (what a `catch` reads) sees the message only
+   — and the caller most in need of the pointer is the one that swallowed the error.
+   Brood tooling reads the same table through `(%renames)`; `nest check --fix-renames`
+   rewrites a ledgered name first — exact, bare or qualified — and hands only the rest
+   to its search heuristic, which stays bare-only.
+
+**Not chosen.** A ledger in Brood with a Rust table generated from it (two sources of truth
+drift, and a drifted rename hint is worse than none). Gating on every warning (the checker
+is advisory by design, ADR-023/024; a type warning on a program that runs is advice). Gating
+`--check-boot` too (a slower boot check that answers a question `nest check` already
+answers). A `(meta … :deprecated)` per old name (ADR-283 needs the old name to still exist;
+these do not — the rename *removed* them, which is the point).
+
+## ADR-305 — Crash reports by default: one system-monitor subscription per pid, and a reporter that prints each crash site once
+
+**Status:** accepted (2026-08-30). Implemented: `process/sysmon.rs` (a `Vec<SysMon>` keyed
+by subscriber pid, per-kind armed bits, the `:exit-abnormal` selector), the
+`proc/system-monitor` forms (`:all`, `nil pid`), `std/proc/crash-report.blsp`, the
+`run_program_with_preamble` hook `brood file` arms through, `crash-report/arm-default` in
+`project/run`, `project/run-bundle` and `repl/run`, `BROOD_NO_CRASH_REPORT`, and the kernel
+one-liner yielding in `scheduler/pool.rs`. Tests: `tests/crash_report_test.blsp`,
+`tests/sysmon_test.blsp`.
+
+**Context.** A comparison of Brood's process model against OTP (2026-08-30, the "Lisp
+survey + OTP-gap backlog" in ROADMAP) ranked the top gap as *an unsupervised process dies
+silently*. That was overstated: the kernel does print `process N died: <located error>` to
+stderr and appends it to `.brood_crash_dump` (KI-72's fix). What it prints is one line —
+no trace, no kind/code, no hint — and it prints it again for every iteration of a crash
+loop, and there is no seam by which a host (an editor's message area, telemetry) can
+receive it as anything but stderr. OTP's answer is not kernel supervision (ADR-039 tried
+that and reverted it: the kernel supervisor *was* the scheduler-race surface) but the
+`logger` process: every crash is *reported* whether or not it is *handled*.
+
+The mechanism existed — `proc/system-monitor` already pushes `[:system :exit pid reason]`
+with the same structured reason a monitor sees — but it was a **single last-wins slot**, so
+a reporter armed by default would be displaced by the next `telemetry/watch-runtime` and
+cleared outright by the MCP `watch-runtime` tool's clear-on-exit. A default subscriber needs
+a stream that can carry more than one.
+
+**Decision.**
+1. **One subscription per subscriber pid.** `proc/system-monitor` keeps a list; arming a
+   pid replaces that pid's entry only; the read form returns the *caller's* subscription,
+   `:all` lists every one, `nil` clears the caller's and `(nil pid)` clears `pid`'s. Death
+   still drops a subscription. Fan-out is the kernel's (one `deliver` per interested
+   subscriber, one message build) because no other party can get the event.
+2. **`:exit-abnormal`** selects exits whose reason is not `:normal`, and the check happens
+   before any lock or message build — per-kind armed bits, so with only the reporter armed
+   a clean exit costs one relaxed load, the same as an unarmed runtime. A hundred thousand
+   spawned-and-finished processes pay nothing for the reporter.
+3. **The reporter is Brood** (`std/proc/crash-report.blsp`): a listener process, one report
+   per **site** — the raise's first positioned trace frame, `(kind file line)`, falling back
+   to `(kind message)` — deduplicated the way ADR-232's drop warning is. Deliberate exits
+   (`:kill`/`:killed`/`:shutdown`/`[:shutdown x]`) are not crashes. The arming process is
+   excluded: its crash is the CLI's to print. `{:sink f}` replaces stderr with a function —
+   the host seam and the test seam.
+4. **Default on** in `brood file`, `nest run`, a bundle and the REPL; **never** under
+   `nest test`. `BROOD_NO_CRASH_REPORT=1` opts out. For `brood file` the arming form runs
+   *inside* the program's process (a preamble to `spawn_root_program`), so `(self)` there is
+   the program's pid and its top-level error is not printed twice.
+5. **The kernel's one-liner yields** while any subscriber selects abnormal exits. A crash is
+   printed once, with the trace, by whoever asked for it; opting out restores the line. The
+   `.brood_crash_dump` note is written either way.
+
+**Alternatives rejected.** *Multiple subscribers as a Brood fan-out process* (one kernel
+subscriber re-broadcasting): a Brood process cannot be armed before the first `def` runs,
+and the MCP tool's `nil` would still have cleared it. *Making the kernel line richer*
+instead of a Brood reporter: the trace is already in the reason; what was missing was
+dedup and a seam, both policy. *Reporting only unsupervised processes*: the kernel does not
+know who is linked at exit time, and OTP reports handled crashes too. *Keeping last-wins and
+having each arming site restore the previous subscription*: the reporter would have been
+silent for the whole duration of any watch.
+
+**Consequences.** `(proc/system-monitor)` no longer reports another process's subscription
+(use `:all`); `sysmon_test` was updated for that. A `telemetry/watch-runtime` selecting
+`:exit` now also silences the kernel line — it has taken responsibility for exits. The
+"`terminate/2` on hard kill" and the registered-name gap remain: the reporter cannot name a
+dead process (the name is gone by the time the event arrives), which a future `:spawn`-time
+name capture could fix at the cost of a message per spawn — deliberately not paid now.
+
+## ADR-306 — `try … finally`, and `throw` rebuilds an error from its map
+
+**Status:** accepted (2026-08-30). Implemented: the `finally` clause in the `try` macro
+(`std/prelude/control.blsp`), `LispError::from_error_map` behind `throw`
+(`crates/lisp/src/error.rs`). Tests: `tests/try_catch_test.blsp` ("try / finally", "throw of
+an error map rebuilds the error"), `crates/cli/tests/rethrow_rendering.rs`.
+
+**Context.** Every other Lisp has unwind cleanup — Clojure's `finally`, CL's
+`unwind-protect`, Racket's `dynamic-wind`; Erlang has `try … after`. Brood had none: a
+resource held inside a handler that must stay alive (a `gen` server's port, a `table` row,
+a lock) could only be released by the process dying. Ranked item 1 of the 2026-08-30 Lisp
+survey and item C of its OTP-gap list.
+
+**Decision.**
+1. **`(try body… [(catch e h…)] (finally cleanup…))`** is a prelude macro clause, no
+   special form: the try-without-finally is wrapped in a second `%try` that tags its
+   outcome `[:ok v]` / `[:threw e]`, `cleanup` runs, and the tag decides between
+   yielding `v` and `(throw e)`. `cleanup`'s value is discarded; a throw from `cleanup`
+   replaces the pending one (the Java/Clojure rule — there is no value in delivering the
+   older of two errors). `finally` must be the last clause; `(finally)` with no body is
+   a macro-time error. `%try` never catches a control signal or an untrappable kill, so
+   `finally` does not run on `(exit pid :kill)` — OTP's `after` doesn't either.
+2. **`throw` of an error map rebuilds the error.** A `(catch e (throw e))` of a built-in
+   error handed `throw` the map the catch had bound, and rendered as
+   `error: {:kind :arity, :file …}` — a diagnostic buried in a map dump, with its `at`
+   lines gone. `finally` rethrows exactly this way, which turned a curiosity into a
+   defect. `LispError::thrown` now recognises a `{:kind <known keyword> :message <string>
+   …}` map and rebuilds kind, message, file/position, hint and trace from it, keeping the
+   map as the payload so a later `catch` binds exactly what was thrown. A user's own map
+   with those two keys reads as an error of that kind — that is what the shape means, and
+   the alternative (a marker key) would leak into every `catch`.
+
+**Alternatives rejected.** *A `%try-finally` primitive*: nothing here needs Rust — the
+two-`%try` expansion is eight lines of Brood. *`finally` running on kill*: would require
+the kill to unwind Brood frames, which is what makes `:kill` untrappable. *Rethrow via a
+dedicated `%rethrow` keeping the original `LispError`*: the catch already erased it into a
+map; rebuilding from the map is the same information and also fixes the existing
+catch-and-rethrow idiom.
+
+**Consequences.** `try`'s expansion with `finally` is not in tail position (it never was
+with `catch` either). `error-message`, `:kind` branching and `:trace` all survive a
+rethrow. The `:trace` printed after a rethrow is the original raise's, not the rethrow
+site's.
+
+
+## ADR-308 — Data-first argument order: one pipe, no thread-last
+
+**Status:** accepted (2026-08-30). Implemented: ~1780 call sites across 30 functions plus
+their `defn`s, `sig`s, docstrings and the checker's own positional reasoning; `->>`,
+`some->>` and `cond->>` deleted.
+
+**Context.** Brood inherited Clojure's *two* argument conventions — subject-first
+(`string/split s sep`, `conj coll & xs`, `assoc coll & kvs`) and collection-last
+(`map f coll`, `fold f acc coll`) — and with them Clojure's two threading macros. A
+pipeline crossing the boundary could be threaded correctly by **neither**:
+`(->> exp (string/split " ") (map string/->number) first)` expands to
+`(string/split " " exp)`, which splits the *separator* and silently yields nil.
+
+**But Clojure's reason does not transfer.** Clojure is cornered into two conventions by
+variadicity pointing opposite ways: `(map f c1 c2 c3)` is variadic **in collections**, so
+they must come last, while `(conj coll x y z)` and `(assoc m k v k2 v2)` are variadic **in
+items**, so the collection must come first. Brood has only the second constraint. Its `map`
+is strictly `(f coll)` — `(map + [1 2] [10 20])` is an arity error — so collection-last was
+inherited style, not consequence. The tree already preferred thread-first **82 : 18**.
+
+**Nor does the ML defence.** Function-first/data-last pays off in a *curried* language
+(Haskell, OCaml, F#), where partial application is free and the pipe threads last. Brood
+does not curry, and cannot: currying and `& rest` are mutually exclusive (`(conj coll)` —
+complete call, or awaiting more?), and Brood's stdlib is built on `& rest`. Currying would
+also erase arity errors (`(map inc)` becomes a silent partial application, not the error the
+kernel's `Arity` and the checker both report today) and put a closure allocation on the
+JIT's arity-specialised call path.
+
+**Decision.** The collection is the first argument, matching `Enum.map(enum, fun)`.
+`->>`, `some->>` and `cond->>` are deleted: one convention needs one pipe, and ADR-303's
+`$` covers a step whose subject genuinely is not first (`(- 100 $)`, `(into [] $)`).
+
+**Deliberately unchanged.** The *reducer's* parameters stay `(fn (acc x))` — Elixir writes
+`fn x, acc ->`, but Clojure, Haskell `foldl`, OCaml `fold_left`, F# and Rust all put the
+accumulator first, and the pipe cannot see inside a callback, so swapping buys nothing. The
+failure modes are asymmetric and decisive: the outer swap fails **loudly** (a function where
+a collection belongs errors at once), while swapping a reducer's params fails **silently**
+— `(fn (acc x) (+ acc x))` keeps working, `(cons x acc)` keeps running and builds garbage.
+`into` also stays `(to from)`: 233 sites, and destination-first is the reading that scans.
+
+**`reduce` kept both arities.** Its `& more` was only an optional-init slot, and data-first
+moves the varying slot to the end, so `(reduce coll f)` and `(reduce coll acc f)` both
+survive — `Enum.reduce/2` and `/3`.
+
+**What this cost, recorded because the next mechanical migration will hit it.** A call has
+**five** spellings in Brood, and a textual rewriter sees only the first: bare (`map`),
+qualified (`stream/map`), root-scoped (`/map`), macro-constructed (`(list '/mapv …)`, which
+does not exist until expansion), and string-embedded (`%load-string`, and `nest new`'s
+scaffold templates, which emit a user's project). Beyond source, the **Rust checker encodes
+the positions structurally** — `sigs.rs` curated signatures and callback demand, `infer.rs`
+result inference for `map`/`keep`/`interpose`/`reduce`/`fold`, `walk.rs` callback-signature
+synthesis. Those degrade to `any` silently rather than erroring. And `map` is the one
+function name that is also a *type* name: `(map -> int)` in a `sig` parses as a two-argument
+call and was silently swapped in 18 signatures. Enumerate the spellings and the tooling
+first; do not discover them one suite run at a time.
+
+## ADR-307 — `(proc/flag :max-mailbox n)`: a mailbox bound that faults the receiver, never the sender
+
+**Status:** accepted (2026-08-30). Implemented: the bound + sticky breach flag on the
+mailbox (`process/mailbox.rs`), sender-side checks at both enqueue paths (wire +
+L1-parked), receiver-side probes at the four `:max-heap` safepoints and at `receive`
+entry, the `proc/flag` arm, `E0046`. Tests: `tests/process_limit_test.blsp`.
+
+**Context.** Item F of the 2026-08-30 OTP-gap backlog. A receiver that cannot keep up
+accumulates its mailbox without bound — the one unbounded buffer in the share-nothing
+model — and the failure is the machine's, not the process's. BEAM has `max_heap_size`
+(mirrored as `:max-heap`, ADR-051-era) but no queue bound; the request for one is
+perennial there, and a queue bound is the more *legible* guard (messages, not bytes).
+
+**Decision.** Mirror `:max-heap`'s protocol exactly, on the queue axis:
+- The bound lives on the registry-reachable mailbox (like `trap_exit`) because the
+  *senders* observe it: each enqueue compares post-push length, one relaxed load when
+  unset. A breach arms a sticky `overflow_hit`; the message is **still delivered**.
+- **The sender is never blocked or errored.** A blocking send would reintroduce
+  deadlock into fire-and-forget; an erroring send would make delivery depend on the
+  receiver's backlog, which no sender can reason about. Backpressure stays a library
+  concern (`gen/call` with a timeout).
+- The **flooded process itself** raises catchable `E0046` — at the same loop-top
+  safepoints that probe `take_proc_limit_hit`, and at `receive` entry, which is where a
+  process parked on a never-matching pattern (woken per delivery, never reaching a VM
+  safepoint) reliably notices. Uncaught, it retires just the offender; the crash
+  reporter (ADR-305) names it. A handler can drain (the flag was taken; `receive`
+  works), and `(proc/flag :max-mailbox nil)` clears a pending trip — the `:max-heap`
+  rescue rule.
+- A selective-receive rebuild re-inserts already-counted messages and does not
+  re-check; only new arrivals can breach.
+
+**Alternatives rejected.** *Dropping new messages at the bound* (a lossy queue): silent
+loss is the failure mode ADR-232 exists to surface; a fault in the offender is honest.
+*Killing the receiver from the sender's thread*: the kill path exists, but a catchable
+error preserves the drain-and-recover option and matches `:max-heap`. *Blocking the
+sender*: deadlock by construction.
+
+**Consequences.** Two atomics per mailbox (16 bytes); one relaxed load per enqueue when
+unbounded. A trap-exit `[:EXIT …]` message and a monitor `[:down …]` count like any
+arrival — the bound is about queue length, not blame. `process-info` does not yet report
+the bound; add it with the observer work if wanted.
+

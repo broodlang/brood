@@ -79,27 +79,26 @@
 (io/puts "--- structural equality: every element equals itself ---")
 (let (all-self-equal (=
                        (count
-                         (filter
+                         (filter soup
                            (fn (v)
                              (if (= (type-of v) :float)
                                ;; NaN != NaN — expected; count float as "special"
                                (or (= v v) (includes? (pr-str v) "NaN"))
-                               (= v v)))
-                           soup))
+                               (= v v)))))
                        (count soup)))
   (io/puts "all self-equal (NaN excepted):" all-self-equal))
 
 (io/puts "--- filter: keep only truthy values ---")
-(def truthy-vals (filter (fn (v) v) soup))
+(def truthy-vals (filter soup (fn (v) v)))
 (io/puts "truthy count (nil and false removed):" (count truthy-vals))
 
 (io/puts "--- map: pr-str every value (exercises the printer on all types) ---")
-(def strs (map pr-str soup))
+(def strs (map soup pr-str))
 (io/puts "stringified count:" (count strs))
-(io/puts "all strings?" (= (count (filter string? strs)) (count strs)))
+(io/puts "all strings?" (= (count (filter strs string?)) (count strs)))
 
 (io/puts "--- type-of frequencies ---")
-(def type-freq (seq/frequencies (map type-of soup)))
+(def type-freq (seq/frequencies (map soup type-of)))
 (io/puts "type frequencies:" (pr-str type-freq))
 
 (io/puts "--- sort the soup (structural order) ---")
@@ -138,7 +137,7 @@
 
 (io/puts "--- reduce with polymorphic accumulator: stringify-chain ---")
 ;; Concatenate pr-str of every element
-(def big-repr (reduce (fn (acc v) (str acc "|" (pr-str v))) "" soup))
+(def big-repr (reduce soup "" (fn (acc v) (str acc "|" (pr-str v)))))
 (io/puts "big-repr length:" (string/length big-repr))
 (io/puts "big-repr first 80:" (string/substring big-repr 0 (math/min 80 (string/length big-repr))))
 

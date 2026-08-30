@@ -19,13 +19,13 @@
 (defn count-via-apply (n)
   (let (callee (fn (& xs) (count xs)))
     ; fresh closure handle
-    (apply callee (seq/lmap inc (range n)))))
+    (apply callee (seq/lmap (range n) inc))))
 
 ;; leading-arg variant: a fresh local list rides as a non-spliced leading arg, so
 ;; it too is held across the realise (the stored-handle / heap-verifier variant).
 (defn lead-via-apply (n)
   (let (pre (list :a :b :c))
-    (count (apply list pre (seq/lmap inc (range n))))))
+    (count (apply list pre (seq/lmap (range n) inc)))))
 
 (defn hammer (i acc f n)
   (if (= i 0) acc (hammer (- i 1) (+ acc (f n)) f n)))

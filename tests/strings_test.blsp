@@ -127,8 +127,8 @@
     (assert= (string/grapheme-at gr-s 3) "b"))
   (test "grapheme-at agrees with string->graphemes at every index"
     (let (v (string/->graphemes gr-s))
-      (assert= (map (fn (i) (string/grapheme-at gr-s i)) (range (string/grapheme-count gr-s)))
-        (map (fn (i) (nth v i)) (range (count v))))))
+      (assert= (map (range (string/grapheme-count gr-s)) (fn (i) (string/grapheme-at gr-s i)))
+        (map (range (count v)) (fn (i) (nth v i))))))
   (test "out of range yields the default, never an error (like nth/get)"
     (assert= (string/grapheme-at gr-s 99) nil)
     (assert= (string/grapheme-at gr-s 99 :none) :none)
@@ -283,13 +283,13 @@
   ;; string, not with the work. A byte offset escaping onto the non-ASCII path would split
   ;; a character, so this checks EVERY range against a char-level reference.
   (test "substring matches a char-level reference over every range"
-    (let (ref-sub (fn (s i j) (apply str (take (- j i) (drop i (string/->list s)))))
+    (let (ref-sub (fn (s i j) (apply str (take (drop (string/->list s) i) (- j i))))
           chk (fn (s)
                 (let (n (string/length s))
-                  (every? (fn (i)
-                            (every? (fn (j) (= (string/substring s i j) (ref-sub s i j)))
-                              (range i (inc n))))
-                    (range 0 (inc n))))))
+                  (every? (range 0 (inc n))
+                    (fn (i)
+                      (every? (range i (inc n))
+                        (fn (j) (= (string/substring s i j) (ref-sub s i j)))))))))
       (is (chk "hello world"))
       (is (chk "héllo wörld"))
       (is (chk "a😀b😀c"))
@@ -351,9 +351,9 @@
 
 (describe "join"
   (test "places the separator between elements"
-    (assert= (string/join ", " (list "a" "b" "c")) "a, b, c"))
-  (test "single element has no separator" (assert= (string/join ", " (list "solo")) "solo"))
-  (test "empty collection is the empty string" (assert= (string/join ", " nil) "")))
+    (assert= (string/join (list "a" "b" "c") ", ") "a, b, c"))
+  (test "single element has no separator" (assert= (string/join (list "solo") ", ") "solo"))
+  (test "empty collection is the empty string" (assert= (string/join nil ", ") "")))
 
 (describe "split"
   (test "splits on each occurrence" (assert= (string/split "a,b,c" ",") (list "a" "b" "c")))
@@ -364,7 +364,7 @@
   (test "empty separator splits into characters"
     (assert= (string/split "abc" "") (list "a" "b" "c")))
   (test "split then join round-trips"
-    (assert= (string/join "," (string/split "x,y,z" ",")) "x,y,z")))
+    (assert= (string/join (string/split "x,y,z" ",") ",") "x,y,z")))
 
 (describe "replace"
   (test "replaces every occurrence" (assert= (string/replace "a-b-c" "-" "+") "a+b+c"))
@@ -567,18 +567,18 @@
 
 (describe "long multi-byte strings (indexed char<->byte conversion)"
   (test "every char index agrees with the code-point reference"
-    (assert= (into [] (map (fn (i) (string/char-at mb-text i)) (range 0 (string/length mb-text))))
+    (assert= (into [] (map (range 0 (string/length mb-text)) (fn (i) (string/char-at mb-text i))))
       mb-chars))
   (test "substring from a rising start is the reference tail"
-    (assert= (into [] (map (fn (i) (string/substring mb-text i (+ i 5))) [0 1 31 32 33 100 495]))
-      (into [] (map (fn (i) (apply str (seq/subvec mb-chars i (+ i 5)))) [0 1 31 32 33 100 495]))))
+    (assert= (into [] (map [0 1 31 32 33 100 495] (fn (i) (string/substring mb-text i (+ i 5)))))
+      (into [] (map [0 1 31 32 33 100 495] (fn (i) (apply str (seq/subvec mb-chars i (+ i 5))))))))
   (test "substring to the end, and the whole string"
     (assert= (string/substring mb-text 497) "漢🙂x")
     (assert= (string/substring mb-text 0 (string/length mb-text)) mb-text))
   (test "an incremental scan finds every occurrence at its char index"
     ;; `🙂` is char 3 of each 5-char unit. This is the `inc-scan` sweep row's shape.
     (assert= (into [] (mb-scan mb-text "🙂" 0 nil))
-      (into [] (map (fn (k) (+ 3 (* 5 k))) (range 0 100)))))
+      (into [] (map (range 0 100) (fn (k) (+ 3 (* 5 k)))))))
   (test "reverse search, with and without a bound"
     (assert= (string/last-index-of mb-text "🙂") 498)
     (assert= (string/last-index-of mb-text "🙂" 498) 493)

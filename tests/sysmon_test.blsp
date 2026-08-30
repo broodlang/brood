@@ -3,9 +3,9 @@
 ;; `[:system kind subject-pid detail]` messages (the observability event
 ;; stream's kernel sources).
 ;;
-;; All blocks are :isolated — the monitor is a runtime-global singleton, so
-;; running these concurrently with anything that spawns processes would
-;; cross-talk. Each test disarms AND flushes leftover [:system …] events before
+;; All blocks are :isolated — subscriptions are runtime-global state (one per
+;; subscriber pid since ADR-305), so running these concurrently with anything that
+;; spawns processes would cross-talk. Each test disarms AND flushes leftover [:system …] events before
 ;; it ends: an isolated unit's tests share one worker process (= one mailbox),
 ;; so a backlog from an earlier test would otherwise satisfy a later receive
 ;; (surfaced by BROOD_GC_STRESS flooding :gc events).
@@ -31,6 +31,13 @@
   (if (or (nil? (proc/system-monitor)) (= n 0))
     (proc/system-monitor)
     (do (sleep 20) (sysmon-wait-disarm (- n 1)))))
+
+(defn- sysmon-wait-empty (n)
+  "Poll until no subscription remains (the async death-disarm), or `n` attempts
+run out. Returns the final `:all` listing ([] on success)."
+  (if (or (empty? (proc/system-monitor :all)) (= n 0))
+    (proc/system-monitor :all)
+    (do (sleep 20) (sysmon-wait-empty (- n 1)))))
 
 (defn- sysmon-done ()
   "End-of-test hygiene: disarm, then drain any [:system …] backlog out of this
@@ -111,9 +118,48 @@ worker's mailbox so it can't satisfy a later test's receive."
     (let (watcher (spawn (do (proc/system-monitor (self)) (receive (:never nil)))))
       ; let it arm
       (sleep 50)
-      (assert= watcher (get (proc/system-monitor) :pid))
+      ;; the read form is the CALLER's subscription — the watcher's shows under :all
+      (assert= nil (proc/system-monitor))
+      (assert= [watcher] (mapv (proc/system-monitor :all) (fn (c) (get c :pid))))
       (exit watcher :kill)
-      (assert= nil (sysmon-wait-disarm 100)))))
+      (assert= [] (sysmon-wait-empty 100))))
+
+  (test "one subscription per subscriber pid: two coexist, each selecting its own kinds"
+    (let (me (self)
+          other (spawn (do
+                         (proc/system-monitor (self) {:spawn true})
+                         (receive ([:system :spawn p _] (send me [:other-saw p])))
+                         (receive (:never nil)))))
+      (sleep 50)
+      (proc/system-monitor me {:exit true})
+      (assert= 2 (count (proc/system-monitor :all)))
+      (let (child (spawn :done))
+        ;; both subscribers hear about the same child, each through its own selection
+        (assert= child (receive ([:other-saw p] p) (after *test-wait-ms* :timeout)))
+        (assert= child (receive ([:system :exit ^child _] child) (after *test-wait-ms* :timeout))))
+      ;; clearing OURS leaves the other's in place; clearing BY PID removes it
+      (proc/system-monitor nil)
+      (assert= nil (proc/system-monitor))
+      (assert= [other] (mapv (proc/system-monitor :all) (fn (c) (get c :pid))))
+      (assert= other (get (proc/system-monitor nil other) :pid))
+      (assert= [] (proc/system-monitor :all))
+      (exit other :kill))
+    (sysmon-done))
+
+  (test ":exit-abnormal reports a crash and not a clean exit"
+    (proc/system-monitor (self) {:exit-abnormal true})
+    (let (cfg (proc/system-monitor))
+      (assert= false (get cfg :exit))
+      (assert= true (get cfg :exit-abnormal)))
+    (let (clean (spawn :done)
+          crasher (spawn (error "boom")))
+      (assert= :crashed
+        (receive
+          ([:system :exit ^crasher [:error _]] :crashed)
+          ([:system :exit ^clean _] :clean-was-reported)
+          (after *test-wait-ms* :timeout)))
+      (assert= :quiet (receive ([:system :exit ^clean _] :clean-was-reported) (after 100 :quiet))))
+    (sysmon-done)))
 
 (describe "telemetry watch-runtime"
   :isolated (test "kernel events flow through the telemetry seam as [:runtime …] events"

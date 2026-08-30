@@ -366,7 +366,11 @@ fn run_files(interp: &mut Interp, files: &[String]) {
         // talking to a spawned worker then uses the userspace direct-handoff path (no
         // per-message cross-thread futex) and its top-level `receive`s park-and-capture,
         // instead of the root thread blocking on its mailbox condvar.
-        if let Err(e) = interp.run_program(&src, Some(path.clone())) {
+        // The default crash reporter (ADR-305) is armed as the program's first form, in
+        // its own process; `BROOD_NO_CRASH_REPORT=1` is honoured inside `arm-default`.
+        if let Err(e) =
+            interp.run_program_with_preamble("(crash-report/arm-default)", &src, Some(path.clone()))
+        {
             // Restore the terminal first: a TUI program that entered raw mode and
             // then threw never reached its `term-raw-leave`, and `process::exit`
             // skips Drop guards. Without this the shell is left wedged in raw mode

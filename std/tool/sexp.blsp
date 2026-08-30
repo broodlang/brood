@@ -60,17 +60,17 @@ interpreted and the bottleneck in structural navigation.)"
   "The deepest container node strictly containing `point` (descending into
 list/vector/map children); the root if none. Reader-macro wrappers are navigated
 as a unit — descending through them is a deferred refinement."
-  (let (hit (seq/find (fn (k)
-                        (and (container-kind? (get k :kind))
-                          (< (get k :start) point)
-                          (< point (get k :end))))
-              (or (get anode :kids) (list))))
+  (let (hit (seq/find (or (get anode :kids) (list))
+              (fn (k)
+                (and (container-kind? (get k :kind))
+                  (< (get k :start) point)
+                  (< point (get k :end))))))
     (if (nil? hit) anode (enclosing hit point))))
 (sig enclosing (map number -> map))
 
 (defn forms-of (anode)
   "The form (non-whitespace, non-comment) children of `anode`."
-  (filter form? (or (get anode :kids) (list))))
+  (filter (or (get anode :kids) (list)) form?))
 
 (defn top-level-forms (text)
   "The top-level forms of `text`, in order, each a positioned node `{:kind :start
@@ -164,12 +164,12 @@ siblings: the sibling walks see only forms starting after / ending before it, so
 stayed put, and from inside the string forward stayed put while backward jumped to before
 `calc/eval` — read as \"C-M-f does nothing / C-M-b jumps up one expression\" (2026-08-30).
 Emacs and paredit move to the atom's own edge; so does this."
-  (seq/find (fn (f)
-              (and (not (container-kind? (get f :kind)))
-                (< (sexp-start f) rp)
-                (< rp (sexp-end f))
-                (keep? f)))
-    (forms-of enc)))
+  (seq/find (forms-of enc)
+    (fn (f)
+      (and (not (container-kind? (get f :kind)))
+        (< (sexp-start f) rp)
+        (< rp (sexp-end f))
+        (keep? f)))))
 (sig sexp-atom-around (map int fn -> (or nil map)))
 
 (defn- sexp-sibling-forward (text point keep?)
@@ -180,7 +180,7 @@ shared body of the forward motions."
         rp (:rp site)
         enc (:enc site)
         nxt (or (sexp-atom-around enc rp keep?)
-              (seq/find (fn (f) (and (>= (sexp-start f) rp) (keep? f))) (forms-of enc))))
+              (seq/find (forms-of enc) (fn (f) (and (>= (sexp-start f) rp) (keep? f))))))
     (if (nil? nxt) point (sexp-abs site (sexp-end nxt)))))
 (sig sexp-sibling-forward (string int fn -> int))
 
@@ -192,7 +192,7 @@ The shared body of the backward motions."
         rp (:rp site)
         enc (:enc site)
         prev (or (sexp-atom-around enc rp keep?)
-               (last (filter (fn (f) (and (<= (sexp-end f) rp) (keep? f))) (forms-of enc)))))
+               (last (filter (forms-of enc) (fn (f) (and (<= (sexp-end f) rp) (keep? f)))))))
     (if (nil? prev) point (sexp-abs site (sexp-start prev)))))
 (sig sexp-sibling-backward (string int fn -> int))
 
@@ -277,7 +277,7 @@ none.
     (sexp/point-down \"(a b)\" 0)       → 1"
   (let (site (sexp-site text point)
         rp (:rp site)
-        lst (seq/find (fn (f) (and (sexp-list? f) (>= (sexp-start f) rp))) (forms-of (:enc site))))
+        lst (seq/find (forms-of (:enc site)) (fn (f) (and (sexp-list? f) (>= (sexp-start f) rp)))))
     (if (nil? lst) point (sexp-abs site (inc (sexp-start lst))))))
 (sig point-down (string int -> int))
 
@@ -286,8 +286,8 @@ none.
 `point` isn't within one. The shared body of `point-defun-start` / `point-defun-end`."
   (let ([base sub] (narrow text point)
         rp (- point base)
-        top (seq/find (fn (f) (and (<= (sexp-start f) rp) (<= rp (sexp-end f))))
-              (forms-of (tree sub))))
+        top (seq/find (forms-of (tree sub))
+              (fn (f) (and (<= (sexp-start f) rp) (<= rp (sexp-end f))))))
     (if (nil? top)
       point
       (+ base (if (= edge :start) (sexp-start top) (sexp-end top))))))
@@ -342,7 +342,7 @@ delimiter past that form (Emacs/paredit `forward-slurp-sexp`).
       (let ([tr enc] ctx
             ee (sexp-end enc)
             parent (enclosing tr (sexp-start enc))
-            nxt (seq/find (fn (f) (>= (get f :start) ee)) (forms-of parent)))
+            nxt (seq/find (forms-of parent) (fn (f) (>= (get f :start) ee))))
         (if (nil? nxt)
           nil
           (let (ne (get nxt :end))
@@ -386,7 +386,7 @@ delimiter back over that form (paredit `backward-slurp-sexp`).
       (let ([tr enc] ctx
             es (sexp-start enc)
             parent (enclosing tr es)
-            prev (last (filter (fn (f) (<= (get f :end) es)) (forms-of parent))))
+            prev (last (filter (forms-of parent) (fn (f) (<= (get f :end) es)))))
         (if (nil? prev)
           nil
           (let (ps (get prev :start))
@@ -428,8 +428,8 @@ form's siblings (paredit `raise-sexp`).
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
-            cur (seq/find (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
-                  (forms-of enc)))
+            cur (seq/find (forms-of enc)
+                  (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))))
         (if (nil? cur)
           nil
           (let (cs (get cur :start) ce (get cur :end))
@@ -464,7 +464,7 @@ new open (paredit `wrap-round`).
     (sexp/point-wrap-round \"a b\" 0)     → [\"(a) b\" 1]"
   (let (tr (tree text)
         enc (enclosing tr point)
-        nxt (seq/find (fn (f) (>= (get f :end) point)) (forms-of enc)))
+        nxt (seq/find (forms-of enc) (fn (f) (>= (get f :end) point))))
     (if (nil? nxt)
       nil
       (let (ns (get nxt :start) ne (get nxt :end))
@@ -487,11 +487,11 @@ at `next.end` (the whitespace between the two forms is preserved in place).
     (sexp/point-transpose \"(a b)\" 2)   → [\"(b a)\" 4]"
   (let (enc (enclosing (tree text) point)
         sibs (forms-of enc)
-        inside (seq/find (fn (f) (and (< (get f :start) point) (< point (get f :end)))) sibs)
-        next (if (nil? inside) (seq/find (fn (f) (>= (get f :start) point)) sibs) inside)
+        inside (seq/find sibs (fn (f) (and (< (get f :start) point) (< point (get f :end)))))
+        next (if (nil? inside) (seq/find sibs (fn (f) (>= (get f :start) point))) inside)
         prev (if (nil? next)
                nil
-               (last (filter (fn (f) (<= (get f :end) (get next :start))) sibs))))
+               (last (filter sibs (fn (f) (<= (get f :end) (get next :start)))))))
     (if (or (nil? prev) (nil? next))
       nil
       (let (ps (get prev :start)

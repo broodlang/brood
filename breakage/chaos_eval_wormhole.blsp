@@ -30,7 +30,7 @@
 
 ;; Generate `(+ 1 (+ 2 (+ 3 ... (+ n 0) ...)))` as a data structure via quasiquote
 (defn build-nested-add (terms)
-  (fold (fn (expr n) `(+ ~n ~expr)) 0 (reverse terms)))
+  (fold (reverse terms) 0 (fn (expr n) `(+ ~n ~expr))))
 
 (def terms-100 (range 1 101))
 (def nested-add-100 (build-nested-add terms-100))
@@ -50,7 +50,7 @@
 (def big-list-expr `(list ~@(range 1 10001)))
 (def big-list (reflect/eval big-list-expr))
 (io/puts "big-list count:" (count big-list))
-(io/puts "big-list sum:" (reduce + 0 big-list))
+(io/puts "big-list sum:" (reduce big-list 0 +))
 
 (io/puts "--- generate and eval 1000 defns, then call them all ---")
 
@@ -61,9 +61,9 @@
   (reflect/eval `(defn ~(symbol (str "chaos-fn-" i)) (x) (+ x ~i))))
 
 (def fn-sum
-  (fold (fn (acc i) (let (fn-name (symbol (str "chaos-fn-" i))) (+ acc ((reflect/eval fn-name) i))))
+  (fold (range 1000)
     0
-    (range 1000)))
+    (fn (acc i) (let (fn-name (symbol (str "chaos-fn-" i))) (+ acc ((reflect/eval fn-name) i))))))
 
 (io/puts "sum of chaos-fn-N(N):" fn-sum)
 (io/puts "expected 999000:" (= 999000 fn-sum))
@@ -73,7 +73,7 @@
 ;; Build a source string for a long `do` block with 500 `def` forms
 (defn make-def-src (n)
   (str "(do "
-    (string/join " " (map (fn (i) (str "(def chaos-var-" i " " (* i i) ")")) (range n)))
+    (string/join (map (range n) (fn (i) (str "(def chaos-var-" i " " (* i i) ")"))) " ")
     ")"))
 
 (def big-do-src (make-def-src 500))
@@ -114,7 +114,7 @@
 (io/puts "SKIP: 500-clause match crashes eval (recursion too deep in pattern compiler)")
 
 (defn build-big-match (n)
-  (let (clauses (map (fn (i) `(~i ~(str "val-" i))) (range n)))
+  (let (clauses (map (range n) (fn (i) `(~i ~(str "val-" i)))))
     `(fn (x) (match x ~@clauses (_ "unknown")))))
 
 ;; Safe with 100 clauses
@@ -132,10 +132,10 @@
 (io/puts "expected 50005000:" (= 50005000 (apply + huge-args)))
 
 (io/puts "--- gensym storm: generate 10000 unique symbols ---")
-(def syms (map (fn (_) (gensym)) (range 10000)))
+(def syms (map (range 10000) (fn (_) (gensym))))
 (io/puts "gensym count:" (count syms))
 ;; All must be unique
-(def unique-syms (into {} (map (fn (s) [s true]) syms)))
+(def unique-syms (into {} (map syms (fn (s) [s true]))))
 (io/puts "all unique?" (= (count unique-syms) 10000))
 
 (io/puts "--- DONE ---")

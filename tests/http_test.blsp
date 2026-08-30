@@ -415,8 +415,8 @@
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp/connect "127.0.0.1" port)
               ;; 70 KiB of header-ish bytes, never a blank line
-              junk (bytes/concat (map (fn (_) "X-Junk: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n")
-                                   (range 0 1750))))
+              junk (bytes/concat (map (range 0 1750)
+                                   (fn (_) "X-Junk: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n"))))
           (tcp/send c ["GET / HTTP/1.0\r\n" junk])
           ;; the server gives up and closes without ever responding
           (let (got (drain c))

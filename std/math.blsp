@@ -190,13 +190,13 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
     (math/sum [])       → 0
 
     (math/sum [1 2 3])     → 6"
-  (fold %add 0 xs))
+  (fold xs 0 %add))
 (sig sum (seqable -> number))
 (defn product (xs)
   "The product of the numbers in `xs`.
 
     (math/product [2 3 4])   → 24"
-  (fold %mul 1 xs))
+  (fold xs 1 %mul))
 (sig product (seqable -> number))
 
 ;; Rounding & roots, all Brood over the one Float->Int primitive `floor` (toward

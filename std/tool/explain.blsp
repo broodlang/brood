@@ -57,7 +57,7 @@ the `nest mcp` tools of the same names.")
    "E0043" {:summary "Soft memory limit crossed (ADR-043) — allocation exceeded the configured cap."
             :causes "A runaway build (an unbounded loop accumulating data); a genuinely large workload under a low `BROOD_MEM_LIMIT`."
             :fix "Bound the work (stream/chunk instead of materialising everything); raise `BROOD_MEM_LIMIT` if the size is legitimate. Catchable — recover and shed load."
-            :example "(reduce + 0 (range 1 1000000))   ; folds without building a list"}
+            :example "(reduce (range 1 1000000) 0 +)   ; folds without building a list"}
    "E0044" {:summary "Stack depth exceeded — runaway NON-tail recursion."
             :causes "A recursive call that isn't in tail position (work happens after the call), so each call grows the stack: `(defn sum (n) (+ n (sum (- n 1))))`."
             :fix "Rewrite as a tail-recursive loop with an accumulator (proper tail calls are O(1) stack), or use `reduce`/`fold`."
@@ -130,7 +130,7 @@ the `nest mcp` tools of the same names.")
      :keywords ["string"
                  "concat" "concatenate" "build string" "join" "stringbuilder" "accumulate string"]
      :idiom "Don't `(str acc x)` in a loop (O(n²)). Cons parts onto a list and `(string/join \"\" (reverse parts))` once — or hand an iolist (nested list of strings/bytes) to the write boundary (ADR-139)."
-     :example "(string/join \"\" (map str (range 0 5)))"
+     :example "(string/join (map (range 0 5) str) \"\")"
      :see "docs/decisions.md ADR-139 (iolists)"}
     {:intent "a set / distinct elements / membership"
      :keywords ["set" "distinct" "unique" "member" "contains" "#{}"]
@@ -201,7 +201,7 @@ the `nest mcp` tools of the same names.")
 (defn- explain-matches? (q entry)
   (let (ql (string/lower q))
     (or (includes? (string/lower (get entry :intent)) ql)
-      (any? (fn (k) (includes? (string/lower k) ql)) (get entry :keywords)))))
+      (any? (get entry :keywords) (fn (k) (includes? (string/lower k) ql))))))
 
 (defn find-pattern (query)
   "Find the idiomatic Brood pattern(s) for a task. `query` is matched (case-
@@ -209,5 +209,5 @@ insensitive substring) against each cookbook entry's intent + keywords. Returns
 `{:matches [{:intent :idiom :example :see} …]}` (the `:keywords` are dropped from
 the result — they're the search index, not content). Empty matches suggests
 `apropos`/`doc-search` for a name-based search instead."
-  {:matches (map (fn (e) (dissoc e :keywords))
-              (filter (fn (e) (explain-matches? query e)) *idiom-cookbook*))})
+  {:matches (map (filter *idiom-cookbook* (fn (e) (explain-matches? query e)))
+              (fn (e) (dissoc e :keywords)))})

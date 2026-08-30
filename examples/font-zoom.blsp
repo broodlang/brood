@@ -5,7 +5,7 @@ pieces that landed together (ADR-079 + the ADR-077 mouse-modifier addendum):
   • the mouse event now carries held modifiers as a trailing vector
     `[:mouse action button row col mods]` (here `mods` is `[:ctrl]` or `[]`), so
     an app can tell Ctrl+wheel from a plain wheel; and
-  • `(gui/font! id spec)` retunes ONE window's font, so the zoom is per-window.
+  • `(gui/font id spec)` retunes ONE window's font, so the zoom is per-window.
 
 Ctrl+scroll-up grows the font, Ctrl+scroll-down shrinks it; a plain wheel does
 nothing. Press q or click the window's close box to quit.
@@ -39,7 +39,7 @@ grows/shrinks within [*min-px* *max-px*]; anything else leaves `px` unchanged."
 ; keys, resizes, etc. — just re-render
 (let (win (gui/open)
       px0 15)
-  (gui/font! win {:height px0})
+  (gui/font win {:height px0})
   ;; A local loop is a `letrec`-bound closure called by name — `go` closes over `win`,
   ;; so only the changing state (`px`) is threaded. Render at `px`, then wait for the
   ;; next input and fold it in. Input arrives in this process's mailbox (ADR-058), so
@@ -53,7 +53,7 @@ grows/shrinks within [*min-px* *max-px*]; anything else leaves `px` unchanged."
                       (let (px* (ctrl-wheel-px ev px))
                         ; retune just THIS window
                         (when (not (= px* px))
-                          (gui/font! win {:height px*}))
+                          (gui/font win {:height px*}))
                         (go px*))
                     else (go px)))))
     (go px0)))

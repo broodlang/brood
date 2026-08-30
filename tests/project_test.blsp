@@ -133,7 +133,7 @@
       (assert= (record-id path-dep) :project/dep-path)
       (assert= (record-id tarball-dep) :project/dep-tarball)
       (assert= (record-id registry-dep) :project/dep-registry)
-      (is (every? project/dep? (list git-dep path-dep tarball-dep registry-dep)))
+      (is (every? (list git-dep path-dep tarball-dep registry-dep) project/dep?))
       (is (project/dep-path? path-dep))
       (is (not (project/dep-path? git-dep)))
       (is (not (project/dep? {:name 'x :path "p"})))))
@@ -181,11 +181,11 @@
                              :dependencies [[core :git "u" :ref "r"]]
                              :dev-dependencies [[testkit :path "../tk"]]))
     ; production deps stay in their own slot, untagged
-    (assert= (map :name *project-dependencies*) (list 'core))
-    (assert= (map :dev *project-dependencies*) (list nil))
+    (assert= (map *project-dependencies* :name) (list 'core))
+    (assert= (map *project-dependencies* :dev) (list nil))
     ; dev deps land in their own slot, tagged :dev true
-    (assert= (map :name *project-dev-dependencies*) (list 'testkit))
-    (assert= (map :dev *project-dev-dependencies*) (list true)))
+    (assert= (map *project-dev-dependencies* :name) (list 'testkit))
+    (assert= (map *project-dev-dependencies* :dev) (list true)))
   (test "no :dev-dependencies parses to an empty dev-dep list"
     (project/apply-config '(:name demo :dependencies [[core :path "../c"]]))
     (assert= *project-dev-dependencies* nil)))
@@ -366,12 +366,12 @@
           "(defmodule shared)\n(defn main () 1)\n(defn- shared-helper () 1)\n(defn- shared-dead () 1)\n(defn use-it () (shared-helper))\n")
         (file/spit fb "(defmodule shared)\n(defn main () 2)\n")
         (let (files [fa fb]
-              extracts (fold (fn (m p)
-                               (let ([c pr dn] (project/project-scan-file-entry p))
-                                 (%map-assoc m p [0 c pr dn])))
+              extracts (fold files
                          {}
-                         files)
-              source-set (fold (fn (m p) (%map-assoc m p true)) {} files))
+                         (fn (m p)
+                           (let ([c pr dn] (project/project-scan-file-entry p))
+                             (%map-assoc m p [0 c pr dn]))))
+              source-set (fold files {} (fn (m p) (%map-assoc m p true))))
           ;; duplicate-defs: extract path == sequential path
           (assert= (sort (project/project-duplicate-def-warnings extracts source-set))
             (sort (project/project-duplicate-def-warnings-seq files)))
@@ -379,7 +379,7 @@
           (let (warns (project/project-unused-private-warnings extracts))
             (assert= (count warns) 1)
             (is (includes? (first warns) "shared-dead"))
-            (refute (any? (fn (w) (includes? w "shared-helper")) warns))))))))
+            (refute (any? warns (fn (w) (includes? w "shared-helper"))))))))))
 
 ;; The Phase-2 check-result cache primitives (ADR-119): `check-file-deps` returns
 ;; `[warnings dep-keys fingerprint]`, and `check-deps-fp` recomputed on those
@@ -509,8 +509,8 @@
         (file/spit (path/join src "plain.blsp") "(defmodule plain)\n(defn h () 2)\n")
         (project/setup root)
         (let (files (project/project-colocated-test-files root))
-          (is (any? (fn (f) (includes? f "lib.blsp")) files))
-          (is (not (any? (fn (f) (includes? f "plain.blsp")) files)))))))
+          (is (any? files (fn (f) (includes? f "lib.blsp"))))
+          (is (not (any? files (fn (f) (includes? f "plain.blsp")))))))))
   (test "strip-test-forms drops deftest/describe, keeps production defs"
     (let (source (str "(defmodule m (:use test))\n"
                    "(defn keep-me (x) x)\n" "(describe \"grp\" (test \"t\" (assert= 1 1)))\n"
@@ -534,8 +534,8 @@
           (str "(defmodule lib (:use test))\n"
             "(defn shipped () 1)\n" "(describe \"lib\" (test \"t\" (assert= 1 (shipped))))\n"))
         (let (bundle (project/bundle-collect root))
-          (is (any? (fn (s) (and (string? s) (includes? s "defn shipped"))) bundle))
-          (is (not (any? (fn (s) (and (string? s) (includes? s "describe"))) bundle)))))))
+          (is (any? bundle (fn (s) (and (string? s) (includes? s "defn shipped")))))
+          (is (not (any? bundle (fn (s) (and (string? s) (includes? s "describe"))))))))))
   (test "an empty describe warns; a describe with a test does not"
     (is (includes? (with-err-str (describe "empty group")) "has no tests"))
     (is (not (includes? (with-err-str (describe "full group" (test "t" (is true)))) "has no tests")))))
@@ -810,10 +810,10 @@
       (file/spit (path/join dir "shapes.blsp")
         "(defmodule shapes) (defn area () 1) (defmodule shapes-internal) (defn secret () 42)")
       (let (pairs (package/module-files dir)
-            names (sort (map (fn (p) (->string (first p))) pairs)))
+            names (sort (map pairs (fn (p) (->string (first p))))))
         (assert= names (list "shapes" "shapes-internal"))
         ;; every declared module maps back to the one file that declares it
-        (is (every? (fn (p) (string/ends-with? (second p) "shapes.blsp")) pairs)))))
+        (is (every? pairs (fn (p) (string/ends-with? (second p) "shapes.blsp")))))))
 
   (test "setup registers a co-located secondary module, rooted"
     (let (root (temp-dir "brood-coloc-"))
@@ -882,8 +882,8 @@
       (def pkge/twomod-internal/*loads* 0)
       (project/setup root)
       (let (me (self) n 8)
-        (map (fn (_) (spawn (fn () (do (require-one 'pkge/twomod-internal) (send me :done)))))
-          (range n))
+        (map (range n)
+          (fn (_) (spawn (fn () (do (require-one 'pkge/twomod-internal) (send me :done))))))
         (coloc-await-n n))
       (assert= pkge/twomod-internal/*loads* 1))))
 

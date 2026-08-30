@@ -15,11 +15,11 @@
 ;; we assert on a *static* diagnostic without failing this file's own compile pass.
 (defn warns-of (src)
   "The advisory warning messages for `src`, as a list of strings."
-  (map (fn (w) (get w :message)) (reflect/check-string-structured src)))
+  (map (reflect/check-string-structured src) (fn (w) (get w :message))))
 
 (defn warns-about? (src needle)
   "Does checking `src` produce a warning containing `needle`?"
-  (any? (fn (w) (includes? w needle)) (warns-of src)))
+  (any? (warns-of src) (fn (w) (includes? w needle))))
 
 (describe "sig: std modules carry signatures the checker enforces"
   (test "a declared std signature is enforced at a call site in another module"

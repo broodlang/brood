@@ -5,7 +5,7 @@
 //! erased the first — while *both* printed `package: added …`. Measured at the time:
 //! three concurrent adds landed between one and three of them.
 //!
-//! The fix is a locked compare-and-swap (`package-edit-manifest!`): the write only
+//! The fix is a locked compare-and-swap (`package-edit-manifest`): the write only
 //! lands if the file still holds exactly what was read, and otherwise the edit is
 //! recomputed against the new content. These tests are the regression, and they are
 //! written to *fail* on the old behaviour rather than merely exercise the new one —

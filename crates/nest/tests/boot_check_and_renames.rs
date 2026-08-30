@@ -257,3 +257,73 @@ fn fix_renames_is_quiet_and_clean_on_a_healthy_project() {
         "a clean project must say there is nothing to do:\n{out}"
     );
 }
+
+// ---------- nest run's launch gate + the rename ledger (ADR-304) ----------
+
+/// A project whose entry reaches a ledgered rename inside a blanket guard — the bedit
+/// shape: `nest run` used to print the warning and launch anyway.
+fn ledger_project(tag: &str) -> TempDir {
+    let tmp = project(tag);
+    let root = tmp.path();
+    write(
+        &root.join("src/main.blsp"),
+        "(defmodule main \"entry\")\n\n\
+         (defn main (& _args)\n  (try (gui/font! 1) (catch e nil))\n  (io/puts \"launched\")\n  0)\n",
+    );
+    tmp
+}
+
+#[test]
+fn run_refuses_to_launch_over_an_unbound_symbol() {
+    let tmp = ledger_project("rungate");
+    let root = tmp.path();
+
+    let (code, out) = nest(root, &["run"]);
+
+    assert_ne!(code, 0, "an unbound symbol must refuse the launch:\n{out}");
+    assert!(
+        out.contains("unbound symbol: gui/font! — renamed to gui/font (ADR-302)"),
+        "the warning names where the name went:\n{out}"
+    );
+    assert!(
+        out.contains("nest run: 1 unbound symbol(s)"),
+        "the one-line verdict:\n{out}"
+    );
+    assert!(
+        !out.contains("launched"),
+        "the program must not have run:\n{out}"
+    );
+}
+
+#[test]
+fn run_no_check_launches_regardless() {
+    let tmp = ledger_project("runnocheck");
+    let root = tmp.path();
+
+    let (code, out) = nest(root, &["run", "--no-check"]);
+
+    assert_eq!(code, 0, "--no-check launches:\n{out}");
+    assert!(out.contains("launched"), "the program ran:\n{out}");
+}
+
+#[test]
+fn fix_renames_consults_the_ledger_first() {
+    let tmp = ledger_project("fixledger");
+    let root = tmp.path();
+
+    let (_code, out) = nest(root, &["check", "--fix-renames"]);
+
+    assert!(
+        out.contains("fix:  gui/font! → gui/font (ADR-302)"),
+        "a ledgered QUALIFIED rename is fixed exactly, with its ADR:\n{out}"
+    );
+    let after = std::fs::read_to_string(root.join("src/main.blsp")).unwrap();
+    assert!(
+        after.contains("(gui/font 1)") && !after.contains("gui/font!"),
+        "{after}"
+    );
+
+    // And the launch gate is satisfied by the rewrite.
+    let (code, out) = nest(root, &["run"]);
+    assert_eq!(code, 0, "after the fix, nest run launches:\n{out}");
+}

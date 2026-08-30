@@ -319,10 +319,10 @@
       (telemetry/telemetry-check-event [:tmm :req :stop] {} {})))
   (test "an undeclared event never reports a problem"
     (assert= nil (telemetry/telemetry-check-event [:undeclared] {} {})))
-  (test "validate! flips the listener flag"
-    (validate! true)
+  (test "validate flips the listener flag"
+    (validate true)
     (assert= true *telemetry-validate*)
-    (validate! false)
+    (validate false)
     (assert= false *telemetry-validate*)))
 
 ;; ---- unified runtime vitals (snapshot builtins → one stream) -----------------

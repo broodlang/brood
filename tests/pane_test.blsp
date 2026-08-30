@@ -60,21 +60,21 @@
 
   (test ":col splits width and reserves one column for the divider"
     (let (l (pane-layout (pane-split (pane-single {:buf 0}) :col {:buf 1}) [0 0 80 24])
-          rects (map (fn (p) (get p :rect)) (get l :panes)))
+          rects (map (get l :panes) (fn (p) (get p :rect))))
       ; 40 + 1 divider + 39 = 80
       (assert= rects (list [0 0 40 24] [41 0 39 24]))
       (assert= (get (first (get l :dividers)) :rect) [40 0 1 24])))
 
   (test ":row splits height and reserves one row for the divider"
     (let (l (pane-layout (pane-split (pane-single {:buf 0}) :row {:buf 1}) [0 0 80 24])
-          rects (map (fn (p) (get p :rect)) (get l :panes)))
+          rects (map (get l :panes) (fn (p) (get p :rect))))
       ; 12 + 1 divider + 11 = 24
       (assert= rects (list [0 0 80 12] [0 13 80 11]))
       (assert= (get (first (get l :dividers)) :rect) [0 12 80 1])))
 
   (test "exactly one pane is flagged selected"
     (let (panes (get (pane-layout (wt-tree3) [0 0 80 24]) :panes)
-          sel (filter (fn (p) (get p :selected)) panes))
+          sel (filter panes (fn (p) (get p :selected))))
       (assert= (count sel) 1)
       (assert= (get (first sel) :payload) {:buf 0}))))
 
@@ -111,7 +111,7 @@
       (assert= (pane-payload-at t (list :a :b)) {:buf 1})
       (assert= (pane-payload-at t (list :b)) {:buf 2})
       ;; the reuse rule: find the path whose pane already shows a given buffer
-      (assert= (seq/find (fn (p) (= 2 (get (pane-payload-at t p) :buf))) (pane-leaf-paths t))
+      (assert= (seq/find (pane-leaf-paths t) (fn (p) (= 2 (get (pane-payload-at t p) :buf))))
         (list :b))))
 
   (test "pane-map rewrites every pane's payload (e.g. re-pointing buffer refs)"
@@ -144,7 +144,7 @@
           l (pane-layout tree [0 0 80 24])
           dv (divider-at l [10 40])
           tree2 (pane-set-ratio tree (get dv :path) (pane-ratio-for dv [10 20]))
-          rects (map (fn (p) (get p :rect)) (get (pane-layout tree2 [0 0 80 24]) :panes)))
+          rects (map (get (pane-layout tree2 [0 0 80 24]) :panes) (fn (p) (get p :rect))))
       (assert= rects (list [0 0 20 24] [21 0 59 24]))))
   (test "the ratio is clamped so neither pane vanishes"
     (let (tree (pane-split (pane-single {:buf 0}) :col {:buf 1})
@@ -171,4 +171,4 @@
       (doseq (i (range 8))
         (spawn (send me (count (get (pane-layout t [0 0 80 24]) :panes)))))
       ;; fold the 8 replies; every worker must see 3 panes
-      (assert= (fold (fn (acc _) (+ acc (receive))) 0 (range 8)) 24))))
+      (assert= (fold (range 8) 0 (fn (acc _) (+ acc (receive)))) 24))))

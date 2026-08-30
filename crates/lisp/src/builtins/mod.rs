@@ -885,11 +885,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "string/split",
-        Arity::exact(2),
+        Arity::range(1, 2),
         // the pieces are strings, and there is always at least one (`""` splits to `("")`)
-        Sig::new(vec![string, string], Ty::list_of(string)),
-        &["s", "sep"],
-        "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters.",
+        Sig::with_optional(vec![string], vec![string], Ty::list_of(string)),
+        &["s", "&optional", "sep"],
+        "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. sep defaults to a single space, so (string/split \"1 1 +\") is the word split. An empty separator splits s into its individual characters.",
         string_split);
     // Codepoint access needs Rust for the same reason as split/search: char
     // indexing into UTF-8 is O(index), and the pure-Brood construction
@@ -1678,6 +1678,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         audio_beep);
     def(
         heap,
+        "%gui-compiled?",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        &[],
+        "Whether this runtime was built with the GUI backend (--features gui). Ask it before a gui/* call meant to be skipped headlessly, instead of calling and catching.",
+        gui_compiled_p,
+    );
+    def(
+        heap,
         "%gui-close",
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
@@ -2235,7 +2244,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         clipboard_get);
     def(
         heap,
-        "%clipboard-set!",
+        "%clipboard-set",
         Arity::exact(1),
         Sig::new(vec![string], string),
         &["s"],
@@ -2323,6 +2332,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &[],
         "",
         builtin_module_file,
+    );
+    // The rename ledger (ADR-304): the Rust table `crate::renames::RENAMES` handed to
+    // Brood as a map `{old {:to new :adr adr}}`, so `nest check --fix-renames` reads the
+    // SAME table the runtime error and the checker diagnostic read.
+    def(
+        heap,
+        "%renames",
+        Arity::exact(0),
+        Sig::new(vec![], map_ty),
+        &[],
+        "The rename ledger (ADR-304): a map of old public name (string) to `{:to new-name :adr adr}` for every deliberate rename the runtime still points at. Backs `renames/ledger`.",
+        renames_ledger,
     );
     def(
         heap,
@@ -3179,6 +3200,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "Whether sym is bound in scope. Quote it: (bound? 'foo).",
         bound_p,
     );
+    def(
+        heap,
+        "%global-generation",
+        Arity::exact(1),
+        Sig::new(vec![sym], int),
+        &["sym"],
+        "The rebinding generation of global sym: grows with every def of that name in this runtime, 0 for a name never def'd here. For restoring a TEMPORARY rebinding without clobbering a redefinition made in between (debug/untrace-fn). Quote it: (%global-generation 'foo).",
+        global_generation,
+    );
 
     // errors / control
     def(
@@ -3693,7 +3723,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::range(1, 2),
         Sig::new(vec![any, any], any),
         &["flag", "&optional", "value"],
-        "Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (proc/flag :max-heap 8000000) (work))). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (Erlang's default; process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector.",
+        "Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (proc/flag :max-heap 8000000) (work))). :max-mailbox — this process's mailbox bound in MESSAGES (ADR-307; positive int sets, nil clears — clearing also cancels a pending trip — absent reads). Checked by every sender at enqueue; a breach raises a catchable E0046 in THIS process at its next safepoint or receive. The sender is never blocked and no message is dropped: this is the guard against a receiver that cannot keep up eating the machine, not a backpressure channel (that stays a library concern - gen/call with a timeout). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (Erlang's default; process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector.",
         process_flag);
     def(
         heap,
@@ -3733,7 +3763,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::range(0, 2),
         Sig::new(vec![any, any], any),
         &["&optional", "pid", "opts"],
-        "Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see), :deopt (detail = the JIT arm's fn name, or nil). No args reads the current config map (nil if unarmed); (proc/system-monitor nil) clears; (proc/system-monitor pid) arms every event at pid; (proc/system-monitor pid {:gc true :gc-min-pause-us 1000 :exit true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long, BEAM's long_gc). Arming/clearing returns the PREVIOUS config. One subscriber at a time (last wins); events about the subscriber itself are never sent (no feedback loops), and the subscriber's death disarms the stream. Policy lives in telemetry/watch-runtime, which re-emits these as telemetry events.",
+        "Read, arm, or clear a subscription to the kernel system monitor — runtime events pushed to subscriber processes as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see; :exit-abnormal selects only reasons other than :normal, filtered before any message is built), :deopt (detail = the JIT arm's fn name, or nil). ONE SUBSCRIPTION PER SUBSCRIBER PID (ADR-305): no args reads the CALLER's config map (nil if none); (proc/system-monitor :all) lists every subscription; (proc/system-monitor nil) clears the caller's and (proc/system-monitor nil pid) clears pid's; (proc/system-monitor pid) arms every event at pid; (proc/system-monitor pid {:gc true :gc-min-pause-us 1000 :exit-abnormal true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long, BEAM's long_gc). Arming/clearing returns that pid's PREVIOUS config. Events about a subscriber itself are never sent to it (no feedback loops), and a subscriber's death drops its subscription. Policy lives in telemetry/watch-runtime (re-emits as telemetry events) and crash-report (the default crash reporter).",
         system_monitor);
     def(
         heap,

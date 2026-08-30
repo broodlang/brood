@@ -6,7 +6,7 @@
 ;; fixtures: a fixture would register into `*units*`, i.e. into the very suite
 ;; being run, so the runner would try to execute the fixtures and the counts would
 ;; drift. A unit is `(mode group tests)` and a test is `(name thunk meta)` — the
-;; same shape `register-test!` builds — so exercising the selectors against
+;; same shape `register-test` builds — so exercising the selectors against
 ;; hand-built units tests exactly what the runner filters.
 
 (defmodule test-selection-test (:use-internals test) (:use test))
@@ -32,8 +32,9 @@
 
 ;; The full labels a selection produces, in order — what every assertion compares.
 (defn- selection-labels (units)
-  (fold (fn (acc unit) (append acc (map (fn (t) (label (second unit) (first t))) (third unit))))
-    nil units))
+  (fold units
+    nil
+    (fn (acc unit) (append acc (map (third unit) (fn (t) (label (second unit) (first t))))))))
 
 (defn- selection-select (spec) (selection-labels (test/test-select-units selection-units spec)))
 
@@ -160,7 +161,7 @@
   (test "no test appears in both shards"
     (let (a (selection-select {:shards 2 :shard 0})
           b (selection-select {:shards 2 :shard 1}))
-      (refute (fold (fn (found l) (or found (includes? b l))) false a))))
+      (refute (fold a false (fn (found l) (or found (includes? b l)))))))
   (test "three shards also partition the suite"
     (assert= (+ (count (selection-select {:shards 3 :shard 0}))
                (+ (count (selection-select {:shards 3 :shard 1}))
@@ -176,11 +177,11 @@
   ;; just the character-sum parity), so `(math/rem h 2)` sent a whole small suite to one
   ;; shard and left the other empty. The finalizer fixes that; assert the spread.
   (test "the hash spreads across 2 shards rather than collapsing into one"
-    (let (counts (fold (fn (acc i)
-                         (let (k (math/rem (test/test-label-hash (str "group " i " › case " i)) 2))
-                           (assoc acc k (+ 1 (or (get acc k) 0)))))
+    (let (counts (fold (range 0 200)
                    {}
-                   (range 0 200)))
+                   (fn (acc i)
+                     (let (k (math/rem (test/test-label-hash (str "group " i " › case " i)) 2))
+                       (assoc acc k (+ 1 (or (get acc k) 0)))))))
       (and (is (> (or (get counts 0) 0) 50)) (is (> (or (get counts 1) 0) 50))))))
 
 (describe "test selection: the filter-spec constructor"
@@ -309,11 +310,12 @@
   (test "many workers select against the same shared global and agree"
     (let (me (self)
           spec {:only (list ["slow" ""])})
-      (fold (fn (_ _i) (spawn (selection-worker me spec selection-units))) nil (range 0 6))
+      (fold (range 0 6) nil (fn (_ _i) (spawn (selection-worker me spec selection-units))))
       (let (results (selection-collect 6 nil))
         (and (assert= (count results) 6)
-          (is (fold (fn (ok r) (and ok (= (selection-labels r) (list "math › multiplies"))))
-                true results)))))))
+          (is (fold results
+                true
+                (fn (ok r) (and ok (= (selection-labels r) (list "math › multiplies")))))))))))
 
 ;; --- output formatters (nest test --formatter) --------------------------------
 ;; The formatters are pure `(results elapsed)` printers over the result tuple

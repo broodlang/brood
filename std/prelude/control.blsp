@@ -26,7 +26,7 @@
 (defn- %show-args (xs)
   ;; Each print argument, run through the installed `*show*` transform — or the
   ;; arguments untouched when none is installed (the default fast path).
-  (if *show* (map *show* xs) xs))
+  (if *show* (map xs *show*) xs))
 ; The printing functions live in `std/io.blsp` as `io/write` / `io/puts` / `io/inspect`,
 ; beside the `Port` ability they write through. `*out*`/`*err*` stay here: they are the dynamic
 ; vars a port is installed into, and the kernel's own diagnostics reach them without
@@ -80,21 +80,60 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
-;; (->> x (f a) (g b)) =>  (g b (f a x))   ; thread as LAST argument
+
+;; The PLACEHOLDER `$` overrides the default position in either macro: a step form
+;; containing `$` — at any depth, inside nested calls, vector and map literals —
+;; puts the threaded value exactly where the `$` is, instead of first or last.
+;; `(-> 100 (- $ 1))` is 99, not -99.
+;;
+;; It exists because Brood, like Clojure, has two argument conventions — subject-first
+;; (`string/split`) and collection-last (`map`) — so a pipeline that crosses the
+;; boundary can be threaded correctly by NEITHER macro. `as->` was the only answer and
+;; it renames the value at every step. `$` is the same escape hatch, in place, and it
+;; keeps its use even once the collection-last half is gone: the subject is genuinely
+;; not the first argument in `(- 100 $)`, `(str "n=" $)`, `(cons $ xs)`.
+;;
+;; The threaded value is bound ONCE to a gensym and the binding substituted, so a
+;; step may name `$` any number of times without re-evaluating the expression:
+;; `(-> (expensive) (+ $ $))` calls `expensive` once.
+(check-allow :non-tail-recursion
+  (defn- %thread-slot? (form)
+    ;; expansion-time recursion over macro-body syntax — depth is source nesting.
+    (cond
+      (= form '$) true
+      ;; `'$` is the SYMBOL $, not the slot — a quoted form is data, never a hole.
+      (and (pair? form) (= (first form) 'quote)) false
+      (pair? form) (any? form %thread-slot?)
+      (vector? form) (any? form %thread-slot?)
+      (map? form) (any? (keys form) (fn (k) (or (%thread-slot? k) (%thread-slot? (get form k)))))
+      else false)))
+(check-allow :non-tail-recursion
+  (defn- %thread-fill (form g)
+    (cond
+      (= form '$) g
+      (and (pair? form) (= (first form) 'quote)) form
+      (pair? form) (map form (fn (x) (%thread-fill x g)))
+      (vector? form) (mapv form (fn (x) (%thread-fill x g)))
+      (map? form)
+        (fold (keys form)
+          {}
+          (fn (acc k) (assoc acc (%thread-fill k g) (%thread-fill (get form k) g))))
+      else form)))
+(defn- %thread-slot-step (acc form)
+  (let (g (gensym "thread"))
+    `(let (~g ~acc) ~(%thread-fill form g))))
+
 (defn- %thread-first-step (acc form)
-  (if (pair? form) (cons (first form) (cons acc (rest form))) (list form acc)))
+  (cond
+    (%thread-slot? form) (%thread-slot-step acc form)
+    (pair? form) (cons (first form) (cons acc (rest form)))
+    else (list form acc)))
 (defmacro -> (x & forms)
-  "Thread `x` through the forms as each one's *first* argument: `(-> x (f a) (g b))` is `(g (f x a) b)`.
+  "Thread `x` through the forms as each one's *first* argument: `(-> x (f a) (g b))` is `(g (f x a) b)`. A form naming the placeholder `$` receives `x` at that position instead, any number of times, evaluated once.
 
-    (-> 1 inc inc)   → 3"
-  (reduce %thread-first-step x forms))
-
-(defn- %thread-last-step (acc form) (if (pair? form) (append form (list acc)) (list form acc)))
-(defmacro ->> (x & forms)
-  "Thread `x` through the forms as each one's *last* argument: `(->> x (f a) (g b))` is `(g b (f a x))`.
-
-    (->> [1 2] (map inc))   → (2 3)"
-  (reduce %thread-last-step x forms))
+    (-> 1 inc inc)        → 3
+    (-> 1 (- 10 $))       → 9"
+  (reduce forms x %thread-first-step))
 
 ;; (as-> x name (f a name) (g name b)) — thread `x` as `name`, in ANY position.
 ;; Brood's `let` is sequential and re-binds a repeated name, so this is one `let`:
@@ -103,14 +142,15 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
   "Thread `expr` through `forms`, re-binding it to `name` at each step so it can sit in *any* argument position: `(as-> 5 $ (+ $ 1) (* $ 2))` is `12`.
 
     (as-> 1 x (+ x 2))   → 3"
-  (let (steps (reduce (fn (acc form) (append acc (list name form))) (list name expr) forms))
+  (let (steps (reduce forms (list name expr) (fn (acc form) (append acc (list name form)))))
     `(let ~steps ~name)))
 
 ;; ---- conditional threading & short-circuit threading ------------------------
-;; `some->`/`some->>` thread like `->`/`->>` but stop and yield `nil` the moment a
-;; step produces `nil`; `cond->`/`cond->>` thread `x` only through the forms whose
-;; guard is truthy. Both build on the `%thread-first-step`/`%thread-last-step`
-;; placement helpers above, so "where does the value go" is defined once.
+;; `some->` threads like `->` but stops and yields `nil` the moment a step produces
+;; `nil`; `cond->` threads `x` only through the forms whose guard is truthy. Both build
+;; on the `%thread-first-step` placement helper above, so "where does the value go" is
+;; defined once. The thread-LAST variants are gone with ADR-308: one argument
+;; convention needs only one pipe, and `$` covers a step wanting the value elsewhere.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
   (defn- %some-thread-build (place forms step)
@@ -126,12 +166,6 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
     (some-> 1 inc)     → 2
     (some-> nil inc)   → nil   ; short-circuits on nil"
   (let (v (gensym "v")) `(let (~v ~x) ~(%some-thread-build v forms %thread-first-step))))
-(defmacro some->> (x & forms)
-  "Thread `x` through `forms` as each one's *last* argument (like `->>`), but short-circuit to `nil` as soon as any step yields `nil`.
-
-    (some->> 5 (- 10) (* 2))   → 10    ; (* 2 (- 10 5))
-    (some->> nil (* 2))        → nil   ; short-circuits; (* 2 nil) never runs"
-  (let (v (gensym "v")) `(let (~v ~x) ~(%some-thread-build v forms %thread-last-step))))
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
@@ -146,11 +180,6 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
     (cond-> 1 true inc)    → 2
     (cond-> 1 false inc)   → 1"
   (let (v (gensym "v")) `(let (~v ~x) ~(%cond-thread-build v clauses %thread-first-step))))
-(defmacro cond->> (x & clauses)
-  "Thread `x` through the `test form` clause pairs, applying each `form` (as its *last* argument, like `->>`) only when its `test` is truthy.
-
-    (cond->> [1 2 3] true (map inc) false (map (fn (x) (* x 10))))   → (2 3 4)"
-  (let (v (gensym "v")) `(let (~v ~x) ~(%cond-thread-build v clauses %thread-last-step))))
 
 (defmacro doto (x & forms)
   "Evaluate `x` once, run each `form` with it spliced in as the *first* argument (for side effects), then return `x`.
@@ -159,7 +188,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
     (doto [1] (conj 2))   → [1]   ; data is immutable — `conj`'s result is discarded"
   (let (v (gensym "v"))
     `(let (~v ~x)
-       ~@(map (fn (form) (%thread-first-step v form)) forms)
+       ~@(map forms (fn (form) (%thread-first-step v form)))
        ~v)))
 
 ;; `tap`/`then` — the single-function pipe helpers (Elixir's `Kernel.tap`/`then`).
@@ -241,14 +270,14 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 ;; a reserved word. See ADR-154 / deferred.md.)
 
 ;; ---- side-effecting iteration (function form of `doseq`) --------------------
-(defn run! (f coll)
-  "Apply `f` to each item of `coll` for its side effects, returning `nil`. The function-valued counterpart of `doseq`: `(run! io/puts xs)`.
+(defn each (coll f)
+  "Apply `f` to each item of `coll` for its side effects, returning `nil`. The function-valued counterpart of `doseq`: `(each io/puts xs)`.
 
-    (with-out-str (run! io/write [1 2 3]))   → \"123\"
-    (run! (fn (n) nil) [1 2 3])              → nil   ; the results are discarded"
-  (fold (fn (acc x) (f x) acc) nil coll)
+    (with-out-str (each [1 2 3] io/write))   → \"123\"
+    (each [1 2 3] (fn (n) nil))              → nil   ; the results are discarded"
+  (fold coll nil (fn (acc x) (f x) acc))
   nil)
-(sig run! (any seqable -> nil))
+(sig each (seqable any -> nil))
 
 ;; ---- error handling ----
 ;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything
@@ -283,8 +312,62 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 
 ;; (try body... (catch e handler...)) => (%try (fn () body...) (fn (e) handler...))
 ;; With no catch clause, it's just (do body...).
+;;
+;; (try body... [(catch e handler...)] (finally cleanup...)) — ADR-306 — runs
+;; `cleanup` after the body (and after the handler, when there is one) whether the
+;; try completes or throws, then yields the try's value or rethrows what escaped:
+;;
+;;   (let (o (%try (fn () [:ok <try-without-finally>]) (fn (e) [:threw e])))
+;;     cleanup...
+;;     (if (= (nth o 0) :threw) (throw (nth o 1)) (nth o 1)))
+;;
+;; `cleanup`'s value is discarded; a throw from `cleanup` replaces the pending one
+;; (the Java/Clojure rule). A rethrown built-in error map is rebuilt into the error
+;; it describes by `throw` (`LispError::from_error_map`), so what escapes a `finally`
+;; prints and propagates as the original did. `%try` never catches a control
+;; signal (a `receive` suspend) or an untrappable kill, so `finally` does not run
+;; on `(exit pid :kill)` — OTP's `after` doesn't either.
+(defn- %try-finally-split (body)
+  "Split `body` into `[forms finally-forms]` when its last form is a `(finally …)`
+clause, else `[body nil]`. A `finally` anywhere but last is an error."
+  (let (clause (last body))
+    (if (and (pair? clause) (= (first clause) 'finally))
+      (do
+        (when (empty? (rest clause))
+          (error "try: `(finally)` has no body — write `(finally cleanup…)` or drop the clause."))
+        [(but-last body) (rest clause)])
+      (do
+        ;; `any?` lives in seq.blsp, concatenated AFTER this file — walk by hand.
+        (letrec (misplaced? (fn (forms)
+                              (cond
+                                (empty? forms) false
+                                (and (pair? (first forms)) (= (first (first forms)) 'finally)) true
+                                else (misplaced? (rest forms)))))
+          (when (misplaced? body)
+            (error "try: `(finally …)` must be the LAST clause — after `(catch …)`, if there is one.")))
+        [body nil]))))
+
 (defmacro try (& body)
-  "Evaluate `body`; if a final `(catch e handler...)` clause is present, run it with the raised value bound to `e` when `body` throws."
+  "Evaluate `body`; if a `(catch e handler...)` clause is present, run it with the raised value bound to `e` when `body` throws; if a final `(finally cleanup...)` clause is present, run `cleanup` afterwards whether or not anything threw, then yield the try's value or rethrow what escaped.
+
+    (try (risky) (catch e :failed))                    → :failed
+    (try 41 (finally nil))                             → 41       ; cleanup ran, value survives
+    (try (throw :x) (catch e :failed) (finally nil))   → :failed   ; cleanup ran after the handler
+
+`cleanup`'s own value is discarded; write the release there — `(finally (release r))` — and
+it runs on both paths. The examples above keep it `nil` because an indented `form → result`
+line is EXECUTED by `doctest` (tests/doc_examples_test.blsp), so it has to be runnable."
+  (let ([body cleanup] (%try-finally-split body))
+    (if cleanup
+      `(let (outcome (%try (fn () [:ok (try ~@body)]) (fn (escaped) [:threw escaped])))
+         ~@cleanup
+         (if (/= (/nth outcome 0) :threw)
+           (throw (/nth outcome 1))
+           (/nth outcome 1)))
+      (%try-expand body))))
+
+(defn- %try-expand (body)
+  "The `try` expansion for a body with no `finally`: `(%try …)` with a `catch`, else a `do`."
   (let (clause (last body))
     (if (and (pair? clause) (= (first clause) 'catch))
       (let (init (but-last body) evar (second clause) handler (rest (rest clause)))

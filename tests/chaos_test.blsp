@@ -113,7 +113,8 @@
     (assert= :ok (try :ok (catch e :error))))
 
   (test "try with a throw skips the body result"
-    (assert= :caught (try (do (throw :x) :not-reached) (catch _ :caught)))))
+    (assert= :caught
+      (try (do (throw :x) :not-reached) (catch _ :caught)))))
 
 ;; ── 4. Function arity errors ──────────────────────────────────────────────────
 
@@ -173,7 +174,7 @@
 
   (test "map over a list using a closure that closes over outer state"
     (let (offset 10)
-      (assert= '(11 12 13) (map (fn (x) (+ x offset)) '(1 2 3)))))
+      (assert= '(11 12 13) (map '(1 2 3) (fn (x) (+ x offset))))))
 
   (test "closure that calls itself via argument (no let-rec bug)"
     (let (f (fn (recurse n)
@@ -283,16 +284,16 @@
 
 (describe "higher-order function chaos"
   (test "map/filter/fold on a vector return a list"
-    (assert= '(2 4 6) (map (fn (x) (* x 2)) [1 2 3]))
-    (assert= '(1 3) (filter odd? [1 2 3 4]))
-    (assert= 15 (fold + 0 [1 2 3 4 5])))
+    (assert= '(2 4 6) (map [1 2 3] (fn (x) (* x 2))))
+    (assert= '(1 3) (filter [1 2 3 4] odd?))
+    (assert= 15 (fold [1 2 3 4 5] 0 +)))
 
   (test "apply with leading args: (apply + 1 2 '(3 4)) = 10"
     (assert= 10 (apply + 1 2 '(3 4))))
 
   (test "map returning closures — each closure closes over its own captured value"
-    (let (fns (map (fn (n) (fn () n)) '(1 2 3)))
-      (assert= '(1 2 3) (map (fn (f) (f)) fns))))
+    (let (fns (map '(1 2 3) (fn (n) (fn () n))))
+      (assert= '(1 2 3) (map fns (fn (f) (f))))))
 
   (test "fold building a list in reverse (classic fold pattern)"
-    (assert= '(5 4 3 2 1) (fold (fn (acc x) (cons x acc)) '() '(1 2 3 4 5)))))
+    (assert= '(5 4 3 2 1) (fold '(1 2 3 4 5) '() (fn (acc x) (cons x acc))))))

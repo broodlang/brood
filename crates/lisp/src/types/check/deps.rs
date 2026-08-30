@@ -178,8 +178,15 @@ fn fact_of_sym(heap: &Heap, sym: Symbol) -> String {
             None => "U".to_string(),
         },
     };
+    // The sig's PRINTED form, not `hash_value`: that hashes symbols by interned id, which
+    // depends on interning order and so differs from process to process — `nest check`
+    // and `nest run` could never agree on a declared function's fact, and each rewrote
+    // the other's cache entries (2026-08-30).
     match heap.declared_sig_value(sym) {
-        Some(v) => format!("{base}|S{}", heap.hash_value(v)),
+        Some(v) => format!(
+            "{base}|S{:016x}",
+            fnv1a(&crate::syntax::printer::print(heap, v))
+        ),
         None => base,
     }
 }

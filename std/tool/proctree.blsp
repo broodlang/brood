@@ -30,18 +30,18 @@ cycle (impossible from `proc/info`, but a buggy remote peer could send one) is
 bounded rather than overflowing the stack."
   (if (>= depth limit)
     [(assoc p :depth depth)]
-    (let (kids (by-id (filter (fn (c) (= (get c :parent) (get p :id))) procs)))
+    (let (kids (by-id (filter procs (fn (c) (= (get c :parent) (get p :id))))))
       (cons (assoc p :depth depth)
-        (mapcat (fn (k) (tree-walk k procs (inc depth) limit)) kids)))))
+        (mapcat kids (fn (k) (tree-walk k procs (inc depth) limit)))))))
 
 (defn tree-order (procs)
   "Order `procs` as a parent→child forest: roots first (a proc whose `:parent` is nil
 or not in the set — an orphan whose spawner already died is a root), each followed by
 its descendants (DFS by id), every map `:depth`-tagged. Children appear under their
 parent."
-  (let (ids (map :id procs)
+  (let (ids (map procs :id)
         limit (count procs)
         root? (fn (p) (let (pa (get p :parent)) (or (nil? pa) (< (index-of ids pa) 0))))
-        roots (by-id (filter root? procs)))
-    (mapcat (fn (r) (tree-walk r procs 0 limit)) roots)))
+        roots (by-id (filter procs root?)))
+    (mapcat roots (fn (r) (tree-walk r procs 0 limit)))))
 (sig tree-order (seqable -> any))

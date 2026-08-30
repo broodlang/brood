@@ -260,7 +260,7 @@
   (test "a call deep below many top-level forms is found (scan starts at the defun, not 0)"
     ;; the enclosing-bracket scan begins at the nearest column-0 form start (safe-restart),
     ;; so cost is O(enclosing form), not O(pos) — but the answer must still be exact.
-    (let (lead (string/join "" (map (fn (i) "(defn f ())\n") (range 500)))
+    (let (lead (string/join (map (range 500) (fn (i) "(defn f ())\n")) "")
           src (str lead "(map g "))
       (assert= (enclosing-call src (+ (string/length lead) 7)) ["map" 1]))))
 

@@ -1094,7 +1094,8 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // that pass, so `nil | list<A>` for `A = elem(coll)` (ADR-078 parametric
     // results). `None` element → fall through to the flat curated `list`.
     if value::symbol_is(head, "filter") {
-        let coll = *items.get(2)?;
+        // Data-first (ADR-308): the collection is argument one.
+        let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
         let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
         // `filter` builds a LIST whatever it is handed (a vector in, a list out), so with
@@ -1514,32 +1515,30 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             return Some(Ty::map_of(key_ty, val_ty));
         }
     }
-    // `(map f coll)` → `nil | list<B>`, `B` = the callback's return type applied
+    // `(map coll f)` → `nil | list<B>`, `B` = the callback's return type applied
     // to `coll`'s element type. Unknown callback / element → flat `list`.
     if value::symbol_is(head, "map") {
-        let f = *items.get(1)?;
-        let coll = *items.get(2)?;
+        let (coll, f) = super::sigs::combinator_args(items)?;
         let coll_ty = expr_ty(heap, coll, ctx);
         let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
         let b = callback_ret(heap, f, &[a], ctx);
         return list_result_over(coll_ty.as_ref(), b);
     }
-    // `(keep f coll)` — `map` then drop the `nil` results; `nil | list<B>` for
+    // `(keep coll f)` — `map` then drop the `nil` results; `nil | list<B>` for
     // `B` = the callback's return (over-approximated by keeping `nil` in `B`, a
     // sound superset). Unknown callback / element → flat.
     if value::symbol_is(head, "keep") {
-        let f = *items.get(1)?;
-        let coll = *items.get(2)?;
+        let (coll, f) = super::sigs::combinator_args(items)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         let b = callback_ret(heap, f, &[a], ctx);
         return list_result(b);
     }
-    // `(seq/interpose sep coll)` — weave `sep` between `coll`'s elements; the result
+    // `(seq/interpose coll sep)` — weave `sep` between `coll`'s elements; the result
     // holds both, `nil | list<A | type(sep)>`. Both must be known, else flat.
     // Keyed qualified: `seq/` since ADR-227.
     if value::symbol_is(head, "seq/interpose") && items.len() == 3 {
-        let sep_ty = expr_ty(heap, items[1], ctx);
-        let a = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
+        let a = expr_ty(heap, items[1], ctx).and_then(|t| t.elem_ty());
+        let sep_ty = expr_ty(heap, items[2], ctx);
         return match (sep_ty, a) {
             (Some(s), Some(e)) => list_result(Some(s.union(e))),
             _ => None,
@@ -1550,21 +1549,21 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "range") {
         return list_result(Some(Ty::NUMBER));
     }
-    // `(reduce f init coll)` / `(fold f init coll)` reduce to an accumulator typed
+    // `(reduce coll init f)` / `(fold coll init f)` reduce to an accumulator typed
     // `ty(init) | B`, where `B` is the 2-arg callback's return (`(f acc x)`). The
     // accumulator can grow across steps, so it's over-approximated as `any` for
     // the callback inference (sound — a superset); the result joins the
     // empty-input case (`init`) with a step result (`B`). The no-init
-    // `(reduce f coll)` form starts the accumulator at `coll`'s first element.
+    // `(reduce coll f)` form starts the accumulator at `coll`'s first element.
     // Both `init` and `B` must be known, else flat.
     if value::symbol_is(head, "reduce") || value::symbol_is(head, "fold") {
-        let f = *items.get(1)?;
+        let (coll_arg, f) = super::sigs::combinator_args(items)?;
         let (init_ty, coll) = match items.len() {
-            // (fold f init coll) / (reduce f init coll)
-            4 => (expr_ty(heap, items[2], ctx), items[3]),
-            // (reduce f coll) — initial accumulator is the first element
+            // (fold coll init f) / (reduce coll init f)
+            4 => (expr_ty(heap, items[2], ctx), coll_arg),
+            // (reduce coll f) — initial accumulator is the first element
             3 if value::symbol_is(head, "reduce") => {
-                let coll = items[2];
+                let coll = coll_arg;
                 let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
                 (elem, coll)
             }

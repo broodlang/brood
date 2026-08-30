@@ -89,7 +89,7 @@ the region functions below."
 (defn region-at (regions pos)
   "The region containing `pos` (boundaries inclusive, so the caret at either edge
 counts as inside), or nil."
-  (seq/find (fn (r) (and (>= pos (get r :start)) (<= pos (get r :end)))) regions))
+  (seq/find regions (fn (r) (and (>= pos (get r :start)) (<= pos (get r :end))))))
 
 (defn region-index (regions pos)
   "The 0-based index of the region containing `pos`, or nil."
@@ -102,18 +102,18 @@ counts as inside), or nil."
 
 (defn region-texts (text regions)
   "The text of every region, in order."
-  (map (fn (r) (region-text text r)) regions))
+  (map regions (fn (r) (region-text text r))))
 (sig region-texts (any seqable -> (or nil (list string))))
 
 (defn skeleton (text regions)
   "Everything OUTSIDE the regions, concatenated — the generated part of the form,
 and the thing to compare against to notice damage. Independent of what the user
 typed inside the regions, so it is stable while they work."
-  (let (r (fold (fn (acc region)
-                  (let ([pos parts] acc)
-                    [(get region :end) (cons (string/substring text pos (get region :start)) parts)]))
+  (let (r (fold regions
             [0 '()]
-            regions)
+            (fn (acc region)
+              (let ([pos parts] acc)
+                [(get region :end) (cons (string/substring text pos (get region :start)) parts)])))
         [pos parts] r)
     (apply str (reverse (cons (string/substring text pos (string/length text)) parts)))))
 (sig skeleton (string seqable -> any))
@@ -126,12 +126,12 @@ edit primitives refuse a keystroke that would damage the generated part — enfo
 the mutator instead of a skeleton comparison run after each key (which every edit path has
 to remember to run). An empty region contributes no gap on either side beyond its neighbours'."
   (let (len (string/length text)
-        r (fold (fn (acc region)
-                  (let ([pos spans] acc
-                        s (get region :start))
-                    [(get region :end) (if (< pos s) (cons [pos s] spans) spans)]))
+        r (fold regions
             [0 '()]
-            regions)
+            (fn (acc region)
+              (let ([pos spans] acc
+                    s (get region :start))
+                [(get region :end) (if (< pos s) (cons [pos s] spans) spans)])))
         [pos spans] r)
     (reverse (if (< pos len) (cons [pos len] spans) spans))))
 (sig protected-spans (string seqable -> any))
@@ -146,16 +146,16 @@ changed shape, and there is no honest correspondence to preserve)."
         old-regions (regions-fn old-text))
     (if (not (= (count new-regions) (count old-regions)))
       new-text
-      (let (r (fold (fn (acc ir)
-                      (let ([pos parts] acc
-                            [i region] ir
-                            old (nth old-regions i))
-                        [(get region :end)
-                          (cons (region-text old-text old)
-                            (cons (string/substring new-text pos (get region :start))
-                              parts))]))
+      (let (r (fold (enumerate new-regions)
                 [0 '()]
-                (enumerate new-regions))
+                (fn (acc ir)
+                  (let ([pos parts] acc
+                        [i region] ir
+                        old (nth old-regions i))
+                    [(get region :end)
+                      (cons (region-text old-text old)
+                        (cons (string/substring new-text pos (get region :start))
+                          parts))])))
             [pos parts] r)
         (apply str (reverse (cons (string/substring new-text pos (string/length new-text)) parts)))))))
 (sig splice (any any (or fn keyword) -> any))
@@ -195,10 +195,11 @@ A context with no regions is returned untouched."
         p (read-point after))
     (if (or (empty? regions) (region-at regions p))
       after
-      (let (nearest (fold (fn (best r)
-                            (let (cand (if (< p (get r :start)) (get r :start) (get r :end))
-                                  d (abs (- p cand)))
-                              (if (or (nil? best) (< d (abs (- p best)))) cand best)))
-                      nil regions))
+      (let (nearest (fold regions
+                      nil
+                      (fn (best r)
+                        (let (cand (if (< p (get r :start)) (get r :start) (get r :end))
+                              d (abs (- p cand)))
+                          (if (or (nil? best) (< d (abs (- p best)))) cand best)))))
         (if (nil? nearest) after (set-point after nearest))))))
 (sig guard-clamp (any (or fn keyword) (or fn keyword) any (or fn keyword) -> any))

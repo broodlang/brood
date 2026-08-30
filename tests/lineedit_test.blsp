@@ -14,7 +14,7 @@
   (:use editor/highlight))
 
 ;; Apply a sequence of keys to a state (fold the pure handler).
-(defn- le-keys (state keys) (fold editor/lineedit/lineedit-handle state keys))
+(defn- le-keys (state keys) (fold keys state editor/lineedit/lineedit-handle))
 (defn- le-fresh () (editor/lineedit/lineedit-init "brood> " "" '()))
 
 (describe "lineedit/lineedit-handle — typing and motion"
@@ -101,14 +101,14 @@
                       :ctrl-r))
       (is (includes? (editor/lineedit/lineedit-display-prompt searching) "reverse-i-search"))))
   (test "the query typed so far appears in the search prompt"
-    (let (typed (fold (fn (st key) (editor/lineedit/lineedit-handle st key))
+    (let (typed (fold (list :ctrl-r "a" "b")
                   (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
-                  (list :ctrl-r "a" "b")))
+                  (fn (st key) (editor/lineedit/lineedit-handle st key))))
       (is (includes? (editor/lineedit/lineedit-display-prompt typed) "ab"))))
   (test "leaving the search restores the configured prompt"
-    (let (state (fold (fn (st key) (editor/lineedit/lineedit-handle st key))
+    (let (state (fold (list :ctrl-r :ctrl-g)
                   (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
-                  (list :ctrl-r :ctrl-g)))
+                  (fn (st key) (editor/lineedit/lineedit-handle st key))))
       (assert= (editor/lineedit/lineedit-display-prompt state) "x> "))))
 
 (describe "lineedit/lineedit-handle — extra emacs/readline keys"
@@ -175,7 +175,7 @@
     (assert= (get (lineedit-reverse-search (rs-init) :ctrl-r) :text) "(map f xs)"))
   (test "typing narrows to the newest matching entry"
     (let (e (lineedit-reverse-search (rs-init) :ctrl-r)
-          r (fold editor/lineedit/lineedit-handle e (list "r" "e" "d")))
+          r (fold (list "r" "e" "d") e editor/lineedit/lineedit-handle))
       (assert= (get r :text) "(reduce + 0 ys)")
       (assert= (get (get r :search) :query) "red")))
   (test "C-r steps to the next older match for the query"
@@ -191,16 +191,16 @@
       (assert= (get c :text) "wip")
       (assert= (get c :search) nil)))
   (test "Enter accepts the match (keeps it, leaves search)"
-    (let (e (fold editor/lineedit/lineedit-handle
+    (let (e (fold (list "r" "e" "d")
               (lineedit-reverse-search (rs-init) :ctrl-r)
-              (list "r" "e" "d"))
+              editor/lineedit/lineedit-handle)
           a (editor/lineedit/lineedit-handle e :enter))
       (assert= (get a :text) "(reduce + 0 ys)")
       (assert= (get a :search) nil)))
   (test "any other key accepts then replays through the keymap"
-    (let (e (fold editor/lineedit/lineedit-handle
+    (let (e (fold (list "r" "e" "d")
               (lineedit-reverse-search (rs-init) :ctrl-r)
-              (list "r" "e" "d"))
+              editor/lineedit/lineedit-handle)
           a (editor/lineedit/lineedit-handle e :ctrl-a))
       ; accept + beginning-of-line
       (assert= (get a :search) nil)
@@ -241,8 +241,8 @@
           a (editor/lineedit/lineedit-handle s :tab)
           cands (get a :completions))
       (is (not (nil? cands)))
-      (is (any? (fn (c) (= c "str")) cands))
-      (is (every? (fn (c) (string/starts-with? c "str")) cands)))))
+      (is (any? cands (fn (c) (= c "str"))))
+      (is (every? cands (fn (c) (string/starts-with? c "str")))))))
 
 (describe "lineedit/lineedit-completion-rows — pure listing layout"
   (test "candidates lay out across in equal columns, one row when they fit"
@@ -254,15 +254,15 @@
     (let (rows (editor/lineedit/lineedit-completion-rows (list "map" "max" "mapcat") 12))
       ; colw 8, room 11 -> 1 column
       (assert= (count rows) 3)
-      (is (every? (fn (r) (<= (string/length r) 11)) rows))))
+      (is (every? rows (fn (r) (<= (string/length r) 11))))))
   (test "a candidate wider than the terminal is truncated, not wrapped"
     (let (rows (editor/lineedit/lineedit-completion-rows (list (string/repeat "x" 50)
                                                            (string/repeat "y" 50))
                  20))
-      (is (every? (fn (r) (<= (string/length r) 19)) rows))))
+      (is (every? rows (fn (r) (<= (string/length r) 19))))))
   (test "an over-long list is capped with a trailing count of the remainder"
     ;; one column (colw 12 in a 13-column room) x 6 max rows = 6 shown of 9.
-    (let (cands (map (fn (i) (str "candidate-" i)) (range 0 9))
+    (let (cands (map (range 0 9) (fn (i) (str "candidate-" i)))
           rows (editor/lineedit/lineedit-completion-rows cands 13))
       (assert= (count rows) 7)
       (assert= (last rows) "… +3 more")))
@@ -288,9 +288,9 @@
                :completions (list "map" "max" "mapcat")
                :width 12)
           ops (editor/lineedit/lineedit-multi-ops st))
-      (is (any? (fn (op) (= op [:print "map" lineedit-face-hint])) ops))
+      (is (any? ops (fn (op) (= op [:print "map" lineedit-face-hint]))))
       ; (2 - 1 lines below row 0) + 3 listing rows - cursor row 1 = 3
-      (is (any? (fn (op) (= op [:up 3])) ops)))))
+      (is (any? ops (fn (op) (= op [:up 3])))))))
 
 (describe "lineedit/lineedit-handle — end-of-read signals"
   (test "C-d on an empty line signals EOF"
@@ -358,11 +358,11 @@
                :point 6)
           ops (editor/lineedit/lineedit-multi-ops st))
       ;; the opener "(" (line 0) and the closer ")" (line 1) both render reversed
-      (is (any? (fn (op) (= op [:print "(" {:reverse true}])) ops))
-      (is (any? (fn (op) (= op [:print ")" {:reverse true}])) ops))
+      (is (any? ops (fn (op) (= op [:print "(" {:reverse true}]))))
+      (is (any? ops (fn (op) (= op [:print ")" {:reverse true}]))))
       ;; both physical lines are repainted (each carries its prompt)
-      (is (any? (fn (op) (= op [:print "p> "])) ops))
-      (is (any? (fn (op) (= op [:print "c> "])) ops)))))
+      (is (any? ops (fn (op) (= op [:print "p> "]))))
+      (is (any? ops (fn (op) (= op [:print "c> "])))))))
 
 ;; Cross-process: an editor-state map crosses a heap boundary via send (deep copy)
 ;; and is edited on the far side, proving the immutable state survives copy-on-send

@@ -45,7 +45,7 @@
 (sig token-replace (any string any -> any))
 
 (defn- apply-pairs (text pairs)
-  (fold (fn (t p) (token-replace t (first p) (second p))) text pairs))
+  (fold pairs text (fn (t p) (token-replace t (first p) (second p)))))
 
 (defn- rewrite-file (pairs f)
   "Rewrite `f` in place if any pair changes it; returns f when changed, else nil."
@@ -57,26 +57,27 @@
 
 (defn- project-blsp ()
   "Every .blsp file under the current directory, skipping .git and vendored _deps."
-  (filter (fn (f)
-            (and (string/ends-with? f ".blsp")
-              (not (includes? f "/.git/"))
-              (not (includes? f "/_deps/"))))
-    (walk-files ".")))
+  (filter (walk-files ".")
+    (fn (f)
+      (and (string/ends-with? f ".blsp")
+        (not (includes? f "/.git/"))
+        (not (includes? f "/_deps/"))))))
 
 (defn rename (pairs)
   "Apply `[[old new] …]` token renames across the project's own .blsp sources. Prints each
   changed file and returns the count."
-  (let (changed (filter (fn (f) (not (nil? f)))
-                  (map (fn (f) (rewrite-file pairs f)) (project-blsp))))
+  (let (changed (filter (map (project-blsp) (fn (f) (rewrite-file pairs f)))
+                  (fn (f) (not (nil? f)))))
     (for (f changed) (io/puts "  changed: " f))
     (io/puts (count changed) " file(s) changed")
     (count changed)))
 
 (defn rename-from-file (path)
   "Load `[old new]` pairs from a file of `OLD NEW` lines and apply them (see `rename`)."
-  (rename (filter (fn (p) (= (count p) 2))
-            (map (fn (l) (string/split (string/trim l) " "))
-              (filter (fn (l) (not (string/blank? l))) (string/split (file/slurp path) "\n"))))))
+  (rename (filter (map (filter (string/split (file/slurp path) "\n")
+                         (fn (l) (not (string/blank? l))))
+                    (fn (l) (string/split (string/trim l) " ")))
+            (fn (p) (= (count p) 2)))))
 (sig rename-from-file (string -> int))
 
 ;; ---- CST-backed rename (context-aware) ---------------------------------------
@@ -125,8 +126,7 @@
   "Rewrite a vector of sibling CST nodes; returns the rewritten text."
   ;; A definition head is the SECOND significant (non-whitespace, non-comment) item of a
   ;; form whose first significant item is a def-head symbol.
-  (let (significant (filter (fn (k) (not (includes? [:whitespace :comment] (node-kind k))))
-                      kids)
+  (let (significant (filter kids (fn (k) (not (includes? [:whitespace :comment] (node-kind k)))))
         head (if (empty? significant) nil (first significant))
         head-name (if (and head (= (node-kind head) :symbol)) (node-payload head) nil)
         def-form? (and head-name (includes? *def-heads* head-name))
@@ -140,13 +140,13 @@
                      nil)
         quoted-kids? (or in-quote? quote-form?))
     (apply str
-      (map (fn (i) (rename-node (nth kids i) old new mode quoted-kids? (= i name-index)))
-        (range 0 (count kids))))))
+      (map (range 0 (count kids))
+        (fn (i) (rename-node (nth kids i) old new mode quoted-kids? (= i name-index)))))))
 
 (defn- significant-indices (kids)
   "The indices in `kids` of the nodes that are neither whitespace nor comments."
-  (filter (fn (i) (not (includes? [:whitespace :comment] (node-kind (nth kids i)))))
-    (range 0 (count kids))))
+  (filter (range 0 (count kids))
+    (fn (i) (not (includes? [:whitespace :comment] (node-kind (nth kids i)))))))
 
 ;; check-allow: a CST walk is inherently non-tail — the recursion depth is the
 ;; source's NESTING depth (a handful of levels), not its length.
@@ -222,12 +222,12 @@ Lossless: an unmatched file comes back byte-identical."
 (defn cst-rename (old new &optional mode)
   "Apply `cst-rename-text` across the project's own .blsp sources — the context-aware
 counterpart to `rename`. Prints each changed file and returns the count."
-  (let (changed (filter (fn (f) (not (nil? f)))
-                  (map (fn (f)
-                         (let (before (file/slurp f)
-                               after (cst-rename-text before old new mode))
-                           (if (= before after) nil (do (file/spit f after) f))))
-                    (project-blsp))))
+  (let (changed (filter (map (project-blsp)
+                          (fn (f)
+                            (let (before (file/slurp f)
+                                  after (cst-rename-text before old new mode))
+                              (if (= before after) nil (do (file/spit f after) f)))))
+                  (fn (f) (not (nil? f)))))
     (for (f changed) (io/puts "  changed: " f))
     (io/puts (count changed) " file(s) changed")
     (count changed)))
@@ -322,11 +322,11 @@ counterpart to `rename`. Prints each changed file and returns the count."
 (defn swap2 (old new)
   "Rewrite every 2-arg call `(old A B)` to `(new B A)` across the project's own .blsp
   sources, reading A/B as balanced s-expressions. For a reversed-args rename."
-  (let (changed (filter (fn (f) (not (nil? f)))
-                  (map (fn (f)
-                         (let (before (file/slurp f)
-                               after (apply str (reverse (swap-loop before old new 0 nil))))
-                           (if (= before after) nil (do (file/spit f after) f))))
-                    (project-blsp))))
+  (let (changed (filter (map (project-blsp)
+                          (fn (f)
+                            (let (before (file/slurp f)
+                                  after (apply str (reverse (swap-loop before old new 0 nil))))
+                              (if (= before after) nil (do (file/spit f after) f)))))
+                  (fn (f) (not (nil? f)))))
     (for (f changed) (io/puts "  swapped: " f))
     (io/puts (count changed) " file(s) changed")))

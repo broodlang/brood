@@ -38,7 +38,7 @@
   :isolated (test "no feature is lost when many processes provide at once"
     (let (n 120)
       (concurrently n (fn (i) (provide (symbol (mt-conc-feature i)))))
-      (assert= (count (seq/remove (fn (i) (contains? *features* (mt-conc-feature i))) (range n))) 0))))
+      (assert= (count (seq/remove (range n) (fn (i) (contains? *features* (mt-conc-feature i))))) 0))))
 
 ;; :serial — these mutate the shared *features* global, so run them one-at-a-time.
 (describe "modules: includes? / provide / require"
@@ -50,11 +50,11 @@
     ;; idempotent: still exactly one entry after a second provide. A map makes a
     ;; duplicate structurally impossible, so this now guards the *key spelling* —
     ;; a `provide` that stored the symbol rather than its name would add a second.
-    (assert= (count (filter (fn (k) (= k "demo-feature")) (keys *features*))) 1))
+    (assert= (count (filter (keys *features*) (fn (k) (= k "demo-feature")))) 1))
   (test "require returns the list of feature names and is idempotent"
     (assert= (require-one 'test) "test")
     ; variadic now: a list of names
-    (assert= (map require-one (list 'test 'docs)) (list "test" "docs")))
+    (assert= (map (list 'test 'docs) require-one) (list "test" "docs")))
   (test "require of a missing module raises" (assert-error (require-one 'no-such-module-xyz)))
 
   ;; ADR-216: the load-once check must be O(1) in the number of loaded features, not a
@@ -68,7 +68,7 @@
     (is (contains? *features* "adr216-probe"))
     (refute (contains? *features* "adr216-absent"))
     ;; adding many features must not change the answer for an absent one
-    (map (fn (i) (provide (symbol (str "adr216-bulk-" i)))) (range 200))
+    (map (range 200) (fn (i) (provide (symbol (str "adr216-bulk-" i)))))
     (refute (contains? *features* "adr216-absent"))
     (is (contains? *features* "adr216-bulk-199")))
 
@@ -80,23 +80,23 @@
   (test "a concurrent load of the same module from many processes never sees it half-loaded"
     (let (path "/tmp/reqrace-mod.blsp"
           src (str "(defmodule reqrace-mod)\n"
-                (string/join "\n" (map (fn (i) (str "(def v" i " " i ")")) (range 400)))
+                (string/join (map (range 400) (fn (i) (str "(def v" i " " i ")"))) "\n")
                 "\n(defn ready () :ok)\n")
           saved-path *load-path*
           me (self))
       (file/spit path src)
-      (reflect/set-load-path! (cons "/tmp" *load-path*))
+      (reflect/set-load-path (cons "/tmp" *load-path*))
       (doseq (k (range 8))
         (spawn (send me
                  [:req-race
                    (try
                      (do (require-one 'reqrace-mod) (reqrace-mod/ready))
                      (catch e [:err (error-message e)]))])))
-      (let (results (map (fn (_) (receive ([:req-race r] r) (after *test-wait-ms* :timeout)))
-                      (range 8)))
-        (reflect/set-load-path! saved-path)
+      (let (results (map (range 8)
+                      (fn (_) (receive ([:req-race r] r) (after *test-wait-ms* :timeout)))))
+        (reflect/set-load-path saved-path)
         (file/rm path)
-        (is (every? (fn (r) (= r :ok)) results)))))
+        (is (every? results (fn (r) (= r :ok)))))))
 
   ;; A FAILED load must clear the in-flight marker: a stale self-marker would make
   ;; the same process's retry match the circular-require arm and "succeed" without
@@ -117,9 +117,9 @@
           src "(defmodule reqcirc-mod)\n(require-one 'reqcirc-mod)\n(defn ok () :yes)\n"
           saved-path *load-path*)
       (file/spit path src)
-      (reflect/set-load-path! (cons "/tmp" *load-path*))
+      (reflect/set-load-path (cons "/tmp" *load-path*))
       (require-one 'reqcirc-mod)
-      (reflect/set-load-path! saved-path)
+      (reflect/set-load-path saved-path)
       (file/rm path)
       (assert= (reqcirc-mod/ok) :yes))))
 
@@ -156,7 +156,11 @@
     (%load-string "(defmodule clpa) (defn thing (x) (list :a x))")
     (%load-string "(defmodule clpb) (defn thing (x) (list :b x))")
     ;; both :used, shared name NEVER referenced -> loads clean (no eager clash)
-    (is (try (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") true) (catch e false)))
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+    (is (check-allow :discarded-catch
+          (try
+            (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") true)
+            (catch e false))))
     ;; referencing the shared bare name -> use-site ambiguity error naming both candidates
     (let (msg (try
                 (do
@@ -207,14 +211,14 @@
       (file/spit b1 "(defmodule cycb (:use cyca))\n(defn b-one () 1)\n")
       (file/spit a2 "(defmodule cyca2 (:use cycb2 :only [b-one]))\n(defn a-one () 1)\n")
       (file/spit b2 "(defmodule cycb2 (:use cyca2 :only [a-one]))\n(defn b-one () (a-one))\n")
-      (reflect/set-load-path! (cons dir *load-path*))
+      (reflect/set-load-path (cons dir *load-path*))
       (let (refer-all-err (try
                             (do (require-one 'cyca) :no-error)
                             (catch e (error-message e)))
             only-ok (try
                       (do (require-one 'cyca2) (cycb2/b-one))
                       (catch e [:err (error-message e)])))
-        (reflect/set-load-path! saved)
+        (reflect/set-load-path saved)
         (doseq (p (list a1 b1 a2 b2)) (file/rm p))
         (is (includes? (str refer-all-err) "circular"))
         (assert= only-ok 1)))))

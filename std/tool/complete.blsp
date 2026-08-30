@@ -49,7 +49,8 @@ suggestions\", never to an error on the user's command line."
 ;; Run `thunk`, yielding nil on any failure. Wrapped around every filesystem or
 ;; parse operation below so a half-written manifest or an unreadable directory
 ;; costs a suggestion, not an error.
-(defn- complete-safely (thunk) (try (thunk) (catch _ nil)))
+;; check-allow :discarded-catch — the documented safety net: a failure costs one suggestion, never the completion
+(defn- complete-safely (thunk) (check-allow :discarded-catch (try (thunk) (catch _ nil))))
 
 ;; --- the project's shape, read not loaded --------------------------------------
 ;; Walk up from `dir` looking for project.blsp. `parent-directory` is its own fixed point
@@ -71,14 +72,14 @@ suggestions\", never to an error on the user's command line."
 ;; reversed (prepend), which is fine: callers sort or filter.
 (defn- complete-under (dir suffix)
   (if (file/dir? dir)
-    (fold (fn (acc entry)
-            (let (p (path/join dir entry))
-              (cond
-                (file/dir? p) (%append-two (complete-under p suffix) acc)
-                (string/ends-with? entry suffix) (cons p acc)
-                else acc)))
+    (fold (file/ls dir)
       nil
-      (file/ls dir))
+      (fn (acc entry)
+        (let (p (path/join dir entry))
+          (cond
+            (file/dir? p) (%append-two (complete-under p suffix) acc)
+            (string/ends-with? entry suffix) (cons p acc)
+            else acc))))
     nil))
 
 ;; The value after key `k` in a flat kv list, or nil — the manifest is a plist.
@@ -115,7 +116,7 @@ suggestions\", never to an error on the user's command line."
         rels (if (or (nil? declared) (not (or (vector? declared) (pair? declared))))
                default
                declared))
-    (map (fn (r) (path/join root r)) rels)))
+    (map rels (fn (r) (path/join root r)))))
 
 ;; Strip `root/` from an absolute path so completions read as the relative paths a
 ;; user actually types.
@@ -134,10 +135,10 @@ suggestions\", never to an error on the user's command line."
     (if (nil? root)
       nil
       (or (complete-safely (fn ()
-                             (map (fn (p) (complete-relative p root))
-                               (fold (fn (acc dir) (append acc (complete-under dir "_test.blsp")))
-                                 nil
-                                 (complete-manifest-dirs root :test-paths ["tests"])))))
+                             (map (fold (complete-manifest-dirs root :test-paths ["tests"])
+                                    nil
+                                    (fn (acc dir) (append acc (complete-under dir "_test.blsp"))))
+                               (fn (p) (complete-relative p root)))))
         nil))))
 
 (defn blsp-files ()
@@ -146,14 +147,14 @@ suggestions\", never to an error on the user's command line."
     (if (nil? root)
       nil
       (or (complete-safely (fn ()
-                             (map (fn (p) (complete-relative p root))
-                               (append (fold (fn (acc dir)
-                                               (append acc (complete-under dir ".blsp")))
-                                         nil
-                                         (complete-manifest-dirs root :source-paths ["src"]))
-                                 (fold (fn (acc dir) (append acc (complete-under dir "_test.blsp")))
-                                   nil
-                                   (complete-manifest-dirs root :test-paths ["tests"]))))))
+                             (map (append (fold (complete-manifest-dirs root :source-paths ["src"])
+                                            nil
+                                            (fn (acc dir)
+                                              (append acc (complete-under dir ".blsp"))))
+                                    (fold (complete-manifest-dirs root :test-paths ["tests"])
+                                      nil
+                                      (fn (acc dir) (append acc (complete-under dir "_test.blsp")))))
+                               (fn (p) (complete-relative p root)))))
         nil))))
 
 ;; --- tags ---------------------------------------------------------------------
@@ -222,13 +223,13 @@ suggestions\", never to an error on the user's command line."
 
 ;; The bare names of the `:keyword`s in a whitespace-separated fragment.
 (defn- complete-keywords (fragment)
-  (fold (fn (acc token)
-          (if (and (string/starts-with? token ":") (> (string/length token) 1))
-            (let (name (string/substring token 1 (string/length token)))
-              (if (complete-tag-name? name) (append acc (list name)) acc))
-            acc))
+  (fold (filter (string/split (string/trim fragment) " ") (fn (s) (not (= s ""))))
     nil
-    (filter (fn (s) (not (= s ""))) (string/split (string/trim fragment) " "))))
+    (fn (acc token)
+      (if (and (string/starts-with? token ":") (> (string/length token) 1))
+        (let (name (string/substring token 1 (string/length token)))
+          (if (complete-tag-name? name) (append acc (list name)) acc))
+        acc))))
 
 ;; Could `name` be a keyword's name? A tag is written `:name`, so anything holding a
 ;; quote, bracket, paren or backslash came from surrounding syntax rather than from a
@@ -238,9 +239,9 @@ suggestions\", never to an error on the user's command line."
 
 (defn- complete-tag-name? (name)
   (and (not (= name ""))
-    (fold (fn (ok ch) (and ok (not (includes? *complete-tag-reject* ch))))
+    (fold (string/split name "")
       true
-      (string/split name ""))))
+      (fn (ok ch) (and ok (not (includes? *complete-tag-reject* ch)))))))
 
 (defn tags ()
   "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why."
@@ -248,16 +249,17 @@ suggestions\", never to an error on the user's command line."
         root (complete-root))
     (if (or (nil? files) (nil? root))
       nil
-      (sort (keys (fold (fn (seen name) (assoc seen name true))
-                    {}
-                    (fold (fn (acc rel)
+      (sort (keys (fold (fold files
+                          nil
+                          (fn (acc rel)
                             (append acc
                               (or (complete-safely (fn ()
                                                      (complete-tags-in (file/slurp (path/join root
                                                                                      rel))
                                                        nil 0)))
-                                nil)))
-                      nil files)))))))
+                                nil))))
+                    {}
+                    (fn (seen name) (assoc seen name true))))))))
 
 ;; --- selectors ----------------------------------------------------------------
 (defn selectors ()
@@ -281,14 +283,14 @@ suggestions\", never to an error on the user's command line."
                                           nil
                                           (complete-plist-get (rest form) :dependencies)))
                                (if (or (vector? deps) (pair? deps))
-                                 (filter (fn (n) (not (nil? n)))
-                                   (map (fn (d)
-                                          (complete-safely (fn ()
-                                                             (->string (if (or (vector? d)
-                                                                             (pair? d))
-                                                                         (first d)
-                                                                         d)))))
-                                     deps))
+                                 (filter (map deps
+                                           (fn (d)
+                                             (complete-safely (fn ()
+                                                                (->string (if (or (vector? d)
+                                                                                (pair? d))
+                                                                            (first d)
+                                                                            d))))))
+                                   (fn (n) (not (nil? n))))
                                  nil))))
         nil))))
 
@@ -296,21 +298,21 @@ suggestions\", never to an error on the user's command line."
 (defn modules ()
   "Candidates for `nest doc MODULE`: every baked-in std module plus this project's own source modules (by file basename, which is how `require` names them)."
   (let (root (complete-root))
-    (sort (keys (fold (fn (seen m) (assoc seen m true))
+    (sort (keys (fold (append (or (complete-safely (fn () (reflect/builtin-modules))) nil)
+                        (if (nil? root)
+                          nil
+                          (or (complete-safely (fn ()
+                                                 (map (fold (complete-manifest-dirs root
+                                                              :source-paths ["src"])
+                                                        nil
+                                                        (fn (acc dir)
+                                                          (append acc
+                                                            (complete-under dir ".blsp"))))
+                                                   (fn (p)
+                                                     (complete-strip-extension (path/basename p))))))
+                            nil)))
                   {}
-                  (append (or (complete-safely (fn () (reflect/builtin-modules))) nil)
-                    (if (nil? root)
-                      nil
-                      (or (complete-safely (fn ()
-                                             (map (fn (p)
-                                                    (complete-strip-extension (path/basename p)))
-                                               (fold (fn (acc dir)
-                                                       (append acc
-                                                         (complete-under dir ".blsp")))
-                                                 nil
-                                                 (complete-manifest-dirs root
-                                                   :source-paths ["src"])))))
-                        nil))))))))
+                  (fn (seen m) (assoc seen m true)))))))
 
 (defn project-modules ()
   "Just THIS project's own source modules (by file basename, which is how `require` names them) — the candidates for `nest run --main`, where a std module would never be a valid entry point."
@@ -318,10 +320,10 @@ suggestions\", never to an error on the user's command line."
     (if (nil? root)
       nil
       (sort (or (complete-safely (fn ()
-                                   (map (fn (p) (complete-strip-extension (path/basename p)))
-                                     (fold (fn (acc dir) (append acc (complete-under dir ".blsp")))
-                                       nil
-                                       (complete-manifest-dirs root :source-paths ["src"])))))
+                                   (map (fold (complete-manifest-dirs root :source-paths ["src"])
+                                          nil
+                                          (fn (acc dir) (append acc (complete-under dir ".blsp"))))
+                                     (fn (p) (complete-strip-extension (path/basename p))))))
               nil)))))
 
 ;; The scaffolder owns the template list, so read it from there rather than
@@ -366,8 +368,8 @@ suggestions\", never to an error on the user's command line."
 
 (defn print-candidates (kind prefix)
   "Print one candidate per line for `kind`, keeping only those starting with `prefix` — the form `nest complete` consumes. Prints nothing (and never raises) when there is nothing to suggest, so the shell falls back to filename completion."
-  (fold (fn (_ c) (io/puts c))
+  (fold (filter (or (complete-safely (fn () (for-kind kind))) nil)
+          (fn (c) (or (= prefix "") (string/starts-with? c prefix))))
     nil
-    (filter (fn (c) (or (= prefix "") (string/starts-with? c prefix)))
-      (or (complete-safely (fn () (for-kind kind))) nil)))
+    (fn (_ c) (io/puts c)))
   :ok)

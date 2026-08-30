@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn hovers_a_prelude_function_with_signature() {
-        let md = hover_at("(map f xs)", "map").expect("hover on map");
+        let md = hover_at("(map xs f)", "map").expect("hover on map");
         assert!(md.contains("(map "), "signature missing: {md:?}");
     }
 
@@ -211,7 +211,7 @@ mod tests {
     fn hover_shows_the_checker_type_signature_of_a_builtin() {
         // Beyond the arglist + docstring, hover now surfaces the checker's TYPE signature
         // (an arrow) for a resolvable name — `map`'s domain/result.
-        let md = hover_at("(map f xs)", "map").expect("hover on map");
+        let md = hover_at("(map xs f)", "map").expect("hover on map");
         assert!(
             md.contains("->"),
             "expected a type-signature arrow in the hover: {md:?}"

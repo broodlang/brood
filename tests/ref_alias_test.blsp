@@ -108,7 +108,7 @@
   ;; that one abandoned ref (its reply, if it ever comes, queues as it always did).
   ;; Never a wrong drop.
   (test "the 8 most recent deactivations are honoured; the 9th evicts the oldest"
-    (let (refs (mapv (fn (_) (ref)) (range 0 9)))
+    (let (refs (mapv (range 0 9) (fn (_) (ref))))
       (doseq (r refs) (%ref-deactivate r))
       ;; the oldest (index 0) was evicted by the 9th — its message is delivered
       (send (self) [:reply (nth refs 0) :evicted])

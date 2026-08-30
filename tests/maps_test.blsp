@@ -27,7 +27,7 @@
 
 (defn mt-build (n)
   ; {0->0, 1->1, 2->4, …, (n-1)->(n-1)²}
-  (fold (fn (m i) (assoc m i (* i i))) {} (mt-range 0 n)))
+  (fold (mt-range 0 n) {} (fn (m i) (assoc m i (* i i)))))
 
 (describe "map literals & construction"
   (test "a literal builds a map"
@@ -82,7 +82,7 @@
     ;; corresponds to the i-th value — that's the invariant we test.
     (let (m {:a 1 :b 2 :c 3})
       (assert= (%map-pairs m)
-        (map (fn (k) [k (get m k)]) (keys m)))))
+        (map (keys m) (fn (k) [k (get m k)])))))
   (test "count and empty? on a populated map"
     (assert= (count {:a 1 :b 2 :c 3}) 3)
     (refute (empty? {:a 1})))
@@ -92,7 +92,7 @@
     ;; survives assoc/dissoc (the CHAMP root size updates on the path back up)
     (assert= (%map-count (dissoc (assoc {:a 1} :b 2 :c 3) :a)) 2)
     ;; agrees with the generic count + the pair enumeration
-    (let (m (into {} (map (fn (i) [i (* i i)]) (range 50))))
+    (let (m (into {} (map (range 50) (fn (i) [i (* i i)]))))
       (assert= (%map-count m) 50)
       (assert= (%map-count m) (count m))
       (assert= (%map-count m) (count (%map-pairs m))))))
@@ -103,7 +103,7 @@
       (assert= (count ps) 3)
       ;; Round-trip through reduce + assoc recovers the original — proves
       ;; every entry is present without depending on iteration order.
-      (assert= (reduce (fn (m kv) (assoc m (first kv) (last kv))) {} ps)
+      (assert= (reduce ps {} (fn (m kv) (assoc m (first kv) (last kv))))
         {:a 1 :b 2 :c 3}))
     (assert= (%map-pairs {}) nil))
   (test "keys and vals enumerate every entry (incl. falsy) — set, not order"
@@ -114,17 +114,17 @@
       ;; The value list has the right multiset (covers nil/false/0).
       (assert= (frequencies (vals m)) {nil 1 false 1 0 1})
       ;; And rebuilding from (keys m) + (get m k) recovers the map.
-      (assert= (reduce (fn (acc k) (assoc acc k (get m k))) {} (keys m)) m)))
+      (assert= (reduce (keys m) {} (fn (acc k) (assoc acc k (get m k)))) m)))
   (test "reduce-kv folds (f acc k v) over the entries"
-    (assert= (map/reduce-kv (fn (acc k v) (+ acc v)) 0 {:a 1 :b 2 :c 3}) 6)
+    (assert= (map/reduce-kv {:a 1 :b 2 :c 3} 0 (fn (acc k v) (+ acc v))) 6)
     ;; Order-independent fold: collect keys into a set-like map then
     ;; compare. The earlier `(cons k acc)` assertion depended on iteration
     ;; order which CHAMP doesn't preserve.
-    (assert= (map/reduce-kv (fn (acc k v) (assoc acc k true)) {} {:a 1 :b 2})
+    (assert= (map/reduce-kv {:a 1 :b 2} {} (fn (acc k v) (assoc acc k true)))
       {:a true :b true})
-    (assert= (map/reduce-kv (fn (acc k v) (assoc acc v k)) {} {:a 1 :b 2}) {1 :a 2 :b}))
+    (assert= (map/reduce-kv {:a 1 :b 2} {} (fn (acc k v) (assoc acc v k))) {1 :a 2 :b}))
   (test "reduce-kv on the empty map returns the seed untouched"
-    (assert= (map/reduce-kv (fn (acc k v) (+ acc 1)) 99 {}) 99)))
+    (assert= (map/reduce-kv {} 99 (fn (acc k v) (+ acc 1))) 99)))
 
 (describe "immutable updates"
   (test "assoc returns a fresh map, leaving the original untouched"
@@ -256,12 +256,12 @@
   (test "keys of a built map cover every inserted key (sorted comparison)"
     (assert= (sort (keys (mt-build 5))) (list 0 1 2 3 4)))
   (test "fold/reduce over keys reconstructs information"
-    (let (m (mt-build 10)) (assert= (reduce + 0 (vals m)) 285)))
+    (let (m (mt-build 10)) (assert= (reduce (vals m) 0 +) 285)))
   ; Σ i² for i in 0..9
   (test "threading macros compose map ops"
     (assert= (frequencies (-> {:x 1} (assoc :y 2) (assoc :z 3) (dissoc :x) keys))
       {:y 1 :z 1})
-    (assert= (->> {:a 1 :b 2} keys count) 2)))
+    (assert= (-> {:a 1 :b 2} keys count) 2)))
 
 (describe "type errors"
   ;; A non-map (that isn't nil) is a hard type error on the map *primitives*.
@@ -359,10 +359,10 @@
     (assert= (:a {:a 1} :dflt) 1))
   (test "THE point: an accessor as a value, for any higher-order op"
     (let (rows (list {:id 2 :name "b"} {:id 1 :name "a"}))
-      (assert= (map :name rows) (list "b" "a"))
-      (assert= (map :id (sort-by :id rows)) (list 1 2))
-      (assert= (count (filter :name rows)) 2)
-      (assert= (seq/keep :id rows) (list 2 1))))
+      (assert= (map rows :name) (list "b" "a"))
+      (assert= (map (sort-by :id rows) :id) (list 1 2))
+      (assert= (count (filter rows :name)) 2)
+      (assert= (seq/keep rows :id) (list 2 1))))
   (test "it is a value, so it composes like any function"
     (assert= (apply :name (list {:name "ada"})) "ada")
     (assert= (let (f :name) (f {:name "ada"})) "ada")

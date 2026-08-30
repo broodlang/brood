@@ -202,12 +202,12 @@
           src "{\"id\":7,\"tags\":[\"a\",\"b\"],\"ok\":true}")
       (doseq (i (range 8))
         (spawn (send me [:r (decode src)])))
-      (let (results (map (fn (_) (receive ([:r m] m) (after *test-wait-ms* :timeout))) (range 8)))
-        (is (every? (fn (m)
-                      (and (= (get m :id) 7)
-                        (= (get m :tags) ["a" "b"])
-                        (= (get m :ok) true)))
-              results)))))
+      (let (results (map (range 8) (fn (_) (receive ([:r m] m) (after *test-wait-ms* :timeout)))))
+        (is (every? results
+              (fn (m)
+                (and (= (get m :id) 7)
+                  (= (get m :tags) ["a" "b"])
+                  (= (get m :ok) true))))))))
   (test "a value encoded in a worker parses back identically here"
     (let (me (self)
           v {:repo "brood" :runs [1 2 3]})
@@ -220,9 +220,8 @@
   (test "a record's JsonEncode impl applies in a spawned process too"
     (let (me (self))
       (doseq (i (range 4)) (spawn (send me [:enc (encode (usd i))])))
-      (let (results (map (fn (_) (receive ([:enc s] s) (after *test-wait-ms* :timeout)))
-                      (range 4)))
-        (assert= (into [] (sort (map decode results))) ["$0" "$1" "$2" "$3"]))))
+      (let (results (map (range 4) (fn (_) (receive ([:enc s] s) (after *test-wait-ms* :timeout)))))
+        (assert= (into [] (sort (map results decode))) ["$0" "$1" "$2" "$3"]))))
   (test "a record built in a worker encodes via its impl after crossing heaps"
     (let (me (self))
       (spawn (send me [:rec (usd 99)]))

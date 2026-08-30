@@ -83,7 +83,7 @@ docs/testing.md for the full guide.")
 (def *collected* nil)
 ; (name thunk) pairs gathered for the current describe
 
-(defn- add-unit! (mode group tests) (def *units* (cons (list mode group tests) *units*)))
+(defn- add-unit (mode group tests) (def *units* (cons (list mode group tests) *units*)))
 
 ;; Empty the registry. A `describe`/`test` form REGISTERS by consing onto
 ;; `*units*`; in a fresh process that starts at nil, so a one-shot `nest test`
@@ -92,7 +92,7 @@ docs/testing.md for the full guide.")
 ;; report inflated counts. The project test runner calls this right before it
 ;; (re)loads the test files, so each run owns a clean registry regardless of how
 ;; many times the image has loaded them before.
-(defn reset-units! ()
+(defn reset-units ()
   "Clear the test registry (drop every registered unit). The project test runner calls this before (re)loading test files so a long-lived image — e.g. a `nest mcp` hot-reload session — doesn't accumulate duplicate registrations across runs."
   (def *units* nil))
 
@@ -210,18 +210,18 @@ docs/testing.md for the full guide.")
 
 ;; A test registers itself: collected into the enclosing describe if there is
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
-(defn register-test! (name thunk isolated? meta)
+(defn register-test (name thunk isolated? meta)
   "Register one test. Inside a `describe` it is collected into that group's `*collected*` (carrying its `:isolated` flag in the meta); otherwise it is emitted immediately as its own standalone unit — `:isolated` if flagged, else `:parallel`."
   (if *collecting*
     ;; Inside a `describe`, a test-level `:isolated` used to be DROPPED here — the group's
     ;; mode decided and the marker did nothing, silently. That is worse than not supporting
     ;; it: you mark a test isolated, the suite reports `0 isolated`, and you believe the test
-    ;; is protected. It rides in the meta now, and `emit-describe!` gives such a test its own
+    ;; is protected. It rides in the meta now, and `emit-describe` gives such a test its own
     ;; isolated unit. (Found 2026-08-05 while fixing a concurrency flake with the marker.)
     (def *collected*
       (cons (list name thunk (assoc (or meta {}) :isolated isolated?))
         *collected*))
-    (add-unit! (if isolated? :isolated :parallel) "" (list (list name thunk meta)))))
+    (add-unit (if isolated? :isolated :parallel) "" (list (list name thunk meta)))))
 
 ;; Was this test marked `:isolated` individually (inside a `describe`)?
 (defn- test-isolated? (t) (let (m (third t)) (and (not (nil? m)) (= (get m :isolated) true))))
@@ -229,19 +229,19 @@ docs/testing.md for the full guide.")
 ;; Turn a finished describe's collected tests into units according to its mode:
 ;; default spreads them across one :parallel unit each; :serial/:isolated keep
 ;; them together in a single unit.
-(defn- emit-describe! (mode group tests group-tags group-skip)
-  (let (tagged (map (fn (t) (test-mark-skip (test-add-tags t group-tags) group-skip)) tests)
+(defn- emit-describe (mode group tests group-tags group-skip)
+  (let (tagged (map tests (fn (t) (test-mark-skip (test-add-tags t group-tags) group-skip)))
         ;; A test marked `:isolated` on its own gets its own isolated unit even in a
         ;; parallel group — that is what the marker says, and honouring it per test avoids
         ;; serialising the other N-1 tests of the group to protect one.
-        solo (filter test-isolated? tagged)
-        rest (filter (fn (t) (not (test-isolated? t))) tagged))
-    (fold (fn (_ t) (add-unit! :isolated group (list t))) nil solo)
+        solo (filter tagged test-isolated?)
+        rest (filter tagged (fn (t) (not (test-isolated? t)))))
+    (fold solo nil (fn (_ t) (add-unit :isolated group (list t))))
     (if (empty? rest)
       nil
       (if (= mode :parallel)
-        (fold (fn (_ t) (add-unit! :parallel group (list t))) nil rest)
-        (add-unit! mode group rest)))))
+        (fold rest nil (fn (_ t) (add-unit :parallel group (list t))))
+        (add-unit mode group rest)))))
 
 ;; Does a form (or anything nested within it) carry a `(test …)`/`(deftest …)`/
 ;; `(describe …)`? Scans RECURSIVELY, so tests wrapped in a `let`/`do`/`when` — the
@@ -250,14 +250,14 @@ docs/testing.md for the full guide.")
 (defn- form-contains-test? (form)
   (and (pair? form)
     (or (includes? (list 'test 'deftest 'describe) (first form))
-      (any? form-contains-test? (rest form)))))
+      (any? (rest form) form-contains-test?))))
 
 ;; Does a describe body carry any tests? Checked SYNTACTICALLY at expansion (the
 ;; runtime `*collected*` sees only direct tests, ADR-225), recursing through wrapper
 ;; forms so a `let`/`do`-wrapped test is not mistaken for empty. An empty describe is
 ;; a mistake — a heading with nothing under it — so `describe` warns when this is false.
 (defn- describe-body-has-tests? (body)
-  (any? form-contains-test? body))
+  (any? body form-contains-test?))
 
 (defmacro describe (group & forms)
   "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. Warns (advisory) if the group contains no tests."
@@ -278,7 +278,7 @@ docs/testing.md for the full guide.")
          (do ~@body)
          ; the (test ...) forms collect themselves
          (def *collecting* false)
-         (emit-describe! ~mode ~group (reverse *collected*) ~tags ~skip)
+         (emit-describe ~mode ~group (reverse *collected*) ~tags ~skip)
          ;; Advisory: a describe with no tests is a heading over nothing (ADR-225).
          ~(unless (describe-body-has-tests? body)
             (list 'io/puts
@@ -300,9 +300,9 @@ docs/testing.md for the full guide.")
         body (third parts)
         skip (nth parts 3)
         loc (fail-loc (first body))
-        thunks (map (fn (f) (list 'fn nil f)) body))
+        thunks (map body (fn (f) (list 'fn nil f))))
     ; each form -> (fn () form)
-    `(register-test! ~name
+    `(register-test ~name
        (fn () (test-run (list ~@thunks) nil))
        ~iso
        (test-meta ~tags (quote ~loc) ~skip))))
@@ -474,7 +474,7 @@ the test rather than hanging the run."
                   (>= (second x) (second (first xs))) (%reverse-onto acc (cons x xs))
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil sorted)))
-(defn- sort-by-ms (xs) (fold (fn (acc x) (insert-by-ms x acc)) nil xs))
+(defn- sort-by-ms (xs) (fold xs nil (fn (acc x) (insert-by-ms x acc))))
 
 ;; A "N.N MB" formatter for the memory line (`quot` is the prelude's).
 (defn- mb-str (bytes)
@@ -545,9 +545,9 @@ the test rather than hanging the run."
 ;; side only forwards argv. `nil`/empty arguments mean "no constraint".
 (defn- test-make-filter (only exclude include lines names seed shards shard)
   "Assemble a `nest test` filter spec from raw CLI values: `only`/`exclude`/`include` are selector strings (`tag`, `test:substr`, `describe:substr`), `lines` a list of `[file line]`, `names` exact full labels, `seed` a shuffle seed, and `shards`/`shard` a CI split."
-  {:only (map test-parse-selector (or only (list)))
-   :exclude (map test-parse-selector (or exclude (list)))
-   :include (map test-parse-selector (or include (list)))
+  {:only (map (or only (list)) test-parse-selector)
+   :exclude (map (or exclude (list)) test-parse-selector)
+   :include (map (or include (list)) test-parse-selector)
    :lines (or lines (list))
    :names names
    :seed seed
@@ -555,7 +555,7 @@ the test rather than hanging the run."
    :shard (or shard 0)})
 
 (defn- test-has-tag? (tags key-string)
-  (fold (fn (found tag) (or found (= (->string tag) key-string))) false (into [] tags)))
+  (fold (into [] tags) false (fn (found tag) (or found (= (->string tag) key-string)))))
 
 ;; Is `needle` a trailing suffix of `path` on a PATH-COMPONENT boundary? The
 ;; boundary check is what stops `a_test.blsp` from matching `extra_test.blsp` —
@@ -583,62 +583,61 @@ the test rather than hanging the run."
       else (test-has-tag? tags key))))
 
 (defn- test-match-any? (selectors group-label test-name tags)
-  (fold (fn (found selector) (or found (test-match-selector? selector group-label test-name tags)))
+  (fold (or selectors (list))
     false
-    (or selectors (list))))
+    (fn (found selector) (or found (test-match-selector? selector group-label test-name tags)))))
 
 ;; Every registered test tuple, across units — the flat view the line resolver
 ;; and the shard assigner walk.
 (defn- test-all-tests (units)
-  (fold (fn (acc unit) (append acc (map (fn (t) (list (second unit) t)) (third unit))))
-    nil units))
+  (fold units nil (fn (acc unit) (append acc (map (third unit) (fn (t) (list (second unit) t)))))))
 
 ;; Resolve one FILE:LINE selector to the exact declared line of the test it
 ;; addresses: the LAST test in that file declared at or before LINE. So pointing
 ;; anywhere inside a test's body (not just at its header) selects that test —
 ;; the `mix test path:line` behaviour. nil when the file has no test at/before it.
 (defn- test-resolve-line (units file target)
-  (fold (fn (best pair)
-          (let (t (second pair)
-                line (test-line t))
-            (if (and (not (nil? line))
-                  (test-same-file? (test-file t) file)
-                  (<= line target)
-                  (or (nil? best) (> line best)))
-              line
-              best)))
+  (fold (test-all-tests units)
     nil
-    (test-all-tests units)))
+    (fn (best pair)
+      (let (t (second pair)
+            line (test-line t))
+        (if (and (not (nil? line))
+              (test-same-file? (test-file t) file)
+              (<= line target)
+              (or (nil? best) (> line best)))
+          line
+          best)))))
 
 ;; Resolve every FILE:LINE selector, warning about any that addresses no test —
 ;; a typo'd path or a line above the file's first test would otherwise just run
 ;; zero tests and exit 0, which in CI reads as "all green".
 (defn- test-resolve-lines (units lines)
-  (fold (fn (acc entry)
-          (let (resolved (test-resolve-line units (first entry) (second entry)))
-            (if (nil? resolved)
-              (do
-                (io/puts (str "warning: no test found at "
-                           (first entry)
-                           ":"
-                           (second entry)
-                           " — that file/line addresses nothing")
-                  :to *err*)
-                acc)
-              (cons [(first entry) resolved] acc))))
+  (fold (or lines (list))
     nil
-    (or lines (list))))
+    (fn (acc entry)
+      (let (resolved (test-resolve-line units (first entry) (second entry)))
+        (if (nil? resolved)
+          (do
+            (io/puts (str "warning: no test found at "
+                       (first entry)
+                       ":"
+                       (second entry)
+                       " — that file/line addresses nothing")
+              :to *err*)
+            acc)
+          (cons [(first entry) resolved] acc))))))
 
 (defn- test-match-line? (t resolved-lines)
-  (fold (fn (found entry)
-          (or found
-            (and (test-same-file? (test-file t) (first entry))
-              (= (test-line t) (second entry)))))
+  (fold (or resolved-lines (list))
     false
-    (or resolved-lines (list))))
+    (fn (found entry)
+      (or found
+        (and (test-same-file? (test-file t) (first entry))
+          (= (test-line t) (second entry)))))))
 
 (defn- test-match-name? (t group-label names)
-  (fold (fn (found n) (or found (= n (label group-label (first t))))) false (or names (list))))
+  (fold (or names (list)) false (fn (found n) (or found (= n (label group-label (first t)))))))
 
 ;; Does this test survive the spec? Positive constraints (`:only` / `:lines` /
 ;; `:names`) are a whitelist — when none are given, everything is a candidate.
@@ -670,12 +669,12 @@ the test rather than hanging the run."
   (if (nil? spec)
     units
     (let (resolved (test-resolve-lines units (get spec :lines)))
-      (filter (fn (unit) (not (empty? (third unit))))
-        (map (fn (unit)
-               (list (first unit)
-                 (second unit)
-                 (filter (fn (t) (test-select? (second unit) t spec resolved)) (third unit))))
-          units)))))
+      (filter (map units
+                (fn (unit)
+                  (list (first unit)
+                    (second unit)
+                    (filter (third unit) (fn (t) (test-select? (second unit) t spec resolved))))))
+        (fn (unit) (not (empty? (third unit))))))))
 
 ;; A stable hash of a test's full label — FNV-1a over its codepoints, masked to
 ;; 32 bits, then avalanched. Deterministic across machines and runs (no address
@@ -691,9 +690,9 @@ the test rather than hanging the run."
 (def- test-fnv-mask 4294967295)
 
 (defn- test-label-hash (s)
-  (let (h (fold (fn (acc c) (bit/and (* (bit/xor acc c) 16777619) test-fnv-mask))
+  (let (h (fold (string/->codepoints s)
             2166136261
-            (string/->codepoints s)))
+            (fn (acc c) (bit/and (* (bit/xor acc c) 16777619) test-fnv-mask))))
     (bit/and (bit/xor h (bit/shift-right h 15)) test-fnv-mask)))
 
 ;; Keep only the tests belonging to shard `index` of `count` (0-based) — the
@@ -701,15 +700,15 @@ the test rather than hanging the run."
 (defn- test-shard-units (units index total)
   (if (or (nil? total) (< total 2))
     units
-    (filter (fn (unit) (not (empty? (third unit))))
-      (map (fn (unit)
-             (list (first unit)
-               (second unit)
-               (filter (fn (t)
-                         (= index
-                           (math/rem (test-label-hash (label (second unit) (first t))) total)))
-                 (third unit))))
-        units))))
+    (filter (map units
+              (fn (unit)
+                (list (first unit)
+                  (second unit)
+                  (filter (third unit)
+                    (fn (t)
+                      (= index
+                        (math/rem (test-label-hash (label (second unit) (first t))) total)))))))
+      (fn (unit) (not (empty? (third unit)))))))
 
 ;; Randomise unit order for this run. `nil` seed keeps declaration order (the
 ;; default — a suite that only passes in one order is a bug worth finding, but
@@ -856,12 +855,13 @@ the test rather than hanging the run."
   ;; Suppressed under `:trace` (which prints a line per test) and under a machine
   ;; `--formatter` (whose output must stay parseable — no stray dots).
   (unless (or *test-trace* *test-formatter*)
-    (fold (fn (_ r)
-            (io/write (cond
-                        (r-skipped? r) (test-orange "○")
-                        (r-failed? r) (test-red "F")
-                        else (test-green "."))))
-      nil results)))
+    (fold results
+      nil
+      (fn (_ r)
+        (io/write (cond
+                    (r-skipped? r) (test-orange "○")
+                    (r-failed? r) (test-red "F")
+                    else (test-green ".")))))))
 
 ;; Run one (name thunk) and produce its result (group name fails ms). The thunk
 ;; returns its own failure list (it catches its first failing assertion), sharing
@@ -891,7 +891,7 @@ the test rather than hanging the run."
 ;; directly for an :isolated unit.
 (defn run-unit (unit)
   "Run every test in `unit` (a `(mode group tests)` tuple) in order via `run`, returning the list of their results. What a worker evaluates for a `:parallel`/`:serial` unit, and what the runner does directly for an `:isolated` one."
-  (let (group (second unit)) (map (fn (t) (run group t)) (third unit))))
+  (let (group (second unit)) (map (third unit) (fn (t) (run group t)))))
 
 ;; --- the two phases ----------------------------------------------------------
 ;; Parallel phase: spawn one worker per non-isolated unit (each worker captures
@@ -909,11 +909,12 @@ the test rather than hanging the run."
   ;; it into a failure instead of blocking forever in `receive`. The kernel fires
   ;; `[:down …]` immediately if the worker has already exited, so there is no
   ;; lost-death window between `spawn` and `monitor`.
-  (fold (fn (acc unit)
-          (let (pid (spawn (send me (list :unit-result (self) (run-unit unit)))))
-            (monitor pid)
-            (cons (list pid unit) acc)))
-    nil units))
+  (fold units
+    nil
+    (fn (acc unit)
+      (let (pid (spawn (send me (list :unit-result (self) (run-unit unit)))))
+        (monitor pid)
+        (cons (list pid unit) acc)))))
 (sig spawn-units (seqable any -> list))
 
 ;; How many units run concurrently in the parallel phase. This BOUNDS MEMORY: the
@@ -1035,12 +1036,12 @@ the test rather than hanging the run."
 ;; fast as a visible failure instead of hanging the collector. A result tuple is
 ;; `(group name fails ms)`; a failure record is `(loc detail-lines)` with loc nil.
 (defn- dead-unit-results (unit reason)
-  (map (fn (t)
-         (list (second unit)
-           (first t)
-           (list (list nil (list (str "test process died: " (pr-str reason)))))
-           0))
-    (third unit)))
+  (map (third unit)
+    (fn (t)
+      (list (second unit)
+        (first t)
+        (list (list nil (list (str "test process died: " (pr-str reason)))))
+        0))))
 
 ;; Account for each spawned worker exactly once — by its result if it reported,
 ;; otherwise by its death. A healthy worker sends `[:unit-result pid results]`
@@ -1055,26 +1056,27 @@ the test rather than hanging the run."
 ;; loop (ADR-063) — and synthesize a timeout failure for each of its tests, so a hung
 ;; test FAILS instead of wedging the collector. Returns the full result list.
 (defn- collect-timeout (workers reported acc)
-  (fold (fn (a w)
-          (if (includes? reported (first w))
-            a
-            (do
-              (exit (first w) :kill)
-              (append (timeout-unit-results (second w)) a))))
-    acc workers))
+  (fold workers
+    acc
+    (fn (a w)
+      (if (includes? reported (first w))
+        a
+        (do
+          (exit (first w) :kill)
+          (append (timeout-unit-results (second w)) a))))))
 
 ;; A timeout failure per test in a hung unit — same shape as `dead-unit-results`:
 ;; `(group name fails ms)`, `fails` = `((loc detail-lines))`.
 (defn- timeout-unit-results (unit)
-  (map (fn (t)
-         (list (second unit)
-           (first t)
-           (list (list nil
-                   (list (str "test timed out after "
-                           (math/quot *test-timeout-ms* 1000)
-                           "s — hard-killed (raise *test-timeout-ms* if legitimately slow)"))))
-           *test-timeout-ms*))
-    (third unit)))
+  (map (third unit)
+    (fn (t)
+      (list (second unit)
+        (first t)
+        (list (list nil
+                (list (str "test timed out after "
+                        (math/quot *test-timeout-ms* 1000)
+                        "s — hard-killed (raise *test-timeout-ms* if legitimately slow)"))))
+        *test-timeout-ms*))))
 
 ;; Tags that buy a batch the raised budget. `:slow` says it directly; `:conformance`
 ;; implies it — an external-corpus sweep is thousands of cases by construction (the
@@ -1086,10 +1088,10 @@ the test rather than hanging the run."
 ;; Is any unit in this batch tagged for the raised budget? (`workers` is a list of
 ;; `(pid unit)`, a unit is `(mode group tests)`, and a test's meta carries its tags.)
 (defn- collect-slow-batch? (workers)
-  (any? (fn (w)
-          (any? (fn (t) (any? (fn (tag) (includes? *test-long-tags* tag)) (test-tags t)))
-            (third (second w))))
-    workers))
+  (any? workers
+    (fn (w)
+      (any? (third (second w))
+        (fn (t) (any? (test-tags t) (fn (tag) (includes? *test-long-tags* tag))))))))
 
 (defn collect-units (workers acc)
   "Collect the results of one batch of spawned `workers` (a list of `(pid unit)`), accumulating onto `acc`. Waits for each worker's `:unit-result` (or its monitor `:down`) under a fresh per-batch deadline, hard-killing and failing any straggler that overruns. A `:slow`/`:conformance`-tagged batch runs under the raised `*test-slow-timeout-ms*` budget."
@@ -1130,8 +1132,9 @@ the test rather than hanging the run."
           (let (pid (third msg)
                 unit (unit-of-pid pid workers))
             (cond
-              (includes? reported pid) (collect-loop pending
-                                         workers reported acc deadline)
+              (includes? reported pid)
+                (collect-loop pending
+                  workers reported acc deadline)
               (nil? unit) (collect-loop pending workers reported acc deadline)
               else
                 (collect-loop (- pending 1)
@@ -1148,7 +1151,7 @@ the test rather than hanging the run."
 ;; is what an isolated unit's *own* worker process evaluates.
 ; -> results
 (defn- run-unit-fresh (unit)
-  (let (group (second unit)) (map (fn (t) (run-fresh group t)) (third unit))))
+  (let (group (second unit)) (map (third unit) (fn (t) (run-fresh group t)))))
 ;; ─── The test runner ────────────────────────────────────────────────────────
 ;; The runner is one long-lived process gathering every step's results. Its
 ;; per-step transients — worker-result copies, the `append` spine, spawn/monitor
@@ -1175,13 +1178,13 @@ the test rather than hanging the run."
 (defn- run-chunks (n coll acc)
   (if (empty? coll)
     (reverse acc)
-    (run-chunks n (drop n coll) (cons (take n coll) acc))))
+    (run-chunks n (drop coll n) (cons (take coll n) acc))))
 
 ;; The driver's work list: each isolated unit as its own `(:iso unit)` step, then
 ;; the parallel/serial units as `(:par . units)` groups.
 (defn- run-steps (iso par)
-  (append (map (fn (u) (list :iso u)) iso)
-    (map (fn (b) (cons :par b)) (run-chunks *parallel-batch* par nil))))
+  (append (map iso (fn (u) (list :iso u)))
+    (map (run-chunks *parallel-batch* par nil) (fn (b) (cons :par b)))))
 
 ;; Run one step in the current (driver) process, returning its unit results. An
 ;; `:iso` step spawns+awaits one unit under `%isolate`; a `:par` step spawns the
@@ -1236,8 +1239,8 @@ the test rather than hanging the run."
 ;; body of `run-tests` and `run-tests-scoped`.
 (defn- drain-current ()
   (let (units (test-select-units (reverse *units*) *test-filter*)
-        par (filter (fn (u) (not (= (first u) :isolated))) units)
-        iso (filter (fn (u) (= (first u) :isolated)) units))
+        par (filter units (fn (u) (not (= (first u) :isolated))))
+        iso (filter units (fn (u) (= (first u) :isolated))))
     (drain-runner iso par)))
 
 ;; Run each `loader` (a 0-arg thunk that `reflect/load`s one test file) in its OWN global
@@ -1264,7 +1267,7 @@ the test rather than hanging the run."
 ;; one clearly-located failure, the other files still run, and the run still exits
 ;; non-zero.
 (defn- drain-one-file (loader)
-  (reset-units!)
+  (reset-units)
   (let (outcome (try (do (loader) :%loaded) (catch e (list :%load-failed e))))
     (if (= outcome :%loaded)
       (drain-current)
@@ -1300,26 +1303,27 @@ the test rather than hanging the run."
   ;; check only ever bounds one file. The fold state carries a running failure count
   ;; — counting once per file rather than re-scanning the accumulator — and stops
   ;; loading further files once the budget is spent.
-  (let (final (fold (fn (state loader)
-                      (let (chunks (first state)
-                            failed (second state))
-                        (if (and (> *test-max-failures* 0) (>= failed *test-max-failures*))
-                          state
-                          (let (file-results (%isolate (fn () (drain-one-file loader))))
-                            (list (cons file-results chunks)
-                              (+ failed (count-failed file-results)))))))
-                (list nil 0)
+  (let (final (fold
                 ;; `--seed` randomises FILE order too, not just the units within a
                 ;; file — the scoped runner drains one file at a time, so without
                 ;; this files always ran in discovery order and a cross-file order
                 ;; dependency could never be shaken out.
-                (test-order-files loaders))
+                (test-order-files loaders)
+                (list nil 0)
+                (fn (state loader)
+                  (let (chunks (first state)
+                        failed (second state))
+                    (if (and (> *test-max-failures* 0) (>= failed *test-max-failures*))
+                      state
+                      (let (file-results (%isolate (fn () (drain-one-file loader))))
+                        (list (cons file-results chunks)
+                          (+ failed (count-failed file-results))))))))
         chunks (first final))
     ;; `chunks` is reverse run order; fold back to run order with `%append-two`, which copies
     ;; only its FIRST arg (the small per-file result list) and SHARES the accumulator tail —
     ;; O(total). NB: the variadic `append` copies BOTH args, so `(append c acc)` here would be
     ;; O(files²) (it recopies the growing accumulator every file); `%append-two` is the fix.
-    (fold (fn (acc file-results) (%append-two file-results acc)) nil chunks)))
+    (fold chunks nil (fn (acc file-results) (%append-two file-results acc)))))
 
 ;; Run a suite file-by-file (each file in its own rolled-back scope, via
 ;; `drain-files-scoped`), aggregate, then report once — the memory-bounded analogue of
@@ -1357,15 +1361,14 @@ the test rather than hanging the run."
      :failed failed
      :failed-assertions fails
      :ms elapsed
-     :results (or (map (fn (r)
-                         {:group (r-group r)
-                          :name (r-name r)
-                          :passed (not (r-failed? r))
-                          :ms (r-ms r)
-                          :failures (or (map (fn (f) {:loc (first f) :details (second f)})
-                                          (r-fails r))
-                                      [])})
-                    results)
+     :results (or (map results
+                    (fn (r)
+                      {:group (r-group r)
+                       :name (r-name r)
+                       :passed (not (r-failed? r))
+                       :ms (r-ms r)
+                       :failures (or (map (r-fails r) (fn (f) {:loc (first f) :details (second f)}))
+                                   [])}))
                 [])}))
 ;; ────────────────────────────────────────────────────────────────────────────
 
@@ -1409,12 +1412,12 @@ the test rather than hanging the run."
 ;; indented. The leading blank separates consecutive failures, which otherwise run
 ;; together into a wall that is hard to scan.
 (defn- print-failure (indent r)
-  (fold (fn (_ rec)
-          (io/puts "")
-          (io/puts (fail-anchor r rec))
-          (fold (fn (_ line) (io/puts (str indent (test-dim-label line)))) nil (fail-lines-of rec)))
+  (fold (r-fails r)
     nil
-    (r-fails r)))
+    (fn (_ rec)
+      (io/puts "")
+      (io/puts (fail-anchor r rec))
+      (fold (fail-lines-of rec) nil (fn (_ line) (io/puts (str indent (test-dim-label line))))))))
 
 ;; Dim the `label:` prefix of a detail line so the VALUE is what stands out —
 ;; `actual:`/`expect:`/`assert:` are scaffolding, the values are the information.
@@ -1428,20 +1431,20 @@ the test rather than hanging the run."
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
 (defn- report-failures (results)
-  (let (failed (filter r-failed? results))
-    (unless (empty? failed) (fold (fn (_ r) (print-failure "    " r)) nil failed))))
+  (let (failed (filter results r-failed?))
+    (unless (empty? failed) (fold failed nil (fn (_ r) (print-failure "    " r))))))
 
 (defn- report-slow (results n)
   (io/puts "")
   (io/puts (str "Slowest " n " tests:"))
-  (let (timings (map (fn (r) [(full-name r) (r-ms r)]) results))
-    (fold (fn (_ entry)
-            (io/puts (str "  "
-                       (string/pad-right (str (first entry)) 28)
-                       (string/pad-left (str (rest entry)) 6)
-                       " ms")))
+  (let (timings (map results (fn (r) [(full-name r) (r-ms r)])))
+    (fold (take (sort-by-ms timings) n)
       nil
-      (take n (sort-by-ms timings)))))
+      (fn (_ entry)
+        (io/puts (str "  "
+                   (string/pad-right (str (first entry)) 28)
+                   (string/pad-left (str (rest entry)) 6)
+                   " ms"))))))
 
 ;; "1.3s" from milliseconds — one decimal, rounded to nearest 0.1s.
 (defn- secs-str (ms)
@@ -1454,29 +1457,28 @@ the test rather than hanging the run."
 ;; nothing when every test is under the threshold — the common, fast case stays
 ;; quiet.
 (defn- report-slow-over (results over)
-  (let (slow (filter (fn (p) (> (second p) over))
-               (map (fn (r) [(full-name r) (r-ms r)]) results)))
+  (let (slow (filter (map results (fn (r) [(full-name r) (r-ms r)])) (fn (p) (> (second p) over))))
     (unless (empty? slow)
       (io/puts "")
       (io/puts (str "Slow tests (> " (secs-str over) "):"))
-      (fold (fn (_ p)
-              (io/puts (str "  " (string/pad-right (str (first p)) 40) " " (secs-str (second p)))))
+      (fold (sort-by-ms slow)
         nil
-        (sort-by-ms slow)))))
+        (fn (_ p)
+          (io/puts (str "  " (string/pad-right (str (first p)) 40) " " (secs-str (second p)))))))))
 
 (defn count-failed (results)
   "Count the results in `results` that have at least one failed assertion (a failing test, not the total number of failed assertions)."
   ; tests with at least one failed assertion
-  (fold (fn (acc r) (if (r-failed? r) (+ acc 1) acc)) 0 results))
+  (fold results 0 (fn (acc r) (if (r-failed? r) (+ acc 1) acc))))
 (sig count-failed (seqable -> any))
 (defn count-skipped (results)
   "Count the results in `results` that were skipped — registered with `:skip` but never run."
   ; tests that registered but were never run (`:skip`)
-  (fold (fn (acc r) (if (r-skipped? r) (+ acc 1) acc)) 0 results))
+  (fold results 0 (fn (acc r) (if (r-skipped? r) (+ acc 1) acc))))
 (sig count-skipped (seqable -> any))
 (defn- count-failures (results)
   ; total failed assertions across tests
-  (fold (fn (acc r) (+ acc (count (r-fails r)))) 0 results))
+  (fold results 0 (fn (acc r) (+ acc (count (r-fails r))))))
 
 ;; --- entry point -------------------------------------------------------------
 ;; Every entry point takes the same option plist, so `nest test`'s flags mean the
@@ -1543,16 +1545,17 @@ adds `# SKIP`); a failure's detail lines follow as `#` comments. Numbered in res
 order (deterministic — the results are already collected)."
   (io/puts "TAP version 13")
   (io/puts (str "1.." (count results)))
-  (fold (fn (i r)
-          (let (status (if (r-failed? r) "not ok" "ok"))
-            (io/puts (str status " " (+ i 1) " - " (full-name r) (if (r-skipped? r) " # SKIP" "")))
-            (when (r-failed? r)
-              (fold (fn (_ rec)
-                      (fold (fn (_ line) (io/puts (str "# " line))) nil (fail-lines-of rec)))
-                nil
-                (r-fails r)))
-            (+ i 1)))
-    0 results)
+  (fold results
+    0
+    (fn (i r)
+      (let (status (if (r-failed? r) "not ok" "ok"))
+        (io/puts (str status " " (+ i 1) " - " (full-name r) (if (r-skipped? r) " # SKIP" "")))
+        (when (r-failed? r)
+          (fold (r-fails r)
+            nil
+            (fn (_ rec)
+              (fold (fail-lines-of rec) nil (fn (_ line) (io/puts (str "# " line)))))))
+        (+ i 1))))
   nil)
 
 (defn- test-result->data (r)
@@ -1562,7 +1565,7 @@ order (deterministic — the results are already collected)."
    :passed (not (r-failed? r))
    :skipped (r-skipped? r)
    :ms (r-ms r)
-   :failures (or (map (fn (f) {:loc (first f) :details (second f)}) (r-fails r)) [])})
+   :failures (or (map (r-fails r) (fn (f) {:loc (first f) :details (second f)})) [])})
 
 (defn- test-fmt-json (results elapsed)
   "One JSON object for the whole run: `{:total :passed :failed :failed-assertions :ms
@@ -1575,7 +1578,7 @@ the suite programmatically. Printed once, at the end, so parallel ordering is ir
                            :failed failed
                            :failed-assertions (count-failures results)
                            :ms elapsed
-                           :results (or (map test-result->data results) [])})))
+                           :results (or (map results test-result->data) [])})))
   nil)
 
 (register-test-formatter "tap" test-fmt-tap)
@@ -1591,7 +1594,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
       (error (str "unknown --formatter '"
                *test-formatter*
                "' (available: "
-               (string/join ", " (sort (keys *test-formatters*)))
+               (string/join (sort (keys *test-formatters*)) ", ")
                ")"))
       (do
         (formatter-fn results elapsed)
@@ -1601,8 +1604,8 @@ the exit code still reflects the run. An unknown formatter name is a clean error
 
 (defn- test-report-pass (results elapsed opts extra)
   ;; `--failed` tracking happens on every path (the interesting run is the failing one).
-  (def *test-last-ran* (map full-name results))
-  (def *test-last-failed* (map full-name (filter r-failed? results)))
+  (def *test-last-ran* (map results full-name))
+  (def *test-last-failed* (map (filter results r-failed?) full-name))
   (if *test-formatter*
     (test-report-formatted results elapsed)
     (test-report-human results elapsed opts extra)))
@@ -1660,9 +1663,9 @@ the exit code still reflects the run. An unknown formatter name is a clean error
 ;; `run-tests` so `:repeat` can run it more than once.
 (defn- run-tests-pass (opts)
   (let (units (test-select-units (reverse *units*) *test-filter*)
-        par (filter (fn (u) (not (= (first u) :isolated))) units)
+        par (filter units (fn (u) (not (= (first u) :isolated))))
         ; parallel + serial
-        iso (filter (fn (u) (= (first u) :isolated)) units)
+        iso (filter units (fn (u) (= (first u) :isolated)))
         start (os/now))
     ;; All result-gathering runs in the hibernating driver (isolated units first
     ;; and serially, then the parallel groups), so the runner's per-step transients
@@ -1682,8 +1685,8 @@ the exit code still reflects the run. An unknown formatter name is a clean error
   "Like `run-tests`, but returns the result as data — `{:total :passed :failed :failed-assertions :ms :results [...]}` — instead of printing and raising. Backs the `nest mcp` `run-tests` tool."
   (test-apply-opts opts)
   (let (units (test-select-units (reverse *units*) *test-filter*)
-        par (filter (fn (u) (not (= (first u) :isolated))) units)
-        iso (filter (fn (u) (= (first u) :isolated)) units)
+        par (filter units (fn (u) (not (= (first u) :isolated))))
+        iso (filter units (fn (u) (= (first u) :isolated)))
         start (os/now))
     (let (results (drain-runner iso par)
           elapsed (- (os/now) start)
@@ -1699,13 +1702,13 @@ the exit code still reflects the run. An unknown formatter name is a clean error
        ;; `[]` rather than `null`. Matters when the suite has zero tests, or
        ;; a passing test has zero failures — agents branch on `length`, not
        ;; `(= null)`.
-       :results (or (map (fn (r)
-                           {:group (r-group r)
-                            :name (r-name r)
-                            :passed (not (r-failed? r))
-                            :ms (r-ms r)
-                            :failures (or (map (fn (f) {:loc (first f) :details (second f)})
-                                            (r-fails r))
-                                        [])})
-                      results)
+       :results (or (map results
+                      (fn (r)
+                        {:group (r-group r)
+                         :name (r-name r)
+                         :passed (not (r-failed? r))
+                         :ms (r-ms r)
+                         :failures (or (map (r-fails r)
+                                         (fn (f) {:loc (first f) :details (second f)}))
+                                     [])}))
                   [])})))

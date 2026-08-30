@@ -15,7 +15,7 @@
 (defmacro my-or (a b) `(let (r ~a) (if r r ~b)))
 
 ;; A plain `fn` param `acc` must not capture caller code spliced into its body.
-(defmacro each-inc (body) `(map (fn (acc) ~body) [1 2 3]))
+(defmacro each-inc (body) `(map [1 2 3] (fn (acc) ~body)))
 
 ;; letrec + a plain internal loop binder + accumulator — the `defseq` shape,
 ;; without any `#`.
@@ -65,9 +65,9 @@
     (assert= (let (r 1) (still-hash false r)) 1))
 
   (test "defseq-based sequence ops remain correct"
-    (assert= (map (fn (x) (* x x)) (list 1 2 3 4)) (list 1 4 9 16))
-    (assert= (filter (fn (x) (> x 2)) (list 1 2 3 4)) (list 3 4))
-    (assert= (seq/remove (fn (x) (> x 2)) (list 1 2 3 4)) (list 1 2))))
+    (assert= (map (list 1 2 3 4) (fn (x) (* x x))) (list 1 4 9 16))
+    (assert= (filter (list 1 2 3 4) (fn (x) (> x 2))) (list 3 4))
+    (assert= (seq/remove (list 1 2 3 4) (fn (x) (> x 2))) (list 1 2))))
 
 ;; ---- across processes -------------------------------------------------------
 ;; A hygienic macro must behave identically when its result is built in a spawned

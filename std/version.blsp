@@ -39,13 +39,13 @@ compare what a human typed in a manifest, not to validate it (that is
 
     (version/core \"1.2.3-rc1\")   → (1 2 3)"
   (let (core (first (string/split (first (string/split v "+")) "-")))
-    (map (fn (p) (or (string/->number p) 0)) (string/split core "."))))
+    (map (string/split core ".") (fn (p) (or (string/->number p) 0)))))
 (sig core (string -> (or nil (list (or nil number)))))
 
 (defn- digit-run? (s)
   (let (cps (string/->codepoints s))
     (and (not (empty? cps))
-      (not (any? (fn (cp) (or (< cp 48) (> cp 57))) cps)))))
+      (not (any? cps (fn (cp) (or (< cp 48) (> cp 57))))))))
 
 (defn valid? (v)
   "Whether `v` is a full `MAJOR.MINOR.PATCH` version — three segments, each a run of
@@ -58,7 +58,7 @@ CONSTRAINT is usually written short (`\">= 0.3\"`).
     (let (core (first (string/split (first (string/split v "+")) "-"))
           parts (string/split core "."))
       (and (= (count parts) 3)
-        (not (any? (fn (p) (not (digit-run? p))) parts))))))
+        (not (any? parts (fn (p) (not (digit-run? p)))))))))
 
 ;; ---- ordering -----------------------------------------------------------------
 
@@ -106,8 +106,9 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
     (and (empty? a) (empty? b)) 0
     (empty? a) -1
     (empty? b) 1
-    else (let (c (compare-id (first a) (first b)))
-           (if (= c 0) (compare-ids (rest a) (rest b)) c))))
+    else
+      (let (c (compare-id (first a) (first b)))
+        (if (= c 0) (compare-ids (rest a) (rest b)) c))))
 
 (defn- compare-id (x y)
   ;; numeric identifiers compare numerically and rank BELOW alphanumeric ones; two
@@ -131,8 +132,9 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
         (cond
           (< x y) -1
           (> x y) 1
-          else (compare-parts (if (empty? a) a (rest a))
-                 (if (empty? b) b (rest b)))))))
+          else
+            (compare-parts (if (empty? a) a (rest a))
+              (if (empty? b) b (rest b)))))))
 
 (defn compare-cores (a b)
   "Compare two numeric cores (integer part-lists, as returned by `core`): -1, 0, or
@@ -172,7 +174,7 @@ everything (the \"no release yet\" placeholder a registry starts from).
   ;; as 0, so the comparison was against garbage and the caller was told, confidently,
   ;; "not satisfied". An operator with no meaning has to say so.
   (let (c (string/trim constraint)
-        op (seq/find (fn (o) (string/starts-with? c o)) *operators*))
+        op (seq/find *operators* (fn (o) (string/starts-with? c o))))
     (cond
       (not (nil? op)) [op (string/trim (string/substring c (string/length op) (string/length c)))]
       (digit-start? c) ["=" c]
@@ -218,8 +220,8 @@ everything (the \"no release yet\" placeholder a registry starts from).
 (defn- upper-bound (parts bump-index)
   ;; A 3-int list: components before `bump-index` copied, the one at it incremented,
   ;; everything after zeroed — the exclusive top of the range.
-  (map (fn (i) (cond (< i bump-index) (nth0 parts i) (= i bump-index) (inc (nth0 parts i)) else 0))
-    (list 0 1 2)))
+  (map (list 0 1 2)
+    (fn (i) (cond (< i bump-index) (nth0 parts i) (= i bump-index) (inc (nth0 parts i)) else 0))))
 
 ;; --- compiled constraints ------------------------------------------------------
 ;; Parsing a constraint STRING (`">= 1.2, < 2.0"`) into terms is the expensive part of a
@@ -241,11 +243,11 @@ module's overview). nil / \"\" compile to nil (no constraint). Raises on a malfo
 the same as `satisfies?` — compiling is where a bad constraint is caught."
   (if (or (nil? constraint) (= (string/trim constraint) ""))
     nil
-    (let (terms (map (fn (term) (compile-term term constraint))
-                  (seq/keep (fn (t) (let (tt (string/trim t)) (when (not (= tt "")) tt)))
-                    (string/split constraint ","))))
+    (let (terms (map (seq/keep (string/split constraint ",")
+                       (fn (t) (let (tt (string/trim t)) (when (not (= tt "")) tt))))
+                  (fn (term) (compile-term term constraint))))
       {:terms terms
-       :pre-cores (seq/keep (fn (t) (get t :pre-core)) terms)})))
+       :pre-cores (seq/keep terms (fn (t) (get t :pre-core)))})))
 
 ;; A version part must not contain whitespace or a constraint operator. Both mean a SECOND
 ;; term that the comma split did not separate — `">=1.0.0 <2.0.0"` (npm/cargo), `"^1 || ^2"`
@@ -257,7 +259,7 @@ the same as `satisfies?` — compiling is where a bad constraint is caught."
 ;; meaning has to say so — extended from the operator to the version beside it.
 ;; `-`/`+` are NOT rejected: they are legal prerelease/build punctuation (`1.0.0-alpha`).
 (defn- junk-in-version? (wanted)
-  (any?
+  (any? (string/->codepoints wanted)
     (fn (cp)
       (or (= cp 32)
         (= cp 9) ; space, tab
@@ -266,9 +268,7 @@ the same as `satisfies?` — compiling is where a bad constraint is caught."
         (= cp 61) ; < > =
         (= cp 124)
         (= cp 94)
-        (= cp 126))) ; | ^ ~
-    (string/->codepoints wanted)))
-
+        (= cp 126))))) ; | ^ ~
 (defn- compile-term (term constraint)
   ;; `constraint` is the whole original string, carried only so an error names what the
   ;; user actually wrote.
@@ -297,7 +297,7 @@ the same as `satisfies?` — compiling is where a bad constraint is caught."
 for pre-release-aware matching use `match?`, which has the version string."
   (if (nil? compiled)
     true
-    (every? (fn (term) (match-term? term parsed nil)) (get compiled :terms))))
+    (every? (get compiled :terms) (fn (term) (match-term? term parsed nil)))))
 
 ;; Compare a candidate `(core, pre)` against a term bound `(core, pre)` — core first, then
 ;; pre-release precedence when the cores tie.
@@ -330,8 +330,8 @@ aware — see the compile overview)."
       (and
         ;; a pre-release candidate is admissible only where a term names a pre-release at its core
         (or (nil? pre)
-          (any? (fn (pc) (= (compare-parts pc core) 0)) (get compiled :pre-cores)))
-        (every? (fn (term) (match-term? term core pre)) (get compiled :terms))))))
+          (any? (get compiled :pre-cores) (fn (pc) (= (compare-parts pc core) 0))))
+        (every? (get compiled :terms) (fn (term) (match-term? term core pre)))))))
 
 (defn satisfies? (v constraint)
   "Whether version string `v` satisfies `constraint`. A constraint is one term —
@@ -361,21 +361,21 @@ the \"this plugin wants an application I am not\" case, which must fail closed.
 
 The shape a plugin manifest's `:enhances` map is checked with:
 `(satisfies-all? {'bedit \"0.4.0\"} {'bedit \">= 0.3\"})`."
-  (not (any? (fn (kv)
-               (let ([nm constraint] kv
-                     have (get versions nm))
-                 (or (nil? have) (not (satisfies? have constraint)))))
-         (%map-pairs constraints))))
+  (not (any? (%map-pairs constraints)
+         (fn (kv)
+           (let ([nm constraint] kv
+                 have (get versions nm))
+             (or (nil? have) (not (satisfies? have constraint))))))))
 (sig satisfies-all? (any map -> bool))
 
 (defn unsatisfied (versions constraints)
   "The `constraints` entries `versions` does NOT satisfy, as a list of
 `[name constraint have]` (`have` is nil when absent) — what an application shows
 the user when it declines a plugin, instead of a bare false."
-  (seq/keep (fn (kv)
-              (let ([nm constraint] kv
-                    have (get versions nm))
-                (when (or (nil? have) (not (satisfies? have constraint)))
-                  [nm constraint have])))
-    (%map-pairs constraints)))
+  (seq/keep (%map-pairs constraints)
+    (fn (kv)
+      (let ([nm constraint] kv
+            have (get versions nm))
+        (when (or (nil? have) (not (satisfies? have constraint)))
+          [nm constraint have])))))
 (sig unsatisfied (any map -> any))

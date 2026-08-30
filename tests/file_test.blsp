@@ -46,7 +46,7 @@
         (spawn (fn () (file/spit-append p (str "worker-" i "\n")) (send me :done))))
       ; barrier: all workers finished
       (fa-await n)
-      (let (lines (filter (fn (l) (not (empty? l))) (string/split (file/slurp p) "\n")))
+      (let (lines (filter (string/split (file/slurp p) "\n") (fn (l) (not (empty? l)))))
         ; none lost
         (assert= (count lines) n)
         (assert= (count (frequencies lines)) n)))))
@@ -137,7 +137,7 @@
   ;; this is a regression tripwire, not a benchmark (see handoff §5 on noise).
   (test "write-lines is linear in the number of lines"
     (let (p (path/join (ftmp) "scale.txt")
-          mk (fn (n) (map (fn (i) (str "line " i " with a little payload")) (range n)))
+          mk (fn (n) (map (range n) (fn (i) (str "line " i " with a little payload"))))
           ms (fn (n)
                (let (ls (mk n) t0 (os/now-ns))
                  (do (write-lines p ls) (math/quot (- (os/now-ns) t0) 1000000))))
@@ -267,7 +267,7 @@
           data (path/join dir "d"))
       (file/mkdir dir)
       (is (%file-swap lock data "" "x"))
-      (assert= (sort (filter (fn (f) (includes? f ".swap.")) (file/ls dir))) nil)))
+      (assert= (sort (filter (file/ls dir) (fn (f) (includes? f ".swap.")))) nil)))
   (test "repeated swaps thread through, each seeing the last"
     (let (dir (temp-dir "brood-file-swap-")
           lock (path/join dir "l")

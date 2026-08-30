@@ -24,14 +24,14 @@
 ;; walk stays linear in the file count.
 (defn- std-check-files (dir)
   (if (file/dir? dir)
-    (fold (fn (acc entry)
-            (let (p (path/join dir entry))
-              (cond
-                (file/dir? p) (%append-two (std-check-files p) acc)
-                (string/ends-with? entry ".blsp") (cons p acc)
-                else acc)))
+    (fold (file/ls dir)
       nil
-      (file/ls dir))
+      (fn (acc entry)
+        (let (p (path/join dir entry))
+          (cond
+            (file/dir? p) (%append-two (std-check-files p) acc)
+            (string/ends-with? entry ".blsp") (cons p acc)
+            else acc))))
     nil))
 
 (describe "the standard library carries no checker warnings"
@@ -41,9 +41,9 @@
     (is (> (count (std-check-files "std")) 50)))
 
   (test "check-file reports nothing for any std file"
-    (let (warnings (fold (fn (acc path) (append acc (or (reflect/check-file path) nil)))
+    (let (warnings (fold (sort (std-check-files "std"))
                      nil
-                     (sort (std-check-files "std"))))
+                     (fn (acc path) (append acc (or (reflect/check-file path) nil)))))
       ;; Assert on the warnings themselves, so a failure names the file, line and lint
       ;; rather than only a count.
       (assert= warnings nil))))

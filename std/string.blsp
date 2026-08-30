@@ -112,12 +112,12 @@ inverse of the `string/->codepoints` primitive."
 ;; duplication buys that; noted here and there so neither looks like an oversight.
 (defn- join-parts (sep coll acc)
   (if (empty? coll) acc (join-parts sep (rest coll) (cons (first coll) (cons sep acc)))))
-(defn join (sep coll)
+(defn join (coll sep)
   "Concatenate the strings in `coll` with `sep` between adjacent elements.
 
-    (string/join \", \" [\"a\" \"b\" \"c\"])   → \"a, b, c\"
-    (string/join \"-\" [\"solo\"])         → \"solo\"
-    (string/join \",\" [])               → \"\""
+    (string/join [\"a\" \"b\" \"c\"] \", \")   → \"a, b, c\"
+    (string/join [\"solo\"] \"-\")         → \"solo\"
+    (string/join [] \",\")               → \"\""
   ;; For the common case — a string separator over a list/vector/range — the
   ;; native `%string-join` walks `coll` once into one buffer (no intermediate
   ;; parts list, no reverse). The all-Brood path stays as a fallback for an
@@ -143,7 +143,7 @@ leaves `s` unchanged.
     (string/replace \"a-b-c\" \"-\" \"+\")   → \"a+b+c\"
     (string/replace \"aaa\" \"aa\" \"b\")    → \"ba\"    ; left to right, no rescan
     (string/replace \"abc\" \"zz\" \"!\")    → \"abc\""
-  (if (= old "") s (join new (string/split s old))))
+  (if (= old "") s (join (string/split s old) new)))
 
 ;; `last-index-of` moved here from the prelude on 2026-08-27. It is STRING-ONLY — it calls
 ;; `%str-last-index-of` and defaults `before` to `(string/length s)` — so by this module's
@@ -265,9 +265,9 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
 
     (string/fill \"abc\" 10)   → \"abc\"   ; already fits, so unchanged"
   (let (flat (replace (replace s "\n" " ") "\t" " ")
-        words (filter (fn (w) (not (= w ""))) (string/split flat " "))
-        [cur done] (fold (fn (acc w) (fill-pack acc w width)) ["" ()] words))
-    (join "\n" (reverse (if (= cur "") done (cons cur done))))))
+        words (filter (string/split flat " ") (fn (w) (not (= w ""))))
+        [cur done] (fold words ["" ()] (fn (acc w) (fill-pack acc w width))))
+    (join (reverse (if (= cur "") done (cons cur done))) "\n")))
 (sig fill (string any -> any))
 
 ;; (restored: this is string's repeat, not the sequence one)
@@ -278,7 +278,7 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
   ;; Build the list of copies with the generic `range`/`map` (NOT the generic
   ;; `repeat`, which this name would shadow inside the `string` namespace), then
   ;; concatenate in one `apply str` pass.
-  (apply str (map (fn (_) s) (range (math/max 0 n)))))
+  (apply str (map (range (math/max 0 n)) (fn (_) s))))
 (sig repeat (string int -> string))
 
 ;; ---- interpolation and printf ------------------------------------------------

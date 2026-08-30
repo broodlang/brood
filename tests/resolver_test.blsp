@@ -156,8 +156,8 @@
       (is (includes? message "Because"))
       ;; exactly two of the three requirers are named in the proof
       (is (= 2
-            (count (filter (fn (pkg) (includes? message (str pkg " 1.0.0 requires s")))
-                     ["x" "y" "z"]))))))
+            (count (filter ["x" "y" "z"]
+                     (fn (pkg) (includes? message (str pkg " 1.0.0 requires s")))))))))
   (test "a required package the provider does not know is a clear error"
     (let (p (rt-prov {'foo ["1.0.0"]} {'foo {"1.0.0" [['ghost ">= 1.0"]]}})
           message (rt-err [['foo nil]] p))
@@ -209,11 +209,11 @@
   ;; propagation and conflict-driven learning resolve it in near-linear steps: it learns
   ;; "b1 must be 1.0.0" from the conflict and never re-explores the dead branch.
   (defn rt-tangled (n)
-    (let (bs (map (fn (i) (str "b" i)) (range 1 (+ n 1))))
-      [(fold (fn (m nm) (assoc m nm ["1.0.0" "2.0.0"])) {"check" ["1.0.0"]} bs)
-        (assoc (fold (fn (m nm) (assoc m nm {"1.0.0" [] "2.0.0" []})) {} bs)
+    (let (bs (map (range 1 (+ n 1)) (fn (i) (str "b" i))))
+      [(fold bs {"check" ["1.0.0"]} (fn (m nm) (assoc m nm ["1.0.0" "2.0.0"])))
+        (assoc (fold bs {} (fn (m nm) (assoc m nm {"1.0.0" [] "2.0.0" []})))
           "check" {"1.0.0" [['b1 "= 1.0.0"]]})
-        (append (map (fn (nm) [(symbol nm) ">= 1.0"]) bs) (list ['check nil]))]))
+        (append (map bs (fn (nm) [(symbol nm) ">= 1.0"])) (list ['check nil]))]))
   (defn rt-tangled-provider (versions deps)
     (make-provider (fn (nm) (get versions (if (symbol? nm) (->string nm) nm)))
       (fn (nm v) (get (get deps (if (symbol? nm) (->string nm) nm)) v))))
@@ -251,23 +251,23 @@
     ;; if either returned, a 120-package solve would crawl and eventually trip the suite cap.
     (let (n 120
           nm (fn (i) (symbol (str "p" i)))
-          versions (fold (fn (m i) (assoc m (nm i) ["1.0.0" "1.1.0" "2.0.0"])) {} (range 0 n))
-          deps (fold (fn (m i)
-                       (let (ds (if (= i 0)
-                                  []
-                                  (seq/distinct (seq/keep (fn (j)
-                                                            (when (and (>= j 0) (< j i))
-                                                              [(nm j) ">= 1.0"]))
-                                                  (list (- i 1) (math/quot i 2) (- i 3))))))
-                         (assoc m (nm i) {"1.0.0" ds "1.1.0" ds "2.0.0" ds})))
+          versions (fold (range 0 n) {} (fn (m i) (assoc m (nm i) ["1.0.0" "1.1.0" "2.0.0"])))
+          deps (fold (range 0 n)
                  {}
-                 (range 0 n))
+                 (fn (m i)
+                   (let (ds (if (= i 0)
+                              []
+                              (seq/distinct (seq/keep (list (- i 1) (math/quot i 2) (- i 3))
+                                              (fn (j)
+                                                (when (and (>= j 0) (< j i))
+                                                  [(nm j) ">= 1.0"]))))))
+                     (assoc m (nm i) {"1.0.0" ds "1.1.0" ds "2.0.0" ds}))))
           p (make-provider (fn (name) (get versions name)) (fn (name v) (get (get deps name) v)))
           solution (rt-ok [[(nm (- n 1)) ">= 1.0"]] p))
       ;; the root reaches the whole chain (each p_i links to p_{i-1}), so all N resolve,
       ;; each to the newest that fits (2.0.0)
       (assert= n (count (keys solution)))
-      (is (every? (fn (kv) (= (nth kv 1) "2.0.0")) (%map-pairs solution))))))
+      (is (every? (%map-pairs solution) (fn (kv) (= (nth kv 1) "2.0.0")))))))
 
 (describe "resolver: determinism"
   (test "the same universe resolves to the same solution every time"
@@ -306,7 +306,7 @@
       (rt-spawn (self) 16 versions deps roots)
       (let (results (rt-collect 0 16 nil))
         (assert= 16 (count results))
-        (is (every? (fn (r) (= r expected)) results))))))
+        (is (every? results (fn (r) (= r expected))))))))
 
 ;; ---- generative oracle: the solver vs brute-force enumeration (ADR-209) -------
 ;; The strongest check here: over hundreds of SEEDED random universes, the backtracking
@@ -329,14 +329,14 @@
 ;; Every full assignment {name -> chosen version}, one per package that HAS a version
 ;; (a versionless package is simply absent — treated as "missing/unsatisfiable" downstream).
 (defn rt-o-assignments (universe)
-  (fold (fn (acc nm)
-          (let (versions (rt-o-versions universe nm))
-            (if (empty? versions)
-              acc
-              (apply append
-                (map (fn (assignment) (map (fn (v) (assoc assignment nm v)) versions)) acc)))))
+  (fold (keys universe)
     (list {})
-    (keys universe)))
+    (fn (acc nm)
+      (let (versions (rt-o-versions universe nm))
+        (if (empty? versions)
+          acc
+          (apply append
+            (map acc (fn (assignment) (map versions (fn (v) (assoc assignment nm v)))))))))))
 
 ;; Walk the closure reachable from `queue` under `assignment`; true iff every reachable
 ;; package is assigned AND every dependency constraint it names is satisfied by the
@@ -351,11 +351,11 @@
         (if (nil? chosen)
           false
           (let (deps (rt-o-deps universe nm chosen))
-            (if (every? (fn (d)
-                          (let (dep-version (get assignment (nth d 0)))
-                            (and dep-version (version/satisfies? dep-version (nth d 1)))))
-                  deps)
-              (rt-o-closure-ok? (append (rest queue) (map (fn (d) (nth d 0)) deps))
+            (if (every? deps
+                  (fn (d)
+                    (let (dep-version (get assignment (nth d 0)))
+                      (and dep-version (version/satisfies? dep-version (nth d 1))))))
+              (rt-o-closure-ok? (append (rest queue) (map deps (fn (d) (nth d 0))))
                 universe
                 assignment
                 (assoc visited nm true))
@@ -364,15 +364,15 @@
 ;; An assignment resolves the roots iff every root is assigned + satisfies its constraint
 ;; AND the closure it reaches is consistent.
 (defn rt-o-resolves? (roots universe assignment)
-  (and (every? (fn (r)
-                 (let (v (get assignment (nth r 0)))
-                   (and v (version/satisfies? v (nth r 1)))))
-         roots)
-    (rt-o-closure-ok? (map (fn (r) (nth r 0)) roots) universe assignment {})))
+  (and (every? roots
+         (fn (r)
+           (let (v (get assignment (nth r 0)))
+             (and v (version/satisfies? v (nth r 1))))))
+    (rt-o-closure-ok? (map roots (fn (r) (nth r 0))) universe assignment {})))
 
 ;; The oracle: is there ANY assignment that resolves the roots?
 (defn rt-o-solvable? (roots universe)
-  (any? (fn (assignment) (rt-o-resolves? roots universe assignment)) (rt-o-assignments universe)))
+  (any? (rt-o-assignments universe) (fn (assignment) (rt-o-resolves? roots universe assignment))))
 
 ;; -- random universe generator (seeded; every gen returns [value next-seed]) --
 (def rt-g-versions ["1.0.0" "1.1.0" "2.0.0"])
@@ -381,7 +381,7 @@
 
 (defn rt-g-version-set (seed)
   ;; 1..3 versions (a prefix of the pool, so they stay ordered)
-  (let ([k s1] (rand/int seed 3)) [(take (+ k 1) rt-g-versions) s1]))
+  (let ([k s1] (rand/int seed 3)) [(take rt-g-versions (+ k 1)) s1]))
 
 (defn rt-g-deps (seed pkg others acc)
   (if (empty? others)
@@ -395,7 +395,7 @@
 (defn rt-g-version-map (seed pkg versions acc)
   (if (empty? versions)
     [acc seed]
-    (let ([deps s1] (rt-g-deps seed pkg (filter (fn (p) (not (= p pkg))) rt-g-packages) nil))
+    (let ([deps s1] (rt-g-deps seed pkg (filter rt-g-packages (fn (p) (not (= p pkg)))) nil))
       (rt-g-version-map s1 pkg (rest versions) (assoc acc (first versions) deps)))))
 
 (defn rt-g-package (seed pkg)

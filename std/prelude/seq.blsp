@@ -19,12 +19,12 @@
     else (%range a (first more) (second more))))
 
 ;; (take n coll) -> the first n elements (fewer if coll is shorter).
-(defn take (n coll)
+(defn take (coll n)
   "The first `n` items of `coll` (fewer if it is shorter), as a list.
 
-    (take 2 [1 2 3 4])  → (1 2)
-    (take 9 [1 2])      → (1 2)
-    (take 0 [1 2])      → nil"
+    (take [1 2 3 4] 2)  → (1 2)
+    (take [1 2] 9)      → (1 2)
+    (take [1 2] 0)      → nil"
   (%take-acc n coll nil))
 (defn- %take-acc (n coll acc)
   (if (or (<= n 0) (empty? coll))
@@ -32,24 +32,24 @@
     (%take-acc (- n 1) (rest coll) (cons (first coll) acc))))
 
 ;; (drop n coll) -> coll without its first n elements.
-(defn drop (n coll)
+(defn drop (coll n)
   "`coll` without its first `n` items.
 
-    (drop 2 [1 2 3 4])  → (3 4)
-    (drop 9 [1 2])      → nil"
-  (if (or (<= n 0) (empty? coll)) coll (drop (- n 1) (rest coll))))
+    (drop [1 2 3 4] 2)  → (3 4)
+    (drop [1 2] 9)      → nil"
+  (if (or (<= n 0) (empty? coll)) coll (drop (rest coll) (- n 1))))
 
 ;; (take-while pred coll) / (drop-while pred coll) split on the first failure.
-(defn take-while (pred coll)
+(defn take-while (coll pred)
   "The leading items of `coll` for which `(pred x)` holds, as a list — like `take`, which
 also returns a list whatever it was given.
 
-    (take-while (fn (x) (< x 3)) [1 2 3 1])   → (1 2)
-    (take-while (fn (x) (< x 3)) [5 1])       → nil
+    (take-while [1 2 3 1] (fn (x) (< x 3)))   → (1 2)
+    (take-while [5 1] (fn (x) (< x 3)))       → nil
 
 The loop guards on `empty?`, the test `take`/`drop` use. It guarded on `(pair? coll)`, which
-is false for a VECTOR and a STRING, so `(take-while pred [1 2 3])` silently answered `nil` —
-a wrong value, not an error — while `(take 2 [1 2 3])` beside it worked. Found by writing
+is false for a VECTOR and a STRING, so `(take-while [1 2 3] pred)` silently answered `nil` —
+a wrong value, not an error — while `(take [1 2 3] 2)` beside it worked. Found by writing
 the example above."
   (%take-while-acc pred coll nil))
 (defn- %take-while-acc (pred coll acc)
@@ -62,17 +62,17 @@ the example above."
 ;; (any? pred coll) -> true if pred holds for any element; (every? pred coll) ->
 ;; true if it holds for all (vacuously true on the empty list). Booleans, by the
 ;; `?` convention — use `find` to recover the matching element itself.
-(defn any? (pred coll)
+(defn any? (coll pred)
   "True if `(pred x)` holds for at least one item of `coll`.
 
-    (any? math/even? [1 3 4])   → true
-    (any? math/even? [1 3])     → false"
-  (cond (empty? coll) false (pred (first coll)) true else (any? pred (rest coll))))
-(defn every? (pred coll)
+    (any? [1 3 4] math/even?)   → true
+    (any? [1 3] math/even?)     → false"
+  (cond (empty? coll) false (pred (first coll)) true else (any? (rest coll) pred)))
+(defn every? (coll pred)
   "True if `(pred x)` holds for every item of `coll` (vacuously true if empty).
 
-    (every? math/even? [2 4])   → true"
-  (cond (empty? coll) true (pred (first coll)) (every? pred (rest coll)) else false))
+    (every? [2 4] math/even?)   → true"
+  (cond (empty? coll) true (pred (first coll)) (every? (rest coll) pred) else false))
 
 ;; (index-of coll x [from]) -> the 0-based index of `x`, or -1. The index-returning
 ;; sibling of `includes?`, and BARE rather than `string/index-of` for the reason ADR-230
@@ -152,7 +152,7 @@ Always true for `n` <= 0.
   (cond (<= n 0) true (empty? coll) false else (%has-at-least? (- n 1) (rest coll))))
 (defn- %partition-acc (n coll acc)
   (if (%has-at-least? n coll)
-    (%partition-acc n (drop n coll) (cons (take n coll) acc))
+    (%partition-acc n (drop coll n) (cons (take coll n) acc))
     (reverse acc)))
 
 ;; (sort coll) ascending via `<` (numbers) or structural order (anything else);
@@ -247,11 +247,11 @@ Always true for `n` <= 0.
     ;; a plain map uses the GC-quiet CHAMP builder. `%map-get` tells them apart.
     (map? to)
       (if (%map-get to :__id__ nil)
-        (fold %conj-one to (seq from))
+        (fold (seq from) to %conj-one)
         (%map-into to (if (map? from) (%map-pairs from) from)))
     ;; Set target: add each item (duplicates collapse). Without this branch the
     ;; `else` poured a set into a LIST — `(into #{} [1 1 2])` was `(1 1 2)`.
-    (set? to) (fold %set-add to from)
+    (set? to) (fold from to %set-add)
     ;; `append to from` is always a list (fold-of-flip-cons), so we re-vectorise.
     ;; That's an extra O(n) pass — acceptable; the previous code silently
     ;; returned a list even when `to` was a vector.
@@ -273,8 +273,9 @@ Always true for `n` <= 0.
         (cond
           (map? x) (merge coll x)
           (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
-          else (error "conj: adding to a map takes a [k v] pair or a map, got "
-                 (pr-str x))))
+          else
+            (error "conj: adding to a map takes a [k v] pair or a map, got "
+              (pr-str x))))
     (pair? coll) (cons x coll)
     ;; A built-in kind with a `Conjable` impl of its own — the third of the collection
     ;; seams, matching `seq` and `count` (ADR-253). Gated on `%impl-exact?` so a kind
@@ -297,7 +298,7 @@ a map. Returns a fresh collection; `coll` is untouched.
 
 `disj` is the inverse and lives beside it — both stay core rather than in `std/set`
 so a set works with the collection protocol without an import."
-  (fold %conj-one coll xs))
+  (fold xs coll %conj-one))
 
 (defn disj (s & xs)
   "A fresh set like `s` with each of `xs` removed (removing an absent element is a
@@ -307,7 +308,7 @@ import (and so `(:use set)` can't shadow them).
 
     (disj #{1 2 3} 2)   → #{1 3}
     (disj #{1} 9)       → #{1}   ; removing what isn't there is a no-op"
-  (fold %set-remove s xs))
+  (fold xs s %set-remove))
 
 ;; ---- more sequence operations -----------------------------------------------
 ;; The eager counterparts of the `x*` transducers, plus the common Clojure-ish
@@ -392,15 +393,15 @@ and it must be loaded before this `defrecord`.
     (defability Columns
       (columns [self] :-> vector)
       :derive-record (fn (flds)
-        (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (->string f)))) flds)]))))
+        (list `(columns [r] [~@(map flds (fn (f) `(get r ~(keyword (->string f)))))]))))
     (defrecord point (x y) :derives [Columns])   ; columns synthesised field-wise
 
 Note the example defines the ability *with* a `:derive-record` recipe: no ability in the
 prelude declares one, so `:derives` always names an ability from your own code. It read
 `:derives [Ord]` until 2026-08-28 — an ability that does not exist, so the one example of
 this clause was an expansion error."
-  (let (fnames (map %defrecord-fname fields)
-        fkws (map (fn (n) (keyword (->string n))) fnames)
+  (let (fnames (map fields %defrecord-fname)
+        fkws (map fnames (fn (n) (keyword (->string n))))
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
         ;; checker tracks via `Ty::keyword_lit`), captured at definition.
         id (%defrecord-qualify (->string rec))
@@ -410,10 +411,10 @@ this clause was an expansion error."
         ;; as a record shape carrying the `:__id__` keyword literal.
         body (%zipmap (cons :__id__ fkws) (cons id fnames))
         ctor `(defn ~rec (~@fnames) ~body)
-        accs (map (fn (f)
-                    (let (fnm (%defrecord-fname f))
-                      `(defn ~(%defrecord-acc-sym rec fnm) (r) (/get r ~(keyword (->string fnm))))))
-               fields)
+        accs (map fields
+               (fn (f)
+                 (let (fnm (%defrecord-fname f))
+                   `(defn ~(%defrecord-acc-sym rec fnm) (r) (/get r ~(keyword (->string fnm)))))))
         ;; the record-shaped constructor sig (always — this is the dispatch-inference
         ;; seam): each field keeps its declared type, else `any`.
         ;; An undeclared field type is a TYPE VARIABLE named after the field (`?x`), not
@@ -424,17 +425,17 @@ this clause was an expansion error."
         field-ty (fn (f)
                    (or (%defrecord-ftype f)
                      (symbol (str "?" (->string (%defrecord-fname f))))))
-        arg-tys (map field-ty fields)
+        arg-tys (map fields field-ty)
         rec-ty (cons 'record
                  (cons :__id__
                    (cons id
-                     (mapcat (fn (f) (list (keyword (->string (%defrecord-fname f))) (field-ty f)))
-                       fields))))
+                     (mapcat fields
+                       (fn (f) (list (keyword (->string (%defrecord-fname f))) (field-ty f)))))))
         ctor-sig (list '/sig rec (append arg-tys (list '-> rec-ty)))
         ;; per-accessor sigs only when every field is typed (else an accessor call on a
         ;; bare map would false-warn), mirroring the pre-unification behaviour.
-        acc-sigs (if (every? pair? fields)
-                   (map
+        acc-sigs (if (every? fields pair?)
+                   (map fields
                      (fn (f)
                        (let (fnm (%defrecord-fname f))
                          (list '/sig
@@ -447,8 +448,7 @@ this clause was an expansion error."
                            ;; field read through a union of records resolve.
                            (list (list 'record '&open (keyword (->string fnm)) (%defrecord-ftype f))
                              '->
-                             (%defrecord-ftype f)))))
-                     fields)
+                             (%defrecord-ftype f))))))
                    nil)
         ;; `:derives [A …]` → one `(%derive-into 'A id 'fields (reflect/current-ns))` per ability. The
         ;; recipe is run at LOAD (not expansion), because the checker expands this `defrecord`
@@ -457,13 +457,13 @@ this clause was an expansion error."
         ;; forms statically (they mark the ability's ops as implemented for `id`).
         derives (%defrecord-derives opts)
         derive-calls (if derives
-                       (map (fn (a)
-                              (list '%derive-into
-                                (list 'quote a)
-                                id
-                                (list 'quote fnames)
-                                (list '/reflect/current-ns)))
-                         derives)
+                       (map derives
+                         (fn (a)
+                           (list '%derive-into
+                             (list 'quote a)
+                             id
+                             (list 'quote fnames)
+                             (list '/reflect/current-ns))))
                        nil))
     ;; The constructor's `sig` follows its `defn`, exactly as the accessor sigs already
     ;; follow theirs. Placement is load-bearing under `BROOD_CONTRACTS=1`: a `sig` above its
@@ -491,7 +491,7 @@ this clause was an expansion error."
 ;; composes the transducers onto one view, so a `->>` pipeline folds/reduces in
 ;; a **single pass with no intermediate lists**:
 ;;
-;;   (->> xs (seq/lmap sq) (seq/lfilter even?) (reduce + 0))   ; one pass, no temp lists
+;;   (-> xs (seq/lmap sq) (seq/lfilter even?) (reduce 0 +))    ; one pass, no temp lists
 ;;
 ;; Consume a view with `fold`/`reduce`/`sum`/`count`/`into`/`join`/`seq`/`nth`/
 ;; `first`/`rest`; `seq`/`into`/`str`/`=` materialise it to a concrete value. A
@@ -512,7 +512,7 @@ arguments, `identity`.
   (cond
     (empty? fns) identity
     (empty? (rest fns)) (first fns)
-    else (fold %comp-compose (first fns) (rest fns))))
+    else (fold (rest fns) (first fns) %comp-compose)))
 
 ;; The rest of the combinator family. `comp` shipped alone for a long time, which
 ;; left `(map (fn (x) (f a x)) xs)` as the only spelling of a partially-applied
@@ -581,32 +581,32 @@ view, compose `xf` onto its transducer (same source) so the stages fuse."
       (%seqview (%vector-ref parts 0) (comp (%vector-ref parts 1) xf)))
     (%seqview coll xf)))
 
-(defn seq/lmap (f coll)
+(defn seq/lmap (coll f)
   "Lazy, fusing `map`: a seq-view of `(f x)` for each `x` in `coll`. Composes with
 adjacent `l*` stages (thread them with `->>`) and folds/reduces in one pass with
 no intermediate lists. Realise with `seq`/`into`, or just consume it
 (`fold`/`reduce`/`count`/…). Use eager `map` when you want a concrete list or are
 iterating for side effects.
 
-    (->> [1 2 3] (seq/lmap inc) (into []))   → [2 3 4]"
+    (-> [1 2 3] (seq/lmap inc) (into [] $))   → [2 3 4]"
   (%seqview-wrap coll (%xmap f)))
 
-(defn seq/lfilter (pred coll)
+(defn seq/lfilter (coll pred)
   "Lazy, fusing `filter` — see `seq/lmap`.
 
-    (seq (seq/lfilter math/even? [1 2 3 4]))   → (2 4)   ; `seq` realises the view"
+    (seq (seq/lfilter [1 2 3 4] math/even?))   → (2 4)   ; `seq` realises the view"
   (%seqview-wrap coll (%xfilter pred)))
 
-(defn seq/lkeep (f coll)
+(defn seq/lkeep (coll f)
   "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `seq/lmap`.
 
-    (seq (seq/lkeep (fn (x) (when (math/even? x) (* x 10))) [1 2 3 4]))   → (20 40)"
+    (seq (seq/lkeep [1 2 3 4] (fn (x) (when (math/even? x) (* x 10)))))   → (20 40)"
   (%seqview-wrap coll (%xkeep f)))
 
-(defn seq/lremove (pred coll)
+(defn seq/lremove (coll pred)
   "Lazy, fusing `remove` — see `seq/lmap`.
 
-    (seq (seq/lremove math/even? [1 2 3 4]))   → (1 3)"
+    (seq (seq/lremove [1 2 3 4] math/even?))   → (1 3)"
   (%seqview-wrap coll (%xremove pred)))
 
 ;; ---- iteration combinators --------------------------------------------------
@@ -642,8 +642,9 @@ iterating for side effects.
       (empty? binds) `(cons ~body ~acc)
       (= (first binds) :when) `(if ~(second binds) ~(%for-fold acc (rest (rest binds)) body) ~acc)
       else
-        `(fold (fn (~acc ~(first binds)) ~(%for-fold acc (rest (rest binds)) body))
-           ~acc ~(second binds)))))
+        `(fold ~(second binds)
+           ~acc
+           (fn (~acc ~(first binds)) ~(%for-fold acc (rest (rest binds)) body))))))
 
 ;; Validate that binding pairs are complete — each variable has a collection, and each
 ;; :when has a guard expression. An odd-count suffix silently produces an empty result
@@ -676,7 +677,7 @@ iterating for side effects.
     (let (acc (gensym "acc"))
       `(/reverse (let (~acc nil)
                    ~(%for-fold acc
-                      (map identity binds)
+                      (map binds identity)
                       (if (empty? (rest body)) (first body) (cons 'do body))))))))
 
 ;; (doseq (pat coll) body...) — run `body` for its side effects over each item,
@@ -729,12 +730,12 @@ iterating for side effects.
 ;; (`but-last` moved to core.blsp — `receive` expands during the prelude's own boot,
 ;; which is earlier than this file. See the note at its definition.) Everything else in the sequence library moved to `seq/`.
 
-(defn drop-while (pred coll)
+(defn drop-while (coll pred)
   "`coll` with its leading items for which `(pred x)` holds removed. Returns `coll` itself
-when nothing is dropped, exactly as `(drop 0 [1 2 3])` does.
+when nothing is dropped, exactly as `(drop [1 2 3] 0)` does.
 
-    (drop-while (fn (x) (< x 3)) [1 2 3 1])   → (3 1)
-    (drop-while (fn (x) (< x 3)) [5 1])       → [5 1]   ; nothing dropped, so `coll` itself
+    (drop-while [1 2 3 1] (fn (x) (< x 3)))   → (3 1)
+    (drop-while [5 1] (fn (x) (< x 3)))       → [5 1]   ; nothing dropped, so `coll` itself
 
 See `take-while`: the `pair?` guard was false for a vector, so this used to hand back the
 whole collection whatever the predicate said."
@@ -747,21 +748,21 @@ whole collection whatever the predicate said."
   "Map `f` over `coll` and concatenate the resulting lists into one."
   (%append-onto acc (f item)))
 
-(defn mapv (f coll)
+(defn mapv (coll f)
   "A VECTOR of `(f x)` for each `x` in `coll` — `map` when the caller needs
-indexed access or a vector literal shape (`(into [] (map f coll))`, named).
+indexed access or a vector literal shape (`(into [] (map coll f))`, named).
 
-    (mapv inc [1 2 3])   → [2 3 4]
-    (map inc [1 2 3])    → (2 3 4)   ; the list-returning sibling"
-  (into [] (map f coll)))
-(sig mapv ((any -> any) seqable -> any))
+    (mapv [1 2 3] inc)   → [2 3 4]
+    (map [1 2 3] inc)    → (2 3 4)   ; the list-returning sibling"
+  (into [] (map coll f)))
+(sig mapv (seqable (any -> any) -> any))
 
-(defn partition (n coll)
+(defn partition (coll n)
   "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped.
 
-    (partition 2 [1 2 3 4])    → ((1 2) (3 4))
-    (partition 2 [1 2 3])      → ((1 2))          ; the odd 3 is dropped
-    (partition 5 [1 2])        → nil"
+    (partition [1 2 3 4] 2)    → ((1 2) (3 4))
+    (partition [1 2 3] 2)      → ((1 2))          ; the odd 3 is dropped
+    (partition [1 2] 5)        → nil"
   (%partition-acc n coll nil))
 
 (defn sort-by (key-fn coll)

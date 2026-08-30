@@ -54,7 +54,7 @@
 (defn unit-park ()
   (receive ([:go] (send me [:r 1]))))
 (defn unit-payload ()
-  (receive ([:go p] (send me [:r (+ (fold + 0 p) 1)]))))
+  (receive ([:go p] (send me [:r (+ (fold p 0 +) 1)]))))
 
 ;; ---- drivers --------------------------------------------------------------------
 

@@ -140,7 +140,7 @@
     (is (includes? (evsrv-encode-request 1 "1" nil :all) ":trace :all")))
 
   (test "session-globals excludes the language, and a module required mid-session"
-    (baseline-globals!)
+    (baseline-globals)
     (eval-capturing "(defn evsrv-sg-mine (x) x)")
     (let (names (session-globals))
       (is (includes? names "evsrv-sg-mine"))
@@ -148,17 +148,17 @@
       (is (not (includes? names "map")))
       (is (not (includes? names "fold")))
       ;; and a namespaced name belongs to whatever module brought it, not to the session
-      (is (empty? (filter (fn (n) (includes? n "/")) names)))))
+      (is (empty? (filter names (fn (n) (includes? n "/")))))))
 
   ;; The whole point, in one test: request 3's source names only `evsrv-all-top`, and the
   ;; trace still shows `evsrv-all-helper` underneath it. A source-walking client (which is
   ;; what every client was reduced to) sees one frame here and reports it as the whole story.
   :isolated (test ":all traces a helper the source never mentions"
-    (baseline-globals!)
+    (baseline-globals)
     (eval-capturing "(defn evsrv-all-helper (n) (* n 2))")
     (eval-capturing "(defn evsrv-all-top (n) (evsrv-all-helper (+ n 1)))")
     (let (r (eval-capturing "(evsrv-all-top 3)" :all)
-          traced (into #{} (map (fn (e) (get e :fn)) (get r :spy))))
+          traced (into #{} (map (get r :spy) (fn (e) (get e :fn)))))
       (assert= (get r :value) "8")
       (is (contains? traced "evsrv-all-top"))
       (is (contains? traced "evsrv-all-helper"))))
@@ -167,7 +167,7 @@
     (eval-capturing "(defn evsrv-named-helper (n) (* n 2))")
     (eval-capturing "(defn evsrv-named-top (n) (evsrv-named-helper (+ n 1)))")
     (let (r (eval-capturing "(evsrv-named-top 3)" ["evsrv-named-top"])
-          traced (into #{} (map (fn (e) (get e :fn)) (get r :spy))))
+          traced (into #{} (map (get r :spy) (fn (e) (get e :fn)))))
       (assert= (get r :value) "8")
       (is (contains? traced "evsrv-named-top"))
       (is (not (contains? traced "evsrv-named-helper")))))
@@ -182,7 +182,7 @@
   ;; claim that matters here is that `:all` cannot flood a reply, and `<=` is that claim;
   ;; asserting a specific number would be asserting the scheduler.
   :isolated (test ":all traces, and cannot exceed the spy cap"
-    (baseline-globals!)
+    (baseline-globals)
     (let (r (eval-capturing "(defn evsrv-all-chat ((0) 1) ((n) (* n (evsrv-all-chat (- n 1)))))\n(evsrv-all-chat 200)"
               :all))
       (assert= (get r :ok) true)
@@ -199,8 +199,8 @@
       (assert= (get r :ok) true)
       (assert= (get r :value) "6")
       (let (spy (get r :spy)
-            calls (filter (fn (e) (= (get e :kind) "call")) spy)
-            returns (filter (fn (e) (= (get e :kind) "return")) spy))
+            calls (filter spy (fn (e) (= (get e :kind) "call")))
+            returns (filter spy (fn (e) (= (get e :kind) "return"))))
         (assert= (count calls) 4) ; fac 3, 2, 1, 0
         (assert= (count returns) 4)
         (assert= (get (first calls) :fn) "evsrv-t-fac")
@@ -286,9 +286,39 @@
                :value)
       "17"))
 
+  (test "a PRIVATE (defn-) redefinition is a definition too — a later traced request sees it"
+    ;; `defn-` was missing from the definition list, so its request installed the traces
+    ;; FIRST, the `defn-` rebound under them, and the teardown restored the old body —
+    ;; every request after reported the definition before the edit (bedit playground).
+    (eval-capturing "(defn- evsrv-t-priv (acc val) val)" :all)
+    (eval-capturing "(defn evsrv-t-priv-use (xs) (reduce xs '() evsrv-t-priv))" :all)
+    (assert= (get (eval-capturing "(evsrv-t-priv-use [\"1\" \"2\"])"
+                    ["evsrv-t-priv" "evsrv-t-priv-use"])
+               :value)
+      "\"2\"")
+    (eval-capturing "(defn- evsrv-t-priv (acc val) (conj acc (string/->number val)))" :all)
+    (let (r (eval-capturing "(evsrv-t-priv-use [\"1\" \"2\"])" ["evsrv-t-priv" "evsrv-t-priv-use"]))
+      (assert= (get r :value) "(2 1)")
+      (assert= (get (first (filter (get r :spy)
+                             (fn (e)
+                               (and (= (get e :kind) "return") (= (get e :fn) "evsrv-t-priv")))))
+                 :value)
+        "(1)")))
+
+  (test "a redefinition MID-request is traced as redefined: traces are re-installed per form"
+    ;; No definition-form predicate any more: `trace-fn` is generation-aware, so the
+    ;; server (re)installs before every form and a name the previous form redefined is
+    ;; wrapped afresh around its new body.
+    (let (r (eval-capturing "(defn evsrv-t-mid (x) (+ x 1))\n(evsrv-t-mid 1)\n(defn evsrv-t-mid (x) (* x 10))\n(evsrv-t-mid 1)"
+              ["evsrv-t-mid"])
+          returns (map (filter (get r :spy) (fn (e) (= (get e :kind) "return")))
+                    (fn (e) (get e :value))))
+      (assert= (get r :value) "10")
+      (assert= (list "2" "10") returns)))
+
   (test "the traced call is wrapped exactly once (no double-wrapping)"
     (let (r (eval-capturing "(defn evsrv-t-once (x) (* 2 x))\n(evsrv-t-once 5)" ["evsrv-t-once"])
-          calls (filter (fn (e) (= (get e :kind) "call")) (get r :spy)))
+          calls (filter (get r :spy) (fn (e) (= (get e :kind) "call"))))
       (assert= (get r :value) "10")
       (assert= (count calls) 1)))
 
@@ -300,7 +330,7 @@
     (let (r (eval-capturing "(defn evsrv-t-f ((0) 1) ((n) (* n (evsrv-t-f (- n 1)))))\n(evsrv-t-f 4)"
               ["evsrv-t-f"]))
       (assert= (get r :value) "24")
-      (assert= (count (filter (fn (e) (= (get e :kind) "call")) (get r :spy))) 5))))
+      (assert= (count (filter (get r :spy) (fn (e) (= (get e :kind) "call")))) 5))))
 
 (describe "process accounting (:procs)"
   :isolated (test "a plain evaluation leaves nothing running"

@@ -22,7 +22,7 @@
 ;; it BLOCKS the worker on the mailbox condvar instead of capturing (§7.4). An exit must
 ;; still reach it (unwind with `Control::Kill`); the `catch` must NOT swallow the signal.
 (defn ex-park-try () (try (receive (x x)) (catch e :caught)))
-(defn ex-park-map () (map (fn (_) (receive (x x))) [1]))
+(defn ex-park-map () (map [1] (fn (_) (receive (x x)))))
 
 (defn ex-down-reason (p m)
   ; wait for p's :down, return its reason. Liveness — every caller asserts a real
@@ -99,7 +99,9 @@
 (defn ex-spin-eval-string () (reflect/eval-string "(exit-test/ex-spin)"))
 (defn ex-spin-eval-form () (reflect/eval (reflect/read-first "(exit-test/ex-spin)")))
 ; `try` around the eval'd spin — the kill must NOT surface as a catchable error
-(defn ex-spin-eval-try () (try (reflect/eval-string "(exit-test/ex-spin)") (catch e :caught)))
+;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+(defn ex-spin-eval-try ()
+  (try (reflect/eval-string "(exit-test/ex-spin)") (catch e :caught)))
 
 (describe "exit reaches a nested eval (the non-capturing paths)"
   (test "hard :kill stops a tight loop inside eval-string"

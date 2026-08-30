@@ -100,7 +100,7 @@
   ;; rather than a build failure. A conforming method is silent; a non-conforming one names
   ;; the multi, the dispatch key, the declared type, and what the body actually yields.
   (defn- mm-warnings (src)
-    (map (fn (d) (get d :message)) (reflect/check-string-structured src)))
+    (map (reflect/check-string-structured src) (fn (d) (get d :message))))
 
   (test "a method whose body conforms to the declared return is silent"
     (assert= (mm-warnings "(defmulti k :-> int) (defmethod k [:int] (n) n)") (list)))
@@ -138,4 +138,4 @@
     ;; declaration at all and this warned nowhere.
     (let (w (mm-warnings "(defmulti k :-> nil) (defmethod k [:int] (n) nil) (defn u () (+ 1 (k 5)))"))
       (is (not (empty? w)))
-      (is (any? (fn (m) (includes? m "got nil")) w)))))
+      (is (any? w (fn (m) (includes? m "got nil")))))))

@@ -331,7 +331,7 @@ fn serves_tier1_requests_end_to_end() {
     // `f` defined, then called; `map` is a prelude global.
     client
         .sender
-        .send(did_open("(defn f (x) \"doubles\" (+ x x))\n(f (map g xs))"))
+        .send(did_open("(defn f (x) \"doubles\" (+ x x))\n(f (map xs g))"))
         .unwrap();
 
     // documentSymbol → one symbol, `f`.

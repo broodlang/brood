@@ -42,19 +42,20 @@ process you own."
 
 (defn- telemetry-without-id (table id)
   "`table` with any handler whose id is `id` removed from every event bucket."
-  (fold (fn (acc ev) (assoc acc ev (filter (fn (h) (not (= (get h :id) id))) (get table ev))))
+  (fold (keys table)
     {}
-    (keys table)))
+    (fn (acc ev) (assoc acc ev (filter (get table ev) (fn (h) (not (= (get h :id) id))))))))
 
 (defn- telemetry-dispatch (bucket event measurements metadata)
   "Run every handler in `bucket` (the handlers for `event`), each guarded by
 try/catch. Returns the list of ids whose handler threw (to be detached). Runs in the
 LISTENER process."
-  (fold (fn (failed h)
-          (try
-            (do ((get h :fn) event measurements metadata) failed)
-            (catch _ (cons (get h :id) failed))))
-    nil bucket))
+  (fold bucket
+    nil
+    (fn (failed h)
+      (try
+        (do ((get h :fn) event measurements metadata) failed)
+        (catch _ (cons (get h :id) failed))))))
 
 (defn- telemetry-run-handlers (event measurements metadata)
   "Dispatch `event` to its handlers and detach any that threw. Runs in the listener."
@@ -74,7 +75,7 @@ LISTENER process."
           ;; Auto-detach the handlers that threw. Same shape as `detach`: fold the removals
           ;; over whatever the registry holds NOW, not over the copy this dispatch read.
           (%swap-registry! telemetry/*telemetry-handlers*
-            (fn (m) (fold telemetry-without-id m failed))))))))
+            (fn (m) (fold failed m telemetry-without-id))))))))
 
 ;; ---- the listener process ---------------------------------------------------
 
@@ -227,12 +228,12 @@ runtime presence-check of a declared event.
   (let (meas (telemetry-opt opts :measurements)
         meta (telemetry-opt opts :metadata)
         doc (telemetry-opt opts :doc)
-        m-names (map telemetry-spec-name meas)
-        md-names (map telemetry-spec-name meta)
-        m-kws (map (fn (n) (keyword (->string n))) m-names)
-        md-kws (map (fn (n) (keyword (->string n))) md-names)
+        m-names (map meas telemetry-spec-name)
+        md-names (map meta telemetry-spec-name)
+        m-kws (map m-names (fn (n) (keyword (->string n))))
+        md-kws (map md-names (fn (n) (keyword (->string n))))
         all-names (append m-names md-names)
-        all-types (append (map telemetry-spec-type meas) (map telemetry-spec-type meta))
+        all-types (append (map meas telemetry-spec-type) (map meta telemetry-spec-type))
         ;; the emitter's measurement/metadata map bodies — `{:field field}` with the field
         ;; symbols as values (spliced as a literal, exactly like defrecord's ctor body, so
         ;; the values evaluate as the params).
@@ -241,9 +242,9 @@ runtime presence-check of a declared event.
         ;; the schema stored for introspection / runtime checks (types kept unevaluated).
         schema {:name (list 'quote fname)
                 :measurements (map/zipmap m-kws
-                                (map (fn (s) (list 'quote (telemetry-spec-type s))) meas))
+                                (map meas (fn (s) (list 'quote (telemetry-spec-type s)))))
                 :metadata (map/zipmap md-kws
-                            (map (fn (s) (list 'quote (telemetry-spec-type s))) meta))
+                            (map meta (fn (s) (list 'quote (telemetry-spec-type s)))))
                 :doc doc})
     `(do
        (register-event ~event ~schema)
@@ -260,7 +261,7 @@ runtime presence-check of a declared event.
 ;; be visible across processes — set it with `(def *telemetry-validate* true)`.
 (def *telemetry-validate* false)
 
-(defn validate! (on)
+(defn validate (on)
   "Enable (`true`) or disable runtime schema presence-checking of declared events. Off by
 default. Must be a function (not a bare `def` from your module) so the rebind lands on
 telemetry's own global, which the listener process reads. Returns `on`."
@@ -269,7 +270,7 @@ telemetry's own global, which the listener process reads. Returns `on`."
 
 (defn- telemetry-missing-keys (schema-map actual)
   "The declared keys of `schema-map` absent from `actual`."
-  (filter (fn (k) (not (contains? actual k))) (keys schema-map)))
+  (filter (keys schema-map) (fn (k) (not (contains? actual k)))))
 (defn- telemetry-check-event (event measurements metadata)
   "The declared keys missing from a declared event's payload, as `[kind key]` pairs
 (`kind` = `:measurements` / `:metadata`); empty when `event` is undeclared or complete.
@@ -277,9 +278,9 @@ Pure — the listener turns each pair into a stderr warning. Types are the check
   (let (schema (get *events* event))
     (if (nil? schema)
       nil
-      (append (map (fn (k) [:measurements k])
-                (telemetry-missing-keys (get schema :measurements) measurements))
-        (map (fn (k) [:metadata k]) (telemetry-missing-keys (get schema :metadata) metadata))))))
+      (append (map (telemetry-missing-keys (get schema :measurements) measurements)
+                (fn (k) [:measurements k]))
+        (map (telemetry-missing-keys (get schema :metadata) metadata) (fn (k) [:metadata k]))))))
 
 ;; ---- the runtime event stream (kernel sources → telemetry) -------------------
 ;; Policy over the `proc/system-monitor` kernel seam: a watcher process subscribes to
@@ -312,8 +313,9 @@ Pure — the listener turns each pair into a stderr warning. Types are the check
 `[:runtime :spawn]`, `[:runtime :exit]`, `[:runtime :deopt]` (each with the pids
 in the metadata). `opts` is passed through to `proc/system-monitor` (nil = every
 event; e.g. `{:gc true :gc-min-pause-us 1000}` = only long GCs). Returns the
-watcher pid; `stop-watch-runtime` (or killing the watcher) disarms the kernel
-stream. One system monitor exists at a time — a second call replaces the first."
+watcher pid; `stop-watch-runtime` (or killing the watcher) drops its subscription.
+Each watcher is its own kernel subscription (ADR-305), so several can coexist —
+with the default crash reporter, an MCP snapshot, or a second `watch-runtime`."
   (let (watcher (spawn (telemetry-runtime-loop)))
     (if opts (proc/system-monitor watcher opts) (proc/system-monitor watcher))
     watcher))
@@ -343,7 +345,7 @@ stream. One system monitor exists at a time — a second call replaces the first
 
 (defn- telemetry-absent (xs ys)
   "The elements of list `xs` not present in list `ys`."
-  (filter (fn (x) (not (telemetry-member? ys x))) xs))
+  (filter xs (fn (x) (not (telemetry-member? ys x)))))
 
 (defn- telemetry-nodes-loop (known interval)
   "Poll `(node/list)` every `interval` ms, emit a `[:runtime :nodeup]`/`[:runtime
@@ -460,7 +462,7 @@ detach it. `subs` tracks the attached ids so a `:stop` cleans them all up."
                                          (send subscriber [:subscribed ref])
                                          (telemetry-serve-loop (cons id subs))))
     ([:unsubscribe ref] (detach [:remote ref])
-      (telemetry-serve-loop (filter (fn (id) (not (= id [:remote ref]))) subs)))
+      (telemetry-serve-loop (filter subs (fn (id) (not (= id [:remote ref]))))))
     (:stop (do (doseq (id subs) (detach id)) nil))
     (_ (telemetry-serve-loop subs))))
 
@@ -730,7 +732,7 @@ derived), or nil if no such metric has recorded anything yet."
 Atomic; safe to poll from any process (this is the stream-folded replacement for
 scraping N snapshot builtins). Empty map if no metrics recorded."
   (let (snap (table/snapshot (telemetry-metrics)))
-    (map/reduce-kv (fn (acc id state) (assoc acc id (telemetry-present state))) {} snap)))
+    (map/reduce-kv snap {} (fn (acc id state) (assoc acc id (telemetry-present state))))))
 
 (defn- telemetry-quantile (bounds counts nb rank i prev-cum prev-bound maxv)
   "Walk the cumulative bucket counts for the bucket the `rank`-th observation falls

@@ -151,7 +151,7 @@ e.g. an editor appending to its `*Messages*` buffer. Async and share-nothing."
   "Hand `rec` to every backend in `backends` (a list or vector) via `backend-emit`, so
 each decides for itself whether and how to write it. Uses `fold` so it walks either —
 `:backends` defaults to a vector but `add-backend` conses."
-  (fold (fn (acc b) (backend-emit b rec) acc) nil backends)
+  (fold backends nil (fn (acc b) (backend-emit b rec) acc))
   nil)
 
 (defserver server

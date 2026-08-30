@@ -38,7 +38,7 @@
     (let (me (self)
           n 20000
           expect (+ (* (math/quot n 2) 3) (if (= (math/rem n 2) 0) 0 1))
-          _ (map (fn (_) (spawn (fn () (send me [:r (ev-step n 0)])))) (range 8))
-          got (map (fn (_) (receive ([:r v] v))) (range 8)))
+          _ (map (range 8) (fn (_) (spawn (fn () (send me [:r (ev-step n 0)])))))
+          got (map (range 8) (fn (_) (receive ([:r v] v)))))
       (is (= (count got) 8))
-      (is (every? (fn (v) (= v expect)) got)))))
+      (is (every? got (fn (v) (= v expect)))))))

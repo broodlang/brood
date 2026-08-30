@@ -6066,3 +6066,58 @@ completely different in the log.
 nothing did. Recorded because this repo's own rule is that a failure seen once is real until proven
 otherwise — and because a single sighting on the one commit that touched the preempt path is
 precisely the coincidence that deserves writing down rather than explaining away.
+
+## KI-89 — a test file's ability impls leak into `std/`'s checker view ⚠️ WATCHING 2026-08-30
+
+**Symptom.** In a scoped `nest test` run, `std_check_test` ("the standard library carries no
+checker warnings") fails with ~15 warnings about a record defined in **another test file**:
+
+```
+std/stats.blsp:26:33: warning: *: no `num/mul` method for [:record-test/usd :record-test/usd]
+std/json.blsp:138:23: warning: +: no `num/add` method for [:record-test/usd :int]
+std/tool/perf.blsp:38:20: warning: /: no `num/div` method for [:record-test/usd :float]
+```
+
+`record-test/usd` is `tests/record_test.blsp`'s money record. It is not `require`d by any
+`std/` module and cannot be: the checker is seeing it because the registration outlived the
+file's scope. `record_test`, `sig_adoption_test`, `docs_test` and `doc_examples_test` fail in
+the same run for the same reason; **every one of them passes when run alone.**
+
+**Minimal repro — two files, order-dependent:**
+
+```bash
+nest test tests/record_test.blsp tests/std_check_test.blsp   # fails
+nest test tests/std_check_test.blsp                          # passes
+```
+
+**Pre-existing, and proven so.** The same two-file invocation reproduces identically on a
+clean HEAD worktree, so this is not ADR-308's argument-order migration (which is what
+surfaced it — adding tests shifted discovery order so `record_test` now loads first). Also
+not the `nest check` result cache: `BROOD_NO_CHECK_CACHE=1` behaves the same.
+
+**Mechanism: UNKNOWN. Five hypotheses tested and ruled out** — recorded so the next attempt
+does not repeat them:
+
+1. *`%isolate` fails to roll back `*record-ids*`.* It rolls back. `(%isolate (fn ()
+   (require-one 'tempo) …))` leaves the count unchanged.
+2. *`%isolate` fails to roll back `*impls*`.* It rolls back. Loading the whole of
+   `tests/record_test.blsp` inside an isolate leaves `*impls*` at 8 entries, no `usd` key,
+   and `record-test/usd` unbound afterwards.
+3. *A process spawned inside an isolate registers after the restore.* No orphans.
+4. *Another process observes the shared RUNTIME-region entry after the parent rolled back.*
+   The child sees the same clean state.
+5. *The checker accumulates knowledge across files in one process.* No: `check-file` on
+   `tests/record_test.blsp` then on `std/stats.blsp` produces zero `usd` warnings.
+
+So the registries are correctly scoped and the checker is not accumulating — yet the two-file
+`nest test` invocation reproduces every time. What remains unexamined is the path between
+them: `drain-files-scoped` folds files serially, but a file's *units* run as concurrent
+spawned workers, and `std_check_test`'s `check-file` sweep is itself one of those units. The
+next probe should be whether a registration made by a worker of file A is visible to a worker
+of file B despite A's isolate having restored — i.e. whether the restore covers writes made
+by processes the isolate did not create.
+
+**Not fixed** — filed rather than patched, because a fix aimed at the wrong mechanism would
+look like a fix. `mono_devirtualize`'s soundness hole is the narrow part worth closing
+independently: it resolves a global and then trusts `*record-ids*` by name, so a stale id
+plus a later same-named non-record would devirtualize wrongly.

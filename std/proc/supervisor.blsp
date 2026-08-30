@@ -184,7 +184,7 @@ record's `:seq`, so the child keeps its place in start order."
 (defn- supervisor-rebuild (state records)
   "`state` with exactly `records` as its children, indexes rebuilt from scratch.
 For the group restarts, which recompute a whole affected set at once."
-  (fold supervisor-put (assoc state :children {} :ids {}) records))
+  (fold records (assoc state :children {} :ids {}) supervisor-put))
 
 ;; ---- terminating a healthy child (link + exit, ADR-063/067) -----------------
 
@@ -218,11 +218,11 @@ a harmless no-op and the selective drain consumes the `[:EXIT]` already queued.
       (= shutdown :brutal-kill) (do (exit pid :kill) (supervisor-await-exit pid nil))
       else
       ; integer ms: graceful, then force
-      (do
-        (send pid [:$stop])
-        (when (= :timeout (supervisor-await-exit pid shutdown))
-          (exit pid :kill)
-          (supervisor-await-exit pid nil))))))
+        (do
+          (send pid [:$stop])
+          (when (= :timeout (supervisor-await-exit pid shutdown))
+            (exit pid :kill)
+            (supervisor-await-exit pid nil))))))
 
 (defn- supervisor-terminate-many (children)
   "Terminate every child in `children` (each assumed alive / not-yet-drained) per
@@ -284,8 +284,8 @@ settle) and `window` is the updated intensity window."
   "Project the child records to client-facing summaries **in start order** (and
 drop the `:start` closure, plus the internal `:seq`, so the reply stays small and
 copies cheaply across `send`)."
-  (map (fn (c) {:id (get c :id) :pid (get c :pid) :restart (get c :restart :permanent)})
-    (supervisor-ordered children)))
+  (map (supervisor-ordered children)
+    (fn (c) {:id (get c :id) :pid (get c :pid) :restart (get c :restart :permanent)})))
 
 (defn- supervisor-giveup (state survivors)
   "Restart intensity exceeded: terminate the still-running `survivors`, then throw
@@ -349,9 +349,8 @@ the child with `:pid` `pid`. `:one-for-all` → everything is affected;
 the earlier-started prefix left untouched. (`children` is an ordered *sequence* of
 records here — callers pass `supervisor-ordered`.)"
   (if (= strategy :rest-for-one)
-    [(take-while (fn (c) (not (= (get c :pid) pid))) children)
-      (drop-while (fn (c) (not (= (get c :pid) pid)))
-        children)]
+    [(take-while children (fn (c) (not (= (get c :pid) pid))))
+      (drop-while children (fn (c) (not (= (get c :pid) pid))))]
     [() children]))
 (defn- supervisor-maybe-restart (child reason)
   "After a group termination, restart `child` if its `:restart` type permits given
@@ -379,13 +378,13 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
                                                                                    :children))
                                     trig-pid
                                     (get state :strategy))
-            survivors (seq/remove (fn (c) (= (get c :pid) trig-pid)) affected)
+            survivors (seq/remove affected (fn (c) (= (get c :pid) trig-pid)))
             _ (supervisor-terminate-many survivors)
-            restarted (seq/remove nil?
-                        (map (fn (c)
-                               (supervisor-maybe-restart c
-                                 (if (= (get c :pid) trig-pid) reason :killed)))
-                          affected)))
+            restarted (seq/remove (map affected
+                                    (fn (c)
+                                      (supervisor-maybe-restart c
+                                        (if (= (get c :pid) trig-pid) reason :killed))))
+                        nil?))
         (supervisor-loop (assoc (supervisor-rebuild state (append unaffected restarted))
                            :restarts recent))))))
 

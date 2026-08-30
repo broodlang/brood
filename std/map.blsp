@@ -16,27 +16,27 @@
 The core ops (`assoc` `dissoc` `get` `keys` `vals` `contains?` `reduce-kv`
 `update` `get-in` `update-in` `merge`) stay bare in the prelude and need no import.
 This module adds: `merge-with` (combine on shared keys), `update-vals` / `update-keys`
-(map every value/key), and `select-keys` (project a subset). `(:use map)` for bare
+(map value/key every), and `select-keys` (project a subset). `(:use map)` for bare
 access, or call qualified (`map/update-vals`).")
 
 ;; merge-with: on a shared key, combine with `(f existing new)` instead of replacing.
 ;; Read-modify-write per key, so it folds immutable `assoc` (each returns a fresh map).
 (defn merge-with (f & maps)
   "Like `merge`, but when two maps share a key the combined value is `(f value-so-far next-value)` rather than just the latter. `nil` maps are skipped."
-  (fold (fn (acc m)
-          (if (nil? m)
-            acc
-            (map/reduce-kv (fn (a k v) (assoc a k (if (contains? a k) (f (get a k) v) v))) acc m)))
+  (fold maps
     {}
-    maps))
+    (fn (acc m)
+      (if (nil? m)
+        acc
+        (map/reduce-kv m acc (fn (a k v) (assoc a k (if (contains? a k) (f (get a k) v) v))))))))
 
 (defn update-vals (m f)
   "A map like `m` with `f` applied to every value."
-  (into {} (map (fn (p) [(first p) (f (second p))]) (%map-pairs m))))
+  (into {} (map (%map-pairs m) (fn (p) [(first p) (f (second p))]))))
 (sig update-vals (map any -> any))
 (defn update-keys (m f)
   "A map like `m` with `f` applied to every key (later keys win on a collision)."
-  (into {} (map (fn (p) [(f (first p)) (second p)]) (%map-pairs m))))
+  (into {} (map (%map-pairs m) (fn (p) [(f (first p)) (second p)]))))
 (sig update-keys (map any -> any))
 
 (defn select-keys (m ks)
@@ -47,18 +47,18 @@ access, or call qualified (`map/update-vals`).")
   ;; first sentinel do we disambiguate present-vs-absent with a second sentinel,
   ;; so a key stored with `nil`/`false` is still kept (contains?'s guarantee).
   (into {}
-    (seq/keep (fn (k)
-                (let (v (%map-get m k :%select-miss-a))
-                  (if (= v :%select-miss-a)
-                    (let (v2 (%map-get m k :%select-miss-b))
-                      (if (= v2 :%select-miss-b) nil [k v2]))
-                    [k v])))
-      ks)))
+    (seq/keep ks
+      (fn (k)
+        (let (v (%map-get m k :%select-miss-a))
+          (if (= v :%select-miss-a)
+            (let (v2 (%map-get m k :%select-miss-b))
+              (if (= v2 :%select-miss-b) nil [k v2]))
+            [k v]))))))
 
-(defn reduce-kv (f init m)
+(defn reduce-kv (m init f)
   "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
-  (fold (fn (acc p) (f acc (first p) (second p))) init (%map-pairs m)))
-(sig reduce-kv (any any map -> any))
+  (fold (%map-pairs m) init (fn (acc p) (f acc (first p) (second p)))))
+(sig reduce-kv (map any any -> any))
 
 ;; ---- zipmap (ADR-251) -------------------------------------------------------
 ;; Published here rather than bare: it RETURNS a map, so it belongs with the map

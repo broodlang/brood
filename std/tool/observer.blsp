@@ -291,15 +291,15 @@ the observer's testable core; `observe-loop` feeds it live data."
         lines (observe-node-lines node nprocs link)
         cap (math/max 1 (- rows 5))
         start (observe-window-start sel cap nprocs)
-        visible (take cap (drop start procs))
-        body (map (fn ([i p])
-                    (let (a (+ start i)
-                          selected? (= a sel))
-                      (text (+ 3 i)
-                        0
-                        (observe-fit (str (if selected? "▸ " "  ") (observe-proc-cells p)) cols)
-                        (observe-row-face p selected?))))
-               (enumerate visible))
+        visible (take (drop procs start) cap)
+        body (map (enumerate visible)
+               (fn ([i p])
+                 (let (a (+ start i)
+                       selected? (= a sel))
+                   (text (+ 3 i)
+                     0
+                     (observe-fit (str (if selected? "▸ " "  ") (observe-proc-cells p)) cols)
+                     (observe-row-face p selected?)))))
         cmd? (= (get ui :mode) :command)
         confirm (get ui :confirm)
         edit (get ui :edit)
@@ -413,11 +413,11 @@ Clamps a negative delta (a recycled id) to 0. Pure."
 matching id in `prev-procs`, over `(at - prev-at)` ms. A process with no prior
 sample (new this tick, or the very first snapshot) gets nil. Pure; O(n) via a
 prev-by-id reductions lookup."
-  (let (prev (reduce (fn (m p) (assoc m (get p :id) (get p :reductions))) {} prev-procs))
-    (map (fn (p)
-           (assoc p
-             :reds-rate (observe-reds-rate (get prev (get p :id)) prev-at (get p :reductions) at)))
-      procs)))
+  (let (prev (reduce prev-procs {} (fn (m p) (assoc m (get p :id) (get p :reductions)))))
+    (map procs
+      (fn (p)
+        (assoc p
+          :reds-rate (observe-reds-rate (get prev (get p :id)) prev-at (get p :reductions) at))))))
 
 (defn- observe-rated-procs (model)
   "The current snapshot's procs, each tagged with `:reds-rate` computed against the
@@ -437,7 +437,7 @@ before ordering."
 0-arg fn returning proc/info maps — the remote-attach source (future) has the
 same shape (it requests a peer's snapshot over the node link), so `observe-loop`
 is source-agnostic: inline and remote are one loop with a swapped thunk."
-  (filter (fn (p) (not (nil? p))) (map proc/info (proc/list))))
+  (filter (map (proc/list) proc/info) (fn (p) (not (nil? p)))))
 
 (defn- observe-local-snapshot ()
   "A full snapshot of THIS runtime — `{:node <node-info> :procs <proc/info list>
@@ -468,7 +468,7 @@ last snapshot) until the user quits. Pure."
   "The row index of the process whose `:id` is `sel-id`, or 0 if it is gone (so
 selection follows the same process across re-sorts, and recovers if it dies).
 Clamped to a valid row."
-  (let (idx (index-of (map :id procs) sel-id))
+  (let (idx (index-of (map procs :id) sel-id))
     (math/max 0 (math/min (math/max 0 (dec (count procs))) (if (< idx 0) 0 idx)))))
 
 (defn- observe-select (state procs idx)
@@ -622,8 +622,9 @@ EOF, return to navigation; otherwise keep editing."
         (assoc state
           :mode :nav
           :edit nil
-          :history (editor/lineedit/lineedit-remember (get state :history)
-                     (get edit :text))
+          :history
+            (editor/lineedit/lineedit-remember (get state :history)
+              (get edit :text))
           :msg ((get backend :eval) (get edit :text)))
       (nil? done) (assoc state :edit edit)
       else (assoc state :mode :nav :edit nil))))

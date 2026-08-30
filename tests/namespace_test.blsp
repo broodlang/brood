@@ -31,7 +31,7 @@
     (is (= (nsC/front) 99)))
 
   (test "root/prelude names fall through and stay bare"
-    (%load-string "(defmodule nsD) (defn doubled (xs) (map (fn (x) (* x 2)) xs))")
+    (%load-string "(defmodule nsD) (defn doubled (xs) (map xs (fn (x) (* x 2))))")
     (is (= (nsD/doubled (list 1 2 3)) (list 2 4 6))))
 
   (test "two namespaces define the same short name without colliding"
@@ -211,7 +211,7 @@
   :isolated (test "a module shadowing a prelude name reaches the original via /name"
     (%load-string (str "(defmodule nsroot1)"
                     " (defn map (x) (list :mine x))" " (defn mine (x) (map x))"
-                    " (defn orig () (/map (fn (x) (* x x)) (list 1 2 3)))"))
+                    " (defn orig () (/map (list 1 2 3) (fn (x) (* x x))))"))
     ;; the module's own `map` wins for a bare reference…
     (assert= (nsroot1/mine 5) (list :mine 5))
     ;; …and `/map` still reaches the prelude's `map`.
@@ -294,7 +294,8 @@
 ;; ADR-235 this whole section pinned a hand-maintained list of every std overlap.)
 (defn- ns-loads? (src)
   "True if `src` loads without error — the clash, if any, never fired."
-  (try (do (%load-string src) true) (catch e false)))
+  ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+  (check-allow :discarded-catch (try (do (%load-string src) true) (catch e false))))
 
 (defn- ns-load-error (src)
   (try (do (%load-string src) "") (catch e (str (error-message e)))))
@@ -356,14 +357,14 @@
 ;; not the file's is invisible to the `<name>.blsp` filename probe. A named project registers
 ;; it (rooted) in `*module-files*`; a nameless project or a bare `brood file.blsp` run
 ;; has no such registry, so `require` scans `*load-path*` for the declaring file. `:isolated`
-;; so each test's `reflect/set-load-path!` mutation stays on its private globals copy.
+;; so each test's `reflect/set-load-path` mutation stays on its private globals copy.
 (describe "require: co-located module by name (nameless project / bare run, ADR-223)"
   :isolated (test "a module in a file whose name it does not share is require-able by name"
     (let (dir (path/temp "brood-coloc-req-"))
       (file/mkdir dir)
       (file/spit (path/join dir "combined.blsp")
         "(defmodule combined-primary)\n(defn cbase () :base)\n(defmodule combined-extra)\n(defn cextra () :extra)\n")
-      (reflect/set-load-path! (cons dir *load-path*))
+      (reflect/set-load-path (cons dir *load-path*))
       (require-one 'combined-extra)
       (assert= :extra (combined-extra/cextra))))
   (test "requiring one co-located module loads its file's siblings too"
@@ -371,7 +372,7 @@
       (file/mkdir dir)
       (file/spit (path/join dir "pair.blsp")
         "(defmodule pair-a)\n(defn pa () 1)\n(defmodule pair-b)\n(defn pb () 2)\n")
-      (reflect/set-load-path! (cons dir *load-path*))
+      (reflect/set-load-path (cons dir *load-path*))
       (require-one 'pair-b)
       (assert= 3 (+ (pair-a/pa) (pair-b/pb)))))
   (test "two files declaring the same co-located module error loudly"
@@ -379,7 +380,7 @@
       (file/mkdir dir)
       (file/spit (path/join dir "x.blsp") "(defmodule x-primary)\n(defmodule shared-dup)\n")
       (file/spit (path/join dir "y.blsp") "(defmodule y-primary)\n(defmodule shared-dup)\n")
-      (reflect/set-load-path! (cons dir *load-path*))
+      (reflect/set-load-path (cons dir *load-path*))
       (is (try
             (do (require-one 'shared-dup) false)
             (catch e (includes? (str (error-message e)) "more than one"))))))
@@ -388,10 +389,10 @@
       (file/mkdir dir)
       (file/spit (path/join dir "vals.blsp")
         "(defmodule vals-primary)\n(defmodule vals-extra)\n(defn payload (n) {:n n :sq (* n n)})\n")
-      (reflect/set-load-path! (cons dir *load-path*))
+      (reflect/set-load-path (cons dir *load-path*))
       (require-one 'vals-extra)
       (let (me (self))
-        (map (fn (k) (let (v (vals-extra/payload k)) (spawn (fn () (send me (get v :sq))))))
-          (range 5))
-        (let (results (fold (fn (acc _) (cons (receive) acc)) nil (range 5)))
+        (map (range 5)
+          (fn (k) (let (v (vals-extra/payload k)) (spawn (fn () (send me (get v :sq)))))))
+        (let (results (fold (range 5) nil (fn (acc _) (cons (receive) acc))))
           (assert= [0 1 4 9 16] (into [] (sort results))))))))

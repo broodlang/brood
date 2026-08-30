@@ -55,7 +55,7 @@
 
 ;; A lazy seq-view (not a vector) of containers: `emit`/`step` reaches its `list?` arm,
 ;; which is the one that walks with `first`/`rest`.
-(defn- lazy-rows (n) (map (fn (i) [i]) (range n)))
+(defn- lazy-rows (n) (map (range n) (fn (i) [i])))
 
 ;; Each fragment count is deterministic: the outer `[`/`]`, then per row `[`, the int and
 ;; `]`, plus a comma between rows — `4n + 1`.
@@ -66,21 +66,21 @@
     ;; Ten calls: the first few run interpreted, the rest native. Before the fix the
     ;; fourth raised `empty?: expected collection, got int (1114114)`.
     (is (= (list 4001 4001 4001 4001 4001 4001 4001 4001 4001 4001)
-          (map (fn (_) (fragments 1000)) (range 10)))))
+          (map (range 10) (fn (_) (fragments 1000))))))
 
   (test "the count does not depend on how many times the walker has run"
     ;; A sweep, because the corruption needed the arm to be hot: every length must agree
     ;; with the closed form no matter where the background compile landed.
-    (is (= (list 41 401 4001 40001) (map (fn (n) (fragments n)) (list 10 100 1000 10000)))))
+    (is (= (list 41 401 4001 40001) (map (list 10 100 1000 10000) (fn (n) (fragments n))))))
 
   (test "json/encode of the same shape round-trips"
     ;; The original report. `json/encode` is this shape (`emit-list` <-> `emit`), and its
     ;; own `emit-list` arm is the one that took the bad gate.
-    (let (rows (map (fn (i) {:n i}) (range 500)))
+    (let (rows (map (range 500) (fn (i) {:n i})))
       (is (= (list 500 500 500 500 500)
-            (map (fn (_) (count (json/decode (json/encode rows)))) (range 5))))))
+            (map (range 5) (fn (_) (count (json/decode (json/encode rows)))))))))
 
   (test "a walker whose elements are maps, so the pair emitter recurses too"
-    (let (rows (map (fn (i) {:a i :b [i i]}) (range 400)))
+    (let (rows (map (range 400) (fn (i) {:a i :b [i i]})))
       (is (= (list 400 400 400 400 400)
-            (map (fn (_) (count (json/decode (json/encode rows)))) (range 5)))))))
+            (map (range 5) (fn (_) (count (json/decode (json/encode rows))))))))))

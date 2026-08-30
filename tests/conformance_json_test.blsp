@@ -65,13 +65,13 @@
   (test "every y_ document parses"
     (let ([oks _ wrong] (js-scan (corpus-files "json") "y" :ok 0 0 nil))
       (is (> oks 80))
-      (assert= (take 5 wrong) ())
+      (assert= (take wrong 5) ())
       (assert= (count wrong) 0)))
 
   (test "every n_ document is rejected"
     (let ([_ rejects wrong] (js-scan (corpus-files "json") "n" :rejected 0 0 nil))
       (is (> rejects 150))
-      (assert= (take 5 wrong) ())
+      (assert= (take wrong 5) ())
       (assert= (count wrong) 0)))
 
   ;; No assertion on the verdict — the point is that an implementation-defined

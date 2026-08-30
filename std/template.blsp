@@ -37,7 +37,7 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported.
   (let (parts (string/split tmpl "{{"))
     (apply str
       (cons (first parts)
-        (map (fn (p) (template-marker p data)) (rest parts))))))
+        (map (rest parts) (fn (p) (template-marker p data)))))))
 (sig render (string any -> any))
 
 ;; One piece following a `{{`: `key}}rest` → the substituted value + `rest`. A piece with
@@ -59,12 +59,13 @@ its ISO form — rather than as its field map."
   (let (v (get data key))
     (cond
       (not (nil? v)) (->string v)
-      else (let (kv (get data (keyword key)))
-             (if (nil? kv) "" (->string kv))))))
+      else
+        (let (kv (get data (keyword key)))
+          (if (nil? kv) "" (->string kv))))))
 
 ;; ---- render-all -------------------------------------------------------------
 
 (defn render-all (tmpl rows)
   "Apply `render` to `tmpl` for each map in list `rows`. Returns a list of strings."
-  (map (fn (row) (render tmpl row)) rows))
+  (map rows (fn (row) (render tmpl row))))
 (sig render-all (any seqable -> (or nil (list any))))

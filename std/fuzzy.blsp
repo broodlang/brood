@@ -77,7 +77,7 @@ camelCase hump (an upper preceded by a non-upper)."
 
 (defn- fuzzy-score (cand positions)
   "The match score for `positions` within `cand` (higher = better)."
-  (get (fold (fn (st pos) (fuzzy-score-step cand st pos)) {:score 0 :prev nil} positions) :score))
+  (get (fold positions {:score 0 :prev nil} (fn (st pos) (fuzzy-score-step cand st pos))) :score))
 
 ;; ---- public -----------------------------------------------------------------
 
@@ -113,13 +113,14 @@ That rebuild dominated ranking large candidate sets (thousands of project files)
     cands
     (let (qlow (string/lower query)
           qn (string/length query)
-          decorated (fold (fn (acc c)
-                            (let (m (fuzzy-match-lc qlow qn c))
-                              (if (nil? m)
-                                acc
-                                (cons [[(- 0 (get m :score)) (string/length c) c] c] acc))))
-                      '() cands))
-      (map second (sort-by first decorated)))))
+          decorated (fold cands
+                      '()
+                      (fn (acc c)
+                        (let (m (fuzzy-match-lc qlow qn c))
+                          (if (nil? m)
+                            acc
+                            (cons [[(- 0 (get m :score)) (string/length c) c] c] acc))))))
+      (map (sort-by first decorated) second))))
 ;; `cands` and the result are `seqable` (empty query returns `cands` as-is, else a ranked
 ;; list) — the domain checks the argument without false-flagging a vector caller.
 (sig filter (string seqable -> seqable))

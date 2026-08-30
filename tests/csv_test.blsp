@@ -167,8 +167,8 @@
 (describe "decode-maps — wide rows"
   (test "a 400-column row parses correctly (and no longer quadratically)"
     (let (cols (csv-wide-header 400 nil)
-          header (string/join "," cols)
-          row (string/join "," (map (fn (c) (str "v" c)) cols))
+          header (string/join cols ",")
+          row (string/join (map cols (fn (c) (str "v" c))) ",")
           ms (%map-pairs (first (csv/decode-maps (str header "\n" row)))))
       (assert= 400 (count ms))
       (assert= "vc1" (get (first (csv/decode-maps (str header "\n" row))) "c1"))

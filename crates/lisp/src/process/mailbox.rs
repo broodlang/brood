@@ -134,6 +134,20 @@ pub(super) struct Mailbox {
     /// process. Read from another worker during the dying peer's `deregister`
     /// (link teardown), so it lives on the registry-reachable mailbox too.
     pub(super) trap_exit: AtomicBool,
+    /// `(proc/flag :max-mailbox n)` (ADR-307): this process's queue-length bound,
+    /// `0` = unlimited (the default). Lives on the registry-reachable mailbox — like
+    /// `trap_exit` — because it is the *senders* who observe it: every enqueue site
+    /// compares the post-push length against it. The sender is NEVER blocked or
+    /// errored and the message is still delivered (fire-and-forget stays
+    /// fire-and-forget); what a breach does is arm `overflow_hit` for the receiver.
+    pub(super) max_mailbox: AtomicUsize,
+    /// Sticky breach flag: the queue length observed when an enqueue crossed
+    /// `max_mailbox` (0 = clean). The receiver's own probes take it (swap 0) and
+    /// raise a catchable `E0046` **in that process only** — the exact
+    /// `proc_limit_hit` protocol `:max-heap` uses, with the same rescue rule:
+    /// clearing the flag (`(proc/flag :max-mailbox nil)`) clears a pending trip,
+    /// so a handler that drains and clears genuinely recovers.
+    pub(super) overflow_hit: AtomicUsize,
     /// **Park generation** — monotonic counter bumped each time this process parks
     /// in `receive` *with a deadline* (see `wait_for_message`). It implements lazy
     /// cancellation of superseded timer entries: each `arm_timer` stamps the entry
@@ -479,6 +493,8 @@ impl Mailbox {
             reductions: AtomicU64::new(0),
             kill_pending: AtomicBool::new(false),
             trap_exit: AtomicBool::new(false),
+            max_mailbox: AtomicUsize::new(0),
+            overflow_hit: AtomicUsize::new(0),
             timer_gen: AtomicU64::new(0),
             parent: AtomicU64::new(0),
         })
@@ -522,6 +538,27 @@ impl Mailbox {
     /// Is an untrappable **hard** kill pending? The loop-top safepoint probe: a
     /// soft exit isn't honoured there (it waits for the next `receive`). Same
     /// fast path as [`pending_kill`](Self::pending_kill).
+    /// Post-push bound check (ADR-307): called by every site that enqueues a NEW
+    /// message (`deliver_envelope_timed`, `try_deliver_local`) with the queue length
+    /// read under the state lock. A selective-receive rebuild re-inserts already
+    /// counted messages and deliberately does not re-check. One relaxed load when
+    /// no bound is set.
+    #[inline]
+    pub(super) fn note_mailbox_bound(&self, queue_len: usize) {
+        let limit = self.max_mailbox.load(Ordering::Relaxed);
+        if limit != 0 && queue_len > limit {
+            self.overflow_hit.store(queue_len, Ordering::Relaxed);
+        }
+    }
+
+    /// Take the sticky breach flag — the receiver-side probe (safepoints + `receive`
+    /// entry). Clearing on read means the raise happens exactly once; still over the
+    /// bound at the next enqueue, it re-arms.
+    pub(super) fn take_overflow_hit(&self) -> Option<(usize, usize)> {
+        let len = self.overflow_hit.swap(0, Ordering::Relaxed);
+        (len != 0).then(|| (len, self.max_mailbox.load(Ordering::Relaxed)))
+    }
+
     pub(super) fn pending_hard_kill(&self) -> bool {
         if !self.kill_pending.load(Ordering::Relaxed) {
             return false;
@@ -814,6 +851,7 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> LocalDelivery {
         #[cfg(feature = "dev-tools")]
         trace: None,
     });
+    mb.note_mailbox_bound(st.queue.len());
     st.wake_pending = true;
     let cv_waiter = st.cv_waiters > 0;
     drop(st);
@@ -846,6 +884,7 @@ fn deliver_envelope_timed(pid: u64, env: Envelope) {
             }
         }
         st.push(env);
+        mb.note_mailbox_bound(st.queue.len());
         let parked = wake_parked(&mut st);
         st.wake_pending = true;
         let cv_waiter = st.cv_waiters > 0;
@@ -1111,6 +1150,14 @@ fn receive_match_timed(
     pin: Value,
 ) -> LispResult {
     let ctx = ensure_ctx();
+    // Mailbox-bound probe (ADR-307): a receiver parked in a never-matching `receive`
+    // wakes here on every delivery and may never pass a VM safepoint, so the entry to
+    // the scan is where a flooded process reliably notices its own breach. Raised
+    // before any scan: catchable, and the handler can drain (`receive` still works —
+    // the flag was taken) or clear the bound.
+    if let Some((len, limit)) = ctx.mailbox.take_overflow_hit() {
+        return Err(crate::eval::proc_mailbox_limit_error(len, limit));
+    }
     // Whether this `receive` runs under state capture (a capture-mode green process):
     // the receive is re-entered from scratch on every wake, so its deadline must be
     // persisted across resumes rather than recomputed.
@@ -1764,6 +1811,29 @@ pub fn list_local_pids() -> Vec<u64> {
 /// mailbox's own lock, briefly.
 pub fn mailbox_len(pid: u64) -> Option<usize> {
     with_mailbox(pid, |mb| crate::core::sync::lock(&mb.state).queue.len())
+}
+
+/// Set (or with `None` clear) `pid`'s mailbox bound, returning the previous one —
+/// the `(proc/flag :max-mailbox n)` mechanism (ADR-307). Clearing also clears a
+/// pending breach, so doing it inside a `catch` genuinely rescues the process.
+pub fn set_max_mailbox(pid: u64, limit: Option<usize>) -> Option<usize> {
+    with_mailbox(pid, |mb| {
+        if limit.is_none() {
+            mb.overflow_hit.store(0, Ordering::Relaxed);
+        }
+        let prev = mb.max_mailbox.swap(limit.unwrap_or(0), Ordering::Relaxed);
+        (prev != 0).then_some(prev)
+    })
+    .flatten()
+}
+
+/// `pid`'s mailbox bound, if set — backs the `(proc/flag :max-mailbox)` read.
+pub fn max_mailbox(pid: u64) -> Option<usize> {
+    with_mailbox(pid, |mb| {
+        let limit = mb.max_mailbox.load(Ordering::Relaxed);
+        (limit != 0).then_some(limit)
+    })
+    .flatten()
 }
 
 /// The run-status of live local process `pid`: `"running"` (executing on a

@@ -50,9 +50,9 @@
     (assert= (reverse (list 1 2 3)) (list 3 2 1))))
 
 (describe "higher-order functions"
-  (test "map" (assert= (map inc (list 1 2 3)) (list 2 3 4)))
-  (test "filter" (assert= (filter positive? (list -1 2 -3 4)) (list 2 4)))
-  (test "reduce" (assert= (reduce + 0 (list 1 2 3 4)) 10))
+  (test "map" (assert= (map (list 1 2 3) inc) (list 2 3 4)))
+  (test "filter" (assert= (filter (list -1 2 -3 4) positive?) (list 2 4)))
+  (test "reduce" (assert= (reduce (list 1 2 3 4) 0 +) 10))
   (test "apply" (assert= (apply + (list 1 2 3)) 6)))
 
 (describe "vectors"
@@ -174,11 +174,52 @@
 
 (describe "threading macros"
   (test "->" (assert= (-> 5 (- 1) (* 2)) 8))
-  (test "->>" (assert= (->> (list 1 2 3) (map inc)) (list 2 3 4)))
+  (test "-> with a multi-argument step" (assert= (-> (list 1 2 3) (reduce 0 +)) 6))
   (test "as-> threads into any position"
     (assert= (as-> 5 $ (+ $ 1) (* $ 2)) 12)
-    (assert= (as-> [1 2 3] xs (map inc xs) (fold + 0 xs)) 9))
+    (assert= (as-> [1 2 3] xs (map xs inc) (fold xs 0 +)) 9))
   (test "as-> with no forms is the value" (assert= (as-> 10 n n) 10)))
+
+;; The `$` placeholder (ADR-303). Brood carries two argument conventions —
+;; subject-first (`string/split`) and collection-last (`map`) — so a pipeline
+;; crossing the boundary is threaded correctly by NEITHER `->` nor `->>`. `$` puts
+;; the value where it actually goes, and survives the move to one convention:
+;; the subject is genuinely not first in `(- 100 $)` or `(cons $ xs)`.
+(describe "the $ placeholder in -> / ->>"
+  (test "a step with no $ threads exactly as before"
+    (assert= (-> 5 (- 1) (* 2)) 8)
+    (assert= (-> 1 inc inc) 3)
+    (assert= (-> (list 1 2 3) (map inc)) (list 2 3 4)))
+  (test "$ overrides the default position"
+    (assert= (-> 1 (- 10 $)) 9)
+    (assert= (-> 10 (- $ 1)) 9))
+  (test "$ threads a pipeline that crosses the two conventions"
+    ;; `string/split` is subject-first, `map` is collection-last: `->` alone gets
+    ;; `map` wrong and `->>` alone gets `string/split` wrong (it splits the
+    ;; SEPARATOR, silently yielding nil rather than raising).
+    (assert= (-> "1 2 3" (string/split " ") (map $ string/->number) first) 1)
+    (assert= (-> "4 5 6" (string/split " ") (map $ string/->number) (fold $ 0 +)) 15))
+  (test "$ is found at any depth, and inside vector and map literals"
+    (assert= (-> 5 (+ 1 (* 2 $))) 11)
+    (assert= (-> 3 [$ $]) [3 3])
+    (assert= (-> 7 {:n $}) {:n 7}))
+  (test "a quoted $ is the symbol, not a hole"
+    (assert= (-> 2 (list '$ $)) (list '$ 2))
+    ;; nothing to fill, so the step threads first as usual
+    (assert= (-> 2 (list '$)) (list 2 '$)))
+  (test "the threaded expression is evaluated once however many $ name it"
+    (let (calls (table/new))
+      (defn %slot-noisy () (table/put calls :n (inc (table/get calls :n 0))) 4)
+      (assert= 8 (-> (%slot-noisy) (+ $ $)))
+      (assert= 1 (table/get calls :n))))
+  (test "some-> / cond-> inherit $ from the shared placement helper"
+    (assert= (some-> 5 (- 10 $)) 5)
+    (assert= (some-> nil (- 10 $)) nil)
+    (assert= (cond-> 5 true (- 10 $)) 5))
+  :isolated (test "a $ pipeline deep-copies across a send and runs on the receiver"
+    (let (me (self))
+      (spawn (send me [:result (-> "7 8" (string/split " ") (map $ string/->number) (fold $ 0 +))]))
+      (assert= 15 (receive ([:result r] r))))))
 
 (describe "clamp"
   (test "constrains to the range"
@@ -198,7 +239,9 @@
 (describe "error handling"
   (test "catch yields the thrown value" (assert= (try (throw 42) (catch e e)) 42))
   (test "built-in errors are catchable" (is (try (/ 1 0) (catch e (map? e)))))
-  (test "no error -> body value" (assert= (try (+ 1 2) (catch e :nope)) 3))
+  ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+  (test "no error -> body value"
+    (assert= (try (+ 1 2) (catch e :nope)) 3))
   (test "assert-error" (assert-error (/ 1 0)) (assert-error (throw :boom))))
 
 ;; Pin the exact message each kind of error produces, so a change to user-facing

@@ -44,9 +44,9 @@
     (let (q (queue/list-> [1 2 3 4]))
       (assert= [1 2 3 4] (into [] q)) ; Seqable
       (assert= 4 (count q))
-      (assert= (list 10 20 30 40) (map (fn (n) (* n 10)) q))
-      (assert= 10 (fold + 0 q))
-      (assert= (list 2 4) (filter even? q))
+      (assert= (list 10 20 30 40) (map q (fn (n) (* n 10))))
+      (assert= 10 (fold q 0 +))
+      (assert= (list 2 4) (filter q even?))
       (assert= [1 2 3 4 5] (into [] (conj q 5))))) ; Conjable
   (test "interleaved push/pop"
     (let (q0 (queue/empty)
@@ -141,11 +141,10 @@
     (let (me (self))
       (doseq (i (range 4))
         (spawn (send me [:q (queue/list-> (list i (+ i 10)))])))
-      (let (results (map (fn (_) (receive ([:q q] q) (after *test-wait-ms* :timeout)))
-                      (range 4)))
-        (is (every? queue? results))
-        (is (every? (fn (q) (= (count q) 2)) results))
-        (assert= (into [] (sort (map (fn (q) (queue/peek q)) results))) [0 1 2 3]))))
+      (let (results (map (range 4) (fn (_) (receive ([:q q] q) (after *test-wait-ms* :timeout)))))
+        (is (every? results queue?))
+        (is (every? results (fn (q) (= (count q) 2))))
+        (assert= (into [] (sort (map results (fn (q) (queue/peek q))))) [0 1 2 3]))))
   (test "a pq survives a round trip and keeps its ordering"
     (let (me (self)
           pq (-> (pq/empty) (pq/insert 3 :c) (pq/insert 1 :a)))

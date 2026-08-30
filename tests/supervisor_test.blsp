@@ -363,7 +363,7 @@
     (let (sup (start (list {:id :a :start (fn () (spawn-link (parked))) :restart :permanent}
                        {:id :b :start (fn () (spawn-link (parked))) :restart :permanent})))
       (start-child sup {:id :c :start (fn () (spawn-link (parked))) :restart :permanent})
-      (assert= (list :a :b :c) (map (fn (k) (get k :id)) (which-children sup)))
+      (assert= (list :a :b :c) (map (which-children sup) (fn (k) (get k :id))))
       (stop sup)))
 
   (test "a restarted child keeps its position in start order"
@@ -372,7 +372,7 @@
                        {:id :c :start (fn () (spawn-link (parked))) :restart :permanent}))
           before (get (second (which-children sup)) :pid)
           fresh (restart-child sup :b))
-      (assert= (list :a :b :c) (map (fn (k) (get k :id)) (which-children sup)))
+      (assert= (list :a :b :c) (map (which-children sup) (fn (k) (get k :id))))
       (is (not (= before fresh)))
       (assert= fresh (get (second (which-children sup)) :pid))
       (stop sup))))
@@ -433,11 +433,16 @@
     (let (sup (start (list)))
       (stop sup)
       (sleep 60)
-      (assert= :raised (try (do (count-children sup) :no-error) (catch e :raised)))
-      (assert= :raised (try (do (which-children sup) :no-error) (catch e :raised)))
+      ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+      (assert= :raised
+        (try (do (count-children sup) :no-error) (catch e :raised)))
+      (assert= :raised
+        (try (do (which-children sup) :no-error) (catch e :raised)))
       (assert= :raised
         (try
           (do (start-child sup {:id :x :start (fn () (spawn-link (parked)))}) :no-error)
           (catch e :raised)))
-      (assert= :raised (try (do (terminate-child sup :x) :no-error) (catch e :raised)))
-      (assert= :raised (try (do (restart-child sup :x) :no-error) (catch e :raised))))))
+      (assert= :raised
+        (try (do (terminate-child sup :x) :no-error) (catch e :raised)))
+      (assert= :raised
+        (try (do (restart-child sup :x) :no-error) (catch e :raised))))))

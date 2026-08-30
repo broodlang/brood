@@ -272,7 +272,7 @@ accumulating spans in reverse. `i` is the char offset of `line` in the original 
       (md-lex-lines (rest lines)
         (+ i (string/length line) 1)
         fence2
-        (fold (fn (a s) (cons s a)) acc spans)))))
+        (fold spans acc (fn (a s) (cons s a)))))))
 (sig md-lex-lines (list int bool list -> list))
 
 (defn markdown-spans (src)

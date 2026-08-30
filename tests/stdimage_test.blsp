@@ -20,15 +20,15 @@
     ;; `json` is a good probe: a plain namespaced module with no root globals.
     (require-one 'json)
     (let (from-source (into #{}
-                        (filter (fn (s) (string/starts-with? (->string s) "json/"))
-                          (reflect/global-names))))
+                        (filter (reflect/global-names)
+                          (fn (s) (string/starts-with? (->string s) "json/")))))
       (is (> (count from-source) 20))
       ;; the image path is only exercised when one exists for THIS binary
       (let (n (install))
         (when n
           (is (> n 0))
           ;; already-loaded, so this asserts the section is present, not that it reloads
-          (is (contains? (into #{} (map ->string (reflect/global-names))) "json/->json"))))))
+          (is (contains? (into #{} (map (reflect/global-names) ->string)) "json/->json"))))))
 
   (test "the image is keyed on system/stdlib-id — content, not the executable"
     ;; Deliberately NOT `system/build-id`: that embeds the running executable's mtime, so `brood`,
@@ -50,12 +50,12 @@
                           (let (before (into #{} (reflect/global-names))
                                 _ (require-one 'editor/lineedit))
                             (into #{}
-                              (filter (fn (s) (not (contains? before s))) (reflect/global-names))))))
+                              (filter (reflect/global-names) (fn (s) (not (contains? before s))))))))
           via (%isolate (fn ()
                           (let (before (into #{} (reflect/global-names))
                                 _ (require-one 'repl))
                             (into #{}
-                              (filter (fn (s) (not (contains? before s))) (reflect/global-names)))))))
+                              (filter (reflect/global-names) (fn (s) (not (contains? before s)))))))))
       ;; both see the name; the definer's set is the smaller one, which is what build picks
       (is (contains? own '*lineedit-keymap*))
       (is (contains? via '*lineedit-keymap*))
@@ -80,8 +80,8 @@
           _ (%merge-require-edges! fake)
           deps (get *require-edges* "somemod"))
       ;; the unloadable dep is dropped, the real one kept
-      (is (nil? (seq/find (fn (d) (= (->string d) "definitely-not-a-real-module")) deps)))
-      (is (not (nil? (seq/find (fn (d) (= (->string d) "string")) deps))))
+      (is (nil? (seq/find deps (fn (d) (= (->string d) "definitely-not-a-real-module")))))
+      (is (not (nil? (seq/find deps (fn (d) (= (->string d) "string"))))))
       ;; and requiring still works afterwards
       (is (= :ok (try (do (require-one 'json) :ok) (catch e (get e :message)))))))
 
@@ -147,10 +147,10 @@
     ;; newest few before writing.
     (let (dir (path/dirname (image-path)))
       (when (file/dir? dir)
-        (let (n (count (filter (fn (e)
-                                 (and (string/starts-with? e "std-image-")
-                                   (string/ends-with? e ".bin")))
-                         (file/ls dir))))
+        (let (n (count (filter (file/ls dir)
+                         (fn (e)
+                           (and (string/starts-with? e "std-image-")
+                             (string/ends-with? e ".bin"))))))
           ;; A bound, not an exact count: another binary in this tree (`nest`, `brood-lsp`)
           ;; legitimately writes its own, and the suite itself may have just built one.
           (is (<= n 12))))))
@@ -162,7 +162,9 @@
     ;; bound and dispatches nothing.
     (let (p (image-path))
       (when (and p (file/exists? p))
-        (let (idx (try (%image-index p (system/stdlib-id)) (catch _ nil)))
+        ;; check-allow :discarded-catch — an absent or stale image index is an expected answer
+        (let (idx (check-allow :discarded-catch
+                    (try (%image-index p (system/stdlib-id)) (catch _ nil))))
           (when idx
             (is (not (nil? (get idx "%std-edges"))))
             (is (not (nil? (get idx "%std-impls"))))
@@ -177,7 +179,7 @@
           mine (or (%map-get by-mod "datetime" nil) []))
       (is (> (count mine) 0))
       ;; every tuple this module claims really was declared by it
-      (is (empty? (filter (fn (r) (not (= (->string (get r 4)) "datetime"))) mine)))))
+      (is (empty? (filter mine (fn (r) (not (= (->string (get r 4)) "datetime"))))))))
 
   :isolated (test "a module materialised under concurrency is never seen before its deps are"
     ;; THE regression test for the race. The image branch used to `provide` before following
@@ -201,19 +203,19 @@
     ;; test, so resolve the real binary: beside the runner (`brood --test`, `nest test`) or
     ;; one level up (`target/release/deps/` → `target/release/`), and skip if absent.
     (let (dir (path/dirname (os/exe-path))
-          exe (first (filter file/exists? [(path/join dir "brood") (path/join dir ".." "brood")]))
+          exe (first (filter [(path/join dir "brood") (path/join dir ".." "brood")] file/exists?))
           prog (path/temp "stdimage-race-")
           _ (file/spit prog
-              (string/join "\n"
-                ["(require-one 'stdimage) (stdimage/ensure)"
-                  "(let (me (self)" "      ps (map (fn (i)"
-                  "                (spawn (fn () (send me [:r (try [:ok (reflect/eval-string \"(uuid/v7)\")]"
-                  "                                                 (catch e [:err (get e :message)]))]))))"
-                  "           (range 0 24)))" "  (let (bad (fold (fn (acc _)"
-                  "                    (receive ([:r [tag v]] (if (= tag :err) (append acc [v]) acc))))"
-                  "              [] ps))" "    (when (> (count bad) 0)"
-                  "      (io/puts (str \"FAILED \" (count bad) \" of 24: \" (first bad)))"
-                  "      (system/halt 1))))"]))
+              (string/join ["(require-one 'stdimage) (stdimage/ensure)"
+                             "(let (me (self)" "      ps (map (range 0 24) (fn (i)"
+                             "                (spawn (fn () (send me [:r (try [:ok (reflect/eval-string \"(uuid/v7)\")]"
+                             "                                                 (catch e [:err (get e :message)]))]))))"
+                             "           ))" "  (let (bad (fold ps [] (fn (acc _)"
+                             "                    (receive ([:r [tag v]] (if (= tag :err) (append acc [v]) acc))))"
+                             "              ))" "    (when (> (count bad) 0)"
+                             "      (io/puts (str \"FAILED \" (count bad) \" of 24: \" (first bad)))"
+                             "      (system/halt 1))))"]
+                "\n"))
           code (if exe (os/run-process "env" ["BROOD_STDIMAGE=1" exe prog]) 0))
       ;; `exe` nil means no brood binary beside the runner — a legitimate environment, not a
       ;; failure. Assert it separately so a skip is visible rather than silently green.

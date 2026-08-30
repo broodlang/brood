@@ -1,6 +1,6 @@
 ;; Tests for the ergonomic prelude additions: string interpolation (`fmt`),
 ;; binding-conditionals (`if-let`/`when-let`), conditional
-;; and short-circuit threading (`cond->`/`some->`), `doto`, and `run!`.
+;; and short-circuit threading (`cond->`/`some->`), `doto`, and `each`.
 (defmodule ergonomics-test (:use test) (:use math))
 
 (describe "fmt — string interpolation"
@@ -37,7 +37,7 @@
     (assert= 6 (some-> {:a {:b 5}} (get :a) (get :b) inc))
     (assert= nil (some-> {:a {:b 5}} (get :nope) (get :b) inc)))
   (test "some->> threads as last arg"
-    (assert= [2 4] (some->> [1 2 3 4] (map inc) (filter even?) (into [])))))
+    (assert= [2 4] (some-> [1 2 3 4] (map inc) (filter even?) (into [] $)))))
 
 (describe "cond-> / cond->>"
   (test "cond-> applies a step only when its guard is truthy"
@@ -107,16 +107,16 @@
       (assert= 11 (table/get t :mid))))
   (test "across processes: tap/then compose in spawned workers"
     (let (me (self)
-          _ (map (fn (k)
-                   (spawn (fn () (send me (-> k (then (fn (n) (* n n))) (tap (fn (_) nil)))))))
-              (list 1 2 3))
-          results (fold (fn (acc _) (cons (receive) acc)) nil (range 3)))
+          _ (map (list 1 2 3)
+              (fn (k)
+                (spawn (fn () (send me (-> k (then (fn (n) (* n n))) (tap (fn (_) nil))))))))
+          results (fold (range 3) nil (fn (acc _) (cons (receive) acc))))
       (assert= [1 4 9] (into [] (sort results))))))
 
-(describe "run!"
+(describe "each"
   (test "applies a fn for effect and returns nil"
     (let (t (table/new))
-      (assert= nil (run! (fn (x) (table/put t x true)) [:a :b :c]))
+      (assert= nil (each [:a :b :c] (fn (x) (table/put t x true))))
       (assert= true (table/get t :b)))))
 
 ;; ---- the combinator family (2026-07-26 review: `comp` had shipped alone) ----
@@ -128,15 +128,15 @@
   (test "partial with no bound arguments is the function itself"
     (assert= 3 ((partial +) 1 2)))
   (test "partial composes with a higher-order op (the reason it exists)"
-    (assert= (list 11 12 13) (map (partial + 10) (list 1 2 3))))
+    (assert= (list 11 12 13) (map (list 1 2 3) (partial + 10))))
   (test "complement negates a predicate"
     (is ((complement odd?) 2))
     (refute ((complement odd?) 3))
-    (assert= (list 2 4) (filter (complement odd?) (list 1 2 3 4))))
+    (assert= (list 2 4) (filter (list 1 2 3 4) (complement odd?))))
   (test "constantly ignores its arguments"
     (assert= :x ((constantly :x)))
     (assert= :x ((constantly :x) 1 2 3))
-    (assert= (list :x :x) (map (constantly :x) (list 1 2)))))
+    (assert= (list :x :x) (map (list 1 2) (constantly :x)))))
 
 (describe "case — literal dispatch"
   (test "dispatches on the value, flat test/result pairs"
@@ -217,7 +217,7 @@
     (assert= [0 1 2] (seq/transduce (erg-xtake-while (fn (n) (< n 3))) conj [] (range 6))))
   (test "the l* combinators share the machinery and agree"
     (assert= (seq/transduce (comp (seq/xfilter odd?) (seq/xmap inc)) + 0 (range 10))
-      (reduce + 0 (->> (range 10) (seq/lfilter odd?) (seq/lmap inc))))))
+      (reduce (-> (range 10) (seq/lfilter odd?) (seq/lmap inc)) 0 +))))
 
 (describe "dissoc-in"
   (test "removes a nested key, leaving the rest"
