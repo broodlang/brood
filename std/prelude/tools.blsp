@@ -1696,28 +1696,34 @@ and that every declared arity still matches its module's actual definition."
 ; type's `:module/name` id) so `queue?`/`pq?` sit alongside `set?`/`map?` instead of doubling
 ; as `queue/queue?` inside their own module (ADR-236). The check is pure and needs no module
 ; loaded: a non-record, or a record of another id, is simply false.
+(sig queue? (any -> (is (record &open :__id__ :queue/queue))))
 (defn queue? (x)
   "True if `x` is a FIFO queue (`std/queue`) — by identity, not by shape."
   (%eq (record-id x) :queue/queue))
 
+(sig pq? (any -> (is (record &open :__id__ :pq/pq))))
 (defn pq? (x)
   "True if `x` is a min-priority queue (`std/pq`) — by identity, not by shape."
   (%eq (record-id x) :pq/pq))
 
+(sig multimap? (any -> (is (record &open :__id__ :multimap/multimap))))
 (defn multimap? (x)
   "True if `x` is a multi-valued map (`std/multimap`) — by identity, not by shape."
   (%eq (record-id x) :multimap/multimap))
 
+(sig datetime? (any -> (is (record &open :__id__ :datetime/datetime))))
 (defn datetime? (x)
   "True if `x` is a datetime — a date *and* a time-of-day (`std/datetime`) — by identity."
   (%eq (record-id x) :datetime/datetime))
 
+(sig date? (any -> (is (record &open :__id__ :datetime/date))))
 (defn date? (x)
   "True if `x` is a date with no time component (`std/datetime`) — by identity.
 
     (date? (datetime/today))   → true"
   (%eq (record-id x) :datetime/date))
 
+(sig time-of-day? (any -> (is (record &open :__id__ :datetime/time-of-day))))
 (defn time-of-day? (x)
   "True if `x` is a time-of-day with no date component (`std/datetime`) — by identity."
   (%eq (record-id x) :datetime/time-of-day))
