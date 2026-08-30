@@ -130,6 +130,32 @@ cost of ~three forms, not the whole buffer."
   "A container form — the `forward-list` sibling filter (and what `down-list` descends)."
   (container-kind? (get anode :kind)))
 
+;; ---- the site: everything a motion asks about the point, computed once --------
+;; Every structural motion used to re-derive the same triple — `narrow` the text,
+;; `tree` the window, `enclosing` the point — with its own copy of the base-offset
+;; arithmetic, and each new rule (the straddled atom) was a fourth branch pasted into
+;; each. A motion is a SELECTION over one value: the enclosing container, its forms, and
+;; where the point sits among them.
+
+(defn- sexp-site (text point)
+  "`{:base :rp :enc}` for `point` in `text`: the narrowed window's offset, the point
+relative to it, and the deepest container node holding it (the window's root at top
+level). Positions the motions read off `:enc`'s forms are window-relative — [[sexp-abs]]
+puts one back."
+  (let ([base sub] (narrow text point)
+        rp (- point base))
+    {:base base :rp rp :enc (enclosing (tree sub) rp)}))
+(sig sexp-site (string int -> map))
+
+(defn- sexp-abs (site p)
+  "A window-relative position of `site` back in the text."
+  (+ (:base site) p))
+(sig sexp-abs (map int -> int))
+
+(defn- sexp-top-level? (site)
+  (= (get (:enc site) :kind) :root))
+(sig sexp-top-level? (map -> bool))
+
 (defn- sexp-atom-around (enc rp keep?)
   "The non-container form of `enc` that STRADDLES `rp` (start < rp < end) and satisfies
 `keep?`, or nil. A point inside a symbol or a string is inside an atom, not between two
@@ -150,25 +176,24 @@ Emacs and paredit move to the atom's own edge; so does this."
   "End of the next sibling form satisfying `keep?` starting at or after `point`, within the
 enclosing list — or the end of the atom `point` is inside; `point` when there is none. The
 shared body of the forward motions."
-  (let ([base sub] (narrow text point)
-        rp (- point base)
-        enc (enclosing (tree sub) rp)
-        inside (sexp-atom-around enc rp keep?)
-        nxt (or inside (seq/find (fn (f) (and (>= (sexp-start f) rp) (keep? f))) (forms-of enc))))
-    (if (nil? nxt) point (+ base (sexp-end nxt)))))
+  (let (site (sexp-site text point)
+        rp (:rp site)
+        enc (:enc site)
+        nxt (or (sexp-atom-around enc rp keep?)
+              (seq/find (fn (f) (and (>= (sexp-start f) rp) (keep? f))) (forms-of enc))))
+    (if (nil? nxt) point (sexp-abs site (sexp-end nxt)))))
 (sig sexp-sibling-forward (string int fn -> int))
 
 (defn- sexp-sibling-backward (text point keep?)
   "Start of the previous sibling form satisfying `keep?` ending at or before `point`, within
 the enclosing list — or the start of the atom `point` is inside; `point` when there is none.
 The shared body of the backward motions."
-  (let ([base sub] (narrow text point)
-        rp (- point base)
-        enc (enclosing (tree sub) rp)
-        inside (sexp-atom-around enc rp keep?)
-        prev (or inside
+  (let (site (sexp-site text point)
+        rp (:rp site)
+        enc (:enc site)
+        prev (or (sexp-atom-around enc rp keep?)
                (last (filter (fn (f) (and (<= (sexp-end f) rp) (keep? f))) (forms-of enc)))))
-    (if (nil? prev) point (+ base (sexp-start prev)))))
+    (if (nil? prev) point (sexp-abs site (sexp-start prev)))))
 (sig sexp-sibling-backward (string int fn -> int))
 
 (defn point-forward (text point)
@@ -202,37 +227,59 @@ over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
   (sexp-sibling-backward text point sexp-list?))
 (sig point-list-backward (string int -> int))
 
+;; The keys get these two; the pure pair above keeps Emacs' exact contract (`forward-sexp`
+;; at the end of a list ERRORS, i.e. does not move) because the edits are built on it —
+;; `kill-sexp` at `(a b|)` must kill nothing, not the `)`; `mark-sexp` must not mark past
+;; the list. A MOTION that stalls there feels broken, and paredit's answer is the right
+;; one: step out of the list. So `C-M-f` at `(a b|)` lands after the `)`, `C-M-b` at
+;; `(|a b)` lands before the `(`, and at top level with nothing further both stay put.
+
+(defn point-forward-out (text point)
+  "`point-forward`, escaping the enclosing list when no sibling follows (paredit
+`forward`): the end of the next sexp, else just past the enclosing list's close
+delimiter, else `point`.
+    (sexp/point-forward-out \"(a b) c\" 4)   → 5"
+  (let (q (point-forward text point))
+    (if (= q point) (point-up-forward text point) q)))
+(sig point-forward-out (string int -> int))
+
+(defn point-backward-out (text point)
+  "`point-backward`, escaping the enclosing list when no sibling precedes (paredit
+`backward`): the start of the previous sexp, else before the enclosing list's open
+delimiter, else `point`.
+    (sexp/point-backward-out \"(a b) c\" 1)   → 0"
+  (let (q (point-backward text point))
+    (if (= q point) (point-up text point) q)))
+(sig point-backward-out (string int -> int))
+
 (defn point-up (text point)
   "Start of the enclosing list — before its opening delimiter (Emacs
 `backward-up-list`); unchanged at top level.
 
     (sexp/point-up \"(a (b))\" 4)       → 3"
-  (let ([base sub] (narrow text point)
-        enc (enclosing (tree sub) (- point base)))
-    (if (= (get enc :kind) :root) point (+ base (sexp-start enc)))))
-(sig point-up (any int -> any))
+  (let (site (sexp-site text point))
+    (if (sexp-top-level? site) point (sexp-abs site (sexp-start (:enc site))))))
+(sig point-up (string int -> int))
 
 (defn point-up-forward (text point)
   "Just past the enclosing list's closing delimiter — the forward counterpart of
 `point-up` (Emacs `up-list`); unchanged at top level.
 
     (sexp/point-up-forward \"(a (b))\" 4)   → 6"
-  (let ([base sub] (narrow text point)
-        enc (enclosing (tree sub) (- point base)))
-    (if (= (get enc :kind) :root) point (+ base (sexp-end enc)))))
-(sig point-up-forward (any int -> any))
+  (let (site (sexp-site text point))
+    (if (sexp-top-level? site) point (sexp-abs site (sexp-end (:enc site))))))
+(sig point-up-forward (string int -> int))
 
 (defn point-down (text point)
   "Just inside the next list at or after `point` (Emacs `down-list`); unchanged if
 none.
 
     (sexp/point-down \"(a b)\" 0)       → 1"
-  (let ([base sub] (narrow text point)
-        rp (- point base)
-        enc (enclosing (tree sub) rp)
-        lst (seq/find (fn (f) (and (sexp-list? f) (>= (get f :start) rp))) (forms-of enc)))
-    (if (nil? lst) point (+ base (get lst :start) 1))))
-(sig point-down (any int -> any))
+  (let (site (sexp-site text point)
+        rp (:rp site)
+        lst (seq/find (fn (f) (and (sexp-list? f) (>= (sexp-start f) rp))) (forms-of (:enc site))))
+    (if (nil? lst) point (sexp-abs site (inc (sexp-start lst))))))
+(sig point-down (string int -> int))
 
 (defn- sexp-defun-edge (text point edge)
   "The `edge` (`:start` / `:end`) of the top-level form containing `point`; `point` when
@@ -501,6 +548,14 @@ single undo unit), leaving point at `new-point`; `buf` unchanged when `result` i
 (defn backward (buf key)
   "Move point back over the previous sexp (Emacs `backward-sexp`); buffer command."
   (goto-char buf (point-backward (buffer-text buf) (get buf :point))))
+(defn forward-out (buf key)
+  "`forward`, stepping out of the list when nothing follows (paredit); the motion to
+bind to C-M-f — `forward` stays the edit primitive (kill/mark)."
+  (goto-char buf (point-forward-out (buffer-text buf) (get buf :point))))
+(defn backward-out (buf key)
+  "`backward`, stepping out of the list when nothing precedes (paredit); the motion to
+bind to C-M-b."
+  (goto-char buf (point-backward-out (buffer-text buf) (get buf :point))))
 (defn up (buf key)
   "Move point out of the enclosing list, before its open delimiter (Emacs
 `backward-up-list`); buffer command."
