@@ -92,10 +92,14 @@ impl RootsBuf {
     }
 
     /// Ensure room for `additional` more elements past `len` (amortized doubling,
-    /// `Vec::reserve` semantics).
+    /// `Vec::reserve` semantics — including the panic on overflow, which must not
+    /// wrap into a too-small allocation).
     #[inline]
     pub(crate) fn reserve(&mut self, additional: usize) {
-        let needed = self.len + additional;
+        let needed = self
+            .len
+            .checked_add(additional)
+            .expect("roots capacity overflow");
         if needed > self.cap {
             self.grow(needed);
         }

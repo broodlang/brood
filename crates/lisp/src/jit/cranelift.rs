@@ -106,6 +106,8 @@ impl CraneliftBackend {
             brood_rt_fastlink_base as *const u8,
         );
         builder.symbol("brood_rt_fast_frame", brood_rt_fast_frame as *const u8);
+        builder.symbol("brood_rt_xcall_latch", brood_rt_xcall_latch as *const u8);
+        builder.symbol("brood_rt_xcall_cold", brood_rt_xcall_cold as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_table_has", brood_rt_table_has as *const u8);
         builder.symbol("brood_rt_table_get2", brood_rt_table_get2 as *const u8);
@@ -164,6 +166,8 @@ impl CraneliftBackend {
                 ("roots_base", brood_rt_roots_base as *const () as usize),
                 ("call_slow", brood_rt_call_slow as *const () as usize),
                 ("fast_frame", brood_rt_fast_frame as *const () as usize),
+                ("xcall_latch", brood_rt_xcall_latch as *const () as usize),
+                ("xcall_cold", brood_rt_xcall_cold as *const () as usize),
                 (
                     "fastlink_base",
                     brood_rt_fastlink_base as *const () as usize,

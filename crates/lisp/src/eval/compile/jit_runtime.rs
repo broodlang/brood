@@ -812,31 +812,7 @@ pub(crate) fn jit_run_fast_link(
     // a latch that mostly failed to hold. The probe stays as the fallback for the one
     // race the scan can miss (an inlined-upgrade swap between invoke and here).
     if heap.blocked_under_gateway == gw_seq {
-        heap.blocked_under_gateway = 0;
-        // Shed THIS site's fast link first, unconditionally: the latch stores `BAILED`
-        // into `arm.jit_code`, but the FastLink mirror's hit path (and the raw load JIT'd
-        // callers emit) never re-reads `jit_code` — so without this, a long-lived process
-        // whose site is already populated keeps entering the latched native and parking
-        // dirty forever. The IC bases were restored above, so `site` resolves against the
-        // caller's block exactly as the lookup that entered here did.
-        heap.vm_fast_link_clear_site(site);
-        let scanned = {
-            use std::sync::atomic::Ordering::Acquire;
-            // Poison-tolerant like the two push sites: a codegen panic (the
-            // CODEGEN-PANICKED path) may have poisoned this mutex, and the latch must
-            // not turn that into a worker-thread crash.
-            let reg = JIT_ARM_KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner());
-            reg.iter()
-                .find(|a| std::ptr::eq(a.jit_code.load(Acquire), code as *mut u8))
-                .cloned()
-        };
-        if let Some(arm) = scanned.or_else(|| {
-            heap.vm_call_ic_probe(site, head, argc as u32, epoch)
-                .and_then(|(_, a)| a)
-                .map(|(arm, _, _)| arm.arc().clone())
-        }) {
-            jit_latch_suspend_host(&arm);
-        }
+        jit_latch_dirty_blocked(heap, code, site, head, argc, epoch);
     }
     // KI-11. Three of the outcome arms below re-enter the evaluator — the outcome-4
     // tail-chain follow-through (`apply_value`), and the deopt/preempt re-runs
@@ -880,6 +856,88 @@ pub(crate) fn jit_run_fast_link(
         callee_env,
         out,
     )
+}
+
+/// The suspend-host latch resolution for a fast link whose callee dirty-blocked its
+/// worker (`blocked_under_gateway` came back equal to the gateway token). Shared by
+/// [`jit_run_fast_link`] and the inline fast-frame path's `brood_rt_xcall_latch`
+/// callback (§7.5, `BROOD_XCALL=1`) — cold by construction (at most once per arm ever).
+#[cfg(feature = "jit")]
+#[cold]
+#[inline(never)]
+pub(crate) fn jit_latch_dirty_blocked(
+    heap: &mut Heap,
+    code: usize,
+    site: u32,
+    head: Symbol,
+    argc: usize,
+    epoch: u64,
+) {
+    heap.blocked_under_gateway = 0;
+    // Shed THIS site's fast link first, unconditionally: the latch stores `BAILED`
+    // into `arm.jit_code`, but the FastLink mirror's hit path (and the raw load JIT'd
+    // callers emit) never re-reads `jit_code` — so without this, a long-lived process
+    // whose site is already populated keeps entering the latched native and parking
+    // dirty forever. The IC bases were restored above, so `site` resolves against the
+    // caller's block exactly as the lookup that entered here did.
+    heap.vm_fast_link_clear_site(site);
+    let scanned = {
+        use std::sync::atomic::Ordering::Acquire;
+        // Poison-tolerant like the two push sites: a codegen panic (the
+        // CODEGEN-PANICKED path) may have poisoned this mutex, and the latch must
+        // not turn that into a worker-thread crash.
+        let reg = JIT_ARM_KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner());
+        reg.iter()
+            .find(|a| std::ptr::eq(a.jit_code.load(Acquire), code as *mut u8))
+            .cloned()
+    };
+    if let Some(arm) = scanned.or_else(|| {
+        heap.vm_call_ic_probe(site, head, argc as u32, epoch)
+            .and_then(|(_, a)| a)
+            .map(|(arm, _, _)| arm.arc().clone())
+    }) {
+        jit_latch_suspend_host(&arm);
+    }
+}
+
+/// The cold-outcome funnel for the **inline** fast-frame path (§7.5, `BROOD_XCALL=1`):
+/// emitted code has already run the ceremony restores, so this is exactly
+/// [`jit_fast_link_cold_outcome`] with the caller context read back off the heap.
+/// The callee env is `GLOBAL` by the inline path's own guard.
+#[cfg(feature = "jit")]
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+pub(crate) fn jit_xcall_cold_outcome(
+    heap: &mut Heap,
+    outcome: i64,
+    argc: usize,
+    site: u32,
+    head: Symbol,
+    epoch: u64,
+    stage_base: usize,
+    nslots: usize,
+    out: *mut Value,
+) -> i64 {
+    let native_depth = heap.jit_native_depth;
+    match jit_fast_link_cold_outcome(
+        heap,
+        outcome,
+        argc,
+        site,
+        head,
+        epoch,
+        stage_base,
+        stage_base,
+        nslots,
+        native_depth,
+        EnvId::GLOBAL,
+        out,
+    ) {
+        FastLinkOutcome::Done => 0,
+        FastLinkOutcome::Error => 1,
+        FastLinkOutcome::Fallthrough => 2,
+    }
 }
 
 /// The deopt / preempt / tail-chain / error outcomes of a native fast link — everything

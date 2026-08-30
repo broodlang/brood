@@ -65,6 +65,13 @@ pub(super) struct Funcs {
     /// `brood_rt_fastlink_base` / `brood_rt_fast_frame` — the in-IR epoch-guarded fast link.
     pub flbase: FuncRef,
     pub fastframe: FuncRef,
+    /// `brood_rt_xcall_latch` / `brood_rt_xcall_cold` — the inline fast-frame path's
+    /// cold callbacks (§7.5, `BROOD_XCALL=1`).
+    pub xlatch: FuncRef,
+    pub xcold: FuncRef,
+    /// The [`crate::jit::JitArmFn`] signature `(heap, base, out) -> outcome`, for the
+    /// inline path's `call_indirect` straight into a callee's native code.
+    pub armfn_sig: cranelift_codegen::ir::SigRef,
     /// `brood_rt_gc_safepoint` / `brood_rt_tick_n` — the self-loop back-edge callbacks.
     pub sp: FuncRef,
     pub tickn: FuncRef,
