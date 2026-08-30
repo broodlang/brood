@@ -6,6 +6,33 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.19.0 — 2026-08-30
+
+The strict release: `nest check --strict` is at zero over the standard library and is a CI
+gate; fourteen checker gaps closed on the way; the checker no longer diverges.
+
+**Fixed — the checker could run without bound (KI-87).** The inference cycle guard's
+refusal path built-and-dropped a guard, un-marking the in-flight symbol — so a mutually
+recursive pair re-inferred each other forever, one stack segment per level. `nest run` on a
+downstream project reached 54 GB. Sabotage-verified guards; `docs/known-issues.md` KI-87.
+
+**Changed — strict mode holds over `std/`.** ~350 signatures declared (written by reading
+the bodies), every nil source made honest, one real bug (`package/registry-install` handed
+a keyword to `path/join`). `tests/` is deliberately not strict.
+
+**Changed — what the checker now understands** (each general, each sound): an extremum
+(`math/max`/`min`) returns one of its operands; `(get m k default)` and `(nth xs i
+default)` read the default as the absence case; `(or x default)` is short-circuit exact;
+an inferred return sees its branches narrowed (`(or (string/->number s) -1)` is `number`);
+a record NAME in a `sig` carries its declared field types (open, ADR-264); a defaulted
+`&optional (n 1)` is `T ∪ typeof(default)`; a destructuring `let` types its binders;
+`(= a b)` is a guard; a branch whose test contradicts what is known of a local is dead and
+neither checked nor typed; `any ∖ {lit}` and `any ∖ vector` are known only by exclusion;
+`filter` returns a list; a `fold`/`reduce` accumulator is seeded from `init` to a fixpoint
+and a callback literal is walked with the same seed; the prelude's own `sig`s survive the
+freeze; a `sig` inside a `check-allow` block is registered; `file/ls` returns
+`(list string)`; `%utf8-bytes->string` accepts the vector/list/nil it always did.
+
 **Changed — a non-empty list stays non-empty through the combinators that preserve length.**
 `list<T>` is the non-empty list (the empty list is `nil`), and that fact now carries:
 `(append '(1 2) '(3))`, `(map inc '(1 2))`, `sort`, `reverse`, `distinct`, `into` a list,
