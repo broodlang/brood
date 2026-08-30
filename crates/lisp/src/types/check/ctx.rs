@@ -891,6 +891,17 @@ impl Ctx {
     /// unreachable. Both sets are tiny (one scope's typed bindings), so the scan is
     /// cheap. Restricting to these two sets is what keeps the dead-clause lint sound
     /// and free of false positives on generated / redefinable bindings.
+    /// Is this scope UNREACHABLE — has a guard narrowed some local to `never`? A branch
+    /// entered under such a scope cannot run (the test that led here is contradicted by
+    /// what is known of the value), so it is neither checked nor typed. What made this
+    /// necessary: once `%vector-ref` on a literal tuple types as the exact element, the
+    /// `with`/`match` lowering's `(%eq el :ok)` over a literal `[:error :nope]` has a then-
+    /// branch whose `el` is `:error ∩ :ok = never` — a branch the runtime never enters,
+    /// which the checker walked and reported `(+ a b)` in, with `b` the literal `:nope`.
+    pub(super) fn is_dead(&self) -> bool {
+        self.types.values().any(Ty::is_never)
+    }
+
     pub(super) fn newly_dead_binding(&self, before: &Ctx) -> Option<(Symbol, Ty)> {
         self.sig_params
             .iter()

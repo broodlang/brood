@@ -33,7 +33,7 @@ primitives. The kernel also provides the always-available file primitives
       (string/ends-with? text "\n")
         (string/split (string/substring text 0 (dec (string/length text))) "\n")
       else (string/split text "\n"))))
-(sig read-lines (string -> (list string)))
+(sig read-lines (string -> (or (list string) nil)))
 
 (defn write-lines (path lines)
   "Write `lines` (a sequence of strings) to `path`, one per line, each terminated by a newline."

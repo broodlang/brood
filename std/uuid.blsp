@@ -34,6 +34,7 @@ always — useful for content-based IDs and idempotent generation.")
     (int->hex-loop (math/quot n 16)
       (str (string/char-at hex-digits (math/rem n 16)) acc))))
 
+(sig pad-hex (string int -> string))
 (defn- pad-hex
   (s n)
   "Left-pad hex string `s` with zeros to exactly `n` characters."
@@ -178,6 +179,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
   "Parse a UUID string (with dashes) into a list of 16 byte ints."
   (parse-bytes (string/replace s "-" "") 0 nil))
 
+(sig parse-bytes (string int list -> list))
 (defn- parse-bytes
   (hex i acc)
   (if (>= i (string/length hex))
@@ -186,6 +188,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
           lo (hex-nibble (string/char-at hex (+ i 1))))
       (parse-bytes hex (+ i 2) (cons (+ (* hi 16) lo) acc)))))
 
+(sig bytes->str (list int -> string))
 (defn- bytes->str
   (bytes version-nibble)
   "Format 16 byte ints as a UUID string, setting version nibble and variant bits."

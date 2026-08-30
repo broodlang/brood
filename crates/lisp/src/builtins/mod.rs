@@ -1028,7 +1028,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "%utf8-bytes->string",
         Arity::exact(1),
-        Sig::new(vec![bytes_ty], string),
+        // What `collect_bytes` accepts: bytes, a vector or list of ints, or nil (empty).
+        Sig::new(
+            vec![bytes_ty.union(Ty::of(Tag::Vector)).union(Ty::LIST)],
+            string,
+        ),
         &["bytes"],
         "Decode UTF-8 bytes (a bytes value, vector, or list of ints 0–255) into a string. Errors on invalid UTF-8.",
         utf8_bytes_to_string);
@@ -2155,7 +2159,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "%load-module-source",
         Arity::range(1, 2),
-        Sig::new(vec![string, string], any),
+        // The second argument is the module's source or nil (`load_module_source` reads
+        // the file itself then); `%builtin-module-file` legitimately hands it nil.
+        Sig::new(vec![string, string.union(Ty::of(Tag::Nil))], any),
         &[],
         "",
         load_module_source,

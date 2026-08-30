@@ -419,6 +419,7 @@ contradiction; it is public here, where its callers can reach it.
         b (get m j))
     (assoc (assoc m i b) j a)))
 
+(sig shuffle-at (map int int -> vector))
 (defn- shuffle-at
   (m i state)
   ;; Descending Fisher–Yates: draw j in 0..i, swap it into slot i, move left.

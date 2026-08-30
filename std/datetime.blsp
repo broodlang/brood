@@ -85,7 +85,8 @@ spellings of one instant.")
 ;; `Temporal` ability below renders any of them, and a fourth temporal type from
 ;; elsewhere (a zoned datetime, a fiscal quarter) can join by impl'ing it.
 
-(defrecord datetime ((year int) (month int) (day int) (hour int) (minute int) (second int) (ms int)))
+(defrecord datetime
+  ((year int) (month int) (day int) (hour int) (minute int) (second int) (ms int)))
 (defrecord date ((year int) (month int) (day int)))
 (defrecord time-of-day ((hour int) (minute int) (second int) (ms int)))
 
@@ -465,7 +466,7 @@ produces is UTC.
 (defn leap-year? (y)
   "True if year `y` is a Gregorian leap year."
   (and (= (math/rem y 4) 0)
-    (or (not= (math/rem y 100) 0)
+    (or (not (= (math/rem y 100) 0))
       (= (math/rem y 400) 0))))
 (sig leap-year? (int -> bool))
 

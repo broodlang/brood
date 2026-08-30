@@ -1240,9 +1240,14 @@ fn propagates_primitive_result_types() {
 
 #[test]
 fn an_any_result_is_not_a_false_positive() {
-    // vector-ref's result type is `any` (unknown), so feeding it to
+    // `%vector-ref` on a vector whose elements are unknown is unknown, so feeding it to
     // string-length (wants string) must NOT warn — `any` overlaps `string`.
-    assert!(warnings("(string/length (%vector-ref [1] 0))").is_empty());
+    assert!(warnings("(string/length (%vector-ref xs 0))").is_empty());
+    // …but on a literal it is exactly that position (a destructuring `let` lowers to
+    // `%vector-ref` behind a length check, so this is what types `[x y] rect` binders).
+    assert!(warnings("(string/length (%vector-ref [1] 0))")
+        .iter()
+        .any(|w| w.contains("string/length")));
 }
 
 #[test]
@@ -5069,11 +5074,15 @@ fn map_filter_do_not_refine_when_uncertain() {
         w.iter().all(|s| !s.contains("string/length")),
         "an identity callback over an unknown collection must not refine: {w:?}"
     );
-    // Branchy lambda body → can't type it → bail to flat (no false positive).
+    // A branchy lambda body over elements whose truthiness is unknown → the union of
+    // both branches, `1 | "a"`, which is not provably a string → reported by `⊆` (precise).
+    // Over `(list 1 2 3)` the else-branch is DEAD (an int is never falsy — `Ctx::is_dead`),
+    // so the result is exactly `1`, and `string/length` of it is a genuine misuse.
     let w = warnings(r#"(string/length (first (map (fn (x) (if x 1 "a")) (list 1 2 3))))"#);
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
-        "a branchy lambda body must bail to a flat result: {w:?}"
+        w.iter()
+            .any(|s| s.contains("string/length") && s.contains("got 1")),
+        "a dead else-branch must not widen the result: {w:?}"
     );
 }
 

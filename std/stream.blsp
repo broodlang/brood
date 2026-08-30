@@ -197,9 +197,9 @@ Call immediately after accept or connect, before any data has been read."
     ([:tcp-error ^sock msg] (when pending (send pending [:stream-err msg])))
     ;; Consumer requests next chunk
     ([:next r] (cond
-                 (not= buf "") (do
-                                 (send r [:stream-val buf])
-                                 (sock-loop sock nil ""))
+                 (not (= buf "")) (do
+                                    (send r [:stream-val buf])
+                                    (sock-loop sock nil ""))
                  else (sock-loop sock r "")))
     ;; Graceful cancel
     (:stream-close (tcp/close sock))))
@@ -449,11 +449,10 @@ Raises on a stream error."
 
 (defn- %fold-loop
   (f acc s)
-  (let (item (next s))
-    (cond
-      (= item :done) acc
-      (= (first item) :ok) (%fold-loop f (f acc (second item)) s)
-      else (error "fold: " (second item)))))
+  (match (next s)
+    (:done acc)
+    ([:ok v] (%fold-loop f (f acc v) s))
+    (item (error "fold: " (second item)))))
 
 (defn ->list (s)
   "Collect all elements of `s` into a list."
@@ -461,11 +460,10 @@ Raises on a stream error."
 
 (defn- collect-loop
   (s acc)
-  (let (item (next s))
-    (cond
-      (= item :done) acc
-      (= (first item) :ok) (collect-loop s (cons (second item) acc))
-      else (error "->list: " (second item)))))
+  (match (next s)
+    (:done acc)
+    ([:ok v] (collect-loop s (cons v acc)))
+    (item (error "->list: " (second item)))))
 
 (defn ->vector (s)
   "Collect all elements of `s` into a vector."
@@ -473,11 +471,10 @@ Raises on a stream error."
 
 (defn for-each (f s)
   "Apply `f` to each element of `s` for side effects. Returns nil."
-  (let (item (next s))
-    (cond
-      (= item :done) nil
-      (= (first item) :ok) (do (f (second item)) (for-each f s))
-      else (error "for-each: " (second item)))))
+  (match (next s)
+    (:done nil)
+    ([:ok v] (do (f v) (for-each f s)))
+    (item (error "for-each: " (second item)))))
 
 (defn count (s)
   "Count the elements in `s`, consuming it."
@@ -490,15 +487,14 @@ then `:stream-eof` when done (or `[:stream-err msg]` + `:stream-eof` on error)."
 
 (defn- pipe-loop
   (src sink)
-  (let (item (next src))
-    (cond
-      (= item :done) (send sink :stream-eof)
-      (= (first item) :ok) (do
-                             (send sink [:stream-data (second item)])
-                             (pipe-loop src sink))
-      else (do
-             (send sink [:stream-err (second item)])
-             (send sink :stream-eof)))))
+  (match (next src)
+    (:done (send sink :stream-eof))
+    ([:ok v] (do
+               (send sink [:stream-data v])
+               (pipe-loop src sink)))
+    (item (do
+            (send sink [:stream-err (second item)])
+            (send sink :stream-eof)))))
 
 (defn ->socket (s sock)
   "Drain stream `s`, writing each chunk to `sock` with `tcp/send`. Returns nil."
