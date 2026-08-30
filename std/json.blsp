@@ -43,19 +43,16 @@ parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
 
 (def- json-hex-digits "0123456789abcdef")
 
-(defn- int->hex-acc
-  (n acc)
+(defn- int->hex-acc (n acc)
   (if (= n 0)
     acc
     (int->hex-acc (math/quot n 16) (str (string/char-at json-hex-digits (math/rem n 16)) acc))))
 
-(defn- int->hex
-  (n)
+(defn- int->hex (n)
   "The lowercase hex string for non-negative int `n` (`0` → \"0\")."
   (if (= n 0) "0" (int->hex-acc n "")))
 
-(defn- cp->string
-  (cp)
+(defn- cp->string (cp)
   "The one-character string for Unicode code point `cp`, via a `\\u{…}` reader
 escape (the codepoint→char mechanism pure Brood otherwise lacks)."
   (reflect/read-string (str "\"\\u{" (int->hex cp) "}\"")))
@@ -73,29 +70,25 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 ;; every per-char test a pure integer prim (`=`/`<=` on i64s — register work in a
 ;; JIT'd arm), the same conversion that took the regex matcher call-free. `s` in every
 ;; parser helper below is that code vector; -1 is the end-of-input sentinel.
-(defn- json-at
-  (s i n)
+(defn- json-at (s i n)
   "The code point at `i`, or -1 at/after the end (so callers never index past `n`)."
   (if (< i n) (nth s i) -1))
 
-(defn- json-slice
-  (s i end)
+(defn- json-slice (s i end)
   "The code points [i, end) of `s`, joined back into a string."
   (%codepoints->string (seq/subvec s i end)))
 (sig json-slice (vector int any -> string))
 
 (defn- ws? (c) (or (= c 32) (= c 9) (= c 10) (= c 13)))
 
-(defn- skip-ws
-  (s i n)
+(defn- skip-ws (s i n)
   (if (and (< i n) (ws? (nth s i))) (skip-ws s (+ i 1) n) i))
 (sig skip-ws (vector int int -> int))
 
 (defn- digit? (c) (and (>= c 48) (<= c 57)))
 
 ;; -- numbers --
-(defn- num-end
-  (s i n)
+(defn- num-end (s i n)
   (if (< i n)
     (let (c (nth s i))
       ;; digit or one of `-+.eE` (45 43 46 101 69)
@@ -111,13 +104,11 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 ;;   frac = . digit+,  exp = [eE] [+-]? digit+
 ;; before handing it to `string/->number`. The validators walk the same code vector
 ;; over the token's [i, end) range — no token string is built unless it parses.
-(defn- digits-run
-  (s i n)
+(defn- digits-run (s i n)
   ; consume zero or more digits
   (if (and (< i n) (digit? (nth s i))) (digits-run s (+ i 1) n) i))
 
-(defn- int-end
-  (s i n)
+(defn- int-end (s i n)
   "Index after the integer part at `i`, or nil. A lone `0`, or `[1-9]` then digits —
 no leading zeros."
   (cond
@@ -127,8 +118,7 @@ no leading zeros."
     (digit? (nth s i)) (digits-run s (+ i 1) n)
     else nil))
 
-(defn- frac-end
-  (s i n)
+(defn- frac-end (s i n)
   "Index after an optional `.digit+` fraction at `i`; `i` unchanged if none; nil if a
 `.` isn't followed by a digit."
   (if (and (< i n) (= (nth s i) 46))
@@ -137,8 +127,7 @@ no leading zeros."
       nil)
     i))
 
-(defn- exp-end
-  (s i n)
+(defn- exp-end (s i n)
   "Index after an optional `[eE][+-]?digit+` exponent at `i`; `i` unchanged if none;
 nil if malformed."
   (if (and (< i n) (or (= (nth s i) 101) (= (nth s i) 69)))
@@ -151,8 +140,7 @@ nil if malformed."
     i))
 
 ; the grammar must consume the whole token
-(defn- strict-number?
-  (s i end)
+(defn- strict-number? (s i end)
   "True iff the codes [i, end) form a strict JSON number (rejects a leading `+` and
 leading zeros)."
   (let (j (if (and (< i end) (= (nth s i) 45)) (+ i 1) i)
@@ -162,16 +150,14 @@ leading zeros)."
         (and j
           (let (j (exp-end s j end))
             (and j (= j end))))))))
-(defn- json-number
-  (s i n)
+(defn- json-number (s i n)
   (let (end (num-end s i n))
     (if (strict-number? s i end)
       [(string/->number (json-slice s i end)) end]
       (error "json: invalid number '" (json-slice s i end) "' at index " i))))
 
 ;; -- strings --
-(defn- hex-val
-  (c)
+(defn- hex-val (c)
   "The value of hex-digit code `c` (0-9 a-f A-F), or nil."
   (cond
     (and (>= c 48) (<= c 57)) (- c 48)
@@ -179,21 +165,18 @@ leading zeros)."
     (and (>= c 65) (<= c 70)) (- c 55)
     else nil))
 
-(defn- hex1
-  (s i)
+(defn- hex1 (s i)
   (let (v (hex-val (nth s i)))
     (if (nil? v) (error "json: invalid hex digit in \\u escape at index " i) v)))
 
-(defn- hex4
-  (s i)
+(defn- hex4 (s i)
   "The int value of the four hex digits at `i` (a `\\uXXXX` body)."
   (+ (* 4096 (hex1 s i))
     (* 256 (hex1 s (+ i 1)))
     (* 16 (hex1 s (+ i 2)))
     (hex1 s (+ i 3))))
 
-(defn- json-unicode
-  (s i n)
+(defn- json-unicode (s i n)
   "A `\\uXXXX` escape body starting at `i` (after the `u`): decode one BMP code
 point, or combine a high+low surrogate pair into one astral code point. Returns
 `[code next-index]`."
@@ -219,8 +202,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
         (and (>= hi 56320) (<= hi 57343)) (error "json: lone low surrogate at index " i)
         else [hi (+ i 4)]))))
 
-(defn- json-escape
-  (s i n)
+(defn- json-escape (s i n)
   "An escape body starting at `i` (after the backslash). Returns `[code next-index]`."
   (let (c (json-at s i n))
     (cond
@@ -246,8 +228,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
 ;; `acc` is the content CODES collected in reverse; the string is assembled once at
 ;; the close quote. (The old per-char `(str acc c)` rebuilt the whole accumulator
 ;; each step — O(n²) over a long string body.)
-(defn- string-acc
-  (s i n acc)
+(defn- string-acc (s i n acc)
   (let (c (json-at s i n))
     (cond
       (= c -1) (error "json: unterminated string")
@@ -265,20 +246,17 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
           (string/pad-left (string/upper (int->hex c)) 4 "0"))
       else (string-acc s (+ i 1) n (cons c acc)))))
 
-(defn- json-string
-  (s i n)
+(defn- json-string (s i n)
   "A string body starting at `i` (just after the opening quote). Returns `[str end]`."
   (string-acc s i n nil))
 
 ;; -- literals --
-(defn- lit-match
-  (s i codes k m)
+(defn- lit-match (s i codes k m)
   (if (>= k m)
     true
     (and (= (nth s (+ i k)) (nth codes k)) (lit-match s i codes (+ k 1) m))))
 
-(defn- json-lit
-  (s i n codes val)
+(defn- json-lit (s i n codes val)
   "Match the literal spelled by code-vector `codes` at `i`; returns `[val end]`."
   (let (m (count codes)
         end (+ i m))
@@ -287,8 +265,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       (error "json: invalid literal at index " i))))
 
 ;; -- arrays --
-(defn- array-acc
-  (s i n acc)
+(defn- array-acc (s i n acc)
   (let ([v j0] (json-value s i n)
         j (skip-ws s j0 n)
         acc2 (cons v acc)
@@ -300,8 +277,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       ; ]
       else (error "json: expected ',' or ']' in array at index " j))))
 
-(defn- json-array
-  (s i n)
+(defn- json-array (s i n)
   "An array body starting at `i` (just after `[`). Returns `[vector end]`."
   (let (i2 (skip-ws s i n))
     (if (= (json-at s i2 n) 93)
@@ -309,8 +285,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       (array-acc s i2 n nil))))
 
 ;; -- objects --
-(defn- object-acc
-  (s i n acc)
+(defn- object-acc (s i n acc)
   (let (i2 (skip-ws s i n))
     (if (not (= (json-at s i2 n) 34))
       (error "json: expected string key at index " i2)
@@ -328,16 +303,14 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
               (= c 125) [acc2 (+ j3 1)]
               else (error "json: expected ',' or '}' in object at index " j3))))))))
 
-(defn- json-object
-  (s i n)
+(defn- json-object (s i n)
   "An object body starting at `i` (just after `{`). Returns `[map end]`."
   (let (i2 (skip-ws s i n))
     (if (= (json-at s i2 n) 125)
       [{} (+ i2 1)]
       (object-acc s i2 n {}))))
 
-(defn- json-value
-  (s i n)
+(defn- json-value (s i n)
   "One JSON value at index `i` (whitespace already skipped). Returns `[value end]`."
   (let (c (json-at s i n))
     (cond
@@ -380,8 +353,7 @@ on malformed input or trailing content. Pure.
 
 ;; ---- encode -----------------------------------------------------------------
 
-(defn- enc-u
-  (cp)
+(defn- enc-u (cp)
   "The `\\u00XX` escape for a control code point `cp` (< 0x20)."
   (str "\\u00"
     (string/char-at json-hex-digits (math/quot cp 16))
@@ -393,16 +365,14 @@ on malformed input or trailing content. Pure.
   (map (fn (cp) [(cp->string cp) (enc-u cp)])
     (filter (fn (cp) (not (includes? [8 9 10 12 13] cp))) (range 32))))
 
-(defn- needs-escape?
-  (s)
+(defn- needs-escape? (s)
   "True if `s` contains any char JSON must escape: `\"` (34), `\\` (92), or a control
 char (< 0x20). The common case is a clean ASCII string, so this one O(n) codepoint
 scan lets `enc-escapes` skip ~27 whole-string `replace` passes (backslash/quote/
 the named escapes + every C0 control) that would each find nothing."
   (any? (fn (c) (or (< c 32) (= c 34) (= c 92))) (string/->codepoints s)))
 
-(defn- enc-escapes
-  (s)
+(defn- enc-escapes (s)
   "Escape the JSON-special characters in `s` (backslash first)."
   (if (not (needs-escape? s))
     ; clean — emit as-is (the overwhelmingly common case)
@@ -420,8 +390,7 @@ the named escapes + every C0 control) that would each find nothing."
 
 (defn- enc-string (s) (str "\"" (enc-escapes s) "\""))
 
-(defn- enc-key
-  (k)
+(defn- enc-key (k)
   "A JSON object key: a string as-is, a keyword/symbol by name, else its `str`."
   (enc-string (cond (keyword? k) (->string k) (symbol? k) (->string k) (string? k) k else (str k))))
 
@@ -430,8 +399,7 @@ the named escapes + every C0 control) that would each find nothing."
 ;; old shape built a string per pair, `join`ed per object (a lazy seq-view + realize
 ;; per node), and re-copied every enclosing level — this emits each fragment exactly
 ;; once and concatenates exactly once.
-(defn- emit-pairs
-  (pairs acc first?)
+(defn- emit-pairs (pairs acc first?)
   (if (empty? pairs)
     acc
     (let ([k v] (first pairs)
@@ -439,8 +407,7 @@ the named escapes + every C0 control) that would each find nothing."
           acc2 (emit v (cons ":" (cons (enc-key k) acc1))))
       (emit-pairs (rest pairs) acc2 false))))
 
-(defn- emit-items
-  (xs i n acc)
+(defn- emit-items (xs i n acc)
   (if (>= i n)
     acc
     (emit-items xs
@@ -448,8 +415,7 @@ the named escapes + every C0 control) that would each find nothing."
       n
       (emit (nth xs i) (if (= i 0) acc (cons "," acc))))))
 
-(defn- emit-list
-  (xs acc first?)
+(defn- emit-list (xs acc first?)
   (if (empty? xs)
     acc
     (emit-list (rest xs)
@@ -476,14 +442,12 @@ the named escapes + every C0 control) that would each find nothing."
   custom wire shape, and for any kind JSON has no built-in rule for."
   (->json [self] :-> any))
 
-(defn- custom
-  (v)
+(defn- custom (v)
   "`v`'s own `JsonEncode/->json` impl, or nil when its identity has none. `JsonEncode`
 registers no `:default`, so nil here means \"no rule\" rather than \"the fallback\"."
   (%impl-for '[JsonEncode ->json] (%identity-of v)))
 
-(defn- emit-record
-  (v acc)
+(defn- emit-record (v acc)
   "Emit record `v`. A custom `JsonEncode` impl decides the wire shape; otherwise the
 default is its FIELDS — the internal `:__id__` identity must never reach the wire."
   (let (custom (custom v))
@@ -491,8 +455,7 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
       (emit (custom v) acc)
       (cons "}" (emit-pairs (%map-pairs (fields v)) (cons "{" acc) true)))))
 
-(defn- emit
-  (v acc)
+(defn- emit (v acc)
   "Emit `v`'s JSON fragments onto `acc` (reversed); returns the new acc."
   (cond
     (nil? v) (cons "null" acc)

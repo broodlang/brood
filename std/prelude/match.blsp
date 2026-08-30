@@ -46,8 +46,7 @@
 ;; `:when` is for. Read as a plain list pattern it would silently bind a variable
 ;; named `not`, so name it (ADR-152).
 (defn- %match-not-pattern? (p) (and (pair? p) (= (first p) 'not)))
-(defn- %match-not-pattern-error
-  (p)
+(defn- %match-not-pattern-error (p)
   (error (str "match: `(not …)` is not a pattern — a negative match binds nothing,"
            " so put the test in a `:when` guard instead:"
            " (x :when (not "
@@ -67,8 +66,7 @@
 ;; Every alternative of an `or` must bind the SAME names — otherwise the body could
 ;; reference a name only some alternatives bind, and which one it is depends on the
 ;; input. Rust enforces the same rule for the same reason.
-(defn- %match-or-check
-  (alts)
+(defn- %match-or-check (alts)
   (let (name-sets (map (fn (a) (sort (map ->string (%pattern-vars a)))) alts))
     (when (not (every? (fn (ns) (= ns (first name-sets))) name-sets))
       (error (str "match: every alternative of an `(or …)` pattern must bind the same"
@@ -78,13 +76,11 @@
                " Use separate clauses when the bindings differ.")))))
 
 ;; -- expand-time helpers --
-(defn- %match-member?
-  (x xs)
+(defn- %match-member? (x xs)
   (cond (empty? xs) false (= x (first xs)) true else (%match-member? x (rest xs))))
 
 (defn- %match-vec->list (v) (%match-vec-collect v (dec (%vector-length v)) nil))
-(defn- %match-vec-collect
-  (v i acc)
+(defn- %match-vec-collect (v i acc)
   (if (< i 0) acc (%match-vec-collect v (dec i) (cons (%vector-ref v i) acc))))
 
 ;; The variables a pattern binds. Threaded as `bound` through the compiler so a
@@ -116,8 +112,7 @@ NON-LINEAR patterns (the same name twice) work.
     else nil))
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-seq-vars
-    (pats)
+  (defn- %match-seq-vars (pats)
     (cond
       (empty? pats) nil
       (= (first pats) '&) (%match-seq-vars (rest pats))
@@ -125,8 +120,7 @@ NON-LINEAR patterns (the same name twice) work.
 
 ;; The core: compile `pat` against the value of the symbol `target`, given the
 ;; already-`bound` names; on a match run `success`, else `fail`. Returns code.
-(defn- %match-compile
-  (pat target bound success fail)
+(defn- %match-compile (pat target bound success fail)
   (cond
     (%match-wildcard? pat) success
     (%match-bind-sym? pat)
@@ -182,15 +176,13 @@ NON-LINEAR patterns (the same name twice) work.
 ;;   & rest                bind the remaining bytes (must be the last segment)
 ;; Without a trailing `& rest`, the bytes must be consumed exactly (count match).
 
-(defn- %match-bytes-pattern?
-  (pat)
+(defn- %match-bytes-pattern? (pat)
   (and (pair? pat) (= (first pat) (quote bytes))))
 
 ; literal → binds nothing
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-bytes-vars
-    (segs)
+  (defn- %match-bytes-vars (segs)
     (cond
       (empty? segs) nil
       (= (first segs) '&) (%match-bytes-vars (rest segs))
@@ -203,8 +195,7 @@ NON-LINEAR patterns (the same name twice) work.
       (%match-bind-sym? (first segs)) (cons (first segs) (%match-bytes-vars (rest segs)))
       else (%match-bytes-vars (rest segs)))))
 ;; typed integer segment spec: :u8/:i8/:u16[-be/-le]/…/:i64[-be/-le] → [width signed? little?]
-(defn- %match-bytes-int-spec
-  (kw)
+(defn- %match-bytes-int-spec (kw)
   (cond
     (= kw :u8) [1 false false]
     (= kw :i8) [1 true false]
@@ -230,8 +221,7 @@ NON-LINEAR patterns (the same name twice) work.
 
 ;; (sym :u16) — a typed integer segment: fixed width, endianness + signedness
 ;; from the spec keyword, value read via the bytes-uint/bytes-int family.
-(defn- %match-bytes-typed-seg
-  (seg more target off bound success fail)
+(defn- %match-bytes-typed-seg (seg more target off bound success fail)
   (let (s (first seg)
         spec (%match-bytes-int-spec (second seg)))
     (if (nil? spec)
@@ -254,8 +244,7 @@ NON-LINEAR patterns (the same name twice) work.
                ~fail)
           ;; non-linear: an already-bound binder requires an equal value
           (%match-member? s bound)
-            `(if (and (<= (+ ~off ~w) (%byte-length ~target))
-                   (%eq (~reader ~target ~off ~w) ~s))
+            `(if (and (<= (+ ~off ~w) (%byte-length ~target)) (%eq (~reader ~target ~off ~w) ~s))
                (let (~noff (+ ~off ~w))
                  ~(%match-bytes-segs more target noff bound success fail))
                ~fail)
@@ -265,14 +254,12 @@ NON-LINEAR patterns (the same name twice) work.
                  ~(%match-bytes-segs more target noff (append bound (list s)) success fail))
                ~fail))))))
 
-(defn- %match-compile-bytes
-  (segs target bound success fail)
+(defn- %match-compile-bytes (segs target bound success fail)
   `(if (bytes? ~target)
      ~(%match-bytes-segs segs target 0 bound success fail)
      ~fail))
 
-(defn- %match-bytes-segs
-  (segs target off bound success fail)
+(defn- %match-bytes-segs (segs target off bound success fail)
   (cond
     ;; exhausted: require the bytes were consumed exactly
     (empty? segs) `(if (%eq ~off (%byte-length ~target)) ~success ~fail)
@@ -283,8 +270,7 @@ NON-LINEAR patterns (the same name twice) work.
         (error "match: bytes pattern '&' must be followed by exactly one rest binding"))
     else (%match-bytes-seg (first segs) (rest segs) target off bound success fail)))
 
-(defn- %match-bytes-seg
-  (seg more target off bound success fail)
+(defn- %match-bytes-seg (seg more target off bound success fail)
   (let (noff (gensym "off"))
     (cond
       ;; (sym :u16) — a typed integer segment (spec keyword in size position)
@@ -317,8 +303,7 @@ NON-LINEAR patterns (the same name twice) work.
       ;; non-linear patterns, consistent with the vector/list matchers)
       (%match-bind-sym? seg)
         (if (%match-member? seg bound)
-          `(if (and (< ~off (%byte-length ~target))
-                 (%eq (%byte-at ~target ~off) ~seg))
+          `(if (and (< ~off (%byte-length ~target)) (%eq (%byte-at ~target ~off) ~seg))
              (let (~noff (+ ~off 1))
                ~(%match-bytes-segs more target noff bound success fail))
              ~fail)
@@ -349,8 +334,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; list pattern: split off an optional `& rest` tail, then bind element-wise.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-split
-    (pats)
+  (defn- %match-split (pats)
     (cond
       (empty? pats) [nil nil false]
       (= (first pats) '&)
@@ -361,8 +345,7 @@ NON-LINEAR patterns (the same name twice) work.
         (let (sub (%match-split (rest pats)))
           [(cons (first pats) (nth sub 0)) (nth sub 1) (nth sub 2)]))))
 
-(defn- %match-compile-list
-  (pat target bound success fail)
+(defn- %match-compile-list (pat target bound success fail)
   (let (parts (%match-split pat))
     (%match-compile-seq (nth parts 0) (nth parts 1) (nth parts 2) target bound success fail)))
 
@@ -370,15 +353,13 @@ NON-LINEAR patterns (the same name twice) work.
 ;; is duplicated per alternative rather than hoisted into a thunk — that keeps every
 ;; alternative's body in TAIL position (a `match` in tail position must stay O(1)
 ;; stack), and alternatives are nearly always literals, so the duplication is small.
-(defn- %match-compile-or
-  (alts target bound success fail)
+(defn- %match-compile-or (alts target bound success fail)
   (do
     (%match-or-check alts)
     (%match-compile-or-chain alts target bound success fail)))
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-compile-or-chain
-    (alts target bound success fail)
+  (defn- %match-compile-or-chain (alts target bound success fail)
     (if (empty? alts)
       fail
       (%match-compile (first alts)
@@ -392,8 +373,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; constraint, as everywhere else). `(and whole {:keys [a]})` is the `:as` idiom.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-compile-and
-    (pats target bound success fail)
+  (defn- %match-compile-and (pats target bound success fail)
     (if (empty? pats)
       success
       (%match-compile (first pats)
@@ -408,8 +388,7 @@ NON-LINEAR patterns (the same name twice) work.
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-compile-seq
-    (pats rest-pat has-rest target bound success fail)
+  (defn- %match-compile-seq (pats rest-pat has-rest target bound success fail)
     (if (empty? pats)
       (if has-rest
         (%match-compile rest-pat target bound success fail)
@@ -430,8 +409,7 @@ NON-LINEAR patterns (the same name twice) work.
         `(if (pair? ~target) (let (~hd (first ~target) ~tl (rest ~target)) ~head) ~fail)))))
 
 ;; vector pattern: a fixed-length tuple, matched element-wise by index.
-(defn- %match-compile-vector
-  (pat target bound success fail)
+(defn- %match-compile-vector (pat target bound success fail)
   (let (elems (%match-vec->list pat) n (count elems))
     (when (%match-member? '& elems)
       (error "match: '&' (rest) is not allowed in a vector pattern — vectors are fixed-length"))
@@ -441,8 +419,7 @@ NON-LINEAR patterns (the same name twice) work.
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-compile-velems
-    (pats target i bound success fail)
+  (defn- %match-compile-velems (pats target i bound success fail)
     (if (empty? pats)
       success
       (let (p (first pats)
@@ -473,8 +450,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; `:as` stays rejected. With general `{key subpattern}` support (ADR-160) a stray
 ;; `:as` would otherwise read as "this map must have an `:as` key", silently matching
 ;; something else entirely — and the `and`-pattern spells the intent exactly.
-(defn- %match-map-check
-  (pat)
+(defn- %match-map-check (pat)
   (when (contains? pat :as)
     (error (str "match: a map pattern has no `:as` — capture the whole value with an"
              " `and` pattern instead: (and "
@@ -483,20 +459,17 @@ NON-LINEAR patterns (the same name twice) work.
              " map.)"))))
 
 ;; :keys value is a vector [a b] (or a list); return it as a list of symbols.
-(defn- %match-map-keys
-  (pat)
+(defn- %match-map-keys (pat)
   (let (kv (get pat :keys))
     (cond (nil? kv) nil (vector? kv) (%match-vec->list kv) else kv)))
 
 ;; The explicit `{key subpattern}` entries — every key except the two markers — as
 ;; a list of `[key subpattern]` pairs.
-(defn- %match-map-entries
-  (pat)
+(defn- %match-map-entries (pat)
   (filter (fn (kv) (not (or (= (first kv) :keys) (= (first kv) :or))))
     (%map-pairs pat)))
 
-(defn- %match-map-vars
-  (pat)
+(defn- %match-map-vars (pat)
   (do
     (%match-map-check pat)
     (append (%match-map-keys pat)
@@ -504,8 +477,7 @@ NON-LINEAR patterns (the same name twice) work.
         nil
         (%match-map-entries pat)))))
 
-(defn- %match-compile-map
-  (pat target bound success fail)
+(defn- %match-compile-map (pat target bound success fail)
   (do
     (%match-map-check pat)
     ;; Explicit `{key subpattern}` entries are tested FIRST (they can fail), then the
@@ -528,8 +500,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; literal (`{[1 2] p}` looks up the vector `[1 2]`), never an expression to evaluate.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-compile-map-entries
-    (entries target bound success fail)
+  (defn- %match-compile-map-entries (entries target bound success fail)
     (if (empty? entries)
       success
       (let (kv (first entries)
@@ -553,8 +524,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; its :or default (evaluated only then) if one is given, else nil.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-map-binds
-    (keys ors target success)
+  (defn- %match-map-binds (keys ors target success)
     (if (empty? keys)
       success
       (let (k (first keys)
@@ -569,8 +539,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; value's `:__id__` (or nil for a non-record), so the whole test is a single `%eq` against
 ;; the id derived from `name` at expansion; a non-record simply fails. The inner map pattern
 ;; is compiled by the ordinary map path, so `{:k p}` / `:keys` / `:or` all work unchanged.
-(defn- %match-compile-record
-  (pat target bound success fail)
+(defn- %match-compile-record (pat target bound success fail)
   (let (name (second pat)
         mappat (first (rest (rest pat))))
     (when (not (symbol? name))
@@ -589,8 +558,7 @@ NON-LINEAR patterns (the same name twice) work.
          ~fail))))
 
 ;; -- clauses: (pattern [:when guard] body...) — one shape for match / fn / receive --
-(defn- %match-parse-clause
-  (clause)
+(defn- %match-parse-clause (clause)
   (if (not (pair? clause))
     (error (str "match: each clause must be a (pattern body...) list, got " (pr-str clause)))
     (let (pat (first clause) more (rest clause))
@@ -602,12 +570,10 @@ NON-LINEAR patterns (the same name twice) work.
 
 ;; A clause is irrefutable (always matches) iff its pattern is _ or a bare bind
 ;; and it has no guard. Such a clause must be last; anything after it is dead.
-(defn- %match-irrefutable?
-  (pat guard)
+(defn- %match-irrefutable? (pat guard)
   (and (nil? guard) (or (%match-wildcard? pat) (%match-bind-sym? pat))))
 
-(defn- %match-compile-clause
-  (clause target fail)
+(defn- %match-compile-clause (clause target fail)
   (let (parsed (%match-parse-clause clause)
         pat (nth parsed 0)
         guard (nth parsed 1)
@@ -617,14 +583,12 @@ NON-LINEAR patterns (the same name twice) work.
 
 ;; The no-match failure: a structured, catchable, self-describing value carrying
 ;; the context (:match / :let / a fn name), the value, and the patterns tried.
-(defn- %match-no-match
-  (context target patterns)
+(defn- %match-no-match (context target patterns)
   `(throw [:match-error (quote ~context) ~target (quote ~patterns)]))
 
 (defn- %match-clause-patterns (clauses) (map (fn (c) (if (pair? c) (first c) c)) clauses))
 
-(defn- %match-check-reachable
-  (clause following)
+(defn- %match-check-reachable (clause following)
   (let (parsed (%match-parse-clause clause))
     (when (and (%match-irrefutable? (nth parsed 0) (nth parsed 1)) (not (empty? following)))
       (error "match: unreachable clause after a catch-all (an irrefutable pattern must come last)"))))
@@ -633,8 +597,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; so quoted user data can never contain it and vectors need no descent).
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-count-sym
-    (form s)
+  (defn- %match-count-sym (form s)
     (cond
       (= form s) 1
       (pair? form) (+ (%match-count-sym (first form) s) (%match-count-sym (rest form) s))
@@ -650,8 +613,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; itself built on this file.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-splice-fail-in
-    (form k code)
+  (defn- %match-splice-fail-in (form k code)
     (cond
       (and (pair? form) (= (first form) k) (nil? (rest form))) [true code]
       (pair? form)
@@ -661,16 +623,14 @@ NON-LINEAR patterns (the same name twice) work.
             [true (cons (second head) (second tail))]
             [false form]))
       else [false form])))
-(defn- %match-splice-fail
-  (form k code)
+(defn- %match-splice-fail (form k code)
   (second (%match-splice-fail-in form k code)))
 
 ;; Remaining budget after counting `form`'s pair nodes, or -1 once exhausted —
 ;; an early-exit size probe (big trees aren't walked past the budget).
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-size-budget
-    (form budget)
+  (defn- %match-size-budget (form budget)
     (cond
       (< budget 0) -1
       (pair? form) (%match-size-budget (rest form) (%match-size-budget (first form) (- budget 1)))
@@ -689,8 +649,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; 2–4-arm receive/fn dispatch stays thunk-free, zero runtime cost); 2+ uses of
 ;; a big one → bind it once as `(let (k (fn () rest-code)) …)`. The `(k)` call
 ;; is in tail position wherever fail was, so match stays TCO-safe.
-(defn- %match-build-clause
-  (clause target rest-code)
+(defn- %match-build-clause (clause target rest-code)
   (let (k (gensym "mfail")
         compiled (%match-compile-clause clause target (list k))
         uses (%match-count-sym compiled k))
@@ -704,8 +663,7 @@ NON-LINEAR patterns (the same name twice) work.
 ;; tail position of the generated if/let, so a `match` in tail position is TCO-safe.
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %match-build-from
-    (clauses target fail)
+  (defn- %match-build-from (clauses target fail)
     (if (empty? clauses)
       fail
       (let (clause (first clauses)
@@ -714,8 +672,7 @@ NON-LINEAR patterns (the same name twice) work.
         (%match-check-reachable clause following)
         (%match-build-clause clause target rest-code)))))
 
-(defn- %match-build
-  (clauses target context)
+(defn- %match-build (clauses target context)
   (%match-build-from clauses
     target
     (%match-no-match context target (%match-clause-patterns clauses))))
@@ -742,8 +699,7 @@ the surface the special forms target directly when they need their own context."
 ;; under "one spelling each"): `case` accepts only *literal* tests, so it cannot
 ;; silently bind where you meant to compare — the one trap `match` has. A bare
 ;; symbol test is therefore rejected rather than read as a binder.
-(defn- %case-check-test
-  (t)
+(defn- %case-check-test (t)
   (cond
     (or (keyword? t) (int? t) (float? t) (decimal? t) (ratio? t) (string? t) (bool? t) (nil? t)) t
     (and (pair? t) (= (first t) 'quote)) t
@@ -760,8 +716,7 @@ the surface the special forms target directly when they need their own context."
 ;; Flat `test result …` pairs → wrapped match clauses; a lone trailing form is the
 ;; default (an `_` clause). Flat pairs match `cond`'s shape, which is where a
 ;; reader's eye already is for value dispatch.
-(defn- %case-clauses
-  (forms acc)
+(defn- %case-clauses (forms acc)
   (cond
     (empty? forms) (reverse acc)
     (empty? (rest forms)) (reverse (cons (list '_ (first forms)) acc))

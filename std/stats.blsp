@@ -22,8 +22,7 @@ Empty sequences raise unless documented otherwise.
     (/ (* 1.0 (sum xs)) n)))
 (sig mean (seqable -> float))
 
-(defn- sum-of-squares
-  (xs m)
+(defn- sum-of-squares (xs m)
   (fold (fn (acc x) (+ acc (* (- x m) (- x m)))) 0 xs))
 
 (defn variance (xs)
@@ -132,8 +131,7 @@ For an even-length sequence, returns the mean of the two middle values.
     (stats/mode [1 1 2])     → 1"
   (when (empty? xs) (error "stats/mode: empty sequence"))
   (let (freq (frequencies xs))
-    (fold (fn (best x)
-            (if (> (get freq x) (get freq best)) x best))
+    (fold (fn (best x) (if (> (get freq x) (get freq best)) x best))
       (first xs)
       (rest xs))))
 (sig mode (seqable -> any))

@@ -243,8 +243,7 @@
                  1763668414462081127.142857M)
           bad (fold (fn (acc r)
                       (fold (fn (acc2 d)
-                              (if (and (= (< r d) (< (- r d) 0))
-                                    (= (> r d) (> (- r d) 0)))
+                              (if (and (= (< r d) (< (- r d) 0)) (= (> r d) (> (- r d) 0)))
                                 acc2
                                 (cons (list r d) acc2)))
                         acc decs))

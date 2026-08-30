@@ -333,8 +333,7 @@
 (defn m-old2 (s) s)
 (meta m-old2 :deprecated "0.14.0")
 
-(defn- stability-messages
-  (src)
+(defn- stability-messages (src)
   "The stability diagnostics the checker reports for `src`."
   (filter (fn (m) (or (includes? m "is deprecated") (includes? m "is beta")))
     (map (fn (d) (get d :message)) (reflect/check-string-structured src))))
@@ -352,9 +351,7 @@
   (test "`:deprecated` warns at each use and names the replacement"
     (let (msgs (stability-messages "(defn u (s) (contract-test/m-old s))"))
       (assert= true
-        (any? (fn (m)
-                (and (includes? m "is deprecated since 0.14.0")
-                  (includes? m "m-new")))
+        (any? (fn (m) (and (includes? m "is deprecated since 0.14.0") (includes? m "m-new")))
           msgs))))
 
   (test "a deprecation is ADVISORY — it prints, it does not gate the build"

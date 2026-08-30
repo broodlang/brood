@@ -22,20 +22,17 @@ always — useful for content-based IDs and idempotent generation.")
 
 (def- hex-digits "0123456789abcdef")
 
-(defn- int->hex
-  (n)
+(defn- int->hex (n)
   "Convert a non-negative integer to a lowercase hex string (no leading zeros)."
   (if (= n 0) "0" (int->hex-loop n "")))
 
-(defn- int->hex-loop
-  (n acc)
+(defn- int->hex-loop (n acc)
   (if (= n 0)
     acc
     (int->hex-loop (math/quot n 16)
       (str (string/char-at hex-digits (math/rem n 16)) acc))))
 
-(defn- pad-hex
-  (s n)
+(defn- pad-hex (s n)
   "Left-pad hex string `s` with zeros to exactly `n` characters."
   (if (>= (string/length s) n)
     (string/substring s (- (string/length s) n) (string/length s))
@@ -50,16 +47,14 @@ always — useful for content-based IDs and idempotent generation.")
 
 (def- variant-chars "89ab")
 
-(defn- hex-nibble
-  (c)
+(defn- hex-nibble (c)
   "Parse a lowercase hex char into 0–15."
   (let (cp (string/char->int c))
     (if (and (>= cp 48) (<= cp 57))
       (- cp 48)
       (+ (- cp 97) 10))))
 
-(defn- variant-char
-  (raw-hex-char)
+(defn- variant-char (raw-hex-char)
   "Map any hex char to one of 8/9/a/b for the RFC 4122 variant nibble."
   (string/char-at variant-chars (math/rem (hex-nibble raw-hex-char) 4)))
 
@@ -117,20 +112,17 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
 
 ;; ---- validation -------------------------------------------------------------
 
-(defn- hex?
-  (c)
+(defn- hex? (c)
   (let (cp (string/char->int c))
     (or (and (>= cp 48) (<= cp 57))
       (and (>= cp 97) (<= cp 102))
       (and (>= cp 65) (<= cp 70)))))
 
-(defn- valid-segment?
-  (s expected-len)
+(defn- valid-segment? (s expected-len)
   (and (= (string/length s) expected-len)
     (all-hex? s 0 expected-len)))
 
-(defn- all-hex?
-  (s i n)
+(defn- all-hex? (s i n)
   (if (>= i n)
     true
     (if (hex? (string/char-at s i))
@@ -174,13 +166,11 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
 (def ns-oid "6ba7b812-9dad-11d1-80b4-00c04fd430c8")
 (def ns-x500 "6ba7b814-9dad-11d1-80b4-00c04fd430c8")
 
-(defn- str->bytes
-  (s)
+(defn- str->bytes (s)
   "Parse a UUID string (with dashes) into a list of 16 byte ints."
   (parse-bytes (string/replace s "-" "") 0 nil))
 
-(defn- parse-bytes
-  (hex i acc)
+(defn- parse-bytes (hex i acc)
   (if (>= i (string/length hex))
     (reverse acc)
     (let (hi (hex-nibble (string/char-at hex i))
@@ -188,8 +178,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
       (parse-bytes hex (+ i 2) (cons (+ (* hi 16) lo) acc)))))
 (sig parse-bytes (string int list -> list))
 
-(defn- bytes->str
-  (bytes version-nibble)
+(defn- bytes->str (bytes version-nibble)
   "Format 16 byte ints as a UUID string, setting version nibble and variant bits."
   (let (bv (into [] bytes)
         ;; Set version in byte 6: high nibble = version, low nibble kept
@@ -215,8 +204,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
       (string/substring hex 20 32))))
 (sig bytes->str (list int -> string))
 
-(defn- name-based
-  (ns-uuid name hash-fn version)
+(defn- name-based (ns-uuid name hash-fn version)
   "Generic name-based UUID: hash(namespace_bytes || name_bytes), set version."
   (let (ns-bytes (str->bytes ns-uuid)
         name-bytes (seq (string/->bytes name))

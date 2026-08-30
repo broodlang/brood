@@ -52,30 +52,25 @@
     {:dir "brood-life" :publish? false}
     {:dir "brood-terminal" :publish? false}])
 
-(defn- env-flag?
-  (name)
+(defn- env-flag? (name)
   "Whether environment variable `name` is set to anything but the empty string."
   (let (v (os/env name)) (and v (not (= v "")))))
 
-(defn- sh
-  (directory command)
+(defn- sh (directory command)
   "Run `command` in `directory` through a shell; returns its exit code."
   (os/run-process "sh" ["-c" (str "cd " directory " && " command)]))
 
-(defn- step
-  (directory label command)
+(defn- step (directory label command)
   "Run one step, printing a heading first. Returns true when it succeeded."
   (io/puts (str "  → " label))
   (= 0 (sh directory command)))
 
-(defn- dirty?
-  (directory)
+(defn- dirty? (directory)
   "Whether the repo has uncommitted changes. A publish packages the WORKING TREE, so a
 dirty one ships bytes that are in no commit — untraceable afterwards to anything."
   (not (= 0 (sh directory "git diff --quiet && git diff --cached --quiet"))))
 
-(defn- process-repo
-  (root entry publish?)
+(defn- process-repo (root entry publish?)
   "Verify one repo, and publish it when asked. Returns a result map."
   (let (directory (path/join root (get entry :dir))
         name (get entry :dir))
@@ -104,8 +99,7 @@ dirty one ships bytes that are in no commit — untraceable afterwards to anythi
 
 ;; Walk the list in order, stopping at the first failure — see the header: continuing past
 ;; a red repo is how a train ends up half-published.
-(defn- run-all
-  (root publish? remaining acc)
+(defn- run-all (root publish? remaining acc)
   (if (empty? remaining)
     (reverse acc)
     (let (result (process-repo root (first remaining) publish?))

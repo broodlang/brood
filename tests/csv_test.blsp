@@ -161,8 +161,7 @@
 ;; decode-maps O(cols²) per row (400 columns measured 517 ms). `decode` already
 ;; returns vectors, so the conversion is hoisted out.
 
-(defn- csv-wide-header
-  (n acc)
+(defn- csv-wide-header (n acc)
   (if (= n 0) acc (csv-wide-header (- n 1) (cons (str "c" n) acc))))
 
 (describe "decode-maps — wide rows"

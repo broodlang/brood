@@ -21,8 +21,7 @@ spellings of one instant.")
 
 ;; ---- internal helpers -------------------------------------------------------
 
-(defn- dt-fdiv
-  (a b)
+(defn- dt-fdiv (a b)
   ;; Integer division toward negative infinity (floor division).
   (let (q (math/quot a b) r (math/rem a b))
     (if (< r 0) (- q 1) q)))
@@ -30,8 +29,7 @@ spellings of one instant.")
 
 ;; check-allow: deliberately non-tail — depth = the pad width — single digits.
 (check-allow :non-tail-recursion
-  (defn- dt-zero-pad
-    (n width)
+  (defn- dt-zero-pad (n width)
     ;; Render n as a decimal string of at least `width` digits. Handles negative n.
     (if (< n 0)
       (str "-" (dt-zero-pad (- n) (- width 1)))
@@ -44,14 +42,12 @@ spellings of one instant.")
 ;; Howard Hinnant's civil_from_days / days_from_civil algorithms.
 ;; Reference: https://howardhinnant.github.io/date_algorithms.html
 
-(defn- dt-days->ymd
-  (z)
+(defn- dt-days->ymd (z)
   ;; Days since 1970-01-01 → {:year :month :day}
   (let (z (+ z 719468)
         era (dt-fdiv z 146097)
         doe (- z (* era 146097))
-        yoe (dt-fdiv (+ (- doe (dt-fdiv doe 1460))
-                       (- (dt-fdiv doe 36524) (dt-fdiv doe 146096)))
+        yoe (dt-fdiv (+ (- doe (dt-fdiv doe 1460)) (- (dt-fdiv doe 36524) (dt-fdiv doe 146096)))
               365)
         y (+ yoe (* era 400))
         doy (- doe (+ (- (* 365 yoe) (dt-fdiv yoe 100)) (dt-fdiv yoe 4)))
@@ -62,8 +58,7 @@ spellings of one instant.")
     {:year y :month m :day d}))
 (sig dt-days->ymd (int -> map))
 
-(defn- dt-ymd->days
-  (year month day)
+(defn- dt-ymd->days (year month day)
   ;; Date → days since 1970-01-01
   (let (y (if (<= month 2) (- year 1) year)
         era (dt-fdiv y 400)
@@ -186,16 +181,14 @@ milliseconds."
   (->iso [self] :-> string))
 
 ;; The two halves, shared by the three impls (a datetime is date + \"T\" + time + \"Z\").
-(defn- dt-iso-date
-  (d)
+(defn- dt-iso-date (d)
   (str (dt-zero-pad (get d :year) 4)
     "-"
     (dt-zero-pad (get d :month) 2)
     "-"
     (dt-zero-pad (get d :day) 2)))
 
-(defn- dt-iso-time
-  (t)
+(defn- dt-iso-time (t)
   (str (dt-zero-pad (get t :hour 0) 2)
     ":"
     (dt-zero-pad (get t :minute 0) 2)
@@ -217,8 +210,7 @@ milliseconds."
 (impl Display datetime/date (->string [d] (->iso d)))
 (impl Display datetime/time-of-day (->string [t] (->iso t)))
 
-(defn- dt-fmt-code
-  (dt code)
+(defn- dt-fmt-code (dt code)
   (cond
     (= code "Y") (dt-zero-pad (year dt) 4)
     (= code "m") (dt-zero-pad (month dt) 2)
@@ -230,8 +222,7 @@ milliseconds."
     (= code "%") "%"
     else (str "%" code)))
 
-(defn- dt-fmt-loop
-  (dt fmt i n acc)
+(defn- dt-fmt-loop (dt fmt i n acc)
   (if (>= i n)
     acc
     (let (c (string/char-at fmt i))
@@ -254,16 +245,14 @@ milliseconds."
 
 ;; ---- parsing ----------------------------------------------------------------
 
-(defn- dt-parse-int
-  (s)
+(defn- dt-parse-int (s)
   ;; A missing component (`(nth parts i)` past the end) parses as nothing, like a bad one.
   (when s
     (let (n (string/->number s))
       (if (int? n) n nil))))
 (sig dt-parse-int ((or string nil) -> (or int nil)))
 
-(defn- dt-frac->ms
-  (frac)
+(defn- dt-frac->ms (frac)
   ;; Right-pad the fractional-second digits to 3 and parse as milliseconds.
   ;; "" → 0, "5" → 500, "05" → 50, "005" → 5, "123" → 123.
   (let (padded (str frac "000"))
@@ -280,12 +269,10 @@ milliseconds."
 ;; impossible date and quietly moves it is worse than one that rejects it: the
 ;; caller's validation looks like it passed. The calendar core underneath
 ;; (`days-in-month`, `leap-year?`) is correct — only the input gate was missing.
-(defn- dt-in-range?
-  (n lo hi)
+(defn- dt-in-range? (n lo hi)
   (and (int? n) (>= n lo) (<= n hi)))
 
-(defn- dt-parse-time-str
-  (s)
+(defn- dt-parse-time-str (s)
   ;; Parse "HH:MM:SS" or "HH:MM:SS.mmm" → a time-of-day, or nil.
   (let (dot-parts (string/split s ".")
         hms-str (first dot-parts)
@@ -335,8 +322,7 @@ nil. Hour 0–23, minute and second 0–59; anything else is nil."
 ;; values it *holds*, not about the inputs it can read: an offset names a real instant, so
 ;; the honest reading is to shift it to UTC rather than refuse it.
 
-(defn- dt-offset-index
-  (time-part)
+(defn- dt-offset-index (time-part)
   "Where a numeric zone designator starts in an ISO 8601 time part, or -1. A `-` cannot occur
   inside a time, so either sign marks the offset."
   (let (plus (index-of time-part "+")
@@ -346,8 +332,7 @@ nil. Hour 0–23, minute and second 0–59; anything else is nil."
       (>= minus 0) minus
       else -1)))
 
-(defn- dt-parse-offset-ms
-  (o)
+(defn- dt-parse-offset-ms (o)
   "The signed milliseconds a zone designator denotes — `+02:00`, `-05:30`, `+0200`, `+02` —
   or nil when it is not one. `Z` never reaches here; `parse-time` consumes it."
   (let (sign (if (string/starts-with? o "-") -1 1)
@@ -448,8 +433,7 @@ produces is UTC.
 ;; cross-type arithmetic review settled on: a coercion the user did not ask for is a wrong
 ;; answer that looks like a right one.
 
-(defn- dt-tod-ms
-  (t)
+(defn- dt-tod-ms (t)
   "A time-of-day as milliseconds since midnight. `->epoch-ms` cannot serve here — it reads
   the date fields a time-of-day does not have."
   (+ (* (get t :hour 0) 3600000)

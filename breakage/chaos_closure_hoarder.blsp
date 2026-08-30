@@ -25,8 +25,7 @@
         ;; fold from the outside in: wrap the accumulated string with another let
         ;; We want (let (v0 0) (let (v1 1) ... inner-body ...))
         ;; So fold from depth-1 down to 0, wrapping each time
-        wrapped (fold (fn (acc i)
-                        (str "(let (v" i " " (* i i) ") " acc ")"))
+        wrapped (fold (fn (acc i) (str "(let (v" i " " (* i i) ") " acc ")"))
                   inner-body
                   (reverse (range depth))))
     wrapped))
@@ -92,8 +91,7 @@
 (def big-fn (fn (x) (+ big-captured x)))
 
 (let (me (self))
-  (spawn (let (result (big-fn 1))
-           (send me [:result result])))
+  (spawn (let (result (big-fn 1)) (send me [:result result])))
   (let (result (receive ([:result r] r)))
     (io/puts "cross-process big-fn(1) result:" result)
     (io/puts "expected:" (+ big-captured 1))
@@ -119,8 +117,7 @@
 
 (io/puts "--- map of closures: 5000 entries, each closure captures key ---")
 (def closure-map
-  (fold (fn (m i)
-          (assoc m i (fn (x) (* i x))))
+  (fold (fn (m i) (assoc m i (fn (x) (* i x))))
     {}
     (range 5000)))
 

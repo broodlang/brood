@@ -19,18 +19,14 @@
 (let (me (self)
       bignum (* 999999999999999999 999999999999999999))
   ; ~10^36, large BigInt
-  (spawn (receive
-           ([:big n] (send me [:result (* n 2)]))
-           (after 5000 :timeout)))
+  (spawn (receive ([:big n] (send me [:result (* n 2)])) (after 5000 :timeout)))
   ;; Capture the spawned pid — use a reference via the next spawn trick
 )
 
 ;; Cleaner: capture pid from spawn's return value
 (let (me (self)
       bignum (* 999999999999999999 999999999999999999))
-  (let (worker (spawn (receive
-                        ([:big n] (send me [:result (* n 2)]))
-                        (after 5000 :timeout))))
+  (let (worker (spawn (receive ([:big n] (send me [:result (* n 2)])) (after 5000 :timeout))))
     (send worker [:big bignum])
     (let (r (receive ([:result v] v) (after 5000 :timeout)))
       (io/puts "P56: sent:" bignum)

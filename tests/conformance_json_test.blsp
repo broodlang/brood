@@ -30,8 +30,7 @@
 
 (defmodule conformance-json-test (:use test) (:use corpus))
 
-(defn- js-verdict
-  (path)
+(defn- js-verdict (path)
   "`:ok` if `path` parses as JSON, `:rejected` if anything refuses it."
   (try
     (do (json/decode (file/slurp path)) :ok)
@@ -40,8 +39,7 @@
 (defn- js-kind (path) (string/substring (path/basename path) 0 1))
 
 ;; [oks rejects wrongs] for one class, where `wrongs` lists the offending basenames.
-(defn- js-scan
-  (files kind want oks rejects wrong)
+(defn- js-scan (files kind want oks rejects wrong)
   (cond
     (nil? files) [oks rejects (reverse wrong)]
     (not (= (js-kind (first files)) kind)) (js-scan (rest files) kind want oks rejects wrong)

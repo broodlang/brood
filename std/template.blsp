@@ -44,16 +44,14 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported.
 ;; no closing `}}` is an unterminated marker, emitted verbatim (`{{` included) — the same
 ;; "leave it alone" outcome the old scan produced, and `{{` nested inside a marker stays
 ;; unsupported, as the docstring says.
-(defn- template-marker
-  (p data)
+(defn- template-marker (p data)
   (let (close (index-of p "}}"))
     (if (< close 0)
       (str "{{" p)
       (str (template-lookup data (string/trim (string/substring p 0 close)))
         (string/substring p (+ close 2) (string/length p))))))
 
-(defn- template-lookup
-  (data key)
+(defn- template-lookup (data key)
   "Look up `key` in `data`, trying string key then keyword key. Returns \"\" if absent.
 A substituted value is rendered with `->string` (the `Display` protocol), so a record
 substitutes as the string its type defines — a money record as `$10.50`, a datetime as

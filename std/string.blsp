@@ -110,8 +110,7 @@ inverse of the `string/->codepoints` primitive."
 ;; PRELUDE reaches for (it is in the `%autoload string` list), and routing it through
 ;; `seq/interpose` would make every `join` drag in a second module. Three lines of
 ;; duplication buys that; noted here and there so neither looks like an oversight.
-(defn- join-parts
-  (sep coll acc)
+(defn- join-parts (sep coll acc)
   (if (empty? coll) acc (join-parts sep (rest coll) (cons (first coll) (cons sep acc)))))
 (defn join (sep coll)
   "Concatenate the strings in `coll` with `sep` between adjacent elements.
@@ -198,8 +197,7 @@ incremental search rides on."
     (cond (= n 0) true (whitespace? (char-at s 0)) (blank? (string/substring s 1 n)) else false)))
 (sig blank? (string -> bool))
 
-(defn- triml-from
-  (s i n)
+(defn- triml-from (s i n)
   (if (and (< i n) (whitespace? (char-at s i))) (triml-from s (inc i) n) (string/substring s i n)))
 (defn triml (s)
   "Remove leading whitespace from `s`.
@@ -208,8 +206,7 @@ incremental search rides on."
   (triml-from s 0 (string/length s)))
 (sig triml (string -> string))
 
-(defn- trimr-to
-  (s n)
+(defn- trimr-to (s n)
   (if (and (> n 0) (whitespace? (char-at s (dec n))))
     (trimr-to s (dec n))
     (string/substring s 0 n)))
@@ -248,8 +245,7 @@ incremental search rides on."
 
 ;; ---- fill: greedy word-wrap (was std/text.blsp) -----------------------------
 
-(defn- fill-pack
-  (acc word width)
+(defn- fill-pack (acc word width)
   "Greedy line-accumulator step. `acc` is `[cur done]`: the current (in-progress) line and
 the completed lines, newest first. Extend `cur` with `word` when the result still fits in
 `width` columns; otherwise flush `cur` onto `done` and start a fresh line at `word`.
@@ -304,12 +300,10 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
 ;; zero runtime machinery — it is exactly the hand-written `str` call, minus the
 ;; quote-chopping. Reach for it wherever a message interleaves text and values:
 ;; `(error (string/interp "json: bad number '{tok}' at index {i}"))`.
-(defn- interp-flush
-  (buf parts)
+(defn- interp-flush (buf parts)
   ;; push the accumulated literal chunk (reversed chars) onto `parts`, if non-empty
   (if (empty? buf) parts (cons (apply str (reverse buf)) parts)))
-(defn- interp-hole
-  (chars expr depth parts)
+(defn- interp-hole (chars expr depth parts)
   ;; inside a {…} hole: accumulate the expression text until the matching `}`, then
   ;; `reflect/read-string` it into a form. Braces nest by `depth` (a map/set literal inside).
   (cond
@@ -321,8 +315,7 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
     (= (first chars) "{") (interp-hole (rest chars) (str expr "{") (inc depth) parts)
     (= (first chars) "}") (interp-hole (rest chars) (str expr "}") (dec depth) parts)
     else (interp-hole (rest chars) (str expr (first chars)) depth parts)))
-(defn- interp-lit
-  (chars buf parts)
+(defn- interp-lit (chars buf parts)
   ;; scanning literal text: `buf` = reversed literal chars, `parts` = reversed forms
   (cond
     (empty? chars) (reverse (interp-flush buf parts))
@@ -369,15 +362,13 @@ Module-rooted rather than bare `format` because that name is also the source FOR
 things in the same image is a name worth spending to fix."
   (format-loop template 0 (string/length template) args ""))
 
-(defn- format-loop
-  (template i n args acc)
+(defn- format-loop (template i n args acc)
   (cond
     (>= i n) acc
     (= (string/char-at template i) "%") (format-spec template (inc i) n args acc)
     else (format-loop template (inc i) n args (str acc (string/char-at template i)))))
 
-(defn- format-spec
-  (template i n args acc)
+(defn- format-spec (template i n args acc)
   ;; called with `i` pointing one past the `%`
   (cond
     (>= i n) (error "string/format: unterminated specifier (lone '%' at end of format string)")
@@ -396,8 +387,7 @@ things in the same image is a name worth spending to fix."
     else
       (error (str "format: unrecognized specifier '%" (string/char-at template i) "' at column " i))))
 
-(defn- format-prec
-  (template i n args acc p)
+(defn- format-prec (template i n args acc p)
   ;; called with `i` pointing one past the `.`, accumulating precision in `p`
   (cond
     (>= i n) (error "format: unterminated %.Nf specifier")

@@ -157,24 +157,20 @@ core knows nothing about buffers."
 
 ;; ---- resolution -------------------------------------------------------------
 
-(defn- layers-list
-  (ctx)
+(defn- layers-list (ctx)
   "The context's layer list (highest precedence first), or () when it has none."
   (or (get ctx :layers) (list)))
 
-(defn- layers-resolve
-  (layer)
+(defn- layers-resolve (layer)
   "A layer reference → its map. A map is itself; a symbol is resolved (late-bound,
 so redefining the layer hot-swaps it), like a keymap command."
   (if (map? layer) layer (reflect/eval layer)))
 
-(defn- layers-name-of
-  (layer)
+(defn- layers-name-of (layer)
   "The `:name` of a layer reference (resolving it first)."
   (get (layers-resolve layer) :name))
 
-(defn- layers-find
-  (ctx name)
+(defn- layers-find (ctx name)
   "The first active layer reference named `name`, or nil."
   (seq/find (fn (l) (= name (layers-name-of l))) (layers-list ctx)))
 
@@ -206,31 +202,26 @@ primitive — `activate-layer` is the hook-firing version."
   "True if an active layer is named `name`."
   (any? (fn (l) (= name (layers-name-of l))) (layers-list ctx)))
 
-(defn- layers-replace-base-list
-  (lst layer)
+(defn- layers-replace-base-list (lst layer)
   "Replace the base (last) element of `lst` with `layer`, or add it if `lst` empty."
   (if (empty? lst) (list layer) (append (but-last lst) (list layer))))
 
 ;; ---- hooks ------------------------------------------------------------------
 
-(defn- layers-run-hook
-  (hook ctx)
+(defn- layers-run-hook (hook ctx)
   "Run one hook — a fn symbol resolved late and applied as `(ctx) -> ctx`. A throw
 leaves `ctx` unchanged, so a bad hook can't crash the loop."
   (try ((reflect/eval hook) ctx) (catch e ctx)))
 
-(defn- layers-run-hooks
-  (ctx hooks)
+(defn- layers-run-hooks (ctx hooks)
   "Thread `ctx` through a list of hooks (each `(ctx) -> ctx`)."
   (fold (fn (acc h) (layers-run-hook h acc)) ctx hooks))
 
-(defn- layers-layer-event-hooks
-  (layer event)
+(defn- layers-layer-event-hooks (layer event)
   "The `event` hook list of a single layer reference, or ()."
   (or (get-in (layers-resolve layer) [:hooks event]) (list)))
 
-(defn- layers-run-one
-  (ctx layer event)
+(defn- layers-run-one (ctx layer event)
   "Run just `layer`'s `event` hooks (the lifecycle path: `:activate`/`:deactivate`)."
   (layers-run-hooks ctx (layers-layer-event-hooks layer event)))
 
@@ -335,13 +326,11 @@ rule wins — a project can override a default."
   "The layer refs bound to `type`, or () if none."
   (or (get *type-layers* type) ()))
 
-(defn- layers-file-matches?
-  (file spec)
+(defn- layers-file-matches? (file spec)
   "Does `file` satisfy a `:match` spec — a suffix string, or a predicate fn?"
   (if (string? spec) (string/ends-with? file spec) (spec file)))
 
-(defn- layers-match-file
-  (file rules)
+(defn- layers-match-file (file rules)
   "Walk `rules` (newest-first); return the `:type` of the first whose `:match` fits
 `file`, else nil."
   (if (empty? rules)

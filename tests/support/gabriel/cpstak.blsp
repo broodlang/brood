@@ -17,8 +17,7 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/cpstak.in
 
 ;; Every call here is a tail call, so this needs no `check-allow` — proper tail calls
 ;; make the whole cascade O(1) stack, which is the property under test.
-(defn- cpstak-tak
-  (x y z k)
+(defn- cpstak-tak (x y z k)
   (if (not (< y x))
     (k z)
     (cpstak-tak (- x 1)

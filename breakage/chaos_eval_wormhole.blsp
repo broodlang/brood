@@ -61,9 +61,7 @@
   (reflect/eval `(defn ~(symbol (str "chaos-fn-" i)) (x) (+ x ~i))))
 
 (def fn-sum
-  (fold (fn (acc i)
-          (let (fn-name (symbol (str "chaos-fn-" i)))
-            (+ acc ((reflect/eval fn-name) i))))
+  (fold (fn (acc i) (let (fn-name (symbol (str "chaos-fn-" i))) (+ acc ((reflect/eval fn-name) i))))
     0
     (range 1000)))
 

@@ -39,10 +39,7 @@
   (test "a parked process observes a redefinition made while it was waiting"
     (def hr-d (fn (x) (* x 2)))
     (let (me (self)
-          w (spawn (do
-                     (send me [:r (hr-d 5)])
-                     (receive (:go :ok))
-                     (send me [:r (hr-d 5)]))))
+          w (spawn (do (send me [:r (hr-d 5)]) (receive (:go :ok)) (send me [:r (hr-d 5)]))))
       (let (old (receive ([:r v] v)))
         ; redefine while the worker is parked in receive
         (def hr-d (fn (x) (* x 100)))

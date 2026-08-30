@@ -63,9 +63,8 @@
 (def eo-u4 (table/new))
 ;; check-allow: deliberately non-tail — the deopt/effect-once shape under test.
 (check-allow :non-tail-recursion
-  (defn eo-multi ((v) (do
-                        (table/put eo-u4 0 (+ 1 (table/get eo-u4 0)))
-                        (+ (eo-multi v 0) (nth v 0))))
+  (defn eo-multi
+    ((v) (do (table/put eo-u4 0 (+ 1 (table/get eo-u4 0))) (+ (eo-multi v 0) (nth v 0))))
     ((v acc) (do (table/put eo-t4 0 (+ 1 (table/get eo-t4 0))) 1.5))))
 (defn eo-drive4 (i v)
   (if (= i 0) nil (do (eo-multi v) (eo-drive4 (- i 1) v))))

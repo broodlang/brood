@@ -66,20 +66,17 @@
 (def- scram-test-expected-stored
   "586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6")
 
-(defn- scram-test-worker
-  (parent i)
+(defn- scram-test-worker (parent i)
   ;; compute the StoredKey, send back [i hex-of-stored-key]
   (let (sp (scram-salted-password "pencil" scram-test-salt-b64 scram-test-iters))
     (send parent [i (encoding/hex-encode-bytes (scram-stored-key sp))])))
 
-(defn- scram-test-spawn-workers
-  (parent n)
+(defn- scram-test-spawn-workers (parent n)
   (when (> n 0)
     (spawn (scram-test-worker parent n))
     (scram-test-spawn-workers parent (- n 1))))
 
-(defn- scram-test-collect
-  (got total all-ok)
+(defn- scram-test-collect (got total all-ok)
   (if (= got total)
     all-ok
     (scram-test-collect (+ got 1)

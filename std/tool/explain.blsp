@@ -198,8 +198,7 @@ the `nest mcp` tools of the same names.")
      :example "(regex/match? \"[0-9]+\" \"abc123\")   ; => true"
      :see "std/regex.blsp"}))
 
-(defn- explain-matches?
-  (q entry)
+(defn- explain-matches? (q entry)
   (let (ql (string/lower q))
     (or (includes? (string/lower (get entry :intent)) ql)
       (any? (fn (k) (includes? (string/lower k) ql)) (get entry :keywords)))))

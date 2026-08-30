@@ -173,8 +173,7 @@
 ;; `(sig area (circle -> float))` warned "unknown type `circle`" about a type the checker
 ;; held in `*record-ids*` all along. Sealed ability names have resolved since ADR-181.
 
-(defn- rt-warnings
-  (src)
+(defn- rt-warnings (src)
   (map (fn (d) (get d :message)) (reflect/check-string-structured src)))
 
 (describe "a record name in type position"

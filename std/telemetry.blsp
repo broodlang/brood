@@ -40,16 +40,13 @@ process you own."
 
 ;; ---- table helpers (pure) ---------------------------------------------------
 
-(defn- telemetry-without-id
-  (table id)
+(defn- telemetry-without-id (table id)
   "`table` with any handler whose id is `id` removed from every event bucket."
-  (fold (fn (acc ev)
-          (assoc acc ev (filter (fn (h) (not (= (get h :id) id))) (get table ev))))
+  (fold (fn (acc ev) (assoc acc ev (filter (fn (h) (not (= (get h :id) id))) (get table ev))))
     {}
     (keys table)))
 
-(defn- telemetry-dispatch
-  (bucket event measurements metadata)
+(defn- telemetry-dispatch (bucket event measurements metadata)
   "Run every handler in `bucket` (the handlers for `event`), each guarded by
 try/catch. Returns the list of ids whose handler threw (to be detached). Runs in the
 LISTENER process."
@@ -59,8 +56,7 @@ LISTENER process."
             (catch _ (cons (get h :id) failed))))
     nil bucket))
 
-(defn- telemetry-run-handlers
-  (event measurements metadata)
+(defn- telemetry-run-handlers (event measurements metadata)
   "Dispatch `event` to its handlers and detach any that threw. Runs in the listener."
   (when *telemetry-validate*
     (doseq (problem (telemetry-check-event event measurements metadata))
@@ -82,8 +78,7 @@ LISTENER process."
 
 ;; ---- the listener process ---------------------------------------------------
 
-(defn- telemetry-listen
-  ()
+(defn- telemetry-listen ()
   "The listener loop: dispatch emits, answer a sync ping, stop on :stop. Tail-recursive
 (O(1) stack). A throwing handler is caught in `telemetry-dispatch`; an uncatchable
 handler fault kills only this process."
@@ -187,16 +182,13 @@ handler logic in a process you own, off even the listener. Returns `id`."
 
 (defonce *events* {})
 
-(defn- telemetry-spec-name
-  (spec)
+(defn- telemetry-spec-name (spec)
   "The field name of a `(->string type)` / bare-`name` schema spec."
   (if (pair? spec) (first spec) spec))
-(defn- telemetry-spec-type
-  (spec)
+(defn- telemetry-spec-type (spec)
   "The declared type of a schema spec, or `any` when it's a bare name."
   (if (pair? spec) (second spec) 'any))
-(defn- telemetry-opt
-  (opts key)
+(defn- telemetry-opt (opts key)
   "Look up `key` in a `:k v :k v …` option list (nil if absent)."
   (cond
     (empty? opts) nil
@@ -275,12 +267,10 @@ telemetry's own global, which the listener process reads. Returns `on`."
   (def *telemetry-validate* on)
   on)
 
-(defn- telemetry-missing-keys
-  (schema-map actual)
+(defn- telemetry-missing-keys (schema-map actual)
   "The declared keys of `schema-map` absent from `actual`."
   (filter (fn (k) (not (contains? actual k))) (keys schema-map)))
-(defn- telemetry-check-event
-  (event measurements metadata)
+(defn- telemetry-check-event (event measurements metadata)
   "The declared keys missing from a declared event's payload, as `[kind key]` pairs
 (`kind` = `:measurements` / `:metadata`); empty when `event` is undeclared or complete.
 Pure — the listener turns each pair into a stderr warning. Types are the checker's job."
@@ -298,8 +288,7 @@ Pure — the listener turns each pair into a stderr warning. Types are the check
 ;; RUNTIME through the exact same attach/handler seam as their app's events, and
 ;; `nest observe`-style tools consume one stream, not N snapshot builtins.
 
-(defn- telemetry-runtime-event
-  (kind pid detail)
+(defn- telemetry-runtime-event (kind pid detail)
   "Map one `[:system …]` kernel event onto a telemetry emit: event
 `[:runtime kind]`, measurements = the numeric payload, metadata = the ids."
   (match kind
@@ -309,8 +298,7 @@ Pure — the listener turns each pair into a stderr warning. Types are the check
     (:deopt (emit [:runtime :deopt] {} {:pid pid :fn detail}))
     (_ (emit [:runtime kind] {} {:pid pid :detail detail}))))
 
-(defn- telemetry-runtime-loop
-  ()
+(defn- telemetry-runtime-loop ()
   "The watcher loop: re-emit each kernel event; stop (and disarm) on `:stop`."
   (receive
     ([:system kind pid detail] (do
@@ -346,21 +334,18 @@ stream. One system monitor exists at a time — a second call replaces the first
 ;; events — and catches BOTH inbound peers and outbound `connect`s, which a
 ;; per-spec `monitor-node` alone would miss.
 
-(defn- telemetry-member?
-  (ys x)
+(defn- telemetry-member? (ys x)
   "Whether list `ys` contains `x` (by `=`)."
   (cond
     (empty? ys) false
     (= (first ys) x) true
     else (telemetry-member? (rest ys) x)))
 
-(defn- telemetry-absent
-  (xs ys)
+(defn- telemetry-absent (xs ys)
   "The elements of list `xs` not present in list `ys`."
   (filter (fn (x) (not (telemetry-member? ys x))) xs))
 
-(defn- telemetry-nodes-loop
-  (known interval)
+(defn- telemetry-nodes-loop (known interval)
   "Poll `(node/list)` every `interval` ms, emit a `[:runtime :nodeup]`/`[:runtime
 :nodedown]` telemetry event per added/removed peer, and recur; stop on `:stop`."
   (receive
@@ -399,8 +384,7 @@ at start are the baseline (no spurious `:nodeup` for them)."
 ;; snapshot builtins (`gc-stats`/`vm-stats`) are read only when bound, so this degrades
 ;; cleanly on a lean runtime (those keys are just nil).
 
-(defn- telemetry-stat
-  (sym thunk)
+(defn- telemetry-stat (sym thunk)
   "Call `thunk` (a 0-arg snapshot reader) when `sym` is bound, else nil — so a lean build
 without the dev-tools stat builtins doesn't error."
   (when (bound? sym) (thunk)))
@@ -416,8 +400,7 @@ scraping the individual stat builtins — what `nest observe` / `nest mcp` can r
    :processes (count (or (proc/list) []))
    :metrics (metrics-snapshot)})
 
-(defn- telemetry-vitals-measurements
-  (snap)
+(defn- telemetry-vitals-measurements (snap)
   "Flatten a `runtime-snapshot` into a numeric measurements map for a `[:runtime :vitals]`
 telemetry event (gauges): live process count, GC collections / max pause / live bytes, and
 the scheduler's spawn/preempt/steal counters. Absent (lean-build) stats read as 0."
@@ -431,8 +414,7 @@ the scheduler's spawn/preempt/steal counters. Absent (lean-build) stats read as 
      :preempts (get sched :preempts 0)
      :steals (get sched :steals 0)}))
 
-(defn- telemetry-vitals-loop
-  (interval)
+(defn- telemetry-vitals-loop (interval)
   (receive
     (:stop nil)
     (after interval
@@ -465,8 +447,7 @@ folding the kernel snapshot builtins behind the same attach seam as `watch-runti
 ;; stream, so local handlers/aggregators consume a peer's events with no new wire format.
 ;; The dist `send` is the only cross-node mechanism; everything else is ordinary policy.
 
-(defn- telemetry-serve-loop
-  (subs)
+(defn- telemetry-serve-loop (subs)
   "The target-side agent loop: on `[:subscribe event subscriber ref]` attach a forwarder
 that ships each emit of `event` to `subscriber`, tagged with `ref`; on `[:unsubscribe ref]`
 detach it. `subs` tracks the attached ids so a `:stop` cleans them all up."
@@ -501,8 +482,7 @@ pid; `stop-serve` (or killing it) tears down every remote subscription."
   nil)
 (sig stop-serve ((or map pid) -> nil))
 
-(defn- telemetry-remote-loop
-  (target event ref local-event)
+(defn- telemetry-remote-loop (target event ref local-event)
   "The subscriber-side loop: re-emit each `[:remote-telemetry ref …]` from the target into
 THIS runtime's stream as `local-event` (with `{:remote-event e}` merged into the metadata);
 `:stop` unsubscribes from the target and exits."
@@ -512,8 +492,7 @@ THIS runtime's stream as `local-event` (with `{:remote-event e}` merged into the
     (:stop (do (send target [:unsubscribe ref]) nil))
     (_ (telemetry-remote-loop target event ref local-event))))
 
-(defn- telemetry-subscribe-to
-  (target event local-event)
+(defn- telemetry-subscribe-to (target event local-event)
   "Spawn a subscriber watcher that subscribes to `event` at `target` (a pid or a
 `{:name :node}` address) and re-emits into the local stream as `local-event`. The seam
 `subscribe-remote` builds the node address over; split out so the message protocol is
@@ -542,14 +521,12 @@ unsubscribes and exits."
 
 ;; ---- span -------------------------------------------------------------------
 
-(defn- telemetry-sub
-  (event seg)
+(defn- telemetry-sub (event seg)
   "Append lifecycle segment `seg` to a base event: a vector gets it appended
 (`[:http :req]` → `[:http :req :stop]`); any other value is wrapped (`[event seg]`)."
   (if (vector? event) (into event [seg]) [event seg]))
 
-(defn- telemetry-span
-  (event metadata thunk)
+(defn- telemetry-span (event metadata thunk)
   (let (metadata (or metadata {})
         t0 (os/now))
     (emit (telemetry-sub event :start) {:system-time t0} metadata)
@@ -586,8 +563,7 @@ the caller. Returns `body`'s value."
 
 (def *telemetry-metrics* nil)
 
-(defn- telemetry-metrics
-  ()
+(defn- telemetry-metrics ()
   "The shared metrics table, created on first use (configuration-time, so the lazy
 init is single-threaded)."
   (when (nil? *telemetry-metrics*) (def *telemetry-metrics* (table/new)))
@@ -659,8 +635,7 @@ read). Returns `id`."
 ;; standard `histogram_quantile` trade: bounded memory for approximate quantiles.
 ;; Assumes non-negative measurements (durations, sizes) — the histogram domain.
 
-(defn- telemetry-bucket-index
-  (bounds v i)
+(defn- telemetry-bucket-index (bounds v i)
   "Index of the first bound ≥ `v` (scanning from `i`), or `(count bounds)` — the
 overflow bucket — when `v` exceeds every bound. `bounds` is ascending."
   (if (>= i (count bounds))
@@ -701,8 +676,7 @@ no samples). `(metric id)` → `{:kind :distribution :count :sum :min :max :mean
               :min (math/min (get cur :min) v)
               :max (math/max (get cur :max) v))))))))
 
-(defn- telemetry-dist-buckets
-  (bounds counts i acc)
+(defn- telemetry-dist-buckets (bounds counts i acc)
   "Build the presented `:buckets` vector: one `{:le bound :count n}` per bound, then
 a final `{:le :inf :count n}` for the overflow bucket."
   (if (>= i (count bounds))
@@ -712,8 +686,7 @@ a final `{:le :inf :count n}` for the overflow bucket."
       (+ i 1)
       (cons {:le (nth bounds i) :count (get counts i 0)} acc))))
 
-(defn- telemetry-present
-  (state)
+(defn- telemetry-present (state)
   "Turn a raw metric accumulator into its reader shape: a `:summary` gets `:mean`
 and `:stddev` derived and its internal `:sumsq` dropped; a `:distribution` gets its
 per-bucket `:buckets` and `:mean` presented (internal `:bounds`/`:counts` dropped);
@@ -759,8 +732,7 @@ scraping N snapshot builtins). Empty map if no metrics recorded."
   (let (snap (table/snapshot (telemetry-metrics)))
     (map/reduce-kv (fn (acc id state) (assoc acc id (telemetry-present state))) {} snap)))
 
-(defn- telemetry-quantile
-  (bounds counts nb rank i prev-cum prev-bound maxv)
+(defn- telemetry-quantile (bounds counts nb rank i prev-cum prev-bound maxv)
   "Walk the cumulative bucket counts for the bucket the `rank`-th observation falls
 in, then linearly interpolate within `[prev-bound, upper]`. The overflow bucket
 (`i = nb`) can't interpolate above its (unbounded) top, so it reports `maxv`."
@@ -781,9 +753,7 @@ bucketed counts — linear interpolation within the containing bucket, the stand
 `histogram_quantile` estimate (approximate; precision is the bucket granularity).
 Returns nil unless `id` is a `distribution` with at least one observation."
   (let (state (table/get (telemetry-metrics) id nil))
-    (when (and state
-            (= (get state :kind) :distribution)
-            (> (get state :count) 0))
+    (when (and state (= (get state :kind) :distribution) (> (get state :count) 0))
       (let (bounds (get state :bounds)
             counts (get state :counts))
         (telemetry-quantile bounds

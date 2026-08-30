@@ -54,28 +54,24 @@ grammar target."
 ;; the backslashes we add for the others aren't themselves re-escaped.
 (def- grammar-meta (list "\\" "*" "?" "+" "." "(" ")" "[" "]" "{" "}" "|" "^" "$"))
 
-(defn- grammar-escape
-  (s)
+(defn- grammar-escape (s)
   "Backslash-escape regex metacharacters in `s`, so a literal keyword matches itself
 (a `*` in a keyword name → `\\*`)."
   (fold (fn (acc c) (string/replace acc c (str "\\" c))) s grammar-meta))
 
-(defn- grammar-quoted
-  (names)
+(defn- grammar-quoted (names)
   "`names` as a space-separated run of double-quoted literals — the shape a tree-sitter
 `#any-of?` predicate and an elisp list both want."
   (string/join " " (map (fn (n) (str "\"" n "\"")) names)))
 
-(defn- grammar-alternation
-  (keywords)
+(defn- grammar-alternation (keywords)
   "An escaped, longest-first `a|b|c` regex alternation. Longest-first so a prefix
 can't shadow a longer form (`->>` before `->`)."
   (string/join "|" (map grammar-escape (sort-by (fn (k) (- (count k))) keywords))))
 
 ;; ---- TextMate grammar (VS Code) ----------------------------------------------
 
-(defn- grammar-bounded
-  (body)
+(defn- grammar-bounded (body)
   "Wrap a regex `body` in symbol-character boundaries on both sides."
   (str "(?<!" grammar-sym ")(" body ")(?!" grammar-sym ")"))
 

@@ -36,75 +36,62 @@ port. The oracle is upstream's own expected output in
 
 ;; Non-tail: `foldr` folds right, so the recursion has to unwind before combining.
 (check-allow :non-tail-recursion
-  (defn- mazefun-foldr
-    (f base lst)
+  (defn- mazefun-foldr (f base lst)
     (if (nil? lst)
       base
       (f (first lst) (mazefun-foldr f base (rest lst))))))
 
 ;; `(f lo) (f lo+1) … (f hi-1)` as a list — upstream's `for`.
-(defn- mazefun-tabulate
-  (lo hi f)
+(defn- mazefun-tabulate (lo hi f)
   (map f (range lo hi)))
 
-(defn- mazefun-concat
-  (lists)
+(defn- mazefun-concat (lists)
   (mazefun-foldr append nil lists))
 
 (check-allow :non-tail-recursion
-  (defn- mazefun-list-write
-    (lst i val)
+  (defn- mazefun-list-write (lst i val)
     (if (= i 0)
       (cons val (rest lst))
       (cons (first lst) (mazefun-list-write (rest lst) (- i 1) val)))))
 
 (check-allow :non-tail-recursion
-  (defn- mazefun-list-remove-pos
-    (lst i)
+  (defn- mazefun-list-remove-pos (lst i)
     (if (= i 0)
       (rest lst)
       (cons (first lst) (mazefun-list-remove-pos (rest lst) (- i 1))))))
 
-(defn- mazefun-duplicates?
-  (lst)
+(defn- mazefun-duplicates? (lst)
   (cond
     (nil? lst) false
     (includes? (rest lst) (first lst)) true
     else (mazefun-duplicates? (rest lst))))
 
-(defn- mazefun-make-matrix
-  (n m init)
+(defn- mazefun-make-matrix (n m init)
   (mazefun-tabulate 0 n (fn (i) (mazefun-tabulate 0 m (fn (j) (init i j))))))
 
-(defn- mazefun-matrix-read
-  (mat i j)
+(defn- mazefun-matrix-read (mat i j)
   (nth (nth mat i) j))
 
-(defn- mazefun-matrix-write
-  (mat i j val)
+(defn- mazefun-matrix-write (mat i j val)
   (mazefun-list-write mat i (mazefun-list-write (nth mat i) j val)))
 
 ;; `[rows cols]` — upstream returns a dotted pair.
-(defn- mazefun-matrix-size
-  (mat)
+(defn- mazefun-matrix-size (mat)
   [(count mat) (count (first mat))])
 
-(defn- mazefun-matrix-map
-  (f mat)
+(defn- mazefun-matrix-map (f mat)
   (map (fn (row) (map f row)) mat))
 
 ;; ---- upstream's own LCG, so the maze is reproducible -------------------------
 
 (def- mazefun-initial-random 0)
 
-(defn- mazefun-next-random
-  (current)
+(defn- mazefun-next-random (current)
   (math/rem (+ (* current 3581) 12751) 131072))
 
 ;; Non-tail (the `cons` wraps the recursion), matching upstream's `shuffle-aux`.
 (check-allow :non-tail-recursion
-  (defn- mazefun-shuffle-acc
-    (lst current)
+  (defn- mazefun-shuffle-acc (lst current)
     (if (nil? lst)
       nil
       (let (next (mazefun-next-random current)
@@ -112,19 +99,15 @@ port. The oracle is upstream's own expected output in
         (cons (nth lst i)
           (mazefun-shuffle-acc (mazefun-list-remove-pos lst i) next))))))
 
-(defn- mazefun-shuffle
-  (lst)
+(defn- mazefun-shuffle (lst)
   (mazefun-shuffle-acc lst mazefun-initial-random))
 
 ;; ---- the maze ---------------------------------------------------------------
 
-(defn- mazefun-neighboring-cavities
-  (pos cave)
+(defn- mazefun-neighboring-cavities (pos cave)
   (let ([n m] (mazefun-matrix-size cave)
         [i j] pos)
-    (append (if (and (> i 0) (mazefun-matrix-read cave (- i 1) j))
-              (list [(- i 1) j])
-              nil)
+    (append (if (and (> i 0) (mazefun-matrix-read cave (- i 1) j)) (list [(- i 1) j]) nil)
       (if (and (< i (- n 1)) (mazefun-matrix-read cave (+ i 1) j))
         (list [(+ i 1) j])
         nil)
@@ -138,32 +121,27 @@ port. The oracle is upstream's own expected output in
 ;; Flood-fill: rename every cell of the cavity `old-cavity-id` to `new-cavity-id`.
 ;; Non-tail through the `fold`'s closure — the recursion is the fill.
 (check-allow :non-tail-recursion
-  (defn- mazefun-change-cavity-from
-    (cave pos new-cavity-id old-cavity-id)
+  (defn- mazefun-change-cavity-from (cave pos new-cavity-id old-cavity-id)
     (let ([i j] pos
           cavity-id (mazefun-matrix-read cave i j))
       (if (= cavity-id old-cavity-id)
-        (fold (fn (c nc)
-                (mazefun-change-cavity-from c nc new-cavity-id old-cavity-id))
+        (fold (fn (c nc) (mazefun-change-cavity-from c nc new-cavity-id old-cavity-id))
           (mazefun-matrix-write cave i j new-cavity-id)
           (mazefun-neighboring-cavities pos cave))
         cave))))
 
-(defn- mazefun-change-cavity
-  (cave pos new-cavity-id)
+(defn- mazefun-change-cavity (cave pos new-cavity-id)
   (let ([i j] pos)
     (mazefun-change-cavity-from cave
       pos
       new-cavity-id
       (mazefun-matrix-read cave i j))))
 
-(defn- mazefun-pierce
-  (pos cave)
+(defn- mazefun-pierce (pos cave)
   (let ([i j] pos)
     (mazefun-matrix-write cave i j pos)))
 
-(defn- mazefun-try-to-pierce
-  (pos cave)
+(defn- mazefun-try-to-pierce (pos cave)
   (let (ncs (mazefun-neighboring-cavities pos cave))
     (if (mazefun-duplicates? (map (fn (nc) (let ([i j] nc) (mazefun-matrix-read cave i j))) ncs))
       cave
@@ -171,8 +149,7 @@ port. The oracle is upstream's own expected output in
         (fold (fn (c nc) (mazefun-change-cavity c nc pos))
           cave ncs)))))
 
-(defn- mazefun-pierce-randomly
-  (possible-holes cave)
+(defn- mazefun-pierce-randomly (possible-holes cave)
   (if (nil? possible-holes)
     cave
     (mazefun-pierce-randomly (rest possible-holes)

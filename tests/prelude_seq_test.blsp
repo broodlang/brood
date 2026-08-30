@@ -125,8 +125,7 @@
           n 6
           input [[1 :a] [1 :b] [2 :c] [3 :d] [3 :e] [2 :f]]
           expected (distinct-by (fn (p) (nth p 0)) input))
-      (map (fn (_)
-             (spawn (fn () (send me (distinct-by (fn (p) (nth p 0)) input)))))
+      (map (fn (_) (spawn (fn () (send me (distinct-by (fn (p) (nth p 0)) input)))))
         (range n))
       (let (results (fold (fn (acc _) (cons (receive) acc)) nil (range n)))
         (assert= n (count results))

@@ -2,8 +2,7 @@
 
 (defmodule stream-test (:use test) (:use math))
 
-(defn- drained-to
-  (target budget-ms)
+(defn- drained-to (target budget-ms)
   "This process's mailbox size once it has fallen back to `target`, or its size when
 `budget-ms` run out. Polling rather than sleeping: a leaked message never drains, so the
 full budget still yields the failing value, while a merely slow one is forgiven."
@@ -103,16 +102,13 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 (describe "map"
   (test "maps a function"
     (assert= [2 4 6]
-      (stream/->vector (stream/map (fn (x) (* x 2))
-                         (stream/list-> [1 2 3])))))
+      (stream/->vector (stream/map (fn (x) (* x 2)) (stream/list-> [1 2 3])))))
   (test "empty input"
     (assert= []
       (stream/->vector (stream/map inc (stream/empty)))))
   (test "chained maps"
     (assert= [3 5 7]
-      (stream/->vector (stream/map inc
-                         (stream/map (fn (x) (* x 2))
-                           (stream/list-> [1 2 3])))))))
+      (stream/->vector (stream/map inc (stream/map (fn (x) (* x 2)) (stream/list-> [1 2 3])))))))
 
 (describe "filter"
   (test "keeps matching elements"
@@ -123,8 +119,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
       (stream/->vector (stream/filter (fn (_) false) (stream/range 0 5)))))
   (test "everything matches"
     (assert= [1 2 3]
-      (stream/->vector (stream/filter (fn (_) true)
-                         (stream/list-> [1 2 3]))))))
+      (stream/->vector (stream/filter (fn (_) true) (stream/list-> [1 2 3]))))))
 
 (describe "take"
   (test "takes first n"
@@ -140,12 +135,10 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 (describe "take-while"
   (test "stops at first non-matching"
     (assert= [0 1 2 3 4]
-      (stream/->vector (stream/take-while (fn (n) (< n 5))
-                         (stream/range 0 20)))))
+      (stream/->vector (stream/take-while (fn (n) (< n 5)) (stream/range 0 20)))))
   (test "empty result when predicate fails immediately"
     (assert= []
-      (stream/->vector (stream/take-while (fn (_) false)
-                         (stream/list-> [1 2 3]))))))
+      (stream/->vector (stream/take-while (fn (_) false) (stream/list-> [1 2 3]))))))
 
 (describe "drop"
   (test "drops first n"
@@ -175,16 +168,13 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 (describe "concat"
   (test "sequences two streams"
     (assert= [1 2 3 4 5 6]
-      (stream/->vector (stream/concat (stream/list-> [1 2 3])
-                         (stream/list-> [4 5 6])))))
+      (stream/->vector (stream/concat (stream/list-> [1 2 3]) (stream/list-> [4 5 6])))))
   (test "first empty"
     (assert= [4 5 6]
-      (stream/->vector (stream/concat (stream/empty)
-                         (stream/list-> [4 5 6])))))
+      (stream/->vector (stream/concat (stream/empty) (stream/list-> [4 5 6])))))
   (test "second empty"
     (assert= [1 2 3]
-      (stream/->vector (stream/concat (stream/list-> [1 2 3])
-                         (stream/empty)))))
+      (stream/->vector (stream/concat (stream/list-> [1 2 3]) (stream/empty)))))
   (test "both empty"
     (assert= []
       (stream/->vector (stream/concat (stream/empty) (stream/empty))))))
@@ -198,8 +188,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
       (stream/->vector (stream/lines (stream/list-> ["a\r\nb\r\nc\r\n"])))))
   (test "split across chunks"
     (assert= ["hello" "world"]
-      (stream/->vector (stream/lines (stream/list-> ["hel"
-                                                      "lo\n" "wor" "ld"])))))
+      (stream/->vector (stream/lines (stream/list-> ["hel" "lo\n" "wor" "ld"])))))
   (test "trailing fragment without newline becomes last line"
     (assert= ["foo" "bar"]
       (stream/->vector (stream/lines (stream/list-> ["foo\nbar"])))))
@@ -236,8 +225,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
   (test "take stops mid-chunk, leaving queued lines undelivered"
     ;; Closing while lines are still queued must not hang or leak the producer.
     (assert= ["a" "b"]
-      (stream/->vector (stream/take 2
-                         (stream/lines (stream/list-> ["a\nb\nc\nd\n"])))))))
+      (stream/->vector (stream/take 2 (stream/lines (stream/list-> ["a\nb\nc\nd\n"])))))))
 
 ;; ---- pipe -------------------------------------------------------------------
 
@@ -281,8 +269,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 
 (defn- stream-test-my-id () (get (proc/info (self)) :id))
 
-(defn- stream-test-parked-children
-  (me)
+(defn- stream-test-parked-children (me)
   (count (filter (fn (p)
                    (and (= me (get (proc/info p) :parent))
                      (= :waiting (get (proc/info p) :status))))
@@ -291,8 +278,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 (describe "streams do not leak producer processes"
   :isolated (test "fully consuming exhausted streams of every shape leaves no parked producers"
     (let (me (stream-test-my-id))
-      (defn- stream-test-consume-batch
-        (k)
+      (defn- stream-test-consume-batch (k)
         (when (> k 0)
           ;; each of these ends in an exhausted-producer state that used to leak:
           (stream/->vector (stream/drop 10 (stream/list-> [1 2]))) ; drop past end

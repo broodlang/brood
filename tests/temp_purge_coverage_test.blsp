@@ -32,24 +32,21 @@
 ;; them in its own source and report a phantom prefix. Skip it by name.
 (def self-name (path/basename (reflect/current-file)))
 
-(defn- test-files
-  ()
+(defn- test-files ()
   (filter (fn (e) (and (string/ends-with? e "_test.blsp") (not (= e self-name))))
     (file/ls tests-dir)))
 
 ;; Every string literal appearing immediately after `marker`. Hand-rolled rather than
 ;; regex because std/regex is a deliberate subset with no capture groups: split on the
 ;; marker, then take each piece up to its closing quote.
-(defn- quoted-args
-  (text marker)
+(defn- quoted-args (text marker)
   (map (fn (p) (first (string/split p "\"")))
     (rest (string/split text marker))))
 
 ;; The prefixes `file` passes to `temp-dir` and never purges. A purge line covers a prefix
 ;; it is a *prefix of* — `(purge-stale-temp "brood-file-")` legitimately covers
 ;; `brood-file-swap-` fixtures too, since the purge itself matches by `starts-with?`.
-(defn- unpurged-prefixes
-  (text)
+(defn- unpurged-prefixes (text)
   (let (used (quoted-args text "(temp-dir \"")
         purged (quoted-args text "(purge-stale-temp \""))
     (filter (fn (u) (not (any? (fn (p) (string/starts-with? u p)) purged))) used)))
@@ -73,8 +70,7 @@
   (test "the scanner actually finds the corpus's temp-dir uses"
     (let (total (fold (fn (acc f)
                         (+ acc
-                          (count (quoted-args (file/slurp (str tests-dir f))
-                                   "(temp-dir \""))))
+                          (count (quoted-args (file/slurp (str tests-dir f)) "(temp-dir \""))))
                   0
                   (test-files)))
       (is (>= total 20)))))

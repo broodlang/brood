@@ -53,13 +53,11 @@ and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
 (def- log-ranks {:debug 0 :info 1 :warn 2 :error 3})
 (def- log-labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})
 
-(defn- log-rank
-  (level)
+(defn- log-rank (level)
   "The numeric severity of `level` (unknown levels rank as :info)."
   (or (get log-ranks level) 1))
 
-(defn- log-default-format
-  (rec)
+(defn- log-default-format (rec)
   "The default line for a record: `[LEVEL ts] msg` plus a newline."
   (str "["
     (or (get log-labels (get rec :level)) "?")
@@ -149,8 +147,7 @@ e.g. an editor appending to its `*Messages*` buffer. Async and share-nothing."
   (apply backend (file-port path) opts))
 
 ;; ---- the logger process -----------------------------------------------------
-(defn- log-dispatch
-  (backends rec)
+(defn- log-dispatch (backends rec)
   "Hand `rec` to every backend in `backends` (a list or vector) via `backend-emit`, so
 each decides for itself whether and how to write it. Uses `fold` so it walks either —
 `:backends` defaults to a vector but `add-backend` conses."
@@ -205,8 +202,7 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
   nil)
 
 ;; ---- the log call -----------------------------------------------------------
-(defn- log-record
-  (level msg meta)
+(defn- log-record (level msg meta)
   "Build a log record map, stamping `:ts` (now, ms) and `:from` (the caller's pid)."
   {:level level :msg msg :meta meta :ts (os/now) :from (self)})
 

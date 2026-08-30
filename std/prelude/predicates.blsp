@@ -267,8 +267,7 @@ and a set its elements, as everywhere else `seq` applies.
     (%impl-exact? '[Seqable ->seq] (%identity-of coll)) (count (->seq coll))
     else (%count-acc coll 0)))
 
-(defn- %nth-list
-  (coll i d)
+(defn- %nth-list (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (%nth-list (rest coll) (- i 1) d)))
 
 ;; A non-integer index is a type error that must name `nth`. Before this it fell
@@ -277,8 +276,7 @@ and a set its elements, as everywhere else `seq` applies.
 ;; naming an arithmetic helper the caller never wrote, in violation of the
 ;; self-identifying-type-error promise in docs/language.md. `(nth v :k)` is a real
 ;; mistake (usually a map/sequence mix-up), so it must say so.
-(defn- %nth-bad-index
-  (coll i)
+(defn- %nth-bad-index (coll i)
   (error (str "nth: expected an integer index, got "
            (->string (type-of i))
            " ("
@@ -289,8 +287,7 @@ and a set its elements, as everywhere else `seq` applies.
 ;; surface as `empty?: expected collection, got int (5)` — an internal `%nth-list`
 ;; walks through, not the op the caller wrote. Checked once per `nth`, not per step:
 ;; the vector/bytes arms never reach it, and a list walk is already O(n).
-(defn- %nth-seq-or-fail
-  (coll i d)
+(defn- %nth-seq-or-fail (coll i d)
   (cond
     (or (pair? coll) (nil? coll)) (%nth-list coll i d)
     ;; a record indexes through its `Seqable` view (a custom collection or its fields)

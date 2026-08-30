@@ -43,8 +43,7 @@
       ;; a binary bytes body rides the plain-response path verbatim
       (is (= (match b ((bytes _ & r) (bytes/slice b (- (count b) 3))) (_ :no)) (bytes 1 2 3)))))
   (test "not-found renders a 404"
-    (is (includes? (string/bytes-> (bytes/concat (render-response (not-found))))
-          "404 Not Found"))))
+    (is (includes? (string/bytes-> (bytes/concat (render-response (not-found)))) "404 Not Found"))))
 
 (describe "http: CR/LF can never be spliced into the wire format"
   ;; Header names/values and the request target are rendered verbatim into a

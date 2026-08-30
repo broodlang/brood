@@ -50,15 +50,12 @@
   ; the JIT-miscompile regression, at the value level
   (test "an int is never = a float, decimal, even when numerically equal"
     (is (not (= 1 1.0)))
-    (is (not (= 1
-               1M)))
-    (is (not (= 1.0
-               1M)))
+    (is (not (= 1 1M)))
+    (is (not (= 1.0 1M)))
     (is (not (= 2.0 2))))
   (test "ordering DOES coerce across the tower (unlike =)"
     (is (< 1 1.5))
-    (is (< 1M
-          2))
+    (is (< 1M 2))
     (is (<= 2 2.0)))
   (test "bigint vs float comparison stays correct (no precision flip)"
     ; 1e20 is not < 1.5

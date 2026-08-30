@@ -14,8 +14,7 @@
 ;; --- synthetic fixtures -------------------------------------------------------
 ;; A test tuple with explicit tags/file/line. The thunk is never called here (the
 ;; selectors only read names and metadata), so a trivial one suffices.
-(defn- selection-test
-  (name tags file line)
+(defn- selection-test (name tags file line)
   (list name (fn () nil) {:tags tags :file file :line line}))
 
 (defn- selection-unit (mode group tests) (list mode group tests))
@@ -32,10 +31,8 @@
       (list (selection-test "joins" [] "tests/demo_test.blsp" 9)))))
 
 ;; The full labels a selection produces, in order — what every assertion compares.
-(defn- selection-labels
-  (units)
-  (fold (fn (acc unit)
-          (append acc (map (fn (t) (label (second unit) (first t))) (third unit))))
+(defn- selection-labels (units)
+  (fold (fn (acc unit) (append acc (map (fn (t) (label (second unit) (first t))) (third unit))))
     nil units))
 
 (defn- selection-select (spec) (selection-labels (test/test-select-units selection-units spec)))
@@ -285,12 +282,10 @@
    :shards 4
    :shard 1})
 
-(defn- selection-echo
-  ()
+(defn- selection-echo ()
   (receive ([:spec from spec] (send from [:echo spec]))))
 
-(defn- selection-collect
-  (pending acc)
+(defn- selection-collect (pending acc)
   (if (= pending 0) acc (receive ([:echo spec] (selection-collect (- pending 1) (cons spec acc))))))
 
 ;; Each worker selects against the shared spec and reports the labels it got.

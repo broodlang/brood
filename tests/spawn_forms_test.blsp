@@ -12,8 +12,7 @@
 ;; A top-level 0-arg worker: the one shape that can't capture its parent lexically
 ;; (a bare global name carries no closure), so it resolves the parent by registered
 ;; name. Reports that it actually ran.
-(defn- spawn-forms-report-bare
-  ()
+(defn- spawn-forms-report-bare ()
   (send (proc/whereis :spawn-forms-bare-parent) :ran-bare))
 
 (describe "spawn: every body shape runs its body (no silent no-op)"
@@ -39,6 +38,5 @@
 
 ;; Worker for the named-form test (defined after its first textual use is fine — a
 ;; global resolves at call time).
-(defn- spawn-forms-report-named
-  ()
+(defn- spawn-forms-report-named ()
   (send (proc/whereis :spawn-forms-named-parent) :ran-named))

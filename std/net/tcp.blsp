@@ -95,8 +95,7 @@ are Rust.")
 ;; `acc` is the chunks in reverse; ONE `bytes-concat` at close (the reversed chunk
 ;; list is itself an iolist). Per-chunk concatenation rebuilt the whole accumulator
 ;; each message — O(total²) over a large response.
-(defn- drain-acc
-  (sock acc)
+(defn- drain-acc (sock acc)
   (receive
     ([:tcp ^sock d] (drain-acc sock (cons d acc)))
     ([:tcp-closed ^sock] (bytes/concat (reverse acc)))))
@@ -105,8 +104,7 @@ are Rust.")
   "Like `drain`, but give up after `ms` milliseconds of silence and return whatever was collected (tagged `[:timeout acc]` vs `[:closed acc]` so the caller can tell; `acc` is a `bytes` value)."
   (drain-to sock nil ms))
 
-(defn- drain-to
-  (sock acc ms)
+(defn- drain-to (sock acc ms)
   (receive
     ([:tcp ^sock d] (drain-to sock (cons d acc) ms))
     ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])
@@ -171,8 +169,7 @@ are Rust.")
 ;; unset. `end` is resolved HERE to an absolute epoch-ms — the budget is measured
 ;; from the call, so a loop that re-reads it per chunk cannot accidentally restart
 ;; it. One place that reads the map, so both combinators accept the same options.
-(defn- read-limits
-  (opts)
+(defn- read-limits (opts)
   (let (d (get opts :deadline-ms))
     [(get opts :timeout-ms) (get opts :max-bytes) (if d (+ (os/now) d) nil)]))
 
@@ -197,8 +194,7 @@ are Rust.")
 ;; unbounded `receive` (there is no way to write "no timeout" as an `after` clause).
 ;; Floors at 1ms so an expired deadline fires immediately rather than passing `after`
 ;; a zero or negative wait.
-(defn- read-wait
-  (ms end)
+(defn- read-wait (ms end)
   (cond
     (and ms end) (math/min ms (math/max 1 (- end (os/now))))
     ms ms
@@ -245,8 +241,7 @@ are Rust.")
 ;;
 ;; The wait is recomputed per chunk rather than once, because that is exactly what
 ;; makes `:deadline-ms` a TOTAL budget: each receive waits only for what is left of it.
-(defn- read-until-loop
-  (sock sep acc have tail ms maxb end)
+(defn- read-until-loop (sock sep acc have tail ms maxb end)
   (let (w (read-wait ms end))
     (if w
       (receive
@@ -257,8 +252,7 @@ are Rust.")
         ([:tcp ^sock d] (read-until-step sock sep acc have tail ms maxb end d))
         ([:tcp-closed ^sock] [:closed (bytes/concat (reverse acc))])))))
 
-(defn- read-until-step
-  (sock sep acc have tail ms maxb end d)
+(defn- read-until-step (sock sep acc have tail ms maxb end d)
   (let (probe (bytes/concat tail d)
         i (bytes/index-of probe sep))
     (if (>= i 0)
@@ -288,8 +282,7 @@ are Rust.")
 
 ;; The last (|sep|-1) bytes of `probe` — everything a delimiter spanning the next
 ;; chunk boundary could need, and nothing more.
-(defn- straddle
-  (probe sep-len)
+(defn- straddle (probe sep-len)
   (let (n (bytes/length probe)
         k (math/max 0 (- sep-len 1)))
     (if (<= n k) probe (bytes/slice probe (- n k) n))))
@@ -306,8 +299,7 @@ are Rust.")
       [:too-large #b""]
       (read-n-loop sock n 0 nil ms end))))
 
-(defn- read-n-loop
-  (sock n have acc ms end)
+(defn- read-n-loop (sock n have acc ms end)
   (if (>= have n)
     (let (buf (bytes/concat (reverse acc)))
       [(bytes/slice buf 0 n) (bytes/slice buf n (count buf))])

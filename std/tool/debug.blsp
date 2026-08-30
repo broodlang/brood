@@ -55,15 +55,13 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 ;; State: {:events [ordered event maps] :paused {pid -> snapshot} :seq n}. The
 ;; debugger's own mailbox order IS a global linearisation of concurrent events, so
 ;; stamping each with an incrementing :seq gives a deterministic, mergeable log.
-(defn- debug-record
-  (state event)
+(defn- debug-record (state event)
   (let (seq (get state :seq))
     (assoc state
       :seq (inc seq)
       :events (conj (get state :events) (assoc event :seq seq)))))
 
-(defn- debug-loop
-  (state)
+(defn- debug-loop (state)
   (receive
     ([:trace entry from] (debug-loop (debug-record state {:kind :trace :pid from :entry entry})))
     ([:span-enter span parent pid label] (debug-loop (debug-record state
@@ -109,8 +107,7 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 ;; env-frame builtin under the tree-walker), and it must expand at the breakpoint's
 ;; lexical site, which only a macro can do. The named `vals` still ride alongside — they
 ;; override a captured local of the same name and let you snapshot a *computed* value.
-(defn- debug-break*
-  (label scope explicit)
+(defn- debug-break* (label scope explicit)
   "The runtime half of `break`: send the snapshot (`:scope` = the auto-captured locals,
 `:vals` = the explicitly-named ones) to the debugger in context and park until resumed.
 A no-op when no debugger is in context. `break`/`break-when` expand to a call to this."
@@ -138,8 +135,7 @@ Returns nil. (A macro so the local capture happens in YOUR lexical scope, not `b
 ;; Turn a `:name value …` argument list into a `{:name value}` map — the captured
 ;; locals of a breakpoint, keyed for display AND for `%eval-in` (a keyword key `:n`
 ;; binds the symbol `n`, so `(eval-at … "(* n n)")` resolves them).
-(defn- debug-pairs->map
-  (kvs)
+(defn- debug-pairs->map (kvs)
   (letrec (go (fn (ks m)
                 (if (or (empty? ks) (empty? (rest ks)))
                   m
@@ -190,15 +186,13 @@ are just a Brood predicate, so no recompile and no cost on the false path. (A ma
 ;; through it; its `arglist` reads `(& args)` while traced.
 
 (defonce *traced-fns* {}) ; sym -> the original fn value (`untrace-fn` restores it)
-(defn- debug-original
-  (sym)
+(defn- debug-original (sym)
   ;; The pre-instrumentation fn for `sym`: the registry entry when already traced
   ;; (re-tracing must not capture a wrapper as the original), else the live value.
   (or (get *traced-fns* sym)
     (if (bound? sym) (reflect/eval sym) (error "trace-fn: unbound symbol " sym))))
 
-(defn- debug-rebind
-  (sym replacement)
+(defn- debug-rebind (sym replacement)
   ;; Rebind global `sym` to the fn value `replacement` — built as data and eval'd,
   ;; so the module-privacy walk (which reads hand-written source) is not in play and
   ;; a qualified name rebinds like it does from the REPL.
@@ -378,9 +372,7 @@ was attempted."
 (defn outliers (dbg form-string)
   "The observations of `form-string` whose value is NOT the modal one — the few rows to inspect when the population mostly agrees. Each is `{:pid :form :value}`."
   (let (modal (modal-value dbg form-string))
-    (filter (fn (o)
-              (and (= (pr-str (get o :form)) form-string)
-                (not (= (get o :value) modal))))
+    (filter (fn (o) (and (= (pr-str (get o :form)) form-string) (not (= (get o :value) modal))))
       (observations dbg))))
 
 ;; ---- causal tree reconstruction ---------------------------------------------
@@ -405,8 +397,7 @@ running shows `:value :running`."
       (map build (filter (fn (e) (nil? (get e :parent))) enters)))))
 (sig causal-tree ((or map pid) -> seqable))
 
-(defn- causal-lines
-  (nodes depth)
+(defn- causal-lines (nodes depth)
   "The causal tree as a flat list of indented, pid-tagged strings (one per span)."
   (mapcat (fn (node)
             (cons (str (apply str (map (constantly "  ") (range depth)))
@@ -422,8 +413,7 @@ running shows `:value :running`."
   (doseq (line (causal-lines (causal-tree dbg) 0)) (io/puts line)))
 
 ;; ---- one-glance session report ----------------------------------------------
-(defn- debug-report-lines
-  (dbg)
+(defn- debug-report-lines (dbg)
   "The session summary as a list of strings: parked processes (the break queue), the
 cross-process causal tree, and the hottest traced forms. Rendered by both the
 `io/puts`-based `report` (cooked mode) and the cursor-positioned `attach`
@@ -448,8 +438,7 @@ causal tree, and the hottest traced forms by hit count. The one-call overview."
   (doseq (line (debug-report-lines dbg)) (io/puts line)))
 
 ;; ---- live terminal view -----------------------------------------------------
-(defn- debug-watch-loop
-  (dbg frames)
+(defn- debug-watch-loop (dbg frames)
   (io/write (str (ansi-clear) (ansi-home)))
   (io/puts "── watch  (Ctrl-C to exit) ──")
   (report dbg)
@@ -466,8 +455,7 @@ tree grow as a workload runs; drive resume from another session or a timer."
 ;; The driveable sibling of `watch`: same live view, but it reads the keyboard
 ;; (raw mode) so you resume parked processes without a timer. Pure IO shell over the
 ;; same `report`; input via `term/poll` (nil on the 400ms timeout → just redraw).
-(defn- debug-attach-render
-  (dbg)
+(defn- debug-attach-render (dbg)
   ;; In raw mode `\n` moves down but NOT to column 0, so a `io/puts` frame staircases.
   ;; Clear, then place every line absolutely at (row, col 1) with `ansi-cursor`.
   (io/write (ansi-clear))
@@ -475,11 +463,9 @@ tree grow as a workload runs; drive resume from another session or a timer."
                    (when (not (empty? lines))
                      (io/write (str (ansi-cursor row 1) (first lines)))
                      (place (rest lines) (inc row)))))
-    (place (cons "── attach    [r] resume all parked    [q] quit ──"
-             (debug-report-lines dbg))
+    (place (cons "── attach    [r] resume all parked    [q] quit ──" (debug-report-lines dbg))
       1)))
-(defn- debug-attach-loop
-  (dbg)
+(defn- debug-attach-loop (dbg)
   (debug-attach-render dbg)
   (let (key (term/poll 400))
     (cond
@@ -537,8 +523,7 @@ under `with-debugger`; advance the steps from `repl-session` (`r`) or `attach`."
 ;; debugger without you passing it each time, so `pry` binds it here for their handlers.
 (defdyn *debug-session* nil)
 
-(defn- debug-repl-resume
-  (rest)
+(defn- debug-repl-resume (rest)
   "`,resume` handler: resume all parked processes in the current `*debug-session*`, or
 the Nth if a number is given (`,resume 2`). No-op note when no session is active."
   (let (dbg *debug-session*)
@@ -550,8 +535,7 @@ the Nth if a number is given (`,resume 2`). No-op note when no session is active
           (let (entries (vec (get (dbg-state dbg) :paused)))
             (io/puts (debug-resume-nth dbg entries (try (reflect/eval-string r) (catch _ nil))))))))))
 
-(defn- debug-repl-step
-  (rest)
+(defn- debug-repl-step (rest)
   "`,step` handler: advance a single parked process one step (resume the first parked;
 under `step`/`stepping-sink` it re-parks at the next node). Note when nothing is parked."
   (let (dbg *debug-session*)
@@ -590,8 +574,7 @@ re-implementation; it registers the `,resume`/`,step` commands via the REPL regi
 ;; state, then a `debug>` prompt. Line commands:
 ;;   <Enter>  refresh      r    resume ALL parked     r N   resume the Nth parked
 ;;   q        quit         (any Brood expr) evaluate it — e.g. (debug/dbg-events d)
-(defn- debug-numbered
-  (entries)
+(defn- debug-numbered (entries)
   (letrec (go (fn (es i acc)
                 (if (empty? es)
                   (reverse acc)
@@ -607,8 +590,7 @@ re-implementation; it registers the `,resume`/`,step` commands via the REPL regi
                             (pr-str-bounded (get (second (first es)) :vals)))
                       acc)))))
     (go entries 1 ())))
-(defn- debug-resume-nth
-  (dbg entries n)
+(defn- debug-resume-nth (dbg entries n)
   (if (and (int? n) (>= n 1) (<= n (count entries)))
     (do (resume dbg (first (nth entries (dec n)))) (str "resumed [" n "]"))
     (str "no parked process [" n "]")))

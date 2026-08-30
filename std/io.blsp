@@ -125,14 +125,12 @@ count, or forward however it likes."
 ;; must be BOTH the keyword and followed by something `port?` accepts, so
 ;; `(io/puts :to 3)` prints `:to 3` like any other pair of values.
 
-(defn- shown
-  (xs)
+(defn- shown (xs)
   ;; Each argument through the installed `*show*` transform, or untouched when none is
   ;; installed (the default fast path). Mirrors the prelude's own printer.
   (if *show* (map *show* xs) xs))
 
-(defn- split-target
-  (xs)
+(defn- split-target (xs)
   "`[values port]` for an argument list that may end in `:to <port>`; `port` is nil when
 it does not."
   (let (n (count xs))
@@ -140,8 +138,7 @@ it does not."
       [(take (- n 2) xs) (nth xs (- n 1))]
       [xs nil])))
 
-(defn- inspect-render
-  (& xs)
+(defn- inspect-render (& xs)
   ;; `%render`'s re-readable twin: the same space-joined shape, but each value through the
   ;; `Inspect` ability (which defaults to `pr-str`) rather than its display form. Written
   ;; here rather than as a primitive because it is a fold over an ability call — the
@@ -150,8 +147,7 @@ it does not."
   ;; resolves to `io/inspect` below and recurses until the stack guard fires.
   (fold (fn (acc v) (let (s (/inspect v)) (if (= acc "") s (str acc " " s)))) "" xs))
 
-(defn- render-display
-  (& xs)
+(defn- render-display (& xs)
   ;; The DISPLAY renderer: each value through the installed `*show*` transform (which is
   ;; what honors `Display` for a record), then the kernel's space-joined `%render`.
   ;; `*show*` lives HERE rather than in `send-text` because it is a display transform: on
@@ -160,8 +156,7 @@ it does not."
   ;; never be seen (`#money<$5>` printed as `"$5"`).
   (apply %render (shown xs)))
 
-(defn- send-text
-  (xs suffix render)
+(defn- send-text (xs suffix render)
   ;; The shared body of the three writers: split off a trailing `:to <port>`, render the
   ;; remaining values with `render`, append `suffix`, and `emit` it — to the named port, or
   ;; to `*out*` when none was named. Each `render` applies its own value transform.

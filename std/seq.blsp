@@ -28,8 +28,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
   (:use map))
 
 ;; reduce-while — the early-terminating fold (≈ Enum.reduce_while).
-(defn- reduce-while-loop
-  (f acc coll)
+(defn- reduce-while-loop (f acc coll)
   (if (empty? coll)
     acc
     (match (f acc (first coll))
@@ -57,8 +56,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 (sig frequencies (seqable -> map))
 
 ;; dedupe: collapse only *consecutive* runs of equal items (no "seen" set needed).
-(defn- dedupe-acc
-  (coll prev acc)
+(defn- dedupe-acc (coll prev acc)
   (cond
     (empty? coll) acc
     (= (first coll) prev) (dedupe-acc (rest coll) prev acc)
@@ -104,8 +102,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 (sig group-by (any seqable -> any))
 
 ;; Byte-identical to `string/join-parts` — see the note there for why the copy stands.
-(defn- interpose-acc
-  (sep coll acc)
+(defn- interpose-acc (sep coll acc)
   (if (empty? coll) acc (interpose-acc sep (rest coll) (cons (first coll) (cons sep acc)))))
 (defn interpose (sep coll)
   "A list with `sep` inserted between adjacent items of `coll`.
@@ -113,8 +110,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
     (seq/interpose 0 [1 2 3])  → (1 0 2 0 3)"
   (if (empty? coll) nil (reverse (interpose-acc sep (rest coll) (list (first coll))))))
 
-(defn- interleave-acc
-  (a b acc)
+(defn- interleave-acc (a b acc)
   (if (or (empty? a) (empty? b))
     (reverse acc)
     (interleave-acc (rest a) (rest b) (cons (first b) (cons (first a) acc)))))
@@ -125,8 +121,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
   (interleave-acc a b nil))
 
 ;; (chunk-every n coll) — like partition but keeps the trailing partial chunk.
-(defn- chunk-every-acc
-  (n coll acc)
+(defn- chunk-every-acc (n coll acc)
   (if (empty? coll)
     (reverse acc)
     (chunk-every-acc n (drop n coll) (cons (into [] (take n coll)) acc))))
@@ -147,8 +142,7 @@ trailing partial chunk is kept. `n` must be positive.
 (sig chunk-every (int seqable -> any))
 
 ;; (chunk-by f coll) — consecutive runs where (f x) returns the same value.
-(defn- chunk-by-acc
-  (f coll key curr acc)
+(defn- chunk-by-acc (f coll key curr acc)
   (if (empty? coll)
     (reverse (cons (into [] (reverse curr)) acc))
     (let (x (first coll) k (f x))
@@ -167,8 +161,7 @@ A new chunk starts each time the return value of `f` changes.
 
 ;; (scan f init coll) — running fold: returns a list of all intermediate values
 ;; including the seed.
-(defn- scan-acc
-  (f acc coll result)
+(defn- scan-acc (f acc coll result)
   (if (empty? coll)
     (reverse result)
     (let (next (f acc (first coll)))
@@ -181,8 +174,7 @@ starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`.
   (scan-acc f init (seq coll) (list init)))
 
 ;; (zip-with f a b) — map `f` over pairs, stopping at the shorter sequence.
-(defn- zip-with-acc
-  (f a b acc)
+(defn- zip-with-acc (f a b acc)
   (if (or (empty? a) (empty? b))
     (reverse acc)
     (zip-with-acc f (rest a) (rest b) (cons (f (first a) (first b)) acc))))
@@ -207,8 +199,7 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`.
   (fold (fn (best x) (if (> (f x) (f best)) x best)) (first coll) (rest coll)))
 (sig max-by (any seqable -> any))
 
-(defn- enumerate-acc
-  (i coll acc)
+(defn- enumerate-acc (i coll acc)
   (if (empty? coll)
     (reverse acc)
     (enumerate-acc (inc i) (rest coll) (cons [i (first coll)] acc))))
@@ -218,8 +209,7 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`.
     (seq/enumerate [:a :b])    → ([0 :a] [1 :b])"
   (enumerate-acc 0 (seq coll) nil))
 
-(defn- index-where-from
-  (pred coll i)
+(defn- index-where-from (pred coll i)
   (cond
     (empty? coll) -1
     (pred (first coll)) i
@@ -301,8 +291,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
 ;; caller here — one of four helpers stranded there when their public functions moved out.
 ;; A prelude-resident helper that only a module uses costs boot-image size and reads as a
 ;; core primitive in `reflect/global-names`; it belongs beside its caller.
-(defn- distinct-step
-  (state x)
+(defn- distinct-step (state x)
   ;; the "seen" map only ever stores `true`, so a single `%map-get` (default `false`)
   ;; distinguishes present from absent — no need for `contains?`'s two-sentinel probe
   ;; (which exists to tell a stored `nil`/`false` from absence).
@@ -323,8 +312,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
 ;; the length. Moved here from the prelude with `distinct-step` — same reason.
 ;; check-allow: deliberately non-tail — depth = the structure's nesting, not its element count.
 (check-allow :non-tail-recursion
-  (defn- flatten-acc
-    (coll acc)
+  (defn- flatten-acc (coll acc)
     (cond
       (empty? coll) acc
       (list? (first coll)) (flatten-acc (rest coll) (flatten-acc (first coll) acc))
@@ -358,8 +346,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
   (take (- (count coll) n) coll))
 (sig drop-last (int seqable -> any))
 
-(defn- iterate-times-acc
-  (f x n acc)
+(defn- iterate-times-acc (f x n acc)
   (if (< n 0) acc (iterate-times-acc f (f x) (dec n) (cons x acc))))
 (defn iterate-times (f x n)
   "The list `(x f(x) f²(x) … fⁿ(x))` — the `n`+1 successive states of applying `f`,
@@ -382,8 +369,7 @@ contradiction; it is public here, where its callers can reach it.
   (if (<= n 0) x (seq/times (dec n) f (f x))))
 (sig times (int any any -> any))
 
-(defn- repeatedly-acc
-  (n f acc)
+(defn- repeatedly-acc (n f acc)
   (if (<= n 0) (reverse acc) (repeatedly-acc (dec n) f (cons (f) acc))))
 (defn repeatedly (n f)
   "A list of `n` successive calls to the zero-argument function `f` (in call order).
@@ -413,14 +399,12 @@ contradiction; it is public here, where its callers can reach it.
 ;; than what it replaced — measured, it exhausts a 2 GB budget at n = 20 000), while
 ;; `assoc` on a CHAMP map shares structure and is O(log₃₂ n). Nothing mutates either
 ;; way; this is just the immutable structure with the right update cost.
-(defn- shuffle-swap
-  (m i j)
+(defn- shuffle-swap (m i j)
   (let (a (get m i)
         b (get m j))
     (assoc (assoc m i b) j a)))
 
-(defn- shuffle-at
-  (m i state)
+(defn- shuffle-at (m i state)
   ;; Descending Fisher–Yates: draw j in 0..i, swap it into slot i, move left.
   (if (<= i 0)
     ; always advance, so a chained next-seed never stalls on a 0/1-element input
@@ -430,8 +414,7 @@ contradiction; it is public here, where its callers can reach it.
       (shuffle-at (shuffle-swap m i j) (- i 1) s))))
 (sig shuffle-at (map int int -> vector))
 
-(defn- shuffle-drain
-  (m i acc)
+(defn- shuffle-drain (m i acc)
   ;; Read slots i…0 back out, building the result list front-to-back.
   (if (< i 0) acc (shuffle-drain m (- i 1) (cons (get m i) acc))))
 

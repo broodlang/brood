@@ -17,8 +17,7 @@
 
 (defn- sysmon-churn (n acc) (if (= n 0) acc (sysmon-churn (- n 1) (cons n acc))))
 
-(defn- sysmon-drain-until
-  (kind subject)
+(defn- sysmon-drain-until (kind subject)
   "Receive [:system …] messages until one matches `kind` about `subject` (or a
 5s timeout → :timeout). Other system events are consumed and dropped."
   (receive
@@ -26,16 +25,14 @@
     ([:system _ _ _] (sysmon-drain-until kind subject))
     (after *test-wait-ms* :timeout)))
 
-(defn- sysmon-wait-disarm
-  (n)
+(defn- sysmon-wait-disarm (n)
   "Poll until the kernel monitor reads back as nil (the async death-disarm), or
 `n` attempts run out. Returns the final config (nil on success)."
   (if (or (nil? (proc/system-monitor)) (= n 0))
     (proc/system-monitor)
     (do (sleep 20) (sysmon-wait-disarm (- n 1)))))
 
-(defn- sysmon-done
-  ()
+(defn- sysmon-done ()
   "End-of-test hygiene: disarm, then drain any [:system …] backlog out of this
 worker's mailbox so it can't satisfy a later test's receive."
   (proc/system-monitor nil)

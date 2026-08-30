@@ -45,8 +45,7 @@
    "string-length" "string/length"
    "os/getenv" "os/env"})
 
-(defn- fenced-blocks
-  (lines in-block acc cur)
+(defn- fenced-blocks (lines in-block acc cur)
   "The Brood code blocks of `lines`, as a list of source strings. Tail-recursive: a `test`
 body runs in a green process with a bounded stack."
   (if (empty? lines)
@@ -64,8 +63,7 @@ body runs in a green process with a bounded stack."
           (fenced-blocks rest-lines true acc (cons line cur))
           (fenced-blocks rest-lines false acc cur))))))
 
-(defn- drop-until-fence
-  (lines)
+(defn- drop-until-fence (lines)
   "Skip to just past the closing fence of a non-Brood block."
   (if (empty? lines)
     nil
@@ -73,12 +71,10 @@ body runs in a green process with a bounded stack."
       (rest lines)
       (drop-until-fence (rest lines)))))
 
-(defn- blocks-in
-  (path)
+(defn- blocks-in (path)
   (fenced-blocks (string/split (file/slurp path) "\n") false nil nil))
 
-(defn- call-heads
-  (form acc)
+(defn- call-heads (form acc)
   "Every symbol in call-head position within `form` — the first element of each list.
 Descends lists, vectors and maps, because a head can sit inside any of them (that is
 KI-70's whole point)."
@@ -91,29 +87,24 @@ KI-70's whole point)."
     (map? form) (fold (fn (a kv) (call-heads (second kv) (call-heads (first kv) a))) acc (seq form))
     else acc))
 
-(defn- heads-of-block
-  (src)
+(defn- heads-of-block (src)
   "The call heads of `src`, or nil if it does not parse — a prose fragment, an elided
 `…`, a deliberately-malformed example. Skipping those is why the anti-vacuity tests below
 exist."
   (let (forms (try (reflect/read-all src) (catch _ nil)))
     (if (nil? forms) nil (fold (fn (a f) (call-heads f a)) nil forms))))
 
-(defn- all-heads
-  ()
+(defn- all-heads ()
   (mapcat (fn (p) (mapcat heads-of-block (blocks-in p))) *docs*))
 
-(defn- qualified?
-  (sym)
+(defn- qualified? (sym)
   (let (n (->string sym))
     (and (not (string/starts-with? n "%")) (contains-slash? n))))
 
-(defn- contains-slash?
-  (s)
+(defn- contains-slash? (s)
   (fold (fn (found c) (or found (= c "/"))) false (string/->list s)))
 
-(defn- module-of
-  (sym)
+(defn- module-of (sym)
   (first (string/split (->string sym) "/")))
 
 (describe "the docs' code blocks"
@@ -128,9 +119,7 @@ exist."
   (test "enough blocks still PARSE to make the head checks meaningful"
     ;; If a reader or fence change made every block unparseable, the checks would go
     ;; vacuously green. They are fragments, so this is a floor, not a total.
-    (is (> (count (filter (fn (b) (not (nil? (heads-of-block b))))
-                    (mapcat blocks-in *docs*)))
-          20)))
+    (is (> (count (filter (fn (b) (not (nil? (heads-of-block b)))) (mapcat blocks-in *docs*))) 20)))
 
   (test "the retired list still names names that are actually gone"
     ;; Guards the guard the other way: if a retired name came back, checking for its

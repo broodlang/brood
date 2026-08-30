@@ -201,8 +201,7 @@
     ;; test, so resolve the real binary: beside the runner (`brood --test`, `nest test`) or
     ;; one level up (`target/release/deps/` → `target/release/`), and skip if absent.
     (let (dir (path/dirname (os/exe-path))
-          exe (first (filter file/exists?
-                       [(path/join dir "brood") (path/join dir ".." "brood")]))
+          exe (first (filter file/exists? [(path/join dir "brood") (path/join dir ".." "brood")]))
           prog (path/temp "stdimage-race-")
           _ (file/spit prog
               (string/join "\n"

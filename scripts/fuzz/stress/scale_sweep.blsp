@@ -287,8 +287,7 @@
 (io/puts "std/ scale sweep — linear ~4x, quadratic ~16x")
 (def- sweep-src-line
   "(defn compute-thing (alpha beta) (if (< alpha beta) (+ alpha 1) (str \"x\" beta)))\n")
-(defn- sweep-src
-  (k acc)
+(defn- sweep-src (k acc)
   (if (= k 0) (cons utf8-src-lead acc) (sweep-src (- k 1) (cons sweep-src-line acc))))
 ;; A SEQUENCE of structural motions across one buffer — the editor's repeated
 ;; `forward-sexp`, not one motion — over ONE held text value (the tooling/LSP shape; the

@@ -91,9 +91,7 @@
     (let (inner (with-err-str (io/write "IN" :to *err*)))
       (assert= inner "IN")))
   (test "a throwing body propagates the error rather than swallowing it"
-    (is (includes? (try
-                     (with-err-str (io/write "before" :to *err*) (error "boom"))
-                     (catch e e))
+    (is (includes? (try (with-err-str (io/write "before" :to *err*) (error "boom")) (catch e e))
           "boom")))
   (test "the sink does not leak after a throw"
     (try (with-err-str (error "boom")) (catch _ nil))

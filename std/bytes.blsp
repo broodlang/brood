@@ -82,22 +82,18 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
     (bytes/int-le-> 258 2)   → #b\"\x02\x01\""
   (bytes (reverse (int->bytes-be v (bytes-width-check "int->bytes-le" n) nil))))
 
-(defn- bytes-acc-be
-  (bs i end acc)
+(defn- bytes-acc-be (bs i end acc)
   (if (>= i end) acc (bytes-acc-be bs (+ i 1) end (+ (* acc 256) (bytes/at bs i)))))
 
-(defn- bytes-acc-le
-  (bs low i acc)
+(defn- bytes-acc-le (bs low i acc)
   (if (< i low) acc (bytes-acc-le bs low (- i 1) (+ (* acc 256) (bytes/at bs i)))))
 
-(defn- bytes-width-check
-  (who n)
+(defn- bytes-width-check (who n)
   (if (and (int? n) (>= n 1) (<= n 8))
     n
     (error (str who ": width must be an int in 1–8, got " (pr-str n)))))
 
-(defn- int->bytes-be
-  (v w acc)
+(defn- int->bytes-be (v w acc)
   (if (<= w 0)
     acc
     (int->bytes-be (bit/shift-right v 8) (- w 1) (cons (bit/and v 255) acc))))

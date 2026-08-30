@@ -168,21 +168,15 @@
 (describe "try / catch — nested and rethrow"
   (test "inner catch handles its own error; outer sees nothing"
     ;; If outer catch fired, result would be :outer; inner handling gives :handled.
-    (assert= (try
-               (try (throw :inner) (catch _ :handled))
-               (catch _ :outer))
+    (assert= (try (try (throw :inner) (catch _ :handled)) (catch _ :outer))
       :handled))
 
   (test "outer catch handles error that escapes inner"
-    (assert= (try
-               (try (throw :escapes) (catch e (throw e)))
-               (catch e e))
+    (assert= (try (try (throw :escapes) (catch e (throw e))) (catch e e))
       :escapes))
 
   (test "rethrowing inside catch propagates to the next handler"
-    (assert= (try
-               (try (throw :original) (catch e (throw :rethrown)))
-               (catch e e))
+    (assert= (try (try (throw :original) (catch e (throw :rethrown))) (catch e e))
       :rethrown))
 
   (test "try can be nested three levels deep"
@@ -194,9 +188,7 @@
       :level3))
 
   (test "a catch handler that itself throws is caught by the next outer try"
-    (assert= (try
-               (try (/ 1 0) (catch _ (error "handler-boom")))
-               (catch e (error-message e)))
+    (assert= (try (try (/ 1 0) (catch _ (error "handler-boom"))) (catch e (error-message e)))
       "handler-boom")))
 
 ;; ── 7. try in various positions ──────────────────────────────────────────────

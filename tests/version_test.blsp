@@ -216,8 +216,7 @@
 (describe "satisfies-all? / unsatisfied — the :enhances shape"
   (test "every named constraint met"
     (is (satisfies-all? {'bedit "0.4.0"} {'bedit ">= 0.3"}))
-    (is (satisfies-all? {'bedit "0.4.0" 'waggle "1.0.0"}
-          {'bedit ">= 0.3" 'waggle ">= 1"})))
+    (is (satisfies-all? {'bedit "0.4.0" 'waggle "1.0.0"} {'bedit ">= 0.3" 'waggle ">= 1"})))
   (test "an empty constraint map is satisfied by anything — an ordinary library"
     (is (satisfies-all? {} {}))
     (is (satisfies-all? {'bedit "0.4.0"} {})))

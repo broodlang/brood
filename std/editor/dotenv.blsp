@@ -26,35 +26,30 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
 
 ;; ---- scanning helpers -------------------------------------------------------
 
-(defn- env-lead-ws
-  (line i n)
+(defn- env-lead-ws (line i n)
   "The column where `line`'s leading whitespace (spaces / tabs) ends."
   (if (and (< i n) (or (= (string/char-at line i) " ") (= (string/char-at line i) "\t")))
     (env-lead-ws line (inc i) n)
     i))
 (sig env-lead-ws (string int int -> int))
 
-(defn- env-find
-  (line i n ch)
+(defn- env-find (line i n ch)
   "The offset of the next single-char `ch` at or after `i` in `line`, or -1."
   (cond (>= i n) -1 (= (string/char-at line i) ch) i else (env-find line (inc i) n ch)))
 (sig env-find (string int int string -> int))
 
-(defn- env-key-char?
-  (c)
+(defn- env-key-char? (c)
   "True if `c` may appear in a dotenv key (letters, digits, `_`, `.`)."
   (or (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" c)
     (= c "_")
     (= c ".")))
-(defn- env-key-end
-  (line i n)
+(defn- env-key-end (line i n)
   (if (and (< i n) (env-key-char? (string/char-at line i))) (env-key-end line (inc i) n) i))
 (sig env-key-end (string int int -> int))
 
 ;; ---- per-line spans ---------------------------------------------------------
 
-(defn- env-value-spans
-  (line base v n)
+(defn- env-value-spans (line base v n)
   "A one-element string span for a quoted value starting at offset `v` (to its closing
 quote, or end of line if unclosed); `()` for an unquoted value (the default face)."
   (if (and (< v n) (or (= (string/char-at line v) "\"") (= (string/char-at line v) "'")))
@@ -65,8 +60,7 @@ quote, or end of line if unclosed); `()` for an unquoted value (the default face
     '()))
 (sig env-value-spans (string int int int -> list))
 
-(defn- env-assign-spans
-  (line base lead n)
+(defn- env-assign-spans (line base lead n)
   "Spans for a `KEY=value` line (offsets shifted by `base`): an `export` keyword when
 present, the key, and a quoted value. `()` when the line isn't an assignment."
   (let (rest (string/substring line lead n)
@@ -80,8 +74,7 @@ present, the key, and a quoted value. `()` when the line isn't an assignment."
       '())))
 (sig env-assign-spans (string int int int -> list))
 
-(defn- env-line-spans
-  (line base)
+(defn- env-line-spans (line base)
   "The spans for one `line` starting at offset `base`: a `#` comment whole, else the
 assignment spans (key / export / quoted value), else none."
   (let (n (string/length line) lead (env-lead-ws line 0 n))
@@ -91,8 +84,7 @@ assignment spans (key / export / quoted value), else none."
       else (env-assign-spans line base lead n))))
 (sig env-line-spans (string int -> list))
 
-(defn- env-lex
-  (src i n acc)
+(defn- env-lex (src i n acc)
   "Tail-recursive line walker: classify each line (`env-line-spans`), accumulating
 spans in reverse."
   (if (>= i n)

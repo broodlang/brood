@@ -108,18 +108,15 @@ LSP's DOC_FORMS list."
 
 ;; ---- character classes ------------------------------------------------------
 
-(defn- hl-ws?
-  (c)
+(defn- hl-ws? (c)
   (or (= c " ") (= c "\t") (= c "\n") (= c "\r") (= c ",")))
 (defn- hl-open? (c) (or (= c "(") (= c "[") (= c "{")))
 (defn- hl-close? (c) (or (= c ")") (= c "]") (= c "}")))
 (defn- hl-bracket? (c) (or (hl-open? c) (hl-close? c)))
-(defn- hl-delim?
-  (c)
+(defn- hl-delim? (c)
   (or (hl-ws? c) (hl-bracket? c) (= c "\"") (= c ";")))
 
-(defn- hl-number?
-  (tok)
+(defn- hl-number? (tok)
   "True if `tok` reads as a number (so it colours as one rather than a symbol). A cheap
 first-char gate skips the `string/->number` parse for the common case — an identifier
 that can't begin a number — since this runs on every atom on the fontify hot path."
@@ -133,15 +130,13 @@ that can't begin a number — since this runs on every atom on the fontify hot p
 ;; which are on the render hot path. The delimiter set mirrors `hl-delim?`.
 (def- hl-delim-chars " \t\n\r,()[]{}\";")
 
-(defn- hl-to-eol
-  (src i n)
+(defn- hl-to-eol (src i n)
   "Index of the newline ending the line containing `i` (or `n` at end of input)."
   (math/min n (string/span-until src i "\n")))
 (sig hl-to-eol (string int int -> int))
 
 ; backslash: skip it and the escaped char
-(defn- hl-string-end
-  (src i n)
+(defn- hl-string-end (src i n)
   "Index just past the closing quote of a string whose body starts at `i` (one past
 the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
   (let (j (string/span-until src i "\\\""))
@@ -151,8 +146,7 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
       (= (string/char-at src j) "\"") (inc j)
       else (hl-string-end src (+ j 2) n))))
 (sig hl-string-end (string int int -> int))
-(defn- hl-atom-end
-  (src i n)
+(defn- hl-atom-end (src i n)
   "Index of the first delimiter at or after `i` — the end of an atom token."
   (math/min n (string/span-until src i hl-delim-chars)))
 (sig hl-atom-end (string int int -> int))
@@ -183,13 +177,11 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
 ;; string a docstring?" — that one is positional (`(defn f (x) "doc" …)` documents,
 ;; `(defn f (x) "hi")` returns), so it needs the head and the index, not just a flag.
 
-(defn- hl-push
-  (stack open)
+(defn- hl-push (stack open)
   "Open a frame for the bracket `open`."
   (cons [open 0 nil false] stack))
 
-(defn- hl-advance
-  (stack params?)
+(defn- hl-advance (stack params?)
   "Advance the innermost frame past one started form; `params?` marks that form as a
 bracketed list sitting in parameter position (index 2)."
   (if (empty? stack)
@@ -197,22 +189,19 @@ bracketed list sitting in parameter position (index 2)."
     (let ([open n head p] (first stack))
       (cons [open (inc n) head (or p (and params? (= n 2)))] (rest stack)))))
 
-(defn- hl-name
-  (stack text)
+(defn- hl-name (stack text)
   "Advance past a symbol, recording it as the list's head when it is the first form."
   (if (empty? stack)
     stack
     (let ([open n head p] (first stack))
       (cons [open (inc n) (if (and (= n 0) (= open "(")) text head) p] (rest stack)))))
 
-(defn- hl-head?
-  (stack)
+(defn- hl-head? (stack)
   "True when the form starting here is in HEAD position — the first form of a `(` list."
   (and (not (empty? stack))
     (let ([open n _ _] (first stack)) (and (= open "(") (= n 0)))))
 
-(defn- hl-more-forms?
-  (toks)
+(defn- hl-more-forms? (toks)
   "True if another form follows in the current list — the next non-comment token is
 not this list's closing bracket."
   (cond
@@ -223,8 +212,7 @@ not this list's closing bracket."
           (= kind :comment) (hl-more-forms? (rest toks))
           else (not (= kind :close))))))
 
-(defn- hl-doc?
-  (stack toks)
+(defn- hl-doc? (stack toks)
   "True when the string token starting here is a DOCSTRING rather than a string value:
 the enclosing form is a doc-carrying `def…` head (`(reflect/doc-forms)`), the string sits right
 after the name — or after the parameter list — and, for the heads that build a function,
@@ -241,8 +229,7 @@ string). `toks` is the stream AFTER the string."
 
 ;; ---- the lexer walk ---------------------------------------------------------
 
-(defn- hl-spans
-  (toks stack acc)
+(defn- hl-spans (toks stack acc)
   "Walk the `scan-tokens` stream into `[start end face]` colour spans, carrying the
 form `stack` (head position, and enough shape to tell a docstring from a string).
 `:symbol` needs position — head + special form → keyword face, head → call face, else
@@ -369,8 +356,7 @@ one-char range `[pos (inc pos) face]`."
 
 ;; ---- bracket matching -------------------------------------------------------
 
-(defn- hl-fwd-match
-  (full i n depth)
+(defn- hl-fwd-match (full i n depth)
   "Scanning forward from `i` (just past an opener), the offset of the closer at
 `depth` 0, or -1. Skips strings/comments so their brackets don't count."
   (if (>= i n)
@@ -384,8 +370,7 @@ one-char range `[pos (inc pos) face]`."
         else (hl-fwd-match full (inc i) n depth)))))
 (sig hl-fwd-match (string int int int -> int))
 
-(defn- hl-opener-scan
-  (full i n cp stack)
+(defn- hl-opener-scan (full i n cp stack)
   "Forward scan maintaining a `stack` of opener offsets; on reaching closer `cp`,
 return the matching opener (top of stack) or -1. Skips strings/comments."
   (if (>= i n)
@@ -402,13 +387,11 @@ return the matching opener (top of stack) or -1. Skips strings/comments."
         else (hl-opener-scan full (inc i) n cp stack)))))
 (sig hl-opener-scan (string int int int list -> int))
 
-(defn- hl-closer-of
-  (c)
+(defn- hl-closer-of (c)
   ;; the closing delimiter that pairs with opener `c`, or nil
   (cond (= c "(") ")" (= c "[") "]" (= c "{") "}" else nil))
 
-(defn- hl-close-scan
-  (full i pos n stack)
+(defn- hl-close-scan (full i pos n stack)
   "Forward scan to `pos` keeping a stack of open-bracket offsets: the innermost opener
 enclosing `pos`, `-1` at top level, or `:text` when `pos` falls inside a string or a comment
 — where a bracket is a character rather than structure.
@@ -495,8 +478,7 @@ newline an auto-indenter handles."
 
 ;; ---- enclosing call (for signature hints) -----------------------------------
 
-(defn- hl-enc-scan
-  (full i pos n stack)
+(defn- hl-enc-scan (full i pos n stack)
   "Forward scan to `pos` maintaining a stack of open-bracket offsets; returns the
 innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped at
 `pos`)."
@@ -511,8 +493,7 @@ innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped a
         else (hl-enc-scan full (inc i) pos n stack)))))
 (sig hl-enc-scan (string int int int list -> int))
 
-(defn- hl-datum-starts
-  (full i end n acc)
+(defn- hl-datum-starts (full i end n acc)
   "Start offsets (reverse order) of the complete datums in `[i, end)` at one nesting
 level — atoms, strings, and whole bracketed forms each count once."
   (if (>= i end)
@@ -563,8 +544,7 @@ cursor sits deep in a large file."
 
 ;; ---- completion helpers (pure; candidates supplied by the caller) -----------
 
-(defn- hl-sym-start
-  (full i)
+(defn- hl-sym-start (full i)
   "The offset where the symbol token ending at `i` begins."
   (if (or (<= i 0) (hl-delim? (string/char-at full (dec i)))) i (hl-sym-start full (dec i))))
 (sig hl-sym-start (string int -> int))
@@ -593,12 +573,10 @@ does — `(map|` reads as `map`, since that is where point lands after typing on
     (when (not (= text "")) [start text])))
 (sig symbol-at (string int -> (or nil (vector any))))
 
-(defn- hl-cp2
-  (a b)
+(defn- hl-cp2 (a b)
   "The longest common prefix of two strings."
   (hl-cp2-at a b 0 (math/min (string/length a) (string/length b))))
-(defn- hl-cp2-at
-  (a b i n)
+(defn- hl-cp2-at (a b i n)
   (if (or (>= i n) (not (= (string/char-at a i) (string/char-at b i))))
     (string/substring a 0 i)
     (hl-cp2-at a b (inc i) n)))

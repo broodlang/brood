@@ -7,8 +7,7 @@
 (defmodule dockerfile-test (:use test) (:use editor/dockerfile))
 
 (defn ascending? (spans) (ascending-go spans -1))
-(defn- ascending-go
-  (spans prev-end)
+(defn- ascending-go (spans prev-end)
   (if (empty? spans)
     true
     (let (s (first spans))

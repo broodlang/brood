@@ -44,8 +44,7 @@
   (:use gabriel/nboyer)
   (:use gabriel/chudnovsky))
 
-(defn- gb-forms
-  (name)
+(defn- gb-forms (name)
   "The s-expressions of the vendored `<name>.input`, in upstream's `(read)` order."
   ;; the prelude's bootstrap `path-join` is 2-arg (`path/join` is the variadic one)
   (corpus-forms (path/join (path/join (corpus-dir "gabriel") "data") (str name ".input"))))

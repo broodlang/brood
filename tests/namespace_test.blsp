@@ -228,8 +228,7 @@
 ;;; though the name was plainly defined. The scan now starts at the first `defmodule`.
 (describe "namespaces: a pre-module def stays at root"
   :isolated (test "a bare reference to a def written before defmodule resolves to root"
-    (%load-string (str "(def pre-cfg 7)"
-                    " (defmodule nspre) (defn read-it () pre-cfg)"))
+    (%load-string (str "(def pre-cfg 7)" " (defmodule nspre) (defn read-it () pre-cfg)"))
     (is (bound? 'pre-cfg)) ; defined at root, not nspre/pre-cfg
     (is (not (bound? 'nspre/pre-cfg)))
     (assert= (nspre/read-it) 7))
@@ -247,8 +246,7 @@
 ;;; switch. The runtime is unchanged — still flat interned symbols, one per qualified name.
 (describe "namespaces: multiple modules per file (ADR-223)"
   :isolated (test "two modules in one file each qualify their own same-named def"
-    (%load-string (str "(defmodule mm-a) (defn val () :a)"
-                    " (defmodule mm-b) (defn val () :b)"))
+    (%load-string (str "(defmodule mm-a) (defn val () :a)" " (defmodule mm-b) (defn val () :b)"))
     (is (= (mm-a/val) :a))
     (is (= (mm-b/val) :b))
     (is (bound? 'mm-a/val))
@@ -294,13 +292,11 @@
 ;; self-report at the point of use, and stay silent when a caller only touches non-overlapping
 ;; names. (`sexp` and `telemetry` both export `forward` — the pair exercised here; before
 ;; ADR-235 this whole section pinned a hand-maintained list of every std overlap.)
-(defn- ns-loads?
-  (src)
+(defn- ns-loads? (src)
   "True if `src` loads without error — the clash, if any, never fired."
   (try (do (%load-string src) true) (catch e false)))
 
-(defn- ns-load-error
-  (src)
+(defn- ns-load-error (src)
   (try (do (%load-string src) "") (catch e (str (error-message e)))))
 
 (describe "namespaces: `(:use …)` clashes resolve lazily (ADR-235)"

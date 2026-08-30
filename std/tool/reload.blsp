@@ -85,15 +85,13 @@ behind a long-lived loop has changed since it started."
 ;; in Brood here — the same pattern the loader's `%require-force-package` uses — so the
 ;; Rust reload primitive stays package-agnostic. A root-project / std / loose file has
 ;; no registered key and reloads exactly as before.
-(defn- reload-package-key
-  (path)
+(defn- reload-package-key (path)
   ;; The rooted key (`"foo/b"`) whose file is `path`, or nil — reverse of
   ;; `*module-files*` (a root registry the package manager fills).
   (fold (fn (found kv) (if found found (if (= (second kv) path) (first kv) nil)))
     nil *module-files*))
 
-(defn- reload-in-package-context
-  (path thunk)
+(defn- reload-in-package-context (path thunk)
   ;; Run `thunk` under `path`'s package context if it is a dep module, restoring the
   ;; enclosing context on both the normal and error paths; else run it as-is.
   (let (key (reload-package-key path))
@@ -107,8 +105,7 @@ behind a long-lived loop has changed since it started."
           (let (result (thunk)) (restore) result)
           (catch e (do (restore) (throw e))))))))
 
-(defn- reload-loop
-  (path last &optional on-reload)
+(defn- reload-loop (path last &optional on-reload)
   (let (now (file/mtime path))
     (cond
       (nil? now)
@@ -142,8 +139,7 @@ behind a long-lived loop has changed since it started."
 ;; Recursive .blsp collector. Returns a flat list of paths (relative to the
 ;; original `dir` argument). Mirrors the walk in std/tool/project.blsp; lives here
 ;; too so std/reload stays prelude-only and require-able without project.
-(defn- reload-collect-blsp
-  (dir)
+(defn- reload-collect-blsp (dir)
   (if (file/dir? dir)
     (fold
       (fn (acc entry)
@@ -170,8 +166,7 @@ behind a long-lived loop has changed since it started."
 ;; File *deletions* aren't reaped here — the orphaned per-file watcher just
 ;; logs "[reload] missing:" on its own poll, which is a useful signal during
 ;; rename storms. A periodic prune could come later if it becomes annoying.
-(defn- reload-dir-loop
-  (dir known &optional on-reload)
+(defn- reload-dir-loop (dir known &optional on-reload)
   (let (current (reload-collect-blsp dir))
     (dolist (p current)
       (unless (includes? known p)

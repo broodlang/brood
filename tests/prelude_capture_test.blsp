@@ -44,8 +44,7 @@
 ;; Walk a form, collecting head symbols that sit inside a quasiquote template.
 ;; `~`/`~@` holes are caller code (already resolved at the call site) and `quote`
 ;; subtrees are data, so both are skipped — the same rule the resolver follows.
-(defn- heads-in
-  (form in-template acc)
+(defn- heads-in (form in-template acc)
   (cond
     (not (pair? form)) acc
     (= (first form) 'quote) acc
@@ -64,8 +63,7 @@
 ;; `(list 'mapv '%identity-of 'args)` — and the template walker above skips `quote`
 ;; subtrees by design, so it never saw those heads. A module defining `mapv` therefore
 ;; broke every multimethod it declared, silently: dispatch keyed on `:CAPTURED`.
-(defn- quoted-heads-in
-  (form acc)
+(defn- quoted-heads-in (form acc)
   (if (not (pair? form))
     acc
     (let (acc (if (and (= (first form) 'list)
@@ -78,8 +76,7 @@
                 acc))
       (fold (fn (a f) (quoted-heads-in f a)) acc form))))
 
-(defn- offenders
-  ()
+(defn- offenders ()
   (fold (fn (acc form)
           (if (and (pair? form) (= (first form) 'defmacro))
             (let (hits (seq (quoted-heads-in form (heads-in form false #{}))))

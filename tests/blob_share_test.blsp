@@ -19,8 +19,7 @@
   "Receive a string, send back [:ptr <its-blob-ptr>] to `parent`."
   (receive (s (send parent [:ptr (%blob-ptr s)]))))
 
-(defn- bs-spawn-workers-acc
-  (parent n acc)
+(defn- bs-spawn-workers-acc (parent n acc)
   (if (= n 0)
     acc
     (bs-spawn-workers-acc parent (- n 1) (cons (spawn (bs-blob-worker parent)) acc))))
@@ -35,8 +34,7 @@
     (send (first workers) msg)
     (bs-send-all (rest workers) msg)))
 
-(defn- bs-collect-ptrs-check
-  (got total expected)
+(defn- bs-collect-ptrs-check (got total expected)
   "Receive `total` [:ptr p] replies; assert every p equals `expected`."
   (if (= got total)
     nil

@@ -69,8 +69,7 @@
 ;; --- %isolate: the reap kills what the THUNK spawned, and nothing else --------
 ;;
 
-(defn- wait-for-key
-  (t key budget-ms)
+(defn- wait-for-key (t key budget-ms)
   "Poll table `t` for `key` until it is set or `budget-ms` elapse; the value, else nil.
 
 Waiting for the WRITE rather than sleeping past its expected arrival: a fixed sleep
@@ -106,14 +105,9 @@ the write never comes, which is what these cases actually test."
                          ;; case the reap must not touch. How long it sleeps
                          ;; no longer decides the verdict.
                          (do
-                           (spawn (fn ()
-                                    (sleep 200)
-                                    (table/put t :bystander-ran true)))
+                           (spawn (fn () (sleep 200) (table/put t :bystander-ran true)))
                            (send from :spawned)))))))
-      (%isolate (fn ()
-                  (send helper [:go me])
-                  (receive (:spawned nil))
-                  :done))
+      (%isolate (fn () (send helper [:go me]) (receive (:spawned nil)) :done))
       (is (= true (wait-for-key t :bystander-ran 5000)))))
 
   (test "a process the thunk spawned directly IS reaped"
@@ -121,10 +115,7 @@ the write never comes, which is what these cases actually test."
     ;; would look up a global the thunk `def`'d and die with a bogus
     ;; `unbound symbol` once the bindings are rolled back.
     (let (t (table/new))
-      (%isolate (fn ()
-                  (spawn (fn () (sleep 400) (table/put t :orphan-ran true)))
-                  (sleep 100)
-                  :done))
+      (%isolate (fn () (spawn (fn () (sleep 400) (table/put t :orphan-ran true))) (sleep 100) :done))
       (sleep 600)
       (is (nil? (table/get t :orphan-ran)))))
 
@@ -216,9 +207,7 @@ the write never comes, which is what these cases actually test."
   (test "the mark is rolled back on the throwing path too"
     (is (= :caught
           (try
-            (%isolate (fn ()
-                        (reflect/eval-string "(defdyn *isolate-leak-throw* 1)")
-                        (throw :x)))
+            (%isolate (fn () (reflect/eval-string "(defdyn *isolate-leak-throw* 1)") (throw :x)))
             (catch e :caught))))
     (is (not (reflect/dynamic? '*isolate-leak-throw*))))
 

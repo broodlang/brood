@@ -96,8 +96,7 @@ If no values remain under `k`, the key is dropped."
           (multimap (/assoc entries k new-vs)))))))
 (sig remove-value (multimap any any -> multimap))
 
-(defn- remove-first
-  (lst v)
+(defn- remove-first (lst v)
   ;; Tail-recursive: accumulate the (reversed) skipped prefix and splice once at
   ;; the match, so removing from a long value list can't overflow the stack.
   (letrec (go (fn (acc xs)
@@ -149,18 +148,14 @@ If no values remain under `k`, the key is dropped."
 
 (defn map-vals (mm f)
   "Return a multimap where each value list has been transformed by `(f key values-list)`."
-  (multimap (fold (fn (m pair)
-                    (let (k (first pair)
-                          vs (second pair))
-                      (/assoc m k (f k vs))))
+  (multimap (fold (fn (m pair) (let (k (first pair) vs (second pair)) (/assoc m k (f k vs))))
               {}
               (%map-pairs (/get mm :entries)))))
 (sig map-vals (multimap fn -> multimap))
 
 (defn ->map (mm)
   "Flatten the multimap to a plain map from key → list-of-values (insertion order)."
-  (fold (fn (m pair)
-          (/assoc m (first pair) (reverse (second pair))))
+  (fold (fn (m pair) (/assoc m (first pair) (reverse (second pair))))
     {}
     (%map-pairs (/get mm :entries))))
 (sig ->map (multimap -> map))

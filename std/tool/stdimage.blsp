@@ -26,8 +26,7 @@
   (:use seq)
   (:use file))
 
-(defn- cache-dir
-  ()
+(defn- cache-dir ()
   "`$XDG_CACHE_HOME/brood` (or `~/.cache/brood`), or nil when neither is set."
   (let (xdg (os/env "XDG_CACHE_HOME")
         home (os/env "HOME")
@@ -48,14 +47,12 @@ installed before the first `require`, and this module is itself reached BY a req
 definition, called from both ends."
   (%std-image-path))
 
-(defn- prefixed-by-any?
-  (nm names)
+(defn- prefixed-by-any? (nm names)
   "Whether global `nm` is qualified by ANY module in `names` — i.e. some module already
 claims it by prefix."
   (not (empty? (filter (fn (m) (string/starts-with? nm (str m "/"))) names))))
 
-(defn- %owner-prefix
-  (nm)
+(defn- %owner-prefix (nm)
   "The module a qualified name belongs to: everything before its LAST `/`, or nil when it
 carries none. `:datetime/date` → `\"datetime\"`; a record declared in a nested module keeps
 the whole path (`editor/keymap/km` → `\"editor/keymap\"`)."
@@ -63,8 +60,7 @@ the whole path (`editor/keymap/km` → `\"editor/keymap\"`)."
     (when (> (count parts) 1)
       (string/join "/" (take (- (count parts) 1) parts)))))
 
-(defn- %reg-entries
-  (reg pairs owner-fn)
+(defn- %reg-entries (reg pairs owner-fn)
   "Group `pairs` (a registry's `[key value]` list) by owning module, as
 `[registry-symbol [key] value]` triples ready for `%registry-update!`. `owner-fn` maps a
 `[key value]` pair to its module name, or nil to drop the entry — which is what a
@@ -80,17 +76,13 @@ registration made at the root/REPL gets, since nothing materialises it back."
     {}
     pairs))
 
-(defn- %merge-by-module
-  (a b)
+(defn- %merge-by-module (a b)
   "Concatenate two module→entries maps."
-  (fold (fn (acc kv)
-          (let ([m es] kv)
-            (%map-assoc acc m (append (or (%map-get acc m nil) []) es))))
+  (fold (fn (acc kv) (let ([m es] kv) (%map-assoc acc m (append (or (%map-get acc m nil) []) es))))
     a
     (%map-pairs b)))
 
-(defn- %std-regs-by-module
-  ()
+(defn- %std-regs-by-module ()
   "Every non-impl registration a std module load performs, grouped by the module that
 performed it — `[registry-symbol key-path value]` triples.
 
@@ -141,8 +133,7 @@ multimethod names by their own qualifier — each key names its owner, so none o
           ['*method-from* (%map-pairs *method-from*) (fn (kv) (->string (second kv)))]])
       [['*methods* *methods* method-owner]])))
 
-(defn- prune!
-  (dir keep)
+(defn- prune! (dir keep)
   "Delete all but the `max-keep` most recently modified `std-image-*.bin` under `dir`,
 never touching `keep`. Returns how many were removed.
 
@@ -309,8 +300,7 @@ instead of being inferred from a run that looked wrong."
                       [])
             ;; The id sits between the `std-image-` prefix and the `.bin` suffix.
             ids (apply vector
-                  (map (fn (e)
-                         (string/substring e 10 (- (string/length e) 4)))
+                  (map (fn (e) (string/substring e 10 (- (string/length e) 4)))
                     present))
             idx (%image-index path want)
             sections (if (nil? idx) nil (count idx)))

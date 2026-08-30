@@ -99,8 +99,7 @@
   ;; The checker half, exercised through `check-string-structured` so a warning is a VALUE
   ;; rather than a build failure. A conforming method is silent; a non-conforming one names
   ;; the multi, the dispatch key, the declared type, and what the body actually yields.
-  (defn- mm-warnings
-    (src)
+  (defn- mm-warnings (src)
     (map (fn (d) (get d :message)) (reflect/check-string-structured src)))
 
   (test "a method whose body conforms to the declared return is silent"

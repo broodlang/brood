@@ -95,8 +95,7 @@
 ;; built from 1-, 2-, 3- and 4-byte characters in seeded-random order so the multi-byte
 ;; chars land in every position relative to the index's stride.
 (def- mb-alphabet ["a" "é" "漢" "🙂" "z" "ß" "€"])
-(defn- mb-build
-  (s n acc)
+(defn- mb-build (s n acc)
   (if (= n 0)
     (apply str acc)
     (mb-build (lcg s) (- n 1) (cons (nth mb-alphabet (math/rem s 7)) acc))))
@@ -104,8 +103,7 @@
 (def- mb-cps (into [] (string/->list mb-text)))
 (def- mb-len (string/length mb-text))
 
-(defn- mb-laws
-  (i j)
+(defn- mb-laws (i j)
   (and (= (string/char-at mb-text i) (nth mb-cps i))
     ; the char index the language speaks
     (= (string/substring mb-text i j) (apply str (seq/subvec mb-cps i j)))

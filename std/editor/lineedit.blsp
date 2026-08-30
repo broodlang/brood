@@ -69,8 +69,7 @@ newline while the form is incomplete instead of submitting)."
 
 ;; ---- character helpers ------------------------------------------------------
 
-(defn- lineedit-word-char?
-  (c)
+(defn- lineedit-word-char? (c)
   "True if `c` is part of a word for M-f/M-b/C-w (i.e. not whitespace or a delimiter)."
   (not (or (= c " ")
          (= c "\t")
@@ -84,33 +83,28 @@ newline while the form is incomplete instead of submitting)."
          (= c ";")
          (= c ","))))
 
-(defn- lineedit-path-word-char?
-  (c)
+(defn- lineedit-path-word-char? (c)
   "Word constituent for **path mode** — like `lineedit-word-char?` but `/` is also a
 boundary, so M-f/M-b/C-w move and kill one path component (folder) at a time."
   (and (lineedit-word-char? c) (not (= c "/"))))
 
-(defn- lineedit-word-pred
-  (state)
+(defn- lineedit-word-pred (state)
   "The word-constituent predicate for `state`: path-aware (breaks on `/`, for find-file /
 project prompts) when `:word-mode` is `:path`, else the default. Set `:word-mode` on the
 lineedit state to pick — a tiny per-prompt 'mode' for path navigation."
   (if (= (get state :word-mode) :path) lineedit-path-word-char? lineedit-word-char?))
 
-(defn- lineedit-fwd
-  (text i n pred)
+(defn- lineedit-fwd (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
   (if (or (>= i n) (not (pred (string/char-at text i)))) i (lineedit-fwd text (inc i) n pred)))
 (sig lineedit-fwd (string int int fn -> int))
 
-(defn- lineedit-bwd
-  (text i pred)
+(defn- lineedit-bwd (text i pred)
   "Largest index ≤ `i` (down to 0) whose preceding char fails `pred`."
   (if (or (<= i 0) (not (pred (string/char-at text (dec i))))) i (lineedit-bwd text (dec i) pred)))
 (sig lineedit-bwd (string int fn -> int))
 
-(defn- lineedit-fwd-word
-  (text p word?)
+(defn- lineedit-fwd-word (text p word?)
   "Point after the next word forward from `p` (skip non-word, then word), where `word?`
 is the word-constituent predicate (`lineedit-word-pred` picks it per mode)."
   (let (n (string/length text)
@@ -118,8 +112,7 @@ is the word-constituent predicate (`lineedit-word-pred` picks it per mode)."
     (lineedit-fwd text i n word?)))
 (sig lineedit-fwd-word (string int fn -> int))
 
-(defn- lineedit-bwd-word
-  (text p word?)
+(defn- lineedit-bwd-word (text p word?)
   "Point at the start of the word backward from `p` (skip non-word, then word), with
 `word?` the word-constituent predicate."
   (let (i (lineedit-bwd text p (fn (c) (not (word? c)))))
@@ -130,35 +123,30 @@ is the word-constituent predicate (`lineedit-word-pred` picks it per mode)."
 ;; `:text` may hold newlines (a multi-line form). Point is a flat offset; these map
 ;; between that offset and (row, col) so motion, Enter, and rendering are line-aware.
 
-(defn- lineedit-line-start
-  (text p)
+(defn- lineedit-line-start (text p)
   "Offset of the first char of the line containing point `p` (just after the previous
 newline, or 0)."
   (inc (string/last-index-of text "\n" p)))
 (sig lineedit-line-start (string int -> int))
 
-(defn- lineedit-line-end
-  (text p)
+(defn- lineedit-line-end (text p)
   "Offset of the end of the line containing point `p` (the next newline, or the end)."
   (let (j (index-of text "\n" p))
     (if (< j 0) (string/length text) j)))
 (sig lineedit-line-end (string int -> int))
 
-(defn- lineedit-count-nl
-  (s)
+(defn- lineedit-count-nl (s)
   "How many newlines are in `s` (deleting them and measuring the length drop)."
   (- (string/length s) (string/length (string/replace s "\n" ""))))
 (sig lineedit-count-nl (string -> int))
 
-(defn- lineedit-cursor-rc
-  (text p)
+(defn- lineedit-cursor-rc (text p)
   "Point `p` as `[row col]` — `row` the count of newlines before `p`, `col` the offset
 within that line."
   [(lineedit-count-nl (string/substring text 0 p)) (- p (lineedit-line-start text p))])
 (sig lineedit-cursor-rc (string int -> (vector int)))
 
-(defn- lineedit-up-point
-  (text p)
+(defn- lineedit-up-point (text p)
   "Point one line up from `p`, keeping the column (clamped to the shorter line), or nil
 when `p` is already on the first line."
   (let (ls (lineedit-line-start text p))
@@ -170,8 +158,7 @@ when `p` is already on the first line."
         (math/min (+ prev-start col) (dec ls))))))
 (sig lineedit-up-point (string int -> (or int nil)))
 
-(defn- lineedit-down-point
-  (text p)
+(defn- lineedit-down-point (text p)
   "Point one line down from `p`, keeping the column (clamped), or nil when `p` is on
 the last line."
   (let (le (lineedit-line-end text p))
@@ -186,13 +173,11 @@ the last line."
 
 (defn- lineedit-clamp (text p) (math/max 0 (math/min (string/length text) p)))
 
-(defn- lineedit-move
-  (state p)
+(defn- lineedit-move (state p)
   "State with point moved to `p` (clamped)."
   (assoc state :point (lineedit-clamp (get state :text) p)))
 
-(defn- lineedit-insert
-  (state s)
+(defn- lineedit-insert (state s)
   "State with string `s` inserted at point; point advances past it."
   (let (text (get state :text) p (get state :point))
     (assoc state
@@ -200,8 +185,7 @@ the last line."
       :point (+ p (string/length s))
       :hist-idx -1)))
 
-(defn- lineedit-del-back
-  (state)
+(defn- lineedit-del-back (state)
   "State with the char before point deleted (backspace)."
   (let (text (get state :text) p (get state :point))
     (if (= p 0)
@@ -212,8 +196,7 @@ the last line."
         :hist-idx -1))))
 (sig lineedit-del-back ((record &open :text string :point int) -> map))
 
-(defn- lineedit-del-fwd
-  (state)
+(defn- lineedit-del-fwd (state)
   "State with the char at point deleted (delete / C-d mid-line)."
   (let (text (get state :text) p (get state :point) n (string/length text))
     (if (>= p n)
@@ -223,15 +206,13 @@ the last line."
         :hist-idx -1))))
 (sig lineedit-del-fwd ((record &open :text string :point int) -> map))
 
-(defn- lineedit-kill-end
-  (state)
+(defn- lineedit-kill-end (state)
   "State with the text from point to end killed into `:kill` (C-k)."
   (let (text (get state :text) p (get state :point) n (string/length text))
     (assoc state :text (string/substring text 0 p) :kill (string/substring text p n) :hist-idx -1)))
 (sig lineedit-kill-end ((record &open :text string :point int) -> map))
 
-(defn- lineedit-kill-begin
-  (state)
+(defn- lineedit-kill-begin (state)
   "State with the text from start to point killed into `:kill`, point to 0 (C-u)."
   (let (text (get state :text) p (get state :point) n (string/length text))
     (assoc state
@@ -241,8 +222,7 @@ the last line."
       :hist-idx -1)))
 (sig lineedit-kill-begin ((record &open :text string :point int) -> map))
 
-(defn- lineedit-kill-word
-  (state)
+(defn- lineedit-kill-word (state)
   "State with the word before point killed into `:kill` (C-w)."
   (let (text (get state :text)
         p (get state :point)
@@ -255,8 +235,7 @@ the last line."
       :hist-idx -1)))
 (sig lineedit-kill-word ((record &open :text string :point int) -> map))
 
-(defn- lineedit-kill-word-fwd
-  (state)
+(defn- lineedit-kill-word-fwd (state)
   "State with the word *after* point killed into `:kill` (M-d), point unchanged."
   (let (text (get state :text)
         p (get state :point)
@@ -268,8 +247,7 @@ the last line."
       :hist-idx -1)))
 (sig lineedit-kill-word-fwd ((record &open :text string :point int) -> map))
 
-(defn- lineedit-transpose
-  (state)
+(defn- lineedit-transpose (state)
   "State with the two characters around point swapped, point advanced (C-t) — at
 end of line, swaps the last two. No-op on a line shorter than 2 or at column 0."
   (let (text (get state :text) p (get state :point) n (string/length text))
@@ -284,15 +262,13 @@ end of line, swaps the last two. No-op on a line shorter than 2 or at column 0."
           :hist-idx -1)))))
 (sig lineedit-transpose ((record &open :text string :point int) -> map))
 
-(defn- lineedit-yank-impl
-  (state)
+(defn- lineedit-yank-impl (state)
   "State with the last-killed text inserted at point (C-y)."
   (lineedit-insert state (get state :kill)))
 
 ;; ---- history ----------------------------------------------------------------
 
-(defn- lineedit-hist-prev
-  (state)
+(defn- lineedit-hist-prev (state)
   "Recall the previous (older) history entry (↑). Saves the in-progress line the
 first time, so ↓ can restore it."
   (let (hist (get state :hist) idx (get state :hist-idx) n (count hist))
@@ -309,14 +285,12 @@ internal newlines collapsed to spaces (so a multi-line form recalls as one line)
 trimmed, dropping blanks and consecutive duplicates. Shared by the REPL and the
 observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
   (let (entry (string/trim (string/replace src "\n" " ")))
-    (if (or (= entry "")
-          (and (not (empty? history)) (= (first history) entry)))
+    (if (or (= entry "") (and (not (empty? history)) (= (first history) entry)))
       history
       (cons entry history))))
 (sig lineedit-remember (any string -> any))
 
-(defn- lineedit-hist-next
-  (state)
+(defn- lineedit-hist-next (state)
   "Recall the next (newer) history entry, or the saved in-progress line at the end (↓)."
   (let (idx (get state :hist-idx))
     (cond
@@ -335,8 +309,7 @@ observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
 ;; matched line for editing), C-g/Esc cancels (restoring the pre-search line), and
 ;; any other key accepts then replays through the normal keymap.
 
-(defn- lineedit-search-find
-  (history query i)
+(defn- lineedit-search-find (history query i)
   "Index of the first history entry at or after `i` (older) that contains `query`
 as a substring, or -1. An empty query matches the newest entry."
   (cond
@@ -344,8 +317,7 @@ as a substring, or -1. An empty query matches the newest entry."
     (includes? (nth history i) query) i
     else (lineedit-search-find history query (inc i))))
 
-(defn- lineedit-search-step
-  (state query from)
+(defn- lineedit-search-step (state query from)
   "Set the search query to `query` and select the nearest match at or after index
 `from`; on no match, keep the current line but record the (failing) query."
   (let (s (get state :search)
@@ -358,19 +330,16 @@ as a substring, or -1. An empty query matches the newest entry."
           :point (string/length entry)
           :search (assoc s :query query :idx found))))))
 
-(defn- lineedit-search-cancel
-  (state)
+(defn- lineedit-search-cancel (state)
   "Leave search, restoring the line as it was before C-r."
   (let (s (get state :search))
     (assoc state :text (get s :orig-text) :point (get s :orig-point) :search nil)))
 
-(defn- lineedit-search-accept
-  (state)
+(defn- lineedit-search-accept (state)
   "Leave search, keeping the currently matched line for editing."
   (assoc state :search nil))
 
-(defn- lineedit-search-key
-  (state key)
+(defn- lineedit-search-key (state key)
   "Handle one key while in reverse-search mode (see `:search`)."
   (let (s (get state :search) q (get s :query) idx (get s :idx))
     (cond
@@ -401,8 +370,7 @@ can restore it, and selecting the newest match (empty query → newest entry)."
 
 ;; ---- completion -------------------------------------------------------------
 
-(defn- lineedit-candidates
-  (pfx)
+(defn- lineedit-candidates (pfx)
   "Sorted global names beginning with `pfx` — the default Tab-completion source.
 Reads the live image (`reflect/global-names`), so globals + macros (defn/when/cond/…) are
 all in (and a new project's own globals, since it's the live runtime)."
@@ -424,24 +392,21 @@ all in (and a new project's own globals, since it's the live runtime)."
 
 ;; check-allow: deliberately non-tail — depth = rows of the completion listing being chunked.
 (check-allow :non-tail-recursion
-  (defn- lineedit-chunk
-    (n items)
+  (defn- lineedit-chunk (n items)
     "Consecutive `n`-sized chunks of `items`, **keeping** a trailing partial chunk —
   unlike `partition`, which drops it. A listing must not silently lose its last row."
     (if (empty? items)
       '()
       (cons (take n items) (lineedit-chunk n (drop n items))))))
 
-(defn- lineedit-widest
-  (strs acc)
+(defn- lineedit-widest (strs acc)
   "The length of the longest string in `strs`, or `acc` if none is longer."
   (if (empty? strs)
     acc
     (lineedit-widest (rest strs) (math/max acc (string/length (first strs))))))
 (sig lineedit-widest ((list string) int -> int))
 
-(defn- lineedit-completion-rows
-  (cands width)
+(defn- lineedit-completion-rows (cands width)
   "Pure: the display rows listing `cands` in a `width`-column terminal — laid out
 across in equal columns (row-major, as bash lists), capped at
 `*lineedit-completion-max-rows*` rows with a trailing `… +N more` when they don't all
@@ -461,8 +426,7 @@ would desync the `[:up n]` cursor restore)."
     (if (> more 0) (append rows (list (str "… +" more " more"))) rows)))
 (sig lineedit-completion-rows ((list string) int -> list))
 
-(defn- lineedit-completion-lines
-  (st)
+(defn- lineedit-completion-lines (st)
   "The listing rows to paint below the input for `st` — empty unless the last key was a
 Tab that couldn't make progress (see `lineedit-apply-completion`). `st` must be
 reflowed (`:width` set)."
@@ -471,14 +435,12 @@ reflowed (`:width` set)."
       '()
       (lineedit-completion-rows cands (or (get st :width) 80)))))
 
-(defn- lineedit-completion-ops
-  (rows)
+(defn- lineedit-completion-ops (rows)
   "Render ops for listing `rows`: each row on its own new line, in the dim hint face."
   (fold (fn (acc row) (append acc (list [:nl] [:print row lineedit-face-hint])))
     '() rows))
 
-(defn- lineedit-apply-completion
-  (state sstart pfx cands)
+(defn- lineedit-apply-completion (state sstart pfx cands)
   "Pure: replace the symbol prefix `[sstart, point)` with the completion of `pfx`
 against `cands` — the candidate itself when unique, else the longest common prefix.
 
@@ -502,8 +464,7 @@ Any other key clears the listing (`lineedit-handle`)."
                      cands
                      nil))))
 
-(defn- lineedit-complete-impl
-  (state)
+(defn- lineedit-complete-impl (state)
   "Tab: complete the symbol under point against `*lineedit-candidates*` (the live
 globals by default; a project can rebind it to complete its own vocabulary)."
   (let (text (get state :text)
@@ -597,8 +558,7 @@ next (newer) history entry (↓ / C-n)."
 (def *lineedit-indent-width* 2)
 (sig *lineedit-indent-width* int)
 
-(defn- lineedit-indent-for
-  (text pos)
+(defn- lineedit-indent-for (text pos)
   "The column a fresh line beginning at offset `pos` should be indented to: two past
 the column of the innermost unclosed `(`/`[`, one past a `{`, and 0 at top level."
   (let (open (enclosing-open text pos))
@@ -615,8 +575,7 @@ the column of the innermost unclosed `(`/`[`, one past a `{`, and 0 at top level
   (lineedit-insert state
     (str "\n" (string/repeat " " (lineedit-indent-for (get state :text) (get state :point))))))
 
-(defn- lineedit-same-forms?
-  (a b)
+(defn- lineedit-same-forms? (a b)
   "True when texts `a` and `b` read as the *same* forms — the guard that a reformat
 preserved meaning. False if either fails to read.
 
@@ -715,8 +674,7 @@ in the editor keymap, taking effect on the next keystroke. The ergonomic way to
 customise the REPL from the REPL: `(lineedit-bind :ctrl-x 'lineedit-clear-screen)`."
   (def *lineedit-keymap* (assoc *lineedit-keymap* key cmd)))
 
-(defn- lineedit-fallback
-  (state key)
+(defn- lineedit-fallback (state key)
   "The unbound-key fallback: a printable 1-char key self-inserts, anything else is
 a no-op. Passed to `keymap-dispatch` as the keymap's default."
   (if (and (string? key) (= (string/length key) 1))
@@ -742,8 +700,7 @@ a rebound key or a user's own command can't leave a stale listing on screen."
 
 ;; ---- signature hint + bracket overrides (pure analysis -> render data) -------
 
-(defn- lineedit-arglist-of
-  (callee)
+(defn- lineedit-arglist-of (callee)
   "The arglist of the function/macro named by string `callee` (resolved in the live
 image), or nil if it isn't a bound symbol. A bare-symbol `reflect/eval` is just a lookup."
   (try
@@ -753,8 +710,7 @@ image), or nil if it isn't a bound symbol. A bare-symbol `reflect/eval` is just 
 
 ;; check-allow: deliberately non-tail — depth = the signature hint's argument count.
 (check-allow :non-tail-recursion
-  (defn- lineedit-arg-pieces
-    (args idx argi)
+  (defn- lineedit-arg-pieces (args idx argi)
     "`[str face]` pieces for the arglist `args`, bolding the parameter at slot `argi`.
   Marker symbols (`&optional`, `&`) render dim and don't consume a slot."
     (if (empty? args)
@@ -766,8 +722,7 @@ image), or nil if it isn't a bound symbol. A bare-symbol `reflect/eval` is just 
         (cons [" " lineedit-face-hint]
           (cons [s face] (lineedit-arg-pieces (rest args) nidx argi)))))))
 
-(defn- lineedit-hint-pieces
-  (full pos)
+(defn- lineedit-hint-pieces (full pos)
   "`[str face]` pieces for the signature hint of the call enclosing cursor `pos`
 in `full`, or nil when there's no call (or its head isn't a known function)."
   (let (call (enclosing-call full pos))
@@ -781,8 +736,7 @@ in `full`, or nil when there's no call (or its head isn't a known function)."
             (append (lineedit-arg-pieces args 0 argi)
               (list [")" lineedit-face-hint]))))))))
 
-(defn- lineedit-fit
-  (pieces room acc)
+(defn- lineedit-fit (pieces room acc)
   "Truncate `[str face]` `pieces` to at most `room` columns so the one-line hint
 never wraps (which would desync the `[:up 1]` cursor restore)."
   (if (or (empty? pieces) (<= room 0))
@@ -807,8 +761,7 @@ matched pair reversed, or a lone unmatched bracket in the error face."
 
 ;; ---- layout + rendering (IO) ------------------------------------------------
 
-(defn- lineedit-cols
-  ()
+(defn- lineedit-cols ()
   "The terminal width in columns, with a sane fallback when the terminal reports no
 size (e.g. a pty with no winsize), so layout never collapses to a 1-column window."
   (let ([c r] (term/size)) (if (< c 1) 80 c)))
@@ -826,8 +779,7 @@ terminal multiplexer), which is the same reason `lineedit-init` is public."
       (get state :prompt)
       (str "(reverse-i-search)`" (get s :query) "': "))))
 
-(defn- lineedit-reflow
-  (state)
+(defn- lineedit-reflow (state)
   "Recompute the horizontal-scroll window so point is visible, and cache the width,
 available text columns, and prompt width for rendering."
   (let (width (lineedit-cols)
@@ -841,13 +793,11 @@ available text columns, and prompt width for rendering."
               else hs))
     (assoc state :hscroll hs2 :width width :avail avail :promptw promptw)))
 
-(defn- lineedit-chunk-ops
-  (chunks)
+(defn- lineedit-chunk-ops (chunks)
   "Turn `[substring face]` highlight chunks into `[:print str face]` ops."
   (map (fn ([s f]) [:print s f]) chunks))
 
-(defn- lineedit-render-single
-  (st)
+(defn- lineedit-render-single (st)
   "Repaint a SINGLE-line input in place (the common case): move up over any block left
 by a previous multi-line render, carriage-return, clear below, reprint prompt + the
 highlighted (horizontally-scrolled) window, draw the signature hint and then any
@@ -892,8 +842,7 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
 
 ;; check-allow: deliberately non-tail — depth = lines of the input being edited.
 (check-allow :non-tail-recursion
-  (defn- lineedit-multi-line-ops
-    (lines i offset base full overrides prompt cont)
+  (defn- lineedit-multi-line-ops (lines i offset base full overrides prompt cont)
     "Render ops for the logical `lines` of a multi-line form: each line gets its prompt
   (`prompt` for the first, `cont` after) + its highlight chunks (lexed from `full`, so
   bracket-match overrides spanning lines apply), `[:nl]`-separated. `offset` tracks each
@@ -915,8 +864,7 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
             prompt
             cont))))))
 
-(defn- lineedit-multi-ops
-  (st)
+(defn- lineedit-multi-ops (st)
   "The full op vector to repaint a MULTI-line form in place: up over the previous
 block, clear, all lines (prompt + highlight, partner brackets reverse-videoed *in
 place* since every line is repainted), then reposition to the cursor's row/col. Pure —
@@ -948,8 +896,7 @@ tested in isolation."
       (list [:cr] [:col col]))))
 (sig lineedit-multi-ops ((record &open :text string :point int) -> list))
 
-(defn- lineedit-render-multi
-  (st)
+(defn- lineedit-render-multi (st)
   "Repaint a multi-line form (emit `lineedit-multi-ops`), and record the cursor row in
 `:last-row` so the next render moves back up to the block top before clearing."
   (do
@@ -957,8 +904,7 @@ tested in isolation."
     (let ([cur-row _] (lineedit-cursor-rc (get st :text) (get st :point)))
       (assoc st :last-row cur-row))))
 
-(defn- lineedit-render
-  (st)
+(defn- lineedit-render (st)
   "Repaint the input in place, returning `st` with an updated `:last-row`. Dispatches to
 the single-line path (with horizontal scroll + signature hint, the common case) unless
 the text spans multiple lines, in which case every line is repainted so a bracket's
@@ -967,8 +913,7 @@ partner highlights in place. `st` must already be reflowed by `lineedit-loop`."
     (lineedit-render-multi st)
     (lineedit-render-single st)))
 
-(defn- lineedit-render-final
-  (state)
+(defn- lineedit-render-final (state)
   "Repaint the finished form once more (all lines, no scroll/cursor games) and drop to a
 fresh line, so the submitted form stays in scrollback as typed. Works for one or many
 lines; moves up over any leftover render block first."
@@ -988,8 +933,7 @@ lines; moves up over any leftover render block first."
 
 ;; ---- the event loop (IO) ----------------------------------------------------
 
-(defn- lineedit-drain
-  (state)
+(defn- lineedit-drain (state)
   "Apply every key already available (without blocking) so a paste burst repaints
 once. Stops as soon as the read is `:done`."
   (if (get state :done)
@@ -997,8 +941,7 @@ once. Stops as soon as the read is `:done`."
     (let (k (term/poll 0))
       (if (nil? k) state (lineedit-drain (lineedit-handle state k))))))
 
-(defn- lineedit-finish
-  (state)
+(defn- lineedit-finish (state)
   "End the read: repaint the final line, drop to a new line, and return the result
 map for `repl-read-eval` — `{:line <str|nil> :eof :cancel}`."
   (do
@@ -1009,8 +952,7 @@ map for `repl-read-eval` — `{:line <str|nil> :eof :cancel}`."
         (= done :cancel) {:line nil :eof false :cancel true}
         else {:line nil :eof true :cancel false}))))
 
-(defn- lineedit-await
-  (state)
+(defn- lineedit-await (state)
   "Block for the next key (re-polling on idle without redrawing), then handle +
 drain it and either finish or loop with the new state."
   (let (k (term/poll 250))
@@ -1021,8 +963,7 @@ drain it and either finish or loop with the new state."
           (lineedit-finish next)
           (lineedit-loop next))))))
 
-(defn- lineedit-loop
-  (state)
+(defn- lineedit-loop (state)
   "Reflow (so the horizontal-scroll window sticks), honour a pending C-l screen
 clear (which resets `:last-row` — the cursor is back at the top), render (threading the
 updated `:last-row` so the next repaint finds the block top), then wait for input.

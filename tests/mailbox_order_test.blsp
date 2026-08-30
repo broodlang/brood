@@ -25,11 +25,8 @@
 (defmodule mailbox-order-test (:use test))
 
 ;; A request/reply peer: `:req` is the one whose reply the pinned receive must find.
-(defn- reply-server
-  ()
-  (if (receive
-        ([:req r from] (do (send from [:reply r :ok]) true))
-        (:stop false))
+(defn- reply-server ()
+  (if (receive ([:req r from] (do (send from [:reply r :ok]) true)) (:stop false))
     (reply-server)
     nil))
 
@@ -39,8 +36,7 @@
 ;; nil)))`, and the receive-mark is a SINGLE slot holding only the most recently minted
 ;; ref — so sleeping after minting `r` would disarm the very mark this case is about, and
 ;; the pinned receive would scan from the front and pass for the wrong reason.
-(defn- await-queued
-  (n tries)
+(defn- await-queued (n tries)
   (if (or (>= (proc/mailbox-size (self)) n) (<= tries 0))
     (proc/mailbox-size (self))
     (await-queued n (- tries 1))))
@@ -49,8 +45,7 @@
 ;; candidate popped out of the queue — so everything it does here shifts the queue under
 ;; that scan. Every nested receive carries a timeout: a guard is not a place to block
 ;; forever (the enclosing receive's own `after` cannot fire while we are inside it).
-(defn- perturb
-  (box srv)
+(defn- perturb (box srv)
   (if (table/get box :done)
     false ; perturb exactly once, however many candidates the scan offers us
     (do

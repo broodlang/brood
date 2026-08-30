@@ -84,6 +84,43 @@
           out (source in))
       ;; defn is in the header table (count = 2): name + params ride along.
       (is (includes? out "(defn long-function-name (x y z)\n  (some-long-body-form"))))
+  (test "a too-long defn- keeps name + params on the head line, like defn"
+    (let (out (source "(defn- long-function-name (x y z) (some-long-body-form x y z w v u u1 u2) (another-long-body x y z w v))"))
+      ;; The private variants were missing from the header table, so the params
+      ;; list fell to the body indent on every `defn-` in the tree.
+      (is (includes? out "(defn- long-function-name (x y z)\n  (some-long-body-form"))))
+  (test "a too-long defmacro- keeps name + params on the head line"
+    (let (out (source "(defmacro- long-macro-name (name & body) `(do ~@body ~name ~name ~name ~name ~name ~name ~name ~name ~name ~name))"))
+      (is (includes? out "(defmacro- long-macro-name (name & body)\n  `(do"))))
+  (test "a multi-arity defn keeps only the name on the head line, one arm per line"
+    (let (out (source "(defn arity ((x) (* x x)) ((x y) (* x y)) ((x y z) (* x y z) (+ x y z) (- x y z) (+ x y z) (- x y z) (+ x y z)))"))
+      ;; The first arm is not a params list — hoisting it onto the head line
+      ;; disguised a multi-arity function as a single-clause one.
+      (is (includes? out "(defn arity\n  ((x) (* x x))\n  ((x y) (* x y))\n  ((x y z)"))))
+  (test "a multi-pattern defn with vector arms is treated the same"
+    (let (out (source "(defn pat ([x] (* x x)) ([x y] (* x y)) ([x y z] (* x y z) (+ x y z) (- x y z) (+ x y z) (- x y z) (+ x y z)))"))
+      (is (includes? out "(defn pat\n  ([x] (* x x))\n  ([x y] (* x y))"))))
+  (test "a params list that does not fit the head line drops whole to the body indent"
+    (let (out (source "(defn long-params (alpha-parameter beta-parameter gamma-parameter delta-parameter epsilon-parameter zeta-parameter) (+ alpha-parameter beta-parameter))"))
+      ;; Never fill-packed at the column the name happened to end on.
+      (is (includes? out
+            "(defn long-params\n  (alpha-parameter beta-parameter gamma-parameter delta-parameter epsilon-parameter zeta-parameter)\n  (+ alpha-parameter"))))
+  (test "a params list too long even for its own line breaks there, at the body indent"
+    (let (out (source "(defn also-long (alpha-parameter beta-parameter gamma-parameter delta-parameter epsilon-parameter zeta-parameter eta-parameter theta-parameter iota-parameter) (+ alpha-parameter beta-parameter))"))
+      (is (includes? out "(defn also-long\n  (alpha-parameter beta-parameter\n    gamma-parameter"))
+      (is (includes? out "iota-parameter)\n  (+ alpha-parameter"))))
+  (test "a long if predicate still hangs on the head line (only defn params drop)"
+    (let (out (source "(if (and (some-long-predicate-name alpha beta gamma) (another-long-predicate-name delta epsilon zeta) (third-one eta theta)) (then-branch) (else-branch))"))
+      (is (includes? out
+            "(if (and (some-long-predicate-name alpha beta gamma)\n      (another-long-predicate-name"))
+      (is (includes? out "(third-one eta theta))\n  (then-branch)\n  (else-branch))"))))
+  (test "the defn shapes are idempotent"
+    (dolist (in ["(defn- long-function-name (x y z) (some-long-body-form x y z w v u u1 u2) (another-long-body x y z w v))"
+                  "(defn arity ((x) (* x x)) ((x y) (* x y)) ((x y z) (* x y z) (+ x y z) (- x y z) (+ x y z) (- x y z) (+ x y z)))"
+                  "(defn long-params (alpha-parameter beta-parameter gamma-parameter delta-parameter epsilon-parameter zeta-parameter) (+ alpha-parameter beta-parameter))"
+                  "(defn also-long (alpha-parameter beta-parameter gamma-parameter delta-parameter epsilon-parameter zeta-parameter eta-parameter theta-parameter iota-parameter) (+ alpha-parameter beta-parameter))"])
+      (let (once (source in))
+        (assert= (source once) once))))
   (test "let bindings break as pairs aligned under the first element"
     (let (in "(let (aaaaaaaaaaa-binding 1 bbbbbbbbbbb-binding 2 ccccccccccc-binding 3 ddddddddddd-binding 4 eeeeeeeeeee-binding 5) body)"
           out (source in))
@@ -93,8 +130,7 @@
     (let (in "(cond (some-test-form x y z) (some-result-form a b) (another-test-form x y z) (another-result-form a b) else default)"
           out (source in))
       ;; Each `test result` pair on one body-indent line.
-      (is (includes? out
-            "(some-test-form x y z) (some-result-form a b)\n  (another-test-form")))))
+      (is (includes? out "(some-test-form x y z) (some-result-form a b)\n  (another-test-form")))))
 
 (describe "format: assoc pairs its key/value args"
   ;; `assoc` takes a collection then trailing key/value PAIRS. Broken,
@@ -122,8 +158,7 @@
   (test "a broken receive keeps each clause on its own line, head alone"
     ;; an author newline after the head forces the broken shape (keep-broken)
     (let (out (source "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"))
-      (is (includes? out
-            "(receive\n  (:stop (cleanup))\n  ([:go x] (run x))\n  (after t (tick)))"))))
+      (is (includes? out "(receive\n  (:stop (cleanup))\n  ([:go x] (run x))\n  (after t (tick)))"))))
   (test "a short receive stays on one line"
     (assert= (source "(receive ([:sse ev] ev))") "(receive ([:sse ev] ev))\n"))
   (test "receive is idempotent when broken"
@@ -293,8 +328,7 @@
                     "; trailing\n;; section\n;;; banner\n(def x 1)" "(def x 1) ; trailing"
                     "(defn f () 0) ;; nullary" "(def s \"hello world\")" "(def s \"a\\tb\\nc\")"
                     "(def doc \"line one\nline two\nline three\")"))
-      (fold (fn (_ s)
-              (let (once (source s) twice (source once)) (assert= once twice)))
+      (fold (fn (_ s) (let (once (source s) twice (source once)) (assert= once twice)))
         nil samples)))
   (test "the prelude is idempotent (format(format(prelude)) == format(prelude))"
     ;; The prelude (now split across std/prelude/*.blsp) is the largest Brood program we
@@ -304,8 +338,7 @@
 
 ;; Tail-recursive (the test green-process stack is small, so O(1) stack): format
 ;; the same source `n` times and report whether every result matched the first.
-(defn- format-stable?
-  (src want i n)
+(defn- format-stable? (src want i n)
   (cond
     (>= i n) true
     (= (source src) want) (format-stable? src want (+ i 1) n)

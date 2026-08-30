@@ -117,13 +117,10 @@
     (assert= (project/parse-dep '[parser :git "https://example.com/p.git" :version "^1.2.0"])
       (assoc (project/dep-git 'parser "https://example.com/p.git" nil "^1.2.0") :optional false)))
   (test "a :git entry giving both :ref and :version is rejected"
-    (is (includes? (try
-                     (project/parse-dep '[p :git "u" :ref "v1" :version "^1"])
-                     (catch e e))
+    (is (includes? (try (project/parse-dep '[p :git "u" :ref "v1" :version "^1"]) (catch e e))
           "cannot give both")))
   (test "a :git entry giving neither :ref nor :version is rejected"
-    (is (includes? (try (project/parse-dep '[p :git "u"]) (catch e e))
-          "needs a :ref")))
+    (is (includes? (try (project/parse-dep '[p :git "u"]) (catch e e)) "needs a :ref")))
   (test "a :path entry normalises to a dep-path record"
     (assert= (project/parse-dep '[shared :path "../shared"])
       (assoc (project/dep-path 'shared "../shared") :optional false)))
@@ -162,19 +159,15 @@
     (is (includes? (try (project/parse-dep '[parser :svn "../p"]) (catch e e))
           "must be :git, :path, :tarball, or :version")))
   (test "a :git dep without a :ref is rejected"
-    (is (includes? (try
-                     (project/parse-dep '[parser :git "https://x.git"])
-                     (catch e e))
+    (is (includes? (try (project/parse-dep '[parser :git "https://x.git"]) (catch e e))
           "needs a :ref")))
   (test "a reserved opt is rejected so the manifest stays forward-compatible"
     (is (includes? (try
-                     (project/parse-dep '[parser
-                                           :git "https://x.git" :ref "v1" :branch "main"])
+                     (project/parse-dep '[parser :git "https://x.git" :ref "v1" :branch "main"])
                      (catch e e))
           "reserved for a future version")))
   (test "an entry that is too short is rejected"
-    (is (includes? (try (project/parse-dep '[parser :path]) (catch e e))
-          "too short"))))
+    (is (includes? (try (project/parse-dep '[parser :path]) (catch e e)) "too short"))))
 
 ;; `:isolated` — `apply` clobbers the ambient `*project-*` globals; roll them back.
 (describe "project: :optional deps and :dev-dependencies (ADR-172)"
@@ -274,8 +267,7 @@
         :name "demo"
         :dependencies [[hatch :git "https://example.com/hatch.git" :ref "v1"]]
         :format-plugins [typo hatch])
-      (with-err-str (assert= (project/project-effective-format-headers root)
-                      {'deflive 0 'tick 2})))))
+      (with-err-str (assert= (project/project-effective-format-headers root) {'deflive 0 'tick 2})))))
 
 (describe "project: scaffold templates (ADR-037)"
   (test "the .gitignore template ignores the package cache"
@@ -546,8 +538,7 @@
           (is (not (any? (fn (s) (and (string? s) (includes? s "describe"))) bundle)))))))
   (test "an empty describe warns; a describe with a test does not"
     (is (includes? (with-err-str (describe "empty group")) "has no tests"))
-    (is (not (includes? (with-err-str (describe "full group" (test "t" (is true))))
-               "has no tests")))))
+    (is (not (includes? (with-err-str (describe "full group" (test "t" (is true)))) "has no tests")))))
 
 ;; NB: the concurrent-require *double-load* race this session fixed (ADR-225 — the kernel
 ;; `registry_update` inline-cache read, `heap.rs`) is guarded by a dedicated STRESS repro,
@@ -581,8 +572,7 @@
           "must be a vector of path strings")))
   (test "the fix-it example matches the key it is about"
     ;; suggesting ["src"] for :test-paths would be actively misleading
-    (is (includes? (try (project/project-check-paths :test-paths 5) (catch e e))
-          "[\"tests\"]"))))
+    (is (includes? (try (project/project-check-paths :test-paths 5) (catch e e)) "[\"tests\"]"))))
 
 (describe "project: manifest loading errors point at the file"
   :isolated (test "an unparseable manifest names the file, line, and column"
@@ -599,8 +589,7 @@
           manifest (path/join dir "project.blsp"))
       (file/mkdir dir)
       (file/spit manifest "")
-      (is (includes? (try (project/project-apply-manifest manifest) (catch e e))
-            "cannot parse"))))
+      (is (includes? (try (project/project-apply-manifest manifest) (catch e e)) "cannot parse"))))
   (test "a first form that is not (project …) is REJECTED, not silently ignored"
     (let (dir (temp-dir "brood-manifest-")
           manifest (path/join dir "project.blsp"))
@@ -811,8 +800,7 @@
 ;; a unique project/module name to avoid cross-test registry contamination.
 
 ;; Receive `n` messages then return (tail-recursive → O(1) stack in a test's green process).
-(defn- coloc-await-n
-  (n)
+(defn- coloc-await-n (n)
   (when (> n 0) (receive) (coloc-await-n (dec n))))
 
 (describe "namespaces: cross-file require-by-name for a co-located module (ADR-223 Phase 2)"

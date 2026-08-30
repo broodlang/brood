@@ -73,8 +73,7 @@
 (describe "spy across processes"
   :isolated (test "a worker spy-computes a value and sends it; the parent gets it intact"
     (let (me (self))
-      (spawn (binding (*spy-sink* (fn (entry) nil))
-               (send me [:ok (spy (+ (* 6 7) (- 0 0)))])))
+      (spawn (binding (*spy-sink* (fn (entry) nil)) (send me [:ok (spy (+ (* 6 7) (- 0 0)))])))
       (assert= 42 (receive ([:ok v] v)))))
   (test "many workers spy-build results; the parent folds them by fanning in"
     (letrec (spawn-n (fn (n)

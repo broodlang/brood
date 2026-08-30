@@ -26,8 +26,7 @@
     (is (warns-about? "(defmodule t1 (:use path)) (defn f () (basename 42))"
           "argument 1 expects string"))
     ;; …and the qualified spelling resolves to the same declaration
-    (is (warns-about? "(defmodule t2) (defn f () (path/basename 42))"
-          "argument 1 expects string")))
+    (is (warns-about? "(defmodule t2) (defn f () (path/basename 42))" "argument 1 expects string")))
 
   (test "the RESULT type flows too — a bool result into a string position"
     (is (warns-about? "(defmodule t3 (:use path)) (defn f () (string/length (absolute? \"/tmp\")))"
@@ -224,8 +223,7 @@
 
 (describe "exact division has a type"
   (test "declaring float over integer division is provably wrong"
-    (is (warns-about? "(defmodule dv1) (sig c (int -> float)) (defn c (x) (/ x 2))"
-          "int | ratio")))
+    (is (warns-about? "(defmodule dv1) (sig c (int -> float)) (defn c (x) (/ x 2))" "int | ratio")))
   (test "the runtime agrees with the claim, both arms"
     (assert= :int (type-of (/ 4 2)))
     (assert= :ratio (type-of (/ 3 2)))
@@ -241,8 +239,7 @@
     (refute (warns-about? "(defmodule dv3) (sig b (int -> number)) (defn b (x) (/ x 2))"
               "declared return type")))
   (test "a float operand is still contagious"
-    (is (warns-about? "(defmodule dv4) (sig g (int -> int)) (defn g (x) (/ x 2.0))"
-          "yields float"))
+    (is (warns-about? "(defmodule dv4) (sig g (int -> int)) (defn g (x) (/ x 2.0))" "yields float"))
     (refute (warns-about? "(defmodule dv5) (sig f (int -> float)) (defn f (x) (/ x 2.0))"
               "declared return type"))))
 
@@ -271,8 +268,7 @@
     (assert= :int (type-of (+ 1/2 1/2))))
 
   (test "declaring int over it is provably wrong now, not merely wider"
-    (is (warns-about? "(defmodule rt1) (sig a (int -> int)) (defn a (x) (+ x 1/2))"
-          "yields ratio")))
+    (is (warns-about? "(defmodule rt1) (sig a (int -> int)) (defn a (x) (+ x 1/2))" "yields ratio")))
 
   (test "a second ratio operand can cancel, and keeps the union"
     (refute (warns-about? "(defmodule rt2) (sig b (ratio -> int)) (defn b (x) (+ x 1/2))"
@@ -285,9 +281,7 @@
   ;; far side would make the checker's claim false where it is least visible.
   (test "the invariant survives a send between processes"
     (let (parent (self)
-          worker (spawn (fn ()
-                          (receive
-                            ([:go from] (send from [:back (+ 1 1/2) (+ 1/2 1/2)]))))))
+          worker (spawn (fn () (receive ([:go from] (send from [:back (+ 1 1/2) (+ 1/2 1/2)]))))))
       (send worker [:go parent])
       (receive
         ([:back shifted cancelled] (assert= :ratio (type-of shifted))

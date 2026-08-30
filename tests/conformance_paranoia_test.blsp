@@ -50,8 +50,7 @@
 ;; The smallest power of the radix at which adding 1 no longer changes the value: that
 ;; power is where the significand runs out. Kahan's search for the radix works by finding
 ;; the first `a` with `(a + 1) - a - 1 /= 0`.
-(defn- pa-radix-a
-  (a)
+(defn- pa-radix-a (a)
   (if (not (= (- (- (+ a 1.0) a) 1.0) 0.0))
     a
     (pa-radix-a (* a 2.0))))
@@ -59,14 +58,12 @@
 ;; With `a` past the significand's reach, the first `b` that `a` can still notice when
 ;; added to it *is* one unit in the last place of `a` — and since `a` is a power of the
 ;; radix, `(a+b) - a` is the radix itself.
-(defn- pa-radix-b
-  (a b)
+(defn- pa-radix-b (a b)
   (if (not (= (- (+ a b) a) 0.0))
     b
     (pa-radix-b a (* b 2.0))))
 
-(defn- pa-radix
-  ()
+(defn- pa-radix ()
   "The arithmetic's radix, derived (Paranoia §radix). 2 for binary64."
   (let (a (pa-radix-a 1.0))
     (- (+ a (pa-radix-b a 1.0)) a)))
@@ -74,20 +71,17 @@
 ;; Precision = how many radix digits the significand holds. Scale `a` up by the radix,
 ;; counting, until `a + 1` rounds back to `a` — at that point `a` has outrun the
 ;; significand and the count is the number of digits. (radix 2: stops at a = 2^53, n = 53.)
-(defn- pa-precision-acc
-  (radix a n)
+(defn- pa-precision-acc (radix a n)
   (if (= (- (+ a 1.0) a) 0.0)
     n
     (pa-precision-acc radix (* a radix) (+ n 1))))
 
-(defn- pa-precision
-  (radix)
+(defn- pa-precision (radix)
   "Significand digits in `radix`, derived. 53 for binary64."
   (pa-precision-acc radix 1.0 0))
 
 ;; The machine epsilon: the gap from 1.0 to the next representable float.
-(defn- pa-eps-acc
-  (e)
+(defn- pa-eps-acc (e)
   (if (= (+ 1.0 (/ e 2.0)) 1.0) e (pa-eps-acc (/ e 2.0))))
 
 (defn- pa-epsilon () "The gap from 1.0 up to its successor." (pa-eps-acc 1.0))
@@ -95,8 +89,7 @@
 ;; The bottom of the exponent range, derived: halve until the halving stops being exact
 ;; (or reaches zero). On a machine with gradual underflow this walks straight through the
 ;; normals and on down the subnormals, converging on the smallest positive float.
-(defn- pa-tiny-acc
-  (x)
+(defn- pa-tiny-acc (x)
   (let (h (/ x 2.0))
     (if (or (= h 0.0) (not (= (* h 2.0) x))) x (pa-tiny-acc h))))
 

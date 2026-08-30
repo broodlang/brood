@@ -16,17 +16,14 @@
 oracle is upstream's own expected output in `tests/corpus/gabriel/data/nqueens.input`.")
 
 ;; `(1 2 … n)` — upstream's `iota1`, which counts UP, unlike takl's `listn`.
-(defn- nqueens-iota1
-  (n)
+(defn- nqueens-iota1 (n)
   (nqueens-iota1-acc n nil))
 
-(defn- nqueens-iota1-acc
-  (i acc)
+(defn- nqueens-iota1-acc (i acc)
   (if (= i 0) acc (nqueens-iota1-acc (- i 1) (cons i acc))))
 
 ;; Tail-recursive over `placed`, so no opt-out needed.
-(defn- nqueens-ok?
-  (row dist placed)
+(defn- nqueens-ok? (row dist placed)
   (if (nil? placed)
     true
     (and (not (= (first placed) (+ row dist)))
@@ -35,13 +32,10 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/nqueens.i
 
 ;; The search itself is non-tail (two recursive calls summed) — that IS the benchmark.
 (check-allow :non-tail-recursion
-  (defn- nqueens-try
-    (x y z)
+  (defn- nqueens-try (x y z)
     (if (nil? x)
       (if (nil? y) 1 0)
-      (+ (if (nqueens-ok? (first x) 1 z)
-           (nqueens-try (append (rest x) y) nil (cons (first x) z))
-           0)
+      (+ (if (nqueens-ok? (first x) 1 z) (nqueens-try (append (rest x) y) nil (cons (first x) z)) 0)
         (nqueens-try (rest x) (cons (first x) y) z)))))
 
 (defn nqueens (n)

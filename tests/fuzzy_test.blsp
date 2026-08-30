@@ -21,8 +21,7 @@
         ; f@0, b@4 — both word starts
         (get (fuzzy/match "fb" "fluffball") :score))))
   (test "an exact prefix scores well (contiguous + boundary + early)"
-    (is (> (get (fuzzy/match "foo" "foobar") :score)
-          (get (fuzzy/match "foo" "barfoo") :score)))))
+    (is (> (get (fuzzy/match "foo" "foobar") :score) (get (fuzzy/match "foo" "barfoo") :score)))))
 
 (describe "fuzzy/filter"
   (test "keeps matches, best score first"

@@ -97,27 +97,23 @@ attach). Drive the standalone app from the shell with `nest observe`."
 (def-face :observer/confirm {:inherit :ui/error})
 ;; ---- pure formatting helpers ------------------------------------------------
 
-(defn- observe-fit
-  (s w)
+(defn- observe-fit (s w)
   "Truncate `s` to at most `w` characters so a rendered row never wraps."
   (if (> (string/length s) w) (string/substring s 0 (math/max 0 w)) s))
 (sig observe-fit (string int -> string))
 
-(defn- observe-bytes->human
-  (n)
+(defn- observe-bytes->human (n)
   "A compact human-readable byte count: `B` / `KB` / `MB` (integer-rounded)."
   (cond
     (< n 1024) (str n " B")
     (< n 1048576) (str (math/quot n 1024) " KB")
     else (str (math/quot n 1048576) " MB")))
 
-(defn- observe-opt
-  (v f)
+(defn- observe-opt (v f)
   "Render optional field `v` with `f`, or `\"-\"` when it's absent (nil)."
   (if (nil? v) "-" (f v)))
 
-(defn- observe-cells
-  (id nm status mbox mem reds rate mon)
+(defn- observe-cells (id nm status mbox mem reds rate mon)
   "One table line's eight fixed-width columns (used for both header and rows).
 `reds` is the cumulative reduction count — Erlang's scheduling unit — and `rate`
 the reductions/second since the last refresh, so a *currently* busy process
@@ -139,8 +135,7 @@ stands out at a glance (cumulative only tells you lifetime work). `mem` and
     " "
     (string/pad-left (str mon) 4)))
 
-(defn- observe-proc-cells
-  (p)
+(defn- observe-proc-cells (p)
   "The table line for one `proc/info` map `p`. In tree view the map carries a
 `:depth`, which indents the NAME (clipped to its column so the rest stay aligned)."
   (let (depth (or (get p :depth) 0)
@@ -155,8 +150,7 @@ stands out at a glance (cumulative only tells you lifetime work). `mem` and
       (observe-opt (get p :reds-rate) str)
       (get p :monitored-by))))
 
-(defn- observe-row-face
-  (p selected?)
+(defn- observe-row-face (p selected?)
   "Face for a process row: the selection face when selected, else the row face for
 its status (running / runnable / waiting), resolved through the shared registry so
 the colours live in one place (`:observer/*`)."
@@ -168,8 +162,7 @@ the colours live in one place (`:observer/*`)."
       (= (get p :status) :waiting) (face :observer/row-waiting)
       else nil)))
 
-(defn- observe-detail
-  (p nprocs cap sel)
+(defn- observe-detail (p nprocs cap sel)
   "The detail line for the selected proc/info map `p`. Absent fields
 (`:name`/`:memory`/`:parent`) are omitted rather than shown as a placeholder."
   (str "  pid "
@@ -188,8 +181,7 @@ the colours live in one place (`:observer/*`)."
     (get p :monitored-by)
     (if (> nprocs cap) (str "   [" (inc sel) "/" nprocs "]") "")))
 
-(defn- observe-node-lines
-  (node nprocs link)
+(defn- observe-node-lines (node nprocs link)
   "The two node-summary header strings from a node-stats map (see
 `observe-node-info`), the live process count, and the `link` status indicator
 (`:ok` shows nothing; `:stale`/`:down` flag a slow/dropped remote link)."
@@ -213,11 +205,9 @@ the colours live in one place (`:observer/*`)."
       (get node
         :spawned)
       " · mem "
-      (observe-bytes->human (get node
-                              :mem))
+      (observe-bytes->human (get node :mem))
       " (peak "
-      (observe-bytes->human (get node
-                              :mem-peak))
+      (observe-bytes->human (get node :mem-peak))
       ")"
       (let (ps (get node
                  :peers))
@@ -226,8 +216,7 @@ the colours live in one place (`:observer/*`)."
           (str " · peers "
             (count ps)))))])
 
-(defn- observe-window-start
-  (sel cap n)
+(defn- observe-window-start (sel cap n)
   "First visible index of a `cap`-row window over `n` items that keeps row `sel`
 on screen (roughly centred), clamped so the window never runs past the end."
   (let (maxstart (math/max 0 (- n cap)))
@@ -241,8 +230,7 @@ on screen (roughly centred), clamped so the window never runs past the end."
 ;; absolute `text` ops (the observer paints a full frame), where lineedit emits
 ;; relative `[:print …]` ops — both over the same `highlight-chunks`.
 
-(defn- observe-chunk-ops-acc
-  (chunks row col acc)
+(defn- observe-chunk-ops-acc (chunks row col acc)
   (if (empty? chunks)
     (reverse acc)
     (let ([s f] (first chunks))
@@ -251,14 +239,12 @@ on screen (roughly centred), clamped so the window never runs past the end."
         (+ col (string/length s))
         (cons (text row col s f) acc)))))
 
-(defn- observe-chunk-ops
-  (chunks row col)
+(defn- observe-chunk-ops (chunks row col)
   "Lay `[substring face]` highlight chunks as absolute `text` ops on `row`, left to
 right from column `col`. Tail-recursive."
   (observe-chunk-ops-acc chunks row col nil))
 
-(defn- observe-minibuffer
-  (edit row cols)
+(defn- observe-minibuffer (edit row cols)
   "Render the eval minibuffer at frame `row` (width `cols`): the prompt, then the
 input text with the **same** live syntax highlighting + bracket matching the REPL
 line editor uses (`highlight-chunks` / `lineedit/lineedit-overrides` over
@@ -282,8 +268,7 @@ completion already works via `lineedit/lineedit-handle`'s keymap in `observe-com
 (sig observe-minibuffer
   ((record &open :prompt string :text string :hscroll (or int nil) :point int) int int -> any))
 
-(defn- observe-confirm-line
-  (c)
+(defn- observe-confirm-line (c)
   "The footer prompt for a pending action confirmation `c` (a map `{:id :name …}`):
 e.g. `  kill pid 7 (worker)? y/n`. The name is shown when the process has one."
   (str "  kill pid "
@@ -369,8 +354,7 @@ the observer's testable core; `observe-loop` feeds it live data."
 
 ;; ---- live data --------------------------------------------------------------
 
-(defn- observe-node-info
-  ()
+(defn- observe-node-info ()
   "This runtime's node stats as a map, for the observer's header panel."
   {:name (node/name)
    :workers (dev/worker-threads)
@@ -380,8 +364,7 @@ the observer's testable core; `observe-loop` feeds it live data."
    :mem-peak (dev/mem-peak)
    :peers (node/list)})
 
-(defn- observe-sort
-  (procs key)
+(defn- observe-sort (procs key)
   "Sort the proc/info list by `key`: `:id` ascending (stable spawn order),
 `:mailbox` / `:memory` / `:reds` descending (busiest/biggest first; `:reds` is
 the live reductions/second rate, so the *currently* busiest process floats up)."
@@ -391,23 +374,20 @@ the live reductions/second rate, so the *currently* busiest process floats up)."
     (= key :reds) (sort-by (fn (p) (- (or (get p :reds-rate) 0))) procs)
     else (sort-by :id procs)))
 
-(defn- observe-tree-order
-  (procs)
+(defn- observe-tree-order (procs)
   "Order `procs` as a parent→child forest (roots first, each followed by its DFS
 descendants, `:depth`-tagged) — the depth-indented tree view. Delegates to the shared
 `proctree/tree-order` (the same walk myedit's *Process List* uses)."
   (proctree/tree-order procs))
 
-(defn- observe-order
-  (procs sort)
+(defn- observe-order (procs sort)
   "Order `procs` for display by `sort`: `:tree` builds the parent→child forest,
 anything else is `observe-sort` (id / mailbox / memory)."
   (if (= sort :tree)
     (observe-tree-order procs)
     (observe-sort procs sort)))
 
-(defn- observe-next-sort
-  (key)
+(defn- observe-next-sort (key)
   "Cycle the sort key: id → mailbox → memory → reds → tree → id."
   (cond
     (= key :id) :mailbox
@@ -416,8 +396,7 @@ anything else is `observe-sort` (id / mailbox / memory)."
     (= key :reds) :tree
     else :id))
 
-(defn- observe-reds-rate
-  (prev-reds prev-at reds at)
+(defn- observe-reds-rate (prev-reds prev-at reds at)
   "Reductions/second between two `proc/info` samples, or nil when it can't be
 computed — no prior sample for this id (`prev-reds`/`prev-at` nil), missing
 counters, or no time elapsed (`at <= prev-at`). `prev-at`/`at` are wall-clock ms.
@@ -429,8 +408,7 @@ Clamps a negative delta (a recycled id) to 0. Pure."
         (math/quot (* 1000 (math/max 0 (- reds prev-reds))) dt)))))
 (sig observe-reds-rate ((or int nil) (or int nil) (or int nil) (or int nil) -> (or int nil)))
 
-(defn- observe-rate-procs
-  (prev-procs prev-at procs at)
+(defn- observe-rate-procs (prev-procs prev-at procs at)
   "Tag each map in `procs` with `:reds-rate` — its reductions/second since the
 matching id in `prev-procs`, over `(at - prev-at)` ms. A process with no prior
 sample (new this tick, or the very first snapshot) gets nil. Pure; O(n) via a
@@ -441,8 +419,7 @@ prev-by-id reductions lookup."
              :reds-rate (observe-reds-rate (get prev (get p :id)) prev-at (get p :reductions) at)))
       procs)))
 
-(defn- observe-rated-procs
-  (model)
+(defn- observe-rated-procs (model)
   "The current snapshot's procs, each tagged with `:reds-rate` computed against the
 previous snapshot (`:prev`). Both snapshots carry `:procs` and `:at`; missing
 either yields nil rates. Pure — the join the `view`/`derived` pipeline applies
@@ -454,8 +431,7 @@ before ordering."
       (or (get snap :procs) [])
       (get snap :at))))
 
-(defn- observe-local-source
-  ()
+(defn- observe-local-source ()
   "The inline data **source**: a `proc/info` map for every live process in
 *this* runtime (dropping any pid that died mid-scan), unsorted. A source is just a
 0-arg fn returning proc/info maps — the remote-attach source (future) has the
@@ -463,8 +439,7 @@ same shape (it requests a peer's snapshot over the node link), so `observe-loop`
 is source-agnostic: inline and remote are one loop with a swapped thunk."
   (filter (fn (p) (not (nil? p))) (map proc/info (proc/list))))
 
-(defn- observe-local-snapshot
-  ()
+(defn- observe-local-snapshot ()
   "A full snapshot of THIS runtime — `{:node <node-info> :procs <proc/info list>
 :at <ms>}` (`:at` the producing runtime's wall clock, so the reductions/second
 rate is computed against a consistent clock for both inline and remote sources)
@@ -474,8 +449,7 @@ dropped remote link, a status keyword `:timeout` / `:down`); `observe-loop` is
 source-agnostic, so inline and remote are one loop with a swapped source."
   {:node (observe-node-info) :procs (observe-local-source) :at (os/now)})
 
-(defn- observe-apply-result
-  (state result)
+(defn- observe-apply-result (state result)
   "Fold a `source` result into the loop state. A snapshot map → rotate the old
 `:last` into `:prev` (so the reductions/second rate can diff the two), store the
 new snapshot as `:last`, and set link `:ok`. `:timeout` → keep `:last`, link
@@ -490,16 +464,14 @@ last snapshot) until the user quits. Pure."
 
 ;; ---- the IO loop (interactive; runs in the root process) --------------------
 
-(defn- observe-sel-index
-  (procs sel-id)
+(defn- observe-sel-index (procs sel-id)
   "The row index of the process whose `:id` is `sel-id`, or 0 if it is gone (so
 selection follows the same process across re-sorts, and recovers if it dies).
 Clamped to a valid row."
   (let (idx (index-of (map :id procs) sel-id))
     (math/max 0 (math/min (math/max 0 (dec (count procs))) (if (< idx 0) 0 idx)))))
 
-(defn- observe-select
-  (state procs idx)
+(defn- observe-select (state procs idx)
   "Return `state` with the selection pinned to the `:id` at row `idx` of `procs`."
   (assoc state :sel-id (if (empty? procs) nil (get (nth procs idx) :id))))
 
@@ -583,13 +555,11 @@ process is selected."
 ;; key/command dispatch, since a mouse value is never a keymap key. All pure, so
 ;; the mapping is unit-testable without a window.
 
-(defn- observe-mouse?
-  (k)
+(defn- observe-mouse? (k)
   "True if input `k` is a mouse event `[:mouse action button row col mods]`, not a key."
   (and (vector? k) (= (first k) :mouse)))
 
-(defn- observe-mouse-row->sel
-  (row sel cap n)
+(defn- observe-mouse-row->sel (row sel cap n)
   "The process index a click on frame `row` selects, or nil if `row` isn't on a
 process line. The body occupies frame rows 3..(3+`cap`) over a window starting at
 `(observe-window-start sel cap n)` — matching `observe-frame`'s layout."
@@ -599,8 +569,7 @@ process line. The body occupies frame rows 3..(3+`cap`) over a window starting a
       (+ start i)
       nil)))
 
-(defn- observe-apply-mouse
-  (state ev cap)
+(defn- observe-apply-mouse (state ev cap)
   "Fold a mouse event into `state` (pure). Left-press on a process row selects it;
 the wheel scrolls the selection one row. Any other event (a right/middle click, a
 click off the list, or an action a future frontend adds) leaves `state` untouched.
@@ -635,16 +604,14 @@ body height (`(math/max 1 (- rows 5))`, as in `observe-frame`)."
 
 ;; ---- the eval minibuffer (a REPL inside the observer) ------------------------
 
-(defn- observe-eval-string
-  (src)
+(defn- observe-eval-string (src)
   "Evaluate `src` in THIS runtime and format the result (or error) as a one-line
 string for the minibuffer. The local backend, and what the remote agent runs."
   (try
     (str "=> " (pr-str (reflect/eval-string src)))
     (catch e (str "error: " (if (and (map? e) (contains? e :message)) (get e :message) (pr-str e))))))
 
-(defn- observe-command-key
-  (state backend key)
+(defn- observe-command-key (state backend key)
   "Feed `key` to the minibuffer's line editor (reusing lineedit's pure core). On
 submit, evaluate the text via `backend`'s `:eval` and show the result; on cancel /
 EOF, return to navigation; otherwise keep editing."
@@ -661,8 +628,7 @@ EOF, return to navigation; otherwise keep editing."
       (nil? done) (assoc state :edit edit)
       else (assoc state :mode :nav :edit nil))))
 
-(defn- observe-kill-msg
-  (pid id)
+(defn- observe-kill-msg (pid id)
   "Kill local process `pid` (`exit … :kill`) and return a one-line result for the
 minibuffer (`id` for display). Used by both the local backend and the remote
 `:observe` agent. A nil pid (a process gone before confirm) reports an error."
@@ -670,8 +636,7 @@ minibuffer (`id` for display). Used by both the local backend and the remote
     "error: no pid to kill"
     (do (exit pid :kill) (str "killed pid " id))))
 
-(defn- observe-confirm-key
-  (model backend key)
+(defn- observe-confirm-key (model backend key)
   "Resolve a pending kill confirmation (`:confirm`): `y`/Enter kills the process via
 the backend's `:kill` and reports the result; any other key cancels. Clears
 `:confirm` either way (the result, or `kill cancelled`, shows on the detail line)."
@@ -690,16 +655,14 @@ the backend's `:kill` and reports the result; any other key cancels. Clears
 ;; :kill <fn confirm → result-string>}` (local inline, or peer request/eval/kill for
 ;; remote attach). `ui-run` quits when a command sets `:done`.
 
-(defn- observe-display-procs
-  (model)
+(defn- observe-display-procs (model)
   "The process list as currently displayed: this snapshot's procs tagged with the
 reductions-per-second rate (`observe-rated-procs`), ordered by the model's sort
 key. Shared by `view` (renders it) and `derived` (threads selection through it),
 so both agree on row order and identity. Pure."
   (observe-order (observe-rated-procs model) (get model :sort)))
 
-(defn- observe-derived
-  (model cols rows)
+(defn- observe-derived (model cols rows)
   "Thread the currently-rendered process list / selection / count into `model`, so
 the nav + mouse commands (pure `(state key) → state`) can read them. Recomputed from
 `:last` + `:sort` per input — cheap, since inputs are infrequent. Pure."
@@ -708,8 +671,7 @@ the nav + mouse commands (pure `(state key) → state`) can read them. Recompute
         sel (observe-sel-index procs (get model :sel-id)))
     (assoc model :procs procs :sel sel :n n)))
 
-(defn- observe-view
-  (model cols rows)
+(defn- observe-view (model cols rows)
   "The observer's `ui-run` **view**: model + terminal size → a render frame (pure).
 Builds `observe-frame` from the last snapshot, the sort key, the link status, and
 the minibuffer UI state. Paints to whatever frontend `ui-run` holds."
@@ -744,8 +706,7 @@ the minibuffer UI state. Paints to whatever frontend `ui-run` holds."
      :handle (fn (m input) (observe-command-key m (get m :backend) input))
      :exit nil}))
 
-(defn- observe-update
-  (model input cols rows)
+(defn- observe-update (model input cols rows)
   "The observer's `ui-run` **update**: fold one input into the next model. `:tick`
 (the refresh beat) fetches a fresh snapshot from the backend's `:source` unless
 paused, in the minibuffer, or awaiting a kill confirmation (so the list can't shift
@@ -777,19 +738,16 @@ honours). The backend rides in the model under `:backend`."
 
 ;; ---- demo processes (so a fresh observer has something to show) -------------
 
-(defn- observe-idle-worker
-  ()
+(defn- observe-idle-worker ()
   "A demo process that idles forever, consuming any message it receives."
   (receive (_ (observe-idle-worker))))
 
-(defn- observe-backlog-worker
-  ()
+(defn- observe-backlog-worker ()
   "A demo process that only handles `[:work _]`, so other messages pile up in its
 mailbox — giving the observer a non-zero backlog to display."
   (receive ([:work _] (observe-backlog-worker))))
 
-(defn- observe-spawn-demo
-  (n)
+(defn- observe-spawn-demo (n)
   "Spawn `n` idle demo processes plus one with a deliberate mailbox backlog, each
 **registered with a name** (`:idle-1`…`:idle-n`, `:backlog`) so a fresh observer
 shows named processes (most live processes are anonymous and render `-`). Returns
@@ -833,8 +791,7 @@ frontends to render to all at once. It blocks the calling process until quit, so
                      :kill (fn (c) (observe-kill-msg (get c :pid) (get c :id)))}}
     observe-view observe-update display))
 
-(defn- observe-window-key
-  (key)
+(defn- observe-window-key (key)
   "The registry name the windowed observer for identity `key` registers under, so
 two `(observe key)` calls with the same key share **one** window (named `spawn` is
 idempotent) while distinct keys get their own. Namespaced under `observer/` so it
@@ -883,8 +840,7 @@ For a modal terminal observer instead, call `(observe-attach *term-display*)`."
 
 ; ms to wait for a remote snapshot before :stale
 (defdyn *observe-timeout* 800)
-(defn- observe-agent-loop
-  ()
+(defn- observe-agent-loop ()
   "The target-side agent's receive loop: reply to `[:snapshot from _]` with this
 runtime's `observe-local-snapshot`, to `[:eval src from _]` with the result of
 evaluating `src` HERE (the remote eval minibuffer), and to `[:kill pid id from _]`
@@ -914,20 +870,17 @@ unless it opens itself up."
       (proc/register :observe agent)
       agent)))
 
-(defn- observe-gen-node-name
-  ()
+(defn- observe-gen-node-name ()
   "A unique transient node name for an observer instance, so two observers attached
 to one target don't collide on node identity."
   (keyword (str "observer-" (os/now))))
 
-(defn- observe-drain-replies
-  ()
+(defn- observe-drain-replies ()
   "Discard any stale `[:observe-reply …]` already queued (non-blocking), so a flaky
 link can't pile them up in the observer's mailbox."
   (receive ([:observe-reply _] (observe-drain-replies)) (after 0 nil)))
 
-(defn- observe-request
-  (peer)
+(defn- observe-request (peer)
   "Request one snapshot from `peer`'s `:observe` agent. Returns the snapshot map, or
 `:down` if the link to `peer` dropped, or `:timeout` if no reply arrived in
 `*observe-timeout*` ms (a stalled link, or the target never called `observe-serve`)."
@@ -938,8 +891,7 @@ link can't pile them up in the observer's mailbox."
     ([:nodedown ^peer] :down)
     (after *observe-timeout* :timeout)))
 
-(defn- observe-remote-eval
-  (peer src)
+(defn- observe-remote-eval (peer src)
   "Evaluate `src` on `peer` via its `:observe` agent (the remote eval minibuffer):
 send `[:eval …]`, await the agent's formatted result string. Returns an error
 string on a dropped/stalled link rather than throwing (the minibuffer shows it)."
@@ -949,8 +901,7 @@ string on a dropped/stalled link rather than throwing (the minibuffer shows it).
     ([:nodedown ^peer] "error: link down")
     (after *observe-timeout* "error: eval timed out")))
 
-(defn- observe-remote-kill
-  (peer c)
+(defn- observe-remote-kill (peer c)
   "Kill the process in confirmation `c` on `peer` via its `:observe` agent (the
 process runs on the peer, so the kill must too): send the target-side `:pid` + `:id`
 and await the agent's result string. Returns an error string on a dropped/stalled

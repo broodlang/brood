@@ -36,10 +36,7 @@
     (string/replace "<" "&lt;")
     (string/replace ">" "&gt;")))
 
-(defn- inline
-  ;; One paragraph as HTML: split on backticks, wrap the odd (inside-a-pair) segments
-  ;; in <code>, escape every segment. An unbalanced backtick just leaves a stray token.
-  (para)
+(defn- inline (para)
   (let (parts (string/split para "`"))
     (apply str
       (map (fn (pair)
@@ -49,8 +46,7 @@
                  (escape segment))))
         (seq/zip (range (count parts)) parts)))))
 
-(defn- leading-space-count
-  (line i)
+(defn- leading-space-count (line i)
   "The number of leading space/tab characters in `line`, scanning from `i`."
   (if (and (< i (string/length line))
         (let (c (string/substring line i (+ i 1))) (or (= c " ") (= c "\t"))))
@@ -58,8 +54,7 @@
     i))
 (sig leading-space-count (string int -> int))
 
-(defn- code-block?
-  (block)
+(defn- code-block? (block)
   "True if `block` is an indented code example — its first non-blank line starts with
   whitespace. Such a block's newlines are significant (each example on its own line), so it must
   render as `<pre>` rather than a `<p>` whose newlines HTML would collapse into one run-on line."
@@ -69,13 +64,11 @@
 ;; The smallest leading indentation across `lines`. A `fold` over `math/min` rather than
 ;; `(apply min …)`, whose result the checker can only call `ordered`; the block's own length
 ;; bounds every line's indent, so it is an inert seed.
-(defn- common-indent
-  (block lines)
+(defn- common-indent (block lines)
   (fold (fn (acc l) (math/min acc (leading-space-count l 0))) (string/length block) lines))
 (sig common-indent (string (list string) -> int))
 
-(defn- dedent
-  (block)
+(defn- dedent (block)
   "Strip the common leading indentation from every line of `block`, so an indented docstring
   code example renders flush-left in its `<pre>` rather than doubly indented."
   (let (lines (string/split block "\n")
@@ -114,15 +107,13 @@
 ;; their qualified CALL form — `(sqrt x)` → `(math/sqrt x)` — since that is how you invoke
 ;; them (bare `sqrt` is unbound; you write `math/sqrt` or `(:use math)`). Applied only when
 ;; the module is a real namespace (`:qualified?`), never to the prelude/category pseudo-modules.
-(defn- qualify-sig
-  (module-name sig)
+(defn- qualify-sig (module-name sig)
   (cond
     (nil? sig) sig
     (string/starts-with? sig "(") (str "(" module-name "/" (string/substring sig 1))
     else (str module-name "/" sig)))
 
-(defn- definition-html
-  (module-name qualified? definition)
+(defn- definition-html (module-name qualified? definition)
   (let (macro? (get definition :macro)
         type-arrow (get definition :type)
         docstring (get definition :doc)
@@ -145,8 +136,7 @@
 
 ;; ---- one module -------------------------------------------------------------
 
-(defn- module-html
-  (module)
+(defn- module-html (module)
   (let (module-name (get module :module)
         qualified? (get module :qualified?)
         defs (get module :defs))
@@ -169,8 +159,7 @@
 ;; time a module's `:section` changes — so the model groups (e.g. "Core language" then
 ;; "Standard library") read as distinct bands, not one flat run of sections. A module with
 ;; no `:section` renders exactly as before (no heading).
-(defn- modules-html
-  (modules)
+(defn- modules-html (modules)
   (get (fold (fn (acc m)
                (let (sec (get m :section)
                      head (if (and sec (not (= sec (get acc :section))))
@@ -184,16 +173,14 @@
 
 ;; ---- sidebar navigation -----------------------------------------------------
 
-(defn- sidebar-def
-  (module-name definition)
+(defn- sidebar-def (module-name definition)
   (str "<li><a href=\"#"
     (def-anchor module-name (get definition :name))
     "\">"
     (escape (get definition :name))
     "</a></li>"))
 
-(defn- sidebar-module
-  (module)
+(defn- sidebar-module (module)
   (let (module-name (get module :module))
     (str "<div class=\"nav-module\">"
       "<a class=\"nav-module-link\" href=\"#"
@@ -208,8 +195,7 @@
 
 ;; Sidebar nav grouped by `:section`, mirroring `modules-html` — a `.nav-section` label
 ;; introduces each group so the core/library split is visible in the nav too.
-(defn- sidebar-modules
-  (modules)
+(defn- sidebar-modules (modules)
   (get (fold (fn (acc m)
                (let (sec (get m :section)
                      head (if (and sec (not (= sec (get acc :section))))
@@ -221,8 +207,7 @@
          modules)
     :html))
 
-(defn- sidebar-html
-  (model)
+(defn- sidebar-html (model)
   (str "<nav class=\"sidebar\">"
     "<div class=\"brand\">"
     (escape (or (get model :name) "Documentation"))
@@ -235,8 +220,7 @@
 
 ;; ---- page assembly ----------------------------------------------------------
 
-(defn- header-html
-  (model)
+(defn- header-html (model)
   (let (v (get model :version))
     (str "<header class=\"page-head\">"
       "<h1>"
@@ -251,8 +235,7 @@
 
 ;; A guide's body is already HTML (Markdown-rendered by the caller), so emit it raw inside
 ;; a `.module`-styled section — it shares the page's spacing and heading treatment.
-(defn- guide-html
-  (guide)
+(defn- guide-html (guide)
   (str "<section class=\"module guide\" id=\""
     (guide-anchor (get guide :title))
     "\">"
@@ -264,16 +247,14 @@
     "</div>"
     "</section>"))
 
-(defn- sidebar-guide
-  (guide)
+(defn- sidebar-guide (guide)
   (str "<div class=\"nav-module\"><a class=\"nav-module-link\" href=\"#"
     (guide-anchor (get guide :title))
     "\">"
     (escape (get guide :title))
     "</a></div>"))
 
-(defn- content-html
-  (model)
+(defn- content-html (model)
   (let (guides (or (get model :guides) []) modules (get model :modules))
     (str (sidebar-html model)
       "<main class=\"content\">"
@@ -287,8 +268,7 @@
 
 ;; The base reset for a standalone page (`:wrap? true`) only — it restyles `body`, so it
 ;; is NOT emitted into an embedding host (hive), whose own body styling must win.
-(defn- page-reset-css
-  ()
+(defn- page-reset-css ()
   (str "*{box-sizing:border-box}"
     "body{margin:0;font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;color:#1f2933;background:#fff}"
     "@media (prefers-color-scheme:dark){body{color:#cbd2d9;background:#1a1f26}}"))
@@ -314,8 +294,7 @@
 ;; A standalone page owns its whole background and so may follow the OS — it now does that
 ;; by redefining these same variables, rather than by carrying a second copy of the rules
 ;; that could drift from the first.
-(defn- component-vars-css
-  ()
+(defn- component-vars-css ()
   (str ".docsite{"
     "--docsite-fg:#1f2933;" ; headings, signatures — the strongest text
     "--docsite-text:#3e4c59;" ; body prose
@@ -335,8 +314,7 @@
 ;; `.sidebar`, … are all namespaced). Two columns: a sticky sidebar + scrolling content,
 ;; monospace signatures. No colour literals: every one is a `--docsite-*` variable from
 ;; `component-vars-css`, so the host owns the theme (see the note there).
-(defn- component-css
-  ()
+(defn- component-css ()
   (str ".docsite code,.docsite .sig,.docsite .type{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}"
     ".docsite a{color:var(--docsite-accent);text-decoration:none}.docsite a:hover{text-decoration:underline}"
     ".docsite .layout{display:flex;align-items:flex-start}"
@@ -381,21 +359,18 @@
 ;; [[render-css-dark]] and decides for itself when (or whether) to apply it, because
 ;; `prefers-color-scheme` answers a question about the OS and the host's theme is not
 ;; the OS's business. That distinction is why hive's reference rendered light-on-light.
-(defn- component-dark-vars
-  ()
+(defn- component-dark-vars ()
   (str "--docsite-fg:#e4e7eb;"
     "--docsite-text:#b0b8c1;" "--docsite-muted:#9aa5b1;" "--docsite-accent:#63b3ed;"
     "--docsite-border:#2b3138;" "--docsite-border-strong:#3e4c59;" "--docsite-rule:#2b3138;"
     "--docsite-surface:#12161c;" "--docsite-code-bg:#2b3138;" "--docsite-input-bg:#1a1f26;"))
 
-(defn- component-dark-css
-  ()
+(defn- component-dark-css ()
   (str "@media (prefers-color-scheme:dark){.docsite{" (component-dark-vars) "}}"))
 
 ;; A dependency-free filter: hide any definition, module, and sidebar entry whose text
 ;; doesn't contain the query. Empty query restores everything.
-(defn- filter-script
-  ()
+(defn- filter-script ()
   (str "<script>(function(){"
     "var q=document.getElementById('docsite-filter');if(!q)return;"
     "function norm(s){return s.toLowerCase()}"
