@@ -179,6 +179,22 @@ impl RecordShape {
         }
     }
 
+    /// The type `(get r k default)` yields: the declared type for a required field (the
+    /// default is never consulted), the declared type *or the default* for an optional one
+    /// (present → declared, absent → default), the default alone for a key a CLOSED shape
+    /// does not declare (always absent), and `rest ∪ default` on an open shape. The
+    /// absence-`nil` of [`field_ty`](Self::field_ty) is replaced by the default, and a
+    /// declared type that itself admits `nil` keeps it — a stored `nil` is present, and
+    /// `get` returns it, not the default.
+    fn field_ty_with_default(&self, key: Symbol, default: Ty) -> Ty {
+        match self.fields.get(&key) {
+            Some((ty, true)) => ty.clone(),
+            Some((ty, false)) => ty.clone().union(default),
+            None if self.is_open() => self.rest.clone().union(default),
+            None => default,
+        }
+    }
+
     /// Is this shape open — may a value carry keys it does not declare?
     fn is_open(&self) -> bool {
         !self.rest.is_never() && !self.rest.is_subtype(&Ty::of(Tag::Nil))
@@ -802,6 +818,31 @@ impl Ty {
                 return None;
             }
             let t = term.term_field_ty(key)?;
+            acc = Some(match acc {
+                Some(a) => a.union(t),
+                None => t,
+            });
+        }
+        acc
+    }
+
+    /// [`record_field_ty`](Self::record_field_ty) for `(get r k default)`: the absence
+    /// case reads as `default`'s type rather than `nil`. See [`RecordShape::field_ty_with_default`].
+    pub fn record_field_ty_with_default(&self, key: Symbol, default: &Ty) -> Option<Ty> {
+        let mut acc: Option<Ty> = None;
+        for term in self.terms_vec() {
+            if term.tags != MAP_BIT {
+                return None;
+            }
+            let shape = term.fields.as_deref()?;
+            let t = if !shape.fields.contains_key(&key) && shape.is_open() {
+                match term.map_kv.as_deref() {
+                    Some((_, v)) => v.clone().union(default.clone()),
+                    None => shape.field_ty_with_default(key, default.clone()),
+                }
+            } else {
+                shape.field_ty_with_default(key, default.clone())
+            };
             acc = Some(match acc {
                 Some(a) => a.union(t),
                 None => t,
