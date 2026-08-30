@@ -7670,3 +7670,51 @@ The lesson for the next inference feature: `expr_ty` is asked O(depth) times per
 so anything that turns it from shallow to deep for a common form multiplies by the
 file's nesting — measure `nest check` on `tests/maps_test.blsp` and `std/editor/buffer.blsp`
 with `BROOD_NO_CHECK_CACHE=1` before and after, not only the unit tests.
+
+### 2026-08-30, seventh — the checker audited for the sixth entry's three fault classes
+
+A read-only sweep of `types/check/*` for the shapes the previous entry fixed — a memo
+outliving its truth, a recursion with a cap but no stack growth, and un-memoized
+re-typing that multiplies with the walker's per-level re-descent. What it found, and what
+changed:
+
+- **`SPECIAL_MEMO` could still pin a same-file `None`** through `infer_sig`'s body walk,
+  which runs under a bare `Ctx::default()` that knows no file globals, so the
+  `is_file_global` guard was inert there. A `None` is memoized only for a name the image
+  binds.
+- **A depth-capped body walk was memoized as the callee's signature.** `expr_ty`'s depth
+  counter was inherited by `infer_sig`'s walk of a callee body, so a deep enough first
+  ask tripped the cap *inside the callee*, and `SIG_MEMO` kept the widened answer for the
+  rest of the file — diagnostics depended on form order. A callee body is a fresh
+  question: `infer::with_fresh_depth` (the `SPEC_ARG_NEST` discipline, applied to depth).
+  Pinned by `a_depth_capped_body_walk_is_not_memoized_as_the_callees_signature`, which
+  took four attempts to make bite: a single-call body is answered by Tier 1 without a
+  walk, a bare top-level form is walked but never *typed* from the outside in (a `def`'s
+  right-hand side is), and call-site specialization re-derived the poisoned return at the
+  misuse — the test's `g` now has a rest parameter, which specialization skips.
+- **Seven unguarded recursive walkers**, each the `expr_ty` frame-size class one function
+  over: `path_of` (asked at `expr_ty`'s first level for every form — now a capped loop,
+  32 keys), `path_guard_assertion`, `guard_assertion` (3 677 frames on the negated-guard
+  test; the audit missed this one, the test found it), `quoted_datum_ty`,
+  `sym_appears_in` (recursed on the cdr — now a worklist), `find_redundant_clause` (now a
+  loop), `collect_arity`, `effectful_head`. One test per shape.
+- **`expr_ty` was 2^depth on `(first (first … x))`.** `seq_aware_call_ty` answers `None`
+  for an unknown collection via `?`, and the declared-sig fallbacks then type the same
+  operand again — every duplicate operand typing inside `expr_ty` doubles per level, and
+  only the 128 cap ended it. Pre-existing; a 40-deep accessor chain hung `nest check` at
+  HEAD. The general fix is a **per-walk `expr_ty` memo** keyed on `(form, Ctx identity)`:
+  `Ctx` mints a fresh id on every clone/default (`ctx::CtxId`), so "same id" is "same
+  bindings" for the walk's duration; the outermost `expr_ty` frame owns the table and
+  clears it on return. The 8k access-path test runs in 6 s (the walker's O(n·128)).
+- Per-file tables that outlived the file on the single-form path: `SEALED_OP_DOMAINS`
+  (not cleared by `clear_ability_types`), `OPERATOR_DOMAINS` (never cleared), and the sig
+  memos in `check_located`. All cleared.
+
+Left as follow-ups, all pre-existing and measured acceptable at HEAD: the walker's own
+duplicate operand typings (`check_into`'s per-argument `gradual_of` beside the overload
+check's `expr_ty`, `check_let` typing each RHS twice, `fold_callback_seed` typing the
+enclosing form), the `reduce`/`fold` handler's three `callback_ret` asks, and the Pass 2.8
+fixpoint re-deriving stated-stable parameter demands each iteration. The per-walk memo
+absorbs the ones inside `expr_ty`; the walker-level ones are O(n · depth), not
+exponential. And the `INFERRING` depth budget (8) still shapes what a caller's memoized
+sig saw of its callees — precision only, order-dependent, not fixed.

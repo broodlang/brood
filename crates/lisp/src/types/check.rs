@@ -828,6 +828,9 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
     // leak a stale table into a `(check 'form)` — defensive: an ability type is sound
     // regardless, but an empty table here is unambiguously so.
     annot::clear_ability_types();
+    // …and the inference memos, whose entries were computed against that file's Ctx
+    // tables (`fn_form`, `clause_arms`) — `signature_string` already does this.
+    sigs::clear_sig_memo();
     let mut out = Vec::new();
     check_into(heap, form, &Ctx::default(), &mut out);
     out

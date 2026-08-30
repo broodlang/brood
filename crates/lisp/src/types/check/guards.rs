@@ -116,36 +116,50 @@ pub(super) struct PathGuard {
 /// a computed (non-literal) key/index, `last` (arity-dependent), or a non-access
 /// form — none of which is a statically pinnable path.
 pub(super) fn path_of(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<PathKey>)> {
-    if let Value::Sym(s) = expr {
-        return Some((s, Vec::new()));
+    // A loop, not recursion, and capped: `expr_ty` asks this at its FIRST level for
+    // every form, so a chain of n accessors cost O(n) frames and an O(n) key vector
+    // per level — O(n²) memory, O(n³) copying on `(first (first … x))` 8k deep. A path
+    // longer than [`MAX_PATH_KEYS`] is no narrowing anyone wrote by hand.
+    let mut keys_outer_first: Vec<PathKey> = Vec::new();
+    let mut expr = expr;
+    loop {
+        if let Value::Sym(s) = expr {
+            keys_outer_first.reverse();
+            return Some((s, keys_outer_first));
+        }
+        if keys_outer_first.len() >= MAX_PATH_KEYS {
+            return None;
+        }
+        let items = list_items(heap, expr)?;
+        let Some(&Value::Sym(head)) = items.first() else {
+            return None;
+        };
+        let (inner, key) = if value::symbol_is(head, "get") && items.len() == 3 {
+            let Value::Keyword(k) = items[2] else {
+                return None;
+            };
+            (items[1], PathKey::Field(k))
+        } else if value::symbol_is(head, "nth") && items.len() == 3 {
+            let Value::Int(i) = items[2] else {
+                return None;
+            };
+            (items[1], PathKey::Index(usize::try_from(i).ok()?))
+        } else if value::symbol_is(head, "first") && items.len() == 2 {
+            (items[1], PathKey::Index(0))
+        } else if value::symbol_is(head, "second") && items.len() == 2 {
+            (items[1], PathKey::Index(1))
+        } else if value::symbol_is(head, "third") && items.len() == 2 {
+            (items[1], PathKey::Index(2))
+        } else {
+            return None;
+        };
+        keys_outer_first.push(key);
+        expr = inner;
     }
-    let items = list_items(heap, expr)?;
-    let Some(&Value::Sym(head)) = items.first() else {
-        return None;
-    };
-    let (inner, key) = if value::symbol_is(head, "get") && items.len() == 3 {
-        let Value::Keyword(k) = items[2] else {
-            return None;
-        };
-        (items[1], PathKey::Field(k))
-    } else if value::symbol_is(head, "nth") && items.len() == 3 {
-        let Value::Int(i) = items[2] else {
-            return None;
-        };
-        (items[1], PathKey::Index(usize::try_from(i).ok()?))
-    } else if value::symbol_is(head, "first") && items.len() == 2 {
-        (items[1], PathKey::Index(0))
-    } else if value::symbol_is(head, "second") && items.len() == 2 {
-        (items[1], PathKey::Index(1))
-    } else if value::symbol_is(head, "third") && items.len() == 2 {
-        (items[1], PathKey::Index(2))
-    } else {
-        return None;
-    };
-    let (base, mut keys) = path_of(heap, inner)?;
-    keys.push(key);
-    Some((base, keys))
 }
+
+/// The longest access path [`path_of`] will describe. Anything deeper is machine-made.
+const MAX_PATH_KEYS: usize = 32;
 
 /// If `test` is a type predicate applied to an access path — or its `(not …)` —
 /// return the [`PathGuard`] it asserts. Handles arbitrary nesting of field/index
@@ -153,6 +167,13 @@ pub(super) fn path_of(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<PathKey>)
 /// (no narrowing, no false positive), and a bare variable (empty path) is
 /// deferred to the plain [`guard_assertion`]. Mirrors that function's structure.
 pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard> {
+    // Deep-form stack safety: `(not (not (not …)))` recurses one frame per `not`.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        path_guard_assertion_inner(heap, test)
+    })
+}
+
+fn path_guard_assertion_inner(heap: &Heap, test: Value) -> Option<PathGuard> {
     let items = list_items(heap, test)?;
     let Value::Sym(head) = *items.first()? else {
         return None;
@@ -192,6 +213,14 @@ pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard
 /// `let`-stored guard result — `(let (cond (int? x)) (if cond …))`). `None` for
 /// any test that isn't a pure single-variable guard.
 pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
+    // Deep-form stack safety: recurses on `(not …)`, from `check_if` — 3 677 frames
+    // deep on the negated-guard test before this wrap.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        guard_assertion_inner(heap, test, ctx)
+    })
+}
+
+fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     if let Value::Sym(s) = test {
         // A let-stored guard alias — recorded only for biconditional guards
         // (see `check_let`), so it narrows the else-branch too.
@@ -756,22 +785,27 @@ pub(super) fn find_redundant_clause(
     sym: Symbol,
     lit: Value,
 ) -> Option<Value> {
-    let items = list_items(heap, form)?;
-    if items.len() != 4 {
-        return None;
+    // A loop down the `else` chain, not recursion: a generated `match` (a codepoint
+    // table) lowers to a cascade as long as it has clauses.
+    let mut form = form;
+    loop {
+        let items = list_items(heap, form)?;
+        if items.len() != 4 {
+            return None;
+        }
+        let Value::Sym(head) = items[0] else {
+            return None;
+        };
+        if !value::symbol_is(head, kw::IF) {
+            return None;
+        }
+        let (test_sym, test_lit) = literal_eq_test_raw(heap, items[1])?;
+        if test_sym != sym {
+            return None;
+        }
+        if literal_values_equal(heap, test_lit, lit) {
+            return Some(form);
+        }
+        form = items[3];
     }
-    let Value::Sym(head) = items[0] else {
-        return None;
-    };
-    if !value::symbol_is(head, kw::IF) {
-        return None;
-    }
-    let (test_sym, test_lit) = literal_eq_test_raw(heap, items[1])?;
-    if test_sym != sym {
-        return None;
-    }
-    if literal_values_equal(heap, test_lit, lit) {
-        return Some(form);
-    }
-    find_redundant_clause(heap, items[3], sym, lit)
 }

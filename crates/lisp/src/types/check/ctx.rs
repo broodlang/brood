@@ -299,8 +299,42 @@ pub(super) enum PathKey {
     Index(usize),
 }
 
+/// A `Ctx` object's identity — minted fresh by `Clone` and `Default`, so no two live
+/// `Ctx` values ever share one. The key half of `infer::expr_ty`'s per-walk memo: a
+/// form's type is a function of the form and the bindings in scope, and every method
+/// that changes the bindings goes through `self.clone()`, so "same id" means "same
+/// bindings". (The in-place `add_*` mutators run between passes, never under a walk.)
+pub(super) struct CtxId(u64);
+
+impl CtxId {
+    fn fresh() -> CtxId {
+        thread_local! {
+            static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+        }
+        CtxId(NEXT.with(|n| {
+            let id = n.get();
+            n.set(id + 1);
+            id
+        }))
+    }
+}
+
+impl Clone for CtxId {
+    fn clone(&self) -> CtxId {
+        CtxId::fresh()
+    }
+}
+
+impl Default for CtxId {
+    fn default() -> CtxId {
+        CtxId::fresh()
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct Ctx {
+    /// See [`CtxId`].
+    id: CtxId,
     /// Strict mode (`nest check --strict`): a dynamic value with a PRECISE bound is
     /// checked by inclusion, not overlap — see [`crate::types::GradualTy::consistent_with_mode`].
     strict_mode: bool,
@@ -555,6 +589,11 @@ impl Ctx {
 
     /// A clone marked as inferring `sym`'s signature — so a self-recursive call is skipped
     /// in return-union inference (see the `inferring_self` field).
+    /// This object's identity (see [`CtxId`]).
+    pub(super) fn id(&self) -> u64 {
+        self.id.0
+    }
+
     pub(super) fn with_inferring_self(&self, sym: Symbol) -> Ctx {
         let mut c = self.clone();
         c.inferring_self = Some(sym);
