@@ -59,7 +59,7 @@ fn ordinary_ranges_still_realise() {
         ("(first (reverse (range 0 100)))", "99"),
         ("(count (seq (range 0 100000)))", "100000"),
         // Wide, but consumed lazily — never realised, so never refused.
-        ("(count (take 4 (range 0 9223372036854775807)))", "4"),
+        ("(count (take (range 0 9223372036854775807) 4))", "4"),
     ] {
         let v = interp
             .eval_str(form)

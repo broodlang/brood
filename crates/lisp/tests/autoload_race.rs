@@ -137,12 +137,12 @@ fn run_fan(interp: &mut Interp, module: &str, call: &str, expected: &str) {
         (defn fan (k)
           (do
             (dotimes (_ k) (spawn (send root [:r {call}])))
-            (reduce (fn (acc _) (receive ([:r v] (cons v acc)))) (list) (range k))))
+            (reduce (range k) (list) (fn (acc _) (receive ([:r v] (cons v acc)))))))
 
         ;; Distinct-count inline rather than through `seq/distinct`, which is itself one of
         ;; the stubs under test — and naming it would load `seq` before the race starts.
         (defn uniq (xs)
-          (reduce (fn (a x) (if (includes? a x) a (cons x a))) (list) xs))
+          (reduce xs (list) (fn (a x) (if (includes? a x) a (cons x a)))))
 
         ;; `%registry-member?` and not `system/feature?`: the load happened in a CHILD process,
         ;; and this process's inline cache of `*features*` can still be pre-`provide` —

@@ -126,7 +126,7 @@
       (is (bytes? d))
       (assert= 32 (count d))))
   (test "bytes are in 0-255"
-    (is (every? (fn (b) (and (>= b 0) (<= b 255))) (hash/sha256-raw hash-test-abc))))
+    (is (every? (hash/sha256-raw hash-test-abc) (fn (b) (and (>= b 0) (<= b 255))))))
   (test "known digest of \"abc\" (hex of raw == FIPS vector)"
     (assert= "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
       (encoding/hex-encode-bytes (hash/sha256-raw hash-test-abc))))

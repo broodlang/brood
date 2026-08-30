@@ -22,10 +22,10 @@
 (defn- public-names ()
   "Every public global the runtime can see, minus the `%` primitives (mechanism, not
 vocabulary) and minus anything a module marked private."
-  (sort (filter (fn (s)
-                  (let (n (->string s))
-                    (and (not (string/starts-with? n "%")) (not (reflect/private? s)))))
-          (reflect/global-names))))
+  (sort (filter (reflect/global-names)
+          (fn (s)
+            (let (n (->string s))
+              (and (not (string/starts-with? n "%")) (not (reflect/private? s))))))))
 
 (defn- module-of (n)
   "The module prefix of qualified name `n`, or nil when it is a bare core name.
@@ -67,19 +67,19 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
 (defn- report (label xs)
   (io/puts "")
   (io/puts "== " label " (" (count xs) ")")
-  (doseq (chunk (partition 6 (sort xs)))
-    (io/puts "   " (reduce (fn (a b) (if (= a "") b (str a "  " b))) "" chunk))))
+  (doseq (chunk (partition (sort xs) 6))
+    (io/puts "   " (reduce chunk "" (fn (a b) (if (= a "") b (str a "  " b)))))))
 
-(let (names (map ->string (public-names))
-      qualified (filter (fn (n) (module-of n)) names)
-      bare (filter (fn (n) (not (module-of n))) names)
-      stutter (filter stutters? qualified)
-      no-doc (filter (fn (n) (nil? (try (doc (reflect/eval (string/->symbol n))) (catch _ nil))))
-               names)
-      no-example (filter (fn (n)
-                           (let (d (try (doc (reflect/eval (string/->symbol n))) (catch _ nil)))
-                             (and d (not (example? d)))))
-                   names))
+(let (names (map (public-names) ->string)
+      qualified (filter names (fn (n) (module-of n)))
+      bare (filter names (fn (n) (not (module-of n))))
+      stutter (filter qualified stutters?)
+      no-doc (filter names
+               (fn (n) (nil? (try (doc (reflect/eval (string/->symbol n))) (catch _ nil)))))
+      no-example (filter names
+                   (fn (n)
+                     (let (d (try (doc (reflect/eval (string/->symbol n))) (catch _ nil)))
+                       (and d (not (example? d)))))))
   (io/puts "stdlib audit — "
     (count names)
     " public names ("

@@ -56,9 +56,9 @@ fn instrumented_lines() -> (BTreeMap<String, Vec<u32>>, TempFile) {
     std::fs::write(
         &script.path,
         "(require-one 'log)\n(require-one 'set)\n(require-one 'json)\n\
-         (fold (fn (_ s)\n\
-                 (when (= (type-of (reflect/eval s)) :fn) (%coverage-precompile (reflect/eval s))))\n\
-           nil (reflect/global-names))\n\
+         (fold (reflect/global-names) nil\n\
+           (fn (_ s)\n\
+             (when (= (type-of (reflect/eval s)) :fn) (%coverage-precompile (reflect/eval s)))))\n\
          (fold (fn (_ e) (io/puts (str \"ATTR \" (seq/vector-ref e 0) \" \" (seq/vector-ref e 1)))) \
          nil (%coverage-instrumented))\n",
     )

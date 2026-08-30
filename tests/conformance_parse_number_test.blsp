@@ -68,7 +68,7 @@
       ;; into the millions. Either way, a truncated corpus should fail loudly.
       (is (> checked 30000))
       ;; Show the first few offenders rather than just a count.
-      (assert= (take 5 bad) ())
+      (assert= (take bad 5) ())
       (assert= (count bad) 0))))
 
 ;; The cases worth naming: each of these broke a shipped implementation. They are

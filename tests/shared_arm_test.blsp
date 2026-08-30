@@ -31,7 +31,7 @@
       (assert= (add40 100) 140)))
 
   (test "a closure built fresh per call is correct every time"
-    (assert= (map sa-apply-fresh [1 2 3]) '(3 6 9)))
+    (assert= (map [1 2 3] sa-apply-fresh) '(3 6 9)))
 
   (test "across processes: each process's instance keeps its own capture"
     ;; The publish/lookup race lives here — every worker resolves the same AST key at
@@ -39,9 +39,9 @@
     (let (me (self))
       (doseq (k (range 1 25))
         (spawn (send me [:r (let (f (sa-adder k)) (f 1000))])))
-      (assert= (fold + 0 (map (fn (_) (receive ([:r v] v))) (range 1 25)))
+      (assert= (fold (map (range 1 25) (fn (_) (receive ([:r v] v)))) 0 +)
         ;; sum of (1000 + k) for k in 1..24
-        (+ (* 24 1000) (fold + 0 (range 1 25))))))
+        (+ (* 24 1000) (fold (range 1 25) 0 +)))))
 
   (test "a reload is observed through a shared arm"
     ;; The shared entry is keyed by the AST of `sa-reloadable`'s body; redefining the
@@ -63,5 +63,5 @@
     (let (me (self))
       (doseq (_ (range 0 24))
         (spawn (send me [:r (sa-apply-fresh 5)])))
-      (assert= (fold + 0 (map (fn (_) (receive ([:r v] v))) (range 0 24)))
+      (assert= (fold (map (range 0 24) (fn (_) (receive ([:r v] v)))) 0 +)
         (* 24 15)))))

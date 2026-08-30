@@ -6,8 +6,8 @@
 (defmodule map-stress-test (:use test))
 
 (def N 2000)
-(defn ms-build (n) (reduce (fn (m i) (assoc m i (* i 3))) {} (range 0 n)))
-(defn ms-build-rev (n) (reduce (fn (m i) (assoc m i (* i 3))) {} (reverse (range 0 n))))
+(defn ms-build (n) (reduce (range 0 n) {} (fn (m i) (assoc m i (* i 3)))))
+(defn ms-build-rev (n) (reduce (reverse (range 0 n)) {} (fn (m i) (assoc m i (* i 3)))))
 ;; count keys whose lookup is wrong (0 = all correct)
 (defn ms-bad-gets (m n i bad)
   (if (= i n) bad (ms-bad-gets m n (+ i 1) (if (= (get m i) (* i 3)) bad (+ bad 1)))))

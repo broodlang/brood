@@ -120,7 +120,7 @@
       (pkg-write-project a "a" "a" "(defn af () 1)" " :dependencies [[b :path \"../b\"]]")
       (pkg-write-project app "app" "main" "(defn main () 1)" " :dependencies [[a :path \"../a\"]]")
       (let (entries (resolve-deps app (list (dep-path 'a "../a")) nil))
-        (assert= (map (fn (e) (get e :name)) entries) (list 'a 'b)))))
+        (assert= (map entries (fn (e) (get e :name))) (list 'a 'b)))))
   (test "a missing path dep is a clear error"
     (let (app (pkg-fixture-root))
       (pkg-write-project app "app" "main" "(defn main () 1)" "")
@@ -192,7 +192,7 @@
                             (dep-git 'greeter greeter-url "v1.0.0" nil))
                           nil)
                 idx (package/package-index-by-name entries))
-            (assert= (sort (map (fn (e) (get e :name)) entries)) (list 'ansi 'greeter))
+            (assert= (sort (map entries (fn (e) (get e :name)))) (list 'ansi 'greeter))
             (assert= (get (get idx 'ansi) :ref) "v2.0.0"))))))
   ;; ADR-238: a direct git/path pin overrides a same-named *transitive registry*
   ;; request. Verifiable fully offline — without the override, greeter's transitive
@@ -221,7 +221,7 @@
                             (dep-git 'greeter greeter-url "v1.0.0" nil))
                           nil)
                 idx (package/package-index-by-name entries))
-            (assert= (sort (map (fn (e) (get e :name)) entries)) (list 'ansi 'greeter))
+            (assert= (sort (map entries (fn (e) (get e :name)))) (list 'ansi 'greeter))
             (assert= (dep-kind (get idx 'ansi)) :git)
             (assert= (get (get idx 'ansi) :ref) "v1.0.0"))))))
   (test "two transitive :git deps at different refs, with no direct pin, error loudly"
@@ -735,16 +735,21 @@
 ;; resolver's prefetch relies on): `{:releases [{:version V :dependencies [...]} ...]}`.
 (defn rr-releases-json (releases)
   (str "{\"releases\":["
-    (string/join ","
-      (map (fn (kv)
-             (str "{\"version\":\""
-               (first kv)
-               "\",\"dependencies\":["
-               (string/join ","
-                 (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}"))
-                   (get (second kv) :deps)))
-               "]}"))
-        (%map-pairs releases)))
+    (string/join (map (%map-pairs releases)
+                   (fn (kv)
+                     (str "{\"version\":\""
+                       (first kv)
+                       "\",\"dependencies\":["
+                       (string/join (map (get (second kv) :deps)
+                                      (fn (d)
+                                        (str "{\"name\":\""
+                                          (first d)
+                                          "\",\"version\":\""
+                                          (second d)
+                                          "\"}")))
+                         ",")
+                       "]}")))
+      ",")
     "]}"))
 
 (defn rr-release-json (version checksum deps)
@@ -753,8 +758,9 @@
     "\",\"version\":\""
     version
     "\",\"dependencies\":["
-    (string/join ","
-      (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}")) deps))
+    (string/join (map deps
+                   (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}")))
+      ",")
     "]}"))
 
 ;; Build one release tarball whose manifest declares `deps-line` (so the extracted
@@ -819,7 +825,7 @@
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (binding (*config-registry* base)
         (let (entries (package/resolve-deps app-dir (list (dep-registry 'foo "^1.0")) nil)
-              by-name (fold (fn (m e) (assoc m (get e :name) e)) {} entries))
+              by-name (fold entries {} (fn (m e) (assoc m (get e :name) e))))
           (assert= 2 (count entries))
           ;; foo: newest satisfying ^1.0 is 1.5.0
           (assert= "1.5.0" (get (get by-name 'foo) :version))
@@ -843,7 +849,7 @@
       (binding (*config-registry* base)
         ;; first resolve pins foo = 1.0.0 and builds a lock row
         (let (entries (package/resolve-deps app-dir (list (dep-registry 'foo "^1.0")) nil)
-              lock (apply vector (map dep-lock-vec entries)))
+              lock (apply vector (map entries dep-lock-vec)))
           (assert= "1.0.0" (get (first entries) :version))
           ;; now point the registry at a server that 404s EVERYTHING — a re-solve would
           ;; fail, so success proves the locked solution was reused without querying it
@@ -870,7 +876,7 @@
         (let (entries (package/resolve-deps app-dir
                         (list (dep-registry 'foo "^1.0") (dep-registry 'bar "^2.0"))
                         prior-lock)
-              by-name (fold (fn (m e) (assoc m (get e :name) e)) {} entries))
+              by-name (fold entries {} (fn (m e) (assoc m (get e :name) e))))
           (assert= 2 (count entries))
           (assert= "1.0.0" (get (get by-name 'foo) :version)) ; kept, NOT upgraded to 1.1.0
           (assert= "2.0.0" (get (get by-name 'bar) :version))))))
@@ -897,7 +903,7 @@
         (let (entries (package/resolve-deps app-dir
                         (list (dep-registry 'a ">= 1.0") (dep-registry 'b ">= 1.0"))
                         nil)
-              by-name (fold (fn (m e) (assoc m (get e :name) e)) {} entries))
+              by-name (fold entries {} (fn (m e) (assoc m (get e :name) e))))
           (assert= 3 (count entries))
           (assert= "1.0.0" (get (get by-name 'a) :version)) ; fell back from 2.0.0
           (assert= "1.0.0" (get (get by-name 'b) :version))
@@ -1033,7 +1039,7 @@
       (file/mkdir gui)
       (file/spit (path/join (path/join root "src") "top.blsp") "(defmodule top)\n")
       (file/spit (path/join gui "window.blsp") "(defmodule gui/window)\n")
-      (assert= (sort (map ->string (package/package-provided-modules (path/join root "src"))))
+      (assert= (sort (map (package/package-provided-modules (path/join root "src")) ->string))
         (list "gui/window" "top"))))
   (test "two providers of the same NESTED module name collide loudly"
     (let (parent (pkg-fixture-root)
@@ -1137,16 +1143,16 @@
           out (package/package-manifest-add src
                 (dep-entry-node (dep-path 'b "../b"))))
       (let (form (reflect/read-string out))
-        (assert= (map (fn (d) (get d :name))
-                   (project/parse-deps (plist-get (rest form) :dependencies)))
+        (assert= (map (project/parse-deps (plist-get (rest form) :dependencies))
+                   (fn (d) (get d :name)))
           (list 'a 'b)))))
   (test "remove drops the named dep, keeps the rest and comments"
     (let (src "(project :name \"app\"\n  :dependencies [[a :path \"../a\"] [b :path \"../b\"]])\n;; keep me\n"
           out (package/package-manifest-remove src 'a))
       (is (includes? out "keep me"))
       (let (form (reflect/read-string out))
-        (assert= (map (fn (d) (get d :name))
-                   (project/parse-deps (plist-get (rest form) :dependencies)))
+        (assert= (map (project/parse-deps (plist-get (rest form) :dependencies))
+                   (fn (d) (get d :name)))
           (list 'b)))))
   (test "remove of the only dep leaves an empty :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
@@ -1164,13 +1170,13 @@
     (assert= (sort (%sealed-members 'Dependency))
       (sort (list :project/dep-path :project/dep-git :project/dep-tarball :project/dep-registry))))
   (test "every declared op resolves for every sealed member"
-    (is (every? (fn (d) (satisfies? 'Dependency d))
-          (list (dep-path 'a "p")
-            (dep-git 'b "u" "r" nil)
-            (dep-tarball 'c "u" "s")
-            (dep-registry 'd "1.0.0")))))
+    (is (every? (list (dep-path 'a "p")
+                  (dep-git 'b "u" "r" nil)
+                  (dep-tarball 'c "u" "s")
+                  (dep-registry 'd "1.0.0"))
+          (fn (d) (satisfies? 'Dependency d)))))
   (test "the ability declares the five ops the package manager dispatches"
-    (assert= (sort (map first (%ability-ops 'Dependency)))
+    (assert= (sort (map (%ability-ops 'Dependency) first))
       (sort (list 'dep-kind 'dep-resolve 'dep-check-compatible 'dep-lock-vec 'dep-entry-node))))
   (test "dep-kind is the manifest keyword for each identity"
     (assert= (dep-kind (dep-path 'a "p")) :path)
@@ -1280,7 +1286,7 @@
       (pkg-write-project app-dir
         "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
       (let (dirs (ensure-deps app-dir (list (dep-path 'greeter "../greeter"))))
-        (reflect/set-load-path! (append *load-path* dirs))
+        (reflect/set-load-path (append *load-path* dirs))
         (require-one 'greeter)
         ;; greeter is a `(defmodule greeter)`, so its `greet` is `greeter/greet`
         (assert= (greeter/greet "you") "hi you")))))
@@ -1298,7 +1304,7 @@
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (let (dirs (ensure-deps app-dir
                      (list (dep-git 'salutation url "v1.0.0" nil))))
-          (reflect/set-load-path! (append *load-path* dirs))
+          (reflect/set-load-path (append *load-path* dirs))
           (require-one 'salutation)
           (assert= (salutation/hi "you") "yo you")
           ;; and the clone + lock landed under the app

@@ -78,7 +78,8 @@
     (assert= *dt2* 100))
 
   (test "a binding restores even when its body throws"
-    (try (binding (*dt* 5) (throw "boom")) (catch e nil))
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+    (check-allow :discarded-catch (try (binding (*dt* 5) (throw "boom")) (catch e nil)))
     (assert= *dt* 0)
     ;; …and the thrown value still propagates to the catch
     (assert= (try (binding (*dt* 5) (throw :raised)) (catch e e)) :raised))

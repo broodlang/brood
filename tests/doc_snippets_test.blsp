@@ -54,7 +54,7 @@ body runs in a green process with a bounded stack."
           rest-lines (rest lines))
       (if (string/starts-with? line "```")
         (if in-block
-          (fenced-blocks rest-lines false (cons (string/join "\n" (reverse cur)) acc) nil)
+          (fenced-blocks rest-lines false (cons (string/join (reverse cur) "\n") acc) nil)
           ;; Opening fence: enter only for a Brood tag, so ```sh blocks never reach the reader.
           (if (contains? *brood-tags* (string/trim (string/replace line "```" "")))
             (fenced-blocks rest-lines true acc nil)
@@ -82,27 +82,28 @@ KI-70's whole point)."
     (and (list? form) (not (empty? form)))
       (let (h (first form)
             acc2 (if (symbol? h) (cons h acc) acc))
-        (fold (fn (a child) (call-heads child a)) acc2 form))
-    (vector? form) (fold (fn (a child) (call-heads child a)) acc form)
-    (map? form) (fold (fn (a kv) (call-heads (second kv) (call-heads (first kv) a))) acc (seq form))
+        (fold form acc2 (fn (a child) (call-heads child a))))
+    (vector? form) (fold form acc (fn (a child) (call-heads child a)))
+    (map? form) (fold (seq form) acc (fn (a kv) (call-heads (second kv) (call-heads (first kv) a))))
     else acc))
 
 (defn- heads-of-block (src)
   "The call heads of `src`, or nil if it does not parse — a prose fragment, an elided
 `…`, a deliberately-malformed example. Skipping those is why the anti-vacuity tests below
 exist."
-  (let (forms (try (reflect/read-all src) (catch _ nil)))
-    (if (nil? forms) nil (fold (fn (a f) (call-heads f a)) nil forms))))
+  ;; check-allow :discarded-catch — a snippet that does not read, or a module with no file behind it, is expected
+  (let (forms (check-allow :discarded-catch (try (reflect/read-all src) (catch _ nil))))
+    (if (nil? forms) nil (fold forms nil (fn (a f) (call-heads f a))))))
 
 (defn- all-heads ()
-  (mapcat (fn (p) (mapcat heads-of-block (blocks-in p))) *docs*))
+  (mapcat *docs* (fn (p) (mapcat (blocks-in p) heads-of-block))))
 
 (defn- qualified? (sym)
   (let (n (->string sym))
     (and (not (string/starts-with? n "%")) (contains-slash? n))))
 
 (defn- contains-slash? (s)
-  (fold (fn (found c) (or found (= c "/"))) false (string/->list s)))
+  (fold (string/->list s) false (fn (found c) (or found (= c "/")))))
 
 (defn- module-of (sym)
   (first (string/split (->string sym) "/")))
@@ -119,7 +120,7 @@ exist."
   (test "enough blocks still PARSE to make the head checks meaningful"
     ;; If a reader or fence change made every block unparseable, the checks would go
     ;; vacuously green. They are fragments, so this is a floor, not a total.
-    (is (> (count (filter (fn (b) (not (nil? (heads-of-block b)))) (mapcat blocks-in *docs*))) 20)))
+    (is (> (count (filter (mapcat *docs* blocks-in) (fn (b) (not (nil? (heads-of-block b)))))) 20)))
 
   (test "the retired list still names names that are actually gone"
     ;; Guards the guard the other way: if a retired name came back, checking for its
@@ -133,13 +134,14 @@ exist."
     ;; `bound?` alone is not enough: a qualified reference auto-requires at COMPILE time,
     ;; and nothing here compiles the block, so the module must be loaded first. Without
     ;; this the check reports `node/start` and eight others as missing when they are fine.
-    (let (heads (seq/distinct (filter qualified? (all-heads))))
+    (let (heads (seq/distinct (filter (all-heads) qualified?)))
       (doseq (h heads)
-        (try (require-one (symbol (module-of h))) (catch _ nil)))
+        ;; check-allow :discarded-catch — a snippet that does not read, or a module with no file behind it, is expected
+        (check-allow :discarded-catch (try (require-one (symbol (module-of h))) (catch _ nil))))
       (doseq (h heads)
         (is (bound? h)))))
 
   (test "no doc block calls a retired name"
-    (let (heads (into #{} (map ->string (all-heads))))
+    (let (heads (into #{} (map (all-heads) ->string)))
       (doseq (kv (seq *retired*))
         (is (not (contains? heads (first kv))))))))

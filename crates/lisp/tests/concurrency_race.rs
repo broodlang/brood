@@ -41,7 +41,7 @@ fn fanout_with_concurrent_global_rebind_matches_serial() {
         ;; `def`), but it only perturbs the map's *values* — the key set is 0..n-1,
         ;; so the count is exactly n regardless of how the rebind race interleaves.
         (defn tally (n)
-          (reduce (fn (a x) (assoc a x (math/mod (+ x *spin*) 7))) {} (range n)))
+          (reduce (range n) {} (fn (a x) (assoc a x (math/mod (+ x *spin*) 7)))))
 
         ;; The writer: churn the shared global table concurrently with the workers.
         (defn churn (n)
@@ -53,7 +53,7 @@ fn fanout_with_concurrent_global_rebind_matches_serial() {
           (do
             (spawn (churn 600))
             (dotimes (b k) (spawn (send root [:r (count (tally n))])))
-            (reduce (fn (acc _) (receive ([:r c] (+ acc c)))) 0 (range k))))
+            (reduce (range k) 0 (fn (acc _) (receive ([:r c] (+ acc c)))))))
 
         ;; Each trial's parallel total must equal the serial k*n. Tail-recursive
         ;; (the test body runs in a small green-process stack).

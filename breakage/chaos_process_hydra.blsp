@@ -16,7 +16,7 @@
 
 ;; Leaf: compute sum of squares [start, end) and reply to parent
 (defn tree-leaf (parent start end)
-  (let (sum (fold (fn (acc i) (+ acc (* i i))) 0 (range start end)))
+  (let (sum (fold (range start end) 0 (fn (acc i) (+ acc (* i i)))))
     (send parent [:leaf-result sum])))
 
 ;; Internal node: spawn two children, collect their results, sum, send up
@@ -52,9 +52,7 @@
   (let (n (get config :n)
         seed (get config :seed)
         ;; compute a pseudo-random sum (poor man's hash chain)
-        total (fold (fn (acc i) (math/rem (+ (* acc 1103515245) i seed) 2147483647))
-                1
-                (range n)))
+        total (fold (range n) 1 (fn (acc i) (math/rem (+ (* acc 1103515245) i seed) 2147483647))))
     (send parent {:id id :result total :config config})))
 
 (let (me (self)
@@ -73,7 +71,7 @@
     (io/puts "workers returned:" (count results))
     ;; Every worker had the same config, so all results must be equal
     (let (vals (vals results)
-          all-same (= (count (into {} (map (fn (v) [v true]) vals))) 1))
+          all-same (= (count (into {} (map vals (fn (v) [v true])))) 1))
       (io/puts "all workers got same result?" all-same)
       (io/puts "sample result[0]:" (get results 0)))))
 
@@ -81,12 +79,10 @@
 
 (let (me (self)
       n 500
-      refs (map (fn (i)
-                  (let (pid (spawn (if (= (math/rem i 3) 0)
-                                     (error "intentional crash")
-                                     :normal-exit)))
-                    (monitor pid)))
-             (range n)))
+      refs (map (range n)
+             (fn (i)
+               (let (pid (spawn (if (= (math/rem i 3) 0) (error "intentional crash") :normal-exit)))
+                 (monitor pid)))))
   ;; Collect all :down messages
   (defn collect-downs (remaining acc)
     (if (= remaining 0)
@@ -97,7 +93,7 @@
           (after 3000 (cons :timeout acc))))))
   (let (downs (collect-downs n nil))
     (io/puts "down messages:" (count downs))
-    (let (crashes (count (filter (fn (r) (string? (error-message r))) downs)))
+    (let (crashes (count (filter downs (fn (r) (string? (error-message r))))))
       (io/puts "crashed processes (approx):" crashes))))
 
 (io/puts "--- named-spawn idempotency: same name spawned from many processes ---")
@@ -119,7 +115,7 @@
       acc
       (collect-pids (- remaining 1) (receive (p (cons p acc))))))
   (let (pids (collect-pids n nil)
-        uniq (into {} (map (fn (p) [p true]) pids)))
+        uniq (into {} (map pids (fn (p) [p true]))))
     (io/puts "unique pids registered for :shared-counter:" (count uniq))
     (io/puts "all same pid?" (= (count uniq) 1))))
 
@@ -144,8 +140,8 @@
     (io/puts "cube(10):" (get cubes 10))
     (io/puts "cube(200):" (get cubes 200))
     (io/puts "all correct?"
-      (= (count (filter (fn (kv) (= (first (rest kv)) (* (first kv) (* (first kv) (first kv)))))
-                  cubes))
+      (= (count (filter cubes
+                  (fn (kv) (= (first (rest kv)) (* (first kv) (* (first kv) (first kv)))))))
         n))))
 
 (io/puts "--- DONE ---")

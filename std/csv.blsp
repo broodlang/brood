@@ -87,19 +87,21 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
                 nil
                 (cons row rows-acc)))
           ;; \r\n — skip the \r, the \n will be processed on the next call
-          (= c "\r") (csv-parse-loop s
-                       (+ i 1)
-                       n
-                       :field-start field-acc
-                       row-acc
-                       rows-acc)
+          (= c "\r")
+            (csv-parse-loop s
+              (+ i 1)
+              n
+              :field-start field-acc
+              row-acc
+              rows-acc)
           ;; any other char → start unquoted field
-          else (csv-parse-loop s
-                 (+ i 1)
-                 n
-                 :unquoted (cons c field-acc)
-                 row-acc
-                 rows-acc))
+          else
+            (csv-parse-loop s
+              (+ i 1)
+              n
+              :unquoted (cons c field-acc)
+              row-acc
+              rows-acc))
 
       ;; ── :unquoted ─────────────────────────────────────────────────────────
       (= state :unquoted)
@@ -121,12 +123,13 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
                 nil
                 (cons row rows-acc)))
           (= c "\r") (csv-parse-loop s (+ i 1) n :unquoted field-acc row-acc rows-acc)
-          else (csv-parse-loop s
-                 (+ i 1)
-                 n
-                 :unquoted (cons c field-acc)
-                 row-acc
-                 rows-acc))
+          else
+            (csv-parse-loop s
+              (+ i 1)
+              n
+              :unquoted (cons c field-acc)
+              row-acc
+              rows-acc))
 
       ;; ── :quoted ───────────────────────────────────────────────────────────
       (= state :quoted)
@@ -148,12 +151,13 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
       (= state :quote-seen)
         (cond
           ;; "" → escaped quote, add one " and back to :quoted
-          (= c "\"") (csv-parse-loop s
-                       (+ i 1)
-                       n
-                       :quoted (cons "\"" field-acc)
-                       row-acc
-                       rows-acc)
+          (= c "\"")
+            (csv-parse-loop s
+              (+ i 1)
+              n
+              :quoted (cons "\"" field-acc)
+              row-acc
+              rows-acc)
           ;; comma after closing quote → end of field
           (= c ",")
             (csv-parse-loop s
@@ -173,23 +177,25 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
                 nil
                 (cons row rows-acc)))
           ;; \r after closing quote → skip (wait for \n)
-          (= c "\r") (csv-parse-loop s
-                       (+ i 1)
-                       n
-                       :quote-seen field-acc
-                       row-acc
-                       rows-acc)
+          (= c "\r")
+            (csv-parse-loop s
+              (+ i 1)
+              n
+              :quote-seen field-acc
+              row-acc
+              rows-acc)
           ;; anything else after closing quote → back to unquoted (lenient)
-          else (csv-parse-loop s
-                 (+ i 1)
-                 n
-                 :unquoted (cons c field-acc)
-                 row-acc
-                 rows-acc))
+          else
+            (csv-parse-loop s
+              (+ i 1)
+              n
+              :unquoted (cons c field-acc)
+              row-acc
+              rows-acc))
 
       else
       ;; Should never happen — fall back to unquoted
-      (csv-parse-loop s (+ i 1) n :unquoted (cons c field-acc) row-acc rows-acc))))
+        (csv-parse-loop s (+ i 1) n :unquoted (cons c field-acc) row-acc rows-acc))))
 
 (defn decode (s)
   "Parse a CSV string → a list of rows, where each row is a vector of strings.
@@ -216,9 +222,9 @@ An empty string returns an empty list.
     ;; fold is enough; the `into` stays only to tolerate a hand-built list row.
     (let (row (first rows)
           cells (if (vector? row) row (into [] row))
-          m (fold (fn (acc i) (assoc acc (nth headers i "") (nth cells i "")))
+          m (fold (range (count headers))
               {}
-              (range (count headers))))
+              (fn (acc i) (assoc acc (nth headers i "") (nth cells i "")))))
       (csv-rows->maps headers (rest rows) (cons m acc)))))
 
 (defn decode-maps (s)
@@ -254,12 +260,12 @@ field map (or, as before `->string`, a type error out of the quoting scan)."
 
 (defn- csv-emit-row (fields)
   "Emit a single CSV row as a string (no trailing newline)."
-  (string/join "," (map csv-emit-field (seq fields))))
+  (string/join (map (seq fields) csv-emit-field) ","))
 
 (defn- csv-emit-rows (rows acc)
   "Emit a list of rows into a newline-separated string."
   (if (empty? rows)
-    (string/join "\n" (reverse acc))
+    (string/join (reverse acc) "\n")
     (csv-emit-rows (rest rows) (cons (csv-emit-row (first rows)) acc))))
 
 (defn encode (rows)
@@ -290,12 +296,12 @@ doubled. Rows are separated by `\\n`.
 
 (defn- csv-map->row (m headers)
   "Extract values from map `m` in the order given by `headers`."
-  (map (fn (h) (csv-cell m h)) headers))
+  (map headers (fn (h) (csv-cell m h))))
 
 (defn encode-maps (maps headers)
   "Serialize a list of maps to CSV, with the given `headers` list determining
 column order. The header row is written first. Missing keys produce empty fields."
   (let (header-row (into [] headers)
-        data-rows (map (fn (m) (into [] (csv-map->row m headers))) maps))
+        data-rows (map maps (fn (m) (into [] (csv-map->row m headers)))))
     (encode (cons header-row (into [] data-rows)))))
 (sig encode-maps (seqable any -> string))

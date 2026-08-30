@@ -168,7 +168,9 @@
 (describe "try / catch — nested and rethrow"
   (test "inner catch handles its own error; outer sees nothing"
     ;; If outer catch fired, result would be :outer; inner handling gives :handled.
-    (assert= (try (try (throw :inner) (catch _ :handled)) (catch _ :outer))
+    (assert= (try
+               (check-allow :discarded-catch (try (throw :inner) (catch _ :handled)))
+               (catch _ :outer))
       :handled))
 
   (test "outer catch handles error that escapes inner"
@@ -199,7 +201,8 @@
       (assert= v :x)))
 
   (test "try as the condition of if"
-    (assert= (if (try (throw :x) false (catch _ true)) :yes :no) :yes))
+    (assert= (if (try (throw :x) false (catch _ true)) :yes :no)
+      :yes))
 
   (test "try as function argument"
     (assert= (str (try (throw :x) (catch e e))) ":x"))
@@ -264,7 +267,8 @@
 
   (test "type error from a compiled function is catchable"
     (deopt-heat 5000)
-    (assert= (try (deopt-adder "not-a-number") (catch _ :caught)) :caught))
+    (assert= (try (deopt-adder "not-a-number") (catch _ :caught))
+      :caught))
 
   (test "type error from compiled function carries the right message"
     (deopt-heat 5000)
@@ -274,8 +278,10 @@
 
   (test "try/catch works across repeated deopt calls"
     (deopt-heat 5000)
-    (let (results (map (fn (v) (try (deopt-adder v) (catch _ :caught)))
-                    '("a" "b" "c" 1 "d" 2)))
+    ;; check-allow :discarded-catch — try/catch itself is under test: the constant proves which arm ran
+    (let (results (map '("a" "b" "c" 1 "d" 2)
+                    (fn (v)
+                      (try (deopt-adder v) (catch _ :caught)))))
       (assert= results '(:caught :caught :caught 2 :caught 3))))
 
   ;; Stale-handle scenario: allocate many short-lived pairs (stress the
@@ -349,8 +355,8 @@
 
   (test "a native-boundary callback frame appears by name"
     (let (names (try
-                  (map trace-inner [1])
-                  (catch e (map (fn (f) (get f :fn)) (get e :trace)))))
+                  (map [1] trace-inner)
+                  (catch e (map (get e :trace) (fn (f) (get f :fn))))))
       (assert= "try-catch-test/trace-inner" (first names))))
 
   (test "a user throw's error still traces when uncaught payload is rethrown"
@@ -358,3 +364,109 @@
     ;; frames unwound through helpers still sees them
     (assert= "try-catch-test/trace-inner"
       (get (first (try (trace-middle 1) (catch e (get e :trace)))) :fn))))
+
+;; ── finally (ADR-306) ────────────────────────────────────────────────────────
+;; `cleanup` runs whether the try completes or throws; the try's value (or the
+;; escaping error) is what comes out. Order of effects is observed through a
+;; process mailbox rather than a mutable cell (there is none).
+
+(defn- finally-note (to tag)
+  "Record `tag` with the observer `to`."
+  (send to [:note tag]))
+
+(defn- finally-notes (n acc)
+  "Collect `n` notes, in arrival order."
+  (if (= n 0)
+    (reverse acc)
+    (receive
+      ([:note tag] (finally-notes (- n 1) (cons tag acc)))
+      (after *test-wait-ms* (reverse (cons :timeout acc))))))
+
+(defn- finally-type-error ()
+  "A kernel type error raised one frame down."
+  (check-allow :type-mismatch (* 2 (+ 1 "not a number"))))
+
+(describe "try / finally"
+  (test "cleanup runs after a completing body and the body's value is kept"
+    (let (me (self))
+      (assert= 42 (try (do (finally-note me :body) 42) (finally (finally-note me :cleanup))))
+      (assert= (list :body :cleanup) (finally-notes 2 ()))))
+
+  (test "cleanup's own value is discarded"
+    (assert= :kept (try :kept (finally :discarded))))
+
+  (test "cleanup runs when the body throws, and the same value escapes"
+    (let (me (self))
+      (assert= :boom
+        (try
+          (try (throw :boom) (finally (finally-note me :cleanup)))
+          (catch e e)))
+      (assert= (list :cleanup) (finally-notes 1 ()))))
+
+  (test "with a catch: handler first, then cleanup, and the handler's value is kept"
+    (let (me (self))
+      (assert= :handled
+        (try
+          (throw :x)
+          (catch _ (do (finally-note me :handler) :handled))
+          (finally (finally-note me :cleanup))))
+      (assert= (list :handler :cleanup) (finally-notes 2 ()))))
+
+  (test "a throw from the handler still runs cleanup, then propagates"
+    (let (me (self))
+      (assert= :from-handler
+        (try
+          (try
+            (throw :x)
+            (catch _ (throw :from-handler))
+            (finally (finally-note me :cleanup)))
+          (catch e e)))
+      (assert= (list :cleanup) (finally-notes 1 ()))))
+
+  (test "a throw from cleanup replaces the pending error"
+    (assert= :from-cleanup
+      (try
+        (try (throw :original) (finally (throw :from-cleanup)))
+        (catch e e))))
+
+  (test "a rethrown built-in error keeps its kind, message and trace"
+    ;; raised inside a call so there is a frame between the raise and the catch
+    (let (e (try
+              (try (* 2 (finally-type-error)) (finally nil))
+              (catch e e)))
+      (assert= :type (get e :kind))
+      (is (string? (get e :message)))
+      (is (pair? (get e :trace)))))
+
+  (test "nested: inner cleanup before outer cleanup"
+    (let (me (self))
+      (assert= :v
+        (try
+          (try :v (finally (finally-note me :inner)))
+          (finally (finally-note me :outer))))
+      (assert= (list :inner :outer) (finally-notes 2 ()))))
+
+  (test "cleanup sees the try's lexical scope"
+    (let (me (self) resource :r1)
+      (try :ok (finally (finally-note me resource)))
+      (assert= (list :r1) (finally-notes 1 ()))))
+
+  (test "a crash escaping a finally in a process is the original reason"
+    (let (p (spawn (try (error "worker failed") (finally nil)))
+          m (monitor p))
+      (assert= "worker failed"
+        (receive ([:down ^m _ [:error e]] (get e :message)) (after *test-wait-ms* :timeout)))))
+
+  (test "(finally) with no body, or not last, is a macro-time error"
+    (is (raises? (fn () (reflect/eval-string "(try 1 (finally))"))))
+    (is (raises? (fn () (reflect/eval-string "(try 1 (finally 2) (catch e e))"))))))
+
+(describe "throw of an error map rebuilds the error"
+  (test "the caught value is still the map thrown (throw shape == catch shape)"
+    (let (original (try (finally-type-error) (catch e e))
+          again (try (throw original) (catch e e)))
+      (assert= (get original :kind) (get again :kind))
+      (assert= (get original :message) (get again :message))))
+
+  (test "a plain map without :kind/:message is an ordinary thrown value"
+    (assert= {:a 1} (try (throw {:a 1}) (catch e e)))))

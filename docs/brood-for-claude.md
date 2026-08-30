@@ -61,8 +61,8 @@ def  fn  quote  quasiquote  if  do  let  letrec
 
 Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (lowers to `(def name (%make-macro (fn …)))`), `defn`, `defn-` / `def-`, `defdyn`, `binding`,
-`cond`, `when`, `unless`, `and`, `or`, `match`, `try` / `catch`, `->` / `->>` /
-`as->`, `some->` / `some->>` / `cond->` / `cond->>` / `doto`, `if-let` / `when-let`,
+`cond`, `when`, `unless`, `and`, `or`, `match`, `try` / `catch`, `->` / `as->`,
+`some->` / `cond->` / `doto`, `if-let` / `when-let`,
 `fmt` (string interpolation), `receive`, `spawn`.
 
 ## Defining things
@@ -233,7 +233,7 @@ processes were rare enough that they simply stay public.
 
 A trailing `!` is **rare and not a mutation warning** — nothing mutates, so the
 Scheme/Clojure reading is vacuous here and `!` is per-context by decision (ADR-163):
-`sig!` = a signature *enforced* at runtime, `reflect/set-load-path!` / `clipboard-set!` = the
+`sig!` = a signature *enforced* at runtime, `reflect/set-load-path` / `clipboard-set` = the
 few root/OS-state setters, `(! pid payload)` = the Erlang-style cast in `gen`.
 **Don't add a `!` to a name of your own.**
 
@@ -558,13 +558,13 @@ frame). Debug "how did I get here" from a caught error with
 `(map (fn (f) (get f :fn)) (get e :trace))`.
 
 For longer pipelines over large data, the **lazy `l*` combinators** fuse
-intermediate collections (one pass, no throwaway lists). Thread them with `->>`:
+intermediate collections (one pass, no throwaway lists). Thread them with `->`:
 
 ```lisp
 ;; eager: builds two throwaway lists of ~1000 / ~500 elements
 (reduce + 0 (map sq (filter math/even? (range 1000))))
 ;; fused: one pass, no intermediate lists (≈3× faster on large inputs)
-(->> (range 1000) (seq/lfilter math/even?) (seq/lmap sq) (reduce + 0))
+(-> (range 1000) (seq/lfilter math/even?) (seq/lmap sq) (reduce 0 +))
 ```
 
 `seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lremove` each return a lazy **seq-view** — a
@@ -608,7 +608,7 @@ path:
 
   Same shape for build-a-collection-then-rebuild: fold the source straight into
   the target instead of `filter`-then-`into`. (For longer `map`/`filter`
-  pipelines over large data, the `l*` combinators threaded with `->>` do this
+  pipelines over large data, the `l*` combinators threaded with `->` do this
   fusion for you — reach for them before hand-rolling a `fold`.)
 
 - **A comprehension over a tiny fixed set loses to an explicit literal.** `for`
@@ -1062,7 +1062,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `send` `receive` `self` `ref` `monitor` `demonitor` `link` `unlink` `proc/trap-exit`
   `proc/register` `proc/whereis`
   — plus the **`gen`** framework below
-- **lazy fusing views**: `seq/lmap` `seq/lfilter` `seq/lkeep` `seq/lremove` (thread with `->>`;
+- **lazy fusing views**: `seq/lmap` `seq/lfilter` `seq/lkeep` `seq/lremove` (thread with `->`;
   realise with `seq`/`into`) plus `comp` for function composition
 
 ## Pitfalls when generating Brood code

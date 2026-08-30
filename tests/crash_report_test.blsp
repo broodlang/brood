@@ -1,0 +1,158 @@
+;; std/proc/crash-report.blsp — the default crash reporter (ADR-305): one system-monitor
+;; subscriber that prints each abnormal exit once per crash site. :isolated because the
+;; reporter registers a global name and holds a runtime-global subscription; every test
+;; uses a `:sink` so nothing reaches stderr and the report text can be asserted on.
+
+(defmodule crash-report-test (:use test) (:use crash-report))
+
+(defn- crash-report-collect (me)
+  "A sink that forwards each report to the test process."
+  (fn (text) (send me [:report text])))
+
+(defn- crash-report-next ()
+  "The next report's text, or :none after a short quiet period."
+  (receive ([:report text] text) (after *test-wait-ms* :none)))
+
+(defn- crash-report-drain ()
+  "Drop any report left in this mailbox by an earlier test (an isolated unit's tests
+share one worker process)."
+  (receive ([:report _] (crash-report-drain)) (after 0 nil)))
+
+(defn- crash-report-quiet? ()
+  "True if no report arrives within 100 ms."
+  (= :none (receive ([:report text] text) (after 100 :none))))
+
+(defn- crash-report-boom (x)
+  "A named frame for the trace assertions."
+  (error "boom: " x))
+
+(describe "crash-report rendering"
+  (test "an error map renders headline, kind/code/position, hint and frames"
+    (let (reason [:error
+                   {:kind :arith-error
+                    :message "division by zero"
+                    :code "E0031"
+                    :file "src/w.blsp"
+                    :line 14
+                    :col 9
+                    :hint "check the divisor"
+                    :trace (list {:fn "w/step" :file "src/w.blsp" :line 14 :col 9}
+                             {:fn "w/loop" :file "src/w.blsp" :line 9 :col 5})}]
+          text (render (self) reason))
+      (is (string/starts-with? text (str "[crash] " (pr-str (self)) " exited: division by zero")))
+      (is (includes? text "kind :arith-error  code E0031  at src/w.blsp:14:9"))
+      (is (includes? text "hint: check the divisor"))
+      (is (includes? text "at w/step (src/w.blsp:14:9)"))
+      (is (includes? text "at w/loop (src/w.blsp:9:5)"))
+      (is (string/ends-with? text "(further crashes at this site are not reported)"))))
+
+  (test "a thrown non-map value and a bare exit reason render their printed form"
+    (is (includes? (render (self) [:error [:bad-state 3]]) "exited: [:bad-state 3]"))
+    (is (includes? (render (self) :boom) "exited: :boom")))
+
+  (test "the trace is capped at eight frames"
+    (let (frames (map (range 1 21) (fn (i) {:fn (str "f" i) :file "x.blsp" :line i}))
+          text (render (self) [:error {:kind :x :message "m" :trace frames}]))
+      (is (includes? text "at f8 (x.blsp:8)"))
+      (is (not (includes? text "at f9 "))))))
+
+(describe "crash-report listener"
+  :isolated (test "a spawned process that raises is reported, with its trace; a clean exit is not"
+    (let (me (self))
+      (crash-report-drain)
+      (start {:sink (crash-report-collect me)})
+      (is (running?))
+      (spawn :done)
+      ;; non-tail so the `error` frame carries this file's position (a tail call
+      ;; collapses into its caller's frame and records none)
+      (let (crasher (spawn (+ 1 (crash-report-boom 1)))
+            text (crash-report-next))
+        (is (string? text))
+        (is (includes? text (pr-str crasher)))
+        (is (includes? text "boom: 1"))
+        (is (includes? text "kind :user"))
+        ;; Match the FILE NAME and a position, not a path prefix: `nest test` loads a
+        ;; discovered file by ABSOLUTE path and an explicitly-named one relatively, so
+        ;; pinning "tests/…" passed alone and failed under discovery — a property of how
+        ;; the runner was invoked, never of the trace.
+        (is (includes? text "at error ("))
+        (is (includes? text "crash_report_test.blsp:")))
+      (is (crash-report-quiet?))
+      (stop)))
+
+  :isolated (test "start is idempotent; stop disarms and drops the subscription"
+    (let (me (self)
+          _ (crash-report-drain)
+          first-pid (start {:sink (crash-report-collect me)}))
+      (assert= first-pid (start {:sink (crash-report-collect me)}))
+      (stop)
+      (sleep 50)
+      (is (not (running?)))
+      (assert= [] (proc/system-monitor :all))
+      (spawn (error "unreported"))
+      (is (crash-report-quiet?))))
+
+  :isolated (test "one report per site: a crash loop at one site prints once, a second site prints again"
+    (let (me (self))
+      (crash-report-drain)
+      (start {:sink (crash-report-collect me)})
+      ;; one raise site (a loop re-running the same spawn), a different message each
+      ;; time: one report. (`crash-report-boom` tail-calls `error`, so the recorded
+      ;; site is the call that entered it — this `dotimes` body.)
+      ;; Which iteration's crash is reported first is scheduling order; the site is not.
+      (dotimes (i 3) (spawn (+ 1 (crash-report-boom i))))
+      (is (includes? (crash-report-next) "exited: boom: "))
+      (is (crash-report-quiet?))
+      ;; a different raise site is a different report
+      (spawn (error "elsewhere"))
+      (is (includes? (crash-report-next) "elsewhere"))
+      (stop)))
+
+  :isolated (test "deliberate exits — :normal, :killed, :shutdown — are never reported"
+    (let (me (self))
+      (crash-report-drain)
+      (start {:sink (crash-report-collect me)})
+      (let (victim (spawn (receive (:never nil)))
+            polite (spawn (receive (:never nil))))
+        (exit victim :kill)
+        (exit polite :shutdown)
+        (is (crash-report-quiet?)))
+      (stop)))
+
+  :isolated (test "the starting process is never reported, and a linked crash still is"
+    (let (me (self))
+      (crash-report-drain)
+      (start {:sink (crash-report-collect me)})
+      ;; a supervised-style crash: the child is linked to a trapping parent; the
+      ;; parent handles it, and the reporter STILL reports it (OTP logs handled crashes)
+      (spawn (do
+               (proc/trap-exit true)
+               (spawn-link (crash-report-boom :linked))
+               (receive ([:EXIT _ _] :handled))))
+      (is (includes? (crash-report-next) "boom: :linked"))
+      (stop)))
+
+  :isolated (test "the reporter coexists with a telemetry watch-runtime subscription"
+    (let (me (self))
+      (crash-report-drain)
+      (start {:sink (crash-report-collect me)})
+      (telemetry/start)
+      (let (watcher (telemetry/watch-runtime {:spawn true}))
+        (assert= 2 (count (proc/system-monitor :all)))
+        (spawn (crash-report-boom :under-watch))
+        (is (includes? (crash-report-next) "under-watch"))
+        (telemetry/stop-watch-runtime watcher)
+        (sleep 50)
+        ;; the watcher leaving does not take the reporter with it
+        (is (running?))
+        (assert= 1 (count (proc/system-monitor :all))))
+      (telemetry/stop)
+      (stop)))
+
+  :isolated (test "arm-default honours BROOD_NO_CRASH_REPORT only when set; otherwise arms once"
+    (if (os/env "BROOD_NO_CRASH_REPORT")
+      (assert= nil (arm-default))
+      (let (pid (arm-default))
+        (is (not (nil? pid)))
+        (assert= pid (arm-default))
+        (stop)))))

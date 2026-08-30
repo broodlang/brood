@@ -136,15 +136,15 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
         (string/substring s (+ i (string/length sep)) (string/length s))))))
 
 (defn- http-parse-headers (lines)
-  (fold (fn (m line)
-          (let (i (index-of line ":"))
-            (if (< i 0)
-              m
-              (assoc m
-                (string/lower (string/trim (string/substring line 0 i)))
-                  (string/trim (string/substring line (+ i 1) (string/length line)))))))
+  (fold lines
     {}
-    lines))
+    (fn (m line)
+      (let (i (index-of line ":"))
+        (if (< i 0)
+          m
+          (assoc m
+            (string/lower (string/trim (string/substring line 0 i)))
+              (string/trim (string/substring line (+ i 1) (string/length line)))))))))
 
 (defn- http-declared-length (head)
   ;; A well-formed Content-Length is a non-negative *integer* byte count. A
@@ -261,12 +261,12 @@ request/response splitting)."
   ;; Render each header line, then one `(apply str …)` — the old `(str acc …)`
   ;; fold rebuilt the whole accumulator per header (O(headers²) in total bytes).
   (apply str
-    (map (fn (kv)
-           (str (http-crlf-free "header name" (first kv))
-             ": "
-             (http-crlf-free "header value" (second kv))
-             "\r\n"))
-      (%map-pairs headers))))
+    (map (%map-pairs headers)
+      (fn (kv)
+        (str (http-crlf-free "header name" (first kv))
+          ": "
+          (http-crlf-free "header value" (second kv))
+          "\r\n")))))
 (sig render-headers (map -> any))
 
 (defn render-response (resp)

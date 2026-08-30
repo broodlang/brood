@@ -137,6 +137,22 @@ wasm `use-native` binding (which defines a Brood fn per component export at
 load time). The one lint whose ground truth is the live image rather than
 the source; everywhere else, prefer fixing the reference.
 
+**`:discarded-catch`.** `(check-allow :discarded-catch …)` suppresses the
+discarded-catch lint: a `(try … (catch e nil))` whose handler **says nothing** —
+`nil`, `false`, or an empty `(do)` — cannot have read the error it caught, so an
+**unbound symbol** after a rename, or a real fault, is swallowed unseen and the result
+is indistinguishable from "there was no value". A *sentinel* is not flagged: `(catch e
+:raised)`, `(catch _ true)`, a string or a number is the author encoding "it threw" as
+a value, which is the idiomatic did-it-throw assertion and carries intent. A downstream project ran for hours with
+ten unbound references because each sat in exactly that shape around a GUI call. The
+binding's spelling is not an opt-out — `(catch _ nil)` is the pattern — while a body
+with any call in it (`(catch _ (fallback))`, `(catch e (log/warn (error-message e)))`)
+is a deliberate fallback that works and stays silent. The lint reads the
+**un-expanded** forms, so only an author-written `catch` is seen — never the one
+`assert-error` or `error-of` builds. Prefer inspecting `e` or narrowing what you catch;
+where the constant genuinely *is* the answer (probing whether an optional feature
+exists, a "did it throw?" test), wrap it with a one-line comment saying so.
+
 **`&optional` params (ADR-127).** `(sig f (int &optional string -> int))`
 declares `f`'s second argument as optional, mirroring a closure's own
 `(a &optional b)` shape; combine with a trailing `& rest` for all three
@@ -385,9 +401,11 @@ so `check_if`'s redundant-clause lint declines inside an `:unreachable-clause`
 scope. Recognised categories today: **`:non-tail-recursion`**,
 **`:unreachable-clause`**, **`:type-mismatch`** (a `sig`-declared return or
 call-site argument the wrapped code deliberately violates), **`:unbound`** (a name
-bound only at runtime), and **`:unrequired`** (ADR-189 — a qualified `mod/name` whose
+bound only at runtime), **`:unrequired`** (ADR-189 — a qualified `mod/name` whose
 module the file deliberately reaches via another require, e.g. a circular dependency
-that can't `(require 'mod)` at the top level). An unrecognised
+that can't `(require 'mod)` at the top level), **`:deprecated`** (ADR-283), and
+**`:discarded-catch`** (a `(catch e nil)` whose nothing is genuinely the
+answer — read by `check/discarded_catch.rs` on the un-expanded forms). An unrecognised
 category suppresses nothing — a typo is a
 no-op that still lints, never a silent blanket opt-out. This is what lets
 `nest check` stay at **zero** warnings project-wide without weakening any lint.

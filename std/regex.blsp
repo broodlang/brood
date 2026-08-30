@@ -73,8 +73,9 @@ backreferences yet.")
   "Parse one atom at `i`; returns [atom next]."
   (let (c (regex-peek pcs i))
     (cond
-      (= c "(") (let ([alt nxt] (regex-alt pcs (inc i)))
-                  [{:t :group :alt alt} (inc nxt)])
+      (= c "(")
+        (let ([alt nxt] (regex-alt pcs (inc i)))
+          [{:t :group :alt alt} (inc nxt)])
       ; (inc nxt) skips the ')'
       (= c "[") (regex-set pcs (inc i))
       (= c ".") [{:t :any} (inc i)]
@@ -283,8 +284,9 @@ object's per-call clone-out stays a few words — see the cache note above."
     (cond
       (= k :any) true
       (= k :lit) (= c (get test :c))
-      (= k :set) (let (m (includes? (get test :chars) c))
-                   (if (get test :neg) (not m) m))
+      (= k :set)
+        (let (m (includes? (get test :chars) c))
+          (if (get test :neg) (not m) m))
       (= k :class) (regex-class-match? (get test :k) c)
       else false)))
 

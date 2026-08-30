@@ -53,4 +53,4 @@
              n
              " LOST="
              (count lost)
-             (if (nil? lost) "  (all present)" (str "  e.g. " (pr-str (take 8 lost)))))))
+             (if (nil? lost) "  (all present)" (str "  e.g. " (pr-str (take lost 8)))))))

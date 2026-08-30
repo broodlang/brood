@@ -73,13 +73,13 @@
   (test "it is the complement of the regions — its text is exactly the skeleton"
     (let (rs (boxes boxed)
           spans (protected-spans boxed rs)
-          joined (apply str (map (fn (s) (let ([lo hi] s) (string/substring boxed lo hi))) spans)))
+          joined (apply str (map spans (fn (s) (let ([lo hi] s) (string/substring boxed lo hi))))))
       (assert= joined (skeleton boxed rs))))
 
   (test "every editable region sits in a GAP between spans, never inside one"
     (let (rs (boxes boxed)
           spans (protected-spans boxed rs)
-          inside? (fn (p) (seq/find (fn (s) (let ([lo hi] s) (and (>= p lo) (< p hi)))) spans)))
+          inside? (fn (p) (seq/find spans (fn (s) (let ([lo hi] s) (and (>= p lo) (< p hi)))))))
       ;; a region's interior char is writable; the delimiter char just before it is frozen
       (is (nil? (inside? (:start (first rs)))))
       (is (not (nil? (inside? (dec (:start (first rs))))))))) ; the >>>/<<< newline

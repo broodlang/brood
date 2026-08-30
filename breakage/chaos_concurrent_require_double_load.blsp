@@ -41,21 +41,20 @@
       (file/mkdir root)
       (file/mkdir (path/join root "src"))
       (file/spit (path/join root "project.blsp") "(project :name \"crp\" :source-paths [\"src\"])")
-      (map (fn (k)
-             (file/spit (path/join (path/join root "src") (str "m" k ".blsp"))
-               (str "(defmodule m"
-                 k ") (defmodule sec" k ") "
-                 "(%registry-update! '*chaos-loads* :cons-new nil (self))")))
-        (range files))
+      (map (range files)
+        (fn (k)
+          (file/spit (path/join (path/join root "src") (str "m" k ".blsp"))
+            (str "(defmodule m"
+              k ") (defmodule sec" k ") " "(%registry-update! '*chaos-loads* :cons-new nil (self))"))))
       (reflect/eval (list 'def '*chaos-loads* nil))
       (setup root)
       ;; Race `nreq` concurrent requires of each secondary in turn — every requirer of one
       ;; key claims against the same marker, so at most one may load its file.
-      (map (fn (k)
-             (let (me (self)
-                   key (symbol (str "crp/sec" k)))
-               (map (fn (_) (spawn (fn () (do (require-one key) (send me :done))))) (range nreq))
-               (await-n nreq)))
-        (range files))
+      (map (range files)
+        (fn (k)
+          (let (me (self)
+                key (symbol (str "crp/sec" k)))
+            (map (range nreq) (fn (_) (spawn (fn () (do (require-one key) (send me :done))))))
+            (await-n nreq))))
       ;; One load per file → exactly `files` pids on the list. A double-load makes it more.
       (assert= files (count (reflect/eval '*chaos-loads*))))))

@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn advances_active_parameter_as_args_are_filled() {
         // `(reduce f init |coll)` — cursor in the gap before the 3rd arg.
-        let src = "(reduce f init coll)";
+        let src = "(reduce coll init f)";
         // after "init " (the gap) → third parameter (index 2)
         let (_label, active) = help_at(src, "init ").expect("help on reduce");
         assert_eq!(active, 2);

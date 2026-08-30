@@ -163,18 +163,18 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(nth [10 20 30] 1)",
         "(first [])",
         // higher-order results (parametric — ADR-078)
-        "(map inc [1 2 3])",
-        "(filter math/even? [1 2 3 4])",
-        "(reduce + 0 [1 2 3])",
-        "(fold (fn (a x) (+ a x)) 0 [1 2 3])",
-        "(map (fn (x) (+ x 1)) [1 2 3])",
+        "(map [1 2 3] inc)",
+        "(filter [1 2 3 4] math/even?)",
+        "(reduce [1 2 3] 0 +)",
+        "(fold [1 2 3] 0 (fn (a x) (+ a x)))",
+        "(map [1 2 3] (fn (x) (+ x 1)))",
         // empty / all-filtered results evaluate to `nil` — these exercise the
         // `… | nil` widening in `list_result`; drop it and the oracle bites.
-        "(map inc [])",
-        "(filter (fn (x) false) [1 2 3])",
+        "(map [] inc)",
+        "(filter [1 2 3] (fn (x) false))",
         // nested
-        "(first (map inc [1 2 3]))",
-        "(reduce + 0 (map inc [1 2 3]))",
+        "(first (map [1 2 3] inc))",
+        "(reduce (map [1 2 3] inc) 0 +)",
         // maps and record shapes — the refinement-carrying rules. `assoc` is the one
         // that was wrong: it kept `K`/`V` unchanged whatever it added.
         "{:a 1 :b 2}",
@@ -203,25 +203,25 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(seq/distinct [1 1 2])",
         "(sort [3 1 2])",
         "(seq/sort-by (fn (x) x) [3 1 2])",
-        "(take 2 [1 2 3])",
-        "(drop 2 [1 2 3])",
-        "(take 0 [1 2 3])",
-        "(drop 5 [1 2 3])",
+        "(take [1 2 3] 2)",
+        "(drop [1 2 3] 2)",
+        "(take [1 2 3] 0)",
+        "(drop [1 2 3] 5)",
         "(seq/take-while math/even? [2 4 5])",
         "(seq/drop-while math/even? [2 4 5])",
-        "(seq/remove math/even? [1 2 3])",
+        "(seq/remove [1 2 3] math/even?)",
         "(cons 1 [2 3])",
         "(cons \"a\" [2 3])",
         "(append [1 2] [\"a\"])",
         "(append)",
         "(range 3)",
         "(range 1 5)",
-        "(seq/keep (fn (x) (if (math/even? x) x nil)) [1 2 3 4])",
+        "(seq/keep [1 2 3 4] (fn (x) (if (math/even? x) x nil)))",
         "(seq/interpose 0 [1 2 3])",
         // mixed-element and nested collections
         "[[1 2] [3]]",
         "[{:a 1} {:b 2}]",
-        "(map (fn (x) [x x]) [1 2])",
+        "(map [1 2] (fn (x) [x x]))",
         "(first [[1 2] [3]])",
         // strings and numbers
         "(str 1 \"a\" :k)",
@@ -393,11 +393,11 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         "(if (number? 5) (* 5 5) :no)",
         "(let (x [1 2 3]) (if (vector? x) (first x) :no))",
         "(let (x 5) (if (int? x) (+ x 1) x))",
-        "(map inc [1 2 3])",
-        "(map (fn (n) (+ n 1)) [1 2 3])",
-        "(reduce + 0 [1 2 3])",
-        "(filter math/even? [1 2 3 4])",
-        "(first (map inc [1 2 3]))",
+        "(map [1 2 3] inc)",
+        "(map [1 2 3] (fn (n) (+ n 1)))",
+        "(reduce [1 2 3] 0 +)",
+        "(filter [1 2 3 4] math/even?)",
+        "(first (map [1 2 3] inc))",
         "(match 5 (5 (+ 5 1)) (_ 0))",
         "(match [1 2] ([a b] (+ a b)) (_ 0))",
         // Maps and records — the refinement-carrying rules (ADR-269). `assoc` adding a
@@ -407,8 +407,8 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         "(string/length (get (assoc {:a 1} :b \"text\") :b))",
         "(string/length (get (assoc {:a 1} :a \"replaced\") :a))",
         "(+ 1 (get (dissoc {:a 1 :b 2} :b) :a))",
-        "(map (fn (k) k) (keys {:a 1 :b 2}))",
-        "(map (fn (v) v) (vals {:a 1 :b 2}))",
+        "(map (keys {:a 1 :b 2}) (fn (k) k))",
+        "(map (vals {:a 1 :b 2}) (fn (v) v))",
         "(let (r {:name \"x\"}) (string/length (get r :name)))",
         "(let (r (assoc {} :name \"x\")) (string/length (get r :name)))",
         // Literal narrowing on BOTH branches (ADR-268) — the else branch now knows what
@@ -423,7 +423,7 @@ fn correct_programs_draw_no_type_disjointness_warning() {
         // directions, so a CORRECT use of one must stay silent.
         "(let (f inc) (+ 1 (f 1)))",
         "(let (f str) (string/length (f 1)))",
-        "(map (fn (g) (g 1)) (list inc))",
+        "(map (list inc) (fn (g) (g 1)))",
         // Multi-alternative unions reaching a call (ADR-267's per-tag decomposition).
         "(let (v (if true 1 [2])) (if (vector? v) (first v) v))",
     ];
@@ -518,7 +518,7 @@ fn an_inferred_parameter_domain_over_approximates_the_real_one() {
         "(defn f (g) (g 1))",
         "(defn f (g) (+ 1 (g 1)))",
         "(defn f (g x) (g x))",
-        "(defn f (g) (map g [1 2 3]))",
+        "(defn f (g) (map [1 2 3] g))",
         // A map argument, so the `:keyword` probe actually succeeds — a keyword is a
         // function OF A MAP, and a domain that admits only `fn | native` is caught here
         // and nowhere else (every other probe raises, and a raising probe is skipped).

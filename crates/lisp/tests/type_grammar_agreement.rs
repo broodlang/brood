@@ -79,8 +79,8 @@ const CASES: &[(&str, &str, bool)] = &[
     ("(tuple int string)", "[1]", false),
     ("(tuple)", "[]", true),
     // maps
-    ("(map keyword int)", "{:a 1}", true),
-    ("(map keyword int)", "{:a \"s\"}", false),
+    ("(map int keyword)", "{:a 1}", true),
+    ("(map int keyword)", "{:a \"s\"}", false),
     // records — CLOSED by default (ADR-264), which is the half that drifted
     ("(record :a int)", "{:a 1}", true),
     ("(record :a int)", "{:a \"s\"}", false),

@@ -23,7 +23,7 @@ constructor from a collection (`set`) and the set algebra (`union` /
 set). Duplicates collapse: `(set [1 1 2]) ⇒ #{1 2}`.
 
     (count (set/set [1 2 2 3]))   → 3"
-  (fold (fn (s x) (%set-add s x)) #{} coll))
+  (fold coll #{} (fn (s x) (%set-add s x))))
 (sig set (any -> set))
 
 ;; `conj`/`disj` deliberately do NOT live here: they are prelude functions that
@@ -37,26 +37,26 @@ set). Duplicates collapse: `(set [1 1 2]) ⇒ #{1 2}`.
   "Every element in either `a` or `b`.
 
     (sort (seq (set/union (set/set [1 2]) (set/set [2 3]))))   → (1 2 3)"
-  (fold (fn (s x) (%set-add s x)) a b))
+  (fold b a (fn (s x) (%set-add s x))))
 (sig union (set set -> set))
 
 (defn intersection (a b)
   "Every element in both `a` and `b`.
 
     (sort (seq (set/intersection (set/set [1 2]) (set/set [2 3]))))   → (2)"
-  (fold (fn (s x) (if (contains? b x) (%set-add s x) s)) #{} a))
+  (fold a #{} (fn (s x) (if (contains? b x) (%set-add s x) s))))
 (sig intersection (set set -> set))
 
 (defn difference (a b)
   "Every element of `a` that is not in `b`.
 
     (sort (seq (set/difference (set/set [1 2]) (set/set [2 3]))))   → (1)"
-  (fold (fn (s x) (%set-remove s x)) a b))
+  (fold b a (fn (s x) (%set-remove s x))))
 (sig difference (set set -> set))
 
 (defn subset? (a b)
   "True when every element of `a` is also in `b`.
 
     (set/subset? (set/set [1]) (set/set [1 2]))   → true"
-  (fold (fn (ok x) (if ok (contains? b x) false)) true a))
+  (fold a true (fn (ok x) (if ok (contains? b x) false))))
 (sig subset? (set set -> bool))

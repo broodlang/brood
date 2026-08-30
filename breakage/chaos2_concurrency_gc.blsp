@@ -103,7 +103,7 @@
     (doseq (v [1 2 3 4 5 0])
       (def p71-global-val v)
       ;; Small sleep equivalent: spin for a bit
-      (fold (fn (a _) (+ a 1)) 0 (range 10000))))
+      (fold (range 10000) 0 (fn (a _) (+ a 1)))))
   ;; Collect results — each reader should get a consistent sum (all one value)
   ;; We can't predict the exact value (depends on when reads vs rebind happen)
   ;; but each individual read should return a valid integer (not corrupted)

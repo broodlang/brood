@@ -97,7 +97,7 @@ define install_binaries
 endef
 
 .DEFAULT_GOAL := help
-.PHONY: help build release perf-brood test test-light test-both breakagetests check-examples check-stress ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
+.PHONY: help build release perf-brood test test-light test-both breakagetests check-examples check-stress smoke-bedit ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -314,9 +314,15 @@ green: ## Answer one question honestly: is this tree green? (completed CI runs +
 	# `--local` skips the CI half, `--remote` skips the local half.
 	@./scripts/green.sh $(ARGS)
 
-green-all: check-examples check-stress ## `make green` plus clippy (CI's flags) and the two slow .blsp corpus gates
+green-all: check-examples check-stress smoke-bedit ## `make green` plus clippy (CI's flags), the two slow .blsp corpus gates and the bedit smoke
 	@./scripts/green.sh --clippy
-	@echo "green-all: clippy and the .blsp gates passed too. Still not run: make test, breakage, tree-walker differential."
+	@echo "green-all: clippy, the .blsp gates and the bedit smoke passed too. Still not run: make test, breakage, tree-walker differential."
+
+smoke-bedit: ## Run bedit's gates (nest check, --check-boot, nest test) against THIS tree's nest — the downstream smoke CI's `downstream-bedit` job runs
+	# bedit is where a brood regression surfaces first (the ADR-302 rename wave, 2026-08-30,
+	# broke an installed brood with std/ + tests/ green). Uses ../bedit (or BEDIT_DIR) and the
+	# NEWEST nest under target/ (or NEST=...); a missing checkout is a note, not a failure.
+	@./scripts/smoke-bedit.sh $(ARGS)
 
 doctor: ## Report the things that make a measurement or a gate lie (build drift, strays, boot cache, litter)
 	# Read this BEFORE trusting a benchmark delta or a green gate. Every check maps to a

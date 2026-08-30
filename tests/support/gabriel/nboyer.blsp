@@ -420,7 +420,7 @@ oracle is the rewrite count published in upstream's own source header; see
 (defn setup-boyer ()
   "The lemma database — a map from a term's head symbol to its lemmas, in the order
 `rewrite` must try them. Built once; read-only thereafter."
-  (fold nboyer-add-lemma {} nboyer-lemma-data))
+  (fold nboyer-lemma-data {} nboyer-add-lemma))
 
 ;; ---- substitution ------------------------------------------------------------
 
@@ -526,11 +526,13 @@ oracle is the rewrite count published in upstream's own source header; see
       (not (pair? x)) false
       (= (first x) 'if)
         (cond
-          (nboyer-truep (second x) true-lst) (nboyer-tautologyp (third x)
-                                               true-lst false-lst)
+          (nboyer-truep (second x) true-lst)
+            (nboyer-tautologyp (third x)
+              true-lst false-lst)
 
-          (nboyer-falsep (second x) false-lst) (nboyer-tautologyp (nth x 3)
-                                                 true-lst false-lst)
+          (nboyer-falsep (second x) false-lst)
+            (nboyer-tautologyp (nth x 3)
+              true-lst false-lst)
 
           else
             (and (nboyer-tautologyp (third x) (cons (second x) true-lst) false-lst)
@@ -548,7 +550,7 @@ oracle is the rewrite count published in upstream's own source header; see
 ;; `((var . term) …)` from `((var head args…) …)`: the entry's head is the variable and
 ;; its TAIL is the term bound to it.
 (defn- nboyer-subst-of-alist (alist)
-  (map (fn (entry) [(first entry) (rest entry)]) alist))
+  (map alist (fn (entry) [(first entry) (rest entry)])))
 
 (defn test-boyer (alist term n db)
   "The number of rewrites needed to prove `term` (scaled by `n`) under lemma database

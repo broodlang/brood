@@ -283,15 +283,15 @@ passed through (not re-wrapped), like `spawn`."
   (cond
     (%match-pin? pat) (second pat)
     (vector? pat)
-      (fold (fn (acc p)
-              (let (inner (%receive-pinned-in p))
-                (cond
-                  (nil? inner) acc
-                  (nil? acc) inner
-                  (= acc inner) acc
-                  else :none)))
+      (fold (seq pat)
         nil
-        (seq pat))
+        (fn (acc p)
+          (let (inner (%receive-pinned-in p))
+            (cond
+              (nil? inner) acc
+              (nil? acc) inner
+              (= acc inner) acc
+              else :none))))
     else nil))
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
@@ -331,7 +331,7 @@ passed through (not re-wrapped), like `spawn`."
           matcher (if (empty? real)
                     `(fn (~msg) [0 ~msg])
                     `(fn (~msg)
-                       ~(%match-build-from (map %receive-result-clause preps) msg nil)))
+                       ~(%match-build-from (map preps %receive-result-clause) msg nil)))
           dispatch (if (empty? real) `(/nth ~r 1) (%receive-dispatch preps r))
           ;; nil when the filter can't apply (see `%receive-tags`). Built as a vector
           ;; FORM (`[~@tags]`), not by calling a function: a plain list would expand to

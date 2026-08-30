@@ -108,7 +108,7 @@
       true))
   (test "split/join round-trip"
     (do
-      (assert= (string/join "," (string/split "a,b,,c" ",")) "a,b,,c")
+      (assert= (string/join (string/split "a,b,,c" ",") ",") "a,b,,c")
       (assert= (string/split "aXbXc" "X") (list "a" "b" "c"))
       true))
   (test "case, trim, predicates"

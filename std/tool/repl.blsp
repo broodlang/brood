@@ -182,11 +182,11 @@ highlights. Used to colour a printed result on an interactive TTY."
 
 (defn- repl-has-name? (names x)
   "True when command-name list `names` contains `x`."
-  (any? (fn (n) (= n x)) names))
+  (any? names (fn (n) (= n x))))
 
 (defn- repl-command-for (cmd)
   "The registered command whose `:names` include `cmd`, or nil."
-  (first (filter (fn (c) (repl-has-name? (get c :names) cmd)) *repl-commands*)))
+  (first (filter *repl-commands* (fn (c) (repl-has-name? (get c :names) cmd)))))
 
 (defn register-repl-command (spec)
   "Register a `,cmd` meta-command. `spec` is `{:names (->string alias…) :usage str
@@ -200,7 +200,7 @@ registration order, the new one last). The extension seam tools use to add comma
     ;; promises to replace survived (KI-23 — it failed `repl_test` 2 runs in 5).
     (%swap-registry! repl/*repl-commands*
       (fn (l)
-        (append (filter (fn (c) (not (any? (fn (n) (repl-has-name? names n)) (get c :names)))) l)
+        (append (filter l (fn (c) (not (any? (get c :names) (fn (n) (repl-has-name? names n))))))
           (list spec))))
     (first names)))
 
@@ -214,7 +214,7 @@ registration order, the new one last). The extension seam tools use to add comma
 (defn- repl-pad (s n)
   "Right-pad string `s` with spaces to at least width `n`."
   (let (gap (- n (string/length s)))
-    (if (<= gap 0) s (str s (apply str (map (constantly " ") (range gap)))))))
+    (if (<= gap 0) s (str s (apply str (map (range gap) (constantly " ")))))))
 (sig repl-pad (string int -> string))
 
 (defn- repl-command-help-line (c)
@@ -225,8 +225,9 @@ registration order, the new one last). The extension seam tools use to add comma
   "Print the `,help` table — generated from the command registry (skipping `:hidden`
 entries) plus the static Tab / `*1 *2 *3` footer."
   (io/puts (str "\e[90m"
-             (string/join "\n"
-               (map repl-command-help-line (filter (fn (c) (not (get c :hidden))) *repl-commands*)))
+             (string/join (map (filter *repl-commands* (fn (c) (not (get c :hidden))))
+                            repl-command-help-line)
+               "\n")
              "\n"
              "  "
              (repl-pad "Tab" 15)
@@ -241,14 +242,15 @@ entries) plus the static Tab / `*1 *2 *3` footer."
 The argument must read as exactly one symbol — it is spliced into code text, so
 anything else (`,doc foo)`, `,doc (fn …)`, `,doc foo) (extra) (`) would splice extra
 forms into the eval rather than fail cleanly."
-  (let (forms (try (reflect/read-all name) (catch _ nil))
+  ;; check-allow :discarded-catch — best-effort history / rc / cwd / half-typed input: nothing to report yet
+  (let (forms (check-allow :discarded-catch (try (reflect/read-all name) (catch _ nil)))
         sym (if (and (pair? forms) (empty? (rest forms))) (first forms) nil))
     (if (not (symbol? sym))
       (io/puts (str "\e[90m(usage: ,doc <name>)\e[0m"))
       (try
         (let (d (reflect/eval-string (str "(doc " name ")"))
               a (reflect/eval-string (str "(arglist " name ")")))
-          (io/puts (str "\e[36m(" name (if a (str " " (string/join " " (map str a))) "") ")\e[0m"))
+          (io/puts (str "\e[36m(" name (if a (str " " (string/join (map a str) " ")) "") ")\e[0m"))
           (io/puts (if d (str "\e[90m" d "\e[0m") "\e[90m(no documentation)\e[0m")))
         (catch e (io/puts (str "\e[90m(no such name: " name ")\e[0m")))))))
 
@@ -286,21 +288,28 @@ forms into the eval rather than fail cleanly."
   "Print every global whose name contains `pattern`, one per line (dim), or a note."
   (if (= pattern "")
     (io/puts "\e[90m(usage: ,apropos <pattern>)\e[0m")
-    (let (hits (try (apropos pattern) (catch _ nil)))
+    (let (hits (try
+                 (apropos pattern)
+                 (catch e
+                   (do (io/puts (str "\e[90m(apropos failed: " (error-message e) ")\e[0m")) nil))))
       (if (empty? hits)
         (io/puts (str "\e[90m(nothing matching " pattern ")\e[0m"))
-        (fold (fn (_ s) (io/puts (str "\e[36m" s "\e[0m"))) nil hits)))))
+        (fold hits nil (fn (_ s) (io/puts (str "\e[36m" s "\e[0m"))))))))
 
 (defn- repl-meta-search (query)
   "Print `doc-search` hits for `query` — `name` then a dim one-line doc summary."
   (if (= query "")
     (io/puts "\e[90m(usage: ,search <words>)\e[0m")
-    (let (hits (try (doc-search query) (catch _ nil)))
+    (let (hits (try
+                 (doc-search query)
+                 (catch e
+                   (do (io/puts (str "\e[90m(search failed: " (error-message e) ")\e[0m")) nil))))
       (if (empty? hits)
         (io/puts (str "\e[90m(nothing matching " query ")\e[0m"))
-        (fold (fn (_ [name doc])
-                (io/puts (str "\e[36m" name "\e[0m  \e[90m" (repl-first-line doc) "\e[0m")))
-          nil hits)))))
+        (fold hits
+          nil
+          (fn (_ [name doc])
+            (io/puts (str "\e[36m" name "\e[0m  \e[90m" (repl-first-line doc) "\e[0m"))))))))
 
 (defn- repl-first-line (s)
   "The first line of `s`, truncated to a terminal-ish width — a docstring's summary
@@ -400,21 +409,21 @@ code rather than re-scanning delimiters (ADR-049)."
 (defn- repl-trace-lines (tr)
   "Render an error map's :trace entries as `  at fn (file:line:col)` lines,
 innermost frame first (each location is the call site that entered the frame)."
-  (string/join ""
-    (map (fn (f)
-           (str "\n  at "
-             (or (get f :fn) "<fn>")
-             (cond
-               (contains? f :line)
-                 (str " ("
-                   (if (contains? f :file) (str (get f :file) ":") "")
-                   (get f :line)
-                   ":"
-                   (get f :col)
-                   ")")
-               (contains? f :file) (str " (" (get f :file) ")")
-               else "")))
-      tr)))
+  (string/join (map tr
+                 (fn (f)
+                   (str "\n  at "
+                     (or (get f :fn) "<fn>")
+                     (cond
+                       (contains? f :line)
+                         (str " ("
+                           (if (contains? f :file) (str (get f :file) ":") "")
+                           (get f :line)
+                           ":"
+                           (get f :col)
+                           ")")
+                       (contains? f :file) (str " (" (get f :file) ")")
+                       else ""))))
+    ""))
 
 (defn- repl-error-message (e)
   "Render a caught value for display: built-in errors arrive as a structured map
@@ -452,7 +461,8 @@ and `(binding (*print-length* nil) …)` lifts the bound for a form."
 against the live image), or nil. Nil on incomplete input — there is nothing to check yet."
   (if (os/env "BROOD_NO_CHECK")
     nil
-    (mapcat reflect/check (try (reflect/read-all src) (catch _ nil)))))
+    ;; check-allow :discarded-catch — best-effort history / rc / cwd / half-typed input: nothing to report yet
+    (mapcat (check-allow :discarded-catch (try (reflect/read-all src) (catch _ nil))) reflect/check)))
 
 (defn- repl-warn (src)
   "Print `src`'s advisory type-check warnings to stderr — yellow on a TTY, plain on a pipe."
@@ -644,12 +654,12 @@ session is armed, else inline. The meta-command counterpart of `repl-eval`."
   "Serialize `history` (newest first) to file text: the most recent
 `*repl-history-max*` entries, oldest first, one per line. (Pure — the testable core
 of `repl-save-history`.)"
-  (string/join "\n" (reverse (take *repl-history-max* history))))
+  (string/join (reverse (take history *repl-history-max*)) "\n"))
 
 (defn- repl-history<-text (text)
   "Parse history-file `text` into a history list (newest first), dropping blank
 lines. (Pure — the testable core of `repl-load-history`.)"
-  (reverse (filter (fn (l) (not (= l ""))) (string/split text "\n"))))
+  (reverse (filter (string/split text "\n") (fn (l) (not (= l ""))))))
 
 (defn- repl-load-history ()
   "Load saved history (newest first) from the history file, or `()` if none / on any
@@ -663,7 +673,9 @@ read error — a missing or unreadable history file must never stop the REPL sta
   "Write the most recent `*repl-history-max*` entries to the history file (oldest
 first, one per line). Best-effort: a write failure is swallowed, never breaking the
 loop."
-  (try (file/spit (repl-history-path) (repl-history->text history)) (catch e nil)))
+  ;; check-allow :discarded-catch — best-effort history / rc / cwd / half-typed input: nothing to report yet
+  (check-allow :discarded-catch
+    (try (file/spit (repl-history-path) (repl-history->text history)) (catch e nil))))
 
 ;; ---- I/O loop ---------------------------------------------------------------
 
@@ -773,8 +785,7 @@ from your home directory doesn't load the same file twice."
         ;; Compared against the *absolute* local path, since `user` is absolute — a
         ;; bare "./.broodrc.blsp" would never match it and we'd load twice.
         local (try (path/join (file/cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
-    (filter (fn (p) (not (nil? p)))
-      (if (= user local) (list user) (list user local)))))
+    (filter (if (= user local) (list user) (list user local)) (fn (p) (not (nil? p))))))
 
 ;; Loaded ONCE per runtime, not once per `run`: `pry` launches a nested `run`
 ;; mid-session, and re-running the user's rc there would re-execute its side effects
@@ -788,15 +799,16 @@ Runs before the banner so anything an rc prints reads as part of startup, and be
 the loop spawns so its `def`s are in place for the first prompt."
   (when (not *repl-rc-loaded*)
     (def- *repl-rc-loaded* true)
-    (fold (fn (_ path)
-            (when (try (file/exists? path) (catch _ false))
-              (try
-                (reflect/load path)
-                (catch e
-                  (io/write (str "\e[33mwarning:\e[0m " path ": " (repl-error-message e) "\n")
-                    :to *err*)))))
+    (fold (repl-rc-paths)
       nil
-      (repl-rc-paths))))
+      (fn (_ path)
+        ;; check-allow :discarded-catch — best-effort history / rc / cwd / half-typed input: nothing to report yet
+        (when (check-allow :discarded-catch (try (file/exists? path) (catch _ false)))
+          (try
+            (reflect/load path)
+            (catch e
+              (io/write (str "\e[33mwarning:\e[0m " path ": " (repl-error-message e) "\n")
+                :to *err*))))))))
 
 ;; Which `run` invocation owns the installed SIGINT handler — nil when none is
 ;; installed. Only the invocation that *installed* it restores the default disposition
@@ -848,6 +860,8 @@ by the outermost invocation only."
         cont-prompt *repl-cont-prompt*
         history (if interactive (repl-load-history) '()))
     (when (os/stdout-tty?) (io/write (str *repl-banner* "\n") :to *err*))
+    ;; A process spawned at the prompt and left to crash reports itself (ADR-305).
+    (crash-report/arm-default)
     ;; `%in-ns` must run in the LOOP process (its persistent `compile_ns` is what each
     ;; `reflect/eval-string` inherits), not the parent — and only there does it see the ambient
     ;; package context that roots the module name. A no-op when `*repl-start-ns*` is nil

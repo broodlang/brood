@@ -404,6 +404,22 @@ pub(super) fn bound_p(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
     }
 }
 
+/// `(%global-generation 'name)` — the rebinding generation of a global: a number that
+/// grows with every `def` of that name in this runtime, 0 for a name never `def`'d here.
+/// For code that rebinds a global TEMPORARILY and must restore it without clobbering a
+/// redefinition made in between (`debug/untrace-fn`).
+pub(super) fn global_generation(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Sym(s) => Ok(Value::Int(heap.global_generation(s) as i64)),
+        other => Err(LispError::wrong_type(
+            heap,
+            "%global-generation",
+            "symbol",
+            other,
+        )),
+    }
+}
+
 pub(super) fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let prefix = match arg(args, 0) {
         Value::Str(id) => heap.string(id).to_string(),
@@ -412,4 +428,20 @@ pub(super) fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         other => printer::display(heap, other),
     };
     Ok(value::gensym(&prefix))
+}
+
+/// `(%renames)` — the rename ledger as Brood data. See `crate::renames`.
+pub(super) fn renames_ledger(_: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let mut pairs = Vec::with_capacity(crate::renames::RENAMES.len());
+    for (old, new, adr) in crate::renames::RENAMES {
+        let old_value = heap.alloc_string(old);
+        let new_value = heap.alloc_string(new);
+        let adr_value = heap.alloc_string(adr);
+        let entry = heap.map_from_pairs(vec![
+            (Value::Keyword(value::intern("to")), new_value),
+            (Value::Keyword(value::intern("adr")), adr_value),
+        ]);
+        pairs.push((old_value, entry));
+    }
+    Ok(heap.map_from_pairs(pairs))
 }

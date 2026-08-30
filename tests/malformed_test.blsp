@@ -199,15 +199,15 @@
     (assert-error (assoc 42 :k 1)))
 
   (test "map/filter/fold accept nil as an empty sequence"
-    (assert= nil (map (fn (x) (* x 2)) nil))
-    (assert= nil (filter odd? nil))
-    (assert= 0 (fold + 0 nil)))
+    (assert= nil (map nil (fn (x) (* x 2))))
+    (assert= nil (filter nil odd?))
+    (assert= 0 (fold nil 0 +)))
 
   (test "(reduce f '()) with no init value returns nil"
-    (assert= nil (reduce + '())))
+    (assert= nil (reduce '() +)))
 
   (test "(reduce f init '()) returns init unchanged"
-    (assert= 0 (reduce + 0 '()))))
+    (assert= 0 (reduce '() 0 +))))
 
 ;; ── 7. Degenerate special forms that silently return nil or the input ─────────
 
@@ -229,8 +229,8 @@
   (test "(-> x) with no threading steps returns x"
     (assert= 42 (-> 42)))
 
-  (test "(->> x) with no threading steps returns x"
-    (assert= 42 (->> 42)))
+  (test "(-> x) with no threading steps returns x"
+    (assert= 42 (-> 42)))
 
   (test "(let () body) with empty binding list evaluates body normally"
     (assert= 42 (let () 42)))
@@ -299,7 +299,7 @@
     (assert-error (apply 42 '(1 2))))
 
   (test "(map fn coll) works normally"
-    (assert= '(2 4 6) (map (fn (x) (* x 2)) '(1 2 3))))
+    (assert= '(2 4 6) (map '(1 2 3) (fn (x) (* x 2)))))
 
   (test "(map) with no args raises arity error"
     (assert-error (map)))

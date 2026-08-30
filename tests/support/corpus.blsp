@@ -32,7 +32,7 @@ because half the corpora encode their expectations as hex.")
 
 ;; Absolute paths of every entry directly under `dir`, sorted — nil if absent.
 (defn- corpus-entries (dir)
-  (if (file/dir? dir) (map (fn (e) (path/join dir e)) (sort (file/ls dir))) nil))
+  (if (file/dir? dir) (map (sort (file/ls dir)) (fn (e) (path/join dir e))) nil))
 
 (defn corpus-files (suite &optional subdir)
   "The corpus files of `suite`, sorted: the complete upstream under `full/` when it

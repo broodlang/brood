@@ -115,7 +115,7 @@ fn sum_tail(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 /// actually parity. See docs/benchmarking.md.)
 #[divan::bench(args = engine_grid![3_000, 30_000])]
 fn defseq_map(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
-    let src = format!("(count (map inc (range {n})))");
+    let src = format!("(count (map (range {n}) inc))");
     bencher
         .with_inputs(|| interp_on(eng))
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
@@ -128,7 +128,7 @@ fn reduce_range(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     // `tier_ceiling` (commit `4af9d2a`). A named `defn` reducer is RUNTIME-region
     // and VM-compiles, so the Vm row shows a clear speedup over the Tw row
     // (~65–67% faster measured at the time of routing).
-    let src = format!("(defn rf (a x) (+ a (* x 2))) (reduce rf 0 (range {n}))");
+    let src = format!("(defn rf (a x) (+ a (* x 2))) (reduce (range {n}) 0 rf)");
     bencher
         .with_inputs(|| interp_on(eng))
         .bench_refs(|interp| interp.eval_str(&src).unwrap());

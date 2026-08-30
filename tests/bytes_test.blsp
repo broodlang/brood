@@ -64,10 +64,10 @@
 (describe "bytes: GC survival"
   :isolated (test "LOCAL bytes survive forced collections with content intact"
     (let (mk (fn (i) (bytes (math/mod i 256) (math/mod (* i 3) 256) 255))
-          xs (into [] (map mk (range 1000))))
+          xs (into [] (map (range 1000) mk)))
       (dev/gc-collect)
       ;; churn: 30k throwaway bytes to force tenuring + a major collection
-      (count (into [] (map (fn (i) (bytes (math/mod i 256))) (range 30000))))
+      (count (into [] (map (range 30000) (fn (i) (bytes (math/mod i 256))))))
       (dev/gc-collect)
       (is (= (count xs) 1000))
       (is (= (nth xs 0) (mk 0)))
@@ -214,5 +214,5 @@
     ;; since the 2026-07-20 walker hardening (stacker segmented growth) the
     ;; kernel's promote/GC/equal/hash walkers survive this depth too — see
     ;; tests/deep_values_test.blsp for the dedicated coverage.
-    (let (deep (fold (fn (acc _) (list acc)) (list "x") (range 40000)))
+    (let (deep (fold (range 40000) (list "x") (fn (acc _) (list acc))))
       (is (= (bytes/concat deep) #b"x")))))

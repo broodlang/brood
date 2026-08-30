@@ -57,6 +57,7 @@ Codes are grouped by [`ErrorKind`]:
 | `E0042` | `:runtime` | index out of range (`vector-ref`, `substring`) | `(vector-ref [1 2 3] 7)`, `(substring "hi" 0 99)` |
 | `E0043` | `:runtime` | allocation crossed the soft memory limit; the eval safepoint raises (catchable) instead of OOMing the host. Off by default; set via `BROOD_MEM_LIMIT` | a runaway `(cons …)`/`(string-repeat …)` loop under a limit |
 | `E0044` | `:runtime` | evaluation used more stack than the byte budget (runaway *non-tail* recursion); raised before the coroutine stack overflows into an uncatchable SIGSEGV. Tune via `BROOD_STACK_BUDGET` | `(defn boom (n) (+ 1 (boom (+ n 1)))) (boom 0)` |
+| `E0046` | `:runtime` | this process's mailbox grew past its `(proc/flag :max-mailbox n)` bound (ADR-307); raised in the flooded process only, senders never blocked, nothing dropped | flood a process that set `(proc/flag :max-mailbox 8)` |
 | `E0050` | `:runtime` | file IO (`load`, `file/slurp`, `file/spit`, `file/mkdir`, `file/ls`, `file/cwd`, `check-file`, `check-file-structured`) | `(file/slurp "/no/such/file")` |
 | `E0051` | `:runtime` | `run-process` couldn't start the subprocess (with a `:hint` about PATH) | `(run-process "nope" [])` |
 | `E0060` | `:runtime` | distribution layer: `node/start` / `connect` failed | `(connect "bad@host")` |

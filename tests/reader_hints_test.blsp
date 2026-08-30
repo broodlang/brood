@@ -78,11 +78,11 @@
                   ["1_000" "digit separator"]
                   ["1N" "bigint"]
                   ["3px" "must be a number"]])
-      (map (fn (c)
-             (let (e (try (reflect/read-string (first c)) (catch e e)))
-               (assert= (get e :kind) :parse)
-               (is (includes? (get e :hint) (second c)))))
-        cases)))
+      (map cases
+        (fn (c)
+          (let (e (try (reflect/read-string (first c)) (catch e e)))
+            (assert= (get e :kind) :parse)
+            (is (includes? (get e :hint) (second c))))))))
   (test "every real numeric literal still reads"
     (assert= (reflect/read-string "42") 42)
     (assert= (reflect/read-string "1.5") 1.5)
@@ -101,8 +101,8 @@
     (assert= (type-of (reflect/read-string "4/2")) :int))
   (test "names that merely contain a sign or dot are untouched"
     ;; The rule keys on a digit AFTER the sign/dot, which is what keeps these legal.
-    (map (fn (t) (assert= (type-of (reflect/read-string t)) :symbol))
-      ["+" "-" "..." "..foo" "foo." ".foo" "foo/bar" "a1" "x2y"])
+    (map ["+" "-" "..." "..foo" "foo." ".foo" "foo/bar" "a1" "x2y"]
+      (fn (t) (assert= (type-of (reflect/read-string t)) :symbol)))
     (assert= (type-of (reflect/read-string ":a/b")) :keyword))
   (test "inf/nan still read as floats, not reserved tokens"
     (is (math/infinite? (reflect/read-string "inf")))

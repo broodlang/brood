@@ -52,7 +52,8 @@
 
   (test "with-out restores even when the body throws"
     (let (me (self))
-      (try (with-out (process-port me) (throw "boom")) (catch e nil))
+      ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+      (check-allow :discarded-catch (try (with-out (process-port me) (throw "boom")) (catch e nil)))
       (assert= (with-out-str (io/puts "after-throw")) "after-throw\n"))))
 
 ;; ---- the Port ability -------------------------------------------------------

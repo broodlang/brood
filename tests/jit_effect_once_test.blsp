@@ -42,7 +42,10 @@
     (table/put t 0 (+ 1 (table/get t 0)))
     (nth v 9))) ; out of range -> deopt
 (defn eo-drive2 (t i v)
-  (if (= i 0) nil (do (try (eo-bump2 t v) (catch e nil)) (eo-drive2 t (- i 1) v))))
+  ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+  (if (= i 0)
+    nil
+    (do (check-allow :discarded-catch (try (eo-bump2 t v) (catch e nil))) (eo-drive2 t (- i 1) v))))
 
 ;; --- 3. a small calls-free callee holding the effect: the leaf-inline candidate ---
 (def eo-t3 (table/new))

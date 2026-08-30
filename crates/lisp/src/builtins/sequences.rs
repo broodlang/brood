@@ -1518,13 +1518,18 @@ pub(super) fn str_splice_diff(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     Ok(heap.alloc_vector(vec![Value::int(lo), Value::int(hi), repl]))
 }
 
-/// `(string/split s sep)` — split `s` into a list of substrings on each occurrence
-/// of `sep`, in one O(n) pass. An empty separator splits `s` into its individual
-/// characters (1-char strings). Mirrors the semantics of the former pure-Brood
-/// `string-split`/`string->list`, but without the O(n²) tail-substring rebuild.
+/// `(string/split s &optional sep)` — split `s` into a list of substrings on each
+/// occurrence of `sep`, in one O(n) pass. `sep` defaults to a single space: splitting
+/// on words is what a bare `split` is reached for, and `(string/split line " ")` was
+/// the separator spelled out at nearly every call site. An empty separator splits `s`
+/// into its individual characters (1-char strings). Mirrors the semantics of the former
+/// pure-Brood `string-split`/`string->list`, but without the O(n²) tail-substring rebuild.
 pub(super) fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "string/split", arg(args, 0))?;
-    let sep = expect_string(heap, "string/split", arg(args, 1))?;
+    let sep = match args.get(1) {
+        Some(v) => expect_string(heap, "string/split", *v)?,
+        None => " ".to_string(),
+    };
     let out: Vec<Value> = if sep.is_empty() {
         s.chars()
             .map(|c| heap.alloc_string(&c.to_string()))

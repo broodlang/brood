@@ -79,14 +79,14 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 
 (describe "fold"
   (test "sum"
-    (assert= 15 (stream/fold + 0 (stream/range 1 6))))
+    (assert= 15 (stream/fold (stream/range 1 6) 0 +)))
   (test "empty stream returns init"
-    (assert= 99 (stream/fold + 99 (stream/empty)))))
+    (assert= 99 (stream/fold (stream/empty) 99 +))))
 
 (describe "for-each"
   (test "side effects in order"
     (let (me (self))
-      (stream/for-each (fn (x) (send me x)) (stream/list-> [1 2 3]))
+      (stream/for-each (stream/list-> [1 2 3]) (fn (x) (send me x)))
       (assert= 1 (receive))
       (assert= 2 (receive))
       (assert= 3 (receive)))))
@@ -102,68 +102,68 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 (describe "map"
   (test "maps a function"
     (assert= [2 4 6]
-      (stream/->vector (stream/map (fn (x) (* x 2)) (stream/list-> [1 2 3])))))
+      (stream/->vector (stream/map (stream/list-> [1 2 3]) (fn (x) (* x 2))))))
   (test "empty input"
     (assert= []
-      (stream/->vector (stream/map inc (stream/empty)))))
+      (stream/->vector (stream/map (stream/empty) inc))))
   (test "chained maps"
     (assert= [3 5 7]
-      (stream/->vector (stream/map inc (stream/map (fn (x) (* x 2)) (stream/list-> [1 2 3])))))))
+      (stream/->vector (stream/map (stream/map (stream/list-> [1 2 3]) (fn (x) (* x 2))) inc)))))
 
 (describe "filter"
   (test "keeps matching elements"
     (assert= [2 4 6]
-      (stream/->vector (stream/filter even? (stream/range 1 7)))))
+      (stream/->vector (stream/filter (stream/range 1 7) even?))))
   (test "nothing matches"
     (assert= []
-      (stream/->vector (stream/filter (fn (_) false) (stream/range 0 5)))))
+      (stream/->vector (stream/filter (stream/range 0 5) (fn (_) false)))))
   (test "everything matches"
     (assert= [1 2 3]
-      (stream/->vector (stream/filter (fn (_) true) (stream/list-> [1 2 3]))))))
+      (stream/->vector (stream/filter (stream/list-> [1 2 3]) (fn (_) true))))))
 
 (describe "take"
   (test "takes first n"
     (assert= [0 1 2]
-      (stream/->vector (stream/take 3 (stream/range 0 100)))))
+      (stream/->vector (stream/take (stream/range 0 100) 3))))
   (test "take more than available"
     (assert= [1 2 3]
-      (stream/->vector (stream/take 10 (stream/list-> [1 2 3])))))
+      (stream/->vector (stream/take (stream/list-> [1 2 3]) 10))))
   (test "take 0"
     (assert= []
-      (stream/->vector (stream/take 0 (stream/range 0 100))))))
+      (stream/->vector (stream/take (stream/range 0 100) 0)))))
 
 (describe "take-while"
   (test "stops at first non-matching"
     (assert= [0 1 2 3 4]
-      (stream/->vector (stream/take-while (fn (n) (< n 5)) (stream/range 0 20)))))
+      (stream/->vector (stream/take-while (stream/range 0 20) (fn (n) (< n 5))))))
   (test "empty result when predicate fails immediately"
     (assert= []
-      (stream/->vector (stream/take-while (fn (_) false) (stream/list-> [1 2 3]))))))
+      (stream/->vector (stream/take-while (stream/list-> [1 2 3]) (fn (_) false))))))
 
 (describe "drop"
   (test "drops first n"
     (assert= [3 4 5]
-      (stream/->vector (stream/drop 3 (stream/range 0 6)))))
+      (stream/->vector (stream/drop (stream/range 0 6) 3))))
   (test "drop more than available"
     (assert= []
-      (stream/->vector (stream/drop 10 (stream/list-> [1 2])))))
+      (stream/->vector (stream/drop (stream/list-> [1 2]) 10))))
   (test "drop 0"
     (assert= [1 2 3]
-      (stream/->vector (stream/drop 0 (stream/list-> [1 2 3]))))))
+      (stream/->vector (stream/drop (stream/list-> [1 2 3]) 0)))))
 
 (describe "chunk"
   (test "even split"
     (assert= [[1 2] [3 4] [5 6]]
-      (stream/->vector (stream/chunk 2 (stream/range 1 7)))))
+      (stream/->vector (stream/chunk (stream/range 1 7) 2))))
   (test "last chunk is shorter"
     (assert= [[1 2] [3 4] [5]]
-      (stream/->vector (stream/chunk 2 (stream/range 1 6)))))
+      (stream/->vector (stream/chunk (stream/range 1 6) 2))))
   (test "chunk larger than stream"
     (assert= [[1 2 3]]
-      (stream/->vector (stream/chunk 10 (stream/list-> [1 2 3])))))
+      (stream/->vector (stream/chunk (stream/list-> [1 2 3]) 10))))
   (test "empty stream"
     (assert= []
-      (stream/->vector (stream/chunk 3 (stream/empty))))))
+      (stream/->vector (stream/chunk (stream/empty) 3)))))
 
 (describe "concat"
   (test "sequences two streams"
@@ -218,14 +218,14 @@ full budget still yields the failing value, while a merely slow one is forgiven.
   (test "many lines in ONE chunk come out in order and complete"
     ;; The case the rewrite optimises: all lines are split out of a single chunk and then
     ;; handed over one pull at a time, so an error in the queue would reorder or drop.
-    (let (want (into [] (map (fn (i) (str "line" i)) (range 500)))
-          blob (apply str (map (fn (i) (str "line" i "\n")) (range 500))))
+    (let (want (into [] (map (range 500) (fn (i) (str "line" i))))
+          blob (apply str (map (range 500) (fn (i) (str "line" i "\n")))))
       (assert= want
         (stream/->vector (stream/lines (stream/list-> [blob]))))))
   (test "take stops mid-chunk, leaving queued lines undelivered"
     ;; Closing while lines are still queued must not hang or leak the producer.
     (assert= ["a" "b"]
-      (stream/->vector (stream/take 2 (stream/lines (stream/list-> ["a\nb\nc\nd\n"])))))))
+      (stream/->vector (stream/take (stream/lines (stream/list-> ["a\nb\nc\nd\n"])) 2)))))
 
 ;; ---- pipe -------------------------------------------------------------------
 
@@ -254,7 +254,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
       (let (client (receive ([:tcp-accept ^ls c] c)))
         ;; Wrap the accepted socket in a stream and collect it.
         (let (s (stream/socket-> client)
-              data (stream/fold str "" s))
+              data (stream/fold s "" str))
           (tcp/close ls)
           (assert= data "hello world"))))))
 
@@ -270,10 +270,10 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 (defn- stream-test-my-id () (get (proc/info (self)) :id))
 
 (defn- stream-test-parked-children (me)
-  (count (filter (fn (p)
-                   (and (= me (get (proc/info p) :parent))
-                     (= :waiting (get (proc/info p) :status))))
-           (proc/list))))
+  (count (filter (proc/list)
+           (fn (p)
+             (and (= me (get (proc/info p) :parent))
+               (= :waiting (get (proc/info p) :status)))))))
 
 (describe "streams do not leak producer processes"
   :isolated (test "fully consuming exhausted streams of every shape leaves no parked producers"
@@ -281,10 +281,10 @@ full budget still yields the failing value, while a merely slow one is forgiven.
       (defn- stream-test-consume-batch (k)
         (when (> k 0)
           ;; each of these ends in an exhausted-producer state that used to leak:
-          (stream/->vector (stream/drop 10 (stream/list-> [1 2]))) ; drop past end
+          (stream/->vector (stream/drop (stream/list-> [1 2]) 10)) ; drop past end
           (stream/->list (stream/empty)) ; empty
-          (stream/->vector (stream/map inc (stream/singleton 7))) ; singleton
-          (stream/->vector (stream/chunk 3 (stream/list-> [1 2]))) ; partial chunk
+          (stream/->vector (stream/map (stream/singleton 7) inc)) ; singleton
+          (stream/->vector (stream/chunk (stream/list-> [1 2]) 3)) ; partial chunk
           (stream-test-consume-batch (- k 1))))
       (stream-test-consume-batch 150)
       (sleep 80)

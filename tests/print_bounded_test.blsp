@@ -8,7 +8,7 @@
 ;; leaf, so before it existed a single 10 MB string sailed past both of them.
 (defmodule print-bounded-test (:use test))
 
-(defn long-string (n) (apply str (map (constantly "x") (range n))))
+(defn long-string (n) (apply str (map (range n) (constantly "x"))))
 
 (describe "pr-str-bounded — collection length"
   (test "a collection past *print-length* elides with … and is not walked further"

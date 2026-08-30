@@ -1488,6 +1488,14 @@ pub struct RuntimeCode {
     /// The global bindings (prelude + user `def`s). Read on every global lookup,
     /// written on `def` (the only mutation). The values point into PRELUDE or RUNTIME.
     globals: RwLock<SymbolMap<Value>>,
+    /// Per-global **rebinding generation**: the value of `version` at each name's most
+    /// recent `def`. Answers "is the binding I wrote still the one that is bound?" —
+    /// what a temporary rebinding (`debug/trace-fn`'s wrapper, `nest test --cover`'s
+    /// shim) must ask before *restoring*, or it overwrites a redefinition the user made
+    /// in between. Comparing handles cannot answer it (a `def` promotes the closure, so
+    /// the bound handle is not the local one); a generation can. Read by
+    /// `%global-generation`.
+    global_generations: RwLock<SymbolMap<u64>>,
     /// Serialises a **registry update** — the read-modify-write of a global that holds a
     /// whole registry map (`*impls*`, `*features*`, `*abilities*`, … — see
     /// [`Heap::registry_update`]). `def` itself is atomic, but `(def *X* (assoc *X* …))` is
@@ -1852,6 +1860,7 @@ impl Default for RuntimeCode {
             gen_inflight: [AtomicUsize::new(0), AtomicUsize::new(0)],
             gen_version: AtomicU64::new(0),
             globals: RwLock::new(SymbolMap::default()),
+            global_generations: RwLock::new(SymbolMap::default()),
             meta: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
             // A default (un-seeded) runtime reserves nothing — the prelude hasn't run.
@@ -1989,6 +1998,7 @@ impl RuntimeCode {
             // bindings themselves are.
             private: RwLock::new(prelude_private.iter().copied().collect()),
             globals: RwLock::new(globals),
+            global_generations: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(HashSet::new()),
             version: AtomicU64::new(0),
             code_epoch: AtomicU64::new(0),
@@ -5943,6 +5953,19 @@ impl Heap {
     /// the unbound-symbol diagnostic to tell a *spuriously*-unbound known global (the
     /// fan-out race) apart from a genuinely-undefined name (a typo) — so the
     /// scheduler-race hint only fires for the former.
+    /// The rebinding generation of global `sym`: strictly increasing across `def`s of
+    /// that name, 0 for a name never `def`'d in this runtime (a prelude binding, or an
+    /// unbound one). See `RuntimeCode::global_generations`.
+    pub fn global_generation(&self, sym: Symbol) -> u64 {
+        self.runtime
+            .global_generations
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&sym)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn global_defined(&self, sym: Symbol) -> bool {
         self.runtime.globals_read().get(&sym).is_some()
     }
@@ -6270,8 +6293,19 @@ impl Heap {
                 def_publish_probe::observe(&h.runtime.promote_lock);
                 h.runtime.globals_write().insert(sym, shared).is_some()
             });
-            // Invalidate every process's global inline cache (late binding).
-            self.runtime.version.fetch_add(1, Ordering::Relaxed);
+            // Invalidate every process's global inline cache (late binding), and stamp
+            // this name with the new version — its rebinding generation.
+            // The bump happens under the generations lock so two racing `def`s of one
+            // name stamp it in the order they took the counter.
+            {
+                let mut generations = self
+                    .runtime
+                    .global_generations
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let generation = self.runtime.version.fetch_add(1, Ordering::Relaxed) + 1;
+                generations.insert(sym, generation);
+            }
             // The JIT's code epoch moves only on a REBIND (ADR-217). Binding a name for
             // the first time cannot invalidate compiled code — no arm can have baked in
             // a binding that did not exist when it compiled (see `code_epoch`'s doc) —

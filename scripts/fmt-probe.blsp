@@ -48,10 +48,10 @@
 ;; Checked here rather than assumed, because a layout rule that joins two items is exactly
 ;; the kind that can oscillate — join on pass 1, re-split on pass 2.
 (io/puts "── idempotency")
-(let (bad (filter (fn (c)
-                    (let (once (format/source (second c)))
-                      (not (= once (format/source once)))))
-            *cases*))
+(let (bad (filter *cases*
+            (fn (c)
+              (let (once (format/source (second c)))
+                (not (= once (format/source once)))))))
   (if (empty? bad)
     (io/puts "  all " (count *cases*) " cases stable under a second pass")
     (doseq (c bad) (io/puts "  UNSTABLE: " (first c)))))

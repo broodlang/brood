@@ -187,12 +187,12 @@ this by implementing the `Display` ability, which takes over this name below.
 ;; The public entry coerces once via `seq`; the inner `%fold-loop` then stays in
 ;; list form for the recursion, so a map costs one extra `%map-pairs` pass total
 ;; rather than O(n) per step.
-(defn fold (f acc coll)
-  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no intermediate lists.
+(defn fold (coll acc f)
+  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce (map (filter (range n) p) sq) 0 +)` walks the range once with no intermediate lists.
 
-    (fold + 0 [1 2 3 4])                      → 10
-    (fold (fn (a x) (cons x a)) nil [1 2 3])  → (3 2 1)
-    (fold math/max 0 [3 9 4])                 → 9"
+    (fold [1 2 3 4] 0 +)                      → 10
+    (fold [1 2 3] nil (fn (a x) (cons x a)))  → (3 2 1)
+    (fold [3 9 4] 0 math/max)                 → 9"
   ;; DISPATCH ORDER IS LOAD-BEARING. A vector is tested first, with the one-call
   ;; `vector?` predicate rather than `type-of` + `%eq` from the bottom of the chain.
   ;; The branches are disjoint (`type-of` is `:vector` for a vector and `:pair` for a
@@ -217,7 +217,7 @@ this by implementing the `Display` ability, which takes over this name below.
         ;; Raw kernel ops (`if`/`let`/`vector-ref`) only — `fold` is defined before
         ;; `cond`/`second`.
         (let (parts (%seqview-parts coll))
-          (fold ((%vector-ref parts 1) f) acc (%vector-ref parts 0)))
+          (fold (%vector-ref parts 0) acc ((%vector-ref parts 1) f)))
         (%fold-loop f acc (seq coll))))))
 (defn- %fold-loop (f acc coll)
   (if (empty? coll) acc (%fold-loop f (f acc (first coll)) (rest coll))))
@@ -283,20 +283,21 @@ splice it back in front of the remainder."
   "Realise the lazy seq-view `sv` to a concrete list by running its transducer. Internal:
 the kernel `first`/`rest`/`apply` builtins call this by name for a view that escapes the
 fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own code."
-  (reverse (fold %flip-cons nil sv)))
+  (reverse (fold sv nil %flip-cons)))
 
-;; reduce supports both (reduce f init coll) and (reduce f coll). The 2-arg
-;; form must seq-coerce `x` itself before splitting head/tail, because the bare
-;; `(first x)`/`(rest x)` calls bypass fold's coercion and a map would error.
-(defn reduce (f x & more)
-  "Reduce a collection with `f`. Either `(reduce f init coll)` or `(reduce f coll)` (using the first item as the initial value). Maps reduce as their `[k v]` pairs.
+;; reduce supports both (reduce coll acc f) and (reduce coll f) — data-first
+;; (ADR-308), matching `Enum.reduce/3` and `/2`. The 2-arg form must seq-coerce
+;; `coll` itself before splitting head/tail, because the bare `(first coll)`/
+;; `(rest coll)` calls bypass fold's coercion and a map would error.
+(defn reduce (coll x & more)
+  "Reduce a collection with `f`. Either `(reduce coll acc f)` or `(reduce coll f)` (using the first item as the initial value). Maps reduce as their `[k v]` pairs.
 
-    (reduce + [1 2 3])    → 6
-    (reduce + 10 [1 2])   → 13   ; with an explicit start
-    (reduce + [])         → nil  ; no items and no start"
+    (reduce [1 2 3] +)    → 6
+    (reduce [1 2] 10 +)   → 13   ; with an explicit start
+    (reduce [] +)         → nil  ; no items and no start"
   (if (empty? more)
-    (let (s (seq x)) (fold f (first s) (rest s)))
-    (fold f x (first more))))
+    (let (s (seq coll)) (fold (rest s) (first s) x))
+    (fold coll x (first more))))
 
 ;; ---- arithmetic (variadic, built on the 2-arg primitives) ----
 ;; Multi-arity (ADR-047): the 0/1/2-argument clauses bind their parameters
@@ -314,7 +315,7 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
   (() 0)
   ((a) a)
   ((a b) (%add a b))
-  ((a b & more) (fold %add (%add a b) more)))
+  ((a b & more) (fold more (%add a b) %add)))
 (defn * "Product of all arguments (1 with none).
 
     (* 2 3 4)   → 24
@@ -322,21 +323,21 @@ fusing path, and `seq` calls it to coerce — use `seq` or `into` in your own co
   (() 1)
   ((a) a)
   ((a b) (%mul a b))
-  ((a b & more) (fold %mul (%mul a b) more)))
+  ((a b & more) (fold more (%mul a b) %mul)))
 (defn - "Subtract the rest from `x`; negate `x` if it's the only argument.
 
     (- 10 3 2)  → 5
     (- 5)       → -5"
   ((x) (%sub 0 x))
   ((a b) (%sub a b))
-  ((x & xs) (fold %sub x xs)))
+  ((x & xs) (fold xs x %sub)))
 (defn / "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero.
 
     (/ 6 3)     → 2
     (/ 1 2)     → 1/2   ; integer division is EXACT, not truncating"
   ((x) (%div 1 x))
   ((a b) (%div a b))
-  ((x & xs) (fold %div x xs)))
+  ((x & xs) (fold xs x %div)))
 
 (defn inc (n)
   "Return `n` + 1.
@@ -593,7 +594,9 @@ for variadic tails."
 ;; reads. A pure runtime no-op — it just yields the wrapped body's value.
 ;; Recognised categories: `:non-tail-recursion`, `:unreachable-clause`,
 ;; `:type-mismatch` (a `sig`-declared return/argument the body deliberately
-;; violates — e.g. a negative test proving a `sig!` runtime contract throws).
+;; violates — e.g. a negative test proving a `sig!` runtime contract throws),
+;; `:unbound`, `:unrequired`, `:deprecated`, and `:discarded-catch` (a
+;; `(catch e nil)` whose constant is genuinely the answer).
 ;; Wraps one or many forms (top-level defns or an inner expression).
 ;; See docs/type-annotations.md.
 (defn %lint-allow (category value)
@@ -630,28 +633,28 @@ names accept anything, so a contract never throws on a type it can't interpret.
           ;; `(is T)` — a type guard's result (ADR-301): the VALUE is a bool; what it
           ;; proves about the argument is the checker's business, not the contract's.
           (%eq h 'is) (bool? v)
-          (%eq h 'or) (any? (fn (s) (type-matches? s v)) (rest t))
-          (%eq h 'and) (every? (fn (s) (type-matches? s v)) (rest t))
-          (%eq h 'not) (not (any? (fn (s) (type-matches? s v)) (rest t)))
+          (%eq h 'or) (any? (rest t) (fn (s) (type-matches? s v)))
+          (%eq h 'and) (every? (rest t) (fn (s) (type-matches? s v)))
+          (%eq h 'not) (not (any? (rest t) (fn (s) (type-matches? s v))))
           (%eq h 'list)
             (and (list? v)
               (let (elem (first (rest t)))
                 (or (nil? elem)
-                  (every? (fn (x) (type-matches? elem x)) v))))
+                  (every? v (fn (x) (type-matches? elem x))))))
           (%eq h 'vector)
             (and (vector? v)
               (let (elem (first (rest t)))
                 (or (nil? elem)
-                  (every? (fn (x) (type-matches? elem x)) v))))
+                  (every? v (fn (x) (type-matches? elem x))))))
           (%eq h 'map)
             (and (map? v)
               (let (ktype (first (rest t))
                     vtype (first (rest (rest t))))
                 (or (and (nil? ktype) (nil? vtype))
-                  (every? (fn (kv)
-                            (and (type-matches? ktype (first kv))
-                              (type-matches? vtype (second kv))))
-                    (%map-pairs v)))))
+                  (every? (%map-pairs v)
+                    (fn (kv)
+                      (and (type-matches? ktype (first kv))
+                        (type-matches? vtype (second kv))))))))
           (%eq h 'record)
           ;; A field's type may be wrapped `(optional T)` — allowed to
           ;; be absent/nil. Every other field is required: `(get v k)`
@@ -665,31 +668,29 @@ names accept anything, so a contract never throws on a type it can't interpret.
           ;; a tagged union — and the contract has to agree with the checker
           ;; about it or `sig!` and `nest check` would disagree on the same
           ;; declaration.
-          (let (open? (%eq (second t) '&open)
-                flds (partition 2 (if open? (rest (rest t)) (rest t))))
-            (and (map? v)
-              (every? (fn (field)
-                        (let (k (first field)
-                              ftype (second field))
-                          (if (and (pair? ftype) (%eq (first ftype) 'optional))
-                            (or (nil? (get v k))
-                              (type-matches? (second ftype) (get v k)))
-                            (type-matches? ftype (get v k)))))
-                flds)
-              (or open?
-                (every? (fn (kv) (any? (fn (field) (%eq (first field) (first kv))) flds))
-                  (%map-pairs v)))))
-            (%eq h
-              'tuple)
+            (let (open? (%eq (second t) '&open)
+                  flds (partition (if open? (rest (rest t)) (rest t)) 2))
+              (and (map? v)
+                (every? flds
+                  (fn (field)
+                    (let (k (first field)
+                          ftype (second field))
+                      (if (and (pair? ftype) (%eq (first ftype) 'optional))
+                        (or (nil? (get v k))
+                          (type-matches? (second ftype) (get v k)))
+                        (type-matches? ftype (get v k))))))
+                (or open?
+                  (every? (%map-pairs v)
+                    (fn (kv) (any? flds (fn (field) (%eq (first field) (first kv)))))))))
+          (%eq h
+            'tuple)
           ;; A fixed-arity positional vector shape (ADR-128): exact
           ;; arity, then each position checked against its own
           ;; declared type.
-          (and (vector? v)
-            (= (count v) (count (rest t)))
-            (every? (fn (i) (type-matches? (nth (rest t) i) (nth v i)))
-              (range (count v))))
-            else
-          true))
+            (and (vector? v)
+              (= (count v) (count (rest t)))
+              (every? (range (count v)) (fn (i) (type-matches? (nth (rest t) i) (nth v i)))))
+          else true))
     ; arrow param / unknown compound → accept
     (keyword? t) (= t v)
     ; a keyword type-expr is a literal: match it exactly
@@ -857,31 +858,31 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                            ~r)))))
               (%lt amp-pos 0)
               ;; fixed arity
-              (let (params (%sig-gensyms i)
-                    orig (gensym "orig")
-                    r (gensym "ret"))
-                ;; Hold the original in a GLOBAL, not a `let`-bound local. A shim written
-                ;; as `(let (orig name) (fn …))` closes over a local frame, and the prelude's
-                ;; freeze step rejects exactly that ("shared closures must capture the global
-                ;; env") — so arming contracts over the prelude's own sigs aborted the boot
-                ;; before this could check anything. The name is a gensym, so nothing can
-                ;; reach or rebind it, and the shim now captures only globals (KI-81).
-                `(do
-                   (def ~orig ~name)
-                   (def ~name
-                     (fn (~@params)
-                       (%contract-check-args '~name '~ptypes (list ~@params) 1)
-                       (let (~r (~orig ~@params))
-                         (unless (type-matches? '~rtype ~r)
-                           (throw (str '~name
-                                    ": result expected "
-                                    '~rtype
-                                    ", got "
-                                    (type-of ~r)
-                                    " ("
-                                    (pr-str ~r)
-                                    ")")))
-                         ~r)))))
+                (let (params (%sig-gensyms i)
+                      orig (gensym "orig")
+                      r (gensym "ret"))
+                  ;; Hold the original in a GLOBAL, not a `let`-bound local. A shim written
+                  ;; as `(let (orig name) (fn …))` closes over a local frame, and the prelude's
+                  ;; freeze step rejects exactly that ("shared closures must capture the global
+                  ;; env") — so arming contracts over the prelude's own sigs aborted the boot
+                  ;; before this could check anything. The name is a gensym, so nothing can
+                  ;; reach or rebind it, and the shim now captures only globals (KI-81).
+                  `(do
+                     (def ~orig ~name)
+                     (def ~name
+                       (fn (~@params)
+                         (%contract-check-args '~name '~ptypes (list ~@params) 1)
+                         (let (~r (~orig ~@params))
+                           (unless (type-matches? '~rtype ~r)
+                             (throw (str '~name
+                                      ": result expected "
+                                      '~rtype
+                                      ", got "
+                                      (type-of ~r)
+                                      " ("
+                                      (pr-str ~r)
+                                      ")")))
+                           ~r)))))
               ;; variadic: (fixed… & rest-type -> ret)
               else
                 (let (fixed-ptypes (%sig-take amp-pos ptypes)

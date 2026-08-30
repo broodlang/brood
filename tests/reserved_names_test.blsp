@@ -86,7 +86,7 @@
     ;; `require`, `provide` and `defmodule`. The rule is "a shipped FUNCTION is
     ;; reserved", not "a shipped NAME is".
     (is (bound? '*load-path*))
-    (assert= :allowed (rn-try "(reflect/add-load-path! \".\")"))
+    (assert= :allowed (rn-try "(reflect/add-load-path \".\")"))
     (assert= :allowed (rn-try "(require-one 'set)"))))
 
 (describe "a dynamic var is never reserved"

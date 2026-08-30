@@ -20,14 +20,14 @@
 ;; Start from the innermost body and wrap it in (let (vN vN^2) ...) repeatedly.
 (defn build-nested-let-src (depth)
   (let (inner-body (str "(fn () (+ "
-                     (string/join " " (map (fn (j) (str "v" j)) (range depth)))
+                     (string/join (map (range depth) (fn (j) (str "v" j))) " ")
                      "))")
         ;; fold from the outside in: wrap the accumulated string with another let
         ;; We want (let (v0 0) (let (v1 1) ... inner-body ...))
         ;; So fold from depth-1 down to 0, wrapping each time
-        wrapped (fold (fn (acc i) (str "(let (v" i " " (* i i) ") " acc ")"))
+        wrapped (fold (reverse (range depth))
                   inner-body
-                  (reverse (range depth))))
+                  (fn (acc i) (str "(let (v" i " " (* i i) ") " acc ")"))))
     wrapped))
 
 ;; CRASH FOUND: 1000-deep nested (let ...) string hits the reader's 256-level
@@ -42,8 +42,8 @@
 ;; Call it: result is sum of i^2 for i in [0, 200)
 (def nested-result (nested-let-fn))
 (io/puts "200-deep nested-let result:" nested-result)
-(io/puts "expected (sum of i^2 for 0..199):" (fold (fn (acc i) (+ acc (* i i))) 0 (range 200)))
-(io/puts "match?" (= nested-result (fold (fn (acc i) (+ acc (* i i))) 0 (range 200))))
+(io/puts "expected (sum of i^2 for 0..199):" (fold (range 200) 0 (fn (acc i) (+ acc (* i i)))))
+(io/puts "match?" (= nested-result (fold (range 200) 0 (fn (acc i) (+ acc (* i i))))))
 
 (io/puts "--- accumulator-closure: fold builds a closure-of-closures ---")
 
@@ -54,7 +54,7 @@
 ;; ...
 ;; f500(0) = 0 + 500 + 499 + ... + 1 = 125250
 (defn build-chain (n)
-  (fold (fn (f i) (fn (x) (f (+ x i)))) (fn (x) x) (range 1 (+ n 1))))
+  (fold (range 1 (+ n 1)) (fn (x) x) (fn (f i) (fn (x) (f (+ x i))))))
 
 (def chain-500 (build-chain 500))
 (io/puts "closure-chain-500(0):" (chain-500 0))
@@ -69,7 +69,7 @@
 
 ;; Each closure closes over its index
 (def closure-vec
-  (into [] (map (fn (i) (fn () (* i i))) (range 10000))))
+  (into [] (map (range 10000) (fn (i) (fn () (* i i))))))
 
 (io/puts "closure-vec count:" (count closure-vec))
 ;; Call a few to verify they captured their respective `i`
@@ -77,9 +77,9 @@
 (io/puts "closure[1]():" ((get closure-vec 1)))
 (io/puts "closure[9999]():" ((get closure-vec 9999)))
 ;; Sum them all: Σ i^2 for i in [0, 10000)
-(def closure-sum (reduce (fn (acc f) (+ acc (f))) 0 closure-vec))
+(def closure-sum (reduce closure-vec 0 (fn (acc f) (+ acc (f)))))
 (io/puts "closure-vec sum:" closure-sum)
-(def expected-sum (fold (fn (acc i) (+ acc (* i i))) 0 (range 10000)))
+(def expected-sum (fold (range 10000) 0 (fn (acc i) (+ acc (* i i)))))
 (io/puts "expected:" expected-sum)
 (io/puts "match?" (= closure-sum expected-sum))
 
@@ -117,9 +117,7 @@
 
 (io/puts "--- map of closures: 5000 entries, each closure captures key ---")
 (def closure-map
-  (fold (fn (m i) (assoc m i (fn (x) (* i x))))
-    {}
-    (range 5000)))
+  (fold (range 5000) {} (fn (m i) (assoc m i (fn (x) (* i x))))))
 
 (io/puts "closure-map count:" (count closure-map))
 ; 0*5 = 0

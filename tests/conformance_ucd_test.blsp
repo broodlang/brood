@@ -26,14 +26,14 @@
 (defmodule conformance-ucd-test (:use test) (:use corpus))
 
 (defn- ucd-file (name)
-  (first (filter (fn (p) (= (path/basename p) name)) (corpus-files "ucd"))))
+  (first (filter (corpus-files "ucd") (fn (p) (= (path/basename p) name)))))
 
 ;; A line's payload: everything before the `#` comment, tabs folded to spaces.
 (defn- ucd-payload (line)
   (let (i (index-of line "#"))
     (string/replace (if (< i 0) line (string/substring line 0 i)) "\t" " ")))
 
-(defn- ucd-codes->string (codes) (apply str (map string/int->char codes)))
+(defn- ucd-codes->string (codes) (apply str (map codes string/int->char)))
 
 ;; ---- GraphemeBreakTest -------------------------------------------------------
 
@@ -64,7 +64,7 @@
 
 (defn- gb-case (line)
   "[input expected-clusters] for a test line, or nil if the line has no test."
-  (let (toks (seq/remove string/blank? (string/split (ucd-payload line) " ")))
+  (let (toks (seq/remove (string/split (ucd-payload line) " ") string/blank?))
     (if (nil? toks)
       nil
       (let (clusters (gb-fold toks nil nil))
@@ -90,7 +90,7 @@
 
 ;; "0044 0307" -> the string it spells.
 (defn- nt-field (s)
-  (ucd-codes->string (map hex->int (seq/remove string/blank? (string/split s " ")))))
+  (ucd-codes->string (map (seq/remove (string/split s " ") string/blank?) hex->int)))
 
 (defn- nt-case (line)
   "The five columns [source nfc nfd nfkc nfkd] as strings, or nil for a non-test line."
@@ -100,7 +100,7 @@
       (let (cols (string/split p ";"))
         (if (< (count cols) 5)
           nil
-          (into [] (map nt-field (take 5 cols))))))))
+          (into [] (map (take cols 5) nt-field)))))))
 
 ;; Is this a case line at all? Cheap — no field parsing, so the samplers can skip a case
 ;; without paying to decode it.
@@ -125,14 +125,14 @@
 (defn- nt-wrong (cols)
   (let ([c1 c2 c3 c4 c5] cols
         expect (fn (form sources want)
-                 (first (seq/remove (fn (s) (= (string/normalize s form) want)) sources)))
-        fails (seq/remove nil?
-                (list (expect :nfc (list c1 c2 c3) c2)
-                  (expect :nfc (list c4 c5) c4)
-                  (expect :nfd (list c1 c2 c3) c3)
-                  (expect :nfd (list c4 c5) c5)
-                  (expect :nfkc (list c1 c2 c3 c4 c5) c4)
-                  (expect :nfkd (list c1 c2 c3 c4 c5) c5))))
+                 (first (seq/remove sources (fn (s) (= (string/normalize s form) want)))))
+        fails (seq/remove (list (expect :nfc (list c1 c2 c3) c2)
+                            (expect :nfc (list c4 c5) c4)
+                            (expect :nfd (list c1 c2 c3) c3)
+                            (expect :nfd (list c4 c5) c5)
+                            (expect :nfkc (list c1 c2 c3 c4 c5) c4)
+                            (expect :nfkd (list c1 c2 c3 c4 c5) c5))
+                nil?))
     (if (nil? fails) nil [(pr-str c1) (pr-str (first fails))])))
 
 ;; Walk the whole file but only test the lines inside `want` (a "PartN" name), tracking
@@ -269,7 +269,7 @@
   (test "string->graphemes segments every GraphemeBreakTest case"
     (let ([ran bad] (gb-scan gb-lines 0 nil))
       (is (> ran 600))
-      (assert= (take 3 bad) ())
+      (assert= (take bad 3) ())
       (assert= (count bad) 0))))
 
 ;; Split by the corpus's own `@PartN` sections rather than run as one sweep. Not
@@ -285,7 +285,7 @@
   (test "Part0 — specific cases"
     (let ([ran bad] (nt-part-scan "Part0"))
       (is (> ran 15))
-      (assert= (take 3 bad) ())))
+      (assert= (take bad 3) ())))
 
   (test "Part1 — character by character (the bulk)"
     (let ([ran bad] (nt-part1-slice))
@@ -293,27 +293,27 @@
       ;; default, ~1,000 under the debug wrapper's 1-in-16. A sampling change that guts
       ;; the coverage fails rather than reading as a pass.
       (is (> ran (math/quot 16000 nt-part1-of)))
-      (assert= (take 3 bad) ())))
+      (assert= (take bad 3) ())))
 
   (test "Part2 — canonical order"
     (let ([ran bad] (nt-part-scan "Part2"))
       (is (> ran 1500))
-      (assert= (take 3 bad) ())))
+      (assert= (take bad 3) ())))
 
   (test "Part3 — PRI #29"
     (let ([ran bad] (nt-part-scan "Part3"))
       (is (> ran 100))
-      (assert= (take 3 bad) ())))
+      (assert= (take bad 3) ())))
 
   (test "Part4 — canonical closures (excluding Hangul)"
     (let ([ran bad] (nt-part-scan "Part4"))
       (is (> ran 600))
-      (assert= (take 3 bad) ())))
+      (assert= (take bad 3) ())))
 
   (test "Part5 — chained primary composites"
     (let ([ran bad] (nt-part-scan "Part5"))
       (is (> ran 10))
-      (assert= (take 3 bad) ()))))
+      (assert= (take bad 3) ()))))
 
 ;; The properties worth naming: what these primitives are FOR, in cases a reader can
 ;; check by eye without decoding hex.

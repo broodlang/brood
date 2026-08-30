@@ -23,7 +23,7 @@ Empty sequences raise unless documented otherwise.
 (sig mean (seqable -> float))
 
 (defn- sum-of-squares (xs m)
-  (fold (fn (acc x) (+ acc (* (- x m) (- x m)))) 0 xs))
+  (fold xs 0 (fn (acc x) (+ acc (* (- x m) (- x m))))))
 
 (defn variance (xs)
   "The population variance (divided by n) of `xs`. Raises on an empty sequence;
@@ -101,7 +101,7 @@ For an even-length sequence, returns the mean of the two middle values.
 
     (stats/min [3 1 2])      → 1"
   (when (empty? xs) (error "stats/min: empty sequence"))
-  (reduce math/min xs))
+  (reduce xs math/min))
 (sig min (seqable -> number))
 
 (defn max (xs)
@@ -109,7 +109,7 @@ For an even-length sequence, returns the mean of the two middle values.
 
     (stats/max [3 1 2])      → 3"
   (when (empty? xs) (error "stats/max: empty sequence"))
-  (reduce math/max xs))
+  (reduce xs math/max))
 (sig max (seqable -> number))
 
 (defn range-of (xs)
@@ -131,7 +131,5 @@ For an even-length sequence, returns the mean of the two middle values.
     (stats/mode [1 1 2])     → 1"
   (when (empty? xs) (error "stats/mode: empty sequence"))
   (let (freq (frequencies xs))
-    (fold (fn (best x) (if (> (get freq x) (get freq best)) x best))
-      (first xs)
-      (rest xs))))
+    (fold (rest xs) (first xs) (fn (best x) (if (> (get freq x) (get freq best)) x best)))))
 (sig mode (seqable -> any))

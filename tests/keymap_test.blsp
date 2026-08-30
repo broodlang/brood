@@ -121,6 +121,6 @@
 
   (test "round-trips with keymap-bind for every bound sequence"
     (let (seqs (list [:ctrl-a] [:ctrl-x "s"] [:ctrl-c :ctrl-n])
-          km (fold (fn (acc s) (keymap-bind acc s 'target)) {} seqs))
+          km (fold seqs {} (fn (acc s) (keymap-bind acc s 'target))))
       (assert= (count (keymap-where-is km 'target)) 3)
       (doseq (s seqs) (is (includes? (keymap-where-is km 'target) s))))))

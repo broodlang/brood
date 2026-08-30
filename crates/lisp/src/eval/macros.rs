@@ -2968,7 +2968,7 @@ mod resolve_tests {
     #[test]
     fn root_prelude_name_stays_bare() {
         // `map` is a prelude global; there is no `foo/map`, so it stays root.
-        assert_eq!(resolved(&[], "foo", "(map f xs)"), "(map f xs)");
+        assert_eq!(resolved(&[], "foo", "(map xs f)"), "(map xs f)");
     }
 
     #[test]

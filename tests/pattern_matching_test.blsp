@@ -263,9 +263,9 @@
   (test "across processes: a guarded fn dispatches correctly in spawned workers"
     (let (me (self)
           sign (fn ((n) :when (< n 0) :neg) ((n) :when (> n 0) :pos) ((n) :zero))
-          _ (map (fn (k) (spawn (fn () (send me [k (sign k)])))) (list -2 0 2))
-          results (fold (fn (acc _) (cons (receive) acc)) nil (range 3))
-          table (fold (fn (mp pair) (assoc mp (first pair) (second pair))) {} results))
+          _ (map (list -2 0 2) (fn (k) (spawn (fn () (send me [k (sign k)])))))
+          results (fold (range 3) nil (fn (acc _) (cons (receive) acc)))
+          table (fold results {} (fn (mp pair) (assoc mp (first pair) (second pair)))))
       (assert= :neg (get table -2))
       (assert= :pos (get table 2))
       (assert= :zero (get table 0)))))
@@ -352,7 +352,7 @@
   (test "the first matching alternative wins"
     (assert= (match 2 ((or 1 2) :hit) (_ :miss)) :hit)
     (assert= (match 3 ((or 1 2) :hit) (_ :miss)) :miss)
-    (assert= (map (fn (x) (match x ((or :a :b :c) :abc) (_ :other))) [:a :b :c :d])
+    (assert= (map [:a :b :c :d] (fn (x) (match x ((or :a :b :c) :abc) (_ :other))))
       (list :abc :abc :abc :other)))
   (test "alternatives may bind, as long as every one binds the same names"
     (assert= (match [2 9] ((or [1 x] [2 x]) x) (_ :miss)) 9)
@@ -363,7 +363,7 @@
     (assert-error (macroexpand '(match 1 ((or a 2) a)))))
   (test "or nests inside other patterns"
     (assert= (match (list :x 2) (((or :x :y) n) n) (_ :no)) 2)
-    (assert= (map (fn (m) (match m ((or {:a v} {:b v}) v) (_ :no))) [{:a 1} {:b 2} {:c 3}])
+    (assert= (map [{:a 1} {:b 2} {:c 3}] (fn (m) (match m ((or {:a v} {:b v}) v) (_ :no))))
       (list 1 2 :no)))
   (test "or works at every binding site, not just match"
     (assert= (let ((or [1 x] [2 x]) [2 42]) x) 42)

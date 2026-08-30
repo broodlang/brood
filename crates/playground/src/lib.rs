@@ -172,7 +172,7 @@ fn globals() -> &'static Vec<String> {
         // Public names only. Raw `(reflect/global-names)` includes private helpers, so the menu
         // offered `map-get`, `macroexpand-loop`, `%map-pairs` and friends — internals that
         // appear in no documentation and that a user has no business calling.
-        let query = "(filter (fn (s) (not (reflect/private? s))) (reflect/global-names))";
+        let query = "(filter (reflect/global-names) (fn (s) (not (reflect/private? s))))";
         let mut names: Vec<String> = match interp.eval_str(query) {
             Ok(value) => {
                 // `(reflect/global-names)` prints as a bare list `(a b c …)`; symbols never contain

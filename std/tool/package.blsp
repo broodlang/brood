@@ -41,7 +41,8 @@ land in a later slice."
 ;; The file paths under `dir`, relative to it, sorted. Recurses into subdirs.
 (defn- package-tree-files (dir) (sort (package-tree-files-walk dir "")))
 (defn- package-tree-files-walk (dir prefix)
-  (fold
+  (fold (file/ls dir)
+    nil
     (fn (acc entry)
       (if (includes? *package-hash-skip* entry)
         acc
@@ -51,9 +52,7 @@ land in a later slice."
           ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
           (if (file/dir? full)
             (%append-two (package-tree-files-walk full rel) acc)
-            (cons rel acc)))))
-    nil
-    (file/ls dir)))
+            (cons rel acc)))))))
 
 ;; Hash the file's raw bytes, not a UTF-8 string: `file/slurp` throws on a binary
 ;; asset (image, font, …), so the old `(hash/sha256 (file/slurp path))` couldn't hash a
@@ -63,9 +62,10 @@ land in a later slice."
 
 (defn tree-hash (dir)
   "The canonical SHA-256 (hex) of a directory's file contents — order-independent of the filesystem, stable across machines (ADR-037)."
-  (hash/sha256 (string/join ""
-                 (map (fn (rel) (str rel "\0" (package-sha256-file (path/join dir rel)) "\n"))
-                   (package-tree-files dir)))))
+  (hash/sha256 (string/join (map (package-tree-files dir)
+                              (fn (rel)
+                                (str rel "\0" (package-sha256-file (path/join dir rel)) "\n")))
+                 "")))
 
 ;; --- reading a dependency's own manifest -------------------------------------
 ;; A dep declares its own deps in its project.blsp. We read (not eval) the first
@@ -107,13 +107,13 @@ land in a later slice."
         ;; for it. This lets an app (e.g. the registry server itself) pin its whole
         ;; closure to git and build with zero registry contact. Empty in the common
         ;; all-registry case, where resolution is unchanged.
-        direct-non-registry (map :name (filter (fn (dep) (not (package-registry-dep? dep))) deps))
+        direct-non-registry (map (filter deps (fn (dep) (not (package-registry-dep? dep)))) :name)
         walked (package-resolve-loop root
                  deps
                  {}
                  nil
                  lock-index
-                 (map :name deps)
+                 (map deps :name)
                  direct-non-registry
                  nil)
         non-registry (first walked)
@@ -127,7 +127,7 @@ land in a later slice."
 (defn- package-resolve-loop
   (root queue resolved order lock-index direct direct-non-registry registry-reqs)
   (cond
-    (empty? queue) [(map (fn (nm) (get resolved nm)) (reverse order)) registry-reqs]
+    (empty? queue) [(map (reverse order) (fn (nm) (get resolved nm))) registry-reqs]
     ;; A registry dep is collected, not resolved here — its version is a range the
     ;; solver picks over the whole registry closure (phase 2), so fetching it now
     ;; would mean fetching a version nobody has chosen yet. (The `dep-kind` ability op
@@ -205,8 +205,8 @@ land in a later slice."
 
 (defn- package-solve-registry (root registry-reqs lock-index preferred)
   (let (base (registry-base-for nil)
-        roots (map (fn (d) [(get d :name) (get d :version)]) registry-reqs)
-        prefetched (package-prefetch-registry base (map (fn (d) (get d :name)) registry-reqs)))
+        roots (map registry-reqs (fn (d) [(get d :name) (get d :version)]))
+        prefetched (package-prefetch-registry base (map registry-reqs (fn (d) (get d :name)))))
     ;; Brood-version gate BEFORE the solve, so a runtime mismatch reports as one (ADR-209)
     ;; rather than as an opaque "no version satisfies" from deep in the backtracker.
     (package-check-brood-compat prefetched)
@@ -220,12 +220,12 @@ land in a later slice."
 ;; only falls back to the configured registry when the cache is cold) and the resolved base
 ;; on a fresh solve. The one place a chosen concrete version becomes an on-disk dependency.
 (defn- package-fetch-registry-solution (root solution lock-index base)
-  (map (fn (kv)
-         (package-resolve-registry root
-           (project/dep-registry (first kv) (second kv))
-           (get lock-index (first kv))
-           base))
-    (%map-pairs solution)))
+  (map (%map-pairs solution)
+    (fn (kv)
+      (package-resolve-registry root
+        (project/dep-registry (first kv) (second kv))
+        (get lock-index (first kv))
+        base))))
 
 ;; --- the registry pre-fetch (ADR-209) -------------------------------------------
 ;; Walk the registry closure from `names` into `{name → [{:version V :dependencies
@@ -242,11 +242,11 @@ land in a later slice."
   (if (empty? frontier)
     fetched
     (let (results (package-fetch-frontier base frontier)
-          fetched2 (fold (fn (m pair) (assoc m (first pair) (second pair))) fetched results)
+          fetched2 (fold results fetched (fn (m pair) (assoc m (first pair) (second pair))))
           discovered (seq/distinct (apply append
-                                     (map (fn (pair) (package-release-dep-names (second pair)))
-                                       results)))
-          next-frontier (filter (fn (nm) (not (contains? fetched2 nm))) discovered))
+                                     (map results
+                                       (fn (pair) (package-release-dep-names (second pair))))))
+          next-frontier (filter discovered (fn (nm) (not (contains? fetched2 nm)))))
       (package-prefetch-bfs base next-frontier fetched2))))
 
 ;; Fetch every package in `frontier` CONCURRENTLY — one spawned process each, results
@@ -278,7 +278,7 @@ land in a later slice."
 
 ;; The distinct dep-name symbols across a package's releases — the frontier to prefetch next.
 (defn- package-release-dep-names (releases)
-  (seq/distinct (apply append (map (fn (release) (map first (get release :dependencies))) releases))))
+  (seq/distinct (apply append (map releases (fn (release) (map (get release :dependencies) first))))))
 
 ;; A PURE provider over the prefetched map (no I/O), so the resolver's backtracking is free:
 ;; Whether a release's `:brood` runtime constraint (ADR-209) is satisfied by the brood we
@@ -300,9 +300,9 @@ land in a later slice."
   (dolist (kv (%map-pairs fetched))
     (let (nm (first kv)
           releases (second kv))
-      (when (and (not (empty? releases)) (empty? (filter package-release-brood-ok? releases)))
-        (let (needed (seq/distinct (filter (fn (c) (and c (not (= c ""))))
-                                     (map (fn (r) (get r :brood)) releases))))
+      (when (and (not (empty? releases)) (empty? (filter releases package-release-brood-ok?)))
+        (let (needed (seq/distinct (filter (map releases (fn (r) (get r :brood)))
+                                     (fn (c) (and c (not (= c "")))))))
           (error "package: no published release of "
             (->string nm)
             " is compatible with the brood you are running ("
@@ -310,7 +310,7 @@ land in a later slice."
             "). "
             (->string nm)
             "'s releases require Brood "
-            (string/join " / " needed)
+            (string/join needed " / ")
             " — upgrade brood, or depend on an older "
             (->string nm)
             " that predates the requirement."))))))
@@ -320,32 +320,32 @@ land in a later slice."
 ;; release's declared deps.
 (defn- package-prefetched-provider (fetched)
   (resolver/make-provider (fn (nm)
-                            (map (fn (release) (get release :version))
-                              (filter package-release-brood-ok? (or (get fetched nm) nil))))
+                            (map (filter (or (get fetched nm) nil) package-release-brood-ok?)
+                              (fn (release) (get release :version))))
     (fn (nm version)
-      (let (release (seq/find (fn (r) (= (get r :version) version)) (or (get fetched nm) nil)))
+      (let (release (seq/find (or (get fetched nm) nil) (fn (r) (= (get r :version) version))))
         (if (nil? release) nil (get release :dependencies))))))
 
 ;; {name → locked concrete version} for every `:registry` row of the prior lock — the
 ;; previously-computed solution, reused when it still satisfies the manifest.
 (defn- package-lock-registry-solution (lock)
-  (fold (fn (m v)
-          (let (row (vec->list v)
-                plist (rest row))
-            (if (plist-get plist :registry)
-              (assoc m (first row) (plist-get plist :registry))
-              m)))
+  (fold (if (nil? lock) nil (vec->list lock))
     {}
-    (if (nil? lock) nil (vec->list lock))))
+    (fn (m v)
+      (let (row (vec->list v)
+            plist (rest row))
+        (if (plist-get plist :registry)
+          (assoc m (first row) (plist-get plist :registry))
+          m)))))
 
 ;; Whether the locked solution still satisfies every collected registry requirement —
 ;; the manifest hasn't asked for a range the pinned version misses. (Transitive
 ;; constraints are not re-checked: the lock is authoritative until `nest update`.)
 (defn- package-lock-covers-reqs? (locked registry-reqs)
-  (every? (fn (d)
-            (let (pinned (get locked (get d :name)))
-              (and pinned (version/satisfies? pinned (get d :version)))))
-    registry-reqs))
+  (every? registry-reqs
+    (fn (d)
+      (let (pinned (get locked (get d :name)))
+        (and pinned (version/satisfies? pinned (get d :version)))))))
 
 ;; --- the Dependency ability (ADR-172) ---------------------------------------
 ;; A dependency's KIND is its record identity (`project/dep-path` / `-git` / `-tarball`
@@ -506,9 +506,9 @@ land in a later slice."
 ;; Index a lock's :dependencies vector by dep name → its plist (the :git/:ref/
 ;; :commit/… key-values), for reuse during resolution. nil lock → empty index.
 (defn- package-lock-index (lock)
-  (fold (fn (m v) (let (lst (vec->list v)) (assoc m (first lst) (rest lst))))
+  (fold (if (nil? lock) nil (vec->list lock))
     {}
-    (if (nil? lock) nil (vec->list lock))))
+    (fn (m v) (let (lst (vec->list v)) (assoc m (first lst) (rest lst))))))
 
 ;; A resolved entry is the DEP RECORD with the resolution fields assoc'd on — same
 ;; identity, so it dispatches through the same `Dependency` impls (that is what lets one
@@ -589,17 +589,18 @@ land in a later slice."
 ;; (`latest`, `nightly`) is ignored. Offline-testable — the range-selection unit.
 (defn- package-select-git-version (tags range)
   (let (compiled (version/compile range)
-        candidates (fold (fn (acc tag)
-                           (let (v (package-git-tag-version tag))
-                             (if (and (version/valid? v) (version/match? compiled v))
-                               (cons [tag v] acc)
-                               acc)))
-                     nil tags))
+        candidates (fold tags
+                     nil
+                     (fn (acc tag)
+                       (let (v (package-git-tag-version tag))
+                         (if (and (version/valid? v) (version/match? compiled v))
+                           (cons [tag v] acc)
+                           acc)))))
     (if (empty? candidates)
       nil
-      (fold (fn (best cand) (if (> (version/compare (second cand) (second best)) 0) cand best))
+      (fold (rest candidates)
         (first candidates)
-        (rest candidates)))))
+        (fn (best cand) (if (> (version/compare (second cand) (second best)) 0) cand best))))))
 
 ;; Resolve a git dep to a concrete tag. An exact-`:ref` dep is returned unchanged.
 ;; A ranged dep gets `:ref` (the chosen tag) + `:resolved-version` (its version)
@@ -626,7 +627,7 @@ land in a later slice."
                 " satisfies \""
                 range
                 "\" (tags: "
-                (if (empty? tags) "none" (string/join ", " tags))
+                (if (empty? tags) "none" (string/join tags ", "))
                 ")")
               (assoc dep :ref (first chosen) :resolved-version (second chosen)))))))))
 
@@ -777,7 +778,9 @@ an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and 
 
 (defn- registry-error-text (resp)
   "The server's `:error` message from a JSON error body, or a generic HTTP line."
-  (let (parsed (try (json/decode (http/body-text resp)) (catch _ nil)))
+  ;; check-allow :discarded-catch — a body / signature / name that does not parse or verify is the negative answer
+  (let (parsed (check-allow :discarded-catch
+                 (try (json/decode (http/body-text resp)) (catch _ nil))))
     (if (and (map? parsed) (get parsed :error))
       (get parsed :error)
       (str "HTTP " (get resp :status)))))
@@ -808,16 +811,15 @@ range]...]} ...]`, in ONE request. An unknown package (404) is nil (the resolver
 as having no versions rather than raising mid-search); any other error raises."
   (match (registry-get-json (registry-releases-url base nm))
     ([:ok data]
-      (map
+      (map (or (get data :releases) nil)
         (fn (release)
           {:version (get release :version)
            ;; the release's runtime-version constraint (ADR-209), nil/"" if the
            ;; release predates it or the registry doesn't serve it — treated as
            ;; unconstrained, so this stays backward-compatible with old releases.
            :brood (get release :brood)
-           :dependencies (map (fn (d) [(symbol (get d :name)) (get d :version)])
-                           (or (get release :dependencies) nil))})
-        (or (get data :releases) nil)))
+           :dependencies (map (or (get release :dependencies) nil)
+                           (fn (d) [(symbol (get d :name)) (get d :version)]))})))
     ([:error 404 _message] nil)
     ([:error _status message] (error "package: listing releases of "
                                 (->string nm)
@@ -827,12 +829,12 @@ as having no versions rather than raising mid-search); any other error raises."
 ;; Thin views over the one-request release list, for callers that want just one slice.
 (defn- registry-list-versions (base nm)
   "The published version strings of `nm` (any order — the resolver sorts)."
-  (map (fn (release) (get release :version)) (or (registry-fetch-releases base nm) nil)))
+  (map (or (registry-fetch-releases base nm) nil) (fn (release) (get release :version))))
 
 (defn- registry-release-deps (base nm version)
   "The `[dep-name constraint]` requirements of `nm`@`version`; empty when absent."
-  (let (release (seq/find (fn (r) (= (get r :version) version))
-                  (or (registry-fetch-releases base nm) nil)))
+  (let (release (seq/find (or (registry-fetch-releases base nm) nil)
+                  (fn (r) (= (get r :version) version))))
     (if (nil? release) nil (get release :dependencies))))
 
 ;; A registry dep names a package + a version RANGE, resolved to a concrete version by
@@ -959,11 +961,13 @@ TOFU-pinned signing key, nil for an unsigned package)."
   (let (signed (and (string? signature) (string? pubkey) (not (= signature "")) (not (= pubkey "")))
         had-pin (and (string? locked-pubkey) (not (= locked-pubkey "")))
         verified (and signed
-                   (try
-                     (crypto/verify (encoding/hex-decode-bytes pubkey)
-                       (package-signing-payload (->string nm) version checksum)
-                       (encoding/hex-decode-bytes signature))
-                     (catch _ false))))
+                   ;; check-allow :discarded-catch — a body / signature / name that does not parse or verify is the negative answer
+                   (check-allow :discarded-catch
+                     (try
+                       (crypto/verify (encoding/hex-decode-bytes pubkey)
+                         (package-signing-payload (->string nm) version checksum)
+                         (encoding/hex-decode-bytes signature))
+                       (catch _ false)))))
     (cond
       signed
         (do
@@ -1025,8 +1029,7 @@ registry, or nil if it is unpublished. Backs an app's 'is there an update?' chec
         versions (registry-list-versions base (if (symbol? nm) nm (symbol nm))))
     (if (or (nil? versions) (empty? versions))
       nil
-      (fold (fn (best v) (if (or (nil? best) (version/newer? v best)) v best))
-        nil versions))))
+      (fold versions nil (fn (best v) (if (or (nil? best) (version/newer? v best)) v best))))))
 (sig registry-latest-version ((or keyword string symbol) -> any))
 
 (defn registry-enhancers (app)
@@ -1110,11 +1113,13 @@ sha256 pin still holds."
 ;; error yields `()` — the file is treated as declaring nothing and the load surfaces
 ;; the real error, matching `project-file-feature`'s tolerance.
 (defn- package-module-names-of (file)
-  (try
-    (map second
-      (filter (fn (form) (and (pair? form) (= (first form) 'defmodule) (symbol? (second form))))
-        (reflect/read-all (file/slurp file))))
-    (catch _ nil)))
+  ;; check-allow :discarded-catch — a body / signature / name that does not parse or verify is the negative answer
+  (check-allow :discarded-catch
+    (try
+      (map (filter (reflect/read-all (file/slurp file))
+             (fn (form) (and (pair? form) (= (first form) 'defmodule) (symbol? (second form)))))
+        second)
+      (catch _ nil))))
 
 ;; Every `.blsp` file at or under `dir`, recursively (full paths). A hierarchical
 ;; module `(defmodule gui/window)` lives at `gui/window.blsp` in a SUBdirectory
@@ -1123,13 +1128,13 @@ sha256 pin still holds."
 ;; nested namespace would collide undetected (ADR-070).
 (defn- package-blsp-files (dir)
   (apply append
-    (map (fn (entry)
-           (let (full (path/join dir entry))
-             (cond
-               (file/dir? full) (package-blsp-files full)
-               (string/ends-with? entry ".blsp") (list full)
-               else nil)))
-      (file/ls dir))))
+    (map (file/ls dir)
+      (fn (entry)
+        (let (full (path/join dir entry))
+          (cond
+            (file/dir? full) (package-blsp-files full)
+            (string/ends-with? entry ".blsp") (list full)
+            else nil))))))
 
 ;; Every module name a source dir provides: each `(defmodule …)` of each `.blsp`
 ;; file in it, recursively (so nested `gui/window` and co-located secondary modules
@@ -1139,7 +1144,7 @@ sha256 pin still holds."
   (if (not (file/dir? src-dir))
     nil
     (apply append
-      (map package-module-names-of (package-blsp-files src-dir)))))
+      (map (package-blsp-files src-dir) package-module-names-of))))
 
 ;; `[module-symbol file-path]` for each MODULE the dir provides (recursively) —
 ;; every `(defmodule …)` paired with the file it lives in. Package-rooting
@@ -1156,8 +1161,8 @@ sha256 pin still holds."
   (if (not (file/dir? src-dir))
     nil
     (apply append
-      (map (fn (file) (map (fn (m) (list m file)) (package-module-names-of file)))
-        (package-blsp-files src-dir)))))
+      (map (package-blsp-files src-dir)
+        (fn (file) (map (package-module-names-of file) (fn (m) (list m file))))))))
 (sig module-files (string -> any))
 
 ;; The [label src-dir] providers to check for a *module-name* collision. Since deps
@@ -1166,8 +1171,7 @@ sha256 pin still holds."
 ;; is two of YOUR OWN source files declaring the same `(defmodule …)`. So only the
 ;; project's own source dirs are checked; `entries` is kept for signature stability.
 (defn- package-collision-sources (root entries)
-  (map (fn (d) (list "your project" d))
-    (project/abs-paths root *project-source-paths*)))
+  (map (project/abs-paths root *project-source-paths*) (fn (d) (list "your project" d))))
 
 ;; `main` is a project's ENTRY POINT, not part of its library surface: `nest run` only
 ;; ever uses the ROOT project's `:main`, and nothing `require`s a dependency's. So two
@@ -1186,19 +1190,19 @@ sha256 pin still holds."
     (let (label (first (first sources))
           dir (second (first sources)))
       (package-collision-loop (rest sources)
-        (fold (fn (m mod)
-                (if (and (contains? m mod) (not (package-entry-module? mod)))
-                  (error "package: module name collision — '"
-                    mod
-                    "' is declared by two of your own source files ("
-                    (get m mod)
-                    " and "
-                    label
-                    "); rename one module (a `(defmodule …)` name must be"
-                    " unique within a package)")
-                  (assoc m mod label)))
+        (fold (package-provided-modules dir)
           seen
-          (package-provided-modules dir))))))
+          (fn (m mod)
+            (if (and (contains? m mod) (not (package-entry-module? mod)))
+              (error "package: module name collision — '"
+                mod
+                "' is declared by two of your own source files ("
+                (get m mod)
+                " and "
+                label
+                "); rename one module (a `(defmodule …)` name must be"
+                " unique within a package)")
+              (assoc m mod label))))))))
 
 ;; A dependency may not be NAMED after a standard-library module (ADR-070/166): its
 ;; name becomes a load-time package prefix, so a dep called `net` would provide `tcp`
@@ -1207,14 +1211,15 @@ sha256 pin still holds."
 ;; `nest fetch`/`add`, not only when its module is first `require`d (`reserved-package-name?`
 ;; is the same predicate the load-time and publish guards use).
 (defn- package-guard-reserved-names (entries)
-  (fold (fn (_ e)
-          (when (reserved-package-name? (get e :name))
-            (error "package: dependency '"
-              (->string (get e :name))
-              "' is named after a standard-library module — the stdlib owns the '"
-              (->string (get e :name))
-              "' namespace, so this dependency cannot be used until its author renames it")))
-    nil entries))
+  (fold entries
+    nil
+    (fn (_ e)
+      (when (reserved-package-name? (get e :name))
+        (error "package: dependency '"
+          (->string (get e :name))
+          "' is named after a standard-library module — the stdlib owns the '"
+          (->string (get e :name))
+          "' namespace, so this dependency cannot be used until its author renames it")))))
 
 ;; The guard the verbs share: reject a dep named after the stdlib, then any
 ;; cross-provider module-name collision.
@@ -1227,7 +1232,7 @@ sha256 pin still holds."
 ;; reviewable. Each entry is a vector `[name :path PATH :sha256 HASH :deps [names…]]`;
 ;; :deps records the dep's own direct deps (by name) for traceability / `nest tree`.
 
-(defn- package-dep-names-vec (deps) (apply vector (map :name deps)))
+(defn- package-dep-names-vec (deps) (apply vector (map deps :name)))
 
 (defn- package-lockfile-content (entries)
   ;; Sort by name so the lock is a CANONICAL, order-stable artifact. Resolution order is
@@ -1238,7 +1243,7 @@ sha256 pin still holds."
   ;; same way every time; the lock is read back by name lookup, so order carries no meaning.
   (let (sorted (sort-by (fn (e) (->string (get e :name))) entries))
     (str ";; project.lock.blsp — generated by `nest fetch`. Do not edit by hand.\n"
-      (pr-str (list 'lock :version 1 :dependencies (apply vector (map dep-lock-vec sorted))))
+      (pr-str (list 'lock :version 1 :dependencies (apply vector (map sorted dep-lock-vec))))
       "\n")))
 
 (defn- package-lockfile-path (root) (path/join root "project.lock.blsp"))
@@ -1277,11 +1282,12 @@ sha256 pin still holds."
   "Record the modules of each `[package-name src-dir]` pair under that package name in the
   ambient `*ns-package*` map. The ability system's app-vs-library seam; called at setup."
   (def *ns-package*
-    (fold (fn (m pair)
-            (let (pkg (first pair)
-                  dir (second pair))
-              (fold (fn (mm mod) (assoc mm mod pkg)) m (package-provided-modules dir))))
-      *ns-package* pkg-dir-pairs)))
+    (fold pkg-dir-pairs
+      *ns-package*
+      (fn (m pair)
+        (let (pkg (first pair)
+              dir (second pair))
+          (fold (package-provided-modules dir) m (fn (mm mod) (assoc mm mod pkg))))))))
 
 ;; Register each dependency's modules as PACKAGE-ROOTED (ADR-070): a dep `foo`
 ;; providing `b.blsp` (`(defmodule b)`) becomes the global namespace `foo/b`, so two
@@ -1290,14 +1296,14 @@ sha256 pin still holds."
 ;; modules are NOT registered here, so they stay short (the asymmetry ADR-070 records —
 ;; the Elixir-style uniform root-project rooting is the recorded next step).
 (defn- package-register-rooting (entries)
-  (map (fn (e)
-         (let (pkg (->string (get e :name))
-               module-files (module-files (package-dep-src-dir e)))
-           (%register-package-modules! pkg (map first module-files))
-           (map (fn (mf)
-                  (%register-package-module! (str pkg "/" (->string (first mf))) (second mf)))
-             module-files)))
-    entries))
+  (map entries
+    (fn (e)
+      (let (pkg (->string (get e :name))
+            module-files (module-files (package-dep-src-dir e)))
+        (%register-package-modules! pkg (map module-files first))
+        (map module-files
+          (fn (mf)
+            (%register-package-module! (str pkg "/" (->string (first mf))) (second mf))))))))
 
 (defn ensure-deps (root deps)
   "Resolve `deps`, refresh the lock file, and return the list of source dirs to add to *load-path* (one per resolved dep). Called from `setup`; a no-op when there are no deps."
@@ -1308,16 +1314,16 @@ sha256 pin still holds."
       ;; A dependency may NOT share your project's package name (ADR-172): package identity
       ;; keys the ability app tier on it, so a same-named dep would silently gain app-override
       ;; rights over your own types. Detect-and-reject, like the module-collision check.
-      (when (and *project-name* (includes? (map :name entries) *project-name*))
+      (when (and *project-name* (includes? (map entries :name) *project-name*))
         (error "package: a dependency shares your project's package name '"
           *project-name*
           "' — rename one (package identity keys the ability app tier on it, ADR-172)"))
       (package-write-lockfile-if-changed root entries)
       ;; identity: each dep's modules → the dep's `:name`.
-      (record-ns-packages (map (fn (e) (list (get e :name) (package-dep-src-dir e))) entries))
+      (record-ns-packages (map entries (fn (e) (list (get e :name) (package-dep-src-dir e)))))
       ;; package-rooting: each dep's modules → `depname/module`, loadable from its file.
       (package-register-rooting entries)
-      (map package-dep-src-dir entries))))
+      (map entries package-dep-src-dir))))
 
 ;; --- the `nest` verbs --------------------------------------------------------
 ;; Read the project manifest as *data* and apply it (populating the `*project-*`
@@ -1361,7 +1367,7 @@ sha256 pin still holds."
       (if (empty? *project-dependencies*)
         (do (io/puts "package: no dependencies declared") nil)
         (let (lock (package-lock-without (read-lockfile root)
-                     (map symbol names))
+                     (map names symbol))
               entries (resolve-deps root *project-dependencies* lock))
           ;; Reject a namespace collision before writing the lock —
           ;; same guard `fetch`/`add` run (ADR-070). Without it,
@@ -1370,7 +1376,7 @@ sha256 pin still holds."
           (package-guard-collisions root entries)
           (write-lockfile root entries)
           (io/puts (str "package: updated "
-                     (if (empty? names) "all dependencies" (string/join ", " names))
+                     (if (empty? names) "all dependencies" (string/join names ", "))
                      " ("
                      (count entries)
                      " locked)"))
@@ -1382,12 +1388,12 @@ sha256 pin still holds."
   (if (empty? names)
     nil
     (apply vector
-      (filter (fn (v) (not (includes? names (first (vec->list v)))))
-        (if (nil? lock) nil (vec->list lock))))))
+      (filter (if (nil? lock) nil (vec->list lock))
+        (fn (v) (not (includes? names (first (vec->list v)))))))))
 
 ;; --- `nest tree` -------------------------------------------------------------
 (defn- package-index-by-name (entries)
-  (fold (fn (m e) (assoc m (get e :name) e)) {} entries))
+  (fold entries {} (fn (m e) (assoc m (get e :name) e))))
 
 ;; Print `deps` (a list of dep records) as an indented tree, recursing into each
 ;; dep's resolved direct deps via `index`. `seen` breaks cycles / shared deps:
@@ -1434,7 +1440,7 @@ sha256 pin still holds."
 ;; Is `n` the manifest's top-level (project …) list node?
 (defn- package-project-list? (n)
   (and (= (node-kind n) :list)
-    (let (forms (filter (fn (c) (not (trivia? c))) (vec->list (node-children n))))
+    (let (forms (filter (vec->list (node-children n)) (fn (c) (not (trivia? c)))))
       (and (not (empty? forms))
         (= (node-kind (first forms)) :symbol)
         (= (node-text (first forms)) "project")))))
@@ -1469,7 +1475,7 @@ sha256 pin still holds."
 
 ;; The dep name (symbol) of an entry node `[:vector [[:symbol "name"] …]]`, or nil.
 (defn- package-entry-name (entry-node)
-  (let (forms (filter (fn (c) (not (trivia? c))) (vec->list (node-children entry-node))))
+  (let (forms (filter (vec->list (node-children entry-node)) (fn (c) (not (trivia? c)))))
     (if (and (not (empty? forms)) (= (node-kind (first forms)) :symbol))
       (symbol (node-text (first forms)))
       nil)))
@@ -1499,13 +1505,13 @@ sha256 pin still holds."
         (fn (vecnode)
           [:vector
             (apply vector
-              (filter (fn (c) (not (and (= (node-kind c) :vector) (= (package-entry-name c) nm))))
-                (vec->list (node-children vecnode))))])))))
+              (filter (vec->list (node-children vecnode))
+                (fn (c) (not (and (= (node-kind c) :vector) (= (package-entry-name c) nm))))))])))))
 
 ;; Re-render `src` after applying `f` to its (project …) node. Comments survive.
 (defn- package-manifest-transform (src f)
   (let (kids (vec->list (node-children (reflect/parse-source src))))
-    (format/cst-root (apply vector (map (fn (n) (if (package-project-list? n) (f n) n)) kids)))))
+    (format/cst-root (apply vector (map kids (fn (n) (if (package-project-list? n) (f n) n)))))))
 
 (defn- package-manifest-add (src entry-node)
   "Return manifest `src` with `entry-node` added to its :dependencies (pure)."
@@ -1523,7 +1529,7 @@ sha256 pin still holds."
 (defn- package-spec-token (tok)
   (if (string/starts-with? tok ":") (keyword (string/substring tok 1 (string/length tok))) tok))
 
-(defn- package-has-dep? (deps nm) (any? (fn (d) (= (get d :name) nm)) deps))
+(defn- package-has-dep? (deps nm) (any? deps (fn (d) (= (get d :name) nm))))
 
 ;; A dependency name is written VERBATIM into project.blsp (unquoted, as a
 ;; symbol), so it has to be one that reads back as itself. Without this check
@@ -1538,7 +1544,8 @@ sha256 pin still holds."
 (defn- package-valid-dep-name? (nm)
   (and (string? nm)
     (not (= nm ""))
-    (= (try (reflect/read-first nm) (catch _ nil)) (symbol nm))))
+    ;; check-allow :discarded-catch — a body / signature / name that does not parse or verify is the negative answer
+    (= (check-allow :discarded-catch (try (reflect/read-first nm) (catch _ nil))) (symbol nm))))
 
 ;; --- editing project.blsp safely --------------------------------------------
 ;; The manifest edit is a read-modify-write: read the source, splice an entry in or
@@ -1566,7 +1573,7 @@ sha256 pin still holds."
 ;; re-reads, so progress is real and 8 is far beyond any plausible contention.
 (def- *package-manifest-edit-attempts* 8)
 
-(defn- package-edit-manifest! (root transform)
+(defn- package-edit-manifest (root transform)
   "Apply `transform` (old manifest source -> new source) to project.blsp atomically, retrying if a concurrent edit lands in between. Returns `[old new]` so the caller can roll its own edit back. Raises if it cannot win within `*package-manifest-edit-attempts*` tries."
   (package-edit-manifest-try (path/join root "project.blsp")
     (package-manifest-lock root)
@@ -1586,7 +1593,7 @@ sha256 pin still holds."
 ;; Undo an edit this command made, without stomping a concurrent one: the swap only
 ;; lands if the manifest still holds exactly what we wrote. If it doesn't, someone
 ;; else has edited since and their content wins — say so rather than overwrite it.
-(defn- package-revert-manifest! (root written original)
+(defn- package-revert-manifest (root written original)
   (let (manifest (path/join root "project.blsp"))
     (if (%file-swap (package-manifest-lock root) manifest written original)
       true
@@ -1605,7 +1612,7 @@ sha256 pin still holds."
       " is not a usable dependency name — it must be a plain symbol written verbatim into project.blsp (no spaces, quotes, brackets, parens, and not a number)"))
   (package-in-project
     (fn (root)
-      (let (dep (project/parse-dep (apply vector (cons (symbol nm) (map package-spec-token spec)))))
+      (let (dep (project/parse-dep (apply vector (cons (symbol nm) (map spec package-spec-token)))))
         (when (package-has-dep? *project-dependencies* (get dep :name))
           (error "package: " nm " is already a dependency"))
         ;; ATOMIC: the manifest edit has to happen before
@@ -1614,10 +1621,10 @@ sha256 pin still holds."
         ;; add foo :path ../nonexistent` left an unresolvable dep
         ;; in project.blsp and EVERY later command failed on it —
         ;; the project needed hand-repair after one typo.
-        ;; The edit is a locked compare-and-swap (see package-edit-manifest!), so a
+        ;; The edit is a locked compare-and-swap (see package-edit-manifest), so a
         ;; concurrent `nest add` can no longer erase this one.
         (let (manifest (path/join root "project.blsp")
-              edit (package-edit-manifest! root
+              edit (package-edit-manifest root
                      (fn (src) (package-manifest-add src (dep-entry-node dep))))
               original (seq/vector-ref edit 0)
               written (seq/vector-ref edit 1))
@@ -1633,7 +1640,7 @@ sha256 pin still holds."
                           (catch e (list :%add-failed e))))
             (if (and (pair? outcome) (= (first outcome) :%add-failed))
               (do
-                (package-revert-manifest! root written original)
+                (package-revert-manifest root written original)
                 (package-load-manifest manifest)
                 (throw (second outcome)))
               (io/puts (str "package: added " nm)))))))))
@@ -1649,7 +1656,7 @@ sha256 pin still holds."
               target (package-git-target root name-sym))
           ;; Same locked compare-and-swap as `add`: a concurrent edit must not be
           ;; erased by this removal (or vice versa).
-          (package-edit-manifest! root (fn (src) (package-manifest-remove src name-sym)))
+          (package-edit-manifest root (fn (src) (package-manifest-remove src name-sym)))
           (package-load-manifest manifest)
           ; drop its _deps/ cache, if any
           (when (file/dir? target) (%rm-rf target))
@@ -1725,8 +1732,8 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
   "The project's `:version` (registry) dependencies as a vector of `{:name :version}` —
   the only deps a published package can carry on the registry. Path/git/tarball deps
   are local, so they are omitted (with a warning)."
-  (let (registry-deps (filter (fn (d) (= (dep-kind d) :registry)) *project-dependencies*)
-        other (filter (fn (d) (not (= (dep-kind d) :registry))) *project-dependencies*))
+  (let (registry-deps (filter *project-dependencies* (fn (d) (= (dep-kind d) :registry)))
+        other (filter *project-dependencies* (fn (d) (not (= (dep-kind d) :registry)))))
     (dolist (d other)
       (io/puts (str "package: warning — omitting non-registry dependency "
                  (->string (get d :name))
@@ -1734,15 +1741,15 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
                  (dep-kind d)
                  ") from the published metadata")))
     (apply vector
-      (map (fn (d) {:name (->string (get d :name)) :version (get d :version)}) registry-deps))))
+      (map registry-deps (fn (d) {:name (->string (get d :name)) :version (get d :version)})))))
 
 (defn- registry-publishable-enhances ()
   "The project's `:enhances` map with STRING keys — JSON has no symbols, and the
 registry indexes these names to answer \"which packages plug into X\". `{}` for an
 ordinary library, which the server stores as \"nothing\"."
-  (fold (fn (acc kv) (let ([nm constraint] kv) (assoc acc (->string nm) constraint)))
+  (fold (%map-pairs *project-enhances*)
     {}
-    (%map-pairs *project-enhances*)))
+    (fn (acc kv) (let ([nm constraint] kv) (assoc acc (->string nm) constraint)))))
 
 ;; --- package signing (ADR-212): sign a release's checksum, TOFU-verify on install ------
 ;; The publisher's ed25519 key lives at `<config>/brood/signing-key.blsp` (private stored 0600).
@@ -1960,7 +1967,7 @@ published is refused. Backs `nest publish`."
       else (error "package: publish failed (HTTP " status "): " (registry-error-text resp)))))
 
 (defn- semver-bump (cur level)
-  (let (p (map string/->number (string/split cur "."))
+  (let (p (map (string/split cur ".") string/->number)
         bad (fn () (error "semver-bump: malformed version " cur " (expected MAJOR.MINOR.PATCH)"))
         ma (or (nth p 0) (bad))
         mi (or (nth p 1) (bad))

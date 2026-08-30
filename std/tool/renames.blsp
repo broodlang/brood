@@ -1,0 +1,26 @@
+;; The rename ledger (ADR-304): where a deliberately renamed public name went.
+;;
+;; The table itself is Rust — `crates/lisp/src/renames.rs` — because its first two
+;; readers are: the runtime `unbound symbol: X` error and the checker's unbound
+;; diagnostic both append ` — renamed to Y (ADR-nnn)` from it, and both fire before any
+;; Brood module can be consulted. This module is the Brood view of that ONE table, for
+;; the tooling that wants it as data: `nest check --fix-renames` rewrites a ledgered
+;; name first, exactly and unambiguously, before falling back to its search heuristic.
+;; There is deliberately no second table here — two sources of truth drift.
+
+(defmodule renames
+  "The rename ledger: where a deliberately renamed public name went (ADR-304).
+
+`(renames/ledger)` is a map of old name (string) to `{:to new-name :adr adr}`;
+`(renames/renamed-to name)` answers the entry for one name, or nil. The runtime
+`unbound symbol` error and `nest check`'s unbound warning read the same table.")
+
+(defn ledger ()
+  "The whole ledger: a map of old public name (string) to `{:to new-name :adr adr}`."
+  (%renames))
+(sig ledger (-> map))
+
+(defn renamed-to (name)
+  "The ledger entry `{:to new-name :adr adr}` for the old name `name` (a string or symbol), or nil when the name was never ledgered."
+  (get (%renames) (->string name)))
+(sig renamed-to ((or string symbol) -> (or map nil)))

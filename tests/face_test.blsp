@@ -67,12 +67,11 @@
   :isolated (test "a face defined here resolves in spawned workers, fanned back in"
     (def-face :t/shared {:fg :cyan :bold true})
     (let (me (self)
-          _workers (map (fn (i) (spawn (send me [:face i (face :t/shared)])))
-                     (range 8)))
+          _workers (map (range 8) (fn (i) (spawn (send me [:face i (face :t/shared)])))))
       ;; collect each worker's resolution of the shared face
-      (let (results (map (fn (_) (receive ([:face _ f] f) (after *test-wait-ms* :timeout)))
-                      (range 8)))
-        (is (every? (fn (f) (= f {:fg :cyan :bold true})) results)))))
+      (let (results (map (range 8)
+                      (fn (_) (receive ([:face _ f] f) (after *test-wait-ms* :timeout)))))
+        (is (every? results (fn (f) (= f {:fg :cyan :bold true})))))))
   (test "a face-set in this process is seen by a later-spawned worker"
     (def-face :t/live {:fg :red})
     (face-set :t/live {:bold true})

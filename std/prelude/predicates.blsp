@@ -101,7 +101,7 @@
   "Copy the immutable map `m` into a fresh mutable table. Internal: used only by the
 compiler's linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed its
 private table, and never surfaced to user code — reach for `table/new` instead."
-  (reduce (fn (t kv) (%table-put t (first kv) (second kv))) (%table) (%map-pairs m)))
+  (reduce (%map-pairs m) (%table) (fn (t kv) (%table-put t (first kv) (second kv)))))
 (sig %table-from-map (map -> table))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
@@ -177,13 +177,13 @@ itself (a type is a set of runtime tags): it does not walk the tail, so an impro
 ;; code; no `#`/`(gensym)` needed.
 (defmacro %defseq (sym params docstring step)
   "Define an eager sequence op that reverse-accumulates over `coll`.
-`params` are the extra arguments before `coll`; inside `step`, `item` is the
+`params` are the extra arguments after `coll`; inside `step`, `item` is the
 current element and `acc` is the current accumulator."
   (if (not (string? docstring))
     (error "%defseq: third argument must be a docstring string, got "
       (pr-str docstring)
       ". Syntax: (%defseq name (params...) \"docstring\" step-expr)")
-    `(defn ~sym (~@params coll)
+    `(defn ~sym (coll ~@params)
        ~docstring
        (letrec (-loop (fn (coll ~'acc)
                         (if (/empty? coll)
@@ -211,7 +211,7 @@ and a set its elements, as everywhere else `seq` applies.
     (vec nil)        → []"
   (into [] coll))
 
-(defn- %append-two (a b) "Concatenate two lists (`a` before `b`)." (fold %flip-cons b (reverse a)))
+(defn- %append-two (a b) "Concatenate two lists (`a` before `b`)." (fold (reverse a) b %flip-cons))
 
 ;; Prepend every element of `lst` onto `acc` (so `acc` collects all elements in
 ;; reverse); `append` folds this over the lists, then reverses once. Argument order
@@ -226,7 +226,7 @@ and a set its elements, as everywhere else `seq` applies.
   ;; O(total length) and fully tail-recursive — so `mapcat` (via `apply append`)
   ;; stays stack-safe on many/long lists. The previous left fold of `%append-two`
   ;; re-reversed the growing accumulator each step, making it O(lists²).
-  (reverse (fold %append-onto nil lists)))
+  (reverse (fold lists nil %append-onto)))
 
 (defn- %count-acc (coll n) (if (empty? coll) n (%count-acc (rest coll) (%add n 1))))
 (defn count (coll)
@@ -243,7 +243,7 @@ and a set its elements, as everywhere else `seq` applies.
     (range? coll) (%range-count coll)
     ;; A lazy seq-view counts by fusing a counting reducer through `fold` — walks
     ;; the source once, no list materialised.
-    (seqview? coll) (fold (fn (n _) (%add n 1)) 0 coll)
+    (seqview? coll) (fold coll 0 (fn (n _) (%add n 1)))
     (string? coll) (string/length coll)
     (vector? coll) (%vector-length coll)
     (bytes? coll) (%byte-length coll)

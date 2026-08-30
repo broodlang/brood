@@ -33,7 +33,7 @@ mod sequence {
     fn pipeline(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(reduce + 0 (filter even? (map (fn (x) (* x x)) (range {n}))))"),
+            format!("(reduce (filter (map (range {n}) (fn (x) (* x x))) even?) 0 +)"),
         );
     }
 
@@ -43,7 +43,7 @@ mod sequence {
     fn mapcat(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(count (mapcat (fn (x) (list x x)) (range {n})))"),
+            format!("(count (mapcat (range {n}) (fn (x) (list x x))))"),
         );
     }
 
@@ -52,7 +52,7 @@ mod sequence {
     fn sort(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(count (sort (map (fn (x) (math/rem (* x 7919) {n})) (range {n}))))"),
+            format!("(count (sort (map (range {n}) (fn (x) (math/rem (* x 7919) {n})))))"),
         );
     }
 
@@ -81,7 +81,7 @@ mod strings {
     fn join(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(string/length (string/join \", \" (map str (range {n}))))"),
+            format!("(string/length (string/join (map (range {n}) str) \", \"))"),
         );
     }
 
@@ -91,7 +91,7 @@ mod strings {
     fn split(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(count (string/split (string/join \",\" (map str (range {n}))) \",\"))"),
+            format!("(count (string/split (string/join (map (range {n}) str) \",\") \",\"))"),
         );
     }
 }
@@ -108,8 +108,8 @@ mod maps {
         bench_prog(
             bencher,
             format!(
-                "(let (m (fold (fn (acc i) (assoc acc i (* i i))) {{}} (range {n}))) \
-                 (fold (fn (s i) (+ s (get m i))) 0 (range {n})))"
+                "(let (m (fold (range {n}) {{}} (fn (acc i) (assoc acc i (* i i))))) \
+                 (fold (range {n}) 0 (fn (s i) (+ s (get m i)))))"
             ),
         );
     }
@@ -120,7 +120,7 @@ mod maps {
     fn frequencies(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(do (count (seq/frequencies (map (fn (x) (math/rem x 7)) (range {n})))))"),
+            format!("(do (count (seq/frequencies (map (range {n}) (fn (x) (math/rem x 7))))))"),
         );
     }
 
@@ -135,7 +135,7 @@ mod maps {
     fn build_transient(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(count (%map-into {{}} (map (fn (i) [i (* i i)]) (range {n}))))"),
+            format!("(count (%map-into {{}} (map (range {n}) (fn (i) [i (* i i)]))))"),
         );
     }
 
@@ -144,7 +144,7 @@ mod maps {
     fn build_via_into(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(count (into {{}} (map (fn (i) [i (* i i)]) (range {n}))))"),
+            format!("(count (into {{}} (map (range {n}) (fn (i) [i (* i i)]))))"),
         );
     }
 }
@@ -162,7 +162,7 @@ mod pattern {
             format!(
                 "(defn area (s) (match s ([:circle r] (* 3 r r)) ([:square w] (* w w)) \
                  ([:rect w h] (* w h)) (_ 0))) \
-                 (fold (fn (acc i) (+ acc (area [:square i]))) 0 (range {n}))"
+                 (fold (range {n}) 0 (fn (acc i) (+ acc (area [:square i]))))"
             ),
         );
     }

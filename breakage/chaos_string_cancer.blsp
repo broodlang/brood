@@ -61,7 +61,7 @@
 (io/puts "parts count:" (count parts))
 (io/puts "first part:" (pr-str (first parts)))
 ;; Rejoin with a different separator
-(def rejoined (string/join "||" parts))
+(def rejoined (string/join parts "||"))
 (io/puts "rejoined length:" (string/length rejoined))
 
 (io/puts "--- string/->list -> list->string on a 10k-char slice ---")

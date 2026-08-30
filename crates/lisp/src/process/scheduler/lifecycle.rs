@@ -5,6 +5,7 @@
 //! queue, worker pool, pid/parent tables, counters) stays in the root and is
 //! reached here via `use super::*`, so this is a pure relocation.
 use super::*;
+use crate::error::Pos;
 use crate::process::scheduler::pool::wake_a_parked_peer;
 
 /// A human descriptor for a process in death/crash diagnostics: its registered
@@ -368,6 +369,7 @@ pub fn spawn_root_program(
     heap: &Heap,
     src: &str,
     file: Option<String>,
+    preamble: Option<&str>,
 ) -> Result<Arc<crate::eval::compile::ProgramExit>, LispError> {
     let prelude = heap.prelude_arc();
     let runtime = heap.runtime_arc();
@@ -386,11 +388,24 @@ pub fn spawn_root_program(
 
     // Read the program into the child heap and pin every form on its root stack — the
     // driver re-fetches each by index so a collection between forms relocates them safely.
-    let forms =
+    let mut forms =
         crate::syntax::reader::read_all_positioned(&mut child, src).map_err(|e| match &file {
             Some(f) => e.or_file(f.clone()),
             None => e,
         })?;
+    // A preamble runs INSIDE the program's process, ahead of its first form — the hook
+    // `brood file` uses to arm the default crash reporter (ADR-305) so that `(self)`
+    // there is the program's pid, the one process whose crash the CLI already prints.
+    // Armed from the root context instead, the reporter would print every top-level
+    // error a second time. Unpositioned: the forms are the runtime's, not the file's.
+    if let Some(pre) = preamble {
+        let mut lead = crate::syntax::reader::read_all(&mut child, pre)?
+            .into_iter()
+            .map(|f| (f, Pos { line: 0, col: 0 }))
+            .collect::<Vec<_>>();
+        lead.append(&mut forms);
+        forms = lead;
+    }
     let root_base = child.roots_len();
     let mut positions = Vec::with_capacity(forms.len());
     for (form, pos) in &forms {

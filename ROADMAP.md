@@ -30,6 +30,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 
 - [**Active work**](#active-work--dated-findings--backlogs) — dated findings & backlogs (the
   large, time-ordered section; skim by the `###` sub-headers below)
+  - [Lisp survey + OTP-gap backlog](#lisp-survey--otp-gap-backlog-2026-08-30) ·
   - [Backend seams](#backend-seams--swappable-jit--engine--perf-legibility-2026-08-11) ·
     [Runtime-feature parity](#runtime-feature-parity-program--beam--net--node-2026-07-22) ·
     [Robustness gaps vs BEAM/.NET](#robustness-gaps-vs-beam--net-2026-07-18-runtime-survey) ·
@@ -56,6 +57,157 @@ protocol on abilities** (read half done), **std-library breadth** (no markdown/W
 and **observability**. See "What's next — by area".
 
 ## Active work — dated findings & backlogs
+
+### Argument order + error conventions — ✅ COMPLETE (2026-08-30)
+
+Three linked changes, all landed:
+
+- **ADR-302 — `!` means "raises", not "has effects".** Brood was spending `!` on both
+  meanings at once: four raising bangs against 37 effectful ones. `!` now marks raising
+  only; the Scheme reading was vacuous here anyway (it marks *mutation*, which Brood has
+  none of — ADR-026). 38 names renamed; `run!` became **`each`**, since six modules define
+  their own `run`.
+- **ADR-303 — the `$` placeholder** in `->` / `->>` / `some->` / `cond->`: a step naming
+  `$`, at any depth and inside vector and map literals, receives the threaded value there.
+  Bound once to a gensym, so `(-> (expensive) (+ $ $))` evaluates once; `'$` stays a symbol.
+- **ADR-308 — data-first argument order.** The collection is argument one
+  (`Enum.map(enum, fun)`), `reduce` keeps both arities, and `->>`/`some->>`/`cond->>` are
+  **deleted** — one convention needs one pipe. ~1780 call sites over 30 functions. The
+  reducer's own `(fn (acc x))` params deliberately did *not* move (that swap fails silently;
+  the outer one fails loudly), and `into` stays `(to from)`.
+
+Ahead, deliberately not started: the `[:ok v]` / `[:error reason]` result convention the `!`
+rename was groundwork for — a structured error map shared by `throw` and the tuple, plus
+`result`/`unwrap`/`unwrap-or`, and **tuple-union exhaustiveness in the checker** (ADR-128
+tuples are tag-disjoint, but `check/exhaustive.rs` covers only literal-enum and sealed
+scrutinees, so a forgotten `[:error …]` branch would not warn). Without that last piece the
+convention is a naming rule rather than an enforced one.
+
+
+### Lisp survey + OTP-gap backlog (2026-08-30)
+
+A feature-by-feature comparison of Brood against Clojure, Common Lisp and Racket, and of
+its process model against OTP, produced two backlogs. Every item below was checked against
+the ADR-170 freeze list — nothing here reopens `loop/recur`, transients, `&key`, metadata,
+reader macros, continuations or a syntax-object expander. Ordered by value per hour within
+each list; the OTP list is first because it is what makes Brood's strongest axis credible.
+
+**Where the process model stands vs OTP.** At BEAM level already: preemptive M:N scheduling,
+per-process heaps + GC, links/monitors/`trap-exit`/`exit :kill`, selective receive with
+receive-marks, one-shot reply aliases, `gen` with `terminate`, supervisors with all three
+strategies + intensity window + shutdown policy + nested teardown, hot reload, encrypted
+full-mesh dist with remote spawn/monitor. ADR-039's kernel supervisor was reverted for being
+the scheduler-race surface and that call stands — **none of the items below touch the
+scheduler.** What is behind OTP is *around* supervision, and nearly all of it is Brood.
+
+- ✅ **A. Crash reports by default** (ADR-305, shipped 2026-08-30). The premise was
+  overstated — the kernel did print a `process N died: …` one-liner and dump it — but the
+  line had no trace, repeated per crash-loop iteration and had no seam. Shipped:
+  `proc/system-monitor` became one subscription per pid with an `:exit-abnormal` selector,
+  `std/proc/crash-report.blsp` prints each crash site once, `brood file`/`nest run`/bundle/
+  REPL arm it, the one-liner yields. Original note: The kernel already emits `:exit` with the
+  structured reason through `proc/system-monitor`; nothing listens unless a supervisor is
+  linked. OTP's answer is the `logger` process, not
+  kernel supervision. Build `std/proc/crash-report.blsp`: a listener spawned at boot (armed by
+  `nest run` and the REPL; off under `nest test`, which has its own reporting), subscribed to
+  non-`:normal` exits, printing one SASL-shaped report — pid, registered name, reason, the
+  error's `:trace`, the last message — deduplicated per site the way ADR-232's drop warning
+  is. **Default-on** for ADR-232's reason: a flag you must arm before the bug is absent when it
+  matters (KI-36). Pure Brood.
+- ⬜ **B. `defapp` — an Application behaviour.** `nest run --main` calls a function; there is
+  no "this project is a tree with a root supervisor, its dependencies start first, shutdown
+  is the reverse". `(defapp name {:start (fn () sup-pid) :stop … :requires [other-app]})` in
+  `std/proc/app.blsp`; `nest run`/`nest release` resolve `:main` to the app when one is
+  declared, start `:requires` in dependency order, link the root supervisor to the top-level
+  process, stop apps in reverse on `halt`/SIGTERM. Extend `--check-boot` to "start every app,
+  stop every app, run nothing". Supersedes the `Application` entry under "OTP deferred" below.
+- ✅ **C. `try … finally`** (ADR-306, shipped 2026-08-30 — a prelude macro clause over two
+  `%try`s; `throw` now rebuilds an error from its caught map so a rethrow renders as the
+  original). Original note: All three Lisps have unwind cleanup (`finally` /
+  `unwind-protect` / `dynamic-wind`); Brood has none — a resource held inside a `gen` handler
+  can only be released by process death. A `(finally …)` clause lowered by the existing `try`
+  macro onto a `%try` variant; no new special form. Pair with a `with-open`-style macro over
+  `Port`, and teach the `:discarded-catch` lint about it. *Reassessment of the "`terminate/2`
+  on hard kill" item under Dist refinements:* OTP's `terminate/2` does not run on `kill`
+  either — it runs on a trapped `shutdown` exit, which is what the supervisor's
+  `:shutdown <ms>` path already sends before the hard kill. That item is by-design; document
+  the semantics and close it.
+- ⬜ **D. `defstatem` over `gen`.** "OTP deferred, gated on a consumer" — a network protocol
+  handler or an editor mode is the consumer. A macro: states as clause heads
+  (`(:connected (:msg …) → [:next :closing data])`), state timeouts via `timer/send-after`,
+  postponed events kept in the state map, all lowered onto `defserver`. No kernel work.
+- ⬜ **E. Registry + process groups.** A local Elixir-style `Registry` is a `table` plus a
+  monitor per entry — a day's work — and gives via-tuples for `gen/call`. Cluster-wide `pg`
+  is a `node/monitor`-driven replicated set, eventually consistent like Erlang's own. `:global`
+  (locking, consensus) stays deferred; it is the part of OTP people replace.
+- ✅ **F. Mailbox bounds** (ADR-308, shipped 2026-08-30): `(proc/flag :max-mailbox n)`,
+  the `:max-heap` protocol on the queue axis — senders check at enqueue but are never
+  blocked and drop nothing; the flooded process raises catchable `E0046` at its next
+  safepoint or `receive` entry; clear-inside-catch rescues. Original note: kills → refined
+  to a catchable raise (what `:max-heap` actually does); backpressure proper stays a
+  library (`gen/call` with a timeout). Also the "Per-process resource limits" item under
+  Robustness gaps.
+- ⬜ **G. Soak, not features.** The remaining gap with OTP is evidence, and no feature closes
+  it. `breakage/` and the stress ladders exist; what they lack is duration. A nightly
+  multi-hour soak — a supervised ring across three nodes, a node killed every N minutes,
+  weekly under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — reported by `make green`.
+
+**What the other Lisps have that fits Brood.** Value ranked; "shape" marks an import that
+needs a Brood-specific form to respect an ADR.
+
+- ✅ **1. `finally`** — item C above (ADR-306).
+- ⬜ **2. A complete regex engine.** Every other Lisp has ranges, captures and `{m,n}`;
+  `std/regex.blsp`'s pure-Brood NFA has none, which blocks the Fowler/rust-regex corpora
+  (External conformance corpora). Ranges and `{m,n}` are parser work; captures need a
+  tagged NFA (Pike VM) — still linear, still Brood. The dogfood rule's ideal case: if it is
+  slow, the VM is missing something and that is the finding.
+- ⬜ **3. `iterate` / generators without unbounded laziness** *(shape)*. Not a lazy cons: a
+  seqview stage `(seq/iterate f x)` consumed only by the fused `seq/l*` pipeline or a `take`,
+  plus `std/stream` as the process-backed generator for anything that crosses a `send`.
+  Keeps ADR-111's rule that laziness is opt-in and heap-local. Replaces the "unbounded stream
+  generation" entry under Language core & types.
+- ⬜ **4. Sorted map and set.** `compare` is already a total order over every value
+  (ADR-285). A persistent balanced tree in `std/sorted.blsp` implementing `Seqable`/`Conjable`
+  so `conj`/`into`/`get` dispatch through the collection protocol (ADR-156); the natural home
+  for a range query, which `pq`/`multimap` do not cover.
+- ⬜ **5. `reduced` early termination for transducers.** Without it `take`/`take-while`/
+  `first`/`some` cannot be transducers. A wrapped-value sentinel checked by `transduce`'s
+  loop, Clojure's exact contract; unblocks `xtake`/`xtake-while`.
+- ⬜ **6. Declarative macro argument grammars** *(shape)*. Racket's `syntax-parse` is the
+  best macro-error story in any Lisp; Brood has the philosophy (ADR-152) and the match
+  compiler but each prelude macro hand-rolls its checks (`%for-check-binds`). Multi-pattern
+  clauses on `defmacro` heads (they exist for `defn`) plus a `:hint` per clause, so a
+  no-match raises with the macro's own message at the offending sub-form (ADR-297 positions
+  already propagate). No expander rewrite.
+- ⬜ **7. `next-impl` in abilities** *(shape)*. The precedence ladder (app > type-owner >
+  ability-owner > default) has the ordering but no way for the winner to call the impl it
+  shadowed, so an app override copies the type-owner's body. A `(next-impl)` form valid only
+  inside an `impl` body, resolving one rung down. No `:before/:after` combination (ADR-011).
+- ⬜ **8. Accumulating comprehensions.** A `:into coll` clause on `for` (reuses `conj`'s
+  kind preservation) and a `for/fold`-shaped `(fold-for (acc init x xs) body)`. Prelude macros.
+- ⬜ **9. Small library gaps** — each a few prelude lines: `juxt`, `fnil`, `memoize` (table-
+  or process-backed; there is no atom), `cycle`, `partition-by`, `condp`, `when-some`,
+  `postwalk`/`prewalk`, `pmap` (spawn + fan-in), and `format` width/justification
+  (`%5d`, `%-10s`).
+- ⬜ **10. Contract blame.** `BROOD_CONTRACTS=1` reports the mismatch but not the party. The
+  checking shim in `std/prelude/core.blsp` knows the signature's module and the call site;
+  attach `:blame :caller | :callee` to the error map.
+
+- ⬜ **11. Contracts on by default in dev mode** — asked 2026-08-30. Blocked on three
+  recorded things, in order: (a) the open ADR-153 design question — `BROOD_CONTRACTS=1`
+  turns a *declaration* into a *rebinding* (placement-sensitive, wraps identity/`arglist`);
+  the better shape is a kernel `def`-time hook applying registered signatures, which is
+  placement-independent and reaches the prelude; (b) the prelude cannot carry contracts at
+  all today (a shim captures a local frame; the freeze forbids it); (c) unmeasured JIT cost —
+  a shim in front of every `sig`'d std function defeats leaf splicing and the IC on the
+  hottest calls. Then: default-on under `nest run`/`nest test` only, never in a bundle
+  (Racket's model). KI-81 made the flag reliable only on 2026-08-29.
+
+**Doc drift found on the way** (fix with the first item that lands nearby): the ADR-170
+freeze table still reads "Multiple dispatch — refused" against ADR-179's `defmulti`;
+`docs/language.md:2341` says `/` returns a float (ADR-196), `:923` still lists `lambda`
+(ADR-162), `:3199` documents `std/enum.blsp` (now `std/seq.blsp`, ADR-234);
+`docs/primitives.md:329` and this file's special-form count disagree on `catch`.
 
 ### Toolchain gaps a downstream migration exposed (2026-08-27)
 
@@ -193,7 +345,7 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
       named anything, and the KI-72 regression test was **vacuous under the CI gate** (it
       passed `os/exe-path`, which there is the libtest binary — `running 0 tests`, exit 0)
 - [x] **The "~15 more bare names" item, resolved — it was closer to zero (2026-08-28,
-      ADR-291).** Six moved (`reflect/set-load-path!` `reflect/add-load-path!`, and the lazy
+      ADR-291).** Six moved (`reflect/set-load-path` `reflect/add-load-path`, and the lazy
       seq-views `seq/lmap` `seq/lfilter` `seq/lkeep` `seq/lremove`); bare prelude names
       180 → 174. The rest of the estimate dissolved on inspection: `builtin-modules` went
       with ADR-290, **`reload-defs` and `module-doc` were already `system/`-qualified** (this
@@ -2404,7 +2556,8 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
   **`remote-spawn-sync` returning the child pid** and the **`[:$stop]`
   graceful-teardown convention** (supervisor `:shutdown` policies + `defprocess`
   `terminate`) had both already shipped.
-- ⬜ **OTP deferred** (ADR-011, gated on a real consumer): **`gen_statem`** state
+- ⬜ **OTP deferred** (ADR-011, gated on a real consumer; **`gen_statem`, `Registry`/`pg` and
+  `Application` now have concrete shapes as items D, E and B of the 2026-08-30 backlog above**): **`gen_statem`** state
   machines; an Elixir-style **`Registry`**/via-tuples + **process groups (`pg`)**; an
   **`Application`** behaviour; **synchronous, ordered, rollback-on-failure** supervisor
   startup + per-child intensity counting + child `type`/`significant`/`auto_shutdown`
@@ -2428,7 +2581,8 @@ both, but the untrusted path is necessarily thinner; document the gap. Versioned
 - 🟡 **Dist refinements** (ADR-011): ✅ exact propagated exit reason for a
   *non-trapping* linked peer (fixed 2026-07-18 — hardness split from the reason,
   see the survey housekeeping item above; the shared `deliver_exit_to` covers
-  remote links too). Still ⬜: a `terminate/2` hook on hard kill; **long-name
+  remote links too). Still ⬜: a `terminate/2` hook on hard kill (**reassessed 2026-08-30 as by-design — OTP's
+  does not run on `kill` either; see item C of the Lisp-survey backlog**); **long-name
   FQDN resolution** (a long name is passed explicitly today, no resolver);
   Windows Unix-socket transport.
 

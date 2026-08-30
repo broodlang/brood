@@ -22,7 +22,7 @@
 (defmodule conformance-crypto-test (:use test) (:use corpus))
 
 (defn- cy-file (name)
-  (first (filter (fn (p) (= (path/basename p) name)) (corpus-files "crypto"))))
+  (first (filter (corpus-files "crypto") (fn (p) (= (path/basename p) name)))))
 
 ;; A `.rsp` field line: "Msg = d3" -> "d3". nil for a non-field line.
 (defn- cy-field (line key)
@@ -127,27 +127,27 @@
   (test "SHA-1 ShortMsg: every bit length 0..255"
     (let ([ran bad] (cy-sha-file :sha1 "SHA1ShortMsg.rsp"))
       (is (> ran 60))
-      (assert= (take 3 bad) ())))
+      (assert= (take bad 3) ())))
 
   (test "SHA-256 ShortMsg: every bit length 0..255"
     (let ([ran bad] (cy-sha-file :sha256 "SHA256ShortMsg.rsp"))
       (is (> ran 60))
-      (assert= (take 3 bad) ())))
+      (assert= (take bad 3) ())))
 
   (test "SHA-384 ShortMsg: every bit length 0..1023"
     (let ([ran bad] (cy-sha-file :sha384 "SHA384ShortMsg.rsp"))
       (is (> ran 120))
-      (assert= (take 3 bad) ())))
+      (assert= (take bad 3) ())))
 
   (test "SHA-512 ShortMsg: every bit length 0..1023"
     (let ([ran bad] (cy-sha-file :sha512 "SHA512ShortMsg.rsp"))
       (is (> ran 120))
-      (assert= (take 3 bad) ())))
+      (assert= (take bad 3) ())))
 
   (test "SHA-256 LongMsg: the multi-block cases"
     (let ([ran bad] (cy-sha-file :sha256 "SHA256LongMsg-sampled.rsp"))
       (is (> ran 5))
-      (assert= (take 3 bad) ()))))
+      (assert= (take bad 3) ()))))
 
 (describe "NIST CAVP: HMAC vectors"
   :tags [:conformance :slow]
@@ -159,7 +159,7 @@
       ;; stops running cases is caught rather than reading as a pass.
       (is (> ran 1000))
       (is (> skipped 0))
-      (assert= (take 3 bad) ()))))
+      (assert= (take bad 3) ()))))
 
 ;; The published vectors everyone knows, spelled out — a failure here is legible without
 ;; opening a 839 KB .rsp, and they pin the string-input wrappers the .rsp files never
