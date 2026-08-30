@@ -1731,12 +1731,15 @@ declaration — a runtime no-op — read by the advisory checker, which then fla
 provably wrong call against it (both the argument and the result type flow):
 
 ```clojure
-(sig area (number -> number))
 (defn area (r) (* 3.14159 r r))
+(sig area (number -> number))
 
 (area "circle")           ; warning: area: argument 1 expects number, got string
 (string/length (area 2))  ; warning: string/length: argument 1 expects string, got number
 ```
+
+**Below the definition, always** — see "Placement" below. A `sig` above its `defn` reads
+better and is fine as a declaration, but it breaks the module under `BROOD_CONTRACTS=1`.
 
 The type grammar: base names — `int float number decimal string symbol keyword
 bool nil pair vector list map set bytes fn rope pid ref table socket subprocess`,
@@ -1780,7 +1783,10 @@ fires on any hand-written same-symbol `%eq`-literal `if`-chain too, not just
 `(sig! name (params… -> ret))` declares the **same** signature *and enforces it at
 run time*: it wraps `name` so each argument and the result are checked on every
 call, throwing on a mismatch (an opt-in "strong arrow"). Place it **after** the
-definition — it rebinds the name, preserving arity.
+definition — it rebinds the name, preserving arity. (One exception: an `&optional`
+signature installs a *variadic* shim, so it passes through only the arguments it was
+given and the callee's own defaults still apply — `arity-of` then reads `2+` where the
+function reads `2-3`.)
 
 ```clojure
 (defn area (r) (* 3.14159 r r))
@@ -1793,18 +1799,31 @@ exactly where you want soundness.
 
 **Placement: put a `sig` *below* its definition.** As a declaration it works
 anywhere, but `BROOD_CONTRACTS=1` makes every `sig` behave like `sig!` — which
-*rebinds* the name — so a `sig` above its `defn` fails under that flag (it now says
-so, naming the fix, instead of dying with `unbound symbol`). `std/` follows the
-below-the-definition rule, and `tests/sig_adoption_test.blsp` checks it
-structurally. A corollary: **prelude functions can't carry a `sig`** — a runtime
-contract wraps the function in a closure that captures a local frame, and the
-prelude freeze requires shared closures to capture only the global environment.
+*rebinds* the name — so a `sig` above its `defn` fails under that flag (it says so,
+naming the fix, instead of dying with `unbound symbol`), and takes the whole module
+load down with it.
 
-Adoption started in `std/path`, `std/json`, and `std/set` (ADR-153); the checker
-enforces those declarations at every call site, in any module, and result types
-flow (a `bool` result handed to `string/length` is caught). The checker treats both identically. Writing a
-*type* never changes behaviour; opting into *enforcement* (`sig!`) does. Full
-design: [type-annotations.md](type-annotations.md) (ADR-082).
+This is the rule most likely to be broken by someone doing the right thing: a
+signature reads as documentation, and documentation goes above. It has been broken in
+bulk twice — `defrecord` emitted its constructor `sig` above the `defn` (KI-81), and
+the adoption sweep wrote 218 of them above (KI-81's recurrence entry). So it is
+asserted over the **whole tree**, not by convention:
+`crates/lisp/tests/sig_placement.rs` scans every `.blsp` and fails on any
+`(sig NAME …)` preceding a same-file definition of `NAME`, naming the line to move.
+(`tests/sig_adoption_test.blsp` pins the *semantics* — that a declaration is
+placement-independent in default mode.)
+
+**The prelude carries signatures too**, ~20 of them. It could not before KI-81: the
+contract shim was `(let (orig name) (fn …))`, a closure over a local frame, and the
+prelude freeze requires a shared closure to capture only globals. The shim now holds
+the original in a gensym'd *global*, so a prelude `sig` arms like any other.
+
+Adoption is broad — **613 declarations across 79 std modules** (ADR-153 started it in
+`std/path`, `std/json` and `std/set`). The checker enforces them at every call site, in
+any module, and result types flow (a `bool` result handed to `string/length` is caught).
+The checker treats `sig` and `sig!` identically. Writing a *type* never changes
+behaviour; opting into *enforcement* does. Full design:
+[type-annotations.md](type-annotations.md) (ADR-082).
 
 ### Advisory lints (non-type warnings)
 
