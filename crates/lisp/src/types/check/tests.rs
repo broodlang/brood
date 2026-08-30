@@ -5153,6 +5153,50 @@ fn get_with_a_default_replaces_the_absence_nil_by_the_default_type() {
     assert!(t.is_subtype(&int), "{t}");
 }
 
+// ---- inferred returns narrow their branches; and/or are short-circuit exact ----
+
+#[test]
+fn an_inferred_return_sees_the_truthy_half_of_an_or_default() {
+    // `string/->number` is `nil | number`; `(or it -1)` can only be a number. The inferred
+    // return (`expr_ty`, not the walk) used to union both branches of the expansion's `if`
+    // under the unnarrowed scope and report `nil | number`.
+    let interp = crate::Interp::new();
+    let ret = |src: &str| {
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let form = reader::read_one(&mut heap, src).expect("parse");
+        let expanded = crate::eval::macros::macroexpand_all(&mut heap, form, interp.root).unwrap();
+        super::infer::expr_ty(&heap, expanded, &Ctx::default())
+            .and_then(|t| t.as_arrow().map(|s| s.ret.clone()))
+    };
+    let nil = Ty::of(Tag::Nil);
+    let number = Ty::NUMBER;
+    // The expanded `(let (g E) (if g g -1))`.
+    let t = ret("(fn (s) (or (string/->number s) -1))").expect("typed");
+    assert!(t.is_subtype(&number) && t.is_disjoint(&nil), "{t}");
+    // A predicate guard narrows the same way.
+    let t = ret("(fn (s) (let (g (string/->number s)) (if (int? g) g -1)))").expect("typed");
+    assert!(t.is_subtype(&Ty::of(Tag::Int)), "{t}");
+    // The SURFACE `or` (a fragment that is not expanded) is short-circuit exact too, and
+    // `and` symmetrically: only the falsy slice of a non-last operand can be the value.
+    let surface = |src: &str| {
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let form = reader::read_one(&mut heap, src).expect("parse");
+        super::infer::expr_ty(&heap, form, &Ctx::default())
+    };
+    let t = surface("(or (string/->number \"1\") -1)").expect("typed");
+    assert!(t.is_subtype(&number) && t.is_disjoint(&nil), "{t}");
+    let t = surface("(and (string/->number \"1\") \"yes\")").expect("typed");
+    assert!(t.is_subtype(&nil.clone().union(Ty::of(Tag::Str))), "{t}");
+}
+
 // ---- an extremum returns one of its operands ----
 
 #[test]

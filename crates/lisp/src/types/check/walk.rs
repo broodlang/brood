@@ -2228,18 +2228,7 @@ fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option<GradualTy>
     // declared `number` (the precise return-check would otherwise false-positive).
     if value::symbol_is(head, kw::IF) {
         let test = items.get(1).copied().unwrap_or(Value::nil());
-        let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
-            Some(g) => {
-                let then_ctx = ctx.narrow(g.sym, g.ty.clone());
-                let else_ctx = if g.then_only {
-                    ctx.clone()
-                } else {
-                    ctx.narrow(g.sym, g.ty.negate())
-                };
-                (then_ctx, else_ctx)
-            }
-            None => (ctx.clone(), ctx.clone()),
-        };
+        let (then_ctx, else_ctx) = super::guards::branch_scopes(heap, test, ctx);
         // A LITERAL condition selects its branch (only nil/false are falsy; every other
         // literal is truthy), the same fold `infer::control_flow_ty` applies — so the
         // argument check sees `1`, not `1 | "a"`, for `(if true 1 "a")`.
