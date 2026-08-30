@@ -90,10 +90,14 @@ what incremental search rides on (formerly the separate `index-of`).
 ;;
 ;; Index of the last `/` in `s`, scanning down from `i`, or -1 if none. (Brood has
 ;; no char accessor yet; paths are short, so a substring scan is fine.)
-(sig %path-last-slash (string int -> int))
+;; The `sig` sits BELOW the defn: prelude files have no `provide`, so the deferred-
+;; contract path (tools.blsp `%contract-defer!`) never fires for them — an above-defn
+;; prelude sig under BROOD_CONTRACTS=1 would silently not enforce. In std MODULES the
+;; deferral makes above-defn placement fine.
 (defn- %path-last-slash
   (s i)
   (cond (< i 0) -1 (= (string/substring s i (inc i)) "/") i else (%path-last-slash s (dec i))))
+(sig %path-last-slash (string int -> int))
 
 ;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
 ;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.

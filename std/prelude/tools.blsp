@@ -382,10 +382,66 @@ would name a registry that does not exist."
   `(%registry-swap! '~registry (fn () ~registry) ~f))
 
 ;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
+;; ---- deferred runtime contracts (BROOD_CONTRACTS=1) --------------------------
+;; std writes `(sig …)` ABOVE the definition wholesale (the strict sweep,
+;; 483288cd): a signature is documentation, so that is its natural place. Contracts
+;; mode used to abort the whole module load on exactly that placement — `sig!`
+;; rebinds the name, so it must already exist (KI-81's shape; the contracts_mode
+;; test caught std/string doing it on the merged tree). Instead of forcing 200+
+;; sigs below their defns, the `sig` macro now records the not-yet-defined case
+;; here, and `provide` — which runs precisely when a module's defs all exist —
+;; installs every pending shim whose name has materialised. A kernel table, not a
+;; registry map: concurrent `require`s race this. Entries whose names never
+;; materialise (a sig for a name defined elsewhere, or a typo) stay parked; the
+;; checker's own diagnostics cover those, and a parked declaration enforces
+;; exactly as much as it did before contracts mode existed: nothing.
+(def- %*pending-contracts* (%table))
+(defn %contract-defer! (qname type)
+  "Queue `(sig! qname type)` until `qname` is defined — installed when the
+OWNING module provides (see the block comment above). The runtime side of a
+`sig` written above its definition under BROOD_CONTRACTS=1."
+  (%table-put %*pending-contracts* (->string qname) [qname type])
+  nil)
+(defn- %contract-owner
+  (qname-str)
+  ;; \"path/path-last-sep\" → \"path\"; a root name (no slash) owns itself nowhere,
+  ;; so it applies at whichever provide first finds it bound. Kernel primitives
+  ;; only — a `string/last-index-of` here would infer a require of std/string in
+  ;; the middle of someone else's provide.
+  (let (i (%str-last-index-of qname-str "/" (string/length qname-str)))
+    (if (nil? i) nil (string/substring qname-str 0 i))))
+(defn- %contracts-apply-pending!
+  (key)
+  ;; Apply only THIS module's entries, and apply them AS the module: `sig!` on a
+  ;; `defn-` name is a private reference, legal only when the compile namespace is
+  ;; the owner itself (ADR-146 — applying another module's pending sig from a
+  ;; foreign ns tripped the privacy check, correctly, and `provide` runs after the
+  ;; loader restored the requiring module's ns). So bracket each application in
+  ;; the owner's namespace via `%in-ns`, restoring what was current — including
+  ;; ROOT, which is what `(%in-ns nil)` exists for. The rethrow keeps a contract
+  ;; error surfacing while the bracket still restores.
+  (when (> (%table-count %*pending-contracts*) 0)
+    (reduce (fn (_ kv)
+              (let (entry (second kv))
+                (let ([qname type] entry
+                      owner (%contract-owner (first kv)))
+                  (when (and (or (nil? owner) (= owner key)) (bound? qname))
+                    (%table-delete %*pending-contracts* (first kv))
+                    (let (prev (reflect/current-ns))
+                      (when owner (%in-ns (symbol owner)))
+                      (let (r (try
+                                (reflect/eval (list 'sig! qname type))
+                                (catch e (do (%in-ns prev) (throw e)))))
+                        (%in-ns prev)
+                        r))))))
+      nil
+      (%map-pairs (%table-snapshot %*pending-contracts*)))))
+
 (defn provide (mod)
   "Mark feature `mod` (a symbol or string) as loaded (idempotent); returns its name."
   (let (key (->string mod))
     (%registry-update! '*features* :assoc-new [key] true)
+    (%contracts-apply-pending! key)
     key))
 
 ;; A module declares itself at the top with `defmodule`: its name, an optional

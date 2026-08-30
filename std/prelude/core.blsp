@@ -538,21 +538,26 @@ for variadic tails."
         ;; Contracts mode turns this *declaration* into an *action*: `sig!` rebinds
         ;; `name` to a checking wrapper, so the definition must already exist. A
         ;; `sig` written above its `defn` — the natural place, since a signature is
-        ;; documentation — then failed with a bare `unbound symbol: mod/name` and
-        ;; took the whole module load down with it (found by annotating `std/` for
-        ;; real, 2026-07-26). Name the fix instead of dying sideways.
+        ;; documentation, and the style the strict sweep adopted across std/ — used
+        ;; to abort the whole module load here. It now DEFERS instead: the pending
+        ;; contract is queued and installed at the next `provide`, when the module's
+        ;; defs all exist (`%contract-defer!` / `%contracts-apply-pending!` in
+        ;; tools.blsp — late-bound, so this expansion referencing them from an
+        ;; earlier prelude file is fine). In a bare file with no module (no provide)
+        ;; an above-defn sig stays a pure declaration, which is what it was before
+        ;; contracts mode existed.
         ;; `bound?` on a QUOTED symbol is not namespace-resolved — inside
         ;; `(defmodule path)` it would ask about bare `basename` while the
         ;; definition is `path/basename`, and report "not defined yet" for a
         ;; perfectly-placed sig. `%register-sig` already returns the qualified
-        ;; symbol it keyed the declaration under, so ask about *that*.
+        ;; symbol it keyed the declaration under, so ask about *that*. NO `let`
+        ;; around this — `sig!` expands to `def`s of a shim `fn`, and a binding
+        ;; frame here makes that shim capture a local env, which the prelude
+        ;; freeze hard-rejects (KI-81's other half). The defer branch calls
+        ;; `%register-sig` a second time instead: cold, idempotent.
         `(if (bound? (%register-sig '~name '~type))
            (sig! ~name ~type)
-           (error "sig: "
-             '~name " is not defined yet, and BROOD_CONTRACTS=1 makes "
-             "`sig` install a runtime contract (which rebinds the name). Move this " "`(sig " '~name
-             " …)` BELOW the definition, or unset BROOD_CONTRACTS "
-             "to use it as a pure declaration."))
+           (%contract-defer! (%register-sig '~name '~type) '~type))
         nil)))
 
 ;; ---- checker suppression: `(check-allow :category form…)` -------------------
