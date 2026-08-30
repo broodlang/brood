@@ -1385,4 +1385,10 @@ invalidates every image). JIT warm and engaged on both (`BROOD_JIT_DUMP_IR` arm 
 Stderr grepped for `CODEGEN-PANICKED` — the JIT can switch itself off and every answer stays
 right. **Interleave every arm in one command, three-way when there is a chain** — §2k exists
 because a saved baseline binary drifted 10% between sessions. Floors measured; a delta under
-~2× floor is noise.
+~2× floor is noise. **And a same-binary floor cannot see cross-binary noise**: on a
+concurrency row (unpinned, all cores), scheduler wake-latency variance plus per-binary code
+layout put wall-clock deltas of ±8% between binaries whose `perf stat` instructions/cycles
+are flat — a phantom "spawn +7.5% from upstream" was retracted this way (2026-08-30).
+Confirm any cross-binary regression on a concurrency row with
+`perf stat -e instructions,cycles` before reporting it. (The stdimage check in the first
+line is now enforced by `ab-bench` itself — footgun 6 in the script.)
