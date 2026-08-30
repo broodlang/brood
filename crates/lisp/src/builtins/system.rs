@@ -1,4 +1,4 @@
-use crate::core::heap::Heap;
+use crate::core::heap::{Heap, ImportEntry};
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 use crate::syntax::{cst, reader};
@@ -2735,6 +2735,94 @@ pub(super) fn in_ns(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // Keyed by the bare declared name (pre-rooting), which is exactly `sym`.
     heap.activate_ns_region(sym);
     Ok(Value::symbol(rooted))
+}
+
+/// `(%compile-context)` — the process's compile context as data: `[ns imports]`, `ns`
+/// the current namespace symbol (nil at root) and `imports` a vector of
+/// `[bare qualified]` pairs (an ambiguous import, ADR-235, carries a vector of its
+/// candidates in place of `qualified`). Both halves are PER PROCESS, and nothing in the
+/// language could read the second — so an evaluator that runs each request in a fresh
+/// process (`std/tool/eval-server.blsp`) had no way to carry a `(defmodule m (:use x))`
+/// from one request to the next. The restore half is [`restore_compile_context`].
+pub(super) fn compile_context(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let ns = match heap.compile_ns() {
+        Some(s) => Value::symbol(s),
+        None => Value::nil(),
+    };
+    let entries = heap.imports_snapshot();
+    let mut pairs = Vec::with_capacity(entries.len());
+    for (bare, entry) in entries {
+        let target = match entry {
+            ImportEntry::One(q) => Value::symbol(q),
+            ImportEntry::Ambiguous(cands) => {
+                let items = cands.into_iter().map(Value::symbol).collect();
+                heap.alloc_vector(items)
+            }
+        };
+        pairs.push(heap.alloc_vector(vec![Value::symbol(bare), target]));
+    }
+    let imports = heap.alloc_vector(pairs);
+    Ok(heap.alloc_vector(vec![ns, imports]))
+}
+
+/// `(%restore-compile-context ctx)` — install a [`compile_context`] snapshot in THIS
+/// process: the namespace exactly as `%in-ns` would (rooted, region activated; nil back
+/// to root) and the import table replaced wholesale. Returns the namespace.
+pub(super) fn restore_compile_context(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let parts = heap.seq_items(arg(args, 0))?;
+    let (ns, imports) = match parts.as_slice() {
+        [ns, imports] => (*ns, *imports),
+        _ => {
+            return Err(LispError::runtime(
+                "%restore-compile-context: expected a `[ns imports]` snapshot from %compile-context",
+            ))
+        }
+    };
+    let mut table: std::collections::HashMap<value::Symbol, ImportEntry> =
+        std::collections::HashMap::new();
+    for pair in heap.seq_items(imports)? {
+        let Some((bare, target)) = heap
+            .seq_items(pair)
+            .ok()
+            .and_then(|p| match p.as_slice() {
+                [Value::Sym(b), t] => Some((*b, *t)),
+                _ => None,
+            })
+        else {
+            return Err(LispError::runtime(
+                "%restore-compile-context: each import must be a `[bare qualified]` pair",
+            ));
+        };
+        let entry = match target {
+            Value::Sym(q) => ImportEntry::One(q),
+            other => ImportEntry::Ambiguous(
+                heap.seq_items(other)?
+                    .into_iter()
+                    .filter_map(|v| match v {
+                        Value::Sym(s) => Some(s),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+        };
+        table.insert(bare, entry);
+    }
+    heap.set_imports(table);
+    match ns {
+        Value::Nil => {
+            heap.set_compile_ns(None);
+            Ok(Value::nil())
+        }
+        Value::Sym(sym) => {
+            let rooted = heap.root_module_name(sym);
+            heap.set_compile_ns(Some(rooted));
+            heap.activate_ns_region(sym);
+            Ok(Value::symbol(rooted))
+        }
+        _ => Err(LispError::runtime(
+            "%restore-compile-context: the namespace must be a symbol or nil",
+        )),
+    }
 }
 
 /// `(%root-module-name 'b)` — root a referenced module name to the active package:

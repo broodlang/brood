@@ -4328,6 +4328,17 @@ impl Heap {
         std::mem::replace(&mut self.cold_mut().imports, imports)
     }
 
+    /// Every `(:use …)` import in this process, `(bare, entry)`, sorted by bare name —
+    /// the read half of [`set_imports`](Self::set_imports), for `%compile-context`.
+    pub fn imports_snapshot(&self) -> Vec<(Symbol, ImportEntry)> {
+        let mut out: Vec<(Symbol, ImportEntry)> = self
+            .cold()
+            .map(|c| c.imports.iter().map(|(k, v)| (*k, v.clone())).collect())
+            .unwrap_or_default();
+        out.sort_by_key(|(bare, _)| crate::core::value::symbol_name(*bare));
+        out
+    }
+
     /// Add one imported binding (bare name → qualified global). Used by `%refer`.
     /// The clash-handling in `%refer` (`refer_add`) calls the ambiguity helpers below
     /// instead when a second module contributes the same bare name.
@@ -6456,6 +6467,13 @@ impl Heap {
     }
     /// Record an observed global symbol (binding/arity/sig).
     pub(crate) fn rec_check_dep_sym(&self, sym: Symbol) {
+        // A gensym is a macro-expansion temporary, never a global: its counter differs
+        // in every process, so recording one made the dependency fingerprint
+        // process-specific — `nest check` and `nest run` could never share a verdict
+        // (found 2026-08-30: 1 982 keys per bedit file, the differing ones all `and__N`).
+        if crate::core::value::is_gensym(sym) {
+            return;
+        }
         if let Some(d) = self
             .check
             .borrow_mut()

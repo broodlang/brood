@@ -315,29 +315,34 @@ process died without answering."
         timeout (if (int? raw-timeout) raw-timeout *default-timeout-ms*)
         trace (get req :trace)
         me (self)
-        ;; The compile namespace is PER PROCESS, and every request evaluates in a
-        ;; fresh one: without this hand-over a `(defmodule calc)` request set the
-        ;; namespace of a child that then exited, the next request's `(defn eval …)`
-        ;; defined a bare `eval`, and `(calc/eval …)` was unbound — form-at-a-time
-        ;; evaluation from an editor could never build a module. The child adopts
-        ;; the session's namespace before it evaluates and reports where it ended;
-        ;; the loop process adopts that below, so the next child inherits it (the
-        ;; REPL's `%in-ns`-in-the-loop-process discipline, spread over two processes).
-        session-ns (reflect/current-ns)
+        ;; The compile context — the namespace AND the `(:use …)` imports — is PER
+        ;; PROCESS, and every request evaluates in a fresh one: without this hand-over
+        ;; a `(defmodule calc)` request set the namespace of a child that then exited,
+        ;; the next request's `(defn eval …)` defined a bare `eval`, and `(calc/eval …)`
+        ;; was unbound — form-at-a-time evaluation from an editor could never build a
+        ;; module. The child adopts the session's context before it evaluates and
+        ;; reports where it ended; the loop process adopts that below, so the next
+        ;; child inherits it (the REPL's `%in-ns`-in-the-loop-process discipline,
+        ;; spread over two processes). A snapshot, not just the namespace: carrying
+        ;; `%in-ns` alone left `(defmodule calc (:use test))`'s `assert=` unbound one
+        ;; request later.
+        session-ctx (%compile-context)
         _ (eval-server-flush-stale)
         child (spawn (do
-                       (when (symbol? session-ns) (%in-ns session-ns))
-                       (send me [:evsrv-result id (eval-capturing src trace) (reflect/current-ns)])))
+                       (%restore-compile-context session-ctx)
+                       (send me [:evsrv-result id (eval-capturing src trace) (%compile-context)])))
         ref (monitor child))
     (receive
-      ([:evsrv-result ^id r ns]
+      ([:evsrv-result ^id r ctx]
         (do
           (demonitor ref)
           ;; the child dies :normal right after its send, so its DOWN is usually
           ;; already queued when we demonitor — drain it now (flush-stale is the
           ;; belt for the delivery-mid-demonitor sliver)
           (receive ([:down ^ref _ _] nil) (after 0 nil))
-          (when (symbol? ns) (%in-ns ns))
+          ;; unconditional: a request that returns to root (`(%in-ns nil)`) must not
+          ;; leave the session stuck in the last module
+          (%restore-compile-context ctx)
           (assoc r :id id)))
       ([:down ^ref ^child reason] (do
                                     (debug/untrace-all)

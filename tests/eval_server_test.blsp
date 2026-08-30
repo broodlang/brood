@@ -336,4 +336,18 @@
           called (answer {:id 3 :src "(evsrv-ns-probe/probe-fn 41)"}))
       (assert= (get defined :value) "evsrv-ns-probe/probe-fn")
       (is (get called :ok))
-      (assert= (get called :value) "41"))))
+      (assert= (get called :value) "41")))
+
+  (test "the module's (:use …) imports carry over too, and a return to root sticks"
+    ;; The first fix carried only the namespace: `assert=` was `unbound symbol:
+    ;; evsrv-use-probe/assert=` one request later. Imports are per-process state as well.
+    (answer {:id 1 :src "(defmodule evsrv-use-probe (:use test))"})
+    (let (defined (answer {:id 2 :src "(defn checked (x) (assert= x x) x)"})
+          called (answer {:id 3 :src "(evsrv-use-probe/checked 7)"})
+          back (answer {:id 4 :src "(%in-ns nil)"})
+          root (answer {:id 5 :src "(reflect/current-ns)"}))
+      (assert= (get defined :value) "evsrv-use-probe/checked")
+      (is (get called :ok))
+      (assert= (get called :value) "7")
+      (is (get back :ok))
+      (assert= (get root :value) "nil"))))

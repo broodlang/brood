@@ -7759,5 +7759,37 @@ process**, so `defmodule` set the namespace of a child that then exited and the 
 request's `defn` landed in the root. Form-at-a-time evaluation could never build a
 module. The child now adopts the session's namespace before evaluating and reports where
 it ended; the loop process adopts that, so the next child inherits it — the REPL's
-"`%in-ns` runs in the loop process" discipline, spread over two processes. Regression
-test in `tests/eval_server_test.blsp`; editors pick it up on the next `make install`.
+"`%in-ns` runs in the loop process" discipline, spread over two processes.
+
+Reviewed again on request, and the first cut was not enough: it carried the namespace
+alone, and `(defmodule calc (:use test))` then `(defn f (x) (assert= x x) x)` answered
+`unbound symbol: calc/assert=` one request later — the `(:use …)` import table is
+per-process state too, and nothing in the language could read it. Two kernel
+primitives now exist for exactly that: `(%compile-context)` — `[ns imports]`, the
+imports as `[bare qualified]` pairs (an ambiguous import carries its candidates) — and
+`(%restore-compile-context ctx)`, which installs both halves the way `%in-ns` and
+`%refer` would. The server hands the whole snapshot from child to child, and applies it
+unconditionally, so a request that returns to root (`(%in-ns nil)`) no longer leaves the
+session stuck in the last module. Regression tests in `tests/eval_server_test.blsp`;
+editors pick it up on the next `make install`.
+
+## 2026-08-30 — `nest run` on bedit: what the launch actually costs, and two cuts
+
+Follow-up to the hang above, once bedit opened again: the launch was still ~2.2 s to a
+window, and `BROOD_NO_CHECK=1` made no difference. Traced (strace timeline + gdb
+samples): the whole gap is `check-run-closure`, `nest run`'s advisory pre-flight, which
+is uncached by design and did not honour `BROOD_NO_CHECK` (only `project-check-files`
+did) — it now does, so the flag means what its catalogue entry says. Under call-site
+specialization the checker's per-file cost had grown from the ~3.7 ms the pre-flight was
+designed around to ~40 ms on bedit's files.
+
+Cut one, in `check/sigs.rs`: `specialize_call` typed a call's operands *before* learning
+the callee has nothing to re-type — true of every builtin and primitive, and that operand
+walk was the profile's hottest frame. A per-file `NO_ARMS` set, filled under exactly the
+condition the argument-tuple `None` memo already uses (an image-bound name), is
+consulted first: bedit `nest check`, uncached, 13.8 s → 8.5 s. An attempt to route the
+pre-flight through the verdict cache was withdrawn: the closures it stores differ from
+`nest check`'s, so the two commands invalidated each other's entries every run.
+
+Also: `/` is a word delimiter for the buffer's word motion (`std/editor/buffer.blsp`),
+so `M-d`/`M-DEL`/`M-f`/`M-b` in bedit treat `math/floor` as two words.
