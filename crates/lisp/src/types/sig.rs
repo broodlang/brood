@@ -30,6 +30,11 @@ pub struct Sig {
     pub rest: Option<Ty>,
     /// The result type.
     pub ret: Ty,
+    /// A **type guard** (ADR-301): `(sig datetime? (any -> (is datetime)))` declares a
+    /// predicate whose truthy result proves its first argument is this type — and whose
+    /// falsy result proves it is not — so `(if (datetime? x) …)` narrows both branches
+    /// exactly as the built-in `int?`/`string?` guards do. `ret` is `bool` beside it.
+    pub guard: Option<Ty>,
 }
 
 impl Sig {
@@ -40,6 +45,7 @@ impl Sig {
             optional: Vec::new(),
             rest: None,
             ret,
+            guard: None,
         }
     }
     /// `() -> ret` — a nullary primitive (a thunk / accessor).
@@ -49,6 +55,7 @@ impl Sig {
             optional: Vec::new(),
             rest: None,
             ret,
+            guard: None,
         }
     }
     /// `(...rest) -> ret` — pure variadic, every argument is `rest`.
@@ -58,6 +65,7 @@ impl Sig {
             optional: Vec::new(),
             rest: Some(rest),
             ret,
+            guard: None,
         }
     }
     /// `params... ...rest -> ret` — fixed leading params then a variadic tail.
@@ -67,6 +75,7 @@ impl Sig {
             optional: Vec::new(),
             rest: Some(rest),
             ret,
+            guard: None,
         }
     }
     /// `params... &optional optional... -> ret` — fixed params then optional
@@ -77,6 +86,7 @@ impl Sig {
             optional,
             rest: None,
             ret,
+            guard: None,
         }
     }
     /// `params... &optional optional... & rest -> ret` — all three parameter
@@ -88,6 +98,7 @@ impl Sig {
             optional,
             rest: Some(rest),
             ret,
+            guard: None,
         }
     }
     /// `(...any) -> any` — the catch-all when a primitive's args/result aren't
@@ -201,6 +212,9 @@ impl fmt::Display for Sig {
             }
             write!(f, "...{rest}")?;
         }
-        write!(f, ") -> {}", self.ret)
+        match &self.guard {
+            Some(g) => write!(f, ") -> (is {g})"),
+            None => write!(f, ") -> {}", self.ret),
+        }
     }
 }

@@ -651,7 +651,13 @@ fn parse_arrow(heap: &Heap, items: &[Value], pos: usize) -> Option<Sig> {
     if pos + 2 != items.len() {
         return None; // exactly one result type must follow `->`
     }
-    let ret = parse_type(heap, items[pos + 1])?;
+    // `(is T)` — a type guard (ADR-301): the result is a bool, and a truthy one proves the
+    // first argument is `T`. Read here, in return position only; anywhere else `is` is an
+    // unknown type constructor and the declaration is dropped as before.
+    let (ret, guard) = match guard_ret(heap, items[pos + 1]) {
+        Some(t) => (Ty::of(Tag::Bool), Some(t)),
+        None => (parse_type(heap, items[pos + 1])?, None),
+    };
 
     let params_region = &items[..pos];
     let amp = params_region
@@ -681,12 +687,15 @@ fn parse_arrow(heap: &Heap, items: &[Value], pos: usize) -> Option<Sig> {
             let params = parse_all(&params_region[..opos])?;
             let optional = parse_all(&params_region[opos + 1..apos])?;
             let rest = parse_type(heap, items[apos + 1])?;
-            Some(Sig::with_optional_and_rest(params, optional, rest, ret))
+            Some(with_guard(
+                Sig::with_optional_and_rest(params, optional, rest, ret),
+                guard,
+            ))
         }
         (Some(opos), None) => {
             let params = parse_all(&params_region[..opos])?;
             let optional = parse_all(&params_region[opos + 1..])?;
-            Some(Sig::with_optional(params, optional, ret))
+            Some(with_guard(Sig::with_optional(params, optional, ret), guard))
         }
         (None, Some(apos)) => {
             // Must be exactly one type after `&` before `->`.
@@ -695,13 +704,26 @@ fn parse_arrow(heap: &Heap, items: &[Value], pos: usize) -> Option<Sig> {
             }
             let params = parse_all(&params_region[..apos])?;
             let rest = parse_type(heap, items[apos + 1])?;
-            Some(Sig::with_rest(params, rest, ret))
+            Some(with_guard(Sig::with_rest(params, rest, ret), guard))
         }
         (None, None) => {
             let params = parse_all(params_region)?;
-            Some(Sig::new(params, ret))
+            Some(with_guard(Sig::new(params, ret), guard))
         }
     }
+}
+
+/// The `T` of a `(is T)` result form, or `None` for any other result type-expression.
+fn guard_ret(heap: &Heap, form: Value) -> Option<Ty> {
+    let items = list_items(heap, form)?;
+    match items.as_slice() {
+        [Value::Sym(h), inner] if value::symbol_is(*h, "is") => parse_type(heap, *inner),
+        _ => None,
+    }
+}
+
+fn with_guard(sig: Sig, guard: Option<Ty>) -> Sig {
+    Sig { guard, ..sig }
 }
 
 /// Parse a type-expression form into a [`SigTerm`], tracking type-variable
