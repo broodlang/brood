@@ -7488,3 +7488,27 @@ test remaining armed). Asks the runtime, not the environment: the ceiling has th
 Also confirmed on the way: the two other failures in that window were the mangled
 multi-line sigs (`image_matches_source` parse error at line 852, the suite's "failed to
 load") — fixed by the sweep — and one `observe_attach` KI-38 listen stall at 20 s.
+
+## 2026-08-30 (fifth) — the tree-walker learns to hand back: eligible callees route to the VM
+
+The broadest lever from the §7.3 postmortem, landed. `apply_closure` never re-entered the
+VM, so ONE deferred call tree-walked everything beneath it transitively at ~10× — every
+autogensym expander, every checker pass, every future vocabulary gap paid it. Now the
+tree-walker's two application sites (`eval_tail_loop`'s dispatch and `apply_closure`) route
+a VM-eligible callee through `vm_apply` — the same nested-run chokepoint `dispatch` already
+uses, so IC-cursor save/restore, the native-stack guard and §8.1 suspend semantics come
+free, and a routed `receive` dirty-blocks exactly as its tree-walked self did
+(`capture_top_level` is already false under the guard).
+
+The invariant that shaped it: **proper tail calls are load-bearing.** A mixed-eligibility
+mutual tail loop (eligible `f` ↔ deferred `g`) runs FLAT today because the tree-walker
+absorbs both sides in its `'tail` loop; unbounded routing would spend two Rust frames per
+alternation. `Heap::tw_reentry_depth` + `TW_REENTRY_BUDGET` (32) bound it: past the budget
+the router stands down and the call tree-walks as before. `tests/tw_reentry_test.blsp`
+pins 300k alternations plus routed-value correctness.
+
+Measured: **60×** on the shape it exists for (an eligible helper hammered from an
+autogensym-deferred driver: 5,048 → 84 ms), `startup` **−6.9%** (floor 0.0%), the standard
+rows neutral (pingpong solo +1.0% wall with instructions −9 M — the drift row drifting).
+`BROOD_NO_TW_REENTRY=1` is the lever; `BROOD_DEFER_DBG`'s line now reads "tree-walks its
+OWN body", which is the new truth.

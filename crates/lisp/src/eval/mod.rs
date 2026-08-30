@@ -922,6 +922,14 @@ fn eval_tail_loop(
                             continue 'dispatch;
                         }
                     }
+                    // Tree-walker→VM router (see `tw_vm_route`): a VM-eligible callee
+                    // runs at engine speed instead of being tree-walked because its
+                    // CALLER happened to defer. Budget-bounded so a mixed-eligibility
+                    // mutual tail loop falls back to this loop's O(1) tree-walking
+                    // rather than recursing natively.
+                    if let Some(r) = tw_vm_route(heap, id, &cur_argv) {
+                        return r.map_err(|e| e.or_form_pos(heap, call_form));
+                    }
                     // `bind_params` selects the arm matching this call's arity, binds
                     // it, and hands back that arm's body (snapshotted into an inline
                     // `SmallVec` so the loop below doesn't re-dispatch the slab).
@@ -1143,6 +1151,59 @@ pub(crate) fn not_a_function_error(heap: &Heap, v: Value) -> LispError {
     }
 }
 
+/// How many tree-walker→VM re-entries may be live at once — see
+/// [`Heap::tw_reentry_depth`]. Small on purpose: each level is a real Rust frame, and
+/// past the budget the call simply tree-walks (today's behaviour), so a
+/// mixed-eligibility mutual tail loop stays flat instead of recursing natively.
+pub(crate) const TW_REENTRY_BUDGET: u32 = 32;
+
+/// Is the tree-walker→VM router enabled? `BROOD_NO_TW_REENTRY=1` opts out — the A/B
+/// and bisect lever, catalogued in `debug_flags.rs`. Read once and cached.
+fn tw_reentry_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_TW_REENTRY").is_none())
+}
+
+/// Route a tree-walked closure application onto the VM when the callee has a
+/// VM-eligible arm for this arity. `None` = not routable — tree-walk it as before.
+///
+/// Why: the tree-walker never re-entered the VM, so ONE deferred call tree-walked
+/// everything beneath it transitively at ~10× cost — found 2026-08-30 as the mechanism
+/// behind §7.3's macro-expansion constant (`BROOD_DEFER_DBG` names the entry points).
+/// This is the general fix: a deferred arm still tree-walks its OWN body, but every
+/// VM-eligible callee it invokes runs at engine speed. The `def`-RHS routing at this
+/// file's `compile::run` call is the narrow precedent (it routes one special form; this
+/// routes the application path).
+///
+/// Safety ledger:
+/// - **PTC**: bounded by [`TW_REENTRY_BUDGET`] — see [`Heap::tw_reentry_depth`].
+/// - **Stack**: `vm_apply` fails with the catchable native-stack error at its own guard.
+/// - **Capture**: a `receive` inside the routed run dirty-blocks, exactly as it does
+///   tree-walked — `capture_top_level` is already false under the `TreeWalkGuard`, and
+///   this router runs strictly inside tree-walked contexts.
+/// - **Suspend/IC**: `vm_apply` is the same nested-run chokepoint `dispatch` uses
+///   (IC-base save/restore, §8.1 suspend re-raise).
+fn tw_vm_route(heap: &mut Heap, id: ClosureId, argv: &[Value]) -> Option<LispResult> {
+    if compile::tier_ceiling() < compile::Tier::Bytecode
+        || !tw_reentry_enabled()
+        || heap.tw_reentry_depth.get() >= TW_REENTRY_BUDGET
+    {
+        return None;
+    }
+    // A passthrough wrapper stays on the tree-walker's own elision path (its caller
+    // already unwraps redirects before reaching here); anything without a compiled
+    // arm for this arity tree-walks as before.
+    if passthrough_arm(heap, id, argv.len()).is_some() {
+        return None;
+    }
+    let arm = compile::compiled_arm_for(heap, id, argv.len())?;
+    let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
+    heap.tw_reentry_depth.set(heap.tw_reentry_depth.get() + 1);
+    let r = compile::vm_apply(heap, arm, argv, cenv);
+    heap.tw_reentry_depth.set(heap.tw_reentry_depth.get() - 1);
+    Some(r)
+}
+
 pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> LispResult {
     // No TreeWalkGuard here: `apply` is also the VM dispatch fallback, and its
     // Native branch is a thin shim — `(%receive …)` reached through it is still
@@ -1168,6 +1229,13 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
 }
 
 pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResult {
+    // Tree-walker→VM router (see `tw_vm_route`): a native-boundary callback (a
+    // `map`/`try`/expander invocation) with a VM-eligible arm runs on the engine.
+    // Checked BEFORE the TreeWalkGuard: the routed run is a VM run, and capture
+    // stays gated by the caller's own context, not by this frame.
+    if let Some(r) = tw_vm_route(heap, cl, argv) {
+        return r;
+    }
     // The closure body runs on the tree-walker: its frames can't be captured,
     // so a `receive` parking inside must block its worker, never capture (see
     // `TreeWalkGuard` — clearing at this boundary rather than in `apply`

@@ -2765,6 +2765,16 @@ pub struct Heap {
     /// recycling semantics exactly (the sym/argc guards on every probe exist for it).
     next_ic_base: std::cell::Cell<u32>,
     next_gic_base: std::cell::Cell<u32>,
+    /// Depth of live tree-walker→VM re-entries (`eval`'s closure application routing a
+    /// VM-eligible callee through `vm_apply` — see `tw_vm_route` in `eval/mod.rs`).
+    /// Each re-entry is a real Rust frame, so unbounded routing would turn a
+    /// mixed-eligibility mutual TAIL loop (VM-eligible `f` ↔ ineligible `g`) — which
+    /// today runs flat because the tree-walker absorbs both sides in its `'tail` loop —
+    /// into unbounded native recursion. Past [`crate::eval::TW_REENTRY_BUDGET`] the
+    /// router stands down and the call tree-walks exactly as before, so the PTC
+    /// invariant (`tail_calls_do_not_overflow`) survives every shape; the budget only
+    /// bounds how much VM speed a pathological bounce pattern can buy.
+    pub(crate) tw_reentry_depth: std::cell::Cell<u32>,
     /// **IR-readable mirror** of the fast-link memo (Track B / Technique A): a flat,
     /// `#[repr(C)]` side table indexed by the same call-site id as [`Self::vm_call_ics`],
     /// so JIT'd code can read a site's `(epoch, code, nslots, env)` with a raw load + an
@@ -3247,6 +3257,7 @@ impl Heap {
             vm_call_ics: RefCell::new(Vec::new()),
             next_ic_base: std::cell::Cell::new(0),
             next_gic_base: std::cell::Cell::new(0),
+            tw_reentry_depth: std::cell::Cell::new(0),
             vm_fast_links: RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
@@ -3331,6 +3342,7 @@ impl Heap {
             vm_call_ics: RefCell::new(Vec::new()),
             next_ic_base: std::cell::Cell::new(0),
             next_gic_base: std::cell::Cell::new(0),
+            tw_reentry_depth: std::cell::Cell::new(0),
             vm_fast_links: RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),

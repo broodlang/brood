@@ -2292,7 +2292,7 @@ fn probe_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compiled
 /// handle is memoized per `(closure, argc)` in the `vm_cache` entry, so the steady state of a
 /// per-element closure call is a hash lookup plus a process-local `Arc` clone — no
 /// allocation, and no touch of the shared arm's refcount. See `Heap::vm_cache_arm_handle`.
-fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<ArmHandle>> {
+pub(crate) fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<ArmHandle>> {
     let key = cache_key(heap, id)?;
     if let Some(hit) = heap.vm_cache_arm_handle(key, argc) {
         return hit;

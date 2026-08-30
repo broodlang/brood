@@ -408,8 +408,12 @@ OWNING module provides (see the block comment above). The runtime side of a
   ;; so it applies at whichever provide first finds it bound. Kernel primitives
   ;; only — a `string/last-index-of` here would infer a require of std/string in
   ;; the middle of someone else's provide.
+  ;; `%str-last-index-of` answers -1 for absent (not nil) — checking `nil?` here made a
+  ;; ROOT name (no slash) slice `[0, -1)` and abort the provide that applied it, the
+  ;; moment the first root-named pending contract existed (found by contracts_mode on
+  ;; the ADR-301 merge).
   (let (i (%str-last-index-of qname-str "/" (string/length qname-str)))
-    (if (nil? i) nil (string/substring qname-str 0 i))))
+    (if (or (nil? i) (< i 0)) nil (string/substring qname-str 0 i))))
 (defn- %contracts-apply-pending!
   (key)
   ;; Apply only THIS module's entries, and apply them AS the module: `sig!` on a
