@@ -323,6 +323,13 @@ fn defn_arities(heap: &Heap, forms: &[Value]) -> HashMap<String, Option<usize>> 
 }
 
 fn collect_arity(heap: &Heap, form: Value, out: &mut HashMap<String, Option<usize>>) {
+    // Deep-form stack safety — the one walker in this file that was not wrapped.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        collect_arity_inner(heap, form, out)
+    })
+}
+
+fn collect_arity_inner(heap: &Heap, form: Value, out: &mut HashMap<String, Option<usize>>) {
     let Some(items) = list_items(heap, form) else {
         return;
     };

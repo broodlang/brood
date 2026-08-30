@@ -131,6 +131,11 @@ fn lint_guard(heap: &Heap, guard: Value, out: &mut Vec<(Option<Pos>, String)>) {
 
 /// The first effectful primitive head anywhere in `form`, or `None`. Skips quoted data.
 fn effectful_head(heap: &Heap, form: Value) -> Option<String> {
+    // Deep-form stack safety: a generated guard is as deep as its generator made it.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || effectful_head_inner(heap, form))
+}
+
+fn effectful_head_inner(heap: &Heap, form: Value) -> Option<String> {
     let items = list_items(heap, form)?;
     if let Some(&Value::Sym(h)) = items.first() {
         let name = value::symbol_name(h);

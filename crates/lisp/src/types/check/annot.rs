@@ -75,6 +75,9 @@ pub(super) fn clear_ability_types() {
     ABILITY_TYPES.with(|m| m.borrow_mut().clear());
     RECORD_IDS.with(|m| m.borrow_mut().clear());
     RECORD_FIELD_TYPES.with(|m| m.borrow_mut().clear());
+    // Per-file too: left installed, the previous file's sealed ops answered for a
+    // fragment `(check 'form)` in which no such ability was in scope.
+    SEALED_OP_DOMAINS.with(|m| m.borrow_mut().clear());
 }
 
 /// Install this file's sealed-op occurrence-typing domains (ADR-190). Overwrites the prior
