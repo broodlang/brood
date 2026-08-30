@@ -1399,15 +1399,33 @@ The increment ladder:
    direct `.roots` touches, all but two in `gc.rs`, which already manipulates the buffer
    raw (`set_len`/`as_mut_ptr`/`write_bytes`). Validate under `BROOD_GC_STRESS` +
    `BROOD_GC_VERIFY` + the full suite; measure flat (it must be).
-2. **Inline the Brood fast-frame hit path** behind `BROOD_XCALL=1` (the BROOD_MONO/MKCLO
-   pattern): in `emit_call`'s `brood_blk`, guard `FastLink.env == GLOBAL` (the named-defn
-   case; other envs keep the callback), then emit the ceremony as direct stores at
-   `Heap` field offsets, the frame window (truncate + nil-extend) against the RootsBuf
-   header with a cold-grow callback, the indirect call to `code`, restores, and the
-   status branch. Debug builds and `BROOD_JIT_VERIFY` keep the callback path (they hook
-   the staged-arg scans there).
-3. Sweep the seven rows (± pinned, short + long, image `:live` both arms) and flip the
-   default; delete the callback path's now-dead half if the sweep holds.
+2. **Inline the Brood fast-frame hit path** — LANDED 2026-08-30 (opt-in `BROOD_XCALL=1`
+   first, then default-on via step 3's re-lowering): in `emit_call`'s `brood_blk`, guard
+   `FastLink.env == GLOBAL` (the named-defn case; other envs keep the callback) and
+   `1 <= depth < 64` (one unsigned compare covers the stamp and the stacker probe),
+   then emit the ceremony as direct stores at `Heap` field offsets, the frame window
+   (nil-fill + len stores) against the RootsBuf header (growth falls back), the
+   `call_indirect` into the callee, restores, the latch compare, and a min-guarded
+   truncate. Cold outcomes funnel through `brood_rt_xcall_cold` into the shared
+   `jit_fast_link_cold_outcome`. Emitted in every body it deleted the trampoline pair
+   from the profile and won bintree −11.4% wall — but cost a ~115M-instruction per-run
+   compile CONSTANT (fib +6%/+2% at N=35/38 — fixed, not per-call) and spawn +19% via
+   contention, so all-bodies stays the `BROOD_XCALL=1` experiment lever.
+3. **The hot re-lowering stage — LANDED 2026-08-30, default ON** (`BROOD_NO_XCALL=1`
+   opts out): an installed arm with no inline derivation whose chunk has a non-tail
+   named call re-lowers its OWN body (same chunk/frame/checkpoint) with the inline
+   emission, on the deferred queue — the swap is a plain `jit_code` pointer store +
+   `invalidate_fast_links_for` (no `inline_installed` flip: both codes want `nslots`,
+   so every stale snapshot stays self-consistent, and `inline_nslots` is floored to
+   `nslots` so even a racing `frame_size_for_code` mid-swap sizes right). The deferred
+   inlined-upgrade bodies carry the emission too. Ship gate (`ab --floor`, 10 rows):
+   **bintree −10.6% improved, all else noise**; long-run bintree (N=6000) **−19.1%**;
+   fib/spawn/startup instruction-flat. Two refinements were tried and rejected on the
+   way — gating to the upgrade body alone is winless (upgrade bodies are call-poor:
+   their callees are spliced, and `check-node` never derives one), and the first
+   "gated win" measurement was boot-cache contamination (see the trap in
+   `jit_lower/call.rs::xcall_emit`'s doc: the first `perf stat -r N` batch after any
+   rebuild pays the boot-cache rebuild).
 4. **Register args** for int-typed cross-arm calls — extend the i64 worker's convention
    (args/results in registers, no roots staging) to non-self calls behind the same
    epoch/identity guard. This is where the multiplier lives (the worker measured ~5× on

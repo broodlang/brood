@@ -107,6 +107,12 @@ pub(crate) trait JitBackend {
     /// Lower `arm` to native code, or `None` to bail to the VM (obligations 1–3).
     fn lower_arm(&mut self, arm: &CompiledArm, slot_tags: &[u8]) -> Option<*const u8>;
 
+    /// Re-lower `arm`'s OWN body with hot-body emission (the inline fast-frame call
+    /// path, §7.5) — same chunk, frame and checkpoint as `lower_arm`'s output, so the
+    /// tier swap is a plain pointer swap. Deferred-queue only; `None` bails (the small
+    /// native keeps running).
+    fn lower_arm_hot(&mut self, arm: &CompiledArm, slot_tags: &[u8]) -> Option<*const u8>;
+
     /// Lower `arm`'s **inlined** variant — the deferred second body two-stage tiering
     /// installs over the small one (self-inlining, leaf splicing, ADR-210). `None` when the
     /// spliced body falls out of the subset, or when the stored derivation's epoch no longer

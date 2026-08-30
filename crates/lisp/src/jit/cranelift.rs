@@ -25,8 +25,8 @@ use super::backend::JitBackend;
 use super::rt::*;
 use crate::core::value::Symbol;
 use crate::eval::compile::{
-    arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep, jit_lower_arm, jit_lower_inlined_arm,
-    CompiledArm,
+    arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep, jit_lower_arm, jit_lower_arm_hot,
+    jit_lower_inlined_arm, CompiledArm,
 };
 
 use cranelift_jit::{JITBuilder, JITModule};
@@ -265,6 +265,10 @@ impl CraneliftBackend {
 impl JitBackend for CraneliftBackend {
     fn lower_arm(&mut self, arm: &CompiledArm, slot_tags: &[u8]) -> Option<*const u8> {
         jit_lower_arm(self, arm, slot_tags)
+    }
+
+    fn lower_arm_hot(&mut self, arm: &CompiledArm, slot_tags: &[u8]) -> Option<*const u8> {
+        jit_lower_arm_hot(self, arm, slot_tags)
     }
 
     fn lower_inlined_arm(&mut self, arm: &CompiledArm, slot_tags: &[u8]) -> Option<*const u8> {

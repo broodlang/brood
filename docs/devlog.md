@@ -8003,3 +8003,46 @@ and a `Heap` moves inside its `Box<Process>`. Validated: suite 1299/1299;
 debug-assertions release build (tripwire armed) all green; `make ab --floor` flat on
 startup/spawn/bintree/sort/fib (startup wobbled ±3.4% at its own floor — `perf stat`
 instructions settled it: 196.7M base vs 195.2M new, i.e. flat with a hair fewer).
+
+### 2026-08-30, eleventh — §7.5 lands: the Brood→Brood call ceremony emitted inline, armed by a hot re-lowering stage (bintree −10.6%, −19% long)
+
+The trampoline pair `brood_rt_fast_frame` → `jit_dispatch_fast_frame` → `jit_run_fast_link`
+was ~20% of `bintree` (13.1% + 6.7% self). The whole of it — the field save/restores
+(`jit_call_env` as two opaque words over the now-`repr(C, u8)` `EnvRoot`, dbg-fn, depth,
+force-vm, the IC bases, the gateway token), the frame window (nil-fill + len stores against
+the RootsBuf header from increment 1), the indirect call, the latch compare, and a
+min-guarded truncate — now emits as direct CLIF in `emit_call`'s hit path, guarded by
+`FastLink.env == GLOBAL` and `1 <= depth < 64` (one unsigned compare covering both the
+stack-limit stamp and the stacker probe); any guard failure falls to the unchanged callback
+block, so a fall-through is only ever slower. Cold outcomes funnel through
+`brood_rt_xcall_cold` into the shared `jit_fast_link_cold_outcome`; the suspend-host latch
+resolution is extracted to `jit_latch_dirty_blocked` and shared with the Rust path.
+
+**How it's armed is the actual story.** Emitted in every body (`BROOD_XCALL=1`, kept as the
+experiment lever) it deletes the trampoline from the profile and wins bintree −11.4% wall —
+and costs a ~115M-instruction per-run compile CONSTANT (fib +6% at default N, +2% at N=38:
+fixed, not per-call — the step-1 MKCLO cost class) plus spawn +19% through contention on the
+fatter compiles. Gating it to the deferred inlined-upgrade body is free and WINLESS: upgrade
+bodies are call-poor (their callees are spliced), and the arms making the millions of
+fast-frame calls (`check-node`, two non-tail self-calls) never derive an upgrade. The
+shipped shape is a **hot re-lowering stage**: an installed arm with no derivation whose
+chunk has a non-tail named call recompiles its OWN body — same chunk, same frame, same
+checkpoint — with the inline emission, on the deferred queue, and the swap is a plain
+`jit_code` store + `invalidate_fast_links_for` (no `inline_installed` flip: both codes want
+`nslots`, so every stale FastLink snapshot stays self-consistent; `inline_nslots` is floored
+to `nslots` so even a racing `frame_size_for_code` mid-swap sizes right). Short runs never
+pay (the deferred queue drains only after every initial tier; a spawn storm never compiles
+it); per the stated preference, long-running programs are where the wins go — and they grow
+with run length: ship gate `ab --floor` over 10 rows reads **bintree −10.6% improved, all
+else noise**, and bintree at 2× run length reads **−19.1%**.
+
+Validated: suite 1300/1300 in BOTH modes; GC_STRESS+GC_VERIFY green across the chaos/JIT-GC/
+spawn/scheduler set with the relower default-on; an outcome-class torture file (tail-chain,
+mid-loop int→float deopt, periodic throw through the linked callee, effect-once exact at
+300 000/300 000) agrees across modes and is formalized as `tests/xcall_relower_test.blsp`.
+
+Two measurement traps found the hard way, both now written where they bit: the first
+`perf stat -r N` batch after ANY rebuild pays the build-id-keyed boot-cache rebuild (~215M
+instructions smeared into the average) — it manufactured a phantom "gated win" that a warmed
+re-run erased; and `perf stat` counts every thread, so a background-compile change reads as
+an instruction regression (nqueens +3.3%) on a row whose wall is flat.

@@ -326,7 +326,15 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                 let t0 = web_time::Instant::now();
                 let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if inlined {
-                        jit.lower_inlined_arm(arm, slot_tags)
+                        // A deferred item is the inlined upgrade when a derivation
+                        // exists; otherwise it is the xcall RE-LOWERING of the arm's
+                        // own body (same chunk/frame/checkpoint, hot emission armed —
+                        // §7.5). Same staging slot (`inline_code`), same swap channel.
+                        if arm.inline_name.is_some() || arm.leaf.is_some() {
+                            jit.lower_inlined_arm(arm, slot_tags)
+                        } else {
+                            jit.lower_arm_hot(arm, slot_tags)
+                        }
                     } else {
                         jit.lower_arm(arm, slot_tags)
                     }
@@ -2296,7 +2304,30 @@ pub(crate) fn jit_tier_in_frame(
     // i64-eligible arms skip the two-stage inline upgrade entirely: their small native IS the
     // unboxed-i64 register worker (`jit_lower_i64_arm`), which already recurses to full depth in
     // registers — the boxed depth-2 inlined upgrade would only swap in inferior code.
-    if arm.inline_name.is_some()
+    // §7.5 hot RE-LOWERING: an arm with NO inline derivation whose chunk has a non-tail
+    // named call re-lowers its OWN body (same chunk, frame and checkpoint) with the
+    // inline fast-frame emission, on the same deferred channel. The chunk scan runs once
+    // per arm (`xcall_wanted` is a OnceLock); `dbg_name` is required because the swap
+    // re-points this process's fast links by callee name.
+    let xcall_relower = arm.inline_name.is_none()
+        && arm.leaf.is_none()
+        && arm.dbg_name.is_some()
+        && super::xcall_relower_enabled()
+        && *arm.xcall_wanted.get_or_init(|| {
+            arm.chunk.as_ref().is_some_and(|c| {
+                c.code.iter().any(|inst| {
+                    matches!(
+                        inst,
+                        Inst::Call {
+                            tail: false,
+                            head: Some(_),
+                            ..
+                        }
+                    )
+                })
+            })
+        });
+    if (arm.inline_name.is_some() || xcall_relower)
         && !arm.inline_installed.load(Acquire)
         && !ActiveBackend::declines_inline_upgrade(arm)
     {
@@ -2309,7 +2340,7 @@ pub(crate) fn jit_tier_in_frame(
             // branch below swaps it in with OUR (deterministic, identical) `inline_nslots`.
             // This is what lets a short parallel fan-out (`pfib`) pick up the inlined win —
             // one compile serves every process instead of each racing its own to completion.
-            if let Some(key) = arm.share_key {
+            if let Some(key) = arm.share_key.filter(|_| arm.inline_name.is_some()) {
                 if let Some((ptr, epoch)) = heap.jit_inline_lookup(key) {
                     if epoch == heap.global_epoch()
                         && !ptr.is_null()
@@ -2349,6 +2380,37 @@ pub(crate) fn jit_tier_in_frame(
                 }
             }
         } else if ic != crate::jit::BAILED && ic != crate::jit::QUEUED {
+            if xcall_relower {
+                // The re-lowered body is ready — a PLAIN pointer swap: same chunk, same
+                // frame size, same checkpoint, so none of the inlined swap's machinery
+                // applies. `inline_installed` stays false (frame sizing stays `nslots`,
+                // which both codes want), and the staging slot is nulled FIRST so
+                // `frame_size_for_code` can never match the new pointer against
+                // `inline_nslots` mid-swap (which is floored to `nslots` anyway — belt
+                // and braces). A peer's stale FastLink (old pointer + `nslots`) stays a
+                // self-consistent snapshot — the old code remains correct, just thinner —
+                // so only this process's links are re-pointed. `inline_queued` stays
+                // true, which is the once-per-epoch latch against re-enqueueing.
+                arm.inline_code.store(std::ptr::null_mut(), Release);
+                arm.jit_code.store(ic, Release);
+                if let Some(sym) = arm.dbg_name {
+                    heap.invalidate_fast_links_for(sym);
+                }
+                {
+                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                        let name = arm
+                            .dbg_name
+                            .map(crate::core::value::symbol_name_ref)
+                            .unwrap_or("<closure>");
+                        eprintln!(
+                            "[jit-ir] arm={name} xcall-relower-installed nslots={}",
+                            arm.nslots
+                        );
+                    }
+                }
+                return None; // one VM activation across the swap, like the inlined path
+            }
             // The inlined upgrade is ready — swap it in. Store `inline_installed` BEFORE
             // `jit_code` so that any reader which Acquire-loads `jit_code = inline_code` is
             // guaranteed (by the Release-Acquire chain) to also see `inline_installed = true`

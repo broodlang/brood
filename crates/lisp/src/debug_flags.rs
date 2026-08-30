@@ -207,6 +207,16 @@ pub const FLAGS: &[DebugFlag] = &[
         "name each module materialised from an image, and time the boot install — the only way          to tell a module that came from the image from one that loaded from source anyway",
     ),
     f(
+        "BROOD_NO_XCALL",
+        OPTOUT,
+        "opt OUT of the hot re-lowering / inline fast-frame call path (§7.5, default ON): a hot arm's body is recompiled on the deferred queue with the Brood-to-Brood call ceremony emitted inline (bintree -10.6%, -19% at 2x run length; short runs unaffected). The A/B and bisect lever",
+    ),
+    f(
+        "BROOD_XCALL",
+        JIT,
+        "=1: additionally emit the inline call path in EVERY body's first compile (the experiment lever) — measured as a ~115M-instruction per-run compile constant, so not the default; the default arms it only in hot re-lowerings",
+    ),
+    f(
         "BROOD_MONO",
         OPTOUT,
         "opt IN to ability-dispatch monomorphization (off by default — it trades late binding)",

@@ -26,22 +26,50 @@ pub(super) enum Flow {
     Break,
 }
 
-/// §7.5 `BROOD_XCALL=1`: emit the Brood fast-frame **hit path inline** — the call
-/// ceremony `jit_run_fast_link` performs in Rust (field save/restore, frame window,
-/// the indirect call) becomes direct CLIF loads/stores, deleting the
-/// `brood_rt_fast_frame` → `jit_dispatch_fast_frame` → `jit_run_fast_link` frames from
-/// the steady state. Opt-in while the seven-row sweep is pending; excluded wherever the
-/// callback path carries diagnostics the inline path does not replicate (debug builds'
-/// staged-arg validation, `BROOD_JIT_VERIFY`/`_FN`'s scans, `perf-stats`' counters).
-fn xcall_active() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var_os("BROOD_XCALL").is_some_and(|v| v == "1")
+/// §7.5: emit the Brood fast-frame **hit path inline** — the call ceremony
+/// `jit_run_fast_link` performs in Rust (field save/restore, frame window, the indirect
+/// call) becomes direct CLIF loads/stores, deleting the `brood_rt_fast_frame` →
+/// `jit_dispatch_fast_frame` → `jit_run_fast_link` frames from the steady state.
+///
+/// **Opt-in (`BROOD_XCALL=1`), emitted in every general-lowered body.** Two refinements
+/// were tried and rejected on 2026-08-30 before settling here:
+/// - *Default-on gated to the inlined-upgrade body* (riding the deferred compile so
+///   short runs never pay the fatter IR): free, but winless — the upgrade body's
+///   callees are spliced, so its residual call sites are few, and the arms that make
+///   the millions of fast-frame calls (`bintree`'s `check-node`, two non-tail
+///   self-calls) never derive an upgrade at all. Measured warmed, same binary:
+///   bintree ±0.3%.
+/// - *Emitted everywhere by default*: bintree −11.4% wall (unpinned, script-warmed),
+///   but a ~115M-instruction per-run compile CONSTANT (fib +6% at default N, +2% at
+///   N=38 — fixed, not per-call: the step-1 MKCLO cost class) and spawn +19% through
+///   contention on the fatter compiles.
+/// The shipped shape is the **hot re-lowering stage** (`hot = true`): recompile the SAME
+/// small body with this blob on the deferred queue once the arm's small native is
+/// installed and it activates again — zero compile cost to short runs (the deferred
+/// queue drains only after every initial tier), the full win for long-running arms; the
+/// deferred inlined-upgrade bodies carry it too. `BROOD_NO_XCALL=1` kills all of it.
+/// Excluded wherever the callback path carries diagnostics the inline path does not
+/// replicate (debug builds' staged-arg validation, `BROOD_JIT_VERIFY`/`_FN`'s scans,
+/// `perf-stats`' counters).
+///
+/// **Measurement trap (cost a wrong conclusion today):** the first `perf stat -r N`
+/// batch after ANY rebuild pays the build-id-keyed boot-cache rebuild (~215M
+/// instructions smeared into the average) — warm each binary once before an A/B, the
+/// way `scripts/ab-bench.sh` footgun 4 already prescribes.
+pub(super) fn xcall_emit(hot: bool) -> bool {
+    // Master enable: the diagnostics exclusions + the BROOD_NO_XCALL kill switch.
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // BROOD_XCALL=1: additionally arm EVERY body (the experiment/A-B lever) — the
+    // measured per-run compile constant makes this unsuitable as a default.
+    static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let ok = *OK.get_or_init(|| {
+        std::env::var_os("BROOD_NO_XCALL").is_none()
             && !cfg!(debug_assertions)
             && !cfg!(feature = "perf-stats")
             && !crate::eval::compile::inline::jit_verify_active()
             && std::env::var_os("BROOD_JIT_VERIFY_FN").is_none()
-    })
+    });
+    ok && (hot || *ALL.get_or_init(|| std::env::var_os("BROOD_XCALL").is_some_and(|v| v == "1")))
 }
 
 /// Report a mid-emit refusal under `BROOD_JIT_BAIL_TRACE=1`, same line shape as
@@ -438,7 +466,7 @@ pub(super) fn emit_call(
         b.ins().brif(nst, error, &[], cont, &[]);
 
         b.switch_to_block(brood_blk);
-        if xcall_active() {
+        if funcs.xcall {
             // ---- §7.5 BROOD_XCALL: the inline fast-frame hit path ----
             // Preconditions the callback path re-derives are guarded here; ANY failure
             // falls to `ff_blk` (the unchanged callback), which re-checks everything —

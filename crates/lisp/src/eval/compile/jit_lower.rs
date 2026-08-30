@@ -129,6 +129,12 @@ pub(super) fn record_mid_emit_reason(reason: &'static str) {
     LAST_MID_EMIT_REASON.set(Some(reason));
 }
 
+/// Is the §7.5 hot re-lowering enabled for this process (the tiering glue's gate)?
+#[cfg(feature = "jit")]
+pub(crate) fn xcall_relower_enabled() -> bool {
+    call::xcall_emit(true)
+}
+
 /// Take (and clear) the mid-emit refusal reason recorded during the lowering attempt
 /// that just returned `None` — for the caller's arm-named decline line.
 #[cfg(feature = "jit")]
@@ -206,7 +212,23 @@ pub(crate) fn jit_lower_arm(
     // it lives in `jit_plan` with the measurement that justifies it, and a refusal is
     // reportable there (`BROOD_JIT_BAIL_TRACE=1`) instead of an unexplained `None` from here.
     plan_general_lowering(arm, slot_tags).ok()?;
-    jit_lower_arm_inner(jit, arm, slot_tags, None)
+    jit_lower_arm_inner(jit, arm, slot_tags, None, false)
+}
+
+/// Re-lower the arm's OWN body — same chunk, same frame size, same checkpoint — with the
+/// hot-body emission armed (the §7.5 inline fast-frame blob at its non-tail named call
+/// sites). Rides the deferred queue like the inlined upgrade, so its fatter compile never
+/// delays an initial tier; the swap in `jit_tier` is a plain `jit_code` pointer swap
+/// (identical layout, no `inline_installed` flip). Skips the i64 worker attempt — the arm
+/// already has installed code, and the worker never reaches this path (its arms decline
+/// via `declines_inline_upgrade`).
+pub(crate) fn jit_lower_arm_hot(
+    jit: &mut crate::jit::CraneliftBackend,
+    arm: &CompiledArm,
+    slot_tags: &[u8],
+) -> Option<*const u8> {
+    plan_general_lowering(arm, slot_tags).ok()?;
+    jit_lower_arm_inner(jit, arm, slot_tags, None, true)
 }
 
 /// Unbox a free-global read that was observed holding a `Value::Float` at tier time
@@ -302,6 +324,7 @@ pub(crate) fn jit_lower_inlined_arm(
             arm,
             slot_tags,
             Some((&r.body, r.chunk.as_ref()?, arm.inline_nslots, r.ckpt_slot)),
+            true,
         );
     }
     // Self-inlining: the body is re-derived fresh here, so box it — its heap address
@@ -322,6 +345,7 @@ pub(crate) fn jit_lower_inlined_arm(
         arm,
         slot_tags,
         Some((&spliced, &chunk, arm.inline_nslots, u32::MAX)),
+        true,
     )?;
     // Lowering succeeded and baked raw `cv` pointers into the chunk — retain it forever.
     JIT_INLINE_CHUNK_KEEPALIVE
@@ -344,6 +368,7 @@ fn jit_lower_arm_inner(
     arm: &CompiledArm,
     slot_tags: &[u8],
     inline: Option<(&Node, &Chunk, usize, u32)>,
+    hot: bool,
 ) -> Option<*const u8> {
     use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_FLOAT, TAG_INT};
     use cranelift_codegen::ir::{
@@ -1624,6 +1649,7 @@ fn jit_lower_arm_inner(
         xlatch: xlatch_ref,
         xcold: xcold_ref,
         armfn_sig: armfn_sigref,
+        xcall: call::xcall_emit(hot),
         sp: sp_ref,
         tickn: tickn_ref,
         #[cfg(debug_assertions)]
