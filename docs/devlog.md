@@ -7381,3 +7381,23 @@ Gauntlet for a wake-ordering change: full suite twice (1282/1282 both), the wake
 binaries (live_migration, local_send_race, autoload_race, jit_suspend_latch) looped 5×
 capped `-j1`, a GC-stress pass over the race tests, and the cli distribution suite 3× —
 all green. The lost-wake protection itself is pinned by 473f8290's sabotage-verified tests.
+
+## 2026-08-30 (third) — M2b's fat tables go lazy: −59 MB at 300k processes, time-flat
+
+`vm_arm_block` materialised an `Option<CallIcEntry>` slot (64 B) for every site of every
+ACTIVATED arm — entered or not — and the same for `vm_global_ics`. The mirror's 2026-08-18
+fix already proved the pattern that removes it: grow by the table's only writer, tolerate
+short reads everywhere else. Bases now come from `next_ic_base`/`next_gic_base` counters,
+`vm_call_ic_put`/`vm_global_ic_put` grow to `abs + 1` on first publish (guarded to never
+grow past the reservation, so a stale base after a `runtime_collect` reset writes nothing
+rather than something wrong), and the counters reset in lockstep with the four
+table+registry clears — ADR-096's site-id recycling is bit-for-bit what it was.
+
+Measured: `spawn-live` peak RSS 1796 → 1737 MB; every timed row flat at both ceilings, with
+ceiling-1 `pfib`'s +3.9% wall retracted against identical instructions (600.9 G both arms —
+the same wall-vs-work discipline the spawn phantom taught). The full sharing design (one
+table per runtime) stays where the 2026-08-20 correction left it: blocked on the
+process-local `ArmHandle` and per-process `callee_bases`; and the 64→48 B entry shrink died
+in analysis tonight — `callee` must ride the entry even on arm hits, because it is the
+rooted pre-args callee the epoch-moved fallback dispatches (re-resolving would be
+semantically wrong), so the enum split has nothing disjoint to union.
