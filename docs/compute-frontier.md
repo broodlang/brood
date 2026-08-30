@@ -1312,6 +1312,17 @@ pinning exaggerates (CLAUDE.md's ADR-175 note).
 
 ### 7.3 Message rows are 15–17% interpreter, and their arms are NOT in the bail trace
 
+> **2026-08-30: the biggest single cost in this family is CLOSED — pingpong −19.7%, ring
+> −17.6%** (the unconditional per-delivery `notify_all` futex syscall `473f8290`'s wake fix
+> introduced; now conditional on a lock-protected `cv_waiters` count, same invariant — see
+> the devlog). What remains of these rows, measured while closing it: a ~83 M-instruction
+> per-RUN constant — load-time macro expansion of `receive`/match forms through tree-walked
+> prelude expander helpers (`macroexpand` was 17% of the row's cycles pre-fix) — smeared in
+> across the 0.13→0.15 type-system window. That is a LOAD cost every match-heavy program
+> pays at startup, not a message cost; it wants its own session (either make the expander
+> helpers VM-eligible during expansion, or cache user-program expansion the way ADR-138
+> caches the prelude's).
+
 `pingpong` 15.0% / `ring` 17.2% `exec_chunk`, and the receive loops never appear in
 `BROOD_JIT_BAIL_TRACE` — a `receive` suspends, so the arm is *structurally* outside the
 subset, not refused. Same partial-lowering family as §7.1 (the receive as an exit point).
