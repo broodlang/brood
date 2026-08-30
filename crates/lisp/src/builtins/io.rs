@@ -973,14 +973,45 @@ pub(super) fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     }
 }
 
-/// `(string/->number s)` — parse `s` as an integer if it is one, else as a float,
-/// else `nil`. The inverse of `str`. A robust parse-or-nil can't be
+/// `(string/->number s &optional radix)` — parse `s` as an integer if it is one, else as
+/// a float, else `nil`. The inverse of `str`. A robust parse-or-nil can't be
 /// expressed over `reflect/read-string` (which would read `"3abc"` as `3` and stop), so
 /// the strict parse is a primitive. Surrounding whitespace is not accepted —
 /// `trim` first if the input may carry any.
-
+///
+/// **`radix` is the only way to read hex, octal or binary in Brood.** ADR-169 reserved
+/// `0x1F`/`0b1010`/`0o17` as syntax rather than names *on the grounds that this function
+/// covers the need at runtime* — and the reader's own hint, `syntax/atom.rs`'s
+/// `reserved_numeric_hint`, has been telling people to call `(string/->number "1F" 16)`
+/// since. It took two arguments nowhere: the arity was `exact(1)`, so the hint named a
+/// call that raised, and the language could not read a radix at all (found 2026-08-30).
+///
+/// With a radix the parse is **integer-only**, for every radix including 10: a radix
+/// describes an integer notation, and `"3.5"` in base 16 is not a number anyone means.
+/// A leading `-`/`+` is accepted; a `0x`/`0b`/`0o` *prefix* is not (the digits alone —
+/// the prefix is the syntax this function exists to replace). Out of `2..=36` the radix
+/// is a caller bug, so it raises rather than answering `nil`, which would be
+/// indistinguishable from unparseable text.
 pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "string/->number", arg(args, 0))?;
+    if args.len() >= 2 {
+        let radix = expect_int(heap, "string/->number", arg(args, 1))?;
+        if !(2..=36).contains(&radix) {
+            return Err(LispError::type_err(format!(
+                "string/->number: radix must be between 2 and 36, got {radix}"
+            )));
+        }
+        let radix = radix as u32;
+        return Ok(match i64::from_str_radix(&s, radix) {
+            Ok(i) => Value::int(i),
+            // Same no-demotion reasoning as the decimal path below: past i64 the value is
+            // a bignum, never a lossy f64.
+            Err(_) => match num_bigint::BigInt::parse_bytes(s.as_bytes(), radix) {
+                Some(n) => heap.alloc_bigint(n),
+                None => Value::nil(),
+            },
+        });
+    }
     if let Ok(i) = s.parse::<i64>() {
         Ok(Value::int(i))
     } else if let Ok(n) = s.parse::<num_bigint::BigInt>() {

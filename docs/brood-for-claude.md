@@ -1005,6 +1005,16 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (or `decimal/number->`) for an inexact result; `math/numerator`/`math/denominator` read the parts.
   Number types: `int` (bignum on overflow) · `float` · `decimal` (`1.50M`, exact
   base-10) · `ratio` (`1/2`, exact rational). `number?`/`ratio?`/`decimal?` test them.
+- **Text → number: `(string/->number s)`, and it picks the type from the digits.**
+  `"42"` → an `int`, `"3.14"` → a `float`, anything it cannot parse in full → **`nil`**
+  (it never throws, and it rejects `"3abc"`, `"  7 "`, `"1/2"` — `string/trim` first, and
+  `(or (string/->number s) 0)` is the default idiom). So `"3"` gives you an int even when
+  you wanted a float: `(->float (string/->number "3"))`. Going the other way,
+  `math/floor`/`math/round` return an `int` (there is no `trunc`). An optional **radix**
+  reads hex/octal/binary — `(string/->number "1F" 16)` → `31` — integer-only, digits
+  alone (no `0x` prefix), 2–36 or it raises; this is the *only* way, since Brood has no
+  radix literals. For money use `(decimal/of "1.50")`, which **throws** on malformed
+  input rather than answering nil: a parse failing is data, a constructor failing is a bug.
 - **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-loads
   it — ADR-227): `abs` `ceil` `round` `round-to` (round to N decimals, stays a number)
   `pow` `sqrt` `clamp` `sum` `product`, the sign/parity predicates `positive?`
