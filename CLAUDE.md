@@ -60,9 +60,10 @@ Before starting new work:
   agreeing with the baseline.
 - **A regression is stop-the-world.** If new work turns a green row red or a green test
   flaky, fixing that takes priority over finishing the feature — don't commit forward.
-- **Build uncapped, run capped.** Put an address-space cap in front of every test, `nest check`
-  and `brood` run — `( ulimit -v 4000000; cargo nextest run -p brood -j1 -E '…' )` — and keep
-  `-j1`, so one runaway is the whole spike. A *diverging* process is indistinguishable from a
+- **Build uncapped, run capped.** Put an address-space cap in front of every test, `nest check`,
+  `nest run` (in a downstream project too — bedit is where KI-87 first showed) and `brood`
+  run — `( ulimit -v 4000000; cargo nextest run -p brood -j1 -E '…' )` — and keep `-j1`, so
+  one runaway is the whole spike. A *diverging* process is indistinguishable from a
   heavy one until it has eaten the machine: KI-87 (a checker cycle guard that un-guarded) put
   three test processes at 19 GB each and a `nest run` at 54 GB, crashing the box three
   sessions running; under the cap the same runs die in ten seconds with the panic site named
