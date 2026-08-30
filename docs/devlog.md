@@ -7401,3 +7401,21 @@ process-local `ArmHandle` and per-process `callee_bases`; and the 64→48 B entr
 in analysis tonight — `callee` must ride the entry even on arm hits, because it is the
 rooted pre-args callee the epoch-moved fallback dispatches (re-resolving would be
 semantically wrong), so the enum split has nothing disjoint to union.
+
+## 2026-08-30 (fourth) — a quasiquote hiding in a vector literal, and the flag that names deserters
+
+§7.3's expansion-constant follow-up. The chain, each link measured: macro expanders already
+run on the VM (`apply_engine`), but the tree-walker's `apply_closure` never re-enters it —
+so ONE closure deferring to the tree-walker tree-walks everything it calls, transitively.
+The `tw_defer` counter (34, warm) could never say WHO; the new `BROOD_DEFER_DBG=1` names
+each deserter, and the warm list led with `%receive-split` — whose only sin is a quasiquote
+inside a VECTOR literal: `expand_static_quasiquotes` walked lists only, a vector literal is
+an atom to `list_to_vec`, so the raw `quasiquote` special form survived into the arm and
+deferred it. The walker now descends vector literals.
+
+Measured: pingpong instructions 2.199 → 2.160 G (−39 M of the ~83 M constant), wall −4.0%
+best-of-15 with a 0.0% floor; startup/json/fib flat-to-better; suite 1285/1285. What
+remains of the constant is the autogensym-template class — macros like `receive`/`match`
+whose expanders defer BY DESIGN (fresh gensyms per invocation can't expand once at
+compile). Compiling those means emitting builder code that calls gensym at runtime — a
+real feature, recorded in §7.3 as the next slice.

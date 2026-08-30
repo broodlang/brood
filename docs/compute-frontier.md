@@ -1319,9 +1319,14 @@ pinning exaggerates (CLAUDE.md's ADR-175 note).
 > per-RUN constant — load-time macro expansion of `receive`/match forms through tree-walked
 > prelude expander helpers (`macroexpand` was 17% of the row's cycles pre-fix) — smeared in
 > across the 0.13→0.15 type-system window. That is a LOAD cost every match-heavy program
-> pays at startup, not a message cost; it wants its own session (either make the expander
-> helpers VM-eligible during expansion, or cache user-program expansion the way ADR-138
-> caches the prelude's).
+> pays at startup, not a message cost. **First slice landed 2026-08-30**: the static
+> quasiquote rewrite now descends VECTOR literals (a qq inside one was invisible, so
+> `%receive-split`'s whole arm deferred — and a deferred arm tree-walks everything below
+> it, since `apply_closure` never re-enters the VM). −39 M instructions, pingpong wall
+> −4.0%. `BROOD_DEFER_DBG=1` now names each deferring closure. The REMAINING constant is
+> the autogensym-template class: `receive`/`match`-style expanders defer by design (fresh
+> gensyms per invocation), and compiling them means builder code that calls gensym at
+> runtime — the next slice, its own session.
 
 `pingpong` 15.0% / `ring` 17.2% `exec_chunk`, and the receive loops never appear in
 `BROOD_JIT_BAIL_TRACE` — a `receive` suspends, so the arm is *structurally* outside the
