@@ -547,6 +547,7 @@ if you are reintroducing hoisting, they are what you have to write back."
       indent-after-open
       head-text
       (+ indent-after-open (last-line-length head-text)))))
+(sig render-head-line (any (or nil list) bool int -> string))
 (defn- render-head-line-build (items pair-bind-first? slot indent acc col)
   ;; `col` is the column the head line currently ends at — tracked rather than
   ;; derived from `(string/length acc)`, because once an arg has dropped only the
@@ -597,6 +598,7 @@ if you are reintroducing hoisting, they are what you have to write back."
                 indent
                 (str acc " " part)
                 (+ at (last-line-length part))))))))
+(sig render-head-line-build ((or nil list) bool keyword int string int -> string))
 
 (defn- last-line-length (s)
   ;; The length of `s` past its last newline (the whole string when it has none).

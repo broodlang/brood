@@ -246,18 +246,22 @@ suggestions\", never to an error on the user's command line."
   "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why."
   (let (files (test-files)
         root (complete-root))
-    (if (or (nil? files) (nil? root))
+    ;; Two nested guards, not one `(or …)`: the checker narrows a single-variable
+    ;; nil test, so `root` reads `string` (not `nil | string`) past its own guard.
+    (if (nil? files)
       nil
-      (sort (keys (fold (fn (seen name) (assoc seen name true))
-                    {}
-                    (fold (fn (acc rel)
-                            (append acc
-                              (or (complete-safely (fn ()
-                                                     (complete-tags-in (file/slurp (path/join root
-                                                                                     rel))
-                                                       nil 0)))
-                                nil)))
-                      nil files)))))))
+      (if (nil? root)
+        nil
+        (sort (keys (fold (fn (seen name) (assoc seen name true))
+                      {}
+                      (fold (fn (acc rel)
+                              (append acc
+                                (or (complete-safely (fn ()
+                                                       (complete-tags-in (file/slurp (path/join root
+                                                                                       rel))
+                                                         nil 0)))
+                                  nil)))
+                        nil files))))))))
 
 ;; --- selectors ----------------------------------------------------------------
 (defn selectors ()

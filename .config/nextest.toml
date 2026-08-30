@@ -136,9 +136,17 @@ retries = 1
 # with the rest of the workspace. If this ever goes red again, check the ENGINE ratio and the
 # profile before touching this number — the history above is a record of what happens
 # otherwise.
+# Raised 300s -> 900s on 2026-08-30, red for the exact reason the 2026-08-11 note
+# warned about: 300s was sized to the VM engine (66s, 5x headroom) and this wrapper
+# ALSO runs under the CI `differential (tree-walker)` job's BROOD_VM=0, where the
+# same cases measure 196s on a 12-core box with exclusive use — a 2-core shared
+# runner sits right on the cap, and 29831e06's run was killed at TRY 2 (the
+# job's only failure; the code was exonerated by a local instruction-count A/B).
+# 900s = ~4.5x headroom over the measured tree-walker figure; the VM run keeps its
+# inner `*test-timeout-ms*` as the guard that catches a hung case, as ever.
 [[profile.default.overrides]]
 filter = 'binary(suite)'
-slow-timeout = { period = "60s", terminate-after = 5 }
+slow-timeout = { period = "60s", terminate-after = 15 }
 # One retry, for the same reason `distribution`/`serve_attach` get one — and with a
 # sharper edge here. The in-language suite CONTAINS timing-sensitive cases that talk
 # to a local node (`tests/remote_spawn_test.blsp` does a `remote-spawn` round trip),
