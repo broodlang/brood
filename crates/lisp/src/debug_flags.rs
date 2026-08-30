@@ -87,7 +87,12 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_DEFER_DBG",
         ATTRIBUTION,
-        "name each closure that defers to the tree-walker — the tw_defer counter says how many, this says WHO (one defer tree-walks everything below it)",
+        "name each closure that defers to the tree-walker — the tw_defer counter says how many, this says WHO (one defer tree-walks its OWN body; eligible callees route back to the VM)",
+    ),
+    f(
+        "BROOD_NO_TW_REENTRY",
+        OPTOUT,
+        "opt OUT of the tree-walker routing VM-eligible callees back to the engine (60x on an eligible helper under a deferred driver; startup -7%)",
     ),
     // ---- JIT ----
     f(
