@@ -167,7 +167,6 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
       (let (n (string/->number v))
         (if (and (int? n) (>= n 0)) n 0)))))
 
-
 (defn parse-request (raw)
   "Parse a raw HTTP request (`bytes`, from `read-request`) into
   `{:method :path :version :headers :body}` (`:headers` keys lower-cased). The head
@@ -439,7 +438,6 @@ place — `url/parse-url` (the full parser); a scheme-less input is treated as a
         path (let (p (/get u :path)) (if (or (nil? p) (= p "")) "/" p))
         port (or (/get u :port) (if (= scheme "https") 443 80)))
     {:scheme scheme :host (/get u :host) :port port :path path :query (/get u :query)}))
-
 
 (defn parse-response (raw)
   "Parse a raw HTTP response (`bytes`, from the transport; a string is accepted
