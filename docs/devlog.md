@@ -7297,6 +7297,25 @@ set each run — wasmtime reserves large virtual regions per store, so the cap b
 whatever is concurrent. Both files pass uncapped. A varying failure set under a cap is the
 cap, not a flake.
 
+### 2026-08-30, later still — RETRACTED: there is no upstream `spawn` regression
+
+The "+7.5% vs 28bcdce8" claim two entries up does not survive a layout-insensitive
+measurement. `perf stat` on the spawn row across three binaries — 28bcdce8, HEAD, and HEAD
+with the new comparison arities reverted — reads **instructions retired flat at
+2.106–2.124 G (±0.9%) and cycles flat at 2.33–2.38 G (±2%)**, while wall-clock deltas
+between the same binaries read anywhere from −1% to +8% with best-of-15 floors of 1–3%.
+The contradiction that exposed it: reverting upstream's `<`/`>`/`<=`/`>=` single-arg
+arities (the only plausible per-spawn mechanism in the range) measured spawn +6.1%
+"slower" — the wrong direction for the hypothesis, and the tell that the wall numbers were
+noise.
+
+Worth keeping, and now in the §7.1 discipline list: **a same-binary floor cannot see
+cross-binary noise.** `spawn` runs unpinned on all cores, so its wall time carries
+scheduler wake-latency variance and per-binary code-layout luck that base-vs-base of ONE
+binary never samples. Before believing a wall-clock regression on a concurrency row
+between two different binaries, confirm it with `perf stat -e instructions,cycles` — work
+that didn't grow is a regression that isn't there.
+
 ## 2026-08-30 (later) — strict to zero over std, and what the checker had to learn to allow it
 
 The type-system question ("what stops sound, complete and gated?") got its practical first

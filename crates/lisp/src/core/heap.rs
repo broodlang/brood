@@ -1936,11 +1936,7 @@ impl RuntimeCode {
     /// A fresh runtime whose global table is seeded with the prelude bindings
     /// (`symbol -> prelude value`). The code slabs start empty — user `def`s
     /// append to them. Inner processes share this whole thing via `Arc`.
-    pub fn seeded(
-        bindings: &[(Symbol, Value)],
-        prelude_private: &[Symbol],
-        prelude_meta: &[(Symbol, NameMeta)],
-    ) -> Self {
+    pub fn seeded(bindings: &[(Symbol, Value)], prelude_private: &[Symbol]) -> Self {
         let mut globals = SymbolMap::with_capacity_and_hasher(bindings.len(), Default::default());
         for &(s, v) in bindings {
             globals.insert(s, v);
@@ -1954,13 +1950,7 @@ impl RuntimeCode {
             runtime_tag: next_runtime_tag(),
             gen_inflight: [AtomicUsize::new(0), AtomicUsize::new(0)],
             gen_version: AtomicU64::new(0),
-            // The prelude's stability metadata, threaded in for exactly the reason its
-            // privacy set is: `seeded` INSERTS the prelude's bindings rather than
-            // re-evaluating them, so the `%register-meta` a `(meta …)` emits never fires
-            // in a live runtime and the facts would be silently absent — which is how
-            // `not=`'s deprecation first came out invisible in every process but the
-            // builder heap.
-            meta: RwLock::new(prelude_meta.iter().cloned().collect()),
+            meta: RwLock::new(SymbolMap::default()),
             // Reserved at seed time: every shipped **function**, macro and builtin.
             // Deliberately NOT the prelude's data globals — `*features*`,
             // `*load-path*`, `*module-docs*`, `*reload-diagnostics*` are registries
@@ -4599,21 +4589,6 @@ impl Heap {
     /// re-evaluated — see [`RuntimeCode::seeded`]).
     /// Also the *snapshot* half of the `%isolate` bracket — see
     /// [`restore_private_names`](Self::restore_private_names).
-    /// A snapshot of this runtime's recorded stability metadata (ADR-283) — the
-    /// `(meta …)` facts, the sibling of [`private_names_snapshot`](Self::private_names_snapshot)
-    /// and used at the same one place, for the same reason: the prelude is inserted into
-    /// each live runtime, not re-evaluated, so a fact recorded by evaluating it in the
-    /// builder heap has to be carried across explicitly or it is lost.
-    pub fn name_meta_snapshot(&self) -> Vec<(Symbol, NameMeta)> {
-        self.runtime
-            .meta
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(s, m)| (*s, m.clone()))
-            .collect()
-    }
-
     pub fn private_names_snapshot(&self) -> Vec<Symbol> {
         self.runtime
             .private
