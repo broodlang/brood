@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::core::value::{Arity, Symbol};
+use crate::core::value::{Arity, Symbol, Value};
 use crate::types::{Sig, Ty};
 
 // ---- Type-variable representation for user-declared sigs --------------------
@@ -416,6 +416,16 @@ pub(super) struct Ctx {
     /// argument constraints. Redefinable-global caution is the caller's (treated as an
     /// over-approximation, like the loaded-inferred sigs).
     inferred_fn_sig: HashMap<Symbol, Sig>,
+    /// The `(fn …)` FORM of each same-file, single-def, undeclared function (the Pass 2.8
+    /// candidates) — what call-site specialization (`sigs::specialized_ret`) re-types under
+    /// a call's argument types. The file isn't loaded while it is checked, so this is the
+    /// only way its bodies are reachable; a loaded function's arms come from the heap.
+    fn_forms: HashMap<Symbol, Value>,
+    /// The un-expanded clauses of each same-file multi-clause `defn` (pattern or arity
+    /// heads), keyed by the qualified name Pass 2.8 records overloads under. The expanded
+    /// tree of such a definition is one variadic `fn` over `match*` (ADR-226) and says
+    /// nothing about what each clause takes; the clauses do, so specialization reads them.
+    clause_arms: HashMap<Symbol, Vec<Value>>,
     /// User-declared sigs that contain type variables (`?A`) — the full
     /// [`SigWithVars`] for unification at call sites.  Populated alongside
     /// [`declared`] when the sig annotation has at least one `?`-symbol.
@@ -844,6 +854,23 @@ impl Ctx {
         if !self.declared.contains_key(&sym) {
             self.inferred_fn_sig.insert(sym, sig);
         }
+    }
+    /// The `(fn …)` form of a same-file function recorded by Pass 2.8, for call-site
+    /// specialization.
+    pub(super) fn fn_form(&self, sym: Symbol) -> Option<Value> {
+        self.fn_forms.get(&sym).copied()
+    }
+    /// Record a same-file function's `(fn …)` form (Pass 2.8 candidates only).
+    pub(super) fn add_fn_form(&mut self, sym: Symbol, form: Value) {
+        self.fn_forms.insert(sym, form);
+    }
+    /// The un-expanded clauses of a same-file multi-clause `defn`, if recorded.
+    pub(super) fn clause_arms(&self, sym: Symbol) -> Option<&Vec<Value>> {
+        self.clause_arms.get(&sym)
+    }
+    /// Record a same-file multi-clause `defn`'s clauses (see [`clause_arms`]).
+    pub(super) fn add_clause_arms(&mut self, sym: Symbol, clauses: Vec<Value>) {
+        self.clause_arms.insert(sym, clauses);
     }
     /// The full (variable-bearing) declared sig for `sym`, if it was parsed
     /// with at least one type variable.

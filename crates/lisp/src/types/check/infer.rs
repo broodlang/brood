@@ -99,6 +99,14 @@ impl Drop for DepthGuard {
 pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
     // Bail (defer) if the type-walk is pathologically deep — overflow guard.
     let _depth = DepthGuard::enter()?;
+    // The cap bounds the DEPTH; the frame's SIZE is the compiler's, and a debug frame of
+    // this function times [`MAX_EXPR_TY_DEPTH`] outgrew the walker's 1 MB stacker segment
+    // once call-site specialization landed (2026-08-30: the deep-forms test overflowed
+    // at exactly 128 frames). Grow the stack here too, so the cap is the only limit.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || expr_ty_inner(heap, form, ctx))
+}
+
+fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
     match form {
         // A bare symbol is a variable reference — looked up in the local ctx
         // (let-bound RHS / if-guard narrowing). A miss falls back to a `(sig x T)`
@@ -324,6 +332,16 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         // loaded-closure path can't see (the file isn't loaded while checked).
                         // After a declaration (authoritative), before the loaded lookup below.
                         if let Some(sg) = ctx.inferred_fn_sig(s) {
+                            if sg.ret.is_any() {
+                                // The body says nothing about its result from its own
+                                // parameters (a pass-through, an unconstrained accumulator):
+                                // re-type it under THIS call's argument types.
+                                if let Some(t) =
+                                    super::sigs::specialize_call(heap, s, &items[1..], ctx)
+                                {
+                                    return Some(t);
+                                }
+                            }
                             return Some(sg.ret);
                         }
                         // An **ability op** with a declared `:-> RET` return type. The op
@@ -381,7 +399,12 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                             items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
                         return Some(resolve_overload_ret(&sigs, &arg_tys));
                     }
-                    sig_of(heap, s).map(|sig| sig.ret)
+                    match sig_of(heap, s).map(|sig| sig.ret) {
+                        Some(t) if !t.is_any() => Some(t),
+                        // A loaded function whose flat return is `any` (or that inferred
+                        // nothing): re-type its body under this call's argument types.
+                        flat => super::sigs::specialize_call(heap, s, &items[1..], ctx).or(flat),
+                    }
                 }
                 _ => None,
             }
@@ -1576,8 +1599,10 @@ fn list_result_over(input: Option<&Ty>, elem: Option<Ty>) -> Option<Ty> {
 /// guarded-use false-positive class.
 pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Option<Ty> {
     match f {
-        // A local binding shadows the global table — its return type isn't known.
-        Value::Sym(s) if ctx.is_local(s) => None,
+        // A LEXICAL local (a `let`/`fn` binding) shadows the global table — its return type
+        // isn't known. A file global is a local too in `is_local`'s sense, but it is exactly
+        // the callee the same-file tables below describe, so the guard is the lexical one.
+        Value::Sym(s) if ctx.is_lexical_local(s) => None,
         Value::Sym(s) => {
             // A numeric operator as the callback — `(map inc xs)`, `(reduce + 0 xs)` — with
             // every input known: the same closure rules a direct call gets, instead of the
@@ -1587,12 +1612,45 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
                     return Some(t);
                 }
             }
+            // A flat `any` answer is where the callback's own body says nothing about its
+            // result FROM ITS OWN PARAMS — `(defn step (acc v) (conj acc …))` reads `any`
+            // because `acc` is unconstrained. The combinator knows what it hands over, so
+            // re-type the body under `inputs` (call-site specialization) before settling.
+            let specialize = |flat: Option<Ty>| -> Option<Ty> {
+                match flat {
+                    Some(t) if !t.is_any() => Some(t),
+                    flat => super::sigs::specialized_ret(heap, s, inputs, ctx).or(flat),
+                }
+            };
+            // The same-file tables first: the file being checked isn't loaded, so the heap
+            // knows nothing of its declarations and inferences — and for a name this file
+            // redefines, the heap's binding is the OLD one.
+            if !ctx.is_lexical_local(s) {
+                if let Some(sv) = ctx.declared_sig_with_vars(s) {
+                    return Some(sv.resolve_ret(inputs));
+                }
+                if let Some(sigs) = ctx.declared_overload(s) {
+                    return Some(resolve_overload_ret(sigs, inputs));
+                }
+                if let Some(sg) = ctx.declared_sig(s) {
+                    return Some(sg.ret);
+                }
+                if let Some(sigs) = ctx.inferred_overload(s) {
+                    return specialize(Some(resolve_overload_ret(&sigs, inputs)));
+                }
+                if let Some(sg) = ctx.inferred_fn_sig(s) {
+                    return specialize(Some(sg.ret));
+                }
+            }
+            if ctx.is_file_global(s) {
+                return specialize(None);
+            }
             // An overloaded callback (ADR-116) — resolve per matching arm from
             // `inputs` instead of a single flat `ret`, same as the call-form case.
             if let Some(sigs) = declared_heap_overload(heap, s) {
                 return Some(resolve_overload_ret(&sigs, inputs));
             }
-            sig_of(heap, s).map(|sig| sig.ret)
+            specialize(sig_of(heap, s).map(|sig| sig.ret))
         }
         Value::Pair(_) => lambda_ret(heap, f, inputs, ctx),
         _ => None,
