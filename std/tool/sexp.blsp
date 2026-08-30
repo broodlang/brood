@@ -130,23 +130,44 @@ cost of ~three forms, not the whole buffer."
   "A container form — the `forward-list` sibling filter (and what `down-list` descends)."
   (container-kind? (get anode :kind)))
 
+(defn- sexp-atom-around (enc rp keep?)
+  "The non-container form of `enc` that STRADDLES `rp` (start < rp < end) and satisfies
+`keep?`, or nil. A point inside a symbol or a string is inside an atom, not between two
+siblings: the sibling walks see only forms starting after / ending before it, so from
+`(calc/ev|al \"1 1 +\")` forward skipped the rest of the symbol AND the string, backward
+stayed put, and from inside the string forward stayed put while backward jumped to before
+`calc/eval` — read as \"C-M-f does nothing / C-M-b jumps up one expression\" (2026-08-30).
+Emacs and paredit move to the atom's own edge; so does this."
+  (seq/find (fn (f)
+              (and (not (container-kind? (get f :kind)))
+                (< (sexp-start f) rp)
+                (< rp (sexp-end f))
+                (keep? f)))
+    (forms-of enc)))
+(sig sexp-atom-around (map int fn -> (or nil map)))
+
 (defn- sexp-sibling-forward (text point keep?)
   "End of the next sibling form satisfying `keep?` starting at or after `point`, within the
-enclosing list; `point` when there is none. The shared body of the forward motions."
+enclosing list — or the end of the atom `point` is inside; `point` when there is none. The
+shared body of the forward motions."
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
-        nxt (seq/find (fn (f) (and (>= (sexp-start f) rp) (keep? f))) (forms-of enc)))
+        inside (sexp-atom-around enc rp keep?)
+        nxt (or inside (seq/find (fn (f) (and (>= (sexp-start f) rp) (keep? f))) (forms-of enc))))
     (if (nil? nxt) point (+ base (sexp-end nxt)))))
 (sig sexp-sibling-forward (string int fn -> int))
 
 (defn- sexp-sibling-backward (text point keep?)
   "Start of the previous sibling form satisfying `keep?` ending at or before `point`, within
-the enclosing list; `point` when there is none. The shared body of the backward motions."
+the enclosing list — or the start of the atom `point` is inside; `point` when there is none.
+The shared body of the backward motions."
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
-        prev (last (filter (fn (f) (and (<= (sexp-end f) rp) (keep? f))) (forms-of enc))))
+        inside (sexp-atom-around enc rp keep?)
+        prev (or inside
+               (last (filter (fn (f) (and (<= (sexp-end f) rp) (keep? f))) (forms-of enc)))))
     (if (nil? prev) point (+ base (sexp-start prev)))))
 (sig sexp-sibling-backward (string int fn -> int))
 
