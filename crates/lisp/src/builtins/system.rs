@@ -2772,23 +2772,17 @@ pub(super) fn restore_compile_context(args: &[Value], _: EnvId, heap: &mut Heap)
     let parts = heap.seq_items(arg(args, 0))?;
     let (ns, imports) = match parts.as_slice() {
         [ns, imports] => (*ns, *imports),
-        _ => {
-            return Err(LispError::runtime(
-                "%restore-compile-context: expected a `[ns imports]` snapshot from %compile-context",
-            ))
-        }
+        _ => return Err(LispError::runtime(
+            "%restore-compile-context: expected a `[ns imports]` snapshot from %compile-context",
+        )),
     };
     let mut table: std::collections::HashMap<value::Symbol, ImportEntry> =
         std::collections::HashMap::new();
     for pair in heap.seq_items(imports)? {
-        let Some((bare, target)) = heap
-            .seq_items(pair)
-            .ok()
-            .and_then(|p| match p.as_slice() {
-                [Value::Sym(b), t] => Some((*b, *t)),
-                _ => None,
-            })
-        else {
+        let Some((bare, target)) = heap.seq_items(pair).ok().and_then(|p| match p.as_slice() {
+            [Value::Sym(b), t] => Some((*b, *t)),
+            _ => None,
+        }) else {
             return Err(LispError::runtime(
                 "%restore-compile-context: each import must be a `[bare qualified]` pair",
             ));
