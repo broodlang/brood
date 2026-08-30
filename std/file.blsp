@@ -80,7 +80,9 @@ primitives. The kernel also provides the always-available file primitives
       (fn (acc e)
         (let (p (path/join dir e))
           (if (file/dir? p) (%append-two (walk-files p) acc) (cons p acc)))))))
-(sig walk-files (string -> (list string)))
+;; `(or nil list)`, not `(list string)`: nil is a real return (non-directory), and the
+;; element type cannot be proven through the `%append-two` kernel op's flat `list`.
+(sig walk-files (string -> (or nil list)))
 
 ;; Pure path-string helpers (extension, stem, basename, …) live in the `path`
 ;; module — `path/extension`, `path/stem`. `file` is filesystem I/O only (ADR-234).

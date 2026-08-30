@@ -8317,3 +8317,32 @@ never blocked, nothing dropped; clear-inside-catch rescues, as with `:max-heap`.
 Five new tests in `process_limit_test.blsp` incl. the busy-spinner (safepoint route)
 and drain-and-recover.
 
+
+### 2026-08-30, twelfth — CI back to green: the strict gate's 13, and the differential's cap
+
+Two failures, two causes. The `test` job has been red since `f3015c3b`: the call-site
+specialization commit made multi-clause flat returns *more precise* (`assoc` now reads
+`vector | map` where it read `any`), so unsig'd single-step helpers (`goto-char`,
+`shuffle-swap`, `buffer-adjust-*`) began carrying a positive, record-erasing bound where
+the old checker stayed silent — and the strict gate, which reads positively-known bounds
+by inclusion, flagged all 13 downstream sites. Specialization never rescues them because
+its gate is `is_any()` — a flat `vector | map` from an unconstrained param is exactly as
+"the body says nothing from its own params" as `any`, but it is not `any`. Fixed the
+convention way (the gate's comment: "a new strict warning is either an undeclared
+function or a real maybe-nil"): sigs on the helpers, a record-typed return for
+`sexp-site`, a split nil-guard in `complete/tags` (the checker narrows a single-variable
+test, not an `(or …)`), and one honest widening — `walk-files` returns nil for a
+non-directory and its element type is unprovable through `%append-two`, so it now says
+`(or nil list)`. Checker follow-up recorded: widen the specialization gate from
+`is_any()` to "specialize when the result would REFINE the flat bound" (accept `spec ⊆
+flat` only) — that would have kept all 13 silent with no sig added, but it re-opens the
+commit's own perf traps (measure `maps_test`/`buffer` first, per its devlog entry).
+
+The `differential (tree-walker)` job failed once, on `29831e06`, with the suite wrapper
+killed at TRY 2 — the 2026-08-27 cap lowering (2700s → 300s) had sized the budget to the
+VM engine (66s) while this job runs the same wrapper under `BROOD_VM=0`, which measures
+**196s on a 12-core box with exclusive use**. The 2026-08-11 note in `nextest.toml`
+documents this exact failure shape ("a wall-clock budget that only ever fitted one of
+the two engines"); RootsBuf, the only code in the flagged merge, was exonerated by a
+tree-walker instruction A/B (−1.6%). Cap raised to 900s (~4.5× the measured figure),
+note appended where the next reader will trip over it.
