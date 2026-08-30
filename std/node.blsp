@@ -124,7 +124,6 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
 
 ;; Index of the first "@" in s, or -1. No string-split primitive — and a node
 ;; spec only ever has the one separator — so a small char scan is plenty.
-(sig node-at (string int int -> int))
 
 (defn- node-at
   (s i n)
@@ -132,10 +131,10 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
     (>= i n) -1
     (= (string/substring s i (inc i)) "@") i
     else (node-at s (inc i) n)))
+(sig node-at (string int int -> int))
 
 ;; Last index of `:` in s (or -1) — needed to split "name@host:port" into the
 ;; node name "name@host" and the port, IPv6-host-safe (the port colon is last).
-(sig node-last-colon (string int int int -> int))
 
 (defn- node-last-colon
   (s i n last)
@@ -143,6 +142,7 @@ on this machine share one cookie; set `$BROOD_COOKIE` to override."
     (>= i n) last
     (= (string/substring s i (inc i)) ":") (node-last-colon s (inc i) n i)
     else (node-last-colon s (inc i) n last)))
+(sig node-last-colon (string int int int -> int))
 
 ;; The bare name-part of a node name (before any `@`). Used for the local Unix
 ;; socket filename — the socket is same-machine, so the host qualifier is

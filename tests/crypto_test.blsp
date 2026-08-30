@@ -11,7 +11,7 @@
     (let (bs (crypto/random-bytes 16))
       (is (every? (fn (b) (and (>= b 0) (<= b 255))) bs))))
   (test "generates different values each time"
-    (is (not= (crypto/random-bytes 16) (crypto/random-bytes 16)))))
+    (is (not (= (crypto/random-bytes 16) (crypto/random-bytes 16))))))
 
 (describe "crypto/encrypt + decrypt"
   (test "round-trip: encrypt then decrypt returns original"
@@ -72,11 +72,11 @@
     (assert= (crypto/pbkdf2 "pass" "salt" 1000 32)
       (crypto/pbkdf2 "pass" "salt" 1000 32)))
   (test "different passwords give different keys"
-    (is (not= (crypto/pbkdf2 "pass1" "salt" 1000 32)
-          (crypto/pbkdf2 "pass2" "salt" 1000 32))))
+    (is (not (= (crypto/pbkdf2 "pass1" "salt" 1000 32)
+               (crypto/pbkdf2 "pass2" "salt" 1000 32)))))
   (test "different salts give different keys"
-    (is (not= (crypto/pbkdf2 "pass" "salt1" 1000 32)
-          (crypto/pbkdf2 "pass" "salt2" 1000 32))))
+    (is (not (= (crypto/pbkdf2 "pass" "salt1" 1000 32)
+               (crypto/pbkdf2 "pass" "salt2" 1000 32)))))
   (test "known PBKDF2-SHA256 test vector"
     ;; python: hashlib.pbkdf2_hmac('sha256', b'password', b'salt', 1, 32).hex()
     ;; = 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
@@ -104,8 +104,8 @@
           4096
           32))))
   (test "different binary salts give different keys"
-    (is (not= (crypto/pbkdf2 "pw" [0 255 0] 100 32)
-          (crypto/pbkdf2 "pw" [0 255 1] 100 32)))))
+    (is (not (= (crypto/pbkdf2 "pw" [0 255 0] 100 32)
+               (crypto/pbkdf2 "pw" [0 255 1] 100 32))))))
 
 (describe "crypto/constant-time-equal?"
   (test "equal byte vectors"

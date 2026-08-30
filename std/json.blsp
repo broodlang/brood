@@ -86,10 +86,10 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 
 (defn- ws? (c) (or (= c 32) (= c 9) (= c 10) (= c 13)))
 
-(sig skip-ws (vector int int -> int))
 (defn- skip-ws
   (s i n)
   (if (and (< i n) (ws? (nth s i))) (skip-ws s (+ i 1) n) i))
+(sig skip-ws (vector int int -> int))
 
 (defn- digit? (c) (and (>= c 48) (<= c 57)))
 
@@ -336,7 +336,6 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       [{} (+ i2 1)]
       (object-acc s i2 n {}))))
 
-(sig json-value (vector int int -> vector))
 (defn- json-value
   (s i n)
   "One JSON value at index `i` (whitespace already skipped). Returns `[value end]`."
@@ -356,6 +355,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       ; null
       (= c -1) (error "json: unexpected end of input")
       else (json-number s i n))))
+(sig json-value (vector int int -> vector))
 
 (defn decode (s)
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →

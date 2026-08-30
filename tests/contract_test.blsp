@@ -376,3 +376,35 @@
     (assert= []
       (apply vector
         (stability-messages "(defn u (s) (check-allow :deprecated (contract-test/m-old2 s)))")))))
+
+;; The first prelude name to carry a deprecation, and the reason the machinery above exists
+;; on a real surface rather than only on this file's fixtures. `not=` buys a spelling, not a
+;; capability — its body IS `(not (= a b))` — so it is on the way out; see the note beside
+;; the definition in `std/prelude/core.blsp` for the two measurements and the variadic trap.
+;; A bare prelude name needs no qualification here: `%meta-of` resolves against the COMPILE
+;; namespace, which is absent at runtime, unlike the module-defined fixtures above.
+(describe "not= is deprecated"
+
+  (test "the metadata is recorded, and names the replacement"
+    (assert= "0.19.0" (get (%meta-of 'not=) :deprecated))
+    (assert= 'not (get (%meta-of 'not=) :use)))
+
+  (test "a use is diagnosed, pointing at `not`"
+    (let (msgs (stability-messages "(defn u (a b) (not= a b))"))
+      (assert= true
+        (any? (fn (m)
+                (and (includes? m "`not=` is deprecated since 0.19.0")
+                  (includes? m "use `not` instead")))
+          msgs))))
+
+  (test "it still WORKS — a deprecation is not a removal"
+    ;; `check-allow` because this file is checked at zero warnings like every other, and
+    ;; the whole point of the test is to call the name we are telling everyone not to call.
+    (check-allow :deprecated
+      (do
+        (assert= true (not= 1 2))
+        (assert= false (not= 1 1))
+        ;; The trap the deprecation note names: this reads "pairwise different" and is
+        ;; the negation of the whole `=` chain.
+        (assert= true (not= 1 2 1))
+        (assert= (not (= 1 2)) (not= 1 2))))))

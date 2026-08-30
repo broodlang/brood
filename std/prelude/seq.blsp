@@ -76,6 +76,61 @@ the example above."
     (every? math/even? [2 4])   → true"
   (cond (empty? coll) true (pred (first coll)) (every? pred (rest coll)) else false))
 
+;; (index-of coll x [from]) -> the 0-based index of `x`, or -1. The index-returning
+;; sibling of `includes?`, and BARE rather than `string/index-of` for the reason ADR-230
+;; draws the boundary on: a module name claims the ops whose *subject* is that type, and
+;; this one's subject is any collection — it dispatches on `(string? coll)` and falls
+;; through to a list/vector scan. (`last-index-of` looked like its twin and is not: that
+;; one is string-only, so it moved to `string/`.) It lives here, in the sequence file,
+;; rather than beside the string helpers it used to sit among, so that where it is defined
+;; and how the reference categorises it both say "collection" — the catalogue said
+;; `:strings` and half the reason the name looked misplaced was that it read as a string op.
+
+(defn- %index-of-seq-from
+  (coll x i from)
+  ;; scan from the head; only start matching once the running index reaches `from`
+  (cond
+    (empty? coll) -1
+    (and (>= i from) (= (first coll) x)) i
+    else (%index-of-seq-from (rest coll) x (inc i) from)))
+(defn index-of (coll x &optional from)
+  "The 0-based index of `x` in `coll` at or after `from` (default 0), or -1 if absent.
+For a string, `x` is a substring (multi-char ok; the empty string matches at `from`);
+for a list or vector, `x` is an element compared structurally. The `from` offset is
+what incremental search rides on (formerly the separate `index-of`).
+
+    (index-of \"hello\" \"ll\")     → 2
+    (index-of \"hello\" \"zz\")     → -1
+    (index-of [:a :b :c] :b)     → 1
+    (index-of \"abab\" \"ab\" 1)    → 2   ; search resumes at `from`"
+  (let (start (or from 0))
+    (cond
+      ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood
+      ;; scan would be O(n²) (char indexing is O(index)), which is too slow for
+      ;; whole-namespace `doc-search`/`apropos` use. The `from` offset goes to the
+      ;; primitive, which searches in place. It used to be `(%str-index-of (string/substring
+      ;; coll s0 n) x)` — which COPIED the suffix on every call, so the incremental
+      ;; search this offset exists for was itself quadratic. `last-index-of` is where that
+      ;; measurably mattered (540 ms → 1 ms at 6400 matches); `fuzzy-next` also calls it
+      ;; per query char per candidate, but making the scan cheap barely moved ranking —
+      ;; see the note there before assuming this is anyone's bottleneck. The empty needle
+      ;; still matches at `from`, and a `from` past the end still finds nothing.
+      (string? coll) (%str-index-of coll x (%max 0 start))
+      else (%index-of-seq-from coll x 0 start))))
+
+;; `includes?` follows it for the same reason — the membership question over any
+;; collection, string included, not a string op that happens to accept a vector.
+(defn includes? (coll x)
+  "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), and maps (membership among values — use `contains?` for keys).
+
+    (includes? [1 2 3] 2)         → true
+    (includes? \"hello\" \"ell\")     → true
+    (includes? {:a 1} 1)          → true    ; VALUES, not keys
+    (includes? {:a 1} :a)         → false   ; use contains? for that"
+  (cond
+    (map? coll) (includes? (vals coll) x)
+    else (>= (index-of coll x) 0)))
+
 ;; (%zip a b) -> a list of [x y] vectors, stopping at the shorter input.
 ;; Internal: `zipmap` below builds on it and the prelude cannot `require` a module.
 ;; The published name is `seq/zip` (ADR-251) — see std/seq.blsp.

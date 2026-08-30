@@ -554,7 +554,7 @@ pub(super) fn prim_to_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 fn div_by_zero() -> LispError {
     LispError::runtime("division by zero")
         .with_code(crate::error::error_codes::DIV_BY_ZERO)
-        .with_hint("guard the denominator: (when (not= y 0) (/ x y))")
+        .with_hint("guard the denominator: (when (not (= y 0)) (/ x y))")
 }
 
 pub(super) fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -697,7 +697,7 @@ pub(super) fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             Some(r) => Ok(Value::int(r)),
             None if y == 0 => Err(LispError::runtime("rem: division by zero")
                 .with_code(crate::error::error_codes::DIV_BY_ZERO)
-                .with_hint("guard the denominator: (when (not= y 0) (math/rem x y))")),
+                .with_hint("guard the denominator: (when (not (= y 0)) (math/rem x y))")),
             None => Ok(Value::int(0)), // i64::MIN % -1
         };
     }
@@ -705,7 +705,7 @@ pub(super) fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     if num_traits::Zero::is_zero(&y) {
         return Err(LispError::runtime("rem: division by zero")
             .with_code(crate::error::error_codes::DIV_BY_ZERO)
-            .with_hint("guard the denominator: (when (not= y 0) (math/rem x y))"));
+            .with_hint("guard the denominator: (when (not (= y 0)) (math/rem x y))"));
     }
     // `BigInt::%` truncates toward zero (matches i64 `%`), so the remainder has
     // the dividend's sign — the non-Euclidean `rem` the prelude `mod` builds on.
@@ -724,7 +724,7 @@ pub(super) fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             None if y == 0 => {
                 return Err(LispError::runtime("quot: division by zero")
                     .with_code(crate::error::error_codes::DIV_BY_ZERO)
-                    .with_hint("guard the denominator: (when (not= y 0) (math/quot x y))"))
+                    .with_hint("guard the denominator: (when (not (= y 0)) (math/quot x y))"))
             }
             None => {} // i64::MIN / -1 — promote and fall through
         }
@@ -733,7 +733,7 @@ pub(super) fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     if num_traits::Zero::is_zero(&y) {
         return Err(LispError::runtime("quot: division by zero")
             .with_code(crate::error::error_codes::DIV_BY_ZERO)
-            .with_hint("guard the denominator: (when (not= y 0) (math/quot x y))"));
+            .with_hint("guard the denominator: (when (not (= y 0)) (math/quot x y))"));
     }
     // `BigInt::/` truncates toward zero, matching i64 `checked_div`.
     Ok(heap.int_from_bigint(x / y))

@@ -12,7 +12,7 @@
   (test "deterministic"
     (assert= (hash/sha256 "test") (hash/sha256 "test")))
   (test "different inputs give different digests"
-    (is (not= (hash/sha256 "a") (hash/sha256 "b")))))
+    (is (not (= (hash/sha256 "a") (hash/sha256 "b"))))))
 
 (describe "hmac-sha256"
   (test "known HMAC for test vector"
@@ -24,9 +24,9 @@
   (test "output is 64 hex chars"
     (assert= 64 (string/length (hash/hmac-sha256 "secret" "data"))))
   (test "different keys give different HMACs"
-    (is (not= (hash/hmac-sha256 "key1" "msg") (hash/hmac-sha256 "key2" "msg"))))
+    (is (not (= (hash/hmac-sha256 "key1" "msg") (hash/hmac-sha256 "key2" "msg")))))
   (test "different messages give different HMACs"
-    (is (not= (hash/hmac-sha256 "key" "msg1") (hash/hmac-sha256 "key" "msg2"))))
+    (is (not (= (hash/hmac-sha256 "key" "msg1") (hash/hmac-sha256 "key" "msg2")))))
   (test "deterministic"
     (assert= (hash/hmac-sha256 "k" "m") (hash/hmac-sha256 "k" "m")))
   (test "known output for simple inputs"
@@ -47,7 +47,7 @@
   (test "deterministic"
     (assert= (hash/md5 "test") (hash/md5 "test")))
   (test "different inputs give different digests"
-    (is (not= (hash/md5 "a") (hash/md5 "b")))))
+    (is (not (= (hash/md5 "a") (hash/md5 "b"))))))
 
 (describe "sha1"
   (test "known digest for empty string"
@@ -61,7 +61,7 @@
   (test "deterministic"
     (assert= (hash/sha1 "test") (hash/sha1 "test")))
   (test "different inputs give different digests"
-    (is (not= (hash/sha1 "a") (hash/sha1 "b")))))
+    (is (not (= (hash/sha1 "a") (hash/sha1 "b"))))))
 
 (describe "sha384"
   (test "known digest for empty string"
@@ -72,7 +72,7 @@
   (test "deterministic"
     (assert= (hash/sha384 "test") (hash/sha384 "test")))
   (test "different inputs give different digests"
-    (is (not= (hash/sha384 "a") (hash/sha384 "b")))))
+    (is (not (= (hash/sha384 "a") (hash/sha384 "b"))))))
 
 (describe "sha512"
   (test "known digest for empty string"
@@ -83,15 +83,15 @@
   (test "deterministic"
     (assert= (hash/sha512 "test") (hash/sha512 "test")))
   (test "different inputs give different digests"
-    (is (not= (hash/sha512 "a") (hash/sha512 "b")))))
+    (is (not (= (hash/sha512 "a") (hash/sha512 "b"))))))
 
 (describe "hmac-sha1"
   (test "output is 40 hex chars"
     (assert= 40 (string/length (hash/hmac-sha1 "secret" "message"))))
   (test "different keys give different HMACs"
-    (is (not= (hash/hmac-sha1 "key1" "msg") (hash/hmac-sha1 "key2" "msg"))))
+    (is (not (= (hash/hmac-sha1 "key1" "msg") (hash/hmac-sha1 "key2" "msg")))))
   (test "different messages give different HMACs"
-    (is (not= (hash/hmac-sha1 "key" "msg1") (hash/hmac-sha1 "key" "msg2"))))
+    (is (not (= (hash/hmac-sha1 "key" "msg1") (hash/hmac-sha1 "key" "msg2")))))
   (test "deterministic"
     (assert= (hash/hmac-sha1 "k" "m") (hash/hmac-sha1 "k" "m")))
   (test "known output: hmac-sha1(key, message)"
@@ -104,9 +104,9 @@
   (test "output is 128 hex chars"
     (assert= 128 (string/length (hash/hmac-sha512 "secret" "message"))))
   (test "different keys give different HMACs"
-    (is (not= (hash/hmac-sha512 "key1" "msg") (hash/hmac-sha512 "key2" "msg"))))
+    (is (not (= (hash/hmac-sha512 "key1" "msg") (hash/hmac-sha512 "key2" "msg")))))
   (test "different messages give different HMACs"
-    (is (not= (hash/hmac-sha512 "key" "msg1") (hash/hmac-sha512 "key" "msg2"))))
+    (is (not (= (hash/hmac-sha512 "key" "msg1") (hash/hmac-sha512 "key" "msg2")))))
   (test "deterministic"
     (assert= (hash/hmac-sha512 "k" "m") (hash/hmac-sha512 "k" "m")))
   (test "known output: hmac-sha512(secret, message)"
@@ -185,8 +185,8 @@
       (encoding/hex-encode-bytes (hash/hmac-sha256-raw (string/->bytes "secret")
                                    (string/->bytes "message")))))
   (test "different keys give different MACs"
-    (is (not= (hash/hmac-sha256-raw [1 2 3] [9 9])
-          (hash/hmac-sha256-raw [4 5 6] [9 9]))))
+    (is (not (= (hash/hmac-sha256-raw [1 2 3] [9 9])
+               (hash/hmac-sha256-raw [4 5 6] [9 9])))))
   (test "deterministic"
     (assert= (hash/hmac-sha256-raw [1 2 3] [4 5 6])
       (hash/hmac-sha256-raw [1 2 3] [4 5 6]))))
@@ -210,6 +210,6 @@
   (test "deterministic"
     (assert= (hash/string "foo") (hash/string "foo")))
   (test "different strings give different hashes (usually)"
-    (is (not= (hash/string "abc") (hash/string "xyz"))))
+    (is (not (= (hash/string "abc") (hash/string "xyz")))))
   (test "empty string"
     (is (int? (hash/string "")))))
