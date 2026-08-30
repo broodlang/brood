@@ -1341,8 +1341,8 @@ fn jit_lower_arm_inner(
         let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
         for &slot in &hoist_slots {
             let roots_base = b.use_var(rb_var);
-            let i = b.ins().iadd_imm(base, slot as i64);
-            let o = b.ins().imul_imm(i, STRIDE);
+            let i = b.ins().iadd_imm_s(base, slot as i64);
+            let o = b.ins().imul_imm_s(i, STRIDE);
             let addr = b.ins().iadd(roots_base, o);
             let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), addr, 0);
             let w1 = b.ins().load(
@@ -1459,8 +1459,8 @@ fn jit_lower_arm_inner(
             None => continue, // handle/vector slot: stays on the frame, not register-carried
         };
         let rb = b.use_var(rb_var);
-        let idx = b.ins().iadd_imm(base, k as i64);
-        let off = b.ins().imul_imm(idx, STRIDE);
+        let idx = b.ins().iadd_imm_s(base, k as i64);
+        let off = b.ins().imul_imm_s(idx, STRIDE);
         let addr = b.ins().iadd(rb, off);
         let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
         let expected_tag = if is_float {
@@ -1468,7 +1468,7 @@ fn jit_lower_arm_inner(
         } else {
             TAG_INT as i64
         };
-        let ok = b.ins().icmp_imm(IntCC::Equal, tag, expected_tag);
+        let ok = b.ins().icmp_imm_s(IntCC::Equal, tag, expected_tag);
         let cont = b.create_block();
         let __dr = b.ins().iconst(types::I32, 106);
         b.ins().brif(ok, cont, &[], deopt, &[BlockArg::Value(__dr)]);
@@ -1516,8 +1516,8 @@ fn jit_lower_arm_inner(
             continue; // absent, or already reset (the small native, where the two agree)
         }
         reset = Some(slot);
-        let idx = b.ins().iadd_imm(base, slot as i64);
-        let off = b.ins().imul_imm(idx, STRIDE);
+        let idx = b.ins().iadd_imm_s(base, slot as i64);
+        let off = b.ins().imul_imm_s(idx, STRIDE);
         let rb = b.use_var(rb_var);
         let addr = b.ins().iadd(rb, off);
         let tag = b.ins().iconst(types::I8, TAG_INT as i64);

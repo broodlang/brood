@@ -75,7 +75,7 @@ impl SealKey {
         let nonce = nonce_bytes(self.counter);
         let ct = self
             .cipher
-            .encrypt(Nonce::from_slice(&nonce), payload)
+            .encrypt(&Nonce::from(nonce), payload)
             .map_err(|_| io::Error::other("frame encryption failed"))?;
         self.counter = self
             .counter
@@ -127,7 +127,7 @@ impl OpenKey {
         let nonce = nonce_bytes(self.counter);
         let pt = self
             .cipher
-            .decrypt(Nonce::from_slice(&nonce), ct.as_slice())
+            .decrypt(&Nonce::from(nonce), ct.as_slice())
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
