@@ -7934,6 +7934,48 @@ the arm's one non-tail call, and `jit_spill_reserve`'s `< 2 → 0` rule — meas
 2026-08-29/30, widening it buys nothing and costs (`jit_plan.rs` has the numbers) —
 reserves no spill slot for a single-call arm. Suite 1296/1296; clippy on CI's flags clean.
 §7.1's follow-on (2) in `docs/compute-frontier.md` updated to RESOLVED.
+## 2026-08-30 — the playground evaluated the PREVIOUS `defn-`; bedit's guards ate the ADR-302 renames
+
+Two separate faults behind one report ("the playground shows the wrong answer, and yank
+pastes something random").
+
+**The eval server discarded a `defn-` redefinition.** `eval-server-definition-form?` was a
+list — `def defn defmacro defdyn defrecord defability` — and `defn-` was not on it. A private
+definition therefore counted as *code*: the request installed its traces before the form ran
+(wrapping the old body), the `defn-` rebound the name under them, and `untrace-all` restored
+the old body over the new one. Every later request evaluated the definition from *before* the
+edit and reported it as this one's answer — `(token nil "1") => "1"` in the pane, `(1)` at
+the REPL. The predicate is now by prefix (`def*`, plus `sig`/`check-allow`). And the teardown
+is defended on its own: `untrace-fn` restores the pre-trace body only while the live binding
+is still the wrapper it installed (registered as the *promoted* value the global holds — the
+local closure is a different handle after `def`), and a name redefined under a trace keeps its
+redefinition, with a `log/warn` line saying so. Regression tests in `eval_server_test` (the
+`defn-` sequence, through separate requests) and `debug_test` (redefine under trace).
+
+**bedit's `(try (gui/font! …) (catch e nil))` guards swallowed unbound symbols.** ADR-302
+renamed `gui/font!`/`inset!`/`bg!`/`title!`/`maximize!`/`fullscreen!`, `os/clipboard-set!`
+and `reflect/add-load-path!`; bedit still called the old names, each inside a blanket
+`try … nil` meant for "no GUI build". So the editor came up unfonted, uninset, untitled and
+with every kill un-mirrored to the OS clipboard — yank then adopted whatever the clipboard
+last held. Migrated the ten sites, and replaced the guards with `theme/gui-only`, which takes
+the function *value* (a stale name fails at the reference) and swallows only the "gui backend
+not compiled in" error. `os/clipboard-set` is unguarded: it is already a no-op without a
+clipboard.
+
+### 2026-08-30, tenth — the motions get a site, and the keys step out of a list
+
+Reviewing the structural navigation for slickness after the atom fix. Two things.
+**Abstraction:** every motion re-derived `narrow` → `tree` → `enclosing` with its own copy
+of the window-offset arithmetic, and each new rule was a branch pasted into each; a motion
+is a selection over one value, so `sexp-site` computes `{:base :rp :enc}` once and
+`sexp-abs` puts a window-relative answer back. No behaviour change (the suite pins it).
+**Behaviour:** at `(a b|)` C-M-f stayed put, at `(|a b)` C-M-b stayed put — Emacs' exact
+contract (`forward-sexp` there *errors*), which the edits need (`kill-sexp` at `(a b|)`
+must kill nothing, not the `)`; `mark-sexp` must not mark past the list) but which reads
+as "does not work" under a finger. paredit steps out of the list; so do the new
+`point-forward-out` / `point-backward-out` and their buffer commands, which the keys get
+in bedit while `forward`/`backward` stay the edit primitives. Inside an atom the atom's
+edge still comes first; at top level with nothing further both stay put.
 
 ### 2026-08-30, tenth — §7.5 re-ordered ahead of partial lowering, and the RootsBuf groundwork lands
 
