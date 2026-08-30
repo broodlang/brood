@@ -129,6 +129,12 @@ pub(super) fn record_mid_emit_reason(reason: &'static str) {
     LAST_MID_EMIT_REASON.set(Some(reason));
 }
 
+/// Is the §7.5 hot re-lowering enabled for this process (the tiering glue's gate)?
+#[cfg(feature = "jit")]
+pub(crate) fn xcall_relower_enabled() -> bool {
+    call::xcall_emit(true)
+}
+
 /// Take (and clear) the mid-emit refusal reason recorded during the lowering attempt
 /// that just returned `None` — for the caller's arm-named decline line.
 #[cfg(feature = "jit")]
@@ -206,7 +212,23 @@ pub(crate) fn jit_lower_arm(
     // it lives in `jit_plan` with the measurement that justifies it, and a refusal is
     // reportable there (`BROOD_JIT_BAIL_TRACE=1`) instead of an unexplained `None` from here.
     plan_general_lowering(arm, slot_tags).ok()?;
-    jit_lower_arm_inner(jit, arm, slot_tags, None)
+    jit_lower_arm_inner(jit, arm, slot_tags, None, false)
+}
+
+/// Re-lower the arm's OWN body — same chunk, same frame size, same checkpoint — with the
+/// hot-body emission armed (the §7.5 inline fast-frame blob at its non-tail named call
+/// sites). Rides the deferred queue like the inlined upgrade, so its fatter compile never
+/// delays an initial tier; the swap in `jit_tier` is a plain `jit_code` pointer swap
+/// (identical layout, no `inline_installed` flip). Skips the i64 worker attempt — the arm
+/// already has installed code, and the worker never reaches this path (its arms decline
+/// via `declines_inline_upgrade`).
+pub(crate) fn jit_lower_arm_hot(
+    jit: &mut crate::jit::CraneliftBackend,
+    arm: &CompiledArm,
+    slot_tags: &[u8],
+) -> Option<*const u8> {
+    plan_general_lowering(arm, slot_tags).ok()?;
+    jit_lower_arm_inner(jit, arm, slot_tags, None, true)
 }
 
 /// Unbox a free-global read that was observed holding a `Value::Float` at tier time
@@ -302,6 +324,7 @@ pub(crate) fn jit_lower_inlined_arm(
             arm,
             slot_tags,
             Some((&r.body, r.chunk.as_ref()?, arm.inline_nslots, r.ckpt_slot)),
+            true,
         );
     }
     // Self-inlining: the body is re-derived fresh here, so box it — its heap address
@@ -322,6 +345,7 @@ pub(crate) fn jit_lower_inlined_arm(
         arm,
         slot_tags,
         Some((&spliced, &chunk, arm.inline_nslots, u32::MAX)),
+        true,
     )?;
     // Lowering succeeded and baked raw `cv` pointers into the chunk — retain it forever.
     JIT_INLINE_CHUNK_KEEPALIVE
@@ -344,6 +368,7 @@ fn jit_lower_arm_inner(
     arm: &CompiledArm,
     slot_tags: &[u8],
     inline: Option<(&Node, &Chunk, usize, u32)>,
+    hot: bool,
 ) -> Option<*const u8> {
     use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_FLOAT, TAG_INT};
     use cranelift_codegen::ir::{
@@ -848,8 +873,41 @@ fn jit_lower_arm_inner(
     let fastframe_id = m
         .declare_function("brood_rt_fast_frame", Linkage::Import, &fastframe_sig)
         .ok()?;
-    // brood_rt_vector_ref(heap, out, vec 3 words, idx 3 words) -> status: bounds-checked
-    // slab read into `*out` (0 = ok, 1 = deopt for non-vector / non-int / out-of-range).
+    // §7.5 BROOD_XCALL — the inline fast-frame path's two cold callbacks.
+    // brood_rt_xcall_latch(heap, code, site_head, argc, epoch): suspend-host latch
+    // resolution after the gateway-token compare matched.
+    let mut xlatch_sig = m.make_signature();
+    xlatch_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    xlatch_sig.params.push(AbiParam::new(types::I64)); // code
+    xlatch_sig.params.push(AbiParam::new(types::I64)); // site<<32 | head
+    xlatch_sig.params.push(AbiParam::new(types::I64)); // argc
+    xlatch_sig.params.push(AbiParam::new(types::I64)); // epoch
+    let xlatch_id = m
+        .declare_function("brood_rt_xcall_latch", Linkage::Import, &xlatch_sig)
+        .ok()?;
+    // brood_rt_xcall_cold(heap, outcome, out, site_head, argc_nslots, epoch, stage_base)
+    // -> status: the deopt/preempt/tail/error outcomes (everything but 0).
+    let mut xcold_sig = m.make_signature();
+    xcold_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    xcold_sig.params.push(AbiParam::new(types::I64)); // outcome
+    xcold_sig.params.push(AbiParam::new(ptr_ty)); // out
+    xcold_sig.params.push(AbiParam::new(types::I64)); // site<<32 | head
+    xcold_sig.params.push(AbiParam::new(types::I64)); // argc<<32 | nslots
+    xcold_sig.params.push(AbiParam::new(types::I64)); // epoch
+    xcold_sig.params.push(AbiParam::new(types::I64)); // stage_base
+    xcold_sig.returns.push(AbiParam::new(types::I64)); // status (0/1/2)
+    let xcold_id = m
+        .declare_function("brood_rt_xcall_cold", Linkage::Import, &xcold_sig)
+        .ok()?;
+    // The callee-arm indirect-call signature (crate::jit::JitArmFn): (heap, base, out)
+    // -> outcome. Imported into the function below for `call_indirect`.
+    let mut armfn_sig = m.make_signature();
+    armfn_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    armfn_sig.params.push(AbiParam::new(types::I64)); // base
+    armfn_sig.params.push(AbiParam::new(ptr_ty)); // out
+    armfn_sig.returns.push(AbiParam::new(types::I64)); // outcome
+                                                       // brood_rt_vector_ref(heap, out, vec 3 words, idx 3 words) -> status: bounds-checked
+                                                       // slab read into `*out` (0 = ok, 1 = deopt for non-vector / non-int / out-of-range).
     let mut vref_sig = m.make_signature();
     vref_sig.params.push(AbiParam::new(ptr_ty)); // heap
     vref_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
@@ -1002,6 +1060,9 @@ fn jit_lower_arm_inner(
     let natfl_ref = m.declare_func_in_func(natfl_id, b.func);
     let flbase_ref = m.declare_func_in_func(flbase_id, b.func);
     let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
+    let xlatch_ref = m.declare_func_in_func(xlatch_id, b.func);
+    let xcold_ref = m.declare_func_in_func(xcold_id, b.func);
+    let armfn_sigref = b.import_signature(armfn_sig.clone());
     let nd_ref = m.declare_func_in_func(nd_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let thas_ref = m.declare_func_in_func(thas_id, b.func);
@@ -1585,6 +1646,10 @@ fn jit_lower_arm_inner(
         natfl: natfl_ref,
         flbase: flbase_ref,
         fastframe: fastframe_ref,
+        xlatch: xlatch_ref,
+        xcold: xcold_ref,
+        armfn_sig: armfn_sigref,
+        xcall: call::xcall_emit(hot),
         sp: sp_ref,
         tickn: tickn_ref,
         #[cfg(debug_assertions)]

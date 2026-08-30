@@ -1199,3 +1199,64 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
         FastLinkOutcome::Fallthrough => 2,
     }
 }
+
+/// Suspend-host latch resolution for the **inline** fast-frame path (§7.5,
+/// `BROOD_XCALL=1`): emitted code compared `blocked_under_gateway` against its gateway
+/// token and branches here (cold, at most once per arm ever) on a match. `site_head`
+/// packs the call site (high 32) and head symbol (low 32).
+///
+/// # Safety
+/// `heap` live.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_xcall_latch(
+    heap: *mut Heap,
+    code: i64,
+    site_head: i64,
+    argc: i64,
+    epoch: i64,
+) {
+    let site = (site_head >> 32) as u32;
+    let head = site_head as u32;
+    crate::eval::compile::jit_latch_dirty_blocked(
+        &mut *heap,
+        code as usize,
+        site,
+        head,
+        argc as usize,
+        epoch as u64,
+    );
+}
+
+/// The non-Done outcome funnel for the inline fast-frame path — deopt / preempt /
+/// tail-chain / error, i.e. `jit_run_fast_link`'s cold arms. The inline path has already
+/// restored the caller's ceremony fields, so this reads the caller context back off the
+/// heap. Returns the same 0/1/2 status contract as [`brood_rt_fast_frame`].
+///
+/// # Safety
+/// `heap` live; `out` a valid slot for the call's result (written only on status 0).
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_xcall_cold(
+    heap: *mut Heap,
+    outcome: i64,
+    out: *mut crate::core::value::Value,
+    site_head: i64,
+    argc_nslots: i64,
+    epoch: i64,
+    stage_base: i64,
+) -> i64 {
+    let site = (site_head >> 32) as u32;
+    let head = site_head as u32;
+    let argc = (argc_nslots >> 32) as usize;
+    let nslots = (argc_nslots as u32) as usize;
+    crate::eval::compile::jit_xcall_cold_outcome(
+        &mut *heap,
+        outcome,
+        argc,
+        site,
+        head,
+        epoch as u64,
+        stage_base as usize,
+        nslots,
+        out,
+    )
+}

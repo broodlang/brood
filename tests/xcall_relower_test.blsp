@@ -1,0 +1,49 @@
+;; §7.5 hot re-lowering (the inline fast-frame call path): drive named non-tail calls
+;; hot enough that the re-lowered body plausibly swaps in mid-run, and assert exact
+;; results through every outcome class the inline path dispatches — plain returns,
+;; a tail-chaining delegator (outcome 4), a mid-loop int→float type flip (deopt,
+;; outcome 1), an error raised through the linked callee (outcome 3), and an
+;; effectful callee whose entry count must be EXACT (the KI-18 duplicated-effect
+;; class). The same file must pass under BROOD_NO_XCALL=1 — the suite runs it on the
+;; default engine; the differential against the opt-out is exercised in CI by the
+;; whole suite passing in both modes.
+;;
+;; Honest caveat: whether the swap lands during the run depends on the deferred
+;; queue's timing; if it never does, these assertions still hold on the small native
+;; (vacuous for the relowered code, correct for the program). The loop counts are
+;; sized so the swap lands well within a normal run.
+(defmodule xcall-relower-test (:use test))
+
+(defn xr-inner-add (a b) (+ a b))
+(defn xr-delegate (a b) (xr-inner-add a b))
+(defn xr-chain (i acc) (if (= i 0) acc (xr-chain (- i 1) (+ 1 (xr-delegate acc 1)))))
+
+(defn xr-poly (x) (+ x 1))
+(defn xr-flip (i acc)
+  (if (= i 0)
+    acc
+    (xr-flip (- i 1) (+ acc (xr-poly (if (> i 50000) 1 1.5))))))
+
+(defn xr-thrower (x) (if (= x -1) (throw :boom) x))
+(defn xr-throwy (i acc)
+  (if (= i 0)
+    acc
+    (xr-throwy (- i 1)
+      (+ acc (try (xr-thrower (if (= (math/rem i 1000) 0) -1 1)) (catch e 0))))))
+
+(def xr-t (table/new))
+(defn xr-effect (k) (do (table/put xr-t :n (+ 1 (table/get xr-t :n 0))) k))
+(defn xr-count (i acc) (if (= i 0) acc (xr-count (- i 1) (+ acc (xr-effect 1)))))
+
+(describe "xcall hot re-lowering"
+  (test "tail-chaining delegator sums exactly"
+    (assert= 400000 (xr-chain 200000 0)))
+  (test "mid-loop type flip deopts to the right answer"
+    ;; 150000 ints (+2 each) then 50000 floats (+2.5 each)
+    (assert= 425000.0 (xr-flip 200000 0)))
+  (test "an error through the linked callee is caught, arithmetic exact"
+    ;; 200 of 200000 iterations throw (rem 1000 == 0) and contribute 0
+    (assert= 199800 (xr-throwy 200000 0)))
+  (test "an effectful callee runs exactly once per call"
+    (assert= 150000 (xr-count 150000 0))
+    (assert= 150000 (table/get xr-t :n 0))))

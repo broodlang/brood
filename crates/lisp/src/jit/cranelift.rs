@@ -25,8 +25,8 @@ use super::backend::JitBackend;
 use super::rt::*;
 use crate::core::value::Symbol;
 use crate::eval::compile::{
-    arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep, jit_lower_arm, jit_lower_inlined_arm,
-    CompiledArm,
+    arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep, jit_lower_arm, jit_lower_arm_hot,
+    jit_lower_inlined_arm, CompiledArm,
 };
 
 use cranelift_jit::{JITBuilder, JITModule};
@@ -106,6 +106,8 @@ impl CraneliftBackend {
             brood_rt_fastlink_base as *const u8,
         );
         builder.symbol("brood_rt_fast_frame", brood_rt_fast_frame as *const u8);
+        builder.symbol("brood_rt_xcall_latch", brood_rt_xcall_latch as *const u8);
+        builder.symbol("brood_rt_xcall_cold", brood_rt_xcall_cold as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_table_has", brood_rt_table_has as *const u8);
         builder.symbol("brood_rt_table_get2", brood_rt_table_get2 as *const u8);
@@ -164,6 +166,8 @@ impl CraneliftBackend {
                 ("roots_base", brood_rt_roots_base as *const () as usize),
                 ("call_slow", brood_rt_call_slow as *const () as usize),
                 ("fast_frame", brood_rt_fast_frame as *const () as usize),
+                ("xcall_latch", brood_rt_xcall_latch as *const () as usize),
+                ("xcall_cold", brood_rt_xcall_cold as *const () as usize),
                 (
                     "fastlink_base",
                     brood_rt_fastlink_base as *const () as usize,
@@ -261,6 +265,10 @@ impl CraneliftBackend {
 impl JitBackend for CraneliftBackend {
     fn lower_arm(&mut self, arm: &CompiledArm, slot_tags: &[u8]) -> Option<*const u8> {
         jit_lower_arm(self, arm, slot_tags)
+    }
+
+    fn lower_arm_hot(&mut self, arm: &CompiledArm, slot_tags: &[u8]) -> Option<*const u8> {
+        jit_lower_arm_hot(self, arm, slot_tags)
     }
 
     fn lower_inlined_arm(&mut self, arm: &CompiledArm, slot_tags: &[u8]) -> Option<*const u8> {

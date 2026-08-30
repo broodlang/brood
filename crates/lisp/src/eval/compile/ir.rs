@@ -708,6 +708,13 @@ pub struct CompiledArm {
     /// within an epoch; reset on epoch invalidation. See `frame_size_for_new_entry`.
     #[cfg(feature = "jit")]
     pub inline_installed: std::sync::atomic::AtomicBool,
+    /// Lazily computed by `jit_tier`: does this arm's chunk contain a non-tail **named**
+    /// call — i.e. would the §7.5 inline fast-frame blob arm at least one site if this
+    /// same body were re-lowered hot? Gates the xcall re-lowering enqueue for arms with
+    /// no inline derivation. Requires `dbg_name` too (the swap re-points this process's
+    /// fast links by callee name). Unset until first asked.
+    #[cfg(feature = "jit")]
+    pub xcall_wanted: std::sync::OnceLock<bool>,
     /// Leaf-callee inlining (default ON; `BROOD_NO_LEAF_INLINE=1` opts out): the body with
     /// each qualifying small non-recursive callee's body spliced in, derived ONCE at
     /// arm-compile time (the only moment a `&Heap` can resolve the callee symbols).
