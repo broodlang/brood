@@ -616,26 +616,33 @@ fn check_value_leaf(
 /// inside `quote`? Used by the unused-`let`-binding lint. False negatives are
 /// acceptable (a shadowed reference counted as "used"); zero false positives.
 fn sym_appears_in(heap: &Heap, form: Value, sym: Symbol) -> bool {
-    match form {
-        Value::Sym(s) => s == sym,
-        Value::Pair(pid) => {
-            let (car, cdr) = heap.pair(pid);
-            sym_appears_in(heap, car, sym) || sym_appears_in(heap, cdr, sym)
+    // A worklist, not recursion: it recursed on the CDR too, so a long flat list was as
+    // deep as it was long, and a deep `let` body — the one shape the deep-form tests
+    // did not build — overflowed the stack.
+    let mut work = vec![form];
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Sym(s) if s == sym => return true,
+            Value::Pair(pid) => {
+                let (car, cdr) = heap.pair(pid);
+                work.push(cdr);
+                work.push(car);
+            }
+            Value::Vector(vid) => work.extend(heap.vector(vid).iter().copied()),
+            // Map literals (`{:k v …}`) are heap maps, not pairs — scan both keys
+            // and values, or a binding used only inside a `{…}` (very common: the
+            // editor's minibuffer specs, `{:start s :end e}` edit forms) is falsely
+            // reported unused, breaking the "false negatives only" invariant.
+            Value::Map(mid) => {
+                for &(k, val) in heap.map_entries(mid).iter() {
+                    work.push(k);
+                    work.push(val);
+                }
+            }
+            _ => {}
         }
-        Value::Vector(vid) => heap
-            .vector(vid)
-            .iter()
-            .any(|&v| sym_appears_in(heap, v, sym)),
-        // Map literals (`{:k v …}`) are heap maps, not pairs — scan both keys
-        // and values, or a binding used only inside a `{…}` (very common: the
-        // editor's minibuffer specs, `{:start s :end e}` edit forms) is falsely
-        // reported unused, breaking the "false negatives only" invariant.
-        Value::Map(mid) => heap
-            .map_entries(mid)
-            .iter()
-            .any(|&(k, v)| sym_appears_in(heap, k, sym) || sym_appears_in(heap, v, sym)),
-        _ => false,
     }
+    false
 }
 
 /// Collect every `Value::Sym` that appears anywhere in `form` — recursively,

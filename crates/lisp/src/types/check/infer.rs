@@ -8,7 +8,8 @@ use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Tag, Value};
 use crate::types::{Sig, Ty};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 /// The type of an *undeclared* global's current heap value — the cross-file half
 /// of Gap A (`docs/type-gating.md`). Same current-image observation same-file
@@ -61,7 +62,23 @@ thread_local! {
     /// `cond`/`or`/threaded expansion) could overflow the stack. Per-thread → sound
     /// under the parallel checker.
     static EXPR_TY_DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// [`expr_ty`]'s memo for the walk in progress: `(form, ctx identity)` → answer.
+    /// Owned by the OUTERMOST `expr_ty` call on the thread and cleared when it returns.
+    /// Sound within a walk because a `Ctx` never changes under a `&Ctx` and every
+    /// binding change is a fresh object with a fresh id (`ctx::CtxId`). What it fixes:
+    /// `expr_ty` of a call form types its operands in more than one fallback — a
+    /// `seq_aware_call_ty` that answers `None` for an unknown collection, then the
+    /// declared-sig path typing the same operand again — which is 2^depth on
+    /// `(first (first … x))`: 40 deep hung `nest check`, and only the depth cap ended
+    /// it (2026-08-30 audit, C-class). One answer per (form, scope) per walk instead.
+    static EXPR_MEMO: RefCell<HashMap<(crate::core::value::PairId, u64), Option<Ty>>> =
+        RefCell::new(HashMap::new());
+    /// Whether some `expr_ty` frame on this thread owns [`EXPR_MEMO`] right now.
+    static EXPR_MEMO_OWNED: Cell<bool> = const { Cell::new(false) };
 }
+
+/// [`EXPR_MEMO`]'s size cap per walk — past it, answers are still computed, not kept.
+const MAX_EXPR_MEMO: usize = 1 << 20;
 
 /// Depth cap for [`expr_ty`]. Comfortably below the ~1900-level overflow observed,
 /// small enough for the green-process coroutine stack the parallel checker runs
@@ -91,6 +108,19 @@ impl Drop for DepthGuard {
     }
 }
 
+/// Run `f` with [`expr_ty`]'s depth counter at 0, restoring it after. For a walk that
+/// is a FRESH question — a callee's body under `infer_sig`/`specialized_ret` — not an
+/// operand of the form that asked it: with the caller's depth inherited, the cap tripped
+/// *because of the caller*, `expr_ty` answered `None`, and `infer_sig` memoized that as
+/// the callee's signature for the rest of the file (2026-08-30 audit, D2). The native
+/// stack is safe either way — `expr_ty` grows it in segments.
+pub(super) fn with_fresh_depth<T>(f: impl FnOnce() -> T) -> T {
+    let outer = EXPR_TY_DEPTH.with(|d| d.replace(0));
+    let out = f();
+    EXPR_TY_DEPTH.with(|d| d.set(outer));
+    out
+}
+
 /// The static type of an expression form *in `ctx`*, or `None` when it can't
 /// be pinned. `None` is "unknown" and is never flagged. Self-evaluating
 /// literals get their exact tag; a `quote`d datum gets the datum's tag; a call
@@ -99,11 +129,33 @@ impl Drop for DepthGuard {
 pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
     // Bail (defer) if the type-walk is pathologically deep — overflow guard.
     let _depth = DepthGuard::enter()?;
+    let key = match form {
+        Value::Pair(id) => Some((id, ctx.id())),
+        _ => None,
+    };
+    if let Some(k) = key {
+        if let Some(hit) = EXPR_MEMO.with(|m| m.borrow().get(&k).cloned()) {
+            return hit;
+        }
+    }
+    let owner = !EXPR_MEMO_OWNED.with(|o| o.replace(true));
     // The cap bounds the DEPTH; the frame's SIZE is the compiler's, and a debug frame of
     // this function times [`MAX_EXPR_TY_DEPTH`] outgrew the walker's 1 MB stacker segment
     // once call-site specialization landed (2026-08-30: the deep-forms test overflowed
     // at exactly 128 frames). Grow the stack here too, so the cap is the only limit.
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || expr_ty_inner(heap, form, ctx))
+    let out = stacker::maybe_grow(64 * 1024, 1024 * 1024, || expr_ty_inner(heap, form, ctx));
+    if owner {
+        EXPR_MEMO.with(|m| m.borrow_mut().clear());
+        EXPR_MEMO_OWNED.with(|o| o.set(false));
+    } else if let Some(k) = key {
+        EXPR_MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.len() < MAX_EXPR_MEMO {
+                m.insert(k, out.clone());
+            }
+        });
+    }
+    out
 }
 
 fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
@@ -1660,6 +1712,12 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
 /// The type of one quoted datum: a nested list recurses (`'((1) (2))` is `list<list<1|2>>`),
 /// an empty list is `nil`, anything else is its `of_value` singleton/tag.
 fn quoted_datum_ty(heap: &Heap, d: Value) -> Ty {
+    // Deep-form stack safety: recurses into itself, never back through `expr_ty`'s
+    // cap, so a deep quoted datum (a macro-emitted template) would overflow otherwise.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || quoted_datum_ty_inner(heap, d))
+}
+
+fn quoted_datum_ty_inner(heap: &Heap, d: Value) -> Ty {
     match d {
         Value::Pair(_) => match list_items(heap, d) {
             Some(elems) => {

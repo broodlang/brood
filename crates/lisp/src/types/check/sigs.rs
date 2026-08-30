@@ -474,6 +474,9 @@ pub(super) fn clear_sig_memo() {
     OVERLOAD_MEMO.with(|m| m.borrow_mut().clear());
     SPECIAL_MEMO.with(|m| m.borrow_mut().clear());
     SPECIAL_FUEL.with(|f| f.set(MAX_SPECIAL_FUEL));
+    // The operator domains are a file's too (`set_operator_domains`); a fragment checked
+    // after a file must derive its own from the registry, not read that file's.
+    OPERATOR_DOMAINS.with(|m| *m.borrow_mut() = None);
 }
 
 thread_local! {
@@ -757,7 +760,10 @@ pub(super) fn specialized_ret(
         // recorded its form yet, and a memoized `None` here would outlive the fixpoint
         // that records it (the bug: `step`'s first call, typed before its `defn`, pinned
         // every later specialization of it to `None`).
-        if !ctx.is_file_global(sym) {
+        // `ctx` may be a bare `Ctx::default()` — `infer_sig`'s body walk — which knows
+        // no file globals, so "not a file global" is not enough: the answer is memoized
+        // only for a name the IMAGE binds (a builtin, a loaded non-closure).
+        if !ctx.is_file_global(sym) && super::deps::obs_global(heap, sym).is_some() {
             memo_specialization(key, None);
         }
         return None;
@@ -802,7 +808,7 @@ pub(super) fn specialized_ret(
         // The body is a fresh question, not an operand of the call that asked it.
         let outer_nest = SPEC_ARG_NEST.with(|n| n.replace(0));
         // One untypeable arm makes the union an under-approximation — defer instead.
-        let typed = expr_ty(heap, arm.tail, &sub);
+        let typed = super::infer::with_fresh_depth(|| expr_ty(heap, arm.tail, &sub));
         SPEC_ARG_NEST.with(|n| n.set(outer_nest));
         let t = typed?;
         ret = Some(match ret {
@@ -973,7 +979,7 @@ fn infer_overload_inner(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
         let ret = arm
             .body
             .last()
-            .and_then(|&tail| expr_ty(heap, tail, &ctx))
+            .and_then(|&tail| super::infer::with_fresh_depth(|| expr_ty(heap, tail, &ctx)))
             .unwrap_or(Ty::ANY);
         sigs.push(Sig::new(param_tys, ret));
     }
@@ -1228,7 +1234,7 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
         ctx = ctx.bind(p, Some(bound));
     }
     let informative = demands.params.iter().any(|t| *t != Ty::ANY) || demands.rest.is_some();
-    match expr_ty(heap, tail, &ctx) {
+    match super::infer::with_fresh_depth(|| expr_ty(heap, tail, &ctx)) {
         Some(ret) => Some(demands.into_sig(ret)),
         // The return couldn't be inferred (e.g. the body calls an ability op whose facts aren't
         // on this bare ctx). Still surface the parameter demands with an `ANY` return when a
@@ -1282,7 +1288,7 @@ fn infer_return_only(
         for &p in binders {
             ctx = ctx.bind(p, Some(Ty::ANY));
         }
-        let t = expr_ty(heap, *tail, &ctx)?;
+        let t = super::infer::with_fresh_depth(|| expr_ty(heap, *tail, &ctx))?;
         ret = Some(match ret {
             Some(a) => a.union(t),
             None => t,
