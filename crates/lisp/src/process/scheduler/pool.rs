@@ -17,6 +17,62 @@ use super::*;
 /// fifty is lost" into "created, enqueued, RAN, and its quantum ended/hung <thus>" in
 /// three runs — the per-pid lifecycle is otherwise invisible (counters aggregate).
 /// Read once and cached; costs nothing when off.
+/// KI-88's quantum ledger (armed by `BROOD_SCHED_DBG`): each entry is `(pid, started)`
+/// for the quantum a thread is currently INSIDE — set after the `run` trace line,
+/// cleared after `handle_capture_outcome`. The watchdog names any quantum older than
+/// 3 s: cross-checked against a core dump, it distinguishes "drive() never returned on
+/// thread T" (ledger holds the pid, T's stack shows where) from "the tail never ran"
+/// (ledger holds the pid, NO thread shows it — the impossible case session 3 saw via
+/// prints alone, now with a data structure that cannot race a line buffer).
+static QUANTUM_LEDGER: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::thread::ThreadId, (u64, std::time::Instant)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn ledger_enter(pid: u64) {
+    if sched_dbg() {
+        QUANTUM_LEDGER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                std::thread::current().id(),
+                (pid, std::time::Instant::now()),
+            );
+    }
+}
+fn ledger_exit() {
+    if sched_dbg() {
+        QUANTUM_LEDGER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&std::thread::current().id());
+    }
+}
+fn ledger_watchdog() {
+    if !sched_dbg() {
+        return;
+    }
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::Builder::new()
+            .name("quantum-watchdog".into())
+            .spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                let now = std::time::Instant::now();
+                for (tid, (pid, t0)) in QUANTUM_LEDGER
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                {
+                    let age = now.duration_since(*t0).as_secs();
+                    if age >= 3 {
+                        eprintln!("[sched] LEDGER: {tid:?} inside pid={pid} for {age}s");
+                    }
+                }
+            })
+            .ok();
+    });
+}
+
 pub(crate) fn sched_dbg() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BROOD_SCHED_DBG").is_some())
@@ -520,6 +576,8 @@ fn run_one_timed(mut proc: Box<Process>) {
         let pid = proc.pid;
         crate::core::heap::stall_guard_pid("quantum", pid)
     };
+    ledger_enter(proc.pid);
+    ledger_watchdog();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.drive()));
     drop(_sg);
     set_capture_run(false);
@@ -529,6 +587,7 @@ fn run_one_timed(mut proc: Box<Process>) {
     proc.spawns_since_park = SPAWNS_SINCE_PARK.with(|c| c.get());
     finish_quantum(&mailbox, wid);
     handle_capture_outcome(proc, &mailbox, outcome);
+    ledger_exit();
 }
 
 /// Shared post-quantum bookkeeping: drop the live-process gauge + worker-busy flag and
