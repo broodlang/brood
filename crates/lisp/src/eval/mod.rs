@@ -1203,13 +1203,24 @@ fn tw_vm_route(heap: &mut Heap, id: ClosureId, argv: &[Value]) -> Option<LispRes
         return None;
     }
     let arm = compile::compiled_arm_for(heap, id, argv.len())?;
-    if std::env::var_os("BROOD_ROUTE_DBG").is_some() {
-        let name = heap
-            .closure(id)
-            .name
-            .map(value::symbol_name_ref)
-            .unwrap_or("<anon>");
-        eprintln!("[route] {name} argc={}", argv.len());
+    // The %receive fence, router edition — see `arm_calls_receive`. A receive-bearing
+    // callee stays on the tree-walker, whose blocking-receive path is the one these
+    // shapes have always run (routing it made the receive a NESTED vm run: KI-88's
+    // wedge). Callees that merely CALL something that receives are fine — the receive
+    // then executes in the callee's own dispatch context, not this nested run.
+    if compile::arm_calls_receive(&arm) {
+        return None;
+    }
+    {
+        static ROUTE_DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ROUTE_DBG.get_or_init(|| std::env::var_os("BROOD_ROUTE_DBG").is_some()) {
+            let name = heap
+                .closure(id)
+                .name
+                .map(value::symbol_name_ref)
+                .unwrap_or("<anon>");
+            eprintln!("[route] {name} argc={}", argv.len());
+        }
     }
     let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
     heap.tw_reentry_depth.set(heap.tw_reentry_depth.get() + 1);

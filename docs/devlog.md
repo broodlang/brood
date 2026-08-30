@@ -7628,3 +7628,32 @@ exposed it rather than caused it. Scheduler-liveness class (KI-1 family), gets i
 session. Until then the router follows the BROOD_MKCLO pattern: `BROOD_TW_REENTRY=1`
 opt-in, its measured wins (60×/startup −6.9%) parked behind the flag, the full breakage
 suite green either way.
+
+## 2026-08-30 (seventh) — KI-88 session 2: the latch, the router fence, and a wedge that enters mid-body
+
+Three findings, two of them shipped hardening, one a sharpened mystery:
+
+**The wake latch.** `MailboxState.wake_pending`, set under the state lock by every wake
+site, consumed by the waiter before it commits to `Condvar::wait` — BEAM's persistent
+state bit beside our counted notify gate. The count's ordering argument is sound on paper
+and had a practical counterexample within hours; a latch's failure mode is one extra
+rescan where a count's is a process asleep forever, so both stay. It turned KI-88's
+four-section combo from 10/10 failing to 10/10 passing.
+
+**The router's %receive fence.** `arm_calls_receive` keeps receive-bearing arms off
+`tw_vm_route`: a core dump caught a reader wedged at `receive_match ← %receive ←
+vm_apply ← tw_vm_route` — a receive that tree-walking would have parked wakeably, made a
+nested-vm dirty block by routing. The JIT learned this fence in the step-1 experiment;
+the router inherits it.
+
+**The survivor.** The FULL chaos2 file still wedges one reader per run, and the
+instrumentation now pins something stranger than messaging: the wedged process parks at
+its `receive` having executed NEITHER preceding form (kernel-table probe absent, server
+counted 49 of 50 gets) — execution entered the body mid-way. That is a resume/continuation
+or ip/frame anomaly in the capture machinery, not a lost message; KI-88 carries the full
+trail and the next probe (park/resume ip tracing for the wedged pid). `BROOD_SCHED_DBG`
+and `BROOD_ROUTE_DBG` are catalogued — the per-pid lifecycle trace is what cracked every
+layer tonight.
+
+The default path (router opt-in) passes the full suite, the entire breakage suite, and
+the wake-sensitive loop ×5 with all of this in.
