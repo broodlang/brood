@@ -44,7 +44,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
   (let (terms (%doc-search-terms query))
     (when (not (empty? terms))
       (map
-        (sort-by (fn (e) [(- (first e)) (str (second e))])
+        (sort-by
           (seq/keep (%discoverable-names)
             (fn (s)
               ;; check-allow :discarded-catch — a best-effort probe (doc / parse / ls / image index): absence is the answer
@@ -52,7 +52,8 @@ degrades to a plain case-insensitive name/docstring search, e.g.
                 (when (string? d)
                   (let (hay (string/lower (str s " " d))
                         hits (count (filter terms (fn (t) (includes? hay t)))))
-                    (when (> hits 0) [hits s d])))))))
+                    (when (> hits 0) [hits s d]))))))
+          (fn (e) [(- (first e)) (str (second e))]))
         (fn (e) [(second e) (nth e 2)])))))
 
 ;; ---- spy: homoiconic tree-tracing debug (ADR-173) ---------------------------
@@ -427,7 +428,9 @@ OWNING module provides (see the block comment above). The runtime side of a
                   r)))))))))
 
 (defn provide (mod)
-  "Mark feature `mod` (a symbol or string) as loaded (idempotent); returns its name."
+  "Mark feature `mod` (a symbol or string) as loaded (idempotent); returns its name.
+
+    (provide 'already-here)   → \"already-here\""
   (let (key (->string mod))
     (%registry-update! '*features* :assoc-new [key] true)
     (%contracts-apply-pending! key)
@@ -1649,22 +1652,30 @@ and that every declared arity still matches its module's actual definition."
 ; as `queue/queue?` inside their own module (ADR-236). The check is pure and needs no module
 ; loaded: a non-record, or a record of another id, is simply false.
 (defn queue? (x)
-  "True if `x` is a FIFO queue (`std/queue`) — by identity, not by shape."
+  "True if `x` is a FIFO queue (`std/queue`) — by identity, not by shape.
+
+    (queue? (list 1 2))   → false"
   (%eq (record-id x) :queue/queue))
 (sig queue? (any -> (is (record &open :__id__ :queue/queue))))
 
 (defn pq? (x)
-  "True if `x` is a min-priority queue (`std/pq`) — by identity, not by shape."
+  "True if `x` is a min-priority queue (`std/pq`) — by identity, not by shape.
+
+    (pq? [1 2 3])   → false"
   (%eq (record-id x) :pq/pq))
 (sig pq? (any -> (is (record &open :__id__ :pq/pq))))
 
 (defn multimap? (x)
-  "True if `x` is a multi-valued map (`std/multimap`) — by identity, not by shape."
+  "True if `x` is a multi-valued map (`std/multimap`) — by identity, not by shape.
+
+    (multimap? {:a 1})   → false"
   (%eq (record-id x) :multimap/multimap))
 (sig multimap? (any -> (is (record &open :__id__ :multimap/multimap))))
 
 (defn datetime? (x)
-  "True if `x` is a datetime — a date *and* a time-of-day (`std/datetime`) — by identity."
+  "True if `x` is a datetime — a date *and* a time-of-day (`std/datetime`) — by identity.
+
+    (datetime? 42)   → false"
   (%eq (record-id x) :datetime/datetime))
 (sig datetime? (any -> (is (record &open :__id__ :datetime/datetime))))
 
@@ -1676,7 +1687,9 @@ and that every declared arity still matches its module's actual definition."
 (sig date? (any -> (is (record &open :__id__ :datetime/date))))
 
 (defn time-of-day? (x)
-  "True if `x` is a time-of-day with no date component (`std/datetime`) — by identity."
+  "True if `x` is a time-of-day with no date component (`std/datetime`) — by identity.
+
+    (time-of-day? 42)   → false"
   (%eq (record-id x) :datetime/time-of-day))
 (sig time-of-day? (any -> (is (record &open :__id__ :datetime/time-of-day))))
 
@@ -2016,6 +2029,11 @@ which is meaningless for a rope, so falling through unconditionally would swap a
   ; `:derive-record` recipe `(fn (fields) …)` (its second is a `(fields)` *list*) and any
   ; keyword-clause value, so only real ops are collected.
   (let (ops (filter specs (fn (s) (and (pair? s) (vector? (second s)))))
+        ;; The ability's own docstring, if it wrote one — the leading string in `specs`.
+        ;; Each generated op inherits it (see the `defn` below): an op IS the ability's
+        ;; surface, and a generic function with no doc at all is a hole in `(doc …)`,
+        ;; `nest doc` and the LSP alike. Surfaced by `(audit/undocumented)`.
+        ability-doc (if (string? (first specs)) (first specs) nil)
         sealed-vec (%defability-sealed-vec specs)
         sealed-ids (if sealed-vec (map sealed-vec %ability-id-kw) nil)
         derive-fn (%defability-derive-fn specs)
@@ -2086,6 +2104,12 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                       (list 'defn
                         op-name
                         arg-syms
+                        (str "`"
+                          (->string op-name)
+                          "` — an operation of ability `"
+                          (->string aname)
+                          "`, dispatching on its first argument."
+                          (if ability-doc (str "\n\n" ability-doc) ""))
                         (list 'let
                           ; `%dispatch` is `%impl-for` through the per-op inline cache (ADR-172
                           ; §7): the op passes `*impls*` so the kernel stays decoupled from the
@@ -2328,10 +2352,18 @@ at run time from a value the checker never read. Returns `value` so it can wrap 
   (`+`/`*`/`min`/`max`) or `:antisymmetric` (`compare-to`) — so a binary op is authored as the
   UPPER TRIANGLE of its type-pair matrix. See [[decisions]] ADR-179.
 
+An optional leading docstring is carried onto the generated function.
+
     (defmulti num/add :commutative)
     (defmulti compare-to :antisymmetric)
     (defmulti render)"
-  (let (ret-pos (%index-of-arrow opts)
+  (let (
+        ;; An optional LEADING docstring, like `defn`/`defability`. Without one a
+        ;; multimethod was a generic function with no `(doc …)` at all — a hole in
+        ;; `nest doc` and the LSP, surfaced by `(audit/undocumented)`.
+        multi-doc (if (and (seq opts) (string? (first opts))) (first opts) nil)
+        opts (if multi-doc (rest opts) opts)
+        ret-pos (%index-of-arrow opts)
         ret (if ret-pos (nth opts (inc ret-pos)) nil)
         ; ABSENT is not `nil`. `nil` is a legal return type — `sig` and `defability` both
         ; accept `:-> nil` — so "was a type given?" is a question about POSITION, never about
@@ -2360,6 +2392,11 @@ at run time from a value the checker never read. Returns `value` so it can wrap 
       (list 'defn
         mname
         '(& args)
+        (str "`"
+          (->string mname)
+          "` — a multimethod, dispatching on the identity tuple "
+          "of its arguments."
+          (if multi-doc (str "\n\n" multi-doc) ""))
         (list 'let
           (list 'key
             (list '/mapv 'args '%identity-of)
@@ -2470,7 +2507,9 @@ at run time from a value the checker never read. Returns `value` so it can wrap 
 ;; native path — so this is purely the record extension point (à la `Display`), at zero
 ;; cost to built-ins.
 (defability Seqable
-  "A value's sequence view — the list that `seq`/`map`/`fold`/`for`/`into` iterate."
+  "A value's sequence view — the list that `seq`/`map`/`fold`/`for`/`into` iterate.
+
+    (->seq {:a 1})   → ([:a 1])"
   (->seq [self] :-> any))
 (impl Seqable :default (->seq [x] (%map-pairs (fields x))))
 
@@ -2483,7 +2522,9 @@ at run time from a value the checker never read. Returns `value` so it can wrap 
 ;; for an ordinary record and the reason `get` works on one at all.
 (defability Lookup
   "A record's own keyed access — what `get` and `keys` should answer for it, when its
-contents are not simply its fields."
+contents are not simply its fields. An ordinary record has no impl and keeps the
+field lookup, so these are called only for a custom-collection record — see
+`std/multimap.blsp`, e.g. `(lookup-get mm :k)` → the values stored under `:k`."
   (lookup-get [self k] :-> any)
   (lookup-keys [self] :-> any))
 
@@ -2493,7 +2534,9 @@ contents are not simply its fields."
 ;; its own insertion (a queue pushes, a stack prepends, …). Built-ins keep their native
 ;; `%conj-one` path — this fires only for a record.
 (defability Conjable
-  "Add element `x` to collection `self`, returning a fresh collection."
+  "Add element `x` to collection `self`, returning a fresh collection.
+
+    (conj-onto {:a 1} [:b 2])   → {:a 1, :b 2}"
   (conj-onto [self x] :-> any))
 (impl Conjable
   :default (conj-onto [coll x]
@@ -2523,7 +2566,10 @@ contents are not simply its fields."
 ;; The `:-> int` machine-checks the return: a method handing back a string or nil was caught
 ;; by nothing, and `sort`, built on this, would then compare on garbage. Declaring it types
 ;; every `(compare-to a b)` call site and makes each method body checkable.
-(defmulti compare-to :antisymmetric :-> int)
+(defmulti compare-to
+  "Three-way comparison: negative when `a` sorts before `b`, zero when they tie,
+positive when `a` sorts after. The seam `compare`/`<`/`sort` consult for a record."
+  :antisymmetric :-> int)
 
 ;; Record-aware compare: a record uses its `compare-to` (a type with no such method is a loud
 ;; %no-method — strict), everything else the kernel `compare`. This is the comparator
@@ -2544,10 +2590,16 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; operand is a record, so int/float arithmetic is byte-for-byte untouched. `+`/`*` are
 ;; `:commutative` (author `[usd :int]` and `[:int usd]` is derived); `-`/`/` are not. There is
 ;; NO `:default` — a pair with no method gets the loud `%no-method` error.
-(defmulti num/add :commutative)
-(defmulti num/sub)
-(defmulti num/mul :commutative)
-(defmulti num/div)
+(defmulti num/add
+  "Addition for a type `+` does not know natively — the seam `+` consults for a record."
+  :commutative)
+(defmulti num/sub
+  "Subtraction for a type `-` does not know natively — the seam `-` consults for a record.")
+(defmulti num/mul
+  "Multiplication for a type `*` does not know natively — the seam `*` consults for a record."
+  :commutative)
+(defmulti num/div
+  "Division for a type `/` does not know natively — the seam `/` consults for a record.")
 
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through
@@ -2556,6 +2608,11 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; — no `%identity-of`/`%impl-for` lookup per printed int or string. Disable for a scope
 ;; with `(binding (*show* nil) …)`.
 (defn- %show-print-hook (x)
+  "The per-argument hook `*show*` holds: render `x` through the `Display` ability when
+it has an impl, else hand it back untouched for the printer's own rendering.
+`(binding (*show* nil) …)` disables it for a scope.
+
+    (*show* 42)   → 42   ; no Display impl for an int — passed straight through"
   ;; Which values the screen printers route through `Display`.
   ;;
   ;; The guard used to be `(if (record? x) …)`, which meant an `(impl Display :rope …)`

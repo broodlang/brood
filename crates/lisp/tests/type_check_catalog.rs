@@ -57,7 +57,7 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     // ---- element types preserved through structural combinators ----
     ("(string/length (first (reverse [1 2 3])))", "string/length"),      // reverse vector<int> → int
     ("(string/length (first (sort [1 2 3])))", "string/length"),         // sort preserves int
-    ("(string/length (first (sort-by (fn (x) x) [1 2 3])))", "string/length"), // sort-by preserves int
+    ("(string/length (first (sort-by [1 2 3] (fn (x) x))))", "string/length"), // sort-by preserves int
     ("(string/length (first (take [1 2 3] 2)))", "string/length"),       // take preserves int
     ("(string/length (first (drop [1 2 3] 1)))", "string/length"),       // drop preserves int
     ("(string/length (first (cons 1 (list 2 3))))", "string/length"),    // cons: int | int = int
@@ -84,7 +84,7 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(+ 1 (any? (list 1 2) int?))", "+"),    // any? → bool
     ("(+ 1 (every? (list 1 2) int?))", "+"),  // every? → bool
     // ---- expanded curated sigs: string converters ----
-    (r#"(+ 1 (string/join ", " (list "a" "b")))"#, "+"), // join → string
+    (r#"(+ 1 (string/join (list "a" "b") ", "))"#, "+"), // join → string
     (r#"(+ 1 (string/capitalize "hello"))"#, "+"), // capitalize → string
     // ---- op names must be unique within a module (ADR-172) ----
     // two abilities declaring the same op name `area` clobber each other's generic fn.
@@ -161,7 +161,7 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(if (number? 42) :yes :no)",             // number? used as a predicate (bool is fine)
     "(if (empty? (list)) :yes :no)",          // empty? as predicate
     r#"(if (contains? {:a 1} :a) :yes :no)"#, // contains? as predicate
-    r#"(string/length (string/join ", " (list "a")))"#, // join→string→length fine
+    r#"(string/length (string/join (list "a") ", "))"#, // join→string→length fine
     // ---- type-variable sigs: correct uses stay silent ----
     "(sig identity (?A -> ?A)) (defn identity (x) x) (+ 1 (identity 42))",
     "(sig my-first ((list ?A) -> ?A)) (defn my-first (xs) (first xs)) (+ 1 (my-first (list 1 2 3)))",
@@ -240,13 +240,14 @@ fn type_findings_anchor_at_the_offending_argument() {
         "the type finding should anchor at the argument `(+ 10 20)` (col 16), not the call head"
     );
 
-    // A callback-arity finding likewise points at the callback argument.
-    // `(fn (a b) a)` is the second token after `(map ` → column 6.
+    // A callback-arity finding likewise points at the callback argument. Data-first
+    // (ADR-308) puts the callback SECOND, so `(fn (a b) a)` starts at column 19 —
+    // the anchor moved with the argument, which is exactly what should happen.
     let cb = "(map (list 1 2 3) (fn (a b) a))";
     let (l2, c2) = warning_pos(cb, "callback").expect("a callback warning");
     assert_eq!(l2, 1);
     assert_eq!(
-        c2, 6,
+        c2, 19,
         "the callback finding should anchor at the lambda argument"
     );
 

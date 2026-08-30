@@ -46,7 +46,7 @@
         (is (not (empty? spans)))
         ;; every span is [start end face] with start < end, and starts ascend
         (is (every? spans (fn (s) (< (first s) (second s)))))
-        (is (= spans (sort-by first spans)))))
+        (is (= spans (sort-by spans first)))))
 
     (test "colours a whole comment node (delimiter + content) as one span"
       (let (src "x = 1 # note\n"

@@ -143,7 +143,7 @@ address the child by a stable name even though its pid changes across restarts."
 (defn- supervisor-ordered (children)
   "Every child record in **start order** — the order `:children` itself used to be
 kept in, reconstructed from each record's `:seq`."
-  (sort-by (fn (c) (get c :seq)) (vals children)))
+  (sort-by (vals children) (fn (c) (get c :seq))))
 
 (defn- supervisor-find (children pid)
   "The child record whose `:pid` is `pid`, or `nil`."

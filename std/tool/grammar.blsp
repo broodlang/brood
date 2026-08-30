@@ -67,7 +67,7 @@ grammar target."
 (defn- grammar-alternation (keywords)
   "An escaped, longest-first `a|b|c` regex alternation. Longest-first so a prefix
 can't shadow a longer form (`->>` before `->`)."
-  (string/join (map (sort-by (fn (k) (- (count k))) keywords) grammar-escape) "|"))
+  (string/join (map (sort-by keywords (fn (k) (- (count k)))) grammar-escape) "|"))
 
 ;; ---- TextMate grammar (VS Code) ----------------------------------------------
 

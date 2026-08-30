@@ -1150,7 +1150,7 @@ pub(super) fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         s @ Value::Str(_) => printer::display(heap, s),
         v => return Err(LispError::wrong_type(heap, "%string-join", "string", v)),
     };
-    // Streaming fast path for a lazy int range (`(string/join "," (range n))`): format
+    // Streaming fast path for a lazy int range (`(string/join (range n) ",")`): format
     // each integer straight into the buffer in one pass — no intermediate Vec of
     // `Value`s, no per-element string allocation. The range stays immutable; this
     // only changes how its joined string is *constructed*.

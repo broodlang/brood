@@ -1326,6 +1326,9 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     embedded_module!("test", "std/tool/test.blsp"),
     // Doc generation (`nest doc`) — tooling, not runtime.
     embedded_module!("docs", "std/tool/docs.blsp"),
+    // The surface audit — docstring / example / data-first argument order over every
+    // public callable (`(audit/report)`). Tooling: it reads the live image's globals.
+    embedded_module!("audit", "std/tool/audit.blsp"),
     // Generate editor syntax grammars (VS Code TextMate, Emacs font-lock) from the
     // language's own `(reflect/special-forms)` — one source of truth, no drift (ADR-092).
     embedded_module!("grammar", "std/tool/grammar.blsp"),

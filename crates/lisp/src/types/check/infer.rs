@@ -1309,17 +1309,25 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             _ => None,
         };
     }
-    // `(sort coll)` / `(sort less? coll)` and `(sort-by key-fn coll)` — the
-    // sequence is always the last argument; element type is preserved unchanged.
-    if value::symbol_is(head, "sort") || value::symbol_is(head, "sort-by") {
+    // `(sort-by coll key-fn)` — data-first (ADR-308), sequence FIRST.
+    if value::symbol_is(head, "sort-by") {
+        let coll = *items.get(1)?;
+        let coll_ty = expr_ty(heap, coll, ctx);
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        return list_result_over(coll_ty.as_ref(), a);
+    }
+    // `(sort coll)` / `(sort less? coll)` — variadic in its comparator, so the
+    // sequence stays LAST in both arms; element type is preserved unchanged.
+    if value::symbol_is(head, "sort") {
         let coll = *items.last()?;
         let coll_ty = expr_ty(heap, coll, ctx);
         let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
         return list_result_over(coll_ty.as_ref(), a);
     }
-    // Element-preserving slices/filters whose sequence is the *second* argument —
-    // `take` / `drop` / `take-while` / `drop-while`, `take-last` / `drop-last`, and
-    // `remove` (the `filter` complement). Element type is preserved unchanged.
+    // Element-preserving slices/filters whose sequence is the *first* argument
+    // (data-first, ADR-308) — `take` / `drop` / `take-while` / `drop-while`,
+    // `take-last` / `drop-last`, and `remove` (the `filter` complement). Element type
+    // is preserved unchanged.
     if value::symbol_is(head, "take")
         || value::symbol_is(head, "drop")
         || value::symbol_is(head, "take-while")
@@ -1328,7 +1336,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "drop-last")
         || value::symbol_is(head, "remove")
     {
-        let coll = *items.get(2)?;
+        let coll = *items.get(1)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         return list_result(a);
     }

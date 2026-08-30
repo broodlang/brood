@@ -120,7 +120,7 @@ That rebuild dominated ranking large candidate sets (thousands of project files)
                           (if (nil? m)
                             acc
                             (cons [[(- 0 (get m :score)) (string/length c) c] c] acc))))))
-      (map (sort-by first decorated) second))))
+      (map (sort-by decorated first) second))))
 ;; `cands` and the result are `seqable` (empty query returns `cands` as-is, else a ranked
 ;; list) — the domain checks the argument without false-flagging a vector caller.
 (sig filter (string seqable -> seqable))

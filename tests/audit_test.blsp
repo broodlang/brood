@@ -1,0 +1,48 @@
+;; std/tool/audit.blsp — the surface audit, and the ADR-308 gate it exists to hold.
+;;
+;; The argument-order check is the load-bearing one. A reversed-args rename is the one
+;; rename mistake with no natural gate — the arity is unchanged and no name is unbound,
+;; so `nest check` is silent and the wrong answer surfaces somewhere else entirely
+;; (KI-71; and again during ADR-308, when `seq/remove-nth` and `seq/transduce` were each
+;; left behind by their siblings). This asserts the whole public surface, by name.
+
+(defmodule audit-test (:use test) (:use audit))
+
+(describe "surface audit: argument order"
+  (test "no public function puts a callback or index ahead of its collection"
+    ;; Compared as the NAME LIST, not a count: a failure then prints which function
+    ;; broke the convention, which is the entire fix instruction.
+    (assert= [] (reversed-args)))
+
+  (test "a declared signature takes as many parameters as its function does"
+    ;; Found two real bugs on its first run: `string/grapheme-at` and
+    ;; `string/substring-graphemes` both declare `Arity::range(2, 3)` but listed only
+    ;; two fixed `Sig` params and no optional, so the checker could not type their
+    ;; third argument at all.
+    (assert= [] (sig-arity-mismatches)))
+
+  (test "the convention is judged per function, and recognises both shapes"
+    (is (data-first? 'map))
+    (is (data-first? 'fold))
+    (is (data-first? 'seq/transduce))
+    ;; a function with no recognisable collection/subject pair is vacuously fine
+    (is (data-first? 'count))))
+
+(describe "surface audit: docs and examples"
+  (test "the audit sees a real surface, so an empty result would not pass vacuously"
+    (is (> (count (public-names)) 300)))
+
+  (test "documented? and exemplified? read the binding's docstring"
+    (is (documented? 'audit/report))
+    (is (exemplified? 'audit/data-first?))
+    (is (not (exemplified? 'audit/undocumented))))
+
+  ;; Not asserted to zero: 23 names carry no docstring and 224 no example as of
+  ;; ADR-308 — mostly Rust builtins whose docs come from PRIMITIVE_DOCS. Recorded
+  ;; here as a WATCH so the numbers are visible and cannot silently grow unnoticed.
+  (test "report returns the four counts it prints"
+    (let (r (with-out-str (report)))
+      (is (includes? r "surface audit"))
+      (is (includes? r "no docstring"))
+      (is (includes? r "no example"))
+      (is (includes? r "reversed args")))))

@@ -129,7 +129,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; `reflect/global-names` (sorted by spelling), so without this the report reads 7, 15, 9 —
 ;; sorting by line is what makes it walk the file top-to-bottom.
 (defn- coverage-uncovered (results)
-  (sort-by :line (filter results (fn (r) (= (get r :hits) 0)))))
+  (sort-by (filter results (fn (r) (= (get r :hits) 0))) :line))
 
 ;; Percentage as a whole number, rounded to nearest. An empty denominator is 100%
 ;; (nothing to cover is not a failure), which keeps a source-less project from

@@ -202,7 +202,7 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(seq/but-last [1 2 3])",
         "(seq/distinct [1 1 2])",
         "(sort [3 1 2])",
-        "(seq/sort-by (fn (x) x) [3 1 2])",
+        "(seq/sort-by [3 1 2] (fn (x) x))",
         "(take [1 2 3] 2)",
         "(drop [1 2 3] 2)",
         "(take [1 2 3] 0)",

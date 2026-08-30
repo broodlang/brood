@@ -42,7 +42,7 @@ primitives. The kernel also provides the always-available file primitives
   ;; the whole accumulator per line, so writing a file was O(total²): 2000 lines 37 ms,
   ;; 4000 144 ms, 8000 361 ms, 16 000 **1888 ms**. The same shape `read-lines`' sibling
   ;; comment at `:67` already warns about for `append`.
-  ;; The empty guard matters: `(string/join "\n" ())` is "", and an unguarded trailing "\n" would
+  ;; The empty guard matters: `(string/join () "\n")` is "", and an unguarded trailing "\n" would
   ;; write a one-byte file where the fold wrote an empty one.
   (file/spit path (if (empty? lines) "" (str (string/join lines "\n") "\n"))))
 ;; `lines` is `seqable`, not `(list string)` — `fold` accepts a list, vector, set or range,

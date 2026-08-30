@@ -199,24 +199,24 @@
 (describe "transduce — transducers as public surface (ADR-161)"
   (test "a composed stage stack reduces in one pass"
     (assert= 165
-      (seq/transduce (comp (seq/xfilter odd?) (seq/xmap (fn (n) (* n n)))) + 0 (range 10)))
-    (assert= [2 3 4] (seq/transduce (seq/xmap inc) conj [] (list 1 2 3))))
+      (seq/transduce (range 10) (comp (seq/xfilter odd?) (seq/xmap (fn (n) (* n n)))) + 0))
+    (assert= [2 3 4] (seq/transduce (list 1 2 3) (seq/xmap inc) conj [])))
   (test "stages compose LEFT to right in data-flow order"
     ;; filter-then-map keeps the odds (1,3) then increments → [2 4];
     ;; map-then-filter increments first (1,2,3,4) then keeps the odds → [1 3].
     ;; (Vector accumulator: `conj` APPENDS to a vector but PREPENDS to a list, so a
     ;; list here would read reversed and obscure the ordering being tested.)
-    (assert= [2 4] (seq/transduce (comp (seq/xfilter odd?) (seq/xmap inc)) conj [] (range 4)))
-    (assert= [1 3] (seq/transduce (comp (seq/xmap inc) (seq/xfilter odd?)) conj [] (range 4))))
+    (assert= [2 4] (seq/transduce (range 4) (comp (seq/xfilter odd?) (seq/xmap inc)) conj []))
+    (assert= [1 3] (seq/transduce (range 4) (comp (seq/xmap inc) (seq/xfilter odd?)) conj [])))
   (test "xkeep drops nil results; xremove is the complement of xfilter"
-    (assert= [1 3 5] (seq/transduce (seq/xkeep (fn (n) (if (odd? n) n nil))) conj [] (range 6)))
-    (assert= [0 2 4] (seq/transduce (seq/xremove odd?) conj [] (range 6))))
+    (assert= [1 3 5] (seq/transduce (range 6) (seq/xkeep (fn (n) (if (odd? n) n nil))) conj []))
+    (assert= [0 2 4] (seq/transduce (range 6) (seq/xremove odd?) conj [])))
   (test "a user-written stage is a plain fn — the reason this is public"
     (defn erg-xtake-while (pred)
       (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
-    (assert= [0 1 2] (seq/transduce (erg-xtake-while (fn (n) (< n 3))) conj [] (range 6))))
+    (assert= [0 1 2] (seq/transduce (range 6) (erg-xtake-while (fn (n) (< n 3))) conj [])))
   (test "the l* combinators share the machinery and agree"
-    (assert= (seq/transduce (comp (seq/xfilter odd?) (seq/xmap inc)) + 0 (range 10))
+    (assert= (seq/transduce (range 10) (comp (seq/xfilter odd?) (seq/xmap inc)) + 0)
       (reduce (-> (range 10) (seq/lfilter odd?) (seq/lmap inc)) 0 +))))
 
 (describe "dissoc-in"
