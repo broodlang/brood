@@ -284,6 +284,17 @@ pub(super) struct MailboxState {
     /// queued. Empty for the overwhelming majority of processes, which is what makes
     /// the delivery check free (`is_empty` on a line the deliverer already holds).
     pub(super) dead_aliases: DeadAliases,
+    /// How many OS threads are blocked (or committed to block) on this mailbox's
+    /// condvar — the root/file-runner thread, and a native-nested `receive` (§7.4).
+    /// Written only under this lock: [`wait_for_message`] increments before its
+    /// `Condvar::wait` atomically releases the lock into the block, and decrements on
+    /// the re-acquired guard when the wait returns. Read by every wake site inside the
+    /// same critical section that makes its wake-relevant change (queue push, kill,
+    /// timer check), so `wake_both` can skip the condvar notify — an unconditional
+    /// `futex(FUTEX_WAKE)` syscall per message, ~20% of `pingpong` — when nobody is
+    /// or can yet be committed to the blocked side. See `wake_both` for why the skip
+    /// cannot recreate the lost-wake bug it was added to fix.
+    pub(super) cv_waiters: u32,
 }
 
 /// How many deactivated aliases one mailbox remembers. Fixed and small — the whole
@@ -446,6 +457,7 @@ impl Mailbox {
                 kill_hard: false,
                 recv_deadline: None,
                 dead_aliases: DeadAliases::default(),
+                cv_waiters: 0,
             }),
             cv: Condvar::new(),
             // The root (which never goes through enqueue/run_one) keeps this; a
@@ -791,11 +803,12 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> LocalDelivery {
         #[cfg(feature = "dev-tools")]
         trace: None,
     });
+    let cv_waiter = st.cv_waiters > 0;
     drop(st);
     // Both paths, for the reason `wake_both` documents: taking a `waiter` here does not prove
     // the receiver is *only* reachable by re-queue. This path never notified the condvar at
     // all, so a receiver that was both parked and cv-blocked was unreachable through it.
-    wake_both(&mb, Some(proc));
+    wake_both(&mb, Some(proc), cv_waiter);
     l1_stats::bump(&l1_stats::HIT);
     LocalDelivery::Delivered
 }
@@ -822,8 +835,9 @@ fn deliver_envelope_timed(pid: u64, env: Envelope) {
         }
         st.push(env);
         let parked = wake_parked(&mut st);
+        let cv_waiter = st.cv_waiters > 0;
         drop(st);
-        wake_both(&mb, parked);
+        wake_both(&mb, parked, cv_waiter);
     }
 }
 
@@ -849,8 +863,21 @@ fn deliver_envelope_timed(pid: u64, env: Envelope) {
 /// re-scans after every `wait_for_message` return anyway. Called with the state lock already
 /// released: we pushed under it, so a receiver that locks after us sees the message on its
 /// own `queue.len() > i` check and never reaches the wait.
-pub(super) fn wake_both(mb: &Mailbox, parked: Option<Box<Process>>) {
-    mb.cv.notify_all();
+/// `cv_waiter` is [`MailboxState::cv_waiters`]` > 0`, read by the caller **inside the
+/// same lock hold that made its wake-relevant change**. Skipping the notify on `false`
+/// cannot recreate the lost-wake bug this function fixed: a waiter registers its count
+/// and re-checks its wake condition under that same mutex before `Condvar::wait`
+/// atomically releases it into the block — so either the wake site's critical section
+/// ran first (the waiter sees the message/kill/deadline and never blocks) or the
+/// waiter's ran first (the wake site reads `cv_waiters > 0` and notifies). The only
+/// notify skipped is one provably delivered to nobody — which a condvar discards
+/// anyway; it was pure cost: an unconditional `notify_all` is a `futex(FUTEX_WAKE)`
+/// syscall per delivery, measured at ~850 instructions/message on `pingpong` (+20%
+/// wall, the 0.13→0.15 step the 2026-08-30 bisect pinned to this site's introduction).
+pub(super) fn wake_both(mb: &Mailbox, parked: Option<Box<Process>>, cv_waiter: bool) {
+    if cv_waiter {
+        mb.cv.notify_all();
+    }
     if let Some(proc) = parked {
         wake_enqueue(proc); // wake a parked green process (capture-mode → may migrate)
     }
@@ -1628,17 +1655,30 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
     }
     set_self_status(ctx, ST_WAITING);
     let _dirty = crate::process::dirty_block();
+    // Register on `cv_waiters` under this same lock hold, so every wake site's
+    // critical section either runs before us (we see its effect on the re-checks
+    // above and never block) or after (it reads a non-zero count and notifies).
+    // The decrement runs on the guard `wait` hands back — exactly once per
+    // increment, on timeout and spurious wakes included. See `wake_both`.
+    let mut st = st;
     match deadline {
         Some(d) => {
             // The SCHEDULER clock — the one `d` was minted on. See the doc comment.
             let now = super::timer::sched_now();
             if now < d {
-                // Guard dropped at end of scope (before we return).
-                let _g = ctx.mailbox.cv.wait_timeout(st, d - now);
+                st.cv_waiters += 1;
+                let (mut g, _timed_out) = ctx
+                    .mailbox
+                    .cv
+                    .wait_timeout(st, d - now)
+                    .unwrap_or_else(|e| e.into_inner());
+                g.cv_waiters -= 1;
             }
         }
         None => {
-            let _g = ctx.mailbox.cv.wait(st);
+            st.cv_waiters += 1;
+            let mut g = ctx.mailbox.cv.wait(st).unwrap_or_else(|e| e.into_inner());
+            g.cv_waiters -= 1;
         }
     }
 }
@@ -1673,13 +1713,14 @@ pub(super) fn wake_for_timeout(pid: u64, gen: u64) {
         }
         let mut st = crate::core::sync::lock(&mb.state);
         let parked = wake_parked(&mut st);
+        let cv_waiter = st.cv_waiters > 0;
         drop(st);
         // Both paths (`wake_both`). This site had **no** condvar notify at all — alone among
         // the wake sites — which was survivable only because a cv-blocked receiver with a
         // deadline sits in `wait_timeout` and self-wakes at the same instant. That made the
         // timer thread's wake redundant *for that shape* and missing for any other; leaving
         // one wake site with different reachability is how the either/or bug above got in.
-        wake_both(&mb, parked); // timer wake (capture-mode → may migrate)
+        wake_both(&mb, parked, cv_waiter); // timer wake (capture-mode → may migrate)
     }
 }
 

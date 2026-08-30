@@ -334,6 +334,12 @@ impl Heap {
         // activation; the currently-executing arm's stale cursors are benign (probes
         // bounds-check → miss, and every entry validates sym+argc+epoch).
         self.arm_ic_blocks.borrow_mut().clear();
+        // M2b: base counters reset in lockstep with the registry + tables, so
+        // recycled site-id space starts at 0 exactly as it did when bases came
+        // from `table.len()` (ADR-096's guards rely on the epoch/sym checks, not
+        // on unique ids).
+        self.next_ic_base.set(0);
+        self.next_gic_base.set(0);
         migrated
     }
 
@@ -454,6 +460,12 @@ impl Heap {
         // activation; the currently-executing arm's stale cursors are benign (probes
         // bounds-check → miss, and every entry validates sym+argc+epoch).
         self.arm_ic_blocks.borrow_mut().clear();
+        // M2b: base counters reset in lockstep with the registry + tables, so
+        // recycled site-id space starts at 0 exactly as it did when bases came
+        // from `table.len()` (ADR-096's guards rely on the epoch/sym checks, not
+        // on unique ids).
+        self.next_ic_base.set(0);
+        self.next_gic_base.set(0);
         // Drop the shared JIT-code caches (the version bump already epoch-invalidated
         // them; clearing reclaims the memory and prevents a recycled id lingering).
         if let Ok(mut c) = self.runtime.jit_code_cache.write() {
@@ -1335,6 +1347,12 @@ impl Heap {
         // activation; the currently-executing arm's stale cursors are benign (probes
         // bounds-check → miss, and every entry validates sym+argc+epoch).
         self.arm_ic_blocks.borrow_mut().clear();
+        // M2b: base counters reset in lockstep with the registry + tables, so
+        // recycled site-id space starts at 0 exactly as it did when bases came
+        // from `table.len()` (ADR-096's guards rely on the epoch/sym checks, not
+        // on unique ids).
+        self.next_ic_base.set(0);
+        self.next_gic_base.set(0);
 
         debug_assert!(
             verify_rt_slabs(&new),

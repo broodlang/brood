@@ -522,6 +522,27 @@ pub(crate) fn dispatch(
         // the worker (§7.4 dirty-scheduler carve-out) instead of attempting a
         // state-capture that can't cross the native boundary.
         crate::perf_bump!(tw_defer);
+        // Name each deferring closure under BROOD_DEFER_DBG=1. The `tw_defer` counter
+        // says how MANY calls fell to the tree-walker, never WHO — and one deferred
+        // entry tree-walks everything below it transitively (`apply_closure` never
+        // re-enters the VM), so the name is the whole diagnosis. This is what found
+        // §7.3's expansion constant: `%receive-split` deferring on a quasiquote the
+        // static rewrite could not see inside a vector literal. Cold path by
+        // definition; one cached bool when off.
+        {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *ON.get_or_init(|| std::env::var_os("BROOD_DEFER_DBG").is_some()) {
+                let name = match cur_callee.unpack() {
+                    crate::core::value::ValueRef::Fn(id) => heap
+                        .closure(id)
+                        .name
+                        .map(crate::core::value::symbol_name_ref)
+                        .unwrap_or("<anon>"),
+                    _ => "<non-fn>",
+                };
+                eprintln!("[tw-defer] {name} argc={}", cur_argv.len());
+            }
+        }
         let _guard = CaptureTopGuard(crate::process::set_capture_top_level(false));
         let result = crate::eval::apply(heap, cur_callee, &cur_argv, genv);
         return Ok(Step::Done(result?));

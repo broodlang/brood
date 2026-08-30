@@ -582,8 +582,17 @@ What this changes:
   unpublished one. Time-neutral at both ceilings (`fib` is the load-bearing row — the in-IR
   fast link is worth ~20% there, so +0.0% is what proves linking still happens).
 
-  **What is left of M2b is the fat table**, `vm_call_ics`, still grown eagerly per activated
-  arm at 64 B/site — plus `vm_global_ics`. Sharing it faces the unchanged difficulty below.
+  **The fat-table half shipped 2026-08-30**: `vm_arm_block` now reserves index space from
+  a counter (`next_ic_base`/`next_gic_base`) and BOTH fat tables (`vm_call_ics`,
+  `vm_global_ics`) grow on publish — the mirror's lazy-by-its-only-writer pattern, since
+  every probe already reads `.get(abs)`. Counters reset in lockstep with the four
+  table+registry clears, preserving ADR-096's recycling semantics. Measured: `spawn-live`
+  peak RSS 1796 → 1737 MB (−59 MB ≈ 200 B/process at 300k); time-neutral at both ceilings
+  (fib/collatz/pingpong/spawn flat; ceiling-1 pfib's +3.9% wall read against IDENTICAL
+  600.9 G instructions on both arms — scheduling variance, the spawn-retraction class).
+
+  **What was left of M2b before that** — kept for the record: `vm_call_ics` grown eagerly per
+  activated arm at 64 B/site — plus `vm_global_ics`. Sharing it faces the unchanged difficulty below.
   Two smaller follow-ons were named alongside the mirror work: shrink `CallIcEntry` 64 → ~48 B,
   and share entries for frozen callees. **Cost them at the parked state (48 B per call site
   *entered*, ~4 while parked), not at a teardown slot count** — see the 2026-08-18 note in the
