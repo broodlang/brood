@@ -61,11 +61,16 @@ the router stands down and the tree-walker's own 'tail loop absorbs the cycle fl
 
   (test "the P40 shape: a spawned drainer reports to a captured pid after recursing"
     (let (me (self))
-      (def w (spawn (do (defn tw-cap-drain (sock acc)
-                          (let (event (receive ([:d d] [:data d]) ([:done] :done) (after 3000 :timeout)))
-                            (if (= :done event)
-                              (send me [:tw-cap-got acc])
-                              (tw-cap-drain sock (str acc (second event))))))
-                        (tw-cap-drain :sock ""))))
-      (send w [:d "a"]) (send w [:d "b"]) (send w [:d "c"]) (send w [:done])
+      (def w
+        (spawn (do
+                 (defn tw-cap-drain (sock acc)
+                   (let (event (receive ([:d d] [:data d]) ([:done] :done) (after 3000 :timeout)))
+                     (if (= :done event)
+                       (send me [:tw-cap-got acc])
+                       (tw-cap-drain sock (str acc (second event))))))
+                 (tw-cap-drain :sock ""))))
+      (send w [:d "a"])
+      (send w [:d "b"])
+      (send w [:d "c"])
+      (send w [:done])
       (assert= "abc" (receive ([:tw-cap-got acc] acc) (after 4000 :timeout))))))

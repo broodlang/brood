@@ -62,7 +62,7 @@ inference*, below, does read `{…}` directly — but that's inferring a type
 
 ### Runtime (`type-matches?`) — Brood only, no Rust
 
-`std/prelude.blsp`, alongside the existing `map` branch:
+`std/prelude/core.blsp`, alongside the existing `map` branch:
 
 ```lisp
 ;; in the (pair? t) / (cond ...) branch of type-matches?:

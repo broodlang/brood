@@ -201,7 +201,7 @@ independent symbol interners. (In-process messages keep the interned id.)
     receiving node cannot find raises there, naming the module and the fact that
     the closure was shipped. Nothing is asked for that the *sender* does not have
     loaded, and quoted data (`'json/x`) drags nothing along.
-  - **`(remote-spawn node expr)`** macro (`std/prelude.blsp`) — the surface
+  - **`(remote-spawn node expr)`** macro (`std/prelude/tools.blsp`) — the surface
     convenience over the `[:run …]` pattern; ships the closure to a
     `:remote-spawn` server on `node` (lazily started via `(start-remote-spawn)`).
     See `remote_spawn_runs_a_thunk_on_a_peer`.
@@ -411,4 +411,4 @@ to exactly the nodes you dial, with no transitive discovery.
 - `crates/lisp/src/process.rs` — `Message::Pid`, `send` dispatch, `pid_value`,
   `deliver` (the shared local-delivery tail).
 - `crates/lisp/src/builtins/` — the primitives above (split by domain).
-- `std/prelude.blsp` — `pid?`.
+- `std/prelude/predicates.blsp` — `pid?`.

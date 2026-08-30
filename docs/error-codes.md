@@ -7,7 +7,7 @@ programmatic handling; humans read `:message` and `:hint`.
 
 The contract is described in [`llm-native.md`](llm-native.md) §4; the
 machinery in [`error.rs`](../crates/lisp/src/error.rs) (`LispError`,
-`error_codes`, `to_value_map`); the catch surface in [`prelude.blsp`](../std/prelude.blsp)
+`error_codes`, `to_value_map`); the catch surface in [`prelude/core.blsp`](../std/prelude/core.blsp)
 (`try`/`catch`); and the MCP projection in [`mcp.md`](mcp.md) (the agent sees
 the same fields in `error.data` of a JSON-RPC failure and in `:error` of a
 tool's `:value`/`:error` result).

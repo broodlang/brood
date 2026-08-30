@@ -6,7 +6,7 @@ description: Use when writing or editing Brood Lisp (`.blsp`) source — generat
 # Writing Brood
 
 Brood (`.blsp`) is a small, dynamic, **immutable** Lisp. The full reference is
-`docs/brood-for-claude.md` (read it for depth); `std/prelude.blsp` is the
+`docs/brood-for-claude.md` (read it for depth); `std/prelude/*.blsp` is the
 canonical example of idiomatic code. This skill is the short list of things you
 will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 
