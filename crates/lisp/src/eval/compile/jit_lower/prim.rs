@@ -356,13 +356,13 @@ pub(super) fn emit_make_vector(
                 off + PAYLOAD_OFFSET as i32 + 8,
             );
         }
-        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+        let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
         let w1 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
         let w2 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
         stack.push(Op::Handle(w0, w1, w2));
     } else {
         // Variadic `[e0 … e{n-1}]` (nbody's `[vx vy vz]` / 7-body rebuild). Pop the `n`
@@ -384,24 +384,24 @@ pub(super) fn emit_make_vector(
         for (i, op) in ops.into_iter().enumerate() {
             let w = read_words(b, op, frame);
             let off = i as i32 * STRIDE as i32;
-            b.ins().stack_store(w[0], stage, off);
+            b.ins().stack_store(types::I64, w[0], stage, off);
             b.ins()
-                .stack_store(w[1], stage, off + PAYLOAD_OFFSET as i32);
+                .stack_store(types::I64, w[1], stage, off + PAYLOAD_OFFSET as i32);
             b.ins()
-                .stack_store(w[2], stage, off + PAYLOAD_OFFSET as i32 + 8);
+                .stack_store(types::I64, w[2], stage, off + PAYLOAD_OFFSET as i32 + 8);
         }
         let stage_addr = b.ins().stack_addr(ptr_ty, stage, 0);
         let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
         let n_val = b.ins().iconst(types::I64, n as i64);
         b.ins()
             .call(funcs.makevecn, &[heap, out_addr, stage_addr, n_val]);
-        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+        let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
         let w1 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
         let w2 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
         stack.push(Op::Handle(w0, w1, w2));
     }
     Some(())
@@ -564,13 +564,13 @@ pub(super) fn emit_prim3_table_put(
         b.ins()
             .brif(is_err, error, &[], deopt, &[BlockArg::Value(__dr)]);
         b.switch_to_block(cont);
-        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+        let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
         let w1 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
         let w2 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
         stack.push(Op::Handle(w0, w1, w2));
     }
     Some(())

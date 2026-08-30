@@ -787,7 +787,7 @@ pub(super) fn jit_lower_i64_arm(
         };
         b.ins().return_(&[zero]);
         b.seal_block(poisoned);
-        b.finalize();
+        b.finalize(m.target_config());
         m.define_function(worker_id, &mut ctx).ok()?;
         m.clear_context(&mut ctx);
     }
@@ -947,7 +947,7 @@ pub(super) fn jit_lower_i64_arm(
         b.switch_to_block(deopt);
         let od = b.ins().iconst(types::I64, 1);
         b.ins().return_(&[od]);
-        b.finalize();
+        b.finalize(m.target_config());
         m.define_function(wrap_id, &mut ctx).ok()?;
         m.clear_context(&mut ctx);
     }
