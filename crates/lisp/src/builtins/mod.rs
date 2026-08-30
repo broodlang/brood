@@ -1101,13 +1101,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "The first index of the needle bytes within haystack at or after from (default 0), or -1 if absent. The byte-protocol workhorse (locate a \\r\\n\\r\\n, a frame delimiter, …).",
         bytes_index_of);
     // string/->number returns int *or* float *or* nil (the parse-failed case).
+    // The optional radix is what ADR-169 pointed at when it reserved `0x1F` as syntax
+    // rather than a name: with no radix literals, this is the only way to read one.
     def(
         heap,
         "string/->number",
-        Arity::exact(1),
-        Sig::new(vec![string], num.union(nil_ty)),
-        &["s"],
-        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike reflect/read-string). The inverse of str.",
+        Arity::range(1, 2),
+        Sig::with_optional(vec![string], vec![int], num.union(nil_ty)),
+        &["s", "&optional", "radix"],
+        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — the only way to read hex/octal/binary, since Brood has no radix literals; give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.",
         string_to_number);
     // `decimal` constructs an exact base-10 decimal from a string ("1.50"), an
     // int (3), or a float (inexact source — uses its shortest round-trip form).

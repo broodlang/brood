@@ -168,6 +168,16 @@
     (let (src (apply str (map (fn (_) "[a](u)") (range 0 2000))))
       (assert= 2001 (count (string/split (docs/md-links src) "<a href="))))))
 
+;; The namespaces the catalogue covers, read off the catalogue itself: every entry's
+;; qualifier. Derived rather than listed so the gate follows the file — the first
+;; `table/…` entry someone adds opts the whole `table/` namespace into the check.
+(defn- doc-catalog-prefixes ()
+  (into #{}
+    (seq/keep (fn (k)
+                (let (i (string/last-index-of k "/"))
+                  (when (>= i 0) (string/substring k 0 i))))
+      (keys doc-catalog/*catalog*))))
+
 ;; ---------------------------------------------------------------------------
 ;; The doc catalogue must not name things that do not exist.
 ;;
@@ -184,6 +194,15 @@
 ;; this asserts the invariant directly, and it is cheap (one `bound?` per entry).
 (describe "doc catalogue: every entry names something that exists"
   (test "no catalogue entry is a name the runtime cannot resolve"
+    ;; Load every namespace the catalogue names first. A `proc/`, `seq/` or `map/` entry
+    ;; is a real function that simply has not been autoloaded yet in THIS process, and
+    ;; `bound?` cannot tell that from a name that no longer exists — so without this the
+    ;; check reads "not yet loaded" as "stale entry". Guarded: several catalogued
+    ;; namespaces (`bit/`, `decimal/`, `system/`, `reflect/`) are kernel primitives with
+    ;; no module file behind them, and `require-one` on those is expected to fail.
+    (fold (fn (_ m) (try (require-one (string/->symbol m)) (catch _ nil)))
+      nil
+      (doc-catalog-prefixes))
     (let (forms (into #{} (map (fn (f) (if (pair? f) (first f) f)) (reflect/special-forms)))
           missing (filter (fn (k)
                             (let (s (string/->symbol k))
@@ -198,7 +217,7 @@
   (test "the catalogue is not empty (a broken load would vacuously pass the check above)"
     (is (> (count (keys doc-catalog/*catalog*)) 400))))
 
-;; ...and the other direction: every public core name must HAVE a category.
+;; ...and the other direction: every public name must HAVE a category.
 ;;
 ;; `category-of` falls back to `:other`, so an uncatalogued name does not error — it just
 ;; lands in a junk drawer at the bottom of the hosted reference. That drawer had grown to
@@ -206,30 +225,57 @@
 ;; `start` — miscategorised while `gen` was briefly prelude-bundled) with
 ;; threading helpers (`tap`, `then`) and internals. A reader scanning by category simply
 ;; never saw them. This asserts the drawer stays empty.
-(describe "doc catalogue: every public core name has a category"
+;;
+;; **Widened 2026-08-30 to qualified names.** It used to skip anything containing a `/`,
+;; which is to say every module-rooted name — and the namespace waves (ADR-227/230/251/
+;; 290/291) had moved most of the library there. So the gate was green while **137 public
+;; names had no category**, including every `string/->…` bridge and all of `math/`,
+;; `path/`, `io/`, `file/`, `reflect/`, `map/` and most of `seq/`. `string/->number` — the
+;; answer to "how do I parse a number?" — rendered under "Other". The catalogue always
+;; covered qualified names (`math/min`, `string/length` have been in it for months); only
+;; the gate did not.
+;;
+;; The rule is **a namespace the catalogue covers, it covers completely**, and the covered
+;; set is read off the catalogue itself rather than hardcoded — so it follows the file
+;; instead of needing to be kept in step with it, and adding the first `table/` entry
+;; opts `table/` in. The catalogue's remit is the core reference (the prelude plus the
+;; kernel-namespaced families), not every std module: `datetime/`, `sexp/`, `project/`,
+;; `editor/buffer/` and friends are documented per-module by `nest doc`, and demanding a
+;; category for each would be a different, much larger claim than the one this file makes.
+(describe "doc catalogue: every public name has a category"
   (test "nothing falls through to :other"
     ;; The candidate set is asserted before the violation set. This gate walks
     ;; `(reflect/global-names)` and asserts a FILTERED result is empty, which is the shape that
     ;; passes vacuously when the filter stops matching — a bug that made every name look
     ;; private, say, would empty the corpus and the drawer would look clean. ADR-280 is
     ;; the same lesson from the startup image: assert the coverage, not only the verdict.
-    (let (candidates (filter (fn (s)
-                               (let (nm (->string s) i (index-of nm "/"))
-                                 (and (not (and i (> i 0)))
-                                   (not (includes? nm "--"))
+    (let (in-remit? (fn (nm)
+                      ;; A bare name, or one in a namespace the catalogue already covers.
+                      (let (i (string/last-index-of nm "/"))
+                        (or (< i 0)
+                          (contains? (doc-catalog-prefixes) (string/substring nm 0 i)))))
+          candidates (filter (fn (s)
+                               (let (nm (->string s))
+                                 (and (not (includes? nm "--"))
                                    (not (string/starts-with? nm "%"))
                                    (not (reflect/private? s))
+                                   (in-remit? nm)
                                    (or (fn? (reflect/eval s)) (= (type-of (reflect/eval s)) :macro)))))
                        (reflect/global-names)))
-      (assert= true (> (count candidates) 200)))
-    (let (uncatalogued (filter
+      ;; Qualified names in the covered namespaces are in the corpus now, so the floor
+      ;; rises with it — 200 was the bare-core figure.
+      (assert= true (> (count candidates) 350)))
+    (let (in-remit? (fn (nm)
+                      (let (i (string/last-index-of nm "/"))
+                        (or (< i 0)
+                          (contains? (doc-catalog-prefixes) (string/substring nm 0 i)))))
+          uncatalogued (filter
                          (fn (s)
-                           (let (nm (->string s) i (index-of nm "/"))
-                             (and (not (and i (> i 0)))
-                               ; not a module function
-                               (not (includes? nm "--"))
+                           (let (nm (->string s))
+                             (and (not (includes? nm "--"))
                                (not (string/starts-with? nm "%")) ; not a kernel primitive
                                (not (reflect/private? s)) ; not an internal helper
+                               (in-remit? nm)
                                (or (fn? (reflect/eval s)) (= (type-of (reflect/eval s)) :macro))
                                (= (doc-catalog/category-of nm) :other))))
                          (reflect/global-names)))
