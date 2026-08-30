@@ -55,15 +55,13 @@ content-agnostic — the editor supplies the payload and the keybindings."
 ;; restructuring can't leave a stale one behind. Selection itself is a `:selected`
 ;; marker on the leaf, not a path.
 
-(defn- pane-get
-  (node path)
+(defn- pane-get (node path)
   "The node at `path` (a list of `:a`/`:b`) under `node`."
   (if (empty? path) node (pane-get (get node (first path)) (rest path))))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
-  (defn- pane-update
-    (node path f)
+  (defn- pane-update (node path f)
     "The tree like `node` with the node at `path` replaced by `(f node-at-path)`."
     (if (empty? path)
       (f node)
@@ -72,8 +70,7 @@ content-agnostic — the editor supplies the payload and the keybindings."
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
-  (defn- pane-paths
-    (node prefix)
+  (defn- pane-paths (node prefix)
     "All leaf paths under `node` in traversal order (a before b), each prefixed by
   the forward-order `prefix`."
     (if (pane-leaf? node)
@@ -97,8 +94,7 @@ content-agnostic — the editor supplies the payload and the keybindings."
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
-  (defn- pane-clear
-    (node)
+  (defn- pane-clear (node)
     "The tree with the `:selected` marker cleared from every leaf."
     (if (pane-leaf? node)
       (assoc node :selected false)
@@ -185,8 +181,7 @@ returned unchanged — you can't delete the only one."
 ;; A rect is `[x y w h]` in cells (x = column origin, y = row origin). A point (from
 ;; a `[:mouse … row col]` event) is `[row col]`.
 
-(defn- pane-clampi
-  (v lo hi)
+(defn- pane-clampi (v lo hi)
   "Clamp integer `v` into `[lo hi]`."
   (math/max lo (math/min hi v)))
 (sig pane-clampi (int int int -> int))
@@ -194,8 +189,7 @@ returned unchanged — you can't delete the only one."
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
   (sig pane-layout-go (any list (vector int) -> map))
-  (defn- pane-layout-go
-    (node path rect)
+  (defn- pane-layout-go (node path rect)
     "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`."
     (if (pane-leaf? node)
       {:panes (list {:path path
@@ -230,14 +224,12 @@ into its rect and the dividers between them."
 
 ;; ---- hit-testing + resize (drag-to-resize over :drag mouse events) ----------
 
-(defn- pane-in-rect?
-  (rect point)
+(defn- pane-in-rect? (rect point)
   "Whether `point` (`[row col]`) falls inside `rect` (`[x y w h]`)."
   (let ([x y w h] rect [row col] point)
     (and (>= col x) (< col (+ x w)) (>= row y) (< row (+ y h)))))
 
-(defn- pane-find
-  (items point)
+(defn- pane-find (items point)
   "The first `{:rect …}` in `items` whose rect contains `point`, or nil."
   (cond
     (empty? items) nil

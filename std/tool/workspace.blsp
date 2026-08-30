@@ -8,8 +8,7 @@
 (defmodule workspace
   (:use file))
 
-(defn- brood-repos
-  ()
+(defn- brood-repos ()
   (filter (fn (dir)
             (and (file/dir? (str dir "/.git"))
               (or (= dir "../brood") (file/exists? (str dir "/project.blsp")))))
@@ -17,39 +16,32 @@
 
 (defn- repo-name (dir) (last (string/split dir "/")))
 
-(defn- git-out
-  (dir git-args)
+(defn- git-out (dir git-args)
   "Trimmed stdout of `git -C dir <git-args…>`."
   (string/trim (get (%os-cmd "git" (cons "-C" (cons dir git-args))) :stdout)))
 
-(defn- git-run
-  (dir git-args)
+(defn- git-run (dir git-args)
   "Run `git -C dir <git-args…>` inheriting stdio; returns the exit code."
   (os/run-process "git" (cons "-C" (cons dir git-args))))
 
-(defn- dirty-count
-  (dir)
+(defn- dirty-count (dir)
   (count (filter (fn (l) (not (string/blank? l)))
            (string/split (git-out dir (list "status" "--short")) "\n"))))
 
-(defn- ahead-count
-  (dir)
+(defn- ahead-count (dir)
   (let (a (git-out dir (list "rev-list" "--count" "@{u}..HEAD")))
     (if (string/blank? a) "0" a)))
 
-(defn- list-repos
-  ()
+(defn- list-repos ()
   (for (dir (brood-repos)) (io/puts (repo-name dir))))
 
-(defn- status
-  ()
+(defn- status ()
   (for (dir (brood-repos))
     (let (d (dirty-count dir) a (ahead-count dir))
       (when (or (> d 0) (not (= a "0")))
         (io/puts (repo-name dir) "  uncommitted=" d " unpushed=" a)))))
 
-(defn- check
-  ()
+(defn- check ()
   (for (dir (brood-repos))
     (when (file/exists? (str dir "/project.blsp"))
       (io/puts "=== " (repo-name dir) " ===")
@@ -57,16 +49,14 @@
       (when (not (= 0 (os/run-process "sh" (list "-c" (str "cd " dir " && nest check")))))
         (io/puts "  CHECK FAILED: " (repo-name dir))))))
 
-(defn- commit
-  (message)
+(defn- commit (message)
   (for (dir (brood-repos))
     (when (> (dirty-count dir) 0)
       (git-run dir (list "add" "-A"))
       (when (= 0 (git-run dir (list "commit" "-q" "-m" message)))
         (io/puts "committed: " (repo-name dir))))))
 
-(defn- push
-  ()
+(defn- push ()
   (for (dir (brood-repos))
     (when (not (= (ahead-count dir) "0"))
       (when (= 0 (git-run dir (list "push")))

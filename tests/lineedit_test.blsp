@@ -99,8 +99,7 @@
                                                        ""
                                                        (list "(abc)"))
                       :ctrl-r))
-      (is (includes? (editor/lineedit/lineedit-display-prompt searching)
-            "reverse-i-search"))))
+      (is (includes? (editor/lineedit/lineedit-display-prompt searching) "reverse-i-search"))))
   (test "the query typed so far appears in the search prompt"
     (let (typed (fold (fn (st key) (editor/lineedit/lineedit-handle st key))
                   (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
@@ -124,8 +123,7 @@
     (let (s (le-keys (le-fresh) (list "a" "b" "c")))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-h) :text) "ab")))
   (test "M-d kills the word after point, leaving point put"
-    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh)
-                                             (list "f" "o" "o" " " "b" "a" "r"))
+    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "f" "o" "o" " " "b" "a" "r"))
               4)
           d (editor/lineedit/lineedit-handle s :alt-d))
       (assert= (get d :text) "foo ")
@@ -169,8 +167,7 @@
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-j) :done) :submit)
       (assert= (get (editor/lineedit/lineedit-handle s :enter) :done) :submit))))
 
-(defn- rs-init
-  ()
+(defn- rs-init ()
   (editor/lineedit/lineedit-init "x> " "" (list "(map f xs)" "(reduce + 0 ys)" "(filter p zs)")))
 
 (describe "reverse incremental search (C-r)"
@@ -216,10 +213,7 @@
         "reduce")))
   (test "an ambiguous set extends to the common prefix"
     (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "m" "a")) 2))
-      (assert= (get (editor/lineedit/lineedit-apply-completion s
-                      0
-                      "ma"
-                      (list "map" "max" "mapcat"))
+      (assert= (get (editor/lineedit/lineedit-apply-completion s 0 "ma" (list "map" "max" "mapcat"))
                  :text)
         "ma")))
   ;; The listing is attached only when Tab has nothing left to insert — that is the
@@ -233,10 +227,8 @@
       ; common prefix "map" extends "ma" -> progress, no list
       (is (nil? (get (editor/lineedit/lineedit-apply-completion s 0 "ma" (list "map" "mapcat"))
                   :completions)))
-      (is (nil? (get (editor/lineedit/lineedit-apply-completion s 0 "ma" (list "map"))
-                  :completions)))
-      (is (nil? (get (editor/lineedit/lineedit-apply-completion s 0 "ma" '())
-                  :completions)))))
+      (is (nil? (get (editor/lineedit/lineedit-apply-completion s 0 "ma" (list "map")) :completions)))
+      (is (nil? (get (editor/lineedit/lineedit-apply-completion s 0 "ma" '()) :completions)))))
   (test "the listing survives exactly one keystroke — the next key clears it"
     (let (listed (assoc (le-fresh) :completions (list "map" "max"))
           typed (editor/lineedit/lineedit-handle listed "x"))
@@ -378,8 +370,7 @@
 (describe "editor state across processes"
   :isolated (test "a state map sent to a worker edits identically"
     (let (st (editor/lineedit/lineedit-init "x> " "" '())
-          w (spawn (receive
-                     ([:edit s from] (send from (get (le-keys s (list "a" "b" "c")) :text))))))
+          w (spawn (receive ([:edit s from] (send from (get (le-keys s (list "a" "b" "c")) :text))))))
       (send w [:edit st (self)])
       (assert= (receive (r r)) "abc"))))
 

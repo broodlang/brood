@@ -24,8 +24,7 @@
 
 (def- url-hex-upper "0123456789ABCDEF")
 
-(defn- url-unreserved?
-  (cp)
+(defn- url-unreserved? (cp)
   "True if codepoint `cp` is an RFC 3986 unreserved character."
   (or (and (>= cp 65) (<= cp 90))
     (and (>= cp 97) (<= cp 122))
@@ -35,8 +34,7 @@
     (= cp 46)
     (= cp 126)))
 
-(defn- url-byte->pct
-  (b)
+(defn- url-byte->pct (b)
   "Encode a single byte `b` as a %XX string (uppercase hex)."
   (str "%"
     (string/char-at url-hex-upper (math/quot b 16))
@@ -44,8 +42,7 @@
 
 ;; `acc` is the emitted pieces in reverse; `percent-encode` joins once. `(str acc …)`
 ;; per byte rebuilt the whole accumulator each step — O(n^2) over a long input.
-(defn- url-encode-bytes
-  (bytes acc)
+(defn- url-encode-bytes (bytes acc)
   "Encode a list of byte ints, emitting unreserved ASCII codepoints as-is and
 encoding everything else as %XX. Accumulates pieces into the reversed list `acc`."
   (if (empty? bytes)
@@ -91,8 +88,7 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 
 ;; `s` is a CODE-POINT VECTOR (built once in `percent-decode`), so char access is
 ;; O(1) `nth` — `char-at` on the raw UTF-8 string is O(i), making the scan O(n^2).
-(defn- url-pct-decode-loop
-  (s i n acc)
+(defn- url-pct-decode-loop (s i n acc)
   "Decode percent-encoded code-point vector `s` (count `n`), accumulating decoded bytes into `acc`."
   (if (>= i n)
     (string/bytes-> (reverse acc))
@@ -128,26 +124,20 @@ Invalid or incomplete %XX sequences are passed through as-is.
 ;; unreserved set). Keys and values are percent-encoded individually.
 
 ;; Reversed piece list, joined once by `url-query-encode-str` (see url-encode-bytes).
-(defn- url-qenc-bytes
-  (bytes acc)
+(defn- url-qenc-bytes (bytes acc)
   (if (empty? bytes)
     acc
     (let (b (first bytes))
       (url-qenc-bytes (rest bytes)
-        (cons (cond
-                (url-unreserved? b) (string/int->char b)
-                (= b 32) "+"
-                else (url-byte->pct b))
+        (cons (cond (url-unreserved? b) (string/int->char b) (= b 32) "+" else (url-byte->pct b))
           acc)))))
 
-(defn- url-query-encode-str
-  (s)
+(defn- url-query-encode-str (s)
   "Encode a single key or value for use in a query string: unreserved chars
 pass through, space becomes +, all other bytes become %XX."
   (apply str (reverse (url-qenc-bytes (seq (string/->bytes s)) nil))))
 
-(defn- url-pairs->query
-  (pairs acc first?)
+(defn- url-pairs->query (pairs acc first?)
   "Encode a list of `[key value]` pairs as a query string."
   (if (empty? pairs)
     acc
@@ -166,9 +156,7 @@ defines rather than as its field map.
 
     (url/query-encode {:a 1})    → \"a=1\""
   (let (pairs (sort (map (fn (kv)
-                           (list (if (keyword? (first kv))
-                                   (->string (first kv))
-                                   (str (first kv)))
+                           (list (if (keyword? (first kv)) (->string (first kv)) (str (first kv)))
                              (->string (second kv))))
                       (%map-pairs params))))
     (apply str (reverse (url-pairs->query pairs nil true)))))
@@ -176,13 +164,11 @@ defines rather than as its field map.
 
 ;; ---- query string decoding --------------------------------------------------
 
-(defn- url-qdecode-str
-  (s)
+(defn- url-qdecode-str (s)
   "Decode a query-string value: replace + with space, then percent-decode."
   (percent-decode (string/replace s "+" " ")))
 
-(defn- url-parse-query-pairs
-  (parts acc)
+(defn- url-parse-query-pairs (parts acc)
   "Parse a list of `key=value` strings into a string→string map."
   (if (empty? parts)
     acc
@@ -195,9 +181,7 @@ defines rather than as its field map.
         (url-parse-query-pairs (rest parts)
           (assoc acc
             (url-qdecode-str (string/substring part 0 eq))
-              (url-qdecode-str (string/substring part
-                                 (+ eq 1)
-                                 (string/length part)))))))))
+              (url-qdecode-str (string/substring part (+ eq 1) (string/length part)))))))))
 
 (defn query-decode (s)
   "Parse a query string `key=value&key=value` into a string→string map,
@@ -213,8 +197,7 @@ decoding + as space and %XX sequences.
 ;; parse-url returns {:scheme :host :port :path :query :fragment}
 ;; port is an integer when present in the URL, nil otherwise.
 
-(defn- url-split-first
-  (s sep)
+(defn- url-split-first (s sep)
   "Split `s` on the first occurrence of `sep`; return `[before after]` or nil if
 `sep` is absent."
   (let (i (index-of s sep))
@@ -233,8 +216,7 @@ decoding + as space and %XX sequences.
 ;; host `evil.com`, so an allow-list check, a logged origin, or an SSRF guard built on
 ;; `:host` sees a *different* host than the one a real client connects to. That is the
 ;; classic userinfo-confusion phishing/SSRF primitive.
-(defn- url-authority-split
-  (hostport)
+(defn- url-authority-split (hostport)
   "Split a `host[:port]` (userinfo already removed) into `[host port-str]`, honouring
 a bracketed IPv6 literal. `port-str` is nil when no `:port` is present."
   (if (string/starts-with? hostport "[")
@@ -253,8 +235,7 @@ a bracketed IPv6 literal. `port-str` is nil when no `:port` is present."
         [(string/substring hostport 0 colon)
           (string/substring hostport (+ colon 1) (string/length hostport))]))))
 
-(defn- url-parse-port
-  (port-str)
+(defn- url-parse-port (port-str)
   ;; An unparseable port used to come back as nil — indistinguishable from "no port
   ;; given", so `http://h:8o80/` silently fell back to port 80 and connected somewhere
   ;; the URL never named. Raise instead. An EMPTY port (`host:`) stays nil: RFC 3986
@@ -268,8 +249,7 @@ a bracketed IPv6 literal. `port-str` is nil when no `:port` is present."
           n
           (error "url: invalid port " (pr-str port-str) " — expected an integer 0..65535")))))
 
-(defn- url-parse-authority
-  (auth)
+(defn- url-parse-authority (auth)
   "Parse an RFC-3986 authority `[userinfo@]host[:port]` into `{:userinfo :host :port}`.
 `:host` keeps the brackets of an IPv6 literal (`\"[::1]\"`, which is what a Host
 header and a `build` round-trip both need); `:userinfo` is nil when absent and

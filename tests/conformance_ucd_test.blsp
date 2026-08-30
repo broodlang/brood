@@ -25,13 +25,11 @@
 
 (defmodule conformance-ucd-test (:use test) (:use corpus))
 
-(defn- ucd-file
-  (name)
+(defn- ucd-file (name)
   (first (filter (fn (p) (= (path/basename p) name)) (corpus-files "ucd"))))
 
 ;; A line's payload: everything before the `#` comment, tabs folded to spaces.
-(defn- ucd-payload
-  (line)
+(defn- ucd-payload (line)
   (let (i (index-of line "#"))
     (string/replace (if (< i 0) line (string/substring line 0 i)) "\t" " ")))
 
@@ -52,8 +50,7 @@
 
 ;; Fold the `÷ 0020 × 0308 ÷` token stream into the clusters it describes: `÷`
 ;; closes the current cluster, `×` keeps accumulating, a hex token adds a code point.
-(defn- gb-fold
-  (tokens cur clusters)
+(defn- gb-fold (tokens cur clusters)
   (if (nil? tokens)
     (reverse clusters)
     (let (t (first tokens))
@@ -65,8 +62,7 @@
         (= t "×") (gb-fold (rest tokens) cur clusters)
         else (gb-fold (rest tokens) (cons (hex->int t) cur) clusters)))))
 
-(defn- gb-case
-  (line)
+(defn- gb-case (line)
   "[input expected-clusters] for a test line, or nil if the line has no test."
   (let (toks (seq/remove string/blank? (string/split (ucd-payload line) " ")))
     (if (nil? toks)
@@ -74,8 +70,7 @@
       (let (clusters (gb-fold toks nil nil))
         [(apply str clusters) (into [] clusters)]))))
 
-(defn- gb-scan
-  (lines ran bad)
+(defn- gb-scan (lines ran bad)
   (if (nil? lines)
     [ran (reverse bad)]
     (let (c (gb-case (first lines)))
@@ -94,12 +89,10 @@
 ;; ---- NormalizationTest -------------------------------------------------------
 
 ;; "0044 0307" -> the string it spells.
-(defn- nt-field
-  (s)
+(defn- nt-field (s)
   (ucd-codes->string (map hex->int (seq/remove string/blank? (string/split s " ")))))
 
-(defn- nt-case
-  (line)
+(defn- nt-case (line)
   "The five columns [source nfc nfd nfkc nfkd] as strings, or nil for a non-test line."
   (let (p (ucd-payload line))
     (if (or (string/blank? p) (string/starts-with? (string/trim p) "@"))
@@ -111,8 +104,7 @@
 
 ;; Is this a case line at all? Cheap — no field parsing, so the samplers can skip a case
 ;; without paying to decode it.
-(defn- nt-test-line?
-  (line)
+(defn- nt-test-line? (line)
   (let (p (ucd-payload line))
     (and (not (string/blank? p))
       (not (string/starts-with? (string/trim p) "@"))
@@ -120,8 +112,7 @@
 
 ;; "@Part1 # Character by character test" -> "Part1", else nil. The corpus divides itself
 ;; into six sections and the runner uses them to split the sweep — see the describe below.
-(defn- nt-part
-  (line)
+(defn- nt-part (line)
   (let (t (string/trim line))
     (if (string/starts-with? t "@")
       (first (string/split (string/substring t 1) " "))
@@ -131,8 +122,7 @@
 ;; column 4; NFD of 1,2,3 is column 3 and of 4,5 is column 5; NFKC of all five is
 ;; column 4; NFKD of all five is column 5. Checking only NFC(source) would miss
 ;; idempotence, which is where a normaliser usually goes wrong.
-(defn- nt-wrong
-  (cols)
+(defn- nt-wrong (cols)
   (let ([c1 c2 c3 c4 c5] cols
         expect (fn (form sources want)
                  (first (seq/remove (fn (s) (= (string/normalize s form) want)) sources)))
@@ -147,8 +137,7 @@
 
 ;; Walk the whole file but only test the lines inside `want` (a "PartN" name), tracking
 ;; the current section as it goes.
-(defn- nt-scan-part
-  (want lines here ran bad)
+(defn- nt-scan-part (want lines here ran bad)
   (if (nil? lines)
     [ran (reverse bad)]
     (let (line (first lines)
@@ -184,15 +173,13 @@
 ;; running a slice with the modulus set so high that no case is tested at all — still
 ;; >120 s. With the walk done once, a 1-in-16 slice is ~42 s. `nt-case` still does the
 ;; real parsing, on the lines a slice actually tests.
-(defn- nt-case-line?
-  (line)
+(defn- nt-case-line? (line)
   (and (not (string/blank? line))
     (not (string/starts-with? (string/trim line) "@"))
     (not (string/starts-with? (string/trim line) "#"))
     (>= (count (string/split line ";")) 5)))
 
-(defn- nt-collect
-  (want lines here acc)
+(defn- nt-collect (want lines here acc)
   (if (nil? lines)
     (reverse acc)
     (let (line (first lines)
@@ -209,8 +196,7 @@
 ;; but enough to blow the framework's 120 s per-test ceiling inside the DEBUG-build
 ;; `brood_suite_passes` wrapper when it is competing with the whole workspace. Chunking by
 ;; `index mod n` splits it evenly across `n` tests that run in parallel, keeping every case.
-(defn- nt-scan-chunk
-  (want k n lines here idx ran bad)
+(defn- nt-scan-chunk (want k n lines here idx ran bad)
   (if (nil? lines)
     [ran (reverse bad)]
     (let (line (first lines)
@@ -259,8 +245,7 @@
 (def- nt-part1-of (math/max 1 (or (string/->number (or (os/env "BROOD_UCD_PART1_OF") "")) 1)))
 
 ;; Every `*ucd-part1-of*`-th case of the pre-collected Part1 list, from offset `k`.
-(defn- nt-slice-scan
-  (lines k n idx ran bad)
+(defn- nt-slice-scan (lines k n idx ran bad)
   (if (nil? lines)
     [ran (reverse bad)]
     (if (= (math/rem idx n) k)

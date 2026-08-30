@@ -108,8 +108,7 @@
       (close inst)))
   (test "an s32 out-of-range argument is a clean error, not a wrap"
     (let (inst (instantiate *scalars-wat*))
-      (is (= (try (call inst "add" 5000000000 1) (catch e :range))
-            :range))
+      (is (= (try (call inst "add" 5000000000 1) (catch e :range)) :range))
       (close inst))))
 
 (describe "wasm: strings and lists cross the canonical ABI"

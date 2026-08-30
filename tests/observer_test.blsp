@@ -168,8 +168,7 @@
     (assert= (get (observer/observe-apply-result {:link :ok :last :L} :timeout) :last) :L)
     (assert= (get (observer/observe-apply-result {:link :ok :last :L} :down) :link) :down)
     ;; :down is sticky — a later good snapshot does NOT revive it
-    (assert= (get (observer/observe-apply-result {:link :down :last :L} {:node {} :procs []})
-               :link)
+    (assert= (get (observer/observe-apply-result {:link :down :last :L} {:node {} :procs []}) :link)
       :down)))
 
 (def sample-node {:name :nonode :workers 4 :peak 6 :spawned 10 :mem 2048 :mem-peak 4096 :peers []})

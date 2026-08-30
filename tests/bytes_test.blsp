@@ -84,11 +84,9 @@
     (is (= (match #b"GET" (#b"GET" :get) (#b"PUT" :put) (_ :other)) :get))
     (is (= (match (bytes 1 2) (#b"\x01\x02" :ok) (_ :no)) :ok)))
   (test "head bytes + rest"
-    (is (= (match (bytes 1 2 3 4) ((bytes a b & rest) [a b rest]) (_ :no))
-          [1 2 (bytes 3 4)])))
+    (is (= (match (bytes 1 2 3 4) ((bytes a b & rest) [a b rest]) (_ :no)) [1 2 (bytes 3 4)])))
   (test "literal prefix then capture the tail"
-    (is (= (match #b"GET /index" ((bytes #b"GET " & p) (string/bytes-> p)) (_ :other))
-          "/index"))
+    (is (= (match #b"GET /index" ((bytes #b"GET " & p) (string/bytes-> p)) (_ :other)) "/index"))
     (is (= (match #b"POST /x"
              ((bytes #b"GET " & p) [:get (string/bytes-> p)])
              ((bytes #b"POST " & p) [:post (string/bytes-> p)])
@@ -128,8 +126,7 @@
     (is (= (match (bytes 255 254) ((bytes (x :i16)) x) (_ :no)) -2))
     (is (= (match (bytes 254 255) ((bytes (x :i16-le)) x) (_ :no)) -2)))
   (test "64-bit segments round-trip through int->bytes"
-    (is (= (match (bytes/int-> 123456789012345 8) ((bytes (x :u64)) x) (_ :no))
-          123456789012345))
+    (is (= (match (bytes/int-> 123456789012345 8) ((bytes (x :u64)) x) (_ :no)) 123456789012345))
     (is (= (match (bytes/int-> -5 8) ((bytes (x :i64)) x) (_ :no)) -5)))
   (test "length is enforced — too-short or unconsumed bytes fall through"
     (is (= (match (bytes 1) ((bytes (x :u16)) x) (_ :short)) :short))
@@ -153,9 +150,7 @@
              (_ :no))
           [2 5 "hello" (bytes 33)])))
   (test "an unknown spec keyword is a clean expand-time error"
-    (is (= (try
-             (reflect/eval '(match (bytes 1) ((bytes (x :u3)) x) (_ :no)))
-             (catch e :bad-spec))
+    (is (= (try (reflect/eval '(match (bytes 1) ((bytes (x :u3)) x) (_ :no))) (catch e :bad-spec))
           :bad-spec))))
 
 (describe "bytes: integer decode/encode helpers"
@@ -192,8 +187,7 @@
 ;; ---- iolists (ADR-139): nested trees flattened once at the write boundary ----
 (describe "iolists"
   (test "bytes-concat flattens nesting, strings (UTF-8), bytes, and byte ints"
-    (is (= (bytes/concat ["ab" ["cd" nil "e"] (bytes 102) 103])
-          #b"abcdefg"))
+    (is (= (bytes/concat ["ab" ["cd" nil "e"] (bytes 102) 103]) #b"abcdefg"))
     (is (= (bytes/concat "x" [(bytes 121)] [[122]]) #b"xyz")))
   (test "empty iolists yield empty bytes"
     (is (= (bytes/concat) #b""))

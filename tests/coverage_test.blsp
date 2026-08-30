@@ -55,8 +55,7 @@
     (assert= (coverage/coverage-relative "/p/src/a.blsp" nil) "/p/src/a.blsp")))
 
 ;; A result record as `results` produces it.
-(defn- coverage-test-result
-  (name file line hits)
+(defn- coverage-test-result (name file line hits)
   {:name name :file file :line line :hits hits})
 
 (def- coverage-test-results
@@ -91,8 +90,7 @@
 (defn- coverage-test-variadic (a & rest) (list a rest))
 (defn- coverage-test-optional (a &optional b) (list a b))
 (defn- coverage-test-multi ((x) (list :one x)) ((x y) (list :two x y)))
-(defn- coverage-test-recursive
-  (n acc)
+(defn- coverage-test-recursive (n acc)
   (if (= n 0) acc (coverage-test-recursive (- n 1) (+ acc n))))
 
 (describe "coverage: instrumentation records hits"
@@ -173,8 +171,7 @@
 ;; end-to-end behaviour — a dead function reported as dead — is an integration test,
 ;; `crates/nest/tests/coverage_lines.rs`, because arming it requires a fresh process.
 
-(defn- coverage-test-dead-line-fn
-  (x)
+(defn- coverage-test-dead-line-fn (x)
   "Never called. Its lines exist so precompile has something real to compile."
   (let (doubled (* x 2))
     (+ doubled 1)))
@@ -188,8 +185,7 @@
     ;; The distinction that matters: 0 files measured, NOT 0% of some invented total.
     (assert= (coverage/line-results (list "/nonexistent-coverage-dir")) nil))
   (test "reporting an unmeasured run is 100%, so it can't fail a --cover-min gate"
-    (assert= (coverage/line-report "/nonexistent-coverage-dir"
-               (list "/nonexistent-coverage-dir"))
+    (assert= (coverage/line-report "/nonexistent-coverage-dir" (list "/nonexistent-coverage-dir"))
       100)))
 
 (describe "coverage: the line index"

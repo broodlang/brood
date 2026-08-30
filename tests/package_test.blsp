@@ -124,11 +124,7 @@
   (test "a missing path dep is a clear error"
     (let (app (pkg-fixture-root))
       (pkg-write-project app "app" "main" "(defn main () 1)" "")
-      (is (includes? (try
-                       (resolve-deps app
-                         (list (dep-path 'gone "../gone"))
-                         nil)
-                       (catch e e))
+      (is (includes? (try (resolve-deps app (list (dep-path 'gone "../gone")) nil) (catch e e))
             "not found")))))
 
 ;; :git deps (Slice 2) — exercised against a local git repo over a file:// URL, so
@@ -284,8 +280,7 @@
     (assert= (package/package-select-git-version (list "v1.0.0" "v1.4.0-rc.1") "^1.0.0")
       ["v1.0.0" "1.0.0"]))
   (test "a range naming a pre-release admits it"
-    (assert= (first (package/package-select-git-version (list "v1.2.0" "v1.3.0-rc.1")
-                      ">= 1.3.0-rc"))
+    (assert= (first (package/package-select-git-version (list "v1.2.0" "v1.3.0-rc.1") ">= 1.3.0-rc"))
       "v1.3.0-rc.1"))
   (test "non-version tags are ignored"
     (assert= (first (package/package-select-git-version (list "latest"
@@ -946,9 +941,7 @@
                      (project/project-parse-enhances [['bedit ">= 0.3"]])
                      (catch e (error-message e)))
           ":enhances must be a MAP"))
-    (is (includes? (try
-                     (project/project-parse-enhances {'bedit 0.3})
-                     (catch e (error-message e)))
+    (is (includes? (try (project/project-parse-enhances {'bedit 0.3}) (catch e (error-message e)))
           "must be a string")))
   (test "a real manifest carries it through apply"
     ;; NOT wrapped in `binding`: `apply` `def`s the dynvar's global ROOT (that is
@@ -1169,8 +1162,7 @@
 (describe "package: the Dependency ability"
   (test "the ability is sealed over exactly the four manifest kinds"
     (assert= (sort (%sealed-members 'Dependency))
-      (sort (list :project/dep-path
-              :project/dep-git :project/dep-tarball :project/dep-registry))))
+      (sort (list :project/dep-path :project/dep-git :project/dep-tarball :project/dep-registry))))
   (test "every declared op resolves for every sealed member"
     (is (every? (fn (d) (satisfies? 'Dependency d))
           (list (dep-path 'a "p")
@@ -1179,8 +1171,7 @@
             (dep-registry 'd "1.0.0")))))
   (test "the ability declares the five ops the package manager dispatches"
     (assert= (sort (map first (%ability-ops 'Dependency)))
-      (sort (list 'dep-kind
-              'dep-resolve 'dep-check-compatible 'dep-lock-vec 'dep-entry-node))))
+      (sort (list 'dep-kind 'dep-resolve 'dep-check-compatible 'dep-lock-vec 'dep-entry-node))))
   (test "dep-kind is the manifest keyword for each identity"
     (assert= (dep-kind (dep-path 'a "p")) :path)
     (assert= (dep-kind (dep-git 'b "u" "r" nil)) :git)
@@ -1372,8 +1363,7 @@
   (test "a trailing-newline name is rejected"
     (refute (package/package-valid-dep-name? "a\n")))
   (test "add refuses a corrupting name before touching the manifest"
-    (is (includes? (try (package/add "" ":path" "../x") (catch e e))
-          "not a usable dependency name"))))
+    (is (includes? (try (package/add "" ":path" "../x") (catch e e)) "not a usable dependency name"))))
 
 ;; A dependency's `main` is its ENTRY POINT, not part of its library surface: `nest
 ;; run` only ever uses the ROOT project's `:main`, and nothing requires a dep's. Two

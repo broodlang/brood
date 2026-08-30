@@ -86,8 +86,7 @@ or tampered ciphertext). Inputs may be bytes values or vectors/lists of ints."
 ;; stored alongside the derived key (it's not secret). Use iterations ≥ 600,000
 ;; for password storage (NIST SP 800-132 2023 recommendation).
 
-(defn- crypto-as-bytes
-  (x)
+(defn- crypto-as-bytes (x)
   "Coerce `x` to bytes: a string → its UTF-8 bytes value; bytes / a byte
 vector/list → itself. Lets the raw-byte crypto primitives accept either shape."
   (if (string? x) (string/->bytes x) x))
@@ -111,8 +110,7 @@ slower brute force; use ≥ 600,000 for password storage."
 Returns true if `a` and `b` are identical, false otherwise."
   (and (= (count a) (count b))
     (= 0
-      (fold (fn (acc pair)
-              (bit/or acc (bit/xor (first pair) (second pair))))
+      (fold (fn (acc pair) (bit/or acc (bit/xor (first pair) (second pair))))
         0
         (seq/zip (seq a) (seq b))))))
 

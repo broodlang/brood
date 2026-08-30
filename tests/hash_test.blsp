@@ -178,15 +178,13 @@
       (assert= 32 (count m))))
   (test "RFC 4231 Test Case 1 (binary key)"
     (assert= "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
-      (encoding/hex-encode-bytes (hash/hmac-sha256-raw hash-test-rfc4231-key
-                                   hash-test-rfc4231-msg))))
+      (encoding/hex-encode-bytes (hash/hmac-sha256-raw hash-test-rfc4231-key hash-test-rfc4231-msg))))
   (test "agrees with string hmac for ASCII key/msg"
     (assert= (hash/hmac-sha256 "secret" "message")
       (encoding/hex-encode-bytes (hash/hmac-sha256-raw (string/->bytes "secret")
                                    (string/->bytes "message")))))
   (test "different keys give different MACs"
-    (is (not (= (hash/hmac-sha256-raw [1 2 3] [9 9])
-               (hash/hmac-sha256-raw [4 5 6] [9 9])))))
+    (is (not (= (hash/hmac-sha256-raw [1 2 3] [9 9]) (hash/hmac-sha256-raw [4 5 6] [9 9])))))
   (test "deterministic"
     (assert= (hash/hmac-sha256-raw [1 2 3] [4 5 6])
       (hash/hmac-sha256-raw [1 2 3] [4 5 6]))))

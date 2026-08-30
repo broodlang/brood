@@ -108,14 +108,12 @@ lines (see the module preamble on stray output)."
 ;; running instrumented for another quarter-million calls we would only discard.
 (def *spy-entry-cap* 200)
 
-(defn- eval-server-bound-output
-  (s)
+(defn- eval-server-bound-output (s)
   (if (<= (string/length s) *output-cap-chars*)
     s
     (str (string/substring s 0 *output-cap-chars*) "\n…[output truncated]")))
 
-(defn- eval-server-process-report
-  (before)
+(defn- eval-server-process-report (before)
   "What the evaluation LEFT BEHIND: `{:alive n}` — processes that did not exist
 before it and are still running when it returned.
 
@@ -128,8 +126,7 @@ looking identical to a round-trip that cleaned up after itself."
   (let (after (proc/list))
     {:alive (count (filter (fn (p) (not (includes? before p))) after))}))
 
-(defn- eval-server-spy-entry
-  (e)
+(defn- eval-server-spy-entry (e)
   ;; One collected `*spy-sink*` entry, display-bounded for the wire.
   {:kind (->string (or (get e :spy) :event))
    :fn (when (get e :fn) (str (get e :fn)))
@@ -143,8 +140,7 @@ looking identical to a round-trip that cleaned up after itself."
 ;; write-once process state that isn't worth a process.
 (def- *baseline-globals* (table/new))
 
-(defn- eval-server-baseline
-  ()
+(defn- eval-server-baseline ()
   ;; The baseline set, captured on first use. On the server path `run` captures it before
   ;; the banner, so it is a genuinely pristine image; an in-image caller captures it at its
   ;; first traced request, which is the best that path can do and still correct for the
@@ -160,8 +156,7 @@ before the banner; anything embedding [[eval-capturing]] should call it at start
 accept a baseline taken at the first traced request."
   (do (eval-server-baseline) nil))
 
-(defn- eval-server-own-name?
-  (n)
+(defn- eval-server-own-name? (n)
   ;; A name the SESSION wrote, as opposed to one a module brought with it. Bare only:
   ;; a module's globals are namespaced (`foo/bar`), so requiring `std/csv` mid-session
   ;; would otherwise make its whole surface "yours" and trace all of it. `%`-hidden
@@ -180,30 +175,26 @@ definitions, with the language's and any later-required module's excluded. What
       (filter (fn (n) (and (not (contains? base n)) (eval-server-own-name? n)))
         (map ->string (reflect/global-names))))))
 
-(defn- eval-server-trace-names
-  (trace)
+(defn- eval-server-trace-names (trace)
   ;; A request's `:trace` as a concrete name vector. `:all` is resolved HERE, at install
   ;; time, rather than by the client: only this image knows what it has defined, which is
   ;; exactly why a client asking for "everything I defined" had to guess at it by walking
   ;; its own source text for call heads — and so never saw a helper the source doesn't name.
   (if (= trace :all) (session-globals) (or trace [])))
 
-(defn- eval-server-try-traces
-  (names)
+(defn- eval-server-try-traces (names)
   ;; Install a boundary trace on every requested name that is a function right now;
   ;; a name that isn't (yet) defined is skipped.
   (doseq (s (eval-server-trace-names names))
     (try (debug/trace-fn (symbol s)) (catch _ nil))))
 
-(defn- eval-server-definition-form?
-  (form)
+(defn- eval-server-definition-form? (form)
   ;; A top-level DEFINITION (as opposed to something that runs): the forms whose
   ;; whole job is to bind a name.
   (and (pair? form)
     (includes? ['def 'defn 'defmacro 'defdyn 'defrecord 'defability] (first form))))
 
-(defn- eval-server-eval-traced
-  (src names)
+(defn- eval-server-eval-traced (src names)
   ;; Evaluate `src` form by form (not `reflect/eval-string`), installing the requested traces
   ;; EXACTLY ONCE — immediately before the first form that isn't a definition, i.e.
   ;; after `(defn fac …)` has landed and before `(fac 5)` runs.
@@ -299,8 +290,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
 ;; the image. `def`s the child makes reach the shared global table (ADR-013), so
 ;; the session survives its own timeouts.
 
-(defn- eval-server-flush-stale
-  ()
+(defn- eval-server-flush-stale ()
   ;; Reap what earlier requests may have left in the mailbox: a result a killed
   ;; child managed to send before the kill landed (results are also matched by
   ;; pinned id — this just keeps corpses from accreting), and `[:down …]` letters
@@ -354,8 +344,7 @@ process died without answering."
 
 ;; ---- the server loop ----------------------------------------------------------
 
-(defn- eval-server-loop
-  ()
+(defn- eval-server-loop ()
   (let (line (read-line))
     (when line
       ; nil = EOF: the parent closed stdin — done

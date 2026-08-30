@@ -26,8 +26,7 @@
     (take 9 [1 2])      → (1 2)
     (take 0 [1 2])      → nil"
   (%take-acc n coll nil))
-(defn- %take-acc
-  (n coll acc)
+(defn- %take-acc (n coll acc)
   (if (or (<= n 0) (empty? coll))
     (reverse acc)
     (%take-acc (- n 1) (rest coll) (cons (first coll) acc))))
@@ -53,8 +52,7 @@ is false for a VECTOR and a STRING, so `(take-while pred [1 2 3])` silently answ
 a wrong value, not an error — while `(take 2 [1 2 3])` beside it worked. Found by writing
 the example above."
   (%take-while-acc pred coll nil))
-(defn- %take-while-acc
-  (pred coll acc)
+(defn- %take-while-acc (pred coll acc)
   ;; `empty?`, not `pair?` — the guard `take`/`drop` use. `pair?` is false for a VECTOR and
   ;; a STRING, so this used to walk zero items of either and answer `nil`.
   (if (and (not (empty? coll)) (pred (first coll)))
@@ -86,8 +84,7 @@ the example above."
 ;; and how the reference categorises it both say "collection" — the catalogue said
 ;; `:strings` and half the reason the name looked misplaced was that it read as a string op.
 
-(defn- %index-of-seq-from
-  (coll x i from)
+(defn- %index-of-seq-from (coll x i from)
   ;; scan from the head; only start matching once the running index reaches `from`
   (cond
     (empty? coll) -1
@@ -138,16 +135,14 @@ what incremental search rides on (formerly the separate `index-of`).
   "A list of `[x y]` pairs from `a` and `b`, stopping at the shorter input.
 Internal — the published name is `seq/zip`."
   (%zip-acc a b nil))
-(defn- %zip-acc
-  (a b acc)
+(defn- %zip-acc (a b acc)
   (if (or (empty? a) (empty? b))
     (reverse acc)
     (%zip-acc (rest a) (rest b) (cons [(first a) (first b)] acc))))
 
 ;; (partition n coll) -> consecutive n-sized chunks; a trailing partial chunk is
 ;; dropped (Clojure `partition` semantics). `%has-at-least?` avoids re-counting.
-(defn- %has-at-least?
-  (n coll)
+(defn- %has-at-least? (n coll)
   "True when `coll` has at least `n` items, walking only that far — the O(n) test that lets
 `partition` and friends check a chunk without counting the whole (possibly long) sequence.
 Always true for `n` <= 0.
@@ -155,8 +150,7 @@ Always true for `n` <= 0.
     (%has-at-least? 2 (list 1 2 3))   → true
     (%has-at-least? 4 (list 1 2 3))   → false"
   (cond (<= n 0) true (empty? coll) false else (%has-at-least? (- n 1) (rest coll))))
-(defn- %partition-acc
-  (n coll acc)
+(defn- %partition-acc (n coll acc)
   (if (%has-at-least? n coll)
     (%partition-acc n (drop n coll) (cons (take n coll) acc))
     (reverse acc)))
@@ -192,8 +186,7 @@ Always true for `n` <= 0.
 ;; Split `coll` into its first `n` items and the rest in ONE pass — what `%merge-sort`
 ;; needs instead of a separate `take` + `drop` (two walks). Private: the published
 ;; spelling is `seq/split-at`, a wrapper over this in std/seq.blsp.
-(defn- %split-at-acc
-  (n coll acc)
+(defn- %split-at-acc (n coll acc)
   (if (or (<= n 0) (empty? coll))
     [(reverse acc) coll]
     (%split-at-acc (dec n) (rest coll) (cons (first coll) acc))))
@@ -205,8 +198,7 @@ Always true for `n` <= 0.
 (defn- %merge-sort (less? coll) (%merge-sort-n less? coll (count coll)))
 ;; check-allow: deliberately non-tail — depth = log2 of the length — ~60 frames for any feasible list.
 (check-allow :non-tail-recursion
-  (defn- %merge-sort-n
-    (less? coll n)
+  (defn- %merge-sort-n (less? coll n)
     (if (<= n 1)
       coll
       ;; `%split-at-acc`, NOT `seq/split-at`. The module function is a one-line wrapper
@@ -220,8 +212,7 @@ Always true for `n` <= 0.
           (%merge-sort-n less? (nth parts 0) h)
           (%merge-sort-n less? (nth parts 1) (- n h)))))))
 (defn- %merge-runs (less? a b) (%merge-acc less? a b nil))
-(defn- %merge-acc
-  (less? a b acc)
+(defn- %merge-acc (less? a b acc)
   (cond
     ;; `acc` holds the merged prefix reversed; `%reverse-onto` splices it in front of
     ;; the remaining run in ONE pass — the old `(append (reverse acc) …)` reversed
@@ -268,8 +259,7 @@ Always true for `n` <= 0.
     else (append to from)))
 
 ;; conj's per-element step: each collection kind has a natural insertion point.
-(defn- %conj-one
-  (coll x)
+(defn- %conj-one (coll x)
   (cond
     (nil? coll) (list x)
     (vector? coll) (into coll [x])
@@ -346,16 +336,14 @@ import (and so `(:use set)` can't shadow them).
 (defn- %defrecord-fname (f) (if (pair? f) (first f) f))
 (defn- %defrecord-ftype (f) (if (pair? f) (second f) nil))
 (defn- %defrecord-acc-sym (rec fld) (symbol (str (->string rec) "-" (->string fld))))
-(defn- %defrecord-derives
-  (opts)
+(defn- %defrecord-derives (opts)
   "The vector following `:derives` in a `defrecord`'s trailing opts (the abilities to
   derive), or nil. Each named ability must declare a `:derive-record` recipe (ADR-185)."
   (cond
     (empty? opts) nil
     (= (first opts) :derives) (second opts)
     else (%defrecord-derives (rest opts))))
-(defn- %defrecord-qualify
-  (nm)
+(defn- %defrecord-qualify (nm)
   "Qualify bare name `nm` (a string) against the current ns → a `:<ns>/nm` keyword; at
 root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
 bakes a record's `:__id__`) and `%ability-id-kw` (an impl's bare id) so the two AGREE — a
@@ -440,8 +428,7 @@ this clause was an expansion error."
         rec-ty (cons 'record
                  (cons :__id__
                    (cons id
-                     (mapcat (fn (f)
-                               (list (keyword (->string (%defrecord-fname f))) (field-ty f)))
+                     (mapcat (fn (f) (list (keyword (->string (%defrecord-fname f))) (field-ty f)))
                        fields))))
         ctor-sig (list '/sig rec (append arg-tys (list '-> rec-ty)))
         ;; per-accessor sigs only when every field is typed (else an accessor call on a
@@ -458,10 +445,7 @@ this clause was an expansion error."
                            ;; no record at all. The constructor's RESULT stays closed:
                            ;; the ctor builds exactly those keys, which is what lets a
                            ;; field read through a union of records resolve.
-                           (list (list 'record
-                                   '&open
-                                   (keyword (->string fnm))
-                                   (%defrecord-ftype f))
+                           (list (list 'record '&open (keyword (->string fnm)) (%defrecord-ftype f))
                              '->
                              (%defrecord-ftype f)))))
                      fields)
@@ -589,8 +573,7 @@ for a higher-order op that wants a fixed answer.
 ;;
 ;; `seq/xmap`/`xfilter`/`xremove`/`xkeep` are the built-in stages (the same functions
 ;; the `l*` combinators use), and `seq/transduce` runs a stack over any collection.
-(defn- %seqview-wrap
-  (coll xf)
+(defn- %seqview-wrap (coll xf)
   "Wrap `coll` in a lazy seq-view applying transducer `xf`. If `coll` is already a
 view, compose `xf` onto its transducer (same source) so the stages fuse."
   (if (seqview? coll)
@@ -654,8 +637,7 @@ iterating for side effects.
 ;; recursive, so deep comprehensions don't grow the stack.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %for-fold
-    (acc binds body)
+  (defn- %for-fold (acc binds body)
     (cond
       (empty? binds) `(cons ~body ~acc)
       (= (first binds) :when) `(if ~(second binds) ~(%for-fold acc (rest (rest binds)) body) ~acc)
@@ -666,8 +648,7 @@ iterating for side effects.
 ;; Validate that binding pairs are complete — each variable has a collection, and each
 ;; :when has a guard expression. An odd-count suffix silently produces an empty result
 ;; (the missing coll becomes nil), which is almost always a mistake.
-(defn- %for-check-binds
-  (binds)
+(defn- %for-check-binds (binds)
   (cond
     (empty? binds) nil
     (%eq (first binds) :when)
@@ -758,8 +739,7 @@ when nothing is dropped, exactly as `(drop 0 [1 2 3])` does.
 See `take-while`: the `pair?` guard was false for a vector, so this used to hand back the
 whole collection whatever the predicate said."
   (%drop-while-from pred coll))
-(defn- %drop-while-from
-  (pred coll)
+(defn- %drop-while-from (pred coll)
   (if (and (not (empty? coll)) (pred (first coll))) (%drop-while-from pred (rest coll)) coll))
 
 (%defseq mapcat

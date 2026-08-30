@@ -10,12 +10,9 @@
 ;; `(apropos "sort")` answered `(%sort-asc %sort-cmp %merge-sort %merge-sort-n sort
 ;; sort-by)` — four of six results were internals. `bound?` guards the `reflect/private?`
 ;; probe against a name in the table with no value yet.
-(defn- %discoverable-names
-  ()
+(defn- %discoverable-names ()
   "Every global worth OFFERING to a human: no `%` plumbing, no module-private names."
-  (filter (fn (s)
-            (and (not (string/starts-with? (->string s) "%"))
-              (not (reflect/private? s))))
+  (filter (fn (s) (and (not (string/starts-with? (->string s) "%")) (not (reflect/private? s))))
     (reflect/global-names)))
 
 (defn apropos (pattern)
@@ -32,8 +29,7 @@ are not callable vocabulary, and they used to bury the answer.
 ;; Whitespace-split a query into lowercased terms (blanks dropped) — the unit
 ;; doc-search ranks by. A single-word query yields one term, so it degrades to
 ;; the old "docstring contains this word" search.
-(defn- %doc-search-terms
-  (query)
+(defn- %doc-search-terms (query)
   "Lowercased, whitespace-separated terms of `query`, with blanks removed."
   (filter (fn (t) (not (string/blank? t))) (string/split (string/lower query) " ")))
 
@@ -90,8 +86,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 (defdyn *spy-sink* nil)
 
 (defn- %spy-indent (depth) (apply str (map (constantly "  ") (range depth))))
-(defn- %spy-default-sink
-  (entry)
+(defn- %spy-default-sink (entry)
   "Default `*spy-sink*`: pretty-print one trace entry as an indented stderr line.
 `:call`/`:return` are the function-boundary entries `debug/trace-fn` emits.
 
@@ -114,13 +109,11 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
                     "\n"))
     nil))
 (defn- %spy-emit (entry) ((or *spy-sink* %spy-default-sink) entry))
-(defn- %spy-node
-  (form value depth)
+(defn- %spy-node (form value depth)
   ;; Runtime: emit a traced node's value, then return it untouched.
   (%spy-emit {:spy :node :form form :value value :depth depth})
   value)
-(defn- %spy-run
-  (form thunk)
+(defn- %spy-run (form thunk)
   (%spy-emit {:spy :enter :form form})
   (let (value (thunk)) (%spy-emit {:spy :exit :value value}) value))
 
@@ -135,8 +128,7 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
     'with-out-str 'with-err-str 'bench})
 
 (defn- %spy-walk-seq (forms depth) (map (fn (form) (%spy-walk form depth)) forms))
-(defn- %spy-walk-binds
-  (binds depth)
+(defn- %spy-walk-binds (binds depth)
   ;; A flat `(name expr …)` binding list — instrument the RHS positions only.
   (letrec (go (fn (bs acc)
                 (cond
@@ -146,25 +138,21 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
                     (go (rest (rest bs))
                       (cons (%spy-walk (second bs) depth) (cons (first bs) acc))))))
     (go binds ())))
-(defn- %spy-walk-if
-  (form depth)
+(defn- %spy-walk-if (form depth)
   ;; Instrument test + both branches in place; the branches stay lazy, so only the
   ;; taken one ever traces.
   (let (parts (rest form) test (first parts) then (second parts) d (inc depth))
     (if (> (count parts) 2)
       `(if ~(%spy-walk test d) ~(%spy-walk then d) ~(%spy-walk (nth parts 2) d))
       `(if ~(%spy-walk test d) ~(%spy-walk then d)))))
-(defn- %spy-walk-let
-  (form depth)
+(defn- %spy-walk-let (form depth)
   (let (head (first form) binds (second form) body (rest (rest form)) d (inc depth))
     `(~head ~(%spy-walk-binds binds d) ~@(%spy-walk-seq body d))))
-(defn- %spy-walk-call
-  (form depth)
+(defn- %spy-walk-call (form depth)
   ;; (f a…) — every operand is eager, unconditional, once; instrument them all and
   ;; trace this call node's value.
   `(%spy-node '~form (~@(%spy-walk-seq form (inc depth))) ~depth))
-(defn- %spy-walk
-  (form depth)
+(defn- %spy-walk (form depth)
   (if (not (pair? form))
     form
     (let (form (macroexpand form))
@@ -255,8 +243,7 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ;; `std/tool/project.blsp` did exactly that, so every imaged start restored the root section
 ;; and then loaded every module from source anyway. Nothing failed; the image was simply
 ;; never consulted. Install through here instead.
-(defn- %set-image-source!
-  (path sections)
+(defn- %set-image-source! (path sections)
   "Install `path`'s section directory `sections` (feature name → `[offset len]`) as a source
 of features, so `require` materialises an imaged module instead of loading its source.
 Returns the directory. Pass `{}` to stop consulting an image."
@@ -264,16 +251,14 @@ Returns the directory. Pass `{}` to stop consulting an image."
   (def *image-sections* sections)
   *image-sections*)
 
-(defn- %add-image-source!
-  (path sections)
+(defn- %add-image-source! (path sections)
   "Append `path`'s section directory as an ADDITIONAL feature source, consulted after the
 primary one. Use this for a second, independently-produced image — the stdlib image beside
 a project's — rather than `%set-image-source!`, which replaces."
   (def *image-sources* (append *image-sources* (list [path sections])))
   *image-sources*)
 
-(defn- %image-section-for
-  (key)
+(defn- %image-section-for (key)
   "`[path [offset len]]` for the first installed image that carries feature `key`, or nil.
 The primary source is consulted first, then `*image-sources*` in install order."
   (if (contains? *image-sections* key)
@@ -402,8 +387,7 @@ OWNING module provides (see the block comment above). The runtime side of a
 `sig` written above its definition under BROOD_CONTRACTS=1."
   (%table-put %*pending-contracts* (->string qname) [qname type])
   nil)
-(defn- %contract-owner
-  (qname-str)
+(defn- %contract-owner (qname-str)
   ;; \"path/path-last-sep\" → \"path\"; a root name (no slash) owns itself nowhere,
   ;; so it applies at whichever provide first finds it bound. Kernel primitives
   ;; only — a `string/last-index-of` here would infer a require of std/string in
@@ -414,8 +398,7 @@ OWNING module provides (see the block comment above). The runtime side of a
   ;; the ADR-301 merge).
   (let (i (%str-last-index-of qname-str "/" (string/length qname-str)))
     (if (or (nil? i) (< i 0)) nil (string/substring qname-str 0 i))))
-(defn- %contracts-apply-pending!
-  (key)
+(defn- %contracts-apply-pending! (key)
   ;; Apply only THIS module's entries, and apply them AS the module: `sig!` on a
   ;; `defn-` name is a private reference, legal only when the compile namespace is
   ;; the owner itself (ADR-146 — applying another module's pending sig from a
@@ -493,8 +476,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; no marker, all of `mod`'s public (non-`--`) names. `:only`/`:exclude` are the sole
 ;; import filters — any other marker is a clean error (ADR-152: name the fix, don't
 ;; silently import everything). Used at `defmodule` expand time.
-(defn- %defmodule-use-clause
-  (clause)
+(defn- %defmodule-use-clause (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
         marker (first opts))
@@ -515,8 +497,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
-(defn- %defmodule-use-forms
-  (clauses)
+(defn- %defmodule-use-forms (clauses)
   (apply append
     (map %defmodule-use-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use))) clauses))))
@@ -529,8 +510,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; and this module are mutually dependent, because a subset refer resolves lazily and
 ;; skips the "refer-all into a still-loading module" error a plain `(:use-internals mod)`
 ;; hits mid-cycle. For tests and tightly-coupled tooling; loud and greppable by design.
-(defn- %defmodule-internals-clause
-  (clause)
+(defn- %defmodule-internals-clause (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
         marker (first opts))
@@ -547,23 +527,20 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
         (list '%grant-internals rooted)
         (list '%refer rooted (list 'quote subset))))))
 
-(defn- %defmodule-internals-forms
-  (clauses)
+(defn- %defmodule-internals-forms (clauses)
   (apply append
     (map %defmodule-internals-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use-internals))) clauses))))
 
 ;; web/views/counter → counter  (a module name's last `/`-segment, as a symbol).
-(defn- %defmodule-last-segment
-  (mod)
+(defn- %defmodule-last-segment (mod)
   (symbol (last (string/split (->string mod) "/"))))
 
 ;; The `(require …)`+`(%alias …)` forms for one `(:alias mod [:as short])` clause:
 ;; load the module, then register a prefix alias so a later `short/name` resolves to
 ;; `mod/name` (Elixir-style `alias`). `short` defaults to `mod`'s last path segment;
 ;; `:as` overrides it (needed when two modules share a last segment).
-(defn- %defmodule-alias-clause
-  (clause)
+(defn- %defmodule-alias-clause (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
         short (if (= (first opts) :as) (second opts) (%defmodule-last-segment mod))
@@ -573,8 +550,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
     (list (list 'require-one rooted)
       (list '%alias rooted (list 'quote short)))))
 
-(defn- %defmodule-alias-forms
-  (clauses)
+(defn- %defmodule-alias-forms (clauses)
   (apply append
     (map %defmodule-alias-clause
       (filter (fn (c) (and (pair? c) (= (first c) :alias))) clauses))))
@@ -591,8 +567,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; (%require-force); providing here, before the module's defs exist, is exactly the
 ;; window a concurrent requirer used to slip through. A direct `(reflect/load "x.blsp")`
 ;; (no require in flight) keeps the immediate provide it always had.
-(defn- %defmodule-provide
-  (mod)
+(defn- %defmodule-provide (mod)
   ;; Symbol or string in; converts here, not at the call site — see `defmodule`'s template.
   (let (key (->string mod))
     (if (contains? *features-loading* key) key (provide key))))
@@ -610,8 +585,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; whole test suite stopped loading.
 (def- %defmodule-clause-heads [:use :use-internals :alias :implements])
 
-(defn- %defmodule-check-clause
-  (clause)
+(defn- %defmodule-check-clause (clause)
   (if (and (pair? clause)
         (keyword? (first clause))
         (includes? %defmodule-clause-heads (first clause)))
@@ -660,8 +634,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
        ~@(%defmodule-alias-forms clauses))))
 
 ;; First existing <filename> across the load-path dirs, or nil.
-(defn- %require-find
-  (filename dirs)
+(defn- %require-find (filename dirs)
   (cond
     (empty? dirs) nil
     (file/exists? (%path-join (first dirs) filename)) (%path-join (first dirs) filename)
@@ -673,8 +646,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 ;; (rooted), so `require` finds it there; a NAMELESS project or a bare `brood file.blsp` run
 ;; has no such registry, so `require` instead scans `*load-path*` for the file that declares
 ;; the name. Reached only AFTER the filename probe misses, so the common path is untouched.
-(defn- %require-file-declares?
-  (path key-name)
+(defn- %require-file-declares? (path key-name)
   ;; True if `path` has a top-level `(defmodule key-name …)`. Read-only; a parse error is
   ;; false (the file's real error surfaces when something actually loads it).
   (any? (fn (form)
@@ -683,8 +655,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
             (not (empty? (rest form)))
             (= (->string (first (rest form))) key-name)))
     (try (%read-all (file/slurp path)) (catch _ nil))))
-(defn- %require-colocated-files
-  (key-name dirs)
+(defn- %require-colocated-files (key-name dirs)
   ;; Every `.blsp` on `dirs` (searched top-level, not recursively) that declares `key-name`.
   (fold (fn (acc dir)
           (fold (fn (a entry)
@@ -695,8 +666,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
             acc
             (or (try (file/ls dir) (catch _ nil)) nil)))
     nil dirs))
-(defn- %require-find-colocated
-  (key)
+(defn- %require-find-colocated (key)
   ;; The single file declaring co-located module `key`, or nil if none. Errors if two files
   ;; declare it — the nameless/bare analogue of a named project's duplicate-module rejection.
   (let (key-name (->string key)
@@ -723,8 +693,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
 ;; ~40% of its updates under contention (KI-22).
 (def- *std-require-edges* nil)
 
-(defn- %set-std-require-edges!
-  (edges)
+(defn- %set-std-require-edges! (edges)
   "Record `edges` in the ROOT global the stdlib image carries them in, and return it.
 
 Deliberately a root global set through the prelude rather than a `def` inside `stdimage`:
@@ -737,8 +706,7 @@ module, so restoring it cannot half-load one."
 
 (def- *std-image-file* nil)
 
-(defn- %std-image-serves?
-  (img-path src)
+(defn- %std-image-serves? (img-path src)
   "May the section found at `img-path` be used for a module whose embedded source is `src`?
 
 Yes for a PROJECT image, which snapshots that project's own modules and is the only thing
@@ -764,8 +732,7 @@ comparison, paid only by a module that actually materialises."
 
 (def- *std-image-sections* nil)
 
-(defn- %std-image-tables!
-  ()
+(defn- %std-image-tables! ()
   "Load the image's three bookkeeping sections — require-edges, ability impls, other
 registrations — the first time a module actually materialises, and clear the stash so later
 materialises pay nothing. Returns nil.
@@ -780,8 +747,7 @@ will never consult."
           (when sec (%image-load-section path (first sec) (second sec)))))
       (def *std-image-sections* nil))))
 
-(defn- %std-edges-for
-  (key)
+(defn- %std-edges-for (key)
   "Module `key`'s recorded require-edges: the live registry\'s if a source load already put
 them there, else the image\'s record.
 
@@ -801,8 +767,7 @@ binary cannot load would fail the require outright."
 
 (def- *std-impls* nil)
 
-(defn- %set-std-impls!
-  (by-module)
+(defn- %set-std-impls! (by-module)
   "Record `by-module` (module name → vector of `[ability op key f from]`) in the ROOT global
 the stdlib image carries ability registrations in, and return it. A root global for the same
 reason `*std-require-edges*` is one: named inside `stdimage` it would half-load that module.
@@ -817,8 +782,7 @@ exactly rather than approximating it."
   (def *std-impls* by-module)
   *std-impls*)
 
-(defn- %replay-std-impls!
-  (key)
+(defn- %replay-std-impls! (key)
   "Re-register the ability impls module `key`'s load performed, from the image's record.
 Returns the number replayed.
 
@@ -833,8 +797,7 @@ exactly this, `ability Response/send-response: no impl for :http/response` and i
 
 (def- *std-regs* nil)
 
-(defn- %set-std-regs!
-  (by-module)
+(defn- %set-std-regs! (by-module)
   "Record `by-module` (module name → vector of `[registry-symbol key-path value]`) in the
 ROOT global the stdlib image carries a load's non-impl REGISTRATIONS in, and return it.
 
@@ -850,8 +813,7 @@ registered before the module materialised still holds its slot."
   (def *std-regs* by-module)
   *std-regs*)
 
-(defn- %replay-std-regs!
-  (key)
+(defn- %replay-std-regs! (key)
   "Re-apply the registrations module `key`'s load performed, from the image's record.
 Returns the number replayed.
 
@@ -862,8 +824,7 @@ resolves against an ability the runtime has never heard of."
     (doseq (r regs) (%registry-update! (get r 0) :assoc (get r 1) (get r 2)))
     (count regs)))
 
-(defn- %merge-require-edges!
-  (edges)
+(defn- %merge-require-edges! (edges)
   "MERGE `edges` (feature name → [dep …]) into `*require-edges*`, keeping any edge already
 recorded for a key. Restoring a module from an image defines its bindings but evaluates
 NOTHING, so the requires its header would have run are replayed from these edges — an image
@@ -909,8 +870,7 @@ own, and whichever installs second must not erase the first."
 ;; exist yet. `%getenv` and `str` stand in; `path/join` on components of this shape is
 ;; exactly a `/` between them, and `file/exists?` is a native, bound from the start.
 
-(defn- %std-image-path
-  ()
+(defn- %std-image-path ()
   "Where this binary's stdlib image lives, or nil when there is no cache directory
 (`$XDG_CACHE_HOME/brood`, else `~/.cache/brood`).
 
@@ -930,8 +890,7 @@ Deliberately NOT `system/build-id`, which embeds the running binary's mtime: tha
                else nil))
     (when base (str base "/brood/std-image-" (system/stdlib-id) ".bin"))))
 
-(defn- %std-image-install
-  ()
+(defn- %std-image-install ()
   "Install this binary's stdlib image as an additional feature source, if one exists and is
 current. Returns the section count, or nil on a miss (absent, stale, unreadable) — in which
 case `require` keeps loading stdlib modules from source exactly as before."
@@ -959,8 +918,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
             (dissoc (dissoc (dissoc idx "%std-edges") "%std-impls") "%std-regs"))
           (count (keys idx)))))))
 
-(defn- %require-record-edge!
-  (key)
+(defn- %require-record-edge! (key)
   ;; `reflect/current-ns` first: it is the module whose FILE is being loaded, which is the accurate
   ;; parent for every require in that file — the `(:use …)` clauses `defmodule` expands and
   ;; any bare top-level `(require …)` alike. It is also the only one that works for the
@@ -981,15 +939,13 @@ case `require` keeps loading stdlib modules from source exactly as before."
 
 ;; The short module name of a rooted bundle key: `store/repo` -> `repo`, `sp/wire/bytes` ->
 ;; `wire/bytes` (everything after the FIRST `/`, i.e. the package prefix).
-(defn- %bundle-key-short
-  (key pkg)
+(defn- %bundle-key-short (key pkg)
   (symbol (string/substring key (+ 1 (string/length pkg)) (string/length key))))
 
 ;; True if SHORT module name `short` is provided by MORE THAN ONE registered package — a genuine
 ;; cross-dependency name collision (two deps each shipping a `parser`). Only such a name needs
 ;; the rooted `pkg/mod` binding to stay distinct; a uniquely-named module does not.
-(defn- %bundle-short-collides?
-  (short)
+(defn- %bundle-short-collides? (short)
   (> (count (filter (fn (pkg) (includes? (get *package-modules-of* pkg) short))
               (map first (%map-pairs *package-modules-of*))))
     1))
@@ -1004,8 +960,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
 ;; exactly as apps reference it — hive's `(:alias repo)`, a bare `web/router/through-handler`.
 ;; This makes the flat bundle bind the same names the dev image does, the parity that was missing.
 ;; Std modules and a bundle's unrooted root-project modules have no package prefix and stay ROOT.
-(defn- %bundle-module-package
-  (key)
+(defn- %bundle-module-package (key)
   (let (seg (first (string/split key "/")))
     (if (and (not (= seg key))
           (contains? *package-modules-of* seg)
@@ -1020,8 +975,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
 ;; order-independent (a root module can be required before the dep whose module it uses). `key`
 ;; may itself be namespaced; a rooted key like `store/repo` is never in a short set, so a direct
 ;; rooted request finds no owner here and simply loads its own embedded source.
-(defn- %bundle-resolve-bare
-  (key)
+(defn- %bundle-resolve-bare (key)
   (let (owner (seq/find (fn (pkg) (includes? (get *package-modules-of* pkg) (symbol key)))
                 (map first (%map-pairs *package-modules-of*))))
     (if owner (str owner "/" key) nil)))
@@ -1029,8 +983,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
 ;; The raw load of feature `key`: evaluate its embedded source (a baked-in std
 ;; module) or the first <key>.blsp found on *load-path*, then record it. No
 ;; loading-bookkeeping — callers manage *features-loading*. Errors if not found.
-(defn- %require-force
-  (key)
+(defn- %require-force (key)
   ;; Everything this load requires is an edge OUT of `key` — `require-one` reads the
   ;; binding to attribute it. It wraps the image branch too, which merely re-records edges
   ;; that are already there (the `member?` fast path makes that free).
@@ -1038,8 +991,7 @@ case `require` keeps loading stdlib modules from source exactly as before."
     (%require-force-in key)))
 
 ;; `%require-force`'s body, split out only so the dynamic binding above wraps every branch.
-(defn- %require-force-in
-  (key)
+(defn- %require-force-in (key)
   ;; `key`'s embedded source. If a bare key isn't embedded directly, resolve it to the
   ;; dependency module embedded under its rooted key `pkg/key` (`%bundle-resolve-bare`) — the
   ;; bundle's basename lookup, so a bare `(:alias repo)` / `pool` reference finds `store/repo`
@@ -1192,8 +1144,7 @@ load-time (`require`) guards."
 ;; root, load it, then RESTORE the enclosing context on both the normal and error
 ;; paths (a dep may be required mid-load of another dep, so contexts nest). The
 ;; prefix is the rooted key's first segment (package local names are single-segment).
-(defn- %require-force-package
-  (key path)
+(defn- %require-force-package (key path)
   (let (prefix (symbol (first (string/split key "/"))))
     ;; Refuse a package whose name the standard library owns, BEFORE touching the
     ;; ambient context — a `:path`/`:git`/registry dep (or a root project) named after
@@ -1247,8 +1198,7 @@ load-time (`require`) guards."
 ;; Reverse either one and a waiter blocks on a notification that can never arrive. That is
 ;; the same class as the wake this file's callers depend on: a notification delivered to
 ;; nobody is gone, so the state has to be observable to a late arrival.
-(defn- %require-enqueue-waiter!
-  (key me rref)
+(defn- %require-enqueue-waiter! (key me rref)
   "Add `[me rref]` to `key`'s waiter list, atomically against a concurrent drain. `rref` is
 this waiter's one-shot REPLY ALIAS (OTP 24's `{alias, demonitor}`): the loader addresses the
 completion to it, so a waiter that stops waiting can have a late reply dropped at delivery
@@ -1256,8 +1206,7 @@ rather than left in its mailbox — see `%require-unwatch!`."
   (%swap-registry! *features-waiting*
     (fn (m) (assoc m key (cons [me rref] (or (get m key) (list)))))))
 
-(defn- %require-take-waiters!
-  (key)
+(defn- %require-take-waiters! (key)
   "Atomically REMOVE and return `key`'s waiter list (empty if none). CAS-retried, so a
 waiter joining concurrently either lands before the take (and is returned here) or after it
 (and its own re-check sees the `provide` that preceded this call)."
@@ -1268,15 +1217,13 @@ waiter joining concurrently either lands before the take (and is returned here) 
       (%registry-cas! '*features-waiting* old (dissoc old key)) ws
       else (%require-take-waiters! key))))
 
-(defn- %require-release!
-  (key)
+(defn- %require-release! (key)
   "Wake every process waiting on `key`'s load. MUST be called after `provide` (or after the
 marker is cleared on failure), never before — see the ordering note above."
   (let (ws (%require-take-waiters! key))
     (%require-notify-each ws key)))
 
-(defn- %require-notify-each
-  (ws key)
+(defn- %require-notify-each (ws key)
   (unless (empty? ws)
     (do
       ;; `[:load-done <ref> …]` — keyword first, ref second, which is the shape the kernel
@@ -1286,8 +1233,7 @@ marker is cleared on failure), never before — see the ordering note above."
       (let ([p r] (first ws)) (send p [:load-done r key]))
       (%require-notify-each (rest ws) key))))
 
-(defn- %require-await
-  (key)
+(defn- %require-await (key)
   "Block until the process that claimed `key`'s load has finished it. Returns `key`."
   (let (me (self)
         rref (ref))
@@ -1350,15 +1296,13 @@ marker is cleared on failure), never before — see the ordering note above."
                 ;; and the message above says the protocol is broken either way.
                 (%require-force key))))))))
 
-(defn- %require-release-dead-claim!
-  (key loader)
+(defn- %require-release-dead-claim! (key loader)
   "Clear `key`'s in-flight marker, but only while it still names `loader` — CAS-retried, so
 a claim another process has meanwhile taken over is left alone rather than clobbered."
   (%swap-registry! *features-loading*
     (fn (m) (if (= (get m key) loader) (dissoc m key) m))))
 
-(defn- %require-unwatch!
-  (key me rref mref)
+(defn- %require-unwatch! (key me rref mref)
   "Stop waiting on `key`: leave the waiter queue, drop the death watch, and DEACTIVATE both
 refs so a notification already in flight is dropped at delivery instead of queueing.
 
@@ -1374,8 +1318,7 @@ is exactly what OTP 24 reply aliases exist for."
   (%ref-deactivate rref)
   (%require-drop-waiter! key me))
 
-(defn- %require-drop-waiter!
-  (key me)
+(defn- %require-drop-waiter! (key me)
   "Remove `me` from `key`'s waiter list (best-effort; a concurrent drain may beat us)."
   (%swap-registry! *features-waiting*
     (fn (m)
@@ -1474,8 +1417,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
 ;; the name the stub promised — a declaration that has drifted from its module.
 (defdyn *autoloading* nil)
 
-(defn- %autoload-call
-  (mod nm args)
+(defn- %autoload-call (mod nm args)
   "Load `mod`, then forward `args` to the real `nm` its load defines. The body of every
 stub `%autoload` binds; see there. Raises if loading `mod` leaves `nm` still a stub."
   (if (= *autoloading* nm)
@@ -1566,8 +1508,7 @@ and that every declared arity still matches its module's actual definition."
 ; get distinct globals and never clash — do not false-warn.
 (def- *op-ability* {})
 
-(defn- %ability-qualify-op
-  (owner op-name)
+(defn- %ability-qualify-op (owner op-name)
   "The global symbol an ability op's `defn` binds: `op-name` qualified to the declaring ns
   `owner` (`<owner>/op`), or bare `op-name` when `owner` is nil (root/REPL). Mirrors how the
   `defn` `defability` emits is namespaced at load, so `*op-ability*` keys on the real global."
@@ -1745,8 +1686,7 @@ and that every declared arity still matches its module's actual definition."
 ; so it is the one boot-time caller of the `string` module — and the module now loads
 ; LAZILY (see `%autoload` below). Cutting at the last `/` is also what the docstring above
 ; describes, without building the intermediate list to rejoin all but its last element.
-(defn- %impl-id-owner
-  (key)
+(defn- %impl-id-owner (key)
   (if (keyword? key)
     (let (nm (->string key)
           cut (%str-last-index-of nm "/"))
@@ -1757,8 +1697,7 @@ and that every declared arity still matches its module's actual definition."
 ; `*ns-package*` entry (set at project setup) equals `*project-name*`. Guarded with `bound?`
 ; so abilities still work when no project is loaded (a bare `brood script.blsp` — those
 ; ambients are undeclared then). Root/REPL (`from` = nil) is handled by the caller as the app.
-(defn- %impl-app?
-  (from)
+(defn- %impl-app? (from)
   (and from
     (bound? '*project-name*)
     *project-name*
@@ -1784,16 +1723,14 @@ resolution; `%impl-for` is what picks the winner."
         (= from-name abl-owner) 2
         else 1))))
 
-(defn- %impl-fn-arity
-  (f)
+(defn- %impl-fn-arity (f)
   "The impl fn `f`'s shape as `[fixed-count variadic?]` — the number of fixed params (before
   any `&`) and whether it takes a `&`-rest — read from `(arglist f)`."
   (let (params (arglist f)
         fixed (count (take-while (fn (s) (not (= s '&))) params)))
     [fixed (includes? params '&)]))
 
-(defn- %register-impl-check-arity
-  (aname op f)
+(defn- %register-impl-check-arity (aname op f)
   "Warn if impl `f`'s arity is incompatible with `aname`'s declared `op` arity. Only runs
   when the ability is KNOWN (in `*abilities*`) — an impl registered before its `defability`
   (legal, ADR-172 late binding) simply isn't arity-checked here; the checker covers the rest.
@@ -1874,8 +1811,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
 ;; (ADR-166): the language's own definitions are not yours to remove. An `impl` you wrote for
 ;; YOUR OWN id (`(impl Display my/rec …)`) is policy, and retracts normally.
 
-(defn- %impl-substrate?
-  (aname key)
+(defn- %impl-substrate? (aname key)
   "Whether `[aname key]` names one of the language's own fallback impls — the `:default` of an
   ability the runtime dispatches on itself."
   (and (= key :default) (includes? *substrate-abilities* aname)))
@@ -1963,24 +1899,21 @@ which is meaningless for a rope, so falling through unconditionally would swap a
 
 ; ---- macros -----------------------------------------------------------------
 
-(defn- %defability-sealed-vec
-  (specs)
+(defn- %defability-sealed-vec (specs)
   "The vector following `:sealed` in a `defability`'s specs (its closed member set), or nil."
   (cond
     (empty? specs) nil
     (= (first specs) :sealed) (second specs)
     else (%defability-sealed-vec (rest specs))))
 
-(defn- %defability-requires-vec
-  (specs)
+(defn- %defability-requires-vec (specs)
   "The vector following `:requires` in a `defability`'s specs (its prerequisite abilities), or nil."
   (cond
     (empty? specs) nil
     (= (first specs) :requires) (second specs)
     else (%defability-requires-vec (rest specs))))
 
-(defn- %defability-derive-fn
-  (specs)
+(defn- %defability-derive-fn (specs)
   "The form following `:derive-record` in a `defability`'s specs — the derive recipe (an
   inline `(fn (fields) …)` or a fn-symbol), or nil. Distinct from an op spec (whose second
   element is a `[args]` *vector*), so it is filtered out of the op list."
@@ -1989,8 +1922,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
     (= (first specs) :derive-record) (second specs)
     else (%defability-derive-fn (rest specs))))
 
-(defn- %ability-id-kw
-  (m)
+(defn- %ability-id-kw (m)
   "The dispatch-id keyword for an impl / sealed-member id `m`. A keyword is kept as-is
   (`:int`, `:default`); a bare record symbol is qualified against the current ns
   (`circle` → `:<ns>/circle`, matching what `defrecord` bakes into a value); an already-
@@ -2020,8 +1952,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                    (string/substring nm (inc cut) (string/length nm))))))
     m))
 
-(defn- %defability-op-call
-  (impl-sym arg-syms)
+(defn- %defability-op-call (impl-sym arg-syms)
   "The dispatch call an op emits once its impl `impl-sym` is resolved. A fixed-arity op
   emits a direct `(impl self a b …)` — no arg-list allocation. A VARIADIC op (a `&` in the
   arg vector) emits `(apply impl self a … rest)`, because `&` is a binding marker, not a
@@ -2033,8 +1964,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
       (append (list '/apply impl-sym) (append fixed (list rest-sym))))
     (cons impl-sym arg-syms)))
 
-(defn- %defability-op-body
-  (op)
+(defn- %defability-op-body (op)
   "The default-implementation body of op spec `op` — everything after the arg vector and
   any `:-> RET` — or nil when the op declares none. A spec `(op [args] :-> ret? body…)`
   with a body is a PROVIDED op (ADR-185): `defability` emits its body as an auto-registered
@@ -2093,9 +2023,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                               (list 'quote ops)
                               (list '/reflect/current-ns))
                         (if sealed-ids
-                          (list (list '%register-sealed
-                                  (list 'quote aname)
-                                  (cons 'list sealed-ids)))
+                          (list (list '%register-sealed (list 'quote aname) (cons 'list sealed-ids)))
                           nil))
                 ; the `:derive-record` recipe is emitted UNQUOTED — evaluated to a closure at
                 ; load, so `defrecord`'s `:derives` can call it at expansion (ADR-185).
@@ -2168,8 +2096,7 @@ which is meaningless for a rope, so falling through unconditionally would swap a
                   ops))
     (cons 'do (append reg (append op-defs provided-defs)))))
 
-(defn- %op-declared-ret
-  (specs op-name)
+(defn- %op-declared-ret (specs op-name)
   "The `:-> RET` form `defability` declared for `op-name` among `specs`, or nil when the op
 declares no return. Read at `impl` EXPANSION time — the ability is registered by the time an
 `impl` for it expands — so the shim below can check what the ability promised.
@@ -2184,8 +2111,7 @@ prelude implements abilities of its own (`(impl Port :native …)`)."
         (if (%eq (first tail) :->) (first (rest tail)) nil))
     else (%op-declared-ret (rest specs) op-name)))
 
-(defn- %contract-check-op-result
-  (aname op ret value)
+(defn- %contract-check-op-result (aname op ret value)
   "Enforce an ability op's declared return at run time, under `BROOD_CONTRACTS=1`. The
 checker reports a *statically* visible violation already; this catches the ones it cannot
 see — an impl whose body only yields the wrong type for some inputs, and an impl registered
@@ -2259,8 +2185,7 @@ at run time from a value the checker never read. Returns `value` so it can wrap 
         (list '/map '/first (list '/or (list '%ability-ops (list 'quote aname)) (list)))
         (list 'quote ops)))))
 
-(defn- %unimpl-do
-  (aname key ops)
+(defn- %unimpl-do (aname key ops)
   "Runtime worker for `%unimpl`: retract each of `ops` for `key`, returning how many were
   there. Separate from the macro so the op list can come from the ability's own declaration
   at expansion time or from a caller's list at runtime."
@@ -2269,11 +2194,9 @@ at run time from a value the checker never read. Returns `value` so it can wrap 
 ;; The position of `:->` in a `defmulti`'s opts, or nil. `:->` is the same marker an
 ;; ability op spec uses for its return (`(compare-to [self other] :-> int)`), so a reader
 ;; meets one spelling for "and it returns" across both dispatch forms.
-(defn- %index-of-arrow
-  (opts)
+(defn- %index-of-arrow (opts)
   (%arrow-at opts 0))
-(defn- %arrow-at
-  (opts i)
+(defn- %arrow-at (opts i)
   (cond
     (empty? opts) nil
     (%eq (first opts) :->) i
@@ -2328,14 +2251,12 @@ at run time from a value the checker never read. Returns `value` so it can wrap 
                   (str "multimethod " mname ": no method for " key " — have " known)))
     (throw {:kind :%no-method :message message :multi mname :key key :have known})))
 
-(defn- %register-method-store
-  (mname key f)
+(defn- %register-method-store (mname key f)
   "Store method `f` at EXACT `key` for `mname` (overwrites — an authored method always wins)."
   (%registry-update! '*methods* :assoc [mname key] f)
   nil)
 
-(defn- %register-method-derive
-  (mname key f)
+(defn- %register-method-derive (mname key f)
   "Fill the CLOSURE-derived mirror at `key` only if ABSENT — an explicitly authored method of
   the same key must never be clobbered by a derived one, whatever the load order."
   ;; `:assoc-new` does the absent-check INSIDE the lock — checking out here would let a
@@ -2629,8 +2550,7 @@ with no `compare-to` method is a loud `%no-method` error — never a silent orde
 ;; other value passes through untouched so the built-in renderer stays on the fast path
 ;; — no `%identity-of`/`%impl-for` lookup per printed int or string. Disable for a scope
 ;; with `(binding (*show* nil) …)`.
-(defn- %show-print-hook
-  (x)
+(defn- %show-print-hook (x)
   ;; Which values the screen printers route through `Display`.
   ;;
   ;; The guard used to be `(if (record? x) …)`, which meant an `(impl Display :rope …)`

@@ -49,9 +49,7 @@
 (describe "with — sequential match-binding with fall-through"
   (test "runs the body with every binding in scope when all steps match"
     (assert= 30
-      (with ([:ok a] [:ok 10]
-              [:ok b]
-              [:ok 20])
+      (with ([:ok a] [:ok 10] [:ok b] [:ok 20])
         (+ a b))))
   (test "the body may be several forms; the last is the result"
     (assert= 3
@@ -60,17 +58,11 @@
         (+ x x x))))
   (test "a step that fails its pattern short-circuits and passes the value through"
     (assert= [:error :nope]
-      (with ([:ok a] [:ok 10]
-              [:ok b]
-              [:error :nope]
-              [:ok c]
-              [:ok 99])
+      (with ([:ok a] [:ok 10] [:ok b] [:error :nope] [:ok c] [:ok 99])
         (+ a b c))))
   (test "bindings from earlier steps are visible to later step expressions"
     (assert= 15
-      (with ([:ok a] [:ok 5]
-              [:ok b]
-              [:ok (* a 2)])
+      (with ([:ok a] [:ok 5] [:ok b] [:ok (* a 2)])
         (+ a b))))
   (test "an :else section runs the short-circuited value through match clauses"
     (assert= {:error "unknown"}
@@ -80,9 +72,7 @@
         ([:error e] {:error e}))))
   (test ":else sees whichever step missed, matched by a later generic clause"
     (assert= {:error :no-card}
-      (with ([:ok a] [:ok 1]
-              [:ok b]
-              [:error :no-card])
+      (with ([:ok a] [:ok 1] [:ok b] [:error :no-card])
         [:ok b]
         :else ([:error :no-user] {:error "unknown"})
         ([:error e] {:error e}))))
@@ -90,9 +80,7 @@
     (assert= 42 (with () 42)))
   (test "non-tuple patterns work too — destructures and binds like match"
     (assert= 7
-      (with ({:n a} {:n 3}
-              [_ b]
-              [:tag 4])
+      (with ({:n a} {:n 3} [_ b] [:tag 4])
         (+ a b)))))
 
 (describe "doto"
@@ -267,9 +255,7 @@
     (let (me (self))
       (spawn (send me [:ok {:score 41}]))
       (assert= 42
-        (with ([:ok m] (receive (r r))
-                {:score n}
-                m)
+        (with ([:ok m] (receive (r r)) {:score n} m)
           (inc n)))))
   (test "with's :else handles a worker-sent failure the same as a local one"
     (let (me (self))

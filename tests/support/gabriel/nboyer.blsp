@@ -67,11 +67,7 @@ oracle is the rewrite count published in upstream's own source header; see
 
 (def- nboyer-lemma-data
   '((equal (compile form)
-      (reverse (codegen (optimize form)
-                 (nil)))) (equal (eqp x
-                                                                                                     y)
-                                                                                              (equal (fix x)
-                                                                                                (fix y)))
+      (reverse (codegen (optimize form) (nil)))) (equal (eqp x y) (equal (fix x) (fix y)))
      (equal (greaterp x y)
        (lessp y x))
      (equal (lesseqp x y)
@@ -138,46 +134,36 @@ oracle is the rewrite count published in upstream's own source header; see
        (if (numberp x)
          x
          (zero)))
-     (equal (if (if a b c)
-              d
-              e)
+     (equal (if (if a b c) d e)
        (if a
          (if b d e)
          (if c d e)))
      (equal (zerop x)
        (or (equal x (zero))
          (not (numberp x))))
-     (equal (plus (plus x y)
-              z)
+     (equal (plus (plus x y) z)
        (plus x (plus y z)))
-     (equal (equal (plus a b)
-              (zero))
+     (equal (equal (plus a b) (zero))
        (and (zerop a)
          (zerop b)))
      (equal (difference x x)
        (zero))
-     (equal (equal (plus a b)
-              (plus a c))
+     (equal (equal (plus a b) (plus a c))
        (equal (fix b)
          (fix c)))
-     (equal (equal (zero)
-              (difference x y))
+     (equal (equal (zero) (difference x y))
        (not (lessp y x)))
      (equal (equal x (difference x y))
        (and (numberp x)
          (or (equal x (zero))
            (zerop y))))
-     (equal (meaning (plus-tree (append x y))
-              a)
-       (plus (meaning (plus-tree x)
-               a)
+     (equal (meaning (plus-tree (append x y)) a)
+       (plus (meaning (plus-tree x) a)
          (meaning (plus-tree y)
            a)))
-     (equal (meaning (plus-tree (plus-fringe x))
-              a)
+     (equal (meaning (plus-tree (plus-fringe x)) a)
        (fix (meaning x a)))
-     (equal (append (append x y)
-              z)
+     (equal (append (append x y) z)
        (append x (append y z)))
      (equal (reverse (append a b))
        (append (reverse b)
@@ -185,15 +171,12 @@ oracle is the rewrite count published in upstream's own source header; see
      (equal (times x (plus y z))
        (plus (times x y)
          (times x z)))
-     (equal (times (times x y)
-              z)
+     (equal (times (times x y) z)
        (times x (times y z)))
-     (equal (equal (times x y)
-              (zero))
+     (equal (equal (times x y) (zero))
        (or (zerop x)
          (zerop y)))
-     (equal (exec (append x y)
-              pds envrn)
+     (equal (exec (append x y) pds envrn)
        (exec y
          (exec x pds envrn)
          envrn))
@@ -210,8 +193,7 @@ oracle is the rewrite count published in upstream's own source header; see
      (equal (member a (intersect b c))
        (and (member a b)
          (member a c)))
-     (equal (nth (zero)
-              i)
+     (equal (nth (zero) i)
        (zero))
      (equal (exp i (plus j k))
        (times (exp i j)
@@ -227,91 +209,67 @@ oracle is the rewrite count published in upstream's own source header; see
      (equal (count-list z (sort-lp x y))
        (plus (count-list z x)
          (count-list z y)))
-     (equal (equal (append a b)
-              (append a c))
+     (equal (equal (append a b) (append a c))
        (equal b c))
-     (equal (plus (remainder x y)
-              (times y (quotient x y)))
+     (equal (plus (remainder x y) (times y (quotient x y)))
        (fix x))
-     (equal (power-eval (big-plus1 l i base)
-              base)
+     (equal (power-eval (big-plus1 l i base) base)
        (plus (power-eval l base)
          i))
-     (equal (power-eval (big-plus x y i base)
-              base)
+     (equal (power-eval (big-plus x y i base) base)
        (plus i
          (plus (power-eval x base)
            (power-eval y base))))
      (equal (remainder y 1)
        (zero))
-     (equal (lessp (remainder x y)
-              y)
+     (equal (lessp (remainder x y) y)
        (not (zerop y)))
      (equal (remainder x x)
        (zero))
-     (equal (lessp (quotient i j)
-              i)
+     (equal (lessp (quotient i j) i)
        (and (not (zerop i))
          (or (zerop j)
            (not (equal j 1)))))
-     (equal (lessp (remainder x y)
-              x)
+     (equal (lessp (remainder x y) x)
        (and (not (zerop y))
          (not (zerop x))
          (not (lessp x y))))
-     (equal (power-eval (power-rep i base)
-              base)
+     (equal (power-eval (power-rep i base) base)
        (fix i))
-     (equal (power-eval (big-plus (power-rep i base)
-                          (power-rep j base)
-                          (zero)
-                          base)
-              base)
+     (equal (power-eval (big-plus (power-rep i base) (power-rep j base) (zero) base) base)
        (plus i j))
      (equal (gcd x y)
        (gcd y x))
-     (equal (nth (append a b)
-              i)
+     (equal (nth (append a b) i)
        (append (nth a i)
          (nth b (difference i (length a)))))
-     (equal (difference (plus x y)
-              x)
+     (equal (difference (plus x y) x)
        (fix y))
-     (equal (difference (plus y x)
-              x)
+     (equal (difference (plus y x) x)
        (fix y))
-     (equal (difference (plus x y)
-              (plus x z))
+     (equal (difference (plus x y) (plus x z))
        (difference y z))
      (equal (times x (difference c w))
        (difference (times c x)
          (times w x)))
-     (equal (remainder (times x z)
-              z)
+     (equal (remainder (times x z) z)
        (zero))
-     (equal (difference (plus b (plus a c))
-              a)
+     (equal (difference (plus b (plus a c)) a)
        (plus b c))
-     (equal (difference (add1 (plus y z))
-              z)
+     (equal (difference (add1 (plus y z)) z)
        (add1 y))
-     (equal (lessp (plus x y)
-              (plus x z))
+     (equal (lessp (plus x y) (plus x z))
        (lessp y z))
-     (equal (lessp (times x z)
-              (times y z))
+     (equal (lessp (times x z) (times y z))
        (and (not (zerop z))
          (lessp x y)))
      (equal (lessp y (plus x y))
        (not (zerop x)))
-     (equal (gcd (times x z)
-              (times y z))
+     (equal (gcd (times x z) (times y z))
        (times z (gcd x y)))
-     (equal (value (normalize x)
-              a)
+     (equal (value (normalize x) a)
        (value x a))
-     (equal (equal (flatten x)
-              (cons y (nil)))
+     (equal (equal (flatten x) (cons y (nil)))
        (and (nlistp x)
          (equal x y)))
      (equal (listp (gopher x))
@@ -319,18 +277,13 @@ oracle is the rewrite count published in upstream's own source header; see
      (equal (samefringe x y)
        (equal (flatten x)
          (flatten y)))
-     (equal (equal (greatest-factor x y)
-              (zero))
-       (and (or (zerop y)
-              (equal y 1))
+     (equal (equal (greatest-factor x y) (zero))
+       (and (or (zerop y) (equal y 1))
          (equal x (zero))))
-     (equal (equal (greatest-factor x y)
-              1)
+     (equal (equal (greatest-factor x y) 1)
        (equal x 1))
      (equal (numberp (greatest-factor x y))
-       (not (and (or (zerop y)
-                   (equal y 1))
-              (not (numberp x)))))
+       (not (and (or (zerop y) (equal y 1)) (not (numberp x)))))
      (equal (times-list (append x y))
        (times (times-list x)
          (times-list y)))
@@ -347,11 +300,9 @@ oracle is the rewrite count published in upstream's own source header; see
        (or (equal x (zero))
          (and (numberp x)
            (equal y 1))))
-     (equal (remainder (times y x)
-              y)
+     (equal (remainder (times y x) y)
        (zero))
-     (equal (equal (times a b)
-              1)
+     (equal (equal (times a b) 1)
        (and (not (equal a (zero)))
          (not (equal b (zero)))
          (numberp a)
@@ -360,47 +311,35 @@ oracle is the rewrite count published in upstream's own source header; see
            (zero))
          (equal (_1- b)
            (zero))))
-     (equal (lessp (length (delete x l))
-              (length l))
+     (equal (lessp (length (delete x l)) (length l))
        (member x l))
      (equal (sort2 (delete x l))
        (delete x (sort2 l)))
      (equal (dsort x)
        (sort2 x))
-     (equal (length (cons x1
-                      (cons x2
-                        (cons x3
-                          (cons x4
-                            (cons x5
-                              (cons x6 x7)))))))
+     (equal (length (cons x1 (cons x2 (cons x3 (cons x4 (cons x5 (cons x6 x7)))))))
        (plus 6 (length x7)))
-     (equal (difference (add1 (add1 x))
-              2)
+     (equal (difference (add1 (add1 x)) 2)
        (fix x))
-     (equal (quotient (plus x (plus x y))
-              2)
+     (equal (quotient (plus x (plus x y)) 2)
        (plus x (quotient y 2)))
-     (equal (sigma (zero)
-              i)
+     (equal (sigma (zero) i)
        (quotient (times i (add1 i))
          2))
      (equal (plus x (add1 y))
        (if (numberp y)
          (add1 (plus x y))
          (add1 x)))
-     (equal (equal (difference x y)
-              (difference z y))
+     (equal (equal (difference x y) (difference z y))
        (if (lessp x y)
          (not (lessp y z))
          (if (lessp z y)
            (not (lessp y x))
            (equal (fix x)
              (fix z)))))
-     (equal (meaning (plus-tree (delete x y))
-              a)
+     (equal (meaning (plus-tree (delete x y)) a)
        (if (member x y)
-         (difference (meaning (plus-tree y)
-                       a)
+         (difference (meaning (plus-tree y) a)
            (meaning x a))
          (meaning (plus-tree y)
            a)))
@@ -408,8 +347,7 @@ oracle is the rewrite count published in upstream's own source header; see
        (if (numberp y)
          (plus x (times x y))
          (fix x)))
-     (equal (nth (nil)
-              i)
+     (equal (nth (nil) i)
        (if (zerop i)
          (nil)
          (zero)))
@@ -420,8 +358,7 @@ oracle is the rewrite count published in upstream's own source header; see
            (cons (car (last a))
              b)
            b)))
-     (equal (equal (lessp x y)
-              z)
+     (equal (equal (lessp x y) z)
        (if (lessp x y)
          (equal (t) z)
          (equal (f) z)))
@@ -438,8 +375,7 @@ oracle is the rewrite count published in upstream's own source header; see
          (cdr (flatten x))
          (cons (zero)
            (nil))))
-     (equal (quotient (times y x)
-              y)
+     (equal (quotient (times y x) y)
        (if (zerop y)
          (zero)
          (fix x)))
@@ -456,12 +392,9 @@ oracle is the rewrite count published in upstream's own source header; see
 (def nboyer-alist
   '((x f
       (plus (plus a b)
-        (plus c (zero)))) (y f
-                                                            (times (times a b)
-                                                              (plus c d)))
+        (plus c (zero)))) (y f (times (times a b) (plus c d)))
      (z f
-       (reverse (append (append a b)
-                  (nil))))
+       (reverse (append (append a b) (nil))))
      (u equal
        (plus a b)
        (difference x y))
@@ -470,10 +403,7 @@ oracle is the rewrite count published in upstream's own source header; see
        (member a (length b)))))
 
 (def nboyer-term
-  '(implies (and (implies x y)
-              (and (implies y z)
-                (and (implies z u)
-                  (implies u w))))
+  '(implies (and (implies x y) (and (implies y z) (and (implies z u) (implies u w))))
      (implies x w)))
 
 ;; ---- phase one: build the lemma database -------------------------------------
@@ -481,8 +411,7 @@ oracle is the rewrite count published in upstream's own source header; see
 ;; A lemma is `(equal LHS RHS)`, filed under the head symbol of its LHS and consed onto
 ;; the front of that symbol's list — so the LAST lemma read is tried FIRST. The rewrite
 ;; count depends on that order.
-(defn- nboyer-add-lemma
-  (db lemma)
+(defn- nboyer-add-lemma (db lemma)
   (if (and (pair? lemma) (= (first lemma) 'equal) (pair? (second lemma)))
     (let (head (first (second lemma)))
       (assoc db head (cons lemma (get db head))))
@@ -497,23 +426,20 @@ oracle is the rewrite count published in upstream's own source header; see
 
 ;; A substitution is a list of `[var term]` pairs, most recent first, so the first hit
 ;; wins — upstream conses onto the front and looks up with `assq`.
-(defn- nboyer-lookup
-  (var subst)
+(defn- nboyer-lookup (var subst)
   (if (nil? subst)
     :none (let ([v term] (first subst))
       (if (= v var) term (nboyer-lookup var (rest subst))))))
 
 (check-allow :non-tail-recursion
-  (defn- nboyer-apply-subst
-    (subst term)
+  (defn- nboyer-apply-subst (subst term)
     (if (not (pair? term))
       (let (found (nboyer-lookup term subst))
         (if (= found :none) term found))
       (cons (first term) (nboyer-apply-subst-lst subst (rest term))))))
 
 (check-allow :non-tail-recursion
-  (defn- nboyer-apply-subst-lst
-    (subst lst)
+  (defn- nboyer-apply-subst-lst (subst lst)
     (if (nil? lst)
       nil
       (cons (nboyer-apply-subst subst (first lst))
@@ -524,8 +450,7 @@ oracle is the rewrite count published in upstream's own source header; see
 ;; a variable. Returns the extended substitution, or `:fail`.
 
 (check-allow :non-tail-recursion
-  (defn- nboyer-unify1
-    (term1 term2 subst)
+  (defn- nboyer-unify1 (term1 term2 subst)
     (if (not (pair? term2))
       (let (found (nboyer-lookup term2 subst))
         (cond
@@ -540,8 +465,7 @@ oracle is the rewrite count published in upstream's own source header; see
         else :fail))))
 
 (check-allow :non-tail-recursion
-  (defn- nboyer-unify1-lst
-    (lst1 lst2 subst)
+  (defn- nboyer-unify1-lst (lst1 lst2 subst)
     (cond
       (nil? lst1) (if (nil? lst2) subst :fail)
       (nil? lst2) :fail
@@ -555,8 +479,7 @@ oracle is the rewrite count published in upstream's own source header; see
 ;; `rewrite`, including for a non-pair, which is where upstream's `set!` sits.
 
 (check-allow :non-tail-recursion
-  (defn- nboyer-rewrite
-    (term db count)
+  (defn- nboyer-rewrite (term db count)
     (let (count (+ count 1))
       (if (not (pair? term))
         [term count]
@@ -567,8 +490,7 @@ oracle is the rewrite count published in upstream's own source header; see
             count2))))))
 
 (check-allow :non-tail-recursion
-  (defn- nboyer-rewrite-args
-    (lst db count)
+  (defn- nboyer-rewrite-args (lst db count)
     (if (nil? lst)
       [nil count]
       (let ([head count1] (nboyer-rewrite (first lst) db count)
@@ -576,8 +498,7 @@ oracle is the rewrite count published in upstream's own source header; see
         [(cons head tail) count2]))))
 
 (check-allow :non-tail-recursion
-  (defn- nboyer-rewrite-with-lemmas
-    (term lemmas db count)
+  (defn- nboyer-rewrite-with-lemmas (term lemmas db count)
     (if (nil? lemmas)
       [term count]
       (let (lemma (first lemmas)
@@ -591,17 +512,14 @@ oracle is the rewrite count published in upstream's own source header; see
 (def- nboyer-true-term '(t))
 (def- nboyer-false-term '(f))
 
-(defn- nboyer-truep
-  (x lst)
+(defn- nboyer-truep (x lst)
   (or (= x nboyer-true-term) (includes? lst x)))
 
-(defn- nboyer-falsep
-  (x lst)
+(defn- nboyer-falsep (x lst)
   (or (= x nboyer-false-term) (includes? lst x)))
 
 (check-allow :non-tail-recursion
-  (defn- nboyer-tautologyp
-    (x true-lst false-lst)
+  (defn- nboyer-tautologyp (x true-lst false-lst)
     (cond
       (nboyer-truep x true-lst) true
       (nboyer-falsep x false-lst) false
@@ -615,9 +533,7 @@ oracle is the rewrite count published in upstream's own source header; see
                                                  true-lst false-lst)
 
           else
-            (and (nboyer-tautologyp (third x)
-                   (cons (second x) true-lst)
-                   false-lst)
+            (and (nboyer-tautologyp (third x) (cons (second x) true-lst) false-lst)
               (nboyer-tautologyp (nth x 3) true-lst (cons (second x) false-lst))))
       else false)))
 
@@ -626,14 +542,12 @@ oracle is the rewrite count published in upstream's own source header; see
 ;; Upstream's scaling parameter: wrap the term in `(or term (f))` n times, which leaves
 ;; the tautology valid but multiplies the work. n=0 is 95,024 rewrites; each step up is
 ;; roughly 3x (see the table in the README).
-(defn- nboyer-scale
-  (term n)
+(defn- nboyer-scale (term n)
   (if (= n 0) term (nboyer-scale (list 'or term '(f)) (- n 1))))
 
 ;; `((var . term) …)` from `((var head args…) …)`: the entry's head is the variable and
 ;; its TAIL is the term bound to it.
-(defn- nboyer-subst-of-alist
-  (alist)
+(defn- nboyer-subst-of-alist (alist)
   (map (fn (entry) [(first entry) (rest entry)]) alist))
 
 (defn test-boyer (alist term n db)

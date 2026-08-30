@@ -42,8 +42,7 @@ compare what a human typed in a manifest, not to validate it (that is
     (map (fn (p) (or (string/->number p) 0)) (string/split core "."))))
 (sig core (string -> (or nil (list (or nil number)))))
 
-(defn- digit-run?
-  (s)
+(defn- digit-run? (s)
   (let (cps (string/->codepoints s))
     (and (not (empty? cps))
       (not (any? (fn (cp) (or (< cp 48) (> cp 57))) cps)))))
@@ -90,12 +89,10 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
       (string/split (string/substring no-build (+ dash 1) (string/length no-build)) "."))))
 (sig prerelease (string -> list))
 
-(defn- index-of-str
-  (s sub)
+(defn- index-of-str (s sub)
   (let (i (index-of s sub)) (if (< i 0) nil i)))
 
-(defn- compare-prerelease
-  (a b)
+(defn- compare-prerelease (a b)
   ;; a, b are identifier lists or nil. A release (nil) outranks any pre-release.
   (cond
     (and (nil? a) (nil? b)) 0
@@ -103,8 +100,7 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
     (nil? b) -1
     else (compare-ids a b)))
 
-(defn- compare-ids
-  (a b)
+(defn- compare-ids (a b)
   ;; identifier-by-identifier; a longer list outranks a prefix of it (semver §11.4.4).
   (cond
     (and (empty? a) (empty? b)) 0
@@ -113,8 +109,7 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
     else (let (c (compare-id (first a) (first b)))
            (if (= c 0) (compare-ids (rest a) (rest b)) c))))
 
-(defn- compare-id
-  (x y)
+(defn- compare-id (x y)
   ;; numeric identifiers compare numerically and rank BELOW alphanumeric ones; two
   ;; alphanumeric identifiers compare in ASCII order.
   (let (nx (string/->number x)
@@ -125,8 +120,7 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
       ny 1
       else (/compare x y))))
 
-(defn- compare-parts
-  (a b)
+(defn- compare-parts (a b)
   ;; Missing tail segments read as 0 (so 1.2 == 1.2.0), which is what makes a
   ;; short constraint mean what a human means by it.
   (cond
@@ -165,13 +159,11 @@ everything (the \"no release yet\" placeholder a registry starts from).
 ;; vocabulary the resolver (ADR-209) matches candidate versions against.
 
 (def *operators* ["~>" "<=" ">=" "<" ">" "=" "^"]) ; longest first: "<=" before "<"
-(defn- digit-start?
-  (s)
+(defn- digit-start? (s)
   (let (cps (string/->codepoints s))
     (let (c (first cps)) (and c (>= c 48) (<= c 57)))))
 
-(defn- split-constraint
-  (constraint)
+(defn- split-constraint (constraint)
   ;; `">= 1.2"` -> `[">=" "1.2"]`; a bare `"1.2"` -> `["=" "1.2"]`; `"^1.2"` ->
   ;; `["^" "1.2"]`; `"~> 1.3"` -> `["~>" "1.3"]`.
   ;;
@@ -198,8 +190,7 @@ everything (the \"no release yet\" placeholder a registry starts from).
 ;; `~> 1.2.3` = `>=1.2.3, <1.3.0` (patch may move), `~> 1.2` = `>=1.2.0, <2.0.0`
 ;; (minor may move). Both bounds compare on part-lists, so no string is built.
 
-(defn- nth0
-  (parts i)
+(defn- nth0 (parts i)
   "The `i`-th element of the int list `parts`, or 0 when out of range — the same
 'missing segment reads as 0' rule the comparisons use."
   (cond
@@ -207,18 +198,15 @@ everything (the \"no release yet\" placeholder a registry starts from).
     (= i 0) (first parts)
     else (nth0 (rest parts) (dec i))))
 
-(defn- first-nonzero-index
-  (parts)
+(defn- first-nonzero-index (parts)
   (first-nonzero-index-go parts 0))
-(defn- first-nonzero-index-go
-  (parts i)
+(defn- first-nonzero-index-go (parts i)
   (cond
     (empty? parts) nil
     (not (= (first parts) 0)) i
     else (first-nonzero-index-go (rest parts) (inc i))))
 
-(defn- bump-index
-  (op parts)
+(defn- bump-index (op parts)
   ;; The 0-based component the exclusive upper bound increments.
   ;;   `^`  : the first non-zero component (so 1.x.y bumps major, 0.2.y bumps minor);
   ;;          if every written component is zero, the last one written.
@@ -227,15 +215,10 @@ everything (the \"no release yet\" placeholder a registry starts from).
     (or (first-nonzero-index parts) (math/max 0 (dec (count parts))))
     (math/max 0 (- (count parts) 2))))
 
-(defn- upper-bound
-  (parts bump-index)
+(defn- upper-bound (parts bump-index)
   ;; A 3-int list: components before `bump-index` copied, the one at it incremented,
   ;; everything after zeroed — the exclusive top of the range.
-  (map (fn (i)
-         (cond
-           (< i bump-index) (nth0 parts i)
-           (= i bump-index) (inc (nth0 parts i))
-           else 0))
+  (map (fn (i) (cond (< i bump-index) (nth0 parts i) (= i bump-index) (inc (nth0 parts i)) else 0))
     (list 0 1 2)))
 
 ;; --- compiled constraints ------------------------------------------------------
@@ -273,8 +256,7 @@ the same as `satisfies?` — compiling is where a bad constraint is caught."
 ;; This is the same rule the operator check already applies one level up — a term with no
 ;; meaning has to say so — extended from the operator to the version beside it.
 ;; `-`/`+` are NOT rejected: they are legal prerelease/build punctuation (`1.0.0-alpha`).
-(defn- junk-in-version?
-  (wanted)
+(defn- junk-in-version? (wanted)
   (any?
     (fn (cp)
       (or (= cp 32)
@@ -287,8 +269,7 @@ the same as `satisfies?` — compiling is where a bad constraint is caught."
         (= cp 126))) ; | ^ ~
     (string/->codepoints wanted)))
 
-(defn- compile-term
-  (term constraint)
+(defn- compile-term (term constraint)
   ;; `constraint` is the whole original string, carried only so an error names what the
   ;; user actually wrote.
   (let ([op wanted] (split-constraint term))
@@ -320,13 +301,11 @@ for pre-release-aware matching use `match?`, which has the version string."
 
 ;; Compare a candidate `(core, pre)` against a term bound `(core, pre)` — core first, then
 ;; pre-release precedence when the cores tie.
-(defn- compare-cp
-  (core-a pre-a core-b pre-b)
+(defn- compare-cp (core-a pre-a core-b pre-b)
   (let (c (compare-parts core-a core-b))
     (if (= c 0) (compare-prerelease pre-a pre-b) c)))
 
-(defn- match-term?
-  (term core pre)
+(defn- match-term? (term core pre)
   (case (get term :kind)
     :lo-hi
       (and (>= (compare-cp core pre (get term :lo) (get term :lo-pre)) 0)

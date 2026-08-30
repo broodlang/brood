@@ -42,8 +42,7 @@ when the kind isn't coloured (so `fontify` descends into its children)."
     (let (name (get kind->face-name (get node :kind)))
       (if (nil? name) nil (face name)))))
 
-(defn- ts-alpha?
-  (c)
+(defn- ts-alpha? (c)
   "True if the 1-char string `c` is a letter. Brood's `<`/`<=` are numeric-only, so
 test by case-folding: a letter changes between upper- and lower-case, punctuation
 and digits don't."
@@ -69,8 +68,7 @@ restyles the editor on its next frame."
                  (if (anonymous-keyword? node) :syntax/keyword nil)))
       (if (nil? name) nil (face name)))))
 
-(defn- ts-spans
-  (node face-of)
+(defn- ts-spans (node face-of)
   "Depth-first `[start end face]` spans (ascending — children are in source order).
 When `face-of` gives a node a face, colour the WHOLE node and stop; else descend."
   (let (fc (face-of node))
@@ -95,13 +93,11 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 
 (defn- ts-container? (node) (get node :kids))
 
-(defn- ts-named-kids
-  (node)
+(defn- ts-named-kids (node)
   "The named children of `node` (grammar nodes, not anonymous tokens)."
   (filter :named (or (get node :kids) [])))
 
-(defn- ts-enclosing
-  (node point)
+(defn- ts-enclosing (node point)
   "The deepest container node strictly containing `point`; `node` if none."
   (let (hit (seq/find (fn (k)
                         (and (ts-container? k)
@@ -110,8 +106,7 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
               (or (get node :kids) [])))
     (if (nil? hit) node (ts-enclosing hit point))))
 
-(defn- ts-root?
-  (node root)
+(defn- ts-root? (node root)
   (and (= (get node :start) (get root :start)) (= (get node :end) (get root :end))))
 
 (defn point-forward (text lang point)
@@ -178,8 +173,7 @@ if none."
 
 ;; check-allow: deliberately non-tail — depth = syntax-tree nesting at point.
 (check-allow :non-tail-recursion
-  (defn- ts-chain-rest
-    (node point)
+  (defn- ts-chain-rest (node point)
     "The containers strictly enclosing `point` below `node`, outermost first — each a
   container that contains the next. `()` at the leaf."
     (let (hit (seq/find (fn (k)
@@ -199,8 +193,7 @@ if none."
   ;; key off the callee text). Extend for a macro-defined construct in another grammar.
   (list "def" "defp" "defmacro" "defmacrop" "defmodule" "defprotocol" "defimpl"))
 
-(defn- ts-defun?
-  (text node)
+(defn- ts-defun? (text node)
   "Whether `node` is a definition for `beginning-of-defun`: a definition-*kind* node (Ruby
 `method`/`class`/`module`, …) or a `call` whose callee text is a `def`-family macro (Elixir,
 where `def`/`defmodule`/… are calls, not distinct node kinds)."
@@ -211,8 +204,7 @@ where `def`/`defmodule`/… are calls, not distinct node kinds)."
           (and (not (nil? head))
             (includes? ts-def-macros (string/substring text (get head :start) (get head :end)))))))))
 
-(defn- ts-defun-edge
-  (text lang point edge)
+(defn- ts-defun-edge (text lang point edge)
   "The `edge` (`:start` / `:end`) of the enclosing **definition**: the deepest `def` /
 `class` / `module` / … containing `point`, falling back to the top-level form, then `point`.
 The shared body of `point-defun-start` / `point-defun-end`."

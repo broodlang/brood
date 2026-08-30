@@ -33,15 +33,13 @@
 ;; comment records).
 (def- jdr-of (math/max 1 (or (string/->number (or (os/env "BROOD_JDR_OF") "")) 1)))
 
-(defn- jdr-parse
-  (path)
+(defn- jdr-parse (path)
   (try (do (json/decode (file/slurp path)) :ok) (catch e :rejected)))
 
 ;; Warm in THIS process so the parser arms tier to native before the spawned run.
 ;; One pass already tiers the arms; extra passes only buy confidence, so they are the
 ;; first thing the knob drops.
-(defn- jdr-warm
-  (path k)
+(defn- jdr-warm (path k)
   (if (= k 0) :warmed (do (jdr-parse path) (jdr-warm path (- k 1)))))
 (defn- jdr-warm-count (k) (math/max 1 (/ k jdr-of)))
 
@@ -57,8 +55,7 @@
 ;; (`:serial` serialises only within this group; all units still run together). At 850 s it
 ;; clears any realistic contended run yet still sits under the `:slow` batch ceiling, so a
 ;; genuinely stuck worker is caught with a clean `:TIMED-OUT` rather than the hard kill.
-(defn- jdr-in-spawn
-  (path)
+(defn- jdr-in-spawn (path)
   (let (me (self))
     (spawn (send me [:r (jdr-parse path)]))
     (receive ([:r r] r) (after 850000 :TIMED-OUT))))
@@ -106,11 +103,9 @@
       (jdr-scan-warm files)
       (assert= (jdr-scan-in-spawn files) (count files)))))
 
-(defn- jdr-every-nth
-  (xs n)
+(defn- jdr-every-nth (xs n)
   (if (= n 1) xs (jdr-every-nth-go xs n 0 nil)))
-(defn- jdr-every-nth-go
-  (xs n i acc)
+(defn- jdr-every-nth-go (xs n i acc)
   (if (nil? xs)
     (reverse acc)
     (jdr-every-nth-go (rest xs)
@@ -118,12 +113,10 @@
       (inc i)
       (if (= (math/rem i n) 0) (cons (first xs) acc) acc))))
 
-(defn- jdr-scan
-  (fs n)
+(defn- jdr-scan (fs n)
   (if (nil? fs) n (do (jdr-parse (first fs)) (jdr-scan (rest fs) (inc n)))))
 (defn- jdr-scan-warm (files) (jdr-scan files 0))
-(defn- jdr-scan-in-spawn
-  (files)
+(defn- jdr-scan-in-spawn (files)
   (let (me (self))
     (spawn (send me [:r (jdr-scan files 0)]))
     ;; 850 s liveness net, as in `jdr-in-spawn` — generous headroom under the `:slow` ceiling.

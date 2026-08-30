@@ -25,8 +25,7 @@
 
 ;; ---- internal helpers -------------------------------------------------------
 
-(defn- path-last-sep
-  (s i)
+(defn- path-last-sep (s i)
   (if (< i 0)
     -1
     (if (= (string/char-at s i) "/")
@@ -34,8 +33,7 @@
       (path-last-sep s (- i 1)))))
 (sig path-last-sep (string int -> int))
 
-(defn- path-last-dot
-  (s i)
+(defn- path-last-dot (s i)
   (if (< i 0)
     -1
     (if (= (string/char-at s i) ".")
@@ -44,8 +42,7 @@
 (sig path-last-dot (string int -> int))
 
 ;; Join a non-empty list of components in order, inserting / between them.
-(defn- path-glue
-  (head rest-parts)
+(defn- path-glue (head rest-parts)
   (if (nil? rest-parts)
     head
     (let (p (first rest-parts)
@@ -125,8 +122,7 @@ an empty argument list.
 (sig join (& string -> string))
 
 ;; acc is built in reverse (cons prepends); reverse before gluing.
-(defn- join-loop
-  (parts acc)
+(defn- join-loop (parts acc)
   (if (nil? parts)
     (if (nil? acc)
       "."
@@ -165,8 +161,7 @@ redundant slashes. An absolute path starts with the `\"/\"` component.
       else (path-glue (first resolved) (rest resolved)))))
 (sig normalize (string -> string))
 
-(defn- normalize-reduce
-  (parts stack absolute)
+(defn- normalize-reduce (parts stack absolute)
   (if (nil? parts)
     (reverse stack)
     (let (p (first parts))
@@ -194,8 +189,7 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
     (relative-strip p-parts base-parts)))
 (sig relative-to (string string -> string))
 
-(defn- relative-strip
-  (p-parts base-parts)
+(defn- relative-strip (p-parts base-parts)
   (cond
     ;; consumed all of base — what remains of p is the relative path
     (nil? base-parts) (if (nil? p-parts)

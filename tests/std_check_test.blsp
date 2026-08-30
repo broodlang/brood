@@ -22,8 +22,7 @@
 
 ;; Every `.blsp` under `dir`, recursively. `cons` + `%append-two` (not `append`) so the
 ;; walk stays linear in the file count.
-(defn- std-check-files
-  (dir)
+(defn- std-check-files (dir)
   (if (file/dir? dir)
     (fold (fn (acc entry)
             (let (p (path/join dir entry))
@@ -42,8 +41,7 @@
     (is (> (count (std-check-files "std")) 50)))
 
   (test "check-file reports nothing for any std file"
-    (let (warnings (fold (fn (acc path)
-                           (append acc (or (reflect/check-file path) nil)))
+    (let (warnings (fold (fn (acc path) (append acc (or (reflect/check-file path) nil)))
                      nil
                      (sort (std-check-files "std"))))
       ;; Assert on the warnings themselves, so a failure names the file, line and lint

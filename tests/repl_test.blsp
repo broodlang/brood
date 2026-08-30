@@ -108,8 +108,7 @@
                                  :summary "two"
                                  :handler (fn (r) nil)})
     (assert= 1
-      (count (filter (fn (c) (repl/repl-has-name? (get c :names) "rt-dup"))
-               repl/*repl-commands*)))
+      (count (filter (fn (c) (repl/repl-has-name? (get c :names) "rt-dup")) repl/*repl-commands*)))
     (assert= "two" (get (repl/repl-command-for "rt-dup") :summary)))
 
   (test "a `:hidden` command is dispatchable but absent from the help table"

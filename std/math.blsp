@@ -253,8 +253,7 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
 ;; halves only recurse while they too come back 0.0. A genuinely-zero answer (10.0^-400,
 ;; below the subnormal floor) costs one extra recompute and still yields 0.0.
 ;; (Found by the Paranoia port, 2026-07-26.)
-(defn- pow-reciprocal
-  (base exp)
+(defn- pow-reciprocal (base exp)
   (let (p (pow-acc base (- exp) 1)
         r (if (pow-inf? p) 0.0 (/ 1 p)))
     (if (and (= r 0.0) (<= exp -2))

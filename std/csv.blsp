@@ -32,21 +32,18 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
 ;; made the whole scan O(n^2). A field is a REVERSED LIST of chars, materialised once
 ;; via `csv-field` at each field boundary — `(str acc c)` per char was O(field^2).
 
-(defn- csv-at
-  (s i n)
+(defn- csv-at (s i n)
   "The char at position `i`, or nil at/after end."
   (if (< i n) (nth s i) nil))
 
-(defn- csv-field
-  (field-acc)
+(defn- csv-field (field-acc)
   "Materialise a reversed char-list field accumulator into a string."
   (apply str (reverse field-acc)))
 
 ;; Forward declarations (mutual recursion between state functions is expressed
 ;; as a single loop via explicit state passing — a Brood pattern for state machines).
 
-(defn- csv-parse-loop
-  (s i n state field-acc row-acc rows-acc)
+(defn- csv-parse-loop (s i n state field-acc row-acc rows-acc)
   "Core parser loop. Returns a list of rows (each a vector of strings)."
   (let (c (csv-at s i n))
     (cond
@@ -209,8 +206,7 @@ An empty string returns an empty list.
 
 ;; ---- parse-maps ---------------------------------------------------------
 
-(defn- csv-rows->maps
-  (headers rows acc)
+(defn- csv-rows->maps (headers rows acc)
   "Build a list of maps from `rows`, using `headers` (a vector of strings) as keys."
   (if (empty? rows)
     (reverse acc)
@@ -239,16 +235,14 @@ maps from header→value strings. An empty or header-only CSV returns nil/empty.
 
 ;; ---- CSV encoding -----------------------------------------------------------
 
-(defn- csv-field-needs-quoting?
-  (s)
+(defn- csv-field-needs-quoting? (s)
   "True if field `s` must be quoted in CSV output: contains comma, quote, newline, or CR."
   (or (includes? s ",")
     (includes? s "\"")
     (includes? s "\n")
     (includes? s "\r")))
 
-(defn- csv-emit-field
-  (v)
+(defn- csv-emit-field (v)
   "Emit a single CSV field, quoting it if necessary. Interior quotes are doubled.
 A non-string cell is rendered with `->string` (the `Display` protocol) first — so a number
 emits as its digits, and a record emits as the string its type defines rather than as its
@@ -258,13 +252,11 @@ field map (or, as before `->string`, a type error out of the quoting scan)."
       (str "\"" (string/replace s "\"" "\"\"") "\"")
       s)))
 
-(defn- csv-emit-row
-  (fields)
+(defn- csv-emit-row (fields)
   "Emit a single CSV row as a string (no trailing newline)."
   (string/join "," (map csv-emit-field (seq fields))))
 
-(defn- csv-emit-rows
-  (rows acc)
+(defn- csv-emit-rows (rows acc)
   "Emit a list of rows into a newline-separated string."
   (if (empty? rows)
     (string/join "\n" (reverse acc))
@@ -284,8 +276,7 @@ doubled. Rows are separated by `\\n`.
 
 ;; ---- emit-maps ----------------------------------------------------------
 
-(defn- csv-cell
-  (m h)
+(defn- csv-cell (m h)
   ;; Presence, not truthiness. The `(or (get m h) (get m (keyword h) ""))` this
   ;; replaced was wrong for every FALSY value Brood has: `false` is falsy here, so a
   ;; legitimately-stored `false` fell through the `or` and emitted an EMPTY field —
@@ -297,8 +288,7 @@ doubled. Rows are separated by `\\n`.
     (contains? m (keyword h)) (let (v (get m (keyword h))) (if (nil? v) "" v))
     else ""))
 
-(defn- csv-map->row
-  (m headers)
+(defn- csv-map->row (m headers)
   "Extract values from map `m` in the order given by `headers`."
   (map (fn (h) (csv-cell m h)) headers))
 

@@ -44,14 +44,12 @@ never the buffer itself. Drive it with `buffer-edit` / `buffer-query`."
 
 ;; ---- helpers ----------------------------------------------------------------
 
-(defn- buffer-clamp
-  (lo hi x)
+(defn- buffer-clamp (lo hi x)
   "Clamp `x` into the inclusive range [lo, hi]."
   (math/max lo (math/min hi x)))
 (sig buffer-clamp (int int int -> int))
 
-(defn- buffer-line-end-col
-  (buf line)
+(defn- buffer-line-end-col (buf line)
   "The column at the end of `line` — its length excluding any trailing newline.
 Where `end-of-line` lands and the rightmost column point can hold on that line."
   (let (lt (text/line (get buf :rope) line))
@@ -233,8 +231,7 @@ the target line is long enough. Clamps to the buffer's line range."
 ;; line editor's M-f/M-b). Forward skips any non-word chars then the word;
 ;; backward is the mirror. Pure scans over the buffer text.
 
-(defn- buffer-word-char?
-  (c)
+(defn- buffer-word-char? (c)
   "True if `c` is part of a word (not whitespace or a delimiter) — matches the
 line editor's M-f/M-b notion of a word."
   (not (or (= c " ")
@@ -250,14 +247,12 @@ line editor's M-f/M-b notion of a word."
          (= c ";")
          (= c ","))))
 
-(defn- buffer-scan-fwd
-  (text i n pred)
+(defn- buffer-scan-fwd (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
   (if (or (>= i n) (not (pred (string/char-at text i)))) i (buffer-scan-fwd text (inc i) n pred)))
 (sig buffer-scan-fwd (string int int fn -> int))
 
-(defn- buffer-scan-bwd
-  (text i pred)
+(defn- buffer-scan-bwd (text i pred)
   "Largest index ≤ `i` (down to 0) whose preceding char fails `pred` — retreat while `pred`."
   (if (or (<= i 0) (not (pred (string/char-at text (dec i)))))
     i
@@ -296,13 +291,11 @@ the line is blank or all whitespace."
 ;; blank separator (or end of buffer); backward is the mirror, landing at the
 ;; paragraph's first line. Pure line scans over the rope.
 
-(defn- buffer-line-blank?
-  (buf line)
+(defn- buffer-line-blank? (buf line)
   "True if buffer `line` is empty or whitespace-only (a paragraph separator)."
   (string/blank? (buffer-line-at buf line)))
 
-(defn- buffer-scan-lines
-  (buf line n step want-blank?)
+(defn- buffer-scan-lines (buf line n step want-blank?)
   "First line index walking from `line` by `step` (±1, within `[0, n)`) whose
 blankness differs from `want-blank?`; stops at the buffer edge."
   (if (or (< line 0) (>= line n) (not (= (buffer-line-blank? buf line) want-blank?)))
@@ -344,8 +337,7 @@ buffer if none) — Emacs `forward-paragraph` (M-})."
 
 (defn- buffer-sentence-space? (c) (or (= c " ") (= c "\t") (= c "\n")))
 
-(defn- buffer-sentence-closers-end
-  (text i n)
+(defn- buffer-sentence-closers-end (text i n)
   "Index past the run of closing quotes/brackets at `i` — what may sit between a
 sentence's terminator and the whitespace after it (`he said \"stop.\"`)."
   (if (or (>= i n) (not (includes? buffer-sentence-closers (string/char-at text i))))
@@ -353,8 +345,7 @@ sentence's terminator and the whitespace after it (`he said \"stop.\"`)."
     (buffer-sentence-closers-end text (inc i) n)))
 (sig buffer-sentence-closers-end (string int int -> int))
 
-(defn- buffer-sentence-end-at
-  (text i n)
+(defn- buffer-sentence-end-at (text i n)
   "Index just past a sentence ending AT `i` — a terminator, its closing quotes/brackets,
 then whitespace or `n` — or nil when `i` doesn't end a sentence."
   (if (not (includes? buffer-sentence-enders (string/char-at text i)))
@@ -363,8 +354,7 @@ then whitespace or `n` — or nil when `i` doesn't end a sentence."
       (if (or (>= j n) (buffer-sentence-space? (string/char-at text j))) j nil))))
 (sig buffer-sentence-end-at (string int any -> any))
 
-(defn- buffer-scan-sentence-fwd
-  (text i limit)
+(defn- buffer-scan-sentence-fwd (text i limit)
   "Index just past the first sentence end at or after `i`, capped at `limit` (the
 paragraph's end); `limit` when the paragraph holds no further sentence end."
   (if (>= i limit)
@@ -372,8 +362,7 @@ paragraph's end); `limit` when the paragraph holds no further sentence end."
     (let (e (buffer-sentence-end-at text i limit))
       (if (nil? e) (buffer-scan-sentence-fwd text (inc i) limit) (math/min e limit)))))
 
-(defn- buffer-sentence-start-before
-  (text i limit best)
+(defn- buffer-sentence-start-before (text i limit best)
   "The greatest sentence start `< limit`, scanning forward from `i` and carrying `best`
 (seeded with the paragraph start). A sentence start is the paragraph start, or the index
 just past a sentence end with the whitespace after it skipped."
@@ -467,8 +456,7 @@ strictly before `before`, or nil if there is none. The backward counterpart of
 ;; run *reverses direction* (redo). Continuing the run (not restarting) keeps direction.
 ;; A snapshot excludes the history fields so snapshots don't nest and grow geometrically.
 
-(defn- buffer-snapshot
-  (buf)
+(defn- buffer-snapshot (buf)
   "The restorable edit state of `buf` — `{:rope :point :mark}` (no history), plus `:markers`
 and `:editable` (the narrowing) when the buffer has any. Both are snapshot-restored like
 `point`/`mark` (not re-derived), so undo/redo return them to their recorded positions instead
@@ -489,8 +477,7 @@ editor's command loop calls this to coalesce a typing / deletion run (or a multi
 command) into one undo, the Emacs way — keeping this primitive's default simple."
   (assoc buf :undo-amalgamate true))
 
-(defn- buffer-push-undo
-  (buf)
+(defn- buffer-push-undo (buf)
   "Record `buf`'s pre-edit state for undo — called by an editing op before it changes the
 text. Normally conses a fresh snapshot onto `:undo` (each op its own undo step); when
 `amalgamate-undo` armed the one-shot `:undo-amalgamate` (and there's a group to merge
@@ -514,8 +501,7 @@ bound — editing ops on the result record nothing, so undo stays a no-op. Like 
 `buffer-disable-undo`."
   (assoc buf :undo-disabled true :undo () :pending-undo ()))
 
-(defn- buffer-restore
-  (buf snap)
+(defn- buffer-restore (buf snap)
   "Restore the `{:rope :point :mark}` (and `:markers`, `:editable`) of `snap` into `buf`,
 keeping `buf`'s history. Markers and the narrowing are restored to the snapshot's recorded
 positions; a snapshot without them drops the key so that state stays as it was."
@@ -566,8 +552,7 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
 ;; Granularity is the LINE (that is the unit a line diff — and the user's "these
 ;; lines" — speaks in); a whole-buffer region reproduces a plain undo exactly.
 
-(defn- undo-common-prefix
-  (a b i)
+(defn- undo-common-prefix (a b i)
   ;; how many leading chars `a` and `b` share — bounds the char diff to what changed
   (if (or (>= i (string/length a))
         (>= i (string/length b))
@@ -576,8 +561,7 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
     (undo-common-prefix a b (inc i))))
 (sig undo-common-prefix (string string int -> int))
 
-(defn- undo-common-suffix
-  (a b lo k)
+(defn- undo-common-suffix (a b lo k)
   ;; how many trailing chars they share, never eating into the shared prefix `lo`
   (let (la (string/length a) lb (string/length b))
     (if (or (>= k (- la lo))
@@ -594,12 +578,10 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
 ;; overlaps the region). Typical edits trim to a handful of chars, so this is never hit
 ;; in practice — it exists so the pathological case degrades instead of freezing.
 
-(defn- undo-hunk-chars
-  (hunk tag)
+(defn- undo-hunk-chars (hunk tag)
   (apply str (seq/keep (fn (op) (let ([t c] op) (when (= t tag) c))) hunk)))
 
-(defn- undo-flush-chunk
-  (hunk n lo hi out)
+(defn- undo-flush-chunk (hunk n lo hi out)
   ;; One CHUNK — a run of consecutive changed characters — is one change, and Emacs's
   ;; rule is that a change is undone when it OVERLAPS the region. An insertion occupies
   ;; `[n, n+len)` in the current text, so it overlaps when it starts before `hi` and ends
@@ -616,8 +598,7 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
         emit (if overlap dels adds))
     [(+ n na) (cons emit out)]))
 
-(defn- undo-region-restore
-  (old new lo hi)
+(defn- undo-region-restore (old new lo hi)
   "The text you get by undoing, in `new`, only the changes (vs `old`) that OVERLAP the
 character range `[lo, hi]` — everything else keeps `new`'s version. Character-precise,
 like Emacs's `undo-in-region`: half of a line, or one of two edits on the same line, is
@@ -636,11 +617,7 @@ the diff only ever runs over the span that actually changed."
       (and (= o-mid "") (= n-mid "")) new
       ;; too large to diff character-wise: treat the whole span as one change
       (> (math/max (string/length o-mid) (string/length n-mid)) *undo-region-char-budget*)
-        (if (and (< pre
-                   hi)
-              (> (+ pre
-                   (string/length n-mid))
-                lo))
+        (if (and (< pre hi) (> (+ pre (string/length n-mid)) lo))
           (str head
             o-mid tail)
           new)
@@ -660,8 +637,7 @@ the diff only ever runs over the span that actually changed."
           (str head (apply str (reverse out2)) tail)))))
 (sig undo-region-restore (string string int int -> string))
 
-(defn- undo-region-candidate
-  (buf lo hi snaps depth)
+(defn- undo-region-candidate (buf lo hi snaps depth)
   ;; The nearest snapshot whose changes actually touch the region: `[undone-text tail]`,
   ;; where `tail` is the history BELOW the snapshot we used. Walking back matters because
   ;; the most recent edit may have been somewhere else entirely and "undo my selection"
@@ -772,8 +748,7 @@ fresh run into a redo) — lives in cmd-undo / cmd-redo, which call `undo-start`
 ;; stay correct across edits with no recomputation, and a form re-narrows only when it
 ;; regenerates its text.
 
-(defn- region-normalize
-  (regions len)
+(defn- region-normalize (regions len)
   ;; Clamp to the buffer, order, and merge anything overlapping or touching. Merging matters:
   ;; two abutting editable regions ARE one editable run, and leaving them apart would let the
   ;; region list's shape leak into behaviour again — the exact failure the complement had.
@@ -852,18 +827,15 @@ here\" is how a buffer ends up read-only by one rule and writable by the other."
 ;; so a caller can tell "you may not edit that" from a genuine fault. The editor's turn of
 ;; the refusal into a graceful no-op matches `(= (:kind e) :read-only)` rather than the
 ;; message text, so the wording stays free to change.
-(defn- buffer-read-only-error
-  (message)
+(defn- buffer-read-only-error (message)
   (throw {:kind :read-only :message message}))
 
-(defn- region-allows-insert?
-  (regions p)
+(defn- region-allows-insert? (regions p)
   ;; Both ends inclusive — see the section note. nil regions = not narrowed = anywhere.
   (or (nil? regions)
     (any? (fn (r) (let ([lo hi] r) (and (>= p lo) (<= p hi)))) regions)))
 
-(defn- region-allows-delete?
-  (regions lo hi)
+(defn- region-allows-delete? (regions lo hi)
   ;; A delete must fall inside ONE region: spanning two would take the read-only text between.
   (or (nil? regions)
     (any? (fn (r) (let ([rlo rhi] r) (and (>= lo rlo) (<= hi rhi)))) regions)))
@@ -876,26 +848,22 @@ of generated text."
     (and (not (nil? regions))
       (not (any? (fn (r) (let ([lo hi] r) (and (>= pos lo) (< pos hi)))) regions)))))
 
-(defn- buffer-barf-if-read-only
-  (buf)
+(defn- buffer-barf-if-read-only (buf)
   "Throw if `buf` is read-only outright — the cheap whole-buffer check every mutator runs
 first, so the contract lives in the model and no consumer has to remember it. Returns `buf`."
   (if (read-only? buf) (buffer-read-only-error "buffer is read-only") buf))
 
-(defn- buffer-barf-if-protected-insert
-  (buf p)
+(defn- buffer-barf-if-protected-insert (buf p)
   (if (region-allows-insert? (editable-regions buf) p)
     buf
     (buffer-read-only-error "text is read-only")))
 
-(defn- buffer-barf-if-protected-delete
-  (buf lo hi)
+(defn- buffer-barf-if-protected-delete (buf lo hi)
   (if (region-allows-delete? (editable-regions buf) lo hi)
     buf
     (buffer-read-only-error "text is read-only")))
 
-(defn- buffer-adjust-editable
-  (buf kind a b)
+(defn- buffer-adjust-editable (buf kind a b)
   "Return `buf` with its editable regions shifted for an edit — `:insert` (a=pos, b=len) or
 `:delete` (a=lo, b=hi) — or `buf` unchanged when it is not narrowed.
 
@@ -911,9 +879,7 @@ width."
       (assoc buf
         :editable
           (if (= kind :insert)
-            (map (fn (r)
-                   (let ([lo hi] r)
-                     [(if (< a lo) (+ lo b) lo) (if (<= a hi) (+ hi b) hi)]))
+            (map (fn (r) (let ([lo hi] r) [(if (< a lo) (+ lo b) lo) (if (<= a hi) (+ hi b) hi)]))
               regions)
             (let (d (- b a))
               (map (fn (r)
@@ -974,21 +940,18 @@ ranges."
 ;; then). Gravity is left: an insert exactly AT a marker leaves it put, so text typed at one
 ;; cursor lands after another user's cursor sitting at the same spot.
 
-(defn- buffer-markers-insert
-  (markers p n)
+(defn- buffer-markers-insert (markers p n)
   "Shift `markers` for an insert of `n` chars at `p`: a marker strictly after `p` moves
 right by `n` (left-gravity — a marker exactly at `p` stays put)."
   (update-vals markers (fn (pos) (if (> pos p) (+ pos n) pos))))
 
-(defn- buffer-markers-delete
-  (markers lo hi)
+(defn- buffer-markers-delete (markers lo hi)
   "Shift `markers` for a delete of `[lo, hi)`: a marker at/before `lo` is unchanged, one
 inside the range collapses to `lo`, one at/after `hi` moves left by the deleted width."
   (let (d (- hi lo))
     (update-vals markers (fn (pos) (cond (<= pos lo) pos (< pos hi) lo else (- pos d))))))
 
-(defn- buffer-adjust-markers
-  (buf kind a b)
+(defn- buffer-adjust-markers (buf kind a b)
   "Return `buf` with its markers shifted for an edit — `:insert` (a=pos, b=len) or `:delete`
 (a=lo, b=hi) — or `buf` unchanged when it has no markers, so marker-less buffers are untouched."
   (let (m (get buf :markers))
@@ -1161,20 +1124,17 @@ line's start does **not** pull that trailing line in (Emacs's line-wise conventi
             hicol (- hi (text/line->char (buffer-rope buf) elraw)))
         [sl (if (and (> elraw sl) (= hicol 0)) (dec elraw) elraw)]))))
 
-(defn- buffer-horizontal-space?
-  (c)
+(defn- buffer-horizontal-space? (c)
   ;; horizontal only: a newline is a line boundary, never whitespace to squeeze
   (or (= c " ") (= c "\t")))
 
-(defn- buffer-ws-run-start
-  (txt i)
+(defn- buffer-ws-run-start (txt i)
   (if (and (> i 0) (buffer-horizontal-space? (string/char-at txt (dec i))))
     (buffer-ws-run-start txt (dec i))
     i))
 (sig buffer-ws-run-start (string int -> int))
 
-(defn- buffer-ws-run-end
-  (txt i n)
+(defn- buffer-ws-run-end (txt i n)
   (if (and (< i n) (buffer-horizontal-space? (string/char-at txt i)))
     (buffer-ws-run-end txt (inc i) n)
     i))
@@ -1267,8 +1227,7 @@ the resulting buffer."
 ;; applied as a structured SPLICE (delta push, transform-ring recorded), so a streamed
 ;; log line costs its subscribers O(line) and never invalidates concurrent based splices.
 
-(defn- buffer-push
-  (subs version buf &optional origin)
+(defn- buffer-push (subs version buf &optional origin)
   "Notify every subscriber of an edit: send each its `[:buffer-updated <bufpid> version
 view origin]`, where `view` is `(proj buf)` for its registered projection `proj` (a nil
 projection pushes a nil view — a bare change notification) and `origin` is whatever the
@@ -1285,15 +1244,13 @@ is the buffer pid the subscriber keys on."
         (let (proj (get s :proj)) (if (nil? proj) nil (proj buf)))
         origin])))
 
-(defn- buffer-push-view
-  (subs version view origin)
+(defn- buffer-push-view (subs version view origin)
   "Push a ready-made `view` (a delta — see the `:splice` / `:marker-set` arms) to every
 subscriber verbatim, bypassing projections: one small value, fanned as-is."
   (doseq (s subs)
     (send (get s :pid) [:buffer-updated (self) version view origin])))
 
-(defn- buffer-serve
-  (buf subs version &optional recent)
+(defn- buffer-serve (buf subs version &optional recent)
   "The receive loop of a buffer process over its immutable `buf`, tracking `subs` (subscriber
 `{:pid :proj}` records) and a monotonic `version`. `:edit` applies a change, bumps the
 version, and **pushes** the new projection to every subscriber — the collaboration seam:

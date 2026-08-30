@@ -25,23 +25,19 @@ delivers `[:nodeup name]` / `[:nodedown name]` to your mailbox; `unwatch` stops.
 Pure Brood policy over connect/monitor-node/nodes. Pair with
 `(proc/flag :send-errors true)` for queue-and-retry senders.")
 
-(defn- reconnect-proc-name
-  (spec)
+(defn- reconnect-proc-name (spec)
   "The watcher's registered name for `spec` — one watcher per spec."
   (keyword (str "reconnect:" spec)))
 
-(defn- reconnect-opt
-  (opts k default)
+(defn- reconnect-opt (opts k default)
   "A backoff bound from `opts` — `:min-ms`/`:max-ms` are milliseconds, ints."
   (get opts k default))
 (sig reconnect-opt (map keyword int -> int))
 
-(defn- reconnect-notify
-  (subs event)
+(defn- reconnect-notify (subs event)
   (dolist (p subs) (send p event)))
 
-(defn- reconnect-up
-  (spec peer opts subs)
+(defn- reconnect-up (spec peer opts subs)
   "Connected state: wait for the link to fall (or control messages)."
   (receive
     ([:nodedown ^peer]
@@ -58,8 +54,7 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
     ;; messages can reach it; without this they'd pile up in the mailbox forever
     (_ (reconnect-up spec peer opts subs))))
 
-(defn- reconnect-down
-  (spec peer opts subs delay)
+(defn- reconnect-down (spec peer opts subs delay)
   "Disconnected state: retry `(node/connect spec)` on an exponential-backoff timer,
 still answering control messages between attempts."
   (let (up (try (node/connect spec) (catch _ nil)))
@@ -71,13 +66,11 @@ still answering control messages between attempts."
       (reconnect-wait spec peer opts subs delay (+ (os/now) delay)))))
 (sig reconnect-down (string (or keyword nil) map list int -> any))
 
-(defn- reconnect-next-delay
-  (delay opts)
+(defn- reconnect-next-delay (delay opts)
   (math/min (* delay 2) (reconnect-opt opts :max-ms 30000)))
 (sig reconnect-next-delay (int map -> int))
 
-(defn- reconnect-wait
-  (spec peer opts subs delay deadline)
+(defn- reconnect-wait (spec peer opts subs delay deadline)
   "Wait out one backoff interval between connect attempts, still answering control
 messages — against a fixed `deadline`, not a fresh `(after delay …)` per message.
 `receive` tries its clauses in order, so the old catch-all matched *first* and
@@ -99,8 +92,7 @@ unrelated message cost nothing."
           (reconnect-down spec peer opts subs (reconnect-next-delay delay opts)))))))
 (sig reconnect-wait (string (or keyword nil) map list int int -> any))
 
-(defn- reconnect-boot
-  (spec opts)
+(defn- reconnect-boot (spec opts)
   "Watcher body: connect (or start retrying immediately) and run the state loop."
   (let (up (try (node/connect spec) (catch _ nil)))
     (if up

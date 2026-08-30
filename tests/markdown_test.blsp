@@ -60,8 +60,7 @@
   (test "empty input yields no spans"
     (assert= (markdown-spans "") '())))
 
-(defn- md-test-non-overlapping?
-  (spans)
+(defn- md-test-non-overlapping? (spans)
   "True if every span ends at or before the next span starts."
   (cond
     (empty? spans) true

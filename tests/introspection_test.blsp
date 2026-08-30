@@ -304,14 +304,27 @@
       (assert= (:sig hit) "(any -> any)")
       (assert= (:informative? hit) false)))
 
+  ;; A pattern-dispatched multi-clause defn used to read as an arity-0 `(-> any)`; its
+  ;; clauses say what each position admits.
+  (test "a pattern-clause definition has a real signature"
+    (let (hit (first (reflect/source-signatures "(defn ixs-tok (((x y & acc) \"+\") (conj acc (+ y x))) ((acc val) (conj acc (string/->number val))))")))
+      (assert= (:sig hit) "(any string -> any)")
+      (assert= (:informative? hit) true)))
+
+  ;; A named reducer whose own signature says nothing about its result gets re-typed under
+  ;; what `reduce` hands it (call-site specialization) — the same precision an inline fn had.
+  (test "a named callback's result flows from what the combinator hands it"
+    (let (sigs (reflect/source-signatures "(defn ixs-step (acc val) (conj acc (string/->number val)))\n(defn ixs-run (xs) (first (reduce ixs-step '() xs)))")
+          run (seq/find (fn (e) (= (:name e) "ixs-run")) sigs))
+      (assert= (:sig run) "(seqable -> (or nil number))")))
+
   (test "a declared sig is reported as declared, and wins"
     (let (hit (first (reflect/source-signatures "(sig ixs-d (int -> int))\n(defn ixs-d (x) x)")))
       (assert= (:sig hit) "(int -> int)")
       (assert= (:declared? hit) true)))
 
   (test "every definition in the text, in order"
-    (assert= (map :name
-               (reflect/source-signatures "(defn ixs-a (n) n)\n(defn ixs-b (n) n)"))
+    (assert= (map :name (reflect/source-signatures "(defn ixs-a (n) n)\n(defn ixs-b (n) n)"))
       (list "ixs-a" "ixs-b")))
 
   (test "text that defines nothing has no signatures"

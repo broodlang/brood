@@ -201,8 +201,7 @@
     (refute (tempo/covers? (tempo/parse! "2026-05") (datetime/parse-date "2026-06-15")))
     (assert= 86400000 (tempo/width (datetime/parse-date "2026-06-15"))))
   (test "a datetime/datetime takes part as the instant it names"
-    (is (tempo/covers? (tempo/parse! "2026-06-15")
-          (datetime/parse-iso8601 "2026-06-15T14:30:00Z")))
+    (is (tempo/covers? (tempo/parse! "2026-06-15") (datetime/parse-iso8601 "2026-06-15T14:30:00Z")))
     (refute (tempo/covers? (tempo/parse! "2026-06-15")
               (datetime/parse-iso8601 "2026-06-16T00:00:00Z")))))
 

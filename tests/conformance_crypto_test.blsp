@@ -21,27 +21,23 @@
 
 (defmodule conformance-crypto-test (:use test) (:use corpus))
 
-(defn- cy-file
-  (name)
+(defn- cy-file (name)
   (first (filter (fn (p) (= (path/basename p) name)) (corpus-files "crypto"))))
 
 ;; A `.rsp` field line: "Msg = d3" -> "d3". nil for a non-field line.
-(defn- cy-field
-  (line key)
+(defn- cy-field (line key)
   (if (string/starts-with? line (str key " = "))
     (string/trim (string/substring line (+ (string/length key) 3)))
     nil))
 
 ;; `Len = 0` is spelled with a placeholder `Msg = 00`, which is NOT the byte 0x00 — the
 ;; message is empty. Getting this wrong makes every empty-message vector fail.
-(defn- cy-msg-bytes
-  (len hex)
+(defn- cy-msg-bytes (len hex)
   (encoding/hex-decode-bytes (if (= len 0) "" hex)))
 
 ;; ---- SHA ---------------------------------------------------------------------
 
-(defn- cy-sha-digest
-  (algo bytes)
+(defn- cy-sha-digest (algo bytes)
   (cond
     (= algo :sha1) (hash/sha1-bytes bytes)
     (= algo :sha256) (hash/sha256-bytes bytes)
@@ -50,8 +46,7 @@
     else (error "conformance-crypto: unsupported algo " algo)))
 
 ;; Walk the record stream, carrying the pending Len/Msg until MD closes the case.
-(defn- cy-sha-scan
-  (algo lines len msg ran bad)
+(defn- cy-sha-scan (algo lines len msg ran bad)
   (if (nil? lines)
     [ran (reverse bad)]
     (let (line (first lines)
@@ -71,31 +66,26 @@
               (if (= got (string/lower d)) bad (cons [algo len (string/lower d) got] bad))))
         else (cy-sha-scan algo (rest lines) len msg ran bad)))))
 
-(defn- cy-sha-file
-  (algo name)
+(defn- cy-sha-file (algo name)
   (cy-sha-scan algo (corpus-lines (cy-file name)) 0 "" 0 nil))
 
 ;; ---- HMAC --------------------------------------------------------------------
 
 ;; HMAC.rsp groups cases under `[L=20]`-style headers giving the digest size in bytes.
-(defn- cy-l->algo
-  (l)
+(defn- cy-l->algo (l)
   (cond (= l 20) :sha1 (= l 32) :sha256 (= l 48) :sha384 (= l 64) :sha512 else nil))
 
 ;; "[L=20]" -> 20, else nil.
-(defn- cy-section-l
-  (line)
+(defn- cy-section-l (line)
   (if (and (string/starts-with? line "[L=") (string/ends-with? line "]"))
     (string/->number (string/substring line 3 (dec (string/length line))))
     nil))
 
 ;; `Tlen` is in BYTES and truncates the MAC; the hex is 2 chars per byte.
-(defn- cy-hmac-mac
-  (algo key msg tlen)
+(defn- cy-hmac-mac (algo key msg tlen)
   (string/substring (encoding/hex-encode-bytes (%hmac algo key msg)) 0 (* 2 tlen)))
 
-(defn- cy-hmac-scan
-  (lines algo tlen key msg ran skipped bad)
+(defn- cy-hmac-scan (lines algo tlen key msg ran skipped bad)
   (if (nil? lines)
     [ran skipped (reverse bad)]
     (let (line (first lines)

@@ -28,8 +28,7 @@
   (:use test)
   (:use project))
 
-(defn- await-n
-  (n)
+(defn- await-n (n)
   (when (> n 0)
     (receive)
     (await-n (dec n))))

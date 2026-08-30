@@ -354,8 +354,7 @@
       (let (kinds (abt-collect 0 (count xs) nil))
         (assert= (count kinds) 6)
         ;; order is nondeterministic — assert every expected impl was reached
-        (is (every? (fn (k) (includes? kinds k))
-              (list :int :string :kw :float :bool :vec))))))
+        (is (every? (fn (k) (includes? kinds k)) (list :int :string :kw :float :bool :vec))))))
   (test "a variadic op runs in a spawned worker"
     (let (parent (self))
       (spawn (send parent [:sum (gather 1 2 3 4)]))

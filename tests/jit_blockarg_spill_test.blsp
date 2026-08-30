@@ -36,20 +36,17 @@
 ;; The canonical shape. Note the `if` INSIDE the argument list of the non-tail `step`
 ;; call: that is what puts operands on the stack across a block boundary, and `walk-list`
 ;; has only the one non-tail call, so it took the bad gate.
-(defn- walk-list
-  (xs acc first?)
+(defn- walk-list (xs acc first?)
   (if (empty? xs)
     acc
     (walk-list (rest xs) (step (first xs) (if first? acc (cons "," acc))) false)))
 
-(defn- walk-items
-  (xs i n acc)
+(defn- walk-items (xs i n acc)
   (if (>= i n) acc (walk-items xs (+ i 1) n (step (nth xs i) acc))))
 
 ;; Mutual recursion back into the walkers is what makes the corrupted slot flow into a
 ;; parameter position, where it is finally noticed.
-(defn- step
-  (v acc)
+(defn- step (v acc)
   (cond
     (int? v) (cons (str v) acc)
     (vector? v) (cons "]" (walk-items v 0 (count v) (cons "[" acc)))
@@ -74,8 +71,7 @@
   (test "the count does not depend on how many times the walker has run"
     ;; A sweep, because the corruption needed the arm to be hot: every length must agree
     ;; with the closed form no matter where the background compile landed.
-    (is (= (list 41 401 4001 40001)
-          (map (fn (n) (fragments n)) (list 10 100 1000 10000)))))
+    (is (= (list 41 401 4001 40001) (map (fn (n) (fragments n)) (list 10 100 1000 10000)))))
 
   (test "json/encode of the same shape round-trips"
     ;; The original report. `json/encode` is this shape (`emit-list` <-> `emit`), and its

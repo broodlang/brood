@@ -167,11 +167,9 @@
     ;; message arrive — across the worker pool. (Observable preemption needs a
     ;; one-worker pool; that is crates/lisp/tests/preemption.rs.)
     (defn- sched-worker (parent n) (send parent [:done n]))
-    (defn- sched-spawn-n
-      (parent n)
+    (defn- sched-spawn-n (parent n)
       (when (> n 0) (spawn (sched-worker parent n)) (sched-spawn-n parent (- n 1))))
-    (defn- sched-collect
-      (got total)
+    (defn- sched-collect (got total)
       (if (= got total) :all-done (sched-collect (receive ([:done _] (+ got 1))) total)))
     (sched-spawn-n (self) 50)
     (assert= (sched-collect 0 50) :all-done))
@@ -182,11 +180,9 @@
   ;; server driven through interleaved casts + calls overflowed the green-process
   ;; coroutine stack and SIGSEGV'd around ~60 cycles. 500 cycles proves the fix.
   (test "a receive loop handles many messages without overflowing the stack"
-    (defn- tco-srv
-      (n)
+    (defn- tco-srv (n)
       (receive (:inc (tco-srv (+ n 1))) ([:get from] (do (send from n) (tco-srv n)))))
-    (defn- tco-hammer
-      (p k)
+    (defn- tco-hammer (p k)
       (when (> k 0)
         (send p :inc)
         ; cast: leaves a message queued…
@@ -218,8 +214,7 @@
   ;; code builds freely (see examples/life.blsp).
   (test "a ref-tagged call round-trips to exactly its own reply"
     (defn- ref-server () (receive ([:call from tag req] (send from [:reply tag (* req 10)]))))
-    (defn- ref-call
-      (pid req)
+    (defn- ref-call (pid req)
       (let (tag (ref)) (send pid [:call (self) tag req]) (receive ([:reply ^tag v] v))))
     (assert= (ref-call (spawn (ref-server)) 7) 70))
   (test "a stale reply with a different ref is left queued, not mistaken for ours"
@@ -339,8 +334,7 @@
 ;; `stream-from-list`) deadlocked intermittently: the receiver parked forever over a
 ;; `[:next pid]` request that had been corrupted to `nil`.
 
-(defn- wait-parked
-  (p)
+(defn- wait-parked (p)
   ;; Spin until p is parked in a `receive`, so a send to it takes the L1 (Local) path —
   ;; the path the bug lived on. Reduction preemption breaks the spin so p gets to run.
   (if (= :waiting (get (proc/info p) :status)) :ok (wait-parked p)))
@@ -367,13 +361,11 @@
   ;; then matched; it reports whether the value survived intact.
   (test "many skipped-then-matched local messages, across processes, none corrupted"
     (let (main (self))
-      (defn- reg-worker
-        (parent i)
+      (defn- reg-worker (parent i)
         (send parent [:ready (self)])
         (receive (:go nil))
         (receive ([:data v] (send parent [:done (= v i)]))))
-      (defn- drive
-        (i n)
+      (defn- drive (i n)
         (when (< i n)
           (let (p (spawn (reg-worker main i)))
             (receive ([:ready _] nil))
@@ -381,8 +373,7 @@
             (send p [:data i])
             (send p :go))
           (drive (+ i 1) n)))
-      (defn- collect
-        (got n ok)
+      (defn- collect (got n ok)
         (if (= got n) ok (collect (+ got 1) n (receive ([:done b] (if b ok false))))))
       (drive 0 40)
       (assert= true (collect 0 40 true)))))

@@ -19,8 +19,7 @@
 ;; typo'd accessor produced a plausible-looking absent value. The `default` argument
 ;; deliberately does NOT suppress these: a default means "the key is absent", not
 ;; "the key is the wrong type".
-(defn- %get-unanswerable
-  (coll k)
+(defn- %get-unanswerable (coll k)
   (if (or (pair? coll) (vector? coll) (bytes? coll) (string? coll))
     (error (str "get: expected an integer index, got "
              (->string (type-of k))
@@ -35,8 +34,7 @@
              (pr-str coll)
              ")"))))
 
-(defn- %lookup-miss
-  (coll k fallback)
+(defn- %lookup-miss (coll k fallback)
   ;; Reached ONLY when a map lookup came back empty: consult `Lookup` for a record whose
   ;; contents are not its fields, else keep `fallback` — which is what `%map-get` ALREADY
   ;; answered, so a map storing `nil` under a key keeps that nil and does not fall to the
@@ -130,11 +128,9 @@ a wrong-typed one.
 ;; passed-in `set` function value. The computed-head form `(set m k v)` mis-compiles under
 ;; the JIT — a map accumulator held across the loop's safepoints goes stale (use-after-GC);
 ;; the direct call avoids that path (and is faster: no per-step function-value dispatch).
-(defn- %assoc-map-pairs
-  (m kvs)
+(defn- %assoc-map-pairs (m kvs)
   (if (empty? kvs) m (%assoc-map-pairs (%map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
-(defn- %assoc-vec-pairs
-  (v kvs)
+(defn- %assoc-vec-pairs (v kvs)
   (if (empty? kvs)
     v
     (%assoc-vec-pairs (%vector-assoc v (first kvs) (second kvs)) (rest (rest kvs)))))
@@ -181,8 +177,7 @@ stable one."
   (let (ks (%keys-via-lookup m))
     (if (nil? ks) (map first (seq m)) ks)))
 
-(defn- %keys-via-lookup
-  (m)
+(defn- %keys-via-lookup (m)
   "This map's own `lookup-keys`, or nil when it has no `Lookup` impl. Raw prims and a `bound?`
 guard, as in `seq`: this file loads six before `*impls*`, and `%identity-of` reads `:__id__`
 with bare `get`."
@@ -253,8 +248,7 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
 ;; Nested-map access along a `path` (a sequence of keys). `get-in` walks; missing
 ;; key → default. `assoc-in` rebuilds, coercing a non-map node to `{}` so it can
 ;; create intermediate maps; `update-in` is `get-in` then `assoc-in`.
-(defn- %get-in-walk
-  (m path default)
+(defn- %get-in-walk (m path default)
   (cond
     (empty? path) m
     (and (map? m) (contains? m (first path)))

@@ -76,15 +76,9 @@
       (start-logger {:level :debug
                      :backends [(backend (fn-port (fn (s) (send me [:line :lsp s])))
                                   {:filter (fn (r) (= (get (get r :meta) :category) :lsp))})
-                                 (backend (fn-port (fn (s)
-                                                     (send me
-                                                       [:line
-                                                         :other s])))
+                                 (backend (fn-port (fn (s) (send me [:line :other s])))
                                    {:filter (fn (r)
-                                              (not (= (get (get r
-                                                             :meta)
-                                                        :category)
-                                                     :lsp)))})]})
+                                              (not (= (get (get r :meta) :category) :lsp)))})]})
       (info "to-lsp" {:category :lsp})
       (info "to-other")
       ;; collect the two delivered lines, tagged by which backend sent them

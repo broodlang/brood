@@ -416,9 +416,7 @@
     ;; to the reader through `count` — the property `count` must not paper over
     (let (t (table/new)
           me (self)
-          _ (spawn (fn ()
-                     (table/put t :from-child 1)
-                     (send me [:wrote (count t) (empty? t)])))
+          _ (spawn (fn () (table/put t :from-child 1) (send me [:wrote (count t) (empty? t)])))
           reply (receive ([:wrote n e] [n e])))
       (assert= reply [1 false])
       (assert= (count t) 1)

@@ -68,8 +68,7 @@
 (let (me (self)
       n 100)
   (dotimes (i n)
-    (spawn (let (r (p70-compute i 10000))
-             (send me [:p70 i r]))))
+    (spawn (let (r (p70-compute i 10000)) (send me [:p70 i r]))))
   (defn collect-p70 (remaining wrong)
     (if (= remaining 0)
       wrong
@@ -98,8 +97,7 @@
       n-readers 100)
   ;; Spawn readers: each does 10k reads of the global
   (dotimes (_ n-readers)
-    (spawn (let (result (p71-reader 10000 0))
-             (send me [:p71 result]))))
+    (spawn (let (result (p71-reader 10000 0)) (send me [:p71 result]))))
   ;; Concurrently rebind the global several times
   (spawn
     (doseq (v [1 2 3 4 5 0])

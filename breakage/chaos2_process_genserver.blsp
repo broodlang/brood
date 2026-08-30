@@ -164,9 +164,7 @@
   (receive
     ([:get k reply-to] (send reply-to [:val (get m k)])
       (map-server m))
-    ([:put k v reply-to] (let (m2 (assoc m k v))
-                           (send reply-to :ok)
-                           (map-server m2)))
+    ([:put k v reply-to] (let (m2 (assoc m k v)) (send reply-to :ok) (map-server m2)))
     (:stop :done)))
 
 (let (me (self)

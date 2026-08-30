@@ -25,8 +25,7 @@ read+write primitive for compare-and-swap-style patterns.")
 ;; instead of a second hand-rolled request/reply that blocked forever against a dead
 ;; agent.
 
-(defn- agent-loop
-  (state)
+(defn- agent-loop (state)
   (receive
     ([:$call from r [:get f]] (send from [:reply r (f state)]) (agent-loop state))
     ([:$call from r [:update f]] (send from [:reply r :ok]) (agent-loop (f state)))

@@ -54,8 +54,7 @@ suggestions\", never to an error on the user's command line."
 ;; --- the project's shape, read not loaded --------------------------------------
 ;; Walk up from `dir` looking for project.blsp. `parent-directory` is its own fixed point
 ;; at "/" and ".", which terminates the walk.
-(defn- complete-find-root
-  (dir)
+(defn- complete-find-root (dir)
   (cond
     (file/exists? (path/join dir "project.blsp")) dir
     (= dir (path/dirname dir)) nil
@@ -70,8 +69,7 @@ suggestions\", never to an error on the user's command line."
 ;; growing accumulator once per entry — O(files²), which is quadratic on a large
 ;; project. `project` learned that the hard way; don't reintroduce it here. Order is
 ;; reversed (prepend), which is fine: callers sort or filter.
-(defn- complete-under
-  (dir suffix)
+(defn- complete-under (dir suffix)
   (if (file/dir? dir)
     (fold (fn (acc entry)
             (let (p (path/join dir entry))
@@ -89,8 +87,7 @@ suggestions\", never to an error on the user's command line."
 ;; is what made this module require all of `project` in the first place. Two lines
 ;; duplicated is the cheaper half of that trade, and it keeps rule 2 enforceable by
 ;; inspection — this file has no `foo/bar` references at all.
-(defn- complete-plist-get
-  (kvs k)
+(defn- complete-plist-get (kvs k)
   (cond
     (empty? kvs) nil
     (= (first kvs) k) (second kvs)
@@ -100,8 +97,7 @@ suggestions\", never to an error on the user's command line."
 ;; arguments), so the form can be read and inspected without evaluating anything —
 ;; which is what rule 1 needs: a manifest that is half-typed or invalid yields nil
 ;; here instead of raising.
-(defn- complete-manifest
-  (root)
+(defn- complete-manifest (root)
   (complete-safely (fn ()
                      (let (form (reflect/read-first (file/slurp (path/join root "project.blsp"))))
                        (if (and (pair? form) (= (first form) 'project)) form nil)))))
@@ -113,8 +109,7 @@ suggestions\", never to an error on the user's command line."
 ;; / `*project-test-paths*` ambients, which only `project`'s manifest loader ever sets
 ;; — and completion never ran it. So a project declaring `:test-paths ["spec"]` got
 ;; the `["tests"]` default and completed none of its own test files.
-(defn- complete-manifest-dirs
-  (root key default)
+(defn- complete-manifest-dirs (root key default)
   (let (form (complete-manifest root)
         declared (if (nil? form) nil (complete-safely (fn () (complete-plist-get (rest form) key))))
         rels (if (or (nil? declared) (not (or (vector? declared) (pair? declared))))
@@ -124,8 +119,7 @@ suggestions\", never to an error on the user's command line."
 
 ;; Strip `root/` from an absolute path so completions read as the relative paths a
 ;; user actually types.
-(defn- complete-relative
-  (path root)
+(defn- complete-relative (path root)
   (if (and (not (nil? root))
         (string/starts-with? path root)
         (> (string/length path)
@@ -157,8 +151,7 @@ suggestions\", never to an error on the user's command line."
                                                (append acc (complete-under dir ".blsp")))
                                          nil
                                          (complete-manifest-dirs root :source-paths ["src"]))
-                                 (fold (fn (acc dir)
-                                         (append acc (complete-under dir "_test.blsp")))
+                                 (fold (fn (acc dir) (append acc (complete-under dir "_test.blsp")))
                                    nil
                                    (complete-manifest-dirs root :test-paths ["tests"]))))))
         nil))))
@@ -170,8 +163,7 @@ suggestions\", never to an error on the user's command line."
 ;; Scans for the literal `:tags` then takes what is between the following `[` and
 ;; `]`. A `:tags` inside a string or comment would be picked up — harmless, since
 ;; the worst case is one spurious suggestion.
-(defn- complete-tags-in
-  (text acc from)
+(defn- complete-tags-in (text acc from)
   (let (i (index-of-from text ":tags" from))
     (if (< i 0)
       acc
@@ -197,8 +189,7 @@ suggestions\", never to an error on the user's command line."
 (sig complete-tags-in (string any int -> any))
 
 ;; `index-of` has no start offset, so scan a suffix and re-base the result.
-(defn- index-of-from
-  (text needle from)
+(defn- index-of-from (text needle from)
   (if (>= from (string/length text))
     -1
     (let (i (index-of (string/substring text from (string/length text)) needle))
@@ -215,14 +206,12 @@ suggestions\", never to an error on the user's command line."
 (defn- complete-line-start (text i) (complete-line-start-walk text i 0))
 (sig complete-line-start (string int -> int))
 
-(defn- complete-line-start-walk
-  (text i at)
+(defn- complete-line-start-walk (text i at)
   (let (nl (index-of-from text "\n" at))
     (if (or (< nl 0) (>= nl i)) at (complete-line-start-walk text i (+ nl 1)))))
 (sig complete-line-start-walk (string int int -> int))
 
-(defn- complete-in-string?
-  (text i)
+(defn- complete-in-string? (text i)
   (let (prefix (string/substring text (complete-line-start text i) i)
         ;; An escaped \" neither opens nor closes, so drop those pairs first.
         cleaned (string/replace prefix "\\\"" ""))
@@ -232,8 +221,7 @@ suggestions\", never to an error on the user's command line."
 (sig complete-in-string? (string int -> bool))
 
 ;; The bare names of the `:keyword`s in a whitespace-separated fragment.
-(defn- complete-keywords
-  (fragment)
+(defn- complete-keywords (fragment)
   (fold (fn (acc token)
           (if (and (string/starts-with? token ":") (> (string/length token) 1))
             (let (name (string/substring token 1 (string/length token)))
@@ -248,8 +236,7 @@ suggestions\", never to an error on the user's command line."
 ;; produce a candidate like `fast"`. Offering that is worse than offering nothing.
 (def- *complete-tag-reject* "\"'()[]{}\\;`,")
 
-(defn- complete-tag-name?
-  (name)
+(defn- complete-tag-name? (name)
   (and (not (= name ""))
     (fold (fn (ok ch) (and ok (not (includes? *complete-tag-reject* ch))))
       true
@@ -311,8 +298,7 @@ suggestions\", never to an error on the user's command line."
   (let (root (complete-root))
     (sort (keys (fold (fn (seen m) (assoc seen m true))
                   {}
-                  (append (or (complete-safely (fn () (reflect/builtin-modules)))
-                            nil)
+                  (append (or (complete-safely (fn () (reflect/builtin-modules))) nil)
                     (if (nil? root)
                       nil
                       (or (complete-safely (fn ()
@@ -333,8 +319,7 @@ suggestions\", never to an error on the user's command line."
       nil
       (sort (or (complete-safely (fn ()
                                    (map (fn (p) (complete-strip-extension (path/basename p)))
-                                     (fold (fn (acc dir)
-                                             (append acc (complete-under dir ".blsp")))
+                                     (fold (fn (acc dir) (append acc (complete-under dir ".blsp")))
                                        nil
                                        (complete-manifest-dirs root :source-paths ["src"])))))
               nil)))))
@@ -358,8 +343,7 @@ suggestions\", never to an error on the user's command line."
                          (check-allow :unbound (into [] *project-templates*))))
     nil))
 
-(defn- complete-strip-extension
-  (filename)
+(defn- complete-strip-extension (filename)
   (if (string/ends-with? filename ".blsp")
     (string/substring filename 0 (- (string/length filename) 5))
     filename))

@@ -28,8 +28,7 @@
 
 ;; A scripted display: inputs arrive as `[:input …]` messages (selectively polled,
 ;; so interleaved `[:saw …]` render-echoes are skipped and survive for `drain-saw`).
-(defn- r-display
-  (me)
+(defn- r-display (me)
   {:enter (fn () nil)
    :leave (fn () :left)
    :size (fn () [80 24])
@@ -317,8 +316,7 @@
 (describe "ui-drain-input"
   ; a display whose :poll(0) returns the next queued message (any shape), nil when empty —
   ; like a real frontend at timeout, so the drain terminates on the empty queue.
-  (defn- di-display
-    (me)
+  (defn- di-display (me)
     {:poll (fn (ms) (receive (m m) (after 0 nil)))})
   (defn- di-count (m i c r) (update m :acc (fn (a) (conj a i))))
   (test "folds the whole queued backlog, then stops at the empty poll (no pending)"
@@ -346,8 +344,7 @@
 
 ;; The loop-level behaviour: with :coalesce-input? a queued burst renders ONCE; without it,
 ;; the legacy once-per-input frames are untouched (the opt-in is inert by default).
-(defn- ci-display
-  (me)
+(defn- ci-display (me)
   {:enter (fn () nil)
    :leave (fn () :left)
    :size (fn () [80 24])

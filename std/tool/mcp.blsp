@@ -35,8 +35,7 @@ as errors."
 ;; come through as the value itself, so we wrap them as `{:kind :user :payload
 ;; v}` to keep `:error` always a map for the agent's JSON consumers. The
 ;; asymmetry — built-in vs user — is deliberate per `docs/llm-native.md` §4.
-(defn- error-shape
-  (e)
+(defn- error-shape (e)
   (if (map? e) e {:kind :user :payload e}))
 
 (defn eval-tool (args)
@@ -69,15 +68,13 @@ process's OS user can; that process is the trust boundary."
 ;; reused across distinct namespaces is not a collision, only a same-namespace
 ;; (or ambient/root) rebinding is. Empty (and silent) outside a project.
 ;; Best-effort — never raises.
-(defn- shadows-for
-  (file)
+(defn- shadows-for (file)
   (try
     (let (root (project/find-root (file/cwd)))
       (if (nil? root) nil (project/file-shadow-warnings file root)))
     (catch _ nil)))
 
-(defn- load-checked
-  (file)
+(defn- load-checked (file)
   "Load `file` into the session image and report the result as `{:ok true
 :diagnostics [...] :shadows [...]}` (or `{:ok false :error ...}` on failure) —
 the shared body of the `reflect/load`/`write`/`edit` tools. `def`s persist (hot reload,
@@ -130,8 +127,7 @@ Like `reflect/eval`, this tool is bounded by the `nest mcp` process, not by the 
 ;; the tool), not a bug fix; it is the owner's call, not something this comment
 ;; should pretend has already happened.
 
-(defn- safe-rel?
-  (rel)
+(defn- safe-rel? (rel)
   "Whether `rel` passes the LEXICAL bar for a project-relative path: a non-empty
 string, not absolute (`/…`) or home-anchored (`~…`), with no `..` segment. The
 first (cheap) of two gates; the second is the symlink-resolving check in
@@ -142,8 +138,7 @@ first (cheap) of two gates; the second is the symlink-resolving check in
     (not (string/starts-with? rel "~"))
     (not (includes? (string/split rel "/") ".."))))
 
-(defn- under-root?
-  (abs)
+(defn- under-root? (abs)
   "Whether real path `abs` is the project root itself or lies strictly under it —
 compared after `os/canonicalize` on both sides, so a **symlinked directory inside
 the project that points outside** cannot be used to escape (the lexical check
@@ -155,8 +150,7 @@ the tree through a symlink)."
       (string? root)
       (or (= real root) (string/starts-with? real (str root "/"))))))
 
-(defn- project-path
-  (rel)
+(defn- project-path (rel)
   "Resolve project-relative `rel` to an absolute path under `*project-root*`, or
 `throw` if it would escape the project — a lexical violation (absolute/`~`/`..`,
 or no project root), OR a **symlink** whose real target is outside the tree.
@@ -176,8 +170,7 @@ path). See the section comment above."
                (pr-str rel))))
     abs))
 
-(defn- write-result
-  (rel abs)
+(defn- write-result (rel abs)
   "The shared tail of `write`/`edit`: a `.blsp` file at absolute `abs` is loaded
 + checked (so the result mirrors `reflect/load`'s `:diagnostics`/`:shadows`) and tagged
 with its project-relative `:path`; any other file just confirms the write."
@@ -334,8 +327,7 @@ Outside a Brood project, returns `{:error msg}`."
     (catch e
       {:error (error-shape e)})))
 
-(defn- process-infos
-  ()
+(defn- process-infos ()
   "A `(proc/info pid)` stat map for every live process, dropping any that died
 mid-scan. The shared snapshot behind both the `processes` and `proc/info`
 tools — one definition of \"what we know about a process\"."
@@ -389,8 +381,7 @@ call instead of scraping the individual stat builtins. Returns `{:gc :sched :vm 
 what `node`/`processes` expose behind one telemetry-fed view."
   (telemetry/runtime-snapshot))
 
-(defn- collect-runtime
-  (acc)
+(defn- collect-runtime (acc)
   "Drain the `[:system kind pid detail]` runtime events already in this process's
 mailbox into a list of maps (chronological). Non-blocking: stops at the first empty
 receive."
@@ -496,8 +487,7 @@ Clojure/Scheme reflex."
       (throw "find-pattern: :query must be a string"))
     (find-pattern query)))
 
-(defn- bench-loop
-  (form n)
+(defn- bench-loop (form n)
   "Eval `form` `n` more times for timing, discarding the results; returns nil."
   (when (> n 0)
     (reflect/eval form)
@@ -531,8 +521,7 @@ like `reflect/eval`. Returns `{:error msg}` on failure."
 
 ;; ---- ability / record introspection ----------------------------------------
 
-(defn- op-provided?
-  (spec)
+(defn- op-provided? (spec)
   "Does an op spec `(->string [params] :-> ret? body…)` carry a body (a provided
 default) rather than being a bare required op? Skip the name + params, then the
 optional `:-> ret`, and check whether anything remains."
@@ -540,8 +529,7 @@ optional `:-> ret`, and check whether anything remains."
         tail (if (= (first tail) :->) (drop 2 tail) tail))
     (not (empty? tail))))
 
-(defn- ability-impls
-  (aname ops)
+(defn- ability-impls (aname ops)
   "The type keys (as strings) that implement any op of ability `aname`, unioned
 across its ops via the `*impls*` registry."
   (let (op-names (map first ops)

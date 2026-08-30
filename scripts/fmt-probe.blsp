@@ -35,8 +35,7 @@
     ["receive with clauses"
       "(receive ([:ping from] (do (send from :pong) (loop-again state))) ([:stop] nil) (after 5000 (timeout-handler state)))"]])
 
-(defn- show
-  (name src)
+(defn- show (name src)
   (io/puts "── " name)
   (io/puts (format/source src))
   (io/puts ""))

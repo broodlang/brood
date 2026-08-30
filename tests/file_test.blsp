@@ -43,9 +43,7 @@
           me (self)
           n 40)
       (dotimes (i n)
-        (spawn (fn ()
-                 (file/spit-append p (str "worker-" i "\n"))
-                 (send me :done))))
+        (spawn (fn () (file/spit-append p (str "worker-" i "\n")) (send me :done))))
       ; barrier: all workers finished
       (fa-await n)
       (let (lines (filter (fn (l) (not (empty? l))) (string/split (file/slurp p) "\n")))

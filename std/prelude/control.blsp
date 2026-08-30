@@ -23,8 +23,7 @@
 ;; scope. Only the screen printers consult it; `str`/`pr-str`/`fmt` stay native.
 (%declare-dynamic '*show*)
 (def *show* nil)
-(defn- %show-args
-  (xs)
+(defn- %show-args (xs)
   ;; Each print argument, run through the installed `*show*` transform — or the
   ;; arguments untouched when none is installed (the default fast path).
   (if *show* (map *show* xs) xs))
@@ -82,8 +81,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
 ;; (->> x (f a) (g b)) =>  (g b (f a x))   ; thread as LAST argument
-(defn- %thread-first-step
-  (acc form)
+(defn- %thread-first-step (acc form)
   (if (pair? form) (cons (first form) (cons acc (rest form))) (list form acc)))
 (defmacro -> (x & forms)
   "Thread `x` through the forms as each one's *first* argument: `(-> x (f a) (g b))` is `(g (f x a) b)`.
@@ -115,8 +113,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 ;; placement helpers above, so "where does the value go" is defined once.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %some-thread-build
-    (place forms step)
+  (defn- %some-thread-build (place forms step)
     (if (empty? forms)
       place
       `(if (nil? ~place)
@@ -138,8 +135,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %cond-thread-build
-    (place clauses step)
+  (defn- %cond-thread-build (place clauses step)
     (if (empty? clauses)
       place
       `(let (~place (if ~(first clauses) ~(step place (second clauses)) ~place))
@@ -210,8 +206,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 ;; section (its own `match` clauses) runs the short-circuited value through them;
 ;; with no `:else`, the value that failed to match falls straight through as the
 ;; result — so an `[:error …]` becomes the answer untouched.
-(defn- %with-split-else
-  (forms before)
+(defn- %with-split-else (forms before)
   ;; [happy-forms else-clauses] — split `forms` at the first bare `:else` keyword.
   (cond
     (empty? forms) [(reverse before) nil]
@@ -219,8 +214,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
     else (%with-split-else (rest forms) (cons (first forms) before))))
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %with-build
-    (bindings body else-clauses)
+  (defn- %with-build (bindings body else-clauses)
     (if (empty? bindings)
       `(do ~@body)
       (let (pattern (first bindings)
@@ -281,8 +275,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 ;; binder whose handler *starts* with a bare symbol and has more forms after it.
 ;; There is no legitimate reading to protect — a leading bare symbol followed by
 ;; more body is dead code in every case — so this is a zero-false-positive guard.
-(defn- %try-class-catch?
-  (clause)
+(defn- %try-class-catch? (clause)
   (let (handler (rest (rest clause)))
     (and (symbol? (second clause))
       (> (count handler) 1)

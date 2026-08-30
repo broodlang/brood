@@ -139,8 +139,7 @@
   (test "a genuinely unrecognised clause is still a hard error"
     ;; The tightening this restores an exception to must keep working — a misspelled
     ;; clause that silently does nothing is the failure mode it exists to prevent.
-    (is (= (try (%load-string "(defmodule impl-d (:require foo))") (catch e :rejected))
-          :rejected)))
+    (is (= (try (%load-string "(defmodule impl-d (:require foo))") (catch e :rejected)) :rejected)))
   (test "the error names :implements among the accepted clauses"
     ;; `error` raises a plain string here, not a structured map — hence `str`, not
     ;; `(get e :message)`.
@@ -157,9 +156,7 @@
     (%load-string "(defmodule clpa) (defn thing (x) (list :a x))")
     (%load-string "(defmodule clpb) (defn thing (x) (list :b x))")
     ;; both :used, shared name NEVER referenced -> loads clean (no eager clash)
-    (is (try
-          (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") true)
-          (catch e false)))
+    (is (try (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") true) (catch e false)))
     ;; referencing the shared bare name -> use-site ambiguity error naming both candidates
     (let (msg (try
                 (do

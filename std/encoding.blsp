@@ -22,8 +22,7 @@ For pure ASCII input the string and byte forms agree.")
 (def- encoding-hex-lower-codes [48 49 50 51 52 53 54 55 56 57 97 98 99 100 101 102])
 (def- encoding-hex-upper-codes [48 49 50 51 52 53 54 55 56 57 65 66 67 68 69 70])
 
-(defn- encoding-hex-encode-loop
-  (bs codes acc)
+(defn- encoding-hex-encode-loop (bs codes acc)
   (if (empty? bs)
     (reverse acc)
     (let (b (first bs)
@@ -33,8 +32,7 @@ For pure ASCII input the string and byte forms agree.")
         codes
         (cons (nth codes lo) (cons (nth codes hi) acc))))))
 
-(defn- encoding-hex-encode-codes
-  (bs codes)
+(defn- encoding-hex-encode-codes (bs codes)
   (string/bytes-> (encoding-hex-encode-loop (seq bs) codes nil)))
 
 (defn hex-encode (s)
@@ -78,8 +76,7 @@ UTF-8-encodes a string.
 ;; in order), or the `:invalid` sentinel on a bad/odd input. `:invalid` rather
 ;; than nil so an empty (valid) input is distinguishable from a failure — nil is
 ;; the empty list here, so the public wrappers map `:invalid` → nil themselves.
-(defn- encoding-hex-decode-loop
-  (s i n acc)
+(defn- encoding-hex-decode-loop (s i n acc)
   (if (>= i n)
     (reverse acc)
     (let (hi (get encoding-hex-val (nth s i))
@@ -91,8 +88,7 @@ UTF-8-encodes a string.
           (cons (+ (* hi 16) lo) acc))
         :invalid))))
 
-(defn- encoding-hex-decode-bytelist
-  (s)
+(defn- encoding-hex-decode-bytelist (s)
   (let (
         ; codepoint vector: O(1) nth, int lookups
         s (string/->codepoints s)
@@ -131,12 +127,10 @@ binary payload (digests, salts, wire bytes)."
 ; the code point of "="
 (def- encoding-b64-pad 61)
 ;; Encode a byte sequence to base64 using the given 64-entry code-point vector.
-(defn- encoding-b64-encode
-  (bytes codes)
+(defn- encoding-b64-encode (bytes codes)
   (string/bytes-> (encoding-b64-enc-loop (seq bytes) codes nil)))
 
-(defn- encoding-b64-enc-loop
-  (bytes codes acc)
+(defn- encoding-b64-enc-loop (bytes codes acc)
   (if (empty? bytes)
     (reverse acc)
     (let (b1 (first bytes)
@@ -205,8 +199,7 @@ UTF-8 form."
 ;; Note `0` is a legitimate value — it is `A` — and only nil/false are falsy in Brood, so
 ;; the loop's `(not (and v1 v2))` validity test reads a real 0 as present, exactly as it did
 ;; with the map.
-(defn- encoding-b64-val-vec
-  (alpha)
+(defn- encoding-b64-val-vec (alpha)
   (let (cs (string/->codepoints alpha)
         empty-128 (apply vector (map (fn (_) nil) (range 128))))
     (fold (fn (v i) (let (c (nth cs i)) (if c (%vector-assoc v c i) v)))
@@ -220,15 +213,13 @@ UTF-8 form."
 ;; input. As with hex, `:invalid` (not nil) keeps an empty valid input distinct
 ;; from a failure; the public wrappers map `:invalid` → nil.
 ;; The length of `s` with its TRAILING '=' run removed.
-(defn- encoding-b64-body-length
-  (s n)
+(defn- encoding-b64-body-length (s n)
   (if (and (> n 0) (= (string/char-at s (- n 1)) "="))
     (encoding-b64-body-length s (- n 1))
     n))
 (sig encoding-b64-body-length (string int -> int))
 
-(defn- encoding-b64-strip-padding
-  (s)
+(defn- encoding-b64-strip-padding (s)
   ;; `=` is *terminal* padding, at most two of it. The old
   ;; `(string/replace s "=" "")` deleted every `=` ANYWHERE, so a misplaced one was
   ;; not merely tolerated but erased: `"QQ==QQ=="` (two concatenated payloads — not
@@ -243,8 +234,7 @@ UTF-8 form."
       (>= (index-of body "=") 0) nil
       else body)))
 
-(defn- encoding-b64-decode
-  (s vals)
+(defn- encoding-b64-decode (s vals)
   (let (body (encoding-b64-strip-padding s))
     (if (nil? body)
       :invalid (let (
@@ -264,8 +254,7 @@ UTF-8 form."
 ;; against a vector that is exactly 128 long. Measured on the `base64` benchmark's
 ;; 50 000-byte payload, warm best-of-5 in one process: **29.4 ms → 15.5 ms**. The dense
 ;; vector alone was worth ~7%; the rest is not calling `nth`.
-(defn- encoding-b64-dec-loop
-  (s i n vals acc)
+(defn- encoding-b64-dec-loop (s i n vals acc)
   (if (>= i n)
     (reverse acc)
     (let (remaining (- n i)

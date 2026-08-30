@@ -28,8 +28,7 @@
 
 ;; Load every section an index names — the whole-image restore expressed in terms of the
 ;; sectioned primitives, which is what a tool wanting the entire project in the heap does.
-(defn- si-load-all
-  (path idx)
+(defn- si-load-all (path idx)
   (fold (fn (acc k)
           (let (sec (get idx k))
             (+ acc (or (%image-load-section path (first sec) (second sec)) 0))))

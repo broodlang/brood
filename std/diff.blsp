@@ -22,26 +22,22 @@
 ;; table is a vector of (m+1) vectors, each of length (n+1).
 ;; table[i][j] = LCS length of a[0..i-1] and b[0..j-1].
 
-(defn- diff-zero-row
-  (n)
+(defn- diff-zero-row (n)
   (into [] (map (fn (_) 0) (range (+ n 1)))))
 (sig diff-zero-row (int -> vector))
 
-(defn- diff-build-table
-  (a b m n)
+(defn- diff-build-table (a b m n)
   "Build the full LCS DP table; returns a vector of (m+1) rows."
   (into [] (diff-build-rows a b m n (diff-zero-row n) (list (diff-zero-row n)) 1)))
 
-(defn- diff-build-rows
-  (a b m n prev acc i)
+(defn- diff-build-rows (a b m n prev acc i)
   (if (> i m)
     (reverse acc)
     (let (ai (nth a (- i 1))
           row (diff-build-row ai b n prev 1 '(0)))
       (diff-build-rows a b m n row (cons row acc) (+ i 1)))))
 
-(defn- diff-build-row
-  (ai b n prev j acc)
+(defn- diff-build-row (ai b n prev j acc)
   ;; acc is built right-to-left; (first acc) is the previously computed cell.
   (if (> j n)
     (into [] (reverse acc))
@@ -54,8 +50,7 @@
 
 ;; ---- backtracking -----------------------------------------------------------
 
-(defn- diff-backtrack
-  (table a b i j acc)
+(defn- diff-backtrack (table a b i j acc)
   "Walk the LCS table from (i,j) to (0,0), accumulating ops in reverse order."
   (cond
     (and (= i 0) (= j 0)) acc

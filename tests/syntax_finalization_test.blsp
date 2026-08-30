@@ -32,8 +32,7 @@
   (test "Clojure's vector-headed multi-arity is rejected, not read as one 2-param fn"
     ;; Was: params `[x]` and `:one`, empty body — a different function, diagnosed
     ;; only later as `expected 2 arguments, got 1` at the call site.
-    (is (includes? (err-of "(defn g ([x] :one) ([x y] :two))")
-          "must be a list, not a vector"))
+    (is (includes? (err-of "(defn g ([x] :one) ([x y] :two))") "must be a list, not a vector"))
     ;; the same mistake with a single clause
     (is (includes? (err-of "(defn f ([x] x))") "must be a list, not a vector")))
 
@@ -72,8 +71,7 @@
       (assert= (match [:nope 1] ([k v] k) (_ :other)) :nope)))
 
   (test "~expr in pattern position is an error naming ^"
-    (is (includes? (err-of "(let (k 1) (match 1 (~k :hit) (_ :miss)))")
-          "a pin is written `^k`")))
+    (is (includes? (err-of "(let (k 1) (match 1 (~k :hit) (_ :miss)))") "a pin is written `^k`")))
 
   (test "a macro can emit a pin — the reason for the change"
     ;; A pin used to BE `(unquote expr)`, so the quasiquote walker consumed it and
@@ -173,14 +171,11 @@
 
 (describe "ADR-152: a defmodule header rejects an unknown clause"
   (test "a misspelled or Clojure-style clause is an error, not silence"
-    (is (includes? (err-of "(defmodule sf-m1 (:use-internal json))")
-          "unrecognised header form"))
-    (is (includes? (err-of "(defmodule sf-m2 (:requires json))")
-          "unrecognised header form"))
+    (is (includes? (err-of "(defmodule sf-m1 (:use-internal json))") "unrecognised header form"))
+    (is (includes? (err-of "(defmodule sf-m2 (:requires json))") "unrecognised header form"))
     ;; …including the `(:doc "…")` shape that silently dropped four std modules'
     ;; docstrings until this check existed.
-    (is (includes? (err-of "(defmodule sf-m3 (:doc \"hi\"))")
-          "unrecognised header form")))
+    (is (includes? (err-of "(defmodule sf-m3 (:doc \"hi\"))") "unrecognised header form")))
 
   (test "a module docstring is the second form, and it registers"
     ;; naming an `encoding` export auto-loads the module, whose load is what

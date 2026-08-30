@@ -172,8 +172,7 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
           [nlink
             [:splice
               (splice-transform-all splice
-                (map (fn (p)
-                       (let ([plo phi plen] p) [plo phi plen]))
+                (map (fn (p) (let ([plo phi plen] p) [plo phi plen]))
                   pending))]]
         splice [nlink :resync]
         (nil? text) [nlink :noop]

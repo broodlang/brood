@@ -219,7 +219,8 @@
 ;; routes the whole fn through the same match engine the pattern clauses use, so the
 ;; guard is evaluated (the native arity path bound by argument count could not).
 ;; ─────────────────────────────────────────────────────────────────────────────
-(defn fhg-sign ((n) :when (< n 0) :neg)
+(defn fhg-sign
+  ((n) :when (< n 0) :neg)
   ((n) :when (> n 0) :pos)
   ((n) :zero))
 
@@ -370,8 +371,7 @@
   (test "an or clause in tail position stays O(1) stack"
     ;; `success` is duplicated per alternative precisely so each stays in tail
     ;; position — a thunk would have cost the TCO guarantee.
-    (assert= (letrec (go (fn (n) (match n ((or 0 -1) :done) (_ (go (- n 1))))))
-               (go 30000))
+    (assert= (letrec (go (fn (n) (match n ((or 0 -1) :done) (_ (go (- n 1)))))) (go 30000))
       :done)))
 
 (describe "and patterns"
@@ -556,12 +556,10 @@
                ((record pm-circle {}) :small))
       :big))
   (test "a qualified id (mod/name) matches the value's baked id"
-    (assert= (match (pm-rect 2 2)
-               ((record pattern-matching-test/pm-rect {:w w :h h}) [w h]))
+    (assert= (match (pm-rect 2 2) ((record pattern-matching-test/pm-rect {:w w :h h}) [w h]))
       [2 2]))
   (test "a record pattern nests inside other patterns"
-    (assert= (match [:shape (pm-circle 7)]
-               ([:shape (record pm-circle {:r r})] r))
+    (assert= (match [:shape (pm-circle 7)] ([:shape (record pm-circle {:r r})] r))
       7)))
 
 ;; ---- record patterns across processes: a record survives send (deep copy) and matches ----

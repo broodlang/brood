@@ -131,10 +131,7 @@
       (url/build {:scheme "https" :host "x.com" :path "/s" :query "q=1"})))
   (test "with query-params map"
     (assert= "https://x.com/s?q=hello+world"
-      (url/build {:scheme "https"
-                  :host "x.com"
-                  :path "/s"
-                  :query-params {"q" "hello world"}})))
+      (url/build {:scheme "https" :host "x.com" :path "/s" :query-params {"q" "hello world"}})))
   (test "with fragment"
     (assert= "https://x.com/page#top"
       (url/build {:scheme "https" :host "x.com" :path "/page" :fragment "top"})))

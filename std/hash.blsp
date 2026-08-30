@@ -34,8 +34,7 @@
 ;; the digests below can read as `(bytes->hex …)` without hash re-implementing
 ;; (and re-exporting) an operation `encoding/hex-encode-bytes` already owns (ADR-234).
 
-(defn- bytes->hex
-  (bytes)
+(defn- bytes->hex (bytes)
   (encoding/hex-encode-bytes bytes))
 
 ;; ---- MD5 --------------------------------------------------------------------

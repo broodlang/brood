@@ -54,13 +54,11 @@ data) …))` from an `http` handler to push events to a browser `EventSource`."
 
 ;; ---- pure frame parsing -----------------------------------------------------
 
-(defn- normalize
-  (s)
+(defn- normalize (s)
   "Normalise line terminators to `\\n` (SSE allows `\\r\\n`, `\\r`, or `\\n`)."
   (string/replace (string/replace s "\r\n" "\n") "\r" "\n"))
 
-(defn- frames
-  (buf)
+(defn- frames (buf)
   "`[complete-event-blocks remainder]` extracted from accumulated stream text `buf`."
   ;; ONE native split, not a `substring` of the rest per block. The drain this replaced
   ;; re-copied the remainder of the buffer for every event, so a single socket read holding
@@ -72,8 +70,7 @@ data) …))` from an `http` handler to push events to a browser `EventSource`."
   (let (parts (string/split buf "\n\n"))
     (if (empty? parts) [nil ""] [(seq/drop-last 1 parts) (last parts)])))
 
-(defn- field
-  (ev line)
+(defn- field (ev line)
   "Fold one SSE field `line` into event map `ev`. `data` lines accumulate (joined by
 `\\n`); `event`/`id`/`retry` set their field; comment lines (`:`-prefixed) and blanks
 are ignored. One optional space after the colon is stripped."
@@ -94,15 +91,13 @@ are ignored. One optional space after the colon is stripped."
           (= field "retry") (assoc ev :retry val)
           else ev))))
 
-(defn- parse-event
-  (block)
+(defn- parse-event (block)
   "Parse one event `block` (its field lines) into `{:event :data :id …}`, defaulting
 the type to `\"message\"` and the data to `\"\"` (the SSE spec's defaults). Pure."
   (let (ev (fold field {} (string/split block "\n")))
     (assoc ev :event (or (get ev :event) "message") :data (or (get ev :data) ""))))
 
-(defn- status
-  (head)
+(defn- status (head)
   "The numeric status from an HTTP response `head` (its first line), or 0."
   (let (line (first (string/split head "\n"))
         parts (string/split line " ")
@@ -134,8 +129,7 @@ socket a `stream-response` handler was handed. Just `(tcp/send sock (frame …))
 
 ;; ---- the reader process (IO) ------------------------------------------------
 
-(defn- stream
-  (sock subscriber buf)
+(defn- stream (sock subscriber buf)
   "Process the buffered stream text `buf` — deliver every complete event to
 `subscriber` — then wait for the next chunk and recurse. Notifies the subscriber
 with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
@@ -150,8 +144,7 @@ with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
         ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
         ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))))))
 
-(defn- read-head
-  (sock subscriber buf)
+(defn- read-head (sock subscriber buf)
   "Read until the HTTP response head's blank line, check the status, then hand the
 leftover bytes to `stream`. A non-200 status closes the connection."
   (receive

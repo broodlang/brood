@@ -13,16 +13,14 @@
 (def- *ident*
   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_?!*<>=+.%&~^-")
 
-(defn- ident-at?
-  (text pos)
+(defn- ident-at? (text pos)
   (and (>= pos 0)
     (< pos (string/length text))
     (includes? *ident* (string/char-at text pos))))
 
 (defn- boundary? (text pos) (not (ident-at? text pos)))
 
-(defn- tr-loop
-  (text old new olen from parts)
+(defn- tr-loop (text old new olen from parts)
   (let (i (index-of text old from))
     (if (< i 0)
       (cons (string/substring text from (string/length text)) parts)
@@ -46,12 +44,10 @@
   (apply str (reverse (tr-loop text old new (string/length old) 0 nil))))
 (sig token-replace (any string any -> any))
 
-(defn- apply-pairs
-  (text pairs)
+(defn- apply-pairs (text pairs)
   (fold (fn (t p) (token-replace t (first p) (second p))) text pairs))
 
-(defn- rewrite-file
-  (pairs f)
+(defn- rewrite-file (pairs f)
   "Rewrite `f` in place if any pair changes it; returns f when changed, else nil."
   (let (before (file/slurp f)
         after (apply-pairs before pairs))
@@ -59,8 +55,7 @@
       nil
       (do (file/spit f after) f))))
 
-(defn- project-blsp
-  ()
+(defn- project-blsp ()
   "Every .blsp file under the current directory, skipping .git and vendored _deps."
   (filter (fn (f)
             (and (string/ends-with? f ".blsp")
@@ -126,8 +121,7 @@
 (defn- node-kind (node) (first node))
 (defn- node-payload (node) (second node))
 
-(defn- rename-kids
-  (kids old new mode in-quote?)
+(defn- rename-kids (kids old new mode in-quote?)
   "Rewrite a vector of sibling CST nodes; returns the rewritten text."
   ;; A definition head is the SECOND significant (non-whitespace, non-comment) item of a
   ;; form whose first significant item is a def-head symbol.
@@ -146,12 +140,10 @@
                      nil)
         quoted-kids? (or in-quote? quote-form?))
     (apply str
-      (map (fn (i)
-             (rename-node (nth kids i) old new mode quoted-kids? (= i name-index)))
+      (map (fn (i) (rename-node (nth kids i) old new mode quoted-kids? (= i name-index)))
         (range 0 (count kids))))))
 
-(defn- significant-indices
-  (kids)
+(defn- significant-indices (kids)
   "The indices in `kids` of the nodes that are neither whitespace nor comments."
   (filter (fn (i) (not (includes? [:whitespace :comment] (node-kind (nth kids i)))))
     (range 0 (count kids))))
@@ -159,8 +151,7 @@
 ;; check-allow: a CST walk is inherently non-tail — the recursion depth is the
 ;; source's NESTING depth (a handful of levels), not its length.
 (check-allow :non-tail-recursion
-  (defn- rename-node
-    (node old new mode in-quote? is-def-name?)
+  (defn- rename-node (node old new mode in-quote? is-def-name?)
     "Rewrite one CST node, returning its (possibly rewritten) source text."
     (let (kind (node-kind node)
           payload (node-payload node))
@@ -204,8 +195,7 @@
                     else in-quote?)
                   false))))))))
 
-(defn- open-delim
-  (kind)
+(defn- open-delim (kind)
   (cond
     (= kind :list) "("
     (= kind :vector) "["
@@ -213,8 +203,7 @@
     (= kind :set) "#{"
     else ""))
 
-(defn- close-delim
-  (kind)
+(defn- close-delim (kind)
   (cond
     (= kind :list) ")"
     (= kind :vector) "]"
@@ -252,15 +241,13 @@ counterpart to `rename`. Prints each changed file and returns the count."
 (defn- opener? (c) (includes? "([{" c))
 (defn- closer? (c) (includes? ")]}" c))
 
-(defn- skip-ws
-  (text i)
+(defn- skip-ws (text i)
   (if (and (< i (string/length text)) (ws? (string/char-at text i)))
     (skip-ws text (inc i))
     i))
 (sig skip-ws (string int -> int))
 
-(defn- skip-str
-  (text i)
+(defn- skip-str (text i)
   ;; i just past the opening quote; returns index after the closing quote
   (if (>= i (string/length text))
     i
@@ -271,8 +258,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
         else (skip-str text (inc i))))))
 (sig skip-str (string int -> int))
 
-(defn- scan-close
-  (text i depth)
+(defn- scan-close (text i depth)
   ;; i inside a bracketed form; returns index after the matching close at depth 0
   (if (>= i (string/length text))
     i
@@ -284,8 +270,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
         else (scan-close text (inc i) depth)))))
 (sig scan-close (string int int -> int))
 
-(defn- atom-end
-  (text i)
+(defn- atom-end (text i)
   (if (>= i (string/length text))
     i
     (let (c (string/char-at text i))
@@ -294,8 +279,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
         (atom-end text (inc i))))))
 (sig atom-end (string int -> int))
 
-(defn- read-one
-  (text i)
+(defn- read-one (text i)
   ;; i at the start of an s-expr (non-ws); returns its end index (exclusive)
   (let (c (string/char-at text i))
     (cond
@@ -304,8 +288,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
       else (atom-end text i))))
 (sig read-one (string int -> int))
 
-(defn- swap-loop
-  (text old new from parts)
+(defn- swap-loop (text old new from parts)
   (let (needle (str "(" old)
         i (index-of text needle from)
         nlen (string/length needle)

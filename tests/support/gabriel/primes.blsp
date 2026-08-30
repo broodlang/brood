@@ -28,8 +28,7 @@ upstream's own expected output in `tests/corpus/gabriel/data/primes.input`.")
       (cons m (interval-list (+ 1 m) n)))))
 
 (check-allow :non-tail-recursion
-  (defn- primes-remove-multiples
-    (n l)
+  (defn- primes-remove-multiples (n l)
     (cond
       (nil? l) nil
       (= (math/rem (first l) n) 0) (primes-remove-multiples n (rest l))

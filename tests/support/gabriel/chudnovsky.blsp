@@ -39,14 +39,12 @@ conformance port. The oracle is upstream's own expected output in
 ;; descends (each `y` is below the previous `x`) and stops on the first non-decrease,
 ;; which is the standard integer-sqrt fixpoint: `x` is then floor(sqrt(n)) exactly, with
 ;; no float anywhere in the derivation.
-(defn- chudnovsky-isqrt-descend
-  (n x y)
+(defn- chudnovsky-isqrt-descend (n x y)
   (if (< y x)
     (chudnovsky-isqrt-descend n y (math/quot (+ y (math/quot n y)) 2))
     x))
 
-(defn- chudnovsky-isqrt
-  (n)
+(defn- chudnovsky-isqrt (n)
   (if (< n 2)
     n
     (chudnovsky-isqrt-descend n n (math/quot (+ n 1) 2))))
@@ -54,8 +52,7 @@ conformance port. The oracle is upstream's own expected output in
 ;; Binary splitting over the series terms [a, b): returns `[g p q]`. Doubly recursive and
 ;; non-tail — the divide-and-conquer shape is the point.
 (check-allow :non-tail-recursion
-  (defn- chudnovsky-split
-    (a b)
+  (defn- chudnovsky-split (a b)
     (if (= 1 (- b a))
       (let (g (* (- (* 6 b) 5) (- (* 2 b) 1) (- (* 6 b) 1)))
         [g

@@ -28,8 +28,7 @@
   `gzip`/`compress`/`zip` accept a string or a byte sequence; the `gunzip`/
   `uncompress`/`unzip` inverses take compressed `bytes` and raise on invalid input.")
 
-(defn- as-bytes
-  (data)
+(defn- as-bytes (data)
   "Coerce iodata to a byte sequence: a string is UTF-8-encoded, bytes pass through."
   (if (string? data) (string/->bytes data) data))
 

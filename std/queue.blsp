@@ -31,8 +31,7 @@ it prints as `#<queue …>` instead of leaking its two-list representation.")
     (count (queue/empty))          → 0"
   (queue nil nil 0))
 
-(defn- balance
-  (front back size)
+(defn- balance (front back size)
   "Rebalance: if front is nil, reverse back to front."
   (if (nil? front)
     (queue (reverse back) nil size)

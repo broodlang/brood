@@ -68,8 +68,7 @@ buffer wants — the user should be able to see where they may type."
                           next-off
                           nil
                           (cons {:start (get open :start)
-                                 :end (math/max (get open
-                                                  :start)
+                                 :end (math/max (get open :start)
                                         (dec off))
                                  :open-line (get open
                                               :open-line)

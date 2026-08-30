@@ -10,8 +10,7 @@ test discovery, lints, release, config)."
 ;; --- scaffolding a new project (`nest new <name>`) ---------------------------
 ;; True if the 1-char string `ch` occurs in `s` (a short scan — Brood has no char
 ;; index yet, and project names/paths are short).
-(defn- str-contains?
-  (s ch)
+(defn- str-contains? (s ch)
   (cond
     (= (string/length s) 0) false
     (= (string/substring s 0 1) ch) true
@@ -36,8 +35,7 @@ test discovery, lints, release, config)."
 ;; outside [a-z A-Z 0-9 - _] becomes `-`. A leading digit gets a `p-` prefix (a symbol
 ;; must not read as a number), and the reserved `main` becomes `main-lib` so the
 ;; library module can't collide with the project's own entry module.
-(defn- project-module-name
-  (nm)
+(defn- project-module-name (nm)
   (let (cleaned (string/join "" (map project-name-char (string/split nm "")))
         prefixed (if (and (> (string/length cleaned) 0)
                        (includes? "0123456789"
@@ -51,19 +49,16 @@ test discovery, lints, release, config)."
       (= prefixed "main") "main-lib"
       else prefixed)))
 
-(defn- project-has-alnum?
-  (s)
+(defn- project-has-alnum? (s)
   (fold (fn (found ch)
           (or found (includes? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ch)))
     false
     (string/split s "")))
 
-(defn- project-name-char
-  (ch)
+(defn- project-name-char (ch)
   (if (includes? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" ch) ch "-"))
 
-(defn- project-valid-name?
-  (nm)
+(defn- project-valid-name? (nm)
   (and (> (string/length nm) 0)
     (not (= nm "."))
     (not (= nm ".."))
@@ -78,8 +73,7 @@ test discovery, lints, release, config)."
     (not (= (string/substring nm 0 1) "~"))))
 
 ;; --- file templates (the starter skeleton) ---
-(defn- project-manifest-template
-  (nm)
+(defn- project-manifest-template (nm)
   (str ";; "
     nm " — a Brood project.\n" "(project\n" "  :name \"" nm "\"\n" "  :version \"0.1.0\")\n" "\n"
     ";; To depend on other Brood packages, add a :dependencies vector to the form\n"
@@ -89,8 +83,7 @@ test discovery, lints, release, config)."
     ";; Then any `nest` command resolves them. project.lock.blsp is committed;\n"
     ";; _deps/ (the cache) is gitignored.\n"))
 
-(defn- project-main-template
-  (nm)
+(defn- project-main-template (nm)
   (str "(defmodule main \"The "
     nm
     " project's entry-point module — wired up as\n"
@@ -123,8 +116,7 @@ test discovery, lints, release, config)."
     "  ;;   (io/with-out (process-port buffer-pid) (io/puts \"…\")).\n"
     "  (io/puts (greeting)))\n"))
 
-(defn- project-hello-template
-  (nm)
+(defn- project-hello-template (nm)
   (let (mod (project-module-name nm))
     (str "(defmodule "
       mod " \"The " nm " project's library module — `main` does\n" "`(:use " mod
@@ -136,15 +128,13 @@ test discovery, lints, release, config)."
       "(namespaces aren't package-rooted yet — ADR-070).\")\n" "\n" "(defn greeting ()\n"
       "  \"Return the project's greeting string.\"\n" "  \"hello " nm "\")\n")))
 
-(defn- project-main-test-template
-  (nm)
+(defn- project-main-test-template (nm)
   (str ";; Tests for the main module. `(:use main)` brings `main` into scope;\n"
     ";; `(:use test)` the describe/test/is macros. `nest test` loads src/ first.\n"
     "(defmodule main-test (:use main) (:use test))\n" "\n" "(describe \"main\"\n"
     "  (test \"main is callable\" (is (fn? main))))\n"))
 
-(defn- project-hello-test-template
-  (nm)
+(defn- project-hello-test-template (nm)
   (let (mod (project-module-name nm))
     (str ";; Tests for the "
       mod " module. `(:use " mod ")` brings `greeting` into\n"
@@ -159,8 +149,7 @@ test discovery, lints, release, config)."
 ;; has no `while`), one frame per tick. Pairs with `nest run --for 2s` to run it
 ;; for a bounded time. Kept to plain stdout for portability; for a real
 ;; full-screen UI use the `term-*` seam (docs/building-an-editor.md).
-(defn- project-tui-main-template
-  (nm)
+(defn- project-tui-main-template (nm)
   (str "(defmodule main \""
     nm " — a terminal animation loop.\n"
     "Run it bounded:  nest run --for 2s   (Ctrl-C also stops it).\")\n" "\n"
@@ -180,8 +169,7 @@ test discovery, lints, release, config)."
     "  (let ([p d] (step pos dir width))\n" "    (animate p d width)))\n" "\n" "(defn main ()\n"
     "  \"Entry point: animate a bouncing marker.\"\n" "  (animate 0 1 20))\n"))
 
-(defn- project-tui-test-template
-  (nm)
+(defn- project-tui-test-template (nm)
   (str ";; Test the pure frame logic directly — the loop itself is exercised by\n"
     ";; `nest run --for`, its pure functions by `nest test`.\n"
     "(defmodule main-test (:use main) (:use test))\n" "\n" "(describe \"animation\"\n"
@@ -193,8 +181,7 @@ test discovery, lints, release, config)."
 ;; `gen`: a stateful process (gen_server-style) via the `gen` framework.
 ;; Genuine mutable state lives in a process's loop, not a variable (ADR-026):
 ;; async `cast` threads new state, synchronous `call` reads/updates it.
-(defn- project-gen-main-template
-  (nm)
+(defn- project-gen-main-template (nm)
   (str "(defmodule main \""
     nm " — a stateful process built with the gen framework.\"\n"
     "  ;; `(:use gen)` refers defserver / start / cast / call bare.\n" "  (:use gen))\n" "\n"
@@ -205,8 +192,7 @@ test discovery, lints, release, config)."
     "  (let (c (start counter 0))\n" "    (cast c :inc)\n" "    (cast c :inc)\n"
     "    (cast c [:add 10])\n" "    (io/puts \"counter =\" (call c :value))))\n"))
 
-(defn- project-gen-test-template
-  (nm)
+(defn- project-gen-test-template (nm)
   (str ";; `(:use main)` brings `counter`; `(:use gen)` the `cast`/`call` API;\n"
     ";; `(:use test)` the macros. :isolated — these spawn processes.\n"
     "(defmodule main-test (:use main) (:use gen) (:use test))\n" "\n" "(describe \"counter\"\n"
@@ -219,8 +205,7 @@ test discovery, lints, release, config)."
 ;; cursor; every edit is a pure `(model -> model)` function (testable without a
 ;; terminal); `view`/`update` plug into `ui-run`, which owns the loop + teardown.
 ;; Runs in the terminal (`*term-display*`) or, with `--features gui`, a window.
-(defn- project-editor-main-template
-  (nm)
+(defn- project-editor-main-template (nm)
   (str "(defmodule main \""
     nm " — a tiny text editor built on the `ui` framework.\n" "\n"
     "Run it:  nest run   (type to edit, arrows move, Enter splits a line, Backspace\n"
@@ -286,8 +271,7 @@ test discovery, lints, release, config)."
     "--features gui and pass `(gui-display)` instead of `*term-display*`.\"\n"
     "  (ui-run (ed-init) ed-view ed-update *term-display*))\n"))
 
-(defn- project-editor-test-template
-  (nm)
+(defn- project-editor-test-template (nm)
   (str ";; `(:use main)` brings the pure edit fns (ed-insert, …); `(:use test)` the macros.\n"
     ";; The loop is `ui-run`'s; here we test the edits — pure `(model -> model)`.\n"
     "(defmodule main-test (:use main) (:use test))\n" "\n" "(describe \"editor edits\"\n"
@@ -309,8 +293,7 @@ test discovery, lints, release, config)."
 ;; runtime) and styled through the shared `face` registry (define the look once,
 ;; restyle in one place). The model is a plain map threaded through `ui-run`'s
 ;; loop; the starting point for a real GUI app (e.g. a daemon dashboard).
-(defn- project-gui-main-template
-  (nm)
+(defn- project-gui-main-template (nm)
   (str "(defmodule main \""
     nm " — a windowed GUI app on the `ui` framework.\n" "\n"
     "Run it:  nest run   (opens a native window — needs the runtime built with the\n"
@@ -354,8 +337,7 @@ test discovery, lints, release, config)."
     "doc); for the terminal instead, pass `*term-display*` for `(gui-display)`.\"\n"
     "  (ui-run (app-init) app-view app-update (gui-display)))\n"))
 
-(defn- project-gui-test-template
-  (nm)
+(defn- project-gui-test-template (nm)
   (str ";; `(:use main)` brings the pure fns; `(:use test)` the macros. The window loop is\n"
     ";; `ui-run`'s (untested here — it needs a display); we test the pure `update` and\n"
     ";; `view` — `(model -> model)` / `(model -> frame)`.\n"
@@ -376,8 +358,7 @@ test discovery, lints, release, config)."
 ;; `CLAUDE.md` for a fresh project — short project-specific intro that points
 ;; at the language reference (which `nest new` also drops into `docs/`, so the
 ;; project is self-contained and an AI assistant has everything it needs in-tree).
-(defn- project-claude-md-template
-  (nm)
+(defn- project-claude-md-template (nm)
   (str "# "
     nm " — guidance for Claude\n" "\n"
     "This is a Brood (`.blsp`) project scaffolded by `nest new`. Replace this stub\n"
@@ -415,8 +396,7 @@ test discovery, lints, release, config)."
 ;; `command: nest` works as long as `nest` is on PATH. Keeping the file
 ;; minimal: a single `brood` server entry. Users can add more (their own
 ;; MCP servers) without losing the scaffold.
-(defn- project-mcp-json-template
-  (nm)
+(defn- project-mcp-json-template (nm)
   (str "{\n"
     "  \"mcpServers\": {\n" "    \"brood\": {\n" "      \"command\": \"nest\",\n"
     "      \"args\": [\"mcp\"]\n" "    }\n" "  }\n" "}\n"))
@@ -427,8 +407,7 @@ test discovery, lints, release, config)."
 ;; command that loads the project. Omitting it here meant every scaffolded project
 ;; committed `.brood/image.bin` and then re-committed it on every check: eight
 ;; ecosystem repos carried a churning binary before this line existed.
-(defn- project-gitignore-template
-  ()
+(defn- project-gitignore-template ()
   (str "# Brood package cache — regenerable from project.lock.blsp (which is committed)\n"
     "_deps/\n" "\n" "# Startup-image cache — a build artifact, rebuilt on demand\n" ".brood/\n" "\n"
     "# Editor / OS cruft\n" "*.swp\n" ".DS_Store\n"))
@@ -439,8 +418,7 @@ test discovery, lints, release, config)."
 ;; (it highlights [] vectors, {} maps, and :keywords, all of which Brood uses).
 ;; `linguist-detectable=false` keeps `.blsp` out of the repo's language stats
 ;; (so a Brood project isn't mislabelled "Clojure") while still highlighting.
-(defn- project-gitattributes-template
-  ()
+(defn- project-gitattributes-template ()
   (str "# Brood source (.blsp) is a Lisp; until it's its own Linguist language,\n"
     "# highlight it as Clojure on GitHub — the closest common grammar — but keep\n"
     "# it out of the language stats (it's Brood, not Clojure).\n"
@@ -463,8 +441,7 @@ test discovery, lints, release, config)."
 ;;   tests/main_test.blsp
 ;;   tests/web/views/messages_test.blsp
 
-(defn- project-hatch-manifest-template
-  (nm)
+(defn- project-hatch-manifest-template (nm)
   (str ";; "
     nm " — a Hatch web application.\n" ";;\n"
     ";; Serves a Postgres-backed message board at GET/POST /messages.\n"
@@ -473,8 +450,7 @@ test discovery, lints, release, config)."
     "                 [store-postgres :path \"../store-postgres\"]]\n"
     "  :format-plugins [hatch])\n"))
 
-(defn- project-hatch-main-template
-  (nm)
+(defn- project-hatch-main-template (nm)
   (str "(defmodule main \"Entry point for "
     nm ".\"\n" "  (:use web/endpoint :only [serve])\n"
     "  (:use web/application :only [start default-logger-opts])\n" "  (:alias db)\n"
@@ -483,8 +459,7 @@ test discovery, lints, release, config)."
     "    {:logger   (default-logger-opts)\n" "     :children [(fn () (db/start (pg/opts-from-env \""
     nm "\")))\n" "                (fn () (serve))]}))\n"))
 
-(defn- project-hatch-db-template
-  (_nm)
+(defn- project-hatch-db-template (_nm)
   (str "(defmodule db\n"
     "  \"Database singleton: the shared repo handle and messages schema.\n"
     "  Call `(db/start opts)` once from `main`; handlers then use\n"
@@ -503,16 +478,14 @@ test discovery, lints, release, config)."
     "  \"Insert a `{:name ... :body ...}` row; return the inserted row with `:id`.\"\n"
     "  (repo/insert *repo* :messages row))\n"))
 
-(defn- project-hatch-db-setup-template
-  (nm)
+(defn- project-hatch-db-setup-template (nm)
   (str "(defmodule db-setup\n"
     "  \"Create the app database if absent, then run schema migrations.\n"
     "  Run with: `nest run --main db-setup`\"\n" "  (:alias pg)\n" "  (:alias db))\n" "\n"
     "(defn main ()\n" "  (let (o (pg/opts-from-env \"" nm "\"))\n" "    (pg/create-database o)\n"
     "    (db/start o)\n" "    (io/puts \"Done. Run `nest run` to start the server.\")))\n"))
 
-(defn- project-hatch-endpoint-template
-  (_nm)
+(defn- project-hatch-endpoint-template (_nm)
   (str "(defmodule web/endpoint \"HTTP endpoint: bridges raw requests through the router.\"\n"
     "  (:alias http/server)\n" "  (:alias web/conn)\n" "  (:alias web/routes)\n"
     "  (:alias web/live)\n" "  (:alias web/errors)\n" "  (:alias task))\n" "\n"
@@ -530,8 +503,7 @@ test discovery, lints, release, config)."
     "  \"Start the HTTP listener on `(port)`.\"\n"
     "  (server/start (port) adapter (live/live-dispatcher) {}))\n"))
 
-(defn- project-hatch-errors-template
-  (_nm)
+(defn- project-hatch-errors-template (_nm)
   (str "(defmodule web/errors\n"
     "  \"The app's error pages, in one place. `error-meta` maps a status code to a\n"
     "  `[title blurb]`; edit or add a clause to override a page. `error-response` builds a\n"
@@ -576,8 +548,7 @@ test discovery, lints, release, config)."
     "  (let (content-type (get (get resp :headers {}) :content-type))\n"
     "    (and (string? content-type) (includes? content-type \"application/json\"))))\n"))
 
-(defn- project-hatch-layout-template
-  (nm)
+(defn- project-hatch-layout-template (nm)
   (str "(defmodule web/layout \"Shared HTML page shell — Tailwind + daisyUI via CDN.\n"
     "  Returns plain Hiccup; the caller (web/page / web/errors) renders it.\")\n" "\n"
     "(defn layout (title & children)\n" "  [:html {:data-theme \"light\"}\n" "    [:head {}\n"
@@ -594,8 +565,7 @@ test discovery, lints, release, config)."
     "          [:a {:href \"/messages\" :class \"btn btn-ghost btn-sm\"} \"Messages\"]]]\n"
     "      [:main {:class \"max-w-2xl mx-auto p-6\"} children]]])\n"))
 
-(defn- project-hatch-routes-template
-  (_nm)
+(defn- project-hatch-routes-template (_nm)
   (str "(defmodule web/routes \"HTTP routes — session + CSRF protected.\"\n"
     "  (:use web/router)\n" "  (:alias web/session)\n" "  (:alias web/csrf))\n" "\n"
     "; Set $SECRET_KEY_BASE in production. Never ship this dev fallback.\n" "(def session-secret\n"
@@ -605,8 +575,7 @@ test discovery, lints, release, config)."
     "    (get \"/messages\" web/views/messages/index)\n"
     "    (post \"/messages\" web/views/messages/create)))\n"))
 
-(defn- project-hatch-home-template
-  (nm)
+(defn- project-hatch-home-template (nm)
   (str "(defmodule web/views/home \"Home page.\"\n"
     "  (:use web/page)\n" "  (:use web/layout))\n" "\n" "(defn index (conn)\n"
     "  \"GET / — welcome page.\"\n" "  (page conn\n" "    (layout \"" nm "\"\n"
@@ -614,8 +583,7 @@ test discovery, lints, release, config)."
     "      [:p {:class \"mb-4 opacity-70\"} \"A Hatch web app backed by PostgreSQL.\"]\n"
     "      [:a {:href \"/messages\" :class \"btn btn-primary\"} \"View messages\"])))\n"))
 
-(defn- project-hatch-messages-view-template
-  (_nm)
+(defn- project-hatch-messages-view-template (_nm)
   (str "(defmodule web/views/messages\n"
     "  \"GET /messages — list messages + form. POST /messages — insert + redirect.\"\n"
     "  (:use web/page)\n" "  (:use web/layout)\n" "  (:use web/conn)\n" "  (:alias web/session)\n"
@@ -658,14 +626,12 @@ test discovery, lints, release, config)."
     "          (web/session/put-flash \"info\" \"Message posted!\")\n"
     "          (redirect-resp \"/messages\"))))))\n"))
 
-(defn- project-hatch-main-test-template
-  (_nm)
+(defn- project-hatch-main-test-template (_nm)
   (str ";; Smoke test: ensure main loads without error.\n"
     "(defmodule main-test (:use main) (:use test))\n" "\n" "(describe \"main\"\n"
     "  (test \"main is callable\" (is (fn? main))))\n"))
 
-(defn- project-hatch-messages-test-template
-  (_nm)
+(defn- project-hatch-messages-test-template (_nm)
   (str ";; Pure rendering tests for web/views/messages -- no database needed.\n"
     ";; (db/*repo* starts nil at load time; DB functions are only called at request time.)\n"
     "(defmodule web-views-messages-test\n" "  (:use test)\n"
@@ -691,8 +657,7 @@ test discovery, lints, release, config)."
 ;;   tests/main_test.blsp
 ;;   tests/web/api_test.blsp
 
-(defn- project-web-api-manifest-template
-  (nm)
+(defn- project-web-api-manifest-template (nm)
   (str ";; "
     nm " — a Hatch JSON API.\n" ";;\n"
     ";; Serves JSON at GET /api/health and GET|POST /api/echo. No live layer, no database.\n"
@@ -700,16 +665,14 @@ test discovery, lints, release, config)."
     "  :name \"" nm "\"\n" "  :version \"0.1.0\"\n" "  :dependencies [[hatch :path \"../hatch\"]]\n"
     "  :format-plugins [hatch])\n"))
 
-(defn- project-web-api-main-template
-  (nm)
+(defn- project-web-api-main-template (nm)
   (str "(defmodule main \"Entry point for "
     nm ".\"\n" "  (:use web/endpoint :only [serve])\n"
     "  (:use web/application :only [start default-logger-opts]))\n" "\n" "(defn main ()\n"
     "  \"Start logging, boot the endpoint, and park.\"\n" "  (start\n"
     "    {:logger   (default-logger-opts)\n" "     :children [(fn () (serve))]}))\n"))
 
-(defn- project-web-api-endpoint-template
-  (_nm)
+(defn- project-web-api-endpoint-template (_nm)
   (str "(defmodule web/endpoint \"HTTP endpoint: bridges raw requests through the router.\"\n"
     "  (:alias http/server)\n" "  (:alias web/conn)\n" "  (:alias web/routes)\n"
     "  (:alias task))\n" "\n"
@@ -732,15 +695,13 @@ test discovery, lints, release, config)."
     "  \"Start the HTTP listener on `(port)` — no ws-handler, so no live layer.\"\n"
     "  (server/start (port) adapter))\n"))
 
-(defn- project-web-api-routes-template
-  (_nm)
+(defn- project-web-api-routes-template (_nm)
   (str "(defmodule web/routes \"JSON API routes.\"\n"
     "  (:use web/router)\n" "  (:alias web/api))\n" "\n" "(defrouter app-router\n"
     "  (get \"/\" web/api/index)\n" "  (get \"/api/health\" web/api/health)\n"
     "  (get \"/api/echo\" web/api/echo)\n" "  (post \"/api/echo\" web/api/echo))\n"))
 
-(defn- project-web-api-handlers-template
-  (nm)
+(defn- project-web-api-handlers-template (nm)
   (str "(defmodule web/api\n"
     "  \"JSON API handlers. Each returns a JSON response built from `web/live/encode`\n"
     "  (Hatch's wire JSON encoder — maps, vectors, strings, numbers, bools, nil).\"\n"
@@ -755,8 +716,7 @@ test discovery, lints, release, config)."
     "  body into :params, so `?msg=hi` and a `{\\\"msg\\\":\\\"hi\\\"}` body both work.\"\n"
     "  (json conn {:echo (or (param conn \"msg\") \"\")}))\n"))
 
-(defn- project-web-api-test-template
-  (_nm)
+(defn- project-web-api-test-template (_nm)
   (str ";; Route tests through the web/test harness — no running server needed.\n"
     "(defmodule web-api-test\n" "  (:use test)\n" "  (:use web/test)\n" "  (:alias web/routes))\n"
     "\n" "(describe \"api\"\n" "  (test \"GET /api/health returns ok\"\n"
@@ -781,8 +741,7 @@ test discovery, lints, release, config)."
 ;; Write the template-specific src/ + tests/ files; return the list of relative
 ;; paths written (for the summary). The shared files (manifest, CLAUDE.md, guide,
 ;; …) are written by the caller; only the starter code varies by template.
-(defn- project-write-template
-  (tmpl nm src-dir tests-dir actual-name)
+(defn- project-write-template (tmpl nm src-dir tests-dir actual-name)
   (cond
     (= tmpl "tui-loop")
       (do
@@ -905,8 +864,7 @@ test discovery, lints, release, config)."
 ;; `file` leaves a file it cannot parse untouched, so a malformed template
 ;; degrades to "written as-is" rather than mangled; failures are swallowed because a
 ;; cosmetic pass must never break scaffolding.
-(defn- scaffold-format-generated!
-  (paths)
+(defn- scaffold-format-generated! (paths)
   (dolist (p paths)
     (when (string/ends-with? p ".blsp") (try (format/file p) (catch _ nil)))))
 
@@ -1007,8 +965,7 @@ test discovery, lints, release, config)."
 ;; fails on an unresolved dependency. The generic "Next: nest test && nest run" was
 ;; therefore a promise the project could not keep: it was the first thing a user saw
 ;; after `nest new`, and it did not work. Say what is required instead.
-(defn- scaffold-print-next-steps
-  (tmpl nm in-place)
+(defn- scaffold-print-next-steps (tmpl nm in-place)
   (let (siblings (get *scaffold-sibling-deps* tmpl)
         enter (if in-place "" (str "cd " nm " && ")))
     (if (nil? siblings)

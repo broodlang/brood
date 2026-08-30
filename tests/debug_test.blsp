@@ -307,7 +307,8 @@
 ;; A tail-recursive countdown, as a GLOBAL so trace-fn has a name to rebind. The
 ;; self-call is the last thing the (n) clause does, so untraced this runs in constant
 ;; stack at any depth — which is exactly what the tracer must not take away.
-(defn tfn-countdown ((0) :liftoff)
+(defn tfn-countdown
+  ((0) :liftoff)
   ((n) (tfn-countdown (- n 1))))
 
 ;; A sink bounded to `cap` entries, answering `:spy-stop` once it is full — the
@@ -455,8 +456,7 @@
   (test "an explicitly-named val overrides a captured local of the same name"
     ;; :a is passed as 99, shadowing the local a=3 in the snapshot
     (let (dbg (start-debugger) me (self))
-      (spawn (with-debugger dbg
-               (fn () (let (a 3) (break "ov" :a 99) (send me [:done a])))))
+      (spawn (with-debugger dbg (fn () (let (a 3) (break "ov" :a 99) (send me [:done a])))))
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
       (assert= 99 (eval-at dbg 1 "a"))
       (resume-all dbg)
@@ -464,8 +464,7 @@
 
   (test "break-when auto-captures scope too (only when the predicate holds)"
     (let (dbg (start-debugger) me (self))
-      (spawn (with-debugger dbg
-               (fn () (let (x -5) (break-when (< x 0) "neg") (send me [:ok])))))
+      (spawn (with-debugger dbg (fn () (let (x -5) (break-when (< x 0) "neg") (send me [:ok])))))
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
       (assert= -5 (eval-at dbg 1 "x"))
       (resume-all dbg)
@@ -473,8 +472,7 @@
 
   (test "break-when does NOT park when the predicate is false"
     (let (dbg (start-debugger) me (self))
-      (spawn (with-debugger dbg
-               (fn () (let (x 5) (break-when (< x 0) "neg") (send me [:ok])))))
+      (spawn (with-debugger dbg (fn () (let (x 5) (break-when (< x 0) "neg") (send me [:ok])))))
       ;; it should reach :ok without ever parking
       (assert= [:ok] (receive ([:ok] [:ok]) (after *test-wait-ms* :timeout)))
       (assert= 0 (count (paused dbg)))

@@ -9,13 +9,11 @@
 (defmodule proc-test (:use test))
 
 ;; Helpers for the UTF-8 read-boundary regression test below. Both are tail-recursive.
-(defn- proc-test-grow
-  (s n)
+(defn- proc-test-grow (s n)
   "Double `s` (a string of 3-byte chars) until it is at least `n` long."
   (if (>= (count s) n) s (proc-test-grow (str s s) n)))
 
-(defn- proc-test-drain
-  (p want acc)
+(defn- proc-test-drain (p want acc)
   "Concatenate inbound [:proc …] chunks from `p` until they reassemble `want`
    (or a 3 s lull ends the stream — a corrupt reassembly then fails the ="
   (if (= acc want)

@@ -20,8 +20,7 @@
 
 (defn- u8-bytes (hex) (encoding/hex-decode-bytes hex))
 
-(defn- u8-decodes?
-  (hex)
+(defn- u8-decodes? (hex)
   "true if `hex` decodes as UTF-8, false if it is rejected."
   (try (do (string/bytes-> (u8-bytes hex)) true) (catch e false)))
 
@@ -113,18 +112,15 @@
   ;; §4 — overlong forms. The security-critical class: an overlong "/" (C0 AF) slips a
   ;; path separator past a naive filter that only looks for the one-byte 2F.
   (test "4.1 overlong ASCII is rejected"
-    (assert= (u8-accepted (list "C0AF"
-                            "E080AF" "F08080AF" "F8808080AF" "FC80808080AF"))
+    (assert= (u8-accepted (list "C0AF" "E080AF" "F08080AF" "F8808080AF" "FC80808080AF"))
       ()))
 
   (test "4.2 maximum overlong forms are rejected"
-    (assert= (u8-accepted (list "C1BF"
-                            "E09FBF" "F08FBFBF" "F887BFBFBF" "FC83BFBFBFBF"))
+    (assert= (u8-accepted (list "C1BF" "E09FBF" "F08FBFBF" "F887BFBFBF" "FC83BFBFBFBF"))
       ()))
 
   (test "4.3 overlong NUL is rejected (the C0 80 trick)"
-    (assert= (u8-accepted (list "C080"
-                            "E08080" "F0808080" "F880808080" "FC8080808080"))
+    (assert= (u8-accepted (list "C080" "E08080" "F0808080" "F880808080" "FC8080808080"))
       ()))
 
   ;; §5.1/5.2 — UTF-16 surrogates have no UTF-8 encoding. CESU-8 / "modified UTF-8"
@@ -148,8 +144,7 @@
       ()))
 
   (test "5.2 paired surrogates are rejected"
-    (assert= (u8-accepted (list "EDA080EDB080"
-                            "EDA080EDBFBF" "EDAFBFEDB080" "EDAFBFEDBFBF"))
+    (assert= (u8-accepted (list "EDA080EDB080" "EDA080EDBFBF" "EDAFBFEDB080" "EDAFBFEDBFBF"))
       ()))
 
   ;; §5.3 — noncharacters ARE valid UTF-8. Rejecting them is as wrong as accepting a

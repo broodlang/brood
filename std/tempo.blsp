@@ -58,8 +58,7 @@ Adapted from Tempo (Kip Cole, Apache-2.0); see PORTING.md.")
 
 (def- unit-order [:year :month :day :hour :minute :second :ms])
 
-(defn- tp-rank
-  (u)
+(defn- tp-rank (u)
   (cond
     (= u :year) 0
     (= u :month) 1
@@ -93,8 +92,7 @@ time unit — nil means \"nothing coarser\", never \"no such unit\"."
 
 ;; Fixed-width units, in ms. Years and months are NOT here — they vary, and are
 ;; advanced by field arithmetic instead.
-(defn- tp-unit-ms
-  (u)
+(defn- tp-unit-ms (u)
   (cond
     (= u :day) 86400000
     (= u :hour) 3600000
@@ -141,26 +139,21 @@ time unit — nil means \"nothing coarser\", never \"no such unit\"."
 
 ;; ---- construction -----------------------------------------------------------
 
-(defn- tp-in?
-  (v lo hi)
+(defn- tp-in? (v lo hi)
   (and (int? v) (>= v lo) (<= v hi)))
 
-(defn- tp-present
-  (m)
+(defn- tp-present (m)
   ;; The known units present in `m`, coarse to fine.
   (vec (for (u unit-order :when (contains? m u)) u)))
 
-(defn- tp-unknown-units
-  (m)
+(defn- tp-unknown-units (m)
   (vec (for (k (keys m) :when (not (tp-unit? k))) k)))
 
-(defn- tp-contiguous?
-  (present)
+(defn- tp-contiguous? (present)
   ;; The units must be exactly the first N of unit-order — no gaps.
   (= present (vec (take (count present) unit-order))))
 
-(defn- tp-validate
-  (m)
+(defn- tp-validate (m)
   ;; nil when `m` is a valid component map, otherwise the reason it is not.
   (let (bad (tp-unknown-units m)
         present (tp-present m)
@@ -231,8 +224,7 @@ a time unit — nil means \"`t` does not carry it\", never \"no such unit\".
     (tempo/units (tempo/parse! \"2026-06\"))   → [:year :month]"
   (vec (take (+ (tp-rank (tempo-res t)) 1) unit-order)))
 
-(defn- tp-restrict
-  (m u)
+(defn- tp-restrict (m u)
   ;; `m` keeping only the units at or coarser than `u`.
   (fold (fn (acc k) (assoc acc k (get m k))) {} (take (+ (tp-rank u) 1) unit-order)))
 
@@ -256,8 +248,7 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
 ;; safe without a mutually-agreed expanded form, but `->iso` emits it, so
 ;; refusing to read it would leave the module unable to parse its own output.
 
-(defn- tp-digits?
-  (s)
+(defn- tp-digits? (s)
   ;; DIGITS, not "parses as an integer". `string/->number` reads a sign, so the
   ;; obvious `(int? (string/->number s))` accepts \"+6\" and would let
   ;; \"2026-+6\" through as June. The sign a year may legitimately carry is
@@ -267,20 +258,17 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
     (every? (fn (i) (>= (index-of "0123456789" (string/char-at s i)) 0))
       (range 0 (string/length s)))))
 
-(defn- tp-int
-  (s)
+(defn- tp-int (s)
   (let (n (if (string? s) (string/->number s) nil))
     (if (int? n) n nil)))
 (sig tp-int ((or string nil) -> (or int nil)))
 
-(defn- tp-frac->ms
-  (frac)
+(defn- tp-frac->ms (frac)
   ;; Fractional seconds → ms, truncating past three digits. \"5\" → 500, \"05\" → 50.
   (let (padded (str frac "000"))
     (tp-int (str (string/char-at padded 0) (string/char-at padded 1) (string/char-at padded 2)))))
 
-(defn- tp-parse-date-parts
-  (s)
+(defn- tp-parse-date-parts (s)
   ;; \"2026-06-15\" → {:year 2026 :month 6 :day 15}, or nil on a shape failure.
   (let (parts (string/split s "-"))
     (when (and (>= (count parts) 1) (<= (count parts) 3) (every? tp-digits? parts))
@@ -289,8 +277,7 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
         (if (> (count parts) 2) (assoc ym :day (tp-int (nth parts 2))) ym)))))
 (sig tp-parse-date-parts (string -> (or map nil)))
 
-(defn- tp-parse-time-parts
-  (s)
+(defn- tp-parse-time-parts (s)
   ;; \"14:30:05.123\" → {:hour … :minute … :second … :ms …}, or nil.
   (let (dot (string/split s ".")
         hms (or (nth dot 0) "")
@@ -353,23 +340,20 @@ worse.
 ;; \"1 July\" adjacent rather than overlapping, and why no `end-of-day` helper
 ;; appears anywhere in this module.
 
-(defn- tp-field
-  (m k default)
+(defn- tp-field (m k default)
   ;; A unit of a validated tempo's unit map, which `tp-validate` has already
   ;; pinned to an int — this is where the checker learns that.
   (get m k default))
 (sig tp-field (map keyword int -> int))
 
-(defn- tp-dt
-  (y mo d h mi s ms)
+(defn- tp-dt (y mo d h mi s ms)
   ;; A real `datetime` record, not a lookalike map. `datetime/->epoch-ms` reads
   ;; its fields with `get`, so a plain map would work — but relying on that
   ;; would make this module depend on an undocumented duck-typing contract.
   (datetime/datetime y mo d h mi s ms))
 (sig tp-dt (int int int int int int int -> datetime))
 
-(defn- tp-floor-dt
-  (t)
+(defn- tp-floor-dt (t)
   (let (m (tempo-by-unit t))
     (tp-dt (get m :year)
       (get m :month 1)
@@ -514,8 +498,7 @@ Either argument may be anything implementing `Spanning`.
       (< a1 b1) :overlaps
       else :overlapped-by)))
 
-(defn- tp-rel?
-  (a b wanted)
+(defn- tp-rel? (a b wanted)
   (= (relation a b) wanted))
 
 (defn before? (a b) "True when `a` ends strictly before `b` begins." (tp-rel? a b :before))
@@ -561,8 +544,7 @@ Either argument may be anything implementing `Spanning`.
 ;; single linear sweeps rather than quadratic pairwise work, and it means two
 ;; sets covering the same timeline are `=` to each other.
 
-(defn- tp-merge-acc
-  (xs acc)
+(defn- tp-merge-acc (xs acc)
   ;; `xs` sorted spans; `acc` the merged result so far, reversed.
   (if (empty? xs)
     (vec (reverse acc))
@@ -573,8 +555,7 @@ Either argument may be anything implementing `Spanning`.
           (cons (span (span-from prev) (math/max (span-to prev) (span-to s))) (rest acc)))
         (tp-merge-acc (rest xs) (cons s acc))))))
 
-(defn- tp-normalize
-  (ss)
+(defn- tp-normalize (ss)
   (tp-merge-acc (sort-by span-from (vec (for (s ss :when (< (span-from s) (span-to s))) s))) nil))
 
 (defn set-of (xs)
@@ -584,8 +565,7 @@ Either argument may be anything implementing `Spanning`.
     (count (tempo/spans (tempo/set-of [(tempo/parse! \"2026-06\") (tempo/parse! \"2026-07\")])))   → 1"
   (iset (tp-normalize (map ->span xs))))
 
-(defn- tp-as-set
-  (x)
+(defn- tp-as-set (x)
   (if (iset? x) x (iset (tp-normalize [(->span x)]))))
 
 (defn spans (x)
@@ -601,8 +581,7 @@ value yields a one-element vector."
   (let (ss (spans x))
     (if (empty? ss) nil (span (span-from (nth ss 0)) (span-to (last ss))))))
 
-(defn- tp-width-acc
-  (acc ss)
+(defn- tp-width-acc (acc ss)
   ;; A tail-recursive sum rather than a `fold`: the checker cannot see that a
   ;; fold whose seed is an int and whose step adds ints stays int.
   (if (empty? ss)
@@ -627,8 +606,7 @@ between them stays a gap.
     (count (tempo/spans (tempo/union (tempo/parse! \"2026-06\") (tempo/parse! \"2026-07\"))))   → 1"
   (iset (tp-normalize (into (vec (spans a)) (spans b)))))
 
-(defn- tp-inter-acc
-  (xs ys acc)
+(defn- tp-inter-acc (xs ys acc)
   ;; Linear sweep over two sorted disjoint span lists.
   (if (or (empty? xs) (empty? ys))
     (vec (reverse acc))
@@ -647,8 +625,7 @@ between them stays a gap.
     (tempo/->iso-set (tempo/intersection (tempo/parse! \"2026-06\") (tempo/parse! \"2026-06-15\"))) → \"2026-06-15T00:00:00.000Z/2026-06-16T00:00:00.000Z\""
   (iset (tp-inter-acc (spans a) (spans b) nil)))
 
-(defn- tp-diff-acc
-  (xs ys acc)
+(defn- tp-diff-acc (xs ys acc)
   ;; `xs` minus `ys`, both sorted and disjoint. Every step either retires a span
   ;; from one side or shrinks the head of `xs`, so it terminates.
   (if (empty? xs)
@@ -710,8 +687,7 @@ collection predicate, and shadowing it inside this module would be a trap.
 
 ;; ---- enumeration ------------------------------------------------------------
 
-(defn- tp-part-count
-  (t)
+(defn- tp-part-count (t)
   ;; How many parts `t` has at the next finer unit — arithmetic, so `explain`
   ;; and friends never materialise 1000 records just to print a number.
   (let (f (finer (tempo-res t)))
@@ -724,8 +700,7 @@ collection predicate, and shadowing it inside this module would be a trap.
       (= f :second) 60
       else 1000)))
 
-(defn- tp-part-start
-  (u)
+(defn- tp-part-start (u)
   ;; Months and days count from 1; clock units from 0.
   (if (or (= u :month) (= u :day)) 1 0))
 
@@ -752,8 +727,7 @@ wrong. February yields 28 or 29 parts because the calendar says so.
             m (tempo-by-unit t))
         (vec (for (v (range lo (+ lo (tp-part-count t)))) (tempo (assoc m f v) f)))))))
 
-(defn- tp-of-datetime
-  (dt u)
+(defn- tp-of-datetime (dt u)
   ;; A datetime truncated to unit `u`, as a tempo.
   (let (all {:year (get dt :year)
              :month (get dt :month)
@@ -801,15 +775,13 @@ arithmetic for years and months, exact millisecond arithmetic below that.
 
 ;; ---- formatting -------------------------------------------------------------
 
-(defn- tp-pad-digits
-  (n w)
+(defn- tp-pad-digits (n w)
   (let (s (str n)
         need (- w (string/length s)))
     (if (> need 0) (str (string/repeat "0" need) s) s)))
 (sig tp-pad-digits (int int -> string))
 
-(defn- tp-pad
-  (n w)
+(defn- tp-pad (n w)
   ;; The sign is handled before padding — otherwise year -44 pads to \"0-44\".
   ;; Unlike `datetime/dt-zero-pad` this does NOT spend a digit on the sign: only
   ;; years can be negative here, and ISO 8601's expanded form wants four digits
@@ -887,8 +859,7 @@ empty set renders as the empty string."
 (impl Display tempo/span (->string [s] (->iso-span s)))
 (impl Display tempo/iset (->string [s] (->iso-set s)))
 
-(defn- tp-unit-name
-  (u)
+(defn- tp-unit-name (u)
   (cond
     (= u :year) "year"
     (= u :month) "month"

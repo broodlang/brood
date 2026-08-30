@@ -28,8 +28,7 @@
 (def *reg-writers* 200)
 
 ;; Fan `n` processes out over `f` (called with its index) and wait for all of them.
-(defn- reg-fan
-  (n f)
+(defn- reg-fan (n f)
   (let (me (self))
     (dotimes (i n) (spawn (do (f i) (send me [:reg-done]))))
     (dotimes (_ n) (receive ([:reg-done] :ok) (after 30000 :timeout)))))
@@ -140,9 +139,7 @@
   (test "register-file-type — every concurrently registered rule is kept"
     (reg-fan 64 (fn (i) (register-file-type (str ".rt" i) (keyword (str "rt/t" i)))))
     (assert= 64
-      (count (filter (fn (i)
-                       (any? (fn (r) (= (get r :match) (str ".rt" i)))
-                         *auto-type-by-file*))
+      (count (filter (fn (i) (any? (fn (r) (= (get r :match) (str ".rt" i))) *auto-type-by-file*))
                (range 64)))))
 
   (test "register-type-layers — every concurrently bound type is kept"

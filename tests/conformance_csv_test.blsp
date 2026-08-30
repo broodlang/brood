@@ -26,18 +26,15 @@
 
 (defn- csv-dir (sub) (corpus-files "csv" (path/join "data" sub)))
 
-(defn- csv-stem
-  (path)
+(defn- csv-stem (path)
   (let (b (path/basename path) i (index-of b "."))
     (if (< i 0) b (string/substring b 0 i))))
 
 ;; A row map keyed by keyword -> the same map keyed by the header string.
-(defn- csv-stringify-keys
-  (m)
+(defn- csv-stringify-keys (m)
   (fold (fn (acc pair) (let ([k v] pair) (assoc acc (->string k) v))) {} m))
 
-(defn- csv-expected
-  (stem)
+(defn- csv-expected (stem)
   (let (p (first (filter (fn (f) (= (csv-stem f) stem)) (csv-dir "json"))))
     (if (nil? p)
       (error "conformance-csv: no json expectation for " stem)
@@ -46,8 +43,7 @@
 (defn- csv-actual (path) (into [] (csv/decode-maps (file/slurp path))))
 
 ;; [checked mismatches], mismatches as [stem expected actual].
-(defn- csv-scan
-  (files checked bad)
+(defn- csv-scan (files checked bad)
   (cond
     (nil? files) [checked (reverse bad)]
     (= (csv-stem (first files)) csv-broken-upstream) (csv-scan (rest files) checked bad)

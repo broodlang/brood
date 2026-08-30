@@ -37,8 +37,7 @@
 ;; `(spawn (fn () body))` and `(spawn body)` then mean the same. (The dual footgun —
 ;; a bare function *name* like `(spawn worker)`, which used to yield the closure and
 ;; exit — is handled by `%spawn-body-thunk` below, which wraps a symbol as a *call*.)
-(defn- %spawn-thunk-form?
-  (form)
+(defn- %spawn-thunk-form? (form)
   (and (list? form)
     (not (empty? form))
     (= (first form) 'fn)
@@ -158,8 +157,7 @@ passed through (not re-wrapped), like `spawn`."
 ;; lists `a` twice, but binds it once (the repeat compiles to an equality check).
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %receive-dedupe
-    (vars seen)
+  (defn- %receive-dedupe (vars seen)
     (cond
       (empty? vars) nil
       (%match-member? (first vars) seen) (%receive-dedupe (rest vars) seen)
@@ -173,8 +171,7 @@ passed through (not re-wrapped), like `spawn`."
 ;; two. Shape: `[clause vars idx]`.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %receive-prep
-    (clauses idx)
+  (defn- %receive-prep (clauses idx)
     (if (empty? clauses)
       nil
       (cons [(first clauses) (%receive-clause-vars (first (first clauses))) idx]
@@ -183,8 +180,7 @@ passed through (not re-wrapped), like `spawn`."
 ;; Replace a clause's body with `[idx var…]` — the clause's index plus the values its
 ;; pattern bound. Keeps the :when guard in place, so the match compiler still gates on
 ;; it and the guard still runs exactly once, during the scan.
-(defn- %receive-result-clause
-  (prep)
+(defn- %receive-result-clause (prep)
   (let (clause (nth prep 0)
         vars (nth prep 1)
         idx (nth prep 2)
@@ -198,8 +194,7 @@ passed through (not re-wrapped), like `spawn`."
 ;; matcher's result vector back into the clause's pattern variables.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %receive-binds
-    (vars r i)
+  (defn- %receive-binds (vars r i)
     (if (empty? vars)
       nil
       (cons (first vars)
@@ -207,8 +202,7 @@ passed through (not re-wrapped), like `spawn`."
 
 ;; One clause's call-site code: rebind its pattern variables from the result vector,
 ;; then run its body.
-(defn- %receive-body-code
-  (prep r)
+(defn- %receive-body-code (prep r)
   (let (clause (nth prep 0)
         more (rest clause)
         body (if (= (first more) :when) (rest (rest more)) more)
@@ -222,8 +216,7 @@ passed through (not re-wrapped), like `spawn`."
 ;; position, so a receive loop stays O(1) stack.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %receive-dispatch
-    (preps r)
+  (defn- %receive-dispatch (preps r)
     (if (empty? (rest preps))
       (%receive-body-code (first preps) r)
       `(if (= (nth ~r 0) ~(nth (first preps) 2))
@@ -233,8 +226,7 @@ passed through (not re-wrapped), like `spawn`."
 ;; Walk the clause list and error if an `(after ...)` clause appears before the last
 ;; position — a non-last `after` would silently become a pattern clause matching the
 ;; symbol `after`, which is almost certainly a mistake.
-(defn- %receive-check-after
-  (clauses)
+(defn- %receive-check-after (clauses)
   (if (or (empty? clauses) (empty? (rest clauses)))
     nil
     (if (and (pair? (first clauses)) (%eq (first (first clauses)) 'after))
@@ -245,8 +237,7 @@ passed through (not re-wrapped), like `spawn`."
 
 ;; Split clauses into [real-clauses ms-or-nil timeout-body-or-nil], peeling an
 ;; optional trailing (after ms body...). `after` as a final clause head is reserved.
-(defn- %receive-split
-  (clauses)
+(defn- %receive-split (clauses)
   (let (lst (last clauses))
     (if (and (pair? lst) (= (first lst) 'after))
       [(but-last clauses) (second lst) `(do ~@(rest (rest lst)))]
@@ -268,8 +259,7 @@ passed through (not re-wrapped), like `spawn`."
 ;; irrelevant to it — a `:when` can only reject a message the tag already admitted.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %receive-tags
-    (clauses)
+  (defn- %receive-tags (clauses)
     (if (empty? clauses)
       nil
       (let (pat (first (first clauses))
@@ -288,8 +278,7 @@ passed through (not re-wrapped), like `spawn`."
 ;; different, disables it (nil), exactly like `%receive-tags`. The kernel only acts on it when
 ;; the value turns out to be a `ref` this process minted, so a false positive here costs
 ;; nothing but a wasted comparison.
-(defn- %receive-pinned-in
-  (pat)
+(defn- %receive-pinned-in (pat)
   "The single pinned expression inside `pat`, or nil if it pins none or several."
   (cond
     (%match-pin? pat) (second pat)
@@ -307,8 +296,7 @@ passed through (not re-wrapped), like `spawn`."
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn- %receive-pin
-    (clauses)
+  (defn- %receive-pin (clauses)
     "The **symbol** pinned by every clause, or nil when they do not agree.
 
   Restricted to a symbol deliberately. The hint is emitted as a form that the call site

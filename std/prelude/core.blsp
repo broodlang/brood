@@ -219,8 +219,7 @@ this by implementing the `Display` ability, which takes over this name below.
         (let (parts (%seqview-parts coll))
           (fold ((%vector-ref parts 1) f) acc (%vector-ref parts 0)))
         (%fold-loop f acc (seq coll))))))
-(defn- %fold-loop
-  (f acc coll)
+(defn- %fold-loop (f acc coll)
   (if (empty? coll) acc (%fold-loop f (f acc (first coll)) (rest coll))))
 
 ;; `cons` with its arguments flipped — the workhorse passed to `fold` to build a
@@ -233,8 +232,7 @@ this by implementing the `Display` ability, which takes over this name below.
 ;; nearly every sequence builder (`map`/`filter`/`take`/`zip`/`range`/…), so
 ;; dropping the per-element `%flip-cons` `apply` frame here pays off across the
 ;; whole library. Coerce a map to its pairs once via `seq`, as `fold` did.
-(defn- %reverse-acc
-  (coll acc)
+(defn- %reverse-acc (coll acc)
   (if (empty? coll) acc (%reverse-acc (rest coll) (cons (first coll) acc))))
 (defn reverse (coll)
   "The items of `coll` in reverse order, as a list.
@@ -259,8 +257,7 @@ A string is not a sequence here — reverse its `string/->list` if you need that
     (but-last [1 2 3])   → (1 2)"
   (reverse (rest (reverse xs))))
 
-(defn- %reverse-onto
-  (coll tail)
+(defn- %reverse-onto (coll tail)
   "The items of `coll` reversed, prepended onto `tail`. `(%reverse-onto xs ys)` is
 `(append (reverse xs) ys)` — but it walks `xs` **once**, so it is the spelling to
 reach for when a tail-recursive loop has accumulated a reversed prefix and wants to
@@ -494,8 +491,7 @@ inlines, while this wrapper stays a call — and it does not mislead past two ar
 ;; binding, and re-def every reload — the bug this fixes). Computed at LOAD time, where
 ;; `reflect/current-ns` is the module being loaded; a bare/root context (no current-ns) or an
 ;; already-qualified name passes through, matching `def`.
-(defn- %defonce-qualified-name
-  (sym)
+(defn- %defonce-qualified-name (sym)
   (let (ns (reflect/current-ns))
     (if (or (nil? ns) (includes? (str sym) "/"))
       sym
@@ -681,8 +677,7 @@ names accept anything, so a contract never throws on a type it can't interpret.
                             (type-matches? ftype (get v k)))))
                 flds)
               (or open?
-                (every? (fn (kv)
-                          (any? (fn (field) (%eq (first field) (first kv))) flds))
+                (every? (fn (kv) (any? (fn (field) (%eq (first field) (first kv))) flds))
                   (%map-pairs v)))))
             (%eq h
               'tuple)
@@ -719,8 +714,7 @@ names accept anything, so a contract never throws on a type it can't interpret.
     (%eq t 'list) (list? v)
     (%eq t 'vector) (vector? v)
     else true))
-(defn- %contract-check-args
-  (name ptypes args i)
+(defn- %contract-check-args (name ptypes args i)
   "Throw if any argument fails its declared type. Pairwise over the overlap —
 arity itself is the static checker's job."
   (when (and (pair? ptypes) (pair? args))
@@ -737,8 +731,7 @@ arity itself is the static checker's job."
                ")")))
     (%contract-check-args name (rest ptypes) (rest args) (inc i))))
 
-(defn- %contract-check-rest
-  (name rtype args)
+(defn- %contract-check-rest (name rtype args)
   "Throw if any rest argument fails its declared rest type."
   (when (pair? args)
     (unless (type-matches? rtype (first args))
@@ -752,8 +745,7 @@ arity itself is the static checker's job."
                ")")))
     (%contract-check-rest name rtype (rest args))))
 
-(defn- %sig-pos
-  (xs x n)
+(defn- %sig-pos (xs x n)
   "Position of `x` in the list `xs` (from index `n`), or -1. Expansion-time helper
 for `sig!` that predates `index-of` in the prelude's own load order."
   (cond
@@ -761,19 +753,16 @@ for `sig!` that predates `index-of` in the prelude's own load order."
     (%eq (first xs) x) n
     else (%sig-pos (rest xs) x (%add n 1))))
 
-(defn- %sig-rev
-  (xs acc)
+(defn- %sig-rev (xs acc)
   "`xs` reversed onto `acc`. Expansion-time helper — see `%sig-take`."
   (if (nil? xs) acc (%sig-rev (rest xs) (cons (first xs) acc))))
 
-(defn- %sig-take-acc
-  (n xs acc)
+(defn- %sig-take-acc (n xs acc)
   (if (or (%le n 0) (nil? xs))
     (%sig-rev acc nil)
     (%sig-take-acc (%sub n 1) (rest xs) (cons (first xs) acc))))
 
-(defn- %sig-take
-  (n xs)
+(defn- %sig-take (n xs)
   "The first `n` elements of `xs`. Expansion-time helper for `sig!`, for the same
 reason `%sig-pos` is one: this runs while the PRELUDE is being expanded, and
 `take` is defined in `seq.blsp`, which the prelude concatenates AFTER this file
@@ -784,14 +773,12 @@ take` — on every COLD boot cache, i.e. the first run after any rebuild, while 
 warm cache skipped expansion and looked fine (KI-81)."
   (%sig-take-acc n xs nil))
 
-(defn- %sig-drop
-  (n xs)
+(defn- %sig-drop (n xs)
   "`xs` without its first `n` elements. Expansion-time helper for `sig!` — see
 `%sig-take` for why the general `drop` cannot be called here."
   (if (or (%le n 0) (nil? xs)) xs (%sig-drop (%sub n 1) (rest xs))))
 
-(defn- %sig-nth
-  (xs n)
+(defn- %sig-nth (xs n)
   "The `n`th element of `xs`, or nil. Expansion-time helper for `sig!` — see
 `%sig-take` for why the general `nth` cannot be called here."
   (cond
@@ -799,12 +786,10 @@ warm cache skipped expansion and looked fine (KI-81)."
     (%le n 0) (first xs)
     else (%sig-nth (rest xs) (%sub n 1))))
 
-(defn- %sig-gensyms-acc
-  (n acc)
+(defn- %sig-gensyms-acc (n acc)
   (if (%le n 0) acc (%sig-gensyms-acc (%sub n 1) (cons (gensym "arg") acc))))
 
-(defn- %sig-gensyms
-  (n)
+(defn- %sig-gensyms (n)
   "A list of `n` fresh argument symbols. Expansion-time helper for `sig!`,
 replacing `(map (fn (_) (gensym \"arg\")) (range (count ptypes)))` — `map`,
 `range` and `count` are all as unreachable during prelude expansion as `take`
@@ -962,8 +947,7 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
 ;; the orphan last element when count is odd, nil when even. Uses only
 ;; `if`/`empty?`/`first`/`rest` — all kernel primitives — so it's safe to call
 ;; during prelude loading before `odd?`/`count`/`last` are defined.
-(defn- %cond-orphan
-  (clauses)
+(defn- %cond-orphan (clauses)
   (if (empty? clauses)
     nil
     (if (empty? (rest clauses))
@@ -1002,8 +986,7 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
 ;; (`MAX_EXPAND_ROUNDS` in eval/macros.rs) — keep the two in step.
 (def- %macroexpand-max-rounds 256)
 
-(defn- %macroexpand-loop
-  (form n)
+(defn- %macroexpand-loop (form n)
   (if (= n 0)
     (error "macroexpand: no fixpoint after "
       %macroexpand-max-rounds " rounds (a macro that expands to itself?)")

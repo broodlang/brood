@@ -31,8 +31,7 @@ because half the corpora encode their expectations as hex.")
   (file/dir? (corpus-dir suite)))
 
 ;; Absolute paths of every entry directly under `dir`, sorted — nil if absent.
-(defn- corpus-entries
-  (dir)
+(defn- corpus-entries (dir)
   (if (file/dir? dir) (map (fn (e) (path/join dir e)) (sort (file/ls dir))) nil))
 
 (defn corpus-files (suite &optional subdir)
@@ -89,8 +88,7 @@ reader, exactly as the Scheme harness's repeated `(read)` drops them."
    "E" 14
    "F" 15})
 
-(defn- corpus-hex-at
-  (s i n acc)
+(defn- corpus-hex-at (s i n acc)
   (if (= i n)
     acc
     (let (d (get corpus-hex-digits (string/char-at s i)))

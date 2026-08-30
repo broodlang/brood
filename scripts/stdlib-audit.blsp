@@ -19,8 +19,7 @@
 ;; Load everything so the audit sees the whole surface, not just what boot happens to pull.
 (doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))
 
-(defn- public-names
-  ()
+(defn- public-names ()
   "Every public global the runtime can see, minus the `%` primitives (mechanism, not
 vocabulary) and minus anything a module marked private."
   (sort (filter (fn (s)
@@ -28,21 +27,18 @@ vocabulary) and minus anything a module marked private."
                     (and (not (string/starts-with? n "%")) (not (reflect/private? s)))))
           (reflect/global-names))))
 
-(defn- module-of
-  (n)
+(defn- module-of (n)
   "The module prefix of qualified name `n`, or nil when it is a bare core name.
 A leading `/` (the bare `/` operator) is not a namespace separator."
   (let (i (index-of n "/"))
     (if (and i (> i 0)) (string/substring n 0 i) nil)))
 
-(defn- local-of
-  (n)
+(defn- local-of (n)
   (let (i (index-of n "/")) (if (and i (> i 0)) (string/substring n (inc i) (count n)) n)))
 
 ;; ---- 1. stutter -------------------------------------------------------------
 
-(defn- stutters?
-  (n)
+(defn- stutters? (n)
   "Does the local part repeat its module — `ansi/strip-ansi`, `bytes/bytes-at`? The last
 segment of the module is what must not reappear, so `editor/buffer/buffer-put` counts."
   (let (m (module-of n))
@@ -55,8 +51,7 @@ segment of the module is what must not reappear, so `editor/buffer/buffer-put` c
 
 ;; ---- 2. docs ----------------------------------------------------------------
 
-(defn- example?
-  (d)
+(defn- example? (d)
   "Does docstring `d` show a usage example? Either an indented form, an arrow, or a
 parenthesised call on its own line — the shapes the stdlib actually uses."
   (and d
@@ -69,8 +64,7 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
 
 ;; ---- report -----------------------------------------------------------------
 
-(defn- report
-  (label xs)
+(defn- report (label xs)
   (io/puts "")
   (io/puts "== " label " (" (count xs) ")")
   (doseq (chunk (partition 6 (sort xs)))

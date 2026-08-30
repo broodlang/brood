@@ -22,8 +22,7 @@
 
 ;; N core instances of one module holding a `pages`-page (64 KiB each) memory.
 ;; Nothing is written, so a permitted load costs reservation, not resident bytes.
-(defn- memory-wat
-  (pages n)
+(defn- memory-wat (pages n)
   (str "(component (core module $m (memory (export \"m\") "
     pages
     "))"
@@ -31,15 +30,13 @@
       (map (fn (i) (str " (core instance $i" i " (instantiate $m))")) (range n)))
     ")"))
 
-(defn- table-wat
-  (elems)
+(defn- table-wat (elems)
   (str "(component (core module $m (table (export \"t\") "
     elems " funcref))" " (core instance $i (instantiate $m)))"))
 
 ;; :loaded / :denied — and a permitted instance is closed, never leaked (an
 ;; instance is a manual resource; the suite must not strand a 250 MiB store).
-(defn- try-load
-  (src)
+(defn- try-load (src)
   (try
     (let (i (instantiate src)) (close i) :loaded)
     (catch e :denied)))

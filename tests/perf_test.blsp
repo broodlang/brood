@@ -23,8 +23,7 @@
         ;; A counter-armed build: no hint needed, and the verdict must be a real label.
         (do
           (is (nil? (get r :hint)))
-          (is (includes? [:dispatch-bound :env-bound :balanced :no-data]
-                (get r :verdict))))
+          (is (includes? [:dispatch-bound :env-bound :balanced :no-data] (get r :verdict))))
         ;; The ordinary build: a claim here would be a claim about zeros.
         (do
           (assert= :no-data (get r :verdict))

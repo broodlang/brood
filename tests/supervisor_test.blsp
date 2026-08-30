@@ -120,8 +120,7 @@
 (describe "supervisor: one-for-all"
   :isolated (test "a crash restarts every child with a fresh pid"
     (let (me (self)
-          sup (start (list (tagged-spec me :a :permanent)
-                       (tagged-spec me :b :permanent))
+          sup (start (list (tagged-spec me :a :permanent) (tagged-spec me :b :permanent))
                 {:strategy :one-for-all :max-restarts 5 :max-seconds 5})
           gen1 (collect-ups 2 {}))
       ; crash a → kills + restarts both
@@ -135,8 +134,7 @@
 
   (test "a :temporary sibling is terminated but not revived"
     (let (me (self)
-          sup (start (list (tagged-spec me :a :permanent)
-                       (tagged-spec me :b :temporary))
+          sup (start (list (tagged-spec me :a :permanent) (tagged-spec me :b :temporary))
                 {:strategy :one-for-all})
           gen1 (collect-ups 2 {})
           mb (monitor (get gen1 :b)))
@@ -176,9 +174,7 @@
     ;; the 3rd restart trips the intensity window and the supervisor throws,
     ;; so a monitor on the supervisor sees `[:down … [:error …]]`.
     ;; (Each crash prints a "process … died" line to stderr — expected here.)
-    (let (sup (start (list {:id :crashy
-                            :restart :permanent
-                            :start (fn () (spawn (error "always")))})
+    (let (sup (start (list {:id :crashy :restart :permanent :start (fn () (spawn (error "always")))})
                 {:max-restarts 2 :max-seconds 5})
           mref (monitor sup))
       (assert= :gaveup
@@ -364,18 +360,14 @@
   ;; child reports last, and a restart keeps the child in its original place
   ;; (its pid changes, its position must not).
   (test "which-children reports start order, including children added dynamically"
-    (let (sup (start (list {:id :a
-                            :start (fn () (spawn-link (parked)))
-                            :restart :permanent}
+    (let (sup (start (list {:id :a :start (fn () (spawn-link (parked))) :restart :permanent}
                        {:id :b :start (fn () (spawn-link (parked))) :restart :permanent})))
       (start-child sup {:id :c :start (fn () (spawn-link (parked))) :restart :permanent})
       (assert= (list :a :b :c) (map (fn (k) (get k :id)) (which-children sup)))
       (stop sup)))
 
   (test "a restarted child keeps its position in start order"
-    (let (sup (start (list {:id :a
-                            :start (fn () (spawn-link (parked)))
-                            :restart :permanent}
+    (let (sup (start (list {:id :a :start (fn () (spawn-link (parked))) :restart :permanent}
                        {:id :b :start (fn () (spawn-link (parked))) :restart :permanent}
                        {:id :c :start (fn () (spawn-link (parked))) :restart :permanent}))
           before (get (second (which-children sup)) :pid)

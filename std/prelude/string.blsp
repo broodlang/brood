@@ -51,8 +51,7 @@
 ;; contract path (tools.blsp `%contract-defer!`) never fires for them — an above-defn
 ;; prelude sig under BROOD_CONTRACTS=1 would silently not enforce. In std MODULES the
 ;; deferral makes above-defn placement fine.
-(defn- %path-last-slash
-  (s i)
+(defn- %path-last-slash (s i)
   (cond (< i 0) -1 (= (string/substring s i (inc i)) "/") i else (%path-last-slash s (dec i))))
 (sig %path-last-slash (string int -> int))
 
@@ -86,8 +85,7 @@
     (if (= m 0) 2463534242 m)))
 (sig %rand-seed (int -> int))
 
-(defn- %rand-step
-  (state)
+(defn- %rand-step (state)
   ;; One xorshift32 transition over a nonzero 32-bit `state`.
   (let (x (bit/and (bit/xor state (bit/shift-left state 13)) *rand-mask*)
         x (bit/xor x (bit/shift-right x 17))
@@ -128,13 +126,11 @@
 ;; 4096 matches Elixir's `Inspect` `:printable_limit`, which exists for exactly this.
 (defdyn *print-string-length* 4096)
 
-(defn- %pr-elide
-  (parts over)
+(defn- %pr-elide (parts over)
   "`parts` joined for display, with the `…` length marker appended when `over`."
   (string/join " " (if over (append parts (list "…")) parts)))
 
-(defn- %pr-limit
-  (items)
+(defn- %pr-limit (items)
   "`[shown over?]` for `items` under `*print-length*` — at most that many items,
 plus whether any were dropped. Takes one extra item to detect the overflow, so a
 long collection is never walked past the limit."
@@ -145,31 +141,26 @@ long collection is never walked past the limit."
             over (> (count taken) lim))
         [(if over (take lim taken) taken) over]))))
 
-(defn- %pr-safely
-  (thunk x)
+(defn- %pr-safely (thunk x)
   "Run `thunk`, falling back to `(pr-str x)` if it raises. The guard for a value
 that looks like a container but doesn't walk like one — an improper/dotted pair
 such as `(cons 1 2)` is the real case. Per-node, so one odd subtree degrades to
 faithful printing instead of losing the bound on the whole value."
   (try (thunk) (catch _ (pr-str x))))
 
-(defn- %pr-bounded-seq
-  (x level open close)
+(defn- %pr-bounded-seq (x level open close)
   (let ([shown over] (%pr-limit x))
     (str open (%pr-elide (map (fn (i) (%pr-bounded i (inc level))) shown) over) close)))
 
-(defn- %pr-bounded-map
-  (x level)
+(defn- %pr-bounded-map (x level)
   (let ([shown over] (%pr-limit (%map-pairs x)))
     (str "{"
-      (%pr-elide (map (fn ([k v])
-                        (str (%pr-bounded k (inc level)) " " (%pr-bounded v (inc level))))
+      (%pr-elide (map (fn ([k v]) (str (%pr-bounded k (inc level)) " " (%pr-bounded v (inc level))))
                    shown)
         over)
       "}")))
 
-(defn- %pr-bounded-text
-  (x)
+(defn- %pr-bounded-text (x)
   "A text leaf — a string or a byte string — under `*print-string-length*`: at most
 that many characters (bytes) print, with the `…` marker inside the closing quote
 (`\"abc…\"`, `#b\"ab…\"`).
@@ -187,8 +178,7 @@ have built the flood this bound exists to prevent."
         ;; drop the closing quote, mark the elision, close again
         (str (string/substring printed 0 (dec (string/length printed))) "…\"")))))
 
-(defn- %pr-bounded
-  (x level)
+(defn- %pr-bounded (x level)
   "`x` printed at nesting `level`, honouring every bound. Containers recurse, text
 leaves are length-bounded, anything else goes to `pr-str`.
 

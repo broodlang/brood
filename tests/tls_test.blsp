@@ -8,8 +8,7 @@
 
 (defmodule tls-test (:use test) (:use tcp :exclude [send]))
 
-(defn- tls-serve-one
-  (reply)
+(defn- tls-serve-one (reply)
   "Spawn a TLS echo-ish server: accept ONE connection, read one chunk, send
 `reply`, close. Returns [port cert] to the caller."
   (let (me (self))

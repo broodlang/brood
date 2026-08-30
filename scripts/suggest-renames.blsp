@@ -19,8 +19,7 @@
 
 (doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))
 
-(defn- candidates
-  (n)
+(defn- candidates (n)
   "Every public global whose LOCAL part is exactly `n` — i.e. the places `n` could have
 moved to. A `%`-prefixed primitive counts: several names became mechanism rather than
 vocabulary, and the caller still needs to know."
@@ -31,8 +30,7 @@ vocabulary, and the caller still needs to know."
                       (and i (> i 0) (= (string/substring full (inc i) (count full)) n))))
             (reflect/global-names)))))
 
-(defn- split-candidate
-  (n)
+(defn- split-candidate (n)
   "`mod/rest` when the bare name `n` is `mod-rest` and that qualified name exists.
 
 The dominant shape of this ecosystem's renames: a bare `gui-size` became `gui/size`,
@@ -49,8 +47,7 @@ before giving up."
                         (reduce (fn (a b) (if (= a "") b (str a "-" b))) "" (drop i parts))))
                  (range 1 (count parts))))))))
 
-(defn- stdin-lines
-  (acc)
+(defn- stdin-lines (acc)
   ;; `read-line` is the only stdin door (there is no bulk reader); nil marks EOF.
   (let (l (read-line)) (if (nil? l) (reverse acc) (stdin-lines (cons l acc)))))
 

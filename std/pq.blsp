@@ -29,8 +29,7 @@ falsy collection, so `(if pq …)` used to take the else branch on an empty queu
     (count (pq/empty))   → 0"
   (pq nil))
 
-(defn- sorted-insert
-  (entries pri val)
+(defn- sorted-insert (entries pri val)
   ;; Tail-recursive: accumulate the (reversed) higher-priority prefix and splice
   ;; the new entry once, so a large queue can't overflow the stack on insert.
   ;; Strict `<` so a new item stops *after* existing equal-priority items —
