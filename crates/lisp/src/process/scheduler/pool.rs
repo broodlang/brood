@@ -17,7 +17,7 @@ use super::*;
 /// fifty is lost" into "created, enqueued, RAN, and its quantum ended/hung <thus>" in
 /// three runs — the per-pid lifecycle is otherwise invisible (counters aggregate).
 /// Read once and cached; costs nothing when off.
-fn sched_dbg() -> bool {
+pub(crate) fn sched_dbg() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BROOD_SCHED_DBG").is_some())
 }

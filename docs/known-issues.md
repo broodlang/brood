@@ -257,9 +257,30 @@ deliberately (scheduler sessions want fresh eyes, and the router is gated off me
 **Held back by it:** `BROOD_TW_REENTRY` stays opt-in (60× on the viral defer shape,
 startup −6.9% — measured and waiting). The default path (router off) passes the full
 suite, the whole breakage suite, and the wake-sensitive loop ×5 with the latch + fence in.
-Next session: chase the mid-body entry — instrument `Suspended.cur.ip` at park and at
-resume for the wedged pid; the four-section c3 combo in the KI's scratch trail is the
-fast repro, the full chaos2 file the canonical one.
+**Session 3 (2026-08-30, later still) — the observation is now maximally sharp, and it is
+the strangest one yet.** With park/resume ip tracing added (`Suspended::dbg_line`, printed
+under `BROOD_SCHED_DBG`), the wedged pid shows: ONE `enq`, ONE `run` (resume=false), then
+NOTHING — no `end` (the outcome print is the unconditional first statement of
+`handle_capture_outcome`), no `park` (`store_resume` never ran), no resume. Global counts:
+10,203 `run` lines, 10,202 `end` lines. And a full core taken inside the wedge window
+shows **no thread anywhere inside that quantum** — 16 LWPs: 12 idle `worker_loop`s, timer,
+jit channel, the main-eval thread in `collect`'s timed receive, the main thread joining.
+A Rust frame cannot evaporate mid-function without unwinding through the instrumented
+tail, so one of the session's models is wrong at a level below ordinary control flow —
+frame/stack corruption in the capture machinery is now the working suspicion (the
+debug-assertion tripwires stay silent, so if it is memory it is valid-but-wrong, the
+hardest class). Every earlier layer (wake ordering, routing of receives, message loss,
+captures) has been either fixed or excluded with instruments that remain in the tree.
+
+Fast repro: the four-section c3 combo (fixed by the latch — keep for regression); canonical
+repro: the full `chaos2_process_genserver` with `BROOD_TW_REENTRY=1`, wedging one reader
+per run at a stable-ish early index. The next probe for fresh eyes: a counter pair
+entering/leaving `run_one_timed` (not prints — a per-pid atomic ledger), and
+`BROOD_GC_VERIFY=1` on the full file (GC_STRESS alone passes, which may just be timing).
+
+**Held back by it:** `BROOD_TW_REENTRY` stays opt-in (60× on the viral defer shape,
+startup −6.9% — measured and waiting). The default path (router off) passes the full
+suite, the whole breakage suite, and the wake-sensitive loop ×5 with the latch + fence in.
 
 ## KI-87 — the checker's cycle guard released the symbol it refused: `nest run` at 54 GB, three 19 GB test processes ✅ FIXED 2026-08-29
 
