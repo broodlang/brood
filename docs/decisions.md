@@ -19307,3 +19307,49 @@ from a predicate's body (`(= (record-id x) :id)`) — a later, complementary ste
 of a refined term is widened (the safe direction), so `x : dtm | string` under
 `(if (dtm? x) … (ts x))` still reads as the union in the else-branch.
 
+
+## ADR-302 — `!` means "raises": the bang is the error-convention marker, not "does I/O"
+
+**Status:** accepted (2026-08-30). Implemented: the 38-name rename wave (37 files) taking
+`!` off every effectful-but-non-raising name; `run!` renamed to `each` (six modules define
+their own `run`, so simply dropping the bang would shadow a bare prelude name).
+
+**Context.** The trigger was `(string/->number "1 1 +")` returning **nil** — absence and
+failure spelled identically. Before any function can grow a raising mirror, `!` has to mean
+one thing, and it meant two: four raising bangs (`tempo/new!`, `parse!`, `parse-span!`,
+`sig!`) against 37 effectful ones (`gui/title!`, `run!`, `coverage/begin!`,
+`project-write-failed!`). The Scheme reading was already vacuous here: `!` marks *mutation*
+there, and Brood has none (ADR-026), so every effectful bang was marking "does I/O" —
+which the name says anyway.
+
+**Decision.** `!` is reserved for functions that **raise on failure**. Effectful names
+carry no marker. This clears the ground for raising mirrors of nil-returning functions
+(`string/->number!` and kin) without a reader ever having to ask which convention a bang
+is following.
+
+**Not chosen.** Keeping both meanings context-dependently (the ambiguity is the problem);
+a separate raising suffix alongside the effect bang (two markers where one convention
+suffices, and the effect marker was informationless).
+
+## ADR-303 — `$` places the threaded value: one placeholder in `->`/`->>`, not two pipes forever
+
+**Status:** accepted (2026-08-30). Implemented: `$` in `->`/`->>` and, through the shared
+placement helpers, `some->`/`cond->` and the thread-last variants; bound once to a gensym;
+`'$` stays the plain symbol.
+
+**Context.** `(->> exp (string/split " ") …)` expands to `(string/split " " exp)` — it
+splits the *separator* and yields nil rather than raising. Brood inherited Clojure's two
+argument conventions and both threading macros, but **not Clojure's reason for them**:
+Clojure's `map` is variadic in collections (so they must come last) while `conj`/`assoc`
+are variadic in items (so the collection comes first) — cornered into two pipes. Brood's
+`map` is strictly `(f coll)`, so only the collection-first half is forced, and `->`
+already outnumbers `->>` in-tree 82 : 18.
+
+**Decision.** A step that names `$` — at any depth, inside vector and map literals —
+receives the threaded value there instead of first or last. The value is bound once to a
+gensym, so `(-> (expensive) (+ $ $))` calls `expensive` once. Purely additive, and not a
+migration crutch: the subject is genuinely not first in `(- 100 $)` or `(cons $ xs)` — a
+gap Elixir papers over with `then/2`.
+
+**Next.** Data-first (`map coll f`), after which `->>`, `some->>` and `cond->>` are
+deleted.
