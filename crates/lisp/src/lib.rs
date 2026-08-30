@@ -101,6 +101,11 @@ struct SharedBundle {
     /// since the prelude is inserted (not re-evaluated) and clean names can't be
     /// re-derived. Parallel to `bindings`.
     private: Vec<Symbol>,
+    /// The prelude's stability metadata (ADR-283) — the `(meta …)` facts recorded in the
+    /// builder heap. Carried for the same reason `private` is: the prelude is inserted
+    /// into each live runtime rather than re-evaluated, so nothing re-runs
+    /// `%register-meta` there. Parallel to `bindings`.
+    meta: Vec<(Symbol, core::heap::NameMeta)>,
 }
 
 static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
@@ -278,6 +283,7 @@ fn boot_from_cache() -> Option<SharedBundle> {
         let t_eval = t_start.elapsed();
         heap.set_current_file(None);
         let private = heap.private_names_snapshot();
+        let name_meta = heap.name_meta_snapshot();
         let t_pre_freeze = t_start.elapsed();
         let (code, bindings) = heap.freeze_as_shared_code(root);
         if std::env::var_os("BROOD_BOOT_TRACE").is_some() {
@@ -296,6 +302,7 @@ fn boot_from_cache() -> Option<SharedBundle> {
             code: Arc::new(code),
             bindings,
             private,
+            meta: name_meta,
         })
     };
     let bundle = run();
@@ -391,6 +398,7 @@ fn boot_from_source() -> SharedBundle {
     let t_eval = t_mark.elapsed();
     let t_mark = web_time::Instant::now();
     let private = heap.private_names_snapshot();
+    let name_meta = heap.name_meta_snapshot();
     let (code, bindings) = heap.freeze_as_shared_code(root);
     let t_freeze = t_mark.elapsed();
     if cache_ok {
@@ -431,6 +439,7 @@ fn boot_from_source() -> SharedBundle {
         code: Arc::new(code),
         bindings,
         private,
+        meta: name_meta,
     }
 }
 
@@ -489,7 +498,11 @@ impl Interp {
         // prelude reload). Inner processes spawned from this runtime share that
         // region (see `process::spawn`), so a `def` reaches them — while
         // separate runtimes (nodes) stay independent, each with its own.
-        let runtime = Arc::new(RuntimeCode::seeded(&SHARED.bindings, &SHARED.private));
+        let runtime = Arc::new(RuntimeCode::seeded(
+            &SHARED.bindings,
+            &SHARED.private,
+            &SHARED.meta,
+        ));
         let mut heap = Heap::with_regions(Arc::clone(&SHARED.code), runtime);
         heap.set_global(EnvId::GLOBAL);
         // Abilities + the Display protocol are core — defined in the shared prelude

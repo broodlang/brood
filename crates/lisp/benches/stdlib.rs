@@ -490,7 +490,7 @@ mod diff {
             format!(
                 "\
                  (def a (range {n})) \
-                 (def b (filter (fn (x) (not= (math/rem x 10) 0)) (range {n}))) \
+                 (def b (filter (fn (x) (not (= (math/rem x 10) 0))) (range {n}))) \
                  (diff/seq a b)"
             ),
         );

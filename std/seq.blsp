@@ -138,13 +138,13 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 ;; which the CI gate turns into a hard failure. Argument types are precise because that is
 ;; what catches the swap; the RETURN stays `any` because a too-narrow return would
 ;; false-positive at call sites and is not what a reversed-args rename gets wrong.
-(sig chunk-every (int seqable -> any))
 (defn chunk-every (n coll)
   "Split `coll` into consecutive `n`-item vectors; unlike `partition`, a
 trailing partial chunk is kept. `n` must be positive.
 
     (seq/chunk-every 2 [1 2 3 4 5])  → ([1 2] [3 4] [5])"
   (chunk-every-acc n (seq coll) nil))
+(sig chunk-every (int seqable -> any))
 
 ;; (chunk-by f coll) — consecutive runs where (f x) returns the same value.
 (defn- chunk-by-acc
@@ -237,18 +237,18 @@ equality); recover the item itself with `find`.
 ;; reads worse than either alternative and because it mirrors `string/substring`, the
 ;; op it is the vector counterpart of. The `sig` still pins the shape, which is what
 ;; KI-71 was actually about — a reversed pair that keeps its arity and stays silent.
-(sig subvec (vector int -> any))
 (defn subvec (v start & more)
   "A fresh vector of v's elements in [start, end); end defaults to the length. The
 vector comes FIRST here, unlike the rest of this module — see the note above.
 
     (seq/subvec [1 2 3 4] 1 3)   → [2 3]"
   (if (empty? more) (%subvec v start) (%subvec v start (first more))))
+(sig subvec (vector int -> any))
 
-(sig vector-ref (vector int -> any))
 (defn vector-ref (v i)
   "The element at index i of vector v."
   (%vector-ref v i))
+(sig vector-ref (vector int -> any))
 
 (defn vector-length (v)
   "The number of elements in vector v."
@@ -337,31 +337,30 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     (seq/flatten '(1 [2 3]))     → (1 [2 3])   ; a vector is a LEAF, not descended into"
   (reverse (flatten-acc coll nil)))
 
-(sig split-at (int seqable -> any))
 (defn split-at (n coll)
   "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`.
 
     (seq/split-at 2 [1 2 3 4]) → [(1 2) (3 4)]"
   (%split-at-acc n coll nil))
+(sig split-at (int seqable -> any))
 
-(sig take-last (int seqable -> any))
 (defn take-last (n coll)
   "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0).
 
     (seq/take-last 2 [1 2 3])  → (2 3)"
   (drop (- (count coll) n) coll))
+(sig take-last (int seqable -> any))
 
-(sig drop-last (int seqable -> any))
 (defn drop-last (n coll)
   "`coll` without its last `n` items (`()` if `n` >= its length).
 
     (seq/drop-last 1 [1 2 3])  → (1 2)"
   (take (- (count coll) n) coll))
+(sig drop-last (int seqable -> any))
 
 (defn- iterate-times-acc
   (f x n acc)
   (if (< n 0) acc (iterate-times-acc f (f x) (dec n) (cons x acc))))
-(sig iterate-times (any any int -> any))
 (defn iterate-times (f x n)
   "The list `(x f(x) f²(x) … fⁿ(x))` — the `n`+1 successive states of applying `f`,
 starting from `x`. `times` returns only the last of these; this keeps the trajectory.
@@ -374,25 +373,25 @@ contradiction; it is public here, where its callers can reach it.
     (seq/iterate-times (fn (n) (* n 2)) 1 4)   → (1 2 4 8 16)
     (seq/iterate-times inc 0 0)                → (0)"
   (reverse (iterate-times-acc f x n nil)))
+(sig iterate-times (any any int -> any))
 
-(sig times (int any any -> any))
 (defn times (n f x)
   "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`.
 
     (seq/times 3 inc 0)   → 3"
   (if (<= n 0) x (seq/times (dec n) f (f x))))
+(sig times (int any any -> any))
 
 (defn- repeatedly-acc
   (n f acc)
   (if (<= n 0) (reverse acc) (repeatedly-acc (dec n) f (cons (f) acc))))
-(sig repeatedly (int any -> any))
 (defn repeatedly (n f)
   "A list of `n` successive calls to the zero-argument function `f` (in call order).
 
     (seq/repeatedly 3 (fn () 7))   → (7 7 7)"
   (repeatedly-acc n f nil))
+(sig repeatedly (int any -> any))
 
-(sig sample (int seqable -> any))
 (defn sample (seed coll)
   "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."
   (let (items (into [] coll)
@@ -401,6 +400,7 @@ contradiction; it is public here, where its callers can reach it.
       (error "sample: cannot sample from an empty collection")
       (let (s (%rand-step (%rand-seed seed)))
         [(nth items (math/rem s n)) s]))))
+(sig sample (int seqable -> any))
 
 ;; Fisher–Yates, which is what the docstring always claimed — the implementation was
 ;; not it. The old `shuffle-acc` rebuilt the remaining collection on every step: two
@@ -419,7 +419,6 @@ contradiction; it is public here, where its callers can reach it.
         b (get m j))
     (assoc (assoc m i b) j a)))
 
-(sig shuffle-at (map int int -> vector))
 (defn- shuffle-at
   (m i state)
   ;; Descending Fisher–Yates: draw j in 0..i, swap it into slot i, move left.
@@ -429,13 +428,13 @@ contradiction; it is public here, where its callers can reach it.
     (let (s (%rand-step state)
           j (math/rem s (+ i 1)))
       (shuffle-at (shuffle-swap m i j) (- i 1) s))))
+(sig shuffle-at (map int int -> vector))
 
 (defn- shuffle-drain
   (m i acc)
   ;; Read slots i…0 back out, building the result list front-to-back.
   (if (< i 0) acc (shuffle-drain m (- i 1) (cons (get m i) acc))))
 
-(sig shuffle (int seqable -> any))
 (defn shuffle (seed coll)
   "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
   (let (v (into [] coll)
@@ -443,8 +442,8 @@ contradiction; it is public here, where its callers can reach it.
         slots (fold (fn (m i) (assoc m i (nth v i))) {} (range n))
         [out state] (shuffle-at slots (- n 1) (%rand-seed seed)))
     [(shuffle-drain out (- n 1) nil) state]))
+(sig shuffle (int seqable -> any))
 
-(sig remove-nth (int seqable -> any))
 (defn remove-nth (i coll)
   "A fresh collection like `coll` with the element at index `i` removed. Returns
 a vector for a vector and a list for a list. `i` must be in `[0, count)`.
@@ -458,6 +457,7 @@ and this was the one function that broke it.
   (if (vector? coll)
     (into (seq/subvec coll 0 i) (seq/subvec coll (inc i) (count coll)))
     (append (take i coll) (drop (inc i) coll))))
+(sig remove-nth (int seqable -> any))
 
 (%defseq remove
   (pred)

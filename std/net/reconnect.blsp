@@ -30,12 +30,12 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
   "The watcher's registered name for `spec` — one watcher per spec."
   (keyword (str "reconnect:" spec)))
 
-(sig reconnect-opt (map keyword int -> int))
 
 (defn- reconnect-opt
   (opts k default)
   "A backoff bound from `opts` — `:min-ms`/`:max-ms` are milliseconds, ints."
   (get opts k default))
+(sig reconnect-opt (map keyword int -> int))
 
 (defn- reconnect-notify
   (subs event)
@@ -59,7 +59,6 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
     ;; messages can reach it; without this they'd pile up in the mailbox forever
     (_ (reconnect-up spec peer opts subs))))
 
-(sig reconnect-down (string (or keyword nil) map list int -> any))
 
 (defn- reconnect-down
   (spec peer opts subs delay)
@@ -72,14 +71,14 @@ still answering control messages between attempts."
         (reconnect-notify subs [:nodeup up])
         (reconnect-up spec up opts subs))
       (reconnect-wait spec peer opts subs delay (+ (os/now) delay)))))
+(sig reconnect-down (string (or keyword nil) map list int -> any))
 
-(sig reconnect-next-delay (int map -> int))
 
 (defn- reconnect-next-delay
   (delay opts)
   (math/min (* delay 2) (reconnect-opt opts :max-ms 30000)))
+(sig reconnect-next-delay (int map -> int))
 
-(sig reconnect-wait (string (or keyword nil) map list int int -> any))
 
 (defn- reconnect-wait
   (spec peer opts subs delay deadline)
@@ -102,6 +101,7 @@ unrelated message cost nothing."
         (_ (reconnect-wait spec peer opts subs delay deadline))
         (after left
           (reconnect-down spec peer opts subs (reconnect-next-delay delay opts)))))))
+(sig reconnect-wait (string (or keyword nil) map list int int -> any))
 
 (defn- reconnect-boot
   (spec opts)

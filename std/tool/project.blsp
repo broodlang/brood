@@ -35,7 +35,6 @@ the `nest new` scaffolder."
 ;; app. Purely identity: no name-rooting/prefixing (that stays the deferred ADR-070 upgrade).
 (defdyn *ns-package* {})
 
-(sig ns-package ((or symbol string nil) -> any))
 (defn ns-package (ns-or-name)
   "The owning package of a namespace or a qualified `mod/fn` name (ADR-172 package identity).
   Resolves the MODULE either way — a module namespace (`widget`, `editor/display`) directly,
@@ -53,6 +52,7 @@ the `nest new` scaffolder."
           (if (> (count parts) 1)
             (get *ns-package* (symbol (string/join "/" (take (- (count parts) 1) parts))))
             nil))))))
+(sig ns-package ((or symbol string nil) -> any))
 
 (defn trace-with-packages (trace)
   "Annotate each stack-trace frame (`{:fn :file :line :col}`) with `:package` — the owning
@@ -1390,22 +1390,22 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
 ; below this many files, check in-process
 (def *check-min-parallel* 2000)
 ; chunks per core (load-balancing headroom)
-(sig *check-oversample* int)
 (def *check-oversample* 2)
+(sig *check-oversample* int)
 ;; The scheduler's worker-pool size (≈ nproc), clamped ≥1. `worker-threads` is 0
 ;; until the first spawn, so warm the pool and poll briefly for the threads to spin.
-(sig project-await-pool (int -> int))
 (defn- project-await-pool
   (tries)
   (let (n (dev/worker-threads))
     (if (or (> n 0) (<= tries 0))
       (math/max 1 n)
       (do (sleep 1) (project-await-pool (dec tries))))))
-(sig project-pool-size (-> int))
+(sig project-await-pool (int -> int))
 (defn- project-pool-size
   ()
   (spawn (fn () nil))
   (project-await-pool 50))
+(sig project-pool-size (-> int))
 
 ;; Slice `coll` into ≤`n`-sized chunks, KEEPING a short trailing chunk.
 ;; A list-returning chunker that KEEPS the trailing partial chunk. Neither bare
@@ -1752,7 +1752,6 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
             total (count files))
         (project-check-fold files closures total 0 nil)))))
 
-(sig project-check-fold ((or list nil) map int int any -> any))
 (defn- project-check-fold
   (files closures total done acc)
   (if (nil? files)
@@ -1762,6 +1761,7 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
           done2 (inc done))
       (%mcp-progress done2 total (str "checked " (path/basename f)))
       (project-check-fold (rest files) closures total done2 (%append-two diags acc)))))
+(sig project-check-fold ((or list nil) map int int any -> any))
 
 ;; --- duplicate-global detection (flat namespace, ADR-019) --------------------
 ;; The project shares one flat global table: exactly one binding per name across

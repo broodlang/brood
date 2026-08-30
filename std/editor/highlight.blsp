@@ -133,14 +133,13 @@ that can't begin a number — since this runs on every atom on the fontify hot p
 ;; which are on the render hot path. The delimiter set mirrors `hl-delim?`.
 (def- hl-delim-chars " \t\n\r,()[]{}\";")
 
-(sig hl-to-eol (string int int -> int))
 (defn- hl-to-eol
   (src i n)
   "Index of the newline ending the line containing `i` (or `n` at end of input)."
   (math/min n (string/span-until src i "\n")))
+(sig hl-to-eol (string int int -> int))
 
 ; backslash: skip it and the escaped char
-(sig hl-string-end (string int int -> int))
 (defn- hl-string-end
   (src i n)
   "Index just past the closing quote of a string whose body starts at `i` (one past
@@ -151,11 +150,12 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
       (>= j n) n
       (= (string/char-at src j) "\"") (inc j)
       else (hl-string-end src (+ j 2) n))))
-(sig hl-atom-end (string int int -> int))
+(sig hl-string-end (string int int -> int))
 (defn- hl-atom-end
   (src i n)
   "Index of the first delimiter at or after `i` — the end of an atom token."
   (math/min n (string/span-until src i hl-delim-chars)))
+(sig hl-atom-end (string int int -> int))
 
 ;; ---- the lexer: source -> colour spans --------------------------------------
 
@@ -369,7 +369,6 @@ one-char range `[pos (inc pos) face]`."
 
 ;; ---- bracket matching -------------------------------------------------------
 
-(sig hl-fwd-match (string int int int -> int))
 (defn- hl-fwd-match
   (full i n depth)
   "Scanning forward from `i` (just past an opener), the offset of the closer at
@@ -383,8 +382,8 @@ one-char range `[pos (inc pos) face]`."
         (hl-open? c) (hl-fwd-match full (inc i) n (inc depth))
         (hl-close? c) (if (= depth 0) i (hl-fwd-match full (inc i) n (dec depth)))
         else (hl-fwd-match full (inc i) n depth)))))
+(sig hl-fwd-match (string int int int -> int))
 
-(sig hl-opener-scan (string int int int list -> int))
 (defn- hl-opener-scan
   (full i n cp stack)
   "Forward scan maintaining a `stack` of opener offsets; on reaching closer `cp`,
@@ -401,13 +400,13 @@ return the matching opener (top of stack) or -1. Skips strings/comments."
             (if (empty? stack) -1 (first stack))
             (hl-opener-scan full (inc i) n cp (rest stack)))
         else (hl-opener-scan full (inc i) n cp stack)))))
+(sig hl-opener-scan (string int int int list -> int))
 
 (defn- hl-closer-of
   (c)
   ;; the closing delimiter that pairs with opener `c`, or nil
   (cond (= c "(") ")" (= c "[") "]" (= c "{") "}" else nil))
 
-(sig hl-close-scan (string int int int list -> (or int :text)))
 (defn- hl-close-scan
   (full i pos n stack)
   "Forward scan to `pos` keeping a stack of open-bracket offsets: the innermost opener
@@ -430,6 +429,7 @@ happens to sit inside one."
         (hl-open? c) (hl-close-scan full (inc i) pos n (cons i stack))
         (hl-close? c) (hl-close-scan full (inc i) pos n (rest stack))
         else (hl-close-scan full (inc i) pos n stack)))))
+(sig hl-close-scan (string int int int list -> (or int :text)))
 
 (defn closer-redundant? (full pos c)
   "Would typing the closing delimiter `c` at offset `pos` in `full` be redundant — is the
@@ -495,7 +495,6 @@ newline an auto-indenter handles."
 
 ;; ---- enclosing call (for signature hints) -----------------------------------
 
-(sig hl-enc-scan (string int int int list -> int))
 (defn- hl-enc-scan
   (full i pos n stack)
   "Forward scan to `pos` maintaining a stack of open-bracket offsets; returns the
@@ -510,8 +509,8 @@ innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped a
         (hl-open? c) (hl-enc-scan full (inc i) pos n (cons i stack))
         (hl-close? c) (hl-enc-scan full (inc i) pos n (rest stack))
         else (hl-enc-scan full (inc i) pos n stack)))))
+(sig hl-enc-scan (string int int int list -> int))
 
-(sig hl-datum-starts (string int int int (list int) -> (list int)))
 (defn- hl-datum-starts
   (full i end n acc)
   "Start offsets (reverse order) of the complete datums in `[i, end)` at one nesting
@@ -528,6 +527,7 @@ level — atoms, strings, and whole bracketed forms each count once."
             (hl-datum-starts full (if (< m 0) end (inc m)) end n (cons i acc)))
         (hl-close? c) (hl-datum-starts full (inc i) end n acc)
         else (hl-datum-starts full (hl-atom-end full (inc i) n) end n (cons i acc))))))
+(sig hl-datum-starts (string int int int (list int) -> (list int)))
 
 (defn enclosing-call (full pos)
   "Return `[callee arg-index]` for the innermost call `(…` enclosing cursor offset
@@ -563,18 +563,18 @@ cursor sits deep in a large file."
 
 ;; ---- completion helpers (pure; candidates supplied by the caller) -----------
 
-(sig hl-sym-start (string int -> int))
 (defn- hl-sym-start
   (full i)
   "The offset where the symbol token ending at `i` begins."
   (if (or (<= i 0) (hl-delim? (string/char-at full (dec i)))) i (hl-sym-start full (dec i))))
+(sig hl-sym-start (string int -> int))
 
-(sig symbol-prefix-at (string int -> (vector any)))
 (defn symbol-prefix-at (full pos)
   "Return `[start prefix]` for the symbol token ending at cursor offset `pos` —
 `start` its offset, `prefix` its text — or `[pos \"\"]` when the cursor isn't on a
 symbol."
   (let (s (hl-sym-start full pos)) [s (string/substring full s pos)]))
+(sig symbol-prefix-at (string int -> (vector any)))
 
 (defn symbol-at (full pos)
   "Return `[start text]` for the whole symbol token **containing** cursor offset `pos`, or

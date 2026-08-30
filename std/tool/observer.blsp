@@ -97,11 +97,11 @@ attach). Drive the standalone app from the shell with `nest observe`."
 (def-face :observer/confirm {:inherit :ui/error})
 ;; ---- pure formatting helpers ------------------------------------------------
 
-(sig observe-fit (string int -> string))
 (defn- observe-fit
   (s w)
   "Truncate `s` to at most `w` characters so a rendered row never wraps."
   (if (> (string/length s) w) (string/substring s 0 (math/max 0 w)) s))
+(sig observe-fit (string int -> string))
 
 (defn- observe-bytes->human
   (n)
@@ -257,7 +257,6 @@ on screen (roughly centred), clamped so the window never runs past the end."
 right from column `col`. Tail-recursive."
   (observe-chunk-ops-acc chunks row col nil))
 
-(sig observe-minibuffer
   ((record &open :prompt string :text string :hscroll (or int nil) :point int) int int -> any))
 (defn- observe-minibuffer
   (edit row cols)
@@ -281,6 +280,7 @@ completion already works via `lineedit/lineedit-handle`'s keymap in `observe-com
     (append [(text row 0 prompt (face :observer/minibuffer-prompt))]
       (observe-chunk-ops chunks row promptw)
       [(cursor row cursor-col)])))
+(sig observe-minibuffer
 
 (defn- observe-confirm-line
   (c)
@@ -293,7 +293,6 @@ e.g. `  kill pid 7 (worker)? y/n`. The name is shown when the process has one."
 
 ;; ---- the pure render core (no IO — the testable heart) ----------------------
 
-(sig observe-frame (any any int int int any any any any -> any))
 (defn observe-frame (node procs sel cols rows paused sort link ui)
   "Pure: build a render frame (a vector of display ops) for a `cols`×`rows`
 terminal — a two-line node panel (from `node`, with the `link` status), a column
@@ -366,6 +365,7 @@ the observer's testable core; `observe-loop` feeds it live data."
            (observe-fit (string/pad-right detail cols) cols)
            (face :observer/detail))]
         last-row))))
+(sig observe-frame (any any int int int any any any any -> any))
 
 ;; ---- live data --------------------------------------------------------------
 
@@ -416,7 +416,6 @@ anything else is `observe-sort` (id / mailbox / memory)."
     (= key :reds) :tree
     else :id))
 
-(sig observe-reds-rate ((or int nil) (or int nil) (or int nil) (or int nil) -> (or int nil)))
 (defn- observe-reds-rate
   (prev-reds prev-at reds at)
   "Reductions/second between two `proc/info` samples, or nil when it can't be
@@ -428,6 +427,7 @@ Clamps a negative delta (a recycled id) to 0. Pure."
       (if (<= dt 0)
         nil
         (math/quot (* 1000 (math/max 0 (- reds prev-reds))) dt)))))
+(sig observe-reds-rate ((or int nil) (or int nil) (or int nil) (or int nil) -> (or int nil)))
 
 (defn- observe-rate-procs
   (prev-procs prev-at procs at)
