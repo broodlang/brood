@@ -1157,11 +1157,17 @@ pub(crate) fn not_a_function_error(heap: &Heap, v: Value) -> LispError {
 /// mixed-eligibility mutual tail loop stays flat instead of recursing natively.
 pub(crate) const TW_REENTRY_BUDGET: u32 = 32;
 
-/// Is the tree-walker→VM router enabled? `BROOD_NO_TW_REENTRY=1` opts out — the A/B
-/// and bisect lever, catalogued in `debug_flags.rs`. Read once and cached.
+/// Is the tree-walker→VM router enabled? **Opt-IN via `BROOD_TW_REENTRY=1`** (the
+/// BROOD_MKCLO pattern) — measured 60× on the viral defer shape and `startup` −6.9%,
+/// but routing exposes a PRE-EXISTING scheduler liveness bug (KI-88: a spawned process
+/// is created, registered and promoted, yet never scheduled — one early spawn of a
+/// 50-burst, deterministic under `breakage/chaos2_process_genserver`'s four warm
+/// sections, reproducible at c4af2feb, GC-stress makes it pass). The router stays
+/// opt-in until that bug is fixed; flip the default WITH its fix, re-running the whole
+/// breakage suite. Read once and cached.
 fn tw_reentry_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_NO_TW_REENTRY").is_none())
+    *ON.get_or_init(|| std::env::var_os("BROOD_TW_REENTRY").is_some_and(|v| v == "1"))
 }
 
 /// Route a tree-walked closure application onto the VM when the callee has a
@@ -1197,6 +1203,14 @@ fn tw_vm_route(heap: &mut Heap, id: ClosureId, argv: &[Value]) -> Option<LispRes
         return None;
     }
     let arm = compile::compiled_arm_for(heap, id, argv.len())?;
+    if std::env::var_os("BROOD_ROUTE_DBG").is_some() {
+        let name = heap
+            .closure(id)
+            .name
+            .map(value::symbol_name_ref)
+            .unwrap_or("<anon>");
+        eprintln!("[route] {name} argc={}", argv.len());
+    }
     let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
     heap.tw_reentry_depth.set(heap.tw_reentry_depth.get() + 1);
     let r = compile::vm_apply(heap, arm, argv, cenv);

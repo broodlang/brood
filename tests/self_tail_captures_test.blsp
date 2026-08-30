@@ -1,0 +1,33 @@
+(defmodule self-tail-captures-test
+  "The VM's two inline self-tail resets nil-filled EVERY frame slot — including the
+CAPTURE slots, which are frame-invariant (both paths require same arm + same captured
+env). A local-capturing global closure — the spawned-server idiom — read nil for every
+capture from its second iteration on; the tree-walker and the JIT back-edge were both
+correct, so the divergence hid until the tree-walker→VM router let the shape reach the
+VM (breakage/chaos2_tcp_stress P40, 2026-08-30). These pin capture survival across deep
+self-recursion on the default engine."
+  (:use test))
+
+(describe "self-tail recursion preserves captured locals"
+  (test "a let-captured value survives every iteration (global-name recursion)"
+    (do
+      (let (anchor 42)
+        (defn stc-loop (n acc)
+          (if (= n 0) acc (stc-loop (- n 1) (+ acc anchor)))))
+      ;; 10k iterations: with the wipe, acc becomes a nil-add type error (or wrong sum)
+      ;; on iteration 2; correct = 10000 * 42.
+      (assert= 420000 (stc-loop 10000 0))))
+
+  (test "letrec-style self-call preserves captures too"
+    (let (anchor 7)
+      (let (f (fn (n acc) (if (= n 0) acc (f (- n 1) (+ acc anchor)))))
+        (assert= 70000 (f 10000 0)))))
+
+  (test "the spawned-server idiom round-trips"
+    (let (me (self))
+      (do
+        (spawn (do
+                 (defn stc-drain (n acc)
+                   (if (= n 0) (send me [:done acc]) (stc-drain (- n 1) (str acc "x"))))
+                 (stc-drain 5 "")))
+        (assert= "xxxxx" (receive ([:done a] a) (after 5000 :timeout)))))))

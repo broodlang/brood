@@ -7512,3 +7512,26 @@ autogensym-deferred driver: 5,048 → 84 ms), `startup` **−6.9%** (floor 0.0%)
 rows neutral (pingpong solo +1.0% wall with instructions −9 M — the drift row drifting).
 `BROOD_NO_TW_REENTRY=1` is the lever; `BROOD_DEFER_DBG`'s line now reads "tree-walks its
 OWN body", which is the new truth.
+
+## 2026-08-30 (sixth) — two bugs under one breakage failure; the router waits for KI-88
+
+CI's red on the merged tree unravelled into two distinct bugs, one fixed and one filed:
+
+**Fixed: the VM's self-tail resets wiped capture slots.** Both inline back-edges
+(`Inst::SelfCall` and the `Inst::Call` self-tail fast path) nil-filled every frame slot and
+refilled only params — so a local-capturing global closure (`(let (me (self)) (defn drain …
+(send me …)))`, the spawned-server idiom) read nil for every capture from iteration two.
+The tree-walker and the JIT's emitted back-edge (params-only writes) were both correct; the
+shape simply never reached the VM until the router routed it — `chaos2_tcp_stress` P40
+found it within minutes of the router landing. `reset_frame_slots` now preserves the
+capture range (branchless wipe kept for the capture-free hot case);
+`tests/self_tail_captures_test.blsp` pins global-name recursion, letrec-style self-calls,
+and the spawned-server round trip.
+
+**Filed: KI-88.** The second failure (`chaos2_process_genserver` P47) shrank to: one spawn
+of a warm 50-burst is created, promoted and registered but NEVER SCHEDULED — placement
+levers don't move it, GC-stress makes it pass, and it reproduces at c4af2feb, so the router
+exposed it rather than caused it. Scheduler-liveness class (KI-1 family), gets its own
+session. Until then the router follows the BROOD_MKCLO pattern: `BROOD_TW_REENTRY=1`
+opt-in, its measured wins (60×/startup −6.9%) parked behind the flag, the full breakage
+suite green either way.

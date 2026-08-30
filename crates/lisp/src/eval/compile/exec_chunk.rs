@@ -48,6 +48,33 @@ pub(crate) fn exec_chunk(
     // (see there). A `def` bumps the epoch, so an unchanged value means no rebinding can
     // have happened since, and the loop takes its zero-lookup fast path.
     let mut self_epoch = heap.global_epoch();
+    /// Nil the frame's slots for a self-tail back-edge — EXCEPT the capture slots,
+    /// which are frame-invariant (both inline self-call paths require the same arm and
+    /// the same captured env, so the values `push_frame` filled from `cenv` are still
+    /// exactly right). Wiping them was a wrong-ANSWER bug: a local-capturing global
+    /// closure (`(let (me (self)) (defn drain … (send me …) … (drain …)))` — the
+    /// spawned-server idiom) read `nil` for every capture from its second iteration on.
+    /// The tree-walker and the JIT's emitted back-edge (which writes only param slots)
+    /// were both already correct; only these two VM resets wiped. Found 2026-08-30 by
+    /// `breakage/chaos2_tcp_stress` the moment the tree-walker→VM router let the shape
+    /// reach the VM at all. The capture-free hot case (loop/collatz/fib) takes the
+    /// branchless wipe it always had.
+    fn reset_frame_slots(heap: &mut Heap, arm: &CompiledArm, base: usize) {
+        let ncap = arm.capture_names.len();
+        if ncap == 0 {
+            for i in 0..arm.nslots {
+                heap.set_root_at(base + i, Value::nil());
+            }
+            return;
+        }
+        let cap_base = arm.nrequired + arm.noptional + arm.rest_slot.is_some() as usize;
+        for i in 0..cap_base {
+            heap.set_root_at(base + i, Value::nil());
+        }
+        for i in (cap_base + ncap)..arm.nslots {
+            heap.set_root_at(base + i, Value::nil());
+        }
+    }
     while *ip < chunk.code.len() {
         let inst = &chunk.code[*ip];
         *ip += 1;
@@ -578,9 +605,7 @@ pub(crate) fn exec_chunk(
                         {
                             crate::perf_bump!(self_tail);
                             heap.truncate_roots(base + arm.nslots);
-                            for i in 0..arm.nslots {
-                                heap.set_root_at(base + i, Value::nil());
-                            }
+                            reset_frame_slots(heap, arm, base);
                             for i in 0..arm.nrequired {
                                 heap.set_root_at(base + i, argv[i]);
                             }
@@ -763,9 +788,7 @@ pub(crate) fn exec_chunk(
                 }
                 // Reset frame in place (same as the old outer-loop SelfTail handler).
                 heap.truncate_roots(base + arm.nslots);
-                for i in 0..arm.nslots {
-                    heap.set_root_at(base + i, Value::nil());
-                }
+                reset_frame_slots(heap, arm, base);
                 for i in 0..arm.nrequired {
                     heap.set_root_at(base + i, argv[i]);
                 }

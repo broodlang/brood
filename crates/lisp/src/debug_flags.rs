@@ -90,9 +90,9 @@ pub const FLAGS: &[DebugFlag] = &[
         "name each closure that defers to the tree-walker — the tw_defer counter says how many, this says WHO (one defer tree-walks its OWN body; eligible callees route back to the VM)",
     ),
     f(
-        "BROOD_NO_TW_REENTRY",
+        "BROOD_TW_REENTRY",
         OPTOUT,
-        "opt OUT of the tree-walker routing VM-eligible callees back to the engine (60x on an eligible helper under a deferred driver; startup -7%)",
+        "opt IN (=1) to the tree-walker routing VM-eligible callees back to the engine (60x on the viral defer shape; startup -7%). Off by default until KI-88 (a routed spawn burst can strand one process unscheduled) is fixed",
     ),
     // ---- JIT ----
     f(

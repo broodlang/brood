@@ -204,6 +204,44 @@ behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed
 
 ---
 
+## KI-88 — one spawn of a warm burst is created, promoted, registered — and never scheduled ⚠️ OPEN 2026-08-30 (deterministic repro; gates the tree-walker→VM router's default)
+
+**Symptom.** In `breakage/chaos2_process_genserver` P47 (50-reader burst against a 10k-entry
+map server), exactly ONE early reader (index 2–4, stable within a config) never runs: its
+spawn returns a pid, `BROOD_TRACE_PROMOTE` shows all 50 thunk promotions, the mailbox is
+registered — but the process never executes its first instruction. No death line (a body
+that never runs exits nothing). The collector then times out and the section fails with
+`nth: expected a collection, got keyword (:timeout)`.
+
+**Exposure, not cause: the tree-walker→VM router** (`tw_vm_route`, 2026-08-30). With
+`BROOD_TW_REENTRY=1` the failure is 10/10 deterministic; without it 6/6 pass — but the bug
+predates the router's *commit lineage entirely*: a worktree at `c4af2feb` fails 3/3 the
+same way (its CI pass was runner luck). The router only makes the burst run at VM speed
+from a shape that used to tree-walk, which lands the spawns in the window.
+
+**The shrink trail (all preserved in scratch, method notes inline):**
+- Needs FOUR warm sections: P43+P44+P45 then P47 fails; every 3-section subset passes.
+  Threshold-shaped (cumulative arms/promotions/pool state), not one interaction.
+- The loop shape is irrelevant (hand-rolled `my-dotimes` fails identically); the burst
+  alone in a fresh process passes at both engines, router on or off.
+- `f` (the per-iteration closure) is CALLED all 50 times — instrumented — and every
+  `%spawn` runs (promotion trace); the loss is between enqueue and first schedule.
+- `BROOD_NO_HANDOFF=1`, `BROOD_SPAWN_RR=1`, `BROOD_SPAWN_SPILL=999999` all still fail —
+  not placement policy. **`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` makes it PASS** (timing
+  moves), and the armed per-deref tripwire never fires — so not a caught use-after-GC.
+
+**Where to look next** (the KI-1 invariant family): the enqueue→first-run window under a
+worker whose green process dirty-blocks a nested `receive` right after a local spawn —
+`enqueue`'s self-wake elision, `wake_a_parked_peer`'s `spawns_since_park >= 2` gate, the
+steal path's STEALABLE accounting against `dirty_block`'s executor bookkeeping. The repro
+is cheap (`--test` on the four concatenated sections, seconds); shrink further before
+theorising — tonight's session got it to "created but never scheduled" and stopped there
+deliberately (scheduler sessions want fresh eyes, and the router is gated off meanwhile).
+
+**Held back by it:** `BROOD_TW_REENTRY` stays opt-in (60× on the viral defer shape,
+startup −6.9% — measured and waiting). Flip the default WITH this fix, re-running the full
+breakage suite and `live_migration` under load.
+
 ## KI-87 — the checker's cycle guard released the symbol it refused: `nest run` at 54 GB, three 19 GB test processes ✅ FIXED 2026-08-29
 
 **Symptom.** `nest run` on bedit sat at 100% CPU with nothing running, RSS climbing past
