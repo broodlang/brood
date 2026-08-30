@@ -195,7 +195,10 @@ fn exit_with(pid: u64, reason: Message, hard: bool) {
     // instead of parking (exactly one wins). `request_kill` publishes `kill_pending`
     // *before* this lock, so a `wait_for_message` that locks after us sees it and won't
     // block through a lost `notify`.
-    let parked = wake_parked(&mut crate::core::sync::lock(&mailbox.state));
+    let (parked, cv_waiter) = {
+        let mut st = crate::core::sync::lock(&mailbox.state);
+        (wake_parked(&mut st), st.cv_waiters > 0)
+    };
     // Both paths, unconditionally (`mailbox::wake_both`). The `else` this replaces assumed a
     // target is reachable by exactly one of them; a green process inside a native-nested
     // `receive` is reachable by both, and having a `waiter` suppressed the notify — so the
@@ -203,7 +206,7 @@ fn exit_with(pid: u64, reason: Message, hard: bool) {
     // a `receive` nothing will ever send to is never. The cv wake is what makes the blocked
     // receiver see `kill_pending` and unwind with `Control::Kill` (`wait_for_message` /
     // `receive_match`); the re-queue is what retires an already-parked continuation.
-    crate::process::mailbox::wake_both(&mailbox, parked);
+    crate::process::mailbox::wake_both(&mailbox, parked, cv_waiter);
 }
 
 /// `(%spawn thunk)` — run `thunk` (a 0-arg function) as a new green process.

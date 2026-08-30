@@ -47,6 +47,7 @@ base   ::= any | never | int | float | number | string | symbol
 literal ::= <keyword>                          ; a bare keyword, e.g. :maximized
 typevar ::= ? <name>                           ; e.g. ?A, ?el — static only
 arrow  ::= ( type* -> type )                   ; fixed arity
+         | ( type* -> (is type) )              ; a type GUARD: truthy ⇒ arg 1 is `type` (ADR-301)
          | ( type* & type -> type )            ; fixed leading params + variadic rest
          | ( type* &optional type* -> type )   ; fixed params + optional (ADR-127)
          | ( type* &optional type* & type -> type ) ; + a trailing rest too

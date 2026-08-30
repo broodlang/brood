@@ -19279,3 +19279,31 @@ line.**
 working. The hand-written reference (`language.md`, `spec.md`, `primitives.md`) strikes the
 name through and says what to write instead. Removal stays open: when it happens, this ADR's
 measurement is the argument, and the call sites are already gone from this tree.
+## ADR-301 — Type-guard signatures: a predicate declares what a truthy result proves
+
+**Status:** accepted (2026-08-30). Implemented: `Sig.guard`, `(is T)` in the sig
+grammar's return position (`annot::guard_ret`), `guards::predicate_guard_ty` (bare-local
+and access-path guards, `(not …)` inverted), the prelude's record predicates declared.
+
+**Context.** The checker narrowed on the built-in predicates only (`Ty::tested_by`). A
+user predicate — `datetime?`, `queue?`, a project's `order?` — proved nothing, so a body
+that asked `(if (datetime? dt) (get dt :hour 0) 0)` read `dt` as unknown in the branch
+that had just tested it. The strict pass over std had to route around this through declared
+accessors, and named it the next design item.
+
+**Decision.** A signature's result may be `(is T)`: the function returns a bool, and a
+truthy result proves its first argument is `T` — a falsy one that it is not. The checker
+treats such a call exactly as a built-in guard (biconditional). The declaration asserts
+the predicate is exact; that is the assumption TypeScript's `x is T` makes, and the same
+trust ADR-259 already places in a `sig`. At runtime a contract reads `(is T)` as "a bool":
+what the value proves is the checker's business, not the contract's.
+
+**Not chosen.** A then-only guard (sound for an inexact predicate) — it would make the
+common `(if (pred? x) … else)` shape narrow only half the branches, for a caution the
+declaration already lets the author express by not writing `(is …)`. Inferring guards
+from a predicate's body (`(= (record-id x) :id)`) — a later, complementary step.
+
+**Known limit.** The else-branch over an OPEN record shape is approximate: the complement
+of a refined term is widened (the safe direction), so `x : dtm | string` under
+`(if (dtm? x) … (ts x))` still reads as the union in the else-branch.
+

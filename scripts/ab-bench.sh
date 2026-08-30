@@ -219,6 +219,49 @@ if [ "$(sha256sum <"$base_bin" | cut -d' ' -f1)" = "$(sha256sum <"$new_bin" | cu
   echo "ab-bench: WARNING both binaries are identical" >&2
 fi
 
+# Footgun 6: the stdimage. Its id embeds the git sha, so a commit silently strands one
+# side booting from source while the other boots `:live` — a fixed ~10 ms/run bias that
+# read as "startup +32% on a comment-only change" (2026-08-30) and contaminated a
+# rejection table's magnitudes the same night. The discipline line ("image :live on BOTH
+# arms, verified per run") lives in three documents and was still skipped mid-session, so
+# the harness now verifies it instead of trusting the operator: ASYMMETRY is fatal,
+# symmetric non-live is a warning (both sides boot from source — comparable, but not the
+# imaged path users get).
+stdimage_state() { # $1 binary -> live|stale|absent|unreadable|unknown
+  local probe out
+  probe="$(mktemp --suffix=.blsp)"
+  printf '(%%print (stdimage/status))\n' >"$probe"
+  out="$(timeout 30 "$1" "$probe" 2>/dev/null || true)"
+  rm -f "$probe"
+  case "$out" in
+    *":state :live"*)       echo live ;;
+    *":state :stale"*)      echo stale ;;
+    *":state :absent"*)     echo absent ;;
+    *":state :unreadable"*) echo unreadable ;;
+    *)                      echo unknown ;;  # predates stdimage/status (or errored)
+  esac
+}
+base_img="$(stdimage_state "$base_bin")"
+new_img="$(stdimage_state "$new_bin")"
+if [ "$base_img" = "$new_img" ]; then
+  if [ "$base_img" = "live" ]; then
+    echo "ab-bench: stdimage :live on both arms" >&2
+  else
+    echo "ab-bench: WARNING stdimage is '$base_img' on BOTH arms — symmetric, so deltas are fair, but neither side measures the imaged boot users get" >&2
+  fi
+elif [ "$base_img" = "unknown" ] || [ "$new_img" = "unknown" ]; then
+  # A side that predates `stdimage/status` (or was built WITH_STDIMAGE=0, the documented
+  # override for old baselines) has no imaged path to be fair to — inherent to comparing
+  # across the feature boundary, so warn rather than refuse.
+  echo "ab-bench: WARNING stdimage state base=$base_img new=$new_img — one side predates the stdimage; boot-heavy rows compare across that feature boundary" >&2
+else
+  echo "ab-bench: stdimage MISMATCH — base=$base_img new=$new_img. One side boots from source: a fixed per-run bias, worst on short rows (startup/spawn)." >&2
+  echo "ab-bench: to fix the working tree: cargo build -p nest && scripts/build-std-image.sh" >&2
+  echo "ab-bench: to fix a worktree baseline: (cd <worktree> && cargo build -p nest && scripts/build-std-image.sh)" >&2
+  echo "ab-bench: or make it symmetric-by-construction: BROOD_NO_STDIMAGE=1 on the whole run (loses the imaged path)." >&2
+  die "stdimage state differs between the arms — fix it or set BROOD_NO_STDIMAGE=1 (see above)"
+fi
+
 # ---- measure ---------------------------------------------------------------
 all_cpus="0-$(( $(nproc) - 1 ))"
 

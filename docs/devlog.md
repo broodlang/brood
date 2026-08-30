@@ -729,6 +729,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-29** — ability-op runtime contracts (ADR-293), and the discovery that `BROOD_CONTRACTS=1` had been unusable on every cold boot cache — three defects, no end-to-end test (KI-81): an intersection of arrows satisfies what no single arm does, checked against a brute-force model of what an arrow denotes rather than against more property laws
 - **2026-08-29** — KI-87: the inference cycle guard released the symbol it refused (`bool::then_some` builds its argument eagerly, so a refused `InferGuard` was built, dropped, and un-marked the in-flight inference) — `nest run` at 54 GB, three 19 GB test processes; one-line fix, sabotage-verified guards, `ulimit -v` in front of every inference test run
 - **2026-08-30** — strict over std 336 → 0 and a CI gate for it: ~350 sigs declared by reading bodies, every nil source made honest (one real bug), and FOURTEEN checker gaps closed generally on the way (extremum/get/nth defaults, short-circuit-exact `or`, branch narrowing in inferred returns, record names carrying field types, optional defaults, destructuring, dead branches, exclusion-known negations, fold fixpoint, prelude sigs surviving the freeze, sigs inside `check-allow`)
+- **2026-08-30** — type-guard signatures (ADR-301): `(sig datetime? (any -> (is datetime)))` narrows like a built-in predicate, bare-local or path, cross-module; the prelude's six record predicates declared
 
 ---
 
@@ -7306,6 +7307,25 @@ set each run — wasmtime reserves large virtual regions per store, so the cap b
 whatever is concurrent. Both files pass uncapped. A varying failure set under a cap is the
 cap, not a flake.
 
+### 2026-08-30, later still — RETRACTED: there is no upstream `spawn` regression
+
+The "+7.5% vs 28bcdce8" claim two entries up does not survive a layout-insensitive
+measurement. `perf stat` on the spawn row across three binaries — 28bcdce8, HEAD, and HEAD
+with the new comparison arities reverted — reads **instructions retired flat at
+2.106–2.124 G (±0.9%) and cycles flat at 2.33–2.38 G (±2%)**, while wall-clock deltas
+between the same binaries read anywhere from −1% to +8% with best-of-15 floors of 1–3%.
+The contradiction that exposed it: reverting upstream's `<`/`>`/`<=`/`>=` single-arg
+arities (the only plausible per-spawn mechanism in the range) measured spawn +6.1%
+"slower" — the wrong direction for the hypothesis, and the tell that the wall numbers were
+noise.
+
+Worth keeping, and now in the §7.1 discipline list: **a same-binary floor cannot see
+cross-binary noise.** `spawn` runs unpinned on all cores, so its wall time carries
+scheduler wake-latency variance and per-binary code-layout luck that base-vs-base of ONE
+binary never samples. Before believing a wall-clock regression on a concurrency row
+between two different binaries, confirm it with `perf stat -e instructions,cycles` — work
+that didn't grow is a regression that isn't there.
+
 ## 2026-08-30 (later) — strict to zero over std, and what the checker had to learn to allow it
 
 The type-system question ("what stops sound, complete and gated?") got its practical first
@@ -7343,3 +7363,69 @@ green on the rebuilt binary; the non-strict gate unchanged at zero; 496 Rust che
 prelude tests green. Left deliberately: `tests/` is not held to strict (a test hands a sig
 the literals it must reject), and user predicates (`datetime?`) do not narrow — the
 type-guard signature is the next design item.
+
+## 2026-08-30 (after the strict gate) — pingpong −20%, ring −18%: the unconditional wake syscall, found from a user question
+
+"Why did pingpong go up so much?" — trend.svg showed +26% between the 2026-08-27 and
+2026-08-28 published runs. Bisected with INSTRUCTIONS RETIRED as the oracle (the wall-clock
+lesson from the spawn retraction, applied): the growth splits into a ~83 M/run constant
+smeared across the type-system window (load-time macro expansion of the port's
+`receive`/match forms — `macroexpand` at 17% of the row's cycles, tree-walked prelude
+expander helpers under it) and **~850 instructions per message pinned to `473f8290`** —
+the wake-both correctness fix. Its `wake_both` called `Condvar::notify_all` on every
+delivery, and Rust's futex condvar issues `futex(FUTEX_WAKE)` unconditionally: one syscall
+per message, visible in the profile as `syscall` + `clear_bhb_loop`.
+
+The fix keeps 473f8290's invariant and drops the cost: `MailboxState.cv_waiters`, written
+only under the state lock — `wait_for_message` registers before `Condvar::wait` atomically
+releases that lock into the block, and every wake site reads the count inside the same
+critical section that makes its wake-relevant change. Either ordering is safe by
+construction (the waiter's re-check sees the change, or the waker sees the count), so the
+only notify skipped is one delivered to provably nobody — which a condvar discards anyway.
+That was the entire per-message cost: **pingpong −19.7%, ring −17.6%** (best-of-15, floors
+2.0%/0.7%, live images), spawn/latency neutral (p99 86–97 µs both arms). Instructions
+2.335 → 2.199 G against 0.13.0's 2.092 G; the residual ~107 M is the expansion constant,
+recorded in compute-frontier §7.3 as its own item.
+
+Gauntlet for a wake-ordering change: full suite twice (1282/1282 both), the wake-sensitive
+binaries (live_migration, local_send_race, autoload_race, jit_suspend_latch) looped 5×
+capped `-j1`, a GC-stress pass over the race tests, and the cli distribution suite 3× —
+all green. The lost-wake protection itself is pinned by 473f8290's sabotage-verified tests.
+
+## 2026-08-30 (third) — M2b's fat tables go lazy: −59 MB at 300k processes, time-flat
+
+`vm_arm_block` materialised an `Option<CallIcEntry>` slot (64 B) for every site of every
+ACTIVATED arm — entered or not — and the same for `vm_global_ics`. The mirror's 2026-08-18
+fix already proved the pattern that removes it: grow by the table's only writer, tolerate
+short reads everywhere else. Bases now come from `next_ic_base`/`next_gic_base` counters,
+`vm_call_ic_put`/`vm_global_ic_put` grow to `abs + 1` on first publish (guarded to never
+grow past the reservation, so a stale base after a `runtime_collect` reset writes nothing
+rather than something wrong), and the counters reset in lockstep with the four
+table+registry clears — ADR-096's site-id recycling is bit-for-bit what it was.
+
+Measured: `spawn-live` peak RSS 1796 → 1737 MB; every timed row flat at both ceilings, with
+ceiling-1 `pfib`'s +3.9% wall retracted against identical instructions (600.9 G both arms —
+the same wall-vs-work discipline the spawn phantom taught). The full sharing design (one
+table per runtime) stays where the 2026-08-20 correction left it: blocked on the
+process-local `ArmHandle` and per-process `callee_bases`; and the 64→48 B entry shrink died
+in analysis tonight — `callee` must ride the entry even on arm hits, because it is the
+rooted pre-args callee the epoch-moved fallback dispatches (re-resolving would be
+semantically wrong), so the enum split has nothing disjoint to union.
+
+## 2026-08-30 (fourth) — a quasiquote hiding in a vector literal, and the flag that names deserters
+
+§7.3's expansion-constant follow-up. The chain, each link measured: macro expanders already
+run on the VM (`apply_engine`), but the tree-walker's `apply_closure` never re-enters it —
+so ONE closure deferring to the tree-walker tree-walks everything it calls, transitively.
+The `tw_defer` counter (34, warm) could never say WHO; the new `BROOD_DEFER_DBG=1` names
+each deserter, and the warm list led with `%receive-split` — whose only sin is a quasiquote
+inside a VECTOR literal: `expand_static_quasiquotes` walked lists only, a vector literal is
+an atom to `list_to_vec`, so the raw `quasiquote` special form survived into the arm and
+deferred it. The walker now descends vector literals.
+
+Measured: pingpong instructions 2.199 → 2.160 G (−39 M of the ~83 M constant), wall −4.0%
+best-of-15 with a 0.0% floor; startup/json/fib flat-to-better; suite 1285/1285. What
+remains of the constant is the autogensym-template class — macros like `receive`/`match`
+whose expanders defer BY DESIGN (fresh gensyms per invocation can't expand once at
+compile). Compiling those means emitting builder code that calls gensym at runtime — a
+real feature, recorded in §7.3 as the next slice.
