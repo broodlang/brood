@@ -227,7 +227,11 @@ pub(crate) fn jit_lower_arm_hot(
     arm: &CompiledArm,
     slot_tags: &[u8],
 ) -> Option<*const u8> {
-    plan_general_lowering(arm, slot_tags).ok()?;
+    // No `plan_general_lowering` here, deliberately: an arm reaching the hot stage
+    // either passed the gate at its first compile (the relower — re-running it would
+    // be a no-op) or was refused by it and admitted anyway (`BROOD_XADMIT=1`, §7.1 —
+    // the hot stage is exactly where the gate's two recorded costs don't apply).
+    // The subset pre-bails inside `jit_lower_arm_inner` still guard everything real.
     jit_lower_arm_inner(jit, arm, slot_tags, None, true)
 }
 
