@@ -108,6 +108,34 @@ pub(super) enum Op {
 #[cfg(feature = "jit")]
 static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+#[cfg(feature = "jit")]
+thread_local! {
+    /// The most recent mid-emit refusal reason on this compile thread — recorded by
+    /// `call::trace_call_bail`, cleared at each `jit_lower_arm_inner` entry, consumed by
+    /// `jit_runtime`'s `trace_lower_declined` so the arm-named `[jit-bail]` line carries
+    /// the specific reason instead of the generic `lowering-returned-none`. The mid-emit
+    /// sites print their own line, but that line has no `arm=` (the arm name isn't in
+    /// scope there) — and a trace read by grepping `arm=` therefore showed those refusals
+    /// as unexplained `lowering-returned-none`, which cost a re-investigation of
+    /// `call-spill-exhausted` on 2026-08-30 (compute-frontier §7.1's "silent refusal"
+    /// open lead was this line-shape gap, not a missing trace).
+    static LAST_MID_EMIT_REASON: std::cell::Cell<Option<&'static str>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Record a mid-emit refusal reason for the arm currently being lowered on this thread.
+#[cfg(feature = "jit")]
+pub(super) fn record_mid_emit_reason(reason: &'static str) {
+    LAST_MID_EMIT_REASON.set(Some(reason));
+}
+
+/// Take (and clear) the mid-emit refusal reason recorded during the lowering attempt
+/// that just returned `None` — for the caller's arm-named decline line.
+#[cfg(feature = "jit")]
+pub(crate) fn take_mid_emit_reason() -> Option<&'static str> {
+    LAST_MID_EMIT_REASON.take()
+}
+
 /// Compile `arm`'s chunk to a native `extern "C" fn(heap: *mut Heap, base: i64) -> i64`
 /// for the Step-A int subset, or `None` to bail to the VM. The compiled fn reads its
 /// frame slots from `roots[base..]`, computes in registers, **boxes the result into
@@ -325,6 +353,9 @@ fn jit_lower_arm_inner(
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
     use cranelift_module::{Linkage, Module};
     use std::sync::atomic::Ordering;
+
+    // A stale reason from a previous arm's refusal must not attach to this arm's decline.
+    LAST_MID_EMIT_REASON.set(None);
 
     // The body/chunk/frame-size this lowering runs against: either the arm's own
     // (original, small — the small native) or a re-derived inlined body (deferred upgrade).

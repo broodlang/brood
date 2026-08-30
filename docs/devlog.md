@@ -7808,3 +7808,28 @@ Recorded as dormant, not fixed: many sightings, no root cause, so the router sta
 `BROOD_TW_REENTRY=1` with its 60×/−6.9% wins waiting. The ledger and the whole per-pid
 lifecycle kit ship in-tree so the NEXT sighting starts from instruments, not from
 archaeology — and the KI's first instruction now is: preserve the binary.
+
+### 2026-08-30, ninth — §7.1's "unnamed refusal" was named all along; the trace's line shape hid it
+
+The partial-lowering warm-up task — "name the silent `lowering-returned-none` on
+`(+ (nth v 0) (inner))`" — dissolved on contact: the refusal **was already named**.
+`trace_call_bail` printed `call-spill-exhausted` at the moment of refusal, but on its own
+`[jit-bail] (mid-emit) reason=…` line, which carries no `arm=` (the arm name is not in
+scope mid-emit). Both investigations — §7.1's original session and today's resumption —
+read the trace by grepping `arm=`, so the reason line was filtered out and the arm-named
+line said only the generic `lowering-returned-none`. Not a missing trace; a line-shape gap
+that defeats the obvious way of reading the trace, twice.
+
+Fix: `trace_call_bail` records its reason in a compile-thread-local
+(`record_mid_emit_reason`, cleared at each `jit_lower_arm_inner` entry so a stale reason
+cannot attach to the next arm), and `trace_lower_declined` consumes it
+(`take_mid_emit_reason`, taken regardless of the trace flag so a flagless run cannot leak
+into a flagged one) — the arm-named decline line now reads
+`arm=host reason=call-spill-exhausted inlined=false nslots=4 ops=[Prim2SlotInt Call Prim2]`.
+The bare mid-emit line stays (it preserves ordering against the IR dump).
+
+The refusal itself is correct and stays: the `(nth v 0)` result is a `Handle` live below
+the arm's one non-tail call, and `jit_spill_reserve`'s `< 2 → 0` rule — measured twice,
+2026-08-29/30, widening it buys nothing and costs (`jit_plan.rs` has the numbers) —
+reserves no spill slot for a single-call arm. Suite 1296/1296; clippy on CI's flags clean.
+§7.1's follow-on (2) in `docs/compute-frontier.md` updated to RESOLVED.

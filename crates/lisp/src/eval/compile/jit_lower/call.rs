@@ -33,6 +33,11 @@ pub(super) enum Flow {
 /// bisect to find (the spill reserve undercounted; see `jit_spill_reserve`). The arm name
 /// is not in scope here; the generic line that follows carries it.
 fn trace_call_bail<T>(reason: &'static str) -> Option<T> {
+    // Recorded unconditionally (a Cell store): the arm-named decline line in
+    // `jit_runtime::trace_lower_declined` picks this up, so grepping `arm=` sees the
+    // specific reason — the bare `(mid-emit)` line below has no arm name and a filtered
+    // trace read used to lose it.
+    super::record_mid_emit_reason(reason);
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
         eprintln!("[jit-bail] (mid-emit) reason={reason}");
