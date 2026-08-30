@@ -1076,6 +1076,15 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   Type grammar beyond the basics: `(or A B)`, `(and A B)`, `(not T)` — so "anything
   but nil" is `(and any (not nil))` — `(vector E)`, `(map K V)`, `(tuple A B)`,
   `(record :k T)`, and bare literals (`:ok`, `5`, `true`, `"GET"`).
+- **`nest check --strict` reads a known bound by inclusion.** Plain `nest check` warns only
+  on a *provable* misuse (`∩ = ∅`); `--strict` also warns where a value is merely wider
+  than the parameter — `number` where `int` is declared, `nil | string` from `nth`/`first`
+  handed to a string function. The standard library holds at zero under it (CI). The
+  answer to a strict warning is almost always a `sig` on the enclosing function pinning
+  its parameters, or an honest nil default (`(or (nth parts 1) "")`, `(nth xs i default)`
+  — the default IS the absence case). A record name in a sig is an open shape: a key it
+  does not declare reads as unknown, so go through a declared accessor. A user predicate
+  (`datetime?`) does not narrow; the built-in `int?`/`string?`/… do.
 - **A `(record …)` is CLOSED** (ADR-264) — it names every key, and one it doesn't
   declare reads as `nil`. Write `(record &open :k T)` when a value may carry more,
   which is what a *parameter* usually wants. Closedness is what makes a tagged union
