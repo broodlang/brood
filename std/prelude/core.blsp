@@ -421,7 +421,7 @@ something that CAN be ordered: `(< '(1 2))` raises rather than silently answerin
     (= [1 2] [1 2])   → true   ; by value, not identity"
   ((a b) (%eq a b))
   ((& xs) (%chain? %eq xs)))
-(defn not= "**Deprecated since 0.19.0 — write `(not (= a b))`.** True if the arguments are
+(defn not= "**Deprecated since 0.19.1 — write `(not (= a b))`.** True if the arguments are
 not all equal.
 
     (not= 1 2)  → true
@@ -453,7 +453,7 @@ inlines, while this wrapper stays a call — and it does not mislead past two ar
 ;; `:use` takes a symbol, so the diagnostic can only name `not`; the docstring carries the
 ;; full replacement. Kept defined (and tested) until the removal — deprecation is advisory,
 ;; so nothing downstream breaks yet.
-(%register-meta 'not= [:deprecated "0.19.0" :use 'not])
+(%register-meta 'not= [:deprecated "0.19.1" :use 'not])
 
 ;; ---- control-flow macros ----
 ;; These read like special forms but are ordinary macros over `if`/`do`/`let`.
@@ -784,6 +784,12 @@ take` — on every COLD boot cache, i.e. the first run after any rebuild, while 
 warm cache skipped expansion and looked fine (KI-81)."
   (%sig-take-acc n xs nil))
 
+(defn- %sig-drop
+  (n xs)
+  "`xs` without its first `n` elements. Expansion-time helper for `sig!` — see
+`%sig-take` for why the general `drop` cannot be called here."
+  (if (or (%le n 0) (nil? xs)) xs (%sig-drop (%sub n 1) (rest xs))))
+
 (defn- %sig-nth
   (xs n)
   "The `n`th element of `xs`, or nil. Expansion-time helper for `sig!` — see
@@ -811,7 +817,10 @@ result are checked at every call and a mismatch throws (an opt-in 'strong
 arrow'). Place it AFTER the function's definition — it rebinds `name`, preserving
 arity (so introspection and the reload-arity check are undisturbed). The checker
 reads it exactly like `(sig …)`. Supports a `&` rest marker:
-`(sig! f (int & number -> string))` checks fixed args then every rest arg."
+`(sig! f (int & number -> string))` checks fixed args then every rest arg, and an
+`&optional` marker: `(sig! f (string int &optional string -> string))` checks each
+optional that was actually supplied and leaves the callee's own defaults alone. That
+one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`."
   ;; Register the declaration on the heap for the checker (keyed by the
   ;; module-qualified global name) — same as `(sig …)` — then install the runtime
   ;; contract. The `(do …)` keeps both effects at top level.
@@ -823,8 +832,45 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
           nil
           (let (ptypes (%sig-take i type)
                 rtype (%sig-nth type (%add i 1))
-                amp-pos (%sig-pos ptypes '& 0))
-            (if (%lt amp-pos 0)
+                amp-pos (%sig-pos ptypes '& 0)
+                opt-pos (%sig-pos ptypes '&optional 0))
+            (cond
+              ;; `(fixed… &optional o… -> ret)`. Checked before the two below because an
+              ;; `&optional` list has neither an `&` nor a fixed count: read as fixed it
+              ;; counts the MARKER as a parameter, which is how `(sig pad-left (string int
+              ;; &optional string -> string))` armed a 4-arity shim over a 2-3-arity
+              ;; function and made every `(string/pad-left s 10)` an arity error under
+              ;; BROOD_CONTRACTS=1. The shim is variadic and `apply`s only the arguments it
+              ;; actually received, so the callee's own defaults still apply — passing an
+              ;; explicit `nil` for an absent optional would override them. The cost is that
+              ;; `arity-of` reports `2+` rather than `2-3` for the wrapped name, which the
+              ;; reload check notes on stderr; contracts mode is a dev switch and the
+              ;; alternative (a sentinel default per optional) buys accuracy nothing reads.
+              (%le 0 opt-pos)
+                (let (fixed-ptypes (%sig-take opt-pos ptypes)
+                      opt-ptypes (%sig-drop (%add opt-pos 1) ptypes)
+                      fixed-params (%sig-gensyms opt-pos)
+                      more (gensym "more")
+                      orig (gensym "orig")
+                      r (gensym "ret"))
+                  `(do
+                     (def ~orig ~name)
+                     (def ~name
+                       (fn (~@fixed-params & ~more)
+                         (%contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
+                         (%contract-check-args '~name '~opt-ptypes ~more ~(%add opt-pos 1))
+                         (let (~r (apply ~orig (append (list ~@fixed-params) ~more)))
+                           (unless (type-matches? '~rtype ~r)
+                             (throw (str '~name
+                                      ": result expected "
+                                      '~rtype
+                                      ", got "
+                                      (type-of ~r)
+                                      " ("
+                                      (pr-str ~r)
+                                      ")")))
+                           ~r)))))
+              (%lt amp-pos 0)
               ;; fixed arity
               (let (params (%sig-gensyms i)
                     orig (gensym "orig")
@@ -852,30 +898,31 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                                     ")")))
                          ~r)))))
               ;; variadic: (fixed… & rest-type -> ret)
-              (let (fixed-ptypes (%sig-take amp-pos ptypes)
-                    rest-ptype (%sig-nth ptypes (%add amp-pos 1))
-                    fixed-params (%sig-gensyms amp-pos)
-                    rest-param (gensym "rest")
-                    orig (gensym "orig")
-                    r (gensym "ret"))
-                ;; Same global-capture reasoning as the fixed-arity shim above.
-                `(do
-                   (def ~orig ~name)
-                   (def ~name
-                     (fn (~@fixed-params & ~rest-param)
-                       (%contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
-                       (%contract-check-rest '~name '~rest-ptype ~rest-param)
-                       (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
-                         (unless (type-matches? '~rtype ~r)
-                           (throw (str '~name
-                                    ": result expected "
-                                    '~rtype
-                                    ", got "
-                                    (type-of ~r)
-                                    " ("
-                                    (pr-str ~r)
-                                    ")")))
-                         ~r)))))))))))
+              else
+                (let (fixed-ptypes (%sig-take amp-pos ptypes)
+                      rest-ptype (%sig-nth ptypes (%add amp-pos 1))
+                      fixed-params (%sig-gensyms amp-pos)
+                      rest-param (gensym "rest")
+                      orig (gensym "orig")
+                      r (gensym "ret"))
+                  ;; Same global-capture reasoning as the fixed-arity shim above.
+                  `(do
+                     (def ~orig ~name)
+                     (def ~name
+                       (fn (~@fixed-params & ~rest-param)
+                         (%contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
+                         (%contract-check-rest '~name '~rest-ptype ~rest-param)
+                         (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
+                           (unless (type-matches? '~rtype ~r)
+                             (throw (str '~name
+                                      ": result expected "
+                                      '~rtype
+                                      ", got "
+                                      (type-of ~r)
+                                      " ("
+                                      (pr-str ~r)
+                                      ")")))
+                           ~r)))))))))))
 
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
 ;; each subexpression evaluated at most once (a gensym holds it across the test).

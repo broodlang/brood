@@ -846,10 +846,6 @@ available text columns, and prompt width for rendering."
   "Turn `[substring face]` highlight chunks into `[:print str face]` ops."
   (map (fn ([s f]) [:print s f]) chunks))
 
-  ((record &open
-     :text string :point int :prefix string :hscroll int :avail int :promptw int :width int
-     :last-row int) ->
-    map))
 (defn- lineedit-render-single
   (st)
   "Repaint a SINGLE-line input in place (the common case): move up over any block left
@@ -889,6 +885,10 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
     (term/emit (into [] (append head tail)))
     (assoc st :last-row 0)))
 (sig lineedit-render-single
+  ((record &open
+     :text string :point int :prefix string :hscroll int :avail int :promptw int :width int
+     :last-row int) ->
+    map))
 
 ;; check-allow: deliberately non-tail — depth = lines of the input being edited.
 (check-allow :non-tail-recursion

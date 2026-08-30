@@ -7429,3 +7429,32 @@ remains of the constant is the autogensym-template class — macros like `receiv
 whose expanders defer BY DESIGN (fresh gensyms per invocation can't expand once at
 compile). Compiling those means emitting builder code that calls gensym at runtime — a
 real feature, recorded in §7.3 as the next slice.
+
+### 2026-08-30, later still — 218 signatures move below their definitions, and the gate that will keep them there
+
+`(sig …)` is a declaration by default and an **action** under `BROOD_CONTRACTS=1`, where it
+rebinds the name to a checking shim — so a sig above its `defn` is a forward reference that
+takes the module load down. That is KI-81's defect 3, and the signature-adoption sweep
+re-introduced it 211 times in `std/` plus 7 in the prelude. `cli::contracts_mode` stayed green
+throughout: it proves the *prelude* boots and writes its own sigs correctly, and asserted
+nothing about the other 400 files.
+
+All 218 moved. The rule is now asserted directly by **`crates/lisp/tests/sig_placement.rs`** —
+a textual scan of every `.blsp` that names the line to move, sabotage-verified. Above-the-defn
+is the natural place to write a signature, so this needed a gate rather than a fix.
+
+Two things fell out of it:
+
+- **`sig!` never handled `&optional`** — read as fixed parameters the marker counts as one, so
+  `(sig pad-left (string int &optional string -> string))` armed a 4-arity shim over a
+  2-3-arity function and every `(string/pad-left s 10)` was an arity error under contracts.
+  Unreachable before only because the module died earlier. The shim is variadic now and
+  `apply`s just what it received, so the callee's own defaults survive; an explicit `nil` for
+  an absent optional would have changed answers silently. `contracts_mode.rs` covers all three
+  cases. Cost: `arity-of` reports `2+` for a wrapped name, which the reload check notes.
+- **A bulk edit moved two multi-line sigs by their first line only**, leaving
+  `std/tool/observer.blsp` and `std/editor/lineedit.blsp` unparseable — and the symptom was
+  three `unbound symbol` warnings in `tests/debug_test.blsp`, a file with nothing wrong with
+  it, because `nest check` could no longer load what it imported. **`nest format --check`
+  names the unparseable file; `nest check` blames the innocent one.** Reach for the formatter
+  first when warnings appear in a file you did not touch.

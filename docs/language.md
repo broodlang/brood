@@ -2390,7 +2390,7 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
 ### Comparison & logic
 `=`  ~~`not=`~~  `<`  `<=`  `>`  `>=`  `not`
 
-- ~~`not=`~~ is **deprecated since 0.19.0 — write `(not (= a b))`.** It never bought a
+- ~~`not=`~~ is **deprecated since 0.19.1 — write `(not (= a b))`.** It never bought a
   capability, only a spelling: its definition *is* `(not (= a b))`, and no part of the
   kernel, the compiler or the checker knows the name. It is also the slower of the two,
   structurally — `=`'s body is a direct primitive call, so the ADR-069 thin-wrapper elision

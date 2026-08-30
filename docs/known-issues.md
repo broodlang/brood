@@ -5407,6 +5407,39 @@ is now that gate, and it cold-caches deliberately (`XDG_CACHE_HOME` at a fresh t
 without that it passes on a broken build, which is exactly what every other check did for the
 entire period this was unusable.
 
+### Recurrence 2026-08-30 — defect 3's shape came back 211 times, and the gate could not see it
+
+The signature-adoption sweep put a `(sig …)` **above** its `defn` in 211 places across `std/`,
+plus 7 in the prelude — the same forward reference as defect 3, and above-the-defn is the
+natural place to write a signature, so this will keep happening. Every one of those modules
+was unloadable under `BROOD_CONTRACTS=1`; `std/string.blsp` took the boot down through an
+auto-derived import as soon as a program used `str`.
+
+**`contracts_mode.rs` was green the whole time.** It proves the *prelude* boots and declares
+its own sigs correctly — it never asserted anything about the other 400 files. A gate that
+covers the place a defect was found is not a gate on the defect's *class*.
+
+So the rule is now asserted where it lives: **`crates/lisp/tests/sig_placement.rs`** scans
+every `.blsp` and fails on any `(sig NAME …)` that precedes a same-file definition of `NAME`,
+naming the line to move. Textual, no interpreter, sabotage-verified. All 218 sites moved below
+their definitions.
+
+Two things fell out of fixing it:
+
+- **`sig!` never handled `&optional`.** Read as fixed parameters, the marker itself counts as
+  one, so `(sig pad-left (string int &optional string -> string))` armed a **4-arity** shim
+  over a 2-3-arity function and every `(string/pad-left s 10)` became an arity error. It was
+  unreachable before only because the module died earlier. The shim is now variadic and
+  `apply`s just the arguments it received, so the callee's own defaults survive — passing an
+  explicit `nil` for an absent optional would have silently changed answers. Covered in
+  `contracts_mode.rs` (default kept, supplied value passed, contract still fires).
+- **Two multi-line sigs were mangled by the bulk move** (`observe-minibuffer`,
+  `lineedit-render-single`): the head line moved and its continuation stayed behind, leaving
+  both files unparseable — and the *symptom* was three `unbound symbol` warnings in
+  `tests/debug_test.blsp`, a file with nothing wrong with it, because `nest check` could no
+  longer load what it imported. `nest format --check` names the unparseable file directly and
+  is the faster read.
+
 ## KI-80 — `brood_suite_passes` flaked once under load, and the output was thrown away ✅ FIXED 2026-08-29
 
 **What was seen.** One `cargo nextest run -p brood --test-threads 4` ended
