@@ -5123,6 +5123,71 @@ fn reduce_fold_bail_when_init_or_callback_unknown() {
     );
 }
 
+// ---- `get` with a default: the absence case is the default, not nil ----
+
+#[test]
+fn get_with_a_default_replaces_the_absence_nil_by_the_default_type() {
+    let interp = crate::Interp::new();
+    let ty = |src: &str| {
+        use super::infer::expr_ty;
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let form = reader::read_one(&mut heap, src).expect("parse");
+        expr_ty(&heap, form, &Ctx::default())
+    };
+    let int = Ty::of(Tag::Int);
+    let nil = Ty::of(Tag::Nil);
+    // A map literal declares `:a`; `:b` is absent, so it is exactly the default.
+    let t = ty("(get {:a 1} :a 0)").expect("typed");
+    assert!(t.is_subtype(&int) && !t.is_subtype(&nil), "{t}");
+    let t = ty("(get {:a 1} :b 0)").expect("typed");
+    assert!(t.is_subtype(&int) && t.is_disjoint(&nil), "{t}");
+    // Without a default the absent key is nil.
+    let t = ty("(get {:a 1} :b)").expect("typed");
+    assert!(t.is_subtype(&nil), "{t}");
+    // A default whose type is unknown keeps the two-argument reading (admits nil).
+    let t = ty("(get {:a 1} :a unknown-thing)").expect("typed");
+    assert!(t.is_subtype(&int), "{t}");
+}
+
+// ---- an extremum returns one of its operands ----
+
+#[test]
+fn an_extremum_is_typed_as_the_union_of_its_operands() {
+    use super::infer::expr_ty;
+    // `math/max` over two ints is an int, so it feeds an int-only parameter without a
+    // `--strict` complaint that `ordered ⊄ int`; over an int and a float it is `int | float`.
+    let interp = crate::Interp::new();
+    let ty = |src: &str| {
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let form = reader::read_one(&mut heap, src).expect("parse");
+        expr_ty(&heap, form, &Ctx::default())
+    };
+    let int = Ty::of(Tag::Int);
+    let float = Ty::of(Tag::Float);
+    // Literal operands keep their literal sets (`{1, 2}` — max of 1 and 2 IS one of them).
+    let t = ty("(math/max 1 2)").expect("typed");
+    assert!(t.is_subtype(&int), "{t}");
+    let t = ty("(math/min 1 2.5)").expect("typed");
+    assert!(
+        t.is_subtype(&int.clone().union(float.clone())) && !t.is_subtype(&int),
+        "{t}"
+    );
+    let t = ty("(math/min 1)").expect("typed");
+    assert!(t.is_subtype(&int), "{t}");
+    // An unknown operand defers to the declared sig (`ordered`) — never narrower than the
+    // truth.
+    let t = ty("(math/max 1 x)").expect("the sig still types it");
+    assert!(!t.is_subtype(&int), "{t}");
+}
+
 // ---- inference terminates on a mutually recursive call graph ----
 
 /// Two loaded functions that call each other, each referencing the partner TWICE. The
@@ -7131,9 +7196,13 @@ fn countable_is_spelled_by_name() {
 // is one of the operands. No more `(-> (or map number))` on a function that picks a max.
 #[test]
 fn max_and_min_take_and_return_the_ordered_domain() {
-    assert_eq!(ty_str("(%max 1 2)"), "number");
-    assert_eq!(ty_str("(math/min 3 4)"), "number");
-    assert_eq!(ty_str("(math/min 3 4 5)"), "number");
+    // An extremum hands back one of its operands, so literal operands keep their literal
+    // set — narrower than the `ordered` domain the sig declares, and still `⊆ number`.
+    assert_eq!(ty_str("(%max 1 2)"), "1 | 2");
+    assert_eq!(ty_str("(math/min 3 4)"), "3 | 4");
+    assert_eq!(ty_str("(math/min 3 4 5)"), "3 | 4 | 5");
+    // An untyped operand defers to the declared domain.
+    assert_eq!(ty_str("(math/min 3 x)"), "number");
     let ws = file_warnings("(defmodule t)\n(sig g (string -> int))\n(defn g (s) (%max 1 s))");
     assert!(
         ws.iter()

@@ -681,6 +681,27 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         let t = expr_ty(heap, arg, ctx)?;
         return t.is_subtype(&num).then_some(float);
     }
+    // An extremum hands back ONE OF ITS OPERANDS — `(math/max a b)` is `a` or `b` — so its
+    // result is the union of the operand types, not the operator's whole domain (`ordered`,
+    // which is what the registry-derived sig says and what made `(+ 1 (math/min i n))` read
+    // as `number + ordered` under `--strict`). Every operand must type; one unknown defers to
+    // the sig. Sound: the union of the operands is exactly the set of values it can return.
+    let is_extremum = value::symbol_is(head, "math/max")
+        || value::symbol_is(head, "math/min")
+        || value::symbol_is(head, "%max")
+        || value::symbol_is(head, "%min");
+    if is_extremum {
+        let args = items.get(1..)?;
+        let mut acc: Option<Ty> = None;
+        for &arg in args {
+            let t = expr_ty(heap, arg, ctx)?;
+            acc = Some(match acc {
+                Some(u) => u.union(t),
+                None => t,
+            });
+        }
+        return acc;
+    }
     numeric_op_kind(head)?;
     // Every operand must be a known numeric type; one non-numeric / unknown defers.
     // (Zero operands — e.g. a bare `(+)` — also defers, leaving the curated sig.)
@@ -1224,13 +1245,32 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "get") && items.len() >= 3 {
         let map_arg = *items.get(1)?;
         let map_ty = expr_ty(heap, map_arg, ctx);
+        // `(get m k default)`: an ABSENT key yields the default, so the absence case reads
+        // as the default's type rather than `nil` — `(get dt :hour 0)` is `int`. A default
+        // whose type can't be pinned falls back to the two-argument reading (which admits
+        // `nil` — a superset, since it can only over-state the absence case).
+        let default_ty = match items.get(3) {
+            Some(&d) if items.len() == 4 => expr_ty(heap, d, ctx),
+            _ => None,
+        };
         if let Value::Keyword(key) = items[2] {
+            if let Some(d) = default_ty.as_ref() {
+                if let Some(fty) = map_ty
+                    .as_ref()
+                    .and_then(|t| t.record_field_ty_with_default(key, d))
+                {
+                    return Some(fty);
+                }
+            }
             if let Some(fty) = map_ty.as_ref().and_then(|t| t.record_field_ty(key)) {
                 return Some(fty);
             }
         }
         if let Some((_, v)) = map_ty.as_ref().and_then(Ty::map_kv) {
-            return Some(v.clone().union(Ty::of(Tag::Nil)));
+            return Some(match default_ty {
+                Some(d) => v.clone().union(d),
+                None => v.clone().union(Ty::of(Tag::Nil)),
+            });
         }
     }
     // `(keys m)` → `nil | list<K>`. On a **closed** record shape the keys are exactly
