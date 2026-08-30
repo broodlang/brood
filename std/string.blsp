@@ -208,6 +208,7 @@ incremental search rides on."
   (triml-from s 0 (string/length s)))
 (sig triml (string -> string))
 
+(sig trimr-to (string int -> string))
 (defn- trimr-to
   (s n)
   (if (and (> n 0) (whitespace? (char-at s (dec n))))
@@ -231,17 +232,19 @@ incremental search rides on."
 ;; Column formatting for tabular/console output. `pad-*` left unchanged when the
 ;; string already meets the width (they never truncate).
 
+(sig pad-left (string int &optional string -> string))
 (defn pad-left (s w &optional (pad " "))
   "Right-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the left; `s` is returned unchanged if it is already at least `w` wide.
 
     (string/pad-left \"7\" 3)    → \"  7\""
-  (let (n (string/length s)) (if (>= n w) s (str (repeat pad (- w n)) s))))
+  (let (n (string/length s)) (if (>= n w) s (str (repeat (or pad " ") (- w n)) s))))
 
+(sig pad-right (string int &optional string -> string))
 (defn pad-right (s w &optional (pad " "))
   "Left-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the right; `s` is returned unchanged if it is already at least `w` wide.
 
     (string/pad-right \"7\" 3)   → \"7  \""
-  (let (n (string/length s)) (if (>= n w) s (str s (repeat pad (- w n))))))
+  (let (n (string/length s)) (if (>= n w) s (str s (repeat (or pad " ") (- w n))))))
 
 ;; ---- fill: greedy word-wrap (was std/text.blsp) -----------------------------
 

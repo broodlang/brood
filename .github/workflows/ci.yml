@@ -221,6 +221,20 @@ jobs:
           cargo run -q -p nest --features brood/treesit-grammars -- \
             check std/**/*.blsp tests/**/*.blsp
 
+      # The STRICT gate over the standard library (2026-08-30): a positively-known bound
+      # is read by inclusion, so `number` where `int` is declared, or `nil | string`
+      # handed to a string function, is a warning. std reached zero on 2026-08-30 (from
+      # 336) by declaring ~350 signatures and making every nil source honest; six
+      # checker gaps closed on the way. Keep it at zero — a new strict warning is either
+      # an undeclared function or a real maybe-nil. `tests/` is deliberately not held to
+      # strict: a test passes literals the sig would not admit on purpose.
+      - name: Type-checker STRICT gate over std (nest check --strict — zero warnings)
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          cargo run -q -p nest --features brood/treesit-grammars -- \
+            check --strict std/**/*.blsp
+
   # The ADR-076 differential gate — the whole suite through the tree-walker
   # escape hatch (`BROOD_VM=0`), the second half of `make test-both`. The VM is
   # the default engine and `differential.rs` already checks per-expression

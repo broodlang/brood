@@ -179,6 +179,22 @@ impl RecordShape {
         }
     }
 
+    /// The type `(get r k default)` yields: the declared type for a required field (the
+    /// default is never consulted), the declared type *or the default* for an optional one
+    /// (present → declared, absent → default), the default alone for a key a CLOSED shape
+    /// does not declare (always absent), and `rest ∪ default` on an open shape. The
+    /// absence-`nil` of [`field_ty`](Self::field_ty) is replaced by the default, and a
+    /// declared type that itself admits `nil` keeps it — a stored `nil` is present, and
+    /// `get` returns it, not the default.
+    fn field_ty_with_default(&self, key: Symbol, default: Ty) -> Ty {
+        match self.fields.get(&key) {
+            Some((ty, true)) => ty.clone(),
+            Some((ty, false)) => ty.clone().union(default),
+            None if self.is_open() => self.rest.clone().union(default),
+            None => default,
+        }
+    }
+
     /// Is this shape open — may a value carry keys it does not declare?
     fn is_open(&self) -> bool {
         !self.rest.is_never() && !self.rest.is_subtype(&Ty::of(Tag::Nil))
@@ -622,7 +638,46 @@ impl Ty {
     /// `nil`/`false`? Such a bound says nothing positive about the value, so strict
     /// checking (`GradualTy::consistent_with_mode`) keeps the overlap reading for it.
     pub fn is_known_only_by_exclusion(&self) -> bool {
-        Ty::truthy().is_subtype(self)
+        if Ty::truthy().is_subtype(self) {
+            return true;
+        }
+        // `any ∖ (a finite literal set)` — what a failed `(= x 0)` / `(= tag :done)` leaves
+        // of an unknown: it says which values `x` is NOT, and nothing it is. Reading
+        // `(not 0)` by inclusion flagged `(- i 1)` in every loop that tested `(= i 0)` first.
+        let excluded = Ty::ANY.difference(self.clone());
+        let without_falsy = excluded
+            .difference(Ty::of(Tag::Nil))
+            .difference(Ty::of(Tag::Bool));
+        if without_falsy.is_never()
+            || without_falsy.as_lit().is_some()
+            || without_falsy.as_lit_int().is_some()
+            || without_falsy.as_lit_str().is_some()
+        {
+            return true;
+        }
+        // `any ∖ vector` — what a failed `(vector? x)` leaves: a flat tag set with no
+        // positive refinement, describing MORE than half the universe. Its complement is
+        // the shorter description, i.e. what is known is what the value is not.
+        let refined = self.alts.is_some()
+            || self.arrow.is_some()
+            || self.elem.is_some()
+            || self.map_kv.is_some()
+            || self.fields.is_some()
+            || self.tuple.is_some()
+            || self.lit.as_deref().is_some_and(|l| l.members().is_some())
+            || self
+                .lit_int
+                .as_deref()
+                .is_some_and(|l| l.members().is_some())
+            || self
+                .lit_bool
+                .as_deref()
+                .is_some_and(|l| l.members().is_some())
+            || self
+                .lit_str
+                .as_deref()
+                .is_some_and(|l| l.members().is_some());
+        !refined && self.tags.count_ones() * 2 > UNIVERSE.count_ones()
     }
 
     /// The record identities named by this type's map member (`:t/usd`, …), as spelled
@@ -802,6 +857,31 @@ impl Ty {
                 return None;
             }
             let t = term.term_field_ty(key)?;
+            acc = Some(match acc {
+                Some(a) => a.union(t),
+                None => t,
+            });
+        }
+        acc
+    }
+
+    /// [`record_field_ty`](Self::record_field_ty) for `(get r k default)`: the absence
+    /// case reads as `default`'s type rather than `nil`. See [`RecordShape::field_ty_with_default`].
+    pub fn record_field_ty_with_default(&self, key: Symbol, default: &Ty) -> Option<Ty> {
+        let mut acc: Option<Ty> = None;
+        for term in self.terms_vec() {
+            if term.tags != MAP_BIT {
+                return None;
+            }
+            let shape = term.fields.as_deref()?;
+            let t = if !shape.fields.contains_key(&key) && shape.is_open() {
+                match term.map_kv.as_deref() {
+                    Some((_, v)) => v.clone().union(default.clone()),
+                    None => shape.field_ty_with_default(key, default.clone()),
+                }
+            } else {
+                shape.field_ty_with_default(key, default.clone())
+            };
             acc = Some(match acc {
                 Some(a) => a.union(t),
                 None => t,

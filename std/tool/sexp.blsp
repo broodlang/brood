@@ -56,6 +56,7 @@ interpreted and the bottleneck in structural navigation.)"
 
 ;; ---- structure queries ------------------------------------------------------
 
+(sig enclosing (map number -> map))
 (defn enclosing (anode point)
   "The deepest container node strictly containing `point` (descending into
 list/vector/map children); the root if none. Reader-macro wrappers are navigated
@@ -117,7 +118,7 @@ cost of ~three forms, not the whole buffer."
         ;; scan (strings/comments skipped, bracket depth tracked) in one native byte pass.
         end (reflect/scan-form-end text base 3))
     [base (string/substring text base end)]))
-(sig narrow (string int -> (tuple any string)))
+(sig narrow (string int -> (tuple int string)))
 
 ;; ---- pure navigation: (text point) -> point ---------------------------------
 
@@ -130,6 +131,7 @@ cost of ~three forms, not the whole buffer."
   "A container form — the `forward-list` sibling filter (and what `down-list` descends)."
   (container-kind? (get anode :kind)))
 
+(sig sexp-sibling-forward (string int fn -> int))
 (defn- sexp-sibling-forward
   (text point keep?)
   "End of the next sibling form satisfying `keep?` starting at or after `point`, within the
@@ -137,9 +139,10 @@ enclosing list; `point` when there is none. The shared body of the forward motio
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
-        nxt (seq/find (fn (f) (and (>= (get f :start) rp) (keep? f))) (forms-of enc)))
-    (if (nil? nxt) point (+ base (get nxt :end)))))
+        nxt (seq/find (fn (f) (and (>= (sexp-start f) rp) (keep? f))) (forms-of enc)))
+    (if (nil? nxt) point (+ base (sexp-end nxt)))))
 
+(sig sexp-sibling-backward (string int fn -> int))
 (defn- sexp-sibling-backward
   (text point keep?)
   "Start of the previous sibling form satisfying `keep?` ending at or before `point`, within
@@ -147,9 +150,10 @@ the enclosing list; `point` when there is none. The shared body of the backward 
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
-        prev (last (filter (fn (f) (and (<= (get f :end) rp) (keep? f))) (forms-of enc))))
-    (if (nil? prev) point (+ base (get prev :start)))))
+        prev (last (filter (fn (f) (and (<= (sexp-end f) rp) (keep? f))) (forms-of enc))))
+    (if (nil? prev) point (+ base (sexp-start prev)))))
 
+(sig point-forward (string int -> int))
 (defn point-forward (text point)
   "End of the next sexp at or after `point` within the enclosing list; unchanged if
 there is none (the Emacs `forward-sexp`).
@@ -157,12 +161,14 @@ there is none (the Emacs `forward-sexp`).
     (sexp/point-forward \"(a b)\" 0)    → 5"
   (sexp-sibling-forward text point sexp-anything?))
 
+(sig point-backward (string int -> int))
 (defn point-backward (text point)
   "Start of the previous sexp ending at or before `point` (Emacs `backward-sexp`).
 
     (sexp/point-backward \"(a b)\" 5)   → 0"
   (sexp-sibling-backward text point sexp-anything?))
 
+(sig point-list-forward (string int -> int))
 (defn point-list-forward (text point)
   "End of the next LIST at or after `point` within the enclosing list — atoms are stepped
 over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
@@ -170,6 +176,7 @@ over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
     (sexp/point-list-forward \"(a) (b)\" 0)   → 3"
   (sexp-sibling-forward text point sexp-list?))
 
+(sig point-list-backward (string int -> int))
 (defn point-list-backward (text point)
   "Start of the previous LIST ending at or before `point` — atoms stepped over (Emacs
 `backward-list`, C-M-p); unchanged if there is none.
@@ -184,7 +191,7 @@ over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
     (sexp/point-up \"(a (b))\" 4)       → 3"
   (let ([base sub] (narrow text point)
         enc (enclosing (tree sub) (- point base)))
-    (if (= (get enc :kind) :root) point (+ base (get enc :start)))))
+    (if (= (get enc :kind) :root) point (+ base (sexp-start enc)))))
 (sig point-up (any int -> any))
 
 (defn point-up-forward (text point)
@@ -194,7 +201,7 @@ over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none.
     (sexp/point-up-forward \"(a (b))\" 4)   → 6"
   (let ([base sub] (narrow text point)
         enc (enclosing (tree sub) (- point base)))
-    (if (= (get enc :kind) :root) point (+ base (get enc :end)))))
+    (if (= (get enc :kind) :root) point (+ base (sexp-end enc)))))
 (sig point-up-forward (any int -> any))
 
 (defn point-down (text point)
@@ -209,21 +216,26 @@ none.
     (if (nil? lst) point (+ base (get lst :start) 1))))
 (sig point-down (any int -> any))
 
+(sig sexp-defun-edge (string int keyword -> int))
 (defn- sexp-defun-edge
   (text point edge)
   "The `edge` (`:start` / `:end`) of the top-level form containing `point`; `point` when
 `point` isn't within one. The shared body of `point-defun-start` / `point-defun-end`."
   (let ([base sub] (narrow text point)
         rp (- point base)
-        top (seq/find (fn (f) (and (<= (get f :start) rp) (<= rp (get f :end))))
+        top (seq/find (fn (f) (and (<= (sexp-start f) rp) (<= rp (sexp-end f))))
               (forms-of (tree sub))))
-    (if (nil? top) point (+ base (get top edge)))))
+    (if (nil? top)
+      point
+      (+ base (if (= edge :start) (sexp-start top) (sexp-end top))))))
 
+(sig point-defun-start (string int -> int))
 (defn point-defun-start (text point)
   "Start of the top-level form containing `point` (Emacs `beginning-of-defun`);
 unchanged if `point` isn't within one."
   (sexp-defun-edge text point :start))
 
+(sig point-defun-end (string int -> int))
 (defn point-defun-end (text point)
   "End of the top-level form containing `point` (Emacs `end-of-defun`, C-M-e);
 unchanged if `point` isn't within one.
@@ -238,8 +250,15 @@ unchanged if `point` isn't within one.
 ;; return `point` unchanged. Unlike the motions these read the FULL-text `tree` (not
 ;; `narrow`): an edit fires once per explicit chord, not per cursor move, so the
 ;; O(buffer) parse is fine (the fontify/diagnostics passes already parse per frame).
-;; `parent` is found with the same `(enclosing tr (get enc :start))` idiom the indenter
+;; `parent` is found with the same `(enclosing tr (sexp-start enc))` idiom the indenter
 ;; uses — a top-level form's parent is the root, so slurp/barf reach the next top form.
+
+;; Typed offset accessors over a tree node — a node's `:start`/`:end` are int offsets,
+;; which a bare `get` cannot say.
+(sig sexp-start (map -> int))
+(defn- sexp-start (anode) (get anode :start))
+(sig sexp-end (map -> int))
+(defn- sexp-end (anode) (get anode :end))
 
 (defn- sexp-enc-of
   (text point)
@@ -258,8 +277,8 @@ delimiter past that form (Emacs/paredit `forward-slurp-sexp`).
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
-            ee (get enc :end)
-            parent (enclosing tr (get enc :start))
+            ee (sexp-end enc)
+            parent (enclosing tr (sexp-start enc))
             nxt (seq/find (fn (f) (>= (get f :start) ee)) (forms-of parent)))
         (if (nil? nxt)
           nil
@@ -279,8 +298,8 @@ form before it (paredit `forward-barf-sexp`); point stays inside the list.
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
-            es (get enc :start)
-            ee (get enc :end)
+            es (sexp-start enc)
+            ee (sexp-end enc)
             fs (forms-of enc))
         (if (empty? fs)
           nil
@@ -302,7 +321,7 @@ delimiter back over that form (paredit `backward-slurp-sexp`).
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
-            es (get enc :start)
+            es (sexp-start enc)
             parent (enclosing tr es)
             prev (last (filter (fn (f) (<= (get f :end) es)) (forms-of parent))))
         (if (nil? prev)
@@ -323,8 +342,8 @@ form after it (paredit `backward-barf-sexp`); point stays inside the list.
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
-            es (get enc :start)
-            ee (get enc :end)
+            es (sexp-start enc)
+            ee (sexp-end enc)
             fs (forms-of enc))
         (if (empty? fs)
           nil
@@ -352,9 +371,9 @@ form's siblings (paredit `raise-sexp`).
         (if (nil? cur)
           nil
           (let (cs (get cur :start) ce (get cur :end))
-            [(str (string/substring text 0 (get enc :start))
+            [(str (string/substring text 0 (sexp-start enc))
                (string/substring text cs ce)
-               (string/substring text (get enc :end)))
+               (string/substring text (sexp-end enc)))
               (+ (get enc
                    :start)
                 (- point
@@ -369,8 +388,8 @@ form's siblings (paredit `raise-sexp`).
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
-            es (get enc :start)
-            ee (get enc :end))
+            es (sexp-start enc)
+            ee (sexp-end enc))
         [(str (string/substring text 0 es)
            (string/substring text (inc es) (dec ee))
            (string/substring text ee))
@@ -445,7 +464,7 @@ parens. At end of line, kills the newline. At least `point` (a no-op at the clos
         enc (enclosing (tree text) point))
     (if (= (get enc :kind) :root)
       (if (= point le) (math/min n (inc point)) le)
-      (let (cp (dec (get enc :end)))
+      (let (cp (dec (sexp-end enc)))
         (cond
           (<= cp le) (math/max point cp)
           ; close on this line → kill up to (not incl) it

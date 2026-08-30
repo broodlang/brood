@@ -441,12 +441,35 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
             | Some(Value::Str(_)) => Some(true),
             _ => None,
         };
+        // Each branch is typed in the scope its test proves (`guards::branch_scopes`) — the
+        // same narrowing the walk and `gradual_of` apply, so `(let (g E) (if g g d))` (what
+        // `or` expands to) reads `g` as truthy in the then-branch.
+        let test = items.get(1).copied().unwrap_or(Value::nil());
+        let (then_ctx, else_ctx) = super::guards::branch_scopes(heap, test, ctx);
         return match (items.len(), taken) {
-            (4, Some(true)) | (3, Some(true)) => expr_ty(heap, items[2], ctx),
-            (4, Some(false)) => expr_ty(heap, items[3], ctx),
+            (4, Some(true)) | (3, Some(true)) => expr_ty(heap, items[2], &then_ctx),
+            (4, Some(false)) => expr_ty(heap, items[3], &else_ctx),
             (3, Some(false)) => Some(Ty::of(Tag::Nil)),
-            (4, None) => branch_union(heap, &[items[2], items[3]], ctx),
-            (3, None) => Some(expr_ty(heap, items[2], ctx)?.union(Ty::of(Tag::Nil))),
+            (4, None) => {
+                // A dead branch (`Ctx::is_dead`) or a self-call branch contributes ⊥ (see
+                // `branch_union`); if both did, defer.
+                let t = (!then_ctx.is_dead()).then(|| branch_union(heap, &[items[2]], &then_ctx));
+                let e = (!else_ctx.is_dead()).then(|| branch_union(heap, &[items[3]], &else_ctx));
+                match (t, e) {
+                    (Some(Some(a)), Some(Some(b))) => Some(a.union(b)),
+                    (Some(Some(a)), None) => Some(a),
+                    (None, Some(Some(b))) => Some(b),
+                    (Some(Some(a)), Some(None)) if is_inferring_self_call(heap, items[3], ctx) => {
+                        Some(a)
+                    }
+                    (Some(None), Some(Some(b))) if is_inferring_self_call(heap, items[2], ctx) => {
+                        Some(b)
+                    }
+                    _ => None,
+                }
+            }
+            (3, None) if then_ctx.is_dead() => Some(Ty::of(Tag::Nil)),
+            (3, None) => Some(expr_ty(heap, items[2], &then_ctx)?.union(Ty::of(Tag::Nil))),
             _ => None,
         };
     }
@@ -507,13 +530,17 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         let mut scope = ctx.clone();
         let mut i = 0;
         while i < binds.len() {
-            let Value::Sym(name) = binds[i] else {
-                // A destructuring binding — we can't pin the names; the body may
-                // depend on them, so defer the whole form.
-                return None;
-            };
             let rhs_ty = expr_ty(heap, binds[i + 1], &scope);
-            scope = scope.bind(name, rhs_ty);
+            match binds[i] {
+                Value::Sym(name) => scope = scope.bind(name, rhs_ty),
+                // A destructuring binding: each positional binder takes the element type
+                // (`super::walk::pattern_bindings`), unknown where it can't be pinned.
+                pat => {
+                    for (sym, ty) in super::walk::pattern_bindings(heap, pat, rhs_ty.as_ref()) {
+                        scope = scope.bind(sym, ty);
+                    }
+                }
+            }
             i += 2;
         }
         let last = *items.last()?;
@@ -577,19 +604,45 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     // to itself, so any operand can be the value). `(or a b … last)` likewise.
     // Empty `(and)` → true; empty `(or)` → nil. Surface forms (post-expansion both
     // are `let`+`if`, handled above); kept for fragments.
+    // Exactly, not "any operand": an operand that is NOT the last one is the value only
+    // when it short-circuits — falsy for `and`, truthy for `or` — so it contributes that
+    // half of its type alone. `(or (string/->number s) -1)` is `number`, never `nil`; the
+    // `nil` that made every `(or x default)` read as maybe-nil under `--strict` was this
+    // union being taken over the whole operand.
     if value::symbol_is(head, kw::AND) {
         if items.len() == 1 {
             return Some(Ty::of(Tag::Bool));
         }
-        return branch_union(heap, &items[1..], ctx);
+        return short_circuit_union(heap, &items[1..], ctx, Ty::truthy().negate());
     }
     if value::symbol_is(head, kw::OR) {
         if items.len() == 1 {
             return Some(Ty::of(Tag::Nil));
         }
-        return branch_union(heap, &items[1..], ctx);
+        return short_circuit_union(heap, &items[1..], ctx, Ty::truthy());
     }
     None
+}
+
+/// The value of `(and …)` / `(or …)`: every operand but the last is the result only when
+/// it short-circuits, so it contributes `ty ∩ short` (the falsy slice for `and`, the truthy
+/// one for `or`); the last operand contributes its whole type. `None` if any operand is
+/// unknown, as [`branch_union`].
+fn short_circuit_union(heap: &Heap, operands: &[Value], ctx: &Ctx, short: Ty) -> Option<Ty> {
+    let mut acc: Option<Ty> = None;
+    for (i, &f) in operands.iter().enumerate() {
+        let t = expr_ty(heap, f, ctx)?;
+        let t = if i + 1 < operands.len() {
+            t.intersect(short.clone())
+        } else {
+            t
+        };
+        acc = Some(match acc {
+            Some(a) => a.union(t),
+            None => t,
+        });
+    }
+    acc
 }
 
 /// The union of the types of several branch result forms, or `None` if *any* of
@@ -680,6 +733,27 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         let arg = *items.get(1)?;
         let t = expr_ty(heap, arg, ctx)?;
         return t.is_subtype(&num).then_some(float);
+    }
+    // An extremum hands back ONE OF ITS OPERANDS — `(math/max a b)` is `a` or `b` — so its
+    // result is the union of the operand types, not the operator's whole domain (`ordered`,
+    // which is what the registry-derived sig says and what made `(+ 1 (math/min i n))` read
+    // as `number + ordered` under `--strict`). Every operand must type; one unknown defers to
+    // the sig. Sound: the union of the operands is exactly the set of values it can return.
+    let is_extremum = value::symbol_is(head, "math/max")
+        || value::symbol_is(head, "math/min")
+        || value::symbol_is(head, "%max")
+        || value::symbol_is(head, "%min");
+    if is_extremum {
+        let args = items.get(1..)?;
+        let mut acc: Option<Ty> = None;
+        for &arg in args {
+            let t = expr_ty(heap, arg, ctx)?;
+            acc = Some(match acc {
+                Some(u) => u.union(t),
+                None => t,
+            });
+        }
+        return acc;
     }
     numeric_op_kind(head)?;
     // Every operand must be a known numeric type; one non-numeric / unknown defers.
@@ -868,6 +942,18 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "vector") {
         return element_union(heap, &items[1..], ctx).map(Ty::vector_of);
     }
+    // `%vector-ref` is what a destructuring `let`/`match` lowers a `[x y w h]` binder to,
+    // behind a length check; out of range it throws rather than yielding nil, so it is
+    // exactly the element (a tuple position when the index is literal).
+    if value::symbol_is(head, "%vector-ref") && items.len() == 3 {
+        let coll_ty = expr_ty(heap, items[1], ctx)?;
+        if let (Some(elems), Value::Int(n)) = (coll_ty.tuple_elems(), items[2]) {
+            if n >= 0 {
+                return elems.get(n as usize).cloned();
+            }
+        }
+        return coll_ty.elem_ty();
+    }
     if value::symbol_is(head, "first")
         || value::symbol_is(head, "last")
         || value::symbol_is(head, "nth")
@@ -914,13 +1000,19 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let elem = coll_ty.elem_ty()?;
         // `first`/`last` of a provably non-empty list is an element, full stop; every
         // other access (an index that may run off the end, a seq that may be empty)
-        // yields `nil` too.
+        // yields `nil` too — except `(nth coll i default)`, whose absent case IS the
+        // default, exactly as `get`'s (`(nth parts 1 "0")` is a string, never nil).
         let always_present = provably_non_empty(&coll_ty)
             && (value::symbol_is(head, "first") || value::symbol_is(head, "last"));
+        let absent = if value::symbol_is(head, "nth") && items.len() == 4 {
+            expr_ty(heap, items[3], ctx)
+        } else {
+            None
+        };
         return Some(if always_present {
             elem
         } else {
-            elem.union(Ty::of(Tag::Nil))
+            elem.union(absent.unwrap_or(Ty::of(Tag::Nil)))
         });
     }
     // `(filter pred coll)` keeps `coll`'s element type — the result is the items
@@ -928,8 +1020,12 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // results). `None` element → fall through to the flat curated `list`.
     if value::symbol_is(head, "filter") {
         let coll = *items.get(2)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
-        return list_result(a);
+        let coll_ty = expr_ty(heap, coll, ctx);
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        // `filter` builds a LIST whatever it is handed (a vector in, a list out), so with
+        // the element type unknown the result is still `list`, not the curated `seqable` —
+        // `(filter pred (file/ls d))` declared `(list string)` is not "seqable ⊄ list".
+        return list_result(a).or_else(|| coll_ty.map(|_| Ty::LIST));
     }
     // Element-preserving reshapers whose sequence is the *first* argument — the
     // same elements, fewer / reordered: `reverse`, `rest` (drop the head),
@@ -1224,13 +1320,32 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "get") && items.len() >= 3 {
         let map_arg = *items.get(1)?;
         let map_ty = expr_ty(heap, map_arg, ctx);
+        // `(get m k default)`: an ABSENT key yields the default, so the absence case reads
+        // as the default's type rather than `nil` — `(get dt :hour 0)` is `int`. A default
+        // whose type can't be pinned falls back to the two-argument reading (which admits
+        // `nil` — a superset, since it can only over-state the absence case).
+        let default_ty = match items.get(3) {
+            Some(&d) if items.len() == 4 => expr_ty(heap, d, ctx),
+            _ => None,
+        };
         if let Value::Keyword(key) = items[2] {
+            if let Some(d) = default_ty.as_ref() {
+                if let Some(fty) = map_ty
+                    .as_ref()
+                    .and_then(|t| t.record_field_ty_with_default(key, d))
+                {
+                    return Some(fty);
+                }
+            }
             if let Some(fty) = map_ty.as_ref().and_then(|t| t.record_field_ty(key)) {
                 return Some(fty);
             }
         }
         if let Some((_, v)) = map_ty.as_ref().and_then(Ty::map_kv) {
-            return Some(v.clone().union(Ty::of(Tag::Nil)));
+            return Some(match default_ty {
+                Some(d) => v.clone().union(d),
+                None => v.clone().union(Ty::of(Tag::Nil)),
+            });
         }
     }
     // `(keys m)` → `nil | list<K>`. On a **closed** record shape the keys are exactly
@@ -1389,6 +1504,27 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         if let (Value::Sym(fs), Some(i), Some(e)) = (f, &init_ty, &elem) {
             if let Some(t) = numeric_result(fs, &[i.clone(), e.clone()]) {
                 return Some(t);
+            }
+        }
+        // Seed the accumulator from `init` and take one step to a fixpoint: with `acc₁ =
+        // init ∪ f(init, e)`, if `f(acc₁, e) ⊆ acc₁` then by induction every iterate is in
+        // `acc₁` — `(fold (fn (h c) (bit/xor (* h 31) …)) 5381 s)` is an int, where seeding
+        // `h` as `any` read `(* h 31)` as `number`. Not stable → the `any`-seeded reading
+        // (sound: the accumulator is over-approximated).
+        // An unknown element is `any` here — still sound, and the accumulator's own closure
+        // (`(fn (m s) (math/max m (string/length s)))` over an untyped `lines`) is what
+        // matters.
+        if let Some(i) = &init_ty {
+            let e = elem.clone().unwrap_or(Ty::ANY);
+            if let Some(step) = callback_ret(heap, f, &[Some(i.clone()), Some(e.clone())], ctx) {
+                let acc = i.clone().union(step);
+                if let Some(again) =
+                    callback_ret(heap, f, &[Some(acc.clone()), Some(e.clone())], ctx)
+                {
+                    if again.is_subtype(&acc) {
+                        return Some(acc);
+                    }
+                }
             }
         }
         let b = callback_ret(heap, f, &[Some(Ty::ANY), elem], ctx);

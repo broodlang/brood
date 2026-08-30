@@ -61,7 +61,7 @@ halves a REPL shows — the value and what it printed.")
 evaluate (may span lines — it's escaped), `timeout-ms` an int or nil for the
 server default, `trace` an optional vector of fn-name strings to boundary-trace — or
 `:all` for every global the session has defined, resolved in the server's own image."
-  (pr-str (if (or (nil? trace) (and (not= trace :all) (empty? trace)))
+  (pr-str (if (or (nil? trace) (and (not (= trace :all)) (empty? trace)))
             {:id id :src src :timeout-ms timeout-ms}
             {:id id :src src :timeout-ms timeout-ms :trace trace})))
 
@@ -258,7 +258,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
         ;; measured — it resolves to a name list only at install time, in the image.
         traced (and trace-names (or (= trace-names :all) (not (empty? trace-names))))
         acc (when traced (table/new))
-        sink (when traced
+        sink (when acc
                (fn (e)
                  (let (n (or (table/get acc :n) 0))
                    (if (< n *spy-entry-cap*)
@@ -285,7 +285,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
              :output out
              :ms (- (os/now) t0)
              :procs (eval-server-process-report pids-before)))
-    (if traced
+    (if acc
       (do
         (debug/untrace-all)
         (assoc r2 :spy (reverse (or (table/get acc :entries) '()))))

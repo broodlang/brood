@@ -57,6 +57,7 @@ recursion — not the native search underneath it. Optimise there, and measure f
   "True if 1-char string `ch` is an upper-case letter."
   (not (= (string/lower ch) ch)))
 
+(sig fuzzy-boundary? (string int -> bool))
 (defn- fuzzy-boundary?
   (cand pos)
   "True if char `pos` starts a word in `cand`: index 0, after a separator, or a
@@ -66,6 +67,7 @@ camelCase hump (an upper preceded by a non-upper)."
       (or (includes? fuzzy-separators prev)
         (and (fuzzy-upper? (string/char-at cand pos)) (not (fuzzy-upper? prev)))))))
 
+(sig fuzzy-score-step (string map int -> map))
 (defn- fuzzy-score-step
   (cand st pos)
   "Fold step: add `pos`'s bonus to the running `{:score :prev}`."

@@ -1240,9 +1240,14 @@ fn propagates_primitive_result_types() {
 
 #[test]
 fn an_any_result_is_not_a_false_positive() {
-    // vector-ref's result type is `any` (unknown), so feeding it to
+    // `%vector-ref` on a vector whose elements are unknown is unknown, so feeding it to
     // string-length (wants string) must NOT warn — `any` overlaps `string`.
-    assert!(warnings("(string/length (%vector-ref [1] 0))").is_empty());
+    assert!(warnings("(string/length (%vector-ref xs 0))").is_empty());
+    // …but on a literal it is exactly that position (a destructuring `let` lowers to
+    // `%vector-ref` behind a length check, so this is what types `[x y] rect` binders).
+    assert!(warnings("(string/length (%vector-ref [1] 0))")
+        .iter()
+        .any(|w| w.contains("string/length")));
 }
 
 #[test]
@@ -5069,11 +5074,15 @@ fn map_filter_do_not_refine_when_uncertain() {
         w.iter().all(|s| !s.contains("string/length")),
         "an identity callback over an unknown collection must not refine: {w:?}"
     );
-    // Branchy lambda body → can't type it → bail to flat (no false positive).
+    // A branchy lambda body over elements whose truthiness is unknown → the union of
+    // both branches, `1 | "a"`, which is not provably a string → reported by `⊆` (precise).
+    // Over `(list 1 2 3)` the else-branch is DEAD (an int is never falsy — `Ctx::is_dead`),
+    // so the result is exactly `1`, and `string/length` of it is a genuine misuse.
     let w = warnings(r#"(string/length (first (map (fn (x) (if x 1 "a")) (list 1 2 3))))"#);
     assert!(
-        w.iter().all(|s| !s.contains("string/length")),
-        "a branchy lambda body must bail to a flat result: {w:?}"
+        w.iter()
+            .any(|s| s.contains("string/length") && s.contains("got 1")),
+        "a dead else-branch must not widen the result: {w:?}"
     );
 }
 
@@ -5121,6 +5130,115 @@ fn reduce_fold_bail_when_init_or_callback_unknown() {
         w.iter().all(|s| !s.contains("string/length")),
         "an unknown init must not refine the reduce result: {w:?}"
     );
+}
+
+// ---- `get` with a default: the absence case is the default, not nil ----
+
+#[test]
+fn get_with_a_default_replaces_the_absence_nil_by_the_default_type() {
+    let interp = crate::Interp::new();
+    let ty = |src: &str| {
+        use super::infer::expr_ty;
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let form = reader::read_one(&mut heap, src).expect("parse");
+        expr_ty(&heap, form, &Ctx::default())
+    };
+    let int = Ty::of(Tag::Int);
+    let nil = Ty::of(Tag::Nil);
+    // A map literal declares `:a`; `:b` is absent, so it is exactly the default.
+    let t = ty("(get {:a 1} :a 0)").expect("typed");
+    assert!(t.is_subtype(&int) && !t.is_subtype(&nil), "{t}");
+    let t = ty("(get {:a 1} :b 0)").expect("typed");
+    assert!(t.is_subtype(&int) && t.is_disjoint(&nil), "{t}");
+    // Without a default the absent key is nil.
+    let t = ty("(get {:a 1} :b)").expect("typed");
+    assert!(t.is_subtype(&nil), "{t}");
+    // A default whose type is unknown keeps the two-argument reading (admits nil).
+    let t = ty("(get {:a 1} :a unknown-thing)").expect("typed");
+    assert!(t.is_subtype(&int), "{t}");
+}
+
+// ---- inferred returns narrow their branches; and/or are short-circuit exact ----
+
+#[test]
+fn an_inferred_return_sees_the_truthy_half_of_an_or_default() {
+    // `string/->number` is `nil | number`; `(or it -1)` can only be a number. The inferred
+    // return (`expr_ty`, not the walk) used to union both branches of the expansion's `if`
+    // under the unnarrowed scope and report `nil | number`.
+    let interp = crate::Interp::new();
+    let ret = |src: &str| {
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let form = reader::read_one(&mut heap, src).expect("parse");
+        let expanded = crate::eval::macros::macroexpand_all(&mut heap, form, interp.root).unwrap();
+        super::infer::expr_ty(&heap, expanded, &Ctx::default())
+            .and_then(|t| t.as_arrow().map(|s| s.ret.clone()))
+    };
+    let nil = Ty::of(Tag::Nil);
+    let number = Ty::NUMBER;
+    // The expanded `(let (g E) (if g g -1))`.
+    let t = ret("(fn (s) (or (string/->number s) -1))").expect("typed");
+    assert!(t.is_subtype(&number) && t.is_disjoint(&nil), "{t}");
+    // A predicate guard narrows the same way.
+    let t = ret("(fn (s) (let (g (string/->number s)) (if (int? g) g -1)))").expect("typed");
+    assert!(t.is_subtype(&Ty::of(Tag::Int)), "{t}");
+    // The SURFACE `or` (a fragment that is not expanded) is short-circuit exact too, and
+    // `and` symmetrically: only the falsy slice of a non-last operand can be the value.
+    let surface = |src: &str| {
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let form = reader::read_one(&mut heap, src).expect("parse");
+        super::infer::expr_ty(&heap, form, &Ctx::default())
+    };
+    let t = surface("(or (string/->number \"1\") -1)").expect("typed");
+    assert!(t.is_subtype(&number) && t.is_disjoint(&nil), "{t}");
+    let t = surface("(and (string/->number \"1\") \"yes\")").expect("typed");
+    assert!(t.is_subtype(&nil.clone().union(Ty::of(Tag::Str))), "{t}");
+}
+
+// ---- an extremum returns one of its operands ----
+
+#[test]
+fn an_extremum_is_typed_as_the_union_of_its_operands() {
+    use super::infer::expr_ty;
+    // `math/max` over two ints is an int, so it feeds an int-only parameter without a
+    // `--strict` complaint that `ordered ⊄ int`; over an int and a float it is `int | float`.
+    let interp = crate::Interp::new();
+    let ty = |src: &str| {
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let form = reader::read_one(&mut heap, src).expect("parse");
+        expr_ty(&heap, form, &Ctx::default())
+    };
+    let int = Ty::of(Tag::Int);
+    let float = Ty::of(Tag::Float);
+    // Literal operands keep their literal sets (`{1, 2}` — max of 1 and 2 IS one of them).
+    let t = ty("(math/max 1 2)").expect("typed");
+    assert!(t.is_subtype(&int), "{t}");
+    let t = ty("(math/min 1 2.5)").expect("typed");
+    assert!(
+        t.is_subtype(&int.clone().union(float.clone())) && !t.is_subtype(&int),
+        "{t}"
+    );
+    let t = ty("(math/min 1)").expect("typed");
+    assert!(t.is_subtype(&int), "{t}");
+    // An unknown operand defers to the declared sig (`ordered`) — never narrower than the
+    // truth.
+    let t = ty("(math/max 1 x)").expect("the sig still types it");
+    assert!(!t.is_subtype(&int), "{t}");
 }
 
 // ---- inference terminates on a mutually recursive call graph ----
@@ -7131,9 +7249,13 @@ fn countable_is_spelled_by_name() {
 // is one of the operands. No more `(-> (or map number))` on a function that picks a max.
 #[test]
 fn max_and_min_take_and_return_the_ordered_domain() {
-    assert_eq!(ty_str("(%max 1 2)"), "number");
-    assert_eq!(ty_str("(math/min 3 4)"), "number");
-    assert_eq!(ty_str("(math/min 3 4 5)"), "number");
+    // An extremum hands back one of its operands, so literal operands keep their literal
+    // set — narrower than the `ordered` domain the sig declares, and still `⊆ number`.
+    assert_eq!(ty_str("(%max 1 2)"), "1 | 2");
+    assert_eq!(ty_str("(math/min 3 4)"), "3 | 4");
+    assert_eq!(ty_str("(math/min 3 4 5)"), "3 | 4 | 5");
+    // An untyped operand defers to the declared domain.
+    assert_eq!(ty_str("(math/min 3 x)"), "number");
     let ws = file_warnings("(defmodule t)\n(sig g (string -> int))\n(defn g (s) (%max 1 s))");
     assert!(
         ws.iter()

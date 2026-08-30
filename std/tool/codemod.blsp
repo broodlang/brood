@@ -39,7 +39,7 @@
           olen
           (inc i)
           (cons (string/substring text from (inc i)) parts))))))
-(sig tr-loop (string any any any int any -> any))
+(sig tr-loop (string any any int int any -> any))
 
 (defn token-replace (text old new)
   "`text` with every whole-token `old` replaced by `new` (substrings left alone)."
@@ -252,12 +252,14 @@ counterpart to `rename`. Prints each changed file and returns the count."
 (defn- opener? (c) (includes? "([{" c))
 (defn- closer? (c) (includes? ")]}" c))
 
+(sig skip-ws (string int -> int))
 (defn- skip-ws
   (text i)
   (if (and (< i (string/length text)) (ws? (string/char-at text i)))
     (skip-ws text (inc i))
     i))
 
+(sig skip-str (string int -> int))
 (defn- skip-str
   (text i)
   ;; i just past the opening quote; returns index after the closing quote
@@ -269,6 +271,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
         (= c "\"") (inc i)
         else (skip-str text (inc i))))))
 
+(sig scan-close (string int int -> int))
 (defn- scan-close
   (text i depth)
   ;; i inside a bracketed form; returns index after the matching close at depth 0
@@ -281,6 +284,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
         (closer? c) (if (= depth 1) (inc i) (scan-close text (inc i) (dec depth)))
         else (scan-close text (inc i) depth)))))
 
+(sig atom-end (string int -> int))
 (defn- atom-end
   (text i)
   (if (>= i (string/length text))
@@ -298,7 +302,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
       (opener? c) (scan-close text (inc i) 1)
       (= c "\"") (skip-str text (inc i))
       else (atom-end text i))))
-(sig read-one (string int -> any))
+(sig read-one (string int -> int))
 
 (defn- swap-loop
   (text old new from parts)

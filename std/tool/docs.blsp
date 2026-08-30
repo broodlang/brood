@@ -48,6 +48,7 @@ module's namespace-rooted globals (ADR-070) back to it."
       else nil)))
 
 ;; The bare module title from a file path: "a/b/foo.blsp" -> "foo".
+(sig docs-basename (string -> string))
 (defn- docs-basename
   (path)
   (let (i (%path-last-slash path (dec (string/length path)))
@@ -71,7 +72,10 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- docs-private? (sym) (reflect/private? sym))
 
 ;; One definition's Markdown: a `### (->string args…)` heading (with a *(macro)* tag
-;; for macros) followed by its docstring, or a placeholder when undocumented.
+;; for macros) followed by its docstring, or a placeholder when undocumented. A name a
+;; `(meta … :deprecated …)` marks gets its heading STRUCK THROUGH as well as the note
+;; below it: the note is what a reader learns after deciding to read the entry, and the
+;; strikethrough is what tells them not to reach for the name while skimming the module.
 (defn- docs-entry
   (sym v)
   (let (sig (pr-str (cons sym (arglist v)))
@@ -87,11 +91,17 @@ module's namespace-rooted globals (ADR-070) back to it."
         ;; appeared, whether it is going away, whether the surface is settled. `:since` is
         ;; documentation and this is the place it is spent.
         m (try (%meta-of sym) (catch _ nil))
+        deprecated (when m (get m :deprecated))
+        ;; `~~…~~` around the signature, inside the heading, when the name is going
+        ;; away — GitHub-flavoured strikethrough, which is what every renderer of these
+        ;; files speaks. The backticks stay INSIDE the tildes: `~~`x`~~` strikes the code
+        ;; span, `` `~~x~~` `` would print the tildes as part of the name.
+        heading (if deprecated (str "~~`" sig "`~~") (str "`" sig "`"))
         stability (if (nil? m)
                     ""
-                    (str (if (get m :deprecated)
+                    (str (if deprecated
                            (str "> **Deprecated** since "
-                             (get m :deprecated)
+                             deprecated
                              (if (get m :use)
                                (str " — use `" (->string (get m :use)) "` instead.")
                                ".")
@@ -99,9 +109,8 @@ module's namespace-rooted globals (ADR-070) back to it."
                            "")
                       (if (get m :beta) (str "> **Beta** — " (get m :beta) "\n\n") "")
                       (if (get m :since) (str "*Since " (get m :since) ".*\n\n") ""))))
-    (str "### `"
-      sig
-      "`"
+    (str "### "
+      heading
       suffix
       "\n\n"
       stability
@@ -176,22 +185,23 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn document-module (modname)
   "The Markdown documentation for the module named `modname` (a symbol or string), resolved baked-in or on `*load-path*`. Errors if it can't be found."
   (let (key (->string modname) src (docs-source key))
-    (when (nil? src) (error "doc: cannot find module '" key "'"))
-    (let (before (reflect/global-names))
-      (require-one modname)
-      ;; Attribute by NAMESPACE, not by a `(reflect/global-names)` delta — the same correction
-      ;; `document-file` already carries, for the same reason. The delta credits a module
-      ;; with only the names its own `require` happened to add, so a module ALREADY bound
-      ;; — transitively loaded by the tool's own bootstrap, or materialised from a startup
-      ;; image (ADR-218) — documented as EMPTY, silently. `nest doc math`, `nest doc json`
-      ;; and `nest doc text` all rendered a header and nothing else; `nest doc uuid`
-      ;; worked only because nothing else pulls uuid in.
-      ;;
-      ;; The delta stays as the fallback for a module whose names are not under its own
-      ;; namespace (a bare-rooted module), where the prefix filter finds nothing.
-      (let (owned (docs-namespace-syms key)
-            syms (if (empty? owned) (docs-added before (reflect/global-names)) owned))
-        (docs-render key (docs-leading-doc src) syms)))))
+    (if (nil? src)
+      (error "doc: cannot find module '" key "'")
+      (let (before (reflect/global-names))
+        (require-one modname)
+        ;; Attribute by NAMESPACE, not by a `(reflect/global-names)` delta — the same correction
+        ;; `document-file` already carries, for the same reason. The delta credits a module
+        ;; with only the names its own `require` happened to add, so a module ALREADY bound
+        ;; — transitively loaded by the tool's own bootstrap, or materialised from a startup
+        ;; image (ADR-218) — documented as EMPTY, silently. `nest doc math`, `nest doc json`
+        ;; and `nest doc text` all rendered a header and nothing else; `nest doc uuid`
+        ;; worked only because nothing else pulls uuid in.
+        ;;
+        ;; The delta stays as the fallback for a module whose names are not under its own
+        ;; namespace (a bare-rooted module), where the prefix filter finds nothing.
+        (let (owned (docs-namespace-syms key)
+              syms (if (empty? owned) (docs-added before (reflect/global-names)) owned))
+          (docs-render key (docs-leading-doc src) syms))))))
 
 ;; Markdown for the whole project: find it from the cwd, put its sources on the
 ;; load-path, and document each source file in turn.
@@ -312,10 +322,11 @@ module's namespace-rooted globals (ADR-070) back to it."
   "The doc-model module entry for the module named `modname` (a symbol or string),
   resolved baked-in or on `*load-path*`. Errors if it can't be found."
   (let (key (->string modname) src (docs-source key))
-    (when (nil? src) (error "docs: cannot find module '" key "'"))
-    (let (before (reflect/global-names))
-      (require-one modname)
-      (docs-module-model key (docs-leading-doc src) (docs-added before (reflect/global-names))))))
+    (if (nil? src)
+      (error "docs: cannot find module '" key "'")
+      (let (before (reflect/global-names))
+        (require-one modname)
+        (docs-module-model key (docs-leading-doc src) (docs-added before (reflect/global-names)))))))
 
 (defn model-project ()
   "The whole-project doc model — `{:name :version :modules […]}` — found from the cwd,

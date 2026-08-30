@@ -25,6 +25,7 @@
 
 ;; ---- internal helpers -------------------------------------------------------
 
+(sig path-last-sep (string int -> int))
 (defn- path-last-sep
   (s i)
   (if (< i 0)
@@ -33,6 +34,7 @@
       i
       (path-last-sep s (- i 1)))))
 
+(sig path-last-dot (string int -> int))
 (defn- path-last-dot
   (s i)
   (if (< i 0)
@@ -145,7 +147,7 @@ redundant slashes. An absolute path starts with the `\"/\"` component.
     (path/split \"a/b/c\")           → (\"a\" \"b\" \"c\")"
   (let (parts (filter (fn (s) (not (= s ""))) (string/split p "/")))
     (if (string/starts-with? p "/") (cons "/" parts) parts)))
-(sig split (string -> (list string)))
+(sig split (string -> (or (list string) nil)))
 
 ;; ---- normalize --------------------------------------------------------------
 
