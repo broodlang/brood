@@ -848,8 +848,41 @@ fn jit_lower_arm_inner(
     let fastframe_id = m
         .declare_function("brood_rt_fast_frame", Linkage::Import, &fastframe_sig)
         .ok()?;
-    // brood_rt_vector_ref(heap, out, vec 3 words, idx 3 words) -> status: bounds-checked
-    // slab read into `*out` (0 = ok, 1 = deopt for non-vector / non-int / out-of-range).
+    // §7.5 BROOD_XCALL — the inline fast-frame path's two cold callbacks.
+    // brood_rt_xcall_latch(heap, code, site_head, argc, epoch): suspend-host latch
+    // resolution after the gateway-token compare matched.
+    let mut xlatch_sig = m.make_signature();
+    xlatch_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    xlatch_sig.params.push(AbiParam::new(types::I64)); // code
+    xlatch_sig.params.push(AbiParam::new(types::I64)); // site<<32 | head
+    xlatch_sig.params.push(AbiParam::new(types::I64)); // argc
+    xlatch_sig.params.push(AbiParam::new(types::I64)); // epoch
+    let xlatch_id = m
+        .declare_function("brood_rt_xcall_latch", Linkage::Import, &xlatch_sig)
+        .ok()?;
+    // brood_rt_xcall_cold(heap, outcome, out, site_head, argc_nslots, epoch, stage_base)
+    // -> status: the deopt/preempt/tail/error outcomes (everything but 0).
+    let mut xcold_sig = m.make_signature();
+    xcold_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    xcold_sig.params.push(AbiParam::new(types::I64)); // outcome
+    xcold_sig.params.push(AbiParam::new(ptr_ty)); // out
+    xcold_sig.params.push(AbiParam::new(types::I64)); // site<<32 | head
+    xcold_sig.params.push(AbiParam::new(types::I64)); // argc<<32 | nslots
+    xcold_sig.params.push(AbiParam::new(types::I64)); // epoch
+    xcold_sig.params.push(AbiParam::new(types::I64)); // stage_base
+    xcold_sig.returns.push(AbiParam::new(types::I64)); // status (0/1/2)
+    let xcold_id = m
+        .declare_function("brood_rt_xcall_cold", Linkage::Import, &xcold_sig)
+        .ok()?;
+    // The callee-arm indirect-call signature (crate::jit::JitArmFn): (heap, base, out)
+    // -> outcome. Imported into the function below for `call_indirect`.
+    let mut armfn_sig = m.make_signature();
+    armfn_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    armfn_sig.params.push(AbiParam::new(types::I64)); // base
+    armfn_sig.params.push(AbiParam::new(ptr_ty)); // out
+    armfn_sig.returns.push(AbiParam::new(types::I64)); // outcome
+                                                       // brood_rt_vector_ref(heap, out, vec 3 words, idx 3 words) -> status: bounds-checked
+                                                       // slab read into `*out` (0 = ok, 1 = deopt for non-vector / non-int / out-of-range).
     let mut vref_sig = m.make_signature();
     vref_sig.params.push(AbiParam::new(ptr_ty)); // heap
     vref_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
@@ -1002,6 +1035,9 @@ fn jit_lower_arm_inner(
     let natfl_ref = m.declare_func_in_func(natfl_id, b.func);
     let flbase_ref = m.declare_func_in_func(flbase_id, b.func);
     let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
+    let xlatch_ref = m.declare_func_in_func(xlatch_id, b.func);
+    let xcold_ref = m.declare_func_in_func(xcold_id, b.func);
+    let armfn_sigref = b.import_signature(armfn_sig.clone());
     let nd_ref = m.declare_func_in_func(nd_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let thas_ref = m.declare_func_in_func(thas_id, b.func);
@@ -1585,6 +1621,9 @@ fn jit_lower_arm_inner(
         natfl: natfl_ref,
         flbase: flbase_ref,
         fastframe: fastframe_ref,
+        xlatch: xlatch_ref,
+        xcold: xcold_ref,
+        armfn_sig: armfn_sigref,
         sp: sp_ref,
         tickn: tickn_ref,
         #[cfg(debug_assertions)]

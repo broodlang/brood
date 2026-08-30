@@ -3045,10 +3045,81 @@ pub enum Root {
 /// [`EnvId::GLOBAL`] sentinel and immutable PRELUDE frames stay inline; a LOCAL
 /// **or** RUNTIME frame takes a slot (the latter is evacuated by the runtime
 /// compactor, so it must be rewritten there).
+///
+/// `#[repr(C, u8)]` because the JIT's inline fast-frame path (§7.5,
+/// `BROOD_XCALL=1`) saves/restores [`Heap::jit_call_env`] as two opaque words
+/// and constructs `Stable(EnvId::GLOBAL)` by storing `(0, u64::MAX)` — the
+/// defined layout (tag `u8` at 0, payload at 8, 16 bytes total) is what makes
+/// those stores a valid value. Pinned by `env_root_layout_is_pinned`.
 #[derive(Clone, Copy)]
+#[repr(C, u8)]
 pub enum EnvRoot {
     Stable(EnvId),
     Slot(usize),
+}
+
+/// Byte offsets of the `Heap` fields the JIT's inline fast-frame path (§7.5,
+/// `BROOD_XCALL=1`) reads and writes directly from emitted code — the call ceremony
+/// `jit_run_fast_link` otherwise performs in Rust. Computed with `offset_of!` at lower
+/// time inside the same binary that runs the emitted code, so they are exact by
+/// construction; a struct reorder recomputes them on the next build.
+#[cfg(feature = "jit")]
+#[derive(Clone, Copy)]
+pub(crate) struct JitCeremonyOffsets {
+    /// `Heap.roots` — a [`roots_buf::RootsBuf`], whose own header is (ptr, len, cap)
+    /// at +0/+8/+16 (pinned by `RootsBuf::header_offsets`).
+    pub roots: usize,
+    pub jit_call_env: usize,
+    pub jit_native_depth: usize,
+    pub jit_force_vm: usize,
+    pub jit_dbg_fn: usize,
+    /// `Cell<u32>` — `repr(transparent)`, so a raw u32 load/store at the offset is the
+    /// same access `set_ic_bases` makes.
+    pub cur_ic_base: usize,
+    pub cur_gic_base: usize,
+    pub native_gateway_seq: usize,
+    pub cur_native_gateway: usize,
+    pub blocked_under_gateway: usize,
+}
+
+#[cfg(feature = "jit")]
+pub(crate) fn jit_ceremony_offsets() -> JitCeremonyOffsets {
+    // The two-word EnvRoot save/restore (and the (0, MAX) = Stable(GLOBAL) store) needs
+    // exactly this size; a grown EnvRoot must revisit the emission.
+    const { assert!(std::mem::size_of::<EnvRoot>() == 16) };
+    JitCeremonyOffsets {
+        roots: std::mem::offset_of!(Heap, roots),
+        jit_call_env: std::mem::offset_of!(Heap, jit_call_env),
+        jit_native_depth: std::mem::offset_of!(Heap, jit_native_depth),
+        jit_force_vm: std::mem::offset_of!(Heap, jit_force_vm),
+        jit_dbg_fn: std::mem::offset_of!(Heap, jit_dbg_fn),
+        cur_ic_base: std::mem::offset_of!(Heap, cur_ic_base),
+        cur_gic_base: std::mem::offset_of!(Heap, cur_gic_base),
+        native_gateway_seq: std::mem::offset_of!(Heap, native_gateway_seq),
+        cur_native_gateway: std::mem::offset_of!(Heap, cur_native_gateway),
+        blocked_under_gateway: std::mem::offset_of!(Heap, blocked_under_gateway),
+    }
+}
+
+#[cfg(all(test, feature = "jit"))]
+mod env_root_layout_tests {
+    use super::*;
+
+    #[test]
+    fn env_root_layout_is_pinned() {
+        // The inline path stores (0u64, u64::MAX) for Stable(GLOBAL): tag byte 0 selects
+        // the first variant under repr(C, u8), the payload word sits at +8.
+        assert_eq!(std::mem::size_of::<EnvRoot>(), 16);
+        let words = [0u64, u64::MAX];
+        // SAFETY: fully-initialized bytes forming a valid repr(C, u8) value (tag 0 =
+        // Stable, payload = EnvId(u64::MAX) = GLOBAL).
+        let er: EnvRoot = unsafe { std::mem::transmute::<[u64; 2], EnvRoot>(words) };
+        assert!(matches!(er, EnvRoot::Stable(e) if e.0 == u64::MAX));
+        let slot = [1u64, 42u64];
+        // SAFETY: tag 1 = Slot, payload 42.
+        let er2: EnvRoot = unsafe { std::mem::transmute::<[u64; 2], EnvRoot>(slot) };
+        assert!(matches!(er2, EnvRoot::Slot(42)));
+    }
 }
 
 // ===== Construction and shared-region management ================================
