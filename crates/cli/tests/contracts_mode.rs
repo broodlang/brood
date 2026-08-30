@@ -52,11 +52,16 @@ const PROGRAM: &str = "\
 (impl Size :int (size [n] n) (tag [n] :fine))\n\
 (defn- report (label thunk)\n\
 \x20\x20(io/puts (str label (try (thunk) (catch e (str \"RAISED \" (error-message e)))))))\n\
+(defn padded (s w &optional (fill \"-\")) (string/pad-left s w fill))\n\
+(sig padded (string int &optional string -> string))\n\
 (report \"sig-good: \" (fn () (good 7)))\n\
 (report \"sig-bad: \" (fn () (bad-result 1)))\n\
 (report \"op-good: \" (fn () (size 7)))\n\
 (report \"op-bad: \" (fn () (size \"x\")))\n\
-(report \"op-undeclared: \" (fn () (tag \"x\")))\n";
+(report \"op-undeclared: \" (fn () (tag \"x\")))\n\
+(report \"opt-absent: \" (fn () (padded \"x\" 3)))\n\
+(report \"opt-given: \" (fn () (padded \"x\" 3 \"*\")))\n\
+(report \"opt-bad: \" (fn () (padded \"x\" \"three\")))\n";
 
 /// Run the program with a **fresh** cache dir, so the prelude is expanded from source rather
 /// than replayed — the only configuration in which either KI-81 cause is reachable.
@@ -126,6 +131,24 @@ fn contracts_mode_boots_on_a_cold_cache_and_enforces_both_kinds() {
     assert!(
         text.contains("op-undeclared: :anything"),
         "an op with no declared return must be left alone:\n{text}"
+    );
+
+    // `&optional`. The shim has to check the optionals that were SUPPLIED and pass the
+    // rest through untouched — read as fixed parameters, the `&optional` marker counts as
+    // one, so the shim took four arguments and every ordinary call became an arity error.
+    // The callee's own default is the part a wrapper is most likely to destroy: passing an
+    // explicit `nil` for an absent optional type-checks fine and silently changes the answer.
+    assert!(
+        text.contains("opt-absent: --x"),
+        "an omitted optional must keep the callee's own default:\n{text}"
+    );
+    assert!(
+        text.contains("opt-given: **x"),
+        "a supplied optional must reach the callee:\n{text}"
+    );
+    assert!(
+        text.contains("opt-bad: RAISED") && text.contains("argument 2 expected int"),
+        "a contract must still fire on a fixed argument of an &optional signature:\n{text}"
     );
 }
 

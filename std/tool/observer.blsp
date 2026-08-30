@@ -257,7 +257,6 @@ on screen (roughly centred), clamped so the window never runs past the end."
 right from column `col`. Tail-recursive."
   (observe-chunk-ops-acc chunks row col nil))
 
-  ((record &open :prompt string :text string :hscroll (or int nil) :point int) int int -> any))
 (defn- observe-minibuffer
   (edit row cols)
   "Render the eval minibuffer at frame `row` (width `cols`): the prompt, then the
@@ -281,6 +280,7 @@ completion already works via `lineedit/lineedit-handle`'s keymap in `observe-com
       (observe-chunk-ops chunks row promptw)
       [(cursor row cursor-col)])))
 (sig observe-minibuffer
+  ((record &open :prompt string :text string :hscroll (or int nil) :point int) int int -> any))
 
 (defn- observe-confirm-line
   (c)

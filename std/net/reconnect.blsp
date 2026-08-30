@@ -30,7 +30,6 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
   "The watcher's registered name for `spec` — one watcher per spec."
   (keyword (str "reconnect:" spec)))
 
-
 (defn- reconnect-opt
   (opts k default)
   "A backoff bound from `opts` — `:min-ms`/`:max-ms` are milliseconds, ints."
@@ -59,7 +58,6 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
     ;; messages can reach it; without this they'd pile up in the mailbox forever
     (_ (reconnect-up spec peer opts subs))))
 
-
 (defn- reconnect-down
   (spec peer opts subs delay)
   "Disconnected state: retry `(node/connect spec)` on an exponential-backoff timer,
@@ -73,12 +71,10 @@ still answering control messages between attempts."
       (reconnect-wait spec peer opts subs delay (+ (os/now) delay)))))
 (sig reconnect-down (string (or keyword nil) map list int -> any))
 
-
 (defn- reconnect-next-delay
   (delay opts)
   (math/min (* delay 2) (reconnect-opt opts :max-ms 30000)))
 (sig reconnect-next-delay (int map -> int))
-
 
 (defn- reconnect-wait
   (spec peer opts subs delay deadline)

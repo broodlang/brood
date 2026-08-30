@@ -386,14 +386,14 @@
 (describe "not= is deprecated"
 
   (test "the metadata is recorded, and names the replacement"
-    (assert= "0.19.0" (get (%meta-of 'not=) :deprecated))
+    (assert= "0.19.1" (get (%meta-of 'not=) :deprecated))
     (assert= 'not (get (%meta-of 'not=) :use)))
 
   (test "a use is diagnosed, pointing at `not`"
     (let (msgs (stability-messages "(defn u (a b) (not= a b))"))
       (assert= true
         (any? (fn (m)
-                (and (includes? m "`not=` is deprecated since 0.19.0")
+                (and (includes? m "`not=` is deprecated since 0.19.1")
                   (includes? m "use `not` instead")))
           msgs))))
 
