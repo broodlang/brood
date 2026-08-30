@@ -7282,3 +7282,31 @@ scheduler wake-latency variance and per-binary code-layout luck that base-vs-bas
 binary never samples. Before believing a wall-clock regression on a concurrency row
 between two different binaries, confirm it with `perf stat -e instructions,cycles` — work
 that didn't grow is a regression that isn't there.
+
+## 2026-08-30 (second) — pingpong −20%, ring −18%: the unconditional wake syscall, found from a user question
+
+"Why did pingpong go up so much?" — trend.svg showed +26% between the 2026-08-27 and
+2026-08-28 published runs. Bisected with INSTRUCTIONS RETIRED as the oracle (the wall-clock
+lesson from the spawn retraction, applied): the growth splits into a ~83 M/run constant
+smeared across the type-system window (load-time macro expansion of the port's
+`receive`/match forms — `macroexpand` at 17% of the row's cycles, tree-walked prelude
+expander helpers under it) and **~850 instructions per message pinned to `473f8290`** —
+the wake-both correctness fix. Its `wake_both` called `Condvar::notify_all` on every
+delivery, and Rust's futex condvar issues `futex(FUTEX_WAKE)` unconditionally: one syscall
+per message, visible in the profile as `syscall` + `clear_bhb_loop`.
+
+The fix keeps 473f8290's invariant and drops the cost: `MailboxState.cv_waiters`, written
+only under the state lock — `wait_for_message` registers before `Condvar::wait` atomically
+releases that lock into the block, and every wake site reads the count inside the same
+critical section that makes its wake-relevant change. Either ordering is safe by
+construction (the waiter's re-check sees the change, or the waker sees the count), so the
+only notify skipped is one delivered to provably nobody — which a condvar discards anyway.
+That was the entire per-message cost: **pingpong −19.7%, ring −17.6%** (best-of-15, floors
+2.0%/0.7%, live images), spawn/latency neutral (p99 86–97 µs both arms). Instructions
+2.335 → 2.199 G against 0.13.0's 2.092 G; the residual ~107 M is the expansion constant,
+recorded in compute-frontier §7.3 as its own item.
+
+Gauntlet for a wake-ordering change: full suite twice (1282/1282 both), the wake-sensitive
+binaries (live_migration, local_send_race, autoload_race, jit_suspend_latch) looped 5×
+capped `-j1`, a GC-stress pass over the race tests, and the cli distribution suite 3× —
+all green. The lost-wake protection itself is pinned by 473f8290's sabotage-verified tests.
