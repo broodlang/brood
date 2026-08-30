@@ -1936,11 +1936,7 @@ impl RuntimeCode {
     /// A fresh runtime whose global table is seeded with the prelude bindings
     /// (`symbol -> prelude value`). The code slabs start empty — user `def`s
     /// append to them. Inner processes share this whole thing via `Arc`.
-    pub fn seeded(
-        bindings: &[(Symbol, Value)],
-        prelude_private: &[Symbol],
-        prelude_meta: &[(Symbol, NameMeta)],
-    ) -> Self {
+    pub fn seeded(bindings: &[(Symbol, Value)], prelude_private: &[Symbol]) -> Self {
         let mut globals = SymbolMap::with_capacity_and_hasher(bindings.len(), Default::default());
         for &(s, v) in bindings {
             globals.insert(s, v);
@@ -1954,13 +1950,7 @@ impl RuntimeCode {
             runtime_tag: next_runtime_tag(),
             gen_inflight: [AtomicUsize::new(0), AtomicUsize::new(0)],
             gen_version: AtomicU64::new(0),
-            // The prelude's stability metadata, threaded in for exactly the reason its
-            // privacy set is: `seeded` INSERTS the prelude's bindings rather than
-            // re-evaluating them, so the `%register-meta` a `(meta …)` emits never fires
-            // in a live runtime and the facts would be silently absent — which is how
-            // `not=`'s deprecation first came out invisible in every process but the
-            // builder heap.
-            meta: RwLock::new(prelude_meta.iter().cloned().collect()),
+            meta: RwLock::new(SymbolMap::default()),
             // Reserved at seed time: every shipped **function**, macro and builtin.
             // Deliberately NOT the prelude's data globals — `*features*`,
             // `*load-path*`, `*module-docs*`, `*reload-diagnostics*` are registries
@@ -2752,6 +2742,19 @@ pub struct Heap {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_deopt_reason: std::cell::Cell<u32>,
     vm_call_ics: RefCell<Vec<Option<CallIcEntry>>>,
+    /// Next IC-block base to hand out for [`Self::vm_call_ics`] / [`Self::vm_global_ics`]
+    /// (M2b, 2026-08-30). `vm_arm_block` used to take `base = table.len()` and
+    /// `resize_with(base + nsites)` — materialising an `Option<CallIcEntry>` slot for
+    /// every site of every ACTIVATED arm, entered or not, which for a spawn-once
+    /// process is nearly all of them. Bases now come from these counters and the
+    /// tables grow **on publish** (`vm_call_ic_put` / `vm_global_ic_put`), the same
+    /// lazy-by-its-only-writer pattern the `vm_fast_links` mirror proved on
+    /// 2026-08-18. Every reader already tolerates a short table (`.get(abs)` — a
+    /// missing slot reads exactly like an unpublished one). Reset to 0 in lockstep
+    /// with the table clears + `arm_ic_blocks`, preserving ADR-096's site-id
+    /// recycling semantics exactly (the sym/argc guards on every probe exist for it).
+    next_ic_base: std::cell::Cell<u32>,
+    next_gic_base: std::cell::Cell<u32>,
     /// **IR-readable mirror** of the fast-link memo (Track B / Technique A): a flat,
     /// `#[repr(C)]` side table indexed by the same call-site id as [`Self::vm_call_ics`],
     /// so JIT'd code can read a site's `(epoch, code, nslots, env)` with a raw load + an
@@ -3232,6 +3235,8 @@ impl Heap {
             live_vm_arms: Vec::new(),
             jit_deopt_reason: std::cell::Cell::new(0),
             vm_call_ics: RefCell::new(Vec::new()),
+            next_ic_base: std::cell::Cell::new(0),
+            next_gic_base: std::cell::Cell::new(0),
             vm_fast_links: RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
@@ -3314,6 +3319,8 @@ impl Heap {
             live_vm_arms: Vec::new(),
             jit_deopt_reason: std::cell::Cell::new(0),
             vm_call_ics: RefCell::new(Vec::new()),
+            next_ic_base: std::cell::Cell::new(0),
+            next_gic_base: std::cell::Cell::new(0),
             vm_fast_links: RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
@@ -4599,21 +4606,6 @@ impl Heap {
     /// re-evaluated — see [`RuntimeCode::seeded`]).
     /// Also the *snapshot* half of the `%isolate` bracket — see
     /// [`restore_private_names`](Self::restore_private_names).
-    /// A snapshot of this runtime's recorded stability metadata (ADR-283) — the
-    /// `(meta …)` facts, the sibling of [`private_names_snapshot`](Self::private_names_snapshot)
-    /// and used at the same one place, for the same reason: the prelude is inserted into
-    /// each live runtime, not re-evaluated, so a fact recorded by evaluating it in the
-    /// builder heap has to be carried across explicitly or it is lost.
-    pub fn name_meta_snapshot(&self) -> Vec<(Symbol, NameMeta)> {
-        self.runtime
-            .meta
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .map(|(s, m)| (*s, m.clone()))
-            .collect()
-    }
-
     pub fn private_names_snapshot(&self) -> Vec<Symbol> {
         self.runtime
             .private

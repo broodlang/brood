@@ -2719,6 +2719,14 @@ pub(super) fn declare_dynamic(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 /// — sets `compile_ns` to `foo/b`, so the file's `def`s become `foo/b/…`. Outside a
 /// dep load (root project / std) the name is unchanged.
 pub(super) fn in_ns(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // `(%in-ns nil)` clears the namespace back to ROOT — the restore half of a
+    // save/set/restore bracket (`reflect/current-ns` returns nil at root, so a
+    // bracket that saved nil needs a way to put it back). The deferred-contracts
+    // machinery (`%contracts-apply-pending!` in tools.blsp) is the first user.
+    if matches!(arg(args, 0), Value::Nil) {
+        heap.set_compile_ns(None);
+        return Ok(Value::nil());
+    }
     let sym = expect_symbol(heap, "%in-ns", arg(args, 0))?;
     let rooted = heap.root_module_name(sym);
     heap.set_compile_ns(Some(rooted));

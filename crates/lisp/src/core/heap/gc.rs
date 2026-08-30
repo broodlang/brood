@@ -510,6 +510,12 @@ impl Heap {
         // Blocks index the tables just dropped, so they go in lockstep; the next
         // activation re-resolves a fresh block.
         self.arm_ic_blocks.borrow_mut().clear();
+        // M2b: base counters reset in lockstep with the registry + tables, so
+        // recycled site-id space starts at 0 exactly as it did when bases came
+        // from `table.len()` (ADR-096's guards rely on the epoch/sym checks, not
+        // on unique ids).
+        self.next_ic_base.set(0);
+        self.next_gic_base.set(0);
         self.arm_ic_blocks.borrow_mut().shrink_to_fit();
         // The ability-dispatch ICs are caches on exactly the same terms (every entry is
         // validated against `global_epoch` before use), so "drop the caches" has to
