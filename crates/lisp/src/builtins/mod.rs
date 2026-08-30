@@ -3286,6 +3286,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "The current compilation namespace as a symbol, or nil at the root namespace (top level).",
         current_ns,
     );
+    // The compile context — namespace AND `(:use …)` imports, both per process — as data,
+    // and back. For an evaluator that runs each request in a fresh process and must carry
+    // a `defmodule` from one request to the next (`std/tool/eval-server.blsp`).
+    def(
+        heap,
+        "%compile-context",
+        Arity::exact(0),
+        Sig::new(vec![], Ty::of(Tag::Vector)),
+        &[],
+        "",
+        compile_context,
+    );
+    def(
+        heap,
+        "%restore-compile-context",
+        Arity::exact(1),
+        Sig::new(vec![Ty::of(Tag::Vector)], sym),
+        &[],
+        "",
+        restore_compile_context,
+    );
     // Package-rooted namespaces (ADR-070): `%root-module-name` roots an intra-package
     // module reference to `prefix/name` under a dep load; `%set-package-context`
     // enters/clears a dep's load context. Emitted by the prelude loader + `defmodule`.
