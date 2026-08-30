@@ -27,15 +27,134 @@
 
 (def *catalog*
   {"*" :math
+   "string/->bytes" :convert
+   "string/->number" :convert
+   "string/->symbol" :convert
+   "math/abs" :math
+   "path/absolute" :filesystem
+   "path/absolute?" :predicates
+   "math/acos" :math
+   "system/argv" :system
+   "math/asin" :math
+   "math/atan" :math
+   "math/atan2" :math
+   "*autoloading*" :meta
+   "path/basename" :filesystem
+   "string/bytes->" :convert
+   "doc-catalog/*catalog*" :meta
+   "doc-catalog/category-of" :meta
+   "doc-catalog/*category-order*" :meta
+   "math/ceil" :math
+   "reflect/check" :meta
+   "reflect/check-deps-fp" :meta
+   "reflect/check-file" :meta
+   "reflect/check-file-deps" :meta
+   "reflect/check-file-structured" :meta
+   "reflect/check-string-structured" :meta
+   "seq/chunk-by" :collections
+   "seq/chunk-every" :collections
+   "math/clamp" :math
+   "math/cos" :math
+   "reflect/current-file" :meta
+   "seq/dedupe" :collections
+   "path/dirname" :filesystem
+   "seq/distinct" :collections
+   "seq/distinct-by" :collections
+   "seq/drop-last" :collections
+   "math/e" :math
+   "io/emit" :io
+   "seq/enumerate" :collections
    "*err*" :io
+   "math/even?" :predicates
+   "math/exp" :math
+   "path/extension" :filesystem
    "*features*" :meta
+   "io/file-port" :io
+   "io/file-port-path" :io
+   "reflect/file-signatures" :meta
+   "string/fill" :strings
+   "seq/filterv" :collections
+   "seq/find" :collections
+   "proc/flag" :processes
+   "seq/flatten" :collections
+   "io/fn-port" :io
+   "reflect/form-pos" :meta
+   "string/format" :strings
+   "seq/frequencies" :collections
+   "seq/group-by" :collections
+   "system/halt" :system
+   "proc/hibernate" :processes
+   "seq/index-where" :collections
+   "proc/info" :processes
+   "io/inspect" :io
+   "seq/interleave" :collections
+   "string/interp" :strings
+   "seq/interpose" :collections
+   "seq/iterate-times" :collections
+   "path/join" :filesystem
+   "seq/keep" :collections
+   "string/last-index-of" :strings
+   "proc/list" :processes
+   "file/list-dirs" :filesystem
+   "file/list-files" :filesystem
+   "math/ln" :math
    "*load-path*" :meta
+   "math/log10" :math
+   "math/log2" :math
+   "proc/mailbox-size" :processes
+   "seq/max-by" :collections
+   "map/merge-with" :maps
+   "seq/min-by" :collections
+   "math/negative?" :predicates
+   "path/normalize" :filesystem
+   "math/odd?" :predicates
+   "reflect/parse-source" :meta
+   "reflect/parse-source-positioned" :meta
+   "math/pi" :math
+   "io/port-fn" :io
+   "io/port?" :predicates
+   "math/positive?" :predicates
+   "math/pow" :math
    "*print-length*" :io
    "*print-level*" :io
    "*print-string-length*" :io
+   "io/process-port" :io
+   "io/process-port-pid" :io
+   "math/product" :math
    "*protocols*" :meta
+   "io/puts" :io
+   "file/read-lines" :filesystem
+   "map/reduce-kv" :maps
+   "seq/reduce-while" :collections
+   "reflect/references-in-source" :meta
+   "file/regular?" :predicates
+   "path/relative-to" :filesystem
+   "path/relative?" :predicates
    "*reload-diagnostics*" :meta
+   "seq/remove" :collections
+   "seq/remove-nth" :collections
+   "seq/repeatedly" :collections
+   "*require-edges*" :meta
    "*require-parent*" :meta
+   "math/round" :math
+   "math/round-to" :math
+   "seq/sample" :collections
+   "seq/scan" :collections
+   "reflect/scan-form-end" :meta
+   "reflect/scan-form-start" :meta
+   "reflect/scan-form-start-2" :meta
+   "reflect/scan-source-extract" :meta
+   "reflect/scan-tokens" :meta
+   "system/script-args" :system
+   "map/select-keys" :maps
+   "seq/shuffle" :collections
+   "math/sin" :math
+   "reflect/source-deps" :meta
+   "reflect/source-location" :meta
+   "reflect/source-signatures" :meta
+   "file/spit-bytes-append" :filesystem
+   "path/split" :filesystem
+   "seq/split-at" :collections
    "*spy-sink*" :io
    "*out*" :io
    "*show*" :meta
@@ -80,6 +199,31 @@
    "bit/positions" :math
    "bit/shift-left" :math
    "bit/shift-right" :math
+   "math/sqrt" :math
+   "io/standard-port" :io
+   "io/standard-port-label" :io
+   "io/standard-port-write" :io
+   "io/stderr-port" :io
+   "io/stdout-port" :io
+   "path/stem" :filesystem
+   "seq/subvec" :collections
+   "math/sum" :math
+   "seq/take-last" :collections
+   "math/tan" :math
+   "path/temp" :filesystem
+   "seq/times" :collections
+   "seq/transduce" :collections
+   "reflect/type-signature" :meta
+   "map/update-keys" :maps
+   "map/update-vals" :maps
+   "seq/vector-length" :collections
+   "seq/vector-ref" :collections
+   "file/walk-files" :filesystem
+   "io/with-err" :io
+   "path/with-extension" :filesystem
+   "io/with-out" :io
+   "io/write" :io
+   "file/write-lines" :filesystem
    "bit/xor" :math
    "bit/->float" :convert
    "string/blank?" :predicates
@@ -465,6 +609,7 @@
    "seq/xkeep" :collections
    "seq/xmap" :collections
    "seq/xremove" :collections
+   "seq/zip-with" :collections
    "map/zipmap" :maps
    "system/stdlib-id" :meta
    ;; ---- back in the prelude: used at macro-expansion time, so they cannot live in seq/
