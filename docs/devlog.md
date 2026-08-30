@@ -7794,6 +7794,20 @@ pre-flight through the verdict cache was withdrawn: the closures it stores diffe
 Also: `/` is a word delimiter for the buffer's word motion (`std/editor/buffer.blsp`),
 so `M-d`/`M-DEL`/`M-f`/`M-b` in bedit treat `math/floor` as two words.
 
+## 2026-08-30 (eighth) — KI-88 goes dormant; the ledger waits armed
+
+The quantum ledger was built for the kill: a per-thread `(pid, started)` map set around
+`drive()`, a watchdog naming any quantum older than 3 s, designed to split "drive never
+returned on thread T" from the session-3 impossibility ("no thread anywhere, tail never
+ran"). It never got its shot — the format reflow's rebuild moved whatever layout/timing
+the bug was keyed to, and even a pristine rebuild of the very commit that failed 3/3 in
+the afternoon passes 8/8 in the evening. The reproducing binary is gone; nothing
+reconstructable fails.
+
+Recorded as dormant, not fixed: many sightings, no root cause, so the router stays behind
+`BROOD_TW_REENTRY=1` with its 60×/−6.9% wins waiting. The ledger and the whole per-pid
+lifecycle kit ship in-tree so the NEXT sighting starts from instruments, not from
+archaeology — and the KI's first instruction now is: preserve the binary.
 ## 2026-08-30 — `nest run` launches warm; one symbol boundary for completion; a chain of cache-fingerprint bugs
 
 **Launch.** `nest run`'s pre-flight (`check-run-closure`) is now cached in its own
