@@ -371,14 +371,15 @@ impl Heap {
         if let Some(&b) = self.arm_ic_blocks.borrow().get(&arm.uid) {
             return b;
         }
+        // Reserve INDEX SPACE only (M2b): the tables grow on publish (`vm_call_ic_put`
+        // / `vm_global_ic_put`), so a site that is never entered never materialises an
+        // `Option<CallIcEntry>` slot — the mirror's proven lazy-by-its-only-writer
+        // pattern, extended to the fat tables. Every probe reads `.get(abs)`, and a
+        // missing slot is indistinguishable from an unpublished one.
         let base = {
-            let mut t = self.vm_call_ics.borrow_mut();
-            let base = t.len();
-            let new_len = base + arm.nsites as usize;
-            t.resize_with(new_len, || None);
-            // The IR-readable `vm_fast_links` mirror is deliberately NOT grown here — see
-            // `fastlink_slot_grown`. A process that never JIT-links a site never allocates it.
-            base as u32
+            let base = self.next_ic_base.get();
+            self.next_ic_base.set(base + arm.nsites);
+            base
         };
         #[cfg(debug_assertions)]
         {
@@ -392,11 +393,9 @@ impl Heap {
             }
         }
         let gbase = {
-            let mut t = self.vm_global_ics.borrow_mut();
-            let gbase = t.len();
-            let new_len = gbase + arm.ngsites as usize;
-            t.resize_with(new_len, || None);
-            gbase as u32
+            let gbase = self.next_gic_base.get();
+            self.next_gic_base.set(gbase + arm.ngsites);
+            gbase
         };
         self.arm_ic_blocks
             .borrow_mut()
@@ -477,7 +476,15 @@ impl Heap {
             return;
         }
         let mut t = self.vm_global_ics.borrow_mut();
-        if let Some(slot) = t.get_mut((self.cur_gic_base.get() + site) as usize) {
+        let abs = (self.cur_gic_base.get() + site) as usize;
+        // Grow on publish (M2b) — same shape and guard as `vm_call_ic_put`.
+        if abs >= t.len() {
+            if abs >= self.next_gic_base.get() as usize {
+                return;
+            }
+            t.resize_with(abs + 1, || None);
+        }
+        if let Some(slot) = t.get_mut(abs) {
             *slot = Some(GlobalIcEntry { sym, epoch, value });
         }
     }
@@ -878,6 +885,16 @@ impl Heap {
         };
         let abs = (self.cur_ic_base.get() + site) as usize;
         let mut t = self.vm_call_ics.borrow_mut();
+        // Grow on publish (M2b) — this is the fat table's only writer, and
+        // `vm_arm_block` now reserves index space without materialising slots.
+        // Guard against an abs outside reserved space (a stale base after a
+        // `runtime_collect` reset): never grow past the reservation counter.
+        if abs >= t.len() {
+            if abs >= self.next_ic_base.get() as usize {
+                return;
+            }
+            t.resize_with(abs + 1, || None);
+        }
         if let Some(slot) = t.get_mut(abs) {
             *slot = Some(entry);
             // Clear the IR-readable mirror so a stale link never leads the fresh entry.

@@ -84,6 +84,11 @@ pub const FLAGS: &[DebugFlag] = &[
         ATTRIBUTION,
         "hit rate of the L1 local-send fast path — check it applied before crediting a message result",
     ),
+    f(
+        "BROOD_DEFER_DBG",
+        ATTRIBUTION,
+        "name each closure that defers to the tree-walker — the tw_defer counter says how many, this says WHO (one defer tree-walks everything below it)",
+    ),
     // ---- JIT ----
     f(
         "BROOD_JIT_DUMP_IR",

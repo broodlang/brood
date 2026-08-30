@@ -1312,6 +1312,22 @@ pinning exaggerates (CLAUDE.md's ADR-175 note).
 
 ### 7.3 Message rows are 15–17% interpreter, and their arms are NOT in the bail trace
 
+> **2026-08-30: the biggest single cost in this family is CLOSED — pingpong −19.7%, ring
+> −17.6%** (the unconditional per-delivery `notify_all` futex syscall `473f8290`'s wake fix
+> introduced; now conditional on a lock-protected `cv_waiters` count, same invariant — see
+> the devlog). What remains of these rows, measured while closing it: a ~83 M-instruction
+> per-RUN constant — load-time macro expansion of `receive`/match forms through tree-walked
+> prelude expander helpers (`macroexpand` was 17% of the row's cycles pre-fix) — smeared in
+> across the 0.13→0.15 type-system window. That is a LOAD cost every match-heavy program
+> pays at startup, not a message cost. **First slice landed 2026-08-30**: the static
+> quasiquote rewrite now descends VECTOR literals (a qq inside one was invisible, so
+> `%receive-split`'s whole arm deferred — and a deferred arm tree-walks everything below
+> it, since `apply_closure` never re-enters the VM). −39 M instructions, pingpong wall
+> −4.0%. `BROOD_DEFER_DBG=1` now names each deferring closure. The REMAINING constant is
+> the autogensym-template class: `receive`/`match`-style expanders defer by design (fresh
+> gensyms per invocation), and compiling them means builder code that calls gensym at
+> runtime — the next slice, its own session.
+
 `pingpong` 15.0% / `ring` 17.2% `exec_chunk`, and the receive loops never appear in
 `BROOD_JIT_BAIL_TRACE` — a `receive` suspends, so the arm is *structurally* outside the
 subset, not refused. Same partial-lowering family as §7.1 (the receive as an exit point).
@@ -1385,4 +1401,10 @@ invalidates every image). JIT warm and engaged on both (`BROOD_JIT_DUMP_IR` arm 
 Stderr grepped for `CODEGEN-PANICKED` — the JIT can switch itself off and every answer stays
 right. **Interleave every arm in one command, three-way when there is a chain** — §2k exists
 because a saved baseline binary drifted 10% between sessions. Floors measured; a delta under
-~2× floor is noise.
+~2× floor is noise. **And a same-binary floor cannot see cross-binary noise**: on a
+concurrency row (unpinned, all cores), scheduler wake-latency variance plus per-binary code
+layout put wall-clock deltas of ±8% between binaries whose `perf stat` instructions/cycles
+are flat — a phantom "spawn +7.5% from upstream" was retracted this way (2026-08-30).
+Confirm any cross-binary regression on a concurrency row with
+`perf stat -e instructions,cycles` before reporting it. (The stdimage check in the first
+line is now enforced by `ab-bench` itself — footgun 6 in the script.)
