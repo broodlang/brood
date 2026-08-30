@@ -147,7 +147,7 @@ and running `(defonce *demo-state* 41)` → `(def *demo-state* 99)` →
 `(defonce *demo-state* 41)` left `*demo-state*` at **99** — the second `defonce`
 no-ops, state preserved. `(bound? 'unbound-sym)` returns `false` (not an error),
 so the macro is safe on first definition. The whole stage is essentially these
-two lines plus tests + docs + adding it to `std/prelude.blsp`.
+two lines plus tests + docs + adding it to `std/prelude/*.blsp`.
 
 **One caveat to document.** `bound?` checks *any* binding in scope, not just the
 global. At top level that's the global, so `defonce` is correct there; just note

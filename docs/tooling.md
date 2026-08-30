@@ -180,7 +180,7 @@ nest run --for 1500            # bare integer = milliseconds
 
 `DURATION` is `Ns`, `Nms`, or a bare integer (ms); anything else exits 2 with a
 usage hint. Mechanism: the entry runs in a spawned green process the root
-monitors with a `(receive … (after ms …))` timeout (`std/prelude.blsp` over
+monitors with a `(receive … (after ms …))` timeout (`std/prelude/process.blsp` over
 `process/timer.rs`); when the cap fires the root prints `[stopped after …]` and
 exits 0, dropping the program where it stood. It composes with `--watch`. Lets a
 whole loop (not just its pure functions) be exercised, and makes time-based

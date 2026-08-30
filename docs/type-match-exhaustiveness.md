@@ -41,7 +41,7 @@ correctly — there's nothing else to wire it into.
 
 ## The insight that made this small
 
-`match` (`std/prelude.blsp`, `match*`/`match` macros, `%match-build-from`/
+`match` (`std/prelude/match.blsp`, `match*`/`match` macros, `%match-build-from`/
 `%match-no-match`) compiles
 
 ```lisp

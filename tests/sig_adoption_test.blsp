@@ -79,28 +79,14 @@
     (assert= (warns-of "(sig ab (string -> string)) (defn ab (s) s)") nil)
     (assert= (warns-of "(defn ba (s) s) (sig ba (string -> string))") nil))
 
-  (test "no std sig sits directly above a definition of the same name"
-    ;; The invariant, checked structurally against the baked-in sources: a `sig`
-    ;; written above its `defn` breaks `BROOD_CONTRACTS=1` for that whole module,
-    ;; and nothing in the default-mode suite would notice.
-    (dolist (m (list "path" "json" "set"))
-      (let (lines (string/split (or (%builtin-module m) "") "\n"))
-        (assert= (sig-misplaced lines) nil)))))
-
-;; Does line `b` define the name `(sig NAME …)` line `a` declares? That adjacency is
-;; the placement that breaks under contracts mode.
-(defn- sig-above-def?
-  (a b)
-  (and (string/starts-with? a "(sig ")
-    (let (nm (second (string/split a " ")))
-      (or (string/starts-with? b (str "(defn " nm " "))
-        (string/starts-with? b (str "(def " nm " "))))))
-
-;; Every misplaced `(sig …)` line in `lines` (empty when the invariant holds).
-(defn- sig-misplaced
-  (lines)
-  (seq/keep (fn (pair) (let ([a b] pair) (when (sig-above-def? a b) a)))
-    (seq/zip lines (rest lines))))
+  ;; The STRUCTURAL invariant is not checked here any more, and deliberately so. This
+  ;; block used to scan three baked-in modules (`path`, `json`, `set`) for a `(sig …)`
+  ;; line directly above a `(defn …)`/`(def …)` of the same name — 3 files of 79, exact
+  ;; adjacency only, and blind to `defn-`/`defmacro`/`defdyn` and to a definition nested
+  ;; in a `(check-allow …)`. It passed while 218 misplaced sigs sat in the tree, which is
+  ;; worse than no check: it read as coverage. `crates/lisp/tests/sig_placement.rs` now
+  ;; asserts it over EVERY `.blsp`, and names the line to move.
+)
 
 ;; ---- occurrence typing: inferred params check callers, zero annotations (ADR-190) ----
 ;; Pass 2.8 now carries each same-file function's inferred PARAMETER demands (not just its

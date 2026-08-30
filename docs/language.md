@@ -294,7 +294,7 @@ A map is **seqable as its `[k v]` pairs**: `seq`, `first`, `rest`, `last`, `map`
 `(map first m)` is its keys and `(first m)` is a `[k v]` vector (`nil` for an empty
 map). Use `reduce-kv` when you want the key and value as separate arguments.
 
-These are thin Brood wrappers (`std/prelude.blsp`) over a small kernel of `map-*`
+These are thin Brood wrappers (`std/prelude/map.blsp`) over a small kernel of `map-*`
 primitives; the representation is a **CHAMP hash-array-mapped trie** (ADR-040),
 which is why `count` is O(1) and structural key equality is O(log n).
 
@@ -928,7 +928,7 @@ eagerly). They are reserved names.
 
 `when`, `unless`, `cond`, `and`, `or`, `case`, `match`, and `comment` read like
 special forms but are **prelude macros** over `if`/`do`/`let`
-(`std/prelude.blsp`), expanded once by the compile pass (ADR-022) — so the
+(`std/prelude/core.blsp`), expanded once by the compile pass (ADR-022) — so the
 evaluator's core stays minimal and they cost nothing extra at runtime.
 (`(comment body…)` ignores its body and yields `nil` — the form-level "don't run
 this", since Brood has no `#_` discard reader macro. The body is still *read*, so
@@ -1222,7 +1222,7 @@ no-op to silence it without editing code:
 
 Erlang/Elixir-style pattern matching, with **one pattern grammar reused at every
 binding site**: `match`, refutable `let`, and `fn`/`defn` clauses. The compiler
-is written in Brood (`std/prelude.blsp`) — no new special form. For the full
+is written in Brood (`std/prelude/match.blsp`) — no new special form. For the full
 design and rationale see [pattern-matching.md](pattern-matching.md).
 
 ### The grammar
@@ -1542,7 +1542,7 @@ error (like division by zero) binds the kernel's canonical **error map** —
 `{:kind :message [:code :file :line :col :hint :trace]}` — so a handler can
 branch on `(get e :kind)` without parsing strings. A `try` with no `catch` is
 just a `do`. Under the hood `throw` and `%try` are primitives and
-`try`/`catch`/`error` are written in Brood (`std/prelude.blsp`) — see
+`try`/`catch`/`error` are written in Brood (`std/prelude/core.blsp`) — see
 [primitives.md](primitives.md).
 
 **`:trace` is the call stack at the raise** — a list of frames, innermost first,
@@ -1731,12 +1731,15 @@ declaration — a runtime no-op — read by the advisory checker, which then fla
 provably wrong call against it (both the argument and the result type flow):
 
 ```clojure
-(sig area (number -> number))
 (defn area (r) (* 3.14159 r r))
+(sig area (number -> number))
 
 (area "circle")           ; warning: area: argument 1 expects number, got string
 (string/length (area 2))  ; warning: string/length: argument 1 expects string, got number
 ```
+
+**Below the definition, always** — see "Placement" below. A `sig` above its `defn` reads
+better and is fine as a declaration, but it breaks the module under `BROOD_CONTRACTS=1`.
 
 The type grammar: base names — `int float number decimal string symbol keyword
 bool nil pair vector list map set bytes fn rope pid ref table socket subprocess`,
@@ -1780,7 +1783,10 @@ fires on any hand-written same-symbol `%eq`-literal `if`-chain too, not just
 `(sig! name (params… -> ret))` declares the **same** signature *and enforces it at
 run time*: it wraps `name` so each argument and the result are checked on every
 call, throwing on a mismatch (an opt-in "strong arrow"). Place it **after** the
-definition — it rebinds the name, preserving arity.
+definition — it rebinds the name, preserving arity. (One exception: an `&optional`
+signature installs a *variadic* shim, so it passes through only the arguments it was
+given and the callee's own defaults still apply — `arity-of` then reads `2+` where the
+function reads `2-3`.)
 
 ```clojure
 (defn area (r) (* 3.14159 r r))
@@ -1793,18 +1799,31 @@ exactly where you want soundness.
 
 **Placement: put a `sig` *below* its definition.** As a declaration it works
 anywhere, but `BROOD_CONTRACTS=1` makes every `sig` behave like `sig!` — which
-*rebinds* the name — so a `sig` above its `defn` fails under that flag (it now says
-so, naming the fix, instead of dying with `unbound symbol`). `std/` follows the
-below-the-definition rule, and `tests/sig_adoption_test.blsp` checks it
-structurally. A corollary: **prelude functions can't carry a `sig`** — a runtime
-contract wraps the function in a closure that captures a local frame, and the
-prelude freeze requires shared closures to capture only the global environment.
+*rebinds* the name — so a `sig` above its `defn` fails under that flag (it says so,
+naming the fix, instead of dying with `unbound symbol`), and takes the whole module
+load down with it.
 
-Adoption started in `std/path`, `std/json`, and `std/set` (ADR-153); the checker
-enforces those declarations at every call site, in any module, and result types
-flow (a `bool` result handed to `string/length` is caught). The checker treats both identically. Writing a
-*type* never changes behaviour; opting into *enforcement* (`sig!`) does. Full
-design: [type-annotations.md](type-annotations.md) (ADR-082).
+This is the rule most likely to be broken by someone doing the right thing: a
+signature reads as documentation, and documentation goes above. It has been broken in
+bulk twice — `defrecord` emitted its constructor `sig` above the `defn` (KI-81), and
+the adoption sweep wrote 218 of them above (KI-81's recurrence entry). So it is
+asserted over the **whole tree**, not by convention:
+`crates/lisp/tests/sig_placement.rs` scans every `.blsp` and fails on any
+`(sig NAME …)` preceding a same-file definition of `NAME`, naming the line to move.
+(`tests/sig_adoption_test.blsp` pins the *semantics* — that a declaration is
+placement-independent in default mode.)
+
+**The prelude carries signatures too**, ~20 of them. It could not before KI-81: the
+contract shim was `(let (orig name) (fn …))`, a closure over a local frame, and the
+prelude freeze requires a shared closure to capture only globals. The shim now holds
+the original in a gensym'd *global*, so a prelude `sig` arms like any other.
+
+Adoption is broad — **613 declarations across 79 std modules** (ADR-153 started it in
+`std/path`, `std/json` and `std/set`). The checker enforces them at every call site, in
+any module, and result types flow (a `bool` result handed to `string/length` is caught).
+The checker treats `sig` and `sig!` identically. Writing a *type* never changes
+behaviour; opting into *enforcement* does. Full design:
+[type-annotations.md](type-annotations.md) (ADR-082).
 
 ### Advisory lints (non-type warnings)
 
@@ -2285,7 +2304,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 > **Where these live:** only a small primitive kernel is implemented in Rust
 > (the `%`-prefixed numeric ops, `cons`/`first`/`rest`, type predicates, I/O,
 > `reflect/eval`/`reflect/load`, …). The functions below that aren't primitives — `+ - * / <
-> = map filter reduce list …` — are defined *in Brood* in `std/prelude.blsp`,
+> = map filter reduce list …` — are defined *in Brood* in `std/prelude/*.blsp`,
 > the same way you'd define your own. See spec.md §9 for the exact split. From a
 > caller's point of view they're all just functions.
 
@@ -2338,7 +2357,7 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   classify integers.
 - Only `%add`/`%sub`/`%mul`/`%div`/`%lt`/`%eq`, `rem`, and `floor` are Rust
   primitives; **everything in this section is Brood** on top of them
-  (`std/prelude.blsp`) — including `+`, `<`, and `=` themselves.
+  (`std/prelude/core.blsp`) — including `+`, `<`, and `=` themselves.
 
 ### Bitwise
 `bit/and`  `bit/or`  `bit/xor`  `bit/not`  `bit/shift-left`  `bit/shift-right`
@@ -2385,7 +2404,7 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   `[shuffled next-seed]`; `(sample seed coll)` → `[item next-seed]`.
 - The generator is Marsaglia xorshift32 — fast, fine for simulations, sampling,
   shuffling, jitter, and ids; **not** for cryptography. All of it is Brood over
-  the bitwise primitives (`std/prelude.blsp`).
+  the bitwise primitives (`std/prelude/*.blsp`).
 
 ### Comparison & logic
 `=`  ~~`not=`~~  `<`  `<=`  `>`  `>=`  `not`
@@ -2711,7 +2730,7 @@ Only `string/upper`/`string/lower` (Unicode tables), `string/->number` (strict p
 (`string/split`, `string/->codepoints`, `string-span`/`string-span-until`,
 `%str-index-of` — one native pass each, where the pure-Brood equivalent is a
 per-character loop) are Rust primitives; the rest of the library is Brood over
-`string/substring`/`str` (`std/prelude.blsp`) — the "write the language in the
+`string/substring`/`str` (`std/prelude/string.blsp`) — the "write the language in the
 language" principle.
 
 **Char indexing costs O(1), in both encoding regimes.** Strings are indexed by
@@ -3066,7 +3085,7 @@ already know (the answer to "is there an RNG?" in one call):
 (doc-search "random")    ;=> ([rand-int "…"] [sample "…"] …)    ; matches docstrings, not names
 ```
 
-These three are Brood over `reflect/global-names`/`doc` (`std/prelude.blsp`), and are
+These three are Brood over `reflect/global-names`/`doc` (`std/prelude/tools.blsp`), and are
 also exposed as `nest mcp` tools (`apropos`, `all-globals`, `doc-search`) so an
 agent can explore the live image — see `docs/mcp.md`.
 
@@ -3076,7 +3095,8 @@ agent can explore the live image — see `docs/mcp.md`.
 > is an error (ADR-166). Shadow one locally with `let`, or define your own inside a
 > `(defmodule …)`; your own globals and your packages stay fully redefinable.
 
-`std/prelude.blsp` is loaded at startup and is where most of the language
+`std/prelude/*.blsp` — nine files concatenated in the order `lib.rs` lists —
+is loaded at startup and is where most of the language
 actually lives — the `defn` macro, the arithmetic operators, comparisons,
 equality, the sequence library, and the `->`/`->>` threading macros, all defined
 in Brood on top of the Rust primitive kernel. It also adds `inc` `dec`

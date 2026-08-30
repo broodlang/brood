@@ -6,7 +6,7 @@ description: Use when writing or editing Brood Lisp (`.blsp`) source — generat
 # Writing Brood
 
 Brood (`.blsp`) is a small, dynamic, **immutable** Lisp. The full reference is
-`docs/brood-for-claude.md` (read it for depth); `std/prelude.blsp` is the
+`docs/brood-for-claude.md` (read it for depth); `std/prelude/*.blsp` is the
 canonical example of idiomatic code. This skill is the short list of things you
 will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 
@@ -90,6 +90,28 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    with `(bound? 'name)` if unsure. Your own globals redefine freely (hot reload). A
    taken name is available three ways: a different name, a local `let` shadow, or a
    `(defmodule your/mod …)` where it becomes `your/mod/name`.
+
+13. **A `(sig …)` goes BELOW the `defn` it describes.** A signature reads as
+   documentation and documentation goes above — which is why this gets written wrong,
+   and it is not a style point: `BROOD_CONTRACTS=1` turns every `sig` into a *rebinding*
+   of the name, so a forward one fails and takes the module's whole load down with it.
+   A test scans every `.blsp` for it.
+
+14. **Write `(not (= a b))`, not `not=`.** `not=` is deprecated (ADR-300) and every use
+   warns. It only ever spelled the same thing, the long form is the faster one, and past
+   two arguments the short name misleads — `(not= 1 2 1)` is `true`, since it negates the
+   whole `=` chain rather than meaning "pairwise different".
+
+13. **A `(sig …)` goes BELOW the `defn` it describes.** A signature reads as
+   documentation and documentation goes above — which is why this gets written wrong,
+   and it is not a style point: `BROOD_CONTRACTS=1` turns every `sig` into a *rebinding*
+   of the name, so a forward one fails and takes the module's whole load down with it.
+   A test scans every `.blsp` for it.
+
+14. **Write `(not (= a b))`, not `not=`.** `not=` is deprecated (ADR-300) and every use
+   warns. It only ever spelled the same thing, the long form is the faster one, and past
+   two arguments the short name misleads — `(not= 1 2 1)` is `true`, since it negates the
+   whole `=` chain rather than meaning "pairwise different".
 
 ## Naming & shape (match std/)
 

@@ -37,6 +37,15 @@ keyword-headed list, unusable as a form head). The arrow marker `->` reads as an
 ordinary symbol, so `(number -> number)` is a plain list the parser splits on
 `->`.
 
+**Write it BELOW the definition.** The examples above are shown alone; in a real file
+each `(sig …)` goes immediately *after* the `defn` it describes. As a pure declaration
+the placement is free — but `BROOD_CONTRACTS=1` turns every `sig` into a `sig!`, which
+**rebinds** the name, so a forward one fails and takes the module's whole load with it.
+This is the rule most likely to be broken by someone doing the right thing (a signature
+reads as documentation, and documentation goes above), and it has been broken in bulk
+twice — see KI-81 and its 2026-08-30 recurrence. `crates/lisp/tests/sig_placement.rs`
+asserts it over every `.blsp` in the tree and names the line to move.
+
 ### Type-expression grammar (slice 1)
 
 ```
@@ -216,16 +225,28 @@ checker reads `(sig! …)` exactly like `(sig …)`, so the static trust is now
 
 It's **all policy in Brood** (no new primitive): the `sig!` macro generates the
 wrapper, `type-matches?` decides membership over `type-of`/predicates, and
-`contract--check-args` does the per-argument check (all in `std/prelude.blsp`).
+`%contract-check-args` does the per-argument check (all in `std/prelude/core.blsp`).
 Place `(sig! …)` **after** the definition (it rebinds the name). The wrapper
 preserves arity, so introspection and the reload-arity diagnostic are
 undisturbed (the one cost: `arglist` of a wrapped fn reflects the wrapper).
 
+**`&optional` is the one shape that cannot preserve arity.** A wrapper has no way to
+tell "not supplied" from "supplied `nil`", so passing an explicit `nil` through would
+silently override the callee's own default. That shim is therefore *variadic* — it
+`apply`s only the arguments it actually received — and `arity-of` reads `2+` where the
+function reads `2-3`, which the reload check notes on stderr. Read as fixed parameters
+instead, the `&optional` marker counts as a parameter: that is how
+`(sig pad-left (string int &optional string -> string))` once armed a **4-arity** shim
+over a 2-3-arity function and made every `(string/pad-left s 10)` an arity error.
+
 Design decisions, as built:
 - **Where the check lives** — the wrapper rebinds the **global**, so every call
   is checked, including indirect / `apply`.
-- **Opt-in** — only `(sig! …)` enforces; plain `(sig …)` stays static-only and
-  free. Writing a *type* never changes behaviour; opting into *enforcement* does.
+- **Opt-in** — `(sig! …)` always enforces; plain `(sig …)` is static-only and free
+  *unless* `BROOD_CONTRACTS=1`, which arms every one of them (slice 3, below). Writing
+  a *type* never changes behaviour; opting into *enforcement* does — and note that the
+  second opt-in is a whole-run switch, not a per-declaration one, which is exactly why
+  placement matters for `sig` and not only for `sig!`.
 - **Unknown types accept** — a type-expr `type-matches?` can't interpret (an
   unknown base name, an arrow param) accepts any value, so a contract never
   throws on a type it doesn't understand (no spurious runtime failure).

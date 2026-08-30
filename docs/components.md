@@ -21,7 +21,7 @@ one with e.g. *"do backlog item W2 from docs/components.md."*
                          └───────────────────────────────┬──────────────────────────────────────┘
                                                           │ embeds
    POLICY (Brood)  ─────────────────────────────────────▼────────────────────────────────────────
-        std/prelude.blsp   std/tool/test.blsp   std/tool/project.blsp        ← redefinable at runtime
+        std/prelude/*.blsp std/tool/test.blsp   std/tool/project.blsp        ← redefinable at runtime
    ───────────────────────────────────────────────────────────────────────────────────────────────
    MECHANISM (Rust)        language pipeline                          advisory types
         reader → macros → eval → printer                              types  ←  check
@@ -230,7 +230,7 @@ before working in any Rust component:
 
 ## Brood standard library (policy — redefinable at runtime)
 
-### `std/prelude.blsp` — the core library · ~465 LOC
+### `std/prelude/*.blsp` — the core library · ~7,000 LOC across nine files
 - **Owns:** `defn`; logic; folding (`reduce`/`map`/`filter`); variadic
   arithmetic & comparison over the 2-arg primitives; control-flow macros
   (`when`/`unless`/`and`/`or`/`cond`); sequence ops; threading macros
