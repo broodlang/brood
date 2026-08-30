@@ -1103,7 +1103,7 @@ for the bytes). Advisory signature/TOFU checking is a lock-file concern and is s
 sha256 pin still holds."
   (let (base (registry-base-for nil)
         name-sym (if (symbol? nm) nm (symbol nm))
-        name-str (if (symbol? nm) (->string nm) nm)
+        name-str (if (string? nm) nm (->string nm))
         version (registry-latest-version name-sym))
     (when (nil? version)
       (error "package: "
@@ -1857,7 +1857,12 @@ ordinary library, which the server stores as \"nothing\"."
 (defn- package-config-dir
   ()
   (let (xdg (os/env "XDG_CONFIG_HOME"))
-    (path/join (if (nil? xdg) (path/join (os/env "HOME") ".config") xdg) "brood")))
+    (path/join (if (nil? xdg)
+                 (path/join (or (os/env "HOME")
+                              (error "package-config-dir: neither XDG_CONFIG_HOME nor HOME is set"))
+                   ".config")
+                 xdg)
+      "brood")))
 
 (defn- package-signing-key-path () (path/join (package-config-dir) "signing-key.blsp"))
 
@@ -2071,9 +2076,10 @@ published is refused. Backs `nest publish`."
 (defn- semver-bump
   (cur level)
   (let (p (map string/->number (string/split cur "."))
-        ma (nth p 0)
-        mi (nth p 1)
-        pa (nth p 2))
+        bad (fn () (error "semver-bump: malformed version " cur " (expected MAJOR.MINOR.PATCH)"))
+        ma (or (nth p 0) (bad))
+        mi (or (nth p 1) (bad))
+        pa (or (nth p 2) (bad)))
     (cond
       (= level "major") (str (inc ma) ".0.0")
       (= level "minor") (str ma "." (inc mi) ".0")

@@ -22,6 +22,7 @@
 ;; table is a vector of (m+1) vectors, each of length (n+1).
 ;; table[i][j] = LCS length of a[0..i-1] and b[0..j-1].
 
+(sig diff-zero-row (int -> vector))
 (defn- diff-zero-row
   (n)
   (into [] (map (fn (_) 0) (range (+ n 1)))))

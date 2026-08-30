@@ -103,7 +103,7 @@ time unit — nil means \"nothing coarser\", never \"no such unit\"."
     (= u :minute) 60000
     (= u :second) 1000
     (= u :ms) 1
-    else nil))
+    else (error (str "tempo: not a clock unit: " (str u)))))
 
 ;; ---- the three types --------------------------------------------------------
 ;;
@@ -116,6 +116,11 @@ time unit — nil means \"nothing coarser\", never \"no such unit\"."
 (defrecord tempo (by-unit res))
 (defrecord span (from to))
 (defrecord iset (spans))
+
+;; A span's endpoints are epoch milliseconds — `span` is only ever built from
+;; `from-ms`/`to-ms` and arithmetic on them — which the accessors say here.
+(sig span-from (map -> int))
+(sig span-to (map -> int))
 
 (defn tempo? (x) "True when `x` is a tempo value." (and (record? x) (= (record-id x) :tempo/tempo)))
 (defn span? (x) "True when `x` is a span." (and (record? x) (= (record-id x) :tempo/span)))
@@ -134,7 +139,7 @@ time unit — nil means \"nothing coarser\", never \"no such unit\"."
 
 (defability Spanning
   "A value occupying a half-open `[from, to)` stretch of the timeline."
-  (->span [self] :-> map))
+  (->span [self] :-> span))
 
 ;; ---- construction -----------------------------------------------------------
 
@@ -265,9 +270,11 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
     (every? (fn (i) (>= (index-of "0123456789" (string/char-at s i)) 0))
       (range 0 (string/length s)))))
 
+(sig tp-int ((or string nil) -> (or int nil)))
+
 (defn- tp-int
   (s)
-  (let (n (string/->number s))
+  (let (n (if (string? s) (string/->number s) nil))
     (if (int? n) n nil)))
 
 (defn- tp-frac->ms
@@ -275,6 +282,8 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
   ;; Fractional seconds → ms, truncating past three digits. \"5\" → 500, \"05\" → 50.
   (let (padded (str frac "000"))
     (tp-int (str (string/char-at padded 0) (string/char-at padded 1) (string/char-at padded 2)))))
+
+(sig tp-parse-date-parts (string -> (or map nil)))
 
 (defn- tp-parse-date-parts
   (s)
@@ -285,11 +294,13 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
             ym (if (> (count parts) 1) (assoc y :month (tp-int (nth parts 1))) y))
         (if (> (count parts) 2) (assoc ym :day (tp-int (nth parts 2))) ym)))))
 
+(sig tp-parse-time-parts (string -> (or map nil)))
+
 (defn- tp-parse-time-parts
   (s)
   ;; \"14:30:05.123\" → {:hour … :minute … :second … :ms …}, or nil.
   (let (dot (string/split s ".")
-        hms (nth dot 0)
+        hms (or (nth dot 0) "")
         frac (if (> (count dot) 1) (nth dot 1) nil)
         parts (string/split hms ":"))
     (when (and (<= (count dot) 2)
@@ -325,7 +336,7 @@ worse.
         neg (string/starts-with? body "-")
         rest-body (if neg (string/substring body 1 (string/length body)) body)
         halves (string/split rest-body "T")
-        date-str (nth halves 0)
+        date-str (or (nth halves 0) "")
         time-str (if (> (count halves) 1) (nth halves 1) nil))
     (if (> (count halves) 2)
       [:error (str "tempo/parse: not an ISO 8601 value: " s)]
@@ -348,12 +359,24 @@ worse.
 ;; \"1 July\" adjacent rather than overlapping, and why no `end-of-day` helper
 ;; appears anywhere in this module.
 
+(sig tp-field (map keyword int -> int))
+
+(defn- tp-field
+  (m k default)
+  ;; A unit of a validated tempo's unit map, which `tp-validate` has already
+  ;; pinned to an int — this is where the checker learns that.
+  (get m k default))
+
+(sig tp-dt (int int int int int int int -> datetime))
+
 (defn- tp-dt
   (y mo d h mi s ms)
   ;; A real `datetime` record, not a lookalike map. `datetime/->epoch-ms` reads
   ;; its fields with `get`, so a plain map would work — but relying on that
   ;; would make this module depend on an undocumented duck-typing contract.
   (datetime/datetime y mo d h mi s ms))
+
+(sig tp-floor-dt (map -> datetime))
 
 (defn- tp-floor-dt
   (t)
@@ -378,8 +401,8 @@ worse.
   "The instant `t` closes, in Unix epoch milliseconds (**exclusive**)."
   (let (u (tempo-res t)
         m (tempo-by-unit t)
-        y (get m :year)
-        mo (get m :month 1))
+        y (tp-field m :year 0)
+        mo (tp-field m :month 1))
     (cond
       (= u :year) (datetime/->epoch-ms (tp-dt (+ y 1) 1 1 0 0 0 0))
       (= u :month)
@@ -441,10 +464,10 @@ For the inclusive reading — \"June through August\" — use `between`.
 
     (tempo/width (tempo/parse-span! \"2026-06-15T07/2026-06-15T09\"))   → 7200000"
   (let (halves (string/split s "/"))
-    (if (not= (count halves) 2)
+    (if (not (= (count halves) 2))
       [:error (str "tempo/parse-span: not an ISO 8601 interval: " s)]
-      (let (a (parse (nth halves 0))
-            b (parse (nth halves 1)))
+      (let (a (parse (or (nth halves 0) ""))
+            b (parse (or (nth halves 1) "")))
         (cond
           (= (nth a 0) :error) a
           (= (nth b 0) :error) b
@@ -589,6 +612,17 @@ value yields a one-element vector."
   (let (ss (spans x))
     (if (empty? ss) nil (span (span-from (nth ss 0)) (span-to (last ss))))))
 
+(sig tp-width-acc (int seqable -> int))
+
+(defn- tp-width-acc
+  (acc ss)
+  ;; A tail-recursive sum rather than a `fold`: the checker cannot see that a
+  ;; fold whose seed is an int and whose step adds ints stays int.
+  (if (empty? ss)
+    acc
+    (let (s (first ss))
+      (tp-width-acc (+ acc (- (span-to s) (span-from s))) (rest ss)))))
+
 (sig total-width (map -> int))
 
 (defn total-width (x)
@@ -596,7 +630,7 @@ value yields a one-element vector."
 answer: how much time is actually taken.
 
     (tempo/total-width (tempo/gaps workday meetings))   ;; ms genuinely free"
-  (fold (fn (acc s) (+ acc (- (span-to s) (span-from s)))) 0 (spans x)))
+  (tp-width-acc 0 (spans x)))
 
 (defn union (a b)
   "Everything covered by `a` or `b`, as an interval set. Unlike `between`, a gap
@@ -743,6 +777,8 @@ wrong. February yields 28 or 29 parts because the calendar says so.
              :ms (get dt :ms 0)})
     (tempo (tp-restrict all u) u)))
 
+(sig shift (map int -> map))
+
 (defn shift (t n)
   "`t` moved `n` steps of its own resolution — negative to go back. Calendar
 arithmetic for years and months, exact millisecond arithmetic below that.
@@ -754,7 +790,7 @@ arithmetic for years and months, exact millisecond arithmetic below that.
     (cond
       (= u :year) (new! {:year (+ (get m :year) n)})
       (= u :month)
-        (let (total (+ (* (get m :year) 12) (- (get m :month) 1) n)
+        (let (total (+ (* (tp-field m :year 0) 12) (- (tp-field m :month 1) 1) n)
               q (math/quot total 12)
               y (if (< (math/rem total 12) 0) (- q 1) q)
               mo (+ (- total (* y 12)) 1))
@@ -779,11 +815,15 @@ arithmetic for years and months, exact millisecond arithmetic below that.
 
 ;; ---- formatting -------------------------------------------------------------
 
+(sig tp-pad-digits (int int -> string))
+
 (defn- tp-pad-digits
   (n w)
   (let (s (str n)
         need (- w (string/length s)))
     (if (> need 0) (str (string/repeat "0" need) s) s)))
+
+(sig tp-pad (int int -> string))
 
 (defn- tp-pad
   (n w)
@@ -833,7 +873,7 @@ prints as a month; nothing is padded out to a full timestamp.
                         (tp-pad (get m :ms) 3))))
         (str date "T" clock "Z")))))
 
-(sig ->iso-span (map -> string))
+(sig ->iso-span (span -> string))
 
 (defn ->iso-span (s)
   "A span as an ISO 8601 interval, `start/end`, at millisecond precision. The

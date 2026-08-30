@@ -361,7 +361,12 @@ fn collect_register_sig_forms_inner(heap: &mut Heap, form: Value, out: &mut Vec<
     let Some(&Value::Sym(head)) = items.first() else {
         return;
     };
-    if crate::core::value::symbol_is(head, kw::DO) {
+    // `(do …)` and `(%lint-allow :category …)` — what `check-allow` expands to — both wrap
+    // definitions; a `(sig …)` inside a `check-allow` block used to be dropped here, so it
+    // declared nothing (its `defn` was walked unseeded) while reading as declared.
+    if crate::core::value::symbol_is(head, kw::DO)
+        || crate::core::value::symbol_is(head, "%lint-allow")
+    {
         for &it in &items[1..] {
             collect_register_sig_forms(heap, it, out);
         }
@@ -1241,6 +1246,32 @@ pub fn check_file_mode(
         sigs::set_operator_domains(protocol::operator_domains(&protocol::build_multi_info(
             heap, &expanded,
         )));
+        // Reconstruct a `(sig name type)` form from each `%register-sig` in the expanded
+        // tree (building forms needs `&mut heap`, so collect first, register after — GC
+        // is blocked for the whole check, so the handles stay live).
+        let mut macro_sig_forms: Vec<Value> = Vec::new();
+        for &form in &expanded {
+            collect_register_sig_forms(heap, form, &mut macro_sig_forms);
+        }
+        // THIS file's records' declared field types, BEFORE any other sig is parsed: a
+        // `(sig f (pt -> …))` resolves the record NAME to a shape carrying them
+        // (`annot::record_ty`), and the file is not loaded while it is checked, so the
+        // constructor's sig — where `defrecord` puts the field types — is nowhere else.
+        // A constructor's sig is the one whose name IS a registered record id and whose
+        // result is a record shape.
+        {
+            let mut field_types = HashMap::new();
+            for &form in &macro_sig_forms {
+                let Some((name, sig)) = annot::parse_sig_decl(heap, form) else {
+                    continue;
+                };
+                let id = value::symbol_name(qualify_decl_name(&ctx, file_ns_name.as_deref(), name));
+                if let Some(fields) = sig.ret.record_fields() {
+                    field_types.entry(id).or_insert_with(|| fields.clone());
+                }
+            }
+            annot::set_record_field_types(field_types);
+        }
         // ADR-190: build the ability facts + the sealed-op occurrence-typing domains HERE —
         // before any pass runs `sig_of` (Gap A, Pass 2.8, the body walk) — so an imported
         // function's inferred sig is never cached *without* the sealed-op demand. Keyed by op
@@ -1250,13 +1281,6 @@ pub fn check_file_mode(
         annot::set_sealed_op_domains(protocol::build_sealed_op_domains(&ability_info));
         for &form in &forms {
             register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
-        }
-        // Reconstruct a `(sig name type)` form from each `%register-sig` in the expanded
-        // tree (building forms needs `&mut heap`, so collect first, register after — GC
-        // is blocked for the whole check, so the handles stay live).
-        let mut macro_sig_forms: Vec<Value> = Vec::new();
-        for &form in &expanded {
-            collect_register_sig_forms(heap, form, &mut macro_sig_forms);
         }
         for &form in &macro_sig_forms {
             register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);

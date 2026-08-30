@@ -50,7 +50,7 @@ the sentence.
   ;; `[source expected]` for one example line, or nil when it does not split cleanly.
   (let (parts (string/split (strip-comment line) " → "))
     (when (= 2 (count parts))
-      [(string/trim (first parts)) (string/trim (second parts))])))
+      [(string/trim (first parts)) (string/trim (or (second parts) ""))])))
 
 (defn- holds?
   (value expected)

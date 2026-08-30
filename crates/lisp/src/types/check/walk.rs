@@ -1709,10 +1709,85 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
     let head_is_macro =
         matches!(items.first(), Some(&Value::Sym(s)) if resolves_to_macro(heap, ctx, s));
     if !head_is_macro {
-        for &item in &items {
-            check_into(heap, item, ctx, out);
+        // A `fold`/`reduce` callback written as a `fn` literal is walked with its
+        // parameters SEEDED: the accumulator to the fold's own result type (the fixpoint
+        // `infer::seq_aware_call_ty` computes — a superset of every accumulator value, by
+        // induction) and the element to the collection's element type. Unseeded, `h` in
+        // `(fold (fn (h c) (bit/xor (* h 31) …)) 5381 s)` read as `any` and `(* h 31)` as
+        // `number`, while the fold as a whole was already known to be an int.
+        let seeded_callback = fold_callback_seed(heap, form, &items, ctx);
+        for (i, &item) in items.iter().enumerate() {
+            match &seeded_callback {
+                Some((idx, sig)) if *idx == i => {
+                    if let Some(fn_items) = list_items(heap, item) {
+                        check_fn_bound(heap, &fn_items, ctx, out, &sig.params);
+                    }
+                }
+                _ => check_into(heap, item, ctx, out),
+            }
         }
     }
+}
+
+/// Walk a single-clause `fn` literal with each parameter bound to an INFERRED bound —
+/// a plain binding (`dynamic_within`, never a sig-authoritative type), because an
+/// inferred accumulator is an over-approximation: reading it by inclusion would flag
+/// `(- x best)` under `(if best …)` as "`(not nil)` is not a number". Positions past
+/// `tys` bind unknown. Body forms are checked in that scope; nothing else `check_fn_seeded`
+/// does (the declared-return check, the dead-clause eligibility) applies to an inferred seed.
+fn check_fn_bound(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+    tys: &[Ty],
+) {
+    let Some(&params_form) = items.get(1) else {
+        return;
+    };
+    let mut scope = ctx.clone();
+    for (i, p) in fn_params(heap, params_form).into_iter().enumerate() {
+        scope = scope.bind(p, tys.get(i).cloned());
+    }
+    let body_start = match (items.get(2), items.get(3)) {
+        (Some(Value::Str(_)), Some(_)) => 3,
+        _ => 2,
+    };
+    for &body_form in &items[body_start..] {
+        check_into(heap, body_form, &scope, out);
+    }
+}
+
+/// For `(fold f init coll)` / `(reduce f init coll)` / `(reduce f coll)` whose `f` is a
+/// two-parameter `fn` literal: `(1, (acc elem -> any))` — the seed for walking it. `None`
+/// when the head is neither, `f` is not such a literal, or the fold's type is unknown.
+fn fold_callback_seed(
+    heap: &Heap,
+    form: Value,
+    items: &[Value],
+    ctx: &Ctx,
+) -> Option<(usize, Sig)> {
+    let Some(&Value::Sym(head)) = items.first() else {
+        return None;
+    };
+    let is_fold = value::symbol_is(head, "fold") || value::symbol_is(head, "reduce");
+    if !is_fold || items.len() < 3 {
+        return None;
+    }
+    let f = items[1];
+    let f_items = list_items(heap, f)?;
+    if !matches!(f_items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
+        return None;
+    }
+    if !matches!(lambda_literal_arity(heap, f), Some(a) if a.min == 2 && a.max == Some(2)) {
+        return None;
+    }
+    let acc = expr_ty(heap, form, ctx)?;
+    let coll = *items.last()?;
+    let elem = expr_ty(heap, coll, ctx)
+        .and_then(|t| t.elem_ty())
+        .unwrap_or(Ty::ANY);
+    Some((1, Sig::new(vec![acc, elem], Ty::ANY)))
 }
 
 /// `(fn (params...) docstring? body...)` (and `lambda` — the same closure
@@ -1773,6 +1848,7 @@ fn check_fn_seeded(
         return;
     };
     let params = fn_params(heap, params_form);
+    let defaults = fn_param_defaults(heap, params_form);
     // Whether the param list ends in a `& rest` binder (always the last binder). Its
     // seeded type differs — the binder collects the variadic args into a *list*.
     let has_rest = params_form_has_rest(heap, params_form);
@@ -1807,7 +1883,18 @@ fn check_fn_seeded(
             sig.is_some_and(|s| i >= s.params.len() && i < s.params.len() + s.optional.len());
         match sig.and_then(|s| s.param(i)) {
             Some(ty) if is_optional_pos => {
-                scope = scope.bind(p, Some(ty.union(Ty::of(crate::core::value::Tag::Nil))));
+                // An unsupplied optional WITH a default `(n 1)` is bound to the default,
+                // never to nil — so the absence case is the default's type. Seeding it as
+                // `T | nil` made `(+ p n)` under `&optional (n 1)` read `nil | int` and
+                // every such site a strict warning. A default whose type can't be pinned
+                // keeps the nil reading (a superset — sound).
+                let absent = defaults
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .and_then(|d| expr_ty(heap, d, ctx))
+                    .unwrap_or(Ty::of(crate::core::value::Tag::Nil));
+                scope = scope.bind(p, Some(ty.union(absent)));
             }
             Some(ty) => scope = scope.bind_sig_param(p, ty),
             None => scope = scope.bind(p, None),
@@ -2228,18 +2315,7 @@ fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option<GradualTy>
     // declared `number` (the precise return-check would otherwise false-positive).
     if value::symbol_is(head, kw::IF) {
         let test = items.get(1).copied().unwrap_or(Value::nil());
-        let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
-            Some(g) => {
-                let then_ctx = ctx.narrow(g.sym, g.ty.clone());
-                let else_ctx = if g.then_only {
-                    ctx.clone()
-                } else {
-                    ctx.narrow(g.sym, g.ty.negate())
-                };
-                (then_ctx, else_ctx)
-            }
-            None => (ctx.clone(), ctx.clone()),
-        };
+        let (then_ctx, else_ctx) = super::guards::branch_scopes(heap, test, ctx);
         // A LITERAL condition selects its branch (only nil/false are falsy; every other
         // literal is truthy), the same fold `infer::control_flow_ty` applies — so the
         // argument check sees `1`, not `1 | "a"`, for `(if true 1 "a")`.
@@ -2261,10 +2337,19 @@ fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option<GradualTy>
             }
             _ => {}
         }
+        // A dead branch (its scope contradicted by the test — `Ctx::is_dead`) contributes
+        // nothing to the value.
         return match items.len() {
-            4 => Some(
-                gradual_of(heap, items[2], &then_ctx).union(gradual_of(heap, items[3], &else_ctx)),
-            ),
+            4 => match (then_ctx.is_dead(), else_ctx.is_dead()) {
+                (false, false) => Some(
+                    gradual_of(heap, items[2], &then_ctx)
+                        .union(gradual_of(heap, items[3], &else_ctx)),
+                ),
+                (true, false) => Some(gradual_of(heap, items[3], &else_ctx)),
+                (false, true) => Some(gradual_of(heap, items[2], &then_ctx)),
+                (true, true) => None,
+            },
+            3 if then_ctx.is_dead() => Some(GradualTy::stat(NIL_TY)),
             3 => Some(gradual_of(heap, items[2], &then_ctx).union(GradualTy::stat(NIL_TY))),
             _ => None,
         };
@@ -2294,11 +2379,15 @@ fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option<GradualTy>
         let mut scope = ctx.clone();
         let mut i = 0;
         while i < binds.len() {
-            let Value::Sym(name) = binds[i] else {
-                return None; // destructuring binder — can't pin; defer the form
-            };
             let rhs_ty = expr_ty(heap, binds[i + 1], &scope);
-            scope = scope.bind(name, rhs_ty);
+            match binds[i] {
+                Value::Sym(name) => scope = scope.bind(name, rhs_ty),
+                pat => {
+                    for (sym, ty) in pattern_bindings(heap, pat, rhs_ty.as_ref()) {
+                        scope = scope.bind(sym, ty);
+                    }
+                }
+            }
             i += 2;
         }
         let &last = items.last()?;
@@ -2502,6 +2591,41 @@ fn params_form_has_rest(heap: &Heap, form: Value) -> bool {
     })
 }
 
+/// Per binder of `form` (aligned with [`fn_params`]), the `&optional` default expression
+/// — `(name default)` — or `None` for a plain parameter / an optional without one.
+pub(super) fn fn_param_defaults(heap: &Heap, form: Value) -> Vec<Option<Value>> {
+    let items = match form {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Nil | Value::Pair(_) => list_items(heap, form).unwrap_or_default(),
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            Value::Sym(s) => {
+                if value::symbol_is(s, kw::AMP)
+                    || value::symbol_is(s, kw::AMP_OPTIONAL)
+                    || value::symbol_is(s, kw::AMP_REST)
+                {
+                    continue;
+                }
+                out.push(None);
+            }
+            Value::Pair(_) | Value::Vector(_) => {
+                let inner = match item {
+                    Value::Vector(id) => heap.vector(id).to_vec(),
+                    _ => list_items(heap, item).unwrap_or_default(),
+                };
+                if let Some(Value::Sym(_)) = inner.first() {
+                    out.push(inner.get(1).copied());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 pub(super) fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
     let items = match form {
         Value::Vector(id) => heap.vector(id).to_vec(),
@@ -2680,10 +2804,15 @@ fn check_if(
         }
         (t, e)
     };
-    check_value_leaf(heap, then_form, form, &then_ctx, out);
-    check_into(heap, then_form, &then_ctx, out);
-    check_value_leaf(heap, else_form, form, &else_ctx, out);
-    check_into(heap, else_form, &else_ctx, out);
+    // A branch whose scope is contradicted by its own test cannot run: don't check it.
+    if !then_ctx.is_dead() {
+        check_value_leaf(heap, then_form, form, &then_ctx, out);
+        check_into(heap, then_form, &then_ctx, out);
+    }
+    if !else_ctx.is_dead() {
+        check_value_leaf(heap, else_form, form, &else_ctx, out);
+        check_into(heap, else_form, &else_ctx, out);
+    }
 }
 
 /// `(let bindings body…)` / `(letrec …)` — walk the bindings,
@@ -2756,8 +2885,9 @@ fn check_let(
             // RHS as an evaluated expression.
             check_value_leaf(heap, binds[i + 1], form, &scope, out);
             check_into(heap, binds[i + 1], &scope, out);
-            for sym in pattern_syms(heap, binds[i]) {
-                scope = scope.bind(sym, None);
+            let rhs_ty = expr_ty(heap, binds[i + 1], &scope);
+            for (sym, ty) in pattern_bindings(heap, binds[i], rhs_ty.as_ref()) {
+                scope = scope.bind(sym, ty);
             }
             i += 2;
             continue;
@@ -2864,6 +2994,56 @@ fn check_let(
             j += 2;
         }
     }
+}
+
+/// The binders of a destructuring pattern with the type each takes from a value of
+/// `rhs_ty`: a flat `[a b c]` / `(a b c)` over a `(vector T)` / `(list T)` binds each name
+/// to `T` — a short value is a match ERROR at runtime, never a nil-fill, so the element is
+/// exactly `T` — and over a tuple to that position's type; a `& rest` binder collects a
+/// `list<T>`. `_` binds nothing. Anything the position can't pin (a nested pattern, a
+/// literal constraint beside it, an unknown RHS) binds to `None` — in scope, unknown —
+/// which is what every binder got before this existed, when `(let ([x y w h] rect) (- w 1))`
+/// read `w` as unknown under a `(vector int)` sig.
+pub(super) fn pattern_bindings(
+    heap: &Heap,
+    pat: Value,
+    rhs_ty: Option<&Ty>,
+) -> Vec<(Symbol, Option<Ty>)> {
+    let names = pattern_syms(heap, pat);
+    let Some(items) = bindings(heap, pat) else {
+        return names.into_iter().map(|s| (s, None)).collect();
+    };
+    let flat = items.iter().all(|it| matches!(it, Value::Sym(_)));
+    let elem = rhs_ty.and_then(|t| t.elem_ty());
+    let tuple = rhs_ty.and_then(|t| t.tuple_elems().cloned());
+    if !flat || (elem.is_none() && tuple.is_none()) {
+        return names.into_iter().map(|s| (s, None)).collect();
+    }
+    let mut out = Vec::new();
+    let mut rest_next = false;
+    let mut position = 0usize;
+    for it in items {
+        let Value::Sym(s) = it else { continue };
+        let nm = name_of(s);
+        if nm == "&" {
+            rest_next = true;
+            continue;
+        }
+        if rest_next {
+            out.push((s, elem.clone().map(Ty::list_of)));
+            rest_next = false;
+            continue;
+        }
+        let ty = match &tuple {
+            Some(elems) => elems.get(position).cloned(),
+            None => elem.clone(),
+        };
+        position += 1;
+        if nm != "_" {
+            out.push((s, ty));
+        }
+    }
+    out
 }
 
 /// The binder symbols of a destructuring pattern (`(a b)`, `[a b & rest]`,

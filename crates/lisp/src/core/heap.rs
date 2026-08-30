@@ -1122,6 +1122,14 @@ pub struct SharedCode {
     /// a user redefinition of a prelude name still wins. Powers cross-file
     /// goto-definition into the standard library (ADR-031, docs/lsp.md).
     def_sites: HashMap<Symbol, SourceLoc>,
+    /// The prelude's own `(sig …)` declarations (`%register-sig` during the build), keyed
+    /// like [`RuntimeCode::declared_sigs`] and holding the type-expression as a PRELUDE
+    /// value. Read by [`Heap::declared_sig_value`] AFTER the runtime table, so a user
+    /// redeclaration wins. Before this existed the build heap's table was simply dropped
+    /// at the freeze (the runtime starts with an empty one), so a prelude sig such as
+    /// `(sig %path-last-slash (string int -> int))` was invisible to every caller and the
+    /// checker fell back to the body's inferred `ordered` — weaker advice, silently.
+    declared_sigs: SymbolMap<Value>,
 }
 
 /// A snapshot of the LOCAL heap's sizes, taken at a top-level boundary. Passing
@@ -3560,6 +3568,16 @@ impl Heap {
     pub fn freeze_as_shared_code(mut self, root: EnvId) -> (SharedCode, Vec<(Symbol, Value)>) {
         // Pull anything a global reaches into the LOCAL slabs first, so the
         // re-tag below is valid for every handle it touches (KI-12).
+        // The build's declared sigs live in its RUNTIME region, which the freeze discards:
+        // localize them like the globals so they can ride into the prelude region.
+        let mut declared_sigs: Vec<(Symbol, Value)> = self
+            .runtime
+            .declared_sigs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
         {
             let mut fwd: HashMap<(u8, u32, u8), Value> = HashMap::new();
             let vars: Vec<(Symbol, Value)> = self.local.envs[root.index()].vars.to_vec();
@@ -3568,6 +3586,9 @@ impl Heap {
                 if handle_key(lv) != handle_key(*v) {
                     self.local.envs[root.index()].vars[i].1 = lv;
                 }
+            }
+            for (_, v) in declared_sigs.iter_mut() {
+                *v = self.localize_for_freeze(*v, &mut fwd);
             }
         }
         let bindings: Vec<(Symbol, Value)> = self.local.envs[root.index()]
@@ -3781,8 +3802,26 @@ impl Heap {
         // loading the prelude) into the immutable region. They describe prelude
         // globals, never change, and shouldn't be re-recorded per runtime.
         let def_sites = std::mem::take(&mut *self.runtime.def_sites_write());
+        let declared_sigs: SymbolMap<Value> = declared_sigs
+            .into_iter()
+            .map(|(k, v)| {
+                assert!(
+                    matches!(handle_key(v), None | Some((_, _, LOCAL))),
+                    "prelude sig {} still points outside LOCAL at freeze (KI-12)",
+                    crate::core::value::symbol_name(k),
+                );
+                (k, to_prelude(v))
+            })
+            .collect();
 
-        (SharedCode { slabs, def_sites }, bindings)
+        (
+            SharedCode {
+                slabs,
+                def_sites,
+                declared_sigs,
+            },
+            bindings,
+        )
     }
 
     // ===== Process global scope =================================================
@@ -6469,6 +6508,7 @@ impl Heap {
             .unwrap_or_else(|e| e.into_inner())
             .get(&sym)
             .copied()
+            .or_else(|| self.prelude.declared_sigs.get(&sym).copied())
     }
 
     /// Restore the runtime's global bindings from a [`Heap::snapshot_globals`]

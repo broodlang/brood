@@ -133,12 +133,14 @@ that can't begin a number — since this runs on every atom on the fontify hot p
 ;; which are on the render hot path. The delimiter set mirrors `hl-delim?`.
 (def- hl-delim-chars " \t\n\r,()[]{}\";")
 
+(sig hl-to-eol (string int int -> int))
 (defn- hl-to-eol
   (src i n)
   "Index of the newline ending the line containing `i` (or `n` at end of input)."
   (math/min n (string/span-until src i "\n")))
 
 ; backslash: skip it and the escaped char
+(sig hl-string-end (string int int -> int))
 (defn- hl-string-end
   (src i n)
   "Index just past the closing quote of a string whose body starts at `i` (one past
@@ -149,6 +151,7 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
       (>= j n) n
       (= (string/char-at src j) "\"") (inc j)
       else (hl-string-end src (+ j 2) n))))
+(sig hl-atom-end (string int int -> int))
 (defn- hl-atom-end
   (src i n)
   "Index of the first delimiter at or after `i` — the end of an atom token."
@@ -366,6 +369,7 @@ one-char range `[pos (inc pos) face]`."
 
 ;; ---- bracket matching -------------------------------------------------------
 
+(sig hl-fwd-match (string int int int -> int))
 (defn- hl-fwd-match
   (full i n depth)
   "Scanning forward from `i` (just past an opener), the offset of the closer at
@@ -380,6 +384,7 @@ one-char range `[pos (inc pos) face]`."
         (hl-close? c) (if (= depth 0) i (hl-fwd-match full (inc i) n (dec depth)))
         else (hl-fwd-match full (inc i) n depth)))))
 
+(sig hl-opener-scan (string int int int list -> int))
 (defn- hl-opener-scan
   (full i n cp stack)
   "Forward scan maintaining a `stack` of opener offsets; on reaching closer `cp`,
@@ -402,6 +407,7 @@ return the matching opener (top of stack) or -1. Skips strings/comments."
   ;; the closing delimiter that pairs with opener `c`, or nil
   (cond (= c "(") ")" (= c "[") "]" (= c "{") "}" else nil))
 
+(sig hl-close-scan (string int int int list -> (or int :text)))
 (defn- hl-close-scan
   (full i pos n stack)
   "Forward scan to `pos` keeping a stack of open-bracket offsets: the innermost opener
@@ -485,10 +491,11 @@ that form. Sound, and the difference between O(enclosing form) and O(pos) — th
 interpreted, and at offset 600 of a 1.5 KB buffer the O(pos) version cost 1.4 ms, on every
 newline an auto-indenter handles."
   (hl-enc-scan full (safe-restart full pos) pos (string/length full) '()))
-(sig enclosing-open (string any -> any))
+(sig enclosing-open (string int -> int))
 
 ;; ---- enclosing call (for signature hints) -----------------------------------
 
+(sig hl-enc-scan (string int int int list -> int))
 (defn- hl-enc-scan
   (full i pos n stack)
   "Forward scan to `pos` maintaining a stack of open-bracket offsets; returns the
@@ -504,6 +511,7 @@ innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped a
         (hl-close? c) (hl-enc-scan full (inc i) pos n (rest stack))
         else (hl-enc-scan full (inc i) pos n stack)))))
 
+(sig hl-datum-starts (string int int int (list int) -> (list int)))
 (defn- hl-datum-starts
   (full i end n acc)
   "Start offsets (reverse order) of the complete datums in `[i, end)` at one nesting
@@ -551,15 +559,17 @@ cursor sits deep in a large file."
                         in-datum (and (> pos 0) (not (hl-delim? (string/char-at full (dec pos)))))
                         argi (if in-datum (math/max 0 (dec afterc)) afterc))
                     [callee argi]))))))))))
-(sig enclosing-call (string any -> (or nil (vector (or map number string)))))
+(sig enclosing-call (string int -> (or nil (vector (or map number string)))))
 
 ;; ---- completion helpers (pure; candidates supplied by the caller) -----------
 
+(sig hl-sym-start (string int -> int))
 (defn- hl-sym-start
   (full i)
   "The offset where the symbol token ending at `i` begins."
   (if (or (<= i 0) (hl-delim? (string/char-at full (dec i)))) i (hl-sym-start full (dec i))))
 
+(sig symbol-prefix-at (string int -> (vector any)))
 (defn symbol-prefix-at (full pos)
   "Return `[start prefix]` for the symbol token ending at cursor offset `pos` —
 `start` its offset, `prefix` its text — or `[pos \"\"]` when the cursor isn't on a
@@ -580,7 +590,7 @@ does — `(map|` reads as `map`, since that is where point lands after typing on
   (let (start (hl-sym-start full pos)
         end (hl-atom-end full pos (string/length full))
         text (string/substring full start end))
-    (when (not= text "") [start text])))
+    (when (not (= text "")) [start text])))
 (sig symbol-at (string int -> (or nil (vector any))))
 
 (defn- hl-cp2

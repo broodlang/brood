@@ -97,6 +97,7 @@ attach). Drive the standalone app from the shell with `nest observe`."
 (def-face :observer/confirm {:inherit :ui/error})
 ;; ---- pure formatting helpers ------------------------------------------------
 
+(sig observe-fit (string int -> string))
 (defn- observe-fit
   (s w)
   "Truncate `s` to at most `w` characters so a rendered row never wraps."
@@ -256,6 +257,8 @@ on screen (roughly centred), clamped so the window never runs past the end."
 right from column `col`. Tail-recursive."
   (observe-chunk-ops-acc chunks row col nil))
 
+(sig observe-minibuffer
+  ((record &open :prompt string :text string :hscroll (or int nil) :point int) int int -> any))
 (defn- observe-minibuffer
   (edit row cols)
   "Render the eval minibuffer at frame `row` (width `cols`): the prompt, then the
@@ -290,6 +293,7 @@ e.g. `  kill pid 7 (worker)? y/n`. The name is shown when the process has one."
 
 ;; ---- the pure render core (no IO — the testable heart) ----------------------
 
+(sig observe-frame (any any int int int any any any any -> any))
 (defn observe-frame (node procs sel cols rows paused sort link ui)
   "Pure: build a render frame (a vector of display ops) for a `cols`×`rows`
 terminal — a two-line node panel (from `node`, with the `link` status), a column
@@ -412,14 +416,14 @@ anything else is `observe-sort` (id / mailbox / memory)."
     (= key :reds) :tree
     else :id))
 
+(sig observe-reds-rate ((or int nil) (or int nil) (or int nil) (or int nil) -> (or int nil)))
 (defn- observe-reds-rate
   (prev-reds prev-at reds at)
   "Reductions/second between two `proc/info` samples, or nil when it can't be
 computed — no prior sample for this id (`prev-reds`/`prev-at` nil), missing
 counters, or no time elapsed (`at <= prev-at`). `prev-at`/`at` are wall-clock ms.
 Clamps a negative delta (a recycled id) to 0. Pure."
-  (if (or (nil? prev-reds) (nil? prev-at) (nil? reds) (nil? at))
-    nil
+  (when (and prev-reds prev-at reds at)
     (let (dt (- at prev-at))
       (if (<= dt 0)
         nil

@@ -32,12 +32,14 @@ case-insensitively), and quoted-string arguments. Pure, so independently testabl
 
 ;; ---- scanning helpers -------------------------------------------------------
 
+(sig dk-lead-ws (string int int -> int))
 (defn- dk-lead-ws
   (line i n)
   (if (and (< i n) (or (= (string/char-at line i) " ") (= (string/char-at line i) "\t")))
     (dk-lead-ws line (inc i) n)
     i))
 
+(sig dk-word-end (string int int -> int))
 (defn- dk-word-end
   (line i n)
   "The offset just past the non-whitespace run starting at `i`."
@@ -45,10 +47,12 @@ case-insensitively), and quoted-string arguments. Pure, so independently testabl
     (dk-word-end line (inc i) n)
     i))
 
+(sig dk-find (string int int string -> int))
 (defn- dk-find
   (line i n ch)
   (cond (>= i n) -1 (= (string/char-at line i) ch) i else (dk-find line (inc i) n ch)))
 
+(sig dk-strings (string int int int list -> list))
 (defn- dk-strings
   (line base i n acc)
   "Tail-recursive scan of `[i, n)` for `\"…\"` / `'…'` runs (offsets shifted by `base`),
@@ -71,6 +75,7 @@ each consumed whole so spans stay non-overlapping; returns them ascending."
 
 ;; ---- per-line spans + the document walker -----------------------------------
 
+(sig dk-line-spans (string int -> list))
 (defn- dk-line-spans
   (line base)
   "The spans for one `line` starting at offset `base`: a `#` comment whole, else a
@@ -87,6 +92,7 @@ leading instruction keyword (when the first word is one) plus quoted-string args
               (dk-strings line base we n '()))
             (dk-strings line base lead n '()))))))
 
+(sig dk-lex (string int int list -> list))
 (defn- dk-lex
   (src i n acc)
   (if (>= i n)

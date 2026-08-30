@@ -21,6 +21,7 @@ spellings of one instant.")
 
 ;; ---- internal helpers -------------------------------------------------------
 
+(sig dt-fdiv (int int -> int))
 (defn- dt-fdiv
   (a b)
   ;; Integer division toward negative infinity (floor division).
@@ -28,6 +29,7 @@ spellings of one instant.")
     (if (< r 0) (- q 1) q)))
 
 ;; check-allow: deliberately non-tail — depth = the pad width — single digits.
+(sig dt-zero-pad (int int -> string))
 (check-allow :non-tail-recursion
   (defn- dt-zero-pad
     (n width)
@@ -42,6 +44,7 @@ spellings of one instant.")
 ;; Howard Hinnant's civil_from_days / days_from_civil algorithms.
 ;; Reference: https://howardhinnant.github.io/date_algorithms.html
 
+(sig dt-days->ymd (int -> map))
 (defn- dt-days->ymd
   (z)
   ;; Days since 1970-01-01 → {:year :month :day}
@@ -59,6 +62,7 @@ spellings of one instant.")
         y (if (<= m 2) (+ y 1) y))
     {:year y :month m :day d}))
 
+(sig dt-ymd->days (int int int -> int))
 (defn- dt-ymd->days
   (year month day)
   ;; Date → days since 1970-01-01
@@ -81,9 +85,10 @@ spellings of one instant.")
 ;; `Temporal` ability below renders any of them, and a fourth temporal type from
 ;; elsewhere (a zoned datetime, a fiscal quarter) can join by impl'ing it.
 
-(defrecord datetime (year month day hour minute second ms))
-(defrecord date (year month day))
-(defrecord time-of-day (hour minute second ms))
+(defrecord datetime
+  ((year int) (month int) (day int) (hour int) (minute int) (second int) (ms int)))
+(defrecord date ((year int) (month int) (day int)))
+(defrecord time-of-day ((hour int) (minute int) (second int) (ms int)))
 
 ;; The three type predicates are BARE, in the prelude beside `queue?`/`pq?`/`multimap?`
 ;; (ADR-236 carve-out 2): a value's type should read the same way whatever its type, rather
@@ -92,6 +97,7 @@ spellings of one instant.")
 
 ;; ---- epoch conversion -------------------------------------------------------
 
+(sig epoch-ms-> (int -> datetime))
 (defn epoch-ms-> (ms)
   "Convert Unix epoch milliseconds to a UTC datetime.
 
@@ -106,14 +112,16 @@ spellings of one instant.")
         ymd (dt-days->ymd days))
     (datetime (get ymd :year) (get ymd :month) (get ymd :day) hour minute second ms-part)))
 
+(sig ->epoch-ms ((or datetime date) -> int))
 (defn ->epoch-ms (dt)
   "Convert a UTC datetime (or date — its time is taken as midnight) to Unix epoch
 milliseconds."
   (let (days (dt-ymd->days (get dt :year) (get dt :month) (get dt :day))
-        time-s (+ (* (get dt :hour 0) 3600)
-                 (* (get dt :minute 0) 60)
-                 (get dt :second 0))
-        ms-val (get dt :ms 0))
+        ;; Through the declared accessors: a `date` has no time fields (midnight), and a
+        ;; record NAME is an open shape (ADR-264), so `(get date :hour 0)` reads as unknown
+        ;; where `(hour date)` is declared `int`.
+        time-s (+ (* (hour dt) 3600) (* (minute dt) 60) (second dt))
+        ms-val (ms dt))
     (+ (* (+ (* days 86400) time-s) 1000) ms-val)))
 
 ;; ---- current time -----------------------------------------------------------
@@ -128,12 +136,20 @@ milliseconds."
 
 ;; ---- accessors --------------------------------------------------------------
 
+(sig year ((or datetime date) -> int))
 (defn year (dt) "The :year field." (get dt :year))
+(sig month ((or datetime date) -> int))
 (defn month (dt) "The :month field (1–12)." (get dt :month))
+(sig day ((or datetime date) -> int))
 (defn day (dt) "The :day field (1–31)." (get dt :day))
+;; The time accessors take a `date` too — its time is midnight, so each reads 0.
+(sig hour ((or datetime date time-of-day) -> int))
 (defn hour (dt) "The :hour field (0–23)." (get dt :hour 0))
+(sig minute ((or datetime date time-of-day) -> int))
 (defn minute (dt) "The :minute field (0–59)." (get dt :minute 0))
+(sig second ((or datetime date time-of-day) -> int))
 (defn second (dt) "The :second field (0–59)." (get dt :second 0))
+(sig ms ((or datetime date time-of-day) -> int))
 (defn ms (dt) "The :ms field (0–999)." (get dt :ms 0))
 
 ;; ---- decomposition ----------------------------------------------------------
@@ -214,6 +230,7 @@ milliseconds."
     (= code "%") "%"
     else (str "%" code)))
 
+(sig dt-fmt-loop (any string int int string -> string))
 (defn- dt-fmt-loop
   (dt fmt i n acc)
   (if (>= i n)
@@ -237,10 +254,13 @@ milliseconds."
 
 ;; ---- parsing ----------------------------------------------------------------
 
+(sig dt-parse-int ((or string nil) -> (or int nil)))
 (defn- dt-parse-int
   (s)
-  (let (n (string/->number s))
-    (if (int? n) n nil)))
+  ;; A missing component (`(nth parts i)` past the end) parses as nothing, like a bad one.
+  (when s
+    (let (n (string/->number s))
+      (if (int? n) n nil))))
 
 (defn- dt-frac->ms
   (frac)
@@ -276,9 +296,10 @@ milliseconds."
             ;; a fractional part must itself be digits — "12:00:00.xyz" used to
             ;; fall back to 0 ms and parse as a clean time
             (or (= frac-str "") (dt-in-range? (dt-parse-int frac-str) 0 999999999)))
-      (let (h (dt-parse-int (nth parts 0))
-            mn (dt-parse-int (nth parts 1))
-            sc (dt-parse-int (nth parts 2)))
+      ;; An unparsable component reads as -1 — never in range — so the values below are ints.
+      (let (h (or (dt-parse-int (nth parts 0)) -1)
+            mn (or (dt-parse-int (nth parts 1)) -1)
+            sc (or (dt-parse-int (nth parts 2)) -1))
         (when (and (dt-in-range? h 0 23) (dt-in-range? mn 0 59) (dt-in-range? sc 0 59))
           (time-of-day h mn sc (dt-frac->ms frac-str)))))))
 
@@ -292,8 +313,8 @@ normalised March date).
   (let (parts (string/split s "-"))
     (when (= (count parts) 3)
       (let (y (dt-parse-int (nth parts 0))
-            m (dt-parse-int (nth parts 1))
-            d (dt-parse-int (nth parts 2)))
+            m (or (dt-parse-int (nth parts 1)) -1)
+            d (or (dt-parse-int (nth parts 2)) -1))
         (when (and (int? y) (dt-in-range? m 1 12) (dt-in-range? d 1 (days-in-month y m)))
           (date y m d))))))
 
@@ -344,11 +365,11 @@ nil. Hour 0–23, minute and second 0–59; anything else is nil."
         digits (if (= shape :hh-mm)
                  (str (string/substring body 0 2) (string/substring body 3 5))
                  body)
-        h (if shape (dt-parse-int (string/substring digits 0 2)) nil)
+        h (if shape (or (dt-parse-int (string/substring digits 0 2)) -1) -1)
         mn (cond
-             (not shape) nil
+             (not shape) -1
              (= shape :hh) 0
-             else (dt-parse-int (string/substring digits 2 4))))
+             else (or (dt-parse-int (string/substring digits 2 4)) -1)))
     (when (and shape (dt-in-range? h 0 23) (dt-in-range? mn 0 59))
       (* sign (+ (* h 3600000) (* mn 60000))))))
 
@@ -362,8 +383,8 @@ produces is UTC.
     (datetime/->iso (datetime/parse-iso8601 \"2026-01-02T03:04:05+02:00\"))   → \"2026-01-02T01:04:05.000Z\""
   (let (parts (string/split s "T"))
     (when (= (count parts) 2)
-      (let (d (parse-date (nth parts 0))
-            time-part (nth parts 1)
+      (let (d (parse-date (or (nth parts 0) ""))
+            time-part (or (nth parts 1) "")
             oi (dt-offset-index time-part))
         (if (< oi 0)
           (let (t (parse-time time-part))
@@ -398,6 +419,7 @@ produces is UTC.
 
 ;; ---- arithmetic -------------------------------------------------------------
 
+(sig add ((or datetime date) int -> datetime))
 (defn add (dt ms)
   "Add `ms` milliseconds to `dt`, returning a new datetime.
 
@@ -444,7 +466,7 @@ produces is UTC.
 (defn leap-year? (y)
   "True if year `y` is a Gregorian leap year."
   (and (= (math/rem y 4) 0)
-    (or (not= (math/rem y 100) 0)
+    (or (not (= (math/rem y 100) 0))
       (= (math/rem y 400) 0))))
 (sig leap-year? (int -> bool))
 

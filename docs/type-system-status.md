@@ -603,3 +603,50 @@ The demand walk also consults a module's own inferred signatures now (`ctx.infer
 — a table lookup on the fixed-point pass's result, so no recursion): all-`any` parameter
 lists over std went 203 → 182, `-> any` returns 117 → 108.
 
+## Strict to zero over std (2026-08-30)
+
+The plan (recorded in the devlog): strict mode + `sig` adoption to zero on std FIRST, because
+it measures how much of the `any` tail annotations remove before inference is built for it.
+The first `--strict` run over std gave **336** warnings; the tree is now at **0**, and
+`nest check --strict std/**/*.blsp` is a CI gate beside the non-strict one.
+
+**What the warnings were.** Three families, only one of which was "add a sig":
+
+- `expects int, got ordered (n)` / `expects int, got number` (~200): an unannotated
+  parameter whose inferred DOMAIN (`ordered` from a `>=`, or nothing at all) strict reads
+  as its type. A `sig` on the enclosing function is the answer — ~350 were declared,
+  written by reading the bodies (a wrong sig is checked against the body and at every call
+  site, so it cannot be pasted from `--suggest-sigs`).
+- `got nil | string` / `nil | number` (~60): `nth`/`first`/`string/->number` results handed
+  on unguarded. These are what strict is FOR; the fix is in the code — `(or (nth parts 1)
+  "")`, an unparsable component reading as an out-of-range `-1`, a `match` on the item
+  instead of `(first item)` after a `(= item :done)` test. Every default is semantically
+  inert; one was a real bug (`package/registry-install` handed a keyword to `path/join`).
+- The rest were CHECKER gaps, each fixed generally rather than worked around in std:
+  an extremum returns one of its operands; `(get m k default)` / `(nth xs i default)`
+  read their default as the absence case; `(or x default)` is short-circuit exact and an
+  inferred return sees its branches narrowed (`guards::branch_scopes`, shared by all three
+  `if` readers); a record NAME in a sig carries its declared field types (open, ADR-264);
+  a defaulted `&optional (n 1)` is `T ∪ typeof(default)`, not `T | nil`; a destructuring
+  `let` types its binders (`%vector-ref` is exact behind the length check); `(= a b)` is
+  the `%eq` guard; a branch whose test contradicts what is known of a local is dead and
+  neither checked nor typed (`Ctx::is_dead`); `any ∖ (a finite literal set)` and `any ∖
+  vector` are known only by exclusion; `filter` returns a list; a `fold`/`reduce`
+  accumulator is seeded from `init` and taken one step to a fixpoint, and a `fn` literal
+  in that position is walked with the same seed; the prelude's own `sig`s ride into the
+  prelude region (they were dropped at the freeze); a `sig` inside a `check-allow` block is
+  registered; the in-file record field-type table is built before the ability facts.
+
+**What strict does not do, and why that is right.** A record name is an OPEN shape, so a
+key it does not declare reads as unknown — `(get date :hour 0)` on a `date` is not `int`;
+the honest form is a declared accessor. `datetime?`-style user predicates do not narrow
+(the checker knows the built-in `tested_by` predicates only) — a **type-guard signature**
+(`x is T`) is the general answer and is the next item. `tests/` is not held to strict on
+purpose: a test hands a sig the literals it must reject.
+
+**Measured on the way.** The demand walk consulting a loaded module's inferred sig costs
+nothing (the zero-warning gate over 342 files: 5.0 s with it and without). `nest check`
+resolves a `:use`d std module from the BINARY's baked-in std, so a cross-module sig change
+is only visible after a rebuild — a batch that edits one module and checks another must
+rebuild in between, or it verifies the old sig.
+

@@ -102,8 +102,9 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
   ;; incomplete request → nil, so the caller closes the socket cleanly — NOT
   ;; `(subbytes head 0 -1)`, which threw and killed the connection's worker
   ;; process (leaking the fd) on a truncated head. A remotely-triggerable crash.
-  (let (head (http-read-until sock nil 0 #b"" #b"\r\n\r\n")
-        marker (if (nil? head) -1 (bytes/index-of head #b"\r\n\r\n")))
+  ;; A nil `head` (the peer went away) reads as empty bytes: no marker, so nil.
+  (let (head (or (http-read-until sock nil 0 #b"" #b"\r\n\r\n") #b"")
+        marker (bytes/index-of head #b"\r\n\r\n"))
     (if (< marker 0)
       nil
       (let (clen (http-declared-length (string/bytes-> (bytes/slice head 0 marker))))
@@ -165,6 +166,8 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
       0
       (let (n (string/->number v))
         (if (and (int? n) (>= n 0)) n 0)))))
+
+(sig parse-request ((or bytes string) -> map))
 
 (defn parse-request (raw)
   "Parse a raw HTTP request (`bytes`, from `read-request`) into
@@ -437,6 +440,8 @@ place — `url/parse-url` (the full parser); a scheme-less input is treated as a
         port (or (/get u :port) (if (= scheme "https") 443 80)))
     {:scheme scheme :host (/get u :host) :port port :path path :query (/get u :query)}))
 
+(sig parse-response ((or bytes string) -> response))
+
 (defn parse-response (raw)
   "Parse a raw HTTP response (`bytes`, from the transport; a string is accepted
 too) into a `response` record: the head is decoded to strings (`:headers`
@@ -449,7 +454,7 @@ keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
         body (if (< marker 0) #b"" (bytes/slice raw (+ marker 4) (bytes/length raw)))
         lines (string/split head "\r\n")
         status (string/split (first lines) " "))
-    (response (let (n (string/->number (nth status 1 "0"))) (if (nil? n) 0 n))
+    (response (let (n (string/->number (or (nth status 1) "0"))) (if (nil? n) 0 n))
       (http-parse-headers (rest lines))
       body)))
 
@@ -461,12 +466,15 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
     (cond
       (nil? b) ""
       (string? b) b
-      else (string/bytes-> b))))
+      (bytes? b) (string/bytes-> b)
+      else (error "body-text: the body is neither bytes nor a string: " (pr-str b)))))
 
 ;; The size of one response chunk in bytes — plaintext chunks are `bytes`, TLS
 ;; chunks are strings (both land byte-faithfully through the iolist `bytes-concat`
 ;; below), so measure by type. `string-length` (codepoints) slightly under-counts
 ;; a multibyte string, which only loosens the cap — fine for a DoS bound.
+(sig http-chunk-size ((or string bytes) -> int))
+
 (defn- http-chunk-size
   (d)
   (if (string? d) (string/length d) (bytes/length d)))
