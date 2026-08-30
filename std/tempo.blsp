@@ -556,7 +556,7 @@ Either argument may be anything implementing `Spanning`.
         (tp-merge-acc (rest xs) (cons s acc))))))
 
 (defn- tp-normalize (ss)
-  (tp-merge-acc (sort-by span-from (vec (for (s ss :when (< (span-from s) (span-to s))) s))) nil))
+  (tp-merge-acc (sort-by (vec (for (s ss :when (< (span-from s) (span-to s))) s)) span-from) nil))
 
 (defn set-of (xs)
   "An interval set covering every value in `xs` — each anything implementing

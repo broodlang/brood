@@ -62,7 +62,7 @@
       (mm-spawn-workers (self) pairs)
       (let (got (mm-collect 0 (count pairs) nil))
         ;; order-independent: each worker returns its own result
-        (assert= (sort-by str got) (sort-by str (list 5 "1x" "4y")))))))
+        (assert= (sort-by got str) (sort-by (list 5 "1x" "4y") str))))))
 
 ;; ---- a declared return type (`:-> RET`) --------------------------------------
 ;; A `defmulti`'s body is the dispatch machinery, so its inferred type is opaque and a call

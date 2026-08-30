@@ -139,8 +139,8 @@
       (assert= (sort (fn (x y) (< (seq/vector-ref x 0) (seq/vector-ref y 0))) pairs)
         (list [0 :b] [0 :d] [1 :a] [1 :c]))))
   (test "sort-by orders by a key function"
-    (assert= (sort-by (fn (s) (string/length s)) (list "ccc" "a" "bb")) (list "a" "bb" "ccc"))
-    (assert= (sort-by abs (list -3 1 -2 4)) (list 1 -2 -3 4)))
+    (assert= (sort-by (list "ccc" "a" "bb") (fn (s) (string/length s))) (list "a" "bb" "ccc"))
+    (assert= (sort-by (list -3 1 -2 4) abs) (list 1 -2 -3 4)))
   (test "sort handles a larger, reversed input correctly"
     (assert= (sort (range 50 0 -1)) (range 1 51)))
   ;; Structural sort for non-numeric items, no custom comparator needed —

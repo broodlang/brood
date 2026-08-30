@@ -400,7 +400,12 @@ Note the example defines the ability *with* a `:derive-record` recipe: no abilit
 prelude declares one, so `:derives` always names an ability from your own code. It read
 `:derives [Ord]` until 2026-08-28 — an ability that does not exist, so the one example of
 this clause was an expansion error."
-  (let (fnames (map fields %defrecord-fname)
+  (let (
+        ;; An optional leading docstring, like `defn`/`defability`/`defmulti` — carried
+        ;; onto the generated constructor.
+        rec-doc (if (and (seq opts) (string? (first opts))) (first opts) nil)
+        opts (if rec-doc (rest opts) opts)
+        fnames (map fields %defrecord-fname)
         fkws (map fnames (fn (n) (keyword (->string n))))
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
         ;; checker tracks via `Ty::keyword_lit`), captured at definition.
@@ -410,11 +415,24 @@ this clause was an expansion error."
         ;; map value (not a `(hash-map …)` call) is what makes the checker infer the result
         ;; as a record shape carrying the `:__id__` keyword literal.
         body (%zipmap (cons :__id__ fkws) (cons id fnames))
-        ctor `(defn ~rec (~@fnames) ~body)
+        ;; Generated bindings carry a docstring: a constructor and its accessors are
+        ;; public surface, and one with no `(doc …)` at all is a hole in `nest doc`,
+        ;; the LSP and `(audit/undocumented)` alike — `io/file-port` and its accessors
+        ;; were exactly that. The record's own docstring, when it wrote one, follows.
+        ctor `(defn ~rec (~@fnames)
+                ~(str "Construct a `"
+                   (->string rec)
+                   "` record from "
+                   (string/join (map fnames ->string) ", ")
+                   "."
+                   (if rec-doc (str "\n\n" rec-doc) ""))
+                ~body)
         accs (map fields
                (fn (f)
                  (let (fnm (%defrecord-fname f))
-                   `(defn ~(%defrecord-acc-sym rec fnm) (r) (/get r ~(keyword (->string fnm)))))))
+                   `(defn ~(%defrecord-acc-sym rec fnm) (r)
+                      ~(str "The `" (->string fnm) "` field of a `" (->string rec) "` record.")
+                      (/get r ~(keyword (->string fnm)))))))
         ;; the record-shaped constructor sig (always — this is the dispatch-inference
         ;; seam): each field keeps its declared type, else `any`.
         ;; An undeclared field type is a TYPE VARIABLE named after the field (`?x`), not
@@ -745,7 +763,9 @@ whole collection whatever the predicate said."
 
 (%defseq mapcat
   (f)
-  "Map `f` over `coll` and concatenate the resulting lists into one."
+  "Map `f` over `coll` and concatenate the resulting lists into one.
+
+    (mapcat [1 2] (fn (n) (list n n)))   → (1 1 2 2)"
   (%append-onto acc (f item)))
 
 (defn mapv (coll f)
@@ -765,10 +785,10 @@ indexed access or a vector literal shape (`(into [] (map coll f))`, named).
     (partition [1 2] 5)        → nil"
   (%partition-acc n coll nil))
 
-(defn sort-by (key-fn coll)
+(defn sort-by (coll key-fn)
   "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the
 structural order (`compare`) — or a key's own `compare-to` if the key is a record. Numeric,
 string, keyword, vector, and record keys all work.
 
-    (sort-by count [\"aaa\" \"b\"])   → (\"b\" \"aaa\")"
+    (sort-by [\"aaa\" \"b\"] count)   → (\"b\" \"aaa\")"
   (%merge-sort (fn (x y) (< (%ord-compare (key-fn x) (key-fn y)) 0)) coll))

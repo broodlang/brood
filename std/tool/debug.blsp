@@ -416,7 +416,7 @@ was attempted."
   (let (dist (value-distribution dbg form-string))
     (if (empty? dist)
       nil
-      (first (first (sort-by (fn (kv) (- (second kv))) dist))))))
+      (first (first (sort-by dist (fn (kv) (- (second kv)))))))))
 
 (defn outliers (dbg form-string)
   "The observations of `form-string` whose value is NOT the modal one — the few rows to inspect when the population mostly agrees. Each is `{:pid :form :value}`."
@@ -479,7 +479,7 @@ cross-process causal tree, and the hottest traced forms. Rendered by both the
                     (pr-str-bounded (get (second entry) :vals))))))
       (cons "── causal tree ──" (causal-lines (causal-tree dbg) 0))
       (cons "── hot traced forms ──"
-        (map (sort-by (fn (kv) (- (second kv))) (hits dbg))
+        (map (sort-by (hits dbg) (fn (kv) (- (second kv))))
           (fn (kv) (str "  " (second kv) "×  " (first kv))))))))
 (defn report (dbg)
   "Print a session summary: parked processes (the break queue), the cross-process

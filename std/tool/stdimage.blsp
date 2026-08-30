@@ -151,7 +151,7 @@ day. Dropping a live one is harmless: its binary rebuilds the image, or loads fr
                    (string/ends-with? e ".bin")
                    (not (= (path/join dir e) keep)))))
         ;; newest first, so everything past the cap is the tail
-        newest (sort-by (fn (e) (- 0 (or (file/mtime (path/join dir e)) 0))) mine)
+        newest (sort-by mine (fn (e) (- 0 (or (file/mtime (path/join dir e)) 0))))
         doomed (drop newest max-keep))
     ;; check-allow :discarded-catch — image-cache housekeeping; a module that will not load stays out of the image (the ADR-280 differential catches it)
     (doseq (e doomed)

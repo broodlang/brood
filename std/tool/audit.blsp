@@ -1,0 +1,287 @@
+;; std/tool/audit.blsp — the SURFACE audit, written in Brood.
+;;
+;; Three questions about every public function the image exposes, asked mechanically
+;; so the answers cannot drift:
+;;
+;;   1. Does it carry a docstring?
+;;   2. Does that docstring carry a runnable `form → result` EXAMPLE? (`doctest`
+;;      already executes those — this reports the ones that have none to execute.)
+;;   3. Is its argument order data-first (ADR-308) — the collection ahead of the
+;;      callback or index?
+;;
+;; (3) exists because a reversed-args rename is the one rename mistake with no
+;; natural gate: the arity is unchanged and no name is unbound, so `nest check` is
+;; silent and the wrong answer surfaces somewhere else entirely (KI-71, and again
+;; during ADR-308 when `seq/remove-nth` was left behind by its three siblings).
+;; The check is NAME-based and therefore advisory: it reads a parameter's spelling,
+;; not its type. That is deliberate — a heuristic that names suspects for a human
+;; is worth more than a sound analysis nobody runs.
+
+(defmodule audit
+  "Audit the public surface: docstrings, examples, and data-first argument order.
+`(audit/report)` prints the summary; the predicates back it and can be called on their
+own. Four checks: a docstring, a `form → result` example, data-first argument order
+(ADR-308), and a declared signature whose parameter count matches the function.
+Argument order is judged on declared TYPES where they exist and parameter names
+otherwise, so it does not depend on an author's choice of spelling.")
+
+;; ---- the surface ------------------------------------------------------------
+
+(defn- callable? (name)
+  (let (kind (type-of (reflect/eval name))) (or (= kind :fn) (= kind :native))))
+
+(defn- internal? (name)
+  (let (text (->string name))
+    (or (string/starts-with? text "%") (includes? text "/%"))))
+
+(def- builtin-module-names
+  ;; The 104 modules the binary bakes in — `reflect/builtin-modules` is the registry,
+  ;; so this cannot drift from what actually ships.
+  (into #{} (map (reflect/builtin-modules) ->string)))
+
+(defn- stdlib? (name)
+  ;; In scope = the LANGUAGE + STANDARD LIBRARY. A bare name (no `/`) is root/prelude;
+  ;; a qualified one is in scope iff its module is baked into the binary. Without this
+  ;; the audit judges whatever the caller happens to have loaded — under `nest test`
+  ;; that pulled in the Gabriel benchmark modules and reported their functions as
+  ;; convention breaches. Keyed on the module registry rather than a definition site,
+  ;; because a Rust builtin has no site and neither does a materialised module.
+  (let (text (->string name)
+        slash (string/last-index-of text "/"))
+    (or (< slash 0)
+      (contains? builtin-module-names (string/substring text 0 slash))
+      ;; A Rust-only NAMESPACE has no `.blsp` module, so it is absent from
+      ;; `reflect/builtin-modules` — `table/*`, and any other kernel-registered
+      ;; namespace (ADR-251). It has no definition site either, which is exactly
+      ;; what distinguishes it from a name some caller happened to load.
+      (nil? (reflect/source-location name)))))
+
+(defn load-everything ()
+  "`require` every module the binary bakes in, so the audit sees the WHOLE surface.
+Without it the audit judges only what happens to be loaded — a qualified call loads
+its module on demand, so `table/*` and every other un-required namespace were simply
+absent from `reflect/global-names` and silently unaudited. Returns how many modules
+are known.
+
+    (> (audit/load-everything) 50)   → true"
+  (each (reflect/builtin-modules)
+    (fn (m) (try (require-one m) (catch e nil))))
+  (count (reflect/builtin-modules)))
+(sig load-everything (-> int))
+
+(defn public-names ()
+  "Every public, callable global of the language core and standard library — the
+surface this module audits. Excludes `%internal` names, anything `defn-` made
+private, and anything defined outside `std/`.
+
+    (> (count (audit/public-names)) 100)   → true"
+  (sort (seq/filterv (reflect/global-names)
+          (fn (name)
+            (and (not (internal? name))
+              (not (reflect/private? name))
+              (bound? name)
+              (callable? name)
+              (stdlib? name))))))
+(sig public-names (-> seqable))
+
+(defn- docstring-of (name)
+  (let (text (doc (reflect/eval name))) (if (string? text) text "")))
+
+;; ---- 1 + 2: docs and examples ----------------------------------------------
+
+(defn documented? (name)
+  "True when `name`'s binding carries a non-empty docstring.
+
+    (audit/documented? 'audit/report)   → true"
+  (not (= "" (docstring-of name))))
+(sig documented? (any -> bool))
+
+(defn exemplified? (name)
+  "True when `name`'s docstring carries at least one `form → result` example —
+the shape `doctest` executes.
+
+    (audit/exemplified? 'audit/documented?)   → true"
+  (includes? (docstring-of name) "→"))
+(sig exemplified? (any -> bool))
+
+(defn undocumented ()
+  "The public names carrying no docstring at all."
+  (seq/filterv (public-names) (fn (name) (not (documented? name)))))
+(sig undocumented (-> seqable))
+
+(defn exampleless ()
+  "The public names that are documented but show no `form → result` example."
+  (seq/filterv (public-names)
+    (fn (name) (and (documented? name) (not (exemplified? name))))))
+(sig exampleless (-> seqable))
+
+;; ---- 3: data-first argument order ------------------------------------------
+;; Judged by parameter SPELLING. A name in `collection-params` ought to precede
+;; every name in `subject-params` — `(map coll f)`, not `(map f coll)`.
+
+(def- collection-params #{'coll 'xs 'ys 'seq 'items 'col 'colls 'm 'mm 's})
+(def- subject-params
+  ;; NOT `k`: a key is not a callback or an index. `(multimap/assoc-all mm k vs)` puts
+  ;; its collection first and correctly so, but reading `k` as a subject made the
+  ;; payload `vs` look like the collection and reported a reversal that was not one.
+  #{'f 'pred 'g 'fun 'keyfn 'key-fn 'kf 'n 'i 'sep 'init 'xform 'rf})
+
+(defn- position-of (needle params index)
+  (cond
+    (empty? params) -1
+    (contains? needle (first params)) index
+    else (position-of needle (rest params) (+ index 1))))
+
+(defn- type-position (pred types index)
+  (cond
+    (empty? types) -1
+    (pred (first types)) index
+    else (type-position pred (rest types) (+ index 1))))
+
+(defn data-first? (name)
+  "True when `name` puts the collection ahead of the callback or index — the ADR-308
+convention. Judged on the declared TYPES first (an arrow parameter is a callback, a
+`seqable`/`countable` one is the collection) and on parameter NAMES as a fallback.
+A name with no recognisable pair is vacuously true.
+
+    (audit/data-first? 'map)   → true"
+  (let (params (or (arglist (reflect/eval name)) [])
+        types (or (sig-params name) [])
+        ;; Types are the stronger signal: they do not depend on the author's choice of
+        ;; parameter spelling. `sort-by` slipped past a name-only check because its
+        ;; callback is written `key-fn`, which the vocabulary did not list.
+        t-coll (type-position collection-type? types 0)
+        t-subject (type-position arrow-type? types 0)
+        n-coll (position-of collection-params params 0)
+        n-subject (position-of subject-params params 0)
+        coll-at (if (>= t-coll 0) t-coll n-coll)
+        subject-at (if (>= t-subject 0) t-subject n-subject))
+    ;; `(= coll-at subject-at)` is ONE parameter answering to both tests — `format/node-children`
+    ;; takes a single `vector` named `n`, collection by type and index by name. A parameter
+    ;; cannot be out of order with itself.
+    (or (< coll-at 0) (< subject-at 0) (= coll-at subject-at) (< coll-at subject-at))))
+(sig data-first? (any -> bool))
+
+;; ---- signature parsing: paren-aware, because a callback's own type has commas ----
+
+(defn- %audit-match-paren (text i depth)
+  ;; Index of the `)` that closes the `(` at index 0, scanning from `i` at `depth`.
+  (cond
+    (>= i (string/length text)) -1
+    else
+      (let (ch (string/char-at text i))
+        (cond
+          (= ch "(") (%audit-match-paren text (+ i 1) (+ depth 1))
+          (and (= ch ")") (= depth 1)) i
+          (= ch ")") (%audit-match-paren text (+ i 1) (- depth 1))
+          else (%audit-match-paren text (+ i 1) depth)))))
+
+(defn- split-top (text depth acc cur out)
+  ;; Split `text` on top-level commas — `(seqable, (any, any) -> any)` is TWO params,
+  ;; not three. A naive `string/split` on "," reads a callback's own arity as extra
+  ;; parameters, which is how a type-blind check misreads `fold`. Braces and brackets
+  ;; nest too: a record shape `{day: int, ...}` is ONE parameter, and counting only
+  ;; parens reported every record accessor in `datetime`/`editor/buffer` as a mismatch.
+  (if (>= acc (string/length text))
+    (reverse (cons (string/trim cur) out))
+    (let (ch (string/char-at text acc))
+      (cond
+        (includes? ["(" "[" "{"] ch) (split-top text (+ depth 1) (+ acc 1) (str cur ch) out)
+        (includes? [")" "]" "}"] ch) (split-top text (- depth 1) (+ acc 1) (str cur ch) out)
+        (and (= ch ",") (= depth 0))
+          (split-top text depth (+ acc 1) "" (cons (string/trim cur) out))
+        else (split-top text depth (+ acc 1) (str cur ch) out)))))
+
+(defn sig-params (name)
+  "The declared parameter TYPES of `name` as a list of strings, or nil when it declares
+no signature. Split at top level, so a callback's own `(any, any) -> any` stays one.
+
+    (audit/sig-params 'map)   → (\"seqable\" \"(any) -> any\")"
+  (let (sig (reflect/type-signature name))
+    (when (string? sig)
+      ;; The MATCHING close paren, not the first: `(seqable, (any) -> any) -> seqable`
+      ;; closes `(any)` before the parameter list ends, and taking the first `)` read
+      ;; the callback's own type as the end of the parameters.
+      (let (close (%audit-match-paren sig 1 1))
+        (when (> close 1)
+          (let (inner (string/substring sig 1 close))
+            (if (= (string/trim inner) "") nil (split-top inner 0 0 "" nil))))))))
+(sig sig-params (any -> any))
+
+(defn- arrow-type? (t) (includes? t "->"))
+(defn- collection-type? (t)
+  (any? ["seqable" "countable" "list" "vector" "map" "string" "bytes"]
+    (fn (k) (= t k))))
+
+;; ---- 4: does the declared signature match the function? ---------------------
+
+(defn sig-arity-ok? (name)
+  "True when `name`'s declared signature takes as many parameters as the function does.
+
+Checked for KERNEL builtins only — a Rust builtin's argument-name list and its `Sig` are
+two hand-maintained lists that must agree, and when they drift the checker cannot type the
+undeclared argument at all (`string/grapheme-at`, `string/substring-graphemes`). A
+BROOD-defined function is exempt: `arglist` reports only ONE arm of a multi-arity `defn`,
+so `table/get` — whose arms are `(t k)` and `(t k default)` — reads as a mismatch against
+a signature that correctly describes its 2-arity arm. Variadic and `&optional` heads are
+exempt too: their arity is a range no fixed list can contradict.
+
+    (audit/sig-arity-ok? 'map)   → true"
+  (let (params (arglist (reflect/eval name))
+        declared (sig-params name))
+    (cond
+      (nil? declared) true
+      (nil? params) true
+      ;; a definition site means Brood source — possibly multi-arity, so `arglist` is
+      ;; one arm of several and cannot be compared against a single signature
+      (not (nil? (reflect/source-location name))) true
+      ;; …and a module MATERIALISED from the stdlib image carries no definition site,
+      ;; so the test above cannot see it. `table/get`'s arms are `(t k)` and
+      ;; `(t k default)` — two clauses on purpose, so the call-site inline reaches
+      ;; `%table-get` (KI-58) — and its sig describes the 2-arity arm correctly.
+      (contains? #{'table/get} name) true
+      (any? (map params ->string) (fn (p) (string/starts-with? p "&"))) true
+      else (= (count params) (count declared)))))
+(sig sig-arity-ok? (any -> bool))
+
+(defn sig-arity-mismatches ()
+  "Public names whose declared signature and actual parameter list disagree on COUNT —
+a signature that cannot be right, whatever the types say."
+  (seq/filterv (public-names) (fn (name) (not (sig-arity-ok? name)))))
+(sig sig-arity-mismatches (-> seqable))
+
+(defn reversed-args ()
+  "The public names whose parameters put a callback or index ahead of the
+collection — ADR-308 suspects, by parameter name."
+  (seq/filterv (public-names) (fn (name) (not (data-first? name)))))
+(sig reversed-args (-> seqable))
+
+;; ---- the report -------------------------------------------------------------
+
+(defn- show-group (label names)
+  (io/puts (str "  " label ": " (count names)))
+  (when (seq names)
+    (io/puts (str "    " (string/join (map names ->string) " ")))))
+
+(defn report ()
+  "Print the surface audit — counts and names for each of the three checks —
+and return `{:total :undocumented :exampleless :reversed-args}`.
+
+    (map? (audit/report))   → true"
+  (load-everything)
+  (let (total (count (public-names))
+        no-doc (undocumented)
+        no-example (exampleless)
+        reversed (reversed-args)
+        bad-arity (sig-arity-mismatches))
+    (io/puts (str "surface audit — " total " public callables"))
+    (show-group "no docstring" no-doc)
+    (show-group "no example" no-example)
+    (show-group "reversed args (ADR-308)" reversed)
+    (show-group "signature arity disagrees" bad-arity)
+    {:total total
+     :undocumented (count no-doc)
+     :exampleless (count no-example)
+     :reversed-args (count reversed)
+     :sig-arity-mismatches (count bad-arity)}))
+(sig report (-> map))
