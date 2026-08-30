@@ -866,13 +866,16 @@ pub(super) fn call_handle(
     args.push(out_addr);
     args.extend_from_slice(operands);
     b.ins().call(fref, &args);
-    let w0 = b.ins().stack_load(types::I64, fu.out_slot, 0);
+    let w0 = b.ins().stack_load(types::I64, types::I64, fu.out_slot, 0);
     let w1 = b
         .ins()
-        .stack_load(types::I64, fu.out_slot, PAYLOAD_OFFSET as i32);
-    let w2 = b
-        .ins()
-        .stack_load(types::I64, fu.out_slot, PAYLOAD_OFFSET as i32 + 8);
+        .stack_load(types::I64, types::I64, fu.out_slot, PAYLOAD_OFFSET as i32);
+    let w2 = b.ins().stack_load(
+        types::I64,
+        types::I64,
+        fu.out_slot,
+        PAYLOAD_OFFSET as i32 + 8,
+    );
     Op::Handle(w0, w1, w2)
 }
 
@@ -1037,13 +1040,16 @@ pub(super) fn vector_ref(
     b.ins()
         .brif(status, f.deopt, &[BlockArg::Value(__dr)], cont, &[]);
     b.switch_to_block(cont);
-    let w0 = b.ins().stack_load(types::I64, fu.out_slot, 0);
+    let w0 = b.ins().stack_load(types::I64, types::I64, fu.out_slot, 0);
     let w1 = b
         .ins()
-        .stack_load(types::I64, fu.out_slot, PAYLOAD_OFFSET as i32);
-    let w2 = b
-        .ins()
-        .stack_load(types::I64, fu.out_slot, PAYLOAD_OFFSET as i32 + 8);
+        .stack_load(types::I64, types::I64, fu.out_slot, PAYLOAD_OFFSET as i32);
+    let w2 = b.ins().stack_load(
+        types::I64,
+        types::I64,
+        fu.out_slot,
+        PAYLOAD_OFFSET as i32 + 8,
+    );
     b.ins().jump(
         vr_done,
         &[
@@ -1090,13 +1096,16 @@ pub(super) fn table_prim(
     b.ins()
         .brif(is_err, fu.error, &[], f.deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(cont);
-    let w0 = b.ins().stack_load(types::I64, fu.out_slot, 0);
+    let w0 = b.ins().stack_load(types::I64, types::I64, fu.out_slot, 0);
     let w1 = b
         .ins()
-        .stack_load(types::I64, fu.out_slot, PAYLOAD_OFFSET as i32);
-    let w2 = b
-        .ins()
-        .stack_load(types::I64, fu.out_slot, PAYLOAD_OFFSET as i32 + 8);
+        .stack_load(types::I64, types::I64, fu.out_slot, PAYLOAD_OFFSET as i32);
+    let w2 = b.ins().stack_load(
+        types::I64,
+        types::I64,
+        fu.out_slot,
+        PAYLOAD_OFFSET as i32 + 8,
+    );
     Op::Handle(w0, w1, w2)
 }
 
@@ -1344,13 +1353,13 @@ pub(super) fn inline_vec_ref(
     b.ins()
         .brif(hstatus, deopt, &[BlockArg::Value(__dr)], hok, &[]);
     b.switch_to_block(hok);
-    let h0 = b.ins().stack_load(types::I64, out_slot, 0);
+    let h0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
     let h1 = b
         .ins()
-        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+        .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
     let h2 = b
         .ins()
-        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+        .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
     b.ins().jump(
         ivr_done,
         &[

@@ -341,13 +341,14 @@ fn serves_tier1_requests_end_to_end() {
         DocumentSymbolRequest::METHOD,
         serde_json::json!({ "textDocument": { "uri": uri() } }),
     );
-    let syms: Vec<lsp_types::DocumentSymbol> = serde_json::from_value(r.result.unwrap()).unwrap();
+    let syms: Vec<lsp_types::DocumentSymbol> =
+        serde_json::from_value(r.response_result.unwrap()).unwrap();
     assert_eq!(syms.len(), 1);
     assert_eq!(syms[0].name, "f");
 
     // hover on the `f` call site (line 1, char 1) → its signature + docstring.
     let r = request(&client, 2, HoverRequest::METHOD, position_params(1, 1));
-    let h: lsp_types::Hover = serde_json::from_value(r.result.unwrap()).unwrap();
+    let h: lsp_types::Hover = serde_json::from_value(r.response_result.unwrap()).unwrap();
     let lsp_types::HoverContents::Markup(m) = h.contents else {
         panic!("expected markup");
     };
@@ -356,13 +357,14 @@ fn serves_tier1_requests_end_to_end() {
 
     // goto-definition on the same `f` → its binder at line 0, char 6.
     let r = request(&client, 3, GotoDefinition::METHOD, position_params(1, 1));
-    let loc: lsp_types::Location = serde_json::from_value(r.result.unwrap()).unwrap();
+    let loc: lsp_types::Location = serde_json::from_value(r.response_result.unwrap()).unwrap();
     assert_eq!(loc.range.start, lsp_types::Position::new(0, 6));
 
     // completion inside the defn body (line 0, at the `x` in `(+ x x)`) →
     // offers the local `x`, the doc def `f`, and the global `map`.
     let r = request(&client, 4, Completion::METHOD, position_params(0, 26));
-    let items: Vec<lsp_types::CompletionItem> = serde_json::from_value(r.result.unwrap()).unwrap();
+    let items: Vec<lsp_types::CompletionItem> =
+        serde_json::from_value(r.response_result.unwrap()).unwrap();
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(labels.contains(&"x"), "local x missing: {labels:?}");
     assert!(labels.contains(&"map"), "global map missing: {labels:?}");
@@ -400,7 +402,8 @@ fn serves_new_features_end_to_end() {
             "options": { "tabSize": 2, "insertSpaces": true },
         }),
     );
-    let edits: Vec<lsp_types::TextEdit> = serde_json::from_value(r.result.unwrap()).unwrap();
+    let edits: Vec<lsp_types::TextEdit> =
+        serde_json::from_value(r.response_result.unwrap()).unwrap();
     assert_eq!(edits.len(), 1, "one whole-document edit");
     assert!(edits[0].new_text.contains("(defn f (x)"), "{:?}", edits[0]);
 
@@ -411,7 +414,8 @@ fn serves_new_features_end_to_end() {
         WorkspaceSymbolRequest::METHOD,
         serde_json::json!({ "query": "f" }),
     );
-    let syms: Vec<lsp_types::WorkspaceSymbol> = serde_json::from_value(r.result.unwrap()).unwrap();
+    let syms: Vec<lsp_types::WorkspaceSymbol> =
+        serde_json::from_value(r.response_result.unwrap()).unwrap();
     assert!(syms.iter().any(|s| s.name == "f"), "got: {syms:?}");
 
     // foldingRange → the multi-line defn folds (lines 0..1).
@@ -421,7 +425,8 @@ fn serves_new_features_end_to_end() {
         FoldingRangeRequest::METHOD,
         serde_json::json!({ "textDocument": { "uri": uri() } }),
     );
-    let folds: Vec<lsp_types::FoldingRange> = serde_json::from_value(r.result.unwrap()).unwrap();
+    let folds: Vec<lsp_types::FoldingRange> =
+        serde_json::from_value(r.response_result.unwrap()).unwrap();
     assert!(folds.iter().any(|f| f.start_line == 0), "got: {folds:?}");
 
     // inlayHint over the whole doc → labels the `(reduc + x)` args? `reduc`
@@ -439,7 +444,8 @@ fn serves_new_features_end_to_end() {
             },
         }),
     );
-    let _hints: Vec<lsp_types::InlayHint> = serde_json::from_value(r.result.unwrap()).unwrap();
+    let _hints: Vec<lsp_types::InlayHint> =
+        serde_json::from_value(r.response_result.unwrap()).unwrap();
 
     // codeAction over the `reduc` token, passing the published unbound-symbol
     // diagnostic in context → a "did you mean `reduce`?" quick-fix.
@@ -467,7 +473,7 @@ fn serves_new_features_end_to_end() {
         }),
     );
     let actions: Vec<lsp_types::CodeActionOrCommand> =
-        serde_json::from_value(r.result.unwrap()).unwrap();
+        serde_json::from_value(r.response_result.unwrap()).unwrap();
     let titles: Vec<String> = actions
         .iter()
         .filter_map(|a| match a {
@@ -491,7 +497,8 @@ fn serves_new_features_end_to_end() {
             "positions": [{ "line": 1, "character": 9 }],
         }),
     );
-    let sel: Vec<lsp_types::SelectionRange> = serde_json::from_value(r.result.unwrap()).unwrap();
+    let sel: Vec<lsp_types::SelectionRange> =
+        serde_json::from_value(r.response_result.unwrap()).unwrap();
     assert_eq!(sel.len(), 1, "one chain per position");
     assert!(
         sel[0].parent.is_some(),
@@ -526,7 +533,7 @@ fn unknown_request_gets_method_not_found() {
     match client.receiver.recv().unwrap() {
         Message::Response(r) => {
             assert_eq!(r.id, RequestId::from(7));
-            let err = r.error.expect("an error response");
+            let err = r.response_result.expect_err("an error response");
             assert_eq!(err.code, lsp_server::ErrorCode::MethodNotFound as i32);
         }
         other => panic!("expected an error Response, got {other:?}"),

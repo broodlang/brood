@@ -174,13 +174,13 @@ pub(super) fn emit_make_closure(
     b.ins().brif(status, funcs.error, &[], cont, &[]);
     b.seal_block(cont);
     b.switch_to_block(cont);
-    let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+    let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
     let w1 = b
         .ins()
-        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+        .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
     let w2 = b
         .ins()
-        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+        .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
     stack.push(Op::Handle(w0, w1, w2));
     Some(())
 }
@@ -291,13 +291,13 @@ pub(super) fn emit_call(
         let callee_ok = b.create_block();
         b.ins().brif(cstatus, error, &[], callee_ok, &[]);
         b.switch_to_block(callee_ok);
-        let cw0 = b.ins().stack_load(types::I64, out_slot, 0);
+        let cw0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
         let cw1 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
         let cw2 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
         Some([cw0, cw1, cw2])
     } else {
         None
@@ -354,13 +354,13 @@ pub(super) fn emit_call(
     let head_v = b.ins().iconst(types::I32, call_head as i64);
     // Read the result `Value` (3 words) back out of `out_slot` and push it.
     let read_out = |b: &mut FunctionBuilder| {
-        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+        let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
         let w1 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
         let w2 = b
             .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
         (w0, w1, w2)
     };
     // The shared slow-dispatch tail: call `brood_rt_call_slow`, re-fetch the roots base
@@ -393,7 +393,7 @@ pub(super) fn emit_call(
         let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
         let fbc = b.ins().call(funcs.flbase, &[heap, len_addr]);
         let fl_base = b.inst_results(fbc)[0];
-        let fl_len = b.ins().stack_load(types::I64, len_slot, 0);
+        let fl_len = b.ins().stack_load(types::I64, types::I64, len_slot, 0);
         let site_idx = b.ins().iconst(types::I64, call_site as i64);
         // Bounds: `site < len` (a live arm whose site ids outran a post-collect re-grow
         // misses here and goes slow — the table read would be OOB).

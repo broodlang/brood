@@ -129,7 +129,7 @@ web-time = "1"
 # three are pulled in only with `--features treesit`; a build without it links no
 # parser. The grammar crates expose a `tree_sitter_language::LanguageFn` (`LANGUAGE`)
 # that `tree_sitter::Language` converts from, decoupling them from the core version.
-tree-sitter = { version = "0.26", optional = true }
+tree-sitter = { version = "0.27", optional = true }
 tree-sitter-ruby = { version = "0.23", optional = true }
 tree-sitter-elixir = { version = "0.3", optional = true }
 # Lock-free, append-only vector for the shared RUNTIME code region: stable
@@ -220,8 +220,8 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 # signed by the publisher's private key and TOFU-verified by the client. Same vetted
 # dalek family as x25519 above — the `%ed25519-*` primitives are the one new mechanism;
 # key management + the publish/verify/TOFU flow are Brood policy (std/tool/package.blsp).
-ed25519-dalek = "2"
-chacha20poly1305 = "0.10"
+ed25519-dalek = "3"
+chacha20poly1305 = "0.11"
 # Constant-time byte comparison for the handshake MAC check — prevents a
 # timing side-channel from leaking information about the shared cookie.
 # Already a transitive dep (via chacha20poly1305 → digest); pinned directly
@@ -301,10 +301,10 @@ unicode-segmentation = "1"
 # makes that true — "é" as U+00E9 and as U+0065 U+0301 are different strings until
 # one of them is normalised. Same tier as the two above: tiny tables, always linked.
 unicode-normalization = "0.1"
-cranelift-jit = { version = "0.133", optional = true }
-cranelift-module = { version = "0.133", optional = true }
-cranelift-codegen = { version = "0.133", optional = true }
-cranelift-frontend = { version = "0.133", optional = true }
+cranelift-jit = { version = "0.135", optional = true }
+cranelift-module = { version = "0.135", optional = true }
+cranelift-codegen = { version = "0.135", optional = true }
+cranelift-frontend = { version = "0.135", optional = true }
 wasmtime = { version = "47.0.2", default-features = false, features = ["runtime", "component-model", "cranelift", "wat"], optional = true }
 
 # uid/gid → owner/group name resolution for `file-stat`'s `ls -l`-style listing
