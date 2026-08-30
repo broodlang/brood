@@ -1709,10 +1709,85 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
     let head_is_macro =
         matches!(items.first(), Some(&Value::Sym(s)) if resolves_to_macro(heap, ctx, s));
     if !head_is_macro {
-        for &item in &items {
-            check_into(heap, item, ctx, out);
+        // A `fold`/`reduce` callback written as a `fn` literal is walked with its
+        // parameters SEEDED: the accumulator to the fold's own result type (the fixpoint
+        // `infer::seq_aware_call_ty` computes — a superset of every accumulator value, by
+        // induction) and the element to the collection's element type. Unseeded, `h` in
+        // `(fold (fn (h c) (bit/xor (* h 31) …)) 5381 s)` read as `any` and `(* h 31)` as
+        // `number`, while the fold as a whole was already known to be an int.
+        let seeded_callback = fold_callback_seed(heap, form, &items, ctx);
+        for (i, &item) in items.iter().enumerate() {
+            match &seeded_callback {
+                Some((idx, sig)) if *idx == i => {
+                    if let Some(fn_items) = list_items(heap, item) {
+                        check_fn_bound(heap, &fn_items, ctx, out, &sig.params);
+                    }
+                }
+                _ => check_into(heap, item, ctx, out),
+            }
         }
     }
+}
+
+/// Walk a single-clause `fn` literal with each parameter bound to an INFERRED bound —
+/// a plain binding (`dynamic_within`, never a sig-authoritative type), because an
+/// inferred accumulator is an over-approximation: reading it by inclusion would flag
+/// `(- x best)` under `(if best …)` as "`(not nil)` is not a number". Positions past
+/// `tys` bind unknown. Body forms are checked in that scope; nothing else `check_fn_seeded`
+/// does (the declared-return check, the dead-clause eligibility) applies to an inferred seed.
+fn check_fn_bound(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+    tys: &[Ty],
+) {
+    let Some(&params_form) = items.get(1) else {
+        return;
+    };
+    let mut scope = ctx.clone();
+    for (i, p) in fn_params(heap, params_form).into_iter().enumerate() {
+        scope = scope.bind(p, tys.get(i).cloned());
+    }
+    let body_start = match (items.get(2), items.get(3)) {
+        (Some(Value::Str(_)), Some(_)) => 3,
+        _ => 2,
+    };
+    for &body_form in &items[body_start..] {
+        check_into(heap, body_form, &scope, out);
+    }
+}
+
+/// For `(fold f init coll)` / `(reduce f init coll)` / `(reduce f coll)` whose `f` is a
+/// two-parameter `fn` literal: `(1, (acc elem -> any))` — the seed for walking it. `None`
+/// when the head is neither, `f` is not such a literal, or the fold's type is unknown.
+fn fold_callback_seed(
+    heap: &Heap,
+    form: Value,
+    items: &[Value],
+    ctx: &Ctx,
+) -> Option<(usize, Sig)> {
+    let Some(&Value::Sym(head)) = items.first() else {
+        return None;
+    };
+    let is_fold = value::symbol_is(head, "fold") || value::symbol_is(head, "reduce");
+    if !is_fold || items.len() < 3 {
+        return None;
+    }
+    let f = items[1];
+    let f_items = list_items(heap, f)?;
+    if !matches!(f_items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
+        return None;
+    }
+    if !matches!(lambda_literal_arity(heap, f), Some(a) if a.min == 2 && a.max == Some(2)) {
+        return None;
+    }
+    let acc = expr_ty(heap, form, ctx)?;
+    let coll = *items.last()?;
+    let elem = expr_ty(heap, coll, ctx)
+        .and_then(|t| t.elem_ty())
+        .unwrap_or(Ty::ANY);
+    Some((1, Sig::new(vec![acc, elem], Ty::ANY)))
 }
 
 /// `(fn (params...) docstring? body...)` (and `lambda` — the same closure

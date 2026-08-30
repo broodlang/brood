@@ -728,6 +728,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-29** — `BROOD_MONO` had never been run: Tier 1 was miscompiling, and now proves the identity rather than the impl (ADR-294)
 - **2026-08-29** — ability-op runtime contracts (ADR-293), and the discovery that `BROOD_CONTRACTS=1` had been unusable on every cold boot cache — three defects, no end-to-end test (KI-81): an intersection of arrows satisfies what no single arm does, checked against a brute-force model of what an arrow denotes rather than against more property laws
 - **2026-08-29** — KI-87: the inference cycle guard released the symbol it refused (`bool::then_some` builds its argument eagerly, so a refused `InferGuard` was built, dropped, and un-marked the in-flight inference) — `nest run` at 54 GB, three 19 GB test processes; one-line fix, sabotage-verified guards, `ulimit -v` in front of every inference test run
+- **2026-08-30** — strict over std 336 → 0 and a CI gate for it: ~350 sigs declared by reading bodies, every nil source made honest (one real bug), and FOURTEEN checker gaps closed generally on the way (extremum/get/nth defaults, short-circuit-exact `or`, branch narrowing in inferred returns, record names carrying field types, optional defaults, destructuring, dead branches, exclusion-known negations, fold fixpoint, prelude sigs surviving the freeze, sigs inside `check-allow`)
 
 ---
 
@@ -7263,3 +7264,73 @@ automatically if a future admission lowers these shapes. Kept beside them, non-l
 `vm_fast_link_clear_site` shed (a latched arm's populated fast link otherwise re-enters
 the native forever in a long-lived process), the poison-tolerant keepalive lock in the
 fast-link latch path, and the no-jit `dead_code` attr on `native_gateway_seq`.
+
+### 2026-08-30, later — the first real deprecation, and the two holes it fell through
+
+`not=` is deprecated (**ADR-297**), not removed. It buys a spelling, not a capability — its
+body *is* `(not (= a b))` — and it is the slower of the two for a structural reason worth
+keeping: `=` is a thin wrapper the ADR-069 elision collapses and `not` is a leaf the inliner
+splices, so the written-out form ends up call-free, while `not=`'s **nested-call** body is
+reachable by neither pass and stays a boxed `Call` whose caller never gets the inlined
+upgrade. 5M-iteration tail loop, same binary, interleaved: 218 ms vs 132 ms native, 1067 ms
+vs 771 ms on the VM. Its variadic reading is also a trap — `(not= 1 2 1)` is `true`, because
+it negates the whole `=` chain rather than meaning "pairwise different".
+
+All 41 in-tree uses rewritten (13 `std/`, 28 `tests/`), including the divide-by-zero **hint
+strings in `builtins/numeric.rs`**, which were teaching the deprecated form inside an error
+message.
+
+Two holes, both found only because this was the first `(meta …)` on a real name:
+
+- **ADR-283 never reached a prelude name.** `RuntimeCode::seeded` starts the `meta` map
+  empty, and the prelude is *inserted* into a live runtime rather than re-evaluated, so
+  `%register-meta` fires only in the builder heap: `(%meta-of 'not=)` was `nil` everywhere.
+  Fixed on the seam privacy (ADR-146) already uses — `Heap::name_meta_snapshot` →
+  `SharedBundle::meta` → `seeded`.
+- **`nest doc` annotated but did not mark.** A deprecated entry now renders its heading
+  **struck through** as well as carrying the note; the note is for a reader who already
+  opened the entry, the strikethrough is for one who is skimming.
+
+Also learned, and worth knowing before the next capped run: **`ulimit -v` and the wasm tests
+do not mix.** Under the CLAUDE.md cap the suite fails 3–5 `wasm_*` cases with a *different*
+set each run — wasmtime reserves large virtual regions per store, so the cap bites at
+whatever is concurrent. Both files pass uncapped. A varying failure set under a cap is the
+cap, not a flake.
+
+## 2026-08-30 (later) — strict to zero over std, and what the checker had to learn to allow it
+
+The type-system question ("what stops sound, complete and gated?") got its practical first
+step: take `nest check --strict` over std from **336 warnings to 0** and make it a CI gate.
+The bet was that most of the `any` tail is annotations, not inference — and it was: ~350
+`sig`s, written by reading each body (six parallel batches over 40 files, every module's
+tests re-run on a REBUILT binary, since the tests exercise the baked-in std), plus ~60
+honest nil fixes and one real bug (`registry-install` handing a keyword to `path/join`).
+
+The interesting half is what the batches sent back as "checker false positives": fourteen
+gaps, every one fixed in the checker rather than papered over in std (the brief forbade
+`check-allow`). The list is in `type-system-status.md` § "Strict to zero over std"; the
+ones worth remembering as *method*:
+
+- **The three `if` readers disagreed.** The walk narrowed branches, `gradual_of` narrowed,
+  `expr_ty` — the one that decides a function's INFERRED return — did not, so `(or
+  (string/->number s) -1)` inferred `nil | number` while its hover said `number`. One
+  `guards::branch_scopes` now serves all three.
+- **A dead branch must not be checked.** Once `%vector-ref` on a literal tuple became
+  exact, the `with` lowering's `(%eq el :ok)` over `[:error :nope]` had a then-branch whose
+  `el` is `never` — and the checker reported `(+ a b)` inside it with `b` the literal
+  `:nope`. Unreachable is unreachable: `Ctx::is_dead` skips it in all three readers.
+- **"Known by exclusion" is about which description is shorter.** `any ∖ {0}` (a failed
+  `(= i 0)`) and `any ∖ vector` (a failed `(vector? x)`) say what a value is not; strict
+  must keep the overlap reading for them. The rule: no positive refinement, and more than
+  half the universe's tags.
+- **The prelude's sigs never left the build heap.** `(sig %path-last-slash …)` in
+  `std/prelude/string.blsp` was dropped at the freeze (the runtime table starts empty), so
+  every caller saw the inferred `ordered`. They ride into the prelude region now.
+- **A `sig` inside `check-allow` declared nothing** — the `%register-sig` collector walked
+  `do` but not `%lint-allow`. `pane-layout-go`'s sig read as declared and did nothing.
+
+Measured: the demand-walk hunk costs nothing (5.0 s gate either way); std module tests all
+green on the rebuilt binary; the non-strict gate unchanged at zero; 496 Rust checker/image/
+prelude tests green. Left deliberately: `tests/` is not held to strict (a test hands a sig
+the literals it must reject), and user predicates (`datetime?`) do not narrow — the
+type-guard signature is the next design item.

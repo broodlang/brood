@@ -361,7 +361,12 @@ fn collect_register_sig_forms_inner(heap: &mut Heap, form: Value, out: &mut Vec<
     let Some(&Value::Sym(head)) = items.first() else {
         return;
     };
-    if crate::core::value::symbol_is(head, kw::DO) {
+    // `(do …)` and `(%lint-allow :category …)` — what `check-allow` expands to — both wrap
+    // definitions; a `(sig …)` inside a `check-allow` block used to be dropped here, so it
+    // declared nothing (its `defn` was walked unseeded) while reading as declared.
+    if crate::core::value::symbol_is(head, kw::DO)
+        || crate::core::value::symbol_is(head, "%lint-allow")
+    {
         for &it in &items[1..] {
             collect_register_sig_forms(heap, it, out);
         }

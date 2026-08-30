@@ -648,10 +648,36 @@ impl Ty {
         let without_falsy = excluded
             .difference(Ty::of(Tag::Nil))
             .difference(Ty::of(Tag::Bool));
-        without_falsy.is_never()
+        if without_falsy.is_never()
             || without_falsy.as_lit().is_some()
             || without_falsy.as_lit_int().is_some()
             || without_falsy.as_lit_str().is_some()
+        {
+            return true;
+        }
+        // `any ∖ vector` — what a failed `(vector? x)` leaves: a flat tag set with no
+        // positive refinement, describing MORE than half the universe. Its complement is
+        // the shorter description, i.e. what is known is what the value is not.
+        let refined = self.alts.is_some()
+            || self.arrow.is_some()
+            || self.elem.is_some()
+            || self.map_kv.is_some()
+            || self.fields.is_some()
+            || self.tuple.is_some()
+            || self.lit.as_deref().is_some_and(|l| l.members().is_some())
+            || self
+                .lit_int
+                .as_deref()
+                .is_some_and(|l| l.members().is_some())
+            || self
+                .lit_bool
+                .as_deref()
+                .is_some_and(|l| l.members().is_some())
+            || self
+                .lit_str
+                .as_deref()
+                .is_some_and(|l| l.members().is_some());
+        !refined && self.tags.count_ones() * 2 > UNIVERSE.count_ones()
     }
 
     /// The record identities named by this type's map member (`:t/usd`, …), as spelled

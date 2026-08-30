@@ -2513,7 +2513,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "file/ls",
         Arity::exact(1),
-        Sig::new(vec![string], list_ty),
+        Sig::new(vec![string], Ty::list_of(string)),
         &["path"],
         "The entry names directly under directory path, sorted.",
         list_dir,

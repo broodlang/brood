@@ -5,6 +5,16 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**Addendum 2026-08-30 — strict over std is at zero and gated.** `nest check --strict
+std/**/*.blsp` is a CI step now (0 warnings, from 336). The story and the fourteen checker
+gaps it closed are in `type-system-status.md` § "Strict to zero over std" and the devlog.
+**Two traps for whoever touches std next:** (1) `nest check` resolves a `:use`d std module
+from the binary's BAKED-IN std, so a cross-module sig edit is invisible until `cargo build
+-p nest`; (2) `tests/` is deliberately not strict. **Next on the type-system list:** a
+type-guard signature (`(sig datetime? (any -> (is datetime)))`) so user predicates narrow —
+today only `tested_by`'s built-ins do, which is why `->epoch-ms` goes through declared
+accessors rather than `(if (datetime? dt) …)`.
+
 **Addendum 2026-08-29 (late) — KI-87, the checker divergence.** Three sessions ended in a
 machine-swapping OOM (`nest run` on bedit at 54 GB; `types::` tests at 3 × 19 GB). Cause: the
 inference cycle guard `sigs::InferGuard::enter` ended in `.then_some(InferGuard(sym))`, which
