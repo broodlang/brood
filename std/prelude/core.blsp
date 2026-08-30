@@ -421,11 +421,39 @@ something that CAN be ordered: `(< '(1 2))` raises rather than silently answerin
     (= [1 2] [1 2])   → true   ; by value, not identity"
   ((a b) (%eq a b))
   ((& xs) (%chain? %eq xs)))
-(defn not= "True if the arguments are not all equal.
+(defn not= "**Deprecated since 0.19.0 — write `(not (= a b))`.** True if the arguments are
+not all equal.
 
-    (not= 1 2)  → true"
+    (not= 1 2)  → true
+
+Deprecated because it buys a *spelling*, not a capability: `(not= a b)` is by definition
+`(not (= a b))`. The long form is also the faster one — `=` folds into its caller and `not`
+inlines, while this wrapper stays a call — and it does not mislead past two arguments:
+`(not= 1 2 1)` is `true`, because it negates the whole `=` chain rather than meaning
+\"pairwise different\"."
   ((a b) (not (%eq a b)))
   ((& xs) (not (apply = xs))))
+;; `%register-meta` rather than the `(meta …)` macro that wraps it: `meta` is defined ~80
+;; lines below and the prelude is evaluated top to bottom, so the macro does not exist yet.
+;;
+;; Three reasons this name is going away, none of them "it is redundant" alone:
+;;   1. It buys a spelling. `(not= a b)` IS `(not (= a b))` — the body above says so — and
+;;      nothing in the kernel, the compiler or the checker knows the name (no special form,
+;;      no primitive, no opcode, no guard). ADR-011's bar for a name is a capability.
+;;   2. It is SLOWER than what it abbreviates, and structurally so. `=`'s 2-arg body is a
+;;      direct primitive call, so ADR-069's thin-wrapper elision collapses `(= i 7)` to a
+;;      `Prim2Slot*`; `not`'s body is a leaf, so the leaf inliner splices it. `not=`'s body
+;;      is a NESTED call — the exact shape the `<=` note above says the elision cannot reach,
+;;      and not a leaf either — so it stays a boxed `Call` forever and the caller never gets
+;;      the inlined upgrade. Measured on a 5M-iteration tail loop: 218 ms vs 132 ms native
+;;      (1.65x), 1067 ms vs 771 ms on the VM (1.38x).
+;;   3. Its variadic reading is a trap. `(not= 1 2 1)` is TRUE — `=` chains pairwise and
+;;      `not=` negates the whole chain, so the name reads "pairwise different" and means
+;;      "not all equal". Written out, the scope of the negation is on the page.
+;; `:use` takes a symbol, so the diagnostic can only name `not`; the docstring carries the
+;; full replacement. Kept defined (and tested) until the removal — deprecation is advisory,
+;; so nothing downstream breaks yet.
+(%register-meta 'not= [:deprecated "0.19.0" :use 'not])
 
 ;; ---- control-flow macros ----
 ;; These read like special forms but are ordinary macros over `if`/`do`/`let`.

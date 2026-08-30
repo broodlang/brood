@@ -145,7 +145,7 @@ user's work. `regions-fn` is `(text) -> regions`, applied to both. Falls back to
 changed shape, and there is no honest correspondence to preserve)."
   (let (new-regions (regions-fn new-text)
         old-regions (regions-fn old-text))
-    (if (not= (count new-regions) (count old-regions))
+    (if (not (= (count new-regions) (count old-regions)))
       new-text
       (let (r (fold (fn (acc ir)
                       (let ([pos parts] acc

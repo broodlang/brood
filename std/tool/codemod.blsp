@@ -252,14 +252,13 @@ counterpart to `rename`. Prints each changed file and returns the count."
 (defn- opener? (c) (includes? "([{" c))
 (defn- closer? (c) (includes? ")]}" c))
 
-(sig skip-ws (string int -> int))
 (defn- skip-ws
   (text i)
   (if (and (< i (string/length text)) (ws? (string/char-at text i)))
     (skip-ws text (inc i))
     i))
+(sig skip-ws (string int -> int))
 
-(sig skip-str (string int -> int))
 (defn- skip-str
   (text i)
   ;; i just past the opening quote; returns index after the closing quote
@@ -270,8 +269,8 @@ counterpart to `rename`. Prints each changed file and returns the count."
         (= c "\\") (skip-str text (+ i 2))
         (= c "\"") (inc i)
         else (skip-str text (inc i))))))
+(sig skip-str (string int -> int))
 
-(sig scan-close (string int int -> int))
 (defn- scan-close
   (text i depth)
   ;; i inside a bracketed form; returns index after the matching close at depth 0
@@ -283,8 +282,8 @@ counterpart to `rename`. Prints each changed file and returns the count."
         (opener? c) (scan-close text (inc i) (inc depth))
         (closer? c) (if (= depth 1) (inc i) (scan-close text (inc i) (dec depth)))
         else (scan-close text (inc i) depth)))))
+(sig scan-close (string int int -> int))
 
-(sig atom-end (string int -> int))
 (defn- atom-end
   (text i)
   (if (>= i (string/length text))
@@ -293,6 +292,7 @@ counterpart to `rename`. Prints each changed file and returns the count."
       (if (or (ws? c) (opener? c) (closer? c) (= c "\"") (= c ";"))
         i
         (atom-end text (inc i))))))
+(sig atom-end (string int -> int))
 
 (defn- read-one
   (text i)

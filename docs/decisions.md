@@ -19220,3 +19220,62 @@ cross the tiering threshold on both the hit and miss paths, run at every `BROOD_
 second test is the non-vacuity check and states the purpose: a field-reading body is **not**
 leaf-inlinable without the prim and **is** with it, asserted through `BROOD_INLINE_DBG`. Both
 sabotage-verified.
+
+## ADR-300 — `not=` is deprecated: a name must buy a capability, not a spelling
+
+**Status:** accepted (2026-08-30). **Deprecation only** — the name still works, every use is
+an *advisory* diagnostic, and nothing is gated. Removal is a later, separate decision.
+
+**Context.** `not=` is four lines of prelude — `((a b) (not (%eq a b)))` plus a variadic arm
+over `(not (apply = xs))` — and nothing else in the system knows the name: no special form,
+no primitive, no opcode, no checker guard, no JIT case. Its whole Rust footprint is one line
+in `types/check/sigs.rs` that it shares with `=`. Held against the bar ADR-011 sets and the
+`==` review applied last week (a name must buy a *capability*, not a spelling), it fails on
+the first count: `(not= a b)` is by construction `(not (= a b))`.
+
+Two things sharpen that from "redundant" to "worse":
+
+- **It is the slower of the two, structurally.** `=`'s two-arg body is a direct primitive
+  call, so ADR-069's thin-wrapper elision collapses `(= i 7)` to a `Prim2SlotInt`; `not`'s
+  body is a leaf, so the leaf inliner splices it — the caller ends up with no call at all.
+  `not=`'s body is a **nested** call, which the elision cannot reach (the same shape the
+  `<=` comment in `std/prelude/core.blsp` already warned about) and which disqualifies it
+  from leaf splicing, so it stays a boxed `Call` and its caller never gets the inlined
+  upgrade. Measured on a 5M-iteration tail loop, same binary, interleaved: **218 ms vs
+  132 ms** native (1.65x) and **1067 ms vs 771 ms** on the VM (1.38x). The IR confirms the
+  mechanism rather than merely the timing — the `not=` arm's ops read `Local Local Const
+  Call`, the written-out arm's read `Prim2SlotInt` with `not` spliced in.
+- **Its variadic reading misleads.** `(not= 1 2 1)` is `true`: `=` chains pairwise and `not=`
+  negates the whole chain, so the name reads "pairwise different" and means "not all equal".
+  Written out, the scope of the negation is on the page. (The honest "all different" op would
+  be a `distinct?`, which does not exist and would be a real capability.)
+
+**Decision.** Mark it, don't remove it: `(meta not= :deprecated "0.19.0" :use 'not)` beside
+the definition, the docstring leading with the replacement, and all 41 in-tree uses (13 in
+`std/`, 28 in `tests/`) rewritten to `(not (= …))` — including the divide-by-zero hint strings
+in `builtins/numeric.rs`, which were teaching the deprecated form in an error message. The
+name stays defined and tested; `tests/contract_test.blsp` pins that it still answers, that the
+diagnostic fires, and that `(not= 1 2 1)` is the `true` the note describes.
+
+**Two things the first real deprecation found, which is why this is an ADR and not a devlog
+line.**
+
+1. **ADR-283's metadata never reached a prelude name.** `RuntimeCode::seeded` builds the
+   `meta` map empty. The prelude is *inserted* into each live runtime, not re-evaluated, so
+   the `%register-meta` a `(meta …)` emits fires only in the builder heap and the fact is
+   dropped — `(%meta-of 'not=)` answered `nil` in every process. The privacy set (ADR-146)
+   already had exactly this problem and solves it with `private_names_snapshot` threaded
+   through `SharedBundle`; the metadata now rides the same seam
+   (`Heap::name_meta_snapshot` → `SharedBundle::meta` → `seeded`). A feature that works only
+   on module names is a feature that does not work on the surface most likely to deprecate
+   something.
+2. **A deprecation note is not a deprecation marker.** `nest doc` rendered the note under an
+   ordinary heading, so a reader skimming a module could not see that a name was going away
+   without opening it. A deprecated definition's heading is now struck through
+   (a `### ~~…~~` heading) as well as annotated — the note is for the reader who already
+   stopped, the strikethrough is for the one who did not.
+
+**Consequences.** Every `not=` in downstream code prints one advisory line per use and keeps
+working. The hand-written reference (`language.md`, `spec.md`, `primitives.md`) strikes the
+name through and says what to write instead. Removal stays open: when it happens, this ADR's
+measurement is the argument, and the call sites are already gone from this tree.

@@ -27,7 +27,6 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/deriv.inp
 ;; A declared sig is consulted before body inference (`sig_of` -> `declared_heap_sig`), so
 ;; it short-circuits the blowup: 105 ms. Declaring the type of a public API is right
 ;; anyway (ADR-153), but do not delete this one thinking it is decoration.
-(sig deriv (any -> any))
 
 ;; Non-tail by nature: the recursive call sits under a `cons`/`list`, which is what
 ;; makes this an allocation benchmark. The lint is correct and unwanted.
@@ -48,3 +47,4 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/deriv.inp
             (second a)
             (list '* (third a) (third a) (deriv (third a)))))
       else (error "deriv: no derivation method available: " (pr-str a)))))
+(sig deriv (any -> any))

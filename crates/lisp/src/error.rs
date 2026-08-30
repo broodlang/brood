@@ -238,7 +238,7 @@ pub mod error_codes {
     pub const UNBOUND_SYMBOL: &str = "E0010";
     pub const ARITY_MISMATCH: &str = "E0020";
     pub const TYPE_MISMATCH: &str = "E0030";
-    /// `(/ x 0)` or `(math/rem x 0)` — guard with `(when (not= y 0) …)`.
+    /// `(/ x 0)` or `(math/rem x 0)` — guard with `(when (not (= y 0)) …)`.
     pub const DIV_BY_ZERO: &str = "E0040";
     /// Integer overflow on the checked numeric ops (`%add`/`%sub`/`%mul`/
     /// `rem`).

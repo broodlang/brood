@@ -7267,7 +7267,7 @@ fast-link latch path, and the no-jit `dead_code` attr on `native_gateway_seq`.
 
 ### 2026-08-30, later — the first real deprecation, and the two holes it fell through
 
-`not=` is deprecated (**ADR-297**), not removed. It buys a spelling, not a capability — its
+`not=` is deprecated (**ADR-300**), not removed. It buys a spelling, not a capability — its
 body *is* `(not (= a b))` — and it is the slower of the two for a structural reason worth
 keeping: `=` is a thin wrapper the ADR-069 elision collapses and `not` is a leaf the inliner
 splices, so the written-out form ends up call-free, while `not=`'s **nested-call** body is
@@ -7290,6 +7290,15 @@ Two holes, both found only because this was the first `(meta …)` on a real nam
 - **`nest doc` annotated but did not mark.** A deprecated entry now renders its heading
   **struck through** as well as carrying the note; the note is for a reader who already
   opened the entry, the strikethrough is for one who is skimming.
+
+**`index-of` stays bare, but stopped being filed as a string op.** Asked again whether it
+should be `string/index-of`; the answer recorded in `wilhelm-review.md` still holds — it
+dispatches on `(string? coll)` and falls through to a list/vector scan, so its subject is any
+collection and ADR-230's boundary rule keeps it bare. What was wrong was everything around
+it: `doc-catalog.blsp` said `:strings`, so the generated reference filed it under "Strings
+and text", and it was defined inside the strings section of `std/prelude/string.blsp`. Now
+`:collections`, and moved to `std/prelude/seq.blsp` with `includes?`, which had the same
+shape. No behaviour change.
 
 Also learned, and worth knowing before the next capped run: **`ulimit -v` and the wasm tests
 do not mix.** Under the CLAUDE.md cap the suite fails 3–5 `wasm_*` cases with a *different*

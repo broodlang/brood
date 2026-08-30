@@ -89,7 +89,7 @@ A hint always names an actionable next step, not just a description:
 
 | Hint context | Message |
 |---|---|
-| `(/ x 0)` / `(math/rem x 0)` | `guard the denominator: (when (not= y 0) (/ x y))` |
+| `(/ x 0)` / `(math/rem x 0)` | `guard the denominator: (when (not (= y 0)) (/ x y))` |
 | Unbound symbol in a green process | `this fired inside a spawned process — if it happens only under fan-out load, the scheduler may be racing prelude lookups; try -j 1 …` |
 | `run-process` failure | `check that the program is on PATH and the args are well-formed` |
 | Message too deep (`E0070`) | `messages cross processes by deep copy — flatten or chunk the data (e.g. send a list of items rather than one nested tree)` |

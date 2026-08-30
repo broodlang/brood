@@ -232,8 +232,8 @@
    "%impl-substrate?" :predicates
    "inc" :math
    "includes?" :predicates
-   "index-of" :strings
-   "%index-of-seq-from" :strings
+   "index-of" :collections
+   "%index-of-seq-from" :collections
    "math/infinite?" :predicates
    "inspect" :io
    "string/int->char" :strings

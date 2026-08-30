@@ -14,7 +14,7 @@
     (is (nil? (diff/seq [] []))))
   (test "single insertion"
     (let (ops (diff/seq [1 2 3] [1 2 99 3]))
-      (is (not= nil ops))
+      (is (not (= nil ops)))
       (assert= 1 (get (diff/summary ops) :inserts))
       (assert= 0 (get (diff/summary ops) :deletes))))
   (test "single deletion"

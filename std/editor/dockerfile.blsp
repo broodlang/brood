@@ -32,27 +32,26 @@ case-insensitively), and quoted-string arguments. Pure, so independently testabl
 
 ;; ---- scanning helpers -------------------------------------------------------
 
-(sig dk-lead-ws (string int int -> int))
 (defn- dk-lead-ws
   (line i n)
   (if (and (< i n) (or (= (string/char-at line i) " ") (= (string/char-at line i) "\t")))
     (dk-lead-ws line (inc i) n)
     i))
+(sig dk-lead-ws (string int int -> int))
 
-(sig dk-word-end (string int int -> int))
 (defn- dk-word-end
   (line i n)
   "The offset just past the non-whitespace run starting at `i`."
   (if (and (< i n) (not (= (string/char-at line i) " ")) (not (= (string/char-at line i) "\t")))
     (dk-word-end line (inc i) n)
     i))
+(sig dk-word-end (string int int -> int))
 
-(sig dk-find (string int int string -> int))
 (defn- dk-find
   (line i n ch)
   (cond (>= i n) -1 (= (string/char-at line i) ch) i else (dk-find line (inc i) n ch)))
+(sig dk-find (string int int string -> int))
 
-(sig dk-strings (string int int int list -> list))
 (defn- dk-strings
   (line base i n acc)
   "Tail-recursive scan of `[i, n)` for `\"…\"` / `'…'` runs (offsets shifted by `base`),
@@ -72,10 +71,10 @@ each consumed whole so spans stay non-overlapping; returns them ascending."
                   dk-face-string]
             acc)))
     else (dk-strings line base (inc i) n acc)))
+(sig dk-strings (string int int int list -> list))
 
 ;; ---- per-line spans + the document walker -----------------------------------
 
-(sig dk-line-spans (string int -> list))
 (defn- dk-line-spans
   (line base)
   "The spans for one `line` starting at offset `base`: a `#` comment whole, else a
@@ -91,8 +90,8 @@ leading instruction keyword (when the first word is one) plus quoted-string args
             (cons [(+ base lead) (+ base we) dk-face-instruction]
               (dk-strings line base we n '()))
             (dk-strings line base lead n '()))))))
+(sig dk-line-spans (string int -> list))
 
-(sig dk-lex (string int int list -> list))
 (defn- dk-lex
   (src i n acc)
   (if (>= i n)
@@ -100,6 +99,7 @@ leading instruction keyword (when the first word is one) plus quoted-string args
     (let (e (math/min n (string/span-until src i "\n"))
           spans (dk-line-spans (string/substring src i e) i))
       (dk-lex src (inc e) n (fold (fn (a s) (cons s a)) acc spans)))))
+(sig dk-lex (string int int list -> list))
 
 (defn dockerfile-spans (src)
   "Lexically tokenize Dockerfile `src` into a list of `[start end face]` colour spans

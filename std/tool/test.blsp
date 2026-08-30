@@ -493,7 +493,6 @@ the test rather than hanging the run."
 (defn- sort-by-ms (xs) (fold (fn (acc x) (insert-by-ms x acc)) nil xs))
 
 ;; A "N.N MB" formatter for the memory line (`quot` is the prelude's).
-(sig mb-str (int -> string))
 (defn- mb-str
   (bytes)
   (let (tenths (math/quot (+ (* bytes 10) 524288) 1048576)
@@ -501,6 +500,7 @@ the test rather than hanging the run."
         whole (math/quot tenths 10)
         frac (math/rem tenths 10))
     (str whole "." frac " MB")))
+(sig mb-str (int -> string))
 
 ;; --- results -----------------------------------------------------------------
 ;; A result is (group name fails ms): `fails` is the list of failure records for
@@ -999,8 +999,8 @@ the test rather than hanging the run."
 ;; nextest wrapper (`brood_suite_passes`, tests/suite.rs) runs this entire suite as
 ;; ONE case, so its per-case cap in `.config/nextest.toml` is set *above* this (300s)
 ;; — otherwise nextest would kill the wrapper before this inner timeout could fire.
-(sig *test-timeout-ms* int)
 (defdyn *test-timeout-ms* 120000)
+(sig *test-timeout-ms* int)
 
 ;; The batch budget for a unit tagged `:slow` or `:conformance`. Before this, `:tags [… :slow]` was
 ;; documentation the runner ignored: the external conformance corpora (~19,000 UCD
@@ -1152,7 +1152,6 @@ the test rather than hanging the run."
       (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*)))
     (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*))))
 
-(sig collect-loop (int any any any int -> any))
 (defn- collect-loop
   (pending workers reported acc deadline)
   (if (= pending 0)
@@ -1195,6 +1194,7 @@ the test rather than hanging the run."
 
         ;; Anything else in the runner's mailbox isn't ours — skip it.
         else (collect-loop pending workers reported acc deadline)))))
+(sig collect-loop (int any any any int -> any))
 
 ;; Run a whole unit with each test under `%isolate` (global-def rollback). This
 ;; is what an isolated unit's *own* worker process evaluates.
@@ -1512,10 +1512,10 @@ the test rather than hanging the run."
       (take n (sort-by-ms timings)))))
 
 ;; "1.3s" from milliseconds — one decimal, rounded to nearest 0.1s.
-(sig secs-str (int -> string))
 (defn- secs-str
   (ms)
   (let (tenths (math/quot (+ ms 50) 100)) (str (math/quot tenths 10) "." (math/rem tenths 10) "s")))
+(sig secs-str (int -> string))
 
 ;; Always-on slow-test surfacing: list every test slower than `over` ms (slowest
 ;; first), so a slow test is never hidden behind the one-line summary. Unlike

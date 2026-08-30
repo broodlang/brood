@@ -61,6 +61,15 @@ if the question had never been asked. Same rule as `decisions.md` and `known-iss
       genuinely polymorphic over strings, lists and vectors, which is the bare-name rule.
       The pair *looked* symmetric and was not — that asymmetry was the real finding.
 
+      **Reopened 2026-08-30 and closed properly.** Staying bare was right; the *code* did
+      not say so. `std/doc-catalog.blsp` categorised `index-of` (and its private scan helper)
+      as `:strings`, so the generated reference filed a collection op under "Strings and
+      text", and it was defined inside the strings section of `std/prelude/string.blsp`.
+      Both now say collection: catalogued `:collections`, and moved — with `includes?`, its
+      membership sibling, for the same reason — to `std/prelude/seq.blsp`. Nothing about the
+      name or its behaviour changed. Half of why it read as misplaced was that everything
+      around it said "string".
+
 # Standard Library
 
 ## gen
