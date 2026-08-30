@@ -449,7 +449,7 @@ pub(super) fn emit_call(
         let nslots_v = b
             .ins()
             .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_nslots_off);
-        let is_native = b.ins().icmp_imm(IntCC::Equal, nslots_v, u32::MAX as i64);
+        let is_native = b.ins().icmp_imm_s(IntCC::Equal, nslots_v, u32::MAX as i64);
         let nat_blk = b.create_block();
         let brood_blk = b.create_block();
         b.ins().brif(is_native, nat_blk, &[], brood_blk, &[]);
@@ -486,7 +486,7 @@ pub(super) fn emit_call(
             let env_v = b
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_env_off);
-            let env_glob = b.ins().icmp_imm(IntCC::Equal, env_v, -1);
+            let env_glob = b.ins().icmp_imm_s(IntCC::Equal, env_v, -1);
             let xc_depth = b.create_block();
             b.ins().brif(env_glob, xc_depth, &[], ff_blk, &[]);
 
@@ -500,8 +500,8 @@ pub(super) fn emit_call(
                 heap,
                 offs.jit_native_depth as i32,
             );
-            let dm1 = b.ins().iadd_imm(depth, -1);
-            let d_ok = b.ins().icmp_imm(IntCC::UnsignedLessThan, dm1, 63);
+            let dm1 = b.ins().iadd_imm_s(depth, -1);
+            let d_ok = b.ins().icmp_imm_s(IntCC::UnsignedLessThan, dm1, 63);
             let xc_cap = b.create_block();
             b.ins().brif(d_ok, xc_cap, &[], ff_blk, &[]);
 
@@ -514,7 +514,7 @@ pub(super) fn emit_call(
             let cap = b
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), heap, roots_cap_off);
-            let stage_base = b.ins().iadd_imm(len, -(argc as i64));
+            let stage_base = b.ins().iadd_imm_s(len, -(argc as i64));
             let nslots64 = b.ins().uextend(types::I64, nslots_v);
             let raw_end = b.ins().iadd(stage_base, nslots64);
             // `umax` guards the nslots < argc degenerate (frame smaller than the staged
@@ -542,7 +542,7 @@ pub(super) fn emit_call(
             let rp = b
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), heap, roots_ptr_off);
-            let byte_off = b.ins().imul_imm(cur, STRIDE);
+            let byte_off = b.ins().imul_imm_s(cur, STRIDE);
             let addr = b.ins().iadd(rp, byte_off);
             let zfill = b.ins().iconst(types::I64, 0);
             b.ins().store(MemFlagsData::trusted(), zfill, addr, 0);
@@ -554,7 +554,7 @@ pub(super) fn emit_call(
                 addr,
                 PAYLOAD_OFFSET as i32 + 8,
             );
-            let nxt = b.ins().iadd_imm(cur, 1);
+            let nxt = b.ins().iadd_imm_s(cur, 1);
             b.ins().jump(xc_fill, &[BlockArg::Value(nxt)]);
 
             // The ceremony + the call, mirroring `jit_run_fast_link` top to bottom.
@@ -583,7 +583,7 @@ pub(super) fn emit_call(
                 .load(types::I32, MemFlagsData::trusted(), heap, dbgfn_off);
             b.ins()
                 .store(MemFlagsData::trusted(), head_v, heap, dbgfn_off);
-            let d1 = b.ins().iadd_imm(depth, 1);
+            let d1 = b.ins().iadd_imm_s(depth, 1);
             b.ins().store(
                 MemFlagsData::trusted(),
                 d1,
@@ -615,7 +615,7 @@ pub(super) fn emit_call(
             let seq = b
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), heap, seq_off);
-            let gw = b.ins().iadd_imm(seq, 1);
+            let gw = b.ins().iadd_imm_s(seq, 1);
             b.ins().store(MemFlagsData::trusted(), gw, heap, seq_off);
             let scur = b
                 .ins()
@@ -672,7 +672,7 @@ pub(super) fn emit_call(
             b.ins().jump(xc_out, &[]);
             // Outcome dispatch: 0 (the overwhelmingly common case) inline; the rest cold.
             b.switch_to_block(xc_out);
-            let ok = b.ins().icmp_imm(IntCC::Equal, outcome, 0);
+            let ok = b.ins().icmp_imm_s(IntCC::Equal, outcome, 0);
             let xc_done = b.create_block();
             let xc_cold = b.create_block();
             b.ins().brif(ok, xc_done, &[], xc_cold, &[]);
@@ -697,11 +697,11 @@ pub(super) fn emit_call(
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), heap, roots_ptr_off);
             b.def_var(rb_var, rb3);
-            let cold_err = b.ins().icmp_imm(IntCC::Equal, cst, 1);
+            let cold_err = b.ins().icmp_imm_s(IntCC::Equal, cst, 1);
             let xc_ne = b.create_block();
             b.ins().brif(cold_err, error, &[], xc_ne, &[]);
             b.switch_to_block(xc_ne);
-            let cold_slow = b.ins().icmp_imm(IntCC::Equal, cst, 2);
+            let cold_slow = b.ins().icmp_imm_s(IntCC::Equal, cst, 2);
             b.ins().brif(cold_slow, miss, &[], cont, &[]);
 
             // Everything below emits the unchanged callback path into `ff_blk`.
@@ -721,11 +721,11 @@ pub(super) fn emit_call(
         let rbc = b.ins().call(funcs.rb, &[heap]);
         b.def_var(rb_var, b.inst_results(rbc)[0]);
         // status: 1 = error → `error`; 2 = could-not-link → `miss`; 0 = `cont`.
-        let is_err = b.ins().icmp_imm(IntCC::Equal, fst, 1);
+        let is_err = b.ins().icmp_imm_s(IntCC::Equal, fst, 1);
         let not_err = b.create_block();
         b.ins().brif(is_err, error, &[], not_err, &[]);
         b.switch_to_block(not_err);
-        let is_slow = b.ins().icmp_imm(IntCC::Equal, fst, 2);
+        let is_slow = b.ins().icmp_imm_s(IntCC::Equal, fst, 2);
         b.ins().brif(is_slow, miss, &[], cont, &[]);
 
         // miss: cold / redefined / over-cap / IC-moved → the slow dispatch.
@@ -800,8 +800,8 @@ pub(super) fn emit_self_call(
             }
             Op::Slot(k) => {
                 let roots_base = b.use_var(rb_var);
-                let i = b.ins().iadd_imm(base, k as i64);
-                let o = b.ins().imul_imm(i, STRIDE);
+                let i = b.ins().iadd_imm_s(base, k as i64);
+                let o = b.ins().imul_imm_s(i, STRIDE);
                 let addr = b.ins().iadd(roots_base, o);
                 let mut words = Vec::new();
                 let mut off = 0i32;
@@ -848,8 +848,8 @@ pub(super) fn emit_self_call(
     }
     let roots_base = b.use_var(rb_var);
     for (i, words) in vals.iter().enumerate() {
-        let idx = b.ins().iadd_imm(base, i as i64);
-        let o = b.ins().imul_imm(idx, STRIDE);
+        let idx = b.ins().iadd_imm_s(base, i as i64);
+        let o = b.ins().imul_imm_s(idx, STRIDE);
         let addr = b.ins().iadd(roots_base, o);
         for &(off, w) in words {
             b.ins().store(MemFlagsData::trusted(), w, addr, off);
@@ -872,8 +872,8 @@ pub(super) fn emit_self_call(
                 let f = match op {
                     Op::Float(v) => v,
                     _ => {
-                        let idx = b.ins().iadd_imm(base, k as i64);
-                        let o = b.ins().imul_imm(idx, STRIDE);
+                        let idx = b.ins().iadd_imm_s(base, k as i64);
+                        let o = b.ins().imul_imm_s(idx, STRIDE);
                         let addr = b.ins().iadd(rb2, o);
                         let bits = b.ins().load(
                             types::I64,
@@ -895,8 +895,8 @@ pub(super) fn emit_self_call(
                         }
                     }
                     _ => {
-                        let idx = b.ins().iadd_imm(base, k as i64);
-                        let o = b.ins().imul_imm(idx, STRIDE);
+                        let idx = b.ins().iadd_imm_s(base, k as i64);
+                        let o = b.ins().imul_imm_s(idx, STRIDE);
                         let addr = b.ins().iadd(rb2, o);
                         b.ins().load(
                             types::I64,
@@ -934,7 +934,7 @@ pub(super) fn emit_self_call(
     // iteration's args every iteration, so both deopt and preempt resume exactly).
     let loop_top = leader_block[0]?;
     let bv = b.use_var(tick_budget);
-    let nv = b.ins().iadd_imm(bv, -1);
+    let nv = b.ins().iadd_imm_s(bv, -1);
     b.def_var(tick_budget, nv);
     let poll = b.create_block();
     b.ins().brif(nv, loop_top, &[], poll, &[]);

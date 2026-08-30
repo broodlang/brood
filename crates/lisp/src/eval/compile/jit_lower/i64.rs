@@ -544,7 +544,7 @@ fn lower_i64_value(
             // call can't disturb — no memory frame).
             let mut call_args: Vec<cranelift_codegen::ir::Value> =
                 args.iter().map(|a| lower_i64_value(b, cx, a)).collect();
-            call_args.push(b.ins().iadd_imm(cx.depth, 1));
+            call_args.push(b.ins().iadd_imm_s(cx.depth, 1));
             call_args.push(cx.ovf);
             call_args.push(cx.heap);
             let call = b.ins().call(cx.self_ref, &call_args);
@@ -838,7 +838,7 @@ pub(super) fn jit_lower_i64_arm(
         // roots (it takes no heap), so this address stays valid across the worker call.
         let rbc = b.ins().call(rb_ref, &[heap]);
         let rbase = b.inst_results(rbc)[0];
-        let off = b.ins().imul_imm(base, STRIDE);
+        let off = b.ins().imul_imm_s(base, STRIDE);
         let argbase = b.ins().iadd(rbase, off);
         // Every arg must match the worker's scalar (Int/Float), else deopt to the VM.
         let deopt = b.create_block();
@@ -847,7 +847,7 @@ pub(super) fn jit_lower_i64_arm(
             let tag = b
                 .ins()
                 .load(types::I8, MemFlagsData::trusted(), argbase, slot_off as i32);
-            let is_ok = b.ins().icmp_imm(IntCC::Equal, tag, kind.tag() as i64);
+            let is_ok = b.ins().icmp_imm_s(IntCC::Equal, tag, kind.tag() as i64);
             let nxt = b.create_block();
             b.ins().brif(is_ok, nxt, &[], deopt, &[]);
             b.seal_block(nxt);
@@ -894,7 +894,7 @@ pub(super) fn jit_lower_i64_arm(
         b.switch_to_block(bailb);
         let z1 = b.ins().iconst(types::I8, 0);
         b.ins().store(MemFlagsData::trusted(), z1, ovf, 0);
-        let is_depth = b.ins().icmp_imm(IntCC::Equal, o, 2);
+        let is_depth = b.ins().icmp_imm_s(IntCC::Equal, o, 2);
         let depthb = b.create_block();
         let notdepthb = b.create_block();
         b.ins().brif(is_depth, depthb, &[], notdepthb, &[]);
@@ -904,7 +904,7 @@ pub(super) fn jit_lower_i64_arm(
         let o5 = b.ins().iconst(types::I64, 5);
         b.ins().return_(&[o5]);
         b.switch_to_block(notdepthb);
-        let is_err = b.ins().icmp_imm(IntCC::Equal, o, 3);
+        let is_err = b.ins().icmp_imm_s(IntCC::Equal, o, 3);
         let errb = b.create_block();
         let ovb = b.create_block();
         b.ins().brif(is_err, errb, &[], ovb, &[]);

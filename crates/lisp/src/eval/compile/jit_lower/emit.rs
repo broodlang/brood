@@ -369,11 +369,11 @@ pub(super) fn load_slot_int(
         return b.use_var(var);
     }
     let roots_base = b.use_var(f.rb_var);
-    let idx = b.ins().iadd_imm(f.base, k);
-    let off = b.ins().imul_imm(idx, STRIDE);
+    let idx = b.ins().iadd_imm_s(f.base, k);
+    let off = b.ins().imul_imm_s(idx, STRIDE);
     let addr = b.ins().iadd(roots_base, off);
     let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
-    let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+    let is_int = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_INT as i64);
     let cont = b.create_block();
     let __dr = b.ins().iconst(types::I32, 20);
     b.ins()
@@ -402,8 +402,8 @@ pub(super) fn store_int(
     );
     let (tag_byte, payload) = box_scalar(b, v);
     let roots_base = b.use_var(f.rb_var);
-    let idx = b.ins().iadd_imm(f.base, k);
-    let off = b.ins().imul_imm(idx, STRIDE);
+    let idx = b.ins().iadd_imm_s(f.base, k);
+    let off = b.ins().imul_imm_s(idx, STRIDE);
     let addr = b.ins().iadd(roots_base, off);
     let tag = b.ins().iconst(types::I8, tag_byte as i64);
     b.ins().store(MemFlagsData::trusted(), tag, addr, 0);
@@ -426,13 +426,13 @@ pub(super) fn copy_value(b: &mut FunctionBuilder, src: i64, dst: i64, f: Frame) 
     );
     let roots_base = b.use_var(f.rb_var);
     let saddr = {
-        let i = b.ins().iadd_imm(f.base, src);
-        let o = b.ins().imul_imm(i, STRIDE);
+        let i = b.ins().iadd_imm_s(f.base, src);
+        let o = b.ins().imul_imm_s(i, STRIDE);
         b.ins().iadd(roots_base, o)
     };
     let daddr = {
-        let i = b.ins().iadd_imm(f.base, dst);
-        let o = b.ins().imul_imm(i, STRIDE);
+        let i = b.ins().iadd_imm_s(f.base, dst);
+        let o = b.ins().imul_imm_s(i, STRIDE);
         b.ins().iadd(roots_base, o)
     };
     let mut off = 0i32;
@@ -472,8 +472,8 @@ pub(super) fn read_words(
                 f.nslots
             );
             let roots_base = b.use_var(f.rb_var);
-            let i = b.ins().iadd_imm(f.base, k as i64);
-            let o = b.ins().imul_imm(i, STRIDE);
+            let i = b.ins().iadd_imm_s(f.base, k as i64);
+            let o = b.ins().imul_imm_s(i, STRIDE);
             let addr = b.ins().iadd(roots_base, o);
             let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), addr, 0);
             let w1 = b.ins().load(
@@ -532,8 +532,8 @@ pub(super) fn store_words(
         f.nslots
     );
     let roots_base = b.use_var(f.rb_var);
-    let i = b.ins().iadd_imm(f.base, dst);
-    let o = b.ins().imul_imm(i, STRIDE);
+    let i = b.ins().iadd_imm_s(f.base, dst);
+    let o = b.ins().imul_imm_s(i, STRIDE);
     let addr = b.ins().iadd(roots_base, o);
     b.ins().store(MemFlagsData::trusted(), w[0], addr, 0);
     b.ins()
@@ -586,8 +586,8 @@ pub(super) fn as_int(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
         Op::Bool(v) => v, // unreachable: handled above
         Op::Slot(k) => load_slot_int(b, k as i64, f),
         Op::Handle(w0, w1, _) => {
-            let tagb = b.ins().band_imm(w0, 0xff);
-            let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
+            let tagb = b.ins().band_imm_s(w0, 0xff);
+            let is_int = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_INT as i64);
             let cont = b.create_block();
             // KI-49: carry the OBSERVED tag in the low byte of the reason id, so the deopt
             // says not just "a Handle wasn't an Int here" but which type actually arrived.
@@ -602,8 +602,8 @@ pub(super) fn as_int(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
         // A hoisted global vector/table used as an int (neither is one) — tag-check
         // its word like a `Handle` and deopt; sound, never expected to fire.
         Op::HoistedVec { w0, w1, .. } | Op::HoistedTable { w0, w1, .. } => {
-            let tagb = b.ins().band_imm(w0, 0xff);
-            let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
+            let tagb = b.ins().band_imm_s(w0, 0xff);
+            let is_int = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_INT as i64);
             let cont = b.create_block();
             let __dr = b.ins().iconst(types::I32, 22);
             b.ins()
@@ -645,8 +645,8 @@ pub(super) fn as_block_arg(
     if let Op::Slot(k) = op {
         if f.slot_bool.borrow().get(k).copied().unwrap_or(false) {
             let roots_base = b.use_var(f.rb_var);
-            let i = b.ins().iadd_imm(f.base, k as i64);
-            let o = b.ins().imul_imm(i, STRIDE);
+            let i = b.ins().iadd_imm_s(f.base, k as i64);
+            let o = b.ins().imul_imm_s(i, STRIDE);
             let addr = b.ins().iadd(roots_base, o);
             let pl = b.ins().load(
                 types::I64,
@@ -654,7 +654,7 @@ pub(super) fn as_block_arg(
                 addr,
                 PAYLOAD_OFFSET as i32,
             );
-            return b.ins().band_imm(pl, 0xff);
+            return b.ins().band_imm_s(pl, 0xff);
         }
     }
     // KI-49: an operand crossing as `ParamRepr::Slot` is NOT materialised — the target
@@ -714,11 +714,11 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
                 return v;
             }
             let roots_base = b.use_var(f.rb_var);
-            let i = b.ins().iadd_imm(f.base, k as i64);
-            let o = b.ins().imul_imm(i, STRIDE);
+            let i = b.ins().iadd_imm_s(f.base, k as i64);
+            let o = b.ins().imul_imm_s(i, STRIDE);
             let addr = b.ins().iadd(roots_base, o);
             let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
-            let is_f = b.ins().icmp_imm(IntCC::Equal, tag, TAG_FLOAT as i64);
+            let is_f = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_FLOAT as i64);
             let cont = b.create_block();
             let __dr = b.ins().iconst(types::I32, 24);
             b.ins()
@@ -738,8 +738,8 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
             // then runs the arm with the real type). Mirrors the `Op::Slot` path but on
             // words already in registers. This is what lets `(nth v k)`-fed float
             // arithmetic stay native instead of deopting on the int-path `as_int`.
-            let tagb = b.ins().band_imm(w0, 0xff);
-            let is_f = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_FLOAT as i64);
+            let tagb = b.ins().band_imm_s(w0, 0xff);
+            let is_f = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_FLOAT as i64);
             let cont = b.create_block();
             let __dr = b.ins().iconst(types::I32, 25);
             b.ins()
@@ -899,28 +899,28 @@ pub(super) fn vector_ref(
     b.append_block_param(vr_done, types::I64);
     let ffi_blk = b.create_block();
     // tag byte must be Vector.
-    let tagb = b.ins().band_imm(vec[0], 0xff);
-    let is_vec = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_VECTOR as i64);
+    let tagb = b.ins().band_imm_s(vec[0], 0xff);
+    let is_vec = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_VECTOR as i64);
     let c1 = b.create_block();
     b.ins().brif(is_vec, c1, &[], ffi_blk, &[]);
     b.switch_to_block(c1);
     // region: high 2 bits of the handle == 0 (LOCAL); RUNTIME/PRELUDE → FFI.
-    let high2 = b.ins().ushr_imm(vec[1], 62);
-    let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0);
+    let high2 = b.ins().ushr_imm_s(vec[1], 62);
+    let is_local = b.ins().icmp_imm_s(IntCC::Equal, high2, 0);
     let c2 = b.create_block();
     b.ins().brif(is_local, c2, &[], ffi_blk, &[]);
     b.switch_to_block(c2);
     // index must be an Int.
-    let itag = b.ins().band_imm(idx[0], 0xff);
-    let is_int = b.ins().icmp_imm(IntCC::Equal, itag, TAG_INT as i64);
+    let itag = b.ins().band_imm_s(idx[0], 0xff);
+    let is_int = b.ins().icmp_imm_s(IntCC::Equal, itag, TAG_INT as i64);
     let c3 = b.create_block();
     b.ins().brif(is_int, c3, &[], ffi_blk, &[]);
     b.switch_to_block(c3);
     let idxv = idx[1];
     // age bit 61 selects the slab base (fetched per read, like the const-index
     // inline — safe across any prior safepoint).
-    let age = b.ins().ushr_imm(vec[1], 61);
-    let is_old = b.ins().icmp_imm(IntCC::NotEqual, age, 0);
+    let age = b.ins().ushr_imm_s(vec[1], 61);
+    let is_old = b.ins().icmp_imm_s(IntCC::NotEqual, age, 0);
     let nb2 = b.create_block();
     let ob2 = b.create_block();
     let based = b.create_block();
@@ -936,13 +936,13 @@ pub(super) fn vector_ref(
     b.ins().jump(based, &[BlockArg::Value(bo2)]);
     b.switch_to_block(based);
     let sbase = b.block_params(based)[0];
-    let vidx = b.ins().band_imm(vec[1], 0xFFFF_FFFFi64);
-    let soff = b.ins().imul_imm(vidx, VS::JIT_STRIDE);
+    let vidx = b.ins().band_imm_s(vec[1], 0xFFFF_FFFFi64);
+    let soff = b.ins().imul_imm_s(vidx, VS::JIT_STRIDE);
     let slotp = b.ins().iadd(sbase, soff);
     let disc = b
         .ins()
         .load(types::I8, MemFlagsData::trusted(), slotp, VS::JIT_TAG_OFF);
-    let is_inline = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
+    let is_inline = b.ins().icmp_imm_s(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
     let inl = b.create_block();
     let not_inl = b.create_block();
     b.ins().brif(is_inline, inl, &[], not_inl, &[]);
@@ -956,8 +956,8 @@ pub(super) fn vector_ref(
     let iok = b.create_block();
     b.ins().brif(ib, iok, &[], ffi_blk, &[]);
     b.switch_to_block(iok);
-    let eo = b.ins().imul_imm(idxv, STRIDE);
-    let ebase = b.ins().iadd_imm(slotp, VS::JIT_ITEMS_OFF as i64);
+    let eo = b.ins().imul_imm_s(idxv, STRIDE);
+    let ebase = b.ins().iadd_imm_s(slotp, VS::JIT_ITEMS_OFF as i64);
     let ep = b.ins().iadd(ebase, eo);
     let i0 = b.ins().load(types::I64, MemFlagsData::trusted(), ep, 0);
     let i1 = b.ins().load(
@@ -982,7 +982,7 @@ pub(super) fn vector_ref(
     );
     // Spill storage: bounds vs the cached len, elements via the cached ptr.
     b.switch_to_block(not_inl);
-    let is_spill = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_SPILL_TAG);
+    let is_spill = b.ins().icmp_imm_s(IntCC::Equal, disc, VS::JIT_SPILL_TAG);
     let spl = b.create_block();
     b.ins().brif(is_spill, spl, &[], ffi_blk, &[]);
     b.switch_to_block(spl);
@@ -1002,7 +1002,7 @@ pub(super) fn vector_ref(
     let sok2 = b.create_block();
     b.ins().brif(sb2, sok2, &[], ffi_blk, &[]);
     b.switch_to_block(sok2);
-    let seo = b.ins().imul_imm(idxv, STRIDE);
+    let seo = b.ins().imul_imm_s(idxv, STRIDE);
     let sep = b.ins().iadd(sptr, seo);
     let s0 = b.ins().load(types::I64, MemFlagsData::trusted(), sep, 0);
     let s1 = b.ins().load(
@@ -1091,7 +1091,7 @@ pub(super) fn table_prim(
     let slow = b.create_block();
     b.ins().brif(status, slow, &[], cont, &[]);
     b.switch_to_block(slow);
-    let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
+    let is_err = b.ins().icmp_imm_s(IntCC::Equal, status, 2);
     let __dr = b.ins().iconst(types::I32, 28);
     b.ins()
         .brif(is_err, fu.error, &[], f.deopt, &[BlockArg::Value(__dr)]);
@@ -1125,13 +1125,13 @@ pub(super) fn eq_dispatch(
     wb: [cranelift_codegen::ir::Value; 3],
     f: Frame,
 ) -> cranelift_codegen::ir::Value {
-    let ta = b.ins().band_imm(wa[0], 0xff);
-    let tb = b.ins().band_imm(wb[0], 0xff);
+    let ta = b.ins().band_imm_s(wa[0], 0xff);
+    let tb = b.ins().band_imm_s(wb[0], 0xff);
     let done = b.create_block();
     b.append_block_param(done, types::I8);
     // Int × Int?
-    let a_int = b.ins().icmp_imm(IntCC::Equal, ta, TAG_INT as i64);
-    let b_int = b.ins().icmp_imm(IntCC::Equal, tb, TAG_INT as i64);
+    let a_int = b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_INT as i64);
+    let b_int = b.ins().icmp_imm_s(IntCC::Equal, tb, TAG_INT as i64);
     let both_int = b.ins().band(a_int, b_int);
     let intb = b.create_block();
     let not_int = b.create_block();
@@ -1141,10 +1141,10 @@ pub(super) fn eq_dispatch(
     b.ins().jump(done, &[BlockArg::Value(ieq)]);
     // Either side an interned immediate (Sym=5 / Keyword=6)?
     b.switch_to_block(not_int);
-    let a_sym = b.ins().icmp_imm(IntCC::Equal, ta, TAG_SYM as i64);
-    let a_kw = b.ins().icmp_imm(IntCC::Equal, ta, TAG_KEYWORD as i64);
-    let b_sym = b.ins().icmp_imm(IntCC::Equal, tb, TAG_SYM as i64);
-    let b_kw = b.ins().icmp_imm(IntCC::Equal, tb, TAG_KEYWORD as i64);
+    let a_sym = b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_SYM as i64);
+    let a_kw = b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_KEYWORD as i64);
+    let b_sym = b.ins().icmp_imm_s(IntCC::Equal, tb, TAG_SYM as i64);
+    let b_kw = b.ins().icmp_imm_s(IntCC::Equal, tb, TAG_KEYWORD as i64);
     let a_in = b.ins().bor(a_sym, a_kw);
     let b_in = b.ins().bor(b_sym, b_kw);
     let either = b.ins().bor(a_in, b_in);
@@ -1157,8 +1157,8 @@ pub(super) fn eq_dispatch(
     // A Sym/Keyword payload is a u32 — the HIGH half of the payload word is
     // undefined padding (Rust doesn't zero it, and word-copies carry it along),
     // so compare only the low 32 bits or equal interned ids can compare unequal.
-    let ida = b.ins().band_imm(wa[1], 0xFFFF_FFFFi64);
-    let idb = b.ins().band_imm(wb[1], 0xFFFF_FFFFi64);
+    let ida = b.ins().band_imm_s(wa[1], 0xFFFF_FFFFi64);
+    let idb = b.ins().band_imm_s(wb[1], 0xFFFF_FFFFi64);
     let ids_eq = b.ins().icmp(IntCC::Equal, ida, idb);
     let keq = b.ins().band(tags_eq, ids_eq);
     b.ins().jump(done, &[BlockArg::Value(keq)]);
@@ -1188,16 +1188,16 @@ pub(super) fn inline_vec_ref(
     let w0 = vec[0];
     let w1 = vec[1];
     // Tag byte must be Vector (Range/SeqView share the slab but tag differently).
-    let tagb = b.ins().band_imm(w0, 0xff);
-    let is_vec = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_VECTOR as i64);
+    let tagb = b.ins().band_imm_s(w0, 0xff);
+    let is_vec = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_VECTOR as i64);
     let c1 = b.create_block();
     let __dr = b.ins().iconst(types::I32, 30);
     b.ins()
         .brif(is_vec, c1, &[], deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(c1);
     // Region: high 2 bits of the handle == 0 (LOCAL). Deopt for PRELUDE/RUNTIME.
-    let high2 = b.ins().ushr_imm(w1, 62);
-    let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0);
+    let high2 = b.ins().ushr_imm_s(w1, 62);
+    let is_local = b.ins().icmp_imm_s(IntCC::Equal, high2, 0);
     let c2 = b.create_block();
     let __dr = b.ins().iconst(types::I32, 31);
     b.ins()
@@ -1205,8 +1205,8 @@ pub(super) fn inline_vec_ref(
     b.switch_to_block(c2);
     // Age bit 61 (0=nursery, 1=old) selects which slab base to fetch. Fetch it per-read
     // so a prior safepoint that moved the slab can't leave it stale.
-    let age = b.ins().ushr_imm(w1, 61);
-    let is_old = b.ins().icmp_imm(IntCC::NotEqual, age, 0);
+    let age = b.ins().ushr_imm_s(w1, 61);
+    let is_old = b.ins().icmp_imm_s(IntCC::NotEqual, age, 0);
     let nb = b.create_block();
     let ob = b.create_block();
     let merge = b.create_block();
@@ -1223,8 +1223,8 @@ pub(super) fn inline_vec_ref(
     b.switch_to_block(merge);
     let base = b.block_params(merge)[0];
     // Slot pointer: base + slab_index * stride. slab_index = low 32 bits.
-    let vidx = b.ins().band_imm(w1, 0xFFFF_FFFFi64);
-    let slot_off = b.ins().imul_imm(vidx, VS::JIT_STRIDE);
+    let vidx = b.ins().band_imm_s(w1, 0xFFFF_FFFFi64);
+    let slot_off = b.ins().imul_imm_s(vidx, VS::JIT_STRIDE);
     let slot_ptr = b.ins().iadd(base, slot_off);
     // Discriminant byte must be `Inline` (spilled/large vectors deopt).
     let disc = b.ins().load(
@@ -1233,7 +1233,7 @@ pub(super) fn inline_vec_ref(
         slot_ptr,
         VS::JIT_TAG_OFF,
     );
-    let is_inline = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
+    let is_inline = b.ins().icmp_imm_s(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
     let inline_blk = b.create_block();
     let heap_blk = b.create_block();
     // The two storage layouts converge here with the element's 3 words.
@@ -1261,7 +1261,7 @@ pub(super) fn inline_vec_ref(
     b.switch_to_block(c4);
     // Element read: slot_ptr + JIT_ITEMS_OFF + idx*size_of::<Value>().
     let elem_off = VS::JIT_ITEMS_OFF as i64 + idx * STRIDE;
-    let elem = b.ins().iadd_imm(slot_ptr, elem_off);
+    let elem = b.ins().iadd_imm_s(slot_ptr, elem_off);
     let r0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem, 0);
     let r1 = b.ins().load(
         types::I64,
@@ -1290,7 +1290,7 @@ pub(super) fn inline_vec_ref(
     // bounds check. Out-of-range (or an unexpected disc) deopts — the VM owns `nth`'s
     // exact result.
     b.switch_to_block(heap_blk);
-    let is_spill = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_SPILL_TAG);
+    let is_spill = b.ins().icmp_imm_s(IntCC::Equal, disc, VS::JIT_SPILL_TAG);
     let spill_blk = b.create_block();
     let __dr = b.ins().iconst(types::I32, 33);
     b.ins()
@@ -1315,7 +1315,7 @@ pub(super) fn inline_vec_ref(
     b.ins()
         .brif(in_b, sok, &[], deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(sok);
-    let elem2 = b.ins().iadd_imm(sptr, idx * STRIDE);
+    let elem2 = b.ins().iadd_imm_s(sptr, idx * STRIDE);
     let s0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem2, 0);
     let s1 = b.ins().load(
         types::I64,

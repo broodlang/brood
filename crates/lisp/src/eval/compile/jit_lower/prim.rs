@@ -55,8 +55,8 @@ pub(super) fn emit_prim1(
             // nil / non-list / type error). The result is an arbitrary Value, so it's
             // a Handle.
             let [w0, w1, w2] = read_words(b, operand, frame);
-            let tagb = b.ins().band_imm(w0, 0xff);
-            let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
+            let tagb = b.ins().band_imm_s(w0, 0xff);
+            let is_pair = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_PAIR as i64);
             let cont = b.create_block();
             let __dr = b.ins().iconst(types::I32, 4);
             b.ins()
@@ -82,8 +82,8 @@ pub(super) fn emit_prim1(
                 // their slabs are `boxcar::Vec`, chunked rather than contiguous, so there
                 // is no single base pointer to hoist. One call per read is the cheap
                 // option, and it keeps the arm native instead of surrendering the loop.
-                let high2 = b.ins().ushr_imm(w1, 62);
-                let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0i64);
+                let high2 = b.ins().ushr_imm_s(w1, 62);
+                let is_local = b.ins().icmp_imm_s(IntCC::Equal, high2, 0i64);
                 let local_cont = b.create_block();
                 let shared_cont = b.create_block();
                 let join = b.create_block();
@@ -111,19 +111,19 @@ pub(super) fn emit_prim1(
                 b.seal_block(local_cont);
                 // Age bit 61: 0=nursery, 1=old. After the LOCAL check, bits 62-63 are
                 // 0, so ushr by 61 gives exactly 0 or 1.
-                let age_shifted = b.ins().ushr_imm(w1, 61);
-                let is_old = b.ins().icmp_imm(IntCC::NotEqual, age_shifted, 0i64);
+                let age_shifted = b.ins().ushr_imm_s(w1, 61);
+                let is_old = b.ins().icmp_imm_s(IntCC::NotEqual, age_shifted, 0i64);
                 let base = b.ins().select(is_old, old_base, nursery_base);
                 // Index: lower 32 bits. stride = 48 (two 24-byte Values).
-                let idx = b.ins().band_imm(w1, 0xFFFF_FFFFi64);
-                let byte_off = b.ins().imul_imm(idx, 48i64);
+                let idx = b.ins().band_imm_s(w1, 0xFFFF_FFFFi64);
+                let byte_off = b.ins().imul_imm_s(idx, 48i64);
                 let pair_ptr = b.ins().iadd(base, byte_off);
                 // Car at offset 0, cdr at offset 24 (one Value = 24 bytes).
                 let field_off: i64 = if matches!(op, PrimOp1::Rest) { 24 } else { 0 };
                 let field_ptr = if field_off == 0 {
                     pair_ptr
                 } else {
-                    b.ins().iadd_imm(pair_ptr, field_off)
+                    b.ins().iadd_imm_s(pair_ptr, field_off)
                 };
                 let rw0 = b
                     .ins()
@@ -160,8 +160,8 @@ pub(super) fn emit_prim1(
             // Tag-only nil check: compare the tag byte to 0 (Tag::Nil). Result is an
             // i8 comparison value (truthy in JumpIfFalse).
             let [w0, _, _] = read_words(b, operand, frame);
-            let tagb = b.ins().band_imm(w0, 0xff);
-            let is_nil = b.ins().icmp_imm(IntCC::Equal, tagb, 0);
+            let tagb = b.ins().band_imm_s(w0, 0xff);
+            let is_nil = b.ins().icmp_imm_s(IntCC::Equal, tagb, 0);
             stack.push(Op::Int(is_nil));
         }
         PrimOp1::IsPair => {
@@ -169,8 +169,8 @@ pub(super) fn emit_prim1(
             // SeqViews also carry TAG_PAIR — matching nil?/pair? semantics from
             // builtins.rs.
             let [w0, _, _] = read_words(b, operand, frame);
-            let tagb = b.ins().band_imm(w0, 0xff);
-            let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
+            let tagb = b.ins().band_imm_s(w0, 0xff);
+            let is_pair = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_PAIR as i64);
             stack.push(Op::Int(is_pair));
         }
         PrimOp1::IsEmpty => {
@@ -178,9 +178,9 @@ pub(super) fn emit_prim1(
             // need a heap-length check — let the native handle them. nqueens `safe?`
             // only ever sees nil/pair.
             let [w0, _, _] = read_words(b, operand, frame);
-            let tagb = b.ins().band_imm(w0, 0xff);
-            let is_nil = b.ins().icmp_imm(IntCC::Equal, tagb, 0);
-            let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
+            let tagb = b.ins().band_imm_s(w0, 0xff);
+            let is_nil = b.ins().icmp_imm_s(IntCC::Equal, tagb, 0);
+            let is_pair = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_PAIR as i64);
             let is_nil_or_pair = b.ins().bor(is_nil, is_pair);
             let cont = b.create_block();
             let __dr = b.ins().iconst(types::I32, 5);
@@ -208,7 +208,7 @@ pub(super) fn emit_prim1(
                     stack.push(Op::Float(b.ins().sqrt(v)));
                 }
                 Op::Int(v) if b.func.dfg.value_type(v) == types::I64 => {
-                    let pos = b.ins().icmp_imm(IntCC::SignedGreaterThan, v, 0);
+                    let pos = b.ins().icmp_imm_s(IntCC::SignedGreaterThan, v, 0);
                     let cont = b.create_block();
                     let __dr = b.ins().iconst(types::I32, 7);
                     b.ins()
@@ -221,10 +221,10 @@ pub(super) fn emit_prim1(
                     // Type-erased (slot / call result): runtime tag dispatch — Float >
                     // 0 → fsqrt; Int > 0 → convert + fsqrt; anything else → deopt.
                     let [w0, w1, _] = read_words(b, operand, frame);
-                    let tagb = b.ins().band_imm(w0, 0xff);
+                    let tagb = b.ins().band_imm_s(w0, 0xff);
                     let done = b.create_block();
                     b.append_block_param(done, types::F64);
-                    let is_f = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_FLOAT as i64);
+                    let is_f = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_FLOAT as i64);
                     let fblk = b.create_block();
                     let not_f = b.create_block();
                     b.ins().brif(is_f, fblk, &[], not_f, &[]);
@@ -240,13 +240,13 @@ pub(super) fn emit_prim1(
                     let fr = b.ins().sqrt(fv);
                     b.ins().jump(done, &[BlockArg::Value(fr)]);
                     b.switch_to_block(not_f);
-                    let is_i = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
+                    let is_i = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_INT as i64);
                     let iblk = b.create_block();
                     let __dr = b.ins().iconst(types::I32, 9);
                     b.ins()
                         .brif(is_i, iblk, &[], deopt, &[BlockArg::Value(__dr)]);
                     b.switch_to_block(iblk);
-                    let posi = b.ins().icmp_imm(IntCC::SignedGreaterThan, w1, 0);
+                    let posi = b.ins().icmp_imm_s(IntCC::SignedGreaterThan, w1, 0);
                     let iok = b.create_block();
                     let __dr = b.ins().iconst(types::I32, 10);
                     b.ins()
@@ -288,10 +288,10 @@ pub(super) fn emit_prim1(
                     // Type-erased (slot / call result / i8 compare): tag byte → table
                     // load → boxed keyword.
                     let [w0, _, _] = read_words(b, operand, frame);
-                    let tagb = b.ins().band_imm(w0, 0xff);
+                    let tagb = b.ins().band_imm_s(w0, 0xff);
                     let table = crate::core::value::jit_layout::type_of_kw_table();
                     let base = b.ins().iconst(ptr_ty, table.as_ptr() as i64);
-                    let off = b.ins().imul_imm(tagb, 4);
+                    let off = b.ins().imul_imm_s(tagb, 4);
                     let addr = b.ins().iadd(base, off);
                     let sym = b.ins().load(types::I32, MemFlagsData::new(), addr, 0);
                     let w1 = b.ins().uextend(types::I64, sym);
@@ -449,14 +449,14 @@ pub(super) fn emit_prim3_table_put(
         let g_enc = b.create_block();
         let enc_done = b.create_block();
         b.append_block_param(enc_done, types::I64);
-        let nul = b.ins().icmp_imm(IntCC::Equal, slots, 0);
+        let nul = b.ins().icmp_imm_s(IntCC::Equal, slots, 0);
         b.ins().brif(nul, ffi, &[], g_key, &[]);
         b.switch_to_block(g_key);
-        let ktag = b.ins().band_imm(kw[0], 0xff);
-        let k_int = b.ins().icmp_imm(IntCC::Equal, ktag, TAG_INT as i64);
+        let ktag = b.ins().band_imm_s(kw[0], 0xff);
+        let k_int = b.ins().icmp_imm_s(IntCC::Equal, ktag, TAG_INT as i64);
         b.ins().brif(k_int, g_bounds, &[], ffi, &[]);
         b.switch_to_block(g_bounds);
-        let oob = b.ins().icmp_imm(
+        let oob = b.ins().icmp_imm_s(
             IntCC::UnsignedGreaterThanOrEqual,
             kw[1],
             crate::core::table::DENSE_KEY_MAX,
@@ -465,35 +465,35 @@ pub(super) fn emit_prim3_table_put(
         // Encode the value into a tagged slot word (mirrors `table::slot_enc`): Int
         // (61-bit) / Bool / Nil; else FFI.
         b.switch_to_block(g_enc);
-        let vtag = b.ins().band_imm(vw[0], 0xff);
+        let vtag = b.ins().band_imm_s(vw[0], 0xff);
         let enc_int_range = b.create_block();
         let t_bool = b.create_block();
-        let v_int = b.ins().icmp_imm(IntCC::Equal, vtag, TAG_INT as i64);
+        let v_int = b.ins().icmp_imm_s(IntCC::Equal, vtag, TAG_INT as i64);
         b.ins().brif(v_int, enc_int_range, &[], t_bool, &[]);
         b.switch_to_block(enc_int_range);
-        let sh = b.ins().ishl_imm(vw[1], 3);
-        let back = b.ins().sshr_imm(sh, 3);
+        let sh = b.ins().ishl_imm_s(vw[1], 3);
+        let back = b.ins().sshr_imm_s(sh, 3);
         let fits = b.ins().icmp(IntCC::Equal, back, vw[1]);
         let enc_int_ok = b.create_block();
         b.ins().brif(fits, enc_int_ok, &[], ffi, &[]);
         b.switch_to_block(enc_int_ok);
-        let wi = b.ins().bor_imm(sh, crate::core::table::INT_TAG as i64);
+        let wi = b.ins().bor_imm_s(sh, crate::core::table::INT_TAG as i64);
         b.ins().jump(enc_done, &[BlockArg::Value(wi)]);
         b.switch_to_block(t_bool);
-        let v_bool = b.ins().icmp_imm(IntCC::Equal, vtag, TAG_BOOL as i64);
+        let v_bool = b.ins().icmp_imm_s(IntCC::Equal, vtag, TAG_BOOL as i64);
         let t_nil = b.create_block();
         let enc_bool = b.create_block();
         b.ins().brif(v_bool, enc_bool, &[], t_nil, &[]);
         b.switch_to_block(enc_bool);
         // Bool payload byte may carry padding above bit 0 — mask, then 3 - bit → TRUE
         // (1→2) / FALSE (0→3).
-        let bit = b.ins().band_imm(vw[1], 1);
+        let bit = b.ins().band_imm_s(vw[1], 1);
         let three = b.ins().iconst(types::I64, 3);
         let wb = b.ins().isub(three, bit);
         b.ins().jump(enc_done, &[BlockArg::Value(wb)]);
         b.switch_to_block(t_nil);
         // `Value::Nil`'s discriminant is 0 (declaration order).
-        let v_nil = b.ins().icmp_imm(IntCC::Equal, vtag, 0);
+        let v_nil = b.ins().icmp_imm_s(IntCC::Equal, vtag, 0);
         let enc_nil = b.create_block();
         b.ins().brif(v_nil, enc_nil, &[], ffi, &[]);
         b.switch_to_block(enc_nil);
@@ -503,7 +503,7 @@ pub(super) fn emit_prim3_table_put(
         b.ins().jump(enc_done, &[BlockArg::Value(wn)]);
         b.switch_to_block(enc_done);
         let word = b.block_params(enc_done)[0];
-        let off = b.ins().imul_imm(kw[1], 8);
+        let off = b.ins().imul_imm_s(kw[1], 8);
         let addr = b.ins().iadd(slots, off);
         let old = b.ins().atomic_rmw(
             types::I64,
@@ -514,7 +514,7 @@ pub(super) fn emit_prim3_table_put(
         );
         let moved = b
             .ins()
-            .icmp_imm(IntCC::Equal, old, crate::core::table::SLOT_MOVED as i64);
+            .icmp_imm_s(IntCC::Equal, old, crate::core::table::SLOT_MOVED as i64);
         let g_flag = b.create_block();
         b.ins().brif(moved, ffi, &[], g_flag, &[]);
         // Post-op dense-flag re-check (the migration protocol on `table::Store`): still
@@ -537,7 +537,7 @@ pub(super) fn emit_prim3_table_put(
         let slow = b.create_block();
         b.ins().brif(status, slow, &[], merge, &[]);
         b.switch_to_block(slow);
-        let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
+        let is_err = b.ins().icmp_imm_s(IntCC::Equal, status, 2);
         let __dr = b.ins().iconst(types::I32, 11);
         b.ins()
             .brif(is_err, error, &[], deopt, &[BlockArg::Value(__dr)]);
@@ -559,7 +559,7 @@ pub(super) fn emit_prim3_table_put(
         let slow = b.create_block();
         b.ins().brif(status, slow, &[], cont, &[]);
         b.switch_to_block(slow);
-        let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
+        let is_err = b.ins().icmp_imm_s(IntCC::Equal, status, 2);
         let __dr = b.ins().iconst(types::I32, 12);
         b.ins()
             .brif(is_err, error, &[], deopt, &[BlockArg::Value(__dr)]);
@@ -637,14 +637,14 @@ pub(super) fn emit_prim2(
             let g_load = b.create_block();
             let g_flag = b.create_block();
             let absent = b.create_block();
-            let nul = b.ins().icmp_imm(IntCC::Equal, slots, 0);
+            let nul = b.ins().icmp_imm_s(IntCC::Equal, slots, 0);
             b.ins().brif(nul, ffi, &[], g_key, &[]);
             b.switch_to_block(g_key);
-            let ktag = b.ins().band_imm(kw[0], 0xff);
-            let k_int = b.ins().icmp_imm(IntCC::Equal, ktag, TAG_INT as i64);
+            let ktag = b.ins().band_imm_s(kw[0], 0xff);
+            let k_int = b.ins().icmp_imm_s(IntCC::Equal, ktag, TAG_INT as i64);
             b.ins().brif(k_int, g_bounds, &[], ffi, &[]);
             b.switch_to_block(g_bounds);
-            let oob = b.ins().icmp_imm(
+            let oob = b.ins().icmp_imm_s(
                 IntCC::UnsignedGreaterThanOrEqual,
                 kw[1],
                 crate::core::table::DENSE_KEY_MAX,
@@ -654,14 +654,14 @@ pub(super) fn emit_prim2(
             let no = b.ins().iconst(types::I8, 0);
             b.ins().jump(merge, &[BlockArg::Value(no)]);
             b.switch_to_block(g_load);
-            let off = b.ins().imul_imm(kw[1], 8);
+            let off = b.ins().imul_imm_s(kw[1], 8);
             let addr = b.ins().iadd(slots, off);
             let sv = b
                 .ins()
                 .atomic_load(types::I64, MemFlagsData::trusted(), addr);
             let moved = b
                 .ins()
-                .icmp_imm(IntCC::Equal, sv, crate::core::table::SLOT_MOVED as i64);
+                .icmp_imm_s(IntCC::Equal, sv, crate::core::table::SLOT_MOVED as i64);
             b.ins().brif(moved, ffi, &[], g_flag, &[]);
             b.switch_to_block(g_flag);
             let f = b
@@ -672,7 +672,7 @@ pub(super) fn emit_prim2(
             b.switch_to_block(done);
             let present =
                 b.ins()
-                    .icmp_imm(IntCC::NotEqual, sv, crate::core::table::SLOT_EMPTY as i64);
+                    .icmp_imm_s(IntCC::NotEqual, sv, crate::core::table::SLOT_EMPTY as i64);
             b.ins().jump(merge, &[BlockArg::Value(present)]);
             // FFI fallback: the exact `table-has?`; its `Value::Bool` result reduces to
             // the same i8.
@@ -680,8 +680,8 @@ pub(super) fn emit_prim2(
             let h = table_prim(b, funcs.thas, [w0, w1, w2], kw, frame, funcs);
             let hb = match h {
                 Op::Handle(_, hw1, _) => {
-                    let bit = b.ins().band_imm(hw1, 1);
-                    b.ins().icmp_imm(IntCC::NotEqual, bit, 0)
+                    let bit = b.ins().band_imm_s(hw1, 1);
+                    b.ins().icmp_imm_s(IntCC::NotEqual, bit, 0)
                 }
                 _ => unreachable!("table_prim returns a Handle"),
             };
@@ -723,7 +723,7 @@ pub(super) fn emit_prim2(
             b.ins()
                 .brif(oob, deopt, &[BlockArg::Value(__dr)], cont, &[]);
             b.switch_to_block(cont);
-            let off = b.ins().imul_imm(idx, STRIDE);
+            let off = b.ins().imul_imm_s(idx, STRIDE);
             let elem = b.ins().iadd(ptr, off);
             let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem, 0);
             let w1 = b.ins().load(
@@ -844,7 +844,7 @@ pub(super) fn emit_prim2_slot_slot(
             b.ins()
                 .brif(oob, deopt, &[BlockArg::Value(__dr)], cont, &[]);
             b.switch_to_block(cont);
-            let off = b.ins().imul_imm(idx, STRIDE);
+            let off = b.ins().imul_imm_s(idx, STRIDE);
             let elem = b.ins().iadd(ptr, off);
             let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem, 0);
             let w1 = b.ins().load(
