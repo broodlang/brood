@@ -145,12 +145,12 @@ puts one back."
   (let ([base sub] (narrow text point)
         rp (- point base))
     {:base base :rp rp :enc (enclosing (tree sub) rp)}))
-(sig sexp-site (string int -> map))
+(sig sexp-site (string int -> (record &open :base int :rp int)))
 
 (defn- sexp-abs (site p)
   "A window-relative position of `site` back in the text."
   (+ (:base site) p))
-(sig sexp-abs (map int -> int))
+(sig sexp-abs ((record &open :base int) int -> int))
 
 (defn- sexp-top-level? (site)
   (= (get (:enc site) :kind) :root))
