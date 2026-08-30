@@ -453,7 +453,7 @@ inlines, while this wrapper stays a call — and it does not mislead past two ar
 ;; `:use` takes a symbol, so the diagnostic can only name `not`; the docstring carries the
 ;; full replacement. Kept defined (and tested) until the removal — deprecation is advisory,
 ;; so nothing downstream breaks yet.
-(%register-meta 'not= [:deprecated "0.19.1" :use 'not])
+(%register-meta 'not= [:deprecated "0.19.0" :use 'not])
 
 ;; ---- control-flow macros ----
 ;; These read like special forms but are ordinary macros over `if`/`do`/`let`.
