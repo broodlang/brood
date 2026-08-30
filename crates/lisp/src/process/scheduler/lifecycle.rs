@@ -197,6 +197,7 @@ fn exit_with(pid: u64, reason: Message, hard: bool) {
     // block through a lost `notify`.
     let (parked, cv_waiter) = {
         let mut st = crate::core::sync::lock(&mailbox.state);
+        st.wake_pending = true;
         (wake_parked(&mut st), st.cv_waiters > 0)
     };
     // Both paths, unconditionally (`mailbox::wake_both`). The `else` this replaces assumed a

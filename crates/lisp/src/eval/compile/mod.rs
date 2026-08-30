@@ -2292,6 +2292,23 @@ fn probe_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compiled
 /// handle is memoized per `(closure, argc)` in the `vm_cache` entry, so the steady state of a
 /// per-element closure call is a hash lookup plus a process-local `Arc` clone — no
 /// allocation, and no touch of the shared arm's refcount. See `Heap::vm_cache_arm_handle`.
+/// Does this arm's chunk call `%receive` (directly)? The tree-walker→VM router must not
+/// route such an arm: a `receive` inside the routed `vm_apply` is a NESTED run, so it
+/// cannot capture-suspend — it dirty-blocks its worker on the mailbox condvar (§7.4),
+/// and KI-88's chaos combo showed a routed reader wedging exactly there (core stack:
+/// `receive_match ← %receive ← … ← vm_apply ← tw_vm_route`). Left tree-walked, the same
+/// receive uses the path those shapes have always used. This is the JIT's `%receive`
+/// fence (`chunk_in_jit_subset`) applied to the router; lifting either is §7.3's
+/// receive-as-exit design, not a predicate tweak.
+pub(crate) fn arm_calls_receive(arm: &CompiledArm) -> bool {
+    let receive_sym = crate::core::value::intern("%receive");
+    arm.chunk.as_ref().is_none_or(|c| {
+        c.code
+            .iter()
+            .any(|inst| matches!(inst, Inst::Call { head: Some(h), .. } if *h == receive_sym))
+    })
+}
+
 pub(crate) fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<ArmHandle>> {
     let key = cache_key(heap, id)?;
     if let Some(hit) = heap.vm_cache_arm_handle(key, argc) {

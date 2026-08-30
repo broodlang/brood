@@ -238,9 +238,28 @@ is cheap (`--test` on the four concatenated sections, seconds); shrink further b
 theorising — tonight's session got it to "created but never scheduled" and stopped there
 deliberately (scheduler sessions want fresh eyes, and the router is gated off meanwhile).
 
+**Session 2 (2026-08-30, later) — three layers peeled, canonical repro narrowed:**
+- The wedge is NOT a lost condvar notify: `MailboxState.wake_pending` (the BEAM-style
+  latch, landed with this update) closes every notify-ordering hole by construction, fixed
+  the four-section combo 10/10 — and the FULL chaos2 file still wedges one reader.
+- The router now carries the `%receive` fence (`arm_calls_receive`): a receive-bearing arm
+  is never routed, so no receive becomes a nested-vm dirty block that tree-walking would
+  have handled. Necessary (a core dump showed a reader wedged at
+  `receive_match ← %receive ← vm_apply ← tw_vm_route`), not sufficient.
+- The surviving wedge, fully instrumented on the full file: one reader of fifty parks at
+  its `receive` having executed NEITHER of the two forms before it (a kernel-table probe
+  and the `send` — the server counts 49 gets; the probe table holds 49 entries and no
+  nil-keyed one), while a core dump shows no thread inside it — i.e. **execution entered
+  the body mid-way, at the receive**, which smells like a resume/continuation applied to a
+  first-run process or an ip/frame mix-up in the capture machinery, not messaging at all.
+  `BROOD_SCHED_DBG=1` (catalogued) traces the per-pid lifecycle that found this.
+
 **Held back by it:** `BROOD_TW_REENTRY` stays opt-in (60× on the viral defer shape,
-startup −6.9% — measured and waiting). Flip the default WITH this fix, re-running the full
-breakage suite and `live_migration` under load.
+startup −6.9% — measured and waiting). The default path (router off) passes the full
+suite, the whole breakage suite, and the wake-sensitive loop ×5 with the latch + fence in.
+Next session: chase the mid-body entry — instrument `Suspended.cur.ip` at park and at
+resume for the wedged pid; the four-section c3 combo in the KI's scratch trail is the
+fast repro, the full chaos2 file the canonical one.
 
 ## KI-87 — the checker's cycle guard released the symbol it refused: `nest run` at 54 GB, three 19 GB test processes ✅ FIXED 2026-08-29
 

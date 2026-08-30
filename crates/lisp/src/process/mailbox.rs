@@ -295,6 +295,16 @@ pub(super) struct MailboxState {
     /// or can yet be committed to the blocked side. See `wake_both` for why the skip
     /// cannot recreate the lost-wake bug it was added to fix.
     pub(super) cv_waiters: u32,
+    /// LATCHED wake (BEAM's `ERTS_PSFLG_ACTIVE` shape): every wake site sets this under
+    /// the state lock alongside its wake-relevant change; a waiter consumes it under the
+    /// same lock before committing to `Condvar::wait`. The `cv_waiters` count already
+    /// gates the notify syscall, and its ordering argument *should* make this flag
+    /// redundant — but a counted protocol has no second chance if any site's ordering is
+    /// ever wrong, and one practical counterexample surfaced within hours of the count
+    /// landing (KI-88's chaos combo wedged one dirty-blocked reader per run; with the
+    /// latch it does not). A latch's failure mode is one extra rescan; a count's is a
+    /// process asleep forever. Both stay.
+    pub(super) wake_pending: bool,
 }
 
 /// How many deactivated aliases one mailbox remembers. Fixed and small — the whole
@@ -458,6 +468,7 @@ impl Mailbox {
                 recv_deadline: None,
                 dead_aliases: DeadAliases::default(),
                 cv_waiters: 0,
+                wake_pending: false,
             }),
             cv: Condvar::new(),
             // The root (which never goes through enqueue/run_one) keeps this; a
@@ -803,6 +814,7 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> LocalDelivery {
         #[cfg(feature = "dev-tools")]
         trace: None,
     });
+    st.wake_pending = true;
     let cv_waiter = st.cv_waiters > 0;
     drop(st);
     // Both paths, for the reason `wake_both` documents: taking a `waiter` here does not prove
@@ -835,6 +847,7 @@ fn deliver_envelope_timed(pid: u64, env: Envelope) {
         }
         st.push(env);
         let parked = wake_parked(&mut st);
+        st.wake_pending = true;
         let cv_waiter = st.cv_waiters > 0;
         drop(st);
         wake_both(&mb, parked, cv_waiter);
@@ -1661,6 +1674,15 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
     // The decrement runs on the guard `wait` hands back — exactly once per
     // increment, on timeout and spurious wakes included. See `wake_both`.
     let mut st = st;
+    // Latched wake: a wake recorded since our scan means new state to look at — treat
+    // it exactly like a spurious wakeup (return; `receive_match` rescans). Consumed
+    // under the same lock `Condvar::wait` would atomically release, so no wake set
+    // after this check can be missed: its setter either ran before (we see the flag)
+    // or will run after our register below (and sees `cv_waiters > 0`, so it notifies).
+    if st.wake_pending {
+        st.wake_pending = false;
+        return;
+    }
     match deadline {
         Some(d) => {
             // The SCHEDULER clock — the one `d` was minted on. See the doc comment.
@@ -1673,12 +1695,14 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
                     .wait_timeout(st, d - now)
                     .unwrap_or_else(|e| e.into_inner());
                 g.cv_waiters -= 1;
+                g.wake_pending = false;
             }
         }
         None => {
             st.cv_waiters += 1;
             let mut g = ctx.mailbox.cv.wait(st).unwrap_or_else(|e| e.into_inner());
             g.cv_waiters -= 1;
+            g.wake_pending = false;
         }
     }
 }
@@ -1713,6 +1737,7 @@ pub(super) fn wake_for_timeout(pid: u64, gen: u64) {
         }
         let mut st = crate::core::sync::lock(&mb.state);
         let parked = wake_parked(&mut st);
+        st.wake_pending = true;
         let cv_waiter = st.cv_waiters > 0;
         drop(st);
         // Both paths (`wake_both`). This site had **no** condvar notify at all — alone among

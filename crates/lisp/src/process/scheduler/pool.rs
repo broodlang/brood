@@ -11,8 +11,22 @@ use super::*;
 /// Push a ready process onto its owning worker's queue and wake that worker.
 /// Preempt re-enqueue routes here so a hot process stays on its worker (cache
 /// locality); a *woken-from-park* process may migrate instead — see [`wake_enqueue`].
+
+/// `BROOD_SCHED_DBG=1`: trace every enqueue, quantum start (with the body's source
+/// prefix) and quantum outcome, per pid. The tool that turned KI-88's "one reader of
+/// fifty is lost" into "created, enqueued, RAN, and its quantum ended/hung <thus>" in
+/// three runs — the per-pid lifecycle is otherwise invisible (counters aggregate).
+/// Read once and cached; costs nothing when off.
+fn sched_dbg() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_SCHED_DBG").is_some())
+}
+
 pub(crate) fn enqueue(mut proc: Box<Process>) {
     let wid = proc.worker_id;
+    if sched_dbg() {
+        eprintln!("[sched] enq pid={} wid={}", proc.pid, wid);
+    }
     proc.queued_at = now_nanos();
     set_status(&proc.mailbox, ST_RUNNABLE); // queued, awaiting a worker turn
                                             // Count it as stealable runnable work (the `try_steal` fast-path hint). Balanced by
@@ -444,6 +458,34 @@ fn run_one(proc: Box<Process>) {
 }
 
 fn run_one_timed(mut proc: Box<Process>) {
+    if sched_dbg() {
+        let body = match proc.body {
+            crate::core::value::Value::Fn(id) => {
+                let c = proc.heap.closure(id);
+                let src = c
+                    .arms
+                    .first()
+                    .and_then(|a| a.body.first())
+                    .map(|&f| crate::syntax::printer::print(&proc.heap, f))
+                    .unwrap_or_default();
+                let src: String = src.chars().take(120).collect();
+                format!(
+                    "fn name={:?} env={:?} src={}",
+                    c.name.map(crate::core::value::symbol_name_ref),
+                    c.env,
+                    src
+                )
+            }
+            other => format!("{other:?}"),
+        };
+        eprintln!(
+            "[sched] run pid={} wid={} resume={} body={}",
+            proc.pid,
+            proc.worker_id,
+            proc.resume.is_some(),
+            body
+        );
+    }
     let mailbox = Arc::clone(&proc.mailbox);
     let wid = proc.worker_id;
     // Pulled to run: the single `STEALABLE` decrement site, paired with the increment in
@@ -510,6 +552,17 @@ fn handle_capture_outcome(
     outcome: std::thread::Result<Result<crate::eval::compile::VmOutcome, LispError>>,
 ) {
     use crate::eval::compile::VmOutcome;
+    if sched_dbg() {
+        let o = match &outcome {
+            Ok(Ok(VmOutcome::Done(_))) => "done".to_string(),
+            Ok(Ok(VmOutcome::Suspended(_))) => "suspended".to_string(),
+            Ok(Ok(VmOutcome::Preempted(_))) => "preempted".to_string(),
+            Ok(Ok(VmOutcome::Killed)) => "killed".to_string(),
+            Ok(Err(e)) => format!("err:{}", e.message),
+            Err(_) => "panic".to_string(),
+        };
+        eprintln!("[sched] end pid={} outcome={o}", proc.pid);
+    }
     match outcome {
         Ok(Ok(VmOutcome::Done(_))) => {
             deregister(

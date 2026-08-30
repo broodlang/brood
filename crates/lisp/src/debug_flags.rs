@@ -94,6 +94,16 @@ pub const FLAGS: &[DebugFlag] = &[
         OPTOUT,
         "opt IN (=1) to the tree-walker routing VM-eligible callees back to the engine (60x on the viral defer shape; startup -7%). Off by default until KI-88 (a routed spawn burst can strand one process unscheduled) is fixed",
     ),
+    f(
+        "BROOD_SCHED_DBG",
+        SCHED,
+        "trace every enqueue, quantum start (body source prefix) and quantum outcome per pid — the per-pid lifecycle counters cannot show (KI-88's tool)",
+    ),
+    f(
+        "BROOD_ROUTE_DBG",
+        ATTRIBUTION,
+        "name each closure the tree-walker routes to the VM (pairs with BROOD_TW_REENTRY)",
+    ),
     // ---- JIT ----
     f(
         "BROOD_JIT_DUMP_IR",
