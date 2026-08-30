@@ -207,7 +207,7 @@ conversion, the wall clock, the allocator counters, the `Ty`-lattice checker
 pass, or a hook into `eval`/the reader. None of it can be written in Brood. Everything that *can* be is already
 in the prelude — including the tag predicates (over `type-of`), the full
 arithmetic/comparison families `+ - * / < <= > >= =` (over `%add`/`%lt`/`%eq`; also
-~~`not=`~~, deprecated since 0.19.0 — write `(not (= a b))`),
+~~`not=`~~, deprecated since 0.19.1 — write `(not (= a b))`),
 the whole math library `mod`/`quot`/`ceil`/`round`/`pow`/`sqrt`/`even?`/`odd?` +
 variadic `min`/`max` (over `rem`/`floor`/`/`/`*`/`<` — `sqrt` is Newton's method),
 the whole sequence library

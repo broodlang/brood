@@ -7430,6 +7430,65 @@ whose expanders defer BY DESIGN (fresh gensyms per invocation can't expand once 
 compile). Compiling those means emitting builder code that calls gensym at runtime — a
 real feature, recorded in §7.3 as the next slice.
 
+### 2026-08-30, later still — 218 signatures move below their definitions, and the gate that will keep them there
+
+`(sig …)` is a declaration by default and an **action** under `BROOD_CONTRACTS=1`, where it
+rebinds the name to a checking shim — so a sig above its `defn` is a forward reference that
+takes the module load down. That is KI-81's defect 3, and the signature-adoption sweep
+re-introduced it 211 times in `std/` plus 7 in the prelude. `cli::contracts_mode` stayed green
+throughout: it proves the *prelude* boots and writes its own sigs correctly, and asserted
+nothing about the other 400 files.
+
+All 218 moved. The rule is now asserted directly by **`crates/lisp/tests/sig_placement.rs`** —
+a textual scan of every `.blsp` that names the line to move, sabotage-verified. Above-the-defn
+is the natural place to write a signature, so this needed a gate rather than a fix.
+
+Two things fell out of it:
+
+- **`sig!` never handled `&optional`** — read as fixed parameters the marker counts as one, so
+  `(sig pad-left (string int &optional string -> string))` armed a 4-arity shim over a
+  2-3-arity function and every `(string/pad-left s 10)` was an arity error under contracts.
+  Unreachable before only because the module died earlier. The shim is variadic now and
+  `apply`s just what it received, so the callee's own defaults survive; an explicit `nil` for
+  an absent optional would have changed answers silently. `contracts_mode.rs` covers all three
+  cases. Cost: `arity-of` reports `2+` for a wrapped name, which the reload check notes.
+- **A bulk edit moved two multi-line sigs by their first line only**, leaving
+  `std/tool/observer.blsp` and `std/editor/lineedit.blsp` unparseable — and the symptom was
+  three `unbound symbol` warnings in `tests/debug_test.blsp`, a file with nothing wrong with
+  it, because `nest check` could no longer load what it imported. **`nest format --check`
+  names the unparseable file; `nest check` blames the innocent one.** Reach for the formatter
+  first when warnings appear in a file you did not touch.
+
+### 2026-08-30, later still — v0.19.1, and the tree-walker differential job that had been red since 06:57Z
+
+**v0.19.1 tagged** (type-guard signatures ADR-301, `not=` deprecated ADR-300, the ADR-283
+meta seam reaching prelude names, 218 sigs below their definitions). Installed, tooling
+re-dropped across the seventeen siblings, hive re-pinned to `e238a884`.
+
+**Then the CI check the release recipe asks for** (`make green`, not the run list) found the
+tree-walker differential job red on every completed run since `fe0a1494` — six in a row, all
+the same line: `TIMEOUT [120s] brood::jit_suspend_latch
+an_arm_hosting_a_parked_receive_latches_and_later_parks_capture`. Not visible from the run
+list, where every one of those runs was also cancelled-or-superseded by the next push.
+
+The cause is in the test's own module doc: it is **vacuous by default** today (the shapes it
+builds no longer lower), and it discovers that the slow way — forty phase-1 rounds of a 150 ms
+sleep plus a 50 000-iteration re-heat, before printing "nothing tiered; vacuous". On the VM
+that walk is ~8 s; on the tree-walker it measured **42.8 s here** and past 120 s on the CI
+runner. It went red when the strict-over-std sweep landed, which added enough prelude work to
+push the runner over the cap — the sweep did not break anything, it moved a test that was
+already spending its whole budget on a foregone conclusion.
+
+Fix: both tests ask `eval::compile::tier_ceiling()` first and exit vacuous when it is below
+`Native` — under that ceiling no arm can lower, so a dirty block is impossible by
+construction and the hunt has nothing to find. 0.006 s on the tree-walker now; the default
+run is unchanged (8.5 s, still walking to its own vacuous exit, which is the point of the
+test remaining armed). Asks the runtime, not the environment: the ceiling has three spellings.
+
+Also confirmed on the way: the two other failures in that window were the mangled
+multi-line sigs (`image_matches_source` parse error at line 852, the suite's "failed to
+load") — fixed by the sweep — and one `observe_attach` KI-38 listen stall at 20 s.
+
 ## 2026-08-30 (fifth) — the tree-walker learns to hand back: eligible callees route to the VM
 
 The broadest lever from the §7.3 postmortem, landed. `apply_closure` never re-entered the
