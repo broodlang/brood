@@ -282,6 +282,19 @@ entering/leaving `run_one_timed` (not prints — a per-pid atomic ledger), and
 startup −6.9% — measured and waiting). The default path (router off) passes the full
 suite, the whole breakage suite, and the wake-sensitive loop ×5 with the latch + fence in.
 
+**Session 4 (2026-08-30 evening) — DORMANT: the repro died with the binary that carried
+it.** The quantum ledger (a per-thread `(pid, started)` map set around `drive()`, with a
+watchdog naming any quantum older than 3 s — now in-tree, armed by `BROOD_SCHED_DBG`) was
+built to catch the vanishing quantum in the act. It never fired: after the 196-file format
+reflow (c8184ab3) the full chaos2 file passes 15/15 with the router on (all-core and
+2-core pinned), and a PRISTINE rebuild of b5ad1888 — the commit that failed 3/3 the same
+afternoon — passes 8/8. The failure was keyed to one incremental build's layout/timing and
+no reconstructable binary exhibits it. Seen many times with the root cause unfound, it is
+real until proven otherwise: the router stays opt-in. If the wedge is next seen anywhere,
+arm `BROOD_SCHED_DBG=1` immediately (run/end/park/resume lines + the ledger watchdog),
+take a core inside the wedge window (`kill -ABRT`; apport keeps it), and PRESERVE THE
+EXACT BINARY — the artefact is the whole case.
+
 ## KI-87 — the checker's cycle guard released the symbol it refused: `nest run` at 54 GB, three 19 GB test processes ✅ FIXED 2026-08-29
 
 **Symptom.** `nest run` on bedit sat at 100% CPU with nothing running, RSS climbing past
