@@ -55,6 +55,14 @@ wasm_unsupported_builtins!(
     gui_font_register,
 );
 
+/// `(%gui-compiled?)` — deliberately NOT one of the unsupported stubs above. It is the
+/// predicate an app asks BEFORE a `gui/*` call it means to skip headlessly, so a version
+/// of it that raises defeats its whole purpose: the caller would have to catch, which is
+/// the very thing it exists to replace. On wasm the honest answer is simply `false`.
+pub(super) fn gui_compiled_p(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::boolean(false))
+}
+
 // Terminal-restore hooks called by always-compiled code (io/system/cli). On wasm
 // there is no terminal to restore, so these are no-ops.
 pub fn restore_raw() {}
