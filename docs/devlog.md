@@ -8672,5 +8672,5 @@ soundness condition violated routinely by the scoped suite. The registry lock cl
 one compounding corruption (wholesale resurrection, still guarded at 0/2000); the rest
 needs a design session — per-file process quiescence, or the spawn-time ownership
 generation `%isolate`'s own comment names as the missing primitive. Everything is in
-KI-89's residual block, including the artifacts (preserved binary + logs in the session
-scratchpad).
+KI-89's residual block. (The preserved binary and run logs were cleaned up at session
+end — the delete-the-images lever supersedes the artifact, reproducing on any binary.)
