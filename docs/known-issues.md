@@ -6380,6 +6380,29 @@ precisely the coincidence that deserves writing down rather than explaining away
 > PRESERVE THE BINARY, re-run it with `BROOD_REG_TRACE=1`, and read the chain= of
 > the seven writes against the RESTORE lines.** Watching, not open: 15 consecutive
 > green full runs and no reproducing artifact.
+>
+> **Follow-up, same day: a REPRO LEVER exists, the class is wider than registries, and
+> this needs a design session.** The residual fired again on the next combined-tree
+> build (first run after the build: `stdimage_test:60`, `*lineedit-keymap*` pre-bound),
+> that binary WAS preserved this time (`scratchpad/preserved-bin`, sha `8bd15795…`),
+> and it then ran 6/6 green warm and 3/3 green cold-booted (`touch` lever) — so the
+> boot cache is not the key either. The lever that works: **delete the stdlib images**
+> (`rm ~/.cache/brood/std-image-*.bin`) so every module load takes the slower SOURCE
+> path. Under that timing the class fires readily and in new shapes: run 1 failed
+> `ui_test.blsp:284` (records/vtables mixing — overlay ability records), and run 2
+> caught the mechanism LIVE mid-suite — a process died
+> `ability Temporal/->iso: no impl for :tempo/tempo — have (:datetime/…)`, i.e.
+> **tempo's `*impls*` entries were ripped out from under a RUNNING dispatch** (the id
+> resolved; the impl map only held datetime's) — and the run then degraded past a
+> 10-minute bound. So the full class is: **a per-file scope restore races processes
+> still RUNNING against the pre-restore globals — readers as well as writers** — the
+> `%isolate` soundness condition ("no other process mutating globals concurrently")
+> violated routinely by the scoped suite under source-path timing. The registry lock
+> fixed the one corruption that compounded (wholesale resurrection); the remaining
+> design question is structural: process quiescence at file boundaries, or the
+> spawn-time ownership generation the `%isolate` comment already names as the missing
+> primitive. A scheduler/runner design session with fresh eyes — do not patch it
+> piecemeal from here.
 
 **Symptom.** In a scoped `nest test` run, `std_check_test` ("the standard library carries no
 checker warnings") fails with ~15 warnings about a record defined in **another test file**:
