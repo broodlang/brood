@@ -5,6 +5,24 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**As of 2026-08-31 (the stability/perf audit session).** A source-level audit of the
+scheduler, heap/GC, VM hot path and dist/net/io found four silent correctness bugs — all
+**fixed this session with sabotage-verified guards** (KI-91 receive's stale-index
+consume: silent message loss + duplicate delivery; KI-92 an L1 `nil` message aliasing a
+free msg-roots slot; KI-93 the net reactor's silent death; KI-94 subprocesses orphaned on
+owner death — note that last one is a deliberate semantic change: a child now dies with
+its owning process). **Open items it filed:** KI-95 (promote duplicates DAG-shaped data —
+exponential, unmeasured), KI-96 (duplicate remote DOWN), KI-97 (the consolidated
+hardening list). The unmeasured perf candidates are `compute-frontier.md` **§7.8** — the
+top one is the i64 eligibility verdict recomputed per activation behind a global Mutex;
+every §7.8 item owes the full A/B protocol before shipping. Verified on the combined
+tree: suite 5351/5351, the scheduler/mailbox/GC binaries, GC_STRESS+VERIFY over the
+touched paths, tiers 0/1, clippy on CI's flags (a pre-existing clippy-1.98 `op_ref` lint
+in `inline.rs` was fixed — it would have been CI-red). Two traps recorded in the devlog:
+the 16 GB `ulimit -v` cap fails `wasm_sandbox_limits_test.blsp` even standalone
+(wasmtime reservations), and the lib *test* target under `--no-default-features` does
+not build (pre-existing, jit-gated test code; CI's `cargo check` gate passes).
+
 **Addendum 2026-08-30 — strict over std is at zero and gated.** `nest check --strict
 std/**/*.blsp` is a CI step now (0 warnings, from 336). The story and the fourteen checker
 gaps it closed are in `type-system-status.md` § "Strict to zero over std" and the devlog.

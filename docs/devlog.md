@@ -8417,3 +8417,57 @@ survives the treatment is the real story: **bintree −17.3%** from the hot re-l
 everything else within noise — supervisor/ring checked same-binary relower-on/off and
 flat. Meta-lesson for every future refresh: a published number from one invocation is one
 sample; before believing a delta against it, apply the same treatment to both sides.
+
+## 2026-08-31 — the stability/perf audit: four silent bugs fixed, the rest filed
+
+A source-level audit of the scheduler, heap/GC, VM hot path, and dist/net/io layers
+(four parallel read-only sweeps, top findings re-verified by hand against the code).
+**Four bugs fixed the same session, each with a sabotage-verified guard:**
+
+- **KI-91** — `receive`'s consume path removed the matched message by a **stale scan
+  index**: a `:when` guard's consuming nested receive shifts the queue with the lock
+  released (the `reinsert_at_seq` hazard, which had fixed the non-match path only), so a
+  neighbouring message was silently lost while the matched one stayed queued to deliver
+  twice. Consume now re-identifies the candidate by arrival `seq`, and the scan cursor
+  re-anchors per loop top. Guard: `tests/receive_consume_test.blsp` case 1 (sabotage red:
+  `[:dup 1]` + a lost `[:tail 2]`).
+- **KI-92** — an L1-delivered `nil` message **aliased a free msg-roots slot** (the free
+  sentinel was `Value::Nil`, i.e. slot content, and `nil` is a legal message): two
+  envelopes read one slot, swapping values. `MsgRoots { slots, free }` tracks freeness
+  out of band — which also makes `msg_root_add` O(1) instead of an O(live) scan under
+  the sender-side mailbox lock. Guard: same file, case 2.
+- **KI-93** — the **net reactor's death was silent**: no `catch_unwind`, `cmd()`
+  discarding the send error, so after any reactor panic every `tcp-send` kept returning
+  `Ok(())` and every socket owner parked forever with zero diagnostics. Now dead-loud:
+  `reactor_died` fails every socket at its owner (`[:tcp-error]` + `[:tcp-closed]`) and
+  every entry point errors. Deliberately no restart (the `Poll`/fd/TLS state died with
+  the thread). Guard: `crates/lisp/tests/net_reactor_death.rs` via a debug-only
+  `Cmd::DieForTest`.
+- **KI-94** — a green process's death **orphaned its OS subprocesses** (`retire_pid_tail`
+  closed sockets but had no subprocess counterpart; `Proc` recorded no owner). Now
+  Erlang port semantics: `close_process_procs(pid)` kills + reaps on owner death — a
+  deliberate semantic change. Guard in `tests/proc_test.blsp` (red `:wrote` on the
+  pre-fix binary).
+
+**Filed, not fixed:** KI-95 (`promote` forwards only closures/envs — DAG-shaped data
+duplicates per referrer, exponential with sharing depth; the GC's flush path forwards
+these, the promoter doesn't), KI-96 (a remote monitor's `PENDING_REMOTE` entry survives
+its own DOWN — leak + a duplicate `:noconnection` DOWN on a later node-down), KI-97 (the
+consolidated hardening list: pre-auth handshake trickle DoS, untimed blocking calls on
+workers, thread-spawn panic classes, and smaller items — all file:line'd). The
+performance candidates — none measured yet — are `compute-frontier.md` **§7.8**; the top
+one is the i64 eligibility verdict recomputed per activation behind a global `Mutex`.
+
+Verification on the combined tree: full in-language suite **5351/5351** (nextest,
+`-j1`), the 27 scheduler/mailbox/GC-adjacent Rust binary tests, `GC_STRESS=1
+GC_VERIFY=1` over the receive/mailbox/proc files + `local_send_race`, the new tests at
+tier ceilings 0 and 1, 696 lib unit tests, clippy clean on CI's flags (which also caught
+a pre-existing 1.98 `op_ref` lint in `inline.rs` — fixed, it would have been CI-red).
+
+Two traps hit and worth keeping: **the 16 GB `ulimit -v` cap fails
+`wasm_sandbox_limits_test.blsp` even standalone** (wasmtime's address-space reservations
+land on the cap wall; the suite's one "failure" under the capped run was this, passing
+uncapped — so a capped suite run needs that file excluded or judged separately). And the
+`brood lib test` target under `--no-default-features` does not build (jit-gated test
+code: `xcall_wanted`, `jit_lower_arm`) — pre-existing, invisible to CI because CI checks
+`--no-default-features` with `cargo check --workspace`, which passes.

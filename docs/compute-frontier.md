@@ -1483,6 +1483,68 @@ the two load-time checker warnings, it is boot residue that closes itself at sca
 - **`latency` under the pinned sweep**: queueing artifact of a fixed-schedule open-loop row.
   Judge it unpinned, via its own p50/p99/rps metrics.
 
+### 7.8 Audit findings 2026-08-31 — code-confirmed candidates, NOT yet measured
+
+A source-level audit (not a profile) of the VM hot path, heap/GC, and message paths.
+Every item below was confirmed by reading the cited code; **none has an A/B number yet**,
+so each owes the full protocol (`make ab` + `ab-vm`, floors, image `:live`, JIT engaged)
+before it ships. Ranked by expected value.
+
+1. **The i64/inline-upgrade eligibility verdict is recomputed per activation, behind a
+   global `Mutex`.** `jit_runtime.rs`'s upgrade check calls
+   `declines_inline_upgrade(arm)` on every entry while `inline_installed` is false — and
+   for the scalar-register class (`fib`/`ack`) it stays false *forever*, so every
+   activation pays `I64_TOO_DEEP.lock()` (a real `std::sync::Mutex` in
+   `jit_lower/i64.rs`, despite its "lock-free-ish" doc) plus two full body walks with a
+   per-`LetBind` scope clone. The memoization pattern sits one condition above:
+   `xcall_wanted.get_or_init`. Cache the verdict per arm the same way; `pfib` (cross-
+   worker lock contention) is the row to watch.
+2. **Per-self-tail-iteration probes that could ride the reduction tick**
+   (`exec_chunk.rs` self-tail paths): `take_current_mailbox_overflow()` is an
+   unconditional `swap` — a full fence on x86 — on the shared `Arc<Mailbox>` cache line
+   senders write, once per back edge, plus a second TLS borrow for
+   `capture_hard_kill_pending`. The non-capture kill probe was already deliberately
+   deferred to budget rollover (`scheduler.rs` `tick_reporting_hard_kill`); these
+   weren't. A relaxed load-before-swap alone removes the fence from the ~always-zero
+   case. Rows: `loop`/`collatz`/`sieve` at ceiling 1, `pingpong`/`ring`.
+3. **`gc_due()` sums eleven slab `len()`s, 2–3× per call** (`heap.rs`
+   `slab_live_count`; its doc still says "six small usizes"). Executed per call, per
+   self-tail back edge, and at each `vm_run_bc` loop top. A live counter maintained at
+   alloc/free sites makes it one load + compare.
+4. **The interpreter's call-IC hit clones an `Arc` it only pointer-compares**
+   (`vm_cache.rs` `vm_call_ic_hit` → `exec_chunk.rs` self-tail check). The JIT-side
+   mirror already returns `Copy` data for exactly this reason (its doc prices the RMW at
+   "~30M times" on `fib`); the interpreter path needs the same probe-by-pointer variant,
+   cloning only when a real `Step` is handed out. `make ab-vm` territory.
+5. **Cheap allocation deletions, all confirmed in source**: `value_cmp` allocates two
+   `String`s per symbol/keyword comparison (`symbol_name` where `symbol_name_ref`'s own
+   doc says compare with it; `equality.rs`) and `to_vec()`s both vectors per vector
+   comparison — every `sort` over keyword keys pays O(n log n) mallocs;
+   `dispatch_identity` re-interns `"__id__"` per dispatch call *including from JIT guard
+   code* (`vm_cache.rs`, `jit/rt.rs`); hashed-`table` ops rebuild every candidate key
+   into the caller's heap per lookup and clone-then-drop the key on every overwrite
+   (`table.rs` `find_idx`); `copy_cross_heap` materialises vector elements into a temp
+   `Vec` **inside the mailbox lock** (`message.rs` — the window the L1 budget bounds);
+   `MakeMap` mallocs a throwaway `Vec` per literal (`exec_chunk.rs`);
+   `reset_frame_keep_captures` nil-fills the argument slots it overwrites on the next
+   line; `dispatch` string-compares `name == "apply"` for every native callee;
+   `promote_list` re-acquires the arc-swap guard per cons cell while `cur_gen` above it
+   was deliberately hoisted (`heap.rs`); RUNTIME compaction still clones the whole
+   `live_vm_arms` stack and take-and-reinserts the entire positions table — both
+   patterns the LOCAL collector already removed, with the reasoning written beside them
+   (`gc_runtime.rs` vs `gc.rs`).
+6. **Message-path latency (scheduler side)**: `dirty_block()` — a whole-worker-queue
+   drain that can spawn an OS thread — runs *before* the `wake_pending` early-out in
+   `wait_for_message`, under the mailbox state lock; and `trim_on_park` (a full
+   collection + slab shrink) runs while holding that same lock (`pool.rs` — the comment
+   justifies correctness, not hold time; every sender and the kill latch stall behind
+   it). Note while touching it: the trim→sysmon deadlock is prevented only by `save_ctx`
+   incidentally clearing `CURRENT` first — worth an assert. Rows: `latency`, judged
+   unpinned via its own p50/p99.
+
+The same audit's correctness findings are KI-91–97; the mailbox slot-table scan (item of
+the same family as 5) was already fixed with KI-92 (`MsgRoots.free`).
+
 ### The measurement discipline (each of these burned someone this week)
 
 Image `:live` on **both** arms, verified per run (`(stdimage/status)` — any commit
