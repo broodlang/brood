@@ -8397,3 +8397,25 @@ spec))`), and zero args is an arity error instead of a nil spec. Regression test
 in `tests/gui_test.blsp`, written to pass on gui and non-gui builds alike (it
 asserts the TYPE error absent, tolerating the "not compiled in" raise). Verified
 on a `--features gui` build headless: both forms return nil.
+
+## 2026-08-31 — `scan-form-start` tracks bracket depth, not column 0
+
+A mis-indented multi-arity `defn` (arms at column 0) could never be re-indented in
+bedit: TAB computed 0 forever. The chain — `brood-indent` slices from
+`reflect/scan-form-start`, whose "form start" was the Emacs heuristic *any column-0
+open bracket outside strings/comments*, so the arm's own `(` was "the defun start",
+the slice was empty, and the indenter saw top level. Self-fulfilling: exactly the
+code that needs re-indenting is the code the heuristic misreads. The formatter
+(`format/source`) was never wrong — it parses the real CST.
+
+Fix in the kernel scanner (`builtins/syntax_scan.rs`): the forward lexical pass now
+carries bracket depth (stray closes saturate at 0), and a form start is an open
+bracket at **depth 0** — column irrelevant. The safepoint-table resume carries the
+depth. Every consumer heals at once: bedit's TAB, `sexp/narrow`, and
+`highlight/safe-restart` (whose tests pinned the old semantics — updated: an
+indented top-level open now IS a restart point, and a column-0 open inside an
+unclosed form is not). Trade-off accepted: an unclosed top-level form makes
+everything below it one form (restarts/windows reach further while you type an
+unbalanced open) — that is the *correct* reading, the pass is native and
+safepoint-resumed, and modern Emacs abandoned the column-0 heuristic for the same
+reason.
