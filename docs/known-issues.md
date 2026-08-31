@@ -6315,7 +6315,7 @@ nothing did. Recorded because this repo's own rule is that a failure seen once i
 otherwise — and because a single sighting on the one commit that touched the preempt path is
 precisely the coincidence that deserves writing down rather than explaining away.
 
-## KI-89 — a test file's ability impls leak into `std/`'s checker view ✅ FIXED 2026-08-31 (a registry RMW racing the isolate restore resurrected the registry — and the "minimal repro" was measuring a different mechanism)
+## KI-89 — a test file's ability impls leak into `std/`'s checker view ✅/⚠️ 2026-08-31: the resurrection race FIXED + guarded; a residual orphan mechanism WATCHING (one binary, since destroyed — see the residual block)
 
 > **Resolution 2026-08-31, two findings.**
 >
@@ -6359,6 +6359,27 @@ precisely the coincidence that deserves writing down rather than explaining away
 > Guard: `tests/registry_isolate_race_test.blsp`, with a liveness floor on the
 > bystander (its first draft died silently on a renamed builtin and "passed" — the
 > gate-that-cannot-fail lesson, again).
+>
+> **Residual, 2026-08-31 (later): a suite-scale orphan mechanism SURVIVES the fix on
+> one binary — and that binary is gone.** The first post-fix build of the merged tree
+> failed 3 of 3 full `nest test` runs orphan-shaped (`stdimage_test:60`,
+> `ability_test:471` ×2, same seven ids) — so the resurrection race was not the only
+> path; the suspected residual is the interleaving the lock deliberately permits (a
+> straggler's constructor `def` wiped by a restore while its locked
+> `%record-register`, starting after the swap, lands in the restored table: id kept,
+> ctor gone — sticky via the next file's snapshot). Then the next incremental build
+> (adding the `BROOD_REG_TRACE` instrumentation, runtime-gated OFF) went **15/15
+> green** — traced and untraced — and no binary that exhibits the residual exists any
+> more. That is KI-88's lesson repeated verbatim, including the mistake: the failing
+> binary was overwritten instead of preserved. What the hunt left in-tree:
+> `BROOD_REG_TRACE=1` (every `*record-ids*` write with the writer's 4-hop ancestry
+> chain + every restore), and two traced observations — the heavy all-registry trace
+> *suppresses* the race (stderr-lock serialization), so trace lean; and the
+> module-sweep writers seen mid-run are `doc_examples_test`'s legitimate
+> load-everything unit, within its own file window. **If orphans are next seen:
+> PRESERVE THE BINARY, re-run it with `BROOD_REG_TRACE=1`, and read the chain= of
+> the seven writes against the RESTORE lines.** Watching, not open: 15 consecutive
+> green full runs and no reproducing artifact.
 
 **Symptom.** In a scoped `nest test` run, `std_check_test` ("the standard library carries no
 checker warnings") fails with ~15 warnings about a record defined in **another test file**:

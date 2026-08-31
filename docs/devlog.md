@@ -8638,3 +8638,21 @@ rebuilds don't relink `nest`, the CLAUDE.md trap, hit again — and KI-98). **Fi
 KI-98** (⚠️ watching): `process_limit_test.blsp:114` timed out twice in five full runs —
 a missed-wake shape, full-suite context only, not established as related to anything
 that changed today.
+
+## 2026-08-31 (later still) — the KI-89 residual: real on one binary, and the binary is gone
+
+Correction to the entry above: "KI-89 fixed" was half right. The registry-lock fix is
+sound and guarded (the deterministic repro stands at 0/2000), but the first post-fix
+build of the merged tree still failed **3/3** full `nest test` runs orphan-shaped — so a
+second interleaving survives the lock (suspected: a straggler's ctor `def` wiped by a
+restore while its locked register lands after the swap — id kept, ctor gone, sticky via
+the next snapshot). Then the next incremental build — adding runtime-gated trace code,
+OFF by default — went **15/15 green**, traced and untraced, and no binary exhibiting the
+residual exists any more. KI-88's layout-keyed lesson repeated verbatim, including the
+mistake: the failing binary was overwritten, not preserved. In-tree from the hunt:
+`BROOD_REG_TRACE=1` (lean by design — the first, all-registry version *suppressed* the
+race through stderr-lock serialization, a measured Heisenbug), the finding that the
+module sweeps visible mid-run are `doc_examples_test`'s legitimate load-everything unit
+inside its own file window, and the KI-89 entry's residual block with the
+next-sighting protocol: preserve the binary, re-run under the lean trace, read the seven
+`chain=` lines against the RESTOREs. KI-98 sighted 3× today, quiet in the last 15 runs.

@@ -1397,6 +1397,15 @@ type ClosureTemplateMap =
 /// `fn_rest` [`PairId`] → the **promoted RUNTIME closure handle** built for it once.
 type ConstClosureMap = HashMap<PairId, Value, std::hash::BuildHasherDefault<SymbolHasher>>;
 
+/// `BROOD_REG_TRACE=1` — name every registry write (pid, registry, op, first key) and
+/// every globals restore on stderr. The tool for attributing a leaked or orphaned
+/// registration to its writer (KI-89's class: WHO registered this id, and did a restore
+/// land between its read and its write?). One cached bool when off.
+fn reg_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_REG_TRACE").is_some())
+}
+
 /// Which update [`Heap::registry_update`] performs. See that method for why the whole
 /// read-modify-write has to happen inside one kernel call (KI-22).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6248,6 +6257,28 @@ impl Heap {
         // Only on the write path: a declined op leaves the registry untouched, and a name
         // that was never written has nothing for an image to carry.
         guard.insert(sym);
+        if reg_trace_enabled() && crate::core::value::symbol_name(sym) == "*record-ids*" {
+            // Ancestry chain (up to 4 hops), so a leaked writer can be attributed to the
+            // unit/driver that spawned it even after intermediates exited.
+            let mut chain = String::new();
+            let mut cur = crate::process::current_pid();
+            for _ in 0..4 {
+                match cur {
+                    Some(p) => {
+                        chain.push_str(&format!("{p}<-"));
+                        cur = crate::process::parent_of(p);
+                    }
+                    None => break,
+                }
+            }
+            eprintln!(
+                "[reg] {} {:?} {} chain={}",
+                crate::core::value::symbol_name(sym),
+                op,
+                crate::syntax::printer::print(self, k1),
+                chain,
+            );
+        }
         true
     }
 
@@ -6753,6 +6784,9 @@ impl Heap {
             .registry_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if reg_trace_enabled() {
+            eprintln!("[reg] pid={:?} RESTORE", crate::process::current_pid());
+        }
         *self.runtime.globals_write() = snapshot.saved;
         // Wholesale table swap — invalidate every stamped global inline cache. This one
         // bumps the code epoch too (ADR-217): a restore can *replace or remove* bindings
