@@ -1367,7 +1367,9 @@ impl Heap {
                             }
                         }
                     }
-                    ValueRef::Map(id) | ValueRef::Set(id) if id.region() == LOCAL => {
+                    ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+                        if id.region() == LOCAL =>
+                    {
                         let Some(slabs) = (if id.is_old() {
                             self.old_opt()
                         } else {
@@ -1890,13 +1892,13 @@ fn flush_value_grown(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Va
         ValueRef::SeqView(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::seqview(flush_vector(old, new, fwd, id))
         }
-        ValueRef::Map(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::map(flush_map(old, new, fwd, id))
-        }
-        // A set is backed by the same CHAMP storage as a map — forward it via
-        // `flush_map` and keep the `Set` wrapper (mirrors the `SeqView` case above).
-        ValueRef::Set(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::set(flush_map(old, new, fwd, id))
+        // Map, set and failure share one CHAMP store — forward the trie once and
+        // re-wrap in whichever kind came in (`champ_rewrap`). One arm replaces the
+        // pair of near-identical Map/Set arms this used to carry.
+        ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+            if fwd.copies(id.region(), id.is_old()) =>
+        {
+            crate::core::value::champ_rewrap(v, flush_map(old, new, fwd, id))
         }
         ValueRef::Str(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::str_(flush_string(old, new, fwd, id))

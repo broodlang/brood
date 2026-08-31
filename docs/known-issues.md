@@ -263,6 +263,11 @@ whether the worker EVER re-entered `receive_match` after the breach armed. Arm
 `BROOD_SCHED_DBG=1` (per-pid run/park/end lines) and keep the whole log — the
 question is one process's lifecycle between its 9th delivery and the timeout.
 
+**Fourth sighting, 2026-08-31 (KI-97 session):** same case, same `:timeout`, in a full
+`make test` on the merged tree — try 1 only, absorbed by the retry, and solo re-run green
+(13/13). Consistent with the established shape; no new information, and no
+`BROOD_SCHED_DBG` armed. Base rate now ~4 in 10 full runs.
+
 **Third sighting, 2026-08-31 (KI-96 session):** the same case, same `:timeout`, under a
 full **tree-walker** suite half (`BROOD_VM=0 cargo nextest run`, 16 GB cap) — first time
 seen at ceiling 0, so it is not VM-specific. Solo re-run under the same cap and engine:

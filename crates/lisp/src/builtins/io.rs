@@ -974,7 +974,8 @@ pub(super) fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 }
 
 /// `(string/->number s &optional radix)` — parse `s` as an integer if it is one, else as
-/// a float, else `nil`. The inverse of `str`. A robust parse-or-nil can't be
+/// a float, else a **failure** value naming the input (falsy, so `(or … d)` still
+/// defaults, but it says *why* where `nil` could not). The inverse of `str`. A robust parse can't be
 /// expressed over `reflect/read-string` (which would read `"3abc"` as `3` and stop), so
 /// the strict parse is a primitive. Surrounding whitespace is not accepted —
 /// `trim` first if the input may carry any.
@@ -1008,7 +1009,9 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
             // a bignum, never a lossy f64.
             Err(_) => match num_bigint::BigInt::parse_bytes(s.as_bytes(), radix) {
                 Some(n) => heap.alloc_bigint(n),
-                None => Value::nil(),
+                None => heap.alloc_failure(&format!(
+                    "string/->number: not a base-{radix} integer: {s:?}"
+                )),
             },
         });
     }
@@ -1024,7 +1027,10 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     } else if let Ok(f) = s.parse::<f64>() {
         Ok(Value::float(f))
     } else {
-        Ok(Value::nil())
+        // Text this cannot interpret is a *known failure*, not an absence: it comes
+        // back as a falsy `failure` naming the input, so `(or (string/->number s) 0)`
+        // still defaults while anything that looks at the value learns why.
+        Ok(heap.alloc_failure(&format!("string/->number: not a number: {s:?}")))
     }
 }
 

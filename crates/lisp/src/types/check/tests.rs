@@ -5353,7 +5353,8 @@ fn get_with_a_default_replaces_the_absence_nil_by_the_default_type() {
 
 #[test]
 fn an_inferred_return_sees_the_truthy_half_of_an_or_default() {
-    // `string/->number` is `nil | number`; `(or it -1)` can only be a number. The inferred
+    // `string/->number` is `number | failure`; `(or it -1)` can only be a number, since a
+    // failure is falsy. The inferred
     // return (`expr_ty`, not the walk) used to union both branches of the expansion's `if`
     // under the unnarrowed scope and report `nil | number`.
     let interp = crate::Interp::new();
@@ -5389,8 +5390,13 @@ fn an_inferred_return_sees_the_truthy_half_of_an_or_default() {
     };
     let t = surface("(or (string/->number \"1\") -1)").expect("typed");
     assert!(t.is_subtype(&number) && t.is_disjoint(&nil), "{t}");
+    // `and` yields the first FALSY operand or the last one — so a failing parse is the
+    // value, exactly as a nil used to be. `string | failure`, and never a number.
     let t = surface("(and (string/->number \"1\") \"yes\")").expect("typed");
-    assert!(t.is_subtype(&nil.clone().union(Ty::of(Tag::Str))), "{t}");
+    assert!(
+        t.is_subtype(&Ty::of(Tag::Str).union(Ty::of(Tag::Failure))),
+        "{t}"
+    );
 }
 
 // ---- an extremum returns one of its operands ----
@@ -6593,7 +6599,7 @@ fn a_named_same_file_callback_flows_its_result_under_the_combinators_inputs() {
          (defn run (xs) (first (reduce xs '() step)))",
     );
     let run = sigs.iter().find(|s| s.0 == "run").expect("run");
-    assert_eq!(run.1, "(seqable) -> nil | number", "{sigs:?}");
+    assert_eq!(run.1, "(seqable) -> nil | number | failure", "{sigs:?}");
     // …and through a pattern-dispatched reducer, whose arms are chosen per input: the
     // list-pattern arms cannot admit the empty accumulator, the plain one can.
     let sigs = signatures(
@@ -6603,14 +6609,41 @@ fn a_named_same_file_callback_flows_its_result_under_the_combinators_inputs() {
          (defn calc (input) (first (reduce (string/split input \" \") '() token)))",
     );
     let calc = sigs.iter().find(|s| s.0 == "calc").expect("calc");
-    assert_eq!(calc.1, "(string) -> nil | number", "{sigs:?}");
+    assert_eq!(calc.1, "(string) -> nil | number | failure", "{sigs:?}");
     // `map` with a named callback flows its return the same way.
     let sigs = signatures(
         "(defn g (v) (string/->number v))
 (defn h (xs) (first (map xs g)))",
     );
     let h = sigs.iter().find(|s| s.0 == "h").expect("h");
-    assert_eq!(h.1, "(seqable) -> nil | number", "{sigs:?}");
+    assert_eq!(h.1, "(seqable) -> nil | number | failure", "{sigs:?}");
+}
+
+#[test]
+fn an_inline_pattern_clause_callback_flows_its_result_too() {
+    // The SAME clauses as the named `token` above, written INLINE in the reduce call.
+    // The expander lowers a pattern-clause literal to one variadic `match*` lambda
+    // before call sites are typed, so this read as `any` while the named spelling was
+    // precise — two spellings of one program, two answers. The surface pre-pass records
+    // the literal's clauses keyed by its printed head list; `clause_lambda_ret` recovers
+    // them through the `[:match-error … (quote heads)]` datum the lowering embeds.
+    let sigs = signatures(
+        "(defn calc (input)
+           (first (reduce (string/split input \" \") '()
+             (fn (((x y & acc) \"+\") (conj acc (+ y x)))
+                 ((acc val) (conj acc (string/->number val)))))))",
+    );
+    let calc = sigs.iter().find(|s| s.0 == "calc").expect("calc");
+    assert_eq!(calc.1, "(string) -> nil | number | failure", "{sigs:?}");
+    // A single-clause literal with a destructuring parameter lowers the same way.
+    let sigs = signatures("(defn firsts (pairs) (map pairs (fn ([k v]) k)))");
+    let firsts = sigs.iter().find(|s| s.0 == "firsts").expect("firsts");
+    assert_ne!(firsts.1, "(seqable) -> any", "{sigs:?}");
+    // A variadic literal must NOT be typed positionally: `(fn (& args) …)` binding `&`
+    // and `args` as two parameters is the bug that masked the recovery above.
+    let sigs = signatures("(defn v (xs) (first (reduce xs '() (fn (& args) args))))");
+    let v = sigs.iter().find(|s| s.0 == "v").expect("v");
+    assert_eq!(v.1, "(seqable) -> any", "{sigs:?}");
 }
 
 #[test]
@@ -7597,11 +7630,11 @@ fn strict_mode_keeps_the_overlap_reading_for_a_bound_that_is_only_a_subtraction(
     );
 }
 
-// The truthy half of `(or x default)` — `any` less `nil` and `false` — is a guard's
-// leftover, not a 21-tag union: it renders as `(not (nil | false))`.
+// The truthy half of `(or x default)` — `any` less the falsy kinds — is a guard's
+// leftover, not a 21-tag union: it renders as a negation.
 #[test]
 fn a_guards_truthy_leftover_renders_as_a_negation() {
-    assert_eq!(Ty::truthy().to_string(), "(not (nil | false))");
+    assert_eq!(Ty::truthy().to_string(), "(not (nil | failure | false))");
     assert_eq!(
         Ty::ANY.difference(Ty::of(Tag::Nil)).to_string(),
         "(not nil)"

@@ -295,6 +295,24 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
     (try (error \"bad \" 42) (catch e (error-message e)))   → \"bad 42\""
   (throw (apply str parts)))
 
+(defn failure (& parts)
+  "**Return** a failure carrying the concatenated display forms of `parts` — the
+other channel from `error`, which *raises*.
+
+Reach for `failure` when the caller asked something whose honest answer is \"that
+cannot be interpreted\": a parse of text that is not a number, a decode of bytes that
+are not base64. Reach for `error` when the caller made a mistake — wrong type, wrong
+arity, a broken invariant — because that is a bug and should unwind to the supervisor.
+
+The two cannot be confused, because they do not travel the same way: one comes back
+as a value, the other unwinds. A failure is falsy, so `(or (parse s) 0)` defaults; it
+is not `nil`, so absence and failure stay distinct; and `error-message` reads it.
+
+    (failure \"not a range: \" (pr-str s))
+    (failure? (failure \"nope\"))            → true
+    (or (failure \"nope\") :default)         → :default"
+  (%failure (apply str parts)))
+
 ;; `(catch Type e body…)` — Clojure/Java's *typed* catch. Brood's `catch` binds
 ;; ONE bare symbol and has no exception class, so this shape is not an error the
 ;; reader can see: the class name silently becomes the binding and the intended
@@ -407,13 +425,16 @@ line is EXECUTED by `doctest` (tests/doc_examples_test.blsp), so it has to be ru
 ;; them into a human string, so a `(catch e …)` handler never has to branch on
 ;; the shape itself.
 (defn error-message (e)
-  "A human-readable message string for a caught value `e`: a raised string
-as-is, the `:message` of a structured error map (what the kernel throws), else
-its printed form.
+  "A human-readable message string for a caught value `e` — or for a **failure**, the
+value a strict function returns when it cannot interpret its input. A raised string
+comes back as-is, a structured error map yields its `:message`, a failure yields the
+message it carries, and anything else its printed form.
 
-    (error-message (try (error \"b\") (catch e e)))   → \"b\""
+    (error-message (try (error \"b\") (catch e e)))   → \"b\"
+    (error-message (string/->number \"abc\"))         → \"string/->number: not a number: \\\"abc\\\"\""
   (cond
     (string? e) e
+    (failure? e) (%failure-message e)
     (and (map? e) (get e :message)) (get e :message)
     else (pr-str e)))
 

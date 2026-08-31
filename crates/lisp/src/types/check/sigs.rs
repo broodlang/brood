@@ -893,6 +893,177 @@ pub(super) fn specialized_ret(
     out
 }
 
+/// [`specialized_ret`] for an inline `(fn …)` **literal with clauses or patterns** — the
+/// callback shape [`super::infer::lambda_ret`] declines. A named multi-clause `defn` in
+/// the same position already gets the full clause machinery via `specialized_ret`; an
+/// inline literal fell to `any`, so `(reduce toks '() (fn (((x y & acc) "+") …)
+/// ((acc val) …)))` said nothing while the identical clauses under a `defn` typed
+/// precisely (found on an RPN reduce, 2026-08-31).
+///
+/// Two spellings reach here:
+///  - **arity-only clause literals** survive expansion as clause syntax and are read
+///    directly;
+///  - **pattern/guard clauses** (and a destructuring single-clause param list) were
+///    already lowered to one variadic `match*` lambda by the time call sites are typed,
+///    so the clauses are gone from the form itself. The lowering embeds the original
+///    clause-head list in each `[:match-error (quote :fn) … (quote heads)]` throw;
+///    that datum's printed form is the key the surface pre-pass recorded the clauses
+///    under (`Ctx::fn_literal_clauses`), and the recovery below reads them back.
+///
+/// Same arm discipline as `specialized_ret`: keep the arms whose head count matches
+/// what the combinator supplies and whose patterns can admit the supplied types
+/// ([`pattern_domain`]); bind each head's binders under its position's type
+/// ([`bind_head`]); type each arm tail; union. A guard (`:when`) never narrows the
+/// union — a guarded clause may fall through to a later one, and both are included.
+/// `None` — the flat answer — when any kept arm is untypeable (a partial union
+/// under-approximates), when no arm admits, or when a top-level variadic arm
+/// (`& rest` in head position) could take the call, since its frame fill differs per
+/// call. There is no memo key for a literal, so no memoization; each arm still spends
+/// the file's [`SPECIAL_FUEL`] budget.
+pub(super) fn clause_lambda_ret(
+    heap: &Heap,
+    fn_form: Value,
+    inputs: &[Option<Ty>],
+    ctx: &Ctx,
+) -> Option<Ty> {
+    if inputs.iter().all(Option::is_none) {
+        return None;
+    }
+    let items = list_items(heap, fn_form)?;
+    if !matches!(items.first(), Some(&Value::Sym(s)) if super::walk::is_fn_head(s)) {
+        return None;
+    }
+    let forms = match items.get(1..) {
+        Some([Value::Str(_), rest @ ..]) if !rest.is_empty() => rest,
+        Some(rest) => rest,
+        None => return None,
+    };
+    if forms.is_empty() {
+        return None;
+    }
+    // Direct read: every form parses as a clause (the arity-only literal, un-lowered).
+    let direct: Option<Vec<(Vec<Value>, Value)>> = forms
+        .iter()
+        .map(|&clause| {
+            let arm = clause_arm(heap, clause)?;
+            let tail = *arm.body.last()?;
+            Some((arm.heads, tail))
+        })
+        .collect();
+    let arms: Vec<(Vec<Value>, Value)> = match direct {
+        Some(arms) => arms,
+        None => recovered_literal_arms(heap, fn_form, ctx)?,
+    };
+    clause_arms_ret(heap, &arms, inputs, ctx)
+}
+
+/// The surface `(heads, tail)` arms of a LOWERED pattern-clause literal, recovered via
+/// the `[:match-error (quote :fn) scrutinee (quote heads)]` vector the lowering embeds:
+/// its quoted head-list datum, printed, is the key the surface pre-pass recorded the
+/// literal's clauses under. `None` when no such vector is found (not a lowered clause
+/// fn) or the key is unknown/ambiguous.
+fn recovered_literal_arms(
+    heap: &Heap,
+    fn_form: Value,
+    ctx: &Ctx,
+) -> Option<Vec<(Vec<Value>, Value)>> {
+    let quoted_of = |v: Value| -> Option<Value> {
+        let q = list_items(heap, v)?;
+        (q.len() == 2 && matches!(q[0], Value::Sym(s) if value::symbol_is(s, kw::QUOTE)))
+            .then(|| q[1])
+    };
+    let mut work = vec![fn_form];
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Vector(id) => {
+                let elems = heap.vector(id).to_vec();
+                let is_match_error = matches!(elems.first(), Some(&Value::Keyword(k))
+                    if value::symbol_name_ref(k) == "match-error")
+                    && elems.len() == 4
+                    && quoted_of(elems[1]).is_some_and(
+                        |t| matches!(t, Value::Keyword(k) if value::symbol_name_ref(k) == "fn"),
+                    );
+                if is_match_error {
+                    if let Some(heads) = quoted_of(elems[3]) {
+                        let key = crate::syntax::printer::print(heap, heads);
+                        return ctx.fn_literal_clauses(&key).cloned();
+                    }
+                }
+                work.extend(elems);
+            }
+            Value::Pair(_) => {
+                if let Some(items) = list_items(heap, v) {
+                    work.extend(items);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The union of arm-tail types over the arms of `inputs`'s arity that can admit the
+/// supplied types — the shared core of [`clause_lambda_ret`]'s two paths (see there for
+/// the soundness discipline).
+fn clause_arms_ret(
+    heap: &Heap,
+    arms: &[(Vec<Value>, Value)],
+    inputs: &[Option<Ty>],
+    ctx: &Ctx,
+) -> Option<Ty> {
+    let mut ret: Option<Ty> = None;
+    let mut matched = false;
+    for (heads, tail) in arms {
+        let variadic = heads.iter().any(|&h| {
+            matches!(h, Value::Sym(s)
+                if value::symbol_is(s, kw::AMP)
+                    || value::symbol_is(s, kw::AMP_OPTIONAL)
+                    || value::symbol_is(s, kw::AMP_REST))
+        });
+        if variadic {
+            // A variadic arm can take this call whatever its fixed heads say —
+            // typing around it would drop a reachable result from the union.
+            return None;
+        }
+        if heads.len() != inputs.len() {
+            continue; // a different arity's arm never runs for this call
+        }
+        let admits = heads.iter().zip(inputs).all(|(&h, input)| match input {
+            Some(t) => !t.clone().intersect(pattern_domain(heap, h)).is_never(),
+            None => true,
+        });
+        if !admits {
+            continue;
+        }
+        matched = true;
+        if !SPECIAL_FUEL.with(|f| {
+            let n = f.get();
+            f.set(n.saturating_sub(1));
+            n > 0
+        }) {
+            return None;
+        }
+        let mut sub = ctx.clone();
+        for (&h, input) in heads.iter().zip(inputs) {
+            sub = bind_head(heap, sub, h, input.clone());
+        }
+        // The body is a fresh question, not an operand of the call that asked it.
+        let outer_nest = SPEC_ARG_NEST.with(|n| n.replace(0));
+        let typed = super::infer::with_fresh_depth(|| expr_ty(heap, *tail, &sub));
+        SPEC_ARG_NEST.with(|n| n.set(outer_nest));
+        let t = typed?;
+        ret = Some(match ret {
+            Some(a) => a.union(t),
+            None => t,
+        });
+    }
+    if matched {
+        ret
+    } else {
+        None
+    }
+}
+
 fn memo_specialization(key: (Symbol, Vec<Option<Ty>>), out: Option<Ty>) {
     SPECIAL_MEMO.with(|m| {
         let mut m = m.borrow_mut();

@@ -600,7 +600,39 @@ pub enum Value {
     /// on construction, so a `Ratio` never numerically equals an integer. Added at
     /// the END to preserve the JIT's pinned discriminant order.
     Ratio(RatioId),
+    /// A **known failure** — the value a function returns when it cannot interpret
+    /// its input (`(string/->number "abc")`), as distinct from raising. Backed by the
+    /// same CHAMP trie as [`Value::Map`] (so it rides the map GC / region / forwarding
+    /// machinery verbatim, the way [`Value::Set`] does) and always carries at least
+    /// `:message`; `:kind` and any producer-supplied fields ride alongside.
+    ///
+    /// Two properties make it a kind rather than a convention. It is **not `nil`**, so
+    /// "no value" and "could not produce one" stop sharing a signal — `nil` goes back
+    /// to meaning absence. And it is **falsy** (see `eval::truthy`), so it short-circuits
+    /// `if`/`when`/`or`/`and` exactly where a `nil` failure used to, while carrying why.
+    ///
+    /// This is the *return* channel; raising stays the bug/unexpected channel. The two
+    /// cannot be confused because they do not travel the same way, which is why no
+    /// error-kind split is needed to tell them apart. Added at the END to preserve the
+    /// JIT's pinned discriminant order.
+    Failure(MapId),
 }
+
+/// The highest valid [`Value`] discriminant — currently [`Value::Failure`], the last
+/// variant (new kinds are appended at the END to preserve the JIT's pinned order).
+///
+/// `eval::compile::dispatch::dbg_check_args` reads this to tell a real value from
+/// corrupt memory: a tag above it is non-`Value` bytes, which under debug-assertions
+/// aborts with the frame that carried it.
+///
+/// **Keeping it here, beside the enum, is the whole point.** It used to be a literal
+/// `25` at the check site with the comment "Value's max discriminant is `Ratio`", and
+/// ADR-310 then appended `Failure` (26). The check did not move, so every *legitimate*
+/// failure value entering a frame tripped the corruption panic — CI went red looking
+/// exactly like a JIT frame-slot corruption (the bug #2 family) when nothing was
+/// corrupt at all. [`max_value_discriminant_is_the_last_variant`] stops that recurring:
+/// it does not compile if a variant is appended without updating this.
+pub(crate) const MAX_VALUE_DISCRIMINANT: u8 = 26;
 
 /// The **unpacked** view of a [`Value`] — the form you `match` against.
 ///
@@ -692,6 +724,13 @@ impl Value {
     #[inline]
     pub fn set(id: MapId) -> Value {
         Value::Set(id)
+    }
+    /// Wrap a CHAMP node id as a **failure** — the same backing store as a map,
+    /// tagged as its own kind. The fields are the map's entries (always at least
+    /// `:message`). See [`Value::Failure`].
+    #[inline]
+    pub fn failure(id: MapId) -> Value {
+        Value::Failure(id)
     }
     #[inline]
     pub fn func(id: ClosureId) -> Value {
@@ -809,6 +848,7 @@ pub enum Tag {
     Decimal,
     Set,
     Ratio,
+    Failure,
 }
 
 impl Tag {
@@ -839,6 +879,7 @@ impl Tag {
             Tag::Decimal => "decimal",
             Tag::Set => "set",
             Tag::Ratio => "ratio",
+            Tag::Failure => "failure",
         }
     }
 
@@ -848,8 +889,8 @@ impl Tag {
     /// code that was essentially the entire `intern` cost (~98% of all interns were
     /// a tag name like `"pair"`). Indexed by the `#[repr(u8)]` discriminant.
     pub fn keyword(self) -> Symbol {
-        static KW: LazyLock<[Symbol; 23]> = LazyLock::new(|| {
-            const TAGS: [Tag; 23] = [
+        static KW: LazyLock<[Symbol; 24]> = LazyLock::new(|| {
+            const TAGS: [Tag; 24] = [
                 Tag::Nil,
                 Tag::Bool,
                 Tag::Int,
@@ -873,14 +914,43 @@ impl Tag {
                 Tag::Decimal,
                 Tag::Set,
                 Tag::Ratio,
+                Tag::Failure,
             ];
-            let mut out = [0u32; 23];
+            let mut out = [0u32; 24];
             for t in TAGS {
                 out[t as usize] = intern(t.name());
             }
             out
         });
         KW[self as usize]
+    }
+}
+
+/// The CHAMP node id behind any **trie-backed** kind — [`Value::Map`],
+/// [`Value::Set`] and [`Value::Failure`] share one storage representation, so every
+/// *storage-level* walk (GC trace, promote, region forwarding, locality checks)
+/// treats them alike and only their semantics differ. `None` for every other kind.
+///
+/// This exists so adding a trie-backed kind touches the storage layer once instead
+/// of once per kind: the walks pattern-match all three together and re-wrap with
+/// [`champ_rewrap`], which replaced a pair of near-identical `Map`/`Set` arms at
+/// each forwarding site.
+#[inline]
+pub fn champ_id(v: Value) -> Option<MapId> {
+    match v {
+        Value::Map(id) | Value::Set(id) | Value::Failure(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// Re-wrap a forwarded/promoted CHAMP `id` in the same kind `original` had, so a
+/// storage walk that moved the trie preserves map-vs-set-vs-failure identity.
+#[inline]
+pub fn champ_rewrap(original: Value, id: MapId) -> Value {
+    match original {
+        Value::Set(_) => Value::set(id),
+        Value::Failure(_) => Value::failure(id),
+        _ => Value::map(id),
     }
 }
 
@@ -923,6 +993,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Decimal(_) => Tag::Decimal,
         // A set is its OWN type — distinct from map (unlike a range/pair alias).
         Value::Set(_) => Tag::Set,
+        Value::Failure(_) => Tag::Failure,
         // A ratio is its OWN exact type — distinct from int/float/decimal.
         Value::Ratio(_) => Tag::Ratio,
     }
@@ -1302,6 +1373,7 @@ pub(crate) mod jit_layout {
             Value::Decimal(DecimalId::local(0)),
             Value::Set(MapId::local(0)),
             Value::Ratio(RatioId::local(0)),
+            Value::Failure(MapId::local(0)),
         ];
         // Exhaustiveness guard: this match must name every variant. When a new
         // variant appears, add it here AND to `all` above.
@@ -1332,6 +1404,7 @@ pub(crate) mod jit_layout {
                 | Value::Bytes(_)
                 | Value::Decimal(_)
                 | Value::Set(_)
+                | Value::Failure(_)
                 | Value::Ratio(_) => {}
             }
         }
@@ -1379,6 +1452,76 @@ mod runtime_gen_handle_tests {
         // Region-aware `canonical`: LOCAL keeps identity across epochs (the point
         // of masking GEN), unaffected by the RUNTIME carve-out above.
         assert_eq!(PairId::local_gen(9, 3), PairId::local_gen(9, 100));
+    }
+}
+
+#[cfg(test)]
+mod discriminant_bound_tests {
+    use super::*;
+
+    /// [`MAX_VALUE_DISCRIMINANT`] must name the LAST `Value` variant.
+    ///
+    /// The guard is the exhaustive `match` below, not the assertion: it has no
+    /// wildcard arm, so appending a variant to `Value` stops this file compiling and
+    /// sends the author here. That matters because the failure mode of a stale bound
+    /// is not a compile error or a wrong answer — it is `dbg_check_args` reporting a
+    /// perfectly valid value as *corrupt memory*, which reads as a JIT frame-slot
+    /// corruption and cost a red CI to diagnose when ADR-310 appended `Failure`.
+    #[test]
+    fn max_value_discriminant_is_the_last_variant() {
+        fn variant_index(v: &Value) -> u8 {
+            match v {
+                Value::Nil => 0,
+                Value::Bool(_) => 1,
+                Value::Int(_) => 2,
+                Value::BigInt(_) => 3,
+                Value::Float(_) => 4,
+                Value::Sym(_) => 5,
+                Value::Keyword(_) => 6,
+                Value::Str(_) => 7,
+                Value::Rope(_) => 8,
+                Value::Pair(_) => 9,
+                Value::Vector(_) => 10,
+                Value::Range(_) => 11,
+                Value::SeqView(_) => 12,
+                Value::Map(_) => 13,
+                Value::Fn(_) => 14,
+                Value::Macro(_) => 15,
+                Value::Native(_) => 16,
+                Value::Ref(_) => 17,
+                Value::Pid { .. } => 18,
+                Value::Socket(_) => 19,
+                Value::Subprocess(_) => 20,
+                Value::Table(_) => 21,
+                Value::Bytes(_) => 22,
+                Value::Decimal(_) => 23,
+                Value::Set(_) => 24,
+                Value::Ratio(_) => 25,
+                // Keep this arm LAST, and keep MAX_VALUE_DISCRIMINANT equal to it.
+                Value::Failure(_) => 26,
+            }
+        }
+
+        // The tag byte the tripwire reads must agree with the declared order, so a
+        // value of the last variant sits exactly at the bound — not past it.
+        let last = Value::Failure(MapId::local(0));
+        assert_eq!(variant_index(&last), MAX_VALUE_DISCRIMINANT);
+        let tag = (unsafe { std::mem::transmute::<Value, [i64; 3]>(last) }[0] as u64 & 0xff) as u8;
+        assert_eq!(
+            tag, MAX_VALUE_DISCRIMINANT,
+            "the last variant's tag byte must equal the bound dbg_check_args compares against"
+        );
+
+        // And a sample of ordinary values must be inside it.
+        for v in [
+            Value::Nil,
+            Value::Bool(true),
+            Value::Int(7),
+            Value::Float(1.5),
+        ] {
+            let t = (unsafe { std::mem::transmute::<Value, [i64; 3]>(v) }[0] as u64 & 0xff) as u8;
+            assert!(t <= MAX_VALUE_DISCRIMINANT, "tag {t} above the bound");
+        }
     }
 }
 

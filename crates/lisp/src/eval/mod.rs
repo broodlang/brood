@@ -20,9 +20,17 @@ use crate::core::value::{
 };
 use crate::error::{LispError, LispResult};
 
-/// Truthiness: only `nil` and `false` are falsy.
+/// Truthiness: `nil`, `false` and a **failure** are falsy.
+///
+/// A failure joins the falsy set so it short-circuits `if`/`when`/`or`/`and`
+/// exactly where a `nil`-on-failure used to — which is what lets a strict
+/// function start returning one without rewriting its callers — while still
+/// carrying *why* it failed, which `nil` never did.
 pub fn truthy(v: Value) -> bool {
-    !matches!(v.unpack(), ValueRef::Nil | ValueRef::Bool(false))
+    !matches!(
+        v.unpack(),
+        ValueRef::Nil | ValueRef::Bool(false) | ValueRef::Failure(_)
+    )
 }
 
 /// Evaluate `form` and attach its source position to any error.

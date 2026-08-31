@@ -73,11 +73,16 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 | Function | `#<fn name>`, `#<native +>` | Closures and builtins. |
 | Ref | `#<ref 0>` | A unique, opaque reference token from `(ref)` — no literal syntax; the only way to make one. Used to tag a request to its reply (see [Processes](#processes-concurrency)). |
 | Pid | `#<pid a/7>` | A process id from `self`/`spawn`; carries node identity (`node/id`). No literal syntax. The location-transparent handle for `send` — local or across a node link (see [Distributed nodes](#distributed-nodes)). |
+| Failure | `#failure{:message "…"}` | What a function returns when it cannot interpret its input — `(string/->number "abc")` (ADR-310). No literal syntax; build one with `failure`, test with `failure?`, read it with `error-message`. **Falsy**, so it short-circuits everywhere `nil` did, but distinct from `nil`, which means *absence*. Prints self-identifyingly and is deliberately not re-readable — reconstructing one from text would manufacture a provenance it never had. See [Errors](#errors). |
 
 ### Truthiness
 
-Only `nil` and `false` are falsy. **Everything else is truthy**, including `0`,
-`""`, and empty collections like `[]`, `{}`, and `#{}`.
+Only `nil`, `false` and a **`failure`** are falsy. **Everything else is truthy**,
+including `0`, `""`, and empty collections like `[]`, `{}`, and `#{}`.
+
+A failure is falsy on purpose: it stands where a function used to answer `nil` on bad
+input, so `(or (string/->number s) 0)` and `(if n …)` keep working unchanged, while the
+value itself can still say what went wrong. See [Errors](#errors).
 
 > **The one asymmetry — an empty *list* is falsy.** The rule is purely
 > `nil`/`false`, but the **empty list is `nil`** (`()` ≡ `nil`), so a list is the
@@ -1537,6 +1542,60 @@ for data" for the full rule.
 
 ## Errors
 
+Brood has **two** channels, and which one a function uses says what kind of thing went
+wrong (ADR-310):
+
+| what happened | mechanism | who deals with it |
+|---|---|---|
+| **a bug** — wrong type, wrong arity, unbound symbol, a broken invariant | **raises** | `try`/`catch`, else the supervisor |
+| **the unexpected** — something failed at runtime that nothing planned for | **raises** | let it crash; the supervisor restarts |
+| **a known failure** — "this text is not a number", "these bytes are not base64" | **returns a `failure`** | the caller, right there |
+
+They cannot be confused, because they do not travel the same way: one is handed back as
+a value, the other unwinds. So a `try` only ever catches a bug or the unexpected, which
+is what a `try` should be for.
+
+### Known failures — a returned value
+
+A function that cannot interpret its input returns a **`failure`**: its own kind, not
+`nil`, carrying a message that names the input.
+
+```clojure
+(string/->number "42")                    ;=> 42
+(string/->number "abc")                   ;=> #failure{:message "string/->number: not a number: \"abc\""}
+(failure? (string/->number "abc"))        ;=> true
+(error-message (string/->number "abc"))   ;=> "string/->number: not a number: \"abc\""
+```
+
+**A failure is falsy**, so it short-circuits everywhere `nil` did — which is why adopting
+it changed almost no call sites:
+
+```clojure
+(or (string/->number s) 0)                ; defaults, exactly as when this answered nil
+(if (string/->number s) :yes :no)         ; branches, exactly as before
+(seq/keep lines string/->number)          ; `keep` drops failures as well as nils
+```
+
+**It is not `nil`, though**, and that is the point: `nil` means *absence* — a lookup
+found nothing — and accessors keep it (`get`, `nth`, `os/env`, `first` of an empty
+list). A failure means *this could not be produced*, and says why. Two different
+questions, two different answers.
+
+Write one with `failure`, in the same place you would have written `error`:
+
+```clojure
+(defn parse-range (s)
+  (match (string/split s "-")
+    ((a b) [(string/->number a) (string/->number b)])
+    (_ (failure "parse-range: not a range (a-b): " (pr-str s)))))
+```
+
+Reach for `failure` when the caller asked something whose honest answer is "that cannot
+be interpreted". Reach for `error` when the caller made a mistake — that is a bug, and
+it should unwind.
+
+### Raising — for bugs and the unexpected
+
 Raise with `throw` (any value) or `error` (a formatted message), and handle with
 `try`/`catch`:
 
@@ -2880,6 +2939,17 @@ Three functions, and which one you want depends on the *type you need*, not on t
 (string/->number "42")      ;=> 42      an int
 (string/->number "3.14")    ;=> 3.14    a float
 (decimal/of "1.50")         ;=> 1.50M   an exact decimal
+```
+
+**Text it cannot read yields a `failure`, not `nil`** (ADR-310) — falsy, so
+`(or (string/->number s) 0)` still defaults, but it names the offending input instead of
+vanishing. `decimal/of` is the exception and *raises*: a parse failing is data, a
+constructor failing is a bug.
+
+```clojure
+(string/->number "3abc")                 ;=> a failure — no partial parse
+(or (string/->number "3abc") 0)          ;=> 0
+(failure? (string/->number "3abc"))      ;=> true
 ```
 
 **`string/->number` decides int-vs-float from the digits**, so `"3"` gives you an `int`

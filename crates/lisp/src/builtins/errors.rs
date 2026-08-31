@@ -30,6 +30,25 @@ pub(super) fn throw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Err(LispError::thrown(arg(args, 0), heap))
 }
 
+/// `(%failure message)` — build a **failure** value. The kernel primitive behind the
+/// prelude's `failure`: a failure is its own `Value` kind, so Brood cannot construct
+/// one without a primitive (the language has no way to make a new tag).
+pub(super) fn failure_new(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let message = expect_string(heap, "%failure", arg(args, 0))?;
+    Ok(heap.alloc_failure(&message))
+}
+
+/// `(%failure-message f)` — the `:message` a failure carries, else `nil`. A failure is
+/// deliberately NOT a collection (`get`/`count`/`seq` reject it), so this is the one
+/// way in; the prelude's `error-message` is what users call.
+pub(super) fn failure_message(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let Value::Failure(id) = arg(args, 0) else {
+        return Ok(Value::nil());
+    };
+    let key = Value::Keyword(crate::core::value::intern("message"));
+    Ok(heap.map_get(id, key).unwrap_or(Value::nil()))
+}
+
 /// `(%force-panic [msg])` — debug-only. Deliberately panics from a primitive,
 /// so tests can exercise the host-side `catch_unwind` boundary (currently the
 /// MCP server's `call_tool`). Not a Brood-clean error path — this *is* a Rust

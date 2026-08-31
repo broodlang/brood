@@ -225,8 +225,13 @@ fn string_kernel() {
     assert_eq!(run("(string/upper \"ß\")"), "\"SS\""); // Unicode case folding
     assert_eq!(run("(string/->number \"42\")"), "42");
     assert_eq!(run("(string/->number \"3.5\")"), "3.5");
-    assert_eq!(run("(string/->number \"3abc\")"), "nil"); // strict parse, not reflect/read-string
-    assert_eq!(run("(string/->number \"\")"), "nil");
+    // A strict parse (not `reflect/read-string`), and since ADR-310 a refusal is a
+    // returned `#failure{…}` rather than `nil` — "no value" and "could not produce one"
+    // no longer share a spelling. Asserted through `failure?` the way the in-language
+    // suite does, so the rendering of the failure map is free to change.
+    assert_eq!(run("(failure? (string/->number \"3abc\"))"), "true");
+    assert_eq!(run("(failure? (string/->number \"\"))"), "true");
+    assert_eq!(run("(failure? (string/->number \"42\"))"), "false");
 }
 
 /// The headline property: deep tail recursion uses O(1) Rust stack, so it must

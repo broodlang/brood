@@ -823,6 +823,13 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         // precision loss, so emit its canonical decimal string (loud, lossless).
         Value::Decimal(id) => Ok(Json::String(heap.decimal(id).to_string())),
         Value::Ratio(id) => Ok(Json::String(heap.ratio(id).to_string())),
+        // A failure has no JSON shape of its own, but it is *data a tool produced*,
+        // so dropping it silently would be the exact defect the kind exists to stop.
+        // Emit its message as a string — loud and lossless enough for a tool result.
+        Value::Failure(_) => Ok(Json::String(
+            heap.failure_message(v)
+                .unwrap_or_else(|| "failure".to_string()),
+        )),
         Value::Float(f) => {
             // serde_json::Number can't carry NaN or infinity; rather than
             // emit `null` and silently lose data, fail.

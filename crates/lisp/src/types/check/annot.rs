@@ -307,6 +307,7 @@ fn base_ty(name: &str) -> Option<Ty> {
         "bytes" => Ty::of(Tag::Bytes),
         "decimal" => Ty::of(Tag::Decimal),
         "ratio" => Ty::of(Tag::Ratio),
+        "failure" => Ty::of(Tag::Failure),
         "fn" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),
         "rope" => Ty::of(Tag::Rope),
         "pid" => Ty::of(Tag::Pid),
