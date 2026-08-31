@@ -76,7 +76,19 @@
   (test "our own closure-edit echo leaves pending alone"
     (let ([l a] (link-fold (fresh (list [3 3 1])) 1 ["doc" {} {}] :me))
       (assert= a :noop)
-      (assert= (get l :pending) (list [3 3 1])))))
+      (assert= (get l :pending) (list [3 3 1]))))
+  ;; The attach-seed race (found by bedit's collab suite, 2026-08-31): subscribe's
+  ;; full-text seed arrives AFTER our first keystroke's local apply. Rebuilding from
+  ;; it clobbers the in-flight edit and rewinds the point — the own-echo after it is
+  ;; rightly a :noop, so the copy stays wrong and the NEXT keystroke splices at 0
+  ;; ("qZ" for "Zq"). A full-text view over a non-empty pending must resync instead
+  ;; — exact, not merely safe: our sends and the sync query share one FIFO to the
+  ;; process, so the snapshot always contains every in-flight edit of ours.
+  (test "a full-text view over IN-FLIGHT edits resyncs instead of clobbering them"
+    (let ([l a] (link-fold (fresh (list [0 0 1])) 1 ["" {} {}] nil))
+      (assert= a :resync)
+      (assert= (get l :version) 1)
+      (assert= (get l :pending) ()))))
 
 ; still in flight
 (describe "link-fold — foreign splices"
