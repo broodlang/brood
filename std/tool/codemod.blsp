@@ -298,11 +298,12 @@ counterpart to `rename`. Prints each changed file and returns the count."
   (let (c (string/char-at text i))
     (cond
       (includes? ["'" "`" "~" "^" "@"] c)
-      (let (j (if (and (= c "~") (< (inc i) (string/length text))
-                    (= (string/char-at text (inc i)) "@"))
-                (+ i 2)
-                (inc i)))
-        (read-one text (skip-ws text j)))
+        (let (j (if (and (= c "~")
+                      (< (inc i) (string/length text))
+                      (= (string/char-at text (inc i)) "@"))
+                  (+ i 2)
+                  (inc i)))
+          (read-one text (skip-ws text j)))
       (opener? c) (scan-close text (inc i) 1)
       (= c "\"") (skip-str text (inc i))
       else (atom-end text i))))
@@ -373,8 +374,8 @@ counterpart to `rename`. Prints each changed file and returns the count."
 ;; swapped back, oscillating forever. The asymmetry decides it: a missed call fails
 ;; LOUDLY at runtime and a test catches it; a wrongly-swapped one silently corrupts.
 (def- callback-names
-  #{"inc" "dec" "identity" "pred" "key-fn" "keyfn" "kf" "xform" "rf"
-    "+" "-" "*" "/" "=" "<" ">" "<=" ">="})
+  #{"inc"
+    "dec" "identity" "pred" "key-fn" "keyfn" "kf" "xform" "rf" "+" "-" "*" "/" "=" "<" ">" "<=" ">="})
 
 (defn- callback-shaped? (text)
   "True when `text` reads as a FUNCTION rather than a collection — the signal that a
@@ -397,7 +398,8 @@ call is still in the old callback-first order.
       ;; also requires the LAST argument not to be a callback (see below).
       (let (sym (check-allow :discarded-catch
                   (try (string/->symbol t) (catch e nil))))
-        (and sym (bound? sym)
+        (and sym
+          (bound? sym)
           (let (k (type-of (reflect/eval sym))) (or (= k :fn) (= k :native))))))))
 (sig callback-shaped? (string -> bool))
 
@@ -480,18 +482,18 @@ call is still in the old callback-first order.
                       order
                       kind
                       (inc closep)
-                      (cons (str "("
-                              name
-                              " "
-                              ;; RECURSE into each argument: a nested call of the same
-                              ;; function lives inside these spans, and resuming the outer
-                              ;; scan past `closep` would skip it — the file then needed
-                              ;; one pass per nesting level.
-                              (string/join
-                                (map order
-                                  (fn (k) (reorder-text (nth args k) name order kind)))
-                                " ")
-                              ")")
+                      (cons
+                        (str "("
+                          name
+                          " "
+                          ;; RECURSE into each argument: a nested call of the same
+                          ;; function lives inside these spans, and resuming the outer
+                          ;; scan past `closep` would skip it — the file then needed
+                          ;; one pass per nesting level.
+                          (string/join (map order
+                                         (fn (k) (reorder-text (nth args k) name order kind)))
+                            " ")
+                          ")")
                         (cons (string/substring text from i) parts))))))))))))
 
 (defn- reorder-text (text name order kind)
