@@ -89,10 +89,26 @@ const MAX_IN_FLIGHT_HANDSHAKES: usize = 128;
 /// via [`HandshakeSlot`].
 static IN_FLIGHT_HANDSHAKES: AtomicUsize = AtomicUsize::new(0);
 
-/// Bound the read-side of a handshake so a peer that connects and then stalls
-/// can't pin a thread forever (the steady-state reader has the timeout cleared —
-/// it *should* block until the next message arrives).
+/// Bound a *single* read during a handshake, so a peer that connects and then
+/// goes silent can't pin a thread forever (the steady-state reader has the
+/// timeout cleared — it *should* block until the next message arrives).
+///
+/// **This is a per-read bound, not a per-handshake one**, which on its own is no
+/// defence at all: it is `SO_RCVTIMEO`, so it restarts on every byte that
+/// arrives. A peer dribbling one byte every 9 s satisfies it forever — a 4 KiB
+/// pre-auth frame would take ~10 hours, all of it holding a [`HandshakeSlot`],
+/// and 128 such sockets shut inbound dist down completely. The whole-handshake
+/// wall clock is [`HANDSHAKE_DEADLINE`]; both are needed (this one bounds a
+/// silent peer between bytes, that one bounds a slow one across them).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wall-clock budget for an ENTIRE handshake, enforced by [`Deadline`] across
+/// every pre-auth read and write. Unlike [`HANDSHAKE_TIMEOUT`] this cannot be
+/// restarted by trickling data, so it is what actually bounds how long an
+/// unauthenticated peer may hold a slot. Generous next to a real handshake (four
+/// small frames on an established TCP connection — microseconds on a LAN, and
+/// the dialer's own connect timeout is already 5 s).
+const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Timeout on dialer socket connect. Without this, `TcpStream::connect(addr)` blocks
 /// at the kernel's TCP SYN timeout (minutes on Linux) when the peer's port is
@@ -995,6 +1011,127 @@ fn clear_identity() {
     LOCAL_NODE.store(u32::MAX, Ordering::Release);
 }
 
+/// A `Read`/`Write` shim that fails once a wall-clock deadline passes — the
+/// whole-handshake bound the socket's `SO_RCVTIMEO` cannot express.
+///
+/// The distinction is the entire point: a socket read timeout restarts on every
+/// byte, so a peer sending one byte just inside it stays alive indefinitely
+/// while holding a [`HandshakeSlot`]. This checks an *absolute* instant that no
+/// amount of progress moves, so a trickling peer is cut off on schedule.
+///
+/// Writes are covered too, not just reads: a peer that completes its side and
+/// then stops reading would otherwise park us in `write_all` against a full
+/// socket buffer with no timeout at all — the same slot held, by the other
+/// direction.
+///
+/// The deadline is checked *around* each call rather than by shortening the
+/// socket timeout, so a single blocking read can still overshoot by at most one
+/// [`HANDSHAKE_TIMEOUT`]; the bound is the sum, which is what matters against an
+/// unbounded hold.
+struct Deadline<'a, S> {
+    inner: &'a mut S,
+    until: Instant,
+}
+
+impl<'a, S> Deadline<'a, S> {
+    fn new(inner: &'a mut S, budget: Duration) -> Self {
+        Self {
+            inner,
+            until: Instant::now() + budget,
+        }
+    }
+
+    fn check(&self) -> io::Result<()> {
+        if Instant::now() >= self.until {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "handshake exceeded its deadline",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<S: Read> Read for Deadline<'_, S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.check()?;
+        let n = self.inner.read(buf)?;
+        // Also *after* the call: a read that dribbled back a byte just under the
+        // socket timeout must not be allowed to start another one past the
+        // deadline. `read_exact` loops on short reads, and this is the loop's
+        // brake.
+        self.check()?;
+        Ok(n)
+    }
+}
+
+impl<S: Write> Write for Deadline<'_, S> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.check()?;
+        let n = self.inner.write(buf)?;
+        self.check()?;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.check()?;
+        self.inner.flush()
+    }
+}
+
+/// How many inbound connections have been shed at the [`MAX_IN_FLIGHT_HANDSHAKES`]
+/// cap since start.
+static SHED_HANDSHAKES: AtomicU64 = AtomicU64::new(0);
+
+/// Millisecond timestamp of the last shed warning, for rate limiting.
+///
+/// `u64::MAX` — not 0 — is the "never warned yet" sentinel: `now_millis()` counts
+/// from process start, so 0 is a perfectly real timestamp during the first
+/// millisecond, and a 0 sentinel would silently swallow the first warning of a
+/// flood that began at startup.
+const SHED_WARN_NEVER: u64 = u64::MAX;
+static LAST_SHED_WARN_MS: AtomicU64 = AtomicU64::new(SHED_WARN_NEVER);
+
+/// Minimum gap between shed warnings. Long enough that a sustained flood costs
+/// one line a minute, short enough that an operator watching a log sees it.
+const SHED_WARN_INTERVAL_MS: u64 = 60_000;
+
+/// Count a shed inbound connection and, at most once per
+/// [`SHED_WARN_INTERVAL_MS`], say so.
+///
+/// The shed itself is correct and stays correct — past the cap, closing the
+/// socket is the whole response. What was wrong was the **silence**: hitting the
+/// cap means *every further inbound link is refused*, i.e. inbound distribution
+/// is effectively down, and the node said nothing to anyone. That is the KI-36
+/// lesson (a silent drop cost twelve days) applied to the one place left that
+/// still dropped without a word.
+///
+/// Rate-limited rather than per-shed, because the trigger is by definition a
+/// flood and a line each would be its own amplification vector — the same shape
+/// as the ADR-232 per-name dedup. The cumulative count rides along, so one line
+/// still conveys the scale.
+fn note_shed_handshake() {
+    let total = SHED_HANDSHAKES.fetch_add(1, Ordering::Relaxed) + 1;
+    let now = now_millis();
+    let last = LAST_SHED_WARN_MS.load(Ordering::Relaxed);
+    // The first shed ever always warns; afterwards, once per interval.
+    if last != SHED_WARN_NEVER && now.saturating_sub(last) < SHED_WARN_INTERVAL_MS {
+        return;
+    }
+    // Only the thread that wins the stamp prints, so a burst yields one line.
+    if LAST_SHED_WARN_MS
+        .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    eprintln!(
+        "dist: inbound connection shed — {MAX_IN_FLIGHT_HANDSHAKES} handshakes already in \
+         flight ({total} shed so far). Inbound links are being refused; if this is not a \
+         flood, a peer may be connecting without completing its handshake."
+    );
+}
+
 /// RAII permit for one in-flight handshake slot (see [`MAX_IN_FLIGHT_HANDSHAKES`]).
 /// Held by the per-connection thread for the whole pre-auth window; released on
 /// drop (thread end), whether the handshake succeeded, failed, or timed out.
@@ -1030,11 +1167,13 @@ fn spawn_acceptor(accept: impl FnMut() -> io::Result<Stream> + Send + 'static) {
                 // Shed past the in-flight-handshake cap *before* spawning a thread
                 // or reading a byte, so a flood of unauthenticated connections
                 // can't exhaust threads/memory. Closing the socket is the whole
-                // response — no thread, no log (a per-shed log would itself be a
-                // flood vector under attack).
+                // response — but it is no longer a *silent* one: reaching the cap
+                // means inbound links are being refused outright, which the node
+                // now reports (rate-limited — see `note_shed_handshake`).
                 let permit = match HandshakeSlot::try_acquire() {
                     Some(p) => p,
                     None => {
+                        note_shed_handshake();
                         let _ = stream.shutdown(Shutdown::Both);
                         continue;
                     }
@@ -1160,7 +1299,13 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     }
     let mut stream = dial(addr)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let (peer, peer_addr, session) = handshake(&mut stream, Role::Initiator)?;
+    // Deadlined like the accept side: a malicious or wedged *listener* can
+    // trickle at a dialer just as easily, and this call is made from a scheduler
+    // worker, so an unbounded hold here wedges a worker rather than a slot.
+    let (peer, peer_addr, session) = {
+        let mut guarded = Deadline::new(&mut stream, HANDSHAKE_DEADLINE);
+        handshake(&mut guarded, Role::Initiator)?
+    };
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
                                     // Always pass to `establish` — even when we already have a link under the
                                     // authenticated name. `establish` has its own symmetric tie-break (both sides
@@ -1211,7 +1356,13 @@ fn dial(addr: &str) -> io::Result<Stream> {
 /// threads. See [`handshake`] for the protocol.
 fn accept_link(mut stream: Stream) -> io::Result<()> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let (peer, peer_addr, session) = handshake(&mut stream, Role::Responder)?;
+    // The per-read timeout above bounds a peer that goes *silent*; the deadline
+    // bounds one that stays slow. Only the second bounds how long an
+    // unauthenticated peer can hold its `HandshakeSlot` (KI-97 item 1).
+    let (peer, peer_addr, session) = {
+        let mut guarded = Deadline::new(&mut stream, HANDSHAKE_DEADLINE);
+        handshake(&mut guarded, Role::Responder)?
+    };
     // Refuse a peer claiming to BE us — the accept-side counterpart of the check
     // `node_connect` already makes on the dial side. Reachable by a relay that
     // cross-wires two connections back to our own listener, or by a misconfigured
@@ -1632,6 +1783,122 @@ mod tests {
         assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), 1);
         drop(s);
         assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), 0);
+    }
+
+    /// KI-97 item 1: a peer that **trickles** must not outlive the handshake
+    /// deadline. This is the case the socket's `SO_RCVTIMEO` cannot catch — every
+    /// individual read succeeds well inside it, so the per-read bound restarts
+    /// forever and a 4 KiB pre-auth frame could be dragged out for ~10 hours while
+    /// holding a `HandshakeSlot`.
+    ///
+    /// The reader below is that attacker in miniature: one byte per call, always
+    /// promptly, never an error. Against a bare `read_exact` it always wins;
+    /// against `Deadline` it must be cut off with `TimedOut` having delivered only
+    /// a fraction of what was asked for.
+    #[test]
+    fn a_trickling_peer_is_cut_off_at_the_handshake_deadline() {
+        /// Always returns exactly one byte — the shape a per-read timeout can
+        /// never reject.
+        struct Trickle {
+            served: usize,
+        }
+        impl Read for Trickle {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(1));
+                self.served += 1;
+                buf[0] = 0;
+                Ok(1)
+            }
+        }
+
+        let mut peer = Trickle { served: 0 };
+        let budget = Duration::from_millis(50);
+        let started = Instant::now();
+        let mut guarded = Deadline::new(&mut peer, budget);
+
+        // Ask for far more than the trickler will ever deliver in the budget.
+        let mut buf = vec![0u8; MAX_HANDSHAKE_FRAME];
+        let err = guarded
+            .read_exact(&mut buf)
+            .expect_err("a trickling peer must not satisfy read_exact past the deadline");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::TimedOut,
+            "expected the deadline to fire, got: {err}"
+        );
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < budget * 10,
+            "the deadline must cut the read off promptly, took {elapsed:?}"
+        );
+        // The point of the assertion: it was cut off mid-frame, not served.
+        assert!(
+            peer.served < MAX_HANDSHAKE_FRAME,
+            "the trickler should never have completed the frame"
+        );
+    }
+
+    /// The deadline must not interfere with a handshake that simply completes:
+    /// reads and writes inside the budget pass through untouched.
+    #[test]
+    fn the_deadline_is_transparent_to_a_prompt_peer() {
+        let mut peer = io::Cursor::new(b"brood".to_vec());
+        let mut guarded = Deadline::new(&mut peer, Duration::from_secs(30));
+        let mut buf = [0u8; 5];
+        guarded.read_exact(&mut buf).expect("prompt read");
+        assert_eq!(&buf, b"brood");
+
+        let mut sink: Vec<u8> = Vec::new();
+        let mut guarded = Deadline::new(&mut sink, Duration::from_secs(30));
+        guarded.write_all(b"hi").expect("prompt write");
+        guarded.flush().expect("prompt flush");
+        assert_eq!(sink, b"hi");
+    }
+
+    /// A write is deadlined too. A peer that finishes its own side and then stops
+    /// reading would otherwise park us in `write_all` against a full socket
+    /// buffer, holding the same slot from the other direction.
+    #[test]
+    fn a_write_past_the_deadline_is_refused() {
+        let mut sink: Vec<u8> = Vec::new();
+        let mut guarded = Deadline::new(&mut sink, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
+        let err = guarded
+            .write_all(b"x")
+            .expect_err("a write past the deadline must fail");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    /// Shedding at the cap is no longer silent, and no longer a flood vector
+    /// either: the first shed warns, an immediately following burst does not
+    /// (rate-limited), and every shed is counted regardless.
+    #[test]
+    fn shedding_counts_every_connection_and_warns_at_most_once_per_interval() {
+        assert_eq!(SHED_HANDSHAKES.load(Ordering::Relaxed), 0);
+        note_shed_handshake();
+        let after_first = LAST_SHED_WARN_MS.load(Ordering::Relaxed);
+        // Not the sentinel any more ⇒ the first shed warned. Deliberately not
+        // `!= 0`: `now_millis()` legitimately IS 0 in the first millisecond of
+        // the process, which is exactly the case this sentinel exists for.
+        assert_ne!(
+            after_first, SHED_WARN_NEVER,
+            "the first shed must warn, even at timestamp 0"
+        );
+
+        for _ in 0..50 {
+            note_shed_handshake();
+        }
+        assert_eq!(
+            SHED_HANDSHAKES.load(Ordering::Relaxed),
+            51,
+            "every shed must be counted, warned or not"
+        );
+        assert_eq!(
+            LAST_SHED_WARN_MS.load(Ordering::Relaxed),
+            after_first,
+            "a burst must not re-warn inside the interval"
+        );
     }
 
     /// A weak cookie is rejected *before* any identity/listener side effect
