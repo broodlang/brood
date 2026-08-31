@@ -9,7 +9,7 @@
     (assert= 0 (count (crypto/random-bytes 0))))
   (test "values are in 0-255"
     (let (bs (crypto/random-bytes 16))
-      (is (every? (fn (b) (and (>= b 0) (<= b 255))) bs))))
+      (is (every? bs (fn (b) (and (>= b 0) (<= b 255)))))))
   (test "generates different values each time"
     (is (not (= (crypto/random-bytes 16) (crypto/random-bytes 16))))))
 
@@ -67,7 +67,7 @@
       (assert= 32 (count dk))))
   (test "bytes are in 0-255"
     (let (dk (crypto/pbkdf2 "password" "salt" 1000 16))
-      (is (every? (fn (b) (and (>= b 0) (<= b 255))) dk))))
+      (is (every? dk (fn (b) (and (>= b 0) (<= b 255)))))))
   (test "deterministic — same inputs same output"
     (assert= (crypto/pbkdf2 "pass" "salt" 1000 32)
       (crypto/pbkdf2 "pass" "salt" 1000 32)))

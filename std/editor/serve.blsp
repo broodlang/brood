@@ -123,7 +123,7 @@ its monitor fire and closes cleanly. Tail-recursive."
                                                         cols rows opts make-model view update)))
                                          (monitor s)
                                          (serve-manager make-model view update (cons s ss))))
-      ([:down _ p _] (serve-manager make-model view update (seq/remove (fn (x) (= x p)) ss)))
+      ([:down _ p _] (serve-manager make-model view update (seq/remove ss (fn (x) (= x p)))))
       ([:shutdown from r] (do (doseq (s ss) (exit s :kill)) (send from [:reply r (count ss)])))
       (_ (serve-manager make-model view update ss)))))
 
@@ -320,7 +320,7 @@ close (`[:bye]`). Tail-recursive; one hub per shared session."
     ([:add pid] (do
                   (when frame (send pid [:frame frame]))
                   (shared-hub (cons pid clients) frame size)))
-    ([:remove pid] (shared-hub (seq/remove (fn (p) (= p pid)) clients) frame size))
+    ([:remove pid] (shared-hub (seq/remove clients (fn (p) (= p pid))) frame size))
     ([:frame f] (do (doseq (p clients) (send p [:frame f])) (shared-hub clients f size)))
     ([:size reply] (do
                      (send reply [:hub-size (first size) (second size)])

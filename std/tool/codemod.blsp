@@ -45,7 +45,7 @@
 (sig token-replace (any string any -> any))
 
 (defn- apply-pairs (text pairs)
-  (fold (fn (t p) (token-replace t (first p) (second p))) text pairs))
+  (fold pairs text (fn (t p) (token-replace t (first p) (second p)))))
 
 (defn- rewrite-file (pairs f)
   "Rewrite `f` in place if any pair changes it; returns f when changed, else nil."
@@ -57,26 +57,27 @@
 
 (defn- project-blsp ()
   "Every .blsp file under the current directory, skipping .git and vendored _deps."
-  (filter (fn (f)
-            (and (string/ends-with? f ".blsp")
-              (not (includes? f "/.git/"))
-              (not (includes? f "/_deps/"))))
-    (walk-files ".")))
+  (filter (walk-files ".")
+    (fn (f)
+      (and (string/ends-with? f ".blsp")
+        (not (includes? f "/.git/"))
+        (not (includes? f "/_deps/"))))))
 
 (defn rename (pairs)
   "Apply `[[old new] …]` token renames across the project's own .blsp sources. Prints each
   changed file and returns the count."
-  (let (changed (filter (fn (f) (not (nil? f)))
-                  (map (fn (f) (rewrite-file pairs f)) (project-blsp))))
+  (let (changed (filter (map (project-blsp) (fn (f) (rewrite-file pairs f)))
+                  (fn (f) (not (nil? f)))))
     (for (f changed) (io/puts "  changed: " f))
     (io/puts (count changed) " file(s) changed")
     (count changed)))
 
 (defn rename-from-file (path)
   "Load `[old new]` pairs from a file of `OLD NEW` lines and apply them (see `rename`)."
-  (rename (filter (fn (p) (= (count p) 2))
-            (map (fn (l) (string/split (string/trim l) " "))
-              (filter (fn (l) (not (string/blank? l))) (string/split (file/slurp path) "\n"))))))
+  (rename (filter (map (filter (string/split (file/slurp path) "\n")
+                         (fn (l) (not (string/blank? l))))
+                    (fn (l) (string/split (string/trim l) " ")))
+            (fn (p) (= (count p) 2)))))
 (sig rename-from-file (string -> int))
 
 ;; ---- CST-backed rename (context-aware) ---------------------------------------
@@ -125,8 +126,7 @@
   "Rewrite a vector of sibling CST nodes; returns the rewritten text."
   ;; A definition head is the SECOND significant (non-whitespace, non-comment) item of a
   ;; form whose first significant item is a def-head symbol.
-  (let (significant (filter (fn (k) (not (includes? [:whitespace :comment] (node-kind k))))
-                      kids)
+  (let (significant (filter kids (fn (k) (not (includes? [:whitespace :comment] (node-kind k)))))
         head (if (empty? significant) nil (first significant))
         head-name (if (and head (= (node-kind head) :symbol)) (node-payload head) nil)
         def-form? (and head-name (includes? *def-heads* head-name))
@@ -140,13 +140,13 @@
                      nil)
         quoted-kids? (or in-quote? quote-form?))
     (apply str
-      (map (fn (i) (rename-node (nth kids i) old new mode quoted-kids? (= i name-index)))
-        (range 0 (count kids))))))
+      (map (range 0 (count kids))
+        (fn (i) (rename-node (nth kids i) old new mode quoted-kids? (= i name-index)))))))
 
 (defn- significant-indices (kids)
   "The indices in `kids` of the nodes that are neither whitespace nor comments."
-  (filter (fn (i) (not (includes? [:whitespace :comment] (node-kind (nth kids i)))))
-    (range 0 (count kids))))
+  (filter (range 0 (count kids))
+    (fn (i) (not (includes? [:whitespace :comment] (node-kind (nth kids i)))))))
 
 ;; check-allow: a CST walk is inherently non-tail — the recursion depth is the
 ;; source's NESTING depth (a handful of levels), not its length.
@@ -222,12 +222,12 @@ Lossless: an unmatched file comes back byte-identical."
 (defn cst-rename (old new &optional mode)
   "Apply `cst-rename-text` across the project's own .blsp sources — the context-aware
 counterpart to `rename`. Prints each changed file and returns the count."
-  (let (changed (filter (fn (f) (not (nil? f)))
-                  (map (fn (f)
-                         (let (before (file/slurp f)
-                               after (cst-rename-text before old new mode))
-                           (if (= before after) nil (do (file/spit f after) f))))
-                    (project-blsp))))
+  (let (changed (filter (map (project-blsp)
+                          (fn (f)
+                            (let (before (file/slurp f)
+                                  after (cst-rename-text before old new mode))
+                              (if (= before after) nil (do (file/spit f after) f)))))
+                  (fn (f) (not (nil? f)))))
     (for (f changed) (io/puts "  changed: " f))
     (io/puts (count changed) " file(s) changed")
     (count changed)))
@@ -241,10 +241,21 @@ counterpart to `rename`. Prints each changed file and returns the count."
 (defn- opener? (c) (includes? "([{" c))
 (defn- closer? (c) (includes? ")]}" c))
 
+(defn- skip-to-eol (text i)
+  (if (or (>= i (string/length text)) (= (string/char-at text i) "\n"))
+    i
+    (skip-to-eol text (inc i))))
+(sig skip-to-eol (string int -> int))
+
 (defn- skip-ws (text i)
-  (if (and (< i (string/length text)) (ws? (string/char-at text i)))
-    (skip-ws text (inc i))
-    i))
+  ;; Whitespace AND comments. A `;` line between two arguments is ordinary in Brood —
+  ;; `(filter (fn …)\n  ;; why\n  coll)` — and stopping at it made the reader take the
+  ;; comment for an argument, so the call was (safely) refused and left unmigrated.
+  (cond
+    (>= i (string/length text)) i
+    (ws? (string/char-at text i)) (skip-ws text (inc i))
+    (= (string/char-at text i) ";") (skip-ws text (skip-to-eol text i))
+    else i))
 (sig skip-ws (string int -> int))
 
 (defn- skip-str (text i)
@@ -280,9 +291,18 @@ counterpart to `rename`. Prints each changed file and returns the count."
 (sig atom-end (string int -> int))
 
 (defn- read-one (text i)
-  ;; i at the start of an s-expr (non-ws); returns its end index (exclusive)
+  ;; i at the start of an s-expr (non-ws); returns its end index (exclusive).
+  ;; A reader-macro prefix belongs to the form it introduces: `'()` is ONE argument,
+  ;; and reading `'` as an atom split it in two, which misaligned every argument after
+  ;; it and refused the call.
   (let (c (string/char-at text i))
     (cond
+      (includes? ["'" "`" "~" "^" "@"] c)
+      (let (j (if (and (= c "~") (< (inc i) (string/length text))
+                    (= (string/char-at text (inc i)) "@"))
+                (+ i 2)
+                (inc i)))
+        (read-one text (skip-ws text j)))
       (opener? c) (scan-close text (inc i) 1)
       (= c "\"") (skip-str text (inc i))
       else (atom-end text i))))
@@ -322,11 +342,253 @@ counterpart to `rename`. Prints each changed file and returns the count."
 (defn swap2 (old new)
   "Rewrite every 2-arg call `(old A B)` to `(new B A)` across the project's own .blsp
   sources, reading A/B as balanced s-expressions. For a reversed-args rename."
-  (let (changed (filter (fn (f) (not (nil? f)))
-                  (map (fn (f)
-                         (let (before (file/slurp f)
-                               after (apply str (reverse (swap-loop before old new 0 nil))))
-                           (if (= before after) nil (do (file/spit f after) f))))
-                    (project-blsp))))
+  (let (changed (filter (map (project-blsp)
+                          (fn (f)
+                            (let (before (file/slurp f)
+                                  after (apply str (reverse (swap-loop before old new 0 nil))))
+                              (if (= before after) nil (do (file/spit f after) f)))))
+                  (fn (f) (not (nil? f)))))
     (for (f changed) (io/puts "  swapped: " f))
     (io/puts (count changed) " file(s) changed")))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; ADR-308 — the data-first migration, for a DOWNSTREAM project
+;; ─────────────────────────────────────────────────────────────────────────────
+;; `swap2` above rewrites a 2-arg call for a reversed-args rename. The data-first
+;; move needs two more things: an n-ary REORDER (`(fold f acc coll)` → `(fold coll acc
+;; f)` is not a swap), and a table of what moved, so a downstream project runs one
+;; command instead of thirty.
+;;
+;; The rewrite is IDEMPOTENT by construction: a call is rewritten only when its first
+;; argument still looks like a callback — an `(fn …)` literal, a `?`-suffixed predicate,
+;; or a known function name. After the rewrite the first argument is the collection, so
+;; a second run does nothing. Running it twice cannot double-swap.
+;;
+;; It is a text rewrite over balanced s-expressions, not a reader round-trip, so
+;; comments and formatting survive.
+
+;; ONLY names that cannot plausibly hold a collection. `rest`, `first`, `count`, `keys`,
+;; `vals`, `str`, `f`, `g` were here and had to go: they are ordinary VARIABLE names, so
+;; `(map rest (fn …))` — already data-first, `rest` a list — read as callback-first and
+;; swapped back, oscillating forever. The asymmetry decides it: a missed call fails
+;; LOUDLY at runtime and a test catches it; a wrongly-swapped one silently corrupts.
+(def- callback-names
+  #{"inc" "dec" "identity" "pred" "key-fn" "keyfn" "kf" "xform" "rf"
+    "+" "-" "*" "/" "=" "<" ">" "<=" ">="})
+
+(defn- callback-shaped? (text)
+  "True when `text` reads as a FUNCTION rather than a collection — the signal that a
+call is still in the old callback-first order.
+
+    (codemod/callback-shaped? \"(fn (x) x)\")   → true"
+  (let (t (string/trim text))
+    (or (string/starts-with? t "(fn ")
+      (string/starts-with? t "(fn(")
+      (string/ends-with? t "?")
+      (contains? callback-names t)
+      (string/starts-with? t "math/")
+      (string/starts-with? t "string/")
+      ;; A KEYWORD is a function of a map in Brood — `(map :name people)` is the
+      ;; accessor-as-a-value idiom, and reading it as data left every one of them
+      ;; unmigrated (`empty?: expected collection, got keyword`).
+      (string/starts-with? t ":")
+      ;; A bare name that RESOLVES to a function — `(map pr-str xs)`,
+      ;; `(map lsp-location result)`. Safe to consult now only because `old-order?`
+      ;; also requires the LAST argument not to be a callback (see below).
+      (let (sym (check-allow :discarded-catch
+                  (try (string/->symbol t) (catch e nil))))
+        (and sym (bound? sym)
+          (let (k (type-of (reflect/eval sym))) (or (= k :fn) (= k :native))))))))
+(sig callback-shaped? (string -> bool))
+
+(defn- number-shaped? (text)
+  "True when `text` reads as a COUNT — the old first argument of `(take n coll)`.
+
+    (codemod/number-shaped? \"3\")   → true"
+  (let (t (string/trim text))
+    (or (not (nil? (string/->number t)))
+      (string/starts-with? t "(inc ")
+      (string/starts-with? t "(dec ")
+      (string/starts-with? t "(count ")
+      (string/starts-with? t "(- ")
+      (string/starts-with? t "(+ "))))
+(sig number-shaped? (string -> bool))
+
+(defn- literal-shaped? (text)
+  "True when `text` is a STRING or keyword literal — the old first argument of
+`(string/join sep coll)` and `(seq/interpose sep coll)`.
+
+    (codemod/literal-shaped? \"\\\", \\\"\")   → true"
+  (let (t (string/trim text))
+    (or (string/starts-with? t "\"") (string/starts-with? t ":"))))
+(sig literal-shaped? (string -> bool))
+
+(defn- old-order? (kind first-arg last-arg)
+  ;; The subject moved to the FRONT, so a migrated call has its callback LAST. Requiring
+  ;; that is what makes reading a bare name as a callback safe: `(map rest (fn …))` —
+  ;; `rest` a list, already data-first — has a callback last and is left alone, where a
+  ;; first-argument-only test swapped it back and oscillated forever.
+  (cond
+    (= kind :callback) (and (callback-shaped? first-arg) (not (callback-shaped? last-arg)))
+    (= kind :count) (and (number-shaped? first-arg) (not (number-shaped? last-arg)))
+    (= kind :literal) (and (literal-shaped? first-arg) (not (literal-shaped? last-arg)))
+    else false))
+
+(defn- read-args (text i n acc)
+  ;; `n` balanced s-expr spans starting at `i` → ([start end] …) and the index after,
+  ;; or nil when fewer than `n` remain before the closing paren.
+  (if (= n 0)
+    [(reverse acc) i]
+    (let (s (skip-ws text i))
+      (if (or (>= s (string/length text)) (= (string/char-at text s) ")"))
+        nil
+        (let (e (read-one text s)) (read-args text e (dec n) (cons [s e] acc)))))))
+
+(defn- reorder-loop (text name order kind from parts)
+  (let (needle (str "(" name)
+        i (index-of text needle from)
+        nlen (string/length needle)
+        len (string/length text)
+        arity (count order))
+    (if (< i 0)
+      (cons (string/substring text from len) parts)
+      (let (after (+ i nlen)
+            skip (fn ()
+                   (reorder-loop text
+                     name
+                     order
+                     kind
+                     (inc i)
+                     (cons (string/substring text from (inc i)) parts))))
+        (if (or (>= after len) (not (ws? (string/char-at text after))))
+          (skip)
+          (let (got (read-args text after arity nil))
+            (if (nil? got)
+              (skip)
+              (let ([spans end] got
+                    closep (skip-ws text end)
+                    args (map spans (fn (sp) (string/substring text (first sp) (second sp)))))
+                (cond
+                  ;; not exactly `arity` arguments — a different arity of the same name
+                  (or (>= closep len) (not (= (string/char-at text closep) ")"))) (skip)
+                  ;; already data-first: the first argument no longer looks like the
+                  ;; old subject, so this call has been migrated (or never needed it)
+                  (not (old-order? kind (first args) (last args))) (skip)
+                  else
+                    (reorder-loop text
+                      name
+                      order
+                      kind
+                      (inc closep)
+                      (cons (str "("
+                              name
+                              " "
+                              ;; RECURSE into each argument: a nested call of the same
+                              ;; function lives inside these spans, and resuming the outer
+                              ;; scan past `closep` would skip it — the file then needed
+                              ;; one pass per nesting level.
+                              (string/join
+                                (map order
+                                  (fn (k) (reorder-text (nth args k) name order kind)))
+                                " ")
+                              ")")
+                        (cons (string/substring text from i) parts))))))))))))
+
+(defn- reorder-text (text name order kind)
+  (apply str (reverse (reorder-loop text name order kind 0 nil))))
+
+(defn reorder (name order kind)
+  "Rewrite every `arity`-argument call of `name` across the project's `.blsp` sources,
+putting its arguments in `order` — `[2 1 0]` turns `(fold f acc coll)` into
+`(fold coll acc f)`. `kind` names what the OLD first argument looked like —
+`:callback`, `:count` or `:literal` — and only calls still matching it are touched, so
+running this twice is a no-op. Returns the files changed."
+  (let (changed (filter (map (project-blsp)
+                          (fn (f)
+                            (let (before (file/slurp f)
+                                  after (reorder-text before name order kind))
+                              (if (= before after) nil (do (file/spit f after) f)))))
+                  (fn (f) (not (nil? f)))))
+    changed))
+(sig reorder (string seqable keyword -> seqable))
+
+;; What ADR-308 moved: `[name argument-order]`, the collection to argument one. The
+;; 2-argument entries are `[1 0]`; `fold`/`reduce`/`scan`/`reduce-while` reverse three.
+(def data-first-table
+  [["map" [1 0] :callback]
+    ["mapv" [1 0] :callback]
+    ["filter" [1 0] :callback]
+    ["each" [1 0] :callback]
+    ["mapcat" [1 0] :callback]
+    ["any?" [1 0] :callback]
+    ["every?" [1 0] :callback]
+    ["take-while" [1 0] :callback]
+    ["drop-while" [1 0] :callback]
+    ["sort-by" [1 0] :callback]
+    ["seq/remove" [1 0] :callback]
+    ["seq/keep" [1 0] :callback]
+    ["seq/filterv" [1 0] :callback]
+    ["seq/find" [1 0] :callback]
+    ["seq/group-by" [1 0] :callback]
+    ["seq/distinct-by" [1 0] :callback]
+    ["seq/min-by" [1 0] :callback]
+    ["seq/max-by" [1 0] :callback]
+    ["seq/index-where" [1 0] :callback]
+    ["seq/chunk-by" [1 0] :callback]
+    ["seq/lmap" [1 0] :callback]
+    ["seq/lfilter" [1 0] :callback]
+    ["seq/lkeep" [1 0] :callback]
+    ["seq/lremove" [1 0] :callback]
+    ;; a COUNT first: `(take n coll)`
+    ["take" [1 0] :count]
+    ["drop" [1 0] :count]
+    ["partition" [1 0] :count]
+    ["seq/take-last" [1 0] :count]
+    ["seq/drop-last" [1 0] :count]
+    ["seq/split-at" [1 0] :count]
+    ["seq/chunk-every" [1 0] :count]
+    ["seq/remove-nth" [1 0] :count]
+    ;; a SEPARATOR literal first: `(string/join sep coll)`
+    ["string/join" [1 0] :literal]
+    ["seq/interpose" [1 0] :literal]
+    ;; three arguments, callback first: `(fold f acc coll)`
+    ["fold" [2 1 0] :callback]
+    ["reduce" [2 1 0] :callback]
+    ["seq/scan" [2 1 0] :callback]
+    ["seq/reduce-while" [2 1 0] :callback]
+    ["map/reduce-kv" [2 1 0] :callback]])
+
+(defn data-first ()
+  "Apply the whole ADR-308 argument-order migration to this project's `.blsp` sources —
+the collection becomes argument one for every collection function that moved. Idempotent:
+a call whose first argument is already a collection is left alone, and a second pass is
+run to PROVE it converged. Prints what changed.
+
+Run `nest check --fix-renames` beside it for the ADR-302 `!` renames, which the rename
+ledger covers."
+  ;; Load the project's OWN sources first: `callback-shaped?` asks whether a bare name
+  ;; resolves to a function, and in a bare image every project-local callback
+  ;; (`lsp-location`, `web-chunk-html`, …) answered "no" — so those calls were left
+  ;; unmigrated while stdlib ones converted.
+  (check-allow :discarded-catch
+    (try (project/load-sources (project/find-root ".")) (catch e nil)))
+  (let (pass (fn ()
+               (fold data-first-table
+                 #{}
+                 (fn (acc entry)
+                   (let ([name order kind] entry)
+                     (fold (reorder name order kind) acc (fn (s f) (conj s f)))))))
+        touched (pass)
+        ;; A second pass MUST change nothing. If it does, some call is being swapped
+        ;; back and forth — a heuristic reading a data-first call as old-order — and
+        ;; leaving that unreported corrupts the tree a little more on every run.
+        again (pass))
+    (for (f (sort (into [] touched))) (io/puts "  data-first: " f))
+    (io/puts (count touched) " file(s) changed")
+    (when (> (count again) 0)
+      (error "codemod/data-first did not converge — "
+        (count again)
+        " file(s) still change on a second pass, so a call is oscillating: "
+        (string/join (sort (into [] again)) ", ")))
+    (count touched)))
+(sig data-first (-> int))

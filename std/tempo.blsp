@@ -151,7 +151,7 @@ time unit — nil means \"nothing coarser\", never \"no such unit\"."
 
 (defn- tp-contiguous? (present)
   ;; The units must be exactly the first N of unit-order — no gaps.
-  (= present (vec (take (count present) unit-order))))
+  (= present (vec (take unit-order (count present)))))
 
 (defn- tp-validate (m)
   ;; nil when `m` is a valid component map, otherwise the reason it is not.
@@ -222,11 +222,11 @@ a time unit — nil means \"`t` does not carry it\", never \"no such unit\".
   "The units present in `t`, coarse to fine.
 
     (tempo/units (tempo/parse! \"2026-06\"))   → [:year :month]"
-  (vec (take (+ (tp-rank (tempo-res t)) 1) unit-order)))
+  (vec (take unit-order (+ (tp-rank (tempo-res t)) 1))))
 
 (defn- tp-restrict (m u)
   ;; `m` keeping only the units at or coarser than `u`.
-  (fold (fn (acc k) (assoc acc k (get m k))) {} (take (+ (tp-rank u) 1) unit-order)))
+  (fold (take unit-order (+ (tp-rank u) 1)) {} (fn (acc k) (assoc acc k (get m k)))))
 
 (defn truncate (t u)
   "`t` at the coarser resolution `u`, dropping every finer unit. Returns `t`
@@ -255,8 +255,8 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
   ;; stripped by `parse` before any field reaches here.
   (and (string? s)
     (> (string/length s) 0)
-    (every? (fn (i) (>= (index-of "0123456789" (string/char-at s i)) 0))
-      (range 0 (string/length s)))))
+    (every? (range 0 (string/length s))
+      (fn (i) (>= (index-of "0123456789" (string/char-at s i)) 0)))))
 
 (defn- tp-int (s)
   (let (n (if (string? s) (string/->number s) nil))
@@ -271,7 +271,7 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
 (defn- tp-parse-date-parts (s)
   ;; \"2026-06-15\" → {:year 2026 :month 6 :day 15}, or nil on a shape failure.
   (let (parts (string/split s "-"))
-    (when (and (>= (count parts) 1) (<= (count parts) 3) (every? tp-digits? parts))
+    (when (and (>= (count parts) 1) (<= (count parts) 3) (every? parts tp-digits?))
       (let (y {:year (tp-int (nth parts 0))}
             ym (if (> (count parts) 1) (assoc y :month (tp-int (nth parts 1))) y))
         (if (> (count parts) 2) (assoc ym :day (tp-int (nth parts 2))) ym)))))
@@ -286,7 +286,7 @@ a time unit at all — a typo'd keyword is a mistake, not a no-op.
     (when (and (<= (count dot) 2)
             (>= (count parts) 1)
             (<= (count parts) 3)
-            (every? tp-digits? parts)
+            (every? parts tp-digits?)
             ;; a fraction is only meaningful on a full HH:MM:SS, and must itself
             ;; be digits — \"14:30:05.xyz\" is a parse failure, not 0 ms.
             (or (not frac) (and (tp-digits? frac) (= (count parts) 3))))
@@ -556,14 +556,14 @@ Either argument may be anything implementing `Spanning`.
         (tp-merge-acc (rest xs) (cons s acc))))))
 
 (defn- tp-normalize (ss)
-  (tp-merge-acc (sort-by span-from (vec (for (s ss :when (< (span-from s) (span-to s))) s))) nil))
+  (tp-merge-acc (sort-by (vec (for (s ss :when (< (span-from s) (span-to s))) s)) span-from) nil))
 
 (defn set-of (xs)
   "An interval set covering every value in `xs` — each anything implementing
 `Spanning`. Overlapping and touching members merge; empty ones drop.
 
     (count (tempo/spans (tempo/set-of [(tempo/parse! \"2026-06\") (tempo/parse! \"2026-07\")])))   → 1"
-  (iset (tp-normalize (map ->span xs))))
+  (iset (tp-normalize (map xs ->span))))
 
 (defn- tp-as-set (x)
   (if (iset? x) x (iset (tp-normalize [(->span x)]))))
@@ -839,7 +839,7 @@ end is the exclusive endpoint, so `parse-span` reads back what this writes."
 (defn ->iso-set (x)
   "An interval set as its spans in ISO 8601 interval form, comma-separated. An
 empty set renders as the empty string."
-  (string/join "," (map ->iso-span (spans x))))
+  (string/join (map (spans x) ->iso-span) ","))
 (sig ->iso-set (map -> string))
 
 ;; `Temporal` is `datetime`'s ability for "renders as ISO 8601". Joining it from HERE keeps

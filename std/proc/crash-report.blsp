@@ -1,0 +1,212 @@
+;; std/proc/crash-report.blsp — crash reports for processes nobody is watching.
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - An unsupervised process that raises just dies. The supervisor sees its
+;;    children, the CLI sees the top-level process, and every other process —
+;;    a `spawn` from a handler, a one-off worker, a `task` whose owner moved on —
+;;    exits with a structured reason that nothing reads. That is the gap
+;;    ADR-039's reversal left open (kernel supervision was the scheduler-race
+;;    surface; userland supervision does not cover what nobody supervises), and
+;;    it is the gap OTP closes with the `logger` process, not with the kernel:
+;;    every crash is *reported* whether or not it is *handled*.
+;;  - Mechanism is the kernel system monitor (`proc/system-monitor`), which
+;;    already pushes `[:system :exit pid reason]` for every exit; this module is
+;;    one subscriber selecting `:exit-abnormal`, which the kernel filters before
+;;    it builds a message, so a clean exit costs one atomic load. One
+;;    subscription per pid (ADR-305) is what lets this sit armed underneath
+;;    `telemetry/watch-runtime` and the MCP snapshot instead of being displaced.
+;;  - Default-ON in `brood file`, `nest run`, a released bundle and the REPL, for
+;;    ADR-232's reason: a flag you must arm before the bug is a flag that is
+;;    absent when it matters (KI-36). `nest test` does not arm it — the test
+;;    runner reports its own failures, and a suite deliberately crashing
+;;    processes would flood. `BROOD_NO_CRASH_REPORT=1` opts a run out.
+;;  - Deduplicated per SITE, like ADR-232's once-per-name drop warning: the
+;;    first crash at a `(kind file line)` prints in full, later ones at the same
+;;    site print nothing. A supervised worker in a restart loop therefore costs
+;;    one report, and the supervisor's own give-up (a different site) another.
+;;  - The reporter does not report the process that started it: in `nest run`
+;;    that is the entry process, whose crash the CLI already prints with the
+;;    same trace. Reporting it here would print every top-level error twice.
+
+(defmodule crash-report
+  "Crash reports for green processes nobody is watching (ADR-305). A listener
+process subscribes to the kernel's abnormal-exit events and prints one report per
+crash site to stderr — pid, reason, error kind/code, source position, hint and the
+innermost trace frames — so a `spawn`ed process that raises is never silent.
+
+    (crash-report/start)          ; arm; idempotent, returns the listener pid
+    (crash-report/stop)           ; disarm
+    (crash-report/start {:sink f}) ; f receives each report string instead of stderr
+
+`brood file.blsp`, `nest run`, a released bundle and the REPL arm it by default
+(`arm-default`); `BROOD_NO_CRASH_REPORT=1` opts out. `nest test` never arms it.
+
+A report looks like:
+
+    [crash] #<pid a/9> exited: division by zero
+            kind :arith-error  code E0031  at src/worker.blsp:14:9
+            at worker/step (src/worker.blsp:14:9)
+            at worker/loop (src/worker.blsp:9:5)
+            (further crashes at this site are not reported)
+
+Reasons that are not crashes — `:normal`, `:killed`, `:shutdown`, `[:shutdown x]` —
+are never reported: a supervisor tearing a subtree down is not a fault.")
+
+(def- crash-report-name :crash-reporter)
+
+(def- crash-report-max-frames 8)
+
+;; ---- classifying a reason ----------------------------------------------------
+
+(defn- crash-report-crash? (reason)
+  "True when `reason` is a fault worth reporting — anything but a clean or
+deliberate exit."
+  (match reason
+    (:normal false)
+    (:killed false)
+    (:kill false)
+    (:shutdown false)
+    ([:shutdown _] false)
+    (_ true)))
+
+(defn- crash-report-first-positioned (frames)
+  "The first trace frame carrying a `:file` (the raise site as the program sees it),
+or nil. A user `error` records its position on the frame that entered it, not on the
+error map, and a frame reached by a tail call carries none."
+  (cond
+    (empty? frames) nil
+    (get (first frames) :file) (first frames)
+    else (crash-report-first-positioned (rest frames))))
+
+(defn- crash-report-site (reason)
+  "The deduplication key for `reason`: the raise site `[kind file line]` when the
+error map or its trace carries a position, `[kind message]` when neither does, else
+the reason itself. A crash loop whose message varies per iteration (`\"boom: 3\"`,
+`\"boom: 4\"`) is still one site."
+  (match reason
+    ([:error (and m {:keys [kind message]})] (let (at (if (get m :file)
+                                                        m
+                                                        (crash-report-first-positioned (or (get m
+                                                                                             :trace)
+                                                                                         ()))))
+                                               (if at
+                                                 [kind (get at :file) (get at :line)]
+                                                 [kind message])))
+    (_ reason)))
+
+;; ---- rendering ---------------------------------------------------------------
+
+(defn- crash-report-position (m)
+  "`file:line:col` for an error map that carries a position, else nil."
+  (let (file (get m :file) line (get m :line) col (get m :col))
+    (cond
+      (and file line col) (str file ":" line ":" col)
+      (and file line) (str file ":" line)
+      file file
+      else nil)))
+
+(defn- crash-report-frame-line (frame)
+  "One `at fn (file:line:col)` line for a trace frame."
+  (let (name (or (get frame :fn) "<anonymous>")
+        pos (crash-report-position frame))
+    (if pos
+      (str "        at " name " (" pos ")")
+      (str "        at " name))))
+
+(defn- crash-report-detail-lines (m)
+  "The lines under the headline for an error map: kind/code/position, hint, frames."
+  (let (pos (crash-report-position m)
+        meta (str "        kind "
+               (pr-str (get m :kind))
+               (if (get m :code) (str "  code " (get m :code)) "")
+               (if pos (str "  at " pos) ""))
+        hint (when (get m :hint) (str "        hint: " (get m :hint)))
+        frames (map (take (or (get m :trace) ()) crash-report-max-frames)
+                 crash-report-frame-line))
+    (append (list meta) (if hint (list hint) ()) frames)))
+
+(defn render (pid reason)
+  "Render one crash report for `pid` exiting with `reason` as a multi-line string
+(no trailing newline). Pure — the piece a host that captures reports formats with."
+  (let (headline (match reason
+                   ([:error (and m {:keys [message]})] (str "[crash] "
+                                                         (pr-str pid)
+                                                         " exited: "
+                                                         (or message (pr-str m))))
+                   ([:error other] (str "[crash] " (pr-str pid) " exited: " (pr-str other)))
+                   (_ (str "[crash] " (pr-str pid) " exited: " (pr-str reason))))
+        details (match reason
+                  ([:error (and m {:keys [kind]})] (if kind (crash-report-detail-lines m) ()))
+                  (_ ()))
+        lines (append (list headline)
+                details
+                (list "        (further crashes at this site are not reported)")))
+    (string/join lines "\n")))
+(sig render (pid any -> string))
+
+;; ---- the listener ------------------------------------------------------------
+
+(defn- crash-report-emit (sink text)
+  "Hand `text` to the configured sink, or print it to stderr."
+  (if sink
+    (sink text)
+    (io/puts text :to *err*)))
+
+(defn- crash-report-loop (starter sink seen)
+  "The listener: report each abnormal exit once per site; `:stop` disarms."
+  (receive
+    ([:system :exit pid reason] (if (or (= pid starter) (not (crash-report-crash? reason)))
+                                  (crash-report-loop starter sink seen)
+                                  (let (site (crash-report-site reason))
+                                    (if (contains? seen site)
+                                      (crash-report-loop starter sink seen)
+                                      (do
+                                        (crash-report-emit sink (render pid reason))
+                                        (crash-report-loop starter sink (conj seen site)))))))
+    ([:system _ _ _] (crash-report-loop starter sink seen))
+    (:stop (do (proc/system-monitor nil) nil))))
+
+(defn start (&optional opts)
+  "Arm the crash reporter: spawn the listener, subscribe it to the kernel's abnormal
+exits and register it as `:crash-reporter`. Idempotent — a second call returns the
+running listener's pid. `opts` may carry `:sink`, a one-argument function that
+receives each rendered report instead of it going to stderr (a host capturing
+reports, or a test). The calling process is never reported — its crash is the
+CLI's to print."
+  (let (running (proc/whereis crash-report-name))
+    (if running
+      running
+      (let (starter (self)
+            sink (get (or opts {}) :sink)
+            listener (spawn (crash-report-loop starter sink #{})))
+        (proc/register crash-report-name listener)
+        (proc/system-monitor listener {:exit-abnormal true})
+        listener))))
+(sig start (&optional (or map nil) -> pid))
+
+(defn stop ()
+  "Disarm the crash reporter, if one is running, and return once it has: the
+listener's subscription is gone and a crash after `stop` returns is not reported.
+Returns nil."
+  (let (running (proc/whereis crash-report-name))
+    (when running
+      (let (m (monitor running))
+        (send running :stop)
+        (receive ([:down ^m _ _] nil) (after 1000 nil))))
+    nil))
+(sig stop (-> nil))
+
+(defn running? ()
+  "Is a crash reporter armed?"
+  (not (nil? (proc/whereis crash-report-name))))
+(sig running? (-> bool))
+
+(defn arm-default ()
+  "Arm the reporter the way the entry points do: unless `BROOD_NO_CRASH_REPORT` is
+set, and unless one is already running. Returns the listener pid, or nil when opted
+out. `brood file`, `nest run`, `project/run-bundle` and the REPL call this before
+the program starts; `nest test` deliberately does not."
+  (if (os/env "BROOD_NO_CRASH_REPORT")
+    nil
+    (start)))
+(sig arm-default (-> (or pid nil)))

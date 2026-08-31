@@ -94,12 +94,12 @@
                 :memory 30
                 :reds-rate 99}
                {:id 1 :mailbox 5 :memory 20 :reds-rate 0}])
-      (assert= (map (fn (p) (get p :id)) (observer/observe-sort ps :id)) '(1 2 3))
+      (assert= (map (observer/observe-sort ps :id) (fn (p) (get p :id))) '(1 2 3))
       ; mbox 9,5,1
-      (assert= (map (fn (p) (get p :id)) (observer/observe-sort ps :mailbox)) '(2 1 3))
+      (assert= (map (observer/observe-sort ps :mailbox) (fn (p) (get p :id))) '(2 1 3))
       ; mem 30,20,10
-      (assert= (map (fn (p) (get p :id)) (observer/observe-sort ps :memory)) '(3 1 2))
-      (assert= (map (fn (p) (get p :id)) (observer/observe-sort ps :reds)) '(3 2 1))))
+      (assert= (map (observer/observe-sort ps :memory) (fn (p) (get p :id))) '(3 1 2))
+      (assert= (map (observer/observe-sort ps :reds) (fn (p) (get p :id))) '(3 2 1))))
   (test "observer/observe-next-sort cycles id → mailbox → memory → reds → tree → id"
     (assert= (observer/observe-next-sort :id) :mailbox)
     (assert= (observer/observe-next-sort :mailbox) :memory)
@@ -135,12 +135,12 @@
                {:id 3 :parent 1}]
           ordered (observer/observe-tree-order ps))
       ;; DFS: 1, then 2 and its child 4, then 3 and its child 5
-      (assert= (map (fn (p) (get p :id)) ordered) '(1 2 4 3 5))
-      (assert= (map (fn (p) (get p :depth)) ordered) '(0 1 2 1 2))))
+      (assert= (map ordered (fn (p) (get p :id))) '(1 2 4 3 5))
+      (assert= (map ordered (fn (p) (get p :depth))) '(0 1 2 1 2))))
   (test "observer/observe-tree-order treats an orphan (parent not in set) as a root"
     (let (ps [{:id 7 :parent 999} {:id 8 :parent 7}]
           ordered (observer/observe-tree-order ps))
-      (assert= (map (fn (p) (get p :id)) ordered) '(7 8))
+      (assert= (map ordered (fn (p) (get p :id))) '(7 8))
       (assert= (get (first ordered) :depth) 0)))
   (test "observer/observe-node-lines summarises the node panel + link status"
     (let (node {:name :nonode
@@ -304,7 +304,7 @@
       (is (includes? (nth (last paused) 3) "PAUSED"))))
 
   (test "long lists are windowed to the terminal with a position counter"
-    (let (procs (map (fn (i) (pinfo i nil :waiting 0 0)) (range 20))
+    (let (procs (map (range 20) (fn (i) (pinfo i nil :waiting 0 0)))
           f (observe-frame sample-node procs 0 60 8 false :id :ok nil))
       ; rows=8 → cap = 3
       ;; clear + 2 node + header + 3 body + detail + footer = 9
@@ -313,14 +313,14 @@
 
   (test "every text op is clipped to the terminal width"
     (let (f (observe-frame sample-node [(pinfo 1 :longname :running 0 0)] 0 20 10 false :id :ok nil))
-      (is (every? (fn (op) (or (not (= (first op) :text)) (<= (string/length (nth op 3)) 20))) f))))
+      (is (every? f (fn (op) (or (not (= (first op) :text)) (<= (string/length (nth op 3)) 20)))))))
 
   (test "command-mode frame renders the minibuffer + cursor"
     (let (ui {:mode :command :edit (editor/lineedit/lineedit-init "λ " "" []) :msg nil}
           f (observe-frame sample-node [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok ui))
       ;; the footer (last text op) is the minibuffer prompt, and a cursor op is placed
-      (is (includes? (nth (last (filter (fn (op) (= (first op) :text)) f)) 3) "λ"))
-      (is (includes? (map first f) :cursor))))
+      (is (includes? (nth (last (filter f (fn (op) (= (first op) :text)))) 3) "λ"))
+      (is (includes? (map f first) :cursor))))
   (test "command-mode minibuffer syntax-highlights the input (shared with the REPL)"
     ;; the input is coloured by the same `highlight-chunks` the REPL line editor uses
     (let (edit (assoc (editor/lineedit/lineedit-init "λ " "" []) :text "(+ 1 2)" :point 7)
@@ -334,13 +334,13 @@
               {:mode :command :edit edit :msg nil})
           ;; text ops on the minibuffer row (rows-1 = 11) carrying an :fg face — the
           ;; coloured tokens (e.g. the numbers / the operator)
-          coloured (filter (fn (op)
-                             (and (= (first op) :text)
-                               (= (nth op 1) 11)
-                               (>= (count op) 5)
-                               (map? (nth op 4))
-                               (contains? (nth op 4) :fg)))
-                     f))
+          coloured (filter f
+                     (fn (op)
+                       (and (= (first op) :text)
+                         (= (nth op 1) 11)
+                         (>= (count op) 5)
+                         (map? (nth op 4))
+                         (contains? (nth op 4) :fg)))))
       (is (> (count coloured) 0))))
   (test "a :msg replaces the detail line"
     (let (f (observe-frame sample-node
@@ -374,9 +374,10 @@
           ; insert a char → still editing
           typed (observer/observe-command-key s back "x")
           submitted (observer/observe-command-key (assoc s
-                                                    :edit (editor/lineedit/lineedit-init "λ "
-                                                            ""
-                                                            []))
+                                                    :edit
+                                                      (editor/lineedit/lineedit-init "λ "
+                                                        ""
+                                                        []))
                       back :enter))
       ; empty submit
       (assert= (get typed :mode) :command)
@@ -502,8 +503,8 @@
     (let (w (spawn (receive (_ :done))))
       (sleep 10)
       (let (procs (observer/observe-local-source)
-            ids (map (fn (p) (get p :id)) procs))
-        (is (every? map? procs))
+            ids (map procs (fn (p) (get p :id))))
+        (is (every? procs map?))
         ;; the inline source sees the just-spawned process
         (is (includes? ids (get (proc/info w) :id))))))
 
@@ -512,7 +513,7 @@
     (let (snap (observer/observe-local-snapshot)
           procs (observer/observe-sort (get snap :procs) :id))
       (is (contains? snap :node))
-      (is (every? (fn (p) (and (number? (get p :id)) (number? (get p :mailbox)))) procs))
+      (is (every? procs (fn (p) (and (number? (get p :id)) (number? (get p :mailbox))))))
       (is (>= (count (observe-frame (get snap :node) procs 0 80 24 false :id :ok nil)) 5))))
 
   (test "the :observe agent replies with a snapshot (the remote-attach seam)"

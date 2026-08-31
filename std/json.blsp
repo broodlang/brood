@@ -362,22 +362,22 @@ on malformed input or trailing content. Pure.
 ;; `[raw escape]` for every control char the named escapes below don't cover —
 ;; strict JSON forbids any raw char < U+0020 in a string, named escape or not.
 (def- json-control-escapes
-  (map (fn (cp) [(cp->string cp) (enc-u cp)])
-    (filter (fn (cp) (not (includes? [8 9 10 12 13] cp))) (range 32))))
+  (map (filter (range 32) (fn (cp) (not (includes? [8 9 10 12 13] cp))))
+    (fn (cp) [(cp->string cp) (enc-u cp)])))
 
 (defn- needs-escape? (s)
   "True if `s` contains any char JSON must escape: `\"` (34), `\\` (92), or a control
 char (< 0x20). The common case is a clean ASCII string, so this one O(n) codepoint
 scan lets `enc-escapes` skip ~27 whole-string `replace` passes (backslash/quote/
 the named escapes + every C0 control) that would each find nothing."
-  (any? (fn (c) (or (< c 32) (= c 34) (= c 92))) (string/->codepoints s)))
+  (any? (string/->codepoints s) (fn (c) (or (< c 32) (= c 34) (= c 92)))))
 
 (defn- enc-escapes (s)
   "Escape the JSON-special characters in `s` (backslash first)."
   (if (not (needs-escape? s))
     ; clean — emit as-is (the overwhelmingly common case)
     s
-    (fold (fn (acc [raw esc]) (string/replace acc raw esc))
+    (fold json-control-escapes
       (-> s
         (string/replace "\\" "\\\\")
         (string/replace "\"" "\\\"")
@@ -386,7 +386,7 @@ the named escapes + every C0 control) that would each find nothing."
         (string/replace "\t" "\\t")
         (string/replace "\u{8}" "\\b")
         (string/replace "\u{c}" "\\f"))
-      json-control-escapes)))
+      (fn (acc [raw esc]) (string/replace acc raw esc)))))
 
 (defn- enc-string (s) (str "\"" (enc-escapes s) "\""))
 

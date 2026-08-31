@@ -94,5 +94,6 @@
     (is (includes? (try (with-err-str (io/write "before" :to *err*) (error "boom")) (catch e e))
           "boom")))
   (test "the sink does not leak after a throw"
-    (try (with-err-str (error "boom")) (catch _ nil))
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+    (check-allow :discarded-catch (try (with-err-str (error "boom")) (catch _ nil)))
     (assert= (with-err-str (io/write "clean" :to *err*)) "clean")))

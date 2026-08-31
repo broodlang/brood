@@ -168,7 +168,7 @@
     (spawn
       (binding (*p35-worker-id* i)
         ;; Do some work to let other processes interleave
-        (def _ (fold (fn (a x) (+ a x)) 0 (range 1000)))
+        (def _ (fold (range 1000) 0 (fn (a x) (+ a x))))
         ;; Check that our binding is still intact
         (send me [:p35 i *p35-worker-id*]))))
   ;; Collect results — each worker must see its own i

@@ -39,7 +39,7 @@
                (ring-node next-pid rounds-l done-pid)))))
 
   (def ring-pids
-    (into [] (map (fn (_) (spawn-node me rounds)) (range n))))
+    (into [] (map (range n) (fn (_) (spawn-node me rounds)))))
 
   ;; Wire each node to the next (ring topology)
   (doseq (i (range n))
@@ -166,7 +166,7 @@
       (let (r (receive ([:watcher-result v] v) (after 10000 :timeout)))
         (collect-watchers (- n 1) (cons r acc)))))
   (def results (collect-watchers watcher-count nil))
-  (def all-normal (= (count (filter (fn (r) (= :normal r)) results)) watcher-count))
+  (def all-normal (= (count (filter results (fn (r) (= :normal r)))) watcher-count))
   (io/puts "P28: watchers that got :down:" (count results))
   (io/puts "P28-correct (all normal):" all-normal))
 

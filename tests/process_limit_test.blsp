@@ -60,11 +60,110 @@
 
   (test "the limit is per-process: an uncapped sibling is unaffected"
     (let (me (self))
-      (spawn (fn ()
-               (do
-                 (proc/flag :max-heap 2000000)
-                 (try (build ()) (catch _ nil))
-                 (send me [:capped-done]))))
+      (spawn
+        (fn ()
+          (do
+            (proc/flag :max-heap 2000000)
+            ;; check-allow :discarded-catch — the heap-cap kill is the event under test, not something to read
+            (check-allow :discarded-catch (try (build ()) (catch _ nil)))
+            (send me [:capped-done]))))
       (spawn (fn () (send me [:sibling (count (into () (range 5000)))])))
       (assert= 5000 (receive ([:sibling n] n) (after 30000 :timeout)))
       (assert= :ok (receive ([:capped-done] :ok) (after 30000 :timeout))))))
+
+;; ── proc/flag :max-mailbox (ADR-307) ─────────────────────────────────────────
+;; The queue-length twin of :max-heap: senders arm the breach at enqueue, the
+;; flooded process raises catchable E0046 at its next safepoint or receive.
+;; Senders are never blocked; nothing is dropped.
+
+(defn flood (pid n)
+  "Send `n` messages to `pid`."
+  (dotimes (_ n) (send pid :flood)))
+
+(describe "proc/flag :max-mailbox"
+  (test "read/set/clear returns the previous value"
+    (assert= nil (proc/flag :max-mailbox))
+    (assert= nil (proc/flag :max-mailbox 64))
+    (assert= 64 (proc/flag :max-mailbox))
+    (assert= 64 (proc/flag :max-mailbox nil))
+    (assert= nil (proc/flag :max-mailbox)))
+
+  (test "bad values error cleanly"
+    (assert-error (proc/flag :max-mailbox 0))
+    (assert-error (proc/flag :max-mailbox -3))
+    (assert-error (proc/flag :max-mailbox "many")))
+
+  (test "a flooded parked receiver dies with catchable E0046; the senders are untouched"
+    (let (me (self)
+          victim (spawn
+                   (do
+                     (proc/flag :max-mailbox 8)
+                     (send me [:ready (self)])
+                     ;; parks on a pattern the flood never matches — the breach
+                     ;; is noticed at the receive re-scan, not a VM safepoint
+                     (receive (:never nil))))
+          _ (receive ([:ready ^victim] nil) (after 30000 (error "no ready")))
+          m (monitor victim))
+      (flood victim 32)
+      (assert= [:runtime "E0046"]
+        (receive
+          ([:down ^m _ [:error e]] [(get e :kind) (get e :code)])
+          (after 30000 :timeout)))))
+
+  (test "the handler can drain and clear the bound — the process recovers"
+    (let (me (self)
+          worker (spawn
+                   (do
+                     (proc/flag :max-mailbox 8)
+                     (send me [:ready (self)])
+                     (try
+                       (receive (:never nil))
+                       (catch e
+                         ;; drain everything, lift the bound, prove we lived
+                         (do
+                           (proc/flag :max-mailbox nil)
+                           ;; `after 0` would stop at whatever had ARRIVED: the bound
+                           ;; trips at message 9 of 32, so the handler starts draining
+                           ;; while `flood` is still sending. A short grace collects the
+                           ;; rest — it is only paid once, when the mailbox truly empties.
+                           (letrec (drain (fn (n)
+                                            (receive
+                                              (:flood (drain (+ n 1)))
+                                              (after 100 n))))
+                             (send me [:recovered (get e :code) (drain 0)]))))))))
+      (receive ([:ready ^worker] nil) (after 30000 (error "no ready")))
+      (flood worker 32)
+      (let ([code drained] (receive ([:recovered c n] [c n]) (after 30000 [:timeout 0])))
+        (assert= "E0046" code)
+        (assert= 32 drained))))
+
+  (test "a busy (non-receiving) flooded process trips at a safepoint"
+    (let (me (self)
+          victim (spawn
+                   (do
+                     (proc/flag :max-mailbox 8)
+                     (send me [:ready (self)])
+                     ;; wait for the go signal, then compute forever — the
+                     ;; breach must reach it through the VM safepoint probe
+                     (receive (:go nil))
+                     (letrec (spin (fn (n) (spin (+ n 1)))) (spin 0))))
+          _ (receive ([:ready ^victim] nil) (after 30000 (error "no ready")))
+          m (monitor victim))
+      (flood victim 32)
+      (send victim :go)
+      (assert= "E0046"
+        (receive
+          ([:down ^m _ [:error e]] (get e :code))
+          (after 30000 :timeout)))))
+
+  (test "an uncapped sibling is unaffected by a capped victim's death"
+    (let (me (self)
+          victim (spawn (do
+                          (proc/flag :max-mailbox 4)
+                          (send me [:ready (self)])
+                          (receive (:never nil))))
+          echo (spawn (receive ([:ping from] (send from :pong))))
+          _ (receive ([:ready ^victim] nil) (after 30000 (error "no ready"))))
+      (flood victim 16)
+      (send echo [:ping me])
+      (assert= :pong (receive (:pong :pong) (after 30000 :timeout))))))

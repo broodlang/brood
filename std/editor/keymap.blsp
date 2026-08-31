@@ -69,9 +69,10 @@ Pure apart from the symbol resolution; testable without a terminal."
         binding (get active key))
     (cond
       (map? binding) [state binding]
-      (nil? binding) (if (nil? pending)
-                       [(fallback state key) nil]
-                       [state nil])
+      (nil? binding)
+        (if (nil? pending)
+          [(fallback state key) nil]
+          [state nil])
       else [(try ((reflect/eval binding) state key) (catch e state)) nil])))
 
 ;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
@@ -86,13 +87,13 @@ Pure apart from the symbol resolution; testable without a terminal."
   Pure over the keymap data — no dispatch, no eval."
     ;; `map?` FIRST: a nested keymap is a prefix, never a command — so passing a
     ;; sub-keymap as `command` finds nothing rather than matching by structural `=`.
-    (mapcat (fn (kv)
-              (let ([k v] kv)
-                (cond
-                  (map? v) (map (fn (seq) (into [k] seq)) (keymap-where-is v command))
-                  (= v command) (list [k])
-                  else '())))
-      keymap)))
+    (mapcat keymap
+      (fn (kv)
+        (let ([k v] kv)
+          (cond
+            (map? v) (map (keymap-where-is v command) (fn (seq) (into [k] seq)))
+            (= v command) (list [k])
+            else '()))))))
 
 ;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
 (check-allow :non-tail-recursion
@@ -106,13 +107,13 @@ Pure apart from the symbol resolution; testable without a terminal."
   can discover a deferred feature's commands WITHOUT loading it — for a command palette, a
   help listing, or an `M-x`-style by-name runner that would otherwise offer only what
   happens to be in memory. Pure over the keymap data — no dispatch, no eval, no load."
-    (seq/distinct (mapcat (fn (kv)
-                            (let ([k v] kv)
-                              (cond
-                                (map? v) (keymap-commands v)
-                                (symbol? v) (list v)
-                                else '())))
-                    keymap))))
+    (seq/distinct (mapcat keymap
+                    (fn (kv)
+                      (let ([k v] kv)
+                        (cond
+                          (map? v) (keymap-commands v)
+                          (symbol? v) (list v)
+                          else '())))))))
 
 ;; check-allow: deliberately non-tail — depth = the bound key-sequence length — a few keys.
 (check-allow :non-tail-recursion

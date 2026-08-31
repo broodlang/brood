@@ -19,7 +19,8 @@
 ;; ships none by default. Skip these suites when absent so a bare `cargo test`
 ;; stays green — `make test` builds them in and runs them.
 (defn tsm-grammar? (lang)
-  (try (do (%tree-sitter-parse "" lang) true) (catch _ false)))
+  ;; check-allow :discarded-catch — probing whether a grammar is compiled in: the error is the answer
+  (check-allow :discarded-catch (try (do (%tree-sitter-parse "" lang) true) (catch _ false))))
 (def tsm-grammars? (and (tsm-grammar? :ruby) (tsm-grammar? :elixir)))
 
 ;; A small Ruby method, used across the navigation tests. Offsets:
@@ -44,13 +45,13 @@
       (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-kinds rb-faces)))
         (is (not (empty? spans)))
         ;; every span is [start end face] with start < end, and starts ascend
-        (is (every? (fn (s) (< (first s) (second s))) spans))
-        (is (= spans (sort-by first spans)))))
+        (is (every? spans (fn (s) (< (first s) (second s)))))
+        (is (= spans (sort-by spans first)))))
 
     (test "colours a whole comment node (delimiter + content) as one span"
       (let (src "x = 1 # note\n"
             spans (editor/treesit/fontify src :ruby (editor/treesit/face-of-kinds rb-faces))
-            cspan (first (filter (fn (s) (= (nth s 2) (editor/face/face :syntax/comment))) spans)))
+            cspan (first (filter spans (fn (s) (= (nth s 2) (editor/face/face :syntax/comment))))))
         (refute (nil? cspan))
         ; "# note" starts at col 6
         (assert= (first cspan) 6)
@@ -66,7 +67,7 @@
       ;; coloured :syntax/keyword by `face-of-syntax` — the path the editor modes use.
       (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-syntax {}))
             kw (editor/face/face :syntax/keyword)
-            kw-spans (filter (fn (s) (= (nth s 2) kw)) spans))
+            kw-spans (filter spans (fn (s) (= (nth s 2) kw))))
         ; def + end
         (is (>= (count kw-spans) 2))
         ; "def" at col 0

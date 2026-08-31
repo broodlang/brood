@@ -53,10 +53,10 @@ started an operating-system process while the bare `spawn` special form started 
   "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature)."
   (%clipboard-get))
 
-(defn clipboard-set! (s)
+(defn clipboard-set (s)
   "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."
-  (%clipboard-set! s))
-(sig clipboard-set! (string -> string))
+  (%clipboard-set s))
+(sig clipboard-set (string -> string))
 
 ;; ---- environment ------------------------------------------------------------
 

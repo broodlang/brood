@@ -215,6 +215,26 @@
     (let (out (source "(cond\n  (a 1)\n  ;; mid\n  (b 2))"))
       (is (includes? out ";; mid"))
       (is (includes? out "(b 2)"))))
+  ;; A comment between a test and its result used to pair the result with the NEXT
+  ;; test, shifting every later clause: `else` landed at the value indent and its
+  ;; body at the test column. The split pair renders test / comment / result at +2,
+  ;; and the clauses after it pair up as written.
+  (test "a comment between a cond test and its result does not shift the later clauses"
+    (let (out (source "(cond\n  (p x) 1\n  (q x)\n  ;; why\n  (do (log x) 2)\n  else\n  (do (log y) 3))"))
+      (assert= out
+        "(cond\n  (p x) 1\n  (q x)\n  ;; why\n    (do (log x) 2)\n  else (do (log y) 3))\n")
+      (assert= out (source out))))
+  (test "a trailing comment on a cond test still leaves its result pending"
+    (let (out (source "(cond\n  (q x) ; why\n  (do (log x) 2)\n  else 3)"))
+      (assert= out "(cond\n  (q x) ; why\n    (do (log x) 2)\n  else 3)\n")
+      (assert= out (source out))))
+  ;; The pair-fit decision is made on the RENDERED result, not its flat form: a result
+  ;; the author broke stays broken, so it drops to the value line rather than hanging
+  ;; off the test — `else (let (x 1)\n           x)` was the old output.
+  (test "an author-broken cond result drops to the value line instead of hanging off the test"
+    (let (out (source "(cond\n  (p x) 1\n  else\n    (let (x 1)\n      x))"))
+      (assert= out "(cond\n  (p x) 1\n  else\n    (let (x 1)\n      x))\n")
+      (assert= out (source out))))
   ;; A comment in a let bindings list used to disable pair-grouping entirely,
   ;; splitting every `name value` onto two lines. The pair walker is comment-aware:
   ;; pairs stay together, a trailing comment is hoisted onto its own line above its
@@ -328,8 +348,7 @@
                     "; trailing\n;; section\n;;; banner\n(def x 1)" "(def x 1) ; trailing"
                     "(defn f () 0) ;; nullary" "(def s \"hello world\")" "(def s \"a\\tb\\nc\")"
                     "(def doc \"line one\nline two\nline three\")"))
-      (fold (fn (_ s) (let (once (source s) twice (source once)) (assert= once twice)))
-        nil samples)))
+      (fold samples nil (fn (_ s) (let (once (source s) twice (source once)) (assert= once twice))))))
   (test "the prelude is idempotent (format(format(prelude)) == format(prelude))"
     ;; The prelude (now split across std/prelude/*.blsp) is the largest Brood program we
     ;; have; idempotency on its biggest file is a high-confidence smoke test of the walker.

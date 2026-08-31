@@ -18,7 +18,8 @@
     (let (src "(a) (b) (c)")
       ;; reflect/read-string parses a *single* form: trailing content is a loud error, not a
       ;; silent drop (the old behaviour, which masked typos / multi-form mistakes).
-      (assert= (try (do (reflect/read-string src) :no-throw) (catch e :threw)) :threw)
+      (assert= (try (do (reflect/read-string src) :no-throw) (catch e :threw))
+        :threw)
       ;; reflect/read-first reads the leading form, ignoring the rest (peek-a-header).
       (assert= (reflect/read-first src) '(a))
       ;; reflect/read-all reads them all.
@@ -28,4 +29,5 @@
     (assert= (reflect/read-string "  42  \n") 42)
     (assert= (reflect/read-string "(+ 1 2) ; trailing comment") '(+ 1 2)))
   (test "raises on an incomplete form (like reflect/read-string)"
-    (assert= (try (do (reflect/read-all "(+ 1 2") :no-throw) (catch e :threw)) :threw)))
+    (assert= (try (do (reflect/read-all "(+ 1 2") :no-throw) (catch e :threw))
+      :threw)))

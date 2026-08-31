@@ -14,7 +14,7 @@
     else (do (sleep 5) (wait-until dbg pred (dec tries)))))
 
 (defn trace-count (state)
-  (count (filter (fn (e) (= (get e :kind) :trace)) (get state :events))))
+  (count (filter (get state :events) (fn (e) (= (get e :kind) :trace)))))
 
 ;; A varying classification most workers agree on, a couple don't (math/mod 5 == 0).
 (defn classify (n) (if (= 0 (math/mod n 5)) :flag :ok))
@@ -32,7 +32,7 @@
   (receive
     ([:go] (spawn (send reporter [:child-has (not (nil? (tc-debugger)))])))))
 (defn exit-count (state)
-  (count (filter (fn (e) (= (get e :kind) :span-exit)) (get state :events))))
+  (count (filter (get state :events) (fn (e) (= (get e :kind) :span-exit)))))
 
 (describe "debugger — no-op when unwired"
   (test "break returns nil and does not block with no *debugger*"
@@ -95,8 +95,8 @@
           (assert= 3 (count (get root :children)))
           ;; every child ran in a DIFFERENT process than the root
           (let (root-pid (get root :pid)
-                child-pids (map (fn (c) (get c :pid)) (get root :children)))
-            (refute (any? (fn (p) (= p root-pid)) child-pids)))))
+                child-pids (map (get root :children) (fn (c) (get c :pid))))
+            (refute (any? child-pids (fn (p) (= p root-pid)))))))
       (dbg-stop dbg))))
 
 (describe "debugger — transparent causal propagation (kernel-propagated *trace-context*)"
@@ -115,8 +115,8 @@
           (assert= "root" (get root :label))
           (assert= 3 (count (get root :children)))
           (let (root-pid (get root :pid)
-                child-pids (map (fn (c) (get c :pid)) (get root :children)))
-            (refute (any? (fn (p) (= p root-pid)) child-pids)))))
+                child-pids (map (get root :children) (fn (c) (get c :pid))))
+            (refute (any? child-pids (fn (p) (= p root-pid)))))))
       (dbg-stop dbg)))
   (test "a plain spawn hitting break inherits the debugger and parks — no rewiring"
     (let (dbg (start-debugger) me (self))
@@ -225,7 +225,8 @@
 ;; GLOBAL by name, so the subject must be one (a let-local has no name to rebind).
 (defn tfn-square (n) (* n n))
 (defn tfn-add (a b) (+ a b))
-
+(defn tfn-redef (x) (* x 10)) ; redefined under a trace by the untrace-fn test
+(defn tfn-rewrap (x) (* x 10)) ; redefined under a trace, then traced again
 (describe "debugger — function-boundary instrumentation (trace-fn / break-fn)"
   :isolated (test "trace-fn emits :call and :return through *spy-sink* and is value-transparent"
     (let (me (self))
@@ -249,6 +250,32 @@
         (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
           (tfn-add 2 3)))
       (assert= :quiet (receive ([:spy-entry e] e) (after 50 :quiet)))))
+  (test "a function redefined WHILE traced keeps its redefinition through untrace-fn"
+    ;; The restore used to put the pre-trace body back over whatever was live, which
+    ;; discarded an edit made under the trace — silently. Now it restores only when the
+    ;; wrapper is still what is bound.
+    (do
+      (trace-fn 'debug-test/tfn-redef)
+      (reflect/eval '(defn debug-test/tfn-redef (x) (* x 100)))
+      (untrace-fn 'debug-test/tfn-redef)
+      (assert= 300 (tfn-redef 3))
+      (refute (includes? (traced-fns) 'debug-test/tfn-redef))))
+  (test "trace-fn on a name redefined under its trace re-wraps the NEW body"
+    (let (me (self))
+      (trace-fn 'debug-test/tfn-rewrap)
+      (reflect/eval '(defn debug-test/tfn-rewrap (x) (* x 1000)))
+      (refute (traced-current? 'debug-test/tfn-rewrap)) ; the generation moved
+      (trace-fn 'debug-test/tfn-rewrap)
+      (is (traced-current? 'debug-test/tfn-rewrap))
+      (assert= 3000
+        (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
+          (tfn-rewrap 3)))
+      ;; drain BOTH entries — an isolated describe shares one process across its tests,
+      ;; and a `:call` left in the mailbox would surface in the next test's receive
+      (assert= '(3) (receive ([:spy-entry {:spy :call :args a}] a) (after 200 :none)))
+      (assert= 3000 (receive ([:spy-entry {:spy :return :value v}] v) (after 200 :none)))
+      (untrace-fn 'debug-test/tfn-rewrap)
+      (assert= 3000 (tfn-rewrap 3)))) ; the redefinition is what remains
   (test "REGRESSION: a REFUSED trace registers nothing, so teardown stays clean"
     ;; `list` passes every check trace-fn makes (it is a function) and is still refused
     ;; at the rebind — it is a reserved prelude name (E0030, ADR-166). The registry used
@@ -268,7 +295,7 @@
       (trace-fn 'debug-test/tfn-square)
       (def debug/*traced-fns* (assoc debug/*traced-fns* 'list (fn (& args) args)))
       (untrace-all)
-      (assert= 0 (count (filter (fn (s) (= s 'debug-test/tfn-square)) (traced-fns))))
+      (assert= 0 (count (filter (traced-fns) (fn (s) (= s 'debug-test/tfn-square)))))
       ;; and `list` still means what Brood says it means
       (assert= (list 1 2) '(1 2))))
 
@@ -334,7 +361,7 @@
       (assert= 10 (table/get acc :n))
       ;; every kept entry is a :call — a stopped tracer delegates in tail position, so
       ;; there is no :return to emit (and for a tail call there never was one to see)
-      (assert= 10 (count (filter (fn (e) (= :call (:spy e))) (table/get acc :entries))))
+      (assert= 10 (count (filter (table/get acc :entries) (fn (e) (= :call (:spy e))))))
       (table/drop acc)))
   (test "REGRESSION: a traced tail loop deeper than the VM's frame limit still returns"
     ;; The wrapper emits `:return` AFTER the call, so a traced self-call is no longer a

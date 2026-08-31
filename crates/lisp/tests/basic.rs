@@ -195,9 +195,9 @@ fn maps_survive_arena_reset() {
 
 #[test]
 fn higher_order() {
-    assert_eq!(run("(map inc (list 1 2 3))"), "(2 3 4)");
-    assert_eq!(run("(filter math/positive? (list -1 2 -3 4))"), "(2 4)");
-    assert_eq!(run("(reduce + 0 (list 1 2 3 4))"), "10");
+    assert_eq!(run("(map (list 1 2 3) inc)"), "(2 3 4)");
+    assert_eq!(run("(filter (list -1 2 -3 4) math/positive?)"), "(2 4)");
+    assert_eq!(run("(reduce (list 1 2 3 4) 0 +)"), "10");
     assert_eq!(run("(apply + (list 1 2 3))"), "6");
 }
 
@@ -699,8 +699,11 @@ fn top_level_unquote_splicing_errors() {
 fn threading_macros() {
     // (-> 5 (- 1) (* 2)) => (* (- 5 1) 2) => 8
     assert_eq!(run("(-> 5 (- 1) (* 2))"), "8");
-    // (->> (list 1 2 3) (map inc)) => (map inc (list 1 2 3)) => (2 3 4)
-    assert_eq!(run("(->> (list 1 2 3) (map inc))"), "(2 3 4)");
+    // One pipe only since ADR-308: every collection fn takes its collection first, so
+    // `->` threads the whole pipeline and the thread-LAST variants are gone.
+    assert_eq!(run("(-> (list 1 2 3) (map inc))"), "(2 3 4)");
+    // `$` places the value where the subject genuinely is not first (ADR-303).
+    assert_eq!(run("(-> 1 (- 10 $))"), "9");
 }
 
 #[test]
@@ -1593,10 +1596,10 @@ fn gensym_is_unique_across_threads() {
 
 /// The test registry (`*units*` in `std/tool/test.blsp`) must be resettable so a
 /// long-lived image — the `nest mcp` hot-reload session (ADR-013) — that loads
-/// the same test file twice doesn't double-count. `reset-units!` clears it; the
+/// the same test file twice doesn't double-count. `reset-units` clears it; the
 /// project test runner calls it before (re)loading test files. Here we simulate
 /// the reload directly: registering a test twice inflates the count, and
-/// `reset-units!` before re-registering restores a count of one.
+/// `reset-units` before re-registering restores a count of one.
 #[test]
 fn reset_units_prevents_reload_double_count() {
     let mut interp = Interp::new();
@@ -1606,7 +1609,7 @@ fn reset_units_prevents_reload_double_count() {
     // Simulate a test file loaded twice into one image: two registrations.
     interp
         .eval_str(
-            r#"(test/reset-units!) (test/test "t" (test/is true)) (test/test "t" (test/is true))"#,
+            r#"(test/reset-units) (test/test "t" (test/is true)) (test/test "t" (test/is true))"#,
         )
         .expect("register twice");
     let doubled = interp
@@ -1619,7 +1622,7 @@ fn reset_units_prevents_reload_double_count() {
     );
     // The fix: reset before the (re)load clears the stale registrations.
     interp
-        .eval_str(r#"(test/reset-units!) (test/test "t" (test/is true))"#)
+        .eval_str(r#"(test/reset-units) (test/test "t" (test/is true))"#)
         .expect("reset then register once");
     let single = interp
         .eval_str("(get (test/run-tests-structured) :total)")
@@ -1891,15 +1894,15 @@ fn letrec_self_recursion_accumulates() {
 /// same results they always did, now that they compile rather than defer.
 #[test]
 fn defseq_ops_run_correctly() {
-    assert_eq!(run("(map inc (range 5))"), "(1 2 3 4 5)");
-    assert_eq!(run("(filter math/even? (range 10))"), "(0 2 4 6 8)");
+    assert_eq!(run("(map (range 5) inc)"), "(1 2 3 4 5)");
+    assert_eq!(run("(filter (range 10) math/even?)"), "(0 2 4 6 8)");
     assert_eq!(
-        run("(mapcat (fn (x) (list x x)) (range 3))"),
+        run("(mapcat (range 3) (fn (x) (list x x)))"),
         "(0 0 1 1 2 2)"
     );
-    assert_eq!(run("(seq/remove math/even? (range 6))"), "(1 3 5)");
+    assert_eq!(run("(seq/remove (range 6) math/even?)"), "(1 3 5)");
     assert_eq!(
-        run("(seq/keep (fn (x) (if (math/even? x) (* x 10) nil)) (range 6))"),
+        run("(seq/keep (range 6) (fn (x) (if (math/even? x) (* x 10) nil)))"),
         "(0 20 40)"
     );
 }

@@ -743,7 +743,7 @@ fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node>
         _ => return None,
     };
     // A LOCAL `fn_rest` is a `(fn …)` literal on the movable data heap — a top-level
-    // inline lambda (e.g. pipeline's `(map (fn (i) (* i i)) …)`); without help its
+    // inline lambda (e.g. pipeline's `(map … (fn (i) (* i i)))`); without help its
     // whole enclosing form defers to the tree-walker. Freeze it into the immovable
     // RUNTIME code region (as `const_node` does for a literal) so the form is VM-
     // compilable. ONLY on a runtime heap: during the prelude *build* (gc disabled) a

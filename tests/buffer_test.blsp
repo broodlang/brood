@@ -125,6 +125,15 @@
       ; start of "bar"
       (assert= (buffer-point (backward-word (backward-word b))) 4)
       (assert= (buffer-point (backward-word (goto-char b 0))) 0)))
+  (test "a qualified name is two words: `/` is a delimiter for M-f/M-b and M-d/M-DEL"
+    (let (b (make-buffer "(math/floor x)"))
+      ; end of "math"
+      (assert= (buffer-point (forward-word b)) 5)
+      ; end of "floor"
+      (assert= (buffer-point (forward-word (forward-word b))) 11)
+      ; from after "floor": back to its start, then to the start of "math"
+      (assert= (buffer-point (backward-word (goto-char b 11))) 6)
+      (assert= (buffer-point (backward-word (backward-word (goto-char b 11)))) 1)))
   (test "word motion crosses lines and delimiters"
     (let (b (make-buffer "(foo\n bar)"))
       ; skips '(', ends "foo"
@@ -466,7 +475,7 @@
           branched (insert u "z"))
       ; "az" — a new branch
       (assert= (buffer-text branched) "az")
-      (is (includes? (map buffer-text (get branched :undo)) "ab"))))
+      (is (includes? (map (get branched :undo) buffer-text) "ab"))))
   (test "undo with no history is a no-op"
     (assert= (buffer-text (undo (make-buffer "abc"))) "abc"))
   ; undo reaches the real edit
@@ -787,9 +796,9 @@
       ; let both subscribe + seed
       (receive (after 300 nil))
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "Z")))
-      (let (zs (filter (fn (m) (= (nth m 2) "Z")) (drain-relayed ())))
-        (is (includes? (map (fn (m) (nth m 0)) zs) :a))
-        (is (includes? (map (fn (m) (nth m 0)) zs) :b)))
+      (let (zs (filter (drain-relayed ()) (fn (m) (= (nth m 2) "Z"))))
+        (is (includes? (map zs (fn (m) (nth m 0))) :a))
+        (is (includes? (map zs (fn (m) (nth m 0))) :b)))
       (stop-buffer bp)))
 
   (test "an origin-tagged edit's push carries the origin (the echo-suppression seam)"
@@ -1082,7 +1091,7 @@
 
   (test "a huge rewrite degrades to whole-span undo instead of hanging"
     ;; past the char budget the span is treated as one change — bounded, not frozen
-    (let (big (apply str (map (fn (i) "x") (range (+ 10 *undo-region-char-budget*))))
+    (let (big (apply str (map (range (+ 10 *undo-region-char-budget*)) (fn (i) "x")))
           b0 (make-buffer "seed")
           b1 (insert (goto-char b0 4) big))
       (assert= (buffer-text (undo-in-region (uir-sel b1 0 (buffer-length b1)))) "seed"))))

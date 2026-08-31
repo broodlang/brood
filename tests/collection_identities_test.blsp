@@ -46,15 +46,15 @@
     (= (count (conj v x)) (+ 1 (count v)))
     (if (> (count v) 0) (= (nth (into v w) 0) (nth v 0)) true)))
 (defn hof-laws (v)
-  (and (= (count (map (fn (x) (* x 2)) v)) (count v))
+  (and (= (count (map v (fn (x) (* x 2)))) (count v))
     ; map preserves length
     ; filter never grows
-    (<= (count (filter (fn (x) (> x 0)) v)) (count v))
-    (= (map (fn (x) (+ 1 (* 2 x))) v)
+    (<= (count (filter v (fn (x) (> x 0)))) (count v))
+    (= (map v (fn (x) (+ 1 (* 2 x))))
       ; map fusion
-      (map (fn (x) (+ 1 x)) (map (fn (x) (* 2 x)) v)))
+      (map (map v (fn (x) (* 2 x))) (fn (x) (+ 1 x))))
     ; sum invariant to order
-    (= (fold + 0 v) (fold + 0 (reverse v)))
+    (= (fold v 0 +) (fold (reverse v) 0 +))
     (= (count (reverse v)) (count v))))
 
 (defn str-laws (a b)

@@ -146,23 +146,22 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
           ;; in-flight splice of ours; touching/overlapping is ambiguous → resync
           mergeable? (and splice
                        (or (empty? pending)
-                         (every? (fn (p) (splice-disjoint? splice p)) pending)))
+                         (every? pending (fn (p) (splice-disjoint? splice p)))))
           npending (cond
                      (and own? splice) (rest pending)
                      ; our echo — first in, first home
                      (and splice mergeable? (not own?))
                      ;; remap our in-flight splices over the foreign one, as the
                      ;; process will when they arrive after it
-                     (map (fn (p)
-                            (let ([plo phi plen] p
-                                  [flo fhi frepl] splice
-                                  [nlo nhi _] (splice-transform [plo phi ""]
-                                                [flo fhi (string/length frepl)]))
-                              [nlo nhi plen]))
-                       pending)
-                       (and splice
-                         (not own?))
-                     ()
+                       (map pending
+                         (fn (p)
+                           (let ([plo phi plen] p
+                                 [flo fhi frepl] splice
+                                 [nlo nhi _] (splice-transform [plo phi ""]
+                                               [flo fhi (string/length frepl)]))
+                             [nlo nhi plen])))
+                     (and splice
+                       (not own?)) ()
                      ; ambiguous → resync resets
                      else pending)
           nlink (assoc link :version version :pending npending))
@@ -172,8 +171,7 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
           [nlink
             [:splice
               (splice-transform-all splice
-                (map (fn (p) (let ([plo phi plen] p) [plo phi plen]))
-                  pending))]]
+                (map pending (fn (p) (let ([plo phi plen] p) [plo phi plen]))))]]
         splice [nlink :resync]
         (nil? text) [nlink :noop]
         else [nlink [:text text]]))))

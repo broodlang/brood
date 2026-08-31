@@ -22,6 +22,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The bedit commit the `downstream-bedit` job checks out. PINNED, not `main`, so a red
+  # run there is attributable to THIS brood commit and never to bedit's own breakage
+  # landing under us. To bump: `git -C ../bedit rev-parse HEAD` (or
+  # `gh api repos/broodlang/bedit/commits/main -q .sha`), paste it here, and run
+  # `make smoke-bedit` against that checkout first — bump it whenever bedit adopts a
+  # brood change (a rename wave, a new std name) that its previous commit predates.
+  BEDIT_REF: 0e61442f9b41c6855b89a4b96db020283538752c
 
 jobs:
   # Is the version in Cargo.toml actually released? Not a gate — a NOTICE, because the
@@ -448,6 +455,84 @@ jobs:
           fi
           grep -hoE '^  FAIL +.*' examples.log | sort -u | head -25 \
             | while IFS= read -r line; do echo "::error::examples:$line"; done || true
+
+  # DOWNSTREAM smoke: bedit (github.com/broodlang/bedit) against the brood under test.
+  #
+  # bedit is the largest program written in the language that does not live in this repo,
+  # so it is where a brood regression surfaces FIRST — and until 2026-08-30 nowhere in this
+  # workflow could see one. That day a half-landed rename wave (ADR-302: `gui/font!` →
+  # `gui/font`, `os/clipboard-set!` → `os/clipboard-set`, …) shipped in an installed brood
+  # while bedit still called the old names; `std/` + `tests/` were green because the broken
+  # callers were in the other repository. bedit's own CI tracks brood `main` (package-ci.yml)
+  # and so reports the break one repo over, after the fact, on a schedule nobody watches
+  # from here.
+  #
+  # REQUIRED and FAILING, deliberately: a non-blocking job is a job nobody reads. What keeps
+  # it fair is the pin — `BEDIT_REF` (top of file) fixes which bedit runs, so bedit's own
+  # in-flight breakage cannot turn this red; only brood can. When bedit moves to adopt a
+  # brood change, bump the pin in the SAME brood commit that lands the change.
+  #
+  # The build mirrors what `./configure --with-gui && make install` produces — bedit's
+  # release workflow builds brood exactly that way, and it is the installed toolchain the
+  # rename wave broke: `INSTALL_FEATURES` from the Makefile (lean base + gui +
+  # treesit-grammars + jit + stdimage, PLUS dev-tools, which carries `nest test`). The
+  # tree-sitter grammars are not optional here: bedit's ruby/elixir/markdown mode tests
+  # need them and fail on a default build (8 of them, measured 2026-08-30). `gui` is what
+  # needs the X11/Wayland/GL headers below; `--check-boot` and the suite run under
+  # BROOD_GUI_HEADLESS=1 so no window is ever opened.
+  #
+  # Two checkouts side by side inside the workspace (`brood/`, `bedit/`) — actions/checkout
+  # refuses a path outside it, and the sibling layout is what `make smoke-bedit` expects
+  # locally (`../bedit`). The script is the single definition of the three gates:
+  # `nest check` (zero warnings), `nest run --check-boot`, `nest test` (~28 s wall locally,
+  # 1378 cases). Each runs under the address-space cap the script sets (CLAUDE.md, KI-87).
+  downstream-bedit:
+    name: downstream smoke (bedit @ BEDIT_REF)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: brood
+      - uses: actions/checkout@v4
+        with:
+          repository: broodlang/bedit
+          ref: ${{ env.BEDIT_REF }}
+          path: bedit
+
+      # The GUI backend's system libraries (same block as the test job).
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: brood
+          cache-on-failure: true
+
+      # Build UNCAPPED (the linker dies under an address-space cap), run capped — the script
+      # applies the cap. `--no-default-features` + the explicit list is `INSTALL_FEATURES`
+      # spelled out; keep it in step with the Makefile's feature variables.
+      - name: Build brood + nest (INSTALL_FEATURES — the `make install` toolchain, with gui)
+        working-directory: brood
+        run: |
+          cargo build --release -p cli -p nest --no-default-features \
+            --features brood/gui --features brood/treesit-grammars --features brood/jit \
+            --features brood/stdimage --features brood/dev-tools
+
+      - name: Smoke bedit (nest check, nest run --check-boot, nest test)
+        working-directory: brood
+        env:
+          BEDIT_DIR: ${{ github.workspace }}/bedit
+          NEST: ${{ github.workspace }}/brood/target/release/nest
+        run: ./scripts/smoke-bedit.sh --require
 
   # The `breakage/` suite: deliberately abusive programs that try to make the JIT diverge
   # from the VM, overflow the eval stack, corrupt the heap or deadlock the scheduler. It is

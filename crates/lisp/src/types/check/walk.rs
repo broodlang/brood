@@ -332,6 +332,11 @@ fn arity_of_sig(sg: &Sig) -> Arity {
 
 fn unbound_msg(nm: &str) -> String {
     let mut msg = format!("{}{}", UNBOUND_PREFIX, nm);
+    // A deliberate rename says where the name went (ADR-304) — the same suffix the
+    // runtime error carries, from the same ledger.
+    if let Some(hint) = crate::renames::rename_hint(nm) {
+        msg.push_str(&hint);
+    }
     if let Some(hint) = crate::eval::foreign_construct_hint(nm) {
         msg.push_str(" — ");
         msg.push_str(hint);
@@ -365,7 +370,7 @@ fn is_debug_only_primitive(nm: &str) -> bool {
 ///  - a **callable** parameter (a `(… -> …)` arrow, or the bare `fn | native` of
 ///    `apply`) also admits a **keyword**, because a keyword IS callable as an
 ///    accessor (ADR-165): `(map :name people)` is valid, and the lattice has no way
-///    to say "keyword, which behaves as (map -> any)" — `Tag::Keyword` and the
+///    to say "keyword, which behaves as (map any ->)" — `Tag::Keyword` and the
 ///    function tags are disjoint bits. Without this the single most-motivating call
 ///    for that feature would draw a warning.
 fn relax_param_for_arg(param: &Ty) -> Ty {
@@ -1720,7 +1725,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // parameters SEEDED: the accumulator to the fold's own result type (the fixpoint
         // `infer::seq_aware_call_ty` computes — a superset of every accumulator value, by
         // induction) and the element to the collection's element type. Unseeded, `h` in
-        // `(fold (fn (h c) (bit/xor (* h 31) …)) 5381 s)` read as `any` and `(* h 31)` as
+        // `(fold s 5381 (fn (h c) (bit/xor (* h 31) …)))` read as `any` and `(* h 31)` as
         // `number`, while the fold as a whole was already known to be an int.
         let seeded_callback = fold_callback_seed(heap, form, &items, ctx);
         for (i, &item) in items.iter().enumerate() {
@@ -1765,7 +1770,7 @@ fn check_fn_bound(
     }
 }
 
-/// For `(fold f init coll)` / `(reduce f init coll)` / `(reduce f coll)` whose `f` is a
+/// For `(fold coll init f)` / `(reduce coll init f)` / `(reduce f coll)` whose `f` is a
 /// two-parameter `fn` literal: `(1, (acc elem -> any))` — the seed for walking it. `None`
 /// when the head is neither, `f` is not such a literal, or the fold's type is unknown.
 fn fold_callback_seed(
@@ -1781,7 +1786,9 @@ fn fold_callback_seed(
     if !is_fold || items.len() < 3 {
         return None;
     }
-    let f = items[1];
+    // Positions come from `sigs::combinator_args` — the one place the data-first
+    // convention is stated (ADR-308), so this cannot drift against the signatures.
+    let (coll_arg, f) = super::sigs::combinator_args(items)?;
     let f_items = list_items(heap, f)?;
     if !matches!(f_items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
         return None;
@@ -1790,11 +1797,10 @@ fn fold_callback_seed(
         return None;
     }
     let acc = expr_ty(heap, form, ctx)?;
-    let coll = *items.last()?;
-    let elem = expr_ty(heap, coll, ctx)
+    let elem = expr_ty(heap, coll_arg, ctx)
         .and_then(|t| t.elem_ty())
         .unwrap_or(Ty::ANY);
-    Some((1, Sig::new(vec![acc, elem], Ty::ANY)))
+    Some((items.len() - 1, Sig::new(vec![acc, elem], Ty::ANY)))
 }
 
 /// `(fn (params...) docstring? body...)` (and `lambda` — the same closure
@@ -1877,7 +1883,7 @@ fn check_fn_seeded(
         // The `& rest` binder (always last) collects the variadic arguments into a
         // list, so its type is `list<rest-elem>` — not the element type the sig's
         // rest position carries. Seeding it as the bare element type was a false-
-        // positive source: `(defn f (& xs) (reduce + 0 xs))` with `(sig f (& int ->
+        // positive source: `(defn f (& xs) (reduce xs 0 +))` with `(sig f (& int ->
         // …))` would type `xs` as `int` and then flag `(reduce … xs)` for passing an
         // int where a sequence is wanted. Bind it plainly (not sig-authoritative) so
         // no dead-clause lint keys off it.

@@ -131,10 +131,10 @@
     ;; throwaway name instead and keep the expected answer fixed.
     (let (srv (spawn (echo-loop)))
       (assert= :ok
-        (fold (fn (_ i)
-                (do
-                  (reflect/eval (list 'def (symbol (str "scm-churn-" i)) (fn () i)))
-                  (assert= 42 (call-through srv shared-thunk))
-                  :ok))
-          :ok (range 40)))
+        (fold (range 40)
+          :ok (fn (_ i)
+            (do
+              (reflect/eval (list 'def (symbol (str "scm-churn-" i)) (fn () i)))
+              (assert= 42 (call-through srv shared-thunk))
+              :ok))))
       (send srv :stop))))

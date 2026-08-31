@@ -101,7 +101,7 @@
     ;; the current stanza (40 20 11) takes 3.5 s in Chez for ONE iteration.
     (let (f (gb-forms "cpstak"))
       ; the stanza is where we think
-      (assert= (take 5 (drop 10 f)) '(1700 18 12 6 7))
+      (assert= (take (drop f 10) 5) '(1700 18 12 6 7))
       (assert= (cpstak (nth f 11) (nth f 12) (nth f 13)) (nth f 14))))
 
   (test "takl — Takeuchi over lists as counters, upstream's oldest stanza"
@@ -175,7 +175,7 @@
     ;; sustained allocation — a GC or JIT-tiering bug rather than a logic one — shows up
     ;; at 1.8M rewrites and not at 95k.
     (let (db (setup-boyer))
-      (dolist (n (filter (fn (k) (<= k gb-nboyer-max-n)) [1 2]))
+      (dolist (n (filter [1 2] (fn (k) (<= k gb-nboyer-max-n))))
         (assert= (test-boyer nboyer-alist nboyer-term n db)
           (get gb-nboyer-rewrites n)))))
 

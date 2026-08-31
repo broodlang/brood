@@ -992,8 +992,8 @@ mod tests {
                      (defn- w (xs acc first?)
                        (if (empty? xs) acc
                          (w (rest xs) (str (first xs) (if first? acc "x")) false)))
-                     (w (map (fn (i) i) (range 50)) "" true)
-                     (json/encode (map (fn (i) {:a i}) (range 50))))"#,
+                     (w (map (range 50) (fn (i) i)) "" true)
+                     (json/encode (map (range 50) (fn (i) {:a i}))))"#,
             )
             .expect("warm the compiler over the offending shapes");
         let mut checked = 0usize;
@@ -1060,7 +1060,7 @@ mod tests {
             )
             .expect("compile the offending shape");
         interp
-            .eval_str(r#"(w (map (fn (i) i) (range 50)) "" true)"#)
+            .eval_str(r#"(w (map (range 50) (fn (i) i)) "" true)"#)
             .expect("run it");
         let mut saw_a_clamped_arm = false;
         for arm in interp.heap.dbg_compiled_arms() {

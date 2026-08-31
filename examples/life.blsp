@@ -12,7 +12,7 @@ the world is unbounded); a `gen` process owns it, advanced by `cast` and read by
 (defn neighbours (cell)
   "The 8 cells surrounding `cell`."
   (let ([x y] cell)
-    (map (fn ([dx dy]) [(+ x dx) (+ y dy)]) offsets)))
+    (map offsets (fn ([dx dy]) [(+ x dx) (+ y dy)]))))
 
 (defn alive-next? (cell n board)
   "Conway's rule: alive next tick with 3 live neighbours, or 2 if already alive."
@@ -20,7 +20,7 @@ the world is unbounded); a `gen` process owns it, advanced by `cast` and read by
 
 (defn step (board)
   "The next generation of `board`."
-  (let (counts (frequencies (mapcat neighbours (keys board))))
+  (let (counts (frequencies (mapcat (keys board) neighbours)))
     (into {} (for ([cell n] (seq counts) :when (alive-next? cell n board)) [cell true]))))
 
 (defn render-row (board y w) (apply str (for (x (range w)) (if (contains? board [x y]) "█" "·"))))

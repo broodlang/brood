@@ -301,7 +301,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "b"],
-        "Bitwise AND of integers a and b.",
+        "Bitwise AND of integers a and b.\n\n    (bit/and 12 10)   → 8",
         bit_and,
     );
     def(
@@ -310,7 +310,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "b"],
-        "Bitwise (inclusive) OR of integers a and b.",
+        "Bitwise (inclusive) OR of integers a and b.\n\n    (bit/or 12 10)   → 14",
         bit_or,
     );
     def(
@@ -319,7 +319,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "b"],
-        "Bitwise exclusive-OR of integers a and b.",
+        "Bitwise exclusive-OR of integers a and b.\n\n    (bit/xor 12 10)   → 6",
         bit_xor,
     );
     def(
@@ -328,7 +328,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![int], int),
         &["a"],
-        "Bitwise complement of integer a (two's-complement, so (bit/not n) = (- (- n) 1)).",
+        "Bitwise complement of integer a (two's-complement, so (bit/not n) = (- (- n) 1)).\n\n    (bit/not 12)   → -13",
         bit_not,
     );
     def(
@@ -337,7 +337,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "n"],
-        "Shift integer a left by n bits (0 <= n < 64); bits shifted past bit 63 are discarded.",
+        "Shift integer a left by n bits (0 <= n < 64); bits shifted past bit 63 are discarded.\n\n    (bit/shift-left 12 10)   → 12288",
         bit_shift_left,
     );
     def(
@@ -346,7 +346,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         &["a", "n"],
-        "Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64).",
+        "Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64).\n\n    (bit/shift-right 12 10)   → 0",
         bit_shift_right,
     );
     def(
@@ -355,7 +355,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![int], int),
         &["a"],
-        "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit/count -1) = 64). For a bignum it is the popcount of the magnitude.",
+        "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit/count -1) = 64). For a bignum it is the popcount of the magnitude.\n\n    (bit/count 12)   → 2",
         bit_count);
     def(
         heap,
@@ -363,7 +363,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![int], vec_ty),
         &["a"],
-        "A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit/positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit/shift-left 1 i); handy for enumerating the set bits of an integer.",
+        "A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit/positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit/shift-left 1 i); handy for enumerating the set bits of an integer.\n\n    (bit/positions 12)   → [2 3]",
         bit_positions);
     // Bit-level reinterpretation of a binary64 — not expressible over the other
     // primitives (no bitcast, no frexp), and the only way to compare two floats
@@ -374,7 +374,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![num], int),
         &["x"],
-        "The IEEE 754 binary64 bit pattern of x, as a non-negative integer (a bignum when the sign bit is set). Reinterpretation, not conversion — the only exact float comparison there is: it separates -0.0 from 0.0 and distinguishes NaN payloads, both of which = collapses. The inverse of bits->float.",
+        "The IEEE 754 binary64 bit pattern of x, as a non-negative integer (a bignum when the sign bit is set). Reinterpretation, not conversion — the only exact float comparison there is: it separates -0.0 from 0.0 and distinguishes NaN payloads, both of which = collapses. The inverse of bits->float.\n\n    (bit/float-> 12)   → 4622945017495814144",
         float_to_bits);
     def(
         heap,
@@ -382,7 +382,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![int], float),
         &["n"],
-        "The binary64 float whose bit pattern is n (0 <= n < 2^64). The inverse of float->bits.",
+        "The binary64 float whose bit pattern is n (0 <= n < 2^64). The inverse of float->bits.\n\n    (bit/->float 12)   → 6e-323",
         bits_to_float,
     );
     // pair / sequence — `empty?` is Brood (type dispatch over string/length /
@@ -395,7 +395,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![any, any], pair),
         &["x", "xs"],
-        "A new pair with head x and tail xs.",
+        "A new pair with head x and tail xs.\n\n    (cons 1 (list 2))   → (1 2)",
         cons,
     );
     def(
@@ -420,7 +420,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
         &["x"],
-        "True if x is nil.",
+        "True if x is nil.\n\n    (nil? nil)   → true",
         is_nil,
     );
     def(
@@ -429,7 +429,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
         &["x"],
-        "True if x is a cons pair.",
+        "True if x is a cons pair.\n\n    (pair? (list 1))   → true",
         is_pair,
     );
     def(
@@ -438,7 +438,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
         &["coll"],
-        "True if coll is empty (nil, an empty string/vector/map, or a seq-view that realises to nothing).",
+        "True if coll is empty (nil, an empty string/vector/map, or a seq-view that realises to nothing).\n\n    (empty? [])   → true",
         is_empty);
     // Lazy reducible range (ADR: reducible range). `%range` constructs it (arg
     // parsing is in the Brood `range`); the fold-family fast paths in the prelude
@@ -460,7 +460,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
         &["x"],
-        "True if x is a lazy range (as produced by range). Ranges fold/reduce/sum/count without materialising; other ops treat them as the list they stand for.",
+        "True if x is a lazy range (as produced by range). Ranges fold/reduce/sum/count without materialising; other ops treat them as the list they stand for.\n\n    (range? (range 3))   → true",
         range_pred);
     def(
         heap,
@@ -531,7 +531,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
         &["x"],
-        "True if x is a lazy sequence view — the reducible produced by range/map/filter/… before it is realized (into/count/…).",
+        "True if x is a lazy sequence view — the reducible produced by range/map/filter/… before it is realized (into/count/…).\n\n    (seqview? [1 2])   → false",
         seqview_pred);
     // `%sort-asc` is the Rust fast path for the common `(sort coll)` case
     // (ascending by `<`, no custom comparator). Avoids per-comparison Brood
@@ -572,7 +572,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![any, any], int),
         &["a", "b"],
-        "Structural total-order comparison: -1 if a sorts before b, 0 if equal, 1 if after. Numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by a stable tag rank. The binary form of `sort`'s order — `sort-by` and custom comparators build on it.",
+        "Structural total-order comparison: -1 if a sorts before b, 0 if equal, 1 if after. Numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by a stable tag rank. The binary form of `sort`'s order — `sort-by` and custom comparators build on it.\n\n    (compare 1 2)   → -1",
         compare);
 
     // vector
@@ -582,7 +582,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::any(),
         Sig::variadic(any, vec_ty),
         &["&", "items"],
-        "A vector of the given items.",
+        "A vector of the given items.\n\n    (vector 1 2 3)   → [1 2 3]",
         vector,
     );
     def(
@@ -814,7 +814,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], int),
         &["s"],
-        "The number of characters in string s.",
+        "The number of characters in string s.\n\n    (string/length \"Hi there\")   → 8",
         string_length,
     );
     def(
@@ -823,7 +823,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::range(2, 3),
         Sig::with_rest(vec![string, int], int, string),
         &["s", "start", "end"],
-        "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string/length s), so (string/substring s start) is \"from start to the end\".",
+        "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string/length s), so (string/substring s start) is \"from start to the end\".\n\n    (string/substring \"Hi there\" 0 2)   → \"Hi\"",
         substring);
     def(
         heap,
@@ -847,7 +847,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], int),
         &["s"],
-        "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string/length.",
+        "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string/length.\n\n    (string/display-width \"Hi there\")   → 8",
         display_width);
     // Linear substring search — like `substring`/`lower`, it genuinely needs Rust:
     // Brood has no O(1) char access (char indexing into UTF-8 is O(index)), so a
@@ -885,11 +885,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "string/split",
-        Arity::exact(2),
+        Arity::range(1, 2),
         // the pieces are strings, and there is always at least one (`""` splits to `("")`)
-        Sig::new(vec![string, string], Ty::list_of(string)),
-        &["s", "sep"],
-        "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters.",
+        Sig::with_optional(vec![string], vec![string], Ty::list_of(string)),
+        &["s", "&optional", "sep"],
+        "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. sep defaults to a single space, so (string/split \"1 1 +\") is the word split. An empty separator splits s into its individual characters.\n\n    (string/split \"a,b\" \",\")   → (\"a\" \"b\")",
         string_split);
     // Codepoint access needs Rust for the same reason as split/search: char
     // indexing into UTF-8 is O(index), and the pure-Brood construction
@@ -901,7 +901,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(int)),
         &["s"],
-        "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse is (%codepoints->string codes), i.e. string/codepoints->.",
+        "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse is (%codepoints->string codes), i.e. string/codepoints->.\n\n    (string/->codepoints \"Hi there\")   → [72 105 32 116 104 101 114 101]",
         string_to_codepoints);
     // The inverse. It had none until 2026-08-26, so every text parser in std/ rebuilt its
     // result with `(apply str (map int->char cs))` — a seq view, a closure per code point
@@ -925,7 +925,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(string)),
         &["s"],
-        "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string/->codepoints; (apply str (string/->graphemes s)) is s.",
+        "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string/->codepoints; (apply str (string/->graphemes s)) is s.\n\n    (string/->graphemes \"Hi there\")   → [\"H\" \"i\" \" \" \"t\" \"h\" \"e\" \"r\" \"e\"]",
         string_to_graphemes);
     // The indexed grapheme accessors (ADR-159). `string->graphemes` alone made the
     // *documented-correct* cursor step — read the cluster at an index — cost a vector
@@ -936,13 +936,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], int),
         &["s"],
-        "How many extended grapheme clusters s has — the length a human means, and the exclusive upper bound for grapheme-at. One O(n) pass, no allocation.",
+        "How many extended grapheme clusters s has — the length a human means, and the exclusive upper bound for grapheme-at. One O(n) pass, no allocation.\n\n    (string/grapheme-count \"Hi there\")   → 8",
         grapheme_count);
     def(
         heap,
         "string/grapheme-at",
         Arity::range(2, 3),
-        Sig::new(vec![string, int], any),
+        // `default` is the OPTIONAL third argument the arity allows — declared here so
+        // the checker can type it. `Sig::new` left it undeclarable (audit/sig-arity).
+        Sig::with_optional(vec![string, int], vec![any], any),
         &["s", "i", "default"],
         "The i-th grapheme cluster of s as a string, or default (else nil) when i is out of range. The grapheme-indexed char-at: walks to i instead of materialising every cluster, so a cursor step is not O(line length).",
         grapheme_at);
@@ -950,7 +952,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "string/substring-graphemes",
         Arity::range(2, 3),
-        Sig::new(vec![string, int], string),
+        // `end` is the OPTIONAL third argument the arity allows (audit/sig-arity).
+        Sig::with_optional(vec![string, int], vec![int], string),
         &["s", "start", "end"],
         "The half-open grapheme-cluster range [start, end) of s (end optional = to the end), clamped to the ends. The grapheme-indexed substring — plain substring is codepoint-indexed and can slice a cluster in half.",
         substring_graphemes);
@@ -984,7 +987,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], string),
         &["s"],
-        "s upper-cased (Unicode-aware).",
+        "s upper-cased (Unicode-aware).\n\n    (string/upper \"Hi there\")   → \"HI THERE\"",
         upper,
     );
     def(
@@ -993,7 +996,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], string),
         &["s"],
-        "s lower-cased (Unicode-aware).",
+        "s lower-cased (Unicode-aware).\n\n    (string/lower \"Hi there\")   → \"hi there\"",
         lower,
     );
     // Codepoint ↔ char and byte-level UTF-8 access — the primitives encoding
@@ -1109,7 +1112,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::range(1, 2),
         Sig::with_optional(vec![string], vec![int], num.union(nil_ty)),
         &["s", "&optional", "radix"],
-        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — the only way to read hex/octal/binary, since Brood has no radix literals; give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.",
+        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — the only way to read hex/octal/binary, since Brood has no radix literals; give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.\n\n    (string/->number \"42\")   → 42",
         string_to_number);
     // `decimal` constructs an exact base-10 decimal from a string ("1.50"), an
     // int (3), or a float (inexact source — uses its shortest round-trip form).
@@ -1119,7 +1122,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string.union(num)], decimal_ty),
         &["x"],
-        "Construct an exact arbitrary-precision base-10 decimal from x: a string (\"1.50\"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M.",
+        "Construct an exact arbitrary-precision base-10 decimal from x: a string (\"1.50\"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M.\n\n    (decimal/of \"1.50\")   → 1.50M",
         numeric::prim_decimal);
     def(
         heap,
@@ -1127,7 +1130,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![decimal_ty], string),
         &["d"],
-        "The canonical decimal string of decimal d (no M suffix).",
+        "The canonical decimal string of decimal d (no M suffix).\n\n    (decimal/->string (decimal/of \"1.50\"))   → \"1.50\"",
         numeric::prim_decimal_to_string,
     );
     def(
@@ -1136,7 +1139,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![decimal_ty], float),
         &["d"],
-        "Decimal d as an (inexact) float.",
+        "Decimal d as an (inexact) float.\n\n    (decimal/->float (decimal/of \"1.50\"))   → 1.5",
         numeric::prim_decimal_to_float,
     );
     // `->fixed` renders a number with a fixed count of decimals — the one
@@ -1678,6 +1681,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         audio_beep);
     def(
         heap,
+        "%gui-compiled?",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        &[],
+        "Whether this runtime was built with the GUI backend (--features gui). Ask it before a gui/* call meant to be skipped headlessly, instead of calling and catching.",
+        gui_compiled_p,
+    );
+    def(
+        heap,
         "%gui-close",
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
@@ -1862,7 +1874,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], kw),
         &["x"],
-        "The runtime type of x as a keyword (:int, :string, :pair, ...).",
+        "The runtime type of x as a keyword (:int, :string, :pair, ...).\n\n    (type-of :k)   → :keyword",
         type_of,
     );
 
@@ -1873,7 +1885,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::any(),
         Sig::variadic(any, string),
         &["&", "xs"],
-        "Concatenate the display forms of the arguments into one string.",
+        "Concatenate the display forms of the arguments into one string.\n\n    (str \"a\" 1 :b)   → \"a1:b\"",
         str_concat,
     );
     def(
@@ -1891,7 +1903,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], string),
         &["x"],
-        "The readable (re-readable) text form of x.",
+        "The readable (re-readable) text form of x — quoted and escaped, so it reads back. Unlike str, which renders for display: (str \"hi\") is 2 chars, (pr-str \"hi\") is 4.\n\n    (string/length (pr-str \"hi\"))   → 4",
         pr_str,
     );
     def(
@@ -2235,7 +2247,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         clipboard_get);
     def(
         heap,
-        "%clipboard-set!",
+        "%clipboard-set",
         Arity::exact(1),
         Sig::new(vec![string], string),
         &["s"],
@@ -2323,6 +2335,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &[],
         "",
         builtin_module_file,
+    );
+    // The rename ledger (ADR-304): the Rust table `crate::renames::RENAMES` handed to
+    // Brood as a map `{old {:to new :adr adr}}`, so `nest check --fix-renames` reads the
+    // SAME table the runtime error and the checker diagnostic read.
+    def(
+        heap,
+        "%renames",
+        Arity::exact(0),
+        Sig::new(vec![], map_ty),
+        &[],
+        "The rename ledger (ADR-304): a map of old public name (string) to `{:to new-name :adr adr}` for every deliberate rename the runtime still points at. Backs `renames/ledger`.",
+        renames_ledger,
     );
     def(
         heap,
@@ -2435,7 +2459,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::at_least(2),
         Sig::with_rest(vec![callable], any, any),
         &["f", "&", "args"],
-        "Call f with the leading args plus the final list argument spliced in as trailing args.",
+        "Call f with the leading args plus the final list argument spliced in as trailing args.\n\n    (apply + (list 1 2 3))   → 6",
         apply_builtin,
     );
 
@@ -2452,7 +2476,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string.union(sym).union(kw)], sym),
         &["x"],
-        "Coerce a string, symbol, or keyword to the matching symbol (interning if needed).",
+        "Coerce a string, symbol, or keyword to the matching symbol (interning if needed).\n\n    (symbol \"ab\")   → ab",
         to_symbol,
     );
     def(
@@ -2461,7 +2485,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string.union(sym).union(kw)], kw),
         &["x"],
-        "Coerce a string, symbol, or keyword to the matching keyword (interning if needed).",
+        "Coerce a string, symbol, or keyword to the matching keyword (interning if needed).\n\n    (keyword \"ab\")   → :ab",
         to_keyword,
     );
 
@@ -2491,7 +2515,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], bool_ty),
         &["path"],
-        "Whether path exists.",
+        "Whether path exists.\n\n    (file/exists? \"/nonexistent-brood-xyz\")   → false",
         file_exists,
     );
     def(
@@ -2508,7 +2532,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], bool_ty),
         &["path"],
-        "Whether path is a directory.",
+        "Whether path is a directory.\n\n    (file/dir? \"/tmp\")   → true",
         is_dir,
     );
     def(
@@ -3089,7 +3113,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![sym], bool_ty),
         &["name"],
-        "Whether the global `name` is module-private (ADR-146). Quote the qualified symbol: (reflect/private? 'mod/helper).",
+        "Whether the global `name` is module-private (ADR-146). Quote the qualified symbol: (reflect/private? 'mod/helper).\n\n    (reflect/private? 'map)   → false",
         private_p);
     def(
         heap,
@@ -3178,6 +3202,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &["sym"],
         "Whether sym is bound in scope. Quote it: (bound? 'foo).",
         bound_p,
+    );
+    def(
+        heap,
+        "%global-generation",
+        Arity::exact(1),
+        Sig::new(vec![sym], int),
+        &["sym"],
+        "The rebinding generation of global sym: grows with every def of that name in this runtime, 0 for a name never def'd here. For restoring a TEMPORARY rebinding without clobbering a redefinition made in between (debug/untrace-fn). Quote it: (%global-generation 'foo).",
+        global_generation,
     );
 
     // errors / control
@@ -3283,7 +3316,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(0),
         Sig::new(vec![], sym),
         &[],
-        "The current compilation namespace as a symbol, or nil at the root namespace (top level).",
+        "The current compilation namespace as a symbol, or nil at the root namespace (top level).\n\n    (reflect/current-ns)   → nil",
         current_ns,
     );
     // The compile context — namespace AND `(:use …)` imports, both per process — as data,
@@ -3478,7 +3511,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], bool_ty),
         &["x"],
-        "Whether x is a symbol declared dynamic with defdyn. Quote it: (reflect/dynamic? '*foo*).",
+        "Whether x is a symbol declared dynamic with defdyn. Quote it: (reflect/dynamic? '*foo*).\n\n    (reflect/dynamic? 'map)   → false",
         dynamic_p,
     );
 
@@ -3693,7 +3726,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::range(1, 2),
         Sig::new(vec![any, any], any),
         &["flag", "&optional", "value"],
-        "Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (proc/flag :max-heap 8000000) (work))). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (Erlang's default; process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector.",
+        "Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (proc/flag :max-heap 8000000) (work))). :max-mailbox — this process's mailbox bound in MESSAGES (ADR-307; positive int sets, nil clears — clearing also cancels a pending trip — absent reads). Checked by every sender at enqueue; a breach raises a catchable E0046 in THIS process at its next safepoint or receive. The sender is never blocked and no message is dropped: this is the guard against a receiver that cannot keep up eating the machine, not a backpressure channel (that stays a library concern - gen/call with a timeout). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (Erlang's default; process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the reconnect reconnector.",
         process_flag);
     def(
         heap,
@@ -3733,7 +3766,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::range(0, 2),
         Sig::new(vec![any, any], any),
         &["&optional", "pid", "opts"],
-        "Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see), :deopt (detail = the JIT arm's fn name, or nil). No args reads the current config map (nil if unarmed); (proc/system-monitor nil) clears; (proc/system-monitor pid) arms every event at pid; (proc/system-monitor pid {:gc true :gc-min-pause-us 1000 :exit true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long, BEAM's long_gc). Arming/clearing returns the PREVIOUS config. One subscriber at a time (last wins); events about the subscriber itself are never sent (no feedback loops), and the subscriber's death disarms the stream. Policy lives in telemetry/watch-runtime, which re-emits these as telemetry events.",
+        "Read, arm, or clear a subscription to the kernel system monitor — runtime events pushed to subscriber processes as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see; :exit-abnormal selects only reasons other than :normal, filtered before any message is built), :deopt (detail = the JIT arm's fn name, or nil). ONE SUBSCRIPTION PER SUBSCRIBER PID (ADR-305): no args reads the CALLER's config map (nil if none); (proc/system-monitor :all) lists every subscription; (proc/system-monitor nil) clears the caller's and (proc/system-monitor nil pid) clears pid's; (proc/system-monitor pid) arms every event at pid; (proc/system-monitor pid {:gc true :gc-min-pause-us 1000 :exit-abnormal true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long, BEAM's long_gc). Arming/clearing returns that pid's PREVIOUS config. Events about a subscriber itself are never sent to it (no feedback loops), and a subscriber's death drops its subscription. Policy lives in telemetry/watch-runtime (re-emits as telemetry events) and crash-report (the default crash reporter).",
         system_monitor);
     def(
         heap,
@@ -3953,7 +3986,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![sym.union(kw)], pid_ty.union(nil_ty)),
         &["name"],
-        "The local pid registered under `name`, or nil. Strictly local — does not query other nodes.",
+        "The local pid registered under `name`, or nil. Strictly local — does not query other nodes.\n\n    (proc/whereis 'no-such-registered-name)   → nil",
         whereis_name);
     def(
         heap,
@@ -3969,7 +4002,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![pid_ty], bool_ty),
         &["pid"],
-        "Is `pid` a live process on this node? False for a dead pid, and false for a remote one (liveness is not knowable locally). Cheaper than the `(proc/info pid)` snapshot, which answered the same question by allocating a whole map.",
+        "Is `pid` a live process on this node? False for a dead pid, and false for a remote one (liveness is not knowable locally). Cheaper than the `(proc/info pid)` snapshot, which answered the same question by allocating a whole map.\n\n    (proc/alive? (self))   → true",
         process_alive);
     // `node/name` is the keyword `:nonode` until `node/start` sets it to a symbol.
     def(

@@ -2,7 +2,7 @@
 
 (defn big (unit n)
   "A string of `unit` repeated `n` times — compressible test data."
-  (apply str (map (fn (_) unit) (range 0 n))))
+  (apply str (map (range 0 n) (fn (_) unit))))
 
 (describe "gzip/gunzip"
   (test "round-trips a string"
@@ -54,6 +54,7 @@
       (assert= s (string/bytes-> (zlib/unzip (zlib/zip s 9))))
       (is (> (bytes/length (zlib/zip s 0)) (bytes/length (zlib/zip s 9))))))
   (test "an out-of-range level raises"
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
     (is (= :raised (try (do (zlib/gzip "x" 10) :ok) (catch e :raised))))
     (is (= :raised (try (do (zlib/gzip "x" -1) :ok) (catch e :raised))))))
 
@@ -82,5 +83,6 @@
             (do (zlib/unbrotli (string/->bytes "definitely not brotli xyz")) :ok)
             (catch e :raised)))))
   (test "an out-of-range quality raises"
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
     (is (= :raised (try (do (zlib/brotli "x" 12) :ok) (catch e :raised))))
     (is (= :raised (try (do (zlib/brotli "x" -1) :ok) (catch e :raised))))))

@@ -419,7 +419,7 @@ mod stats {
             bencher,
             format!(
                 "\
-                 (def xs (map (fn (x) (math/rem (* x 7919) {n})) (range {n}))) \
+                 (def xs (map (range {n}) (fn (x) (math/rem (* x 7919) {n})))) \
                  (stats/median xs)"
             ),
         );
@@ -490,7 +490,7 @@ mod diff {
             format!(
                 "\
                  (def a (range {n})) \
-                 (def b (filter (fn (x) (not (= (math/rem x 10) 0))) (range {n}))) \
+                 (def b (filter (range {n}) (fn (x) (not (= (math/rem x 10) 0))))) \
                  (diff/seq a b)"
             ),
         );
@@ -676,7 +676,7 @@ mod enum_extras {
     /// Running sum via `scan` over `n` integers.
     #[divan::bench(args = [1_000, 10_000])]
     fn scan(bencher: divan::Bencher, n: usize) {
-        bench_prog(bencher, format!("(last (scan + 0 (range {n})))"));
+        bench_prog(bencher, format!("(last (scan (range {n}) 0 +))"));
     }
 
     /// `zip-with +` two `n`-element ranges.
@@ -694,7 +694,7 @@ mod enum_extras {
         bench_prog(
             bencher,
             format!(
-                "(def xs (map str (range {n}))) \
+                "(def xs (map (range {n}) str)) \
                  (do (min-by string-length xs) (max-by string-length xs))"
             ),
         );

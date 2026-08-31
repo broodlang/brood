@@ -131,16 +131,16 @@ const CORPUS: &[&str] = &[
     "(defn adder3 (a) (fn (b) (let (s (+ a b)) (fn (c) (+ s c))))) (((adder3 1) 2) 3)",
     "(defn drive (f acc i n) (if (= i n) acc (drive f (f acc) (+ i 1) n))) (drive (make-adder 1) 0 0 1000)",
     // higher-order + threading
-    "(map (fn (x) (* x x)) (range 1 6))",
-    "(filter even? (range 1 11))",
-    "(reduce + 0 (range 1 101))",
+    "(map (range 1 6) (fn (x) (* x x)))",
+    "(filter (range 1 11) even?)",
+    "(reduce (range 1 101) 0 +)",
     "(-> 5 (+ 3) (* 2))",
     "(->> (range 1 6) (map (fn (x) (* x x))) (reduce + 0))",
     // multi-arity
     "(defn g ((x) x) ((x y) (+ x y))) [(g 7) (g 3 4)]",
     // variadic call (and a variadic user fn)
-    "(defn vsum (& xs) (reduce + 0 xs)) (vsum 1 2 3 4 5)",
-    "(defn vsum (& xs) (reduce + 0 xs)) (vsum)",        // empty rest → ()
+    "(defn vsum (& xs) (reduce xs 0 +)) (vsum 1 2 3 4 5)",
+    "(defn vsum (& xs) (reduce xs 0 +)) (vsum)",        // empty rest → ()
     "(defn greet (name & rest) [name (count rest)]) (greet :a :b :c)",
     "(defn greet (name & rest) [name rest]) (greet :a)", // rest is the empty list
     // &optional (nil default) — provided and missing
@@ -159,7 +159,7 @@ const CORPUS: &[&str] = &[
     // (fixed arms win for their exact arity; the rest arm catches the overflow)
     "(defn ma ((x) :one) ((x y) :two) ((x y & r) [:many (count r)])) [(ma 1) (ma 1 2) (ma 1 2 3 4)]",
     // a variadic helper driven in a tail loop (rest list rebuilt each call)
-    "(defn vmax (& xs) (reduce (fn (a b) (if (< a b) b a)) (first xs) (rest xs))) (vmax 3 9 2 7 1)",
+    "(defn vmax (& xs) (reduce (rest xs) (first xs) (fn (a b) (if (< a b) b a)))) (vmax 3 9 2 7 1)",
     // pattern-dispatch fns (string/lower to match* whose no-match arm is `(throw [:match-error
     // (quote ctx) m (quote pats)])`): the VM now compiles `quote` + vector/map literals,
     // so these run on the VM instead of deferring. Recursive + non-total + the throw path.
@@ -204,8 +204,8 @@ const CORPUS: &[&str] = &[
     // chunk and run on the bytecode loop when called. These exercise its node set —
     // arithmetic, if-nesting, let, vector/map build, first/rest, the fallback/error
     // paths, and the epoch-guard re-resolve after redefining an inlined operator.
-    "(defn sq (x) (* x x)) (map sq (range 1 7))",
-    "(defn classify (n) (if (< n 0) :neg (if (= n 0) :zero :pos))) (map classify (list -3 0 8))",
+    "(defn sq (x) (* x x)) (map (range 1 7) sq)",
+    "(defn classify (n) (if (< n 0) :neg (if (= n 0) :zero :pos))) (map (list -3 0 8) classify)",
     "(defn pick (x) (let (a (* x 2) b (+ a 1)) [a b {:k a :v b}])) (pick 10)",
     "(defn hd (xs) (first xs)) (defn tl (xs) (rest xs)) [(hd [10 20 30]) (tl '(1 2 3)) (hd '())]",
     "(defn boom (x) (first x)) (boom 5)",          // Prim1 fallback → type error, both engines

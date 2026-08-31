@@ -6,22 +6,22 @@
 
 (describe "proctree/by-id"
   (test "sorts ascending by id (the flat view)"
-    (assert= (map (fn (p) (get p :id)) (by-id [{:id 3} {:id 1} {:id 2}])) '(1 2 3))))
+    (assert= (map (by-id [{:id 3} {:id 1} {:id 2}]) (fn (p) (get p :id))) '(1 2 3))))
 
 (describe "proctree/tree-order"
   (test "roots first, each followed by its DFS descendants, depth-tagged"
     (let (ps [{:id 1 :parent nil} {:id 2 :parent 1} {:id 3 :parent 1} {:id 4 :parent 2}]
           o (tree-order ps))
       ; 1 → (2 → 4) → 3
-      (assert= (map (fn (p) (get p :id)) o) '(1 2 4 3))
-      (assert= (map (fn (p) (get p :depth)) o) '(0 1 2 1))))
+      (assert= (map o (fn (p) (get p :id))) '(1 2 4 3))
+      (assert= (map o (fn (p) (get p :depth))) '(0 1 2 1))))
   (test "an orphan (parent not in the set) is treated as a root"
     (let (o (tree-order [{:id 5 :parent 99} {:id 6 :parent 5}]))
-      (assert= (map (fn (p) (get p :id)) o) '(5 6))
-      (assert= (map (fn (p) (get p :depth)) o) '(0 1))))
+      (assert= (map o (fn (p) (get p :id))) '(5 6))
+      (assert= (map o (fn (p) (get p :depth))) '(0 1))))
   (test "multiple roots are ordered by id; siblings too"
-    (assert= (map (fn (p) (get p :id))
-               (tree-order [{:id 2 :parent nil} {:id 1 :parent nil} {:id 3 :parent 2}]))
+    (assert= (map (tree-order [{:id 2 :parent nil} {:id 1 :parent nil} {:id 3 :parent 2}])
+               (fn (p) (get p :id)))
       '(1 2 3)))
   (test "a snapshot with no root (mutual parents) is bounded to empty, not a hang"
     ;; impossible from real proc/info, but a malformed snapshot must terminate

@@ -21,8 +21,10 @@ inference cycle guard `sigs::InferGuard::enter` ended in `.then_some(InferGuard(
 builds-and-drops a guard on the REFUSAL path and so un-marked the in-flight symbol — latent since
 July, made unbounded by the demand walk consulting a callee's inferred sig. One-line fix, guards
 sabotage-verified, the demand-walk hunk (`domain_of_inner`'s last `or_else`) committed with it —
-it costs nothing (zero-warning gate 5.0 s either way). **Method:** put `ulimit -v 4000000` in
-front of any test run that exercises inference — the OOM becomes a ten-second named panic — but
+it costs nothing (zero-warning gate 5.0 s either way). **Method:** put `ulimit -v 16000000` in
+front of any test run that exercises inference (16 GB, not 4: the runtime reserves ~3 GB of
+address space up front — allocator arenas + worker stacks — and a 4 GB cap fails the first
+`table` a test creates; CLAUDE.md "Build uncapped, run capped") — the OOM becomes a ten-second named panic — but
 never in front of a `cargo` build (the linker inherits it and dies). Full account in KI-87.
 
 **As of 2026-08-29 (the perf session — the call path mined, and the next list drawn up).**
@@ -279,7 +281,13 @@ before you shipped. Three of the five were a question nothing had a command for:
    cannot drift from the boot it checks. (KI-66) **Know its edge:** it catches a module that
    raises at *load*, not a name reached only once `main` executes — that one is
    `nest run --for`, already wired in hive's CI. ADR-257 has the three-way table; don't
-   trust `--check-boot` past it.
+   trust `--check-boot` past it. **And since 2026-08-30 (ADR-304), plain `nest run` refuses
+   to launch over an unbound symbol** in the entry's require-closure — the pre-flight
+   already ran there and only printed; bedit ran for hours on ten of ADR-302's renames
+   each swallowed by a `(try … (catch e nil))`. `--no-check` skips the pre-flight. The
+   unbound diagnostic (runtime error and checker alike) now names where a ledgered rename
+   went: `unbound symbol: gui/font! — renamed to gui/font (ADR-302)`, from the one table
+   in `crates/lisp/src/renames.rs` (`(renames/ledger)` is its Brood view).
 2. **What is this binary?** `myapp --brood-build-info` — version, build-id, features, app +
    module count. The **`--brood-` argv prefix is reserved** (two names, first position only)
    so the bundle's "argv belongs to the app" contract is intact; it loads no module, so it
@@ -1425,8 +1433,8 @@ distribution. If you are timing a boot, state which path you measured, and use
   concurrent copies of that one test separated them in seconds: **8/16 vs 0/16 at HEAD**, where the
   full suite gave a 1-in-8 murmur that six baseline runs had failed to contradict.
 - **A test-level `:isolated` inside a `describe` used to be silently dropped** —
-  `register-test!` discarded the flag while collecting, so the marker did nothing and the suite
-  reported `0 isolated`. Fixed 2026-08-05 (it rides in the meta; `emit-describe!` gives such a
+  `register-test` discarded the flag while collecting, so the marker did nothing and the suite
+  reported `0 isolated`. Fixed 2026-08-05 (it rides in the meta; `emit-describe` gives such a
   test its own isolated unit), but the lesson generalises: **a marker that is ignored rather than
   rejected is worse than an unsupported one**, because you believe the test is protected. Check
   the `(N isolated)` count in the summary when you rely on it.

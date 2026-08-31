@@ -505,6 +505,19 @@ pub(crate) fn tick_reporting_hard_kill() -> bool {
     capture_hard_kill_pending()
 }
 
+/// Mailbox-bound probe for the CURRENT process (ADR-307) — the safepoint twin of the
+/// `receive`-entry check, for a flooded process that computes instead of receiving.
+/// Probed beside `take_proc_limit_hit` at the same loop-top safepoints; one borrow +
+/// one relaxed load when clean, `None` always on the root thread (CURRENT unset),
+/// matching the kill probe's root rule.
+pub(crate) fn take_current_mailbox_overflow() -> Option<(usize, usize)> {
+    CURRENT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|ctx| ctx.mailbox.take_overflow_hit())
+    })
+}
+
 /// Is an untrappable hard `:kill` pending for the current process? The driver checks this
 /// at a loop-top safepoint and stops. A *soft* exit isn't honoured here — it waits for
 /// the next `receive` (checked when `run_one` would park).

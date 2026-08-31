@@ -1,0 +1,68 @@
+;; The rename ledger (ADR-304): where a deliberately renamed public name went, and the
+;; two places that say so — the runtime `unbound symbol` error and the checker's unbound
+;; diagnostic. The table is Rust (`crates/lisp/src/renames.rs`); `renames/ledger` is its
+;; Brood view through `%renames`, so there is one source of truth to test against.
+;;
+;; Register-only — discovered and run by `nest test`.
+
+(defmodule renames-test (:use test) (:use renames))
+
+;; The module a qualified new name lives in, so the "every new name is bound" case can
+;; load it first: `bound?` does not trigger the `mod/name` load a call would.
+(defn- module-of (qualified)
+  (let (slash (string/last-index-of qualified "/"))
+    (if (< slash 0) nil (string/substring qualified 0 slash))))
+
+(describe "rename ledger"
+  (test "the runtime unbound error names where a renamed name went"
+    ;; The bedit shape: the old name in a guard. `error-message` sees the MESSAGE only,
+    ;; which is why the pointer is appended there rather than carried as a hint.
+    ;; `reflect/eval-string`, so the checker does not see (and `nest check` does not
+    ;; report) the deliberately-unbound reference in this file.
+    (let (msg (try (reflect/eval-string "(gui/font! 1)") (catch e (error-message e))))
+      (is (includes? msg "unbound symbol: gui/font!"))
+      (is (includes? msg "renamed to gui/font (ADR-302)"))))
+
+  (test "a bare prelude rename is pointed at too"
+    (let (msg (try (reflect/eval-string "(run! inc [1])") (catch e (error-message e))))
+      (is (includes? msg "renamed to each (ADR-302)"))))
+
+  (test "the checker's unbound warning carries the same pointer"
+    (let (diags (reflect/check-string-structured "(defn f () (os/clipboard-set! \"x\"))")
+          messages (map diags (fn (d) (get d :message)))
+          unbound (filter messages (fn (m) (includes? m "unbound symbol: os/clipboard-set!"))))
+      (assert= (count unbound) 1)
+      (is (includes? (first unbound) "renamed to os/clipboard-set (ADR-302)"))))
+
+  (test "an unledgered name gets no pointer"
+    (let (msg (try (reflect/eval-string "(definitely-not-a-name 1)") (catch e (error-message e))))
+      (is (includes? msg "unbound symbol: definitely-not-a-name"))
+      (is (not (includes? msg "renamed to")))))
+
+  (test "renamed-to answers an entry for a string or a symbol, nil otherwise"
+    (assert= (get (renamed-to "gui/bg!") :to) "gui/bg")
+    (assert= (get (renamed-to 'gui/bg!) :adr) "ADR-302")
+    (assert= (renamed-to "gui/bg") nil))
+
+  (test "every ledger old name is unbound and every new name is bound"
+    (let (entries (seq (ledger))
+          stale (filter entries
+                  (fn (kv)
+                    (let (old (first kv)
+                          new (get (second kv) :to)
+                          modname (module-of new))
+                      (when modname (require-one (symbol modname)))
+                      (or (bound? (symbol old)) (not (bound? (symbol new))))))))
+      (is (> (count entries) 10))
+      ;; Assert on the entries themselves, so a failure names the stale row.
+      (assert= stale nil))))
+
+(describe "rename ledger across processes"
+  (test "the pointer is the same from a spawned process"
+    (let (parent (self))
+      (spawn (fn ()
+               (send parent
+                 [:msg (try (reflect/eval-string "(gui/inset! 1)") (catch e (error-message e)))])))
+      (receive
+        ([:msg msg] (is (includes? msg "renamed to gui/inset (ADR-302)")))
+        (after 5000 (is false))))))

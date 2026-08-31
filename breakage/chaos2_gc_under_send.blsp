@@ -38,7 +38,7 @@
 (let (me (self)
       deep-list (range 1 10001))
   (let (worker (spawn (receive
-                        ([:list xs] (let (s (fold (fn (a v) (+ a v)) 0 xs))
+                        ([:list xs] (let (s (fold xs 0 (fn (a v) (+ a v))))
                                       (send me [:sum s (count xs)])))
                         (after 10000 :timeout))))
     (send worker [:list deep-list])
@@ -54,7 +54,7 @@
 (let (me (self)
       big-base (* 12345678901234 56789012345678))
   (def closure-map-58
-    (fold (fn (m i) (assoc m i (fn () (+ big-base i)))) {} (range 500)))
+    (fold (range 500) {} (fn (m i) (assoc m i (fn () (+ big-base i))))))
   (let (worker (spawn
                  (receive
                    ([:cmap m]

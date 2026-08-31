@@ -219,7 +219,7 @@ fn the_root_project_roots_its_own_modules_under_its_name() {
          \x20 (test \"the REAL globals are the rooted names, not the bare ones\"\n\
          \x20   ;; `reflect/global-names` lists actual bindings; the bare `main/go` is only\n\
          \x20   ;; REACHABLE via root_qualified_ref's alias (ADR-070), not a binding.\n\
-         \x20   (let (globals (map ->string (reflect/global-names)))\n\
+         \x20   (let (globals (map (reflect/global-names) ->string))\n\
          \x20     (is (includes? globals \"myapp/main/go\"))\n\
          \x20     (is (includes? globals \"myapp/greeter/hi\"))\n\
          \x20     (is (not (includes? globals \"main/go\")))\n\

@@ -41,9 +41,9 @@
 (defn- dt-numeric? (s)
   (and (> (string/length s) 0)
     (let (cs (string/->list s))
-      (and (nil? (first (seq/remove (fn (c) (includes? "0123456789+-.eE" c)) cs)))
+      (and (nil? (first (seq/remove cs (fn (c) (includes? "0123456789+-.eE" c)))))
         ;; at least one digit — rules out a bare sign and dectest's `#` null
-        (not (nil? (first (filter (fn (c) (includes? "0123456789" c)) cs))))))))
+        (not (nil? (first (filter cs (fn (c) (includes? "0123456789" c))))))))))
 
 ;; dectest's absurd-exponent cases (1E+999999999) all carry Overflow/Underflow and
 ;; are dropped by the conditions filter — but `decimal/->string` expands integer-side
@@ -62,7 +62,7 @@
 (defn- dt-words (line)
   (let (s (string/replace line "\t" " ")
         i (index-of s "--"))
-    (seq/remove string/blank? (string/split (if (< i 0) s (string/substring s 0 i)) " "))))
+    (seq/remove (string/split (if (< i 0) s (string/substring s 0 i)) " ") string/blank?)))
 
 ;; The computed result as a canonical decimal string, or nil when the case does not
 ;; apply to Brood's decimal. `compare` answers -1/0/1, so it renders as an int.
@@ -92,7 +92,7 @@
       nil
       (let (id (nth words 0)
             op (string/lower (nth words 1))
-            args (map dt-unquote (seq/subvec (into [] words) 2 arrow))
+            args (map (seq/subvec (into [] words) 2 arrow) dt-unquote)
             want (dt-unquote (nth words (inc arrow)))
             conditions (- n (+ arrow 2))
             unary (get dt-ops-unary op)
@@ -104,8 +104,8 @@
               (and binary (not (= (count args) 2)))
               (not (dt-numeric? want))
               (not (dt-in-range? want))
-              (first (seq/remove dt-numeric? args))
-              (first (seq/remove dt-in-range? args)))
+              (first (seq/remove args dt-numeric?))
+              (first (seq/remove args dt-in-range?)))
           nil
           (let (a (decimal/of (first args))
                 b (if binary (decimal/of (nth args 1)) nil)
@@ -142,7 +142,7 @@
       ;; that drops the applicable set below this has broken the runner, not the
       ;; corpus. (~1,900 of the ~5,600 vendored lines apply.)
       (is (> ran 1500))
-      (assert= (take 5 bad) ())
+      (assert= (take bad 5) ())
       (assert= (count bad) 0))))
 
 ;; The ideal-exponent rules are the substance of what dectest pins down for an exact

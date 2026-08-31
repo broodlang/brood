@@ -73,11 +73,11 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
   (test "every key and value comes back as a string"
     (let (e (%env-all))
       (is (map? e))
-      (is (every? string? (keys e)))
-      (is (every? string? (vals e)))))
+      (is (every? (keys e) string?))
+      (is (every? (vals e) string?))))
 
   (test "%argv comes back as strings"
-    (is (every? string? (%argv))))
+    (is (every? (%argv) string?)))
 
   (test "a non-UTF-8 env var value is decoded lossily, not panicked on"
     ;; Was: `std::env::vars()` unwraps, so ONE non-UTF-8 value anywhere in the
@@ -101,9 +101,8 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
                               r (%os-cmd bin [p])
                               _ (file/rm p))
                           (= (get r :stdout) this-build)))
-          bin (first (filter same-build?
-                       (filter file/exists?
-                         ["target/release/brood" "target/debug/brood"]))))
+          bin (first (filter (filter ["target/release/brood" "target/debug/brood"] file/exists?)
+                       same-build?)))
       (if (nil? bin)
         (is true)
         (let (probe (str "/tmp/brood-envall-probe-" (os-pid) ".blsp")
@@ -148,7 +147,7 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
           data (str dir "/data")
           _ (file/spit data "old")
           _ (%file-swap (str dir "/lock") data "old" "new")
-          left (filter (fn (n) (>= (index-of n ".swap.") 0)) (file/ls dir)))
+          left (filter (file/ls dir) (fn (n) (>= (index-of n ".swap.") 0))))
       (assert= '() (seq left))
       (file/rmdir dir))))
 

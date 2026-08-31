@@ -26,8 +26,7 @@
   (str "(component (core module $m (memory (export \"m\") "
     pages
     "))"
-    (string/join ""
-      (map (fn (i) (str " (core instance $i" i " (instantiate $m))")) (range n)))
+    (string/join (map (range n) (fn (i) (str " (core instance $i" i " (instantiate $m))"))) "")
     ")"))
 
 (defn- table-wat (elems)

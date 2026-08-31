@@ -19,7 +19,7 @@ rules, scoping — see [spec.md](spec.md).
 Brood's surface is deliberately Clojure-flavoured, so most Clojure reflexes
 transfer unchanged: nil/false-only truthiness, type-sensitive `=`
 (`(= 1 1.0)` is `false`), `:keyword`s, `cond` with flat test/expr pairs, the
-`->`/`->>` threading macros, and quasiquote with `` ` `` / `~` / `~@` (Clojure's
+`->` threading macro, and quasiquote with `` ` `` / `~` / `~@` (Clojure's
 choice, not Common Lisp's `,` / `,@`).
 
 The catch is that a few core forms borrow from Scheme / Common Lisp instead, in
@@ -1099,13 +1099,31 @@ destructuring binders, `match*` pattern binders, and computed (`~params`) binder
 inside a template stay literal — opt into `#`/`gensym` there if capture is a
 concern.
 
-The `->`, `->>`, and `as->` threading macros are also defined in the prelude:
+The `->` and `as->` threading macros are also defined in the prelude. There is only
+**one** pipe: every collection function takes its collection first (ADR-305), so a
+thread-*last* variant would have nothing to thread (`->>` and friends were deleted):
 
 ```clojure
 (-> 5 (- 1) (* 2))            ;=> 8     ; (* (- 5 1) 2)   thread as FIRST arg
-(->> (list 1 2 3) (map inc))  ;=> (2 3 4)                 thread as LAST arg
 (as-> 5 $ (+ $ 1) (* $ 2))    ;=> 12    ; bind $, thread into ANY position
 ```
+
+A step form naming **`$`** receives the threaded value at that position instead of first
+or last (ADR-303). This matters because the stdlib carries two argument conventions —
+subject-first (`string/split s sep`) and collection-last (`map f coll`) — so a pipeline
+crossing the boundary is threaded correctly by *neither* macro:
+
+```clojure
+(-> 1 (- 10 $))                                  ;=> 9     ; not -9
+(-> "1 2 3" (string/split " ") (map string/->number $) first)   ;=> 1
+(-> 5 (+ 1 (* 2 $)))                             ;=> 11    ; found at any depth
+(-> 3 [$ $])                                     ;=> [3 3] ; and in vector/map literals
+```
+
+A form with no `$` threads exactly as before, so this is purely additive. The value is
+bound **once** and the binding substituted, so a step may name `$` repeatedly without
+re-evaluating it — `(-> (expensive) (+ $ $))` calls `expensive` once. A quoted `'$` is
+the symbol, not a hole. `some->`/`cond->` and their thread-last variants inherit it.
 
 The **conditional / short-circuit threading** macros build on those, plus `doto`:
 
@@ -1115,8 +1133,8 @@ The **conditional / short-circuit threading** macros build on those, plus `doto`
 (doto (table/new) (table/put :a 1) (table/put :b 2))  ; run forms for effect, return the value
 ```
 
-`some->>`/`cond->>` are the thread-*last* variants; `run!` applies a function to
-each item for effect (`(run! io/puts xs)`, the function form of `doseq`).
+`each` applies a function to
+each item for effect (`(each io/puts xs)`, the function form of `doseq`).
 
 `tap` and `then` are the single-**function** pipe helpers (Elixir's `Kernel.tap`/`then`),
 where `doto`/`->` splice *forms*: `(tap x f)` calls `(f x)` for its side effects and returns
@@ -1532,6 +1550,27 @@ Raise with `throw` (any value) or `error` (a formatted message), and handle with
 (throw :boom)                       ; raise an arbitrary value
 (error "bad index: " i)             ; raise a message string
 ```
+
+A final **`(finally cleanup…)`** clause runs `cleanup` after the body — and after
+the handler, when there is a `catch` — whether the try completed or threw, then
+yields the try's value or rethrows what escaped (ADR-306). `cleanup`'s own value
+is discarded; a throw from `cleanup` replaces the pending one. It is the
+`unwind-protect`/`dynamic-wind` of the other Lisps, for a resource that must be
+released on the way out of a handler that stays alive — a port, a `table` row, a
+lock held in a `gen` server — where letting the process die is not an option:
+
+```clojure
+(try
+  (io-write port (render frame))
+  (catch e (log/warn "render failed" {:error (error-message e)}))
+  (finally (release port)))
+```
+
+`finally` does **not** run on an untrappable kill (`(exit pid :kill)`), the same as
+OTP's `after`: a kill is not an error and unwinds no handler. A rethrown built-in
+error is rebuilt from its map by `throw` (`kind`, message, position, hint and
+`:trace` restored), so what escapes a `finally` — or a `(catch e (throw e))` —
+prints and propagates exactly as the original did rather than as a printed map.
 
 `catch` takes **exactly one bare binder** and no exception class — Clojure's
 `(catch Type e body…)` is rejected with a hint, since reading it Brood's way would
@@ -2167,6 +2206,46 @@ failure only appears under load — exactly where a supervisor matters.
 `gen/start-link` is the same guarantee for a `defserver` server. The prelude
 macro expands to the `%spawn-link` primitive (ADR-067).
 
+### Crash reports
+
+A process nobody links to or monitors still crashes somewhere: the kernel prints
+one line to stderr — `process 7 died: worker.blsp:14:9: division by zero` — and
+appends it to `.brood_crash_dump`, but that line has no trace, no hint, and prints
+again for every iteration of a crash loop. **The default crash reporter**
+(`std/proc/crash-report.blsp`, ADR-305) is a `proc/system-monitor` subscriber
+selecting `:exit-abnormal`, armed by `brood file.blsp`, `nest run`, a released
+bundle and the REPL before the program starts (`nest test` never arms it — the
+runner reports its own failures), and it prints one report per **crash site**:
+
+```
+[crash] #<pid a/7> exited: division by zero
+        kind :arith-error  code E0031  at src/worker.blsp:14:9
+        at worker/step (src/worker.blsp:14:9)
+        at worker/loop (src/worker.blsp:9:5)
+        (further crashes at this site are not reported)
+```
+
+The site is the raise's first positioned frame (`kind file line`), so a worker
+crashing thirty times in a supervisor's restart loop costs one report and the
+supervisor's own give-up another; a raise with no position keys on
+`(kind message)`. Deliberate exits — `:normal`, `:kill`/`:killed`, `:shutdown`,
+`[:shutdown x]` — are never reported: a supervisor tearing a subtree down is
+not a fault. The process that armed the reporter is excluded too (its crash is
+the CLI's to print). A *handled* crash is still reported — a linked, trapping
+parent that restarts its child does not make the child's error less worth
+reading, which is OTP's `logger` behaviour.
+
+- `(crash-report/start [opts])` arms it (idempotent; registered as
+  `:crash-reporter`); `{:sink f}` hands each rendered report to `f` instead of
+  stderr — the seam for a host that captures reports (an editor's message
+  area) and for tests. `(crash-report/stop)` disarms and returns once the
+  subscription is gone; `(crash-report/running?)`; `(crash-report/render pid
+  reason)` is the pure formatter. `(crash-report/arm-default)` is what the
+  entry points call — a no-op under **`BROOD_NO_CRASH_REPORT=1`**.
+- The kernel's one-liner yields while any abnormal-exit subscriber is armed
+  (see `proc/system-monitor` above), so opting out restores it: nothing is ever
+  reported twice, and nothing goes unreported.
+
 ### Timers
 
 `(timer/send-after ms pid msg)` delivers `msg` to `pid` after `ms` milliseconds
@@ -2231,6 +2310,27 @@ the spawned fn —
 ```clojure
 (spawn (fn () (proc/flag :max-heap 8000000) (work)))
 ```
+
+**`:max-mailbox`** is the queue-length twin (ADR-308): a bound on this process's
+mailbox, in messages.
+
+```clojure
+(proc/flag :max-mailbox 10000)  ; more than 10k queued messages is a fault here
+(proc/flag :max-mailbox)        ; read it
+(proc/flag :max-mailbox nil)    ; clear it (also cancels a pending trip)
+```
+
+Every sender checks the bound at enqueue, but **the sender is never blocked or
+errored and no message is dropped** — `send` stays fire-and-forget, which is the
+model's load-bearing rule (a blocking send re-introduces deadlock). A breach arms
+a sticky flag that the *flooded process itself* raises as a catchable `E0046` at
+its next safepoint or `receive` — the same one-process-only protocol as
+`:max-heap`, with the same rescue: a handler can drain the backlog (`receive`
+still works after the raise), clear or raise the bound, or let the supervisor
+restart it. This is the guard against a slow receiver quietly eating the machine
+— BEAM has no queue bound either, and the request for one is perennial there.
+Backpressure proper stays a library concern: `gen/call` with a timeout is
+already a bounded round-trip.
 
 ### Going idle (`proc/hibernate`)
 
@@ -2523,8 +2623,8 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
   return a concrete list and run their function immediately (so `(map f xs)` for
   side effects works). When you want a pipeline to **fuse** — fold/reduce in a
   single pass with no intermediate lists — use the lazy combinators `seq/lmap`,
-  `seq/lfilter`, `seq/lkeep`, `seq/lremove`, threaded with `->>`:
-  `(->> (range n) (seq/lfilter odd?) (seq/lmap sq) (reduce + 0))`. Each returns a **lazy
+  `seq/lfilter`, `seq/lkeep`, `seq/lremove`, threaded with `->`:
+  `(-> (range n) (seq/lfilter odd?) (seq/lmap sq) (reduce 0 +))`. Each returns a **lazy
   seq-view** — an O(1) value (like a [lazy range](#lists--sequences)) that stands
   in for the list it would produce. Chaining composes the stages onto one view,
   so the whole pipeline walks the source once, building nothing in between (≈3×
@@ -2914,20 +3014,30 @@ iolist in memory.
   near-zero cost when off. (A JIT-resident loop is attributed when it yields
   at its reduction-budget preempt; the legacy tree-walker isn't sampled.)
 - `(proc/system-monitor [pid opts])` — the **runtime event stream** (Erlang
-  `system_monitor/2` shape): the kernel pushes selected runtime events to one
-  subscriber process as ordinary `[:system kind subject-pid detail]` mailbox
+  `system_monitor/2` shape): the kernel pushes selected runtime events to
+  subscriber processes as ordinary `[:system kind subject-pid detail]` mailbox
   messages — `:gc` (a collection finished; detail
   `{:pause-us :collections :live}`, filtered by `:gc-min-pause-us`, BEAM's
   `long_gc`), `:spawn` (detail = parent pid), `:exit` (detail = the structured
-  exit reason monitors see), and `:deopt` (detail = the JIT arm's fn name).
-  No args reads the config; `nil` clears; `(proc/system-monitor pid)` arms every
-  event, `(proc/system-monitor pid {:gc true :gc-min-pause-us 1000})` selects
-  exactly the truthy keys. One subscriber at a time (last wins); events about
-  the subscriber itself are never sent, and its death disarms the stream. Off,
-  the cost is one relaxed flag load per event site. **Policy lives in
-  telemetry**: `(telemetry/watch-runtime [opts])` spawns a watcher that
-  re-emits each kernel event as a `[:runtime kind]` telemetry event, so
-  operators consume runtime and app events through one attach/handler seam.
+  exit reason monitors see) or `:exit-abnormal` (only a reason other than
+  `:normal`, filtered before any message is built), and `:deopt` (detail = the
+  JIT arm's fn name). **One subscription per subscriber pid** (ADR-305): no args
+  reads the *caller's* subscription, `:all` lists every one, `nil` clears the
+  caller's and `(proc/system-monitor nil pid)` clears `pid`'s;
+  `(proc/system-monitor pid)` arms every event at `pid`,
+  `(proc/system-monitor pid {:gc true :gc-min-pause-us 1000})` selects exactly
+  the truthy keys. Events about a subscriber itself are never sent to it, and a
+  subscriber's death drops its subscription. Off, the cost is one relaxed flag
+  load per event site; a kind nobody selected costs the same. **Policy lives in
+  Brood**: `(telemetry/watch-runtime [opts])` spawns a watcher that re-emits each
+  kernel event as a `[:runtime kind]` telemetry event, so operators consume
+  runtime and app events through one attach/handler seam, and the default crash
+  reporter (`std/proc/crash-report.blsp`, below) is a second subscriber selecting
+  `:exit-abnormal` — the two coexist, which the single-slot stream of before could
+  not offer. A subscriber listening for abnormal exits also takes over the
+  kernel's own `process N died: …` one-liner: while one is armed, the kernel
+  prints nothing for an uncaught error (the `.brood_crash_dump` note is written
+  regardless), so a crash is reported once, with its trace, by whoever asked.
 - `(gc-collect)` forces a collection now and returns the `gc-stats` map
   (an observability/test aid, *not* a load-bearing trigger), and `(gc-trace on?)`
   toggles per-collection stderr logging for the calling process (no arg = query;
@@ -3044,8 +3154,8 @@ Two consequences worth knowing:
 - To let other modules read or set your knob, declare it: `(defdyn *my-knob* v)`.
   A knob only its own module touches needs nothing.
 - A **root** registry can only be rebound by root code, so the prelude exposes
-  setters for the ones tooling extends — `(reflect/set-load-path! dirs)` /
-  `(reflect/add-load-path! dir…)` for `*load-path*`, `(record-module-doc! key doc)` for
+  setters for the ones tooling extends — `(reflect/set-load-path dirs)` /
+  `(reflect/add-load-path dir…)` for `*load-path*`, `(record-module-doc! key doc)` for
   `*module-docs*`. Writing `(def *load-path* …)` inside a module would define
   `mod/*load-path*` and the loader would never see it.
 
@@ -3159,7 +3269,7 @@ agent can explore the live image — see `docs/mcp.md`.
 `std/prelude/*.blsp` — nine files concatenated in the order `lib.rs` lists —
 is loaded at startup and is where most of the language
 actually lives — the `defn` macro, the arithmetic operators, comparisons,
-equality, the sequence library, and the `->`/`->>` threading macros, all defined
+equality, the sequence library, and the `->` threading macro, all defined
 in Brood on top of the Rust primitive kernel. It also adds `inc` `dec`
 `identity` `second` `third` `zero?` `max` `min` (the sign/parity predicates,
 `abs`, `sum`, `product` and the rest of the math library are in the `math`

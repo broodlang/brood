@@ -82,9 +82,9 @@
     (let (s (stack (list 10 20 30)))
       (assert= (seq s) (list 10 20 30))
       (assert= (count s) 3) ; not 1 (the one `items` field)
-      (assert= (fold + 0 s) 60)
-      (assert= (map inc s) (list 11 21 31))
-      (assert= (filter even? s) (list 10 20 30))))
+      (assert= (fold s 0 +) 60)
+      (assert= (map s inc) (list 11 21 31))
+      (assert= (filter s even?) (list 10 20 30))))
   (test "the accessors first/rest/empty?/nth route through Seqable too"
     (let (s (stack (list 10 20 30)))
       (assert= (first s) 10)
@@ -94,7 +94,7 @@
       (is (empty? (stack (list))))))
   (test "Conjable — conj/into build the custom collection its own way"
     (assert= (seq (conj (stack (list)) 1)) (list 1))
-    (assert= (seq (fold conj (stack (list)) (list 1 2 3))) (list 3 2 1)) ; prepend
+    (assert= (seq (fold (list 1 2 3) (stack (list)) conj)) (list 3 2 1)) ; prepend
     (assert= (seq (into (stack (list)) (list :a :b :c))) (list :c :b :a)))
   (test "a record WITHOUT impls still iterates/conj's as its fields (map behaviour)"
     (assert= (into {} (seq (point 1 2))) {:x 1 :y 2}) ; as a map — hash-order-independent
@@ -112,9 +112,9 @@
 (describe "defrecord: custom Ord"
   (test "sort/sort-by use a record's Ord (semantic-version order, not map order)"
     (let (vs (list (ver 1 5) (ver 1 2) (ver 2 0) (ver 1 10)))
-      (assert= (map (fn (v) [(get v :major) (get v :minor)]) (sort vs))
+      (assert= (map (sort vs) (fn (v) [(get v :major) (get v :minor)]))
         (list [1 2] [1 5] [1 10] [2 0]))
-      (assert= (map (fn (v) (get v :minor)) (sort-by (fn (v) v) vs))
+      (assert= (map (sort-by vs (fn (v) v)) (fn (v) (get v :minor)))
         (list 2 5 10 0))))
   (test "built-in sort is unchanged"
     (assert= (sort (list 3 1 2)) (list 1 2 3))
@@ -174,7 +174,7 @@
 ;; held in `*record-ids*` all along. Sealed ability names have resolved since ADR-181.
 
 (defn- rt-warnings (src)
-  (map (fn (d) (get d :message)) (reflect/check-string-structured src)))
+  (map (reflect/check-string-structured src) (fn (d) (get d :message))))
 
 (describe "a record name in type position"
   (test "resolves, bare and qualified, and admits a record carrying extra fields"
@@ -183,11 +183,11 @@
   (test "rejects a different record and a non-record"
     (let (w (rt-warnings "(defmodule u) (defrecord circle (r)) (defrecord square (s)) (sig area (circle -> float)) (defn area (c) (get c :r)) (defn bad () (area (square 2)))"))
       (is (not (empty? w)))
-      (is (any? (fn (m) (includes? m "argument 1")) w))))
+      (is (any? w (fn (m) (includes? m "argument 1"))))))
   (test "a base type name still outranks a record that claimed it"
     ;; In a type EXPRESSION `int` is the int kind, even with a root record named `int`.
     (assert= (rt-warnings "(defrecord int (n)) (sig f (int -> int)) (defn f (n) (+ n 1)) (defn ok () (f 42))")
       (list)))
   (test "an ambiguous bare name declines rather than guessing"
     (let (w (rt-warnings "(defmodule a) (defrecord pt (x y)) (defmodule b) (defrecord pt (m n)) (sig amb (pt -> int)) (defn amb (p) 1)"))
-      (is (any? (fn (m) (includes? m "unknown type")) w)))))
+      (is (any? w (fn (m) (includes? m "unknown type")))))))

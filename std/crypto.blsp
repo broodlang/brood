@@ -110,9 +110,9 @@ slower brute force; use ≥ 600,000 for password storage."
 Returns true if `a` and `b` are identical, false otherwise."
   (and (= (count a) (count b))
     (= 0
-      (fold (fn (acc pair) (bit/or acc (bit/xor (first pair) (second pair))))
+      (fold (seq/zip (seq a) (seq b))
         0
-        (seq/zip (seq a) (seq b))))))
+        (fn (acc pair) (bit/or acc (bit/xor (first pair) (second pair))))))))
 
 ;; --- ed25519 signatures (ADR-212) ------------------------------------------
 ;; Public-key signatures: a private seed signs a message, the matching public key verifies

@@ -39,12 +39,12 @@
 (defn- inline (para)
   (let (parts (string/split para "`"))
     (apply str
-      (map (fn (pair)
-             (let ([index segment] pair)
-               (if (odd? index)
-                 (str "<code>" (escape segment) "</code>")
-                 (escape segment))))
-        (seq/zip (range (count parts)) parts)))))
+      (map (seq/zip (range (count parts)) parts)
+        (fn (pair)
+          (let ([index segment] pair)
+            (if (odd? index)
+              (str "<code>" (escape segment) "</code>")
+              (escape segment))))))))
 
 (defn- leading-space-count (line i)
   "The number of leading space/tab characters in `line`, scanning from `i`."
@@ -58,24 +58,25 @@
   "True if `block` is an indented code example — its first non-blank line starts with
   whitespace. Such a block's newlines are significant (each example on its own line), so it must
   render as `<pre>` rather than a `<p>` whose newlines HTML would collapse into one run-on line."
-  (let (lines (filter (fn (l) (not (= (string/trim l) ""))) (string/split block "\n")))
+  (let (lines (filter (string/split block "\n") (fn (l) (not (= (string/trim l) "")))))
     (let (line (first lines)) (and line (> (leading-space-count line 0) 0)))))
 
 ;; The smallest leading indentation across `lines`. A `fold` over `math/min` rather than
 ;; `(apply min …)`, whose result the checker can only call `ordered`; the block's own length
 ;; bounds every line's indent, so it is an inert seed.
 (defn- common-indent (block lines)
-  (fold (fn (acc l) (math/min acc (leading-space-count l 0))) (string/length block) lines))
+  (fold lines (string/length block) (fn (acc l) (math/min acc (leading-space-count l 0)))))
 (sig common-indent (string (list string) -> int))
 
 (defn- dedent (block)
   "Strip the common leading indentation from every line of `block`, so an indented docstring
   code example renders flush-left in its `<pre>` rather than doubly indented."
   (let (lines (string/split block "\n")
-        non-blank (filter (fn (l) (not (= (string/trim l) ""))) lines)
+        non-blank (filter lines (fn (l) (not (= (string/trim l) ""))))
         n (if (empty? non-blank) 0 (common-indent block non-blank)))
-    (string/join "\n"
-      (map (fn (l) (if (>= (string/length l) n) (string/substring l n (string/length l)) l)) lines))))
+    (string/join (map lines
+                   (fn (l) (if (>= (string/length l) n) (string/substring l n (string/length l)) l)))
+      "\n")))
 
 (defn prose (text)
   "Render a docstring as safe HTML: blank-line-separated blocks become `<p>` paragraphs (with
@@ -84,12 +85,11 @@
   (if (or (nil? text) (= (string/trim (str text)) ""))
     ""
     (apply str
-      (map (fn (block)
-             (if (code-block? block)
-               (str "<pre class=\"doc-example\"><code>" (escape (dedent block)) "</code></pre>")
-               (str "<p>" (inline block) "</p>")))
-        (filter (fn (block) (not (= (string/trim block) "")))
-          (string/split (str text) "\n\n"))))))
+      (map (filter (string/split (str text) "\n\n") (fn (block) (not (= (string/trim block) ""))))
+        (fn (block)
+          (if (code-block? block)
+            (str "<pre class=\"doc-example\"><code>" (escape (dedent block)) "</code></pre>")
+            (str "<p>" (inline block) "</p>")))))))
 
 ;; ---- anchors ----------------------------------------------------------------
 
@@ -151,7 +151,7 @@
       (if (empty? defs)
         "<p class=\"empty\">No public definitions.</p>"
         (str "<div class=\"defs\">"
-          (apply str (map (fn (d) (definition-html module-name qualified? d)) defs))
+          (apply str (map defs (fn (d) (definition-html module-name qualified? d))))
           "</div>"))
       "</section>")))
 
@@ -160,15 +160,15 @@
 ;; "Standard library") read as distinct bands, not one flat run of sections. A module with
 ;; no `:section` renders exactly as before (no heading).
 (defn- modules-html (modules)
-  (get (fold (fn (acc m)
-               (let (sec (get m :section)
-                     head (if (and sec (not (= sec (get acc :section))))
-                            (str "<h2 class=\"doc-section\">" (escape sec) "</h2>")
-                            ""))
-                 {:section (or sec (get acc :section))
-                  :html (str (get acc :html) head (module-html m))}))
+  (get (fold modules
          {:section nil :html ""}
-         modules)
+         (fn (acc m)
+           (let (sec (get m :section)
+                 head (if (and sec (not (= sec (get acc :section))))
+                        (str "<h2 class=\"doc-section\">" (escape sec) "</h2>")
+                        ""))
+             {:section (or sec (get acc :section))
+              :html (str (get acc :html) head (module-html m))})))
     :html))
 
 ;; ---- sidebar navigation -----------------------------------------------------
@@ -189,22 +189,22 @@
       (escape module-name)
       "</a>"
       "<ul class=\"nav-defs\">"
-      (apply str (map (fn (d) (sidebar-def module-name d)) (get module :defs)))
+      (apply str (map (get module :defs) (fn (d) (sidebar-def module-name d))))
       "</ul>"
       "</div>")))
 
 ;; Sidebar nav grouped by `:section`, mirroring `modules-html` — a `.nav-section` label
 ;; introduces each group so the core/library split is visible in the nav too.
 (defn- sidebar-modules (modules)
-  (get (fold (fn (acc m)
-               (let (sec (get m :section)
-                     head (if (and sec (not (= sec (get acc :section))))
-                            (str "<div class=\"nav-section\">" (escape sec) "</div>")
-                            ""))
-                 {:section (or sec (get acc :section))
-                  :html (str (get acc :html) head (sidebar-module m))}))
+  (get (fold modules
          {:section nil :html ""}
-         modules)
+         (fn (acc m)
+           (let (sec (get m :section)
+                 head (if (and sec (not (= sec (get acc :section))))
+                        (str "<div class=\"nav-section\">" (escape sec) "</div>")
+                        ""))
+             {:section (or sec (get acc :section))
+              :html (str (get acc :html) head (sidebar-module m))})))
     :html))
 
 (defn- sidebar-html (model)
@@ -214,7 +214,7 @@
     (let (v (get model :version)) (if v (str " <span class=\"ver\">" (escape v) "</span>") ""))
     "</div>"
     "<input id=\"docsite-filter\" type=\"search\" placeholder=\"Filter…\" autocomplete=\"off\" spellcheck=\"false\">"
-    (apply str (map sidebar-guide (or (get model :guides) [])))
+    (apply str (map (or (get model :guides) []) sidebar-guide))
     (sidebar-modules (get model :modules))
     "</nav>"))
 
@@ -259,7 +259,7 @@
     (str (sidebar-html model)
       "<main class=\"content\">"
       (header-html model)
-      (apply str (map guide-html guides))
+      (apply str (map guides guide-html))
       (cond
         (not (empty? modules)) (modules-html modules)
         (empty? guides) "<p class=\"empty\">No documented modules.</p>"

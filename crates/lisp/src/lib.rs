@@ -79,6 +79,7 @@ pub mod net; // wasm has no sockets — stub with the same API (fails at runtime
 pub mod perf; // VM work-attribution counters (feature "perf-stats") — docs/benchmarking.md
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 pub mod profile; // sampling CPU profiler over the VM's reified frames (observability timing tier)
+pub mod renames; // the rename ledger: where a deliberately renamed public name went (ADR-304)
 pub mod subprocess; // persistent child-process mechanism: spawn + stdio pipes over the mailbox seam (ADR-104)
 pub mod text_width; // grapheme-cluster display-cell width (the `string/display-width` builtin + the GUI grid)
 pub mod treesit; // optional tree-sitter parsing for foreign languages (feature "treesit") — ROADMAP §C
@@ -523,7 +524,21 @@ impl Interp {
     /// payload stripped at the process boundary) so the caller can render the full
     /// report — caret, hint, call trace.
     pub fn run_program(&mut self, src: &str, file: Option<String>) -> Result<(), LispError> {
-        let exit = process::spawn_root_program(&self.heap, src, file)?;
+        let exit = process::spawn_root_program(&self.heap, src, file, None)?;
+        exit.wait()
+    }
+
+    /// [`run_program`](Self::run_program) with `preamble` evaluated first, inside the
+    /// program's own process. The `brood file` entry point passes
+    /// `(crash-report/arm-default)` here (ADR-305): armed in the program's process the
+    /// reporter knows the program's pid and leaves its crash to the CLI's report.
+    pub fn run_program_with_preamble(
+        &mut self,
+        preamble: &str,
+        src: &str,
+        file: Option<String>,
+    ) -> Result<(), LispError> {
+        let exit = process::spawn_root_program(&self.heap, src, file, Some(preamble))?;
         exit.wait()
     }
 
@@ -534,7 +549,7 @@ impl Interp {
     /// single-thread scheduler, so `spawn`/`send`/`receive` run with no OS threads.
     #[cfg(target_arch = "wasm32")]
     pub fn run_program_repr(&mut self, src: &str) -> Result<String, LispError> {
-        let exit = process::spawn_root_program(&self.heap, src, None)?;
+        let exit = process::spawn_root_program(&self.heap, src, None, None)?;
         exit.wait()?;
         Ok(exit.take_result().unwrap_or_default())
     }

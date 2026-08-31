@@ -88,7 +88,7 @@ Used by `std/editor/lineedit.blsp` (the REPL editor); pure, so independently tes
 (def- hl-special-forms (reflect/special-forms))
 ;; As a SET (map → true) so `special-form?` is an O(1) hash lookup, not an O(n) list
 ;; scan: it runs on every head-position atom on the fontify hot path.
-(def- hl-special-set (fold (fn (m s) (assoc m s true)) {} hl-special-forms))
+(def- hl-special-set (fold hl-special-forms {} (fn (m s) (assoc m s true))))
 
 (defn special-form? (s)
   "True if string `s` names a Brood special form / core macro that should highlight
@@ -280,7 +280,7 @@ stream (O(tokens)), so it stays fast enough for per-frame fontification."
   "Shift every `[start end face]` span by `base` — maps slice-local offsets into the
 absolute coordinates of the larger source the slice came from. The one place windowed
 fontification (any lexer's, mode-agnostic) re-bases its spans."
-  (map (fn ([s e f]) [(+ s base) (+ e base) f]) spans))
+  (map spans (fn ([s e f]) [(+ s base) (+ e base) f])))
 
 (defn highlight-window (slice base)
   "Like `highlight-spans`, but for a windowed `slice` that begins at offset `base`
@@ -314,19 +314,21 @@ fontify-restart multi-second on every idle beat in a large file."
 scan; spans need not be sorted."
   (cond
     (empty? spans) nil
-    else (let ([s e f] (first spans))
-           (if (and (>= pos s) (< pos e)) f (face-at (rest spans) pos)))))
+    else
+      (let ([s e f] (first spans))
+        (if (and (>= pos s) (< pos e)) f (face-at (rest spans) pos)))))
 
 (defn ranges-face (ranges pos)
   "Merge the faces of every `[lo hi face]` range in `ranges` covering offset `pos`
 (later ranges win on key conflict via `into`), or nil when none cover it. Region
 highlight, isearch overlays, and bracket-match are all such ranges."
-  (fold (fn (acc [lo hi f])
-          (cond
-            (not (and (>= pos lo) (< pos hi))) acc
-            (nil? acc) f
-            else (into acc f)))
-    nil ranges))
+  (fold ranges
+    nil
+    (fn (acc [lo hi f])
+      (cond
+        (not (and (>= pos lo) (< pos hi))) acc
+        (nil? acc) f
+        else (into acc f)))))
 (sig ranges-face (seqable any -> any))
 
 (defn fontify-runs (text base spans ranges)
@@ -351,7 +353,7 @@ one-char range `[pos (inc pos) face]`."
   (fontify-runs line
     base
     (highlight-spans full)
-    (map (fn ([p f]) [p (inc p) f]) overrides)))
+    (map overrides (fn ([p f]) [p (inc p) f]))))
 (sig highlight-chunks (any any any seqable -> list))
 
 ;; ---- bracket matching -------------------------------------------------------
@@ -544,9 +546,22 @@ cursor sits deep in a large file."
 
 ;; ---- completion helpers (pure; candidates supplied by the caller) -----------
 
+(defn symbol-char? (c)
+  "True if `c` (a 1-char string) can be part of a symbol token — not whitespace, a
+bracket, `\"`, `;`, and not one of the reader-macro prefixes `' \` ~ ^ @ #` that
+glue onto a symbol without being part of it (`'foo`, `~x`, `^pat`, `~@xs`). The ONE
+word-boundary rule every completer uses: the mode source, the buffer-word scan and
+an LSP source must agree on where the prefix starts, or a merge drops the sources
+that disagree (a `'foo` prefix used to start at the quote for one and after it for
+another — and the buffer-word candidates silently vanished)."
+  (not (or (hl-delim? c) (= c "'") (= c "`") (= c "~") (= c "^") (= c "@") (= c "#"))))
+(sig symbol-char? (string -> bool))
+
 (defn- hl-sym-start (full i)
   "The offset where the symbol token ending at `i` begins."
-  (if (or (<= i 0) (hl-delim? (string/char-at full (dec i)))) i (hl-sym-start full (dec i))))
+  (if (or (<= i 0) (not (symbol-char? (string/char-at full (dec i)))))
+    i
+    (hl-sym-start full (dec i))))
 (sig hl-sym-start (string int -> int))
 
 (defn symbol-prefix-at (full pos)
@@ -586,4 +601,4 @@ does — `(map|` reads as `map`, since that is where point lands after typing on
 `strs` is empty or shares nothing)."
   (if (empty? strs)
     ""
-    (fold hl-cp2 (first strs) (rest strs))))
+    (fold (rest strs) (first strs) hl-cp2)))

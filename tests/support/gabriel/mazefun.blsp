@@ -43,7 +43,7 @@ port. The oracle is upstream's own expected output in
 
 ;; `(f lo) (f lo+1) … (f hi-1)` as a list — upstream's `for`.
 (defn- mazefun-tabulate (lo hi f)
-  (map f (range lo hi)))
+  (map (range lo hi) f))
 
 (defn- mazefun-concat (lists)
   (mazefun-foldr append nil lists))
@@ -80,7 +80,7 @@ port. The oracle is upstream's own expected output in
   [(count mat) (count (first mat))])
 
 (defn- mazefun-matrix-map (f mat)
-  (map (fn (row) (map f row)) mat))
+  (map mat (fn (row) (map row f))))
 
 ;; ---- upstream's own LCG, so the maze is reproducible -------------------------
 
@@ -125,9 +125,9 @@ port. The oracle is upstream's own expected output in
     (let ([i j] pos
           cavity-id (mazefun-matrix-read cave i j))
       (if (= cavity-id old-cavity-id)
-        (fold (fn (c nc) (mazefun-change-cavity-from c nc new-cavity-id old-cavity-id))
+        (fold (mazefun-neighboring-cavities pos cave)
           (mazefun-matrix-write cave i j new-cavity-id)
-          (mazefun-neighboring-cavities pos cave))
+          (fn (c nc) (mazefun-change-cavity-from c nc new-cavity-id old-cavity-id)))
         cave))))
 
 (defn- mazefun-change-cavity (cave pos new-cavity-id)
@@ -143,11 +143,10 @@ port. The oracle is upstream's own expected output in
 
 (defn- mazefun-try-to-pierce (pos cave)
   (let (ncs (mazefun-neighboring-cavities pos cave))
-    (if (mazefun-duplicates? (map (fn (nc) (let ([i j] nc) (mazefun-matrix-read cave i j))) ncs))
+    (if (mazefun-duplicates? (map ncs (fn (nc) (let ([i j] nc) (mazefun-matrix-read cave i j)))))
       cave
       (mazefun-pierce pos
-        (fold (fn (c nc) (mazefun-change-cavity c nc pos))
-          cave ncs)))))
+        (fold ncs cave (fn (c nc) (mazefun-change-cavity c nc pos)))))))
 
 (defn- mazefun-pierce-randomly (possible-holes cave)
   (if (nil? possible-holes)

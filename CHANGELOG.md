@@ -6,6 +6,74 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+One argument convention, one pipe, and `!` with one meaning. **This release breaks every
+call to a collection function in existing Brood code**, deliberately: pre-1.0, a coherent
+surface beats a compatible one.
+
+**Changed (BREAKING) — the collection comes first (ADR-308).** `(map coll f)`,
+`(filter coll pred)`, `(fold coll acc f)`, `(reduce coll f)` / `(reduce coll acc f)`,
+`(take coll n)`, `(sort-by coll key-fn)`, `(string/join coll sep)` — ~1780 call sites over
+30 functions, matching `Enum.map(enum, fun)`. **`->>`, `some->>` and `cond->>` are deleted**:
+one convention needs one pipe.
+
+Brood inherited Clojure's *two* conventions without inheriting Clojure's reason for them.
+Clojure is cornered by variadicity pointing opposite ways — `(map f c1 c2)` is variadic in
+*collections* so they must come last, while `(conj coll x y z)` is variadic in *items* so the
+collection must come first. Brood has only the second: its `map` is strictly `(f coll)` and
+`(map + [1 2] [10 20])` is an arity error. The ML defence does not apply either — data-last
+pays off under currying, and currying is incompatible with `& rest`, which the stdlib is
+built on.
+
+*Deliberately unchanged:* a reducer's own parameters stay `(fn (acc x))` (Clojure, Haskell
+`foldl`, OCaml `fold_left`, F# and Rust all agree; Elixir is the outlier). The asymmetry is
+the failure mode — the outer swap fails **loudly**, a callback-parameter swap fails
+**silently**. `into` stays `(to from)`; `$` covers it in a pipeline.
+
+**Added — `$`, a placeholder for the threaded value (ADR-303).** A step naming `$` — at any
+depth, inside vector and map literals — receives the value there instead of first:
+`(-> 1 (- 10 $))` is 9. Bound once to a gensym, so `(-> (expensive) (+ $ $))` evaluates
+once; a quoted `'$` stays a symbol. It survives the move to one convention, because the
+subject genuinely is not first in `(- 100 $)` or `(cons $ xs)`.
+
+**Changed (BREAKING) — `!` means a function RAISES (ADR-302).** It was spending the sigil on
+two meanings at once: four raising bangs against 37 effectful ones. The Scheme reading was
+already vacuous — it marks *mutation*, which Brood has none of. 38 renames; **`run!` is now
+`each`**, since six modules define their own `run`. A `!` in `std/` is now a promise: std
+does not call one internally on a path a caller might want to recover from.
+
+**Added — the surface audit (`std/tool/audit.blsp`).** `(audit/report)` asks four mechanical
+questions of every public callable: a docstring, a `form → result` example, data-first
+argument order, and a signature whose parameter count matches the function. Three are at
+zero and gated by `tests/audit_test.blsp`. **Docstrings are at 100%** (0 of 1593), reached by
+fixing three generators rather than one function at a time — `defability` now passes the
+ability's doc to each op, `defmulti` gained a docstring slot it never had, and `defrecord`
+documents its constructor and accessors.
+
+**Fixed — the checker had gone stale against the new order.** `infer.rs` read the collection
+from argument two for `map`/`keep`/`filter`/`interpose`/`reduce`/`fold` and the whole
+`take`/`drop`/`take-while`/`drop-while`/`take-last`/`drop-last`/`remove` family, so the
+element type was silently lost — no warning where one was due. Positions now live in ONE
+place (`sigs::combinator_args`), read by `infer.rs`, `walk.rs` and `specialize_call`, with a
+test asserting every curated signature puts its callback last.
+
+**Fixed — a stale record id could devirtualize to the wrong impl (KI-90).**
+`mono_devirtualize` proved a constructor call's identity by keywording the resolved global's
+name and looking it up in `*record-ids*`. The registry is keyed by name and a registration
+can outlive the module that made it, so a later non-record function of the same name was
+devirtualized as if it were still the constructor — a silently wrong impl, not a slow path.
+The constructor must now still be bound, and the registry must still name it. Guarded by a
+differential against the dynamic path.
+
+**Fixed — two kernel signatures were undeclarable.** `string/grapheme-at` and
+`string/substring-graphemes` declare `Arity::range(2, 3)` but listed only two fixed `Sig`
+params and no optional, so the checker could not type their third argument at all. Found by
+the new audit.
+
+**Known issues.** [KI-89](docs/known-issues.md) — a test file's ability impls can leak into
+`std/`'s checker view in a scoped run (pre-existing, reproduced identically at the previous
+release's HEAD; five mechanisms ruled out). 1130 of 1593 public
+callables still carry no example; `(audit/report)` tracks the number.
+
 ## v0.19.1 — 2026-08-30
 
 Type-guard signatures, the first real deprecation, and 218 signatures moved to where

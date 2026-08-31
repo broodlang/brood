@@ -18,9 +18,9 @@
 (io/puts "sum 1..100000 =" (sum-to 100000 0))
 
 ;; Higher-order functions over lists.
-(io/puts "squares:" (map (fn (x) (* x x)) (list 1 2 3 4 5)))
-(io/puts "evens:  " (filter (fn (x) (= 0 (math/mod x 2))) (list 1 2 3 4 5 6)))
-(io/puts "total:  " (reduce + 0 (list 1 2 3 4 5)))
+(io/puts "squares:" (map (list 1 2 3 4 5) (fn (x) (* x x))))
+(io/puts "evens:  " (filter (list 1 2 3 4 5 6) (fn (x) (= 0 (math/mod x 2)))))
+(io/puts "total:  " (reduce (list 1 2 3 4 5) 0 +))
 
 ;; Vectors are a data type with O(1) indexing (code is lists, data can be vectors).
 (def v [10 20 30])

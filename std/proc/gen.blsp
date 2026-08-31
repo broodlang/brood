@@ -241,26 +241,26 @@ clause is dropped (so the mailbox can't leak)."
         clauses (if doc (rest clauses) clauses)
         state-sym (first params)
         ;; Lifecycle clauses are pulled out; the rest are message clauses.
-        init-clause (seq/find (fn (c) (= (first c) 'init)) clauses)
-        term-clause (seq/find (fn (c) (= (first c) 'terminate)) clauses)
-        cc-clause (seq/find (fn (c) (= (first c) 'code-change)) clauses)
-        msg-clauses (filter (fn (c)
-                              (not (includes? (list 'init 'terminate 'code-change) (first c))))
-                      clauses)
+        init-clause (seq/find clauses (fn (c) (= (first c) 'init)))
+        term-clause (seq/find clauses (fn (c) (= (first c) 'terminate)))
+        cc-clause (seq/find clauses (fn (c) (= (first c) 'code-change)))
+        msg-clauses (filter clauses
+                      (fn (c)
+                        (not (includes? (list 'init 'terminate 'code-change) (first c)))))
         ;; Envelope clauses (cast/call/query) are matched BEFORE info clauses,
         ;; regardless of declaration order, so a broad `info` pattern can never
         ;; swallow a `[:$call …]` / `[:$cast …]` envelope (receive is first-match).
-        env-clauses (filter (fn (c) (includes? (list 'cast 'call 'query 'defer) (first c)))
-                      msg-clauses)
-        info-clauses (filter (fn (c) (= (first c) 'info)) msg-clauses)
+        env-clauses (filter msg-clauses
+                      (fn (c) (includes? (list 'cast 'call 'query 'defer) (first c))))
+        info-clauses (filter msg-clauses (fn (c) (= (first c) 'info)))
         from (gensym "from")
         rf (gensym "ref")
         res (gensym "res")
         loop (gensym "loop")
         junk (gensym "msg")
         compile (fn (c) (gen-clause c loop from rf res state-sym))
-        env-receive (map compile env-clauses)
-        info-receive (map compile info-clauses)
+        env-receive (map env-clauses compile)
+        info-receive (map info-clauses compile)
         ;; `[:$stop]` ends the loop; run `terminate` (reason :normal) first if present.
         stop-clause (if term-clause
                       `([:$stop] (let (~(second term-clause) :normal) ~@(rest (rest term-clause)))

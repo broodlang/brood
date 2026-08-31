@@ -587,6 +587,11 @@ pub(crate) fn exec_chunk(
                                 let limit = heap.proc_mem_limit().unwrap_or(0);
                                 return Err(crate::eval::proc_memory_limit_error(live, limit));
                             }
+                            if let Some((len, limit)) =
+                                crate::process::take_current_mailbox_overflow()
+                            {
+                                return Err(crate::eval::proc_mailbox_limit_error(len, limit));
+                            }
                             if capture {
                                 if crate::process::capture_hard_kill_pending() {
                                     return Ok(ChunkExit::Killed);
@@ -766,6 +771,9 @@ pub(crate) fn exec_chunk(
                 if let Some(live) = heap.take_proc_limit_hit() {
                     let limit = heap.proc_mem_limit().unwrap_or(0);
                     return Err(crate::eval::proc_memory_limit_error(live, limit));
+                }
+                if let Some((len, limit)) = crate::process::take_current_mailbox_overflow() {
+                    return Err(crate::eval::proc_mailbox_limit_error(len, limit));
                 }
                 if capture {
                     if crate::process::capture_hard_kill_pending() {

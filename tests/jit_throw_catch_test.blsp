@@ -18,14 +18,19 @@
 (defn hammer (i caught)
   (if (= i 0)
     caught
-    (hammer (- i 1) (+ caught (try (do (risky (math/rem i 5)) 0) (catch e 1))))))
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+    (hammer (- i 1)
+      (+ caught (try (do (risky (math/rem i 5)) 0) (catch e 1))))))
 
 ;; explicit (error ...) in a hot non-recursive arm.
 (defn checked (x) (if (< x 0) (error "negative") (* x 2)))
 (defn hammer2 (i caught)
   (if (= i 0)
     caught
-    (hammer2 (- i 1) (+ caught (try (do (checked (- (math/rem i 3) 1)) 0) (catch e 1))))))
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+    (hammer2 (- i 1)
+      (+ caught
+        (try (do (checked (- (math/rem i 3) 1)) 0) (catch e 1))))))
 
 ;; a throw deep inside warmed NON-TAIL recursion, caught at the top — the arm gets
 ;; self-inlined, and the thrown error must unwind without reading a freed const.
@@ -85,6 +90,6 @@
   (test "float worker boxes its thrown payload"
     (assert= (fhammer 100 0.0) 300.0))
   (test "a throw in non-final do position still fires (never the 999)"
-    (assert= (dohammer 200 0) (reduce + 0 (map (fn (k) k) (range 1 201)))))
+    (assert= (dohammer 200 0) (reduce (map (range 1 201) (fn (k) k)) 0 +)))
   (test "past the depth cap the arm depth-bails to boxed and still catches"
     (assert= (try (descend-throw 40000 5) (catch e e)) 5)))

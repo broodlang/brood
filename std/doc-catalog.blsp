@@ -161,7 +161,6 @@
    "+" :math
    "-" :math
    "->" :control
-   "->>" :control
    "decimal/number->" :convert
    "->float" :convert
    "conj-onto" :meta
@@ -175,7 +174,7 @@
    ">=" :math
    "%ability-id-kw" :meta
    "%ability-qualify-op" :meta
-   "reflect/add-load-path!" :meta
+   "reflect/add-load-path" :meta
    "and" :control
    "any?" :predicates
    "append" :collections
@@ -262,7 +261,6 @@
    "complement" :functions
    "cond" :control
    "cond->" :control
-   "cond->>" :control
    "%cond-orphan" :control
    "%cond-thread-build" :control
    "conj" :collections
@@ -505,7 +503,7 @@
    "reverse" :collections
    "%reverse-acc" :collections
    "rope?" :predicates
-   "run!" :control
+   "each" :control
    "satisfies?" :meta
    "second" :collections
    "third" :collections
@@ -513,7 +511,7 @@
    "send" :processes
    "seq" :collections
    "seqview?" :predicates
-   "reflect/set-load-path!" :meta
+   "reflect/set-load-path" :meta
    "set?" :predicates
    "%show-args" :io
    "%show-print-hook" :meta
@@ -525,7 +523,6 @@
    "file/slurp" :filesystem
    "file/slurp-bytes" :filesystem
    "some->" :control
-   "some->>" :control
    "%some-thread-build" :control
    "sort" :collections
    "spawn" :processes

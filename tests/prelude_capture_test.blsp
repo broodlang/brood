@@ -28,18 +28,18 @@
     "std/prelude/string.blsp" "std/prelude/tools.blsp"])
 
 (def- prelude-source
-  (string/join "\n" (map file/slurp prelude-files)))
+  (string/join (map prelude-files file/slurp) "\n"))
 
 ;; Every bare root name that is NOT a special form — the set a template could capture.
 (def- capturable
-  (let (sf (into #{} (map ->string (reflect/special-forms))))
+  (let (sf (into #{} (map (reflect/special-forms) ->string)))
     (into #{}
-      (seq/remove (fn (s)
-                    (or (string/starts-with? s "%")
-                      (includes? s "/")
-                      (string/starts-with? s "*")
-                      (contains? sf s)))
-        (map ->string (reflect/global-names))))))
+      (seq/remove (map (reflect/global-names) ->string)
+        (fn (s)
+          (or (string/starts-with? s "%")
+            (includes? s "/")
+            (string/starts-with? s "*")
+            (contains? sf s)))))))
 
 ;; Walk a form, collecting head symbols that sit inside a quasiquote template.
 ;; `~`/`~@` holes are caller code (already resolved at the call site) and `quote`
@@ -56,7 +56,7 @@
             acc (if (and in-template (symbol? head) (contains? capturable (->string head)))
                   (conj acc (->string head))
                   acc))
-        (fold (fn (a f) (heads-in f in-template a)) acc form))))
+        (fold form acc (fn (a f) (heads-in f in-template a))))))
 
 ;; The second emission shape, and the one that hid a live bug for a day. A macro can
 ;; build its output with `(list 'head …)` instead of a quasiquote — `defmulti` did, with
@@ -74,16 +74,16 @@
                     (contains? capturable (->string (second (second form)))))
                 (conj acc (->string (second (second form))))
                 acc))
-      (fold (fn (a f) (quoted-heads-in f a)) acc form))))
+      (fold form acc (fn (a f) (quoted-heads-in f a))))))
 
 (defn- offenders ()
-  (fold (fn (acc form)
-          (if (and (pair? form) (= (first form) 'defmacro))
-            (let (hits (seq (quoted-heads-in form (heads-in form false #{}))))
-              (if (empty? hits) acc (assoc acc (->string (second form)) (sort hits))))
-            acc))
+  (fold (reflect/read-all prelude-source)
     {}
-    (reflect/read-all prelude-source)))
+    (fn (acc form)
+      (if (and (pair? form) (= (first form) 'defmacro))
+        (let (hits (seq (quoted-heads-in form (heads-in form false #{}))))
+          (if (empty? hits) acc (assoc acc (->string (second form)) (sort hits))))
+        acc))))
 
 (describe "prelude macro templates cannot be captured by user code"
   ;; Compared as the whole MAP, not a count: a failure then prints which macro emits
@@ -144,7 +144,7 @@
     (assert=
       (%load-string
         "(defmodule capture-probe-mapv)
-         (defn mapv (f c) :CAPTURED)
+         (defn mapv (c f) :CAPTURED)
          (defrecord sq (n))
          (defmulti describe-it)
          (defmethod describe-it [capture-probe-mapv/sq] (x) :ok)

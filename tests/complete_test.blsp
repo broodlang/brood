@@ -87,11 +87,11 @@
   (test "it contains the completion module itself"
     (is (includes? (reflect/builtin-modules) "complete")))
   (test "entries are strings"
-    (is (fold (fn (ok m) (and ok (string? m))) true (reflect/builtin-modules))))
+    (is (fold (reflect/builtin-modules) true (fn (ok m) (and ok (string? m))))))
   (test "the list is sorted"
     (assert= (reflect/builtin-modules) (sort (reflect/builtin-modules))))
   (test "modules include the baked-in set"
-    (is (fold (fn (found m) (or found (= m "json"))) false (complete/modules)))))
+    (is (fold (complete/modules) false (fn (found m) (or found (= m "json")))))))
 
 (describe "complete: dispatch by kind"
   (test "an unknown kind yields nothing rather than raising"

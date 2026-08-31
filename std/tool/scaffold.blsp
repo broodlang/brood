@@ -36,7 +36,7 @@ test discovery, lints, release, config)."
 ;; must not read as a number), and the reserved `main` becomes `main-lib` so the
 ;; library module can't collide with the project's own entry module.
 (defn- project-module-name (nm)
-  (let (cleaned (string/join "" (map project-name-char (string/split nm "")))
+  (let (cleaned (string/join (map (string/split nm "") project-name-char) "")
         prefixed (if (and (> (string/length cleaned) 0)
                        (includes? "0123456789"
                          (string/substring cleaned 0 1)))
@@ -50,10 +50,10 @@ test discovery, lints, release, config)."
       else prefixed)))
 
 (defn- project-has-alnum? (s)
-  (fold (fn (found ch)
-          (or found (includes? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ch)))
+  (fold (string/split s "")
     false
-    (string/split s "")))
+    (fn (found ch)
+      (or found (includes? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ch)))))
 
 (defn- project-name-char (ch)
   (if (includes? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" ch) ch "-"))
@@ -223,7 +223,7 @@ test discovery, lints, release, config)."
     "(defn ed-line (m) \"The line the cursor is on.\" (nth (get m :lines) (get m :row)))\n" "\n"
     "(defn ed-set-line (lines row s)\n"
     "  \"`lines` with line `row` replaced by `s` (lists are immutable — rebuild it).\"\n"
-    "  (append (take row lines) (cons s (drop (inc row) lines))))\n" "\n"
+    "  (append (take lines row) (cons s (drop lines (inc row)))))\n" "\n"
     "(defn ed-move (m drow dcol)\n"
     "  \"Move the cursor by [drow dcol], clamped to the buffer and the target line.\"\n"
     "  (let (lines (get m :lines)\n"
@@ -237,9 +237,9 @@ test discovery, lints, release, config)."
     "             :col (+ col (string/length ch)))))\n" "\n" "(defn ed-newline (m)\n"
     "  \"Split the current line at the cursor into two lines.\"\n"
     "  (let (ln (ed-line m) row (get m :row) col (get m :col) lines (get m :lines))\n"
-    "    (assoc m\n" "           :lines (append (take row lines)\n"
+    "    (assoc m\n" "           :lines (append (take lines row)\n"
     "                          (list (string/substring ln 0 col) (string/substring ln col (string/length ln)))\n"
-    "                          (drop (inc row) lines))\n" "           :row (inc row) :col 0)))\n"
+    "                          (drop lines (inc row)))\n" "           :row (inc row) :col 0)))\n"
     "\n" "(defn ed-backspace (m)\n"
     "  \"Delete the char before the cursor; at column 0, join with the previous line.\"\n"
     "  (let (row (get m :row) col (get m :col) lines (get m :lines))\n" "    (cond\n"
@@ -248,14 +248,14 @@ test discovery, lints, release, config)."
     "                            (str (string/substring ln 0 (dec col)) (string/substring ln col (string/length ln))))\n"
     "                   :col (dec col)))\n" "      (> row 0)\n"
     "        (let (prev (nth lines (dec row)))\n" "          (assoc m\n"
-    "                 :lines (append (take (dec row) lines)\n"
-    "                                (cons (str prev (ed-line m)) (drop (inc row) lines)))\n"
+    "                 :lines (append (take lines (dec row))\n"
+    "                                (cons (str prev (ed-line m)) (drop lines (inc row))))\n"
     "                 :row (dec row) :col (string/length prev)))\n" "      else m)))\n" "\n"
     "(defn ed-fit (s w) \"Clip `s` to `w` columns.\" (if (> (string/length s) w) (string/substring s 0 w) s))\n"
     "\n" "(defn ed-view (m cols rows)\n"
     "  \"ui-run view: a `text` op per line, a reverse-video status bar, cursor at point.\"\n"
     "  (apply frame\n" "    (append\n" "      [(clear)]\n"
-    "      (map (fn ([i ln]) (text i 0 (ed-fit ln cols))) (enumerate (get m :lines)))\n"
+    "      (map (enumerate (get m :lines)) (fn ([i ln]) (text i 0 (ed-fit ln cols))))\n"
     "      [(text (dec rows) 0\n"
     "             (ed-fit (str \" \" (inc (get m :row)) \":\" (get m :col) \"  —  Ctrl-C to quit\") cols)\n"
     "             {:reverse true})\n" "       (cursor (get m :row) (get m :col))])))\n" "\n"
@@ -351,9 +351,9 @@ test discovery, lints, release, config)."
     "    (is (get (app-update {:count 0} :ctrl-c 80 24) :done))\n"
     "    (is (get (app-update {:count 0} :escape 80 24) :done)))\n"
     "  (test \"view shows the counter value\"\n" "    (let (f (app-view {:count 3} 80 24))\n"
-    "      (is (> (count (filter (fn (op) (and (= (first op) :text)\n"
-    "                                          (includes? (nth op 3) \"count: 3\")))\n"
-    "                            f))\n" "             0)))))\n"))
+    "      (is (> (count (filter f (fn (op) (and (= (first op) :text)\n"
+    "                                            (includes? (nth op 3) \"count: 3\")))))\n"
+    "             0)))))\n"))
 
 ;; `CLAUDE.md` for a fresh project — short project-specific intro that points
 ;; at the language reference (which `nest new` also drops into `docs/`, so the
@@ -599,12 +599,12 @@ test discovery, lints, release, config)."
     "(defn message-list (msgs)\n" "  \"Render message cards, or an empty-state prompt.\"\n"
     "  (if (empty? msgs)\n"
     "    [:p {:class \"opacity-60 mb-6\"} \"No messages yet -- be the first!\"]\n"
-    "    [:div {:class \"space-y-3 mb-6\"}\n" "      (map (fn (m)\n"
+    "    [:div {:class \"space-y-3 mb-6\"}\n" "      (map msgs (fn (m)\n"
     "             [:div {:class \"card bg-base-200\"}\n"
     "               [:div {:class \"card-body py-3\"}\n"
     "                 [:p {:class \"font-semibold\"} (get m :name)]\n"
-    "                 [:p {} (get m :body)]]])\n" "           msgs)]))\n" "\n"
-    "(defn new-message-form (conn)\n" "  \"The form to post a new message.\"\n"
+    "                 [:p {} (get m :body)]]]))]))\n" "\n" "(defn new-message-form (conn)\n"
+    "  \"The form to post a new message.\"\n"
     "  [:form {:method \"post\" :action \"/messages\" :class \"card bg-base-200\"}\n"
     "    [:div {:class \"card-body space-y-3\"}\n"
     "      [:h2 {:class \"card-title\"} \"Post a message\"]\n" "      (web/csrf/csrf-input conn)\n"
@@ -864,9 +864,11 @@ test discovery, lints, release, config)."
 ;; `file` leaves a file it cannot parse untouched, so a malformed template
 ;; degrades to "written as-is" rather than mangled; failures are swallowed because a
 ;; cosmetic pass must never break scaffolding.
-(defn- scaffold-format-generated! (paths)
+(defn- scaffold-format-generated (paths)
   (dolist (p paths)
-    (when (string/ends-with? p ".blsp") (try (format/file p) (catch _ nil)))))
+    ;; check-allow :discarded-catch — a cosmetic formatting pass must never break scaffolding
+    (when (string/ends-with? p ".blsp")
+      (check-allow :discarded-catch (try (format/file p) (catch _ nil))))))
 
 (defn new-project (nm &optional template)
   "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime), `\"hatch\"` (a Hatch web app with a Postgres-backed message board — requires hatch + store-postgres as sibling path deps; run `nest run --main db-setup` once to create the database, then `nest run` to start), or `\"web-api\"` (a minimal Hatch JSON API — no live layer, no database; requires hatch as a sibling path dep; `nest run` to start). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
@@ -883,7 +885,7 @@ test discovery, lints, release, config)."
       (error "new: unknown template '"
         tmpl
         "' (use one of: "
-        (string/join ", " *project-templates*)
+        (string/join *project-templates* ", ")
         ")"))
     (unless (or in-place (project-valid-name? nm))
       (error "new: invalid project name '" nm "' (no '/' or spaces, and not empty)"))
@@ -909,7 +911,7 @@ test discovery, lints, release, config)."
       (file/spit (path/join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
       (file/spit (path/join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
       (let (code-files (project-write-template tmpl nm src-dir tests-dir actual-name)
-            _ (scaffold-format-generated! (cons (path/join nm "project.blsp") code-files)))
+            _ (scaffold-format-generated (cons (path/join nm "project.blsp") code-files)))
         (io/puts (str "Created Brood project '"
                    actual-name
                    "'"
@@ -972,7 +974,7 @@ test discovery, lints, release, config)."
       (io/puts (str "Next:  " enter "nest test && nest run"))
       (do
         (io/puts (str "This template depends on "
-                   (string/join " and " (map (fn (d) (str "../" d)) siblings))
+                   (string/join (map siblings (fn (d) (str "../" d))) " and ")
                    (if (= (count siblings) 1) " as a sibling path dep," " as sibling path deps,")))
         (io/puts (str "so `nest` commands will fail until "
                    (if (= (count siblings) 1) "it is" "they are")

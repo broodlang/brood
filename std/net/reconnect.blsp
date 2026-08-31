@@ -57,7 +57,8 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
 (defn- reconnect-down (spec peer opts subs delay)
   "Disconnected state: retry `(node/connect spec)` on an exponential-backoff timer,
 still answering control messages between attempts."
-  (let (up (try (node/connect spec) (catch _ nil)))
+  ;; check-allow :discarded-catch — a failed connect IS the down state this loop exists to retry
+  (let (up (check-allow :discarded-catch (try (node/connect spec) (catch _ nil))))
     (if up
       (do
         (node/monitor up)
@@ -94,7 +95,8 @@ unrelated message cost nothing."
 
 (defn- reconnect-boot (spec opts)
   "Watcher body: connect (or start retrying immediately) and run the state loop."
-  (let (up (try (node/connect spec) (catch _ nil)))
+  ;; check-allow :discarded-catch — a failed connect IS the down state this loop exists to retry
+  (let (up (check-allow :discarded-catch (try (node/connect spec) (catch _ nil))))
     (if up
       (do
         (node/monitor up)

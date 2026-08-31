@@ -37,78 +37,78 @@
 
 (describe "take / drop"
   (test "take returns the first n (or all, if shorter)"
-    (assert= (take 3 (range 10)) (list 0 1 2))
-    (assert= (take 0 (range 10)) nil)
-    (assert= (take 99 (list 1 2 3)) (list 1 2 3))
-    (assert= (take 3 nil) nil))
+    (assert= (take (range 10) 3) (list 0 1 2))
+    (assert= (take (range 10) 0) nil)
+    (assert= (take (list 1 2 3) 99) (list 1 2 3))
+    (assert= (take nil 3) nil))
   (test "drop discards the first n (or all, if shorter)"
-    (assert= (drop 7 (range 10)) (list 7 8 9))
-    (assert= (drop 0 (list 1 2 3)) (list 1 2 3))
-    (assert= (drop 99 (list 1 2 3)) nil)
-    (assert= (drop 3 nil) nil))
+    (assert= (drop (range 10) 7) (list 7 8 9))
+    (assert= (drop (list 1 2 3) 0) (list 1 2 3))
+    (assert= (drop (list 1 2 3) 99) nil)
+    (assert= (drop nil 3) nil))
   (test "take and drop at index n partition the sequence"
-    (let (xs (range 10)) (assert= (append (take 4 xs) (drop 4 xs)) xs))))
+    (let (xs (range 10)) (assert= (append (take xs 4) (drop xs 4)) xs))))
 
 (describe "split-at"
   (test "split-at returns [front back], one pass equivalent to [take drop]"
-    (assert= (seq/split-at 3 (range 6)) [(list 0 1 2) (list 3 4 5)])
-    (assert= (seq/split-at 0 (list 1 2 3)) [nil (list 1 2 3)])
-    (assert= (seq/split-at 99 (list 1 2 3)) [(list 1 2 3) nil])
-    (assert= (seq/split-at 2 nil) [nil nil]))
+    (assert= (seq/split-at (range 6) 3) [(list 0 1 2) (list 3 4 5)])
+    (assert= (seq/split-at (list 1 2 3) 0) [nil (list 1 2 3)])
+    (assert= (seq/split-at (list 1 2 3) 99) [(list 1 2 3) nil])
+    (assert= (seq/split-at nil 2) [nil nil]))
   (test "split-at agrees with take/drop at the same index"
-    (let (xs (range 10) p (seq/split-at 4 xs))
-      (assert= (nth p 0) (take 4 xs))
-      (assert= (nth p 1) (drop 4 xs))))
+    (let (xs (range 10) p (seq/split-at xs 4))
+      (assert= (nth p 0) (take xs 4))
+      (assert= (nth p 1) (drop xs 4))))
   (test "split-at accepts a vector and splits its [k v]-free elements"
-    (assert= (seq/split-at 2 [10 20 30 40]) [(list 10 20) (list 30 40)])))
+    (assert= (seq/split-at [10 20 30 40] 2) [(list 10 20) (list 30 40)])))
 
 (describe "take-while / drop-while"
   (test "take-while keeps the leading run that satisfies pred"
-    (assert= (take-while (fn (x) (< x 4)) (range 10)) (list 0 1 2 3))
-    (assert= (take-while even? (list 2 4 5 6)) (list 2 4))
-    (assert= (take-while even? (list 1 2 3)) nil))
+    (assert= (take-while (range 10) (fn (x) (< x 4))) (list 0 1 2 3))
+    (assert= (take-while (list 2 4 5 6) even?) (list 2 4))
+    (assert= (take-while (list 1 2 3) even?) nil))
   (test "drop-while skips the leading run that satisfies pred"
-    (assert= (drop-while (fn (x) (< x 4)) (range 10)) (list 4 5 6 7 8 9))
-    (assert= (drop-while even? (list 2 4 5 6)) (list 5 6))
-    (assert= (drop-while even? (list 1 2 3)) (list 1 2 3)))
+    (assert= (drop-while (range 10) (fn (x) (< x 4))) (list 4 5 6 7 8 9))
+    (assert= (drop-while (list 2 4 5 6) even?) (list 5 6))
+    (assert= (drop-while (list 1 2 3) even?) (list 1 2 3)))
   ;; KI-65: both guarded on `pair?`, false for a VECTOR, so each walked zero items and
   ;; answered `nil` / the input unchanged — a wrong VALUE, not an error. Every case above
   ;; passes a list or a range, which is why it survived; these are the vector ones.
   (test "both accept a vector, not just a list (KI-65)"
-    (assert= (take-while (fn (x) (< x 3)) [1 2 3 1]) (list 1 2))
-    (assert= (drop-while (fn (x) (< x 3)) [1 2 3 1]) (list 3 1))
-    (assert= (take-while (fn (x) (< x 3)) [5 1]) nil)
+    (assert= (take-while [1 2 3 1] (fn (x) (< x 3))) (list 1 2))
+    (assert= (drop-while [1 2 3 1] (fn (x) (< x 3))) (list 3 1))
+    (assert= (take-while [5 1] (fn (x) (< x 3))) nil)
     ;; nothing dropped => `coll` itself, exactly as `(drop 0 [1 2 3])` gives `[1 2 3]`
-    (assert= (drop-while (fn (x) (< x 3)) [5 1]) [5 1])))
+    (assert= (drop-while [5 1] (fn (x) (< x 3))) [5 1])))
 
 (describe "any? / every? / find"
   (test "any? is true iff any element satisfies pred"
-    (is (any? even? (list 1 3 4 5)))
-    (refute (any? even? (list 1 3 5)))
-    (refute (any? even? nil)))
+    (is (any? (list 1 3 4 5) even?))
+    (refute (any? (list 1 3 5) even?))
+    (refute (any? nil even?)))
   ; vacuously false on empty
   (test "every? is true iff all elements satisfy pred"
-    (is (every? even? (list 2 4 6)))
-    (refute (every? even? (list 2 4 5)))
-    (is (every? even? nil)))
+    (is (every? (list 2 4 6) even?))
+    (refute (every? (list 2 4 5) even?))
+    (is (every? nil even?)))
   ; vacuously true on empty
   (test "find returns the first matching element, or nil"
-    (assert= (seq/find even? (list 1 3 4 5 6)) 4)
-    (assert= (seq/find even? (list 1 3 5)) nil)
-    (assert= (seq/find (fn (x) (> x 100)) (range 10)) nil)))
+    (assert= (seq/find (list 1 3 4 5 6) even?) 4)
+    (assert= (seq/find (list 1 3 5) even?) nil)
+    (assert= (seq/find (range 10) (fn (x) (> x 100))) nil)))
 
 (describe "index-where"
   ;; The predicate counterpart of index-of (which matches by equality).
   (test "returns the index of the first matching element"
-    (assert= (index-where even? (list 1 3 4 5)) 2)
-    (assert= (index-where (fn (x) (= x :b)) [:a :b :c]) 1)
-    (assert= (index-where (fn (x) (> x 100)) [10 200 3000]) 1))
+    (assert= (index-where (list 1 3 4 5) even?) 2)
+    (assert= (index-where [:a :b :c] (fn (x) (= x :b))) 1)
+    (assert= (index-where [10 200 3000] (fn (x) (> x 100))) 1))
   (test "is -1 when nothing matches"
-    (assert= (index-where even? (list 1 3 5)) -1)
-    (assert= (index-where even? nil) -1)
-    (assert= (index-where even? []) -1))
+    (assert= (index-where (list 1 3 5) even?) -1)
+    (assert= (index-where nil even?) -1)
+    (assert= (index-where [] even?) -1))
   (test "matches at index 0"
-    (assert= (index-where odd? (list 1 2 3)) 0)))
+    (assert= (index-where (list 1 2 3) odd?) 0)))
 
 (describe "zip"
   (test "zip pairs elements into 2-vectors, stopping at the shorter input"
@@ -119,12 +119,12 @@
 
 (describe "partition"
   (test "partition chunks into n-sized groups, dropping a trailing partial"
-    (assert= (partition 2 (range 6)) (list (list 0 1) (list 2 3) (list 4 5)))
-    (assert= (partition 2 (range 7)) (list (list 0 1) (list 2 3) (list 4 5)))
-    (assert= (partition 3 (range 9)) (list (list 0 1 2) (list 3 4 5) (list 6 7 8))))
+    (assert= (partition (range 6) 2) (list (list 0 1) (list 2 3) (list 4 5)))
+    (assert= (partition (range 7) 2) (list (list 0 1) (list 2 3) (list 4 5)))
+    (assert= (partition (range 9) 3) (list (list 0 1 2) (list 3 4 5) (list 6 7 8))))
   (test "partition of too-short input is empty"
-    (assert= (partition 5 (range 3)) nil)
-    (assert= (partition 1 nil) nil)))
+    (assert= (partition (range 3) 5) nil)
+    (assert= (partition nil 1) nil)))
 
 (describe "sort / sort-by"
   (test "sort orders ascending by default"
@@ -139,8 +139,8 @@
       (assert= (sort (fn (x y) (< (seq/vector-ref x 0) (seq/vector-ref y 0))) pairs)
         (list [0 :b] [0 :d] [1 :a] [1 :c]))))
   (test "sort-by orders by a key function"
-    (assert= (sort-by (fn (s) (string/length s)) (list "ccc" "a" "bb")) (list "a" "bb" "ccc"))
-    (assert= (sort-by abs (list -3 1 -2 4)) (list 1 -2 -3 4)))
+    (assert= (sort-by (list "ccc" "a" "bb") (fn (s) (string/length s))) (list "a" "bb" "ccc"))
+    (assert= (sort-by (list -3 1 -2 4) abs) (list 1 -2 -3 4)))
   (test "sort handles a larger, reversed input correctly"
     (assert= (sort (range 50 0 -1)) (range 1 51)))
   ;; Structural sort for non-numeric items, no custom comparator needed —
@@ -191,20 +191,20 @@
     (assert= (into [] (append [1 2] [3 4])) [1 2 3 4]))
   ; (into [] …) for a vector result
   (test "mapcat maps then concatenates the resulting lists"
-    (assert= (mapcat (fn (x) (list x x)) (list 1 2 3)) (list 1 1 2 2 3 3))
-    (assert= (mapcat (fn (x) (range x)) (list 1 2 3)) (list 0 0 1 0 1 2))
-    (assert= (mapcat (fn (x) (list x)) nil) nil))
+    (assert= (mapcat (list 1 2 3) (fn (x) (list x x))) (list 1 1 2 2 3 3))
+    (assert= (mapcat (list 1 2 3) (fn (x) (range x))) (list 0 0 1 0 1 2))
+    (assert= (mapcat nil (fn (x) (list x))) nil))
   ;; Maps are seqable: every list-shaped op walks them as `[k v]` pairs without
   ;; the `(zip (keys m) (vals m))` workaround. Map iteration order is hash-
   ;; driven (ADR-040), so we compare against frequency maps where order matters.
   (test "map/filter/mapcat/fold/reduce/count accept a map as the collection"
     (let (m {:a 1 :b 2 :c 3})
-      (assert= (frequencies (map first m)) {:a 1 :b 1 :c 1})
+      (assert= (frequencies (map m first)) {:a 1 :b 1 :c 1})
       (assert= (count m) 3)
-      (assert= (fold + 0 (map second m)) 6)
-      (assert= (reduce + 0 (map second m)) 6)
-      (assert= (frequencies (filter (fn ([_ v]) (> v 1)) m)) {[:b 2] 1 [:c 3] 1})
-      (assert= (frequencies (mapcat (fn ([k v]) (list k v)) m)) {:a 1 :b 1 :c 1 1 1 2 1 3 1})))
+      (assert= (fold (map m second) 0 +) 6)
+      (assert= (reduce (map m second) 0 +) 6)
+      (assert= (frequencies (filter m (fn ([_ v]) (> v 1)))) {[:b 2] 1 [:c 3] 1})
+      (assert= (frequencies (mapcat m (fn ([k v]) (list k v)))) {:a 1 :b 1 :c 1 1 1 2 1 3 1})))
   (test "seq coerces a map to its pairs; entries is an alias for %map-pairs"
     (let (m {:x 1 :y 2})
       (assert= (frequencies (seq m)) {[:x 1] 1 [:y 2] 1})
@@ -258,11 +258,11 @@
 
 (describe "remove / keep"
   (test "remove is the complement of filter"
-    (assert= (seq/remove even? (range 8)) (list 1 3 5 7))
-    (assert= (seq/remove (fn (x) true) (range 3)) nil))
+    (assert= (seq/remove (range 8) even?) (list 1 3 5 7))
+    (assert= (seq/remove (range 3) (fn (x) true)) nil))
   (test "keep takes the non-nil results of f (map+filter fused)"
-    (assert= (seq/keep (fn (x) (if (even? x) (* x x) nil)) (range 6)) (list 0 4 16))
-    (assert= (seq/keep (fn (x) nil) (range 3)) nil)))
+    (assert= (seq/keep (range 6) (fn (x) (if (even? x) (* x x) nil))) (list 0 4 16))
+    (assert= (seq/keep (range 3) (fn (x) nil)) nil)))
 
 (describe "distinct / dedupe"
   (test "distinct drops duplicates, keeping first occurrence (order-preserving)"
@@ -276,9 +276,9 @@
 
 (describe "group-by"
   (test "group-by buckets items by f, preserving order within a bucket"
-    (assert= (group-by even? (range 6)) {true (list 0 2 4) false (list 1 3 5)}))
+    (assert= (group-by (range 6) even?) {true (list 0 2 4) false (list 1 3 5)}))
   (test "group-by on an empty collection is the empty map"
-    (assert= (group-by even? nil) {})))
+    (assert= (group-by nil even?) {})))
 
 (describe "flatten"
   (test "flatten splices nested lists into one flat list"
@@ -289,21 +289,21 @@
 
 (describe "interpose / interleave"
   (test "interpose inserts a separator between adjacent items"
-    (assert= (interpose :x (list 1 2 3)) (list 1 :x 2 :x 3))
-    (assert= (interpose :x (list 1)) (list 1))
-    (assert= (interpose :x nil) nil))
+    (assert= (interpose (list 1 2 3) :x) (list 1 :x 2 :x 3))
+    (assert= (interpose (list 1) :x) (list 1))
+    (assert= (interpose nil :x) nil))
   (test "interleave alternates, stopping at the shorter input"
     (assert= (interleave (list 1 2 3) (list :a :b :c :d)) (list 1 :a 2 :b 3 :c))
     (assert= (interleave nil (list 1)) nil)))
 
 (describe "take-last / drop-last"
   (test "take-last returns the final n items (whole list if shorter)"
-    (assert= (seq/take-last 2 (range 5)) (list 3 4))
-    (assert= (seq/take-last 99 (range 3)) (list 0 1 2))
-    (assert= (seq/take-last 0 (range 3)) nil))
+    (assert= (seq/take-last (range 5) 2) (list 3 4))
+    (assert= (seq/take-last (range 3) 99) (list 0 1 2))
+    (assert= (seq/take-last (range 3) 0) nil))
   (test "drop-last removes the final n items"
-    (assert= (seq/drop-last 2 (range 5)) (list 0 1 2))
-    (assert= (seq/drop-last 99 (range 3)) nil)))
+    (assert= (seq/drop-last (range 5) 2) (list 0 1 2))
+    (assert= (seq/drop-last (range 3) 99) nil)))
 
 (describe "repeat / repeatedly"
   (test "repeat builds a list of n copies"
@@ -329,7 +329,7 @@
 
 (def seq-data (range 1 21))
 ; a shared global list read by many processes
-(defn seq-reader (parent i) (send parent [:s (sum (take i seq-data))]))
+(defn seq-reader (parent i) (send parent [:s (sum (take seq-data i))]))
 ; Σ 1..i
 (defn seq-spawn-readers (parent n)
   (when (> n 0) (spawn (seq-reader parent n)) (seq-spawn-readers parent (- n 1))))
@@ -339,7 +339,7 @@
 ; worker i folds a fused VIEW over the shared global — same Σ 1..i as seq-reader
 (defn seq-view-reader (parent i)
   (send parent
-    [:s (->> seq-data (take i) (seq/lfilter (fn (_) true)) (seq/lmap identity) (reduce + 0))]))
+    [:s (-> seq-data (take i) (seq/lfilter (fn (_) true)) (seq/lmap identity) (reduce 0 +))]))
 (defn seq-spawn-view-readers (parent n)
   (when (> n 0) (spawn (seq-view-reader parent n)) (seq-spawn-view-readers parent (- n 1))))
 
@@ -368,50 +368,50 @@
 
 (describe "lazy seq-views"
   (test "lmap/lfilter are views; map/filter stay eager lists"
-    (is (seqview? (seq/lmap inc [1 2 3])))
-    (is (seqview? (seq/lfilter even? (range 5))))
-    (refute (seqview? (map inc [1 2 3])))
-    (refute (seqview? (filter even? (range 5)))))
+    (is (seqview? (seq/lmap [1 2 3] inc)))
+    (is (seqview? (seq/lfilter (range 5) even?)))
+    (refute (seqview? (map [1 2 3] inc)))
+    (refute (seqview? (filter (range 5) even?))))
 
   (test "a view realises to the list it stands for"
-    (assert= (seq (seq/lmap inc [10 20 30])) (list 11 21 31))
-    (assert= (seq (seq/lfilter even? (range 8))) (list 0 2 4 6))
-    (assert= (seq (seq/lkeep (fn (x) (if (even? x) (* x 10) nil)) (range 4))) (list 0 20))
-    (assert= (seq (seq/lremove even? (range 6))) (list 1 3 5)))
+    (assert= (seq (seq/lmap [10 20 30] inc)) (list 11 21 31))
+    (assert= (seq (seq/lfilter (range 8) even?)) (list 0 2 4 6))
+    (assert= (seq (seq/lkeep (range 4) (fn (x) (if (even? x) (* x 10) nil)))) (list 0 20))
+    (assert= (seq (seq/lremove (range 6) even?)) (list 1 3 5)))
 
   (test "fold/reduce/sum/count fuse over a view"
-    (assert= (reduce + 0 (seq/lmap (fn (i) (* i i)) (seq/lfilter odd? (range 10)))) 165)
-    (assert= (sum (seq/lmap inc (range 5))) 15)
-    (assert= (count (seq/lfilter even? (range 100))) 50)
-    (assert= (fold (fn (a x) (cons x a)) nil (seq/lmap inc [1 2 3])) (list 4 3 2)))
+    (assert= (reduce (seq/lmap (seq/lfilter (range 10) odd?) (fn (i) (* i i))) 0 +) 165)
+    (assert= (sum (seq/lmap (range 5) inc)) 15)
+    (assert= (count (seq/lfilter (range 100) even?)) 50)
+    (assert= (fold (seq/lmap [1 2 3] inc) nil (fn (a x) (cons x a))) (list 4 3 2)))
 
   (test "chained l* stages compose into one fused view"
-    (assert= (reduce +
-               0
-               (seq/lmap (fn (i) (* i i))
-                 (seq/lfilter (fn (i) (or (= 0 (math/rem i 3)) (= 0 (math/rem i 5)))) (range 20))))
+    (assert= (reduce (seq/lmap (seq/lfilter (range 20)
+                                 (fn (i) (or (= 0 (math/rem i 3)) (= 0 (math/rem i 5)))))
+                       (fn (i) (* i i)))
+               0 +)
       944)
-    (assert= (seq (seq/lremove even? (seq/lmap inc (range 6)))) (list 1 3 5)))
+    (assert= (seq (seq/lremove (seq/lmap (range 6) inc) even?)) (list 1 3 5)))
 
   (test "->> threads l* stages into one fused left-to-right pipeline"
     ;; (even? then inc): 0→1, 2→3, 4→5, 6→7, 8→9 ⇒ 1+3+5+7+9 = 25
-    (assert= (->> (range 10) (seq/lfilter even?) (seq/lmap inc) (reduce + 0)) 25)
-    (assert= (seq (->> (range 3) (seq/lmap inc))) (list 1 2 3))
-    (assert= (->> (range 6) (seq/lfilter odd?) (seq/lmap (fn (i) (* i i))) (sum)) 35)
-    (assert= (into [] (->> (range 8) (seq/lremove even?) (seq/lkeep (fn (x) (if (> x 3) x nil)))))
+    (assert= (-> (range 10) (seq/lfilter even?) (seq/lmap inc) (reduce 0 +)) 25)
+    (assert= (seq (-> (range 3) (seq/lmap inc))) (list 1 2 3))
+    (assert= (-> (range 6) (seq/lfilter odd?) (seq/lmap (fn (i) (* i i))) (sum)) 35)
+    (assert= (into [] (-> (range 8) (seq/lremove even?) (seq/lkeep (fn (x) (if (> x 3) x nil)))))
       [5 7]))
 
   (test "view interop: first/rest/nth/empty?/into/=/join/apply/str"
-    (assert= (first (seq/lmap inc [10 20])) 11)
-    (assert= (rest (seq/lmap inc [10 20 30])) (list 21 31))
-    (assert= (nth (seq/lmap inc (range 100)) 50) 51)
-    (is (empty? (seq/lfilter (fn (_) false) (range 10))))
-    (refute (empty? (seq/lfilter even? (range 10))))
-    (assert= (into [] (seq/lmap inc [1 2 3])) [2 3 4])
-    (assert= (seq/lmap inc [1 2 3]) (list 2 3 4))
-    (assert= (string/join "," (seq/lmap str (range 4))) "0,1,2,3")
-    (assert= (apply + (seq/lmap inc [1 2 3])) 9)
-    (assert= (str (seq/lmap inc [1 2 3])) "(2 3 4)"))
+    (assert= (first (seq/lmap [10 20] inc)) 11)
+    (assert= (rest (seq/lmap [10 20 30] inc)) (list 21 31))
+    (assert= (nth (seq/lmap (range 100) inc) 50) 51)
+    (is (empty? (seq/lfilter (range 10) (fn (_) false))))
+    (refute (empty? (seq/lfilter (range 10) even?)))
+    (assert= (into [] (seq/lmap [1 2 3] inc)) [2 3 4])
+    (assert= (seq/lmap [1 2 3] inc) (list 2 3 4))
+    (assert= (string/join (seq/lmap (range 4) str) ",") "0,1,2,3")
+    (assert= (apply + (seq/lmap [1 2 3] inc)) 9)
+    (assert= (str (seq/lmap [1 2 3] inc)) "(2 3 4)"))
 
   (test "reduce with a capturing step closure over a large range is exact (HOF JIT fast-frame + capture fill)"
     ;; Regression guard for the HOF native fast-frame (`hof_apply_native`): a `reduce` step
@@ -421,7 +421,7 @@
     ;; value must match the closed form regardless of engine (`BROOD_NO_HOF_JIT` on or off).
     (let (bias 7
           n 5000
-          got (reduce (fn (acc i) (+ acc (+ i bias))) 0 (range n)))
+          got (reduce (range n) 0 (fn (acc i) (+ acc (+ i bias)))))
       ;; sum(0..n-1) + n*bias = n*(n-1)/2 + n*bias
       (assert= got (+ (math/quot (* n (- n 1)) 2) (* n bias)))))
 
@@ -430,12 +430,12 @@
     ;; test-runner rely on `(map require-one …)` / `(map run …)` for effect).
     ;; A lazy view must NOT run its fn until something realises it.
     ; eager → runs now
-    (assert= (with-out-str (map io/write (range 5))) "01234")
+    (assert= (with-out-str (map (range 5) io/write)) "01234")
     ; view built, not realised → nothing
-    (assert= (with-out-str (seq/lmap io/write (range 5))) "")
+    (assert= (with-out-str (seq/lmap (range 5) io/write)) "")
     ; seq realises → runs
-    (assert= (with-out-str (seq (seq/lmap io/write (range 5)))) "01234")
-    (assert= (with-out-str (reduce (fn (a _) a) nil (seq/lmap io/write (range 5)))) "01234")))
+    (assert= (with-out-str (seq (seq/lmap (range 5) io/write))) "01234")
+    (assert= (with-out-str (reduce (seq/lmap (range 5) io/write) nil (fn (a _) a))) "01234")))
 
 ;; ---- views across processes / network / hot-reload --------------------------
 ;; A view is heap-local: `send` REFUSES to ship one (it references the sender's
@@ -447,11 +447,11 @@
 ; fold realises
 (describe "lazy seq-views across processes and reload"
   :isolated (test "a raw view cannot be sent — it must be realised first (heap-local guard)"
-    (assert-error (send (self) [:v (seq/lmap inc [1 2 3])])))
+    (assert-error (send (self) [:v (seq/lmap [1 2 3] inc)])))
 
   (test "a realised view round-trips through a worker as a deep-copied list"
     (let (me (self)
-          _w (spawn (send me [:v (seq (->> (range 5) (seq/lmap inc) (seq/lfilter even?)))])))
+          _w (spawn (send me [:v (seq (-> (range 5) (seq/lmap inc) (seq/lfilter even?)))])))
       (let (got (receive ([:v xs] xs)))
         ; the receiver got a plain list, not a live view
         (refute (seqview? got))
@@ -465,25 +465,25 @@
     ;; The view's fn calls `view-scale` BY NAME; redefining that global before the
     ;; view is realised means the fold sees the NEW definition (late binding).
     (def view-scale (fn (x) (* x 1)))
-    (let (v (seq/lmap (fn (x) (view-scale x)) (range 4)))
+    (let (v (seq/lmap (range 4) (fn (x) (view-scale x))))
       ; view built, NOT realised
       (def view-scale (fn (x) (* x 10)))
       (assert= (seq v) (list 0 10 20 30)))))
 (describe "mapv / filterv"
   (test "mapv returns a VECTOR of mapped items"
-    (assert= [2 4 6] (mapv (fn (x) (* x 2)) (list 1 2 3)))
-    (is (vector? (mapv inc (list 1 2 3))))
-    (assert= [] (mapv inc nil)))
+    (assert= [2 4 6] (mapv (list 1 2 3) (fn (x) (* x 2))))
+    (is (vector? (mapv (list 1 2 3) inc)))
+    (assert= [] (mapv nil inc)))
 
   (test "filterv returns a VECTOR of kept items"
-    (assert= [2 4] (seq/filterv even? (list 1 2 3 4)))
-    (is (vector? (seq/filterv even? (list 1 2))))
-    (assert= [] (seq/filterv even? (list 1 3))))
+    (assert= [2 4] (seq/filterv (list 1 2 3 4) even?))
+    (is (vector? (seq/filterv (list 1 2) even?)))
+    (assert= [] (seq/filterv (list 1 3) even?)))
 
   (test "both accept any seqable source"
-    (assert= [1 2 3] (mapv inc (range 3)))
-    (assert= [0 2 4] (seq/filterv even? (range 6)))
-    (assert= [10 20] (mapv (fn (x) (* x 10)) [1 2]))))
+    (assert= [1 2 3] (mapv (range 3) inc))
+    (assert= [0 2 4] (seq/filterv (range 6) even?))
+    (assert= [10 20] (mapv [1 2] (fn (x) (* x 10))))))
 
 ;; `fold` over a VECTOR takes an indexed fast path (`fold-vec`) rather than the generic
 ;; `first`/`rest` walk, because `(rest v)` on a vector materialises a list of the tail —
@@ -494,28 +494,28 @@
 (describe "fold over a vector matches the generic walk"
   (test "same result as the equivalent list, order preserved"
     (doseq (v [[] [1] [1 2 3 4 5] [10 -3 7]])
-      (assert= (fold + 0 v) (fold + 0 (seq (into (list) (reverse v)))))
+      (assert= (fold v 0 +) (fold (seq (into (list) (reverse v))) 0 +))
       ;; `-` is order-sensitive: a reversed or reordered walk shows up here
-      (assert= (fold - 100 v) (fold - 100 (apply list v)))
+      (assert= (fold v 100 -) (fold (apply list v) 100 -))
       ;; and so does a builder, which records the visit order outright
-      (assert= (fold %flip-cons nil v) (fold %flip-cons nil (apply list v)))))
+      (assert= (fold v nil %flip-cons) (fold (apply list v) nil %flip-cons))))
   (test "the initial accumulator is returned untouched for an empty vector"
-    (assert= (fold + 7 []) 7)
-    (assert= (fold str "seed" []) "seed"))
+    (assert= (fold [] 7 +) 7)
+    (assert= (fold [] "seed" str) "seed"))
   (test "elements that are themselves collections are passed through, not walked"
-    (assert= (fold (fn (a x) (conj a (count x))) [] [[1 2] [3] []]) [2 1 0])
-    (assert= (fold (fn (a p) (+ a (second p))) 0 [[:a 1] [:b 2]]) 3))
+    (assert= (fold [[1 2] [3] []] [] (fn (a x) (conj a (count x)))) [2 1 0])
+    (assert= (fold [[:a 1] [:b 2]] 0 (fn (a p) (+ a (second p)))) 3))
   (test "reduce (which funnels through fold) agrees on vectors and lists"
-    (assert= (reduce + [1 2 3 4]) (reduce + (list 1 2 3 4)))
-    (assert= (reduce max [3 9 2]) 9)
-    (assert= (reduce + 10 [1 2 3]) 16))
+    (assert= (reduce [1 2 3 4] +) (reduce (list 1 2 3 4) +))
+    (assert= (reduce [3 9 2] max) 9)
+    (assert= (reduce [1 2 3] 10 +) 16))
   (test "a large vector folds without materialising a list"
     ;; 50k elements: the generic walk would allocate 50k cons cells here.
     (let (v (into [] (range 50000)))
-      (assert= (fold + 0 v) (math/quot (* 49999 50000) 2))))
+      (assert= (fold v 0 +) (math/quot (* 49999 50000) 2))))
   (test "across processes: each folds its own copy of a vector"
     (let (me (self))
       (doseq (k (range 1 9))
-        (spawn (send me [:r (fold + 0 (into [] (range k)))])))
-      (assert= (fold + 0 (map (fn (_) (receive ([:r v] v))) (range 1 9)))
-        (fold + 0 (map (fn (k) (math/quot (* (- k 1) k) 2)) (range 1 9)))))))
+        (spawn (send me [:r (fold (into [] (range k)) 0 +)])))
+      (assert= (fold (map (range 1 9) (fn (_) (receive ([:r v] v)))) 0 +)
+        (fold (map (range 1 9) (fn (k) (math/quot (* (- k 1) k) 2))) 0 +)))))

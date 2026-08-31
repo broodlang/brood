@@ -79,7 +79,7 @@ Stable: among equal priorities, earlier inserts pop first (FIFO).
 ;; the established way to carry two things through one element. Without this, `(conj q 3)`
 ;; fell through to that default and failed with "adding to a RECORD takes a [k v] pair or
 ;; a map" — an error about records, raised for a priority queue.
-(impl Seqable pq/pq (->seq [q] (map second (get q :entries))))
+(impl Seqable pq/pq (->seq [q] (map (get q :entries) second)))
 (impl Conjable
   pq/pq
   (conj-onto [q x]

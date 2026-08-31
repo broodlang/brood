@@ -23,7 +23,9 @@
 
 (check-allow :non-tail-recursion
   ;; The `try` shape: each level re-enters the VM natively.
-  (defn nsg-try (n) (if (= n 0) 0 (try (+ 1 (nsg-try (- n 1))) (catch e 0))))
+  ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+  (defn nsg-try (n)
+    (if (= n 0) 0 (try (+ 1 (nsg-try (- n 1))) (catch e 0))))
   ;; The same recursion with no `try` — stays in heap frames.
   (defn nsg-plain (n) (if (= n 0) 0 (+ 1 (nsg-plain (- n 1)))))
   ;; The same `try` re-entry, but re-raising instead of swallowing, so the depth error

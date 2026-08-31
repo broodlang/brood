@@ -81,6 +81,14 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
         // i.e. `keyword(ctor)`. It is a record constructor iff that id is registered in
         // `*record-ids*` (ground truth from `defrecord`) — so a same-named plain fn, whose
         // call would NOT carry that `:__id__`, is rejected.
+        //
+        // KI-90: the registry is keyed by NAME, and a registration can outlive the module
+        // that made it (KI-89 shows ids whose constructor is no longer bound). Trusting the
+        // name alone would then devirtualize a call to whatever that name means NOW —
+        // a silently wrong impl, not a slow path (docs/dispatch-speculation.md). So the
+        // name is necessary, not sufficient: the constructor must still be BOUND, and the
+        // registry's recorded name must still be this one. An unbound id is exactly the
+        // orphan shape, and it is refused here rather than devirtualized.
         Node::Call { callee, .. } => {
             let ctor = match &**callee {
                 Node::Global(s) | Node::GlobalIc { sym: s, .. } => *s,
@@ -88,7 +96,24 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
             };
             let id = Value::keyword(ctor);
             let records = global_map(heap, "*record-ids*")?;
-            heap.map_get(records, id).map(|_| id)
+            let recorded = heap.map_get(records, id)?;
+            // The constructor this id names must still exist. A rolled-back or
+            // never-materialised module leaves the id behind; the binding is the thing
+            // that actually has to be there for the call to mean what the id claims.
+            heap.env_get(heap.global(), ctor)?;
+            // …and the registry must still name THIS constructor, not another that
+            // happened to register the same id.
+            let names_this_ctor = match recorded {
+                Value::Sym(s) => s == ctor,
+                v => match v.unpack() {
+                    ValueRef::Str(id) => &*heap.string(id) == value::symbol_name(ctor),
+                    _ => false,
+                },
+            };
+            if !names_this_ctor {
+                return None;
+            }
+            Some(id)
         }
         _ => None,
     }

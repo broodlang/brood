@@ -36,10 +36,10 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
       ([:cont v] (reduce-while-loop f v (rest coll)))
       (other (error "reduce-while: reducer must return [:cont acc] or [:halt acc], got: "
                (pr-str other))))))
-(defn reduce-while (f init coll)
+(defn reduce-while (coll init f)
   "Left-fold `coll` with `f`, but let the reducer stop early: `(f acc x)` returns `[:cont acc']` to keep going or `[:halt acc']` to stop now. Returns the last accumulator either way. Like `fold`/`reduce`, except the step decides when to quit — the early-terminating fold (≈ `Enum.reduce_while`). Tail-recursive, so it is stack-safe.
 
-    (seq/reduce-while (fn (a x) (if (> x 2) [:halt a] [:cont (+ a x)])) 0 [1 2 3 4])   → 3"
+    (seq/reduce-while [1 2 3 4] 0 (fn (a x) (if (> x 2) [:halt a] [:cont (+ a x)])))   → 3"
   (reduce-while-loop f init (seq coll)))
 
 (defn frequencies (coll)
@@ -52,7 +52,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
   ;; The map accumulator is always a map, so hit the 3-arg kernel ops
   ;; (`%map-assoc`/`%map-get`) directly — variadic `assoc` would build a rest-list
   ;; and `get` a `cond` dispatch on every one of the n elements.
-  (fold (fn (m x) (%map-assoc m x (%add (%map-get m x 0) 1))) {} coll))
+  (fold coll {} (fn (m x) (%map-assoc m x (%add (%map-get m x 0) 1)))))
 (sig frequencies (seqable -> map))
 
 ;; dedupe: collapse only *consecutive* runs of equal items (no "seen" set needed).
@@ -72,42 +72,42 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 ;; distinct-by: like the bare `distinct`, but dedup by a key function — keep the
 ;; first item for each distinct `(f item)`. A map carried alongside the result is
 ;; the "seen" set of keys (stores only `true`, so one `%map-get` distinguishes it).
-(defn distinct-by (f coll)
+(defn distinct-by (coll f)
   "The items of `coll` with duplicates removed by key: keeps the first item for each distinct `(f item)`, order-preserving. `(distinct-by :id users)` keeps one user per id (≈ `Enum.uniq_by`).
 
-    (seq/distinct-by count [\"a\" \"b\" \"cc\"])   → (\"a\" \"cc\")"
-  (reverse (nth (fold (fn (state x)
-                        (let (k (f x))
-                          (if (%map-get (nth state 0) k false)
-                            state
-                            [(%map-assoc (nth state 0) k true) (cons x (nth state 1))])))
+    (seq/distinct-by [\"a\" \"b\" \"cc\"] count)   → (\"a\" \"cc\")"
+  (reverse (nth (fold coll
                   [{} nil]
-                  coll)
+                  (fn (state x)
+                    (let (k (f x))
+                      (if (%map-get (nth state 0) k false)
+                        state
+                        [(%map-assoc (nth state 0) k true) (cons x (nth state 1))]))))
              1)))
-(sig distinct-by (any seqable -> any))
+(sig distinct-by (seqable any -> any))
 
-(defn group-by (f coll)
+(defn group-by (coll f)
   "A map from each `(f x)` to the list of items of `coll` that produced it, each list in original order.
 
-    (seq/group-by math/even? [1 2 3 4])   → {false (1 3), true (2 4)}
-    (seq/group-by count [\"a\" \"bb\"])       → {1 (\"a\"), 2 (\"bb\")}
+    (seq/group-by [1 2 3 4] math/even?)   → {false (1 3), true (2 4)}
+    (seq/group-by [\"a\" \"bb\"] count)       → {1 (\"a\"), 2 (\"bb\")}
 
-    (seq/group-by math/even? [1 2 3 4])   → {false (1 3), true (2 4)}"
+    (seq/group-by [1 2 3 4] math/even?)   → {false (1 3), true (2 4)}"
   ;; Prepend per group (O(1)) then reverse every group's list once at the end.
   ;; Direct kernel `%map-assoc`/`%map-get` — the accumulator is always a map.
-  (map/update-vals (fold (fn (m x) (let (k (f x)) (%map-assoc m k (cons x (%map-get m k nil)))))
+  (map/update-vals (fold coll
                      {}
-                     coll)
+                     (fn (m x) (let (k (f x)) (%map-assoc m k (cons x (%map-get m k nil))))))
     reverse))
-(sig group-by (any seqable -> any))
+(sig group-by (seqable any -> any))
 
 ;; Byte-identical to `string/join-parts` — see the note there for why the copy stands.
 (defn- interpose-acc (sep coll acc)
   (if (empty? coll) acc (interpose-acc sep (rest coll) (cons (first coll) (cons sep acc)))))
-(defn interpose (sep coll)
+(defn interpose (coll sep)
   "A list with `sep` inserted between adjacent items of `coll`.
 
-    (seq/interpose 0 [1 2 3])  → (1 0 2 0 3)"
+    (seq/interpose [1 2 3] 0)  → (1 0 2 0 3)"
   (if (empty? coll) nil (reverse (interpose-acc sep (rest coll) (list (first coll))))))
 
 (defn- interleave-acc (a b acc)
@@ -124,7 +124,7 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 (defn- chunk-every-acc (n coll acc)
   (if (empty? coll)
     (reverse acc)
-    (chunk-every-acc n (drop n coll) (cons (into [] (take n coll)) acc))))
+    (chunk-every-acc n (drop coll n) (cons (into [] (take coll n)) acc))))
 ;; The index/count comes FIRST and the collection LAST throughout this module. A call
 ;; that reverses the two is the one rename mistake nothing catches: the arity is unchanged
 ;; and no name is unbound, so `nest check` is silent and the wrong answer surfaces somewhere
@@ -133,13 +133,13 @@ running folds (`scan` `reduce-while`), pairwise combination (`zip-with`
 ;; which the CI gate turns into a hard failure. Argument types are precise because that is
 ;; what catches the swap; the RETURN stays `any` because a too-narrow return would
 ;; false-positive at call sites and is not what a reversed-args rename gets wrong.
-(defn chunk-every (n coll)
+(defn chunk-every (coll n)
   "Split `coll` into consecutive `n`-item vectors; unlike `partition`, a
 trailing partial chunk is kept. `n` must be positive.
 
-    (seq/chunk-every 2 [1 2 3 4 5])  → ([1 2] [3 4] [5])"
+    (seq/chunk-every [1 2 3 4 5] 2)  → ([1 2] [3 4] [5])"
   (chunk-every-acc n (seq coll) nil))
-(sig chunk-every (int seqable -> any))
+(sig chunk-every (seqable int -> any))
 
 ;; (chunk-by f coll) — consecutive runs where (f x) returns the same value.
 (defn- chunk-by-acc (f coll key curr acc)
@@ -149,11 +149,11 @@ trailing partial chunk is kept. `n` must be positive.
       (if (= k key)
         (chunk-by-acc f (rest coll) key (cons x curr) acc)
         (chunk-by-acc f (rest coll) k (list x) (cons (into [] (reverse curr)) acc))))))
-(defn chunk-by (f coll)
+(defn chunk-by (coll f)
   "Split `coll` into consecutive vectors where `(f x)` returns the same value.
 A new chunk starts each time the return value of `f` changes.
 
-    (seq/chunk-by math/even? [2 4 1])   → ([2 4] [1])"
+    (seq/chunk-by [2 4 1] math/even?)   → ([2 4] [1])"
   (let (s (seq coll))
     (if (empty? s)
       nil
@@ -166,11 +166,11 @@ A new chunk starts each time the return value of `f` changes.
     (reverse result)
     (let (next (f acc (first coll)))
       (scan-acc f next (rest coll) (cons next result)))))
-(defn scan (f init coll)
+(defn scan (coll init f)
   "Return a list of successively accumulated values of `(fold f init coll)`,
-starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`.
+starting with `init`. `(scan '(1 2 3) 0 +)` → `(0 1 3 6)`.
 
-    (seq/scan + 0 [1 2 3])      → (0 1 3 6)"
+    (seq/scan [1 2 3] 0 +)      → (0 1 3 6)"
   (scan-acc f init (seq coll) (list init)))
 
 ;; (zip-with f a b) — map `f` over pairs, stopping at the shorter sequence.
@@ -186,18 +186,18 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`.
   (zip-with-acc f (seq a) (seq b) nil))
 
 ;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
-(defn min-by (f coll)
+(defn min-by (coll f)
   "The item in `coll` for which `(f item)` is smallest; `nil` if `coll` is empty.
 
-    (seq/min-by count [\"aaa\" \"b\"])   → \"b\""
-  (fold (fn (best x) (if (< (f x) (f best)) x best)) (first coll) (rest coll)))
-(sig min-by (any seqable -> any))
-(defn max-by (f coll)
+    (seq/min-by [\"aaa\" \"b\"] count)   → \"b\""
+  (fold (rest coll) (first coll) (fn (best x) (if (< (f x) (f best)) x best))))
+(sig min-by (seqable any -> any))
+(defn max-by (coll f)
   "The item in `coll` for which `(f item)` is largest; `nil` if `coll` is empty.
 
-    (seq/max-by count [\"aaa\" \"b\"])   → \"aaa\""
-  (fold (fn (best x) (if (> (f x) (f best)) x best)) (first coll) (rest coll)))
-(sig max-by (any seqable -> any))
+    (seq/max-by [\"aaa\" \"b\"] count)   → \"aaa\""
+  (fold (rest coll) (first coll) (fn (best x) (if (> (f x) (f best)) x best))))
+(sig max-by (seqable any -> any))
 
 (defn- enumerate-acc (i coll acc)
   (if (empty? coll)
@@ -214,12 +214,12 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`.
     (empty? coll) -1
     (pred (first coll)) i
     else (index-where-from pred (rest coll) (inc i))))
-(defn index-where (pred coll)
+(defn index-where (coll pred)
   "The 0-based index of the first item of `coll` for which `(pred x)` holds, or
 -1 if none does. The predicate counterpart of `index-of` (which matches by
 equality); recover the item itself with `find`.
 
-    (seq/index-where math/even? [1 3 4])   → 2"
+    (seq/index-where [1 3 4] math/even?)   → 2"
   (index-where-from pred coll 0))
 
 ;; `subvec` is the ONE deliberate exception to this module's index-first rule: it takes
@@ -245,9 +245,9 @@ vector comes FIRST here, unlike the rest of this module — see the note above.
   (%vector-length v))
 (sig vector-length (vector -> int))
 
-(defn transduce (xform rf init coll)
+(defn transduce (coll xform rf init)
   "Reduce `coll` with `rf`/`init` through the transducer `xform` — one pass, no
-intermediate collections. `(transduce (comp (seq/xfilter odd?) (seq/xmap sq)) + 0 (range 10))`
+intermediate collections. `(transduce (range 10) (comp (seq/xfilter odd?) (seq/xmap sq)) + 0)`
 sums the squares of the odd numbers, allocating nothing in between.
 
 `xform` is any `(rf) -> rf'` function, so a stage of your own is a plain `fn`:
@@ -259,29 +259,29 @@ Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter
 (xmap f))` filters before mapping — because each stage wraps the next one's reducer.
 `seq/lmap`/`seq/lfilter`/… are the ergonomic front end over the same machinery; use
 `transduce` when the stage stack is computed, reused, or your own."
-  (fold (xform rf) init coll))
-(sig transduce ((or fn keyword) any any seqable -> any))
+  (fold coll init (xform rf)))
+(sig transduce (seqable (or fn keyword) any any -> any))
 
-(defn filterv (pred coll)
+(defn filterv (coll pred)
   "A VECTOR of the items of `coll` for which `(pred x)` is truthy — `filter`
-when the caller needs indexed access (`(into [] (filter pred coll))`, named).
+when the caller needs indexed access (`(into [] (filter coll pred))`, named).
 
-    (seq/filterv math/even? [1 2 3 4])   → [2 4]"
-  (into [] (filter pred coll)))
-(sig filterv ((any -> any) seqable -> any))
+    (seq/filterv [1 2 3 4] math/even?)   → [2 4]"
+  (into [] (filter coll pred)))
+(sig filterv (seqable (any -> any) -> any))
 
 ;; (find pred coll) -> the first element satisfying pred, or nil.
-(defn find (pred coll)
+(defn find (coll pred)
   "The first item of `coll` for which `(pred x)` holds, or `nil`.
 
-    (seq/find (fn (n) (> n 2)) [1 2 3 4])   → 3
-    (seq/find (fn (n) (> n 9)) [1 2])       → nil
+    (seq/find [1 2 3 4] (fn (n) (> n 2)))   → 3
+    (seq/find [1 2] (fn (n) (> n 9)))       → nil
 
 `nil` for \"not found\" is indistinguishable from finding a stored `nil` — use
 `seq/index-of` when that matters.
 
-    (seq/find math/even? [1 3 4])   → 4"
-  (cond (empty? coll) nil (pred (first coll)) (first coll) else (seq/find pred (rest coll))))
+    (seq/find [1 3 4] math/even?)   → 4"
+  (cond (empty? coll) nil (pred (first coll)) (first coll) else (seq/find (rest coll) pred)))
 
 ;; distinct: keep the first occurrence of each item. A map carried alongside the result
 ;; acts as the "seen" set, so membership is O(1)-ish rather than the O(n²) a
@@ -303,7 +303,7 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
   "The items of `coll` with duplicates removed, keeping the first occurrence of each (order-preserving).
 
     (seq/distinct [1 1 2])     → (1 2)"
-  (reverse (nth (fold distinct-step [{} nil] coll) 1)))
+  (reverse (nth (fold coll [{} nil] distinct-step) 1)))
 (sig distinct (seqable -> any))
 
 ;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil` (so
@@ -325,26 +325,26 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named).
     (seq/flatten '(1 [2 3]))     → (1 [2 3])   ; a vector is a LEAF, not descended into"
   (reverse (flatten-acc coll nil)))
 
-(defn split-at (n coll)
+(defn split-at (coll n)
   "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`.
 
-    (seq/split-at 2 [1 2 3 4]) → [(1 2) (3 4)]"
+    (seq/split-at [1 2 3 4] 2) → [(1 2) (3 4)]"
   (%split-at-acc n coll nil))
-(sig split-at (int seqable -> any))
+(sig split-at (seqable int -> any))
 
-(defn take-last (n coll)
+(defn take-last (coll n)
   "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0).
 
-    (seq/take-last 2 [1 2 3])  → (2 3)"
-  (drop (- (count coll) n) coll))
-(sig take-last (int seqable -> any))
+    (seq/take-last [1 2 3] 2)  → (2 3)"
+  (drop coll (- (count coll) n)))
+(sig take-last (seqable int -> any))
 
-(defn drop-last (n coll)
+(defn drop-last (coll n)
   "`coll` without its last `n` items (`()` if `n` >= its length).
 
-    (seq/drop-last 1 [1 2 3])  → (1 2)"
-  (take (- (count coll) n) coll))
-(sig drop-last (int seqable -> any))
+    (seq/drop-last [1 2 3] 1)  → (1 2)"
+  (take coll (- (count coll) n)))
+(sig drop-last (seqable int -> any))
 
 (defn- iterate-times-acc (f x n acc)
   (if (< n 0) acc (iterate-times-acc f (f x) (dec n) (cons x acc))))
@@ -423,34 +423,37 @@ contradiction; it is public here, where its callers can reach it.
   "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
   (let (v (into [] coll)
         n (count v)
-        slots (fold (fn (m i) (assoc m i (nth v i))) {} (range n))
+        slots (fold (range n) {} (fn (m i) (assoc m i (nth v i))))
         [out state] (shuffle-at slots (- n 1) (%rand-seed seed)))
     [(shuffle-drain out (- n 1) nil) state]))
 (sig shuffle (int seqable -> any))
 
-(defn remove-nth (i coll)
+(defn remove-nth (coll i)
   "A fresh collection like `coll` with the element at index `i` removed. Returns
 a vector for a vector and a list for a list. `i` must be in `[0, count)`.
 
-The index comes FIRST, like every other index/count-taking function in this module
-(`take-last`, `drop-last`, `split-at`, `chunk-every`): collection-last is the convention,
-and this was the one function that broke it.
+The collection comes FIRST, like every other function in this module
+(`take-last`, `drop-last`, `split-at`, `chunk-every`) — data-first, ADR-308.
 
-    (seq/remove-nth 1 [10 20 30])        → [10 30]
-    (seq/remove-nth 0 (list 1 2 3))      → (2 3)"
+    (seq/remove-nth [10 20 30] 1)        → [10 30]
+    (seq/remove-nth (list 1 2 3) 0)      → (2 3)"
   (if (vector? coll)
     (into (seq/subvec coll 0 i) (seq/subvec coll (inc i) (count coll)))
-    (append (take i coll) (drop (inc i) coll))))
-(sig remove-nth (int seqable -> any))
+    (append (take coll i) (drop coll (inc i)))))
+(sig remove-nth (seqable int -> any))
 
 (%defseq remove
   (pred)
-  "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`."
+  "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`.
+
+    (seq/remove [1 2 3 4] math/even?)   → (1 3)"
   (if (pred item) acc (cons item acc)))
 
 (%defseq keep
   (f)
-  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `seq/xkeep`)."
+  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `seq/xkeep`).
+
+    (seq/keep [1 2 3 4] (fn (n) (if (math/even? n) (* n 10) nil)))   → (20 40)"
   (let (y (f item)) (if (nil? y) acc (cons y acc))))
 
 ;; ---- transducer stages (ADR-251) --------------------------------------------
@@ -469,24 +472,24 @@ The pairwise sibling of `zip-with`, which combines instead of pairing.
   "The `map` stage as a transducer: `(f x)` for each input. Compose with `comp`, run
 with `transduce`, or reach for `seq/lmap` when you just want a fusing pipeline.
 
-    (seq/transduce (comp (seq/xmap inc) (seq/xfilter math/even?)) + 0 [1 2 3])   → 6"
+    (seq/transduce [1 2 3] (comp (seq/xmap inc) (seq/xfilter math/even?)) + 0)   → 6"
   (%xmap f))
 
 (defn xfilter (pred)
   "The `filter` stage as a transducer: keep inputs where `(pred x)` is truthy.
 
-    (seq/transduce (seq/xfilter math/odd?) conj [] [1 2 3])   → [1 3]"
+    (seq/transduce [1 2 3] (seq/xfilter math/odd?) conj [])   → [1 3]"
   (%xfilter pred))
 
 (defn xremove (pred)
   "The `remove` stage as a transducer: drop inputs where `(pred x)` is truthy — the
 complement of `xfilter`.
 
-    (seq/transduce (seq/xremove math/odd?) conj [] [1 2 3])   → [2]"
+    (seq/transduce [1 2 3] (seq/xremove math/odd?) conj [])   → [2]"
   (%xremove pred))
 
 (defn xkeep (f)
   "The `keep` stage as a transducer: `(f x)` for each input, dropping `nil` results.
 
-    (seq/transduce (seq/xkeep (fn (n) (if (math/odd? n) n nil))) conj [] [1 2 3])   → [1 3]"
+    (seq/transduce [1 2 3] (seq/xkeep (fn (n) (if (math/odd? n) n nil))) conj [])   → [1 3]"
   (%xkeep f))

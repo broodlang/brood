@@ -51,7 +51,7 @@ look-alike map, and it prints as `#<multimap …>` (`->map` is the plain-map vie
 
 (defn assoc-all (mm k vs)
   "Return a multimap with all values in list `vs` added under key `k`."
-  (fold (fn (m v) (assoc m k v)) mm vs))
+  (fold vs mm (fn (m v) (assoc m k v))))
 (sig assoc-all (any any seqable -> any))
 
 (defn get (mm k)
@@ -137,27 +137,28 @@ If no values remain under `k`, the key is dropped."
   (conj-onto [mm x]
     (cond
       (and (vector? x) (= (count x) 2)) (assoc mm (nth x 0) (nth x 1))
-      (map? x) (fold (fn (m kv) (assoc m (nth kv 0) (nth kv 1))) mm (seq x))
-      else (error "conj: adding to a multimap takes a [key value] pair or a map, got "
-             (pr-str x)))))
+      (map? x) (fold (seq x) mm (fn (m kv) (assoc m (nth kv 0) (nth kv 1))))
+      else
+        (error "conj: adding to a multimap takes a [key value] pair or a map, got "
+          (pr-str x)))))
 (impl Seqable
   multimap/multimap
   (->seq [mm]
-    (mapcat (fn (pair) (map (fn (v) [(first pair) v]) (reverse (second pair))))
-      (%map-pairs (/get mm :entries)))))
+    (mapcat (%map-pairs (/get mm :entries))
+      (fn (pair) (map (reverse (second pair)) (fn (v) [(first pair) v]))))))
 
 (defn map-vals (mm f)
   "Return a multimap where each value list has been transformed by `(f key values-list)`."
-  (multimap (fold (fn (m pair) (let (k (first pair) vs (second pair)) (/assoc m k (f k vs))))
+  (multimap (fold (%map-pairs (/get mm :entries))
               {}
-              (%map-pairs (/get mm :entries)))))
+              (fn (m pair) (let (k (first pair) vs (second pair)) (/assoc m k (f k vs)))))))
 (sig map-vals (multimap fn -> multimap))
 
 (defn ->map (mm)
   "Flatten the multimap to a plain map from key → list-of-values (insertion order)."
-  (fold (fn (m pair) (/assoc m (first pair) (reverse (second pair))))
+  (fold (%map-pairs (/get mm :entries))
     {}
-    (%map-pairs (/get mm :entries))))
+    (fn (m pair) (/assoc m (first pair) (reverse (second pair))))))
 (sig ->map (multimap -> map))
 
 ;; `Display` is the O(1) summary (how many keys, how many pairs); `Inspect` shows the

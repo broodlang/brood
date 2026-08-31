@@ -187,19 +187,24 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
             ),
         );
     }
-    // higher-order: the first arg is a callback of a *known arity* — what the
-    // combinator calls it with. The arrow's parameter count drives the
-    // callback-arity check (ADR-078): `(map f xs)` calls `(f x)` → 1-ary;
-    // `(reduce f init xs)` / `(fold f init xs)` call `(f acc x)` → 2-ary. The
-    // arrow's tags are still `fn | native`, so the existing "non-function
-    // argument" check is unchanged; the arrow only *adds* the arity refinement.
+    // higher-order: the callback is of a *known arity* — what the combinator calls
+    // it with. The arrow's parameter count drives the callback-arity check
+    // (ADR-078): `(map xs f)` calls `(f x)` → 1-ary; `(fold xs init f)` calls
+    // `(f acc x)` → 2-ary. The arrow's tags are still `fn | native`, so the
+    // existing "non-function argument" check is unchanged; the arrow only *adds*
+    // the arity refinement.
+    //
+    // These are data-FIRST (ADR-308): the collection is argument one, matching
+    // `Enum.map(enum, fun)` and `Enum.reduce/2`+`/3`. `reduce`'s `& more` was
+    // only an optional-init slot, and data-first moves the varying slot to the
+    // end, so both of its arities survive the change unchanged in meaning.
     let cb1 = Ty::arrow(Sig::new(vec![any], any));
     let cb2 = Ty::arrow(Sig::new(vec![any, any], any));
     for n in ["map", "filter"] {
-        put(n, Sig::new(vec![cb1.clone(), seq], seq));
+        put(n, Sig::new(vec![seq, cb1.clone()], seq));
     }
-    put("reduce", Sig::new(vec![cb2.clone(), any, seq], any));
-    put("fold", Sig::new(vec![cb2, any, seq], any));
+    put("reduce", Sig::new(vec![seq, any, cb2.clone()], any));
+    put("fold", Sig::new(vec![seq, any, cb2], any));
     // Predicates: branchy / `or`-expanded bodies that infer_sig can't walk.
     // All are widest-safe domains (any/any) so a tighter call never warns falsely.
     //   number? — body is (or (int? x) (float? x)); or-expansion hides the pattern.
@@ -224,17 +229,17 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     //   can index or key — with the result left `any` (the value at a key is anything)
     //   and the optional `default` slot variadic. ADR-167.
     put("get", Sig::with_rest(vec![countable, any], any, any));
-    // any?/every?: both take a 1-ary callback and a sequence, return bool.
-    // Curated because the body is a cond-recursive closure; infer_sig bails.
+    // any?/every?: both take a sequence and a 1-ary callback (data-first, ADR-308),
+    // return bool. Curated because the body is a cond-recursive closure; infer_sig bails.
     for n in ["any?", "every?"] {
-        put(n, Sig::new(vec![cb1.clone(), seq], bool_ty));
+        put(n, Sig::new(vec![seq, cb1.clone()], bool_ty));
     }
     // String operations: branchy or `apply`-based bodies; infer_sig bails.
     //   join           — complex if/apply body; always returns a string.
     //   capitalize     — if-branches, both arms produce strings.
     //   string-split   — accumulator recursion; returns a list of strings
     //                    (unrefined list — list<string> would warn on (first …) = nil).
-    put("string/join", Sig::new(vec![any, seq], str_ty));
+    put("string/join", Sig::new(vec![seq, any], str_ty));
     put("string/capitalize", Sig::new(vec![str_ty], str_ty));
     // `->string` renders ANY value as text (ADR-258's rename of `name`): always a string.
     put("->string", Sig::new(vec![Ty::ANY], str_ty));
@@ -291,7 +296,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     put("index-of", Sig::new(vec![any, any], int));
     // `seq/` since ADR-227 — keyed qualified for the same reason as `math/abs` above: a
     // bare key here would suppress the unbound lint on a name that no longer exists bare.
-    put("seq/index-where", Sig::new(vec![cb1, seq], int));
+    put("seq/index-where", Sig::new(vec![seq, cb1], int));
     put("string/last-index-of", Sig::new(vec![str_ty, str_ty], int));
     m
 });
@@ -397,6 +402,28 @@ pub(super) fn primitive_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
 
 /// Signatures for the stable stdlib **closures** the checker can't infer but
 /// that matter: the arithmetic/comparison kernel (variadic over numbers) and the
+/// **The one place a data-first combinator's argument positions are stated (ADR-308).**
+///
+/// `map`/`keep`/`fold`/`reduce` all take the collection FIRST and the callback LAST — the
+/// convention `curated_combinators_put_the_callback_last` asserts over the curated table.
+/// Reading them positionally in each consumer is what made the ADR-308 reorder expensive:
+/// `infer.rs` (result inference), `walk.rs` (callback synthesis) and `specialize_call`
+/// each restated `items[1]`/`items[2]`, and when they went stale the checker degraded to
+/// `any` *silently*. They all call this instead, so the convention lives once.
+///
+/// Deriving from arity rather than from the signature's parameter count is deliberate:
+/// `reduce` has two arities — `(reduce coll f)` and `(reduce coll acc f)` — and the
+/// callback is last in both, while a fixed index would be right for only one.
+///
+/// `items` is the whole call form, head included. `None` when it is too short to have
+/// both a collection and a callback.
+pub(super) fn combinator_args(items: &[Value]) -> Option<(Value, Value)> {
+    if items.len() < 3 {
+        return None;
+    }
+    Some((items[1], *items.last()?))
+}
+
 /// core higher-order fns. Hand-vetted, so sound — this is what makes `(+ 1 "x")`
 /// catchable even though `+` is `(reduce %add 0 xs)`.
 pub(super) fn curated_sig(sym: Symbol) -> Option<Sig> {
@@ -473,6 +500,7 @@ pub(super) fn clear_sig_memo() {
     SIG_MEMO.with(|m| m.borrow_mut().clear());
     OVERLOAD_MEMO.with(|m| m.borrow_mut().clear());
     SPECIAL_MEMO.with(|m| m.borrow_mut().clear());
+    NO_ARMS.with(|m| m.borrow_mut().clear());
     SPECIAL_FUEL.with(|f| f.set(MAX_SPECIAL_FUEL));
     // The operator domains are a file's too (`set_operator_domains`); a fragment checked
     // after a file must derive its own from the registry, not read that file's.
@@ -506,6 +534,14 @@ thread_local! {
     /// Completed specializations for this check pass, keyed by `(name, argument types)`.
     /// Per-thread, cleared per file by [`clear_sig_memo`]; a deliberate `None` is stored
     /// too, so an unhelpful shape is not re-typed at every call site.
+    /// Image-bound names [`fixed_arms_of`] found nothing to re-type for — every builtin
+    /// and primitive, every variadic loaded definition. A fact about the image, so it is
+    /// recorded by NAME (under exactly the condition `specialized_ret` memoizes its `None`
+    /// by argument tuple) and consulted by [`specialize_call`] BEFORE it types the call's
+    /// operands: on bedit that operand walk was the profile's hottest frame, and for these
+    /// names it bought nothing. Same-file names never enter — their arms arrive during
+    /// Pass 2.8. Reset per file with the memo.
+    static NO_ARMS: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
     static SPECIAL_MEMO: RefCell<HashMap<(Symbol, Vec<Option<Ty>>), Option<Ty>>> =
         RefCell::new(HashMap::new());
 }
@@ -538,7 +574,10 @@ const MAX_SPEC_ARG_NEST: u8 = 1;
 /// is open for `sym` (see [`specialization_open`]), so a refused question costs nothing,
 /// and only [`MAX_SPEC_ARG_NEST`] deep in nested operand typing.
 pub(super) fn specialize_call(heap: &Heap, sym: Symbol, args: &[Value], ctx: &Ctx) -> Option<Ty> {
-    if SPEC_ARG_NEST.with(|n| n.get()) > MAX_SPEC_ARG_NEST || !specialization_open(sym) {
+    if SPEC_ARG_NEST.with(|n| n.get()) > MAX_SPEC_ARG_NEST
+        || !specialization_open(sym)
+        || NO_ARMS.with(|m| m.borrow().contains(&sym))
+    {
         return None;
     }
     SPEC_ARG_NEST.with(|n| n.set(n.get() + 1));
@@ -765,6 +804,9 @@ pub(super) fn specialized_ret(
         // only for a name the IMAGE binds (a builtin, a loaded non-closure).
         if !ctx.is_file_global(sym) && super::deps::obs_global(heap, sym).is_some() {
             memo_specialization(key, None);
+            NO_ARMS.with(|m| {
+                m.borrow_mut().insert(sym);
+            });
         }
         return None;
     };
@@ -1809,14 +1851,20 @@ fn domain_of_inner(
             .union(Ty::of(Tag::Keyword));
         acc[pos] = acc[pos].clone().intersect(callable);
     }
-    // `(fold f init coll)` / `(reduce f init coll)` with a KNOWN `f`: the init is `f`'s
+    // `(fold coll init f)` / `(reduce coll init f)` with a KNOWN `f`: the init is `f`'s
     // first argument and every element of `coll` its second, so a parameter in either
-    // slot takes `f`'s demand — `(fold + x more)` wants `x` numeric and `more` a seqable
+    // slot takes `f`'s demand — `(fold more x +)` wants `x` numeric and `more` a seqable
     // of numerics. This is the callback demand the suggested signatures were missing most.
+    // Positions from `combinator_args` — the single statement of the data-first
+    // convention (ADR-308), so this cannot drift against the signatures above.
     if (value::symbol_is(h, "fold") || value::symbol_is(h, "reduce")) && items.len() == 4 {
-        if let Value::Sym(f) = items[1] {
+        let (coll_arg, f_arg) = match combinator_args(&items) {
+            Some(pair) => pair,
+            None => (items[1], items[3]),
+        };
+        if let Value::Sym(f) = f_arg {
             let known =
-                !scope.shadowed.contains(&f) && param_index(items[1], params, scope).is_none();
+                !scope.shadowed.contains(&f) && param_index(f_arg, params, scope).is_none();
             let f_sig = if known {
                 ctx.declared_sig(f)
                     .or_else(|| primitive_sig(heap, f))
@@ -1831,7 +1879,7 @@ fn domain_of_inner(
                         acc[pos] = acc[pos].clone().intersect(p0);
                     }
                 }
-                if let Some(pos) = param_index(items[3], params, scope) {
+                if let Some(pos) = param_index(coll_arg, params, scope) {
                     if let Some(p1) = f_sig.param(1) {
                         acc[pos] = acc[pos].clone().intersect(seqable_of(p1));
                     }
@@ -2135,6 +2183,63 @@ pub(super) fn arity_str(a: Arity) -> String {
 /// just because the checker can't say much about the binding's *shape*.
 pub(super) fn is_globally_bound(heap: &Heap, sym: Symbol) -> bool {
     super::deps::obs_global(heap, sym).is_some()
+}
+
+#[cfg(test)]
+mod convention_tests {
+    use super::*;
+
+    /// **The data-first convention, machine-checked (ADR-308).**
+    ///
+    /// A combinator's argument positions belong in exactly ONE place — its curated
+    /// signature. The checker's structural reasoning restates them: `infer.rs` reads the
+    /// collection and callback out of a call to type the result, `walk.rs` synthesises a
+    /// callback signature from the collection's element type, and `specialize_call` below
+    /// pushes callback demand onto parameters. During ADR-308 those hard-coded indices
+    /// went stale against the signatures, and the failure was **silent** — inference
+    /// degraded to `any` rather than erroring, so exactly one test in 5300 noticed.
+    ///
+    /// This asserts the invariant all of those sites assume, so the next reorder fails
+    /// here, by name, instead of quietly losing type precision:
+    ///
+    ///   in every curated signature that takes a callback, the callback is the LAST
+    ///   fixed parameter — the collection comes first.
+    #[test]
+    fn curated_combinators_put_the_callback_last() {
+        let mut offenders: Vec<String> = Vec::new();
+        for (sym, sig) in CURATED_SIGS.iter() {
+            if sig.params.len() < 2 {
+                continue;
+            }
+            let arrows: Vec<usize> = sig
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.as_arrow().is_some())
+                .map(|(i, _)| i)
+                .collect();
+            let Some(&first_arrow) = arrows.first() else {
+                continue;
+            };
+            let last = sig.params.len() - 1;
+            if first_arrow != last {
+                offenders.push(format!(
+                    "{}: callback at param {first_arrow} of {}, expected last ({last})",
+                    crate::core::value::symbol_name(*sym),
+                    sig.params.len()
+                ));
+            }
+        }
+        offenders.sort();
+        assert!(
+            offenders.is_empty(),
+            "curated signatures must be data-first — the callback is the last parameter \
+             (ADR-308). Offenders:\n  {}\n\nIf you are deliberately reordering, update \
+             `infer.rs` (result inference), `walk.rs` (callback synthesis) and \
+             `specialize_call` together — they read these positions.",
+            offenders.join("\n  ")
+        );
+    }
 }
 
 #[cfg(test)]

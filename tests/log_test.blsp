@@ -186,7 +186,7 @@
   :isolated (test "N processes each log once; every line arrives, none lost or interleaved"
     (let (me (self) n 40)
       (start-logger {:level :debug :backends [(lt-collect me)]})
-      (fold (fn (acc i) (spawn (info (str "w" i))) acc) nil (lt-upto n))
+      (fold (lt-upto n) nil (fn (acc i) (spawn (info (str "w" i))) acc))
       (let (got (lt-drain n nil))
         (stop-logger)
         (assert= (count got) n)

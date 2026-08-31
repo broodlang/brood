@@ -186,13 +186,13 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
         ;; Set variant in byte 8: high 2 bits = 10, rest kept
         b8 (bit/or 128 (bit/and (nth bv 8) 63))
         ;; Build hex
-        hex (fold (fn (acc i)
-                    (let (b (if (= i 6) b6 (if (= i 8) b8 (nth bv i))))
-                      (str acc
-                        (string/char-at hex-digits (math/quot b 16))
-                        (string/char-at hex-digits (math/rem b 16)))))
+        hex (fold (range 16)
               ""
-              (range 16)))
+              (fn (acc i)
+                (let (b (if (= i 6) b6 (if (= i 8) b8 (nth bv i))))
+                  (str acc
+                    (string/char-at hex-digits (math/quot b 16))
+                    (string/char-at hex-digits (math/rem b 16)))))))
     (str (string/substring hex 0 8)
       "-"
       (string/substring hex 8 12)

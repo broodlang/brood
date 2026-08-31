@@ -501,11 +501,11 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         // a range is a range of integers
         ("(range 5)", "list<int>"),
         // a numeric operator as a callback / a fold / spread — the same closure rules
-        ("(map inc [1 2])", "nil | list<int>"),
-        ("(reduce + [1 2])", "int"),
-        ("(reduce + 0 [1 2])", "int"),
+        ("(map [1 2] inc)", "nil | list<int>"),
+        ("(reduce [1 2] +)", "int"),
+        ("(reduce [1 2] 0 +)", "int"),
         ("(apply + [1 2])", "int"),
-        ("(reduce + 0.5 [1 2])", "float"),
+        ("(reduce [1 2] 0.5 +)", "float"),
         // reshapers with no signature at all used to be `any`
         ("(vec [1 2])", "vector<1 | 2>"),
         ("(into [] (list 1))", "vector<1>"),
@@ -1333,7 +1333,7 @@ fn no_warning_for_tail_recursion_or_higher_order() {
     assert!(recursion_warnings("(defn p (n) (and (> n 0) (p (- n 1))))").is_empty());
     assert!(recursion_warnings("(defn k (n) (let (m (- n 1)) (k m)))").is_empty());
     // a self-call inside a nested closure is a different frame — not flagged
-    assert!(recursion_warnings("(defn h (xs) (map (fn (x) (h x)) xs))").is_empty());
+    assert!(recursion_warnings("(defn h (xs) (map xs (fn (x) (h x))))").is_empty());
     // non-recursive function
     assert!(recursion_warnings("(defn g (x) (+ x 1))").is_empty());
 }
@@ -1400,13 +1400,13 @@ fn curated_closures_are_checked() {
         .iter()
         .any(|w| w.contains('+') && w.contains("number")));
     assert!(warnings("(< 1 :k)").iter().any(|w| w.contains('<')));
-    // map's first argument must be callable; an int is not.
-    assert!(warnings("(map 1 xs)")
+    // map's SECOND argument must be callable; an int is not (data-first, ADR-308).
+    assert!(warnings("(map xs 1)")
         .iter()
-        .any(|w| w.contains("map") && w.contains("argument 1")));
+        .any(|w| w.contains("map") && w.contains("argument 2")));
     // Correct uses, and an unknown (variable) callable, stay silent.
     assert!(warnings("(+ 1 2)").is_empty());
-    assert!(warnings("(map inc xs)").is_empty()); // inc is a variable → unknown
+    assert!(warnings("(map xs inc)").is_empty()); // inc is a variable → unknown
 }
 
 #[test]
@@ -1838,7 +1838,7 @@ fn curated_helper_sigs_catch_misuse() {
         "(count (bytes 1 2 3))",
         "(first (bytes 1 2 3))",
         "(rest (bytes 1 2 3))",
-        "(every? math/odd? (bytes 1 3 5))",
+        "(every? (bytes 1 3 5) math/odd?)",
         "(not x)",
         "(math/zero? n)",
     ] {
@@ -2118,7 +2118,7 @@ fn unbound_inside_an_error_testing_form_is_still_flagged() {
 
 /// KI-71 — a **reversed-args rename** is the one rename mistake with no natural gate: the
 /// arity is unchanged and no name is unbound, so `nest check` is silent and the wrong answer
-/// surfaces somewhere else entirely (`seq/remove-nth` moving to index-first read as seven
+/// surfaces somewhere else entirely (`seq/remove-nth` moving its index read as seven
 /// unrelated buffer-lifecycle failures downstream). A declared `sig` is what makes it
 /// visible, and the index/collection functions in `std/seq.blsp` now carry one.
 ///
@@ -2126,32 +2126,36 @@ fn unbound_inside_an_error_testing_form_is_still_flagged() {
 /// ARGUMENT mistake, and a too-narrow return would false-positive at every call site.
 #[test]
 fn a_reversed_index_and_collection_call_is_flagged() {
+    // Data-first (ADR-308): the COLLECTION comes first, so an index-first call is the
+    // reversal. This pair flipped with the convention — the shapes below used to be the
+    // correct ones.
     for (src, fname) in [
-        ("(seq/remove-nth [1 2 3] 1)", "remove-nth"),
-        ("(seq/take-last (list 1 2 3) 2)", "take-last"),
-        ("(seq/chunk-every [1 2 3 4] 2)", "chunk-every"),
-        ("(seq/split-at [1 2 3] 1)", "split-at"),
+        ("(seq/remove-nth 1 [1 2 3])", "remove-nth"),
+        ("(seq/take-last 2 (list 1 2 3))", "take-last"),
+        ("(seq/chunk-every 2 [1 2 3 4])", "chunk-every"),
+        ("(seq/split-at 1 [1 2 3])", "split-at"),
     ] {
         let w = warnings_with(&["seq"], src);
         assert!(
             w.iter()
-                .any(|m| m.contains(fname) && m.contains("argument 1 expects int")),
+                .any(|m| m.contains(fname) && m.contains("argument 1 expects seqable")),
             "{src} reverses index and collection and should be flagged, got {w:?}"
         );
     }
 }
 
-/// The false-positive half: the CORRECT order must stay silent, and so must a call whose
+/// The false-positive half: the CORRECT (collection-first) order must stay silent, and so
+/// must a call whose
 /// arguments are untyped locals — the checker only knows a param's type when something
 /// says so, and guessing would make these sigs unusable.
 #[test]
-fn the_correct_index_first_order_stays_silent() {
+fn the_correct_collection_first_order_stays_silent() {
     for src in [
-        "(seq/remove-nth 1 [1 2 3])",
-        "(seq/take-last 2 (list 1 2 3))",
-        "(seq/chunk-every 2 [1 2 3 4])",
-        "(seq/split-at 1 [1 2 3])",
-        "(fn (i coll) (seq/remove-nth i coll))",
+        "(seq/remove-nth [1 2 3] 1)",
+        "(seq/take-last (list 1 2 3) 2)",
+        "(seq/chunk-every [1 2 3 4] 2)",
+        "(seq/split-at [1 2 3] 1)",
+        "(fn (coll i) (seq/remove-nth coll i))",
     ] {
         assert!(
             warnings_with(&["seq"], src).is_empty(),
@@ -2196,7 +2200,7 @@ fn descending_into_a_literal_does_not_read_data_as_code() {
         "'{:k v}",                                    // quoted map
         "(quote [definitely-not-bound])",             // explicit quote
         "(match [1 2] ([a b] (+ a b)) (_ 0))",        // pattern binders, post-expansion
-        "(let (xs [1 2 3]) (map (fn (n) [n n]) xs))", // ordinary literal use
+        "(let (xs [1 2 3]) (map xs (fn (n) [n n])))", // ordinary literal use
     ] {
         assert!(
             warnings(src).is_empty(),
@@ -3722,7 +3726,7 @@ fn operand_check_respects_scope_and_forward_refs() {
         .iter()
         .all(|m| !m.contains("unbound")));
     // A prelude name as an operand resolves through the heap globals.
-    assert!(file_warnings("(defn f () (map inc (list 1 2)))")
+    assert!(file_warnings("(defn f () (map (list 1 2) inc))")
         .iter()
         .all(|m| !m.contains("unbound")));
 }
@@ -3783,7 +3787,7 @@ fn function_as_value_lint_is_quiet_on_the_correct_and_legitimate_shapes() {
         .all(|m| !m.contains("function used as a value")));
     // The lint is sink-scoped: passing a bare zero-arg fn elsewhere (a real
     // higher-order use) is not flagged.
-    assert!(check_with_defs(&["(defn home () 1)"], "(map home [1 2])")
+    assert!(check_with_defs(&["(defn home () 1)"], "(map [1 2] home)")
         .iter()
         .all(|m| !m.contains("function used as a value")));
 }
@@ -3819,7 +3823,7 @@ fn unbound_is_silent_for_prelude_names() {
         "(list 1 2 3)",
         "(int? 5)",
         "(math/zero? 0)",
-        "(map (fn (x) x) [1 2 3])",
+        "(map [1 2 3] (fn (x) x))",
     ] {
         assert!(
             warnings(src).iter().all(|w| !w.contains("unbound")),
@@ -4052,7 +4056,7 @@ fn shadowing_clears_an_alias() {
 #[test]
 fn flags_a_named_callback_of_the_wrong_arity() {
     // `cons` is arity 2; `map` calls its callback with 1 arg → real bug.
-    let w = warnings("(map cons nil)");
+    let w = warnings("(map nil cons)");
     assert!(
         w.iter()
             .any(|s| s.contains("map") && s.contains("callback") && s.contains("cons")),
@@ -4063,13 +4067,13 @@ fn flags_a_named_callback_of_the_wrong_arity() {
 #[test]
 fn accepts_a_named_callback_of_the_right_arity() {
     // `inc` is arity 1 — exactly what `map` supplies. No warning.
-    let w = warnings("(map inc nil)");
+    let w = warnings("(map nil inc)");
     assert!(
         w.iter().all(|s| !s.contains("callback")),
         "a correct-arity callback must not warn: {w:?}"
     );
     // A variadic callback (`+` accepts 1) is fine too.
-    let w = warnings("(map + nil)");
+    let w = warnings("(map nil +)");
     assert!(
         w.iter().all(|s| !s.contains("callback")),
         "a variadic callback must not warn: {w:?}"
@@ -4079,14 +4083,14 @@ fn accepts_a_named_callback_of_the_right_arity() {
 #[test]
 fn flags_an_inline_fn_callback_of_the_wrong_arity() {
     // A 2-param inline fn passed where `map` calls it with 1 arg.
-    let w = warnings("(map (fn (a b) a) nil)");
+    let w = warnings("(map nil (fn (a b) a))");
     assert!(
         w.iter()
             .any(|s| s.contains("map") && s.contains("callback") && s.contains("the fn")),
         "map should flag a 2-arg fn: {w:?}"
     );
     // Correct arity — no warning.
-    let w = warnings("(map (fn (a) a) nil)");
+    let w = warnings("(map nil (fn (a) a))");
     assert!(
         w.iter().all(|s| !s.contains("callback")),
         "a 1-arg fn must not warn under map: {w:?}"
@@ -4098,7 +4102,7 @@ fn lambda_is_retired_and_hints_at_fn() {
     // ADR-162 retired the alias: `fn` is the only spelling. `lambda` is now an
     // ordinary unbound name — with a hint naming `fn`, so the mistake is one line to
     // fix. (It was a synonym for years, claimed removed by the docs for months.)
-    let w = warnings("(map (lambda (a b) a) nil)");
+    let w = warnings("(map nil (lambda (a b) a))");
     assert!(
         w.iter().any(|s| s.contains("lambda")),
         "a `lambda` head must be reported now: {w:?}"
@@ -4108,7 +4112,7 @@ fn lambda_is_retired_and_hints_at_fn() {
         Some("Brood spells `lambda` as `fn`: `(fn (x) …)`.")
     );
     // The `fn` spelling still gets the callback-arity check it always did.
-    let w = warnings("(map (fn (a b) a) nil)");
+    let w = warnings("(map nil (fn (a b) a))");
     assert!(
         w.iter()
             .any(|s| s.contains("map") && s.contains("callback")),
@@ -4121,7 +4125,7 @@ fn fn_form_is_not_unbound() {
     // Regression (originally found via the `lambda` alias, retired in ADR-162): a fn
     // head missing from SPECIAL_HEAD / is_syntactic_keyword made whole-file mode flag
     // the head AND its params as unbound — a false positive on valid code.
-    let w = file_warnings("(def f (map (fn (x) (+ x 1)) (list 1 2 3)))");
+    let w = file_warnings("(def f (map (list 1 2 3) (fn (x) (+ x 1))))");
     assert!(
         w.iter().all(|m| !m.contains("unbound symbol")),
         "an `fn` literal must not draw unbound-symbol warnings: {w:?}"
@@ -4970,20 +4974,20 @@ fn self_recursive_let_bound_closure_is_bound() {
 #[test]
 fn reduce_and_fold_expect_a_two_arg_callback() {
     // reduce/fold call `(f acc x)` — 2 args. A 1-arg callback is wrong.
-    let w = warnings("(reduce (fn (a) a) 0 nil)");
+    let w = warnings("(reduce nil 0 (fn (a) a))");
     assert!(
         w.iter()
             .any(|s| s.contains("reduce") && s.contains("callback")),
         "reduce should flag a 1-arg callback: {w:?}"
     );
-    let w = warnings("(fold inc 0 nil)");
+    let w = warnings("(fold nil 0 inc)");
     assert!(
         w.iter()
             .any(|s| s.contains("fold") && s.contains("callback")),
         "fold should flag a 1-arg callback (inc): {w:?}"
     );
     // A correct 2-arg callback is silent.
-    let w = warnings("(reduce (fn (a b) a) 0 nil)");
+    let w = warnings("(reduce nil 0 (fn (a b) a))");
     assert!(
         w.iter().all(|s| !s.contains("callback")),
         "a 2-arg callback must not warn under reduce: {w:?}"
@@ -4994,13 +4998,13 @@ fn reduce_and_fold_expect_a_two_arg_callback() {
 fn callback_arity_is_skipped_when_unknown() {
     // A multi-arity lambda accepts 1 *and* 2 — must not warn (we bail rather
     // than risk a false positive).
-    let w = warnings("(map (fn ((a) a) ((a b) a)) nil)");
+    let w = warnings("(map nil (fn ((a) a) ((a b) a)))");
     assert!(
         w.iter().all(|s| !s.contains("callback")),
         "multi-arity lambda must be skipped: {w:?}"
     );
     // A locally-bound callback has unknown arity here — skip.
-    let w = warnings("(fn (f) (map f nil))");
+    let w = warnings("(fn (f) (map nil f))");
     assert!(
         w.iter().all(|s| !s.contains("callback")),
         "a local callback must be skipped: {w:?}"
@@ -5122,15 +5126,15 @@ fn or_guard_does_not_falsely_narrow() {
 
 #[test]
 fn map_result_flows_the_callback_return() {
-    // `(map inc (list 1 2 3))` : list<number>, so `(first …)` is number|nil —
+    // `(map (list 1 2 3) inc)` : list<number>, so `(first …)` is number|nil —
     // disjoint from string → string-length flags it.
-    let w = warnings("(string/length (first (map inc (list 1 2 3))))");
+    let w = warnings("(string/length (first (map (list 1 2 3) inc)))");
     assert!(
         w.iter().any(|s| s.contains("string/length")),
         "map's element type (number) should flow to first: {w:?}"
     );
     // ...and a numeric sink is fine (number overlaps).
-    let w = warnings("(+ 1 (first (map inc (list 1 2 3))))");
+    let w = warnings("(+ 1 (first (map (list 1 2 3) inc)))");
     assert!(
         w.iter().all(|s| !s.contains("expects")),
         "a number element must not warn against +: {w:?}"
@@ -5139,8 +5143,8 @@ fn map_result_flows_the_callback_return() {
 
 #[test]
 fn filter_preserves_the_element_type() {
-    // `(filter even? (list 1 2 3))` : list<int> — element type unchanged.
-    let w = warnings("(string/length (first (filter even? (list 1 2 3))))");
+    // `(filter (list 1 2 3) even?)` : list<int> — element type unchanged.
+    let w = warnings("(string/length (first (filter (list 1 2 3) even?)))");
     assert!(
         w.iter().any(|s| s.contains("string/length")),
         "filter should preserve the int element type: {w:?}"
@@ -5158,9 +5162,9 @@ fn element_type_flows_through_more_combinators() {
         r#"(+ 1 (first (but-last ["a" "b"])))"#,
         r#"(+ 1 (first (distinct ["a" "b"])))"#,
         r#"(+ 1 (first (seq/dedupe ["a" "b"])))"#,
-        r#"(+ 1 (first (remove (fn (x) false) ["a" "b"])))"#,
-        r#"(+ 1 (first (take-last 1 ["a" "b"])))"#,
-        r#"(+ 1 (first (keep (fn (x) x) ["a" "b"])))"#,
+        r#"(+ 1 (first (seq/remove ["a" "b"] (fn (x) false))))"#,
+        r#"(+ 1 (first (seq/take-last ["a" "b"] 1)))"#,
+        r#"(+ 1 (first (seq/keep ["a" "b"] (fn (x) x))))"#,
         "(string/length (first (range 5)))",
     ] {
         let w = warnings(src);
@@ -5187,9 +5191,9 @@ fn element_type_flows_through_more_combinators() {
 
 #[test]
 fn identity_lambda_preserves_element_type() {
-    // `(map (fn (x) x) (list 1 2 3))` : list<int> — the lambda returns its
+    // `(map (list 1 2 3) (fn (x) x))` : list<int> — the lambda returns its
     // argument, so B = the element type A.
-    let w = warnings("(string/length (first (map (fn (x) x) (list 1 2 3))))");
+    let w = warnings("(string/length (first (map (list 1 2 3) (fn (x) x))))");
     assert!(
         w.iter().any(|s| s.contains("string/length")),
         "an identity callback should preserve the element type: {w:?}"
@@ -5199,14 +5203,14 @@ fn identity_lambda_preserves_element_type() {
 #[test]
 fn map_filter_do_not_refine_when_uncertain() {
     // Unknown callback (a local) → no refinement → no warning.
-    let w = warnings("(fn (g) (string/length (first (map g (list 1 2 3)))))");
+    let w = warnings("(fn (g) (string/length (first (map (list 1 2 3) g))))");
     assert!(
         w.iter().all(|s| !s.contains("string/length")),
         "an unknown callback must not refine the result: {w:?}"
     );
     // Identity callback + unknown collection → B depends on the (unknown)
     // element type → no refinement.
-    let w = warnings("(fn (xs) (string/length (first (map (fn (x) x) xs))))");
+    let w = warnings("(fn (xs) (string/length (first (map xs (fn (x) x)))))");
     assert!(
         w.iter().all(|s| !s.contains("string/length")),
         "an identity callback over an unknown collection must not refine: {w:?}"
@@ -5215,7 +5219,7 @@ fn map_filter_do_not_refine_when_uncertain() {
     // both branches, `1 | "a"`, which is not provably a string → reported by `⊆` (precise).
     // Over `(list 1 2 3)` the else-branch is DEAD (an int is never falsy — `Ctx::is_dead`),
     // so the result is exactly `1`, and `string/length` of it is a genuine misuse.
-    let w = warnings(r#"(string/length (first (map (fn (x) (if x 1 "a")) (list 1 2 3))))"#);
+    let w = warnings(r#"(string/length (first (map (list 1 2 3) (fn (x) (if x 1 "a")))))"#);
     assert!(
         w.iter()
             .any(|s| s.contains("string/length") && s.contains("got 1")),
@@ -5227,15 +5231,15 @@ fn map_filter_do_not_refine_when_uncertain() {
 
 #[test]
 fn reduce_result_is_the_accumulator_type() {
-    // `(reduce + 0 (list 1 2 3))` : number (init int ∪ +'s number return) —
+    // `(reduce (list 1 2 3) 0 +)` : number (init int ∪ +'s number return) —
     // disjoint from string → flagged.
-    let w = warnings("(string/length (reduce + 0 (list 1 2 3)))");
+    let w = warnings("(string/length (reduce (list 1 2 3) 0 +))");
     assert!(
         w.iter().any(|s| s.contains("string/length")),
         "reduce's accumulator type should flow out: {w:?}"
     );
     // ...and a numeric sink is fine.
-    let w = warnings("(+ 1 (reduce + 0 (list 1 2 3)))");
+    let w = warnings("(+ 1 (reduce (list 1 2 3) 0 +))");
     assert!(
         w.iter().all(|s| !s.contains("expects")),
         "a numeric reduce result must not warn against +: {w:?}"
@@ -5244,9 +5248,9 @@ fn reduce_result_is_the_accumulator_type() {
 
 #[test]
 fn fold_with_a_lambda_callback_types_the_result() {
-    // `(fold (fn (acc x) (+ acc x)) 0 …)` : number — the 2-arg callback's
+    // `(fold … 0 (fn (acc x) (+ acc x)))` : number — the 2-arg callback's
     // return (number) joined with the init (int).
-    let w = warnings("(string/length (fold (fn (acc x) (+ acc x)) 0 (list 1 2 3)))");
+    let w = warnings("(string/length (fold (list 1 2 3) 0 (fn (acc x) (+ acc x))))");
     assert!(
         w.iter().any(|s| s.contains("string/length")),
         "fold should type the accumulator from a lambda callback: {w:?}"
@@ -5256,13 +5260,13 @@ fn fold_with_a_lambda_callback_types_the_result() {
 #[test]
 fn reduce_fold_bail_when_init_or_callback_unknown() {
     // Unknown callback (local) → flat, no warning.
-    let w = warnings("(fn (g) (string/length (reduce g 0 (list 1 2 3))))");
+    let w = warnings("(fn (g) (string/length (reduce (list 1 2 3) 0 g)))");
     assert!(
         w.iter().all(|s| !s.contains("string/length")),
         "an unknown reduce callback must not refine: {w:?}"
     );
     // Unknown init type (a fn param) → flat, no warning.
-    let w = warnings("(fn (init) (string/length (reduce + init (list 1 2 3))))");
+    let w = warnings("(fn (init) (string/length (reduce (list 1 2 3) init +)))");
     assert!(
         w.iter().all(|s| !s.contains("string/length")),
         "an unknown init must not refine the reduce result: {w:?}"
@@ -6044,7 +6048,7 @@ fn a_lambda_callback_with_a_merely_wider_result_is_not_flagged() {
 fn a_tuple_shape_does_not_leak_onto_a_pair_member_through_first() {
     let ws = file_warnings(
         "(sig takes-str (string -> any))\n(defn takes-str (s) s)\n\
-         (defn fp () (takes-str (first (fold (fn (a x) (cons x a)) [0] [\"t\"]))))",
+         (defn fp () (takes-str (first (fold [\"t\"] [0] (fn (a x) (cons x a))))))",
     );
     assert!(ws.is_empty(), "{ws:?}");
 }
@@ -6127,7 +6131,7 @@ fn a_same_file_callback_is_checked_from_its_inferred_signature() {
 #[test]
 fn a_permissive_higher_order_stdlib_callback_stays_silent() {
     // `map`'s curated arrow is `(any) -> any`, which is disjoint from nothing.
-    let ws = file_warnings("(defn c () (map string/length [1 2 3]))");
+    let ws = file_warnings("(defn c () (map [1 2 3] string/length))");
     assert!(!ws.iter().any(|w| w.contains("callback handed")), "{ws:?}");
 }
 
@@ -6540,7 +6544,7 @@ fn a_named_same_file_callback_flows_its_result_under_the_combinators_inputs() {
     // what an inline `fn` always got) makes the fold precise.
     let sigs = signatures(
         "(defn step (acc val) (conj acc (string/->number val)))
-         (defn run (xs) (first (reduce step '() xs)))",
+         (defn run (xs) (first (reduce xs '() step)))",
     );
     let run = sigs.iter().find(|s| s.0 == "run").expect("run");
     assert_eq!(run.1, "(seqable) -> nil | number", "{sigs:?}");
@@ -6550,14 +6554,14 @@ fn a_named_same_file_callback_flows_its_result_under_the_combinators_inputs() {
         "(defn token
            (((x y & acc) \"+\") (conj acc (+ y x)))
            ((acc val) (conj acc (string/->number val))))
-         (defn calc (input) (first (reduce token '() (string/split input \" \"))))",
+         (defn calc (input) (first (reduce (string/split input \" \") '() token)))",
     );
     let calc = sigs.iter().find(|s| s.0 == "calc").expect("calc");
     assert_eq!(calc.1, "(string) -> nil | number", "{sigs:?}");
     // `map` with a named callback flows its return the same way.
     let sigs = signatures(
         "(defn g (v) (string/->number v))
-(defn h (xs) (first (map g xs)))",
+(defn h (xs) (first (map xs g)))",
     );
     let h = sigs.iter().find(|s| s.0 == "h").expect("h");
     assert_eq!(h.1, "(seqable) -> nil | number", "{sigs:?}");
@@ -6581,7 +6585,7 @@ fn a_declared_callback_signature_is_honoured_by_the_combinators() {
     let sigs = signatures(
         "(sig g (string -> int))
 (defn g (v) (string/length v))
-         (defn h (xs) (first (map g xs)))",
+         (defn h (xs) (first (map xs g)))",
     );
     let h = sigs.iter().find(|s| s.0 == "h").expect("h");
     assert_eq!(h.1, "(seqable) -> nil | int", "{sigs:?}");
@@ -6594,9 +6598,9 @@ fn specialization_declines_a_lexical_local_callback_and_a_variadic_arm() {
     // positional binding to specialize under — both stay flat.
     let sigs = signatures(
         "(defn step (acc val) (conj acc val))
-         (defn run (xs) (let (step (fn (a v) a)) (reduce step '() xs)))
+         (defn run (xs) (let (step (fn (a v) a)) (reduce xs '() step)))
          (defn vstep (acc & vals) (conj acc (count vals)))
-         (defn vrun (xs) (reduce vstep '() xs))",
+         (defn vrun (xs) (reduce xs '() vstep))",
     );
     let run = sigs.iter().find(|s| s.0 == "run").expect("run");
     assert!(!run.1.contains("list"), "{sigs:?}");
@@ -7563,11 +7567,11 @@ fn a_guards_truthy_leftover_renders_as_a_negation() {
 // A `& rest` function's fixed parameters bind positionally like any other's, so they keep
 // their demands; the rest binder's demand becomes a per-argument one. And a known callback
 // hands its demands to `fold`/`reduce`'s init and collection. Together:
-// `(defn foo (x y & more) (+ (fold + x more) y))` is `(number number & number -> number)`.
+// `(defn foo (x y & more) (+ (fold more x +) y))` is `(number number & number -> number)`.
 #[test]
 fn a_rest_function_keeps_its_positional_demands_and_fold_hands_down_the_callbacks() {
     let mut interp = crate::Interp::new();
-    let form = reader::read_one(&mut interp.heap, "(fn (x y & more) (+ (fold + x more) y))")
+    let form = reader::read_one(&mut interp.heap, "(fn (x y & more) (+ (fold more x +) y))")
         .expect("parse");
     let demands =
         super::sigs::infer_params_from_form(&interp.heap, form, &Ctx::default()).expect("demands");
@@ -7581,7 +7585,7 @@ fn a_rest_function_keeps_its_positional_demands_and_fold_hands_down_the_callback
     let ws = file_warnings(
         "\
          (defmodule t)\n\
-         (defn foo (x y & more) (+ (fold + x more) y))\n\
+         (defn foo (x y & more) (+ (fold more x +) y))\n\
          (defn bad () (foo 1 2 3 \"four\"))",
     );
     assert!(
@@ -7603,7 +7607,7 @@ fn length_preserving_combinators_over_a_non_empty_list_drop_the_nil() {
         "list<1 | 2 | string>"
     );
     assert_eq!(ty_str("(append '(1) nil)"), "list<1>");
-    assert_eq!(ty_str("(map inc '(1 2))"), "list<int>");
+    assert_eq!(ty_str("(map '(1 2) inc)"), "list<int>");
     assert_eq!(ty_str("(sort '(3 1))"), "list<1 | 3>");
     assert_eq!(ty_str("(reverse '(1 2))"), "list<1 | 2>");
     assert_eq!(ty_str("(first '(1 2))"), "1 | 2");
@@ -7611,9 +7615,85 @@ fn length_preserving_combinators_over_a_non_empty_list_drop_the_nil() {
     assert_eq!(ty_str("(range 5)"), "list<int>");
     assert_eq!(ty_str("(into '(1) '(2))"), "list<1 | 2>");
     // …and what may be empty keeps the nil
-    assert!(ty_str("(filter even? '(1 2))").starts_with("nil | "));
+    assert!(ty_str("(filter '(1 2) even?)").starts_with("nil | "));
     assert!(ty_str("(rest '(1 2))").starts_with("nil | "));
     assert!(ty_str("(nth '(1 2) 5)").contains("nil"));
     assert!(ty_str("(first [1 2])").contains("nil") || ty_str("(first [1 2])") == "1");
-    assert!(ty_str("(map inc [])").starts_with("nil"));
+    assert!(ty_str("(map [] inc)").starts_with("nil"));
+}
+
+// ---- discarded catch (`:discarded-catch`) ----
+// A `(catch e <constant>)` handler cannot have read the error it caught, so it
+// swallows an unbound symbol (a rename) or a real fault unseen. The lint reads the
+// UN-expanded forms, so only an author-written catch is seen — never the one a
+// macro such as `assert-error` builds.
+
+#[test]
+fn discarded_catch_warns_on_constant_handler_bodies() {
+    for src in [
+        "(defn f () (try (gui-font 1) (catch e nil)))",
+        "(defn f () (try (gui-font 1) (catch _ nil)))",
+        "(defn f () (try (gui-font 1) (catch e false)))",
+        "(defn f () (try (gui-font 1) (catch e (do))))",
+    ] {
+        let w = file_warnings(&format!("(defn gui-font (x) x) {src}"));
+        assert!(
+            w.iter()
+                .any(|m| m.starts_with(discarded_catch::DISCARDED_CATCH_PREFIX)),
+            "must warn on a discarded catch ({src}): {w:?}"
+        );
+    }
+}
+
+#[test]
+fn discarded_catch_stays_silent_when_the_error_is_used_or_handled() {
+    for src in [
+        "(defn f () (try (gui-font 1) (catch e (log/warn (error-message e)))))",
+        "(defn f () (try (gui-font 1) (catch _ (fallback))))",
+        "(defn f () (try (gui-font 1) (catch e (if (map? e) nil e))))",
+        "(defn f () (try (gui-font 1)))",
+        "(defn f () (try (gui-font 1) (catch e e)))",
+        // A SENTINEL is intent — "it threw" as a value — not a swallowed error.
+        "(defn f () (try (gui-font 1) (catch e :raised)))",
+        "(defn f () (try (gui-font 1) (catch _ true)))",
+        "(defn f () (try (gui-font 1) (catch _ \"failed\")))",
+        "(defn f () (try (gui-font 1) (catch _ 0)))",
+        // Macro-built catches are the macro's business, not the author's.
+        "(defmacro swallow (& body) `(try (do ~@body) (catch e nil)))",
+        "(defn f () (assert-error (gui-font 1)))",
+    ] {
+        let w = file_warnings(&format!("(defn gui-font (x) x) (defn fallback () 1) {src}"));
+        assert!(
+            w.iter()
+                .all(|m| !m.starts_with(discarded_catch::DISCARDED_CATCH_PREFIX)),
+            "must not warn when the catch is used or handled ({src}): {w:?}"
+        );
+    }
+}
+
+#[test]
+fn discarded_catch_check_allow_suppresses_only_its_category() {
+    let src = "(defn gui-font (x) x) (defn f () (try (gui-font 1) (catch e nil)))";
+    let w = file_warnings(&format!("(check-allow :discarded-catch {src})"));
+    assert!(
+        w.iter()
+            .all(|m| !m.starts_with(discarded_catch::DISCARDED_CATCH_PREFIX)),
+        "check-allow :discarded-catch must suppress: {w:?}"
+    );
+    // The opt-out works on the inner expression too, not only at the top level.
+    let w = file_warnings(
+        "(defn gui-font (x) x) (defn f () (check-allow :discarded-catch (try (gui-font 1) (catch e nil))))",
+    );
+    assert!(
+        w.iter()
+            .all(|m| !m.starts_with(discarded_catch::DISCARDED_CATCH_PREFIX)),
+        "inner check-allow :discarded-catch must suppress: {w:?}"
+    );
+    // A mismatched category does not suppress.
+    let w = file_warnings(&format!("(check-allow :unbound {src})"));
+    assert!(
+        w.iter()
+            .any(|m| m.starts_with(discarded_catch::DISCARDED_CATCH_PREFIX)),
+        "a mismatched category must not suppress the discarded-catch lint: {w:?}"
+    );
 }

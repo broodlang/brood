@@ -51,13 +51,12 @@ const SNAPSHOT: &str = r#"
     (do
       (doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))
       (apply str
-        (map (fn (s)
+        (map (sort (reflect/global-names)) (fn (s)
                (str (->string s)
                     " " (->string (type-of (reflect/eval s)))
                     (if (reflect/private? s) " private" "")
                     " :: " (or (try (reflect/type-signature s) (catch _ nil)) "-")
-                    "\n"))
-          (sort (reflect/global-names)))))
+                    "\n")))))
 "#;
 
 fn snapshot(install_image: bool) -> String {

@@ -67,11 +67,11 @@
 ;; reference a name only some alternatives bind, and which one it is depends on the
 ;; input. Rust enforces the same rule for the same reason.
 (defn- %match-or-check (alts)
-  (let (name-sets (map (fn (a) (sort (map ->string (%pattern-vars a)))) alts))
-    (when (not (every? (fn (ns) (= ns (first name-sets))) name-sets))
+  (let (name-sets (map alts (fn (a) (sort (map (%pattern-vars a) ->string)))))
+    (when (not (every? name-sets (fn (ns) (= ns (first name-sets)))))
       (error (str "match: every alternative of an `(or …)` pattern must bind the same"
                " names, got "
-               (pr-str (map (fn (ns) ns) name-sets))
+               (pr-str (map name-sets (fn (ns) ns)))
                " — a body can't reference a name only some alternatives bind."
                " Use separate clauses when the bindings differ.")))))
 
@@ -466,16 +466,13 @@ NON-LINEAR patterns (the same name twice) work.
 ;; The explicit `{key subpattern}` entries — every key except the two markers — as
 ;; a list of `[key subpattern]` pairs.
 (defn- %match-map-entries (pat)
-  (filter (fn (kv) (not (or (= (first kv) :keys) (= (first kv) :or))))
-    (%map-pairs pat)))
+  (filter (%map-pairs pat) (fn (kv) (not (or (= (first kv) :keys) (= (first kv) :or))))))
 
 (defn- %match-map-vars (pat)
   (do
     (%match-map-check pat)
     (append (%match-map-keys pat)
-      (fold (fn (acc kv) (append acc (%pattern-vars (second kv))))
-        nil
-        (%match-map-entries pat)))))
+      (fold (%match-map-entries pat) nil (fn (acc kv) (append acc (%pattern-vars (second kv))))))))
 
 (defn- %match-compile-map (pat target bound success fail)
   (do
@@ -586,7 +583,7 @@ NON-LINEAR patterns (the same name twice) work.
 (defn- %match-no-match (context target patterns)
   `(throw [:match-error (quote ~context) ~target (quote ~patterns)]))
 
-(defn- %match-clause-patterns (clauses) (map (fn (c) (if (pair? c) (first c) c)) clauses))
+(defn- %match-clause-patterns (clauses) (map clauses (fn (c) (if (pair? c) (first c) c))))
 
 (defn- %match-check-reachable (clause following)
   (let (parsed (%match-parse-clause clause))

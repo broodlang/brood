@@ -21,7 +21,7 @@
   (test "8 writers x 25k puts + mid-run migration lose nothing"
     (let (t (table/new) me (self))
       (do
-        (fold (fn (_ k) (spawn (hammer t me (* k 25000) (* (+ k 1) 25000)))) nil (range 8))
+        (fold (range 8) nil (fn (_ k) (spawn (hammer t me (* k 25000) (* (+ k 1) 25000)))))
         (sleep 2)
         (table/put t "force-migration" :now)
         (assert= (await-n 8) :ok)
@@ -40,7 +40,7 @@
   (test "8 processes x 20k incrs on one key across a migration = 160000"
     (let (t (table/new) me (self))
       (do
-        (fold (fn (_ k) (spawn (bump t me 7 20000))) nil (range 8))
+        (fold (range 8) nil (fn (_ k) (spawn (bump t me 7 20000))))
         (sleep 1)
         (table/put t "migrate" :x)
         (assert= (await-n 8) :ok)
@@ -66,7 +66,7 @@
   (test "ops during a drop either apply or error — never crash"
     (let (t (table/new) me (self))
       (do
-        (fold (fn (_ k) (spawn (poke t me 30000 0 0))) nil (range 4))
+        (fold (range 4) nil (fn (_ k) (spawn (poke t me 30000 0 0))))
         (sleep 3)
         (table/drop t)
         (let ([oks errs] (await-pairs 4 0 0))
@@ -85,14 +85,14 @@
   (if (= n 0)
     :ok (let (s (table/snapshot t))
       (do
-        (fold (fn (_ [k v]) (assert= v (* k 3))) nil (seq s))
+        (fold (seq s) nil (fn (_ [k v]) (assert= v (* k 3))))
         (snap-loop t (- n 1))))))
 
 (describe "table stress: snapshots under concurrent writes"
   (test "every snapshot entry is a value some writer stored"
     (let (t (table/new) me (self))
       (do
-        (fold (fn (_ k) (spawn (hammer t me (* k 10000) (* (+ k 1) 10000)))) nil (range 4))
+        (fold (range 4) nil (fn (_ k) (spawn (hammer t me (* k 10000) (* (+ k 1) 10000)))))
         (snap-loop t 50)
         (assert= (await-n 4) :ok)
         (table/drop t)
