@@ -116,15 +116,28 @@ jobs:
       - name: Start Postgres
         if: inputs.postgres
         run: |
+          set -uo pipefail
           docker run -d --name ci-postgres \
             -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -e POSTGRES_DB=postgres \
             -p 5432:5432 postgres:16-alpine
           # The container is up long before the server accepts connections; poll rather
           # than sleep a guessed interval.
+          ready=""
           for i in $(seq 1 60); do
-            docker exec ci-postgres pg_isready -U postgres -q && break
+            if docker exec ci-postgres pg_isready -U postgres -q; then ready=yes; break; fi
             sleep 1
           done
+          # Say WHY on failure. Without this the loop runs its 60 turns in silence and the
+          # step ends on a bare `pg_isready` exit code, so an image-pull failure, a port
+          # clash and a genuinely slow server are indistinguishable — and the whole gate
+          # reads as "store-postgres is broken" when nothing in the package moved. Seen
+          # 2026-08-31 on store-postgres 4c570f80, whose code was green locally.
+          if [ -z "$ready" ]; then
+            echo "::error::Postgres did not accept connections within 60s — diagnostics follow"
+            docker ps -a || true
+            docker logs ci-postgres 2>&1 | tail -40 || true
+            exit 1
+          fi
           docker exec ci-postgres pg_isready -U postgres
 
       - name: Boot check
