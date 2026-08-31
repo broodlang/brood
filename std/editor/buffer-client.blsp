@@ -133,7 +133,13 @@ process uses on ours) into the `[:splice …]` to apply, and the pendings are re
 over it, as the process will when they arrive after it. A foreign splice that
 touches a span one of ours also touched is genuinely ambiguous → `:pending` resets
 and the caller must `:resync` from the process. A full-text view (closure edits, the
-seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
+seed) is handed back as `[:text s]` — unless we hold IN-FLIGHT edits, where rebuilding
+from it would clobber them (the attach seed racing a first keystroke: the stale
+snapshot rewound the local copy to empty, the own-echo after it was rightly a `:noop`,
+and the next keystroke spliced at 0 — `qZ` for `Zq`); that case is `:resync` too,
+which is EXACT here, not merely safe: our sends and the sync query share one FIFO to
+the process, so the snapshot always contains every in-flight edit of ours. A
+cursor-only delta is `:noop`."
   (if (<= version (or (get link :version) -1))
     [link :stale]
     (let (vp (view-parts view)
@@ -174,4 +180,7 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
                 (map pending (fn (p) (let ([plo phi plen] p) [plo phi plen]))))]]
         splice [nlink :resync]
         (nil? text) [nlink :noop]
+        ;; a full-text rebuild over in-flight edits would clobber them — resync
+        ;; (atomic snapshot; includes our sends by FIFO order), pendings reset
+        (not (empty? pending)) [(assoc nlink :pending ()) :resync]
         else [nlink [:text text]]))))

@@ -1712,18 +1712,46 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
 
 ;; --- publish: build a source tarball, then POST it (Bearer-token authed) -----
 
+(def- tarball-excludes
+  ["--exclude=./_deps"
+    "--exclude=./_build" "--exclude=./.git" "--exclude=./tests" "--exclude=./project.lock.blsp"
+    "--exclude=*.tar.gz"])
+
+(defn- registry-tracked-files (root)
+  "The project's git-TRACKED paths relative to `root`, or nil when `root` is not a git
+work tree (or git is unavailable). Ignored and untracked files are absent by
+construction, which is the point — see `registry-build-tarball`."
+  (let (r (check-allow :discarded-catch
+            (try
+              (os/cmd "git" ["-C" root "ls-files" "--cached" "--exclude-standard"])
+              (catch _ nil))))
+    (if (or (nil? r) (not (= (get r :exit) 0)))
+      nil
+      (let (paths (filter (string/split (get r :stdout) "\n")
+                    (fn (l) (not (= (string/trim l) "")))))
+        (if (empty? paths) nil paths)))))
+
 (defn- registry-build-tarball (root)
   "Create a gzip'd source tarball of the project at `root` — its files at the archive
   root — excluding `_deps/`, `_build/`, `.git/`, `tests/`, the lock file, and any
-  stray tarball. Returns the archive path (under `_deps/`, which the excludes skip)."
+  stray tarball. Returns the archive path (under `_deps/`, which the excludes skip).
+
+  The file list comes from `git ls-files` where it can: `tar .` packs whatever happens to
+  be lying in the working directory, so a local build artifact ships to the registry as
+  part of a \"source\" release. bedit made that visible by failing with HTTP 413 — a 41 MB
+  `bedit` bundle sat in its root, git-ignored — but size is the symptom, not the problem:
+  the same path would publish any untracked file, and a tarball whose contents depend on
+  what you last built is not reproducible. Outside a git work tree there is nothing to
+  consult, so the whole-directory walk stays as the fallback."
   (let (out (path/join (package-deps-dir root)
               (str *project-name* "-" *project-version* ".tar.gz")))
     (file/mkdir (package-deps-dir root))
     (when (file/exists? out) (file/rm out))
-    (let (code (os/run-process "tar"
-                 (list "-czf"
-                   out "-C" root "--exclude=./_deps" "--exclude=./_build" "--exclude=./.git"
-                   "--exclude=./tests" "--exclude=./project.lock.blsp" "--exclude=*.tar.gz" ".")))
+    (let (tracked (registry-tracked-files root)
+          args (if tracked
+                 (into (into ["-czf" out "-C" root] tarball-excludes) tracked)
+                 (into (into ["-czf" out "-C" root] tarball-excludes) ["."]))
+          code (os/run-process "tar" args))
       (when (not (= code 0))
         (error "package: building the source tarball failed (tar exit " code ")"))
       out)))
