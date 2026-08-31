@@ -169,9 +169,9 @@
   (test "leading zeros"
     (assert= (datetime/date 2000 1 5)
       (datetime/parse-date "2000-01-05")))
-  (test "invalid returns nil"
-    (assert= nil (datetime/parse-date "not-a-date"))
-    (assert= nil (datetime/parse-date "2026-06"))))
+  (test "invalid returns a failure"
+    (is (failure? (datetime/parse-date "not-a-date")))
+    (is (failure? (datetime/parse-date "2026-06")))))
 
 (describe "parse-time"
   (test "no fractional seconds"
@@ -194,9 +194,9 @@
   (test "with milliseconds"
     (assert= (datetime/datetime 2026 6 7 15 4 30 750)
       (datetime/parse-iso8601 "2026-06-07T15:04:30.750Z")))
-  (test "invalid returns nil"
-    (assert= nil (datetime/parse-iso8601 "not a date"))
-    (assert= nil (datetime/parse-iso8601 "2026-06-07"))))
+  (test "invalid returns a failure"
+    (is (failure? (datetime/parse-iso8601 "not a date")))
+    (is (failure? (datetime/parse-iso8601 "2026-06-07")))))
 
 ;; A numeric zone designator is as much a part of ISO 8601 as `Z`, and every timestamp a real
 ;; API hands you carries one. It used to return **nil** — indistinguishable from malformed
@@ -221,10 +221,10 @@
   (test "an offset that crosses midnight moves the date, and the year with it"
     (assert= (datetime/datetime 2025 12 31 22 30 0 0)
       (datetime/parse-iso8601 "2026-01-01T00:30:00+02:00")))
-  (test "a malformed offset is still nil, not a silently wrong instant"
-    (assert= nil (datetime/parse-iso8601 "2026-01-02T03:04:05+99:00"))
-    (assert= nil (datetime/parse-iso8601 "2026-01-02T03:04:05+xx"))
-    (assert= nil (datetime/parse-iso8601 "2026-01-02T03:04:05+2:0"))))
+  (test "a malformed offset still fails, not a silently wrong instant"
+    (is (failure? (datetime/parse-iso8601 "2026-01-02T03:04:05+99:00")))
+    (is (failure? (datetime/parse-iso8601 "2026-01-02T03:04:05+xx")))
+    (is (failure? (datetime/parse-iso8601 "2026-01-02T03:04:05+2:0")))))
 
 ;; ---- arithmetic -------------------------------------------------------------
 
@@ -346,46 +346,46 @@
 ;; quietly moves it is worse than one that rejects it: the caller's validation
 ;; looks like it passed. The calendar core itself was always correct.
 
-(describe "parse-date — impossible dates are nil, not normalised"
+(describe "parse-date — impossible dates fail, not normalised"
   (test "a day past the end of the month"
-    (assert= nil (datetime/parse-date "2026-02-31"))
-    (assert= nil (datetime/parse-date "2026-04-31"))
-    (assert= nil (datetime/parse-date "2026-01-32")))
+    (is (failure? (datetime/parse-date "2026-02-31")))
+    (is (failure? (datetime/parse-date "2026-04-31")))
+    (is (failure? (datetime/parse-date "2026-01-32"))))
   (test "an out-of-range month"
-    (assert= nil (datetime/parse-date "2026-13-05"))
-    (assert= nil (datetime/parse-date "2026-00-05")))
+    (is (failure? (datetime/parse-date "2026-13-05")))
+    (is (failure? (datetime/parse-date "2026-00-05"))))
   (test "a zero day"
-    (assert= nil (datetime/parse-date "2026-01-00")))
+    (is (failure? (datetime/parse-date "2026-01-00"))))
   (test "leap days follow the real calendar"
     (refute (nil? (datetime/parse-date "2024-02-29")))
-    (assert= nil (datetime/parse-date "2026-02-29"))
+    (is (failure? (datetime/parse-date "2026-02-29")))
     (refute (nil? (datetime/parse-date "2000-02-29")))
-    (assert= nil (datetime/parse-date "1900-02-29")))
+    (is (failure? (datetime/parse-date "1900-02-29"))))
   (test "ordinary dates still parse"
     (let (d (datetime/parse-date "2026-08-24"))
       (assert= 2026 (datetime/date-year d))
       (assert= 8 (datetime/date-month d))
       (assert= 24 (datetime/date-day d)))))
 
-(describe "parse-time — out-of-range components are nil"
+(describe "parse-time — out-of-range components fail"
   (test "a negative component"
-    (assert= nil (datetime/parse-time "12:-5:00")))
+    (is (failure? (datetime/parse-time "12:-5:00"))))
   (test "hour, minute and second bounds"
-    (assert= nil (datetime/parse-time "24:00:00"))
-    (assert= nil (datetime/parse-time "12:60:00"))
-    (assert= nil (datetime/parse-time "12:00:60"))
+    (is (failure? (datetime/parse-time "24:00:00")))
+    (is (failure? (datetime/parse-time "12:60:00")))
+    (is (failure? (datetime/parse-time "12:00:60")))
     (refute (nil? (datetime/parse-time "23:59:59"))))
-  (test "junk after the Z is nil, not silently truncated"
-    (assert= nil (datetime/parse-time "12:00:00Zjunk"))
+  (test "junk after the Z fails, not silently truncated"
+    (is (failure? (datetime/parse-time "12:00:00Zjunk")))
     (refute (nil? (datetime/parse-time "12:00:00Z"))))
-  (test "a non-numeric fraction is nil, not 0 ms"
-    (assert= nil (datetime/parse-time "12:00:00.xyz"))
+  (test "a non-numeric fraction fails, not 0 ms"
+    (is (failure? (datetime/parse-time "12:00:00.xyz")))
     (refute (nil? (datetime/parse-time "12:00:00.250")))))
 
 (describe "parse-iso8601 — validation flows through"
-  (test "an impossible hour is nil"
-    (assert= nil (datetime/parse-iso8601 "2026-01-01T99:00:00Z")))
-  (test "an impossible date is nil"
-    (assert= nil (datetime/parse-iso8601 "2026-02-31T00:00:00Z")))
+  (test "an impossible hour fails"
+    (is (failure? (datetime/parse-iso8601 "2026-01-01T99:00:00Z"))))
+  (test "an impossible date fails"
+    (is (failure? (datetime/parse-iso8601 "2026-02-31T00:00:00Z"))))
   (test "a real timestamp still parses"
     (refute (nil? (datetime/parse-iso8601 "2026-08-24T12:34:56.789Z")))))

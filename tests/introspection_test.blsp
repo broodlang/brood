@@ -316,7 +316,7 @@
   (test "a named callback's result flows from what the combinator hands it"
     (let (sigs (reflect/source-signatures "(defn ixs-step (acc val) (conj acc (string/->number val)))\n(defn ixs-run (xs) (first (reduce xs '() ixs-step)))")
           run (seq/find sigs (fn (e) (= (:name e) "ixs-run"))))
-      (assert= (:sig run) "(seqable -> (or nil number))")))
+      (assert= (:sig run) "(seqable -> (or failure nil number))")))
 
   ;; ── ADR-308 guard: the checker's structural reasoning about combinators ──────
   ;; `infer.rs` reads the collection and the callback out of a `map`/`keep`/`fold`/
@@ -349,6 +349,15 @@
       ;; does, so `(or nil number)` narrows to `number` (see infer.rs).
       (assert= "(seqable -> (or nil (list number)))"
         (sig-of "(defn icb-k (xs) (seq/keep xs (fn (x) (string/->number x))))" "icb-k"))))
+
+  ;; An INLINE pattern-clause literal is two spellings of the named `token` reducer the
+  ;; Rust tests pin — and it read `(string -> any)` while the named spelling was precise,
+  ;; because the literal is lowered to a variadic `match*` lambda before call sites are
+  ;; typed. The surface pre-pass now records the literal's clauses by printed head list
+  ;; and `clause_lambda_ret` recovers them (found on an RPN reduce, 2026-08-31).
+  (test "an inline pattern-clause reduce callback keeps the named spelling's precision"
+    (let (hit (first (reflect/source-signatures "(defn calc (expr) (-> expr (string/split) (reduce '() (fn (((x y & acc) \"+\") (conj acc (+ x y))) ((acc val) (conj acc (string/->number val))))) (first)))")))
+      (assert= (:sig hit) "(string -> (or failure nil number))")))
 
   (test "a declared sig is reported as declared, and wins"
     (let (hit (first (reflect/source-signatures "(sig ixs-d (int -> int))\n(defn ixs-d (x) x)")))

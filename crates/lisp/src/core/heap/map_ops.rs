@@ -817,6 +817,31 @@ impl Heap {
     /// atomic-refcount traffic dominates the per-byte memcpy at small sizes.
     /// Every `String -> Value::Str` path must come through here — don't add a
     /// second allocator that bypasses the threshold.
+    /// Build a **failure** value (see [`crate::core::value::Value::Failure`]) carrying
+    /// `:message`. The one place a failure is constructed in the kernel, so its shape
+    /// stays in one spot: a CHAMP map re-wrapped as its own kind.
+    pub fn alloc_failure(&mut self, message: &str) -> Value {
+        let key = Value::Keyword(crate::core::value::intern("message"));
+        let msg = self.alloc_string(message);
+        match self.map_from_pairs(vec![(key, msg)]) {
+            Value::Map(id) => Value::failure(id),
+            other => other,
+        }
+    }
+
+    /// The `:message` a failure carries, as a Rust `String` — `None` for anything
+    /// that is not a failure. The host-side twin of the `%failure-message` primitive.
+    pub fn failure_message(&self, v: Value) -> Option<String> {
+        let Value::Failure(id) = v else {
+            return None;
+        };
+        let key = Value::Keyword(crate::core::value::intern("message"));
+        match self.map_get(id, key) {
+            Some(Value::Str(s)) => Some(self.string(s).to_string()),
+            _ => None,
+        }
+    }
+
     pub fn alloc_string(&mut self, s: &str) -> Value {
         let entry = if s.len() >= SHARED_BLOB_THRESHOLD {
             LocalString::shared(SharedBlob::new(s.as_bytes()))

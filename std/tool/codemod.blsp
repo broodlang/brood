@@ -410,7 +410,7 @@ call is still in the old callback-first order.
 
     (codemod/number-shaped? \"3\")   → true"
   (let (t (string/trim text))
-    (or (not (nil? (string/->number t)))
+    (or (not (failure? (string/->number t)))
       (string/starts-with? t "(inc ")
       (string/starts-with? t "(dec ")
       (string/starts-with? t "(count ")

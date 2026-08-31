@@ -95,14 +95,17 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
     (let (c (nth s i))
       (if (= c "%")
         (if (>= (+ i 2) n)
-          ;; Incomplete %XX — emit the % literally as a byte
-          (url-pct-decode-loop s (+ i 1) n (cons (string/char->int c) acc))
+          ;; Incomplete %XX. This used to emit the `%` literally and carry on, which
+          ;; returned CORRUPT DATA — text that looks decoded but isn't — and is the one
+          ;; outcome worse than either failing or raising. `:invalid` unwinds to the
+          ;; public wrapper, which answers a failure naming the input.
+          :invalid
           (let (hi (get url-hex-val (nth s (+ i 1)))
                 lo (get url-hex-val (nth s (+ i 2))))
             (if (and hi lo)
               (url-pct-decode-loop s (+ i 3) n (cons (+ (* hi 16) lo) acc))
-              ;; Not a valid %XX — emit the % literally and re-process
-              (url-pct-decode-loop s (+ i 1) n (cons (string/char->int c) acc)))))
+              ;; Not a valid %XX — same reasoning as the incomplete case above.
+              :invalid)))
         ;; Normal char: encode its UTF-8 bytes into the accumulator
         (url-pct-decode-loop s
           (+ i 1)
@@ -110,13 +113,17 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
           (%reverse-onto (string/->bytes c) acc))))))
 
 (defn percent-decode (s)
-  "Decode percent-encoded sequences in `s`, returning the original string.
-Invalid or incomplete %XX sequences are passed through as-is.
+  "Decode percent-encoded sequences in `s` → the original string, or a `failure` when
+`s` contains an invalid or incomplete %XX sequence.
 
-    (url/percent-decode \"a%20b\") → \"a b\""
-  (let (v (into [] (string/->list s)))
-    (url-pct-decode-loop v 0 (count v) nil)))
-(sig percent-decode (string -> any))
+    (url/percent-decode \"a%20b\")          → \"a b\"
+    (failure? (url/percent-decode \"a%ZZ\"))   → true"
+  (let (v (into [] (string/->list s))
+        r (url-pct-decode-loop v 0 (count v) nil))
+    (if (= r :invalid)
+      (failure "url/percent-decode: invalid percent-encoding: " (pr-str s))
+      r)))
+(sig percent-decode (string -> (or string failure)))
 
 ;; ---- query string encoding --------------------------------------------------
 ;;
@@ -169,23 +176,28 @@ defines rather than as its field map.
   (percent-decode (string/replace s "+" " ")))
 
 (defn- url-parse-query-pairs (parts acc)
-  "Parse a list of `key=value` strings into a string→string map."
+  "Parse a list of `key=value` strings into a string→string map, or the first
+component's `failure` if one will not percent-decode.
+
+A failure must NOT be stored: `(assoc acc <failure> \"\")` would put it in the map as a
+key and hand the caller a structure that looks decoded, which is the corrupt-data
+outcome this whole channel exists to prevent. It propagates out instead — the boundary
+where a decoded query stops being decodable is the query, not one field."
   (if (empty? parts)
     acc
     (let (part (first parts)
-          eq (index-of part "="))
-      (if (< eq 0)
-        ;; bare key with no value — store empty string
-        (url-parse-query-pairs (rest parts)
-          (assoc acc (url-qdecode-str part) ""))
-        (url-parse-query-pairs (rest parts)
-          (assoc acc
-            (url-qdecode-str (string/substring part 0 eq))
-              (url-qdecode-str (string/substring part (+ eq 1) (string/length part)))))))))
+          eq (index-of part "=")
+          k (url-qdecode-str (if (< eq 0) part (string/substring part 0 eq)))
+          v (if (< eq 0) "" (url-qdecode-str (string/substring part (+ eq 1) (string/length part)))))
+      (cond
+        (failure? k) k
+        (failure? v) v
+        else (url-parse-query-pairs (rest parts) (assoc acc k v))))))
 
 (defn query-decode (s)
   "Parse a query string `key=value&key=value` into a string→string map,
-decoding + as space and %XX sequences.
+decoding + as space and %XX sequences — or a `failure` if any component carries an
+invalid %XX sequence (the failure propagates rather than landing in the map).
 
     (url/query-decode \"a=1\")     → {\"a\" \"1\"}"
   (if (= s "")

@@ -39,6 +39,20 @@
     (assert= "hello world" (url/percent-decode "hello%20world")))
   (test "decode %2F as slash"
     (assert= "a/b" (url/percent-decode "a%2Fb")))
+  ;; These used to pass the bad sequence THROUGH, returning text that looks decoded
+  ;; but is not — corrupt data, the one outcome worse than failing. Now a failure.
+  (test "an invalid %XX is a failure, not passed through"
+    (is (failure? (url/percent-decode "a%ZZ")))
+    (is (failure? (url/percent-decode "%GG")))
+    (is (includes? (error-message (url/percent-decode "a%ZZ")) "invalid percent-encoding")))
+  (test "an incomplete %X at the end is a failure"
+    (is (failure? (url/percent-decode "a%2")))
+    (is (failure? (url/percent-decode "a%"))))
+  (test "a failure propagates out of query-decode rather than into the map"
+    ;; storing it would hand back a map that looks decoded — the corrupt-data outcome
+    (is (failure? (url/query-decode "a=1&b=%ZZ")))
+    (is (failure? (url/query-decode "%ZZ=1")))
+    (assert= {"a" "1"} (url/query-decode "a=1")))
   (test "roundtrip"
     (let (s "hello world! /path?q=1&r=2")
       (assert= s (url/percent-decode (url/percent-encode s)))))

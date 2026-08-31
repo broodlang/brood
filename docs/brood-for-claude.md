@@ -1006,15 +1006,25 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   Number types: `int` (bignum on overflow) · `float` · `decimal` (`1.50M`, exact
   base-10) · `ratio` (`1/2`, exact rational). `number?`/`ratio?`/`decimal?` test them.
 - **Text → number: `(string/->number s)`, and it picks the type from the digits.**
-  `"42"` → an `int`, `"3.14"` → a `float`, anything it cannot parse in full → **`nil`**
-  (it never throws, and it rejects `"3abc"`, `"  7 "`, `"1/2"` — `string/trim` first, and
-  `(or (string/->number s) 0)` is the default idiom). So `"3"` gives you an int even when
-  you wanted a float: `(->float (string/->number "3"))`. Going the other way,
-  `math/floor`/`math/round` return an `int` (there is no `trunc`). An optional **radix**
-  reads hex/octal/binary — `(string/->number "1F" 16)` → `31` — integer-only, digits
-  alone (no `0x` prefix), 2–36 or it raises; this is the *only* way, since Brood has no
-  radix literals. For money use `(decimal/of "1.50")`, which **throws** on malformed
-  input rather than answering nil: a parse failing is data, a constructor failing is a bug.
+  `"42"` → an `int`, `"3.14"` → a `float`, anything it cannot parse in full → a
+  **`failure`** (it never throws, and it rejects `"3abc"`, `"  7 "`, `"1/2"` —
+  `string/trim` first). So `"3"` gives you an int even when you wanted a float:
+  `(->float (string/->number "3"))`. Going the other way, `math/floor`/`math/round`
+  return an `int` (there is no `trunc`). An optional **radix** reads hex/octal/binary —
+  `(string/->number "1F" 16)` → `31` — integer-only, digits alone (no `0x` prefix), 2–36
+  or it raises; this is the *only* way, since Brood has no radix literals. For money use
+  `(decimal/of "1.50")`, which **throws**: a parse failing is data, a constructor failing
+  is a bug.
+- **A `failure` is a returned value, not a raise (ADR-310).** Brood splits two channels:
+  a **bug or the unexpected raises** (wrong type, wrong arity, unbound — catch with
+  `try`/`catch`, or let the supervisor have it), while a **known failure comes back as a
+  value** — `(string/->number "abc")`, the `encoding` decoders, `datetime/parse-*`,
+  `url/percent-decode`. Test with `failure?`, read with `error-message`, build one with
+  `(failure "…")`. It is **falsy**, so `(or (string/->number s) 0)` defaults and
+  `(if n …)` branches exactly as they would have with `nil` — but it is *not* `nil`,
+  which still means absence (`get`, `nth`, `os/env`, `first` of empty). There are **no
+  call-site wrappers**: no `attempt`, no `result`, no `ok->`. `seq/keep` drops failures
+  as well as nils, so `(seq/keep lines string/->number)` keeps the numbers.
 - **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-loads
   it — ADR-227): `abs` `ceil` `round` `round-to` (round to N decimals, stays a number)
   `pow` `sqrt` `clamp` `sum` `product`, the sign/parity predicates `positive?`

@@ -205,6 +205,8 @@ fn tag_rank(v: Value) -> u8 {
         // A set sorts among collections, just past maps (its own rank so a
         // heterogeneous set-vs-map fallback never needs a same-rank tiebreak).
         ValueRef::Set(_) => 19,
+        // A failure is not a collection; it sorts after every collection kind.
+        ValueRef::Failure(_) => 24,
         ValueRef::Fn(_) => 9,
         ValueRef::Native(_) => 10,
         ValueRef::Macro(_) => 11,
@@ -445,6 +447,22 @@ impl Heap {
                 (size as u64).hash(h);
                 acc.hash(h);
             }
+            // A failure hashes over its fields like a map, under its own tag byte
+            // (24) so a failure never hashes equal to the map with the same entries.
+            ValueRef::Failure(id) => {
+                24u8.hash(h);
+                let mut acc = 0u64;
+                let mut size = 0usize;
+                self.fold_entries(id, &mut |k, val| {
+                    size += 1;
+                    let mut e = std::collections::hash_map::DefaultHasher::new();
+                    self.hash_value_into_grown(k, &mut e);
+                    self.hash_value_into_grown(val, &mut e);
+                    acc ^= e.finish();
+                });
+                (size as u64).hash(h);
+                acc.hash(h);
+            }
             ValueRef::Set(id) => {
                 // Order-insensitive like Map (XOR the per-element hashes), but a
                 // distinct tag byte (18) and **keys only** (a set's backing values are
@@ -662,6 +680,8 @@ impl Heap {
             // equality on the underlying trie. A set is never equal to a map — that
             // mixed pair falls through to `_ => false` (distinct kinds, ADR-060).
             (Set(x), Set(y)) => self.map_equal(x, y),
+            // Two failures are equal iff they carry the same fields (same CHAMP).
+            (Failure(x), Failure(y)) => self.map_equal(x, y),
             (Fn(x), Fn(y)) => x == y,
             (Macro(x), Macro(y)) => x == y,
             (Native(x), Native(y)) => x == y,
@@ -901,7 +921,9 @@ impl Heap {
             // the entries in KEY order: a CHAMP's iteration order is an artifact of key
             // hashes, so the pairs must be sorted here or the answer would depend on
             // insertion history and two `equal` maps could compare non-`Equal`.
-            (Map(x), Map(y)) => {
+            // Failures compare by their fields, exactly as maps do — one arm, since
+            // the two share the entry-walking CHAMP underneath.
+            (Map(x), Map(y)) | (Failure(x), Failure(y)) => {
                 let (sx, sy) = (self.map_size(x), self.map_size(y));
                 if sx != sy {
                     return sx.cmp(&sy);

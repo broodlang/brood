@@ -440,6 +440,8 @@ const M_NATIVE: u8 = 18;
 /// identity, which is why blob lifetimes don't matter here). Carries the startup image's byte
 /// literals (`#b"…"`), and a cross-node byte send.
 const M_BYTES: u8 = 19;
+/// A failure value — its fields, encoded exactly like `M_MAP`'s entries.
+const M_FAILURE: u8 = 20;
 
 pub(crate) fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     match m {
@@ -518,6 +520,14 @@ pub(crate) fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
         }
         Message::Map(entries) => {
             w.push(M_MAP);
+            put_u32(w, entries.len() as u32);
+            for (k, v) in entries {
+                encode_msg(w, k)?;
+                encode_msg(w, v)?;
+            }
+        }
+        Message::Failure(entries) => {
+            w.push(M_FAILURE);
             put_u32(w, entries.len() as u32);
             for (k, v) in entries {
                 encode_msg(w, k)?;
@@ -696,6 +706,16 @@ fn decode_msg_at(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Message> {
                 entries.push((k, v));
             }
             Message::Map(entries)
+        }
+        M_FAILURE => {
+            let n = get_u32(r)? as usize;
+            let mut entries = Vec::with_capacity(prealloc(r, n));
+            for _ in 0..n {
+                let k = decode_msg_at(r, depth + 1)?;
+                let v = decode_msg_at(r, depth + 1)?;
+                entries.push((k, v));
+            }
+            Message::Failure(entries)
         }
         M_SET => {
             let n = get_u32(r)? as usize;

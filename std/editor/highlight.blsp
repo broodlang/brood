@@ -121,7 +121,7 @@ LSP's DOC_FORMS list."
 first-char gate skips the `string/->number` parse for the common case — an identifier
 that can't begin a number — since this runs on every atom on the fontify hot path."
   (and (includes? "+-.0123456789" (string/char-at tok 0))
-    (not (nil? (string/->number tok)))))
+    (not (failure? (string/->number tok)))))
 
 ;; ---- scanning primitives (shared by lexer + matchers) -----------------------
 

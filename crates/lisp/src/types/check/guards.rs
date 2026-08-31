@@ -231,9 +231,9 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
                 then_only: false,
             });
         }
-        // **Truthiness.** A bare local as the test is itself a guard: only `nil` and
-        // `false` are falsy (`eval::truthy`), so a true test means the local is
-        // neither. This is what `if-let` / `when-let` expand to — `(let (v expr) (if v
+        // **Truthiness.** A bare local as the test is itself a guard: `nil`, `false`
+        // and a `failure` are falsy (`eval::truthy`), so a true test means the local is
+        // none of them. This is what `if-let` / `when-let` expand to — `(let (v expr) (if v
         // then else))` — and without it the *then* branch sees the binding's
         // unnarrowed type. Invisible while a map lookup was untyped; once a closed
         // literal made `(get {:x 10} :y)` exactly `nil` (ADR-264), `(if-let (v (get
@@ -253,7 +253,11 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
         if ctx.is_lexical_local(s) {
             return Some(Guard {
                 sym: s,
-                ty: Ty::of(Tag::Nil).union(Ty::bool_lit(false)).negate(),
+                // `Ty::truthy()` — the ONE definition of falsiness in the checker, so it
+                // cannot drift from the evaluator's. It used to be spelled out here as
+                // `nil ∪ false` negated, which silently excluded `failure` when that kind
+                // arrived and left `(or (parse s) 0)` reading `number | failure`.
+                ty: Ty::truthy(),
                 then_only: false,
             });
         }

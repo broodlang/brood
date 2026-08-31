@@ -70,6 +70,18 @@
 
     (set? #{1})    → true"
   (%eq (type-of x) :set))
+(defn failure? (x)
+  "True if `x` is a **failure** — the value a function returns when it cannot
+interpret its input, as opposed to raising.
+
+A failure is falsy, so `(or (string/->number s) 0)` defaults exactly as it did when
+the answer was `nil`; reach for `failure?` when you want to know *that* it failed,
+and read `:message` when you want to know why.
+
+    (failure? (string/->number \"abc\"))   → true
+    (failure? (string/->number \"42\"))    → false
+    (failure? nil)                        → false   ; absence is not failure"
+  (%eq (type-of x) :failure))
 (defn ref? (x)
   "True if `x` is a `(ref)` token (a unique reference).
 
