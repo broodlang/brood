@@ -8656,3 +8656,21 @@ module sweeps visible mid-run are `doc_examples_test`'s legitimate load-everythi
 inside its own file window, and the KI-89 entry's residual block with the
 next-sighting protocol: preserve the binary, re-run under the lean trace, read the seven
 `chain=` lines against the RESTOREs. KI-98 sighted 3× today, quiet in the last 15 runs.
+
+## 2026-08-31 (evening) — the KI-89 residual has a repro lever, and it is bigger than registries
+
+The residual fired on the next build's first run (`stdimage_test:60`), and this time the
+binary was preserved. Warm and cold-boot (`touch`) re-runs are green, so neither layout
+nor the boot cache is the key. **The lever: delete the stdlib images** — under source-path
+load timing the class fires readily and in new shapes: `ui_test.blsp:284`
+(records/vtables mixing) on one run, and on the next the mechanism was caught LIVE — a
+process died `ability Temporal/->iso: no impl for :tempo/tempo — have (:datetime/…)`:
+tempo's `*impls*` entries ripped out from under a RUNNING dispatch, after which the run
+degraded past a 10-minute bound. So the class is **scope restores racing processes still
+running against the pre-restore globals — readers as well as writers**, the `%isolate`
+soundness condition violated routinely by the scoped suite. The registry lock closed the
+one compounding corruption (wholesale resurrection, still guarded at 0/2000); the rest
+needs a design session — per-file process quiescence, or the spawn-time ownership
+generation `%isolate`'s own comment names as the missing primitive. Everything is in
+KI-89's residual block, including the artifacts (preserved binary + logs in the session
+scratchpad).
