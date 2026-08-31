@@ -6122,6 +6122,42 @@ look like a fix. `mono_devirtualize`'s soundness hole is the narrow part worth c
 independently: it resolves a global and then trusts `*record-ids*` by name, so a stale id
 plus a later same-named non-record would devirtualize wrongly.
 
+**Two more sightings, 2026-08-31 — and the concurrency hypothesis is now DEAD.** Three
+consecutive full `nest test` runs on `da038914` failed, each on a different case, one failure
+per run:
+
+| run | failing case |
+|-----|--------------|
+| 2 | `stdimage_test.blsp:60` — "a root global is attributed to the module that defines it, not to a dependent" |
+| 3 | `ability_test.blsp:471` — "every registered record id names a bound constructor" |
+| 4 (**`-j1`**) | `ability_test.blsp:471`, identically |
+
+Run 4 used `nest test -j1`, so a file's units did **not** run as concurrent workers — which
+retires the "next probe" this entry proposes above (whether a worker of file A is visible to
+a worker of file B). The leak survives a fully serial run, so it is not cross-worker
+visibility; it is the per-file scope restore itself, or file-to-file state in the folding
+process. Both cases pass alone (`ability_test` 94/94, `stdimage_test` 12/12).
+
+`ability_test.blsp:471`'s own diagnostic paid off — it names the orphans, so this sighting
+cost no extra run:
+
+```
+(:tempo/iset :multimap/multimap :tempo/tempo :queue/queue :pq/pq :tempo/span :log/line-backend)
+```
+
+Every one is module-qualified, and every one is a `defrecord` in a std module (`tempo`,
+`multimap`, `queue`, `pq`, `log`) that some *earlier* test file `require`d. So the shape is
+narrower than "a test file's records leak": the ids of **std** records outlive the scope that
+`require`d their module, while the constructors those ids name are correctly unbound again.
+That is a registry write escaping a restore that did roll back the bindings beside it —
+which contradicts hypothesis 1 above as tested (an isolate around a single `require-one`
+leaves the count unchanged), so the escape needs more than one `require` depth, or the
+`nest test` scope is not the same mechanism as a bare `%isolate`.
+
+`stdimage_test.blsp:60` fails by the same asymmetry read the other way: it compares the count
+of globals a module introduces against the count a dependent introduces, and a registry entry
+left behind by an earlier file makes the definer's set no smaller than the dependent's.
+
 ## KI-90 — `mono_devirtualize` trusted `*record-ids*` by NAME after resolving a global ✅ FIXED 2026-08-30
 
 **The hole.** `inline::mono_arg_identity` proves a direct-constructor call's identity by

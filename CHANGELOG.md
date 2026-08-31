@@ -4,7 +4,7 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.20.0 — 2026-08-31
 
 One argument convention, one pipe, and `!` with one meaning. **This release breaks every
 call to a collection function in existing Brood code**, deliberately: pre-1.0, a coherent
