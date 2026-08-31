@@ -699,6 +699,10 @@ Shipped as ADRs:
   `cond`'s bare `else` stays, `!`'s three meanings documented, naming lineage is
   "best name for the job" + `apropos`, the failure convention is throw-for-bugs /
   tagged-value-for-expected, and the reader gaps are documented rather than changed.
+  (**ADR-310 settled the second half**: an expected failure is a `failure` *value* —
+  its own falsy kind carrying a message — not a tagged tuple, which does not thread
+  through `->`. `string/->number`, the `encoding` decoders, `datetime/parse-*` and
+  `url/percent-decode` return one; raising stays the bug/unexpected channel.)
 - ✅ Also landed: `dissoc-in` (completing `get-in`/`assoc-in`/`update-in`), `for`
   taking multiple body forms like every other iteration form, and a hint-table audit
   (five hints named features that didn't exist).

@@ -83,7 +83,9 @@ impl Heap {
                 ValueRef::Vector(id) if id.region() == RUNTIME => {
                     work.extend(self.vector(id).iter().copied());
                 }
-                ValueRef::Map(id) | ValueRef::Set(id) if id.region() == RUNTIME => {
+                ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+                    if id.region() == RUNTIME =>
+                {
                     // `fold_entries` walks the trie in place — no intermediate Vec
                     // (unlike `map_entries`), which matters on this diagnostics walk.
                     // A set shares the trie (values all `true`), so the same walk covers it.
@@ -860,7 +862,9 @@ impl Heap {
                         work.extend(self.vector(id).iter().copied());
                     }
                 }
-                ValueRef::Map(id) | ValueRef::Set(id) if id.region() == RUNTIME => {
+                ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+                    if id.region() == RUNTIME =>
+                {
                     if id.code_gen() == gen {
                         return true;
                     }
@@ -1614,7 +1618,9 @@ fn runtime_gen_of(v: Value) -> Option<usize> {
         ValueRef::Vector(id) | ValueRef::Range(id) | ValueRef::SeqView(id) => {
             in_rt(id.region(), id.code_gen())
         }
-        ValueRef::Map(id) | ValueRef::Set(id) => in_rt(id.region(), id.code_gen()),
+        ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id) => {
+            in_rt(id.region(), id.code_gen())
+        }
         ValueRef::Str(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::BigInt(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::Decimal(id) => in_rt(id.region(), id.code_gen()),
@@ -1670,13 +1676,12 @@ fn flush_rt_value_grown(
         ValueRef::SeqView(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::seqview(flush_rt_vector(old, new, fwd, id))
         }
-        ValueRef::Map(id) if id.region() == RUNTIME && id.code_gen() == g => {
-            Value::map(flush_rt_map(old, new, fwd, id))
-        }
-        // A set shares the CHAMP storage — forward its trie like a map under a
-        // RUNTIME compaction and keep the `Set` wrapper (mirrors `SeqView` above).
-        ValueRef::Set(id) if id.region() == RUNTIME && id.code_gen() == g => {
-            Value::set(flush_rt_map(old, new, fwd, id))
+        // Map, set and failure share one CHAMP store — forward the trie once and
+        // re-wrap in the kind that came in. One arm in place of two near-identical ones.
+        ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+            if id.region() == RUNTIME && id.code_gen() == g =>
+        {
+            crate::core::value::champ_rewrap(v, flush_rt_map(old, new, fwd, id))
         }
         ValueRef::Str(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::str_(flush_rt_string(old, new, fwd, id))

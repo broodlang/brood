@@ -451,10 +451,11 @@ The collection comes FIRST, like every other function in this module
 
 (%defseq keep
   (f)
-  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `seq/xkeep`).
+  "A list of the results of `(f x)` over `coll` that produced something — map and filter fused (the eager counterpart of `seq/xkeep`). A `nil` result drops, and so does a `failure`: both mean nothing was produced, so `(seq/keep lines string/->number)` is \"parse every line, keep the ones that are numbers\".
 
-    (seq/keep [1 2 3 4] (fn (n) (if (math/even? n) (* n 10) nil)))   → (20 40)"
-  (let (y (f item)) (if (nil? y) acc (cons y acc))))
+    (seq/keep [1 2 3 4] (fn (n) (if (math/even? n) (* n 10) nil)))   → (20 40)
+    (seq/keep [\"1\" \"x\" \"3\"] string/->number)                       → (1 3)"
+  (let (y (f item)) (if (or (nil? y) (failure? y)) acc (cons y acc))))
 
 ;; ---- transducer stages (ADR-251) --------------------------------------------
 ;; The four built-in stages, published here beside `transduce` — the only thing

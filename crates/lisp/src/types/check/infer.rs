@@ -1549,7 +1549,12 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let (coll, f) = super::sigs::combinator_args(items)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         let b = callback_ret(heap, f, &[a], ctx).map(|t| {
-            let non_nil = t.clone().difference(Ty::of(Tag::Nil));
+            // `keep` drops nil AND failure — both mean "nothing produced" — so both
+            // come off the element type.
+            let non_nil = t
+                .clone()
+                .difference(Ty::of(Tag::Nil))
+                .difference(Ty::of(Tag::Failure));
             // A callback that only ever yields nil keeps an empty list, i.e. `nil`.
             // Reporting `list<never>` would be true but useless downstream, so keep
             // the unstripped type in that one case.
@@ -1731,7 +1736,12 @@ pub(super) fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &C
             }
             specialize(sig_of(heap, s).map(|sig| sig.ret))
         }
-        Value::Pair(_) => lambda_ret(heap, f, inputs, ctx),
+        // A single-clause plain-param literal types directly; a PATTERN-clause literal
+        // gets the same clause machinery a named multi-clause defn does (the inline
+        // spelling used to fall to `any` while the identical clauses under a `defn`
+        // typed precisely — found on an RPN reduce, 2026-08-31).
+        Value::Pair(_) => lambda_ret(heap, f, inputs, ctx)
+            .or_else(|| super::sigs::clause_lambda_ret(heap, f, inputs, ctx)),
         _ => None,
     }
 }
@@ -1820,6 +1830,14 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
         let Value::Sym(p) = param else {
             return None; // not a plain-symbol parameter
         };
+        // `&`/`&optional`/`&rest` are markers, not parameters: a variadic literal's
+        // frame fill differs per call, and binding the marker itself positionally
+        // typed `(fn (& args) …)` as a 2-param fn whenever a combinator supplied two
+        // inputs — which is exactly the LOWERED pattern-clause lambda's shape, so the
+        // bogus answer also masked `clause_lambda_ret`'s recovery below it.
+        if value::symbol_name_ref(*p).starts_with('&') {
+            return None;
+        }
         sub = sub.bind(*p, input.clone());
     }
     expr_ty(heap, *parts.last()?, &sub)

@@ -21,11 +21,17 @@
   (test "floats parse to floats"
     (assert= (string/->number "3.5") 3.5)
     (assert= (string/->number "-0.25") -0.25))
-  (test "non-numbers and partial matches are nil"
-    (assert= (string/->number "x") nil)
-    (assert= (string/->number "3abc") nil)
-    (assert= (string/->number "") nil)
-    (assert= (string/->number " 5") nil))
+  (test "non-numbers and partial matches are a failure, not nil"
+    ;; A failure names the input, and is FALSY — so `(or … d)` still defaults, but
+    ;; unlike the old nil it can say why, and it never reads as an absent value.
+    (is (failure? (string/->number "x")))
+    (is (failure? (string/->number "3abc")))
+    (is (failure? (string/->number "")))
+    (is (failure? (string/->number " 5")))
+    (is (includes? (error-message (string/->number "3abc")) "not a number: \"3abc\""))
+    (assert= (or (string/->number "x") 0) 0)
+    (assert= (if (string/->number "x") :truthy :falsy) :falsy)
+    (is (not (nil? (string/->number "x")))))
   (test "str is string/->number's inverse"
     (assert= (str 42) "42")
     (assert= (str 3.5) "3.5")
@@ -55,10 +61,10 @@
   (test "a radix parse is integer-only, and takes the digits alone"
     ;; A radix describes an integer notation — "3.5" in any base is not a number
     ;; anyone means — and the `0x` prefix is the syntax this argument replaces.
-    (assert= (string/->number "3.5" 10) nil)
-    (assert= (string/->number "0x1f" 16) nil)
-    (assert= (string/->number "gg" 16) nil)
-    (assert= (string/->number "" 16) nil)
+    (is (failure? (string/->number "3.5" 10)))
+    (is (failure? (string/->number "0x1f" 16)))
+    (is (failure? (string/->number "gg" 16)))
+    (is (failure? (string/->number "" 16)))
     ;; base 10 with an explicit radix is still integer-only, deliberately
     (assert= (string/->number "42" 10) 42))
   (test "a radix past i64 is a bignum, like the base-10 path"

@@ -291,29 +291,34 @@ milliseconds."
           (time-of-day h mn sc (dt-frac->ms frac-str)))))))
 
 (defn parse-date (s)
-  "Parse an ISO 8601 date string \"YYYY-MM-DD\" → a `date`, or nil on failure.
-The date must be a **real** one: the month is 1–12 and the day is within that
-month for that year (so \"2026-02-31\" and \"2026-13-05\" are nil, not a silently
-normalised March date).
+  "Parse an ISO 8601 date string \"YYYY-MM-DD\" → a `date`, or a `failure` naming the
+input. The date must be a **real** one: the month is 1–12 and the day is within that
+month for that year (so \"2026-02-31\" and \"2026-13-05\" fail rather than silently
+normalising to a March date).
 
-    (datetime/format (datetime/parse-date \"2026-08-27\") \"%Y-%m-%d\")   → \"2026-08-27\""
-  (let (parts (string/split s "-"))
-    (when (= (count parts) 3)
-      (let (y (dt-parse-int (nth parts 0))
-            m (or (dt-parse-int (nth parts 1)) -1)
-            d (or (dt-parse-int (nth parts 2)) -1))
-        (when (and (int? y) (dt-in-range? m 1 12) (dt-in-range? d 1 (days-in-month y m)))
-          (date y m d))))))
+    (datetime/format (datetime/parse-date \"2026-08-27\") \"%Y-%m-%d\")   → \"2026-08-27\"
+    (failure? (datetime/parse-date \"2026-02-31\"))                     → true"
+  (or
+    (let (parts (string/split s "-"))
+      (when (= (count parts) 3)
+        (let (y (dt-parse-int (nth parts 0))
+              m (or (dt-parse-int (nth parts 1)) -1)
+              d (or (dt-parse-int (nth parts 2)) -1))
+          (when (and (int? y) (dt-in-range? m 1 12) (dt-in-range? d 1 (days-in-month y m)))
+            (date y m d)))))
+    (failure "datetime/parse-date: not a real YYYY-MM-DD date: " (pr-str s))))
 
 (defn parse-time (s)
-  "Parse \"HH:MM:SS\" or \"HH:MM:SS.mmm\" (optional trailing Z) → a `time-of-day`, or
-nil. Hour 0–23, minute and second 0–59; anything else is nil."
+  "Parse \"HH:MM:SS\" or \"HH:MM:SS.mmm\" (optional trailing Z) → a `time-of-day`, or a
+`failure` naming the input. Hour 0–23, minute and second 0–59."
   ;; `(first (string/split s "Z"))` threw away everything after the FIRST Z, so
   ;; "12:00:00Zjunk" parsed as 12:00:00. Only a trailing Z is a UTC designator.
-  (cond
-    (string/ends-with? s "Z") (dt-parse-time-str (string/substring s 0 (- (string/length s) 1)))
-    (>= (index-of s "Z") 0) nil
-    else (dt-parse-time-str s)))
+  (or
+    (cond
+      (string/ends-with? s "Z") (dt-parse-time-str (string/substring s 0 (- (string/length s) 1)))
+      (>= (index-of s "Z") 0) nil
+      else (dt-parse-time-str s))
+    (failure "datetime/parse-time: not HH:MM:SS[.mmm][Z]: " (pr-str s))))
 
 ;; A numeric zone designator (`+02:00`) is as much a part of ISO 8601 as `Z`, and every
 ;; timestamp a real API hands you carries one. It used to yield **nil** — indistinguishable
@@ -360,24 +365,30 @@ nil. Hour 0–23, minute and second 0–59; anything else is nil."
 
 (defn parse-iso8601 (s)
   "Parse an ISO 8601 datetime string \"YYYY-MM-DDTHH:MM:SS[.mmm][Z|±HH:MM]\" → a `datetime`,
-or nil.
+or a `failure` naming the input.
 
 A numeric offset is applied, yielding the equivalent UTC instant — every datetime this module
 produces is UTC.
 
     (datetime/->iso (datetime/parse-iso8601 \"2026-01-02T03:04:05+02:00\"))   → \"2026-01-02T01:04:05.000Z\""
-  (let (parts (string/split s "T"))
-    (when (= (count parts) 2)
-      (let (d (parse-date (or (nth parts 0) ""))
-            time-part (or (nth parts 1) "")
-            oi (dt-offset-index time-part))
-        (if (< oi 0)
-          (let (t (parse-time time-part))
-            (when (and d t) (date+time d t)))
-          (let (t (parse-time (string/substring time-part 0 oi))
-                off (dt-parse-offset-ms (string/substring time-part oi (string/length time-part))))
-            ;; subtract: a local time east of UTC names an EARLIER UTC instant
-            (when (and d t off) (add (date+time d t) (- off)))))))))
+  ;; The inner `(and d t)` needs no change now that `parse-date`/`parse-time` answer a
+  ;; FAILURE instead of nil: a failure is falsy, so a bad component short-circuits here
+  ;; exactly as a nil did, and the outer `or` turns the whole thing into one failure
+  ;; naming the input the caller actually passed.
+  (or
+    (let (parts (string/split s "T"))
+      (when (= (count parts) 2)
+        (let (d (parse-date (or (nth parts 0) ""))
+              time-part (or (nth parts 1) "")
+              oi (dt-offset-index time-part))
+          (if (< oi 0)
+            (let (t (parse-time time-part))
+              (when (and d t) (date+time d t)))
+            (let (t (parse-time (string/substring time-part 0 oi))
+                  off (dt-parse-offset-ms (string/substring time-part oi (string/length time-part))))
+              ;; subtract: a local time east of UTC names an EARLIER UTC instant
+              (when (and d t off) (add (date+time d t) (- off))))))))
+    (failure "datetime/parse-iso8601: not an ISO 8601 datetime: " (pr-str s))))
 
 ;; ---- duration helpers -------------------------------------------------------
 

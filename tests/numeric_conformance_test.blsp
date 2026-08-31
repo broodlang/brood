@@ -104,10 +104,12 @@
     (is (= 42 (string/->number (str 42))))
     (is (= 1.5 (string/->number (str 1.5))))
     (is (= 100000000000000000000 (string/->number (str 100000000000000000000)))))
-  (test "string/->number parses valid forms and returns nil on garbage"
+  ;; Since ADR-310 a refusal is a returned `#failure{…}`, not `nil`: "no value" and
+  ;; "could not produce one" no longer share a spelling.
+  (test "string/->number parses valid forms and fails on garbage"
     (assert= (string/->number "42") 42)
     (assert= (string/->number "1.5") 1.5)
     (assert= (string/->number "1e3") 1000.0)
-    (assert= (string/->number "nope") nil)
-    (assert= (string/->number "1.5.6") nil)
-    (assert= (string/->number "0x10") nil)))
+    (is (failure? (string/->number "nope")))
+    (is (failure? (string/->number "1.5.6")))
+    (is (failure? (string/->number "0x10")))))

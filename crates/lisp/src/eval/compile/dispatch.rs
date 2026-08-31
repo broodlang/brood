@@ -566,8 +566,11 @@ pub(crate) fn dispatch(
 pub(crate) fn dbg_check_args(args: &[Value], label: &str) {
     for (i, a) in args.iter().enumerate() {
         let tag = (unsafe { std::mem::transmute::<Value, [i64; 3]>(*a) }[0] as u64 & 0xff) as u8;
-        // Value's max discriminant is `Ratio` (25); above that is garbage.
-        if tag > 25 {
+        // Anything above the last discriminant is garbage. The bound lives beside the
+        // enum (`MAX_VALUE_DISCRIMINANT`) rather than as a literal here: as a literal it
+        // silently went stale when ADR-310 appended `Value::Failure`, and every valid
+        // failure value then read as corrupt memory.
+        if tag > crate::core::value::MAX_VALUE_DISCRIMINANT {
             panic!("[arg-origin] {label}: arg[{i}] has invalid Value tag {tag:#x} — corrupt (non-Value) memory passed into a frame");
         }
     }

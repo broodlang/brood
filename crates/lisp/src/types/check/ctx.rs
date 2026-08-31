@@ -460,6 +460,16 @@ pub(super) struct Ctx {
     /// tree of such a definition is one variadic `fn` over `match*` (ADR-226) and says
     /// nothing about what each clause takes; the clauses do, so specialization reads them.
     clause_arms: HashMap<Symbol, Vec<Value>>,
+    /// The un-expanded clauses of each same-file **inline pattern-clause `fn` literal**
+    /// (`(reduce xs '() (fn (((x y & acc) "+") …) ((acc val) …)))`), keyed by the printed
+    /// form of its clause-HEAD list — the very list the match lowering embeds in its
+    /// `[:match-error (quote :fn) … (quote heads)]` throws, which is how the lowered
+    /// variadic lambda a combinator hands to `callback_ret` finds its way back to the
+    /// clauses it was lowered from. `None` marks a key two literals with *different*
+    /// bodies share: ambiguous, so no answer (typing the wrong body would be worse than
+    /// the flat one). The second `String` is the full printed clause list, for exactly
+    /// that collision test.
+    fn_literal_clauses: HashMap<String, Option<(Vec<(Vec<Value>, Value)>, String)>>,
     /// User-declared sigs that contain type variables (`?A`) — the full
     /// [`SigWithVars`] for unification at call sites.  Populated alongside
     /// [`declared`] when the sig annotation has at least one `?`-symbol.
@@ -910,6 +920,36 @@ impl Ctx {
     /// Record a same-file multi-clause `defn`'s clauses (see [`clause_arms`]).
     pub(super) fn add_clause_arms(&mut self, sym: Symbol, clauses: Vec<Value>) {
         self.clause_arms.insert(sym, clauses);
+    }
+    /// The surface clauses of the inline pattern-clause `fn` literal whose clause-head
+    /// list prints as `key` — see the field. `None` also for an ambiguous key.
+    pub(super) fn fn_literal_clauses(&self, key: &str) -> Option<&Vec<(Vec<Value>, Value)>> {
+        match self.fn_literal_clauses.get(key) {
+            Some(Some((clauses, _))) => Some(clauses),
+            _ => None,
+        }
+    }
+    /// Record one inline pattern-clause literal's clauses under its head-list key.
+    /// A second literal with the same heads keeps the entry only if its full printed
+    /// clause list agrees (an identical literal); otherwise the key goes ambiguous.
+    pub(super) fn add_fn_literal_clauses(
+        &mut self,
+        key: String,
+        clauses: Vec<(Vec<Value>, Value)>,
+        printed: String,
+    ) {
+        use std::collections::hash_map::Entry;
+        match self.fn_literal_clauses.entry(key) {
+            Entry::Vacant(e) => {
+                e.insert(Some((clauses, printed)));
+            }
+            Entry::Occupied(mut e) => {
+                let keep = matches!(e.get(), Some((_, p)) if *p == printed);
+                if !keep {
+                    e.insert(None);
+                }
+            }
+        }
     }
     /// The full (variable-bearing) declared sig for `sym`, if it was parsed
     /// with at least one type variable.
