@@ -76,9 +76,11 @@
   (%gui-draw id frame))
 (sig draw (int vector -> nil))
 
-(defn font (&optional id spec)
+(defn font (id-or-spec &optional spec)
   "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui/font-register), :height the cell pixel size. (gui/font spec) sets the global default — every open window and ones opened later; (gui/font id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."
-  (%gui-font! id spec))
+  (if (nil? spec)
+    (%gui-font! id-or-spec)
+    (%gui-font! id-or-spec spec)))
 
 (defn font-register (name styles)
   "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui/font) selects it. Needs --features gui. Returns name."
