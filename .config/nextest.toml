@@ -187,6 +187,18 @@ retries = 1
 filter = 'binary(complete) and test(completion_never_fails_however_it_is_called)'
 slow-timeout = { period = "60s", terminate-after = 3 }
 
+# `image_matches_source` (ADR-280) loads EVERY std module twice — once from source, once
+# from the freshly built image — and diffs the resulting bindings, so it is the heaviest
+# single case outside the suite wrapper by design, and the CI `differential (tree-walker)`
+# job runs it at the tree-walker's ~10x. Measured 2026-08-31: 30.5s solo (release-profile
+# tests, 12-core box); the 2-core shared runner blew the 120s default on 124fd339
+# (TIMEOUT at 120.007s on both tries — the steady repeat of a budget, not a hang). 60s x 6
+# = 360s keeps ~3x headroom over a plausible loaded-runner figure; the mismatch this test
+# exists to catch fails in seconds, so the budget hides no regression class.
+[[profile.default.overrides]]
+filter = 'binary(image_matches_source)'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
 # --- KI-38: warm the boot cache once, before ~50 binaries fan out ---
 #
 # The expanded-prelude cache is keyed on `build_id` = version + git sha + the

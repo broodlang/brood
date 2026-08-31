@@ -71,6 +71,11 @@ if [ -z "${NEST:-}" ] || [ ! -x "$NEST" ]; then
   exit 1
 fi
 
+# bedit's end-to-end tests (apprun/testrun/procstream) spawn `nest` by NAME, so the
+# resolved binary must be what a bare `nest` finds — on CI nothing is installed and
+# without this the fixtures die with "proc-spawn nest: No such file or directory".
+export PATH="$(cd "$(dirname "$NEST")" && pwd):$PATH"
+
 nest_version=$("$NEST" --version 2>/dev/null || echo "?")
 tree_sha=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo "?")
 bedit_sha=$(git -C "$BEDIT_DIR" rev-parse --short HEAD 2>/dev/null || echo "?")
