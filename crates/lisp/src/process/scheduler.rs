@@ -1114,7 +1114,7 @@ pub fn shutdown_runtime_parked(runtime: &Arc<crate::core::heap::RuntimeCode>) ->
             deregister(
                 pid,
                 Message::Keyword(crate::core::value::intern(pk::KILLED)),
-                &p.heap,
+                Some(&p.heap),
             );
             reaped += 1;
         }

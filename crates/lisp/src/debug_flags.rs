@@ -109,6 +109,11 @@ pub const FLAGS: &[DebugFlag] = &[
         ATTRIBUTION,
         "name each closure the tree-walker routes to the VM (pairs with BROOD_TW_REENTRY)",
     ),
+    f(
+        "BROOD_FAULT_QUANTUM_TAIL",
+        SCHED,
+        "=<n>: FAULT INJECTION — panic on the nth quantum's post-drive tail. Proves that path stays survivable (the worker lives, the process is retired, not silently dropped); nothing an ordinary program does provokes one",
+    ),
     // ---- JIT ----
     f(
         "BROOD_JIT_DUMP_IR",

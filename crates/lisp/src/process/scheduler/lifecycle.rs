@@ -26,11 +26,14 @@ pub(super) fn proc_descr(pid: u64) -> String {
 /// watchers via the dist layer (an ordinary `send` to a remote pid, which
 /// routes over the link). Same `[:down …]` shape in both cases — the
 /// receiver code on the wire side is unchanged from local.
-pub(super) fn deregister(pid: u64, reason: Message, heap: &Heap) {
+/// `heap` is `None` only on the quantum-tail panic-recovery path (`run_one`), where the
+/// unwind has already dropped the process and its heap: everything here still runs
+/// except `drain_note_exit`, which needs one. Every ordinary death passes `Some`.
+pub(super) fn deregister(pid: u64, reason: Message, heap: Option<&Heap>) {
     crate::perf_time!(ns_teardown, { deregister_timed(pid, reason, heap) })
 }
 
-fn deregister_timed(pid: u64, reason: Message, heap: &Heap) {
+fn deregister_timed(pid: u64, reason: Message, heap: Option<&Heap>) {
     EXITED.fetch_add(1, Ordering::Relaxed);
     if crate::process::sysmon::armed() {
         // Exit event first, then the death-disarm check — so a monitor watching
@@ -75,7 +78,9 @@ fn deregister_timed(pid: u64, reason: Message, heap: &Heap) {
     // acked clean": if this process had acked the current epoch, drop its ack now
     // that it's out of the live set (after the REGISTRY remove above, so the two
     // stay consistent). A no-op when no drain is armed.
-    heap.drain_note_exit(pid);
+    if let Some(heap) = heap {
+        heap.drain_note_exit(pid);
+    }
     retire_pid_tail(pid, reason);
 }
 

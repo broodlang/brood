@@ -8732,3 +8732,45 @@ plus a `Frame::Down` wire round-trip. Verified: distribution suite 4/4 loops + a
 GC_STRESS+VERIFY pass, full suite green on both engines (the capped run's only failures
 were the documented wasm-under-cap exception — green uncapped — and one KI-98 recurrence,
 its third sighting, first on the tree-walker half; logged in KI-98), clippy on CI's flags.
+
+## 2026-08-31 (late night) — KI-88 picked up, found dormant; the tail it implicates is now hardened
+
+Picked KI-88 as the next item because its status line advertised a *deterministic repro*.
+It has none: the canonical repro (full `chaos2_process_genserver`, `BROOD_TW_REENTRY=1`,
+router confirmed live at 394 routed closures, freshly built armed binary) passes **10/10**
+at `62eac84c`. Session 4 had already recorded it dormant on 2026-08-30 — the entry's
+header just never said so, which is the whole reason it was picked. Header corrected, and
+the index gained a KI-88 row (it had none at all, so the one open scheduler bug was
+invisible to anyone scanning the table).
+
+What the session produced instead came from reading the implicated path rather than
+running it: **`run_one`'s post-quantum tail was unprotected.** `catch_unwind` wrapped
+`drive()` only; `save_ctx`, `finish_quantum` and the outcome routing ran as plain
+statements, and `worker_loop` has no catch either. A panic there killed the worker thread
+permanently (the pool shrinks; nothing restarts a worker) *and* dropped the `Box<Process>`
+mid-unwind, so the process vanished with no `deregister` — no death line, no monitors, no
+`[:down …]`, and every waiter waiting forever. Fault injection confirmed it end to end:
+pre-fix, one injected tail panic **hangs `chaos2` at P47 until killed**.
+
+That is precisely KI-88's recorded signature (a `run` with no `end`, a ledger entry no
+thread is inside, no death line, a collector timing out) — session 3's "a Rust frame
+cannot evaporate mid-function without unwinding through the instrumented tail" was right
+about unwinding and wrong about the tail, which is not a `Drop` guard. It is still **not a
+diagnosis**: this mechanism is loud (panic hook + `.brood_crash_dump`) and no sighting ever
+carried a panic. Its value is elimination. The tail is now caught, the worker survives, the
+process is retired loudly (`deregister` takes `Option<&Heap>` — the unwind ate the heap),
+and the retire is liveness-guarded because `deregister` is not idempotent.
+
+Guard: `crates/cli/tests/quantum_tail_panic.rs` + `BROOD_FAULT_QUANTUM_TAIL=<n>`
+(catalogued). Sabotage-verified: reverting the catch fails the guard while its no-fault
+control passes. **Two traps worth keeping.** A short program can exit while the panicking
+worker is still symbolizing its backtrace, so the recovery's own line never prints and the
+run reads as a silent vanish — the guard sleeps and runs further waves to outlive it; a
+"no diagnostic appeared" conclusion should first rule out having out-run one. And my first
+workload put `(self)` inside the spawned form, so every worker messaged itself and both
+waves collected 0 — the *control* caught that, which is why the control exists.
+
+Also filed **KI-99**: `a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 of
+the full suite with `dist: incoming connection failed: failed to fill whole buffer` on B —
+a handshake EOF under load, so the send never arrived. Retry-absorbed, 6/6 solo after, but
+captured, which is the difference from KI-80's class.
