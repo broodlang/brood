@@ -69,6 +69,13 @@ struct Proc {
     /// Shared with the reader threads, which load it per chunk, so
     /// `proc-set-binary` flips an already-running child mid-stream.
     binary: Arc<AtomicBool>,
+    /// The green process this child belongs to — the `subscriber` its readers
+    /// deliver to. When that process dies, [`close_process_procs`] kills and reaps
+    /// the child (Erlang port semantics: a port dies with its owner). Without
+    /// this, an owner that crashed without `proc-close` orphaned the OS child
+    /// forever: the registry entry leaked, and both reader threads kept draining
+    /// output into a dead pid's mailbox (a no-op delivery) for the child's life.
+    owner: u64,
 }
 
 /// The `Child` plus a condvar the reaper waits on.
@@ -270,6 +277,7 @@ pub fn spawn(
             stdin: Arc::new(Mutex::new(stdin)),
             child: child.clone(),
             binary: binary.clone(),
+            owner: subscriber,
         },
     );
     start_stdout_reader(id, stdout, child, subscriber, binary.clone());
@@ -331,6 +339,22 @@ pub fn close(id: u64) {
         // `[:proc-closed …]` follows the kill promptly.
         child.killed.notify_all();
         // `stdin` (in `removed`) drops here, sending EOF to the child too.
+    }
+}
+
+/// Close every subprocess owned by `pid` — the process-death hook, called from the
+/// scheduler's retirement path beside `net::close_process_sockets` (the OS-process
+/// model: a dead process's resources are reclaimed on exit). A process that
+/// `proc-close`d its children has none left here, so this is a no-op then.
+pub fn close_process_procs(pid: u64) {
+    // Collect under the lock, close outside it: `close` re-takes the registry lock.
+    let ids: Vec<u64> = reg()
+        .iter()
+        .filter(|(_, p)| p.owner == pid)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in ids {
+        close(id);
     }
 }
 
