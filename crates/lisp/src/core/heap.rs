@@ -6734,6 +6734,25 @@ impl Heap {
             snapshot.block_depth,
             "restore_globals out of order — globals snapshots must be restored LIFO"
         );
+        // Serialize with the registry read-modify-write (`registry_update`/`registry_cas`,
+        // KI-22's lock) — KI-89. Those RMWs hold `registry_lock` from their read of the
+        // registry global to their write; this swap did NOT take it, so a concurrent
+        // registration could read `cur` before the swap and `env_define` its successor
+        // after it — writing back a map computed from the PRE-restore table, i.e.
+        // resurrecting every accumulated `*record-ids*`/`*impls*`/`*features*` entry
+        // wholesale while the ordinary bindings beside them stayed rolled back. That
+        // asymmetry (ids registered, constructors unbound) is exactly KI-89's orphaned
+        // record ids, and one hit is sticky: the resurrected entries sit inside every
+        // later snapshot. Measured before this lock: 1994 of 2000 isolate cycles against
+        // a registering bystander resurrected the rolled-back entry. Under the lock a
+        // racing RMW either completes first (and is wiped — the isolation contract) or
+        // starts after (and reads the restored table). Lock order is registry_lock →
+        // globals lock here and in every RMW, so no inversion.
+        let _registry = self
+            .runtime
+            .registry_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *self.runtime.globals_write() = snapshot.saved;
         // Wholesale table swap — invalidate every stamped global inline cache. This one
         // bumps the code epoch too (ADR-217): a restore can *replace or remove* bindings
