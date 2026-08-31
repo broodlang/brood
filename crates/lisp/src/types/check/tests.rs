@@ -2897,6 +2897,36 @@ fn atoms_and_malformed_forms_do_not_panic() {
         .any(|w| w.contains("first") && w.contains("expected 1")));
 }
 
+#[test]
+fn combinator_collection_slot_rejects_the_old_argument_order() {
+    // The shape of bedit's seven 0.20-migration bugs: a callback or count in the
+    // collection slot (pre-ADR-308 order), which sailed through the checker and
+    // failed only at runtime. Two rules catch it now: the curated data-first
+    // domains (take/drop/mapcat/…), and the fn-LITERAL rule — a lambda whose
+    // result can't be inferred has no arrow type, but its tag is never in doubt,
+    // so a parameter with no room for a function rejects it regardless.
+    for (src, frag) in [
+        ("(map (fn (x) x) [1])", "got a function"),
+        ("(mapcat (fn (x) x) [1])", "got a function"),
+        ("(any? (fn (x) x) [1])", "got a function"),
+        ("(take 5 [1 2])", "argument 1 expects seqable"),
+        ("(drop 3 [1 2])", "argument 1 expects seqable"),
+    ] {
+        let ws = warnings(src);
+        assert!(ws.iter().any(|w| w.contains(frag)), "{src}: {ws:?}");
+    }
+    // …and the data-first order stays silent.
+    for src in [
+        "(map [1] (fn (x) x))",
+        "(take [1 2] 5)",
+        "(drop [1 2] 3)",
+        "(mapcat [1] (fn (x) (list x)))",
+        "(fold [1] 0 (fn (a x) a))",
+    ] {
+        assert!(warnings(src).is_empty(), "{src}: {:?}", warnings(src));
+    }
+}
+
 // ------------- Step 3: sigs sourced from NativeFn, closure inference --------------
 
 /// The eight test cases below need real user-defined closures, which means
