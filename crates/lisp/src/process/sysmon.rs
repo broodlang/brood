@@ -260,7 +260,11 @@ pub fn emit_exit(subject: u64, reason: &Message) {
     // The default crash reporter selects only abnormal exits, so the common
     // clean exit must cost nothing past this load — no lock, no message.
     let normal = is_normal(reason);
-    if !wants(if normal { WANT_EXIT_ALL } else { WANT_EXIT_ABNORMAL }) {
+    if !wants(if normal {
+        WANT_EXIT_ALL
+    } else {
+        WANT_EXIT_ABNORMAL
+    }) {
         return;
     }
     let targets = interested(subject, |m| m.exit || (m.exit_abnormal && !normal));
