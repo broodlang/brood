@@ -8709,3 +8709,26 @@ under `make test-both` (1 in-language failure, NOT a TMT) and the name was lost 
 the run was piped through a summary grep, the exact trap KI-80 records; not reproduced
 across three subsequent fully-captured runs (solo, full VM, full test-both — all green).
 Addendum in KI-80. Capture whole runs to a file; grep the file.
+
+## 2026-08-31 (night) — KI-96 fixed: a monitor's DOWN now retires its own pending entry
+
+The audit's remaining correctness item. A cross-node monitor's DOWN rode back as an
+ordinary `Frame::Send`, so the watcher's node had no hook to remove the sender-side
+`PENDING_REMOTE` entry — one leak per completed remote monitor on a long-lived watcher,
+and a later node-down replayed the mref as a second `[:down … :noconnection]`, breaking
+the one-shot guarantee a ref-pinned `gen/call` receive relies on (and the ADR-195
+receive-mark makes a stale pinned message cheap to hit). Fixed at the entry's own "clean
+seam": a dedicated **`Frame::Down`** (wire v7 — a v6 peer would drop the unknown tag, so
+the byte bumps) shipped by `fire_down`'s Remote arm; the inbound handler
+(`deliver_remote_down`) retires the pending entry first, then delivers. The dying pid is
+node-qualified by the authenticated peer, never wire data — same rule as the other
+coupling frames. The `:noproc` immediate-fire path leaked identically and is closed by
+the same mechanism; `drop_pending_remote` now also prunes emptied node keys.
+
+Guard: `a_delivered_remote_monitor_does_not_fire_again_on_node_down` (two-node: monitor
+→ target dies → DOWN → kill node → `[:nodedown]` → assert no replay), **sabotage-verified**
+— retire disabled fails `SECOND-DOWN-BUG :noconnection`, the entry's exact prediction —
+plus a `Frame::Down` wire round-trip. Verified: distribution suite 4/4 loops + a
+GC_STRESS+VERIFY pass, full suite green on both engines (the capped run's only failures
+were the documented wasm-under-cap exception — green uncapped — and one KI-98 recurrence,
+its third sighting, first on the tree-walker half; logged in KI-98), clippy on CI's flags.
