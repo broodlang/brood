@@ -11,7 +11,13 @@
 (defn r-big (n) (if (= n 0) 99999999999999999999 (+ n (r-big (- n 1)))))
 ; map const + alloc
 (defn r-map (n) (if (= n 0) {:k 0} (assoc (r-map (- n 1)) n n)))
-(defn warm (f n a) (if (= n 0) :done (do (try (f a) (catch e nil)) (warm f (- n 1) a))))
+;; The discarded catch is the POINT here: `r-throw` is warmed precisely because it
+;; raises, so the error is the expected outcome, not a hidden fault.
+(defn warm (f n a)
+  (if (= n 0)
+    :done (do
+      (check-allow :discarded-catch (try (f a) (catch e nil)))
+      (warm f (- n 1) a))))
 (defn warm-all ()
   (do
     (warm r-str 3000 8)
@@ -24,11 +30,12 @@
   (if (= rounds 0)
     (send parent :done)
     (do
-      (try (string/length (r-str 8)) (catch e nil))
-      (try (r-throw 15) (catch e nil))
-      (try (count (r-vec 6)) (catch e nil))
-      (try (r-big 10) (catch e nil))
-      (try (count (r-map 6)) (catch e nil))
+      (check-allow :discarded-catch
+        (try (string/length (r-str 8)) (catch e nil))
+        (try (r-throw 15) (catch e nil))
+        (try (count (r-vec 6)) (catch e nil))
+        (try (r-big 10) (catch e nil))
+        (try (count (r-map 6)) (catch e nil)))
       (worker parent (- rounds 1)))))
 
 (defn churn (k)

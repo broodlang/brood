@@ -84,16 +84,21 @@
       (list [11 12 hl-face-function] [13 14 hl-face-number]))))
 
 ; point inside the string → the enclosing (a form
-(describe "safe-restart — a column-0 form start to lex from"
+(describe "safe-restart — a top-level form start to lex from"
   (test "backs up to the start of the enclosing top-level form"
-    ;; pos 18 sits inside the second form, whose `(` is at offset 11 (after the \n at 10)
-    (assert= (safe-restart "(defn a ()\n(defn b ()" 18) 11))
-  (test "a column-0 open bracket at pos is itself the restart"
+    ;; `(defn a ()` is UNCLOSED, so the second defn — column 0 or not — is textually
+    ;; inside it: the only sound restart is 0 (depth-tracked scan, not the Emacs
+    ;; column-0 heuristic; the same rule that lets TAB re-indent a mis-indented arm).
+    (assert= (safe-restart "(defn a ()\n(defn b ()" 18) 0))
+  (test "a top-level open bracket at pos is itself the restart"
     (assert= (safe-restart "(a)\n(b)" 4) 4))
-  (test "no column-0 form start yields 0"
-    (assert= (safe-restart "   (indented)" 8) 0)
+  (test "an INDENTED top-level open is a restart point (depth 0 decides, not the column)"
+    (assert= (safe-restart "   (indented)" 8) 3)
     (assert= (safe-restart "" 0) 0))
-  (test "an indented form falls back to the column-0 form above it"
+  (test "a column-0 open INSIDE an unclosed form is not a restart point"
+    ;; the classic trap: a mis-indented multi-arity defn arm at column 0
+    (assert= (safe-restart "(defn fib\n((0) 0)\n((1) 1)" 15) 0))
+  (test "an indented form falls back to the top-level form above it"
     (assert= (safe-restart "(let (x 1)\n  (f x))" 15) 0))
   (test "a column-0 bracket INSIDE a multi-line string is not a restart point"
     ;; value:  (a / "s / (x  <- col-0 ( but inside the string / ") / (b)

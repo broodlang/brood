@@ -396,11 +396,13 @@ call is still in the old callback-first order.
       ;; A bare name that RESOLVES to a function — `(map pr-str xs)`,
       ;; `(map lsp-location result)`. Safe to consult now only because `old-order?`
       ;; also requires the LAST argument not to be a callback (see below).
+      ;; `if`, not `and`: this is the LAST term of the `or`, so an `and` yielding nil
+      ;; here is the whole function's value — and the declared return type is `bool`.
       (let (sym (check-allow :discarded-catch
                   (try (string/->symbol t) (catch e nil))))
-        (and sym
-          (bound? sym)
-          (let (k (type-of (reflect/eval sym))) (or (= k :fn) (= k :native))))))))
+        (if (and sym (bound? sym))
+          (let (k (type-of (reflect/eval sym))) (or (= k :fn) (= k :native)))
+          false)))))
 (sig callback-shaped? (string -> bool))
 
 (defn- number-shaped? (text)

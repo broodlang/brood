@@ -23,7 +23,7 @@ as pure functions over a source string (ADR-052):
   - `(highlight-spans src)` — `[start end face]` colour spans for the tokens.
   - `(highlight-window slice base)` — `highlight-spans` for a windowed `slice`, with
     every span shifted into the larger source's absolute coordinates by `base`.
-  - `(safe-restart src pos)` — a column-0 form start ≤ `pos` to (re)start lexing from,
+  - `(safe-restart src pos)` — a top-level form start ≤ `pos` to (re)start lexing from,
     so a viewport can be fontified without lexing the whole buffer.
   - `(highlight-chunks full base line overrides)` — `[substring face]` chunks that
     tile a visible line (with caller `overrides`, e.g. bracket-match colours).
@@ -291,11 +291,11 @@ its visible slice yet hand the renderer absolute offsets; `base` 0 is exactly
   (shift-spans (highlight-spans slice) base))
 
 (defn safe-restart (src pos)
-  "The offset of the nearest *top-level form start* at or before `pos`: a column-0 open
+  "The offset of the nearest *top-level form start* at or before `pos`: a depth-0 open
 bracket (`(`/`[`/`{`) that lies OUTSIDE any string or comment, or 0 if there is none. A safe
 point to (re)start lexing `src` from — head-position state is known-false there, so a
 viewport can be highlighted from here without lexing everything above it (the Brood analogue
-of Emacs `beginning-of-defun`). String/comment-aware, so a column-0 bracket inside a
+of Emacs `beginning-of-defun`). String/comment-aware and bracket-depth-tracked, so a bracket inside a
 multi-line docstring is correctly skipped. The awareness needs a forward lexical pass from
 the top (a backward scan can't know string state), which is O(pos) — run natively
 (`scan-form-start`, the ADR-093 scanner family), because interpreted it stalled eldoc /
@@ -470,7 +470,7 @@ and where does it start — and `enclosing-call` (right below) already computes 
 signature hints; exposing it beats a second, subtly-different scan in the editor.
 
 The scan starts at the nearest top-level form start ([[safe-restart]]) rather than offset 0,
-for the reason `enclosing-call` gives and by the same argument: a column-0 open bracket is
+for the reason `enclosing-call` gives and by the same argument: a top-level open bracket is
 top level, so nothing above it is still open, and every bracket enclosing `pos` is inside
 that form. Sound, and the difference between O(enclosing form) and O(pos) — this scan is
 interpreted, and at offset 600 of a 1.5 KB buffer the O(pos) version cost 1.4 ms, on every
@@ -519,7 +519,7 @@ the cursor (0 = first arg) — or nil when the cursor isn't inside a call whose 
 is a plain symbol.
 
 The enclosing-bracket scan starts at the nearest top-level form start (`safe-restart`)
-rather than offset 0: head-position state is known-balanced at a column-0 form start, so
+rather than offset 0: head-position state is known-balanced at a top-level form start, so
 the scan walks only the *current* defun, not every character above `pos`. This makes
 eldoc O(enclosing-form) instead of O(pos) — instant versus a multi-second stall when the
 cursor sits deep in a large file."

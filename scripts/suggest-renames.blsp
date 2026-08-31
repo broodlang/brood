@@ -17,7 +17,10 @@
 (require-one 'string)
 (require-one 'seq)
 
-(doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))
+;; A module this build cannot load (a lean runtime has no dev-tools) is the expected
+;; outcome here, not a hidden fault — the point is to load whatever IS present.
+(doseq (m (reflect/builtin-modules))
+  (check-allow :discarded-catch (try (require-one m) (catch _ nil))))
 
 (defn- candidates (n)
   "Every public global whose LOCAL part is exactly `n` — i.e. the places `n` could have
