@@ -1328,13 +1328,17 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // (data-first, ADR-308) — `take` / `drop` / `take-while` / `drop-while`,
     // `take-last` / `drop-last`, and `remove` (the `filter` complement). Element type
     // is preserved unchanged.
+    // `take`/`drop`/`take-while`/`drop-while` are bare (prelude); `take-last`/`drop-last`/
+    // `remove` live in `seq` (ADR-227) and are reached QUALIFIED — matching them bare
+    // meant the arm never fired for them at all, and their element type was silently
+    // lost. `seq/interpose` below was already keyed qualified for the same reason.
     if value::symbol_is(head, "take")
         || value::symbol_is(head, "drop")
         || value::symbol_is(head, "take-while")
         || value::symbol_is(head, "drop-while")
-        || value::symbol_is(head, "take-last")
-        || value::symbol_is(head, "drop-last")
-        || value::symbol_is(head, "remove")
+        || value::symbol_is(head, "seq/take-last")
+        || value::symbol_is(head, "seq/drop-last")
+        || value::symbol_is(head, "seq/remove")
     {
         let coll = *items.get(1)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
@@ -1535,7 +1539,8 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // `(keep coll f)` — `map` then drop the `nil` results; `nil | list<B>` for
     // `B` = the callback's return (over-approximated by keeping `nil` in `B`, a
     // sound superset). Unknown callback / element → flat.
-    if value::symbol_is(head, "keep") {
+    // `keep` is `seq/keep` (ADR-227) — keyed qualified, as `seq/interpose` is.
+    if value::symbol_is(head, "seq/keep") {
         let (coll, f) = super::sigs::combinator_args(items)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         let b = callback_ret(heap, f, &[a], ctx);

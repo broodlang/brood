@@ -52,9 +52,12 @@ otherwise, so it does not depend on an author's choice of spelling.")
       (contains? builtin-module-names (string/substring text 0 slash))
       ;; A Rust-only NAMESPACE has no `.blsp` module, so it is absent from
       ;; `reflect/builtin-modules` — `table/*`, and any other kernel-registered
-      ;; namespace (ADR-251). It has no definition site either, which is exactly
-      ;; what distinguishes it from a name some caller happened to load.
-      (nil? (reflect/source-location name)))))
+      ;; namespace (ADR-251). Such a namespace is SINGLE-SEGMENT: requiring that is
+      ;; what keeps a multi-segment project module out, since an image-materialised
+      ;; binding has no definition site either and the site test alone re-admitted
+      ;; `brood/gabriel/chudnovsky/*`.
+      (and (nil? (reflect/source-location name))
+        (not (includes? (string/substring text 0 slash) "/"))))))
 
 (defn load-everything ()
   "`require` every module the binary bakes in, so the audit sees the WHOLE surface.
@@ -64,8 +67,11 @@ absent from `reflect/global-names` and silently unaudited. Returns how many modu
 are known.
 
     (> (audit/load-everything) 50)   → true"
+  ;; check-allow :discarded-catch — a module this binary cannot load (a lean build has no
+  ;; dev-tools; a GUI module needs a display) is simply not part of the surface to audit.
+  ;; The failure IS the answer, so there is nothing in `e` to inspect.
   (each (reflect/builtin-modules)
-    (fn (m) (try (require-one m) (catch e nil))))
+    (fn (m) (check-allow :discarded-catch (try (require-one m) (catch e nil)))))
   (count (reflect/builtin-modules)))
 (sig load-everything (-> int))
 

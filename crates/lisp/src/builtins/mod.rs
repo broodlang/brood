@@ -1903,7 +1903,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], string),
         &["x"],
-        "The readable (re-readable) text form of x.\n\n    (pr-str \"hi\")   → the 4-char text \\\"hi\\\"",
+        "The readable (re-readable) text form of x — quoted and escaped, so it reads back. Unlike str, which renders for display: (str \"hi\") is 2 chars, (pr-str \"hi\") is 4.\n\n    (string/length (pr-str \"hi\"))   → 4",
         pr_str,
     );
     def(
