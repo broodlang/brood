@@ -34,7 +34,8 @@ use super::scheduler::self_pid;
 /// process on a peer runtime (`Remote`), so one [`MONITORS`] table holds both
 /// shapes and the same deregister / demonitor code drives them. The peer
 /// learns we want a watch via the `dist::Frame::Monitor` frame, the down
-/// notification rides back as an ordinary `Message::Vector([:down …])` send.
+/// notification rides back as a dedicated `dist::Frame::Down` (so the
+/// watcher's node can retire its pending entry on delivery — KI-96).
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum Watcher {
     /// A process on *this* runtime.
@@ -43,15 +44,6 @@ pub(crate) enum Watcher {
     /// watcher's pid *over there* (so a peer's `[:down …]` lands in its own
     /// mailbox), `mref` is the watcher's monitor reference (opaque to us).
     Remote { node: Symbol, pid: u64, mref: u64 },
-}
-
-impl Watcher {
-    /// Both variants carry a monitor ref; surface it for shared code paths.
-    fn mref(&self) -> u64 {
-        match *self {
-            Watcher::Local { mref, .. } | Watcher::Remote { mref, .. } => mref,
-        }
-    }
 }
 
 /// Monitors: watched-pid → the watchers to notify when it dies. Each watcher
@@ -69,7 +61,9 @@ pub(super) static MONITORS: LazyLock<Mutex<HashMap<u64, Vec<Watcher>>>> =
 /// fire `[:down mref pid :noconnection]` should the link to that peer die
 /// (Erlang semantics: a monitor fires on net-split). Compact mirror of
 /// [`MONITORS`] — no down-delivery state, just enough to wake the watcher
-/// when the wire goes away.
+/// when the wire goes away. An entry lives until the monitor resolves:
+/// demonitor, the watcher's own death, node-down — or the DOWN itself
+/// arriving ([`deliver_remote_down`]), the one-shot's normal completion.
 static PENDING_REMOTE: LazyLock<Mutex<HashMap<Symbol, Vec<PendingRemote>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -165,13 +159,18 @@ pub fn monitored_by(pid: u64) -> usize {
 /// a routed `send`, so the wire-format `[:down …]` is exactly the message a
 /// peer's process would receive locally.
 pub(super) fn fire_down(w: Watcher, dying_pid: u64, reason: Message) {
-    let msg = down_message(local_node_pid_msg(dying_pid), w.mref(), reason);
     match w {
-        Watcher::Local { pid, .. } => deliver(pid, msg),
-        Watcher::Remote { node, pid, .. } => {
-            // Best-effort: a DOWN to a disconnected watcher has nowhere to go
-            // (its own [:nodedown] tells it the link fell).
-            let _ = crate::dist::route(node, crate::dist::Target::Pid(pid), msg);
+        Watcher::Local { pid, mref } => deliver(
+            pid,
+            down_message(local_node_pid_msg(dying_pid), mref, reason),
+        ),
+        // A dedicated `Frame::Down`, not an ordinary send: the watcher's node
+        // retires its `PENDING_REMOTE` entry when the one-shot delivers, which
+        // a plain message gave it no hook for (KI-96). Best-effort: a DOWN to
+        // a disconnected watcher has nowhere to go (its own [:nodedown] tells
+        // it the link fell).
+        Watcher::Remote { node, pid, mref } => {
+            crate::dist::send_down(node, pid, mref, dying_pid, reason)
         }
     }
 }
@@ -326,7 +325,40 @@ pub(crate) fn drop_pending_remote(target_node: Symbol, watcher_pid: u64, mref: u
     let mut t = crate::core::sync::lock(&PENDING_REMOTE);
     if let Some(v) = t.get_mut(&target_node) {
         v.retain(|p| !(p.watcher_pid == watcher_pid && p.mref == mref));
+        // Prune the emptied key so the map doesn't hold one entry per node
+        // ever monitored (this runs once per completed/dropped monitor).
+        if v.is_empty() {
+            t.remove(&target_node);
+        }
     }
+}
+
+/// An inbound `Frame::Down` from the authenticated `peer`: a monitor we asked
+/// that peer to keep has fired. Retire the pending entry FIRST — the monitor
+/// is one-shot, and an entry that outlives its own DOWN both leaks (one per
+/// completed remote monitor on a long-lived watcher) and fires a duplicate
+/// `[:down mref … :noconnection]` on a later node-down, which a `gen/call`-style
+/// receive pinned on that ref can mis-route (KI-96) — then deliver the
+/// `[:down mref pid reason]` the watcher is waiting on.
+pub(crate) fn deliver_remote_down(
+    peer: Symbol,
+    watcher_pid: u64,
+    mref: u64,
+    target_pid: u64,
+    reason: Message,
+) {
+    drop_pending_remote(peer, watcher_pid, mref);
+    deliver(
+        watcher_pid,
+        down_message(
+            Message::Pid {
+                node: peer,
+                id: target_pid,
+            },
+            mref,
+            reason,
+        ),
+    );
 }
 
 /// `(demonitor mref)` on a ref the local table didn't claim: scan

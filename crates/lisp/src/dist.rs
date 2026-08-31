@@ -567,6 +567,31 @@ pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64)
     let _ = send_frame(target_node, &Frame::Demonitor { watcher_pid, mref });
 }
 
+/// A monitor a peer registered on one of our local pids (`Frame::Monitor`) just
+/// fired: ship the DOWN as a dedicated `Frame::Down`, not an ordinary `Send`, so
+/// the watcher's node can retire its `PENDING_REMOTE` entry the moment the
+/// one-shot delivers — as a plain message that entry outlived its own DOWN and a
+/// later node-down fired a second `[:down mref … :noconnection]` (KI-96).
+/// Best-effort: a DOWN to a disconnected watcher has nowhere to go (its own
+/// `[:nodedown]`/`:noconnection` path already covers it).
+pub(crate) fn send_down(
+    target_node: Symbol,
+    watcher_pid: u64,
+    mref: u64,
+    dying_pid: u64,
+    reason: Message,
+) {
+    let _ = send_frame(
+        target_node,
+        &Frame::Down {
+            watcher_pid,
+            mref,
+            target_pid: dying_pid,
+            reason,
+        },
+    );
+}
+
 // ---- cross-node links (ADR-067) — the symmetric cousin of monitor_remote ----
 
 /// `(link remote-pid)`: record our half of the link, ship a `Frame::Link` so the
@@ -1362,6 +1387,17 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
                         matches!(*w, process::Watcher::Remote { node, pid, mref: r }
                                      if node == peer && pid == watcher_pid && r == mref)
                     }),
+                    // A monitor we asked the peer to keep just fired. Retire our
+                    // `PENDING_REMOTE` entry (the one-shot has delivered — a later
+                    // node-down must not fire it again, KI-96), then deliver the
+                    // `[:down …]`. The dying pid is node-qualified by the
+                    // authenticated `peer`, never by wire data.
+                    Frame::Down {
+                        watcher_pid,
+                        mref,
+                        target_pid,
+                        reason,
+                    } => process::deliver_remote_down(peer, watcher_pid, mref, target_pid, reason),
                     // A peer linked its `from_pid` to our local `to_pid` — record
                     // our half (keyed by the trusted connection `peer`, not the
                     // wire's `from_node`, same as the monitor handlers).

@@ -672,8 +672,8 @@ fn remote_spawn_runs_a_thunk_on_a_peer() {
 /// worker exits cleanly, B receives `[:down mref pid reason]` on its mailbox.
 /// Verifies the full cross-node monitor path: the `Frame::Monitor` register
 /// on A's side reuses the same `add_monitor` core the local monitor uses; A's
-/// `deregister` fires the `Remote` watcher; the `[:down …]` is routed back as
-/// an ordinary `send` to B's pid.
+/// `deregister` fires the `Remote` watcher; the `[:down …]` rides back as a
+/// dedicated `Frame::Down` (KI-96) and lands in B's mailbox.
 #[test]
 fn cross_node_pid_monitor_fires_down() {
     let _g = port_lock();
@@ -837,6 +837,118 @@ fn remote_monitor_fires_noconnection_on_node_down() {
     assert!(
         status.success() && stdout.contains("NOCONNECTION-OK"),
         "client did not see :noconnection.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{b_err}"
+    );
+}
+
+/// KI-96: a delivered remote monitor is a *finished* one-shot. B monitors A's
+/// worker, the worker dies, B receives the DOWN — then the link to A drops.
+/// Pre-fix, B's `PENDING_REMOTE` entry survived its own DOWN (the DOWN arrived
+/// as an ordinary send, so nothing retired the entry), and `handle_node_down`
+/// fired a second `[:down mref … :noconnection]` for a monitor that had already
+/// delivered — breaking the one-shot guarantee a ref-pinned `gen/call` receive
+/// relies on. Post-fix the DOWN rides a dedicated `Frame::Down` that retires
+/// the entry on delivery, so after `[:nodedown]` no further `[:down]` may carry
+/// that mref.
+#[test]
+fn a_delivered_remote_monitor_does_not_fire_again_on_node_down() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-dupdown-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Server on A: spawns a worker that dies on `:stop`; the node itself parks
+    // until the harness kills it (the node-down trigger).
+    let server = format!(
+        r#"
+(node/start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(defn worker (parent)
+  (do (send parent [:my-pid (self)])
+      (receive (:stop nil) (after 60000 nil))))
+(proc/register :work-bootstrap (self))
+(receive
+  ([:hello from] (spawn (worker from)))
+  (after 60000 nil))
+(receive (after 60000 nil))
+"#
+    );
+
+    // Client: monitor the worker, let it die, receive the DOWN, then have the
+    // harness kill A and assert the node-down does NOT replay the mref.
+    let client = format!(
+        r#"
+(node/start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(def peer (node/connect "a@127.0.0.1:{port_a}"))
+(node/monitor peer)
+(send {{:name :work-bootstrap :node :a@127.0.0.1}} [:hello (self)])
+(def remote-pid (receive ([:my-pid p] p) (after 30000 (throw "no pid reply"))))
+(def m (monitor remote-pid))
+(send remote-pid :stop)
+(receive
+  ([:down mref pid reason]
+    (if (= mref m) nil (throw (str "wrong first down: " mref " " reason))))
+  (after 30000 (throw "no first :down")))
+;; The one-shot has delivered. Tell the harness to kill A (node down).
+(io/puts "ARMED")
+(receive
+  ([:nodedown _] nil)
+  (after 15000 (throw "no :nodedown after A was killed")))
+;; Pre-fix, the duplicate DOWN is enqueued by the same node-down sweep that
+;; just delivered [:nodedown] — a short bounded wait is enough to catch it.
+(receive
+  ([:down mref _ reason]
+    (if (= mref m)
+      (io/puts "SECOND-DOWN-BUG " reason)
+      (io/puts "UNEXPECTED-DOWN " mref " " reason)))
+  (after 2000 (io/puts "NO-DUP-DOWN-OK")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let mut b = spawn_brood(&dir, "client.blsp", &client);
+
+    // Wait for the client to print ARMED (first DOWN received), then kill A.
+    let mut b_stdout = b.stdout.take().expect("client stdout");
+    let mut buf = Vec::new();
+    let mut armed = false;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !armed {
+        let mut chunk = [0u8; 256];
+        match b_stdout.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if String::from_utf8_lossy(&buf).contains("ARMED") {
+                    armed = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        armed,
+        "client never reached ARMED — the first DOWN never delivered. partial stdout:\n{}",
+        String::from_utf8_lossy(&buf)
+    );
+
+    // Trigger the node-down.
+    let _ = a.kill();
+    let _ = a.wait();
+
+    let _ = b_stdout.read_to_end(&mut buf);
+    let status = b.wait().expect("client finished");
+    let mut b_err = String::new();
+    if let Some(mut e) = b.stderr.take() {
+        let _ = e.read_to_string(&mut b_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&buf);
+    assert!(
+        status.success() && stdout.contains("NO-DUP-DOWN-OK"),
+        "a completed monitor's mref fired again on node-down (KI-96).\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{b_err}"
     );
 }
 

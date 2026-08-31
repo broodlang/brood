@@ -80,6 +80,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "name every closure entering the append-only RUNTIME region; per-operation promotion is a leak",
     ),
     f(
+        "BROOD_REG_TRACE",
+        ATTRIBUTION,
+        "trace *record-ids* registry writes (with the writer's ancestry chain) and every globals restore — the KI-89 orphan-attribution tool; trace LEAN, heavy tracing suppresses the race",
+    ),
+    f(
         "BROOD_L1_STATS",
         ATTRIBUTION,
         "hit rate of the L1 local-send fast path — check it applied before crediting a message result",
@@ -103,6 +108,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "BROOD_ROUTE_DBG",
         ATTRIBUTION,
         "name each closure the tree-walker routes to the VM (pairs with BROOD_TW_REENTRY)",
+    ),
+    f(
+        "BROOD_FAULT_QUANTUM_TAIL",
+        SCHED,
+        "=<n>: FAULT INJECTION — panic on the nth quantum's post-drive tail. Proves that path stays survivable (the worker lives, the process is retired, not silently dropped); nothing an ordinary program does provokes one",
     ),
     // ---- JIT ----
     f(

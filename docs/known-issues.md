@@ -81,13 +81,16 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe) |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
 | KI-93 | **the net reactor thread's death was SILENT** — no `catch_unwind`, no restart, and `Reactor::cmd` discarded the channel error, so after any reactor panic or fatal `poll` error every `tcp-send`/`tcp-listen` kept returning `Ok(())` into a dead channel, no `[:tcp-closed]` was ever emitted again, and every socket-owning process parked in `receive` forever with zero diagnostics | ✅ **FIXED 2026-08-31** — the death is loud and terminal: a `catch_unwind` wrapper runs `reactor_died` (a `REACTOR_DOWN` flag, one stderr line, and a registry sweep failing every socket at its owner with `[:tcp-error]` + `[:tcp-closed]`); `connect`/`listen`/`tls-listen`/`tls-request`/`send` gate on the flag and the creators re-check after insert. Restart is deliberately NOT attempted — the `Poll`, fd registrations and TLS state died with the thread. Guard `crates/lisp/tests/net_reactor_death.rs`, sabotage-verified |
 | KI-94 | **a green process's death ORPHANED its OS subprocesses** — `subprocess::close`'s only caller was the `proc-close` builtin and `retire_pid_tail` had no subprocess counterpart to `close_process_sockets`, so an owner that exited without closing leaked the OS child (never killed), its registry entry (forever), and both reader threads (draining into a dead pid) | ✅ **FIXED 2026-08-31** — `Proc` records its owner (the spawn subscriber) and `retire_pid_tail` calls `close_process_procs(pid)`: Erlang port semantics, a child dies with its owner (a deliberate semantic change). Guard in `tests/proc_test.blsp`, verified red (`:wrote`) on the pre-fix binary |
-| KI-95 | **`promote` forwards only closures/envs — DAG-shaped data is duplicated once per referrer, exponentially with nesting** — `heap.rs`'s `PromoteForward` comment reasons "acyclic ⇒ a finite tree to re-copy", but acyclic ≠ tree: immutable path-copying code produces DAGs everywhere, so every `def`/`spawn` of a value with shared substructure copies the shared part per reference into the append-only RUNTIME region, `2^n` with sharing depth, no cap | ⚠️ **OPEN 2026-08-31** (audit finding, constructed not observed) — see the section for the fix shape (mirror the GC flush path's pair/vector/map forwarding) and the measurement it owes (`spawn`/`spawn-live`/`startup` rows) |
-| KI-96 | **a remote monitor's `PENDING_REMOTE` entry survives its own `[:down …]`** — nothing removes the entry when the watched remote target dies and the peer's DOWN arrives, so (a) a long-lived watcher leaks one entry per dead remote monitor, and (b) a later node-down fires a SECOND `[:down mref pid :noconnection]` for an mref that already delivered — breaking the one-shot guarantee a `gen/call`-style pinned receive relies on | ⚠️ **OPEN 2026-08-31** (audit finding) — `monitor.rs:273-292`/`:367-385`; the fix needs a hook on DOWN delivery |
+| KI-95 | **`promote` forwards only closures/envs — DAG-shaped data is duplicated once per referrer, exponentially with nesting** — `heap.rs`'s `PromoteForward` comment reasons "acyclic ⇒ a finite tree to re-copy", but acyclic ≠ tree: immutable path-copying code produces DAGs everywhere, so every `def`/`spawn` of a value with shared substructure copies the shared part per reference into the append-only RUNTIME region, `2^n` with sharing depth, no cap | ✅ **FIXED 2026-08-31** — `PromoteForward` forwards pairs/vectors/maps/strings too (mirroring the GC flush tables), keyed on the handles' canonical identity (also closing a latent nursery/old `index()` collision in the closure/env tables); long spines stride-register (every 8th cell) so a bulk `def` stays cheap while growth stays O(n). Guards: 5 `promote_sharing_tests` (17 cells where pre-fix copied 131 071). Measured: `sort`/`spawn`/`startup`/`spawn-live`/`supervisor` all floor-level; `spawn`/`supervisor` **fewer** instructions than base |
+| KI-96 | **a remote monitor's `PENDING_REMOTE` entry survives its own `[:down …]`** — nothing removes the entry when the watched remote target dies and the peer's DOWN arrives, so (a) a long-lived watcher leaks one entry per dead remote monitor, and (b) a later node-down fires a SECOND `[:down mref pid :noconnection]` for an mref that already delivered — breaking the one-shot guarantee a `gen/call`-style pinned receive relies on | ✅ **FIXED 2026-08-31** — the DOWN now rides a dedicated `Frame::Down` (wire v7) instead of an ordinary `Send`, giving the watcher's node the hook the entry lacked: `deliver_remote_down` retires the pending entry, then delivers. Guard: `a_delivered_remote_monitor_does_not_fire_again_on_node_down` (two-node; sabotage-verified — retire disabled reproduces `SECOND-DOWN-BUG :noconnection`) |
 | KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading |
+| KI-88 | **one spawn of a warm burst is created, promoted, registered — and never scheduled** — exactly one reader of a 50-process burst never executes its first instruction; no death line, and the collector times out. Gates `BROOD_TW_REENTRY`'s default (60× on the viral defer shape, measured and waiting) | ⚠️ **WATCHING 2026-08-31 — DORMANT.** Seen many times, root cause never found, and no reconstructable binary exhibits it: 10/10 pass at `62eac84c` with the router confirmed live, on top of session 4's 15/15 + 8/8 (incl. a pristine rebuild of the commit that failed 3/3 hours earlier). One candidate mechanism — `run_one`'s unprotected post-quantum tail, whose unwind produces this exact signature — was found and **closed** in session 5, so a future sighting is known not to be that. Next sighting: PRESERVE THE BINARY, arm `BROOD_SCHED_DBG=1`, take a core in the window |
+| KI-99 | **`a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 under a full `make test`** — B warned 0 times instead of 1, with `dist: incoming connection failed: failed to fill whole buffer` on B's stderr: the handshake hit EOF mid-frame under full-suite load, so the inbound send that should have been dropped-and-warned never arrived | ⚠️ **WATCHING 2026-08-31** — retry-absorbed (try 2 passed), 6/6 green solo after. One sighting, but the failure output was **captured** this time (KI-80's lesson), and it names the mechanism: a connection that never completed, not a dedup miscount. If it recurs, the question is why the handshake EOFs under load — `MAX_HANDSHAKE_FRAME`/`accept_link` timeout interaction is the place to look, and KI-97 item 1 touches that code |
 | KI-87 | **The checker diverged — `nest run` at 54 GB, three 19 GB `types::` test processes.** `InferGuard::enter` ended in `.then_some(InferGuard(sym))`; `bool::then_some` builds its argument eagerly, so a REFUSED entry built and dropped a guard whose `Drop` removed the in-flight symbol's mark — every cycle refusal un-guarded the symbol it refused (latent since 2026-07-07). The demand walk consulting a callee's inferred sig (`0f64f600`) made `require-one` ⇄ `%require-await` nest without bound, one stack segment per level | ✅ **FIXED 2026-08-29** — the guard is constructed only on the success path (`entered.then(\|\| InferGuard(sym))`). Guards sabotage-verified: a refused third `enter` stays refused, and the mutually recursive pair reproduces the exact `mmap failed to allocate stack` OOM under `ulimit -v` with the bug restored. Build uncapped, run capped |
 | KI-86 | **`runtime_collector`'s three promotion tests failed under `cargo test`** — `expected ≥3000 promoted closures, got total=231`, with the count-based collector switched OFF by the test and one closure promoted per iteration | ⚠️ **WATCHING 2026-08-29** — precondition removed, mechanism inferred: `BROOD_RT_GC_FLOOR` is read once per process (`OnceLock`), two tests in the binary `set_var` it to 128/256, and under plain `cargo test` the leaked floor armed the `Interp`'s scheduler WORKER heaps (which share the runtime region) — a worker safepoint aged the runtime and the main heap's `cur_code()` count dropped. Fix: `Heap::set_rt_gc_floor` per test heap, no env. Not reproducible on demand on a quiet box (a worker has to wake); 4/4 green under load since |
 | KI-85 | **The checker produced a FALSE POSITIVE — its one hard invariant.** `(takes-str (first (fold (fn (a x) (cons x a)) [0] ["t"])))` warned `expects string, got 0` on a value that was the string `"t"` at runtime. A tuple shape (`[0]` → `(tuple 0)`) refines the VECTOR member only, but once the fold's result merged into one `pair \| vector` term, `elem_ty`/`tuple_elems` reported the tuple's elements for the whole term, pair member included | ✅ **FIXED 2026-08-29** — both accessors answer only for a term whose seq members the shape actually describes (`tuple_elems` only on a pure vector — a `nil` member makes `first` nil, a `pair` member makes it unknown). Found by an adversarial probe of the set-theoretic model; the same session closed a second gap the probe exposed — a lambda LITERAL passed as a callback was never checked at all (`callback_sig` answered `None`), so `(g (fn (x) (str x)))` against `((int -> int) -> int)` was silent; it is now typed under the arrow's own domain and the existing result-disjointness rule catches it, with no `⊆`-on-an-inferred-return false positives (`(+ x 1)` under `x : int` is `int`). Guards sabotage-verified |
@@ -210,6 +213,62 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-99 — a dist handshake EOF'd under full-suite load, so a drop-warning test saw no send ⚠️ WATCHING 2026-08-31
+
+**Symptom.** In a full `make test`, `cli::distribution
+a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 (passing on try 2):
+`assertion left == right failed: B should warn exactly once for the repeated inbound send
+(dedup)` — B warned **0** times. Its captured stderr names the cause:
+
+```
+--- B stderr ---
+dist: incoming connection failed: failed to fill whole buffer
+```
+
+**Reading.** Not a dedup miscount — the link never came up. `failed to fill whole buffer`
+is a `read_exact` hitting EOF mid-frame during the handshake, so the inbound send that
+should have been dropped-and-warned never reached B at all. Under full-suite load the
+box is running ~nproc test processes plus this test's two nodes.
+
+**Status.** One sighting, retry-absorbed; 6/6 green solo afterwards. Recorded rather than
+chased because the *output was captured this time* (KI-80's standing lesson) and it points
+somewhere specific. If it recurs: the question is why a local handshake EOFs under load.
+`accept_link`'s per-read `SO_RCVTIMEO` and `read_frame_capped` are the code — the same
+pair KI-97 item 1 rewrites for the trickle-DoS deadline, so that fix should re-test this.
+
+## KI-98 — `process_limit_test.blsp:114` timed out under a full `nest test`, twice in five runs ⚠️ WATCHING 2026-08-31
+
+**Symptom.** In a full `nest test`, "proc/flag :max-mailbox › the handler can drain and
+clear the bound — the process recovers" fails with `code = :timeout` after its 30 s
+`after`: the flooded worker (parked on `(:never nil)` with `:max-mailbox 8`, flooded
+with 32) never sent `[:recovered …]`. Two sightings in five full runs on 2026-08-31
+(one on a stale pre-KI-89-fix binary, one on the fixed tree); the sibling cases in the
+same file stayed green.
+
+**What it needs to fail.** The worker's breach flag arms at delivery 9
+(`note_mailbox_bound`); ANY subsequent wake re-enters `receive_match`, whose entry
+check raises the catchable E0046 (`mailbox.rs`, the ADR-307 probe). `:timeout` means
+the worker never re-entered the scan for 30 s with 24+ undelivered messages queued —
+a missed-wake shape (the KI-88 family), or an E0046/drain path that hung.
+
+**Not reproducible on demand:** 16 solo runs of the file green; 10 runs under 8-way
+CPU load green; only the full-suite context shows it. Sighted on a tree carrying the
+KI-91/92 mailbox fixes — those touch the receive scan/consume and the msg-roots slot
+table, not delivery or wake, and a 3-run pre-fix control (worktree at `e569ca4f`)
+didn't fire it — but three runs is not a base rate; neither direction is established.
+
+**If it recurs:** the failing run's log already names the case; the missing fact is
+whether the worker EVER re-entered `receive_match` after the breach armed. Arm
+`BROOD_SCHED_DBG=1` (per-pid run/park/end lines) and keep the whole log — the
+question is one process's lifecycle between its 9th delivery and the timeout.
+
+**Third sighting, 2026-08-31 (KI-96 session):** the same case, same `:timeout`, under a
+full **tree-walker** suite half (`BROOD_VM=0 cargo nextest run`, 16 GB cap) — first time
+seen at ceiling 0, so it is not VM-specific. Solo re-run under the same cap and engine:
+green (13/13). Still full-suite-context only; no `BROOD_SCHED_DBG` was armed (the run was
+a KI-96 verification pass, not a hunt). Base rate so far: ~3 in 8 full runs across both
+engines.
 
 ## KI-91 — `receive`'s consume path removed the matched message by a stale scan index ✅ FIXED 2026-08-31
 
@@ -335,7 +394,35 @@ first (there is no `proc-controlling-process` yet; the socket layer has one).
 child reaped". Verified red on the pre-fix binary (`actual: :wrote` — the orphaned `cat`
 accepted the write), green after.
 
-## KI-95 — `promote` forwards only closures/envs: DAG-shaped data duplicates per referrer, exponentially with nesting ⚠️ OPEN 2026-08-31
+## KI-95 — `promote` forwards only closures/envs: DAG-shaped data duplicates per referrer, exponentially with nesting ✅ FIXED 2026-08-31
+
+**Status:** ✅ fixed, exactly along the fix shape below. `PromoteForward` now forwards
+pairs, vectors (shared with ranges/seq-views — one `VecId` slab), map/set trie nodes and
+strings, keyed on the **handle types themselves** rather than `index() as u32` — handle
+`Eq`/`Hash` use the canonical identity (region + index + the LOCAL nursery/old AGE bit),
+which also closes a latent collision in the pre-existing closure/env tables: a nursery
+and an old-gen closure at the same slab index are distinct objects and could resolve to
+one RUNTIME copy. Guards: `core::heap::promote_sharing_tests` (5 tests) — the 16-level
+pair DAG promotes **17** cells where the pre-fix code promoted **131 071**, plus a
+shared-tail case, a vector DAG, a map/string sharing case, and the stride bound below.
+
+**The cost, measured (the entry demanded it).** Registration is a per-copied-node map
+insert on the `def`/`spawn` path. Three rounds:
+- SipHash was ~2% of the `spawn` row's instructions → replaced with a multiplicative
+  `HandleHasher` (the `table.rs` `IdentityHasher` pattern); `spawn` then measured
+  **fewer** instructions than base (the closure/env tables shed their SipHash too).
+- A bulk `def` of a long list (`sort`'s 375k-cell spine) paid ~107 instructions/cell in
+  `HashMap::insert` (+5% on the row, confirmed by interleaved `perf stat`) → long spines
+  (> 64 cells) register every **8th** cell (`SPINE_REG_STRIDE`), head always registered.
+  A walk re-entering the spine re-copies at most 7 cells per referrer before joining the
+  registered copy — growth stays O(n), the exponential class stays closed, and `sort`
+  came back to +0.7% on a 0.7% floor.
+- Final `make ab --floor`: `sort`/`spawn`/`startup`/`spawn-live`/`supervisor` all read
+  noise at their floors; `spawn`/`supervisor` instructions are *below* base per
+  interleaved `perf stat` (the concurrency-row wall deltas were the documented ±
+  cross-binary layout noise, checked as CLAUDE.md prescribes).
+
+Original entry:
 
 **Symptom** (constructed — audit finding, not yet observed): a `def` (or `spawn`
 argument) of a value whose substructure is *shared* — which immutable path-copying code
@@ -363,7 +450,27 @@ for pairs/vectors/maps/strings, mirroring the flush tables. Promote is on the
 no-sharing case. A guard at fix time: promoting an n-level self-sharing structure must
 grow `cur_code().pairs` by O(n), asserted directly.
 
-## KI-96 — a remote monitor's `PENDING_REMOTE` entry survives its own DOWN ⚠️ OPEN 2026-08-31
+## KI-96 — a remote monitor's `PENDING_REMOTE` entry survives its own DOWN ✅ FIXED 2026-08-31
+
+**Status:** ✅ fixed, along the entry's own "clean seam": the dist inbound path now
+*recognises* a monitor DOWN because the DOWN is no longer an ordinary send — it travels
+as a dedicated **`Frame::Down`** (wire protocol v7; `watcher_pid`/`mref`/`target_pid` +
+the `Message` reason). The watched node's `fire_down` ships it (`dist::send_down`); the
+watcher's node handles it in `deliver_remote_down`, which retires the `PENDING_REMOTE`
+entry FIRST, then delivers the `[:down mref pid reason]`. The dying pid is node-qualified
+by the *authenticated* peer on the receiving side, never wire data — same rule as the
+other coupling frames. Bonus closures: the `:noproc` immediate-fire path retires its
+pending entry the same way (it leaked identically), and `drop_pending_remote` now prunes
+emptied node keys. Guard: the two-node test
+`a_delivered_remote_monitor_does_not_fire_again_on_node_down` (monitor → target dies →
+DOWN received → node killed → `[:nodedown]` → assert no second `[:down]` on that mref),
+sabotage-verified — with the retire commented out it fails `SECOND-DOWN-BUG
+:noconnection`, the entry's exact predicted duplicate. Verified: distribution suite 4/4
+loops + a `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` pass, full suite green both engines
+(modulo the documented wasm-under-cap exception and one KI-98 recurrence, logged there),
+clippy on CI's flags.
+
+Original entry:
 
 **Symptom** (constructed — audit finding): entries in `PENDING_REMOTE`
 (`process/monitor.rs`) are removed by `demonitor`, by the watcher's own death, or by
@@ -422,10 +529,17 @@ here as they close.
    `ARMED == 0` (`process/sysmon.rs`).
 
 Also recorded by the same audit, elsewhere: the four fixed bugs above (KI-91–94), the two
-open correctness items (KI-95/96), and the performance candidates in
-`compute-frontier.md` §7.8.
+correctness items KI-95/96 (both fixed later the same day), and the performance
+candidates in `compute-frontier.md` §7.8.
 
-## KI-88 — one spawn of a warm burst is created, promoted, registered — and never scheduled ⚠️ OPEN 2026-08-30 (deterministic repro; gates the tree-walker→VM router's default)
+## KI-88 — one spawn of a warm burst is created, promoted, registered — and never scheduled ⚠️ WATCHING 2026-08-31 (DORMANT since 2026-08-30 — no reconstructable binary reproduces it; still gates the tree-walker→VM router's default)
+
+**Status note (2026-08-31, KI-96 session):** the *header* of this entry advertised a
+"deterministic repro" for a day after session 4 had already found it dormant — which is
+how it got picked up as the next item. It does not reproduce: the canonical repro (the
+full chaos2 file, `BROOD_TW_REENTRY=1`, router confirmed live at 394 routed closures)
+passes **10/10** at `62eac84c`, on top of session 4's 15/15 and 8/8. Read the session 5
+note at the end before spending time here.
 
 **Symptom.** In `breakage/chaos2_process_genserver` P47 (50-reader burst against a 10k-entry
 map server), exactly ONE early reader (index 2–4, stable within a config) never runs: its
@@ -515,6 +629,38 @@ real until proven otherwise: the router stays opt-in. If the wedge is next seen 
 arm `BROOD_SCHED_DBG=1` immediately (run/end/park/resume lines + the ledger watchdog),
 take a core inside the wedge window (`kill -ABRT`; apport keeps it), and PRESERVE THE
 EXACT BINARY — the artefact is the whole case.
+
+**Session 5 (2026-08-31) — still dormant; one candidate mechanism found and CLOSED.**
+Re-confirmed dormant (10/10, above). What the session did produce is a structural hole in
+the exact code path this entry implicates, found by reading rather than by reproducing:
+**`run_one`'s post-quantum tail ran unprotected.** `catch_unwind` wrapped `drive()` only,
+and everything after it — `save_ctx`, `finish_quantum`, and the outcome routing
+(`store_resume`/`park_on_receive`/`deregister`/`enqueue`) — was plain statements, with no
+catch in `worker_loop` either. A panic there did two silent things at once: killed that
+worker thread for good (the pool shrinks permanently; nothing restarts a worker), and
+dropped the `Box<Process>` during the unwind, so the process vanished with **no
+`deregister`** — no death line, no monitors, no `[:down …]`, and anything waiting on it
+waited forever.
+
+That is *exactly* this entry's signature: a `run` with no `end` (the `end` print is the
+first statement of `handle_capture_outcome`, which the unwind skips), a ledger entry no
+thread is inside (`ledger_exit` is likewise skipped), no death line, and a collector
+timing out. Session 3's "a Rust frame cannot evaporate mid-function without unwinding
+through the instrumented tail" was right about unwinding and wrong about the tail: the
+tail is not a `Drop` guard, so an unwind skips it silently.
+
+**It is not, however, a diagnosis of KI-88** — the mechanism is *loud* (the panic hook
+prints and appends `.brood_crash_dump`), and no sighting ever carried a panic message. It
+is now hardened and guarded regardless (`crates/cli/tests/quantum_tail_panic.rs`, with the
+`BROOD_FAULT_QUANTUM_TAIL=<n>` injection knob; sabotage-verified — reverting the catch
+fails the guard while its no-fault control still passes). The value for this entry is
+**elimination**: if the wedge is seen again, it is not this.
+
+One trap worth keeping from building that guard: a short program can exit *while the
+panicking worker is still symbolizing its backtrace*, so the recovery's own line never
+prints and the run looks like a silent vanish. The guard sleeps and runs two further waves
+to outlive the unwind. A wedge investigation that ends "no diagnostic appeared" should
+check it did not simply out-run one.
 
 ## KI-87 — the checker's cycle guard released the symbol it refused: `nest run` at 54 GB, three 19 GB test processes ✅ FIXED 2026-08-29
 
@@ -5830,6 +5976,19 @@ concurrent nextest loop) runs **green in 99 s** where it produced the 62-F TMT b
 original sighting's discarded output is permanently unknowable, but every mechanism the
 kept output exposed is closed.
 
+**Fourth sighting, 2026-08-31 — and the terminal trap repeated verbatim.** Under a
+`make test-both` (KI-95 session), `brood_suite_passes` failed **both tries** on the VM
+half (`Summary [511s] 1319 run: 1318 passed, 1 failed` per try, `Brood test suite
+failed: error: 1 test(s) failed` — a named in-language failure, NOT a TMT) — and the run
+was piped through `grep -E "Summary|FAIL|failed|passed"`, so the one line worth having,
+the failing case's name, was discarded *again*, this time by the model driving the
+session. Not reproduced with output kept: solo green, a full captured VM run green
+(1319/1319, 163 s), a full captured `make test-both` green on both halves (161 s/244 s,
+zero retries). Both-tries-failed distinguishes it from the retry-absorbed class above;
+with the name lost it cannot be told apart from KI-98's full-suite-context family
+either. The standing instruction survives another demonstration: **never pipe a suite
+run through a filter — capture the whole run to a file, grep the file.**
+
 ## KI-75 — `compare` called unequal values equal, and `sort` inherited it ✅ FIXED 2026-08-28
 
 **Symptom.** Sorting float data containing a `NaN` silently returned it *unsorted*:
@@ -6288,7 +6447,95 @@ nothing did. Recorded because this repo's own rule is that a failure seen once i
 otherwise — and because a single sighting on the one commit that touched the preempt path is
 precisely the coincidence that deserves writing down rather than explaining away.
 
-## KI-89 — a test file's ability impls leak into `std/`'s checker view ⚠️ WATCHING 2026-08-30
+## KI-89 — a test file's ability impls leak into `std/`'s checker view ✅/⚠️ 2026-08-31: the resurrection race FIXED + guarded; a residual orphan mechanism WATCHING (one binary, since destroyed — see the residual block)
+
+> **Resolution 2026-08-31, two findings.**
+>
+> **1. The recorded minimal repro never touched `%isolate`.** `nest test FILE...` with
+> explicit files takes the **single-file path** in `crates/nest/src/main.rs`: it
+> `eval_file`s every named file into ONE image and runs `run-loaded-tests` — no
+> `drain-files-scoped`, no per-file isolate anywhere. So
+> `nest test tests/record_test.blsp tests/std_check_test.blsp` fails **by design of that
+> path**: `usd` is simply still bound (a probe file run the same way sees the
+> constructor bound and zero orphans — nothing was ever rolled back, because nothing
+> ever restores). Every hypothesis this entry ruled out was tested against `%isolate`,
+> which the repro does not exercise; the image/order/`-j1` invariance that seemed
+> mysterious is just this. (Whether the explicit-files path *should* scope per file is
+> a separate design question, deliberately not changed here.)
+>
+> **2. The full-suite orphans were a lost-update race between `registry_update` and
+> `restore_globals` — found by code reading, reproduced deterministically, fixed.**
+> The registry RMW (KI-22's fix) holds `registry_lock` from its read of the registry
+> global to its `env_define`; `restore_globals`' wholesale table swap did **not** take
+> that lock. A bystander process (a straggler the per-file reaper's documented
+> ancestry gap misses) that read the registry *before* a restore's swap and wrote its
+> successor *after* it writes back a map computed from the PRE-restore table —
+> resurrecting **every accumulated registration wholesale** (`*record-ids*`,
+> `*impls*`, `*features*`, …) while the ordinary bindings beside them stay rolled
+> back. That is exactly the observed asymmetry: std record ids registered, their
+> constructors unbound. And one hit is **sticky**: the resurrected entries sit inside
+> every later snapshot, so they never roll back again — which is why orphans from
+> five different modules appeared at once.
+>
+> Reproduced deterministically (`tests/registry_isolate_race_test.blsp`: a spawned
+> registering bystander + 2000 isolate cycles): **1994 of 2000 cycles resurrected**
+> the rolled-back registration on the pre-fix build, **0 of 2000** with the fix. At
+> suite scale: a pre-fix worktree (`e569ca4f`) failed **3 of 3** full `nest test`
+> runs on this entry's own sightings (`ability_test.blsp:471` orphans ×2,
+> `stdimage_test.blsp:60` ×1); the fixed tree ran the same suite with **zero** orphan
+> failures. Fix: `restore_globals` acquires `registry_lock` around the swap (lock
+> order registry → globals, matching every RMW; see the comment at the swap). A
+> racing RMW now either completes before the swap and is wiped — the isolation
+> contract — or starts after and reads the restored table.
+>
+> Guard: `tests/registry_isolate_race_test.blsp`, with a liveness floor on the
+> bystander (its first draft died silently on a renamed builtin and "passed" — the
+> gate-that-cannot-fail lesson, again).
+>
+> **Residual, 2026-08-31 (later): a suite-scale orphan mechanism SURVIVES the fix on
+> one binary — and that binary is gone.** The first post-fix build of the merged tree
+> failed 3 of 3 full `nest test` runs orphan-shaped (`stdimage_test:60`,
+> `ability_test:471` ×2, same seven ids) — so the resurrection race was not the only
+> path; the suspected residual is the interleaving the lock deliberately permits (a
+> straggler's constructor `def` wiped by a restore while its locked
+> `%record-register`, starting after the swap, lands in the restored table: id kept,
+> ctor gone — sticky via the next file's snapshot). Then the next incremental build
+> (adding the `BROOD_REG_TRACE` instrumentation, runtime-gated OFF) went **15/15
+> green** — traced and untraced — and no binary that exhibits the residual exists any
+> more. That is KI-88's lesson repeated verbatim, including the mistake: the failing
+> binary was overwritten instead of preserved. What the hunt left in-tree:
+> `BROOD_REG_TRACE=1` (every `*record-ids*` write with the writer's 4-hop ancestry
+> chain + every restore), and two traced observations — the heavy all-registry trace
+> *suppresses* the race (stderr-lock serialization), so trace lean; and the
+> module-sweep writers seen mid-run are `doc_examples_test`'s legitimate
+> load-everything unit, within its own file window. **If orphans are next seen:
+> PRESERVE THE BINARY, re-run it with `BROOD_REG_TRACE=1`, and read the chain= of
+> the seven writes against the RESTORE lines.** Watching, not open: 15 consecutive
+> green full runs and no reproducing artifact.
+>
+> **Follow-up, same day: a REPRO LEVER exists, the class is wider than registries, and
+> this needs a design session.** The residual fired again on the next combined-tree
+> build (first run after the build: `stdimage_test:60`, `*lineedit-keymap*` pre-bound),
+> that binary WAS preserved this time (sha `8bd15795…` — since cleaned up: the
+> delete-the-images lever below supersedes it, reproducing the class on any binary),
+> and it then ran 6/6 green warm and 3/3 green cold-booted (`touch` lever) — so the
+> boot cache is not the key either. The lever that works: **delete the stdlib images**
+> (`rm ~/.cache/brood/std-image-*.bin`) so every module load takes the slower SOURCE
+> path. Under that timing the class fires readily and in new shapes: run 1 failed
+> `ui_test.blsp:284` (records/vtables mixing — overlay ability records), and run 2
+> caught the mechanism LIVE mid-suite — a process died
+> `ability Temporal/->iso: no impl for :tempo/tempo — have (:datetime/…)`, i.e.
+> **tempo's `*impls*` entries were ripped out from under a RUNNING dispatch** (the id
+> resolved; the impl map only held datetime's) — and the run then degraded past a
+> 10-minute bound. So the full class is: **a per-file scope restore races processes
+> still RUNNING against the pre-restore globals — readers as well as writers** — the
+> `%isolate` soundness condition ("no other process mutating globals concurrently")
+> violated routinely by the scoped suite under source-path timing. The registry lock
+> fixed the one corruption that compounded (wholesale resurrection); the remaining
+> design question is structural: process quiescence at file boundaries, or the
+> spawn-time ownership generation the `%isolate` comment already names as the missing
+> primitive. A scheduler/runner design session with fresh eyes — do not patch it
+> piecemeal from here.
 
 **Symptom.** In a scoped `nest test` run, `std_check_test` ("the standard library carries no
 checker warnings") fails with ~15 warnings about a record defined in **another test file**:
