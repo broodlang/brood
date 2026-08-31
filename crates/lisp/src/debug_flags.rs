@@ -217,6 +217,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "=1: additionally emit the inline call path in EVERY body's first compile (the experiment lever) — measured as a ~115M-instruction per-run compile constant, so not the default; the default arms it only in hot re-lowerings",
     ),
     f(
+        "BROOD_XADMIT",
+        JIT,
+        "=1: admit profitability-gate-refused named defns at the HOT stage (deferred compile, inline call blob, frame cap). Measured NEGATIVE 2026-08-31 — nqueens +7.6% cycles, pipeline +7.6%: a call-dominated boxed arm is better interpreted even on the cheapest native call path we have. Kept as the one-env-var re-test for when the call convention changes (§7.5 increment 4)",
+    ),
+    f(
         "BROOD_MONO",
         OPTOUT,
         "opt IN to ability-dispatch monomorphization (off by default — it trades late binding)",

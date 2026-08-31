@@ -227,9 +227,10 @@ pub(super) fn chacha20_encrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     }
     let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
         .map_err(|e| LispError::runtime(format!("%chacha20-encrypt: {e}")))?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::try_from(nonce_bytes.as_slice())
+        .map_err(|e| LispError::runtime(format!("chacha20 nonce: {e}")))?;
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_slice())
+        .encrypt(&nonce, plaintext.as_slice())
         .map_err(|e| LispError::runtime(format!("%chacha20-encrypt: {e}")))?;
     Ok(bytes_to_value(&ciphertext, heap))
 }
@@ -256,8 +257,9 @@ pub(super) fn chacha20_decrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     }
     let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
         .map_err(|e| LispError::runtime(format!("%chacha20-decrypt: {e}")))?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    match cipher.decrypt(nonce, ciphertext.as_slice()) {
+    let nonce = Nonce::try_from(nonce_bytes.as_slice())
+        .map_err(|e| LispError::runtime(format!("chacha20 nonce: {e}")))?;
+    match cipher.decrypt(&nonce, ciphertext.as_slice()) {
         Ok(plaintext) => Ok(bytes_to_value(&plaintext, heap)),
         Err(_) => Ok(Value::keyword(value::intern("error"))),
     }

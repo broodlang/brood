@@ -73,6 +73,14 @@ impl CraneliftBackend {
         // Cranelift upgrade, and only with the fuzz differential + every benchmark row's
         // stderr grepped for CODEGEN-PANICKED (the failure mode is a caught panic and a
         // silently interpreter-only process, not a wrong answer).
+        //
+        // Re-attempted on the 0.135.1 upgrade (2026-08-30), per the instruction above,
+        // and the verdict got STRONGER: the same `remove_constant_phis.rs` assert
+        // (line 299, usize assert_failed) now fires on EVERY benchmark row's first
+        // compile, not one arm of `json` — 26 of 26 rows printed CODEGEN-PANICKED.
+        // Whatever contract the verifier is establishing for that pass, this codebase's
+        // CLIF violates it pervasively without the verifier's normalization in the loop.
+        // Do not retry on 0.13x at all; a future major bump repeats the same protocol.
         #[allow(clippy::result_large_err)]
         let mut builder =
             JITBuilder::with_flags(&[("opt_level", "speed")], default_libcall_names())
@@ -245,7 +253,7 @@ impl CraneliftBackend {
             b.seal_block(block);
             let v = b.ins().iconst(types::I64, n);
             b.ins().return_(&[v]);
-            b.finalize();
+            b.finalize(self.module.target_config());
         }
         self.module
             .define_function(id, &mut ctx)

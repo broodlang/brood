@@ -108,7 +108,10 @@ fn a_half_typed_multibyte_buffer_does_not_kill_the_server() {
             FoldingRangeRequest::METHOD,
             serde_json::json!({ "textDocument": { "uri": u } }),
         );
-        assert!(r.error.is_none(), "folding on {text:?} errored: {r:?}");
+        assert!(
+            r.response_result.is_ok(),
+            "folding on {text:?} errored: {r:?}"
+        );
     }
 
     // Still serving afterwards.
@@ -119,7 +122,7 @@ fn a_half_typed_multibyte_buffer_does_not_kill_the_server() {
         DocumentSymbolRequest::METHOD,
         serde_json::json!({ "textDocument": { "uri": u } }),
     );
-    assert!(r.error.is_none());
+    assert!(r.response_result.is_ok());
 
     shutdown(&client);
     handle.join().unwrap().unwrap();
@@ -163,7 +166,7 @@ fn a_diagnostic_after_an_emoji_lands_on_the_offending_token() {
         }),
     );
     let actions: Vec<lsp_types::CodeActionOrCommand> =
-        serde_json::from_value(r.result.expect("code actions")).unwrap();
+        serde_json::from_value(r.response_result.expect("code actions")).unwrap();
     let fix = actions
         .iter()
         .find_map(|a| match a {
@@ -234,7 +237,7 @@ fn rename_is_version_stamped_for_a_capable_client() {
             "newName": "g",
         }),
     );
-    let edit: WorkspaceEdit = serde_json::from_value(r.result.expect("a rename")).unwrap();
+    let edit: WorkspaceEdit = serde_json::from_value(r.response_result.expect("a rename")).unwrap();
     assert!(
         edit.changes.is_none(),
         "a documentChanges-capable client must not get the unversioned map"
@@ -277,7 +280,7 @@ fn rename_stays_unversioned_for_a_plain_client() {
             "newName": "g",
         }),
     );
-    let edit: WorkspaceEdit = serde_json::from_value(r.result.expect("a rename")).unwrap();
+    let edit: WorkspaceEdit = serde_json::from_value(r.response_result.expect("a rename")).unwrap();
     assert!(edit.document_changes.is_none());
     assert!(edit.changes.is_some());
 
@@ -341,14 +344,14 @@ fn hostile_requests_are_answered_and_not_fatal() {
     // Unknown method → MethodNotFound, not silence.
     let r = request(&client, 1, "textDocument/nonsense", serde_json::json!({}));
     assert_eq!(
-        r.error.expect("an error").code,
+        r.response_result.expect_err("an error").code,
         ErrorCode::MethodNotFound as i32
     );
 
     // Misshaped params → InvalidParams, not a panic.
     let r = request(&client, 2, HoverRequest::METHOD, serde_json::json!({}));
     assert_eq!(
-        r.error.expect("an error").code,
+        r.response_result.expect_err("an error").code,
         ErrorCode::InvalidParams as i32
     );
 
@@ -362,7 +365,7 @@ fn hostile_requests_are_answered_and_not_fatal() {
             "position": { "line": 4294967295u32, "character": 4294967295u32 },
         }),
     );
-    assert!(r.error.is_none(), "{r:?}");
+    assert!(r.response_result.is_ok(), "{r:?}");
 
     // A request for a document we never opened → a result, never a hang.
     let r = request(
@@ -371,7 +374,7 @@ fn hostile_requests_are_answered_and_not_fatal() {
         DocumentSymbolRequest::METHOD,
         serde_json::json!({ "textDocument": { "uri": uri_for("never") } }),
     );
-    assert!(r.error.is_none(), "{r:?}");
+    assert!(r.response_result.is_ok(), "{r:?}");
 
     shutdown(&client);
     handle.join().unwrap().unwrap();

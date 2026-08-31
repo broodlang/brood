@@ -227,7 +227,11 @@ pub(crate) fn jit_lower_arm_hot(
     arm: &CompiledArm,
     slot_tags: &[u8],
 ) -> Option<*const u8> {
-    plan_general_lowering(arm, slot_tags).ok()?;
+    // No `plan_general_lowering` here, deliberately: an arm reaching the hot stage
+    // either passed the gate at its first compile (the relower — re-running it would
+    // be a no-op) or was refused by it and admitted anyway (`BROOD_XADMIT=1`, §7.1 —
+    // the hot stage is exactly where the gate's two recorded costs don't apply).
+    // The subset pre-bails inside `jit_lower_arm_inner` still guard everything real.
     jit_lower_arm_inner(jit, arm, slot_tags, None, true)
 }
 
@@ -1341,8 +1345,8 @@ fn jit_lower_arm_inner(
         let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
         for &slot in &hoist_slots {
             let roots_base = b.use_var(rb_var);
-            let i = b.ins().iadd_imm(base, slot as i64);
-            let o = b.ins().imul_imm(i, STRIDE);
+            let i = b.ins().iadd_imm_s(base, slot as i64);
+            let o = b.ins().imul_imm_s(i, STRIDE);
             let addr = b.ins().iadd(roots_base, o);
             let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), addr, 0);
             let w1 = b.ins().load(
@@ -1390,13 +1394,13 @@ fn jit_lower_arm_inner(
             b.ins()
                 .brif(status, deopt, &[BlockArg::Value(__dr)], okb, &[]);
             b.switch_to_block(okb);
-            let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+            let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
             let w1 = b
                 .ins()
-                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-            let w2 = b
-                .ins()
-                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            let w2 =
+                b.ins()
+                    .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
             let c = b.ins().call(vbase_ref, &[heap, w0, w1, w2, len_addr]);
             let ptr = b.inst_results(c)[0];
             let cont = b.create_block();
@@ -1424,13 +1428,13 @@ fn jit_lower_arm_inner(
             b.ins()
                 .brif(status, deopt, &[BlockArg::Value(__dr)], okb, &[]);
             b.switch_to_block(okb);
-            let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+            let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
             let w1 = b
                 .ins()
-                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-            let w2 = b
-                .ins()
-                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            let w2 =
+                b.ins()
+                    .stack_load(types::I64, types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
             hoisted_scalar.insert(sym, (w0, w1, w2));
             // Dense-table hoist (the sieve lever): resolve this global's dense slot
             // region once. NO branch here — a null base (non-table / hashed /
@@ -1459,8 +1463,8 @@ fn jit_lower_arm_inner(
             None => continue, // handle/vector slot: stays on the frame, not register-carried
         };
         let rb = b.use_var(rb_var);
-        let idx = b.ins().iadd_imm(base, k as i64);
-        let off = b.ins().imul_imm(idx, STRIDE);
+        let idx = b.ins().iadd_imm_s(base, k as i64);
+        let off = b.ins().imul_imm_s(idx, STRIDE);
         let addr = b.ins().iadd(rb, off);
         let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
         let expected_tag = if is_float {
@@ -1468,7 +1472,7 @@ fn jit_lower_arm_inner(
         } else {
             TAG_INT as i64
         };
-        let ok = b.ins().icmp_imm(IntCC::Equal, tag, expected_tag);
+        let ok = b.ins().icmp_imm_s(IntCC::Equal, tag, expected_tag);
         let cont = b.create_block();
         let __dr = b.ins().iconst(types::I32, 106);
         b.ins().brif(ok, cont, &[], deopt, &[BlockArg::Value(__dr)]);
@@ -1516,8 +1520,8 @@ fn jit_lower_arm_inner(
             continue; // absent, or already reset (the small native, where the two agree)
         }
         reset = Some(slot);
-        let idx = b.ins().iadd_imm(base, slot as i64);
-        let off = b.ins().imul_imm(idx, STRIDE);
+        let idx = b.ins().iadd_imm_s(base, slot as i64);
+        let off = b.ins().imul_imm_s(idx, STRIDE);
         let rb = b.use_var(rb_var);
         let addr = b.ins().iadd(rb, off);
         let tag = b.ins().iconst(types::I8, TAG_INT as i64);
@@ -1719,13 +1723,19 @@ fn jit_lower_arm_inner(
                         let cv_ptr = b.ins().iconst(ptr_ty, cv as *const ConstVal as i64);
                         let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
                         b.ins().call(const_load_ref, &[cv_ptr, out_addr]);
-                        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-                        let w1 = b
-                            .ins()
-                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-                        let w2 =
-                            b.ins()
-                                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
+                        let w1 = b.ins().stack_load(
+                            types::I64,
+                            types::I64,
+                            out_slot,
+                            PAYLOAD_OFFSET as i32,
+                        );
+                        let w2 = b.ins().stack_load(
+                            types::I64,
+                            types::I64,
+                            out_slot,
+                            PAYLOAD_OFFSET as i32 + 8,
+                        );
                         stack.push(Op::Handle(w0, w1, w2));
                     }
                 },
@@ -1788,13 +1798,19 @@ fn jit_lower_arm_inner(
                         let cont = b.create_block();
                         b.ins().brif(status, error, &[], cont, &[]);
                         b.switch_to_block(cont);
-                        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-                        let w1 = b
-                            .ins()
-                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-                        let w2 =
-                            b.ins()
-                                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        let w0 = b.ins().stack_load(types::I64, types::I64, out_slot, 0);
+                        let w1 = b.ins().stack_load(
+                            types::I64,
+                            types::I64,
+                            out_slot,
+                            PAYLOAD_OFFSET as i32,
+                        );
+                        let w2 = b.ins().stack_load(
+                            types::I64,
+                            types::I64,
+                            out_slot,
+                            PAYLOAD_OFFSET as i32 + 8,
+                        );
                         stack.push(unbox_float_global(
                             &mut b,
                             *s,
@@ -2070,7 +2086,7 @@ fn jit_lower_arm_inner(
     let four = b.ins().iconst(types::I64, 4);
     b.ins().return_(&[four]);
     b.seal_all_blocks();
-    b.finalize();
+    b.finalize(m.target_config());
 
     // IR inspection (debug): `BROOD_JIT_DUMP_IR=1` dumps each fully-lowered arm's
     // bytecode + Cranelift CLIF to stderr — the tool for diagnosing a JIT miscompile
