@@ -8383,6 +8383,20 @@ lowering, it is §7.5 increment 4 — the X-register convention — and `BROOD_X
 kept as the one-env-var re-test for exactly that moment. Suite 1300/1300 with the flag
 armed; correctness of admitted arms verified on nqueens (checksum match).
 
+## 2026-08-31 — `gui/font`'s one-arg form never worked (&optional nil-padding)
+
+bedit's startup died on `(gui/font *font*)` — `%gui-font!: expected int, got map`.
+The builtin dispatches on argument COUNT (one arg = the global spec, two = window id
++ spec), but the `std/gui.blsp` wrapper was `(defn font (&optional id spec)
+(%gui-font! id spec))`: `&optional` fills an absent `spec` with nil, so the
+documented one-arg form always reached the builtin as TWO args and the spec map
+landed in the window-id slot. The absent-vs-nil wrapper trap, verbatim — the
+same class `docs/known-issues.md` has seen before. Fix: the wrapper now arity-
+dispatches (`(if (nil? spec) (%gui-font! id-or-spec) (%gui-font! id-or-spec
+spec))`), and zero args is an arity error instead of a nil spec. Regression test
+in `tests/gui_test.blsp`, written to pass on gui and non-gui builds alike (it
+asserts the TYPE error absent, tolerating the "not compiled in" raise). Verified
+on a `--features gui` build headless: both forms return nil.
 ### 2026-08-31 — "performance went down": no, the measurement did — the harness's one-invocation refresh was a coin flip
 
 The refreshed benchmarks column read several rows up (regex +15%, errors-deep +7%, …) and
