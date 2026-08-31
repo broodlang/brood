@@ -52,7 +52,10 @@ fn an_error_escaping_a_finally_renders_as_itself_with_its_trace() {
     );
     let (stderr, ok) = run(&path);
     assert!(!ok);
-    assert!(stderr.contains("type error: +: expected number"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("type error: +: expected number"),
+        "stderr: {stderr}"
+    );
     assert!(stderr.contains("at boom"), "trace lost: {stderr}");
     assert!(!stderr.contains("{:kind"), "map dump leaked: {stderr}");
 }

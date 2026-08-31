@@ -1745,14 +1745,15 @@ pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             Ok(prev.map(|n| Value::int(n as i64)).unwrap_or(Value::nil()))
         }
         "max-mailbox" => {
-            let pid = crate::process::current_pid().ok_or_else(|| {
-                LispError::runtime("proc/flag :max-mailbox: no calling process")
-            })?;
+            let pid = crate::process::current_pid()
+                .ok_or_else(|| LispError::runtime("proc/flag :max-mailbox: no calling process"))?;
             let prev = if args.len() < 2 {
                 crate::process::max_mailbox(pid)
             } else {
                 match arg(args, 1) {
-                    Value::Int(n) if n > 0 => crate::process::set_max_mailbox(pid, Some(n as usize)),
+                    Value::Int(n) if n > 0 => {
+                        crate::process::set_max_mailbox(pid, Some(n as usize))
+                    }
                     Value::Nil => crate::process::set_max_mailbox(pid, None),
                     other => {
                         return Err(LispError::wrong_type(
