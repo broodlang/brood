@@ -6384,7 +6384,8 @@ precisely the coincidence that deserves writing down rather than explaining away
 > **Follow-up, same day: a REPRO LEVER exists, the class is wider than registries, and
 > this needs a design session.** The residual fired again on the next combined-tree
 > build (first run after the build: `stdimage_test:60`, `*lineedit-keymap*` pre-bound),
-> that binary WAS preserved this time (`scratchpad/preserved-bin`, sha `8bd15795…`),
+> that binary WAS preserved this time (sha `8bd15795…` — since cleaned up: the
+> delete-the-images lever below supersedes it, reproducing the class on any binary),
 > and it then ran 6/6 green warm and 3/3 green cold-booted (`touch` lever) — so the
 > boot cache is not the key either. The lever that works: **delete the stdlib images**
 > (`rm ~/.cache/brood/std-image-*.bin`) so every module load takes the slower SOURCE
