@@ -1863,8 +1863,7 @@ fn domain_of_inner(
             None => (items[1], items[3]),
         };
         if let Value::Sym(f) = f_arg {
-            let known =
-                !scope.shadowed.contains(&f) && param_index(f_arg, params, scope).is_none();
+            let known = !scope.shadowed.contains(&f) && param_index(f_arg, params, scope).is_none();
             let f_sig = if known {
                 ctx.declared_sig(f)
                     .or_else(|| primitive_sig(heap, f))

@@ -509,7 +509,9 @@ impl LispError {
         use crate::core::value::{intern, symbol_name_ref};
         let Value::Map(map) = value else { return None };
         let key = |name: &str| heap.map_get(map, Value::keyword(intern(name)));
-        let Value::Keyword(kind_sym) = key("kind")? else { return None };
+        let Value::Keyword(kind_sym) = key("kind")? else {
+            return None;
+        };
         let kind = match symbol_name_ref(kind_sym) {
             "parse" => ErrorKind::Parse,
             "unbound" => ErrorKind::Unbound,
@@ -519,7 +521,9 @@ impl LispError {
             "user" => ErrorKind::User,
             _ => return None,
         };
-        let Value::Str(message_id) = key("message")? else { return None };
+        let Value::Str(message_id) = key("message")? else {
+            return None;
+        };
         let string_of = |v: Option<Value>| match v {
             Some(Value::Str(id)) => Some(heap.string(id).to_string()),
             _ => None,
@@ -540,7 +544,9 @@ impl LispError {
                 .unwrap_or_default()
                 .into_iter()
                 .filter_map(|frame| {
-                    let Value::Map(frame) = frame else { return None };
+                    let Value::Map(frame) = frame else {
+                        return None;
+                    };
                     let field = |name: &str| heap.map_get(frame, Value::keyword(intern(name)));
                     Some(TraceFrame {
                         name: string_of(field("fn")).map(|n| symbol_name_ref(intern(&n))),
