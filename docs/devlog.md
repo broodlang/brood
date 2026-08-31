@@ -8439,3 +8439,13 @@ survives the treatment is the real story: **bintree −17.3%** from the hot re-l
 everything else within noise — supervisor/ring checked same-binary relower-on/off and
 flat. Meta-lesson for every future refresh: a published number from one invocation is one
 sample; before believing a delta against it, apply the same treatment to both sides.
+
+## 2026-08-31 — the block cursor gets a rim
+
+`Block` was a bare 50% white overlay, which sinks into any busy background — sitting
+on a bracket-match block or a region tint, the eye loses which cell owns the cursor
+(bedit's "am I at the start or end of this bracket?" confusion). It now also paints a
+solid `CURSOR_FG` rim around the cell, scaled like the bar caret's thickness, so the
+cursor cell reads crisply against anything while the glyph under it stays visible.
+(bedit pairs this with split bracket-pair faces: the end at point underlined, the
+partner in the solid block — the block now always means "the other end".)

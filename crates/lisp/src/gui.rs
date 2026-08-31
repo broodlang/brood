@@ -2903,7 +2903,10 @@ pub(crate) mod backend {
 
     /// Draw the text cursor at a cell per its `style`:
     ///   * `Block` — overlay 50% white on the whole cell, so the glyph under it
-    ///     stays faintly visible (the terminal-style caret);
+    ///     stays faintly visible (the terminal-style caret), plus a crisp solid
+    ///     rim around the cell so the cursor reads unambiguously against any
+    ///     background (a translucent fill alone sinks into a busy highlight —
+    ///     e.g. the bracket-match block — and the eye loses which cell owns it);
     ///   * `Bar` — a thin, solid vertical line on the cell's left edge (a modern
     ///     GUI insertion caret) that doesn't obscure the glyph;
     ///   * `Underline` — a thin solid rule along the cell bottom.
@@ -2935,6 +2938,36 @@ pub(crate) mod backend {
                     let row = y * fb_w;
                     for x in left..(left + w).min(fb_w) {
                         buf[row + x] = blend(buf[row + x], [0xff, 0xff, 0xff], 128);
+                    }
+                }
+                // The rim: solid CURSOR_FG, scaled like the bar caret so it stays
+                // proportional on HiDPI. Vertical edges span the visible slice;
+                // horizontal edges sit at the LOGICAL cell top/bottom (cell_top may
+                // be off-screen when the cursor is partially scrolled off).
+                let t = (w / 10).max(2);
+                let x0 = left;
+                let x1 = (left + w).min(fb_w);
+                for y in draw_top..draw_bottom {
+                    let row = y * fb_w;
+                    for x in x0..(x0 + t).min(fb_w) {
+                        buf[row + x] = pack(CURSOR_FG);
+                    }
+                    for x in x1.saturating_sub(t)..x1 {
+                        buf[row + x] = pack(CURSOR_FG);
+                    }
+                }
+                let edges = [
+                    (cell_top, cell_top + t as isize),
+                    (cell_top + h as isize - t as isize, cell_top + h as isize),
+                ];
+                for (ey0, ey1) in edges {
+                    let y0 = ey0.max(draw_top as isize).max(0) as usize;
+                    let y1 = ey1.min(draw_bottom as isize).max(0) as usize;
+                    for y in y0..y1 {
+                        let row = y * fb_w;
+                        for x in x0..x1 {
+                            buf[row + x] = pack(CURSOR_FG);
+                        }
                     }
                 }
             }
