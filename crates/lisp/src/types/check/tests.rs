@@ -2869,7 +2869,23 @@ fn nested_misuse_is_found() {
 
 #[test]
 fn atoms_and_malformed_forms_do_not_panic() {
-    for src in ["5", "foo", "\"s\"", ":k", "()", "(5 6 7)", "(first)"] {
+    for src in [
+        "5",
+        "foo",
+        "\"s\"",
+        ":k",
+        "()",
+        "(5 6 7)",
+        "(first)",
+        // a bare `(fn)` — no params, no body — panicked the recursion analyzer's
+        // body slice (`&items[2..]` on length 1), live in bedit 2026-08-31; the
+        // letrec shape is the exact path that crashed an unguarded worker thread
+        "(fn)",
+        "(letrec (go (fn)) (go))",
+        "(let (f (fn)) (f))",
+        "(def g (fn))",
+        "(defn h () (letrec (go (fn)) go))",
+    ] {
         // No panic, and no spurious warning on a bare atom / non-symbol head /
         // missing argument.
         let _ = warnings(src);
