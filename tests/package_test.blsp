@@ -131,6 +131,37 @@
 ;; the suite stays offline. Covers cloning into _deps/, commit pinning, the lock
 ;; fields, transitive resolution, the direct-beats-transitive rule, and the loud
 ;; conflict error.
+(describe "package: the publish tarball is a SOURCE tarball"
+  ;; `registry-build-tarball` used to `tar .` the project root behind a fixed exclude list,
+  ;; so it packed whatever was lying in the working directory. bedit made that visible by
+  ;; failing to publish with HTTP 413 — a 41 MB git-ignored `bedit` bundle sat in its root —
+  ;; but the size was the symptom: the same path publishes ANY untracked file, and a tarball
+  ;; whose contents depend on what you last built is not a reproducible source release.
+  (test "git-ignored build artifacts are not in the file list"
+    (let (parent (pkg-fixture-root)
+          app-dir (path/join parent "app"))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      ;; An ignored build artifact, and an untracked file nobody ignored either.
+      (file/spit (path/join app-dir ".gitignore") "/app-binary\n")
+      (file/spit (path/join app-dir "app-binary") "ELF-ish bytes")
+      (pkg-git-init app-dir)
+      (file/spit (path/join app-dir "scratch.txt") "not committed")
+      (let (tracked (package/registry-tracked-files app-dir))
+        (is (not (nil? tracked)))
+        ;; The manifest and the source module are there …
+        (is (includes? tracked "project.blsp"))
+        ;; … and neither the ignored artifact nor the untracked file is.
+        (is (not (includes? tracked "app-binary")))
+        (is (not (includes? tracked "scratch.txt"))))))
+
+  (test "outside a git work tree it falls back rather than failing"
+    ;; A project need not be a git repo to publish, so the whole-directory walk stays as
+    ;; the fallback — `nil` here is what selects it.
+    (let (parent (pkg-fixture-root)
+          app-dir (path/join parent "app"))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (assert= nil (package/registry-tracked-files app-dir)))))
+
 (describe "package: resolving :git deps"
   (test "a :git dep clones into _deps/, pins a commit, and records a sha"
     (let (parent (pkg-fixture-root)
