@@ -8674,3 +8674,38 @@ needs a design session — per-file process quiescence, or the spawn-time owners
 generation `%isolate`'s own comment names as the missing primitive. Everything is in
 KI-89's residual block. (The preserved binary and run logs were cleaned up at session
 end — the delete-the-images lever supersedes the artifact, reproducing on any binary.)
+
+## 2026-08-31 (late) — KI-95 fixed: promote forwards data DAGs; the benchmark rows had died again
+
+**KI-95 closed** (the audit's top open item). `PromoteForward` now forwards
+pairs/vectors/maps/strings alongside closures/envs, so shared (DAG) substructure
+promotes ONCE instead of once per referrer — the 16-level doubling guard promotes 17
+cells where the pre-fix code promoted 131 071. Keys are the handle types themselves
+(canonical identity), which also closed a latent nursery/old `index()`-collision in the
+old closure/env tables. Cost was measured to floor-level neutrality in three rounds
+(details in the KI-95 entry): a multiplicative `HandleHasher` (the `table.rs` pattern),
+`reserve` per spine, and stride-8 registration for spines past 64 cells — bulk `def`
+(`sort`) back to +0.7% on a 0.7% floor, `spawn`/`supervisor` *fewer* instructions than
+base by interleaved `perf stat`. Guards: 5 `promote_sharing_tests` incl. the stride
+bound. Verified: full suite ×2 + both engines, `make gcstress`, clippy on CI's flags.
+
+**The benchmark rows were dead AGAIN — the fourth wholesale kill** (after KI-42/KI-44's
+two): the ADR-302/307 data-first reorder left 11 of 31 `bench/brood` rows calling the
+old order. Found because `make ab`'s spawn-live warmup "timed out"; the truth was every
+unit crashing (`empty?: expected collection, got fn`) and the collector waiting forever
+— **a crash presenting as a hang**, and ab-bench discarded the stderr that said so.
+Upstream had already fixed the rows the same morning (`33e646d`, `bd7e637`); the local
+checkout was 3 commits behind and the locally *installed* brood 0.19.1 accepts the old
+order, so `bench/smoke.py` on PATH said all-green while every current binary failed.
+Converged the checkout to origin/main, verified `smoke.py --brood <current>` 31/31 and
+`--langs all` 224/224 checksums. In-tree fix here: **ab-bench's warmup now keeps stderr
+and names the failure class** — crash vs timeout — instead of "needs harness
+scaffolding?" (sabotage-verified on a stale-order row). Trap for next time: any smoke
+verdict is a verdict about the binary it ran — pass `--brood` explicitly; the PATH
+binary being two minor versions stale made a dead suite read green.
+
+Also this session: a **fourth KI-80 sighting** — `brood_suite_passes` failed both tries
+under `make test-both` (1 in-language failure, NOT a TMT) and the name was lost because
+the run was piped through a summary grep, the exact trap KI-80 records; not reproduced
+across three subsequent fully-captured runs (solo, full VM, full test-both — all green).
+Addendum in KI-80. Capture whole runs to a file; grep the file.

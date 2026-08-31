@@ -86,7 +86,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
 | KI-93 | **the net reactor thread's death was SILENT** — no `catch_unwind`, no restart, and `Reactor::cmd` discarded the channel error, so after any reactor panic or fatal `poll` error every `tcp-send`/`tcp-listen` kept returning `Ok(())` into a dead channel, no `[:tcp-closed]` was ever emitted again, and every socket-owning process parked in `receive` forever with zero diagnostics | ✅ **FIXED 2026-08-31** — the death is loud and terminal: a `catch_unwind` wrapper runs `reactor_died` (a `REACTOR_DOWN` flag, one stderr line, and a registry sweep failing every socket at its owner with `[:tcp-error]` + `[:tcp-closed]`); `connect`/`listen`/`tls-listen`/`tls-request`/`send` gate on the flag and the creators re-check after insert. Restart is deliberately NOT attempted — the `Poll`, fd registrations and TLS state died with the thread. Guard `crates/lisp/tests/net_reactor_death.rs`, sabotage-verified |
 | KI-94 | **a green process's death ORPHANED its OS subprocesses** — `subprocess::close`'s only caller was the `proc-close` builtin and `retire_pid_tail` had no subprocess counterpart to `close_process_sockets`, so an owner that exited without closing leaked the OS child (never killed), its registry entry (forever), and both reader threads (draining into a dead pid) | ✅ **FIXED 2026-08-31** — `Proc` records its owner (the spawn subscriber) and `retire_pid_tail` calls `close_process_procs(pid)`: Erlang port semantics, a child dies with its owner (a deliberate semantic change). Guard in `tests/proc_test.blsp`, verified red (`:wrote`) on the pre-fix binary |
-| KI-95 | **`promote` forwards only closures/envs — DAG-shaped data is duplicated once per referrer, exponentially with nesting** — `heap.rs`'s `PromoteForward` comment reasons "acyclic ⇒ a finite tree to re-copy", but acyclic ≠ tree: immutable path-copying code produces DAGs everywhere, so every `def`/`spawn` of a value with shared substructure copies the shared part per reference into the append-only RUNTIME region, `2^n` with sharing depth, no cap | ⚠️ **OPEN 2026-08-31** (audit finding, constructed not observed) — see the section for the fix shape (mirror the GC flush path's pair/vector/map forwarding) and the measurement it owes (`spawn`/`spawn-live`/`startup` rows) |
+| KI-95 | **`promote` forwards only closures/envs — DAG-shaped data is duplicated once per referrer, exponentially with nesting** — `heap.rs`'s `PromoteForward` comment reasons "acyclic ⇒ a finite tree to re-copy", but acyclic ≠ tree: immutable path-copying code produces DAGs everywhere, so every `def`/`spawn` of a value with shared substructure copies the shared part per reference into the append-only RUNTIME region, `2^n` with sharing depth, no cap | ✅ **FIXED 2026-08-31** — `PromoteForward` forwards pairs/vectors/maps/strings too (mirroring the GC flush tables), keyed on the handles' canonical identity (also closing a latent nursery/old `index()` collision in the closure/env tables); long spines stride-register (every 8th cell) so a bulk `def` stays cheap while growth stays O(n). Guards: 5 `promote_sharing_tests` (17 cells where pre-fix copied 131 071). Measured: `sort`/`spawn`/`startup`/`spawn-live`/`supervisor` all floor-level; `spawn`/`supervisor` **fewer** instructions than base |
 | KI-96 | **a remote monitor's `PENDING_REMOTE` entry survives its own `[:down …]`** — nothing removes the entry when the watched remote target dies and the peer's DOWN arrives, so (a) a long-lived watcher leaks one entry per dead remote monitor, and (b) a later node-down fires a SECOND `[:down mref pid :noconnection]` for an mref that already delivered — breaking the one-shot guarantee a `gen/call`-style pinned receive relies on | ⚠️ **OPEN 2026-08-31** (audit finding) — `monitor.rs:273-292`/`:367-385`; the fix needs a hook on DOWN delivery |
 | KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading |
 | KI-87 | **The checker diverged — `nest run` at 54 GB, three 19 GB `types::` test processes.** `InferGuard::enter` ended in `.then_some(InferGuard(sym))`; `bool::then_some` builds its argument eagerly, so a REFUSED entry built and dropped a guard whose `Drop` removed the in-flight symbol's mark — every cycle refusal un-guarded the symbol it refused (latent since 2026-07-07). The demand walk consulting a callee's inferred sig (`0f64f600`) made `require-one` ⇄ `%require-await` nest without bound, one stack segment per level | ✅ **FIXED 2026-08-29** — the guard is constructed only on the success path (`entered.then(\|\| InferGuard(sym))`). Guards sabotage-verified: a refused third `enter` stays refused, and the mutually recursive pair reproduces the exact `mmap failed to allocate stack` OOM under `ulimit -v` with the bug restored. Build uncapped, run capped |
@@ -362,7 +362,35 @@ first (there is no `proc-controlling-process` yet; the socket layer has one).
 child reaped". Verified red on the pre-fix binary (`actual: :wrote` — the orphaned `cat`
 accepted the write), green after.
 
-## KI-95 — `promote` forwards only closures/envs: DAG-shaped data duplicates per referrer, exponentially with nesting ⚠️ OPEN 2026-08-31
+## KI-95 — `promote` forwards only closures/envs: DAG-shaped data duplicates per referrer, exponentially with nesting ✅ FIXED 2026-08-31
+
+**Status:** ✅ fixed, exactly along the fix shape below. `PromoteForward` now forwards
+pairs, vectors (shared with ranges/seq-views — one `VecId` slab), map/set trie nodes and
+strings, keyed on the **handle types themselves** rather than `index() as u32` — handle
+`Eq`/`Hash` use the canonical identity (region + index + the LOCAL nursery/old AGE bit),
+which also closes a latent collision in the pre-existing closure/env tables: a nursery
+and an old-gen closure at the same slab index are distinct objects and could resolve to
+one RUNTIME copy. Guards: `core::heap::promote_sharing_tests` (5 tests) — the 16-level
+pair DAG promotes **17** cells where the pre-fix code promoted **131 071**, plus a
+shared-tail case, a vector DAG, a map/string sharing case, and the stride bound below.
+
+**The cost, measured (the entry demanded it).** Registration is a per-copied-node map
+insert on the `def`/`spawn` path. Three rounds:
+- SipHash was ~2% of the `spawn` row's instructions → replaced with a multiplicative
+  `HandleHasher` (the `table.rs` `IdentityHasher` pattern); `spawn` then measured
+  **fewer** instructions than base (the closure/env tables shed their SipHash too).
+- A bulk `def` of a long list (`sort`'s 375k-cell spine) paid ~107 instructions/cell in
+  `HashMap::insert` (+5% on the row, confirmed by interleaved `perf stat`) → long spines
+  (> 64 cells) register every **8th** cell (`SPINE_REG_STRIDE`), head always registered.
+  A walk re-entering the spine re-copies at most 7 cells per referrer before joining the
+  registered copy — growth stays O(n), the exponential class stays closed, and `sort`
+  came back to +0.7% on a 0.7% floor.
+- Final `make ab --floor`: `sort`/`spawn`/`startup`/`spawn-live`/`supervisor` all read
+  noise at their floors; `spawn`/`supervisor` instructions are *below* base per
+  interleaved `perf stat` (the concurrency-row wall deltas were the documented ±
+  cross-binary layout noise, checked as CLAUDE.md prescribes).
+
+Original entry:
 
 **Symptom** (constructed — audit finding, not yet observed): a `def` (or `spawn`
 argument) of a value whose substructure is *shared* — which immutable path-copying code
@@ -5856,6 +5884,19 @@ concurrent nextest loop) runs **green in 99 s** where it produced the 62-F TMT b
 `remote_spawn_test` standalone 6/6 (was 0/4); suite 1250/1250; gcstress green. The
 original sighting's discarded output is permanently unknowable, but every mechanism the
 kept output exposed is closed.
+
+**Fourth sighting, 2026-08-31 — and the terminal trap repeated verbatim.** Under a
+`make test-both` (KI-95 session), `brood_suite_passes` failed **both tries** on the VM
+half (`Summary [511s] 1319 run: 1318 passed, 1 failed` per try, `Brood test suite
+failed: error: 1 test(s) failed` — a named in-language failure, NOT a TMT) — and the run
+was piped through `grep -E "Summary|FAIL|failed|passed"`, so the one line worth having,
+the failing case's name, was discarded *again*, this time by the model driving the
+session. Not reproduced with output kept: solo green, a full captured VM run green
+(1319/1319, 163 s), a full captured `make test-both` green on both halves (161 s/244 s,
+zero retries). Both-tries-failed distinguishes it from the retry-absorbed class above;
+with the name lost it cannot be told apart from KI-98's full-suite-context family
+either. The standing instruction survives another demonstration: **never pipe a suite
+run through a filter — capture the whole run to a file, grep the file.**
 
 ## KI-75 — `compare` called unequal values equal, and `sort` inherited it ✅ FIXED 2026-08-28
 
