@@ -4,33 +4,28 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.21.0 — 2026-08-31
 
-**Added — `spawn-monitor`, the atomic monitor (ADR-309).** `(spawn-monitor expr)` returns
-`[pid ref]` with the monitor registered before the child can run, so `[:down ref pid
-reason]` always carries the child's real exit reason. The monitor-side twin of
-`spawn-link`, and it closes the same gap: `(let (p (spawn expr) r (monitor p)) …)` holds
-only while the spawner never yields between the two bindings, and otherwise the DOWN
-reports `:noproc` **in place of** the reason. Measured — adjacent, 0 of 300 runs lost it;
-with one 5 ms yield between them, 40 of 40 did. Nothing raises, which is what makes it
-expensive: a supervisor reading `:noproc` where `:normal` belonged restarts a `:transient`
-child that exited cleanly.
+**Added — `nest check` catches an un-migrated call.** bedit's seven 0.20-migration failures
+shared one shape — a callback or a count sitting in a seq combinator's *collection* slot —
+and the checker was silent on every one. `take`, `drop`, `mapcat`, `each`, `take-while`,
+`drop-while`, `seq/keep` and `seq/remove` gain curated data-first domains, so `(take 5 xs)`
+no longer types clean; results stay `any` and `infer.rs` keeps the precise ones. The second
+gap was subtler: a `fn` **literal** whose result cannot be inferred has no arrow type by
+design, so it read as `dynamic` and passed every slot. A new call-site rule warns when a
+literal lambda meets a parameter disjoint from `fn`/`native` — `(map (fn (x) x) xs)` now
+warns whatever the lambda returns. The *count* slot stays `number` rather than `int`
+deliberately: a provably-int value the checker can only type `number` — the observer's
+window `start`, `string.blsp`'s `(inc lim)` — is the merely-wider residue ADR-011 defers,
+and `int` there flagged exactly those legitimate sites, while the wrong-*order* class the
+signature exists for is caught by the seqable slot either way. Both zero-warning gates
+over `std/` + `tests/` stay at zero, and bedit checks clean.
 
-Found by bedit's own tutorial: lesson 32 *"When a process dies"* teaches this pattern, and
-under `taskset -c 0,1` its shipped answer failed its own exercise with `first: expected
-list, …, got keyword (:noproc)`.
-
-**Fixed — the wasm32 target had not built since the 0.20.0 wave.** `%gui-compiled?` shipped
-without a `terminal_wasm.rs` shim while its registration stayed un-cfg'd, so the playground
-build died with `E0425: cannot find value gui_compiled_p`. `cargo build`, `cargo clippy
---all-features` and the whole suite were green throughout — none of them names that target —
-and it surfaced as a failed Fly deploy. CI now builds wasm32.
-
-**Fixed — `nest publish` packed the working directory, not the source.** It ran `tar .`
-behind a fixed exclude list, so git-ignored build output shipped to the registry; bedit hit
-the 12 MB cap with a 41 MB ignored binary in its root. The file list now comes from
-`git ls-files --cached --exclude-standard`, with the whole-directory walk kept as the
-fallback outside a git work tree.
+**Fixed — a bare `(fn)` panicked the recursion analyzer.** `items[2..]` on a length-1
+list: `(fn)` has neither params nor body, and the advisory checker reads mid-edit source
+constantly. The letrec path runs on an unguarded worker thread, so this was three hard
+panics at bedit startup rather than the caught "checker internal error" the `def` path
+degrades to. The malformed-forms panic test gains the five `fn` shapes.
 
 ## v0.20.0 — 2026-08-31
 
@@ -96,6 +91,36 @@ differential against the dynamic path.
 `string/substring-graphemes` declare `Arity::range(2, 3)` but listed only two fixed `Sig`
 params and no optional, so the checker could not type their third argument at all. Found by
 the new audit.
+
+The three entries below landed between the `release: v0.20.0` commit and the tag,
+which was cut at `57070f72` — the first commit whose gates were green — so they ship
+in the v0.20.0 artifacts.
+
+**Added — `spawn-monitor`, the atomic monitor (ADR-309).** `(spawn-monitor expr)` returns
+`[pid ref]` with the monitor registered before the child can run, so `[:down ref pid
+reason]` always carries the child's real exit reason. The monitor-side twin of
+`spawn-link`, and it closes the same gap: `(let (p (spawn expr) r (monitor p)) …)` holds
+only while the spawner never yields between the two bindings, and otherwise the DOWN
+reports `:noproc` **in place of** the reason. Measured — adjacent, 0 of 300 runs lost it;
+with one 5 ms yield between them, 40 of 40 did. Nothing raises, which is what makes it
+expensive: a supervisor reading `:noproc` where `:normal` belonged restarts a `:transient`
+child that exited cleanly.
+
+Found by bedit's own tutorial: lesson 32 *"When a process dies"* teaches this pattern, and
+under `taskset -c 0,1` its shipped answer failed its own exercise with `first: expected
+list, …, got keyword (:noproc)`.
+
+**Fixed — the wasm32 target had not built since the 0.20.0 wave.** `%gui-compiled?` shipped
+without a `terminal_wasm.rs` shim while its registration stayed un-cfg'd, so the playground
+build died with `E0425: cannot find value gui_compiled_p`. `cargo build`, `cargo clippy
+--all-features` and the whole suite were green throughout — none of them names that target —
+and it surfaced as a failed Fly deploy. CI now builds wasm32.
+
+**Fixed — `nest publish` packed the working directory, not the source.** It ran `tar .`
+behind a fixed exclude list, so git-ignored build output shipped to the registry; bedit hit
+the 12 MB cap with a 41 MB ignored binary in its root. The file list now comes from
+`git ls-files --cached --exclude-standard`, with the whole-directory walk kept as the
+fallback outside a git work tree.
 
 **Known issues.** [KI-89](docs/known-issues.md) — a test file's ability impls can leak into
 `std/`'s checker view in a scoped run (pre-existing, reproduced identically at the previous

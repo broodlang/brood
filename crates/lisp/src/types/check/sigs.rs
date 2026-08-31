@@ -222,8 +222,13 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     for n in ["seq/keep", "seq/remove"] {
         put(n, Sig::new(vec![seq, cb1.clone()], any));
     }
-    put("take", Sig::new(vec![seq, int], any));
-    put("drop", Sig::new(vec![seq, int], any));
+    // The count is `number`, not `int`: the merely-wider residue (a provably-int
+    // value typed `number` — observer's `start`, string.blsp's `(inc lim)`) is the
+    // class the checker deliberately defers (ADR-011), and the STRICT gate showed
+    // `int` here flags exactly those legitimate sites. The wrong-ORDER class this
+    // signature exists for is caught by the seqable slot either way.
+    put("take", Sig::new(vec![seq, num.clone()], any));
+    put("drop", Sig::new(vec![seq, num], any));
     // Predicates: branchy / `or`-expanded bodies that infer_sig can't walk.
     // All are widest-safe domains (any/any) so a tighter call never warns falsely.
     //   number? — body is (or (int? x) (float? x)); or-expansion hides the pattern.
