@@ -86,6 +86,44 @@ fn auth_roundtrips() {
 }
 
 #[test]
+fn down_roundtrips() {
+    // The monitor-fired frame (KI-96): three u64 identity fields plus an
+    // arbitrary Message reason (an exit reason can be any value, not just a
+    // keyword — exercise a structured one).
+    let f = Frame::Down {
+        watcher_pid: 42,
+        mref: u64::MAX - 3,
+        target_pid: 7,
+        reason: Message::Vector(vec![
+            Message::Keyword(value::intern("badmatch")),
+            Message::Int(9),
+        ]),
+    };
+    match read_full(&f) {
+        Frame::Down {
+            watcher_pid,
+            mref,
+            target_pid,
+            reason,
+        } => {
+            assert_eq!(watcher_pid, 42);
+            assert_eq!(mref, u64::MAX - 3);
+            assert_eq!(target_pid, 7);
+            match reason {
+                Message::Vector(items) => {
+                    assert!(
+                        matches!(&items[0], Message::Keyword(k) if value::symbol_name(*k) == "badmatch")
+                    );
+                    assert!(matches!(&items[1], Message::Int(9)));
+                }
+                _ => panic!("wrong reason"),
+            }
+        }
+        _ => panic!("wrong frame"),
+    }
+}
+
+#[test]
 fn send_with_rich_message_roundtrips() {
     // A message exercising symbols/keywords/pids/maps/nesting — the symbol
     // fields must survive as *names* (re-interned on decode).

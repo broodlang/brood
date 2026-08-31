@@ -86,6 +86,22 @@ pub(super) enum Frame {
     /// authenticated peer node + pid + mref). Goes through `process::drop_monitor`,
     /// the same dropper local `demonitor` uses.
     Demonitor { watcher_pid: u64, mref: u64 },
+    /// "A monitor you registered with me (`Frame::Monitor`) just fired" —
+    /// `target_pid` (local to the *sending* node) died with `reason`; deliver
+    /// `[:down mref pid reason]` to `watcher_pid`. A dedicated frame rather
+    /// than an ordinary `Send` because the receiver needs a hook: the monitor
+    /// is one-shot, so its `PENDING_REMOTE` entry must be retired the moment
+    /// the DOWN delivers — as a plain message the entry outlived its own DOWN,
+    /// leaking per completed monitor and firing a *second*
+    /// `[:down mref … :noconnection]` on a later node-down (KI-96). The dying
+    /// pid is node-qualified by the authenticated peer on the receiving side,
+    /// never by wire data (see the security note above).
+    Down {
+        watcher_pid: u64,
+        mref: u64,
+        target_pid: u64,
+        reason: Message,
+    },
     /// "Link my `from_pid` (on the authenticated peer node) to your local
     /// `to_pid`" (ADR-067). The receiver records its half in `links::REMOTE_LINKS`
     /// so either side's death — or a net-split — reaches the other. Symmetric:
@@ -125,6 +141,7 @@ const FRAME_LINK: u8 = 7;
 const FRAME_UNLINK: u8 = 8;
 const FRAME_EXIT: u8 = 9;
 const FRAME_PEERS: u8 = 10;
+const FRAME_DOWN: u8 = 11;
 const TARGET_PID: u8 = 0;
 const TARGET_NAME: u8 = 1;
 
@@ -148,8 +165,13 @@ const MAX_GOSSIP_PEERS: usize = 4096;
 /// every later field — a v4 peer would mis-decode them, so the byte bumps;
 /// **v6** adds the shipped-closure module list to the `M_CLOSURE` record (KI-55),
 /// which a v5 peer would read as the start of `captured` — a silent mis-decode of
-/// every closure sent, so again the byte bumps rather than being made optional.
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x06";
+/// every closure sent, so again the byte bumps rather than being made optional;
+/// **v7** carries a monitor's DOWN in a dedicated `Down` frame instead of an
+/// ordinary `Send`, so the watcher's node can retire its `PENDING_REMOTE` entry
+/// when the one-shot delivers (KI-96) — to a v6 peer the new tag is a decode
+/// error that tears the whole link down on the first monitor to fire, so the
+/// byte bumps.
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x07";
 pub(super) const NONCE_LEN: usize = 32;
 pub(super) const MAC_LEN: usize = 32;
 /// Length of an X25519 public key (the ephemeral DH key in `Hello`, ADR-089).
@@ -272,6 +294,18 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
             w.extend_from_slice(&watcher_pid.to_be_bytes());
             w.extend_from_slice(&mref.to_be_bytes());
         }
+        Frame::Down {
+            watcher_pid,
+            mref,
+            target_pid,
+            reason,
+        } => {
+            w.push(FRAME_DOWN);
+            w.extend_from_slice(&watcher_pid.to_be_bytes());
+            w.extend_from_slice(&mref.to_be_bytes());
+            w.extend_from_slice(&target_pid.to_be_bytes());
+            encode_msg(w, reason)?;
+        }
         Frame::Link { from_pid, to_pid } => {
             w.push(FRAME_LINK);
             w.extend_from_slice(&from_pid.to_be_bytes());
@@ -335,6 +369,12 @@ pub(super) fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
         FRAME_DEMONITOR => Ok(Frame::Demonitor {
             watcher_pid: get_u64(r)?,
             mref: get_u64(r)?,
+        }),
+        FRAME_DOWN => Ok(Frame::Down {
+            watcher_pid: get_u64(r)?,
+            mref: get_u64(r)?,
+            target_pid: get_u64(r)?,
+            reason: decode_msg(r)?,
         }),
         FRAME_LINK => Ok(Frame::Link {
             from_pid: get_u64(r)?,

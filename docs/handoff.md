@@ -5,14 +5,27 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Addendum 2026-08-31 (latest) — KI-95 FIXED; the benchmark rows had died a fourth
+**Addendum 2026-08-31 (latest) — KI-96 FIXED: a remote monitor's DOWN now retires its
+own `PENDING_REMOTE` entry.** The DOWN rides a dedicated `Frame::Down` (wire **v7**)
+instead of an ordinary send; the inbound handler (`deliver_remote_down`) retires the
+pending entry, then delivers — so a completed monitor can no longer leak an entry or
+replay its mref as a second `[:down … :noconnection]` on a later node-down. Guarded by a
+sabotage-verified two-node test (`a_delivered_remote_monitor_does_not_fire_again_on_node_down`)
++ a wire round-trip. With KI-95 and KI-96 both closed, the audit's remaining items are
+**KI-97** (the hardening list — item 1, the pre-auth handshake trickle DoS, is the
+natural next stability pick) and the §7.8 perf candidates (item 1 first). Watch items:
+KI-98 got a **third sighting** this session (first on the tree-walker half — engine-
+independent, still full-suite-only, solo green; next probe is `BROOD_SCHED_DBG=1` with
+the whole log kept), and KI-88 still gates the tw-reentry default.
+
+**Addendum 2026-08-31 (earlier) — KI-95 FIXED; the benchmark rows had died a fourth
 time.** `promote` now forwards pairs/vectors/maps/strings through `PromoteForward`
 (the GC-flush pattern), so DAG-shaped data promotes once instead of `2^n` times —
 guarded by 5 `promote_sharing_tests`, cost measured to floor-level neutrality
 (`HandleHasher` + stride-8 spine registration; full numbers in the KI-95 entry).
-Remaining open from the audit: **KI-96** (duplicate remote DOWN) and **KI-97** (the
-hardening list) — KI-96 is the natural next stability item; §7.8 item 1 the next perf
-item. Separately: 11 of 31 `bench/brood` rows were dead on the ADR-302/307 reorder —
+Remaining open from the audit: **KI-96** (duplicate remote DOWN — fixed later this
+session, see the addendum above) and **KI-97** (the hardening list); §7.8 item 1 the
+next perf item. Separately: 11 of 31 `bench/brood` rows were dead on the ADR-302/307 reorder —
 upstream fixed them the same morning; the local checkout was behind and the *installed*
 brood 0.19.1 made `bench/smoke.py` on PATH read green over dead rows (pass `--brood`
 explicitly). A crashed row presented as an ab-bench "timeout"; ab-bench's warmup now
