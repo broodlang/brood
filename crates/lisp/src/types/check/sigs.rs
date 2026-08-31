@@ -205,6 +205,25 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     put("reduce", Sig::new(vec![seq, any, cb2.clone()], any));
     put("fold", Sig::new(vec![seq, any, cb2], any));
+    // The rest of the data-first sequence walkers (ADR-308) — curated for the same
+    // reason, and because their ABSENCE was load-bearing: during bedit's 0.20
+    // migration, seven pre-reorder call sites (`(take n coll)`, `(drop n coll)`,
+    // `(mapcat f coll)`, `(fold f init coll)`, …) sailed through `nest check`
+    // silently and failed only at runtime. A number or callback in the collection
+    // slot is exactly what these domains exist to reject. Results stay `any`
+    // (drop can return its input unchanged, so even "list" would be wrong);
+    // precise results for the inferable ones come from `infer.rs`'s arms, which
+    // run independently of these domains.
+    for n in ["mapcat", "each", "take-while", "drop-while"] {
+        put(n, Sig::new(vec![seq, cb1.clone()], any));
+    }
+    // `seq/` — qualified, like `seq/index-where` above (a bare key would suppress
+    // the unbound lint on names that no longer exist bare, ADR-227).
+    for n in ["seq/keep", "seq/remove"] {
+        put(n, Sig::new(vec![seq, cb1.clone()], any));
+    }
+    put("take", Sig::new(vec![seq, int], any));
+    put("drop", Sig::new(vec![seq, int], any));
     // Predicates: branchy / `or`-expanded bodies that infer_sig can't walk.
     // All are widest-safe domains (any/any) so a tighter call never warns falsely.
     //   number? — body is (or (int? x) (float? x)); or-expansion hides the pattern.

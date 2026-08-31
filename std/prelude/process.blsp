@@ -97,6 +97,26 @@ and reports `:noproc` (losing `:normal`). Supervised children should use this so
 passed through (not re-wrapped), like `spawn`."
   `(%spawn-link ~(%spawn-body-thunk expr)))
 
+(defmacro spawn-monitor (expr)
+  "Spawn a new green process running `expr` and `monitor` it from the caller
+**atomically** (Erlang `spawn_monitor`) — returns `[pid ref]`. When the child dies the
+caller receives `[:down ref pid reason]`, one-shot and unidirectional (contrast
+`spawn-link`, which is symmetric and kills).
+
+The monitor is established *before* the child runs, and that is the whole point. The
+idiomatic-looking `(let (p (spawn expr) r (monitor p)) …)` is only reliable while the
+spawner does not yield between the two calls: let any gap open — a loaded scheduler, or a
+boundary trace wrapping the code — and a short-lived child exits first, `monitor` takes
+its already-dead branch, and the DOWN arrives carrying **`:noproc` instead of the real
+exit reason**. Measured: adjacent, 0 of 300 runs lost the reason; with one 5 ms yield
+between them, 40 of 40 did. Nothing raises — the receive fires with a reason that says
+only \"already gone\" — so prefer this form whenever the reason matters.
+
+    (let ([p r] (spawn-monitor :ok)) (receive ([:down ^r _ reason] reason) (after 500 :lost)))   → :normal
+
+A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `spawn`."
+  `(%spawn-monitor ~(%spawn-body-thunk expr)))
+
 ;; ---- sleep: park on the scheduler timer (policy in Brood) ---------------
 ;; Sleep `ms` milliseconds in the current process. A bare `(receive (after ms …))`
 ;; would *consume* the next queued message — an empty clause list matches anything,
