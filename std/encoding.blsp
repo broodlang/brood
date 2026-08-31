@@ -101,7 +101,8 @@ UTF-8-encodes a string.
     (encoding/hex-decode \"6869\")       → \"hi\"
     (failure? (encoding/hex-decode \"zz\"))   → true"
   (let (bs (encoding-hex-decode-bytelist s))
-    (if (= bs :invalid) (failure "encoding/hex-decode: not hexadecimal: " (pr-str s))
+    (if (= bs :invalid)
+      (failure "encoding/hex-decode: not hexadecimal: " (pr-str s))
       (string/bytes-> bs))))
 (sig hex-decode (string -> (or string failure)))
 
@@ -110,7 +111,8 @@ UTF-8-encodes a string.
 Byte-faithful: unlike `hex-decode` it never UTF-8-decodes, so it round-trips any
 binary payload (digests, salts, wire bytes)."
   (let (bs (encoding-hex-decode-bytelist s))
-    (if (= bs :invalid) (failure "encoding/hex-decode-bytes: not hexadecimal: " (pr-str s))
+    (if (= bs :invalid)
+      (failure "encoding/hex-decode-bytes: not hexadecimal: " (pr-str s))
       (bytes bs))))
 (sig hex-decode-bytes (string -> (or bytes failure)))
 
@@ -283,14 +285,16 @@ UTF-8 form."
 
     (encoding/base64-decode \"aGk=\")    → \"hi\""
   (let (bs (encoding-b64-decode s encoding-b64-std-vals))
-    (if (= bs :invalid) (failure "encoding/base64-decode: not standard Base64: " (pr-str s))
+    (if (= bs :invalid)
+      (failure "encoding/base64-decode: not standard Base64: " (pr-str s))
       (string/bytes-> bs))))
 (sig base64-decode (string -> (or string failure)))
 
 (defn base64-url-decode (s)
   "Decode a URL-safe Base64 string → original string, or a `failure` naming the input."
   (let (bs (encoding-b64-decode s encoding-b64-url-vals))
-    (if (= bs :invalid) (failure "encoding/base64-url-decode: not URL-safe Base64: " (pr-str s))
+    (if (= bs :invalid)
+      (failure "encoding/base64-url-decode: not URL-safe Base64: " (pr-str s))
       (string/bytes-> bs))))
 (sig base64-url-decode (string -> (or string failure)))
 
@@ -299,13 +303,15 @@ UTF-8 form."
 Byte-faithful: unlike `base64-decode` it never UTF-8-decodes, so it round-trips
 any binary payload (a SCRAM salt, a key, wire bytes)."
   (let (bs (encoding-b64-decode s encoding-b64-std-vals))
-    (if (= bs :invalid) (failure "encoding/base64-decode-bytes: not standard Base64: " (pr-str s))
+    (if (= bs :invalid)
+      (failure "encoding/base64-decode-bytes: not standard Base64: " (pr-str s))
       (bytes bs))))
 (sig base64-decode-bytes (string -> (or bytes failure)))
 
 (defn base64-url-decode-bytes (s)
   "Decode a URL-safe Base64 string → a `bytes` value, or a `failure` naming the input."
   (let (bs (encoding-b64-decode s encoding-b64-url-vals))
-    (if (= bs :invalid) (failure "encoding/base64-url-decode-bytes: not URL-safe Base64: " (pr-str s))
+    (if (= bs :invalid)
+      (failure "encoding/base64-url-decode-bytes: not URL-safe Base64: " (pr-str s))
       (bytes bs))))
 (sig base64-url-decode-bytes (string -> (or bytes failure)))
