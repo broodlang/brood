@@ -20,3 +20,16 @@
 
   (test "the opts map is the last argument — a 5th is an arity error"
     (assert-error (gui/open nil nil nil {} :extra))))
+
+(describe "gui/font — the one-arg (global default) form"
+  ;; The wrapper used to nil-pad `spec` (&optional), so the documented one-arg form
+  ;; `(gui/font spec)` reached `%gui-font!` as TWO args and the spec map landed in
+  ;; the window-id slot: "expected int, got map" (found by bedit's startup). The
+  ;; lone map must parse as the spec. Testable on any build: the argument parse
+  ;; runs before the backend call, so a runtime without --features gui raises its
+  ;; own "not compiled in" error — never the type error asserted absent here.
+  (test "a lone spec map is the spec, never a window id"
+    (let (msg (try
+                (do (gui/font {:height 15 :family :mono}) "")
+                (catch e (error-message e))))
+      (is (not (includes? msg "expected int"))))))
