@@ -63,10 +63,10 @@
     (assert= "Hello" (encoding/hex-decode "48656c6C6f")))
   (test "empty string"
     (assert= "" (encoding/hex-decode "")))
-  (test "odd length returns nil"
-    (assert= nil (encoding/hex-decode "abc")))
+  (test "odd length returns a failure"
+    (is (failure? (encoding/hex-decode "abc"))))
   (test "invalid chars return nil"
-    (assert= nil (encoding/hex-decode "gg")))
+    (is (failure? (encoding/hex-decode "gg"))))
   (test "encode-decode roundtrip"
     (let (s "Hello, World!")
       (assert= s (encoding/hex-decode (encoding/hex-encode s))))))
@@ -103,7 +103,7 @@
   (test "empty string"
     (assert= "" (encoding/base64-decode "")))
   (test "invalid char returns nil"
-    (assert= nil (encoding/base64-decode "Zg=!")))
+    (is (failure? (encoding/base64-decode "Zg=!"))))
   (test "encode-decode roundtrip"
     (let (s "The quick brown fox jumps over the lazy dog")
       (assert= s (encoding/base64-decode (encoding/base64-encode s))))))
@@ -145,10 +145,10 @@
       (assert= all (into [] (encoding/hex-decode-bytes (encoding/hex-encode-bytes all))))))
   (test "empty input decodes to an empty bytes value (not nil)"
     (assert= [] (into [] (encoding/hex-decode-bytes ""))))
-  (test "odd length returns nil"
-    (assert= nil (encoding/hex-decode-bytes "abc")))
+  (test "odd length returns a failure"
+    (is (failure? (encoding/hex-decode-bytes "abc"))))
   (test "invalid chars return nil"
-    (assert= nil (encoding/hex-decode-bytes "zz"))))
+    (is (failure? (encoding/hex-decode-bytes "zz")))))
 
 (describe "base64-encode-bytes / base64-decode-bytes"
   ; "f"
@@ -166,7 +166,7 @@
   (test "empty input decodes to an empty bytes value (not nil)"
     (assert= [] (into [] (encoding/base64-decode-bytes ""))))
   (test "invalid input returns nil"
-    (assert= nil (encoding/base64-decode-bytes "Zg=!")))
+    (is (failure? (encoding/base64-decode-bytes "Zg=!"))))
   (test "full 0x00-0xFF round-trip"
     (let (all (into [] (range 256)))
       (assert= all (into [] (encoding/base64-decode-bytes (encoding/base64-encode-bytes all))))))
@@ -188,11 +188,11 @@
 
 (describe "base64-decode — padding placement"
   (test "interior padding is rejected"
-    (assert= nil (encoding/base64-decode "QQ==QQ=="))
-    (assert= nil (encoding/base64-decode "Q=QQ"))
-    (assert= nil (encoding/base64-decode "=QQQ")))
+    (is (failure? (encoding/base64-decode "QQ==QQ==")))
+    (is (failure? (encoding/base64-decode "Q=QQ")))
+    (is (failure? (encoding/base64-decode "=QQQ"))))
   (test "more than two pad characters is rejected"
-    (assert= nil (encoding/base64-decode "QQ===")))
+    (is (failure? (encoding/base64-decode "QQ==="))))
   (test "ordinary trailing padding still decodes"
     (assert= "A" (encoding/base64-decode "QQ=="))
     (assert= "AB" (encoding/base64-decode "QUI="))
@@ -201,7 +201,7 @@
     (assert= "A" (encoding/base64-decode "QQ"))
     (assert= "AB" (encoding/base64-decode "QUI")))
   (test "the URL-safe decoder enforces the same rule"
-    (assert= nil (encoding/base64-url-decode "QQ==QQ=="))
+    (is (failure? (encoding/base64-url-decode "QQ==QQ==")))
     (assert= "A" (encoding/base64-url-decode "QQ==")))
   (test "encode/decode still round-trips"
     (assert= "hello, world" (encoding/base64-decode (encoding/base64-encode "hello, world")))))

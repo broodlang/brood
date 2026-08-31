@@ -31,7 +31,7 @@
           want (pn-expected line)
           n (string/->number input))
       (cond
-        (nil? n) [input (string/substring line 14 30) "unparseable"]
+        (failure? n) [input (string/substring line 14 30) "unparseable"]
         (= (bit/float-> n) want) nil
         else [input (string/substring line 14 30) (bit/float-> n)]))))
 

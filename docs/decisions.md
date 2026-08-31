@@ -19672,3 +19672,85 @@ the unchanged already-dead `:noproc`, and a 24-way concurrent fan-out.
 `sleep`, never `(receive (after 5 nil))`. An empty clause list matches anything, so a bare
 timed receive **eats the very `[:down …]` the test is waiting for** and every case reads as
 a timeout — a test that fails for the opposite reason to the one it is checking.
+
+## ADR-310 — A known failure is a returned value, not a raise
+
+**Date:** 2026-08-31
+
+**Context.** Functions whose job is to interpret input answered `nil` when they could
+not: `string/->number` on junk, `datetime/parse-date` on an impossible date, the six
+`encoding` decoders on garbage. `url/percent-decode` was worse — it passed an invalid
+`%XX` through, returning text that *looks* decoded. The tree also disagreed with
+itself: `json/decode` and `decimal/of` raise, `tempo/parse` returns `[:ok …]`/`[:error …]`
+with `!` siblings.
+
+Two things make `nil` the wrong signal. It is a **legitimate result**, so "no value"
+and "could not produce one" share a spelling and the caller cannot tell them apart.
+And it carries **no provenance**: a nil that rides into someone else's arithmetic
+surfaces as `expected number, got nil`, naming neither the input nor the parse.
+
+**The alternatives.** A long design session worked through four:
+
+- **raise on bad content**, with a call-site wrapper to opt into leniency
+  (`(attempt … default)`) and another to lift into data (`(result …)`);
+- **tagged tuples everywhere**, `[:ok v]`/`[:error e]`, with either `f!` siblings or
+  one `ok!` unwrap;
+- **failure as a returned value** — a distinct kind, handed back in place of the
+  answer;
+- keeping `nil` and adding a checker lint.
+
+Tuples lost first: they are structurally at war with `->`, since a pipe dies the moment
+a tuple enters it, which is why ecosystems built on them grow bang-suffixed shadow APIs
+as pipe lubricant. They also need a parametric `(result T)` in the checker's lattice or
+hover precision collapses to `any`.
+
+Raising was drafted in full and **reverted the same day**. Two reasons, both decisive.
+An error arriving up the stack takes control away from the caller who is best placed to
+handle it — "it is really bad to receive the error down the stack" — and every lenient
+call site then needs a wrapper, which is ceremony wrapped around a call purely to change
+its shape. Measured on the 13 real call sites, the raising design left **zero simpler,
+five unchanged, and the rest a word longer**, with `url`'s own diagnostic degraded to the
+sub-parser's. A model that makes "more correct" mean "more verbose" is failing.
+
+**Decision.** A function that cannot interpret its input **returns a `failure`** — a
+distinct `Value` kind (the 24th `Tag`), carrying `:message` and naming the input.
+
+1. **It is not `nil`.** Absence and failure stop sharing a signal; `nil` goes back to
+   meaning "the lookup found nothing", which accessors (`get`, `nth`, `os/env`) keep.
+2. **It is falsy.** `eval::truthy` is `Nil | Bool(false) | Failure`. This is what makes
+   the change nearly free at the call sites: `(or (string/->number p) 0)` defaults
+   exactly as before, `(if n …)` branches as before, `(and …)` short-circuits as before
+   — while anything that *looks* at the value now learns why. Eleven of thirteen call
+   sites needed **no edit at all**, confirmed by their suites passing untouched.
+3. **Raising stays the other channel**, unchanged, for bugs and the unexpected: wrong
+   type, wrong arity, unbound symbol, a broken invariant. The two cannot be confused
+   because they do not travel the same way — one is handed back, the other unwinds —
+   so **no error-kind split is needed to tell them apart**, and a `try` catches only
+   what a `try` should.
+4. **Two names, both on the producer side**, never wrapped around a call: `failure`
+   builds one, `failure?` tests one. `error-message` reads either a failure or a caught
+   error. Everything a caller writes is already in the language — `if`, `or`, `match`
+   with `:when`, and the type predicates.
+5. **Converted:** `string/->number` (both paths), the six `encoding` hex/base64
+   decoders, `datetime/parse-date`/`parse-time`/`parse-iso8601`, and
+   `url/percent-decode` — which stops returning corrupt data.
+6. **`keep` drops failures** as well as nils: both mean "nothing was produced", so
+   `(seq/keep lines string/->number)` is "parse every line, keep the numbers". This
+   also stops failures accumulating into a result list, which is the one way a returned
+   failure can travel far from its cause.
+7. **The type system carries it natively.** `failure` is a tag, so `(or number failure)`
+   is a plain union — no parametric type, which is exactly what sank the tuple design.
+   `Ty::truthy()` is now the single definition of falsiness in the checker, so `or`/`and`
+   narrowing agrees with the evaluator by construction.
+
+**Rejected, and why it stays rejected:** `attempt`, `result`, `ok->`, a per-type
+`string/numeric?` predicate, and an `ErrorKind::Invalid` channel split. Each exists only
+to compensate for failure being a control transfer rather than a value; with a returned
+failure there is nothing for them to do.
+
+**Consequences.** The residual risk is that a failure, being a value, can be stored —
+`(conj acc f)` keeps one. Unlike a nil it is diagnosable, `keep` drops it, and the
+checker sees the union; but the mechanism is real and the raising design did not have
+it. A pipe also still ends in a raise, one step late: `(-> s string/->number (* 2))`
+reports `*: expected number, got failure(…)` rather than aborting at the parse — better
+than today's `got nil`, which named nothing, and the price of the value being local.

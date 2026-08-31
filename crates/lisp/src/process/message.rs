@@ -93,6 +93,8 @@ pub enum Message {
     List(Vec<Message>, Option<Pos>),
     Vector(Vec<Message>),
     Map(Vec<(Message, Message)>),
+    /// A **failure** value — its fields, mirroring `Map` (they share one CHAMP store).
+    Failure(Vec<(Message, Message)>),
     /// A set value — its elements (the backing values are all `true`, so only the
     /// elements ship). Rebuilt as a `Value::Set` on the receiver, preserving the
     /// distinct set type across a `send`/node boundary.
@@ -424,6 +426,19 @@ fn to_message_rec(
             }
             Message::Map(out)
         }
+        // A failure crosses as its fields — the map path verbatim, re-wrapped so the
+        // receiver gets a failure rather than a plain map.
+        Value::Failure(id) => {
+            let entries = heap.map_entries(id);
+            let mut out = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                out.push((
+                    to_message_rec(heap, k, visited, depth + 1, dest_runtime)?,
+                    to_message_rec(heap, v, visited, depth + 1, dest_runtime)?,
+                ));
+            }
+            Message::Failure(out)
+        }
         Value::Set(id) => {
             let elems = heap.set_elems(id);
             let mut out = Vec::with_capacity(elems.len());
@@ -638,7 +653,7 @@ fn collect_symbols(heap: &Heap, form: Value, out: &mut std::collections::HashSet
                 collect_symbols(heap, item, out);
             }
         }
-        Value::Map(id) => {
+        Value::Map(id) | Value::Failure(id) => {
             for (k, v) in heap.map_entries(id) {
                 collect_symbols(heap, k, out);
                 collect_symbols(heap, v, out);
@@ -714,7 +729,7 @@ fn collect_qualified_syms(heap: &Heap, form: Value, out: &mut Vec<Symbol>) {
                 collect_qualified_syms(heap, item, out);
             }
         }
-        Value::Map(id) => {
+        Value::Map(id) | Value::Failure(id) => {
             for (k, v) in heap.map_entries(id) {
                 collect_qualified_syms(heap, k, out);
                 collect_qualified_syms(heap, v, out);
@@ -806,7 +821,7 @@ pub(crate) fn message_fits(m: &Message, budget: i64) -> bool {
                     }
                 }
             }
-            Message::Map(entries) => {
+            Message::Map(entries) | Message::Failure(entries) => {
                 for (k, v) in entries {
                     walk(k, left);
                     walk(v, left);
@@ -911,6 +926,16 @@ fn from_message_timed(heap: &mut Heap, m: &Message) -> Value {
                 vals.push(from_message(heap, item));
             }
             heap.alloc_vector(vals)
+        }
+        Message::Failure(entries) => {
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                pairs.push((from_message(heap, k), from_message(heap, v)));
+            }
+            match heap.map_from_pairs(pairs) {
+                Value::Map(id) => Value::failure(id),
+                other => other,
+            }
         }
         Message::Map(entries) => {
             let mut pairs = Vec::with_capacity(entries.len());

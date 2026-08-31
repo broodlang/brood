@@ -659,6 +659,7 @@ fn handle_key(v: Value) -> Option<(u8, u32, u8)> {
         ValueRef::SeqView(id) => (3, id.index() as u32, id.region()),
         ValueRef::Map(id) => (4, id.index() as u32, id.region()),
         ValueRef::Set(id) => (5, id.index() as u32, id.region()),
+        ValueRef::Failure(id) => (24, id.index() as u32, id.region()),
         ValueRef::Str(id) => (6, id.index() as u32, id.region()),
         ValueRef::BigInt(id) => (7, id.index() as u32, id.region()),
         ValueRef::Decimal(id) => (8, id.index() as u32, id.region()),
@@ -699,6 +700,7 @@ fn to_prelude(v: Value) -> Value {
         ValueRef::SeqView(id) => Value::seqview(VecId::prelude(id.index())),
         ValueRef::Map(id) => Value::map(MapId::prelude(id.index())),
         ValueRef::Set(id) => Value::set(MapId::prelude(id.index())),
+        ValueRef::Failure(id) => Value::failure(MapId::prelude(id.index())),
         ValueRef::Str(id) => Value::str_(StrId::prelude(id.index())),
         ValueRef::BigInt(id) => Value::bigint(BigIntId::prelude(id.index())),
         ValueRef::Decimal(id) => Value::decimal(DecimalId::prelude(id.index())),
@@ -2987,6 +2989,7 @@ pub fn is_movable(v: Value) -> bool {
         ValueRef::SeqView(id) => id.region() == LOCAL,
         ValueRef::Map(id) => id.region() == LOCAL,
         ValueRef::Set(id) => id.region() == LOCAL,
+        ValueRef::Failure(id) => id.region() == LOCAL,
         ValueRef::Str(id) => id.region() == LOCAL,
         ValueRef::BigInt(id) => id.region() == LOCAL,
         ValueRef::Decimal(id) => id.region() == LOCAL,
@@ -3020,6 +3023,7 @@ pub fn needs_root_slot(v: Value) -> bool {
         ValueRef::SeqView(id) => shared(id.region()),
         ValueRef::Map(id) => shared(id.region()),
         ValueRef::Set(id) => shared(id.region()),
+        ValueRef::Failure(id) => shared(id.region()),
         ValueRef::Str(id) => shared(id.region()),
         ValueRef::BigInt(id) => shared(id.region()),
         ValueRef::Decimal(id) => shared(id.region()),
@@ -5109,9 +5113,11 @@ impl Heap {
                 // sub-node handles.
                 Value::map(self.promote_map_node(id, fwd))
             }
-            // A set shares the CHAMP storage — promote its trie exactly like a map
-            // and keep the `Set` wrapper (mirrors the `SeqView` case above).
-            ValueRef::Set(id) if id.region() == LOCAL => Value::set(self.promote_map_node(id, fwd)),
+            // Set and failure share the map's CHAMP storage — promote the trie the
+            // same way and re-wrap in the kind that came in.
+            ValueRef::Set(id) | ValueRef::Failure(id) if id.region() == LOCAL => {
+                crate::core::value::champ_rewrap(v, self.promote_map_node(id, fwd))
+            }
             ValueRef::Fn(id) if id.region() == LOCAL => Value::func(self.promote_closure(id, fwd)),
             ValueRef::Macro(id) if id.region() == LOCAL => {
                 Value::macro_(self.promote_closure(id, fwd))
@@ -5391,6 +5397,7 @@ impl Heap {
             Value::Vector(id) => ("vector", id.region(), id.is_old(), id.generation()),
             Value::Map(id) => ("map", id.region(), id.is_old(), id.generation()),
             Value::Set(id) => ("set", id.region(), id.is_old(), id.generation()),
+            Value::Failure(id) => ("failure", id.region(), id.is_old(), id.generation()),
             Value::Str(id) => ("string", id.region(), id.is_old(), id.generation()),
             Value::Rope(id) => ("rope", id.region(), id.is_old(), id.generation()),
             _ => return None,
@@ -5435,7 +5442,7 @@ impl Heap {
         match v {
             Value::Pair(id) => check!(id, "pair", pairs),
             Value::Vector(id) | Value::Range(id) => check!(id, "vector", vectors),
-            Value::Map(id) | Value::Set(id) => check!(id, "map", maps),
+            Value::Map(id) | Value::Set(id) | Value::Failure(id) => check!(id, "map", maps),
             Value::Str(id) => check!(id, "string", strings),
             _ => {}
         }

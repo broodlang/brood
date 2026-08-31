@@ -162,6 +162,23 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             }
             out.push('}');
         }
+        // A failure prints as `#failure{…}` — self-identifying, and NOT re-readable,
+        // which is deliberate: a failure records that something could not be produced,
+        // so reconstructing one from text would manufacture a fake provenance.
+        ValueRef::Failure(id) => {
+            out.push_str("#failure{");
+            let mut first = true;
+            for (k, val) in heap.map_entries(id) {
+                if !first {
+                    out.push_str(", ");
+                }
+                first = false;
+                write_value(out, heap, k, readable, depth + 1);
+                out.push(' ');
+                write_value(out, heap, val, readable, depth + 1);
+            }
+            out.push('}');
+        }
         ValueRef::Set(id) => {
             // `#{a b c}` — elements only (the backing values are all `true`), in the
             // CHAMP's insertion order. Reads back as a set literal.

@@ -334,6 +334,8 @@
    "empty?" :predicates
    "string/ends-with?" :predicates
    "error" :errors
+   "failure" :errors
+   "failure?" :predicates
    "error-message" :errors
    "reflect/eval" :meta
    "reflect/eval-string" :meta

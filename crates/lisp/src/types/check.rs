@@ -264,6 +264,104 @@ fn defn_clauses(heap: &Heap, form: Value) -> Option<(Symbol, Vec<Value>)> {
     Some((name, rest.to_vec()))
 }
 
+/// Walk `form` (un-expanded) for inline pattern-clause `fn` literals and record each
+/// one's `(heads, tail)` arms in `ctx` under its printed clause-head-list key — the side
+/// channel [`sigs::clause_lambda_ret`] reads back at call sites, where the expanded tree
+/// holds only the lowered variadic `match*` lambda (see `Ctx::fn_literal_clauses`).
+/// Quoted/quasiquoted subtrees are data/templates and `comment` never runs — skipped,
+/// like the other surface passes.
+fn record_fn_literal_clauses(heap: &Heap, form: Value, ctx: &mut Ctx) {
+    let mut work = vec![form];
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Vector(id) => work.extend(heap.vector(id).iter().copied()),
+            Value::Pair(_) => {
+                let Some(items) = list_items(heap, v) else {
+                    continue;
+                };
+                if let Some(&Value::Sym(head)) = items.first() {
+                    if value::symbol_is(head, kw::QUOTE)
+                        || value::symbol_is(head, kw::QUASIQUOTE)
+                        || value::symbol_is(head, kw::COMMENT)
+                    {
+                        continue;
+                    }
+                    if walk::is_fn_head(head) {
+                        if let Some((key, arms, printed)) = pattern_fn_literal(heap, &items) {
+                            ctx.add_fn_literal_clauses(key, arms, printed);
+                        }
+                    }
+                }
+                work.extend(items);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Read `items` (a surface `(fn …)` form's items) as a literal the expander will lower
+/// to `match*` — clause style with at least one pattern head or guard, or the plain
+/// single-clause style with a destructuring parameter. `None` for anything the expander
+/// keeps as a native `fn` (plain params, arity-only clauses), which the direct path in
+/// `clause_lambda_ret` / `lambda_ret` already types. Returns the head-list key (printed
+/// exactly as the lowering's `(quote heads)` datum prints), the `(heads, tail)` arms,
+/// and the full printed clause list for the registry's collision test.
+#[allow(clippy::type_complexity)]
+fn pattern_fn_literal(
+    heap: &Heap,
+    items: &[Value],
+) -> Option<(String, Vec<(Vec<Value>, Value)>, String)> {
+    let forms = match items.get(1..) {
+        Some([Value::Str(_), rest @ ..]) if !rest.is_empty() => rest,
+        Some(rest) => rest,
+        None => return None,
+    };
+    if forms.is_empty() {
+        return None;
+    }
+    let is_pattern_head = |h: &Value| !matches!(h, Value::Sym(_));
+    let print = |v: Value| crate::syntax::printer::print(heap, v);
+    // Clause style: every form is `(head-list body…)`.
+    let as_clauses: Option<Vec<_>> = forms.iter().map(|&c| sigs::clause_arm(heap, c)).collect();
+    if let Some(arms) = as_clauses {
+        let lowered = arms
+            .iter()
+            .any(|a| a.guard.is_some() || a.heads.iter().any(is_pattern_head));
+        if !lowered {
+            return None; // arity-only clauses stay native `fn` clauses
+        }
+        let head_lists: Vec<String> = forms
+            .iter()
+            .map(|&c| Some(print(*list_items(heap, c)?.first()?)))
+            .collect::<Option<_>>()?;
+        let key = format!("({})", head_lists.join(" "));
+        let printed: String = forms
+            .iter()
+            .map(|&c| print(c))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let out = arms
+            .into_iter()
+            .map(|a| a.body.last().map(|&t| (a.heads, t)))
+            .collect::<Option<Vec<_>>>()?;
+        return Some((key, out, printed));
+    }
+    // Plain single-clause style with a destructuring parameter: `(fn ([k v]) body…)`.
+    let plist = *forms.first()?;
+    let heads = match plist {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Nil | Value::Pair(_) => list_items(heap, plist)?,
+        _ => return None,
+    };
+    if !heads.iter().any(is_pattern_head) {
+        return None; // plain params — native `fn`, `lambda_ret`'s case
+    }
+    let tail = *forms.get(1..)?.last()?;
+    let key = format!("({})", print(plist));
+    let printed = format!("{} {}", print(plist), print(tail));
+    Some((key, vec![(heads, tail)], printed))
+}
+
 /// Do the two arities overlap — is there an argument count both admit? The
 /// question a sig-vs-definition mismatch turns on: only a *disjoint* pair is
 /// provably wrong (a multi-arm `defn` annotated with one arm's arrow overlaps,
@@ -1409,6 +1507,14 @@ pub fn check_file_mode(
                     ctx.add_clause_arms(qn, clauses.clone());
                     clause_defs.push((qn, clauses));
                 }
+            }
+            // Inline PATTERN-clause `fn` literals get the same surface record, keyed by
+            // their printed clause-head list (there is no name to key by): the expanded
+            // tree holds only the lowered variadic `match*` lambda, whose embedded
+            // `[:match-error … (quote heads)]` data is how `sigs::clause_lambda_ret`
+            // finds its way back here from a combinator call site.
+            for &form in &forms {
+                record_fn_literal_clauses(heap, form, &mut ctx);
             }
             // Iterate to a fixed point; break as soon as a pass records nothing new. The cap
             // bounds a pathological deep chain (the tail just stays deferred — sound).

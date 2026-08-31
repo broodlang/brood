@@ -8607,3 +8607,72 @@ silent on every one. Two gaps, both closed:
 Zero-warning gate over std/ + tests/ stays at zero, bedit checks clean (no false
 positives, no stragglers), and `combinator_collection_slot_rejects_the_old_argument_order`
 pins five warning shapes and five data-first silences.
+
+## 2026-08-31 — inline pattern-clause callbacks stop reading as `any`
+
+`(reduce toks '() (fn (((x y & acc) "+") …) ((acc val) …)))` typed its enclosing
+function `(string -> any)` while the SAME clauses under a named `defn` typed
+`(string -> (or nil number))` — two spellings of one program, two answers. Two
+stacked causes: the expander lowers a pattern-clause literal to one variadic
+`match*` lambda before call sites are typed (a named defn's clauses survive in
+`ctx.clause_arms`; a literal's were simply gone), and `lambda_ret` mis-read the
+lowered `(fn (& args) …)` as a two-parameter fn — binding `&` itself — whose
+`any` masked every fallback. Fixed with the same side-channel the named path
+uses: a surface pre-pass records each pattern-clause literal's `(heads, tail)`
+arms keyed by its printed clause-head list, and `sigs::clause_lambda_ret`
+recovers them through the `[:match-error … (quote heads)]` datum the lowering
+embeds (two literals sharing heads with different bodies go ambiguous — no
+answer beats a wrong one). Arity-only clause literals are read directly, a
+single destructuring param literal records as one arm, and `lambda_ret` now
+declines any `&`-marked param list. Pinned in Rust
+(`an_inline_pattern_clause_callback_flows_its_result_too`) and in
+`tests/introspection_test.blsp`; zero-warning gate over std/ + tests/ and
+bedit's `nest check` both stay clean under the new precision.
+
+## 2026-08-31 — ADR-310: a known failure is a value, not a raise
+
+`string/->number` on junk answered `nil`, which is a *legitimate result* — so "no
+value" and "could not produce one" shared a spelling, and neither carried why. It now
+returns a **`failure`**: the 24th `Value` kind, carrying `:message` and naming the
+input. Converted alongside it: the six `encoding` decoders, the three `datetime`
+parsers, and `url/percent-decode`, which had been passing an invalid `%XX` *through* —
+returning text that looks decoded, the one outcome worse than either failing or raising.
+
+The design went the other way first. A strict-raising draft with `attempt`/`result`
+call-site wrappers was written, and reverted the same day: an error arriving up the
+stack takes control from the caller best placed to handle it, and wrapping a call purely
+to change its shape is ceremony. Measured across the 13 real call sites, raising left
+**zero simpler, five unchanged, the rest a word longer**, with `url`'s own diagnostic
+degraded to the sub-parser's.
+
+**Falsiness is what makes it nearly free.** `eval::truthy` is now
+`Nil | Bool(false) | Failure`, so `(or (string/->number p) 0)` defaults as before and
+`(if n …)` branches as before. **Eleven of thirteen call sites needed no edit** — and
+that is not an assertion: `version`, `url`, `tempo`, `datetime`, `string/format`,
+`project` and the scaffold templates pass with their sources untouched.
+
+Two names, both producer-side and never wrapped around a call: `failure` and
+`failure?`; `error-message` reads either. Raising stays the bug/unexpected channel
+untouched — the two cannot be confused because they don't travel the same way, so the
+`ErrorKind::Invalid` split the earlier draft needed is unnecessary. `keep` now drops
+failures as well as nils, so `(seq/keep lines string/->number)` is "keep the numbers"
+and failures stop accumulating into result lists.
+
+Three things got *simpler* on the way in. The near-identical `Map` and `Set` forwarding
+arms in `gc.rs`, `gc_runtime.rs` and `promote` collapse into **one** arm plus
+`champ_rewrap`, so adding a trie-backed kind removed duplication instead of adding a
+third copy. `guards.rs` held a **second definition of falsiness** beside `Ty::truthy()`
+— which is precisely why `(or (parse s) 0)` first typed `number | failure`; there is now
+one definition and the checker cannot drift from the evaluator. And `sse.blsp`'s
+`(if (nil? n) 0 n)` became `(or n 0)` — that one was a latent bug: with a failure the
+nil-test is false, so an unparseable status line would have returned the failure *as the
+HTTP status*.
+
+`query-decode` propagates a component's failure rather than `assoc`ing it into the map,
+since a map with a failure for a key looks decoded and isn't. `url_test` had no coverage
+of invalid `%XX` at all; it does now.
+
+Gates: 698 Rust tests, clippy `--all-features -D warnings` clean, `nest check` at zero
+warnings over 353 files, 215 `.blsp` test files, doctests and `doc_examples` green, and
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean over 500 held failures, map/set storage,
+equality dedup and 200 cross-process round trips.

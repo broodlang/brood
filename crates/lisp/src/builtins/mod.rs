@@ -1110,9 +1110,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "string/->number",
         Arity::range(1, 2),
-        Sig::with_optional(vec![string], vec![int], num.union(nil_ty)),
+        Sig::with_optional(vec![string], vec![int], num.union(Ty::of(Tag::Failure))),
         &["s", "&optional", "radix"],
-        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — the only way to read hex/octal/binary, since Brood has no radix literals; give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.\n\n    (string/->number \"42\")   → 42",
+        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else a falsy failure value naming the input (unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — the only way to read hex/octal/binary, since Brood has no radix literals; give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.\n\n    (string/->number \"42\")   → 42",
         string_to_number);
     // `decimal` constructs an exact base-10 decimal from a string ("1.50"), an
     // int (3), or a float (inexact source — uses its shortest round-trip form).
@@ -3222,6 +3222,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &["x"],
         "Raise x as an error - a non-local exit caught by try/catch.",
         throw,
+    );
+    // A *returned* failure — the other channel. `throw` unwinds (bugs, the
+    // unexpected); a failure is handed back as a value (input this function
+    // cannot interpret), is falsy, and carries its own message.
+    def(
+        heap,
+        "%failure",
+        Arity::exact(1),
+        Sig::new(vec![string], Ty::of(Tag::Failure)),
+        &["message"],
+        "Build a failure value carrying message. The primitive behind the prelude's `failure`.",
+        failure_new,
+    );
+    def(
+        heap,
+        "%failure-message",
+        Arity::exact(1),
+        Sig::new(vec![any], string.union(nil_ty)),
+        &["f"],
+        "The message a failure carries, else nil. Behind the prelude's `error-message`.",
+        failure_message,
     );
     // `%force-panic` — deliberately panics the Rust thread when called. Exists
     // *only* in debug builds: it gives the MCP-host panic-isolation regression
