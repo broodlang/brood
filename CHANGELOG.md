@@ -4,6 +4,57 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.22.0 — 2026-08-31
+
+**Changed (breaking) — a known failure is a returned value, not `nil` (ADR-310).** A
+function that cannot interpret its input now returns a **`failure`**: its own `Value`
+kind, carrying a message that names the input. `nil` goes back to meaning *absence* —
+a lookup that found nothing — which is what accessors (`get`, `nth`, `os/env`, `first`
+of an empty list) keep. The two were sharing a spelling, so "no value" and "could not
+produce one" were indistinguishable, and neither carried why: a nil riding into someone
+else's arithmetic surfaced as `expected number, got nil`, naming neither the input nor
+the parse.
+
+Brood now has **two channels that cannot be confused, because they do not travel the
+same way**. A bug or the unexpected *raises* — wrong type, wrong arity, unbound symbol,
+a broken invariant — and unwinds to a `try` or the supervisor. A known failure is
+*handed back*. No error-kind tagging and no channel scoping are needed to tell them
+apart, and a `try` catches only what a `try` should.
+
+Converted: `string/->number` (both paths), `encoding/hex-decode`,
+`hex-decode-bytes`, `base64-decode`, `base64-decode-bytes`, `base64-url-decode`,
+`base64-url-decode-bytes`, `datetime/parse-date`, `parse-time`, `parse-iso8601`, and
+`url/percent-decode` — which had been passing an invalid `%XX` **through**, returning
+text that looks decoded, the one outcome worse than either failing or raising.
+`url/query-decode` propagates a component's failure rather than `assoc`ing it into the
+map. `seq/keep` drops failures as well as nils — both mean "nothing was produced" — so
+`(seq/keep lines string/->number)` is "parse every line, keep the numbers".
+
+**Migrating is usually nothing.** A failure is **falsy**, so `(or (string/->number s) 0)`
+defaults, `(if n …)` branches and `(and …)` short-circuits exactly as they did when
+these answered `nil`. Eleven of the thirteen call sites in this repo needed **no edit**,
+and bedit's 1379 tests pass with one line changed. What breaks is an explicit
+`(nil? x)` test on one of these results: write `(failure? x)`. What was already broken
+and now isn't: a `(nil? …)` guard that silently read a bad parse as valid — bedit's
+file-extension check and `std/net/sse`'s HTTP status were both one.
+
+**Added.** `failure` builds one, `failure?` tests one, and `error-message` reads either
+a failure or a caught error. Deliberately *not* added: `attempt`, `result`, `ok->`, a
+per-type predicate, or an error-kind split — each compensates for failure being a
+control transfer rather than a value, and there is nothing for them to do here.
+
+**Types.** `failure` is a tag, so `(or number failure)` is a plain union and hovers read
+`(string -> (or number failure))` with no parametric machinery. `Ty::truthy()` is now
+the single definition of falsiness in the checker, so `or`/`and`/guard narrowing agrees
+with the evaluator by construction — `guards.rs` had been carrying a second, divergent
+copy.
+
+**Fixed — inline pattern-clause callbacks no longer infer `any`.** The same clauses
+under a named `defn` typed precisely while an inline `fn` literal read `any`, because
+the expander lowers a clause literal to one variadic `match*` lambda before call sites
+are typed, and `lambda_ret` bound the `&` marker as a parameter. Surface-clause recovery
+through the lowered lambda fixes both.
+
 ## v0.21.0 — 2026-08-31
 
 **Added — `nest check` catches an un-migrated call.** bedit's seven 0.20-migration failures
