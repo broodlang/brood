@@ -89,6 +89,8 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-95 | **`promote` forwards only closures/envs — DAG-shaped data is duplicated once per referrer, exponentially with nesting** — `heap.rs`'s `PromoteForward` comment reasons "acyclic ⇒ a finite tree to re-copy", but acyclic ≠ tree: immutable path-copying code produces DAGs everywhere, so every `def`/`spawn` of a value with shared substructure copies the shared part per reference into the append-only RUNTIME region, `2^n` with sharing depth, no cap | ✅ **FIXED 2026-08-31** — `PromoteForward` forwards pairs/vectors/maps/strings too (mirroring the GC flush tables), keyed on the handles' canonical identity (also closing a latent nursery/old `index()` collision in the closure/env tables); long spines stride-register (every 8th cell) so a bulk `def` stays cheap while growth stays O(n). Guards: 5 `promote_sharing_tests` (17 cells where pre-fix copied 131 071). Measured: `sort`/`spawn`/`startup`/`spawn-live`/`supervisor` all floor-level; `spawn`/`supervisor` **fewer** instructions than base |
 | KI-96 | **a remote monitor's `PENDING_REMOTE` entry survives its own `[:down …]`** — nothing removes the entry when the watched remote target dies and the peer's DOWN arrives, so (a) a long-lived watcher leaks one entry per dead remote monitor, and (b) a later node-down fires a SECOND `[:down mref pid :noconnection]` for an mref that already delivered — breaking the one-shot guarantee a `gen/call`-style pinned receive relies on | ✅ **FIXED 2026-08-31** — the DOWN now rides a dedicated `Frame::Down` (wire v7) instead of an ordinary `Send`, giving the watcher's node the hook the entry lacked: `deliver_remote_down` retires the pending entry, then delivers. Guard: `a_delivered_remote_monitor_does_not_fire_again_on_node_down` (two-node; sabotage-verified — retire disabled reproduces `SECOND-DOWN-BUG :noconnection`) |
 | KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading |
+| KI-88 | **one spawn of a warm burst is created, promoted, registered — and never scheduled** — exactly one reader of a 50-process burst never executes its first instruction; no death line, and the collector times out. Gates `BROOD_TW_REENTRY`'s default (60× on the viral defer shape, measured and waiting) | ⚠️ **WATCHING 2026-08-31 — DORMANT.** Seen many times, root cause never found, and no reconstructable binary exhibits it: 10/10 pass at `62eac84c` with the router confirmed live, on top of session 4's 15/15 + 8/8 (incl. a pristine rebuild of the commit that failed 3/3 hours earlier). One candidate mechanism — `run_one`'s unprotected post-quantum tail, whose unwind produces this exact signature — was found and **closed** in session 5, so a future sighting is known not to be that. Next sighting: PRESERVE THE BINARY, arm `BROOD_SCHED_DBG=1`, take a core in the window |
+| KI-99 | **`a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 under a full `make test`** — B warned 0 times instead of 1, with `dist: incoming connection failed: failed to fill whole buffer` on B's stderr: the handshake hit EOF mid-frame under full-suite load, so the inbound send that should have been dropped-and-warned never arrived | ⚠️ **WATCHING 2026-08-31** — retry-absorbed (try 2 passed), 6/6 green solo after. One sighting, but the failure output was **captured** this time (KI-80's lesson), and it names the mechanism: a connection that never completed, not a dedup miscount. If it recurs, the question is why the handshake EOFs under load — `MAX_HANDSHAKE_FRAME`/`accept_link` timeout interaction is the place to look, and KI-97 item 1 touches that code |
 | KI-87 | **The checker diverged — `nest run` at 54 GB, three 19 GB `types::` test processes.** `InferGuard::enter` ended in `.then_some(InferGuard(sym))`; `bool::then_some` builds its argument eagerly, so a REFUSED entry built and dropped a guard whose `Drop` removed the in-flight symbol's mark — every cycle refusal un-guarded the symbol it refused (latent since 2026-07-07). The demand walk consulting a callee's inferred sig (`0f64f600`) made `require-one` ⇄ `%require-await` nest without bound, one stack segment per level | ✅ **FIXED 2026-08-29** — the guard is constructed only on the success path (`entered.then(\|\| InferGuard(sym))`). Guards sabotage-verified: a refused third `enter` stays refused, and the mutually recursive pair reproduces the exact `mmap failed to allocate stack` OOM under `ulimit -v` with the bug restored. Build uncapped, run capped |
 | KI-86 | **`runtime_collector`'s three promotion tests failed under `cargo test`** — `expected ≥3000 promoted closures, got total=231`, with the count-based collector switched OFF by the test and one closure promoted per iteration | ⚠️ **WATCHING 2026-08-29** — precondition removed, mechanism inferred: `BROOD_RT_GC_FLOOR` is read once per process (`OnceLock`), two tests in the binary `set_var` it to 128/256, and under plain `cargo test` the leaked floor armed the `Interp`'s scheduler WORKER heaps (which share the runtime region) — a worker safepoint aged the runtime and the main heap's `cur_code()` count dropped. Fix: `Heap::set_rt_gc_floor` per test heap, no env. Not reproducible on demand on a quiet box (a worker has to wake); 4/4 green under load since |
 | KI-85 | **The checker produced a FALSE POSITIVE — its one hard invariant.** `(takes-str (first (fold (fn (a x) (cons x a)) [0] ["t"])))` warned `expects string, got 0` on a value that was the string `"t"` at runtime. A tuple shape (`[0]` → `(tuple 0)`) refines the VECTOR member only, but once the fold's result merged into one `pair \| vector` term, `elem_ty`/`tuple_elems` reported the tuple's elements for the whole term, pair member included | ✅ **FIXED 2026-08-29** — both accessors answer only for a term whose seq members the shape actually describes (`tuple_elems` only on a pure vector — a `nil` member makes `first` nil, a `pair` member makes it unknown). Found by an adversarial probe of the set-theoretic model; the same session closed a second gap the probe exposed — a lambda LITERAL passed as a callback was never checked at all (`callback_sig` answered `None`), so `(g (fn (x) (str x)))` against `((int -> int) -> int)` was silent; it is now typed under the arrow's own domain and the existing result-disjointness rule catches it, with no `⊆`-on-an-inferred-return false positives (`(+ x 1)` under `x : int` is `int`). Guards sabotage-verified |
@@ -211,6 +213,29 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-99 — a dist handshake EOF'd under full-suite load, so a drop-warning test saw no send ⚠️ WATCHING 2026-08-31
+
+**Symptom.** In a full `make test`, `cli::distribution
+a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 (passing on try 2):
+`assertion left == right failed: B should warn exactly once for the repeated inbound send
+(dedup)` — B warned **0** times. Its captured stderr names the cause:
+
+```
+--- B stderr ---
+dist: incoming connection failed: failed to fill whole buffer
+```
+
+**Reading.** Not a dedup miscount — the link never came up. `failed to fill whole buffer`
+is a `read_exact` hitting EOF mid-frame during the handshake, so the inbound send that
+should have been dropped-and-warned never reached B at all. Under full-suite load the
+box is running ~nproc test processes plus this test's two nodes.
+
+**Status.** One sighting, retry-absorbed; 6/6 green solo afterwards. Recorded rather than
+chased because the *output was captured this time* (KI-80's standing lesson) and it points
+somewhere specific. If it recurs: the question is why a local handshake EOFs under load.
+`accept_link`'s per-read `SO_RCVTIMEO` and `read_frame_capped` are the code — the same
+pair KI-97 item 1 rewrites for the trickle-DoS deadline, so that fix should re-test this.
 
 ## KI-98 — `process_limit_test.blsp:114` timed out under a full `nest test`, twice in five runs ⚠️ WATCHING 2026-08-31
 
@@ -507,7 +532,14 @@ Also recorded by the same audit, elsewhere: the four fixed bugs above (KI-91–9
 correctness items KI-95/96 (both fixed later the same day), and the performance
 candidates in `compute-frontier.md` §7.8.
 
-## KI-88 — one spawn of a warm burst is created, promoted, registered — and never scheduled ⚠️ OPEN 2026-08-30 (deterministic repro; gates the tree-walker→VM router's default)
+## KI-88 — one spawn of a warm burst is created, promoted, registered — and never scheduled ⚠️ WATCHING 2026-08-31 (DORMANT since 2026-08-30 — no reconstructable binary reproduces it; still gates the tree-walker→VM router's default)
+
+**Status note (2026-08-31, KI-96 session):** the *header* of this entry advertised a
+"deterministic repro" for a day after session 4 had already found it dormant — which is
+how it got picked up as the next item. It does not reproduce: the canonical repro (the
+full chaos2 file, `BROOD_TW_REENTRY=1`, router confirmed live at 394 routed closures)
+passes **10/10** at `62eac84c`, on top of session 4's 15/15 and 8/8. Read the session 5
+note at the end before spending time here.
 
 **Symptom.** In `breakage/chaos2_process_genserver` P47 (50-reader burst against a 10k-entry
 map server), exactly ONE early reader (index 2–4, stable within a config) never runs: its
@@ -597,6 +629,38 @@ real until proven otherwise: the router stays opt-in. If the wedge is next seen 
 arm `BROOD_SCHED_DBG=1` immediately (run/end/park/resume lines + the ledger watchdog),
 take a core inside the wedge window (`kill -ABRT`; apport keeps it), and PRESERVE THE
 EXACT BINARY — the artefact is the whole case.
+
+**Session 5 (2026-08-31) — still dormant; one candidate mechanism found and CLOSED.**
+Re-confirmed dormant (10/10, above). What the session did produce is a structural hole in
+the exact code path this entry implicates, found by reading rather than by reproducing:
+**`run_one`'s post-quantum tail ran unprotected.** `catch_unwind` wrapped `drive()` only,
+and everything after it — `save_ctx`, `finish_quantum`, and the outcome routing
+(`store_resume`/`park_on_receive`/`deregister`/`enqueue`) — was plain statements, with no
+catch in `worker_loop` either. A panic there did two silent things at once: killed that
+worker thread for good (the pool shrinks permanently; nothing restarts a worker), and
+dropped the `Box<Process>` during the unwind, so the process vanished with **no
+`deregister`** — no death line, no monitors, no `[:down …]`, and anything waiting on it
+waited forever.
+
+That is *exactly* this entry's signature: a `run` with no `end` (the `end` print is the
+first statement of `handle_capture_outcome`, which the unwind skips), a ledger entry no
+thread is inside (`ledger_exit` is likewise skipped), no death line, and a collector
+timing out. Session 3's "a Rust frame cannot evaporate mid-function without unwinding
+through the instrumented tail" was right about unwinding and wrong about the tail: the
+tail is not a `Drop` guard, so an unwind skips it silently.
+
+**It is not, however, a diagnosis of KI-88** — the mechanism is *loud* (the panic hook
+prints and appends `.brood_crash_dump`), and no sighting ever carried a panic message. It
+is now hardened and guarded regardless (`crates/cli/tests/quantum_tail_panic.rs`, with the
+`BROOD_FAULT_QUANTUM_TAIL=<n>` injection knob; sabotage-verified — reverting the catch
+fails the guard while its no-fault control still passes). The value for this entry is
+**elimination**: if the wedge is seen again, it is not this.
+
+One trap worth keeping from building that guard: a short program can exit *while the
+panicking worker is still symbolizing its backtrace*, so the recovery's own line never
+prints and the run looks like a silent vanish. The guard sleeps and runs two further waves
+to outlive the unwind. A wedge investigation that ends "no diagnostic appeared" should
+check it did not simply out-run one.
 
 ## KI-87 — the checker's cycle guard released the symbol it refused: `nest run` at 54 GB, three 19 GB test processes ✅ FIXED 2026-08-29
 

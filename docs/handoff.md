@@ -5,7 +5,21 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Addendum 2026-08-31 (latest) — KI-96 FIXED: a remote monitor's DOWN now retires its
+**Addendum 2026-08-31 (latest) — KI-88 is DORMANT, not deterministic; its implicated
+path is now hardened.** Do not pick KI-88 up expecting a repro: 10/10 pass at `62eac84c`
+with the router live, on top of session 4's 15/15 + 8/8. Its status line said
+"deterministic repro" for a day after session 4 found it dormant — corrected, and it now
+has an index row (it had none). What did land: **`run_one`'s post-quantum tail is caught**
+(`save_ctx`/`finish_quantum`/outcome routing ran unprotected, and `worker_loop` has no
+catch — one panic there killed a worker for good AND dropped the process with no
+`deregister`, hanging the runtime; fault injection reproduces the hang pre-fix). That is
+KI-88's exact signature but NOT a diagnosis of it (this mechanism is loud); its value is
+elimination. Guard: `crates/cli/tests/quantum_tail_panic.rs` + `BROOD_FAULT_QUANTUM_TAIL`,
+sabotage-verified. **Next up: KI-97 item 1** (the pre-auth handshake trickle DoS — and it
+should re-test the newly filed **KI-99**, a handshake EOF under load in the same code),
+then §7.8 item 1.
+
+**Addendum 2026-08-31 (earlier) — KI-96 FIXED: a remote monitor's DOWN now retires its
 own `PENDING_REMOTE` entry.** The DOWN rides a dedicated `Frame::Down` (wire **v7**)
 instead of an ordinary send; the inbound handler (`deliver_remote_down`) retires the
 pending entry, then delivers — so a completed monitor can no longer leak an entry or

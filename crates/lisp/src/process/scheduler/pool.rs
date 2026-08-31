@@ -578,16 +578,70 @@ fn run_one_timed(mut proc: Box<Process>) {
     };
     ledger_enter(proc.pid);
     ledger_watchdog();
+    let pid = proc.pid;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.drive()));
     drop(_sg);
-    set_capture_run(false);
-    proc.save_ctx();
-    // Read back before `handle_capture_outcome`, which routes a parking process into
-    // `park_on_receive` — the one place that resets this.
-    proc.spawns_since_park = SPAWNS_SINCE_PARK.with(|c| c.get());
-    finish_quantum(&mailbox, wid);
-    handle_capture_outcome(proc, &mailbox, outcome);
+    // The tail is caught too, not just `drive()`. A panic in HERE — a bad handle in
+    // `save_ctx`/`store_resume`, an OOB slab index, a broken invariant in the outcome
+    // routing — used to unwind straight through `worker_loop`, which has no catch: the
+    // worker thread died for good (the pool silently shrank, and nothing restarts it)
+    // and the unwind dropped the `Box<Process>` on the way out, so the process vanished
+    // with no `deregister` — no death line, no monitors fired, no `[:down …]`. Anything
+    // waiting on it then waited forever, so ONE tail panic hung the whole runtime.
+    // Verified by fault injection: pre-fix, `BROOD_FAULT_QUANTUM_TAIL` on the chaos2
+    // gen-server wedges the program at P47 until it is killed.
+    //
+    // That shape is also, exactly, KI-88's recorded signature (`run` with no `end`, the
+    // ledger holding a pid no thread is inside, no death line, the collector timing out)
+    // — which is why the tail is hardened here even though KI-88 itself is dormant and
+    // was never caught with a panic message on stderr. This closes the mechanism rather
+    // than diagnosing that bug: if the wedge is ever seen again, it is NOT this.
+    let tail = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fault_quantum_tail();
+        set_capture_run(false);
+        proc.save_ctx();
+        // Read back before `handle_capture_outcome`, which routes a parking process into
+        // `park_on_receive` — the one place that resets this.
+        proc.spawns_since_park = SPAWNS_SINCE_PARK.with(|c| c.get());
+        finish_quantum(&mailbox, wid);
+        handle_capture_outcome(proc, &mailbox, outcome);
+    }));
+    if tail.is_err() {
+        // Loud, durable, and — above all — survivable: this worker returns to its loop.
+        let who = proc_descr(pid);
+        eprintln!("process {who} lost: the scheduler's post-quantum tail panicked");
+        crate::cli_support::dump_process_death(&who, "scheduler post-quantum tail panicked");
+        // Retire it so monitors/links fire and nothing waits on it forever. Guarded by a
+        // liveness check because the panic may have struck *after* `handle_capture_outcome`
+        // already deregistered — `deregister` is not idempotent (it would re-fire every
+        // watcher and double-count the live-process gauge). No heap: the unwind dropped it.
+        if crate::process::mailbox::is_alive(pid) {
+            deregister(pid, Message::Keyword(value::intern(pk::KILLED)), None);
+        }
+        // `finish_quantum`'s gauges (RUNNING / WORKER_BUSY) may be skewed if the panic
+        // preceded it; both are documented as pure diagnostics, and squaring them up
+        // blind would double-count the ordinary path.
+    }
     ledger_exit();
+}
+
+/// Fault injection for the quantum tail (`BROOD_FAULT_QUANTUM_TAIL=<n>`): panic on the
+/// `n`th quantum, in the window between `drive()` returning and the outcome being routed.
+/// Exists so the hardening above is *testable* — the failure it guards against is a
+/// permanently dead worker plus a silently destroyed process, which no ordinary input
+/// provokes on demand. See `quantum_tail_panic_does_not_wedge_the_runtime`.
+fn fault_quantum_tail() {
+    static AT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let at = *AT.get_or_init(|| {
+        std::env::var_os("BROOD_FAULT_QUANTUM_TAIL")
+            .and_then(|v| v.to_string_lossy().parse::<u64>().ok())
+    });
+    if let Some(n) = at {
+        static COUNT: AtomicU64 = AtomicU64::new(0);
+        if COUNT.fetch_add(1, Ordering::Relaxed) == n {
+            panic!("BROOD_FAULT_QUANTUM_TAIL: injected panic on quantum {n}");
+        }
+    }
 }
 
 /// Shared post-quantum bookkeeping: drop the live-process gauge + worker-busy flag and
@@ -627,7 +681,7 @@ fn handle_capture_outcome(
             deregister(
                 proc.pid,
                 Message::Keyword(value::intern(pk::NORMAL)),
-                &proc.heap,
+                Some(&proc.heap),
             );
         }
         Ok(Ok(VmOutcome::Suspended(s))) => {
@@ -651,7 +705,7 @@ fn handle_capture_outcome(
                 .kill
                 .take()
                 .unwrap_or_else(|| Message::Keyword(value::intern(pk::KILLED)));
-            deregister(proc.pid, reason, &proc.heap);
+            deregister(proc.pid, reason, Some(&proc.heap));
         }
         Ok(Err(e)) => {
             // An unwinding untrappable kill (`Control::Kill`) that no VM driver
@@ -663,7 +717,7 @@ fn handle_capture_outcome(
                     .kill
                     .take()
                     .unwrap_or_else(|| Message::Keyword(value::intern(pk::KILLED)));
-                deregister(proc.pid, reason, &proc.heap);
+                deregister(proc.pid, reason, Some(&proc.heap));
                 return;
             }
             // An uncaught throw/error killed the process (Erlang let-it-crash).
@@ -687,7 +741,7 @@ fn handle_capture_outcome(
             deregister(
                 proc.pid,
                 crate::process::message::error_reason(&e),
-                &proc.heap,
+                Some(&proc.heap),
             );
         }
         Err(_) => {
@@ -697,7 +751,7 @@ fn handle_capture_outcome(
             deregister(
                 proc.pid,
                 Message::Keyword(value::intern(pk::KILLED)),
-                &proc.heap,
+                Some(&proc.heap),
             );
         }
     }
@@ -717,7 +771,7 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
             .take()
             .unwrap_or_else(|| Message::Keyword(value::intern(pk::KILLED)));
         drop(st);
-        deregister(proc.pid, reason, &proc.heap);
+        deregister(proc.pid, reason, Some(&proc.heap));
         // `proc` dropped here → its captured continuation + LOCAL heap are freed.
     } else if st.queue.len() > st.scanned {
         // A message raced in during the park — resume instead of parking. This is a
