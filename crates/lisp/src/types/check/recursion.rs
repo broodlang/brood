@@ -114,8 +114,13 @@ fn analyze_fn(
             }
         }
     } else {
-        // (fn params body…): body is everything after the param list.
-        analyze_body(heap, name, &items[2..], enclosing, out);
+        // (fn params body…): body is everything after the param list. A bare
+        // `(fn)` — mid-edit source; the advisory checker sees anything — has
+        // neither params nor body, and must not panic the checker thread
+        // (found live in bedit: three worker panics at startup, 2026-08-31).
+        if let Some(body) = items.get(2..) {
+            analyze_body(heap, name, body, enclosing, out);
+        }
     }
 }
 

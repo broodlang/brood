@@ -1938,6 +1938,7 @@ child's own pid** — to hand the parent's pid in, bind it in an enclosing `let`
 |---|---|
 | `(spawn expr)` | Run `expr` (unevaluated) in a new green process; returns its pid. Free locals are captured; `(self)` inside is the *child's* pid. |
 | `(spawn-link expr)` | As `spawn`, but the child is **linked to the caller atomically** — before it can run (Erlang `spawn_link`), so even an instant exit reports its *true* reason. What supervised children use. See *Links* below. |
+| `(spawn-monitor expr)` | As `spawn`, but the caller **monitors** the child atomically — returns `[pid ref]`, and the `[:down …]` carries the *true* reason even for an instant exit (Erlang `spawn_monitor`). One-shot, never kills. See *Links* below. |
 | `(send target msg)` | Copy `msg` into `target`'s mailbox (non-blocking; a dead/unknown target is a no-op). `target` is a pid (local **or remote** — see [Distributed nodes](#distributed-nodes)) or a `{:name :node}` address. |
 | `(receive clause...)` | Take the first matching message (see below); suspend until one arrives. `(receive)` with no clauses takes the next message. |
 | `(self)` | Your own pid — a `:pid` value carrying this node's identity. |
@@ -2205,6 +2206,32 @@ failure only appears under load — exactly where a supervisor matters.
 `:start` thunks do (`(fn () (spawn-link (worker …)))`), and `gen`'s
 `gen/start-link` is the same guarantee for a `defserver` server. The prelude
 macro expands to the `%spawn-link` primitive (ADR-067).
+
+#### `spawn-monitor` — spawn and monitor atomically
+
+`(spawn-monitor expr)` is the same guarantee on the **monitor** side (Erlang
+`spawn_monitor`), returning `[pid ref]`. The child is monitored before it is
+enqueued, so `[:down ref pid reason]` always carries the child's real reason.
+One-shot and unidirectional like `monitor`: it never kills, and `demonitor`
+takes the returned ref.
+
+```clojure
+(let ([p r] (spawn-monitor (error "boom")))
+  (receive ([:down ^r _ reason] (first reason))
+    (after 500 :lost)))                    ;=> :error — always
+```
+
+The gap it closes is the link one exactly: `(let (p (spawn expr) r (monitor p)) …)`
+*looks* right and holds only while the spawner never yields between the two
+bindings. Open a gap — a loaded scheduler, or a boundary trace wrapping the code —
+and the child exits first, `monitor` takes its already-dead branch, and the DOWN
+carries `:noproc` **in place of** the reason. Measured: adjacent, 0 of 300 runs
+lost the reason; with one 5 ms yield between them, 40 of 40 did.
+
+Nothing raises when that happens — the receive fires, with a reason that says only
+"already gone" — so prefer this form whenever the reason matters. Monitoring a pid
+that is *genuinely* already dead still reports `:noproc`, which is correct and
+unchanged. The prelude macro expands to the `%spawn-monitor` primitive (ADR-309).
 
 ### Crash reports
 

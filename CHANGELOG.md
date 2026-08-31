@@ -4,6 +4,34 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Added — `spawn-monitor`, the atomic monitor (ADR-309).** `(spawn-monitor expr)` returns
+`[pid ref]` with the monitor registered before the child can run, so `[:down ref pid
+reason]` always carries the child's real exit reason. The monitor-side twin of
+`spawn-link`, and it closes the same gap: `(let (p (spawn expr) r (monitor p)) …)` holds
+only while the spawner never yields between the two bindings, and otherwise the DOWN
+reports `:noproc` **in place of** the reason. Measured — adjacent, 0 of 300 runs lost it;
+with one 5 ms yield between them, 40 of 40 did. Nothing raises, which is what makes it
+expensive: a supervisor reading `:noproc` where `:normal` belonged restarts a `:transient`
+child that exited cleanly.
+
+Found by bedit's own tutorial: lesson 32 *"When a process dies"* teaches this pattern, and
+under `taskset -c 0,1` its shipped answer failed its own exercise with `first: expected
+list, …, got keyword (:noproc)`.
+
+**Fixed — the wasm32 target had not built since the 0.20.0 wave.** `%gui-compiled?` shipped
+without a `terminal_wasm.rs` shim while its registration stayed un-cfg'd, so the playground
+build died with `E0425: cannot find value gui_compiled_p`. `cargo build`, `cargo clippy
+--all-features` and the whole suite were green throughout — none of them names that target —
+and it surfaced as a failed Fly deploy. CI now builds wasm32.
+
+**Fixed — `nest publish` packed the working directory, not the source.** It ran `tar .`
+behind a fixed exclude list, so git-ignored build output shipped to the registry; bedit hit
+the 12 MB cap with a 41 MB ignored binary in its root. The file list now comes from
+`git ls-files --cached --exclude-standard`, with the whole-directory walk kept as the
+fallback outside a git work tree.
+
 ## v0.20.0 — 2026-08-31
 
 One argument convention, one pipe, and `!` with one meaning. **This release breaks every
