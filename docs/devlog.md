@@ -8111,3 +8111,24 @@ calls themselves get cheaper.** The next lever for this class is not admission o
 lowering, it is §7.5 increment 4 — the X-register convention — and `BROOD_XADMIT=1` is
 kept as the one-env-var re-test for exactly that moment. Suite 1300/1300 with the flag
 armed; correctness of admitted arms verified on nqueens (checksum match).
+
+### 2026-08-31 — "performance went down": no, the measurement did — the harness's one-invocation refresh was a coin flip
+
+The refreshed benchmarks column read several rows up (regex +15%, errors-deep +7%, …) and
+the question "are we measuring correctly?" was the right one. The forensic chain, in
+order: a C-language anchor showed the box in the same state as the field run (sort −1.0%,
+loop +0.0%), `ab-bench` with build parity and image parity showed the whole day's code
+span FLAT (regex +0.0%), and then two back-to-back harness invocations of the same row on
+the same binary read **119.5 ms and 139.3 ms** — this box's `powersave` governor lands
+each harness invocation on one of two turbo plateaus and holds it for all of that
+invocation's runs, so best-of-N inside one invocation hides nothing while invocations sit
+17% apart. Both the previous column and the "regressed" one were single-invocation
+samples: single coin flips, published.
+
+The fix is the sampling, not the code: a Brood-only refresh is now the **min over 3
+interleaved invocations** (both binaries' min-of-3 agreed to 0.2% on the accused row),
+republished at 8a2aaa01 with the rule recorded in brood-benchmarks' CLAUDE.md. What
+survives the treatment is the real story: **bintree −17.3%** from the hot re-lowering,
+everything else within noise — supervisor/ring checked same-binary relower-on/off and
+flat. Meta-lesson for every future refresh: a published number from one invocation is one
+sample; before believing a delta against it, apply the same treatment to both sides.
