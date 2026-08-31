@@ -131,6 +131,62 @@ fn reg() -> std::sync::MutexGuard<'static, HashMap<u64, Ctl>> {
     REGISTRY.lock().expect("socket registry mutex")
 }
 
+/// True once the reactor thread has exited — a caught panic, or a fatal `poll` error.
+/// Nothing restarts it (the mio `Poll`, every fd's registration and all TLS state died
+/// with the thread), so the flag makes the death **loud and terminal** instead of
+/// silent: before it existed, `Reactor::cmd` discarded the channel error, `tcp-send`
+/// kept returning `Ok(())` into a dead channel, and every socket-owning process parked
+/// in `receive` forever with no diagnostic anywhere.
+static REACTOR_DOWN: AtomicBool = AtomicBool::new(false);
+
+fn reactor_dead_err() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "net reactor thread has died; sockets are unavailable for the rest of this run",
+    )
+}
+
+/// Gate for every socket operation that would otherwise queue a command into a dead
+/// reactor and report success.
+fn reactor_up() -> std::io::Result<()> {
+    if REACTOR_DOWN.load(Ordering::SeqCst) {
+        return Err(reactor_dead_err());
+    }
+    Ok(())
+}
+
+/// The reactor thread's exit hook: mark the reactor dead, say so once on stderr, and
+/// fail every registered socket at its owner — an `[:tcp-error …]` naming the cause,
+/// then the terminal `[:tcp-closed …]`, so a receive loop driven by either terminates
+/// instead of hanging. Ordering matters: the flag is set (SeqCst) **before** the
+/// registry drain, and the socket creators re-check it after inserting, so an entry
+/// can never slip in behind the sweep and hang its owner.
+fn reactor_died(panic: Option<Box<dyn std::any::Any + Send>>) {
+    REACTOR_DOWN.store(true, Ordering::SeqCst);
+    let why = panic
+        .as_ref()
+        .map(|p| {
+            p.downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panicked".to_string())
+        })
+        .unwrap_or_else(|| "fatal poll error".to_string());
+    eprintln!(
+        "brood: net reactor thread died ({why}); all sockets are being closed and \
+         every subsequent tcp-*/tls-* operation will error"
+    );
+    let entries: Vec<(u64, u64)> = reg()
+        .drain()
+        .map(|(id, ctl)| (id, ctl.subscriber.load(Ordering::Acquire)))
+        .collect();
+    for (id, pid) in entries {
+        let (sink, _) = sink_pair(pid);
+        sink.emit(tcp_error_msg(id, "net reactor died"));
+        sink.emit(tcp_closed_msg(id));
+    }
+}
+
 // ---- commands into the reactor ----
 
 enum Cmd {
@@ -176,6 +232,10 @@ enum Cmd {
     SetIdle { id: u64, ms: u64 },
     /// Flush queued outbound (bounded by [`LINGER`]) and close.
     Close { id: u64 },
+    /// Test-only: panic the reactor thread, to exercise the death hook
+    /// (`reactor_died`). Debug builds only; see [`die_for_test`].
+    #[cfg(debug_assertions)]
+    DieForTest,
 }
 
 struct Reactor {
@@ -185,8 +245,10 @@ struct Reactor {
 
 impl Reactor {
     fn cmd(&self, cmd: Cmd) {
-        // The reactor thread lives for the process; a send can only fail if it
-        // panicked, in which case every socket is dead anyway.
+        // A send fails only once the reactor thread has died; `reactor_died` has
+        // then already marked the runtime state (`REACTOR_DOWN`) and failed every
+        // socket at its owner, and the public entry points gate on `reactor_up()`,
+        // so there is nothing further to report here.
         let _ = self.tx.send(cmd);
         let _ = self.waker.wake();
     }
@@ -201,7 +263,17 @@ fn reactor() -> &'static Reactor {
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
         std::thread::Builder::new()
             .name("brood-net-reactor".into())
-            .spawn(move || reactor_loop(poll, rx))
+            .spawn(move || {
+                // The reactor multiplexes EVERY socket in the runtime on this one
+                // thread, so its death must be observed, not swallowed: catch a
+                // panic (a `poll` error returns normally) and run the death hook —
+                // mark the reactor down, fail every socket at its owner, and make
+                // subsequent socket ops error instead of silently succeeding.
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    reactor_loop(poll, rx)
+                }));
+                reactor_died(r.err());
+            })
             .expect("spawn net reactor thread");
         Reactor { tx, waker }
     })
@@ -1047,7 +1119,19 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                 teardown(id, conns, registry);
             }
         }
+        #[cfg(debug_assertions)]
+        Cmd::DieForTest => panic!("net reactor: test-induced death (Cmd::DieForTest)"),
     }
+}
+
+/// Test-only trigger for the reactor death hook: panics the reactor thread from a
+/// command, exactly like a real bug in the event loop would. Debug builds only —
+/// integration tests use it to prove the death is loud (sockets failed at their
+/// owners, subsequent ops erroring) rather than a silent hang.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn die_for_test() {
+    reactor().cmd(Cmd::DieForTest);
 }
 
 /// Remove a connection from the reactor + poll (control-side entry is the
@@ -1184,6 +1268,7 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// `(tcp-connect host port)` — connect (name resolution + a time-bounded TCP
 /// handshake on the calling thread); reads start at once, delivering to `subscriber`.
 pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
+    reactor_up()?;
     // Resolve first so we can use `connect_timeout`, which needs a concrete addr.
     // Try each resolved address in turn, as `TcpStream::connect` does.
     let mut addrs = std::net::ToSocketAddrs::to_socket_addrs(&(host, port))?.peekable();
@@ -1228,12 +1313,20 @@ pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
         sink,
         binary,
     });
+    // Closes the race with `reactor_died`'s sweep: the flag is set before the sweep
+    // drains the registry, so an entry inserted after the sweep observes it here and
+    // withdraws instead of hanging its owner on a socket nothing will ever drive.
+    if REACTOR_DOWN.load(Ordering::SeqCst) {
+        reg().remove(&id);
+        return Err(reactor_dead_err());
+    }
     Ok(id)
 }
 
 /// `(tcp-listen host port)` — bind; connections are announced as
 /// `[:tcp-accept lid client]` to `subscriber`. Port 0 = OS-assigned.
 pub fn listen(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
+    reactor_up()?;
     let std_listener = std::net::TcpListener::bind((host, port))?;
     let local = std_listener.local_addr()?.port();
     std_listener.set_nonblocking(true)?;
@@ -1257,6 +1350,11 @@ pub fn listen(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
         sink,
         subscriber: cell,
     });
+    // See `connect` — closes the race with `reactor_died`'s sweep.
+    if REACTOR_DOWN.load(Ordering::SeqCst) {
+        reg().remove(&id);
+        return Err(reactor_dead_err());
+    }
     Ok(id)
 }
 
@@ -1337,6 +1435,7 @@ pub fn set_idle_timeout(id: u64, ms: u64) -> std::io::Result<()> {
 /// know now — unknown socket, a listener, an unclaimed TLS stream — still
 /// error synchronously.
 pub fn send(id: u64, data: &[u8]) -> std::io::Result<()> {
+    reactor_up()?;
     {
         let reg = reg();
         match reg.get(&id) {
@@ -1448,6 +1547,7 @@ pub fn tls_request(
     ca_pem: Option<String>,
     subscriber: u64,
 ) -> std::io::Result<u64> {
+    reactor_up()?;
     let config = match ca_pem {
         Some(pem) => tls_config_with_ca(&pem)?,
         None => tls_config(),
@@ -1553,6 +1653,7 @@ pub fn tls_listen(
     key_pem: &str,
     subscriber: u64,
 ) -> std::io::Result<u64> {
+    reactor_up()?;
     let config = build_server_config(cert_pem, key_pem)?;
     let std_listener = std::net::TcpListener::bind((host, port))?;
     let local = std_listener.local_addr()?.port();
@@ -1578,6 +1679,11 @@ pub fn tls_listen(
         subscriber: cell,
         config,
     });
+    // See `connect` — closes the race with `reactor_died`'s sweep.
+    if REACTOR_DOWN.load(Ordering::SeqCst) {
+        reg().remove(&id);
+        return Err(reactor_dead_err());
+    }
     Ok(id)
 }
 

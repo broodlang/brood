@@ -88,6 +88,10 @@ fn retire_pid_tail(pid: u64, reason: Message) {
     // that restarts a dead listener finds its port already being freed. A process
     // that `tcp-close`d its sockets has none left here — this is a no-op then.
     crate::net::close_process_sockets(pid);
+    // Likewise any child OS processes it still owns (ADR-104): kill + reap, the same
+    // port-dies-with-its-owner semantics. Without this a crashed owner orphaned the
+    // child, its registry entry, and both its reader threads for the runtime's life.
+    crate::subprocess::close_process_procs(pid);
     // Drop any registered names that pointed at this pid — Erlang semantics
     // (a name lives only as long as its process). Without this, named-spawn
     // would see the stale entry as "already running" and never respawn.

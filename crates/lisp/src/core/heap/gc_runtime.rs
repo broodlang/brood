@@ -52,7 +52,7 @@ impl Heap {
         // its delivered-message (L1) slots, which can park a shared RUNTIME closure.
         work.extend(self.runtime.globals_read().values().copied());
         work.extend(self.roots.iter().copied());
-        work.extend(self.msg_roots.iter().flat_map(|t| t.iter()).copied());
+        work.extend(self.msg_roots.iter().flat_map(|t| t.slots.iter()).copied());
         while let Some(v) = work.pop() {
             match v.unpack() {
                 ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => {
@@ -717,7 +717,7 @@ impl Heap {
         // in copied data, but not for the top-level value sitting in this slot table. A
         // selective `receive` can leave a slot occupied indefinitely, so without seeding
         // it the drain frees a generation still referenced by a queued message.
-        work.extend(self.msg_roots.iter().flat_map(|t| t.iter()).copied());
+        work.extend(self.msg_roots.iter().flat_map(|t| t.slots.iter()).copied());
         #[cfg(feature = "dev-tools")]
         work.extend(self.trace_context.iter().copied());
         // --- Live VM arms mid-execution: RUNTIME literals baked into Const/MakeClosure
@@ -1122,7 +1122,7 @@ impl Heap {
         roots.extend(self.roots.iter().copied());
         // Delivered-message slots (L1) — a root set here too, so this preview cannot
         // disagree with what `runtime_collect_with` actually evacuates.
-        roots.extend(self.msg_roots.iter().flat_map(|t| t.iter()).copied());
+        roots.extend(self.msg_roots.iter().flat_map(|t| t.slots.iter()).copied());
         let cur = self.runtime.cur_code();
         for r in roots {
             flush_rt_value(&cur, &new, &mut fwd, r);
@@ -1243,7 +1243,7 @@ impl Heap {
         // relocated out from under its slot and the `receive` that finally pops it
         // dispatches a stranger (or panics on a dead handle). The LOCAL collector has
         // always treated these as roots; the RUNTIME side never did.
-        for v in self.msg_roots.iter_mut().flat_map(|t| t.iter_mut()) {
+        for v in self.msg_roots.iter_mut().flat_map(|t| t.slots.iter_mut()) {
             *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
         }
         for e in self.env_roots.iter_mut() {

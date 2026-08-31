@@ -2490,17 +2490,14 @@ pub struct Heap {
     ///
     /// It is a **slot table, not a stack**: `roots` is the operand stack and is truncated
     /// from ~109 sites (every frame pop), so a long-lived value cannot live there. A
-    /// consumed slot is tombstoned to `nil` and reused, so the table stays as small as the
-    /// process's peak *undelivered* Local message count — normally 0 or 1.
+    /// consumed slot is recorded on the table's free list and reused, so the table stays
+    /// as small as the process's peak *undelivered* Local message count — normally 0 or 1.
     ///
-    /// Boxed and lazily allocated: inline it is 24 bytes on every `Heap`, and a `Heap`
+    /// Boxed and lazily allocated: inline it is 24+ bytes on every `Heap`, and a `Heap`
     /// is inline in `Box<Process>`, where bytes cost about 2:1 in RSS via mimalloc's size
     /// classes — measured at `spawn` +5.9% for the inline `Vec`. `None` until this process
     /// is actually handed a fast-path message, which most processes never are.
-    // `Box<Vec>` is deliberate, not the redundant box clippy assumes: boxing keeps this
-    // 8 bytes inline on every `Heap` instead of the `Vec`'s 24 (the +5.9%-spawn cost above).
-    #[allow(clippy::box_collection)]
-    msg_roots: Option<Box<Vec<Value>>>,
+    msg_roots: Option<Box<MsgRoots>>,
     /// Loader/checker/namespace state — see [`ColdHeap`]. `None` until a module load,
     /// namespace compile or checker run needs it, so a plain worker process never
     /// allocates it (worth a mimalloc size class on `Box<Process>`).
@@ -3147,27 +3144,57 @@ pub(crate) use self::vm_cache::{
     CallIcEntry, DispatchIcEntry, FastLink, GlobalIcEntry, VmCacheKey,
 };
 
+/// The parked-message slot table ([`Heap::msg_roots`]): the traced slots plus an
+/// explicit free list.
+///
+/// Freeness is tracked **out of band, never by slot content**: `nil` is a legal message
+/// value, so a content sentinel cannot work — when `Value::Nil` *was* the tombstone, an
+/// L1-delivered `nil` message wrote a slot indistinguishable from a free one, the next
+/// delivery reused it, and two queued envelopes then read one slot (the receiver saw the
+/// second message where `nil` belonged and `nil` where the second message belonged —
+/// silent duplication + loss, guarded by `tests/receive_consume_test.blsp`). The free
+/// list also makes [`Heap::msg_root_add`] O(1) instead of an O(live-slots) scan, which
+/// mattered because that add runs under the receiver's mailbox lock on every L1 send.
+///
+/// A freed slot's `Value` is still overwritten to `nil` so the GC (which traces every
+/// slot) never keeps a consumed message alive.
+#[derive(Default)]
+pub struct MsgRoots {
+    slots: Vec<Value>,
+    free: Vec<u32>,
+}
+
 impl Heap {
     /// Park a message value copied into this heap, returning its slot index. Reuses a
-    /// tombstoned slot when one is free so a steady request/response process never grows
+    /// freed slot when one is available so a steady request/response process never grows
     /// the table past one entry.
     pub fn msg_root_add(&mut self, v: Value) -> u32 {
         let table = self.msg_roots.get_or_insert_with(Box::default);
-        if let Some(i) = table.iter().position(|s| matches!(s, Value::Nil)) {
-            table[i] = v;
-            return i as u32;
+        if let Some(i) = table.free.pop() {
+            table.slots[i as usize] = v;
+            return i;
         }
-        table.push(v);
-        (table.len() - 1) as u32
+        table.slots.push(v);
+        (table.slots.len() - 1) as u32
     }
 
-    /// Take the value out of slot `i`, tombstoning it for reuse. Returns `nil` for an
+    /// Take the value out of slot `i`, freeing it for reuse. Returns `nil` for an
     /// out-of-range index, which cannot happen for an envelope this heap produced.
     pub fn msg_root_take(&mut self, i: u32) -> Value {
-        match self.msg_roots.as_mut().and_then(|t| t.get_mut(i as usize)) {
-            Some(slot) => std::mem::replace(slot, Value::nil()),
-            None => Value::nil(),
-        }
+        let Some(t) = self.msg_roots.as_mut() else {
+            return Value::nil();
+        };
+        let Some(slot) = t.slots.get_mut(i as usize) else {
+            return Value::nil();
+        };
+        // Clear the slot so the traced table doesn't keep the consumed value alive.
+        let v = std::mem::replace(slot, Value::nil());
+        debug_assert!(
+            !t.free.contains(&i),
+            "msg_root_take: slot {i} freed twice — two envelopes aliasing one slot"
+        );
+        t.free.push(i);
+        v
     }
 
     /// Read slot `i` without clearing it — the peek-in-place scan path, where a
@@ -3175,7 +3202,7 @@ impl Heap {
     pub fn msg_root_peek(&self, i: u32) -> Value {
         self.msg_roots
             .as_ref()
-            .and_then(|t| t.get(i as usize))
+            .and_then(|t| t.slots.get(i as usize))
             .copied()
             .unwrap_or(Value::nil())
     }

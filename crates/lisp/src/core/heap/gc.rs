@@ -74,7 +74,7 @@ impl Heap {
         // sender can sit queued through any number of collections before a selective
         // `receive` reaches it, so the slots relocate in place like the operand stack.
         // Empty for any process that has never been sent a Local message.
-        for v in self.msg_roots.iter_mut().flat_map(|t| t.iter_mut()) {
+        for v in self.msg_roots.iter_mut().flat_map(|t| t.slots.iter_mut()) {
             *v = flush_value(&old, &mut self.local, &mut fwd, *v);
         }
         // The env half of the operand stack (ADR-061) — relocate in place so an
@@ -875,7 +875,7 @@ impl Heap {
         }
         // Delivered-message slots (L1) — same reasoning as the nursery flush above: a
         // queued Local message outlives arbitrarily many collections.
-        for v in self.msg_roots.iter_mut().flat_map(|t| t.iter_mut()) {
+        for v in self.msg_roots.iter_mut().flat_map(|t| t.slots.iter_mut()) {
             *v = flush_value(src, dest, fwd, *v);
         }
         let mut er = std::mem::take(&mut self.env_roots);
@@ -1201,7 +1201,7 @@ impl Heap {
         }
         // Delivered-message slots (L1) are a root set too — a stale handle parked in
         // one would otherwise surface far away, at the `receive` that finally pops it.
-        for &v in self.msg_roots.iter().flat_map(|t| t.iter()) {
+        for &v in self.msg_roots.iter().flat_map(|t| t.slots.iter()) {
             work.push(W::V(v, 0));
         }
         for &v in self.roots.iter() {

@@ -1,0 +1,99 @@
+;; Two message-integrity guards for the receive scan, both found 2026-08-31 by a code
+;; audit of `receive_match` (crates/lisp/src/process/mailbox.rs) and both silent — no
+;; crash, just a wrong delivery. Each case pins the OBSERVABLE contract (every message
+;; delivered exactly once, in arrival order), not the mechanism.
+;;
+;; Case 1 — a matched candidate must be removed by its arrival seq, not by the scan
+;; index. The matcher runs with the mailbox lock released, and a clause `:when` guard
+;; that runs a *consuming* nested `receive` shifts the queue during that window (the
+;; exact hazard `reinsert_at_seq` documents for the NON-match path). The consume path
+;; used `queue.remove(i)` with the stale index: it deleted a neighbouring message
+;; (silently lost) while the matched one stayed queued to be delivered again.
+;;
+;; **Verified by sabotage.** With the consume path reverted to `remove(*i)`, this case
+;; fails on both trailing asserts: the second `[:want …]` receive returns `[:dup 1]`
+;; (duplicate delivery) and the `[:tail …]` sweep reads `1 3 :LOST-TAIL` ([:tail 2] was
+;; the neighbour the stale index removed).
+;;
+;; Case 2 — an L1-delivered `nil` message must not alias a free msg-roots slot. The
+;; parked-receiver fast path parks the copied value in `Heap::msg_roots`, and the free
+;; slot sentinel WAS `Value::Nil` — so a queued `nil` message's slot read as free, the
+;; next delivery reused it, and two envelopes read one slot: the receiver saw the second
+;; message where `nil` belonged and `nil` where the second message belonged.
+;;
+;; **Verified by sabotage.** With `msg_root_add` reverted to the position-scan-for-nil
+;; sentinel, this case fails with `[:result [:a 1] nil]` — the two messages swapped.
+(defmodule receive-consume-test (:use test))
+
+;; The queue-shifting guard: consume both `[:junk …]` messages out from under the
+;; enclosing scan, exactly once, then accept the clause. Every nested receive carries a
+;; timeout — a guard is not a place to block.
+(defn- eat-junk (box)
+  (do
+    (if (table/get box :done)
+      nil
+      (do
+        (table/put box :done true)
+        (table/put box
+          :ate [(receive ([:junk n] n) (after 500 :none))
+            (receive ([:junk n] n) (after 500 :none))])))
+    true))
+
+;; Case 2's receiver: park in a selective receive that matches NEITHER of the first two
+;; messages (that is what keeps this process parked across both sends, so both take the
+;; L1 heap-copy path and exercise the slot table), then report the two remaining
+;; messages in arrival order.
+(defn- slot-victim (parent)
+  (do
+    (receive ([:go] :ok))
+    (send parent
+      [:result
+        (receive (m m) (after 1000 :none))
+        (receive (m m) (after 1000 :none))])))
+
+(describe "receive consume identity"
+  :isolated (test "a matched candidate is removed by seq, not by the stale scan index"
+    (let (me (self)
+          box (table/new))
+      ;; Two messages the guard will eat mid-scan, the candidate, then three witnesses
+      ;; for the "no neighbour was lost" half.
+      (send me [:junk 0])
+      (send me [:junk 1])
+      (send me [:want 1])
+      (send me [:tail 1])
+      (send me [:tail 2])
+      (send me [:tail 3])
+      ;; The scan tag-skips the junk and peeks [:want 1] at index 2; the guard then
+      ;; consumes both junk messages, so index 2 names [:tail 2] by consume time.
+      (assert= (try
+                 (receive
+                   ([:want x] :when (eat-junk box) [:got x])
+                   (after 1200 :no-match))
+                 (catch e [:threw e]))
+        [:got 1])
+      ;; The interleaving actually happened — if this stops holding, the asserts below
+      ;; pass for the wrong reason and the case needs rebuilding, not relaxing.
+      (assert= (table/get box :ate) [0 1])
+      ;; Consumed exactly once: a second selective receive must find nothing…
+      (assert= (receive ([:want x] [:dup x]) (after 300 :once)) :once)
+      ;; …and every neighbour of the stale index is still deliverable, in order.
+      (assert= (receive ([:tail n] n) (after 500 :LOST-TAIL)) 1)
+      (assert= (receive ([:tail n] n) (after 500 :LOST-TAIL)) 2)
+      (assert= (receive ([:tail n] n) (after 500 :LOST-TAIL)) 3)))
+
+  :isolated (test "an L1-delivered nil message does not alias a free slot"
+    (let (me (self)
+          v (spawn (slot-victim me)))
+      ;; Each sleep lets the victim (re-)park, so each send finds it parked and takes
+      ;; the L1 path — the slot table under test. (If a send races the park and falls
+      ;; back to the wire path the assertion still holds on correct code; the sabotage
+      ;; run is what proves the case actually reaches the slot table.)
+      (sleep 100)
+      (send v nil)
+      (sleep 100)
+      (send v [:a 1])
+      (sleep 100)
+      (send v [:go])
+      ;; Arrival order, exactly once: nil first, then [:a 1].
+      (assert= (receive ([:result m1 m2] [m1 m2]) (after *test-wait-ms* :NO-REPLY))
+        [nil [:a 1]]))))

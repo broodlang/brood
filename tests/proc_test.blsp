@@ -131,3 +131,24 @@
       (let (got (receive ([:proc ^p d] d) (after *test-wait-ms* :timeout)))
         (os/close p)
         (assert= got "from a worker")))))
+
+(describe "proc: a child dies with its owning process"
+  :isolated
+  ;; Erlang port semantics: when the owning green process exits — normally or by a
+  ;; crash — the scheduler's retirement path (`retire_pid_tail`) closes every child
+  ;; it still owns, exactly as it already closes its sockets. Before this hook
+  ;; existed, an owner that exited without `os/close` orphaned the OS child forever:
+  ;; the registry entry leaked, and both reader threads kept draining output into a
+  ;; dead pid's mailbox for the child's whole life.
+  ;;
+  ;; **Verified by sabotage.** With the `close_process_procs` call removed from
+  ;; `retire_pid_tail`, the `os/write` below succeeds (`cat` is alive on a live
+  ;; handle) and the case fails with `:wrote`.
+  (test "an exited owner's subprocess handle is closed and its child reaped"
+    (let (me (self)
+          _owner (spawn (send me [:handle (os/spawn "cat" [])])))
+      (let (p (receive ([:handle h] h) (after *test-wait-ms* :NO-HANDLE)))
+        ;; The owner exited right after the send; give retirement a moment to land.
+        (sleep 300)
+        ;; The handle must be dead: a write to it errors ("no such subprocess").
+        (assert= (try (do (os/write p "x") :wrote) (catch e :closed)) :closed)))))

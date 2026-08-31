@@ -1396,9 +1396,11 @@ fn scan_mailbox(
     // first queued / just-delivered message matches): pop it out under the one lock,
     // then build (`from_message`) and match it with the mutex RELEASED — a match is
     // done with no second acquisition, and the sender never contends with the deep
-    // copy into the receiver's heap. Sound because only the owner removes from its
-    // own mailbox (`send` only appends), so position `*i` is stable across the
-    // unlocked window. A non-match pays one extra lock to re-insert the message at
+    // copy into the receiver's heap. `send` only appends, but the owner ITSELF can
+    // remove from this queue during the unlocked window (a clause guard's consuming
+    // nested `receive` — see `reinsert_at_seq`), so position `*i` is NOT stable
+    // across it: every re-acquisition re-identifies the candidate by `seq`, never by
+    // the recorded index. A non-match pays one extra lock to re-insert the message at
     // `*i` (arrival order preserved) and reverts the rest of the scan to
     // peek-in-place, so a long selective-receive backlog isn't popped/re-inserted
     // per candidate — the scan's lock count stays ≤ the peek-only scheme's for
@@ -1411,6 +1413,12 @@ fn scan_mailbox(
     // from applying to backlog length — a message no clause could match is rejected
     // on its tag and never rebuilt at all.
     let mut optimistic = true;
+    // Arrival seq of the last examined-and-declined candidate. The matcher runs with the
+    // mailbox lock RELEASED and can run arbitrary user code — a clause `:when` guard that
+    // itself runs a *consuming* nested `receive` removes messages from this very queue
+    // during that window (see `reinsert_at_seq`) — so the scan cursor `*i` can go stale
+    // between iterations. Each loop top re-anchors `*i` against this seq.
+    let mut prev_seq: Option<u64> = None;
     // Lazily-decoded clause tags (see the filter below). `None` = not decoded yet.
     let mut tagbuf = [0u32; MAX_RECEIVE_TAGS];
     let mut ntags: Option<usize> = None;
@@ -1418,8 +1426,23 @@ fn scan_mailbox(
         // (A hard `:kill` is caught at the VM driver's loop top; a soft exit at the
         // `park_on_receive` boundary — not here, since there's no coroutine to suspend.)
         // Rebuild candidate `*i` into the heap (no eval here → no collection).
-        let (popped, v) = {
+        let (popped, v, cand_seq) = {
             let mut st = crate::core::sync::lock(&ctx.mailbox.state);
+            // Re-anchor the cursor: `*i` is only meaningful relative to the queue the
+            // previous iteration saw, and the matcher may have consumed entries out from
+            // under it (the guard hazard above). The fast path — the entry just examined
+            // still sits at `*i - 1` — is O(1) and holds whenever nothing shifted; only
+            // the perturbed case pays the binary search (sound: `queue` is strictly
+            // increasing in `seq`). Without this, a guard that consumed entries *ahead*
+            // of the cursor makes `*i` skip an unexamined message — one that stays
+            // queued, but that THIS receive never sees, so a matchable message reads as
+            // absent until two more arrivals.
+            if let Some(ps) = prev_seq {
+                let anchored = *i > 0 && *i <= st.queue.len() && st.queue[*i - 1].seq == ps;
+                if !anchored {
+                    *i = st.queue.partition_point(|e| e.seq <= ps);
+                }
+            }
             if *i >= st.queue.len() {
                 return Ok(None); // scanned to the end with no match
             }
@@ -1484,6 +1507,10 @@ fn scan_mailbox(
             if skipped_any {
                 optimistic = false; // the head is no longer the candidate
             }
+            // The candidate's identity for the rest of this iteration. `*i` alone is NOT
+            // that identity: the matcher below runs with the lock released, so by consume
+            // time the index may name a different envelope — see the consume path.
+            let cand_seq = st.queue[*i].seq;
             if optimistic {
                 let m = st.queue.remove(*i).expect("bounds checked above");
                 drop(st);
@@ -1498,7 +1525,7 @@ fn scan_mailbox(
                     // path below, the one place the message is actually consumed.
                     Payload::Local { slot, .. } => heap.msg_root_peek(*slot),
                 };
-                (Some(m), v)
+                (Some(m), v, cand_seq)
             } else {
                 // Peek-in-place: a Local payload must NOT be taken here (the candidate
                 // may not match and has to stay queued), so read the slot without
@@ -1530,13 +1557,13 @@ fn scan_mailbox(
                     };
                     // `Some(m)` routes it through the same re-insert path the optimistic
                     // branch uses on a non-match, so nothing new has to be maintained.
-                    (Some(m), v)
+                    (Some(m), v, cand_seq)
                 } else {
                     let v = match &st.queue[*i].msg {
                         Payload::Wire(w) => from_message(heap, w),
                         Payload::Local { slot, .. } => heap.msg_root_peek(*slot),
                     };
-                    (None, v)
+                    (None, v, cand_seq)
                 }
             }
         };
@@ -1583,7 +1610,26 @@ fn scan_mailbox(
             // matcher's `[idx var…]` answer already roots any value the clause bound.
             let consumed = match popped {
                 Some(env) => Some(env),
-                None => crate::core::sync::lock(&ctx.mailbox.state).queue.remove(*i),
+                None => {
+                    // Remove by `seq`, NEVER by the recorded index: the matcher ran with
+                    // the lock released, and a guard's consuming nested `receive` may have
+                    // shifted the queue (the `reinsert_at_seq` hazard). Removing by a
+                    // stale index silently deletes a *neighbour* — which is then LOST,
+                    // and its msg_roots slot below is wrongly freed — while the matched
+                    // message stays queued to match (and be delivered) again. `None`
+                    // (the guard consumed the candidate itself) removes nothing.
+                    let mut st = crate::core::sync::lock(&ctx.mailbox.state);
+                    let j = if st.queue.get(*i).is_some_and(|e| e.seq == cand_seq) {
+                        Some(*i) // unshifted — the common case, O(1)
+                    } else {
+                        let j = st.queue.partition_point(|e| e.seq < cand_seq);
+                        st.queue
+                            .get(j)
+                            .is_some_and(|e| e.seq == cand_seq)
+                            .then_some(j)
+                    };
+                    j.and_then(|j| st.queue.remove(j))
+                }
             };
             if let Some(env) = consumed.as_ref() {
                 if let Payload::Local { slot, .. } = &env.msg {
@@ -1612,6 +1658,7 @@ fn scan_mailbox(
             *i = reinsert_candidate(ctx, *i, m);
             optimistic = false; // one non-match → peek-in-place for the rest of the scan
         }
+        prev_seq = Some(cand_seq); // the loop top re-anchors `*i` against this
         *i += 1; // no clause matched — leave it queued, try the next message
     }
 }
