@@ -4064,7 +4064,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![string, int], int),
         &["s", "pos"],
-        "The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer.",
+        "The greatest char offset <= pos of a top-level (bracket depth 0) open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. Depth-tracked, not the Emacs column-0 heuristic, so a mis-indented open bracket at column 0 inside an unclosed form is not a form start. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer.",
         scan_form_start);
     def(
         heap,
@@ -4072,7 +4072,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![string, int], Ty::vector_of(int)),
         &["s", "pos"],
-        "[prev start] — the greatest column-0 form-start offset <= pos AND the one before it, from a SINGLE forward pass. What tool/sexp narrowing actually wants: computing the pair as two scan-form-start calls runs the O(pos) lexical pass twice over the same prefix. prev is 0 when there is no earlier form start, matching what the second call returned there.",
+        "[prev start] — the greatest top-level (depth-0) form-start offset <= pos AND the one before it, from a SINGLE forward pass. What tool/sexp narrowing actually wants: computing the pair as two scan-form-start calls runs the O(pos) lexical pass twice over the same prefix. prev is 0 when there is no earlier form start, matching what the second call returned there.",
         scan_form_start_2);
     def(
         heap,

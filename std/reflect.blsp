@@ -144,12 +144,12 @@ anything."
 (sig parse-source-positioned (string -> map))
 
 (defn scan-form-start (s pos)
-  "The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer."
+  "The greatest char offset <= pos of a top-level (bracket depth 0) open bracket in s lying OUTSIDE any string or ; comment, else 0 — depth-tracked, not the Emacs column-0 heuristic, so a mis-indented open bracket at column 0 inside an unclosed form is not a form start — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer."
   (%scan-form-start s pos))
 (sig scan-form-start (string int -> int))
 
 (defn scan-form-start-2 (s pos)
-  "[prev start] — the greatest column-0 form-start offset <= pos AND the one before it, from a SINGLE forward pass. What tool/sexp narrowing actually wants: computing the pair as two scan-form-start calls runs the O(pos) lexical pass twice over the same prefix. prev is 0 when there is no earlier form start, matching what the second call returned there."
+  "[prev start] — the greatest top-level (depth-0) form-start offset <= pos AND the one before it, from a SINGLE forward pass. What tool/sexp narrowing actually wants: computing the pair as two scan-form-start calls runs the O(pos) lexical pass twice over the same prefix. prev is 0 when there is no earlier form start, matching what the second call returned there."
   (%scan-form-start-2 s pos))
 (sig scan-form-start-2 (string int -> (vector int)))
 
