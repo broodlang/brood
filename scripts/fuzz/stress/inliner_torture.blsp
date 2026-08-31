@@ -15,8 +15,8 @@
 ;; raises, so the error is the expected outcome, not a hidden fault.
 (defn warm (f n a)
   (if (= n 0)
-    :done
-    (do (check-allow :discarded-catch (try (f a) (catch e nil)))
+    :done (do
+      (check-allow :discarded-catch (try (f a) (catch e nil)))
       (warm f (- n 1) a))))
 (defn warm-all ()
   (do
