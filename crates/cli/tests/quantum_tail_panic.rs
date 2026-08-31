@@ -17,6 +17,15 @@
 //!
 //! `BROOD_FAULT_QUANTUM_TAIL=<n>` injects the panic on the nth quantum, because nothing
 //! an ordinary program can do provokes one on demand.
+//!
+//! **These assertions are causal, not timed.** An earlier draft watched for the recovery's
+//! own stderr line while the program did unrelated work, and that is a race the test loses
+//! under load: the panicking worker is still symbolizing a backtrace (the hook also writes
+//! `.brood_crash_dump`) when a short program exits, so the line never lands. It passed solo
+//! and failed inside a full suite run. The workload below instead **monitors** the process
+//! whose quantum is struck and blocks on its `[:down …]`, so the program cannot reach its
+//! own last line until the retire has actually happened — the very thing under test orders
+//! the output, and no sleep is involved.
 
 use std::io::Write;
 use std::process::Command;
@@ -43,12 +52,16 @@ fn run(path: &std::path::Path, fault_at: Option<u32>) -> (String, String, bool) 
     )
 }
 
-/// The program keeps scheduling work long past the injected fault: many short-lived
-/// processes, each reporting back, then a second wave *after* the first has been
-/// collected. Every wave is monitored with a bounded `receive`, so a lost process shows
-/// up as a missing reply rather than a hang, and the final line only prints if the pool
-/// was still scheduling at the end.
+/// One long-running process that is preempted many times, monitored by a main process
+/// that then parks. Because main is parked it consumes almost no quanta, so an injected
+/// fault lands on the spinner — and main is released only by the spinner's `[:down …]`,
+/// which only a real retire can send.
+///
+/// The trailing wave proves the pool still schedules afterwards: pre-fix, the worker
+/// thread that took the panic is gone for good.
 const WORKLOAD: &str = r#"
+(defn spin (n) (if (= n 0) :done (spin (- n 1))))
+
 (defn worker (parent i) (send parent [:done i]))
 
 (defn collect (n got)
@@ -65,20 +78,20 @@ const WORKLOAD: &str = r#"
     (do (dotimes (i n) (spawn (worker me i)))
         (collect n 0))))
 
-;; The first wave straddles the injected fault; the later ones prove the pool still
-;; schedules afterwards. The run has to OUTLIVE the panicking worker's unwind — the
-;; panic hook symbolizes a backtrace and appends a crash dump, which takes far longer
-;; than these processes do, and an exit before it finishes would race the very recovery
-;; this is meant to observe.
-(io/puts (str "WAVE1 " (wave 400)))
-(sleep 500)
-(io/puts (str "WAVE2 " (wave 400)))
-(io/puts (str "WAVE3 " (wave 400)))
+(def w (spawn (spin 40000000)))
+(def m (monitor w))
+;; Blocks until the spinner is retired. Pre-fix it never is — it vanishes mid-unwind with
+;; no deregister — so this times out and reports NO-DOWN.
+(receive
+  ([:down mref _ reason] (io/puts (str "DOWN " reason)))
+  (after 30000 (io/puts "NO-DOWN")))
+(io/puts (str "WAVE " (wave 200)))
 (io/puts "ALIVE")
 "#;
 
-/// The control: with no fault, both waves complete in full. Pins the workload itself as
-/// sound, so a failure in the injected run below cannot be blamed on a flaky program.
+/// The control: with no fault the spinner finishes normally, so the monitor fires
+/// `:normal`, the wave completes, and the program exits cleanly. Pins the workload itself
+/// as sound, so a failure in the injected run cannot be blamed on a flaky program.
 #[test]
 fn the_workload_completes_with_no_fault_injected() {
     let path = script("control", WORKLOAD);
@@ -88,42 +101,47 @@ fn the_workload_completes_with_no_fault_injected() {
         "control run failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("WAVE1 400")
-            && stdout.contains("WAVE2 400")
-            && stdout.contains("WAVE3 400")
-            && stdout.contains("ALIVE"),
-        "control run did not complete both waves.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        stdout.contains("DOWN :normal"),
+        "the spinner should have exited normally.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("WAVE 200") && stdout.contains("ALIVE"),
+        "control run did not finish.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
 
-/// The guard: a panic injected into the quantum tail costs *at most* the one process
-/// whose quantum it struck. The worker survives, the process is retired (loudly, and
-/// reported as lost rather than vanishing), and the runtime keeps scheduling — the
-/// second wave completes in full and the program exits cleanly.
+/// The guard: a panic injected into the quantum tail costs *at most* the one process whose
+/// quantum it struck, and that process is properly retired rather than silently destroyed
+/// — its monitor still fires. The worker thread survives to keep scheduling.
 ///
-/// Pre-fix this run hangs until it is killed: the worker thread is gone and the process
-/// it was carrying was destroyed without ever being deregistered.
+/// Pre-fix, the spinner vanishes with no `deregister`: no `[:down …]` ever arrives, the
+/// `receive` burns its full 30 s and reports `NO-DOWN`.
 #[test]
-fn a_quantum_tail_panic_costs_one_process_not_the_runtime() {
+fn a_quantum_tail_panic_retires_the_process_and_spares_the_runtime() {
     let path = script("fault", WORKLOAD);
-    let (stdout, stderr, ok) = run(&path, Some(50));
+    let (stdout, stderr, ok) = run(&path, Some(20));
 
+    // Sanity: the fault must actually have been injected, or the test proves nothing.
     assert!(
-        stderr.contains("the scheduler's post-quantum tail panicked"),
-        "the injected fault did not reach the tail's recovery path — the test is not \
-         exercising what it claims.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        stderr.contains("BROOD_FAULT_QUANTUM_TAIL"),
+        "the fault never fired — the test is not exercising what it claims.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    // The runtime survived the panic: it kept scheduling to the very end of the program.
+    // The substantive guarantee: the struck process was RETIRED, not dropped on the floor.
+    // Causal — the DOWN can only come from the recovery path's `deregister`.
     assert!(
-        stdout.contains("ALIVE"),
+        stdout.contains("DOWN :killed"),
+        "the struck process vanished without firing its monitor.\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("NO-DOWN"),
+        "the monitor never fired for the struck process.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // And the pool kept scheduling: work queued after the fault completes in full.
+    assert!(
+        stdout.contains("WAVE 200") && stdout.contains("ALIVE"),
         "the runtime did not survive a quantum-tail panic.\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    // And the damage is bounded to the single struck process — a wave started *after*
-    // the fault loses nothing at all.
-    assert!(
-        stdout.contains("WAVE2 400") && stdout.contains("WAVE3 400"),
-        "a wave scheduled after the fault came back short — the pool did not fully \
-         recover.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(ok, "exit status.\nstdout:\n{stdout}\nstderr:\n{stderr}");
 }

@@ -5,7 +5,19 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Addendum 2026-08-31 (latest) — KI-88 is DORMANT, not deterministic; its implicated
+**Addendum 2026-08-31 (latest) — KI-97 item 1 FIXED: the handshake has a wall clock.**
+The pre-auth timeout was `SO_RCVTIMEO` (per read, restarted by every byte), so a
+trickling peer held a `HandshakeSlot` for hours and 128 of them took inbound dist down
+silently. Now a `Deadline` shim bounds the whole exchange (15 s) on both the accept and
+dial sides, reads and writes, and shedding at the cap reports itself (rate-limited, with
+a cumulative count). Sabotage-verified — no-op the check and the trickle test spends
+4.4 s delivering the full 4 KiB frame a byte at a time. **Next: KI-97 items 2–4** (item 2,
+the untimed blocking calls on scheduler workers, is the biggest — a `git` credential
+prompt can pin a worker forever), then §7.8 item 1 for perf. KI-99 (the handshake EOF
+under load) re-tested green 3× here but is *not* closed by this change — it is a
+connection that never completed, not one held too long.
+
+**Addendum 2026-08-31 (earlier) — KI-88 is DORMANT, not deterministic; its implicated
 path is now hardened.** Do not pick KI-88 up expecting a repro: 10/10 pass at `62eac84c`
 with the router live, on top of session 4's 15/15 + 8/8. Its status line said
 "deterministic repro" for a day after session 4 found it dormant — corrected, and it now

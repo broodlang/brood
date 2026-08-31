@@ -8774,3 +8774,40 @@ Also filed **KI-99**: `a_dropped_send_to_an_unregistered_name_warns_once` failed
 the full suite with `dist: incoming connection failed: failed to fill whole buffer` on B —
 a handshake EOF under load, so the send never arrived. Retry-absorbed, 6/6 solo after, but
 captured, which is the difference from KI-80's class.
+
+## 2026-08-31 (night, later) — KI-97 item 1: the handshake gets a wall clock
+
+The pre-auth trickle DoS, closed as the entry prescribed. The 10 s handshake timeout was
+`SO_RCVTIMEO` — **per read, not per handshake** — so it restarts on every byte that
+arrives: a peer dribbling one byte every 9 s satisfies it forever, dragging a 4 KiB
+pre-auth frame out for ~10 hours while holding a `HandshakeSlot`, and 128 such sockets
+take inbound distribution down entirely. No cookie required.
+
+Fix: a `Deadline` `Read`/`Write` shim around the whole exchange (15 s), on the **dial**
+side as well as accept — a wedged listener can trickle at a dialer just as easily, and
+that call runs on a scheduler worker, so an unbounded hold there wedges a worker rather
+than a slot. The instant is absolute, so progress cannot restart it, and it is checked
+before *and* after each call because `read_exact` loops on short reads. Writes are
+deadlined too (a peer that stops reading parks us in `write_all` with no timeout at all —
+the same slot, the other direction). The per-read `SO_RCVTIMEO` stays: the two bound
+different things, a silent peer between bytes and a slow one across them.
+
+The second half was the silence. Hitting the cap means every further inbound link is
+refused — inbound dist is *down* — and the node said nothing, the same shape KI-36's
+silent drop cost twelve days over. `note_shed_handshake` counts every shed and warns at
+most once per 60 s with the cumulative total, rate-limited because a per-shed line under
+a flood is its own amplification vector (the ADR-232 dedup pattern).
+
+Sabotage-verified, and the sabotage is the nicest part: no-op the deadline check and the
+trickle test not only fails, it **takes 4.4 s successfully delivering the entire 4 KiB
+frame one byte at a time** — the attack, reproduced in a unit test. A second sabotage
+(shed path back to silent) fails the warning guard alone, so the two are independent.
+
+One real bug caught while writing the tests: `now_millis()` counts from process start, so
+**0 is a legitimate timestamp** during the first millisecond, and the obvious `0` sentinel
+for "never warned" would have silently swallowed the first warning of a flood that started
+at boot. Sentinel is `u64::MAX`. A test asserting `!= 0` would have hidden it; the test
+asserts `!= SHED_WARN_NEVER`.
+
+Not measured for perf: the shim adds two `Instant::now()` per pre-auth read/write, on a
+path that runs four frames per link and never in steady state.
