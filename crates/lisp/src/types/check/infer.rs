@@ -1537,13 +1537,28 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         return list_result_over(coll_ty.as_ref(), b);
     }
     // `(keep coll f)` — `map` then drop the `nil` results; `nil | list<B>` for
-    // `B` = the callback's return (over-approximated by keeping `nil` in `B`, a
-    // sound superset). Unknown callback / element → flat.
+    // `B` = the callback's return with `nil` REMOVED. Dropping nil is exact, not a
+    // guess: `keep`'s body is `(if (nil? y) acc (cons y acc))`, so nil is the one
+    // thing that cannot reach the result (`false` still can). Keeping it instead —
+    // which this did, as a "sound superset" — made every `keep` result `nil | T`
+    // and pushed that nil into the next combinator, which is how a `(fold (keep …)
+    // 0 (fn (a b) (> b a)))` drew "argument expects ordered, got nil | int".
+    // Unknown callback / element → flat.
     // `keep` is `seq/keep` (ADR-227) — keyed qualified, as `seq/interpose` is.
     if value::symbol_is(head, "seq/keep") {
         let (coll, f) = super::sigs::combinator_args(items)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
-        let b = callback_ret(heap, f, &[a], ctx);
+        let b = callback_ret(heap, f, &[a], ctx).map(|t| {
+            let non_nil = t.clone().difference(Ty::of(Tag::Nil));
+            // A callback that only ever yields nil keeps an empty list, i.e. `nil`.
+            // Reporting `list<never>` would be true but useless downstream, so keep
+            // the unstripped type in that one case.
+            if non_nil.is_never() {
+                t
+            } else {
+                non_nil
+            }
+        });
         return list_result(b);
     }
     // `(seq/interpose coll sep)` — weave `sep` between `coll`'s elements; the result

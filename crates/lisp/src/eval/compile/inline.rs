@@ -106,7 +106,7 @@ fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
             let names_this_ctor = match recorded {
                 Value::Sym(s) => s == ctor,
                 v => match v.unpack() {
-                    ValueRef::Str(id) => &*heap.string(id) == value::symbol_name(ctor),
+                    ValueRef::Str(id) => *heap.string(id) == value::symbol_name(ctor),
                     _ => false,
                 },
             };

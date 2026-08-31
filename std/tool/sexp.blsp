@@ -92,7 +92,7 @@ fine for position queries, but don't feed the returned spans to `reflect/eval` u
 ;; before point or the form after it. So `narrow` slices the text to that neighbourhood
 ;; (the previous, enclosing, and next top-level forms) and the queries run on the slice,
 ;; shifting positions back by its base. O(buffer) → O(neighbouring forms). A top-level form
-;; start is a column-0 open bracket that lies OUTSIDE any string or comment
+;; start is a top-level (depth-0) open bracket that lies OUTSIDE any string or comment
 ;; (`highlight/safe-restart` is the same idea) — found by the native `scan-form-start`:
 ;; the awareness needs a forward lexical pass from the top (a backward char-scan can't know
 ;; whether a `(` sits inside an unterminated string), and interpreted that pass made every

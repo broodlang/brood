@@ -8397,6 +8397,28 @@ spec))`), and zero args is an arity error instead of a nil spec. Regression test
 in `tests/gui_test.blsp`, written to pass on gui and non-gui builds alike (it
 asserts the TYPE error absent, tolerating the "not compiled in" raise). Verified
 on a `--features gui` build headless: both forms return nil.
+
+## 2026-08-31 — `scan-form-start` tracks bracket depth, not column 0
+
+A mis-indented multi-arity `defn` (arms at column 0) could never be re-indented in
+bedit: TAB computed 0 forever. The chain — `brood-indent` slices from
+`reflect/scan-form-start`, whose "form start" was the Emacs heuristic *any column-0
+open bracket outside strings/comments*, so the arm's own `(` was "the defun start",
+the slice was empty, and the indenter saw top level. Self-fulfilling: exactly the
+code that needs re-indenting is the code the heuristic misreads. The formatter
+(`format/source`) was never wrong — it parses the real CST.
+
+Fix in the kernel scanner (`builtins/syntax_scan.rs`): the forward lexical pass now
+carries bracket depth (stray closes saturate at 0), and a form start is an open
+bracket at **depth 0** — column irrelevant. The safepoint-table resume carries the
+depth. Every consumer heals at once: bedit's TAB, `sexp/narrow`, and
+`highlight/safe-restart` (whose tests pinned the old semantics — updated: an
+indented top-level open now IS a restart point, and a column-0 open inside an
+unclosed form is not). Trade-off accepted: an unclosed top-level form makes
+everything below it one form (restarts/windows reach further while you type an
+unbalanced open) — that is the *correct* reading, the pass is native and
+safepoint-resumed, and modern Emacs abandoned the column-0 heuristic for the same
+reason.
 ### 2026-08-31 — "performance went down": no, the measurement did — the harness's one-invocation refresh was a coin flip
 
 The refreshed benchmarks column read several rows up (regex +15%, errors-deep +7%, …) and
@@ -8417,6 +8439,16 @@ survives the treatment is the real story: **bintree −17.3%** from the hot re-l
 everything else within noise — supervisor/ring checked same-binary relower-on/off and
 flat. Meta-lesson for every future refresh: a published number from one invocation is one
 sample; before believing a delta against it, apply the same treatment to both sides.
+
+## 2026-08-31 — the block cursor gets a rim
+
+`Block` was a bare 50% white overlay, which sinks into any busy background — sitting
+on a bracket-match block or a region tint, the eye loses which cell owns the cursor
+(bedit's "am I at the start or end of this bracket?" confusion). It now also paints a
+solid `CURSOR_FG` rim around the cell, scaled like the bar caret's thickness, so the
+cursor cell reads crisply against anything while the glyph under it stays visible.
+(bedit pairs this with split bracket-pair faces: the end at point underlined, the
+partner in the solid block — the block now always means "the other end".)
 
 ## 2026-08-31 — the stability/perf audit: four silent bugs fixed, the rest filed
 
@@ -8462,7 +8494,8 @@ Verification on the combined tree: full in-language suite **5351/5351** (nextest
 `-j1`), the 27 scheduler/mailbox/GC-adjacent Rust binary tests, `GC_STRESS=1
 GC_VERIFY=1` over the receive/mailbox/proc files + `local_send_race`, the new tests at
 tier ceilings 0 and 1, 696 lib unit tests, clippy clean on CI's flags (which also caught
-a pre-existing 1.98 `op_ref` lint in `inline.rs` — fixed, it would have been CI-red).
+a pre-existing 1.98 `op_ref` lint in `inline.rs` — upstream fixed the same line in
+parallel, so the merge kept theirs).
 
 Two traps hit and worth keeping: **the 16 GB `ulimit -v` cap fails
 `wasm_sandbox_limits_test.blsp` even standalone** (wasmtime's address-space reservations

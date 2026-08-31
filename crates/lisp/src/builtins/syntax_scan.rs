@@ -96,8 +96,11 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(heap.alloc_vector(out))
 }
 
-/// `(scan-form-start s pos)` — the greatest char offset ≤ `pos` of a column-0 open
-/// bracket (`(`/`[`/`{`) in `s` lying OUTSIDE any string or `;` comment, else 0. The
+/// `(scan-form-start s pos)` — the greatest char offset ≤ `pos` of a **top-level**
+/// (bracket depth 0) open bracket (`(`/`[`/`{`) in `s` lying OUTSIDE any string or `;`
+/// comment, else 0. Depth-tracked, not the Emacs column-0 heuristic, so a mis-indented
+/// open bracket at column 0 inside an unclosed form is not a form start (and an indented
+/// top-level open is). The
 /// string/comment-aware `beginning-of-defun` primitive behind `highlight/safe-restart`
 /// and `tool/sexp`'s narrowing window: correctness requires a forward lexical pass from
 /// the top (a backward scan cannot know whether a bracket sits inside a string without
@@ -105,7 +108,7 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// keystroke in interpreted Brood on a large file (eldoc / fontify-restart / structural
 /// motion all sit on it), trivial here. Strings honour `\\` escapes; a comment runs to
 /// end-of-line — the same lexical rules as `scan-tokens`.
-/// `(scan-form-start-2 s pos)` — `[prev start]`: the greatest column-0 form-start offset
+/// `(scan-form-start-2 s pos)` — `[prev start]`: the greatest top-level form-start offset
 /// `<= pos` (`start`, as [`scan_form_start`]) **and** the one before it (`prev`, i.e. the
 /// greatest such offset `< start`), both from a SINGLE forward pass.
 ///
@@ -119,7 +122,7 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// The sequence of motions is still O(n^2) overall — see `scan_form_start`'s note on why the
 /// forward pass from the top is required. This makes the constant twice as good; it does not
 /// change the shape. The real fix is resumable lexer state, which needs somewhere to live.
-// ---- the column-0 form-start lexer, and its safepoint table -----------------
+// ---- the top-level form-start lexer, and its safepoint table ----------------
 //
 // `scan-form-start` / `-2` answer "where does the top-level form containing `pos` begin"
 // — the beginning-of-defun primitive under `tool/sexp`'s narrowing and
@@ -167,27 +170,27 @@ const SCAN_POINT_STRIDE: usize = 4096;
 /// a table (plus its allocation) would cost more than it saves.
 const SCAN_TABLE_MIN_BYTES: usize = 4096;
 
-/// The lexer's state at a point it can resume from. `at_bol` is what decides whether a
-/// bracket is in column 0; `best`/`prev` are the answer so far, so a resume needs no
-/// history before this point.
+/// The lexer's state at a point it can resume from. `depth` is the bracket depth that
+/// decides whether an open bracket starts a top-level form; `best`/`prev` are the answer
+/// so far, so a resume needs no history before this point.
 #[derive(Clone, Copy)]
 struct ScanPoint {
     byte: u32,
     ch: u32,
-    at_bol: bool,
+    depth: u32,
     best: u32,
     prev: u32,
 }
 
 impl ScanPoint {
-    /// The state at the start of any text: offset 0 is column 0, and "no form start seen"
-    /// reports as 0 — which is also what a form start *at* char 0 reports, exactly as the
-    /// pre-table implementation did.
+    /// The state at the start of any text: depth 0, and "no form start seen" reports as
+    /// 0 — which is also what a form start *at* char 0 reports, exactly as the pre-table
+    /// implementation did.
     fn start() -> ScanPoint {
         ScanPoint {
             byte: 0,
             ch: 0,
-            at_bol: true,
+            depth: 0,
             best: 0,
             prev: 0,
         }
@@ -219,10 +222,13 @@ fn utf8_width(b: u8) -> usize {
 /// `emit` is called at each safepoint-eligible position (between tokens) so one pass can
 /// both answer a query and build the table. Returns the state reached.
 ///
-/// The rules are the pre-existing ones, unchanged: `"` opens a string body in which `\`
-/// escapes the next character and which an unterminated literal runs to the end of; `;`
-/// runs to end-of-line; and `(`/`[`/`{` in column 0 outside both is a form start, where
-/// the previous `best` becomes `prev`.
+/// The rules: `"` opens a string body in which `\` escapes the next character and which
+/// an unterminated literal runs to the end of; `;` runs to end-of-line; and `(`/`[`/`{`
+/// at bracket **depth 0** outside both is a form start, where the previous `best` becomes
+/// `prev`. Depth — not column 0 — is what makes the answer exact on mis-indented source:
+/// an open bracket at column 0 *inside* an unclosed form (the classic Emacs
+/// beginning-of-defun trap) is not a start, and an indented top-level open is one. A
+/// stray close at depth 0 is ignored (saturating), so unbalanced text degrades gracefully.
 fn form_scan(s: &str, from: ScanPoint, upto: usize, mut emit: impl FnMut(ScanPoint)) -> ScanPoint {
     let b = s.as_bytes();
     let len = b.len();
@@ -254,24 +260,27 @@ fn form_scan(s: &str, from: ScanPoint, upto: usize, mut emit: impl FnMut(ScanPoi
                         _ => step!(),
                     }
                 }
-                st.at_bol = false;
             }
             b';' => {
                 while (st.byte as usize) < len && b[st.byte as usize] != b'\n' {
                     step!();
                 }
-                st.at_bol = false;
             }
-            b'(' | b'[' | b'{' if st.at_bol => {
-                if st.ch > 0 {
-                    st.prev = st.best;
+            b'(' | b'[' | b'{' => {
+                if st.depth == 0 {
+                    if st.ch > 0 {
+                        st.prev = st.best;
+                    }
+                    st.best = st.ch;
                 }
-                st.best = st.ch;
+                st.depth += 1;
                 step!();
-                st.at_bol = false;
             }
-            c => {
-                st.at_bol = c == b'\n';
+            b')' | b']' | b'}' => {
+                st.depth = st.depth.saturating_sub(1);
+                step!();
+            }
+            _ => {
                 step!();
             }
         }
@@ -677,10 +686,10 @@ pub(super) fn clipboard_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 mod form_scan_tests {
     use super::*;
 
-    /// The pre-table implementation, kept verbatim as the oracle: a `Vec<char>` walk
-    /// truncated at `pos + 1`. Every case below asserts the byte-level scan and its
-    /// safepoint resume agree with THIS at every position — the definition of the
-    /// primitive is what it used to answer, not what the new code thinks it should.
+    /// The obvious implementation, kept as the oracle: a `Vec<char>` walk truncated at
+    /// `pos + 1`, same lexical rules as `form_scan` (a depth-0 open bracket outside
+    /// strings/comments is a form start). Every case below asserts the byte-level scan
+    /// and its safepoint resume agree with THIS at every position.
     fn oracle(text: &str, pos: usize) -> (usize, usize) {
         let chars: Vec<char> = text.chars().take(pos + 1).collect();
         let n = chars.len();
@@ -689,6 +698,7 @@ mod form_scan_tests {
         }
         let pos = pos.min(n - 1);
         let (mut best, mut prev) = (0usize, 0usize);
+        let mut depth = 0usize;
         let mut i = 0usize;
         while i < n && i <= pos {
             match chars[i] {
@@ -711,11 +721,18 @@ mod form_scan_tests {
                         i += 1;
                     }
                 }
-                '(' | '[' | '{' if i == 0 || chars[i - 1] == '\n' => {
-                    if i > 0 {
-                        prev = best;
+                '(' | '[' | '{' => {
+                    if depth == 0 {
+                        if i > 0 {
+                            prev = best;
+                        }
+                        best = i;
                     }
-                    best = i;
+                    depth += 1;
+                    i += 1;
+                }
+                ')' | ']' | '}' => {
+                    depth = depth.saturating_sub(1);
                     i += 1;
                 }
                 _ => i += 1,
@@ -758,10 +775,11 @@ mod form_scan_tests {
         }
     }
 
-    /// The shapes that make this lexer non-trivial: a column-0 bracket inside a string or
-    /// a comment must NOT count, escapes must not end a string early, an unterminated
-    /// string swallows the rest, and multi-byte text must not shift the char indices the
-    /// language sees.
+    /// The shapes that make this lexer non-trivial: a bracket inside a string or a
+    /// comment must NOT count, an open bracket inside an UNCLOSED form must not count
+    /// however it is indented (the mis-indented multi-arity defn that motivated depth
+    /// tracking), escapes must not end a string early, an unterminated string swallows
+    /// the rest, and multi-byte text must not shift the char indices the language sees.
     #[test]
     fn agrees_with_the_pre_table_scan() {
         for text in [
@@ -769,6 +787,9 @@ mod form_scan_tests {
             "(",
             "(a)\n(b)\n(c)\n",
             "(a)\n  (b)\n(c)",
+            "(defn fib\n((0) 0)\n((1) 1)\n((n) n)))\n(b)\n",
+            ")\n(a)\n",
+            "(a\n(b)\n(c)",
             "[v]\n{m}\n(l)\n",
             "(a \"\n(not-a-form)\n\")\n(b)\n",
             "(a \";\n\")\n(b)\n",
