@@ -3535,6 +3535,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         spawn_link);
     def(
         heap,
+        "%spawn-monitor",
+        Arity::exact(1),
+        Sig::new(vec![callable], vec_ty),
+        &["thunk"],
+        "Like %spawn but atomically monitors the child from the caller before it runs, returning [pid ref] — so the [:down ref pid reason] carries the child's REAL exit reason even for an instant exit, instead of the :noproc a separate (monitor p) reports when the child got there first. Use the `spawn-monitor` macro.",
+        spawn_monitor,
+    );
+    def(
+        heap,
         "%spawn-named",
         Arity::exact(2),
         Sig::new(vec![sym.union(kw), callable], pid_ty),

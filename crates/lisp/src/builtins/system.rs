@@ -1597,6 +1597,15 @@ pub(super) fn spawn_link(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     Ok(crate::process::pid_value(pid))
 }
 
+/// `(%spawn-monitor thunk)` — atomic `spawn` + `monitor`: the caller monitors the new
+/// child *before* it runs, so the DOWN carries the child's true exit reason even for an
+/// instant exit (no spawn→monitor `:noproc` race). Returns `[pid ref]`. The
+/// `spawn-monitor` macro wraps an expression.
+pub(super) fn spawn_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (pid, mref) = crate::process::spawn_monitored(heap, arg(args, 0))?;
+    Ok(heap.alloc_vector2(crate::process::pid_value(pid), Value::ref_(mref)))
+}
+
 /// `(%spawn-named name thunk)` — idempotent named spawn. If `name` (a
 /// keyword or symbol) is currently registered to a still-alive pid, return
 /// that pid and **do not** spawn — `thunk` is never evaluated. Otherwise,

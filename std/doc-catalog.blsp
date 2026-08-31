@@ -528,6 +528,7 @@
    "spawn" :processes
    "%spawn-body-thunk" :processes
    "spawn-link" :processes
+   "spawn-monitor" :processes
    "%spawn-thunk-form?" :predicates
    "reflect/special-forms" :meta
    "file/spit" :filesystem
