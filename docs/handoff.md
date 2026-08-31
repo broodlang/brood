@@ -5,6 +5,19 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**Addendum 2026-08-31 (latest) — KI-95 FIXED; the benchmark rows had died a fourth
+time.** `promote` now forwards pairs/vectors/maps/strings through `PromoteForward`
+(the GC-flush pattern), so DAG-shaped data promotes once instead of `2^n` times —
+guarded by 5 `promote_sharing_tests`, cost measured to floor-level neutrality
+(`HandleHasher` + stride-8 spine registration; full numbers in the KI-95 entry).
+Remaining open from the audit: **KI-96** (duplicate remote DOWN) and **KI-97** (the
+hardening list) — KI-96 is the natural next stability item; §7.8 item 1 the next perf
+item. Separately: 11 of 31 `bench/brood` rows were dead on the ADR-302/307 reorder —
+upstream fixed them the same morning; the local checkout was behind and the *installed*
+brood 0.19.1 made `bench/smoke.py` on PATH read green over dead rows (pass `--brood`
+explicitly). A crashed row presented as an ab-bench "timeout"; ab-bench's warmup now
+keeps stderr and says crash vs hang (sabotage-verified).
+
 **Addendum 2026-08-31 (later) — KI-89: the resurrection race is FIXED + guarded; a
 residual orphan mechanism is WATCHING, and its only exhibiting binary was destroyed.**
 The core find: `registry_update` (KI-22's locked RMW) racing `restore_globals`' unlocked
@@ -31,8 +44,8 @@ consume: silent message loss + duplicate delivery; KI-92 an L1 `nil` message ali
 free msg-roots slot; KI-93 the net reactor's silent death; KI-94 subprocesses orphaned on
 owner death — note that last one is a deliberate semantic change: a child now dies with
 its owning process). **Open items it filed:** KI-95 (promote duplicates DAG-shaped data —
-exponential, unmeasured), KI-96 (duplicate remote DOWN), KI-97 (the consolidated
-hardening list). The unmeasured perf candidates are `compute-frontier.md` **§7.8** — the
+exponential, unmeasured; **fixed later the same day**, see the addendum above), KI-96
+(duplicate remote DOWN), KI-97 (the consolidated hardening list). The unmeasured perf candidates are `compute-frontier.md` **§7.8** — the
 top one is the i64 eligibility verdict recomputed per activation behind a global Mutex;
 every §7.8 item owes the full A/B protocol before shipping. Verified on the combined
 tree: suite 5351/5351, the scheduler/mailbox/GC binaries, GC_STRESS+VERIFY over the
