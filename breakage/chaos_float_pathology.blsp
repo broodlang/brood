@@ -26,11 +26,11 @@
 
 ;; Generate inf/nan via other means — sqrt(-1) might give NaN, or large pow
 ; overflow → +inf or raises?
-(def f-inf (try (math/pow 1.0e308 2.0) (catch _ nil)))
+(def f-inf (check-allow :discarded-catch (try (math/pow 1.0e308 2.0) (catch _ nil))))
 ; complex result → NaN or raises?
-(def f-nan (try (math/sqrt -1.0) (catch _ nil)))
+(def f-nan (check-allow :discarded-catch (try (math/sqrt -1.0) (catch _ nil))))
 ; overflow negative?
-(def f-ninf (try (* f-max -2.0) (catch _ nil)))
+(def f-ninf (check-allow :discarded-catch (try (* f-max -2.0) (catch _ nil))))
 (io/puts "--- basic IEEE 754 extremes ---")
 (io/puts "f-max:" f-max)
 (io/puts "f-min:" f-min)

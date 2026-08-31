@@ -17,7 +17,10 @@
 (require-one 'seq)
 
 ;; Load everything so the audit sees the whole surface, not just what boot happens to pull.
-(doseq (m (reflect/builtin-modules)) (try (require-one m) (catch _ nil)))
+;; A module this build cannot load (a lean runtime has no dev-tools) is the expected
+;; outcome here, not a hidden fault — the point is to load whatever IS present.
+(doseq (m (reflect/builtin-modules))
+  (check-allow :discarded-catch (try (require-one m) (catch _ nil))))
 
 (defn- public-names ()
   "Every public global the runtime can see, minus the `%` primitives (mechanism, not
@@ -75,10 +78,14 @@ parenthesised call on its own line — the shapes the stdlib actually uses."
       bare (filter names (fn (n) (not (module-of n))))
       stutter (filter qualified stutters?)
       no-doc (filter names
-               (fn (n) (nil? (try (doc (reflect/eval (string/->symbol n))) (catch _ nil)))))
+               ;; The raise IS the answer: a name with no reachable doc is what we count.
+               (fn (n)
+                 (nil? (check-allow :discarded-catch
+                         (try (doc (reflect/eval (string/->symbol n))) (catch _ nil))))))
       no-example (filter names
                    (fn (n)
-                     (let (d (try (doc (reflect/eval (string/->symbol n))) (catch _ nil)))
+                     (let (d (check-allow :discarded-catch
+                               (try (doc (reflect/eval (string/->symbol n))) (catch _ nil))))
                        (and d (not (example? d)))))))
   (io/puts "stdlib audit — "
     (count names)
