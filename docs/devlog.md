@@ -8608,6 +8608,173 @@ Zero-warning gate over std/ + tests/ stays at zero, bedit checks clean (no false
 positives, no stragglers), and `combinator_collection_slot_rejects_the_old_argument_order`
 pins five warning shapes and five data-first silences.
 
+## 2026-08-31 (later) — KI-89 root-caused and fixed: the registry resurrected across the isolate restore
+
+Two findings, one fix. **First, the entry's own minimal repro was measuring the wrong
+mechanism:** `nest test FILE...` with explicit files takes the single-file path (load every
+named file into ONE image, `run-loaded-tests`) — no per-file `%isolate` anywhere — so
+`record_test.blsp + std_check_test.blsp` failing was that path behaving as built, and all
+five ruled-out hypotheses had been tested against a mechanism the repro never touched. A
+probe file run the same way showed `usd` fully bound: nothing had rolled back because
+nothing restores on that path.
+
+**Second, the real leak: `registry_update` racing `restore_globals`.** The KI-22 registrar
+holds `registry_lock` across its read-modify-write; the isolate restore's wholesale table
+swap did not take it. A straggler's RMW that reads before the swap and writes after it
+reinstates a map computed from the PRE-restore table — resurrecting every accumulated
+`*record-ids*`/`*impls*`/`*features*` entry while the bindings beside them stay rolled
+back (the orphaned-id asymmetry), and one hit is sticky (the resurrected entries ride
+every later snapshot). Reproduced deterministically: a registering bystander + 2000
+isolate cycles = **1994 resurrections pre-fix, 0 post-fix**
+(`tests/registry_isolate_race_test.blsp`, with a liveness floor after its first draft
+died silently on a renamed builtin and "passed"). Fix: `restore_globals` takes
+`registry_lock` around the swap (lock order registry → globals, matching every RMW).
+
+Suite-scale control: a pre-fix worktree failed **3/3** full `nest test` runs on KI-89's
+own sightings (`ability_test:471` orphans ×2, `stdimage_test:60` ×1 — near-deterministic
+on today's tree); the fixed tree ran **0 orphan failures** across four full runs
+(5356/5356 twice; the other runs' failures were a stale-binary artifact — `-p cli`
+rebuilds don't relink `nest`, the CLAUDE.md trap, hit again — and KI-98). **Filed
+KI-98** (⚠️ watching): `process_limit_test.blsp:114` timed out twice in five full runs —
+a missed-wake shape, full-suite context only, not established as related to anything
+that changed today.
+
+## 2026-08-31 (later still) — the KI-89 residual: real on one binary, and the binary is gone
+
+Correction to the entry above: "KI-89 fixed" was half right. The registry-lock fix is
+sound and guarded (the deterministic repro stands at 0/2000), but the first post-fix
+build of the merged tree still failed **3/3** full `nest test` runs orphan-shaped — so a
+second interleaving survives the lock (suspected: a straggler's ctor `def` wiped by a
+restore while its locked register lands after the swap — id kept, ctor gone, sticky via
+the next snapshot). Then the next incremental build — adding runtime-gated trace code,
+OFF by default — went **15/15 green**, traced and untraced, and no binary exhibiting the
+residual exists any more. KI-88's layout-keyed lesson repeated verbatim, including the
+mistake: the failing binary was overwritten, not preserved. In-tree from the hunt:
+`BROOD_REG_TRACE=1` (lean by design — the first, all-registry version *suppressed* the
+race through stderr-lock serialization, a measured Heisenbug), the finding that the
+module sweeps visible mid-run are `doc_examples_test`'s legitimate load-everything unit
+inside its own file window, and the KI-89 entry's residual block with the
+next-sighting protocol: preserve the binary, re-run under the lean trace, read the seven
+`chain=` lines against the RESTOREs. KI-98 sighted 3× today, quiet in the last 15 runs.
+
+## 2026-08-31 (evening) — the KI-89 residual has a repro lever, and it is bigger than registries
+
+The residual fired on the next build's first run (`stdimage_test:60`), and this time the
+binary was preserved. Warm and cold-boot (`touch`) re-runs are green, so neither layout
+nor the boot cache is the key. **The lever: delete the stdlib images** — under source-path
+load timing the class fires readily and in new shapes: `ui_test.blsp:284`
+(records/vtables mixing) on one run, and on the next the mechanism was caught LIVE — a
+process died `ability Temporal/->iso: no impl for :tempo/tempo — have (:datetime/…)`:
+tempo's `*impls*` entries ripped out from under a RUNNING dispatch, after which the run
+degraded past a 10-minute bound. So the class is **scope restores racing processes still
+running against the pre-restore globals — readers as well as writers**, the `%isolate`
+soundness condition violated routinely by the scoped suite. The registry lock closed the
+one compounding corruption (wholesale resurrection, still guarded at 0/2000); the rest
+needs a design session — per-file process quiescence, or the spawn-time ownership
+generation `%isolate`'s own comment names as the missing primitive. Everything is in
+KI-89's residual block. (The preserved binary and run logs were cleaned up at session
+end — the delete-the-images lever supersedes the artifact, reproducing on any binary.)
+
+## 2026-08-31 (late) — KI-95 fixed: promote forwards data DAGs; the benchmark rows had died again
+
+**KI-95 closed** (the audit's top open item). `PromoteForward` now forwards
+pairs/vectors/maps/strings alongside closures/envs, so shared (DAG) substructure
+promotes ONCE instead of once per referrer — the 16-level doubling guard promotes 17
+cells where the pre-fix code promoted 131 071. Keys are the handle types themselves
+(canonical identity), which also closed a latent nursery/old `index()`-collision in the
+old closure/env tables. Cost was measured to floor-level neutrality in three rounds
+(details in the KI-95 entry): a multiplicative `HandleHasher` (the `table.rs` pattern),
+`reserve` per spine, and stride-8 registration for spines past 64 cells — bulk `def`
+(`sort`) back to +0.7% on a 0.7% floor, `spawn`/`supervisor` *fewer* instructions than
+base by interleaved `perf stat`. Guards: 5 `promote_sharing_tests` incl. the stride
+bound. Verified: full suite ×2 + both engines, `make gcstress`, clippy on CI's flags.
+
+**The benchmark rows were dead AGAIN — the fourth wholesale kill** (after KI-42/KI-44's
+two): the ADR-302/307 data-first reorder left 11 of 31 `bench/brood` rows calling the
+old order. Found because `make ab`'s spawn-live warmup "timed out"; the truth was every
+unit crashing (`empty?: expected collection, got fn`) and the collector waiting forever
+— **a crash presenting as a hang**, and ab-bench discarded the stderr that said so.
+Upstream had already fixed the rows the same morning (`33e646d`, `bd7e637`); the local
+checkout was 3 commits behind and the locally *installed* brood 0.19.1 accepts the old
+order, so `bench/smoke.py` on PATH said all-green while every current binary failed.
+Converged the checkout to origin/main, verified `smoke.py --brood <current>` 31/31 and
+`--langs all` 224/224 checksums. In-tree fix here: **ab-bench's warmup now keeps stderr
+and names the failure class** — crash vs timeout — instead of "needs harness
+scaffolding?" (sabotage-verified on a stale-order row). Trap for next time: any smoke
+verdict is a verdict about the binary it ran — pass `--brood` explicitly; the PATH
+binary being two minor versions stale made a dead suite read green.
+
+Also this session: a **fourth KI-80 sighting** — `brood_suite_passes` failed both tries
+under `make test-both` (1 in-language failure, NOT a TMT) and the name was lost because
+the run was piped through a summary grep, the exact trap KI-80 records; not reproduced
+across three subsequent fully-captured runs (solo, full VM, full test-both — all green).
+Addendum in KI-80. Capture whole runs to a file; grep the file.
+
+## 2026-08-31 (night) — KI-96 fixed: a monitor's DOWN now retires its own pending entry
+
+The audit's remaining correctness item. A cross-node monitor's DOWN rode back as an
+ordinary `Frame::Send`, so the watcher's node had no hook to remove the sender-side
+`PENDING_REMOTE` entry — one leak per completed remote monitor on a long-lived watcher,
+and a later node-down replayed the mref as a second `[:down … :noconnection]`, breaking
+the one-shot guarantee a ref-pinned `gen/call` receive relies on (and the ADR-195
+receive-mark makes a stale pinned message cheap to hit). Fixed at the entry's own "clean
+seam": a dedicated **`Frame::Down`** (wire v7 — a v6 peer would drop the unknown tag, so
+the byte bumps) shipped by `fire_down`'s Remote arm; the inbound handler
+(`deliver_remote_down`) retires the pending entry first, then delivers. The dying pid is
+node-qualified by the authenticated peer, never wire data — same rule as the other
+coupling frames. The `:noproc` immediate-fire path leaked identically and is closed by
+the same mechanism; `drop_pending_remote` now also prunes emptied node keys.
+
+Guard: `a_delivered_remote_monitor_does_not_fire_again_on_node_down` (two-node: monitor
+→ target dies → DOWN → kill node → `[:nodedown]` → assert no replay), **sabotage-verified**
+— retire disabled fails `SECOND-DOWN-BUG :noconnection`, the entry's exact prediction —
+plus a `Frame::Down` wire round-trip. Verified: distribution suite 4/4 loops + a
+GC_STRESS+VERIFY pass, full suite green on both engines (the capped run's only failures
+were the documented wasm-under-cap exception — green uncapped — and one KI-98 recurrence,
+its third sighting, first on the tree-walker half; logged in KI-98), clippy on CI's flags.
+
+## 2026-08-31 (late night) — KI-88 picked up, found dormant; the tail it implicates is now hardened
+
+Picked KI-88 as the next item because its status line advertised a *deterministic repro*.
+It has none: the canonical repro (full `chaos2_process_genserver`, `BROOD_TW_REENTRY=1`,
+router confirmed live at 394 routed closures, freshly built armed binary) passes **10/10**
+at `62eac84c`. Session 4 had already recorded it dormant on 2026-08-30 — the entry's
+header just never said so, which is the whole reason it was picked. Header corrected, and
+the index gained a KI-88 row (it had none at all, so the one open scheduler bug was
+invisible to anyone scanning the table).
+
+What the session produced instead came from reading the implicated path rather than
+running it: **`run_one`'s post-quantum tail was unprotected.** `catch_unwind` wrapped
+`drive()` only; `save_ctx`, `finish_quantum` and the outcome routing ran as plain
+statements, and `worker_loop` has no catch either. A panic there killed the worker thread
+permanently (the pool shrinks; nothing restarts a worker) *and* dropped the `Box<Process>`
+mid-unwind, so the process vanished with no `deregister` — no death line, no monitors, no
+`[:down …]`, and every waiter waiting forever. Fault injection confirmed it end to end:
+pre-fix, one injected tail panic **hangs `chaos2` at P47 until killed**.
+
+That is precisely KI-88's recorded signature (a `run` with no `end`, a ledger entry no
+thread is inside, no death line, a collector timing out) — session 3's "a Rust frame
+cannot evaporate mid-function without unwinding through the instrumented tail" was right
+about unwinding and wrong about the tail, which is not a `Drop` guard. It is still **not a
+diagnosis**: this mechanism is loud (panic hook + `.brood_crash_dump`) and no sighting ever
+carried a panic. Its value is elimination. The tail is now caught, the worker survives, the
+process is retired loudly (`deregister` takes `Option<&Heap>` — the unwind ate the heap),
+and the retire is liveness-guarded because `deregister` is not idempotent.
+
+Guard: `crates/cli/tests/quantum_tail_panic.rs` + `BROOD_FAULT_QUANTUM_TAIL=<n>`
+(catalogued). Sabotage-verified: reverting the catch fails the guard while its no-fault
+control passes. **Two traps worth keeping.** A short program can exit while the panicking
+worker is still symbolizing its backtrace, so the recovery's own line never prints and the
+run reads as a silent vanish — the guard sleeps and runs further waves to outlive it; a
+"no diagnostic appeared" conclusion should first rule out having out-run one. And my first
+workload put `(self)` inside the spawned form, so every worker messaged itself and both
+waves collected 0 — the *control* caught that, which is why the control exists.
+
+Also filed **KI-99**: `a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 of
+the full suite with `dist: incoming connection failed: failed to fill whole buffer` on B —
+a handshake EOF under load, so the send never arrived. Retry-absorbed, 6/6 solo after, but
+captured, which is the difference from KI-80's class.
+
 ## 2026-08-31 — inline pattern-clause callbacks stop reading as `any`
 
 `(reduce toks '() (fn (((x y & acc) "+") …) ((acc val) …)))` typed its enclosing

@@ -1,0 +1,64 @@
+;; KI-89's mechanism, reproduced deterministically and guarded: a registry
+;; read-modify-write (`%registry-update!`, KI-22's atomic registrar) racing an
+;; `%isolate` restore RESURRECTED the registry. The RMW holds `registry_lock` from its
+;; read to its write; `restore_globals`' wholesale table swap did not take that lock, so
+;; a racing registration could read the registry BEFORE the swap and write its successor
+;; AFTER it — reinstating every accumulated `*record-ids*`/`*impls*`/`*features*` entry
+;; while the ordinary bindings beside them stayed rolled back. That asymmetry (ids
+;; registered, constructors unbound) is exactly the orphaned-record-id shape the full
+;; scoped suite kept sighting. And one hit is sticky: the resurrected entries sit inside
+;; every LATER snapshot, so they never roll back again.
+;;
+;; **Verified by sabotage** (the pre-fix binary IS the sabotage): without the
+;; `registry_lock` acquisition in `restore_globals`, this case fails with
+;; `resurrected: 1994` of 2000 cycles.
+(defmodule registry-isolate-race-test (:use test))
+
+;; A registering BYSTANDER: spawned outside the isolates, so `%isolate`'s reaper leaves
+;; it alone — the straggler shape from the real suite (a process the per-file kill set's
+;; documented ancestry gap misses). Registers ids that point at a bound global
+;; (`identity`) so a scheduling tail can never leave the shared registry with an
+;; orphan id even momentarily confusing another file's assertions.
+(defn- ki89-hammer (stop i)
+  (if (table/get stop :stop)
+    nil
+    (do
+      (%record-register (keyword (str "ki89-race/k" (math/mod i 8))) 'identity)
+      (table/incr stop :n 1)
+      (ki89-hammer stop (+ i 1)))))
+
+;; One cycle: register a probe id inside an isolate — the restore must remove it.
+(defn- ki89-cycle-once ()
+  (do
+    (%isolate (fn () (%record-register :ki89-race/probe 'ki89-probe)))
+    (contains? *record-ids* :ki89-race/probe)))
+
+;; Retract everything this file wrote to the shared registry, so nothing leaks into
+;; another file's image even on the no-scope path.
+(defn- ki89-cleanup ()
+  (do
+    (%registry-update! '*record-ids* :dissoc [:ki89-race/probe] nil)
+    (fold (range 8)
+      nil
+      (fn (_ i)
+        (%registry-update! '*record-ids*
+          :dissoc [(keyword (str "ki89-race/k" i))]
+          nil)))))
+
+(describe "registry update vs isolate restore (KI-89)"
+  :isolated (test "a concurrent registry RMW cannot resurrect rolled-back registrations"
+    (let (stop (table/new)
+          _h (spawn (ki89-hammer stop 0))
+          ;; Head start: the hammer's first iteration autoloads `table`, and the
+          ;; cycles below are fast enough to finish before it registers anything.
+          _w (sleep 50)
+          resurrected (fold (range 2000)
+                        0
+                        (fn (acc _) (if (ki89-cycle-once) (+ acc 1) acc))))
+      (table/put stop :stop true)
+      (sleep 20)
+      (ki89-cleanup)
+      ;; Liveness first: the hammer must actually have been registering, or the case
+      ;; is vacuous (it once died silently on a renamed builtin and "passed").
+      (is (> (or (table/get stop :n) 0) 100))
+      (assert= resurrected 0))))

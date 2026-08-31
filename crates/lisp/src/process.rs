@@ -112,6 +112,6 @@ pub(crate) use scheduler::set_capture_run;
 
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};
 pub(crate) use monitor::{
-    add_monitor, demonitor_remote_fanout, drop_monitor, drop_pending_remote, fire_noconnection,
-    handle_node_down, record_pending_remote, Watcher,
+    add_monitor, deliver_remote_down, demonitor_remote_fanout, drop_monitor, drop_pending_remote,
+    fire_noconnection, handle_node_down, record_pending_remote, Watcher,
 };

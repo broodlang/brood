@@ -1399,6 +1399,15 @@ type ClosureTemplateMap =
 /// `fn_rest` [`PairId`] → the **promoted RUNTIME closure handle** built for it once.
 type ConstClosureMap = HashMap<PairId, Value, std::hash::BuildHasherDefault<SymbolHasher>>;
 
+/// `BROOD_REG_TRACE=1` — name every registry write (pid, registry, op, first key) and
+/// every globals restore on stderr. The tool for attributing a leaked or orphaned
+/// registration to its writer (KI-89's class: WHO registered this id, and did a restore
+/// land between its read and its write?). One cached bool when off.
+fn reg_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_REG_TRACE").is_some())
+}
+
 /// Which update [`Heap::registry_update`] performs. See that method for why the whole
 /// read-modify-write has to happen inside one kernel call (KI-22).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5030,14 +5039,14 @@ impl Heap {
         publish(self, shared)
     }
 
-    /// The recursive core of [`promote`](Self::promote), threading a forwarding
-    /// table so a *cyclic* graph (a closure capturing its own binding scope)
-    /// terminates: closures and envs reserve their RUNTIME slot and register it in
-    /// `fwd` *before* recursing, so the back-edge resolves to the reserved handle
-    /// instead of recursing forever. The table also collapses shared (DAG)
-    /// closures/envs to one RUNTIME copy. Pairs/vectors/maps/strings/ropes are
-    /// acyclic by construction (immutable, built bottom-up), so they aren't
-    /// forwarded — they just recurse through `fwd` to reach any closures inside.
+    /// The recursive core of [`promote`](Self::promote), threading the
+    /// [`PromoteForward`] tables so a *cyclic* graph (a closure capturing its own
+    /// binding scope) terminates — closures and envs reserve their RUNTIME slot
+    /// and register it in `fwd` *before* recursing, so the back-edge resolves to
+    /// the reserved handle instead of recursing forever — and so shared (DAG)
+    /// substructure of every forwarded kind (closures, envs, pairs, vectors,
+    /// maps, strings) collapses to ONE RUNTIME copy instead of one per referrer
+    /// (KI-95).
     fn promote_in(&self, v: Value, fwd: &mut PromoteForward) -> Value {
         // Deep-car-nesting guard — see `WALKER_RED_ZONE`.
         stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
@@ -5048,8 +5057,13 @@ impl Heap {
     fn promote_in_grown(&self, v: Value, fwd: &mut PromoteForward) -> Value {
         match v.unpack() {
             ValueRef::Str(id) if id.region() == LOCAL => {
+                if let Some(&nid) = fwd.strings.get(&id) {
+                    return Value::str_(nid);
+                }
                 let s = self.string(id).to_string();
-                Value::str_(self.runtime.push_str(s))
+                let nid = self.runtime.push_str(s);
+                fwd.strings.insert(id, nid);
+                Value::str_(nid)
             }
             ValueRef::BigInt(id) if id.region() == LOCAL => {
                 // A leaf: clone the value into the shared region (no children).
@@ -5080,42 +5094,28 @@ impl Heap {
             }
             ValueRef::Pair(id) if id.region() == LOCAL => self.promote_list(id, fwd),
             ValueRef::Vector(id) if id.region() == LOCAL => {
-                let items: Vec<Value> = self
-                    .vector(id)
-                    .to_vec()
-                    .into_iter()
-                    .map(|x| self.promote_in(x, fwd))
-                    .collect();
-                Value::vector(self.runtime.push_vec(VecStore::from_vec(items)))
+                Value::vector(self.promote_vec_store(id, fwd, /*promote_items*/ true))
             }
             // A range's backing `[lo hi step]` vector holds only ints (atoms) —
-            // copy it across and keep the `Range` wrapper.
+            // copy it across and keep the `Range` wrapper. (Item promotion is a
+            // no-op on atoms, so it shares the vector table harmlessly.)
             ValueRef::Range(id) if id.region() == LOCAL => {
-                let items = self.vector(id).to_vec();
-                Value::range(self.runtime.push_vec(VecStore::from_vec(items)))
+                Value::range(self.promote_vec_store(id, fwd, /*promote_items*/ false))
             }
             // A seq-view's backing `[source xform]` holds heap values (a
             // collection and a transducer closure), so promote each across like a
             // vector and keep the `SeqView` wrapper.
             ValueRef::SeqView(id) if id.region() == LOCAL => {
-                let items: Vec<Value> = self
-                    .vector(id)
-                    .to_vec()
-                    .into_iter()
-                    .map(|x| self.promote_in(x, fwd))
-                    .collect();
-                Value::seqview(self.runtime.push_vec(VecStore::from_vec(items)))
+                Value::seqview(self.promote_vec_store(id, fwd, /*promote_items*/ true))
             }
-            ValueRef::Map(id) if id.region() == LOCAL => {
-                // Recursively promote the trie depth-first. Children are
-                // promoted before their parent so the parent's `children`
-                // array can be wired to the freshly-allocated RUNTIME
-                // sub-node handles.
-                Value::map(self.promote_map_node(id, fwd))
-            }
-            // Set and failure share the map's CHAMP storage — promote the trie the
-            // same way and re-wrap in the kind that came in.
-            ValueRef::Set(id) | ValueRef::Failure(id) if id.region() == LOCAL => {
+            // Map, set and failure share one CHAMP store, so one arm promotes all
+            // three: recursively promote the trie depth-first — children before their
+            // parent, so the parent's `children` array can be wired to the freshly
+            // allocated RUNTIME sub-node handles — then re-wrap in the kind that came
+            // in. `fwd` is shared, so KI-95's DAG forwarding applies to all three.
+            ValueRef::Map(id) | ValueRef::Set(id) | ValueRef::Failure(id)
+                if id.region() == LOCAL =>
+            {
                 crate::core::value::champ_rewrap(v, self.promote_map_node(id, fwd))
             }
             ValueRef::Fn(id) if id.region() == LOCAL => Value::func(self.promote_closure(id, fwd)),
@@ -5127,11 +5127,33 @@ impl Heap {
         }
     }
 
+    /// Promote a LOCAL vector-backed store (vector / range / seq-view — they
+    /// share the `VecId` slab) into RUNTIME, forwarding through `fwd.vectors` so
+    /// a store referenced from several places is copied once (KI-95). The three
+    /// wrappers re-tag the forwarded handle, which is sound because handle
+    /// equality means "same store".
+    fn promote_vec_store(&self, id: VecId, fwd: &mut PromoteForward, promote_items: bool) -> VecId {
+        if let Some(&nid) = fwd.vectors.get(&id) {
+            return nid;
+        }
+        let mut items = self.vector(id).to_vec();
+        if promote_items {
+            for x in items.iter_mut() {
+                *x = self.promote_in(*x, fwd);
+            }
+        }
+        let nid = self.runtime.push_vec(VecStore::from_vec(items));
+        fwd.vectors.insert(id, nid);
+        nid
+    }
+
     /// Promote a local cons-chain. Walks the `cdr` spine *iteratively* so a long
     /// list doesn't recurse its length deep (which overflowed the native stack);
     /// recursion is bounded by element nesting via `promote_in` on each `car`.
-    /// Stops at the first already-shared cell or non-pair tail, preserving both
-    /// improper (dotted) lists and existing structure sharing.
+    /// Stops at the first already-shared cell, already-*copied* cell
+    /// (`fwd.pairs` — the KI-95 DAG collapse; a shared tail resolves to its one
+    /// RUNTIME copy) or non-pair tail, preserving both improper (dotted) lists
+    /// and existing structure sharing.
     fn promote_list(&self, first: PairId, fwd: &mut PromoteForward) -> Value {
         // Keep each source LOCAL pair id alongside its promoted head, so the new
         // RUNTIME pair can inherit the source position (`form_pos`) the reader stamped
@@ -5142,6 +5164,11 @@ impl Heap {
         let tail = loop {
             match cur.unpack() {
                 ValueRef::Pair(id) if id.region() == LOCAL => {
+                    // Already copied on this walk (a shared cell/tail, or the
+                    // whole list re-referenced) — reuse its one RUNTIME copy.
+                    if let Some(&copied) = fwd.pairs.get(&id) {
+                        break Value::pair(copied);
+                    }
                     let (head, next) = self.pair(id);
                     let promoted_head = self.promote_in(head, fwd);
                     nodes.push((id, promoted_head));
@@ -5151,11 +5178,32 @@ impl Heap {
             }
         };
         let mut acc = tail;
+        // Register the spine in `fwd.pairs` so a later walk reaching any of these
+        // cells (a shared tail, the whole list re-referenced) reuses this copy
+        // (KI-95). Registration is per-cell only for SMALL spines: on a bulk
+        // `def` of a long list the map insert is the dominant promote cost
+        // (~107 instructions/cell measured on a 375k-cell def, +13% on a
+        // promote-saturated program), so a long spine registers every
+        // `SPINE_REG_STRIDE`-th cell instead. A re-entering walk then re-copies
+        // at most `stride − 1` cells before hitting a registered one — per
+        // *referrer*, so total growth stays O(n) and the exponential class
+        // KI-95 closed stays closed. Index 0 (the spine head — the common
+        // `(list a a)` sharing shape) always registers, whatever the stride.
+        const SPINE_REG_FULL: usize = 64;
+        const SPINE_REG_STRIDE: usize = 8;
+        let stride = if nodes.len() <= SPINE_REG_FULL {
+            1
+        } else {
+            SPINE_REG_STRIDE
+        };
+        // One rehash for the whole spine (a 375k-cell def otherwise pays ~20
+        // incremental rehash rounds).
+        fwd.pairs.reserve(nodes.len() / stride + 1);
         // One read of the current generation for the whole spine: the caller holds the
         // `promote_lock` read guard, so aging cannot flip it underneath us — and the
         // position key must name the same generation as the handle we mint.
         let cur_gen = self.runtime.cur_gen();
-        for (src, head) in nodes.into_iter().rev() {
+        for (i, (src, head)) in nodes.into_iter().enumerate().rev() {
             let idx = self.runtime.cur_code().pairs.push((head, acc));
             if let Some(entry) = self
                 .cold()
@@ -5163,7 +5211,11 @@ impl Heap {
             {
                 self.runtime.set_position(idx, cur_gen, entry);
             }
-            acc = Value::pair(PairId::runtime_gen(idx, cur_gen));
+            let promoted = PairId::runtime_gen(idx, cur_gen);
+            acc = Value::pair(promoted);
+            if i % stride == 0 {
+                fwd.pairs.insert(src, promoted);
+            }
         }
         acc
     }
@@ -5176,6 +5228,11 @@ impl Heap {
     /// the original LOCAL trie is left untouched (it'll be GC'd when its
     /// last reference goes).
     fn promote_map_node(&self, id: MapId, fwd: &mut PromoteForward) -> MapId {
+        // Already copied on this walk (a shared sub-trie — path copying makes
+        // these routinely) — reuse its one RUNTIME copy (KI-95).
+        if let Some(&nid) = fwd.maps.get(&id) {
+            return nid;
+        }
         let node = self.map_node(id);
         // Promote children first (bottom-up) so the new RUNTIME node can
         // be built with the new child handles in one push.
@@ -5200,17 +5257,18 @@ impl Heap {
             data: new_data,
             children: new_children,
         };
-        MapId::runtime_gen(
+        let nid = MapId::runtime_gen(
             self.runtime.cur_code().maps.push(promoted),
             self.runtime.cur_gen(),
-        )
+        );
+        fwd.maps.insert(id, nid);
+        nid
     }
 
     fn promote_closure(&self, id: ClosureId, fwd: &mut PromoteForward) -> ClosureId {
         // Already promoted on this walk? Return the shared handle (cycle break +
-        // DAG-sharing collapse). Keyed on LOCAL slot index.
-        let key = id.index() as u32;
-        if let Some(&existing) = fwd.closures.get(&key) {
+        // DAG-sharing collapse). Keyed on the handle's canonical identity.
+        if let Some(&existing) = fwd.closures.get(&id) {
             return existing;
         }
         // Reserve the RUNTIME slot *first* and register it, so a reference back to
@@ -5252,7 +5310,7 @@ impl Heap {
         // probe (see `rt_dirty`). This is the one place closures enter the region.
         self.runtime.rt_dirty.store(true, Ordering::Relaxed);
         let runtime_id = ClosureId::runtime_gen(new_idx, self.runtime.cur_gen());
-        fwd.closures.insert(key, runtime_id);
+        fwd.closures.insert(id, runtime_id);
         let cl = self.closure(id).clone();
         // Promote every arm's body forms and `&optional` defaults into the shared
         // region (param symbols and `&` rest are interned/copy, so they ride along).
@@ -5305,13 +5363,12 @@ impl Heap {
         if env == EnvId::GLOBAL || env.region() == RUNTIME {
             return env;
         }
-        let key = env.index() as u32;
-        if let Some(&existing) = fwd.envs.get(&key) {
+        if let Some(&existing) = fwd.envs.get(&env) {
             return existing;
         }
         let new_idx = self.runtime.cur_code().envs.push(OnceLock::new());
         let runtime_id = EnvId::runtime_gen(new_idx, self.runtime.cur_gen());
-        fwd.envs.insert(key, runtime_id);
+        fwd.envs.insert(env, runtime_id);
         // Snapshot the frame, then promote its parent and values (no borrow held).
         let (parent, bindings): (Option<EnvId>, Vec<(Symbol, Value)>) = {
             let frame = self.env_frame(env);
@@ -6255,6 +6312,28 @@ impl Heap {
         // Only on the write path: a declined op leaves the registry untouched, and a name
         // that was never written has nothing for an image to carry.
         guard.insert(sym);
+        if reg_trace_enabled() && crate::core::value::symbol_name(sym) == "*record-ids*" {
+            // Ancestry chain (up to 4 hops), so a leaked writer can be attributed to the
+            // unit/driver that spawned it even after intermediates exited.
+            let mut chain = String::new();
+            let mut cur = crate::process::current_pid();
+            for _ in 0..4 {
+                match cur {
+                    Some(p) => {
+                        chain.push_str(&format!("{p}<-"));
+                        cur = crate::process::parent_of(p);
+                    }
+                    None => break,
+                }
+            }
+            eprintln!(
+                "[reg] {} {:?} {} chain={}",
+                crate::core::value::symbol_name(sym),
+                op,
+                crate::syntax::printer::print(self, k1),
+                chain,
+            );
+        }
         true
     }
 
@@ -6741,6 +6820,28 @@ impl Heap {
             snapshot.block_depth,
             "restore_globals out of order — globals snapshots must be restored LIFO"
         );
+        // Serialize with the registry read-modify-write (`registry_update`/`registry_cas`,
+        // KI-22's lock) — KI-89. Those RMWs hold `registry_lock` from their read of the
+        // registry global to their write; this swap did NOT take it, so a concurrent
+        // registration could read `cur` before the swap and `env_define` its successor
+        // after it — writing back a map computed from the PRE-restore table, i.e.
+        // resurrecting every accumulated `*record-ids*`/`*impls*`/`*features*` entry
+        // wholesale while the ordinary bindings beside them stayed rolled back. That
+        // asymmetry (ids registered, constructors unbound) is exactly KI-89's orphaned
+        // record ids, and one hit is sticky: the resurrected entries sit inside every
+        // later snapshot. Measured before this lock: 1994 of 2000 isolate cycles against
+        // a registering bystander resurrected the rolled-back entry. Under the lock a
+        // racing RMW either completes first (and is wiped — the isolation contract) or
+        // starts after (and reads the restored table). Lock order is registry_lock →
+        // globals lock here and in every RMW, so no inversion.
+        let _registry = self
+            .runtime
+            .registry_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if reg_trace_enabled() {
+            eprintln!("[reg] pid={:?} RESTORE", crate::process::current_pid());
+        }
         *self.runtime.globals_write() = snapshot.saved;
         // Wholesale table swap — invalidate every stamped global inline cache. This one
         // bumps the code epoch too (ADR-217): a restore can *replace or remove* bindings
@@ -6767,17 +6868,64 @@ impl Heap {
     }
 }
 
-/// Forwarding table for [`Heap::promote`]: LOCAL slot index → the RUNTIME handle
-/// it was promoted to, for the two handle kinds that can form a cycle (a closure
-/// capturing its own binding scope). Lets a cyclic graph terminate — the back-edge
-/// resolves to the already-reserved RUNTIME handle — and collapses a shared (DAG)
-/// closure/env to one RUNTIME copy. Pairs/vectors/maps are acyclic by construction
-/// so they need no forwarding (they'd only ever be a finite tree to re-copy).
+/// Forwarding tables for [`Heap::promote`]: LOCAL handle → the RUNTIME handle it
+/// was promoted to. Closures/envs can form a *cycle* (a closure capturing its own
+/// binding scope), so they reserve-then-register BEFORE recursing — the back-edge
+/// resolves to the reserved handle. Pairs/vectors/maps/strings are acyclic by
+/// construction (immutable, built bottom-up) but **not trees**: path-copying code
+/// routinely produces DAGs, and without forwarding each shared node was re-copied
+/// once per referrer into the append-only RUNTIME region — exponentially with
+/// nesting (KI-95; the GC's flush path always forwarded these, `gc.rs`
+/// `flush_pair`/`flush_vector`/`flush_map`). They register AFTER copying (no cycle
+/// to break), collapsing every DAG to one RUNTIME copy.
+///
+/// Keys are the handles themselves: their `Eq`/`Hash` use the canonical identity
+/// (region + index + the LOCAL nursery/old AGE bit), so an old-gen and a
+/// nursery handle at the same slab index — distinct objects — cannot collide the
+/// way the previous bare-`index()` keys could. The maps are lazy (an empty
+/// `HashMap` doesn't allocate), so the dominant small no-sharing promote pays
+/// only the lookups.
 #[derive(Default)]
 struct PromoteForward {
-    closures: HashMap<u32, ClosureId>,
-    envs: HashMap<u32, EnvId>,
+    closures: HandleMap<ClosureId, ClosureId>,
+    envs: HandleMap<EnvId, EnvId>,
+    /// Source pair cell → its promoted cell (tail included — `promote_list`
+    /// registers every cell of a spine it builds). The id, not a `Value`: a
+    /// bulk `def` of a long list registers every cell, so entry size is table
+    /// cache-miss rate.
+    pairs: HandleMap<PairId, PairId>,
+    vectors: HandleMap<VecId, VecId>,
+    maps: HandleMap<MapId, MapId>,
+    strings: HandleMap<StrId, StrId>,
 }
+
+/// Multiplicative hasher for [`PromoteForward`]'s handle keys. Promote registers
+/// every node it copies, so the map hash is a per-node cost on the `def`/`spawn`
+/// path — and the key is a single canonical-handle `u64` (one `write_u64`), for
+/// which the default SipHash is pure tax (measured ~2% of the `spawn` row's
+/// instructions). A Fibonacci multiply spreads the low slab-index bits into the
+/// high bits hashbrown's control bytes read. Same pattern as `table.rs`'s
+/// `IdentityHasher`, which strips the identical round from table ops.
+#[derive(Default)]
+struct HandleHasher(u64);
+impl std::hash::Hasher for HandleHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Handle keys always arrive as one `write_u64`; this keeps the impl total.
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ b as u64;
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+type HandleMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<HandleHasher>>;
 
 #[cfg(all(test, feature = "jit"))]
 mod vecstore_layout_tests {
@@ -7047,6 +7195,143 @@ mod rt_position_tests {
             Some(pos_a),
             "a promote into the fresh generation overwrote a LIVE old-generation form's \
              recorded position — the RUNTIME position table is keyed by bare slab index",
+        );
+    }
+}
+
+/// KI-95: `promote` must copy shared (DAG) substructure ONCE, the way the GC's
+/// flush path does (`flush_pair`/`flush_vector`/`flush_map` in `gc.rs`) — not once
+/// per referrer. Immutable path-copying code produces shared substructure
+/// routinely, and the RUNTIME region is append-only, so per-referrer copies are a
+/// leak that compounds exponentially with nesting. The counts are asserted
+/// directly against the RUNTIME slabs, per the KI-95 fix-shape note.
+#[cfg(test)]
+mod promote_sharing_tests {
+    use super::*;
+
+    /// Level 0 is `(1)`; level k is a pair whose car AND cdr are level k-1:
+    /// n+1 distinct cells, but 2^(n+1)-1 if re-copied once per referrer.
+    #[test]
+    fn a_self_sharing_pair_dag_promotes_linearly() {
+        let mut h = Heap::new();
+        let n = 16;
+        let mut v = h.alloc_pair(Value::int(1), Value::nil());
+        for _ in 0..n {
+            v = h.alloc_pair(v, v);
+        }
+        let before = h.runtime.cur_code().pairs.count();
+        let promoted = h.promote(v);
+        let grown = h.runtime.cur_code().pairs.count() - before;
+        assert_eq!(
+            grown,
+            n + 1,
+            "each distinct cell must be promoted exactly once"
+        );
+        // The promoted graph still reads correctly: car^n reaches the `(1)` leaf.
+        let mut cur = promoted;
+        for _ in 0..n {
+            let ValueRef::Pair(id) = cur.unpack() else {
+                panic!("expected a pair");
+            };
+            cur = h.pair(id).0;
+        }
+        let ValueRef::Pair(id) = cur.unpack() else {
+            panic!("expected the leaf pair");
+        };
+        assert!(matches!(h.pair(id).0.unpack(), ValueRef::Int(1)));
+    }
+
+    /// A shared list *tail* rides the same table: two lists converging on one
+    /// spine must promote the shared cells once.
+    #[test]
+    fn a_shared_list_tail_promotes_once() {
+        let mut h = Heap::new();
+        let mut tail = Value::nil();
+        for i in 0..8 {
+            tail = h.alloc_pair(Value::int(i), tail);
+        }
+        let a = h.alloc_pair(Value::int(100), tail);
+        let b = h.alloc_pair(Value::int(200), tail);
+        let both = h.alloc_pair(a, b);
+        let before = h.runtime.cur_code().pairs.count();
+        h.promote(both);
+        let grown = h.runtime.cur_code().pairs.count() - before;
+        assert_eq!(
+            grown,
+            8 + 3,
+            "the 8 shared tail cells + a + b + the outer pair"
+        );
+    }
+
+    /// Past `SPINE_REG_FULL` a spine registers only every `SPINE_REG_STRIDE`-th
+    /// cell, so a walk re-entering it (the shared tail here) may re-copy up to
+    /// stride−1 cells per referrer before hitting a registered one — bounded,
+    /// still O(n), never the pre-KI-95 once-per-referrer full re-copy.
+    #[test]
+    fn a_long_shared_tail_stays_linear_past_the_stride_threshold() {
+        let mut h = Heap::new();
+        let n = 1000;
+        let mut tail = Value::nil();
+        for i in 0..n {
+            tail = h.alloc_pair(Value::int(i), tail);
+        }
+        let a = h.alloc_pair(Value::int(-1), tail);
+        let b = h.alloc_pair(Value::int(-2), tail);
+        let both = h.alloc_pair(a, b);
+        let before = h.runtime.cur_code().pairs.count();
+        h.promote(both);
+        let grown = h.runtime.cur_code().pairs.count() - before;
+        assert!(
+            grown <= n as usize + 3 + 8,
+            "grown={grown} for a {n}-cell tail shared twice — a re-entering walk \
+             must join the registered copy within one stride window"
+        );
+    }
+
+    #[test]
+    fn a_self_sharing_vector_dag_promotes_linearly() {
+        let mut h = Heap::new();
+        let n = 12;
+        let mut v = h.alloc_vector(vec![Value::int(1)]);
+        for _ in 0..n {
+            v = h.alloc_vector(vec![v, v]);
+        }
+        let before = h.runtime.cur_code().vectors.count();
+        h.promote(v);
+        let grown = h.runtime.cur_code().vectors.count() - before;
+        assert_eq!(
+            grown,
+            n + 1,
+            "each distinct vector must be promoted exactly once"
+        );
+    }
+
+    /// A map referenced twice must land as one RUNTIME trie, not two. The trie's
+    /// per-copy node count is measured by a single-reference promote of the same
+    /// map, so the assertion doesn't hardcode CHAMP layout.
+    #[test]
+    fn a_shared_map_promotes_once() {
+        let mut h = Heap::new();
+        let s = h.alloc_string("shared-once");
+        let m = h.map_from_pairs(vec![(Value::int(1), s), (Value::int(2), s)]);
+        let unit = {
+            let before = h.runtime.cur_code().maps.count();
+            h.promote(m);
+            h.runtime.cur_code().maps.count() - before
+        };
+        let twice = h.alloc_vector(vec![m, m]);
+        let before_maps = h.runtime.cur_code().maps.count();
+        let before_strs = h.runtime.cur_code().strings.count();
+        h.promote(twice);
+        assert_eq!(
+            h.runtime.cur_code().maps.count() - before_maps,
+            unit,
+            "the map is one value referenced twice — one trie copy"
+        );
+        assert_eq!(
+            h.runtime.cur_code().strings.count() - before_strs,
+            1,
+            "the string is referenced twice inside the map — one copy"
         );
     }
 }

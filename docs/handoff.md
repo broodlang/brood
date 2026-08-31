@@ -5,6 +5,65 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**Addendum 2026-08-31 (latest) — KI-88 is DORMANT, not deterministic; its implicated
+path is now hardened.** Do not pick KI-88 up expecting a repro: 10/10 pass at `62eac84c`
+with the router live, on top of session 4's 15/15 + 8/8. Its status line said
+"deterministic repro" for a day after session 4 found it dormant — corrected, and it now
+has an index row (it had none). What did land: **`run_one`'s post-quantum tail is caught**
+(`save_ctx`/`finish_quantum`/outcome routing ran unprotected, and `worker_loop` has no
+catch — one panic there killed a worker for good AND dropped the process with no
+`deregister`, hanging the runtime; fault injection reproduces the hang pre-fix). That is
+KI-88's exact signature but NOT a diagnosis of it (this mechanism is loud); its value is
+elimination. Guard: `crates/cli/tests/quantum_tail_panic.rs` + `BROOD_FAULT_QUANTUM_TAIL`,
+sabotage-verified. **Next up: KI-97 item 1** (the pre-auth handshake trickle DoS — and it
+should re-test the newly filed **KI-99**, a handshake EOF under load in the same code),
+then §7.8 item 1.
+
+**Addendum 2026-08-31 (earlier) — KI-96 FIXED: a remote monitor's DOWN now retires its
+own `PENDING_REMOTE` entry.** The DOWN rides a dedicated `Frame::Down` (wire **v7**)
+instead of an ordinary send; the inbound handler (`deliver_remote_down`) retires the
+pending entry, then delivers — so a completed monitor can no longer leak an entry or
+replay its mref as a second `[:down … :noconnection]` on a later node-down. Guarded by a
+sabotage-verified two-node test (`a_delivered_remote_monitor_does_not_fire_again_on_node_down`)
++ a wire round-trip. With KI-95 and KI-96 both closed, the audit's remaining items are
+**KI-97** (the hardening list — item 1, the pre-auth handshake trickle DoS, is the
+natural next stability pick) and the §7.8 perf candidates (item 1 first). Watch items:
+KI-98 got a **third sighting** this session (first on the tree-walker half — engine-
+independent, still full-suite-only, solo green; next probe is `BROOD_SCHED_DBG=1` with
+the whole log kept), and KI-88 still gates the tw-reentry default.
+
+**Addendum 2026-08-31 (earlier) — KI-95 FIXED; the benchmark rows had died a fourth
+time.** `promote` now forwards pairs/vectors/maps/strings through `PromoteForward`
+(the GC-flush pattern), so DAG-shaped data promotes once instead of `2^n` times —
+guarded by 5 `promote_sharing_tests`, cost measured to floor-level neutrality
+(`HandleHasher` + stride-8 spine registration; full numbers in the KI-95 entry).
+Remaining open from the audit: **KI-96** (duplicate remote DOWN — fixed later this
+session, see the addendum above) and **KI-97** (the hardening list); §7.8 item 1 the
+next perf item. Separately: 11 of 31 `bench/brood` rows were dead on the ADR-302/307 reorder —
+upstream fixed them the same morning; the local checkout was behind and the *installed*
+brood 0.19.1 made `bench/smoke.py` on PATH read green over dead rows (pass `--brood`
+explicitly). A crashed row presented as an ab-bench "timeout"; ab-bench's warmup now
+keeps stderr and says crash vs hang (sabotage-verified).
+
+**Addendum 2026-08-31 (later) — KI-89: the resurrection race is FIXED + guarded; a
+residual orphan mechanism is WATCHING, and its only exhibiting binary was destroyed.**
+The core find: `registry_update` (KI-22's locked RMW) racing `restore_globals`' unlocked
+table swap resurrected the whole pre-restore registry, stickily. Fixed by taking
+`registry_lock` around the swap; guarded by `tests/registry_isolate_race_test.blsp`
+(1994/2000 cycles resurrected pre-fix → 0/2000). A pre-fix worktree failed 3/3 full
+`nest test` runs on the entry's own sightings. **But the first post-fix build also
+failed 3/3 orphan-shaped** (the suspected residual: a straggler's ctor `def` wiped by a
+restore while its locked register lands after — id kept, ctor gone), and the next
+incremental build went **15/15 green** traced and untraced — the KI-88 layout-keyed
+shape, and the failing binary was overwritten before being preserved (KI-88's lesson,
+repeated; recorded in the entry). Tooling left armed: **`BROOD_REG_TRACE=1`** traces
+every `*record-ids*` write with a 4-hop ancestry chain plus every restore — trace LEAN,
+the all-registry version suppresses the race via the stderr lock. **Also learned: the
+entry's two-file repro never exercised `%isolate`** — explicit-file `nest test` takes
+the load-all single-file path (by design; noted as an open design question). **New watch
+item KI-98:** `process_limit_test.blsp:114` timed out 3 times across today's full runs
+(missed-wake shape, full-suite context only, unattributed, quiet in the last 15).
+
 **As of 2026-08-31 (the stability/perf audit session).** A source-level audit of the
 scheduler, heap/GC, VM hot path and dist/net/io found four silent correctness bugs — all
 **fixed this session with sabotage-verified guards** (KI-91 receive's stale-index
@@ -12,8 +71,8 @@ consume: silent message loss + duplicate delivery; KI-92 an L1 `nil` message ali
 free msg-roots slot; KI-93 the net reactor's silent death; KI-94 subprocesses orphaned on
 owner death — note that last one is a deliberate semantic change: a child now dies with
 its owning process). **Open items it filed:** KI-95 (promote duplicates DAG-shaped data —
-exponential, unmeasured), KI-96 (duplicate remote DOWN), KI-97 (the consolidated
-hardening list). The unmeasured perf candidates are `compute-frontier.md` **§7.8** — the
+exponential, unmeasured; **fixed later the same day**, see the addendum above), KI-96
+(duplicate remote DOWN), KI-97 (the consolidated hardening list). The unmeasured perf candidates are `compute-frontier.md` **§7.8** — the
 top one is the i64 eligibility verdict recomputed per activation behind a global Mutex;
 every §7.8 item owes the full A/B protocol before shipping. Verified on the combined
 tree: suite 5351/5351, the scheduler/mailbox/GC binaries, GC_STRESS+VERIFY over the

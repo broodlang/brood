@@ -299,10 +299,31 @@ for r in "${rows[@]}"; do
   # Footgun 4: discard one run per binary so the build-id-keyed boot cache is warm.
   # The warmup doubles as the hang guard: it is untimed, so `timeout` here costs
   # nothing, and a row that blocks forever fails loudly instead of pinning a core.
-  timeout "$timeout_s" env ${ab_tier:+BROOD_TIER=$ab_tier} taskset -c "$cpus" "$base_bin" "$prog" >/dev/null 2>&1 \
-    || die "row '$r' did not finish within ${timeout_s}s on the baseline — needs harness scaffolding?"
-  timeout "$timeout_s" env ${ab_tier:+BROOD_TIER=$ab_tier} taskset -c "$cpus" "$new_bin"  "$prog" >/dev/null 2>&1 \
-    || die "row '$r' did not finish within ${timeout_s}s on the working tree" 
+  # Footgun 7: keep the warmup's stderr and say WHICH failure this is. A stale row
+  # whose processes crash (a bench program calling a renamed/reordered std name)
+  # wedges its collector and reads exactly like a scheduler hang — the crash report
+  # was going to /dev/null and a 2026-08-31 session debugged the "timeout" for an
+  # hour before finding `empty?: expected collection, got fn` behind it.
+  warmup() { # $1=binary $2=label
+    local err rc=0
+    err="$(mktemp)"
+    # `|| rc=$?` keeps a failure out of errexit's reach so we can name it below.
+    timeout "$timeout_s" env ${ab_tier:+BROOD_TIER=$ab_tier} taskset -c "$cpus" "$1" "$prog" >/dev/null 2>"$err" || rc=$?
+    if [ $rc -ne 0 ]; then
+      if [ -s "$err" ]; then
+        echo "ab-bench: row '$r' failed on $2 (exit $rc$([ $rc -eq 124 ] && echo ", timeout ${timeout_s}s")) — its stderr:" >&2
+        tail -n 8 "$err" | sed 's/^/  /' >&2
+      fi
+      rm -f "$err"
+      if [ $rc -eq 124 ]; then
+        die "row '$r' did not finish within ${timeout_s}s on $2 — a hang, or crashed processes wedging a collector (see stderr above)"
+      fi
+      die "row '$r' exited $rc on $2 — the program is broken, not slow (see stderr above)"
+    fi
+    rm -f "$err"
+  }
+  warmup "$base_bin" "the baseline"
+  warmup "$new_bin" "the working tree"
   b=$(best_of "$base_bin" "$prog" "$cpus")
   # The floor pass runs the SAME binary again, between the two sides, so it samples the
   # same thermal/cache window the comparison does.

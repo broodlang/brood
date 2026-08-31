@@ -212,11 +212,15 @@ independent symbol interners. (In-process messages keep the interned id.)
   - **Distributed pid monitors** — `(monitor remote-pid)` ships a
     `Frame::Monitor` to the peer, which routes through the same shared
     `process::add_monitor` core the local monitor uses (one `Watcher` enum,
-    one `MONITORS` table). On the watched process's death the peer fires
-    `[:down …]` as an ordinary `send` to the remote watcher. Net-split fires
-    `[:down mref pid :noconnection]` via the sender-side `PENDING_REMOTE`
-    table and `handle_node_down`. See `cross_node_pid_monitor_fires_down` and
-    `remote_monitor_fires_noconnection_on_node_down`.
+    one `MONITORS` table). On the watched process's death the peer ships the
+    DOWN as a dedicated `Frame::Down`; the watcher's node retires its
+    sender-side `PENDING_REMOTE` entry, then delivers `[:down …]` — the
+    dedicated frame is what gives it that hook, so a completed monitor can't
+    leak its entry or replay the mref on a later node-down (KI-96). Net-split
+    fires `[:down mref pid :noconnection]` via `PENDING_REMOTE` and
+    `handle_node_down`. See `cross_node_pid_monitor_fires_down`,
+    `remote_monitor_fires_noconnection_on_node_down`, and
+    `a_delivered_remote_monitor_does_not_fire_again_on_node_down`.
   - **Distributed links** (ADR-067) — the symmetric cousin of monitors.
     `(link remote-pid)` ships a `Frame::Link`; each node keeps its half in
     `links::REMOTE_LINKS` (`local_pid → (node, remote_pid)`). A linked process's
