@@ -232,6 +232,10 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
     use std::sync::mpsc::{sync_channel, TryRecvError};
     let (ptx, prx) = sync_channel::<JitWorkItem>(256);
     let (dtx, drx) = sync_channel::<JitWorkItem>(256);
+    // The bg thread's own handle to the deferred queue, for the §7.1 hot-admission
+    // re-enqueue (a gate-refused arm handed straight to the hot stage). It must not
+    // touch `JIT_COMPILER` — the thread starts inside this LazyLock's initializer.
+    let dtx_bg = dtx.clone();
     std::thread::Builder::new()
         .name("brood-jit".into())
         .spawn(move || {
@@ -382,7 +386,36 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                     }
                     Ok(None) => {
                         trace_lower_declined(arm, inlined);
-                        slot.store(crate::jit::BAILED, Release)
+                        slot.store(crate::jit::BAILED, Release);
+                        // §7.1 hot admission (`BROOD_XADMIT=1`, experiment): an arm the
+                        // profitability gate refused keeps running on the VM, but is
+                        // handed to the HOT stage — the deferred queue, gate skipped,
+                        // frame-size capped — where both of step 2's measured costs are
+                        // absent (the compile is deferred; the calls emit the inline
+                        // blob). Its pointer stages in `inline_code`; `jit_tier`'s
+                        // BAILED path installs it. `inline_queued` is the once latch;
+                        // `dtx_bg` (not `JIT_COMPILER.deferred`) because this thread
+                        // starts inside that LazyLock's initializer.
+                        if !inlined
+                            && xadmit_enabled()
+                            && arm.inline_name.is_none()
+                            && arm.leaf.is_none()
+                            && arm.dbg_name.is_some()
+                            && arm.nslots <= XCALL_RELOWER_MAX_NSLOTS
+                            && crate::eval::compile::jit_plan::codegen::plan_general_lowering(
+                                arm, slot_tags,
+                            )
+                            .is_err()
+                            && !arm
+                                .inline_queued
+                                .swap(true, std::sync::atomic::Ordering::AcqRel)
+                            && dtx_bg
+                                .try_send((arm.clone(), slot_tags.to_vec(), rt_tag))
+                                .is_err()
+                        {
+                            arm.inline_queued
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     Err(_) => {
                         // The panic that poisons the compiler for the rest of the process.
@@ -864,6 +897,19 @@ pub(crate) fn jit_run_fast_link(
         callee_env,
         out,
     )
+}
+
+/// §7.5 hot re-lowering: the largest frame the inline-blob re-compile is worth — see
+/// the profitability comment at the `xcall_relower` gate in `jit_tier`.
+#[cfg(feature = "jit")]
+const XCALL_RELOWER_MAX_NSLOTS: usize = 8;
+
+/// §7.1 hot admission (`BROOD_XADMIT=1`, experiment): admit profitability-gate-refused
+/// named defns at the HOT stage — deferred compile, inline call blob, frame-size cap.
+#[cfg(feature = "jit")]
+fn xadmit_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_XADMIT").is_some_and(|v| v == "1"))
 }
 
 /// The suspend-host latch resolution for a fast link whose callee dirty-blocked its
@@ -2142,7 +2188,32 @@ pub(crate) fn jit_tier_in_frame(
     }
     let mut code = arm.jit_code.load(Acquire);
     if code == crate::jit::BAILED {
-        return None; // out of subset — run the VM
+        // §7.1 hot admission: a gate-refused arm's deferred hot compile may have landed
+        // (staged in `inline_code` by the bg thread) — install it, the same plain swap
+        // the relower uses (same chunk/frame/checkpoint as the small body would have
+        // had). The next activation runs it through the normal installed path, whose
+        // epoch guard covers a `def` since the compile.
+        if xadmit_enabled() {
+            let ic = arm.inline_code.load(Acquire);
+            if !ic.is_null() && ic != crate::jit::BAILED && ic != crate::jit::QUEUED {
+                arm.inline_code.store(std::ptr::null_mut(), Release);
+                arm.jit_code.store(ic, Release);
+                if let Some(sym) = arm.dbg_name {
+                    heap.invalidate_fast_links_for(sym);
+                }
+                {
+                    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+                        let name = arm
+                            .dbg_name
+                            .map(crate::core::value::symbol_name_ref)
+                            .unwrap_or("<closure>");
+                        eprintln!("[jit-ir] arm={name} xadmit-installed nslots={}", arm.nslots);
+                    }
+                }
+            }
+        }
+        return None; // out of subset (or awaiting the hot install) — run the VM
     }
     // Shared-JIT install (the spawn lever): before this process spends THRESHOLD
     // interpreted calls + a background compile on its OWN copy of a RUNTIME/PRELUDE
@@ -2312,6 +2383,16 @@ pub(crate) fn jit_tier_in_frame(
     let xcall_relower = arm.inline_name.is_none()
         && arm.leaf.is_none()
         && arm.dbg_name.is_some()
+        // Profitability, measured 2026-08-30: the inline blob adds ~90 CLIF lines and
+        // several blocks PER CALL SITE, and every value live across a call is pressured
+        // through that extra CFG — so an arm carrying lots of live state pays in its own
+        // loop code what the calls save. `nslots` is that live state's size. bintree's
+        // winners (`check-node` 3, `make` 4: −15% wall) sit far below nbody's loser
+        // (`advance-body`, 20 slots, 8 call sites, float-unboxed: relowered body +32%
+        // CLIF / +36% blocks, row +8%). The cut is between 5 and 20; 8 keeps every
+        // measured winner (`run` at 5 included) and excludes the measured loser with
+        // margin on both sides.
+        && arm.nslots <= XCALL_RELOWER_MAX_NSLOTS
         && super::xcall_relower_enabled()
         && *arm.xcall_wanted.get_or_init(|| {
             arm.chunk.as_ref().is_some_and(|c| {

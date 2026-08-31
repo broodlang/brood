@@ -8346,3 +8346,39 @@ documents this exact failure shape ("a wall-clock budget that only ever fitted o
 the two engines"); RootsBuf, the only code in the flagged merge, was exonerated by a
 tree-walker instruction A/B (−1.6%). Cap raised to 900s (~4.5× the measured figure),
 note appended where the next reader will trip over it.
+
+### 2026-08-30, thirteenth — the relower gets a frame-size profitability gate (nbody was a victim the sweep missed)
+
+The brood-benchmarks refresh caught what the seven-row sweep did not: **nbody +8%** under
+the hot re-lowering. `advance-body` — 20 slots, 8 non-tail call sites, float-unboxed —
+relowered into a body +32% CLIF / +36% blocks, and everything live across those calls paid
+the extra CFG in its own loop code. The winners (`check-node` 3 slots, `make` 4) carry
+almost no live state across their calls; the loser carries 20 slots of it. So the gate is
+the frame size: `nslots <= 8` (`XCALL_RELOWER_MAX_NSLOTS`), which keeps every measured
+winner (`run` at 5 included) and excludes the measured loser with margin. Re-measured,
+same binary, warmed: nbody +0.2% (was +7.9%), bintree −15.3% (kept), matmul/regex flat.
+The lesson repeats §7.1's: emitted-code size is a real cost axis, and every new emission
+needs a profitability bound measured on both a winner and a loser — the sweep that
+validates it must include a float-heavy big-frame row.
+
+### 2026-08-31 — §7.1 CLOSES: hot admission loses too, and the gate's cost model is now triangulated
+
+The experiment the ranked plan called for: admit `call-mediated-boxed` gate refusals at
+the HOT stage — deferred compile (no compile constant), the inline call blob (no
+trampoline), the relower's frame cap — behind `BROOD_XADMIT=1`. Mechanics: a gate-refused
+arm stays BAILED on the VM, the bg thread re-enqueues it to the deferred queue
+(`inline_queued` latch, `dtx_bg` — the thread cannot touch `JIT_COMPILER` from inside its
+own LazyLock initializer), `jit_lower_arm_hot` drops the gate (the subset pre-bails
+remain), and `jit_tier`'s BAILED path installs the staged pointer by plain swap.
+
+Measured, same binary, warmed, instructions/cycles: **nqueens +5.6%/+7.6%, pipeline
++7.4%/+7.6%** — the two rows the admission was supposed to WIN. `reduce` (the boxed fold
+driver) natively compiled is slower than `reduce` interpreted, even calling through the
+inline blob. That is the third independent test the gate's cost model has survived
+(step 2's full-blob admission, the hot re-lowering of gate-passing arms — a win, and now
+hot admission of gate-refused arms — a loss), so §7.1 comes OFF the standing list with a
+conclusion instead of a deferral: **a call-dominated boxed arm belongs on the VM until
+calls themselves get cheaper.** The next lever for this class is not admission or partial
+lowering, it is §7.5 increment 4 — the X-register convention — and `BROOD_XADMIT=1` is
+kept as the one-env-var re-test for exactly that moment. Suite 1300/1300 with the flag
+armed; correctness of admitted arms verified on nqueens (checksum match).
