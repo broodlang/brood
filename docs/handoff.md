@@ -5,18 +5,24 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Addendum 2026-08-31 (later) — KI-89 is FIXED, and its minimal repro was a red herring.**
-The full-suite orphaned-record-id sightings were `registry_update` (KI-22's locked RMW)
-racing `restore_globals`' unlocked table swap: a straggler's RMW reading before the swap
-and writing after it resurrected the whole pre-restore registry, stickily. Fixed by taking
+**Addendum 2026-08-31 (later) — KI-89: the resurrection race is FIXED + guarded; a
+residual orphan mechanism is WATCHING, and its only exhibiting binary was destroyed.**
+The core find: `registry_update` (KI-22's locked RMW) racing `restore_globals`' unlocked
+table swap resurrected the whole pre-restore registry, stickily. Fixed by taking
 `registry_lock` around the swap; guarded by `tests/registry_isolate_race_test.blsp`
-(1994/2000 cycles resurrected pre-fix → 0), and a pre-fix worktree failed 3/3 full
-`nest test` runs on the entry's own sightings vs 0 orphan failures fixed. **The entry's
-recorded two-file repro never exercised `%isolate` at all** — explicit-file `nest test`
-takes the load-all single-file path (by design; left unchanged, noted in the entry as an
-open design question). **New watch item KI-98:** `process_limit_test.blsp:114` timed out
-2-in-5 full runs (missed-wake shape, full-suite context only, cause unattributed — arm
-`BROOD_SCHED_DBG=1` on recurrence).
+(1994/2000 cycles resurrected pre-fix → 0/2000). A pre-fix worktree failed 3/3 full
+`nest test` runs on the entry's own sightings. **But the first post-fix build also
+failed 3/3 orphan-shaped** (the suspected residual: a straggler's ctor `def` wiped by a
+restore while its locked register lands after — id kept, ctor gone), and the next
+incremental build went **15/15 green** traced and untraced — the KI-88 layout-keyed
+shape, and the failing binary was overwritten before being preserved (KI-88's lesson,
+repeated; recorded in the entry). Tooling left armed: **`BROOD_REG_TRACE=1`** traces
+every `*record-ids*` write with a 4-hop ancestry chain plus every restore — trace LEAN,
+the all-registry version suppresses the race via the stderr lock. **Also learned: the
+entry's two-file repro never exercised `%isolate`** — explicit-file `nest test` takes
+the load-all single-file path (by design; noted as an open design question). **New watch
+item KI-98:** `process_limit_test.blsp:114` timed out 3 times across today's full runs
+(missed-wake shape, full-suite context only, unattributed, quiet in the last 15).
 
 **As of 2026-08-31 (the stability/perf audit session).** A source-level audit of the
 scheduler, heap/GC, VM hot path and dist/net/io found four silent correctness bugs — all

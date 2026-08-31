@@ -80,6 +80,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "name every closure entering the append-only RUNTIME region; per-operation promotion is a leak",
     ),
     f(
+        "BROOD_REG_TRACE",
+        ATTRIBUTION,
+        "trace *record-ids* registry writes (with the writer's ancestry chain) and every globals restore — the KI-89 orphan-attribution tool; trace LEAN, heavy tracing suppresses the race",
+    ),
+    f(
         "BROOD_L1_STATS",
         ATTRIBUTION,
         "hit rate of the L1 local-send fast path — check it applied before crediting a message result",
