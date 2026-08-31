@@ -68,7 +68,11 @@ Before starting new work:
   128 MB `PROT_NONE`) plus the worker stacks (28 × 16 MB) — so a 4 GB cap fails the first
   test that creates a `table` (its 64 MB virtual region is merely the mapping that lands on
   the wall; measured 2026-08-30 with `strace -e mmap`), and that failure is a Brood error
-  naming the cap, not a runaway. 16 GB still catches the KI-87 class (19 GB processes). A *diverging* process is indistinguishable from a
+  naming the cap, not a runaway. 16 GB still catches the KI-87 class (19 GB processes).
+  **Known exception (2026-08-31):** `tests/wasm_sandbox_limits_test.blsp` fails under the
+  16 GB cap even run alone — wasmtime's per-memory address-space reservations land on the
+  wall — so a capped suite run reporting exactly that one failure is the cap, not a
+  regression; judge that file uncapped. A *diverging* process is indistinguishable from a
   heavy one until it has eaten the machine: KI-87 (a checker cycle guard that un-guarded) put
   three test processes at 19 GB each and a `nest run` at 54 GB, crashing the box three
   sessions running; under the cap the same runs die in ten seconds with the panic site named
