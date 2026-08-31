@@ -8519,3 +8519,34 @@ because our sends and the sync query share one FIFO to the process, so the snaps
 always contains every in-flight edit of ours. Regression case in
 `tests/buffer_client_test.blsp`; bedit's original rapid-fire test then passed 15/15
 (3/10 red before).
+
+## 2026-08-31 (later) — KI-89 root-caused and fixed: the registry resurrected across the isolate restore
+
+Two findings, one fix. **First, the entry's own minimal repro was measuring the wrong
+mechanism:** `nest test FILE...` with explicit files takes the single-file path (load every
+named file into ONE image, `run-loaded-tests`) — no per-file `%isolate` anywhere — so
+`record_test.blsp + std_check_test.blsp` failing was that path behaving as built, and all
+five ruled-out hypotheses had been tested against a mechanism the repro never touched. A
+probe file run the same way showed `usd` fully bound: nothing had rolled back because
+nothing restores on that path.
+
+**Second, the real leak: `registry_update` racing `restore_globals`.** The KI-22 registrar
+holds `registry_lock` across its read-modify-write; the isolate restore's wholesale table
+swap did not take it. A straggler's RMW that reads before the swap and writes after it
+reinstates a map computed from the PRE-restore table — resurrecting every accumulated
+`*record-ids*`/`*impls*`/`*features*` entry while the bindings beside them stay rolled
+back (the orphaned-id asymmetry), and one hit is sticky (the resurrected entries ride
+every later snapshot). Reproduced deterministically: a registering bystander + 2000
+isolate cycles = **1994 resurrections pre-fix, 0 post-fix**
+(`tests/registry_isolate_race_test.blsp`, with a liveness floor after its first draft
+died silently on a renamed builtin and "passed"). Fix: `restore_globals` takes
+`registry_lock` around the swap (lock order registry → globals, matching every RMW).
+
+Suite-scale control: a pre-fix worktree failed **3/3** full `nest test` runs on KI-89's
+own sightings (`ability_test:471` orphans ×2, `stdimage_test:60` ×1 — near-deterministic
+on today's tree); the fixed tree ran **0 orphan failures** across four full runs
+(5356/5356 twice; the other runs' failures were a stale-binary artifact — `-p cli`
+rebuilds don't relink `nest`, the CLAUDE.md trap, hit again — and KI-98). **Filed
+KI-98** (⚠️ watching): `process_limit_test.blsp:114` timed out twice in five full runs —
+a missed-wake shape, full-suite context only, not established as related to anything
+that changed today.

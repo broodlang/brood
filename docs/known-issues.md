@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full `nest test` shows it (~2/5). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe) |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
 | KI-93 | **the net reactor thread's death was SILENT** — no `catch_unwind`, no restart, and `Reactor::cmd` discarded the channel error, so after any reactor panic or fatal `poll` error every `tcp-send`/`tcp-listen` kept returning `Ok(())` into a dead channel, no `[:tcp-closed]` was ever emitted again, and every socket-owning process parked in `receive` forever with zero diagnostics | ✅ **FIXED 2026-08-31** — the death is loud and terminal: a `catch_unwind` wrapper runs `reactor_died` (a `REACTOR_DOWN` flag, one stderr line, and a registry sweep failing every socket at its owner with `[:tcp-error]` + `[:tcp-closed]`); `connect`/`listen`/`tls-listen`/`tls-request`/`send` gate on the flag and the creators re-check after insert. Restart is deliberately NOT attempted — the `Poll`, fd registrations and TLS state died with the thread. Guard `crates/lisp/tests/net_reactor_death.rs`, sabotage-verified |
@@ -210,6 +211,32 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-98 — `process_limit_test.blsp:114` timed out under a full `nest test`, twice in five runs ⚠️ WATCHING 2026-08-31
+
+**Symptom.** In a full `nest test`, "proc/flag :max-mailbox › the handler can drain and
+clear the bound — the process recovers" fails with `code = :timeout` after its 30 s
+`after`: the flooded worker (parked on `(:never nil)` with `:max-mailbox 8`, flooded
+with 32) never sent `[:recovered …]`. Two sightings in five full runs on 2026-08-31
+(one on a stale pre-KI-89-fix binary, one on the fixed tree); the sibling cases in the
+same file stayed green.
+
+**What it needs to fail.** The worker's breach flag arms at delivery 9
+(`note_mailbox_bound`); ANY subsequent wake re-enters `receive_match`, whose entry
+check raises the catchable E0046 (`mailbox.rs`, the ADR-307 probe). `:timeout` means
+the worker never re-entered the scan for 30 s with 24+ undelivered messages queued —
+a missed-wake shape (the KI-88 family), or an E0046/drain path that hung.
+
+**Not reproducible on demand:** 16 solo runs of the file green; 10 runs under 8-way
+CPU load green; only the full-suite context shows it. Sighted on a tree carrying the
+KI-91/92 mailbox fixes — those touch the receive scan/consume and the msg-roots slot
+table, not delivery or wake, and a 3-run pre-fix control (worktree at `e569ca4f`)
+didn't fire it — but three runs is not a base rate; neither direction is established.
+
+**If it recurs:** the failing run's log already names the case; the missing fact is
+whether the worker EVER re-entered `receive_match` after the breach armed. Arm
+`BROOD_SCHED_DBG=1` (per-pid run/park/end lines) and keep the whole log — the
+question is one process's lifecycle between its 9th delivery and the timeout.
 
 ## KI-91 — `receive`'s consume path removed the matched message by a stale scan index ✅ FIXED 2026-08-31
 
@@ -6288,7 +6315,50 @@ nothing did. Recorded because this repo's own rule is that a failure seen once i
 otherwise — and because a single sighting on the one commit that touched the preempt path is
 precisely the coincidence that deserves writing down rather than explaining away.
 
-## KI-89 — a test file's ability impls leak into `std/`'s checker view ⚠️ WATCHING 2026-08-30
+## KI-89 — a test file's ability impls leak into `std/`'s checker view ✅ FIXED 2026-08-31 (a registry RMW racing the isolate restore resurrected the registry — and the "minimal repro" was measuring a different mechanism)
+
+> **Resolution 2026-08-31, two findings.**
+>
+> **1. The recorded minimal repro never touched `%isolate`.** `nest test FILE...` with
+> explicit files takes the **single-file path** in `crates/nest/src/main.rs`: it
+> `eval_file`s every named file into ONE image and runs `run-loaded-tests` — no
+> `drain-files-scoped`, no per-file isolate anywhere. So
+> `nest test tests/record_test.blsp tests/std_check_test.blsp` fails **by design of that
+> path**: `usd` is simply still bound (a probe file run the same way sees the
+> constructor bound and zero orphans — nothing was ever rolled back, because nothing
+> ever restores). Every hypothesis this entry ruled out was tested against `%isolate`,
+> which the repro does not exercise; the image/order/`-j1` invariance that seemed
+> mysterious is just this. (Whether the explicit-files path *should* scope per file is
+> a separate design question, deliberately not changed here.)
+>
+> **2. The full-suite orphans were a lost-update race between `registry_update` and
+> `restore_globals` — found by code reading, reproduced deterministically, fixed.**
+> The registry RMW (KI-22's fix) holds `registry_lock` from its read of the registry
+> global to its `env_define`; `restore_globals`' wholesale table swap did **not** take
+> that lock. A bystander process (a straggler the per-file reaper's documented
+> ancestry gap misses) that read the registry *before* a restore's swap and wrote its
+> successor *after* it writes back a map computed from the PRE-restore table —
+> resurrecting **every accumulated registration wholesale** (`*record-ids*`,
+> `*impls*`, `*features*`, …) while the ordinary bindings beside them stay rolled
+> back. That is exactly the observed asymmetry: std record ids registered, their
+> constructors unbound. And one hit is **sticky**: the resurrected entries sit inside
+> every later snapshot, so they never roll back again — which is why orphans from
+> five different modules appeared at once.
+>
+> Reproduced deterministically (`tests/registry_isolate_race_test.blsp`: a spawned
+> registering bystander + 2000 isolate cycles): **1994 of 2000 cycles resurrected**
+> the rolled-back registration on the pre-fix build, **0 of 2000** with the fix. At
+> suite scale: a pre-fix worktree (`e569ca4f`) failed **3 of 3** full `nest test`
+> runs on this entry's own sightings (`ability_test.blsp:471` orphans ×2,
+> `stdimage_test.blsp:60` ×1); the fixed tree ran the same suite with **zero** orphan
+> failures. Fix: `restore_globals` acquires `registry_lock` around the swap (lock
+> order registry → globals, matching every RMW; see the comment at the swap). A
+> racing RMW now either completes before the swap and is wiped — the isolation
+> contract — or starts after and reads the restored table.
+>
+> Guard: `tests/registry_isolate_race_test.blsp`, with a liveness floor on the
+> bystander (its first draft died silently on a renamed builtin and "passed" — the
+> gate-that-cannot-fail lesson, again).
 
 **Symptom.** In a scoped `nest test` run, `std_check_test` ("the standard library carries no
 checker warnings") fails with ~15 warnings about a record defined in **another test file**:
