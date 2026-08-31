@@ -8449,3 +8449,18 @@ solid `CURSOR_FG` rim around the cell, scaled like the bar caret's thickness, so
 cursor cell reads crisply against anything while the glyph under it stays visible.
 (bedit pairs this with split bracket-pair faces: the end at point underlined, the
 partner in the solid block — the block now always means "the other end".)
+
+## 2026-08-31 — the attach seed could clobber a first keystroke (collab)
+
+bedit's collab suite flaked "qZ" for "Zq" — once on a 2-core CI runner, then 3-in-10
+locally once the keys were paced enough to look at. Not a test race: `link-fold`'s
+merge matrix transformed foreign SPLICES over in-flight local edits but handed a
+full-text view (the subscribe seed, closure edits) back as a rebuild unconditionally.
+Seed arrives after the first local keystroke → rebuild rewinds the copy and the
+point, the own-echo after it is rightly a `:noop`, and the next keystroke splices at
+0. Fix in `std/editor/buffer-client.blsp`: a full-text view over a non-empty
+`:pending` is `:resync`, pendings reset — and resync is EXACT here, not merely safe,
+because our sends and the sync query share one FIFO to the process, so the snapshot
+always contains every in-flight edit of ours. Regression case in
+`tests/buffer_client_test.blsp`; bedit's original rapid-fire test then passed 15/15
+(3/10 red before).
