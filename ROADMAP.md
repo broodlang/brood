@@ -76,6 +76,22 @@ Three linked changes, all landed:
   reducer's own `(fn (acc x))` params deliberately did *not* move (that swap fails silently;
   the outer one fails loudly), and `into` stays `(to from)`.
 
+**The surface audit (`std/tool/audit.blsp`, `(audit/report)`)** landed with it: four
+mechanical checks over every public callable — a docstring, a `form → result` example,
+data-first argument order, and a declared signature whose parameter count matches the
+function. Three of the four are at **zero** and gated by `tests/audit_test.blsp`. It found
+`seq/transduce` and `sort-by` still data-last, and two kernel signatures
+(`string/grapheme-at`, `string/substring-graphemes`) that declared `Arity::range(2, 3)` but
+left the third argument undeclarable.
+
+Open, with a number that is honest rather than flattering: **1130 of 1593 public callables
+carry no example.** The figure jumped from 238 when the audit learned to `require` every
+baked-in module first — `reflect/global-names` lists only what is LOADED, so two thirds of
+the surface had been silently unaudited. Docstrings are at 100%. Closing the examples is
+authorship, not a sweep: ~40 names are side-effecting (`file/rm`, `exit`, `system/halt`)
+where an indented example would really run under `doctest`, and the rest need a
+human-meaningful case per function. Do it module-by-module with `doctest` gating each batch.
+
 Ahead, deliberately not started: the `[:ok v]` / `[:error reason]` result convention the `!`
 rename was groundwork for — a structured error map shared by `throw` and the tuple, plus
 `result`/`unwrap`/`unwrap-or`, and **tuple-union exhaustiveness in the checker** (ADR-128

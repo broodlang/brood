@@ -5162,9 +5162,9 @@ fn element_type_flows_through_more_combinators() {
         r#"(+ 1 (first (but-last ["a" "b"])))"#,
         r#"(+ 1 (first (distinct ["a" "b"])))"#,
         r#"(+ 1 (first (seq/dedupe ["a" "b"])))"#,
-        r#"(+ 1 (first (remove (fn (x) false) ["a" "b"])))"#,
-        r#"(+ 1 (first (take-last 1 ["a" "b"])))"#,
-        r#"(+ 1 (first (keep ["a" "b"] (fn (x) x))))"#,
+        r#"(+ 1 (first (seq/remove ["a" "b"] (fn (x) false))))"#,
+        r#"(+ 1 (first (seq/take-last ["a" "b"] 1)))"#,
+        r#"(+ 1 (first (seq/keep ["a" "b"] (fn (x) x))))"#,
         "(string/length (first (range 5)))",
     ] {
         let w = warnings(src);
@@ -6777,7 +6777,7 @@ fn an_open_record_declines_the_exhaustive_sinks() {
 
 #[test]
 fn assoc_widens_the_map_refinement_to_what_it_adds() {
-    // `(assoc m :extra "text")` on a `(map int keyword)` genuinely holds a string at
+    // `(assoc m :extra "text")` on a `(map keyword int)` genuinely holds a string at
     // `:extra`. Carrying `K`/`V` forward unchanged claimed otherwise, so reading the key
     // back gave `nil | int` and flagged correct code — a false positive on the one
     // operation everyone uses to build a map.

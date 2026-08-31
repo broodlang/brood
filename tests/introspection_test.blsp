@@ -342,9 +342,11 @@
       ;; honestly `any`, which a STALE position also yields — hence the literal here)
       (assert= "(-> int)"
         (sig-of "(defn icb-r () (reduce [1 2 3] (fn (a x) (+ a x))))" "icb-r"))
-      ;; keep — `map` then drop nils; its own arm in `infer.rs`
+      ;; seq/keep — `map` then drop nils; its own arm in `infer.rs`. Keyed QUALIFIED,
+      ;; like `seq/interpose`: `keep` lives in `seq` (ADR-227), so an arm matching the
+      ;; bare name never fired at all and the element type was silently lost.
       (assert= "(any -> (or nil (list (or nil number))))"
-        (sig-of "(defn icb-k (xs) (keep xs (fn (x) (string/->number x))))" "icb-k"))))
+        (sig-of "(defn icb-k (xs) (seq/keep xs (fn (x) (string/->number x))))" "icb-k"))))
 
   (test "a declared sig is reported as declared, and wins"
     (let (hit (first (reflect/source-signatures "(sig ixs-d (int -> int))\n(defn ixs-d (x) x)")))

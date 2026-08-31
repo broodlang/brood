@@ -6121,3 +6121,38 @@ by processes the isolate did not create.
 look like a fix. `mono_devirtualize`'s soundness hole is the narrow part worth closing
 independently: it resolves a global and then trusts `*record-ids*` by name, so a stale id
 plus a later same-named non-record would devirtualize wrongly.
+
+## KI-90 — `mono_devirtualize` trusted `*record-ids*` by NAME after resolving a global ✅ FIXED 2026-08-30
+
+**The hole.** `inline::mono_arg_identity` proves a direct-constructor call's identity by
+taking the constructor's resolved global name, keywording it (`(circle 2)` → `:mod/circle`)
+and confirming that keyword is registered in `*record-ids*`. The registry is consulted by
+NAME only — nothing checks that the global still *is* that record's constructor.
+
+So a stale id plus a later, same-named non-record function devirtualizes wrongly: under
+`BROOD_MONO=1` the guard compares the identity and then calls an impl directly, which is a
+silently **wrong impl**, not a slow path (`docs/dispatch-speculation.md` names this exact
+risk). The registry does go stale — see [KI-89](#ki-89), where ids outlived the modules that
+registered them.
+
+**Why it has not bitten.** `BROOD_MONO` is off by default (ADR-182 keeps 100% dynamic
+semantics precisely because a captured impl fn can go stale), and a name being re-bound to a
+non-record between a `defrecord` and a call is rare. It is still the narrow, fixable half of
+KI-89's problem, and it is fixable **without** reproducing KI-89.
+
+**Fixed** in `eval/compile/inline.rs`: the name is now necessary but not sufficient. The
+constructor must still be **bound** — an unbound id is exactly KI-89's orphan shape, and it
+is refused rather than devirtualized — and the registry's recorded name must still be this
+constructor. Either check failing leaves the call on the dynamic path, which is the correct
+conservative answer: the rewrite declines on any uncertainty (ADR-182).
+
+**Guarded by** `crates/cli/tests/mono_differential.rs`
+`a_stale_record_id_is_not_devirtualized_to_whatever_the_name_means_now` — a `defrecord`
+named `shape` is rebound to a plain fn returning a bare map while its id stays registered,
+and `BROOD_MONO=1` must answer byte-identically to the dynamic path. A differential rather
+than a pinned string, so it cannot pass by agreeing with a wrong expectation.
+
+**Residual.** This closes the reachable path (a stale id, or a name rebound to something
+else). It does not make the registry itself self-cleaning — that is KI-89, still open.
+
+**Found by** reading the readers while diagnosing KI-89, not by a failure.
