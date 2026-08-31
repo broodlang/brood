@@ -24,11 +24,11 @@ transformers, and terminals — each transformer adds one green process.
 
   ;; HTTP body line-by-line (with http):
   (let (body-stream (socket-> sock))
-    (for-each io/puts (lines body-stream)))
+    (for-each (lines body-stream) io/puts))
 
   ;; Lazy integer processing:
   (->list
-    (take 5 (map (fn (n) (* n n)) (range 1 100))))
+    (take (map (range 1 100) (fn (n) (* n n))) 5))
   ;; => [1 4 9 16 25]")
 
 ;; ---- protocol helpers -------------------------------------------------------
@@ -190,9 +190,10 @@ Call immediately after accept or connect, before any data has been read."
     ([:tcp-error ^sock msg] (when pending (send pending [:stream-err msg])))
     ;; Consumer requests next chunk
     ([:next r] (cond
-                 (not (= buf "")) (do
-                                    (send r [:stream-val buf])
-                                    (sock-loop sock nil ""))
+                 (not (= buf ""))
+                   (do
+                     (send r [:stream-val buf])
+                     (sock-loop sock nil ""))
                  else (sock-loop sock r "")))
     ;; Graceful cancel
     (:stream-close (tcp/close sock))))
@@ -212,7 +213,7 @@ Call immediately after accept or connect, before any data has been read."
 ;; The nested receive in each is safe: the inner receive fires before the next
 ;; outer [:next] can arrive (the consumer is blocked waiting for our reply).
 
-(defn map (f s)
+(defn map (s f)
   "A stream applying `f` to each element of `s`."
   (spawn (map-loop f s)))
 
@@ -225,7 +226,7 @@ Call immediately after accept or connect, before any data has been read."
         ([:stream-err m] (send r [:stream-err m]))))
     (:stream-close (close up))))
 
-(defn filter (pred s)
+(defn filter (s pred)
   "A stream yielding only elements of `s` for which `(pred element)` is true."
   (spawn (filter-outer pred s)))
 
@@ -244,7 +245,7 @@ Call immediately after accept or connect, before any data has been read."
     (:stream-done (send r :stream-done))
     ([:stream-err m] (send r [:stream-err m]))))
 
-(defn take (n s)
+(defn take (s n)
   "A stream yielding at most the first `n` elements of `s`."
   (spawn (take-loop n s)))
 
@@ -272,7 +273,7 @@ Call immediately after accept or connect, before any data has been read."
         ([:stream-err m] (send r [:stream-err m]))))
     (:stream-close (close up))))
 
-(defn drop (n s)
+(defn drop (s n)
   "A stream skipping the first `n` elements of `s`."
   (spawn (drop-init n s)))
 
@@ -304,12 +305,12 @@ Call immediately after accept or connect, before any data has been read."
     ([:next r] (send r [:stream-err m]))
     (:stream-close nil)))
 
-(defn chunk (n s)
+(defn chunk (s n)
   "A stream of vectors, each holding `n` consecutive elements of `s`.
 The last vector may be shorter if the source isn't a multiple of `n`."
   (when (<= n 0) (error "chunk: n must be > 0"))
   (spawn (chunk-outer n s)))
-(sig chunk (int any -> pid))
+(sig chunk (any int -> pid))
 
 (defn- chunk-outer (n up)
   (receive
@@ -402,7 +403,7 @@ after EOF is emitted as a last line (for streams without a trailing newline)."
   (let (parts (string/split all "\n")
         n (/count parts)
         tail (nth parts (dec n))
-        lines (/map strip-cr (/take (dec n) parts)))
+        lines (/map (/take parts (dec n)) strip-cr))
     (if (empty? lines)
       ;; No newline in the chunk — keep buffering and ask again.
       (lines-fetch up tail () r)
@@ -419,7 +420,7 @@ after EOF is emitted as a last line (for streams without a trailing newline)."
 ;; ---- terminals --------------------------------------------------------------
 ;; These consume the stream in the calling process (no extra spawn).
 
-(defn fold (f init s)
+(defn fold (s init f)
   "Reduce stream `s` with `f` (a `(fn (acc v) → new-acc)`) starting from `init`.
 Raises on a stream error."
   (%fold-loop f init s))
@@ -444,16 +445,16 @@ Raises on a stream error."
   "Collect all elements of `s` into a vector."
   (into [] (->list s)))
 
-(defn for-each (f s)
+(defn for-each (s f)
   "Apply `f` to each element of `s` for side effects. Returns nil."
   (match (next s)
     (:done nil)
-    ([:ok v] (do (f v) (for-each f s)))
+    ([:ok v] (do (f v) (for-each s f)))
     (item (error "for-each: " (second item)))))
 
 (defn count (s)
   "Count the elements in `s`, consuming it."
-  (fold (fn (n _) (+ n 1)) 0 s))
+  (fold s 0 (fn (n _) (+ n 1))))
 
 (defn pipe (src sink)
   "Drain stream `src`, sending each value as `[:stream-data v]` to process `sink`,
@@ -468,9 +469,9 @@ then `:stream-eof` when done (or `[:stream-err msg]` + `:stream-eof` on error)."
 
 (defn ->socket (s sock)
   "Drain stream `s`, writing each chunk to `sock` with `tcp/send`. Returns nil."
-  (for-each (fn (chunk) (tcp/send sock chunk)) s))
+  (for-each s (fn (chunk) (tcp/send sock chunk))))
 
 ;; (restored: this is stream's take-while, not the sequence one)
-(defn take-while (pred s)
+(defn take-while (s pred)
   "A stream yielding elements from `s` while `(pred element)` is true."
   (spawn (take-while-loop pred s)))

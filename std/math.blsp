@@ -130,10 +130,10 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0.
   "True when `self` is the additive identity of its own type — across the whole numeric
 tower, not just the int `0`. A type with no impl RAISES rather than answering.
 
-    (zero? 0)      → true
-    (zero? 0.0)    → true
-    (zero? 0M)     → true
-    (zero? 1/2)    → false"
+    (math/zero? 0)      → true
+    (math/zero? 0.0)    → true
+    (math/zero? 0M)     → true
+    (math/zero? 1/2)    → false"
   (zero? [self] :-> bool))
 (impl Zero :int (zero? [n] (%eq n 0)))
 (impl Zero :float (zero? [n] (%eq n 0.0)))
@@ -190,13 +190,13 @@ tower, not just the int `0`. A type with no impl RAISES rather than answering.
     (math/sum [])       → 0
 
     (math/sum [1 2 3])     → 6"
-  (fold %add 0 xs))
+  (fold xs 0 %add))
 (sig sum (seqable -> number))
 (defn product (xs)
   "The product of the numbers in `xs`.
 
     (math/product [2 3 4])   → 24"
-  (fold %mul 1 xs))
+  (fold xs 1 %mul))
 (sig product (seqable -> number))
 
 ;; Rounding & roots, all Brood over the one Float->Int primitive `floor` (toward

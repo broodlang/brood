@@ -20,8 +20,8 @@
     (assert= (doc greeting) nil)
     (assert= (greeting 'x) "hello"))
   (test "macros carry docstrings too"
-    (defmacro inc! (x) "Add one." `(+ ~x 1))
-    (assert= (doc inc!) "Add one."))
+    (defmacro bump (x) "Add one." `(+ ~x 1))
+    (assert= (doc bump) "Add one."))
   (test "a function with a destructured parameter keeps its docstring"
     (defn add-pair ([x y]) "Sum a 2-vector." (+ x y))
     (assert= (doc add-pair) "Sum a 2-vector.")
@@ -121,7 +121,7 @@
       (is (includes? g 'rand/int))
       (assert= g (reflect/global-names))))
   (test "doc-search finds globals whose docstring mentions a word"
-    (let (names (map first (doc-search "uniformly random")))
+    (let (names (map (doc-search "uniformly random") first))
       (is (includes? names 'seq/shuffle))
       (is (includes? names 'seq/sample))))
   (test "doc-search returns [name doc] pairs with real docstrings"
@@ -134,12 +134,12 @@
   ;; docstring need hold the whole phrase) — the §3.3 fix. Each of these
   ;; returned nil under the old whole-query substring matcher.
   (test "doc-search ranks by multi-term overlap, not whole-phrase containment"
-    (is (includes? (map first (doc-search "remote node distributed")) 'node/connect))
-    (is (includes? (map first (doc-search "remote node distributed")) 'node/start))
-    (is (includes? (map first (doc-search "node up down notification")) 'node/monitor))
-    (is (includes? (map first (doc-search "raw mode single keypress")) 'term/raw-enter)))
+    (is (includes? (map (doc-search "remote node distributed") first) 'node/connect))
+    (is (includes? (map (doc-search "remote node distributed") first) 'node/start))
+    (is (includes? (map (doc-search "node up down notification") first) 'node/monitor))
+    (is (includes? (map (doc-search "raw mode single keypress") first) 'term/raw-enter)))
   (test "doc-search is case-insensitive"
-    (assert= (map first (doc-search "XORSHIFT")) (map first (doc-search "xorshift"))))
+    (assert= (map (doc-search "XORSHIFT") first) (map (doc-search "xorshift") first)))
   (test "doc-search of a blank query is empty"
     (assert= (doc-search "") nil)
     (assert= (doc-search "   ") nil)))
@@ -314,9 +314,39 @@
   ;; A named reducer whose own signature says nothing about its result gets re-typed under
   ;; what `reduce` hands it (call-site specialization) — the same precision an inline fn had.
   (test "a named callback's result flows from what the combinator hands it"
-    (let (sigs (reflect/source-signatures "(defn ixs-step (acc val) (conj acc (string/->number val)))\n(defn ixs-run (xs) (first (reduce ixs-step '() xs)))")
-          run (seq/find (fn (e) (= (:name e) "ixs-run")) sigs))
+    (let (sigs (reflect/source-signatures "(defn ixs-step (acc val) (conj acc (string/->number val)))\n(defn ixs-run (xs) (first (reduce xs '() ixs-step)))")
+          run (seq/find sigs (fn (e) (= (:name e) "ixs-run"))))
       (assert= (:sig run) "(seqable -> (or nil number))")))
+
+  ;; ── ADR-308 guard: the checker's structural reasoning about combinators ──────
+  ;; `infer.rs` reads the collection and the callback out of a `map`/`keep`/`fold`/
+  ;; `reduce` call to type the result. Those positions are hard-coded there, and when
+  ;; they went stale during the data-first move the inference degraded to plain `any`
+  ;; — no error, no warning, just lost precision that one test happened to catch.
+  ;; These pin a KNOWN-PRECISE result per combinator, so the next reorder fails here
+  ;; by name. The companion gate over the curated signatures themselves is
+  ;; `types::check::sigs::convention_tests::curated_combinators_put_the_callback_last`.
+  (test "combinator result inference survives the argument order (ADR-308)"
+    (let (sig-of (fn (src name)
+                   (let (hit (seq/find (reflect/source-signatures src)
+                               (fn (e) (= (:name e) name))))
+                     (if (nil? hit) :no-such-fn (:sig hit)))))
+      ;; map: element type flows through the callback's return
+      (assert= "(seqable -> (or nil (list string)))"
+        (sig-of "(defn icb-m (xs) (map xs (fn (x) (str x))))" "icb-m"))
+      ;; fold: accumulator seeded from init, stepped by the callback
+      (assert= "(seqable -> int)"
+        (sig-of "(defn icb-f (xs) (fold xs 0 (fn (a x) (+ a 1))))" "icb-f"))
+      ;; reduce/2 — no init: the accumulator starts at the collection's first element,
+      ;; so a typed collection is what makes the result provable (an untyped one is
+      ;; honestly `any`, which a STALE position also yields — hence the literal here)
+      (assert= "(-> int)"
+        (sig-of "(defn icb-r () (reduce [1 2 3] (fn (a x) (+ a x))))" "icb-r"))
+      ;; seq/keep — `map` then drop nils; its own arm in `infer.rs`. Keyed QUALIFIED,
+      ;; like `seq/interpose`: `keep` lives in `seq` (ADR-227), so an arm matching the
+      ;; bare name never fired at all and the element type was silently lost.
+      (assert= "(any -> (or nil (list (or nil number))))"
+        (sig-of "(defn icb-k (xs) (seq/keep xs (fn (x) (string/->number x))))" "icb-k"))))
 
   (test "a declared sig is reported as declared, and wins"
     (let (hit (first (reflect/source-signatures "(sig ixs-d (int -> int))\n(defn ixs-d (x) x)")))
@@ -324,7 +354,7 @@
       (assert= (:declared? hit) true)))
 
   (test "every definition in the text, in order"
-    (assert= (map :name (reflect/source-signatures "(defn ixs-a (n) n)\n(defn ixs-b (n) n)"))
+    (assert= (map (reflect/source-signatures "(defn ixs-a (n) n)\n(defn ixs-b (n) n)") :name)
       (list "ixs-a" "ixs-b")))
 
   (test "text that defines nothing has no signatures"
@@ -386,7 +416,7 @@
   (test "returns a vector of keywords"
     (let (fs (system/features))
       (is (vector? fs))
-      (assert= (count (filter (fn (f) (not (keyword? f))) fs)) 0)))
+      (assert= (count (filter fs (fn (f) (not (keyword? f))))) 0)))
 
   (test "the jit is on in a default build" (is (includes? (system/features) :jit)))
 

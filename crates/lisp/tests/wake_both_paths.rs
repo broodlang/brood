@@ -33,8 +33,8 @@ fn racing_requirers_are_all_released_by_the_loader() {
         .eval_str(
             "(def root (self))\
              (dotimes (_ 32) (spawn (send root [:r (string/blank? \"\")])))\
-             (let (got (reduce (fn (a _) (receive ([:r v] (cons v a)))) (list) (range 32)))\
-               [(count got) (count (filter (fn (x) (= x true)) got))\
+             (let (got (reduce (range 32) (list) (fn (a _) (receive ([:r v] (cons v a))))))\
+               [(count got) (count (filter got (fn (x) (= x true))))\
                 (%registry-member? '*features* \"string\")])",
         )
         .expect("32 processes racing the first call into `string`");
@@ -144,8 +144,8 @@ fn a_failed_load_does_not_report_success_to_racing_requirers() {
              (dotimes (_ 8)\
                (spawn (send root [:r (try (do (require-one \"zzz-no-such-module\") :ok)\
                                        (catch _ :err))])))\
-             (let (got (reduce (fn (a _) (receive ([:r v] (cons v a)))) (list) (range 8)))\
-               [(count got) (count (filter (fn (x) (= x :err)) got))])",
+             (let (got (reduce (range 8) (list) (fn (a _) (receive ([:r v] (cons v a))))))\
+               [(count got) (count (filter got (fn (x) (= x :err))))])",
         )
         .expect("8 processes racing a require of a module that does not exist");
     assert_eq!(
@@ -167,7 +167,7 @@ fn a_receive_nested_in_a_native_hof_is_woken() {
         .eval_str(
             "(def root (self))\
              (dotimes (_ 24) (spawn (send root [:r 7])))\
-             (count (reduce (fn (acc _) (receive ([:r v] (cons v acc)))) (list) (range 24)))",
+             (count (reduce (range 24) (list) (fn (acc _) (receive ([:r v] (cons v acc))))))",
         )
         .expect("racing 24 senders into a native-nested receive");
     assert_eq!(
@@ -188,8 +188,8 @@ fn repeated_parks_in_a_native_hof_are_all_woken() {
         .eval_str(
             "(def root (self))\
              (dotimes (_ 40) (spawn (send root [:r 1])))\
-             (count (reduce (fn (acc _) (try (receive ([:r v] (cons v acc))) (catch _ acc)))\
-                      (list) (range 40)))",
+             (count (reduce (range 40) (list)\
+                      (fn (acc _) (try (receive ([:r v] (cons v acc))) (catch _ acc)))))",
         )
         .expect("40 sends into a try-wrapped native-nested receive");
     assert_eq!(
@@ -209,8 +209,8 @@ fn exit_reaches_a_receiver_blocked_in_a_native_hof() {
         .eval_str(
             "(def root (self))\
              ;; the child blocks in a native-nested receive that nothing ever sends to
-             (def victim (spawn (reduce (fn (acc _) (receive ([:never v] (cons v acc))))\
-                                  (list) (range 1))))\
+             (def victim (spawn (reduce (range 1) (list)\
+                                  (fn (acc _) (receive ([:never v] (cons v acc)))))))\
              (sleep 50)\
              (exit victim :kill)\
              (defn settle (n)\

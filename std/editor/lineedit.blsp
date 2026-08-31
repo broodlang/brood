@@ -374,7 +374,7 @@ can restore it, and selecting the newest match (empty query → newest entry)."
   "Sorted global names beginning with `pfx` — the default Tab-completion source.
 Reads the live image (`reflect/global-names`), so globals + macros (defn/when/cond/…) are
 all in (and a new project's own globals, since it's the live runtime)."
-  (sort (filter (fn (s) (string/starts-with? s pfx)) (map str (reflect/global-names)))))
+  (sort (filter (map (reflect/global-names) str) (fn (s) (string/starts-with? s pfx)))))
 
 ;; The completion source: a `(fn pfx -> sorted-candidate-strings)`. Defaults to the
 ;; live globals; a project that wants to complete its *own* vocabulary (buffer
@@ -397,7 +397,7 @@ all in (and a new project's own globals, since it's the live runtime)."
   unlike `partition`, which drops it. A listing must not silently lose its last row."
     (if (empty? items)
       '()
-      (cons (take n items) (lineedit-chunk n (drop n items))))))
+      (cons (take items n) (lineedit-chunk n (drop items n))))))
 
 (defn- lineedit-widest (strs acc)
   "The length of the longest string in `strs`, or `acc` if none is longer."
@@ -418,11 +418,10 @@ would desync the `[:up n]` cursor restore)."
         total (count cands)
         shown (math/min total (* ncols *lineedit-completion-max-rows*))
         more (- total shown)
-        rows (map (fn (row)
-                    (let (line (string/trimr (apply str
-                                               (map (fn (c) (string/pad-right c colw)) row))))
-                      (if (> (string/length line) room) (string/substring line 0 room) line)))
-               (lineedit-chunk ncols (take shown cands))))
+        rows (map (lineedit-chunk ncols (take cands shown))
+               (fn (row)
+                 (let (line (string/trimr (apply str (map row (fn (c) (string/pad-right c colw))))))
+                   (if (> (string/length line) room) (string/substring line 0 room) line)))))
     (if (> more 0) (append rows (list (str "… +" more " more"))) rows)))
 (sig lineedit-completion-rows ((list string) int -> list))
 
@@ -437,8 +436,7 @@ reflowed (`:width` set)."
 
 (defn- lineedit-completion-ops (rows)
   "Render ops for listing `rows`: each row on its own new line, in the dim hint face."
-  (fold (fn (acc row) (append acc (list [:nl] [:print row lineedit-face-hint])))
-    '() rows))
+  (fold rows '() (fn (acc row) (append acc (list [:nl] [:print row lineedit-face-hint])))))
 
 (defn- lineedit-apply-completion (state sstart pfx cands)
   "Pure: replace the symbol prefix `[sstart, point)` with the completion of `pfx`
@@ -460,9 +458,10 @@ Any other key clears the listing (`lineedit-handle`)."
       :text (str (string/substring text 0 sstart) ins (string/substring text p n))
       :point (+ sstart (string/length ins))
       :hist-idx -1
-      :completions (if (and (= ins pfx) (not (empty? cands)) (not (empty? (rest cands))))
-                     cands
-                     nil))))
+      :completions
+        (if (and (= ins pfx) (not (empty? cands)) (not (empty? (rest cands))))
+          cands
+          nil))))
 
 (defn- lineedit-complete-impl (state)
   "Tab: complete the symbol under point against `*lineedit-candidates*` (the live
@@ -584,7 +583,8 @@ completes it: mid-typing, `(defn f (x` came back as `(defn f (x ) )`, silently c
 brackets the user had not closed yet. Comparing the parsed forms rejects that (and any
 future rewrite that changes structure) while correctly ignoring comment and whitespace
 changes, which is exactly the difference a formatter is allowed to make."
-  (try (= (reflect/read-all a) (reflect/read-all b)) (catch _ false)))
+  ;; check-allow :discarded-catch — a parse failure on half-typed input is the expected answer (not equivalent / nothing to format / no hint)
+  (check-allow :discarded-catch (try (= (reflect/read-all a) (reflect/read-all b)) (catch _ false))))
 
 (defn lineedit-reformat (state _)
   "M-q: reformat the whole form in place with `std/format.blsp`, leaving point at the
@@ -595,11 +595,13 @@ exactly as typed. Reformatting must never eat what you typed.
 `format` is required lazily: the editor shouldn't drag the formatter into every REPL
 boot (or into a lean bundle) for a key most sessions never press."
   (let (text (get state :text)
-        formatted (try
-                    (do
-                      (let (out (string/trim (format/source text)))
-                        (if (= out "") nil out)))
-                    (catch _ nil)))
+        ;; check-allow :discarded-catch — a parse failure on half-typed input is the expected answer (not equivalent / nothing to format / no hint)
+        formatted (check-allow :discarded-catch
+                    (try
+                      (do
+                        (let (out (string/trim (format/source text)))
+                          (if (= out "") nil out)))
+                      (catch _ nil))))
     (cond
       (nil? formatted) state
       (= formatted text) state
@@ -703,10 +705,12 @@ a rebound key or a user's own command can't leave a stale listing on screen."
 (defn- lineedit-arglist-of (callee)
   "The arglist of the function/macro named by string `callee` (resolved in the live
 image), or nil if it isn't a bound symbol. A bare-symbol `reflect/eval` is just a lookup."
-  (try
-    (let (sym (reflect/read-string callee))
-      (if (and (symbol? sym) (bound? sym)) (arglist (reflect/eval sym)) nil))
-    (catch e nil)))
+  ;; check-allow :discarded-catch — a parse failure on half-typed input is the expected answer (not equivalent / nothing to format / no hint)
+  (check-allow :discarded-catch
+    (try
+      (let (sym (reflect/read-string callee))
+        (if (and (symbol? sym) (bound? sym)) (arglist (reflect/eval sym)) nil))
+      (catch e nil))))
 
 ;; check-allow: deliberately non-tail — depth = the signature hint's argument count.
 (check-allow :non-tail-recursion
@@ -795,7 +799,7 @@ available text columns, and prompt width for rendering."
 
 (defn- lineedit-chunk-ops (chunks)
   "Turn `[substring face]` highlight chunks into `[:print str face]` ops."
-  (map (fn ([s f]) [:print s f]) chunks))
+  (map chunks (fn ([s f]) [:print s f])))
 
 (defn- lineedit-render-single (st)
   "Repaint a SINGLE-line input in place (the common case): move up over any block left

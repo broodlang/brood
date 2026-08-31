@@ -68,7 +68,7 @@ data) …))` from an `http` handler to push events to a browser `EventSource`."
   ;; remainder (`""` when the buffer ended on a blank line); an empty buffer splits to no
   ;; pieces at all, hence the guard. Covered by the `sse frames-1c` sweep row.
   (let (parts (string/split buf "\n\n"))
-    (if (empty? parts) [nil ""] [(seq/drop-last 1 parts) (last parts)])))
+    (if (empty? parts) [nil ""] [(seq/drop-last parts 1) (last parts)])))
 
 (defn- field (ev line)
   "Fold one SSE field `line` into event map `ev`. `data` lines accumulate (joined by
@@ -94,7 +94,7 @@ are ignored. One optional space after the colon is stripped."
 (defn- parse-event (block)
   "Parse one event `block` (its field lines) into `{:event :data :id …}`, defaulting
 the type to `\"message\"` and the data to `\"\"` (the SSE spec's defaults). Pure."
-  (let (ev (fold field {} (string/split block "\n")))
+  (let (ev (fold (string/split block "\n") {} field))
     (assoc ev :event (or (get ev :event) "message") :data (or (get ev :data) ""))))
 
 (defn- status (head)
@@ -119,7 +119,7 @@ the `headers` of a `stream-response` so a browser `EventSource` reads the open s
 round-trip), an optional `event:` type line first, terminated by the blank line.
 The exact inverse of `parse-event`."
   (str (if (nil? event) "" (str "event: " event "\n"))
-    (string/join "\n" (map (fn (l) (str "data: " l)) (string/split data "\n")))
+    (string/join (map (string/split data "\n") (fn (l) (str "data: " l))) "\n")
     "\n\n"))
 
 (defn emit (sock data &optional (event nil))

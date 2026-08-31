@@ -18,7 +18,7 @@
     :ok (receive (:done (tt-await (- n 1))) (after *test-wait-ms* :timeout))))
 
 ;; Put i -> (* i i) for i in [0,n) (fold is tail-recursive in the kernel).
-(defn tt-fill (t n) (fold (fn (_ i) (table/put t i (* i i))) nil (range n)))
+(defn tt-fill (t n) (fold (range n) nil (fn (_ i) (table/put t i (* i i)))))
 
 (defn threw? (thunk) (try (do (thunk) false) (catch e true)))
 
@@ -273,7 +273,7 @@
 
   (test "an unsendable value (an unrealised lazy seq-view) is rejected as a value"
     (let (t (table/new))
-      (is (threw? (fn () (table/put t :k (seq/lmap inc [1 2 3]))))))))
+      (is (threw? (fn () (table/put t :k (seq/lmap [1 2 3] inc))))))))
 
 ;; ---- scale ------------------------------------------------------------------
 (describe "table: scale"
@@ -307,15 +307,16 @@
 
   (test "concurrent table/incr never loses an update (single key)"
     (let (t (table/new) me (self) n 200)
-      (fold (fn (_ i) (spawn (do (table/incr t :counter) (send me :done)))) nil (range n))
+      (fold (range n) nil (fn (_ i) (spawn (do (table/incr t :counter) (send me :done)))))
       (assert= (tt-await n) :ok)
       (assert= (table/get t :counter) n)))
 
   (test "concurrent table/incr across several keys is exact"
     (let (t (table/new) me (self) per 50 keys [:a :b :c :d])
-      (fold (fn (_ k)
-              (fold (fn (_ i) (spawn (do (table/incr t k) (send me :done)))) nil (range per)))
-        nil keys)
+      (fold keys
+        nil
+        (fn (_ k)
+          (fold (range per) nil (fn (_ i) (spawn (do (table/incr t k) (send me :done)))))))
       (assert= (tt-await (* per (count keys))) :ok)
       (assert= (table/get t :a) per)
       (assert= (table/get t :b) per)
@@ -324,7 +325,7 @@
 
   (test "many processes write distinct keys; parent sees them all"
     (let (t (table/new) me (self) n 100)
-      (fold (fn (_ i) (spawn (do (table/put t i (* i i)) (send me :done)))) nil (range n))
+      (fold (range n) nil (fn (_ i) (spawn (do (table/put t i (* i i)) (send me :done)))))
       (assert= (tt-await n) :ok)
       (assert= (table/count t) n)
       (assert= (table/get t 7) 49)
@@ -352,7 +353,7 @@
       (is (not (table/has? t 3)))))
   (test "a string key migrates dense -> hashed with every entry intact"
     (let (t (table/new))
-      (fold (fn (_ i) (table/put t i (* i 2))) nil (range 500))
+      (fold (range 500) nil (fn (_ i) (table/put t i (* i 2))))
       (table/put t "s" :str)
       (assert= (table/count t) 501)
       (assert= (table/get t 250) 500)
@@ -378,7 +379,8 @@
       (table/put t "k" 1)
       (assert= (table/incr t 10) 7)
       (table/put t 20 true)
-      (assert= (try (do (table/incr t 20) :no-error) (catch e :err)) :err)))
+      (assert= (try (do (table/incr t 20) :no-error) (catch e :err))
+        :err)))
   (test "snapshot of a dense table"
     (let (t (table/new))
       (table/put t 1 10)

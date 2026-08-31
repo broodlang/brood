@@ -660,7 +660,7 @@ pub(super) fn run_program_file(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         LispError::runtime(format!("%run-program-file: cannot read {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    let exit = crate::process::spawn_root_program(heap, &src, Some(path.clone()))
+    let exit = crate::process::spawn_root_program(heap, &src, Some(path.clone()), None)
         .map_err(|e| e.or_file(path.clone()))?;
     match exit.wait() {
         Ok(()) => Ok(Value::nil()),
@@ -958,6 +958,9 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("string", "std/string.blsp"),
     embedded_module!("project", "std/tool/project.blsp"),
     embedded_module!("stdimage", "std/tool/stdimage.blsp"),
+    // The rename ledger as Brood data (ADR-304) — a thin wrapper over `%renames`, so
+    // `nest check --fix-renames` reads the table the runtime error reads.
+    embedded_module!("renames", "std/tool/renames.blsp"),
     embedded_module!("coverage", "std/tool/coverage.blsp"),
     embedded_module!("complete", "std/tool/complete.blsp"),
     // `nest new` scaffolding (templates + new-project), split out of `project` so
@@ -1022,6 +1025,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Process-backed state cell: start/get/update/get-and-update/cast/stop.
     // A thin Brood layer over spawn/send/receive for the common "stateful process" case.
     embedded_module!("agent", "std/proc/agent.blsp"),
+    // Crash reports for processes nobody supervises (ADR-305): one system-monitor
+    // subscriber printing each abnormal exit once per site. CORE, not dev-tools — a
+    // released bundle arms it by default, the same as `brood file` and `nest run`.
+    embedded_module!("crash-report", "std/proc/crash-report.blsp"),
     // Order a flat process-info snapshot as a parent→child forest (depth-tagged, DFS
     // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
     // the dev observer's tree sort *and* a shipped app's process list (bedit's
@@ -1319,6 +1326,9 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     embedded_module!("test", "std/tool/test.blsp"),
     // Doc generation (`nest doc`) — tooling, not runtime.
     embedded_module!("docs", "std/tool/docs.blsp"),
+    // The surface audit — docstring / example / data-first argument order over every
+    // public callable (`(audit/report)`). Tooling: it reads the live image's globals.
+    embedded_module!("audit", "std/tool/audit.blsp"),
     // Generate editor syntax grammars (VS Code TextMate, Emacs font-lock) from the
     // language's own `(reflect/special-forms)` — one source of truth, no drift (ADR-092).
     embedded_module!("grammar", "std/tool/grammar.blsp"),
@@ -1734,6 +1744,28 @@ pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             };
             Ok(prev.map(|n| Value::int(n as i64)).unwrap_or(Value::nil()))
         }
+        "max-mailbox" => {
+            let pid = crate::process::current_pid().ok_or_else(|| {
+                LispError::runtime("proc/flag :max-mailbox: no calling process")
+            })?;
+            let prev = if args.len() < 2 {
+                crate::process::max_mailbox(pid)
+            } else {
+                match arg(args, 1) {
+                    Value::Int(n) if n > 0 => crate::process::set_max_mailbox(pid, Some(n as usize)),
+                    Value::Nil => crate::process::set_max_mailbox(pid, None),
+                    other => {
+                        return Err(LispError::wrong_type(
+                            heap,
+                            "proc/flag :max-mailbox",
+                            "positive int (messages) or nil",
+                            other,
+                        ))
+                    }
+                }
+            };
+            Ok(prev.map(|n| Value::int(n as i64)).unwrap_or(Value::nil()))
+        }
         "send-errors" => {
             let prev = if args.len() < 2 {
                 heap.proc_send_errors()
@@ -1744,7 +1776,7 @@ pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             Ok(Value::boolean(prev))
         }
         other => Err(LispError::runtime(format!(
-            "proc/flag: unknown flag :{other} (known: :max-heap, :send-errors)"
+            "proc/flag: unknown flag :{other} (known: :max-heap, :max-mailbox, :send-errors)"
         ))),
     }
 }
@@ -2235,7 +2267,7 @@ pub(super) fn profile_stop(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(heap.list(items))
 }
 
-/// The `(proc/system-monitor)` return shape: the armed config as a map, or nil.
+/// The `(proc/system-monitor)` return shape: one subscription as a map, or nil.
 fn sysmon_config_map(heap: &mut Heap, m: Option<crate::process::sysmon::SysMon>) -> Value {
     match m {
         None => Value::nil(),
@@ -2249,6 +2281,7 @@ fn sysmon_config_map(heap: &mut Heap, m: Option<crate::process::sysmon::SysMon>)
                 ),
                 (value::kw("spawn"), Value::boolean(m.spawn)),
                 (value::kw("exit"), Value::boolean(m.exit)),
+                (value::kw("exit-abnormal"), Value::boolean(m.exit_abnormal)),
                 (value::kw("deopt"), Value::boolean(m.deopt)),
             ];
             heap.map_from_pairs(pairs)
@@ -2256,20 +2289,61 @@ fn sysmon_config_map(heap: &mut Heap, m: Option<crate::process::sysmon::SysMon>)
     }
 }
 
-/// `(proc/system-monitor [pid opts])` — read, arm, or clear the kernel **system
-/// monitor**: runtime events (`:gc`/`:spawn`/`:exit`/`:deopt`) delivered to one
-/// subscriber process as `[:system kind subject-pid detail]` messages (BEAM
-/// `system_monitor` shape; see `process/sysmon.rs`). No args reads the current
-/// config; `nil` clears; a local pid arms it — with no opts map every event is
-/// selected, with one exactly the truthy keys are. Arming/clearing returns the
-/// *previous* config (map or nil), so callers can save/restore.
+/// The calling process's pid — the subscriber the no-pid forms of
+/// `proc/system-monitor` act on. The root context (a `brood` invocation before
+/// `run_program`, an embedding host) has one too; only a bare `Interp` outside
+/// any scheduler context has none, and that context cannot receive messages
+/// anyway.
+fn sysmon_caller() -> Result<u64, LispError> {
+    crate::process::current_pid().ok_or_else(|| {
+        LispError::runtime(
+            "proc/system-monitor: no calling process — arm or clear a named pid instead",
+        )
+    })
+}
+
+/// `(proc/system-monitor [pid opts])` — read, arm, or clear a subscription to the
+/// kernel **system monitor**: runtime events (`:gc`/`:spawn`/`:exit`/
+/// `:exit-abnormal`/`:deopt`) delivered to a subscriber process as
+/// `[:system kind subject-pid detail]` messages (BEAM `system_monitor` shape; see
+/// `process/sysmon.rs`). One subscription per subscriber pid (ADR-305). No args
+/// reads the **caller's** subscription; `:all` lists every subscription; `nil`
+/// clears the caller's and `(nil pid)` clears `pid`'s; a local pid arms it — with
+/// no opts map every event is selected, with one exactly the truthy keys are.
+/// Arming/clearing returns that pid's *previous* config (map or nil), so callers
+/// can save/restore.
 pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use crate::process::sysmon::{self, SysMon};
     if args.is_empty() {
-        return Ok(sysmon_config_map(heap, sysmon::current()));
+        let me = sysmon_caller()?;
+        return Ok(sysmon_config_map(heap, sysmon::current_for(me)));
     }
     let prev = match arg(args, 0) {
-        Value::Nil => sysmon::install(None),
+        Value::Keyword(k) if k == value::intern("all") => {
+            let maps = sysmon::all()
+                .into_iter()
+                .map(|m| sysmon_config_map(heap, Some(m)))
+                .collect::<Vec<_>>();
+            return Ok(heap.alloc_vector(maps));
+        }
+        Value::Nil => {
+            let target = if args.len() > 1 {
+                match arg(args, 1) {
+                    Value::Pid { node, id } if crate::dist::is_local(node) => id,
+                    other => {
+                        return Err(LispError::wrong_type(
+                            heap,
+                            "proc/system-monitor",
+                            "local pid to clear",
+                            other,
+                        ))
+                    }
+                }
+            } else {
+                sysmon_caller()?
+            };
+            sysmon::clear(target)
+        }
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             let mut m = SysMon {
                 pid: id,
@@ -2277,6 +2351,7 @@ pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
                 gc_min_pause_us: 0,
                 spawn: true,
                 exit: true,
+                exit_abnormal: true,
                 deopt: true,
             };
             if args.len() > 1 {
@@ -2290,6 +2365,7 @@ pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
                         m.gc = sel(heap, "gc");
                         m.spawn = sel(heap, "spawn");
                         m.exit = sel(heap, "exit");
+                        m.exit_abnormal = m.exit || sel(heap, "exit-abnormal");
                         m.deopt = sel(heap, "deopt");
                         if let Some(Value::Int(n)) =
                             heap.map_get(opts, value::kw("gc-min-pause-us"))
@@ -2310,13 +2386,13 @@ pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
                     }
                 }
             }
-            sysmon::install(Some(m))
+            sysmon::install(m)
         }
         other => {
             return Err(LispError::wrong_type(
                 heap,
                 "proc/system-monitor",
-                "local pid or nil",
+                "local pid, :all, or nil",
                 other,
             ))
         }

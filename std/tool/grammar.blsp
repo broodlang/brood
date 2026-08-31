@@ -34,14 +34,14 @@ read. The shared input to every grammar's docstring rule."
 (defn fn-doc-heads ()
   "The subset of `doc-heads` that build a FUNCTION — where a lone trailing string is
 the return value rather than documentation."
-  (filter (fn (h) (= :fn (get (reflect/doc-forms) h))) (doc-heads)))
+  (filter (doc-heads) (fn (h) (= :fn (get (reflect/doc-forms) h)))))
 
 (defn special-keywords ()
   "The special-form / core-macro names to highlight as control keywords:
 `(reflect/special-forms)` minus the `def…` heads (those get a distinct name-capturing rule,
 so they must not also land in the keyword alternation). The shared input to every
 grammar target."
-  (filter (fn (k) (not (string/starts-with? k "def"))) (reflect/special-forms)))
+  (filter (reflect/special-forms) (fn (k) (not (string/starts-with? k "def")))))
 
 ;; ---- regex helpers (TextMate uses the Oniguruma engine) ----------------------
 
@@ -57,17 +57,17 @@ grammar target."
 (defn- grammar-escape (s)
   "Backslash-escape regex metacharacters in `s`, so a literal keyword matches itself
 (a `*` in a keyword name → `\\*`)."
-  (fold (fn (acc c) (string/replace acc c (str "\\" c))) s grammar-meta))
+  (fold grammar-meta s (fn (acc c) (string/replace acc c (str "\\" c)))))
 
 (defn- grammar-quoted (names)
   "`names` as a space-separated run of double-quoted literals — the shape a tree-sitter
 `#any-of?` predicate and an elisp list both want."
-  (string/join " " (map (fn (n) (str "\"" n "\"")) names)))
+  (string/join (map names (fn (n) (str "\"" n "\""))) " "))
 
 (defn- grammar-alternation (keywords)
   "An escaped, longest-first `a|b|c` regex alternation. Longest-first so a prefix
 can't shadow a longer form (`->>` before `->`)."
-  (string/join "|" (map grammar-escape (sort-by (fn (k) (- (count k))) keywords))))
+  (string/join (map (sort-by keywords (fn (k) (- (count k)))) grammar-escape) "|"))
 
 ;; ---- TextMate grammar (VS Code) ----------------------------------------------
 
@@ -199,7 +199,7 @@ approximate. Emitted last so it overrides the blanket `(string) @string` above."
     ";; special forms + core macros in head position (the canonical (reflect/special-forms)).\n"
     "((list . (symbol) @keyword.control)\n"
     " (#any-of? @keyword.control "
-    (string/join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
+    (string/join (map (special-keywords) (fn (k) (str "\"" k "\""))) " ")
     "))\n\n"
     ";; docstrings: in a doc-carrying def… form ((reflect/doc-forms)) the string right after the\n"
     ";; name — or after the parameter list — DOCUMENTS the definition rather than being a\n"
@@ -232,8 +232,9 @@ a lone trailing string is its return value) or `head`. `brood-mode` reads it to 
 docstring with `font-lock-doc-face` instead of the string face."
   (str "(defconst brood-doc-forms\n"
     "  '("
-    (string/join " "
-      (map (fn (h) (str "(\"" h "\" . " (->string (get (reflect/doc-forms) h)) ")")) (doc-heads)))
+    (string/join (map (doc-heads)
+                   (fn (h) (str "(\"" h "\" . " (->string (get (reflect/doc-forms) h)) ")")))
+      " ")
     ")\n"
     "  \"Brood `def…' heads whose form carries a docstring, as (HEAD . KIND).\n"
     "KIND is `fn\' when the head builds a function — there a lone trailing string is the\n"

@@ -103,7 +103,7 @@ const PROGRAMS: &[(&str, &str, &str)] = &[
     (
         "gabriel/primes",
         "primes.input",
-        "(= (gabriel/primes/primes<= 100) (take 25 (nth f 2)))",
+        "(= (gabriel/primes/primes<= 100) (take (nth f 2) 25))",
     ),
     // All 121 cells of the generated maze.
     (

@@ -301,6 +301,11 @@ pub const FLAGS: &[DebugFlag] = &[
         SCHED,
         "silence the once-per-name warning that a message was dropped for an unregistered name",
     ),
+    f(
+        "BROOD_NO_CRASH_REPORT",
+        SCHED,
+        "opt OUT of the default crash reporter (ADR-305): `brood file`, `nest run`, a bundle and the REPL otherwise print one report per crash site for any process that exits abnormally",
+    ),
     // ---- engine ----
     f(
         "BROOD_TIER",

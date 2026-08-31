@@ -23,7 +23,7 @@
   (test "returns the value of a nested arithmetic expression unchanged"
     (assert= 27 (silent (fn () (spy (+ (* 5 4) (add5 2)))))))
   (test "returns the value of a pipeline unchanged"
-    (assert= 6 (silent (fn () (spy (->> [1 2 3 4] (map inc) (filter even?) (reduce + 0)))))))
+    (assert= 6 (silent (fn () (spy (-> [1 2 3 4] (map inc) (filter even?) (reduce 0 +)))))))
   (test "a plain literal or symbol passes through"
     (assert= 42 (silent (fn () (spy 42))))
     (assert= [1 2] (silent (fn () (spy [1 2])))))
@@ -37,9 +37,9 @@
       (assert= 9 (table/get nodes "(- 10 1)"))
       (assert= 15 (table/get nodes "(+ (* 2 3) (- 10 1))"))))
   (test "pipeline stages are traced (the general walker subsumes the pipe case)"
-    (let (nodes (traced-nodes (fn () (spy (->> [1 2 3] (map inc) (reduce + 0))))))
-      (assert= (list 2 3 4) (table/get nodes "(map inc [1 2 3])"))
-      (assert= 9 (table/get nodes "(reduce + 0 (map inc [1 2 3]))")))))
+    (let (nodes (traced-nodes (fn () (spy (-> [1 2 3] (map inc) (reduce 0 +))))))
+      (assert= (list 2 3 4) (table/get nodes "(map [1 2 3] inc)"))
+      (assert= 9 (table/get nodes "(reduce (map [1 2 3] inc) 0 +)")))))
 
 (describe "spy — laziness is preserved"
   ; untaken branch absent
@@ -59,10 +59,10 @@
 
 (describe "spy — opaque positions"
   (test "an fn body is not traced, but the enclosing call result is"
-    (let (nodes (traced-nodes (fn () (spy (map (fn (n) (* n n)) [1 2 3])))))
+    (let (nodes (traced-nodes (fn () (spy (map [1 2 3] (fn (n) (* n n)))))))
       ; fn body opaque
       (assert= nil (table/get nodes "(* n n)"))
-      (assert= (list 1 4 9) (table/get nodes "(map (fn (n) (* n n)) [1 2 3])"))))
+      (assert= (list 1 4 9) (table/get nodes "(map [1 2 3] (fn (n) (* n n)))"))))
   (test "quoted data is left untouched"
     (assert= (list 'a 'b) (silent (fn () (spy (quote (a b))))))))
 

@@ -91,7 +91,7 @@ spans in reverse."
     (reverse acc)
     (let (e (math/min n (string/span-until src i "\n"))
           spans (env-line-spans (string/substring src i e) i))
-      (env-lex src (inc e) n (fold (fn (a s) (cons s a)) acc spans)))))
+      (env-lex src (inc e) n (fold spans acc (fn (a s) (cons s a)))))))
 (sig env-lex (string int int list -> list))
 
 (defn env-spans (src)

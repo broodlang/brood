@@ -235,8 +235,11 @@ the target line is long enough. Clamps to the buffer's line range."
 
 (defn- buffer-word-char? (c)
   "True if `c` is part of a word (not whitespace or a delimiter) — matches the
-line editor's M-f/M-b notion of a word."
+line editor's M-f/M-b notion of a word. `/` is a delimiter: a qualified name
+`math/floor` is two words, so `M-d`/`M-DEL` and `M-f`/`M-b` take the namespace
+and the name separately."
   (not (or (= c " ")
+         (= c "/")
          (= c "\t")
          (= c "\n")
          (= c "(")
@@ -409,7 +412,7 @@ by `*mark-ring-max*`, newest first). The ring records where the mark has been so
   (let (p (get buf :point))
     (assoc buf
       :mark p
-      :mark-ring (take *mark-ring-max* (cons p (or (get buf :mark-ring) ()))))))
+      :mark-ring (take (cons p (or (get buf :mark-ring) ())) *mark-ring-max*))))
 
 (defn pop-mark (buf)
   "Move point to the newest entry on the buffer's `:mark-ring`, rotating that entry
@@ -582,7 +585,7 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
 ;; in practice — it exists so the pathological case degrades instead of freezing.
 
 (defn- undo-hunk-chars (hunk tag)
-  (apply str (seq/keep (fn (op) (let ([t c] op) (when (= t tag) c))) hunk)))
+  (apply str (seq/keep hunk (fn (op) (let ([t c] op) (when (= t tag) c))))))
 
 (defn- undo-flush-chunk (hunk n lo hi out)
   ;; One CHUNK — a run of consecutive changed characters — is one change, and Emacs's
@@ -626,15 +629,15 @@ the diff only ever runs over the span that actually changed."
           new)
       else
         (let (ops (diff/seq (string/->list o-mid) (string/->list n-mid))
-              r (fold (fn (acc op)
-                        (let ([n out hunk] acc
-                              [tag c] op)
-                          (if (= tag :keep)
-                            (let ([n2 out2] (undo-flush-chunk hunk n lo hi out))
-                              [(inc n2) (cons c out2) '()])
-                            [n out (append hunk (list op))])))
+              r (fold ops
                   [pre '() '()]
-                  ops)
+                  (fn (acc op)
+                    (let ([n out hunk] acc
+                          [tag c] op)
+                      (if (= tag :keep)
+                        (let ([n2 out2] (undo-flush-chunk hunk n lo hi out))
+                          [(inc n2) (cons c out2) '()])
+                        [n out (append hunk (list op))]))))
               [n out hunk] r
               [_ out2] (undo-flush-chunk hunk n lo hi out))
           (str head (apply str (reverse out2)) tail)))))
@@ -757,22 +760,23 @@ fresh run into a redo) — lives in cmd-undo / cmd-redo, which call `undo-start`
   ;; region list's shape leak into behaviour again — the exact failure the complement had.
   ;; An isolated empty region survives (it is a real permission), one absorbed by a
   ;; neighbour does not (it grants nothing the neighbour does not already grant).
-  (let (clamped (sort (map (fn (r)
-                             (let ([lo hi] r
-                                   l (buffer-clamp 0 len lo)
-                                   h (buffer-clamp 0 len hi))
-                               [(math/min l h) (math/max l h)]))
-                        regions)))
+  (let (clamped (sort (map regions
+                        (fn (r)
+                          (let ([lo hi] r
+                                l (buffer-clamp 0 len lo)
+                                h (buffer-clamp 0 len hi))
+                            [(math/min l h) (math/max l h)])))))
     (into []
-      (reverse (fold (fn (acc r)
-                       (let ([lo hi] r)
-                         (if (empty? acc)
-                           (list r)
-                           (let ([plo phi] (first acc))
-                             (if (<= lo phi)
-                               (cons [plo (math/max phi hi)] (rest acc))
-                               (cons r acc))))))
-                 '() clamped)))))
+      (reverse (fold clamped
+                 '()
+                 (fn (acc r)
+                   (let ([lo hi] r)
+                     (if (empty? acc)
+                       (list r)
+                       (let ([plo phi] (first acc))
+                         (if (<= lo phi)
+                           (cons [plo (math/max phi hi)] (rest acc))
+                           (cons r acc)))))))))))
 
 (defn narrowed? (buf)
   "True when `buf` has been narrowed — only some of it (possibly none of it) is editable.
@@ -836,12 +840,12 @@ here\" is how a buffer ends up read-only by one rule and writable by the other."
 (defn- region-allows-insert? (regions p)
   ;; Both ends inclusive — see the section note. nil regions = not narrowed = anywhere.
   (or (nil? regions)
-    (any? (fn (r) (let ([lo hi] r) (and (>= p lo) (<= p hi)))) regions)))
+    (any? regions (fn (r) (let ([lo hi] r) (and (>= p lo) (<= p hi)))))))
 
 (defn- region-allows-delete? (regions lo hi)
   ;; A delete must fall inside ONE region: spanning two would take the read-only text between.
   (or (nil? regions)
-    (any? (fn (r) (let ([rlo rhi] r) (and (>= lo rlo) (<= hi rhi)))) regions)))
+    (any? regions (fn (r) (let ([rlo rhi] r) (and (>= lo rlo) (<= hi rhi)))))))
 
 (defn position-read-only? (buf pos)
   "True when the character at `pos` may not be edited — outside every editable region, or the
@@ -849,7 +853,7 @@ buffer is read-only. What the editor asks to explain a refused edit, or to keep 
 of generated text."
   (let (regions (editable-regions buf))
     (and (not (nil? regions))
-      (not (any? (fn (r) (let ([lo hi] r) (and (>= pos lo) (< pos hi)))) regions)))))
+      (not (any? regions (fn (r) (let ([lo hi] r) (and (>= pos lo) (< pos hi)))))))))
 
 (defn- buffer-barf-if-read-only (buf)
   "Throw if `buf` is read-only outright — the cheap whole-buffer check every mutator runs
@@ -882,13 +886,13 @@ width."
       (assoc buf
         :editable
           (if (= kind :insert)
-            (map (fn (r) (let ([lo hi] r) [(if (< a lo) (+ lo b) lo) (if (<= a hi) (+ hi b) hi)]))
-              regions)
+            (map regions
+              (fn (r) (let ([lo hi] r) [(if (< a lo) (+ lo b) lo) (if (<= a hi) (+ hi b) hi)])))
             (let (d (- b a))
-              (map (fn (r)
-                     (let ([lo hi] r)
-                       [(if (>= lo b) (- lo d) lo) (if (>= hi b) (- hi d) hi)]))
-                regions)))))))
+              (map regions
+                (fn (r)
+                  (let ([lo hi] r)
+                    [(if (>= lo b) (- lo d) lo) (if (>= hi b) (- hi d) hi)])))))))))
 (sig buffer-adjust-editable (buffer keyword int int -> buffer))
 
 ;; ---- the complement view (compatibility) ------------------------------------
@@ -905,12 +909,12 @@ when the buffer is not narrowed. A query view; [[narrow-to]] is how you set it."
     (if (nil? regions)
       '()
       (let (len (buffer-length buf)
-            r (fold (fn (acc region)
-                      (let ([pos spans] acc
-                            [lo hi] region)
-                        [hi (if (< pos lo) (cons [pos lo] spans) spans)]))
+            r (fold regions
                 [0 '()]
-                regions)
+                (fn (acc region)
+                  (let ([pos spans] acc
+                        [lo hi] region)
+                    [hi (if (< pos lo) (cons [pos lo] spans) spans)])))
             [pos spans] r)
         (reverse (if (< pos len) (cons [pos len] spans) spans))))))
 
@@ -926,12 +930,12 @@ ranges."
     (widen buf)
     (let (len (buffer-length buf)
           frozen (region-normalize spans len)
-          r (fold (fn (acc span)
-                    (let ([pos regions] acc
-                          [lo hi] span)
-                      [hi (if (< pos lo) (cons [pos lo] regions) regions)]))
+          r (fold frozen
               [0 '()]
-              frozen)
+              (fn (acc span)
+                (let ([pos regions] acc
+                      [lo hi] span)
+                  [hi (if (< pos lo) (cons [pos lo] regions) regions)])))
           [pos regions] r)
       (narrow-to buf (reverse (if (< pos len) (cons [pos len] regions) regions))))))
 
@@ -962,9 +966,10 @@ inside the range collapses to `lo`, one at/after `hi` moves left by the deleted 
     (if (nil? m)
       buf
       (assoc buf
-        :markers (if (= kind :insert)
-                   (buffer-markers-insert m a b)
-                   (buffer-markers-delete m a b))))))
+        :markers
+          (if (= kind :insert)
+            (buffer-markers-insert m a b)
+            (buffer-markers-delete m a b))))))
 (sig buffer-adjust-markers (buffer keyword int int -> buffer))
 
 (defn insert (buf s)
@@ -1093,9 +1098,10 @@ remote participants' cursors on a shared buffer."
   "Stamp derived `value` onto `buf` under `key`, together with the rope and line
 count it describes. Read it back with `annotation`."
   (assoc buf
-    key {:value value
-         :rope (buffer-rope buf)
-         :lines (buffer-line-count buf)}))
+    key
+      {:value value
+       :rope (buffer-rope buf)
+       :lines (buffer-line-count buf)}))
 
 (defn annotation (buf key)
   "The annotation stored under `key` as `{:value :current? :stale?}`, or nil when
@@ -1215,7 +1221,7 @@ buffer through — the scaffold for line-wise commands (comment, indent-region, 
 `f` must not add or remove lines (line numbers stay valid across the fold). Returns
 the resulting buffer."
   (let ([sl el] (region-line-range buf))
-    (fold f buf (range sl (inc el)))))
+    (fold (range sl (inc el)) buf f)))
 (sig map-region-lines (any (any any -> any) -> any))
 
 ;; ---- the actor shell (buffer-as-process) ------------------------------------
@@ -1318,7 +1324,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                        (buffer-serve nb
                                          subs
                                          v
-                                         (take 64 (cons [v lo hi (string/length repl) origin] rec))))))
+                                         (take (cons [v lo hi (string/length repl) origin] rec) 64)))))
       ;; A BASED splice: computed against `base`, so first TRANSFORM it over every
       ;; splice applied since (the `rec` ring, oldest-first over the window) — two
       ;; people typing in different places inside one round-trip window both land
@@ -1326,18 +1332,18 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
       ;; local copy already contained them when it computed these positions
       ;; (local-apply-first), so shifting over them again would land a pipelined
       ;; second keystroke one column too far. The push carries the splice AS APPLIED.
-      ([:splice lo hi repl origin base] (let (since (reverse (take-while (fn (e) (> (first e) base))
-                                                               rec))
-                                              foreign (filter (fn (e)
-                                                                (or (nil? origin)
-                                                                  (not (= (nth e 4 nil) origin))))
-                                                        since)
+      ([:splice lo hi repl origin base] (let (since (reverse (take-while rec
+                                                               (fn (e) (> (first e) base))))
+                                              foreign (filter since
+                                                        (fn (e)
+                                                          (or (nil? origin)
+                                                            (not (= (nth e 4 nil) origin)))))
                                               [tlo thi trepl] (splice-transform-all [lo hi repl]
-                                                                (map (fn (e)
-                                                                       [(nth e 1)
-                                                                         (nth e 2)
-                                                                         (nth e 3)])
-                                                                  foreign))
+                                                                (map foreign
+                                                                  (fn (e)
+                                                                    [(nth e 1)
+                                                                      (nth e 2)
+                                                                      (nth e 3)])))
                                               nb (replace-region buf tlo thi trepl)
                                               v (inc version))
                                           (do
@@ -1350,8 +1356,9 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                             (buffer-serve nb
                                               subs
                                               v
-                                              (take 64
-                                                (cons [v tlo thi (string/length trepl) origin] rec))))))
+                                              (take (cons [v tlo thi (string/length trepl) origin]
+                                                      rec)
+                                                64)))))
       ;; A cursor move as data: no text change at all — the push carries markers + names
       ;; only, so presence traffic on a large document never ships its text.
       ([:marker-set id pos origin] (let (nb (buffer-marker-set buf id pos) v (inc version))
@@ -1379,7 +1386,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                       (buffer-serve nb
                         subs
                         v
-                        (take 64 (cons [v n n (string/length s) nil] rec))))))
+                        (take (cons [v n n (string/length s) nil] rec) 64)))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer-serve buf subs version rec)))
       ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
       ;; its copy after an ambiguous collision needs the text AND the version it
@@ -1399,17 +1406,17 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                    nil])
                                (buffer-serve buf (cons {:pid pid :proj proj} subs) version rec)))
       ([:unsubscribe pid] (buffer-serve buf
-                            (seq/remove (fn (s) (= (get s :pid) pid)) subs)
+                            (seq/remove subs (fn (s) (= (get s :pid) pid)))
                             version
                             rec))
       ([:down _ pid _]
-        (let (ns (seq/remove (fn (s) (= (get s :pid) pid)) subs)
+        (let (ns (seq/remove subs (fn (s) (= (get s :pid) pid)))
               ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)
               ;; or by a vector containing it (e.g. [pid :mark] — its selection anchor)
-              nb (fold (fn (b k) (buffer-marker-delete b k))
+              nb (fold (filter (keys (buffer-markers buf))
+                         (fn (k) (or (= k pid) (and (vector? k) (includes? k pid)))))
                    buf
-                   (filter (fn (k) (or (= k pid) (and (vector? k) (includes? k pid))))
-                     (keys (buffer-markers buf)))))
+                   (fn (b k) (buffer-marker-delete b k))))
           (if (= nb buf)
             ; no marker for it — just drop the subscriber
             (buffer-serve buf ns version rec)
@@ -1488,7 +1495,7 @@ to delete no longer exists as written)."
 
 (defn splice-transform-all (splice applieds)
   "`splice` transformed over each of `applieds` in order (oldest first)."
-  (fold (fn (sp a) (splice-transform sp a)) splice applieds))
+  (fold applieds splice (fn (sp a) (splice-transform sp a))))
 (sig splice-transform-all (any seqable -> any))
 
 (defn buffer-splice (bp lo hi repl &optional origin base)

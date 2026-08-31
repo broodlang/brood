@@ -155,10 +155,10 @@ with `->string` (the `Display` protocol), so a record encodes as the string its 
 defines rather than as its field map.
 
     (url/query-encode {:a 1})    → \"a=1\""
-  (let (pairs (sort (map (fn (kv)
-                           (list (if (keyword? (first kv)) (->string (first kv)) (str (first kv)))
-                             (->string (second kv))))
-                      (%map-pairs params))))
+  (let (pairs (sort (map (%map-pairs params)
+                      (fn (kv)
+                        (list (if (keyword? (first kv)) (->string (first kv)) (str (first kv)))
+                          (->string (second kv)))))))
     (apply str (reverse (url-pairs->query pairs nil true)))))
 (sig query-encode (map -> any))
 

@@ -211,11 +211,10 @@ fn bignum_step_churn_via_mcp_does_not_corrupt_heap() {
                     up (fn (f) (bit/or (bit/and (bit/shift-left f w) board) (bit/shift-right f hm1w)))
                     dn (fn (f) (bit/or (bit/shift-right f w) (bit/shift-left (bit/and f mask) hm1w)))
                     ns [(up l) (up b) (up r) l r (dn l) (dn b) (dn r)]
-                    planes (reduce (fn ([s0 s1 s2 s3] m)
+                    planes (reduce ns [0 0 0 0] (fn ([s0 s1 s2 s3] m)
                                      (let (c (bit/and s0 m) s0b (bit/xor s0 m) c2 (bit/and s1 c) s1b (bit/xor s1 c)
                                            c3 (bit/and s2 c2) s2b (bit/xor s2 c2) s3b (bit/or s3 c3))
-                                       [s0b s1b s2b s3b]))
-                             [0 0 0 0] ns)
+                                       [s0b s1b s2b s3b])))
                     s0 (vector-ref planes 0) s1 (vector-ref planes 1) s2 (vector-ref planes 2) s3 (vector-ref planes 3))
                 (bit/and (bit/and s1 (bit/and (bit/xor s2 board) (bit/xor s3 board))) (bit/or s0 b)))))"#;
     // each call builds the wide masks as LOCAL lets, captured by the closures
@@ -226,7 +225,7 @@ fn bignum_step_churn_via_mcp_does_not_corrupt_heap() {
                             col0 (math/quot board mask)
                             high (bit/shift-left col0 (- w 1))
                             st (bit/and board (bit/shift-left (- (bit/shift-left 1 100) 1) 5000)))
-                        (ms (fn () (bit/count (reduce (fn (b _) (wstep b w h mask board col0 high)) st (range 30))))))"#;
+                        (ms (fn () (bit/count (reduce (range 30) st (fn (b _) (wstep b w h mask board col0 high)))))))"#;
     let mut reqs = vec![
         req(1, "initialize", json!({})),
         req(

@@ -145,7 +145,7 @@ fn gc_stats_counts_automatic_collections() {
         (defn churn (n acc)
           (if (= n 0)
               acc
-              (let (junk (map inc (range 200)))
+              (let (junk (map (range 200) inc))
                 (churn (- n 1) (+ acc (count junk))))))
         (churn 2000 0)
         (dev/gc-stats)
@@ -267,7 +267,7 @@ fn promoted_range_survives_collection() {
     let prog = r#"
         (def r (range 1 10 2))
         (defn churn (n)
-          (if (= n 0) nil (let (j (map inc (range 200))) (churn (- n 1)))))
+          (if (= n 0) nil (let (j (map (range 200) inc)) (churn (- n 1)))))
         (churn 2000)
         (= r '(1 3 5 7 9))
     "#;
@@ -288,7 +288,7 @@ fn collects_below_the_outermost_eval() {
         (defn churn (n acc)
           (if (= n 0)
               (dev/gc-stats)
-              (let (junk (map inc (range 200)))
+              (let (junk (map (range 200) inc))
                 (churn (- n 1) (+ acc (count junk))))))
         ;; `try` runs `churn` via a thunk apply, so its loop body sits at eval
         ;; depth >= 2 — the case that used to never reach a GC safepoint.

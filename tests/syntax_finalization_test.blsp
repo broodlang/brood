@@ -45,7 +45,7 @@
   (test "a vector INSIDE a binding position still destructures"
     (assert= (let ([a b] [1 2]) (+ a b)) 3)
     (assert= ((fn ([x y]) (* x y)) [3 4]) 12)
-    (assert= (map (fn ([k v]) v) [[:a 1] [:b 2]]) '(1 2)))
+    (assert= (map [[:a 1] [:b 2]] (fn ([k v]) v)) '(1 2)))
 
   (test "the list spellings all work"
     (assert= (let (a 1 b 2) (+ a b)) 3)

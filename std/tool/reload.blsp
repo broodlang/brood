@@ -88,8 +88,9 @@ behind a long-lived loop has changed since it started."
 (defn- reload-package-key (path)
   ;; The rooted key (`"foo/b"`) whose file is `path`, or nil — reverse of
   ;; `*module-files*` (a root registry the package manager fills).
-  (fold (fn (found kv) (if found found (if (= (second kv) path) (first kv) nil)))
-    nil *module-files*))
+  (fold *module-files*
+    nil
+    (fn (found kv) (if found found (if (= (second kv) path) (first kv) nil)))))
 
 (defn- reload-in-package-context (path thunk)
   ;; Run `thunk` under `path`'s package context if it is a dep module, restoring the
@@ -113,9 +114,10 @@ behind a long-lived loop has changed since it started."
           (io/puts "[reload] missing:" path)
           (sleep *reload-poll-ms*)
           (reload-loop path last on-reload))
-      (= now last) (do
-                     (sleep *reload-poll-ms*)
-                     (reload-loop path last on-reload))
+      (= now last)
+        (do
+          (sleep *reload-poll-ms*)
+          (reload-loop path last on-reload))
       else
         (do
           (try
@@ -141,7 +143,8 @@ behind a long-lived loop has changed since it started."
 ;; too so std/reload stays prelude-only and require-able without project.
 (defn- reload-collect-blsp (dir)
   (if (file/dir? dir)
-    (fold
+    (fold (file/ls dir)
+      nil
       (fn (acc entry)
         (let (p (path/join dir entry))
           (cond
@@ -149,9 +152,7 @@ behind a long-lived loop has changed since it started."
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
             (file/dir? p) (%append-two (reload-collect-blsp p) acc)
             (string/ends-with? entry ".blsp") (cons p acc)
-            else acc)))
-      nil
-      (file/ls dir))
+            else acc))))
     nil))
 
 ;; The directory watcher loop. Holds the set of files we've already noticed.
@@ -212,10 +213,9 @@ use yet)."
     ;;   2. spawn the dir watcher with `known` pre-seeded to that set, so
     ;;      it only fires on files that appear *after* startup, and does
     ;;      `reflect/load` + per-file watcher for each.
-    (let (initial (reload-collect-blsp path))
-      (dolist (p initial)
-        (spawn (reload-loop p (file/mtime p) on-reload)))
-      (spawn (reload-dir-loop path initial on-reload))
-      nil)
-      else
-    (do (spawn (reload-loop path (file/mtime path) on-reload)) nil)))
+      (let (initial (reload-collect-blsp path))
+        (dolist (p initial)
+          (spawn (reload-loop p (file/mtime p) on-reload)))
+        (spawn (reload-dir-loop path initial on-reload))
+        nil)
+    else (do (spawn (reload-loop path (file/mtime path) on-reload)) nil)))

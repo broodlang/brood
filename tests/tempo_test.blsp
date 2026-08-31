@@ -67,12 +67,12 @@
     (assert= -44 (tempo/unit (tempo/parse! "-0044-03-15") :year))
     (assert= 3 (tempo/unit (tempo/parse! "-0044-03-15") :month))
     (assert= 15 (tempo/unit (tempo/parse! "-0044-03-15") :day))
-    (run! (fn (t) (assert= (tempo/->iso t) (tempo/->iso (tempo/parse! (tempo/->iso t)))))
-      [(tempo/new! {:year -44})
-        (tempo/new! {:year -44 :month 3})
-        (tempo/new! {:year -1 :month 12 :day 31})
-        (tempo/new! {:year 0})
-        (tempo/new! {:year 0 :month 1 :day 1 :hour 0 :minute 0})]))
+    (each [(tempo/new! {:year -44})
+            (tempo/new! {:year -44 :month 3})
+            (tempo/new! {:year -1 :month 12 :day 31})
+            (tempo/new! {:year 0})
+            (tempo/new! {:year 0 :month 1 :day 1 :hour 0 :minute 0})]
+      (fn (t) (assert= (tempo/->iso t) (tempo/->iso (tempo/parse! (tempo/->iso t)))))))
   (test "a bare sign is not a value"
     (assert= :error (nth (tempo/parse "-") 0))
     (assert= :error (nth (tempo/parse "-abc") 0)))
@@ -159,11 +159,11 @@
                   [(tempo/parse! "2026-01") (tempo/parse! "2026") :starts :started-by]
                   [(tempo/parse! "2026-12") (tempo/parse! "2026") :finishes :finished-by]
                   [(tempo/parse! "2026-06") (tempo/parse! "2026") :during :contains]])
-      (run! (fn (p)
-              (let (a (nth p 0) b (nth p 1))
-                (assert= (nth p 2) (tempo/relation a b))
-                (assert= (nth p 3) (tempo/relation b a))))
-        pairs))))
+      (each pairs
+        (fn (p)
+          (let (a (nth p 0) b (nth p 1))
+            (assert= (nth p 2) (tempo/relation a b))
+            (assert= (nth p 3) (tempo/relation b a))))))))
 
 (describe "predicates"
   (test "covers? is the loose containment question"
@@ -188,8 +188,8 @@
     (is (< (tempo/parse! "2026-01") (tempo/parse! "2026")))
     (is (< (tempo/parse! "2026") (tempo/parse! "2027")))
     (assert= (list "2026-01" "2026" "2027")
-      (map ->string
-        (sort (list (tempo/parse! "2027") (tempo/parse! "2026") (tempo/parse! "2026-01")))))))
+      (map (sort (list (tempo/parse! "2027") (tempo/parse! "2026") (tempo/parse! "2026-01")))
+        ->string))))
 
 ;; ---- interop with the datetime module ---------------------------------------
 ;;
@@ -455,11 +455,11 @@
     (assert= "2026-06-15T14:30:00.000Z"
       (datetime/->iso (datetime/parse-iso8601 "2026-06-15T14:30:00Z"))))
   (test "the ability op and the plain function agree"
-    (run! (fn (t) (assert= (tempo/->iso t) (datetime/->iso t)))
-      [(tempo/parse! "2026")
-        (tempo/parse! "2026-06-15")
-        (tempo/parse! "2026-06-15T14:30:05.123")
-        (tempo/new! {:year -44 :month 3})]))
+    (each [(tempo/parse! "2026")
+            (tempo/parse! "2026-06-15")
+            (tempo/parse! "2026-06-15T14:30:05.123")
+            (tempo/new! {:year -44 :month 3})]
+      (fn (t) (assert= (tempo/->iso t) (datetime/->iso t)))))
   (test "explain names the unit and the span"
     (is (>= (index-of (tempo/explain (tempo/parse! "2026-06")) "A month") 0))
     (is (>= (index-of (tempo/explain (tempo/parse! "2026-06")) "30 days") 0))))

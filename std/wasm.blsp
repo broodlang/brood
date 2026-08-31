@@ -65,12 +65,12 @@ the `use Rustler` moment, driven by the component's own interface. Returns the
 list of names bound. The bindings are ordinary `def`s (hot-reloadable); each
 calls the export inline — wrap with `call-blocking` yourself for exports
 that run long."
-  (map (fn (e)
-         (let (name (first e))
-           (reflect/eval (list 'defn
-                           (string/->symbol name)
-                           '(& args)
-                           (list '%wasm-call inst name '(into [] args))))
-           (string/->symbol name)))
-    (exports inst)))
+  (map (exports inst)
+    (fn (e)
+      (let (name (first e))
+        (reflect/eval (list 'defn
+                        (string/->symbol name)
+                        '(& args)
+                        (list '%wasm-call inst name '(into [] args))))
+        (string/->symbol name)))))
 (sig use-native (int -> (or nil (list symbol))))

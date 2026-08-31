@@ -730,6 +730,10 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-29** — KI-87: the inference cycle guard released the symbol it refused (`bool::then_some` builds its argument eagerly, so a refused `InferGuard` was built, dropped, and un-marked the in-flight inference) — `nest run` at 54 GB, three 19 GB test processes; one-line fix, sabotage-verified guards, `ulimit -v` in front of every inference test run
 - **2026-08-30** — strict over std 336 → 0 and a CI gate for it: ~350 sigs declared by reading bodies, every nil source made honest (one real bug), and FOURTEEN checker gaps closed generally on the way (extremum/get/nth defaults, short-circuit-exact `or`, branch narrowing in inferred returns, record names carrying field types, optional defaults, destructuring, dead branches, exclusion-known negations, fold fixpoint, prelude sigs surviving the freeze, sigs inside `check-allow`)
 - **2026-08-30** — type-guard signatures (ADR-301): `(sig datetime? (any -> (is datetime)))` narrows like a built-in predicate, bare-local or path, cross-module; the prelude's six record predicates declared
+- **2026-08-30** — mailbox bounds (ADR-308): `(proc/flag :max-mailbox n)` — senders check at enqueue but are never blocked and drop nothing; the flooded process raises catchable E0046 at its next safepoint or receive (the `:max-heap` protocol on the queue axis)
+- **2026-08-30** — `try … finally` (ADR-306), a prelude macro clause over two `%try`s; and `throw` of a caught error map rebuilds the error, so a rethrow (and everything escaping a `finally`) renders as the original, not as a map dump
+- **2026-08-30** — crash reports by default (ADR-305): `proc/system-monitor` becomes one subscription per pid with an `:exit-abnormal` selector; `std/proc/crash-report.blsp` prints each crash site once with the trace; armed by `brood file`/`nest run`/bundle/REPL, never `nest test`; the kernel's `process N died` one-liner yields to it
+- **2026-08-30** — Lisp survey: Brood vs Clojure/CL/Racket and vs OTP; two backlogs recorded in ROADMAP ("Lisp survey + OTP-gap backlog") — seven OTP-gap items (crash reports by default, `defapp`, `finally`, `defstatem`, registry/`pg`, mailbox bounds, soak) and ten Lisp borrowings (regex captures, `iterate` as a seqview, sorted map/set, `reduced`, macro grammars, `next-impl`, `for :into`, small helpers, contract blame); the `terminate/2`-on-kill item reassessed as by-design
 
 ---
 
@@ -8046,6 +8050,273 @@ Two measurement traps found the hard way, both now written where they bit: the f
 instructions smeared into the average) — it manufactured a phantom "gated win" that a warmed
 re-run erased; and `perf stat` counts every thread, so a background-compile change reads as
 an instruction regression (nqueens +3.3%) on a row whose wall is flat.
+
+### 2026-08-30, eleventh — a downstream smoke: bedit gates every brood commit
+
+The ADR-302 rename wave went out in an installed brood while bedit still called the old
+names, and no gate in this repo could have seen it: `std/` + `tests/` were green because the
+broken callers live one repository over, and bedit's own CI tracks brood `main` after the
+fact. So: `downstream-bedit` in `.github/workflows/ci.yml` — required, failing — checks out
+`broodlang/bedit` at a PINNED sha (`BEDIT_REF`, top of the workflow, with the bump recipe
+beside it: pinned so bedit's own breakage cannot redden brood, and bumped in the same brood
+commit that lands a change bedit adopts), builds `cli` + `nest` with `INSTALL_FEATURES`
+spelled out (lean base + gui + treesit-grammars + jit + stdimage + dev-tools — the
+`./configure --with-gui && make install` toolchain bedit's release builds, and the one the
+wave broke; the grammars are load-bearing, eight of bedit's mode tests fail without them),
+then runs `scripts/smoke-bedit.sh --require`. That script is the single definition of the
+gate, and `make smoke-bedit` (now a `make green-all` prerequisite) is the same thing against
+`../bedit` with the newest `nest` under `target/`: `nest check` at zero warnings,
+`BROOD_GUI_HEADLESS=1 nest run --check-boot`, `nest test` — each under the KI-87
+address-space cap, one OS process at a time, timed, with the nest build sha printed beside
+HEAD so a stale binary announces itself. A missing sibling checkout is a note locally and a
+failure in CI.
+
+Measured with the 19:24 debug `nest` on bedit's working tree: `nest check` 8.9 s,
+`--check-boot` 0.2 s, `nest test` 27.6 s wall for 1378 cases — well inside the 5-minute
+budget, so the suite is in. Two things the first run will say, both real: bedit's committed
+HEAD (the pinned sha) checks with **94 warnings** against this brood — its rename-wave fixes
+are in 52 uncommitted files — so the job is red until those land and `BEDIT_REF` is bumped;
+and 13 cases failed locally, 8 of them the tree-sitter modes the debug build lacks grammars
+for (CI builds them) and 5 in `view_scroll_test`'s completion-popup block, not yet attributed.
+
+
+## 2026-08-30 — tracing that cannot lose a definition; the table's abort becomes an error; the cap is 16 GB
+
+Follow-through on the morning's playground fault, closing the *class* rather than the instance.
+
+**A rebinding generation on every global** (`RuntimeCode::global_generations`, read by the new
+`%global-generation` primitive): the runtime's `version` counter at a name's most recent `def`.
+It answers the question a temporary rebinding must ask before restoring — "is what is bound
+still what I bound?" — which handles cannot answer (a `def` promotes the closure, so the bound
+handle is never the local one). `debug/trace-fn` records the generation its wrapper was bound
+at; `untrace-fn` restores only while it is unchanged and otherwise keeps the redefinition and
+logs; and `trace-fn` itself is now idempotent while its wrapper is bound and **re-wraps the
+live value** when the generation has moved. That last property is what lets the eval server
+drop its definition-form predicate entirely: it (re)installs the requested traces before
+*every* form, so `(defn f …) (f 5)` traces, a `defn-` traces, and a redefinition mid-request
+is traced as redefined — there is no list of definition heads left to be incomplete. Tests:
+`eval_server_test` (mid-request redefinition), `debug_test` (re-wrap after redefinition,
+`traced-current?`).
+
+**The table's dense-region reservation is a Brood error, not an abort.** `DenseSlots::new`
+`assert!`ed on `mmap` failure — from inside a JIT callback that cannot unwind, so the process
+aborted with a message blaming the table. The reservation is now fallible (`dense_slots()`
+returns `Result`, `jit_dense_base` declines rather than latching a store with no region) and
+the error names the actual cause: the region is virtual, so a failure is an address-space
+limit. Which it was: `strace -e mmap` on `tests/regex_test.blsp` shows **20 × 128 MB
+`PROT_NONE`** allocator arenas and 28 × 16 MB worker stacks — ~3 GB reserved on this 28-core
+box before any table exists — so the 4 GB cap CLAUDE.md prescribed failed the first test that
+created a table, and the table's 64 MB was merely the mapping that landed on the wall. **The
+documented cap is now 16 GB** (CLAUDE.md, handoff, memory); it still catches the KI-87 class
+(19 GB processes) and no longer fails a green test.
+
+## 2026-08-30 — `nest run` refuses an unbound symbol; the unbound error says where a renamed name went (ADR-304)
+
+The morning's bedit report had a second lesson under the first. The ten guarded calls to
+ADR-302's old names were **printed by `nest run` on every launch** — the pre-flight over the
+entry's require-closure has reported them since ADR-129 — and the launch proceeded every
+time. A warning that stops nothing is a log line, and a log line above a starting editor is
+scrolled away before it is read.
+
+**The gate.** `project/run` now reads the pre-flight's tally as `[gating unbound]` (the tally
+was one count; every check path — fresh, shared, cached — folds the pair now, and the public
+`check`/`check-files`/`check-sources` still return the gating count) and refuses to launch
+over `unbound > 0`: one line to stderr, exit 1, `system/halt` rather than `error` so the
+verdict is not buried under a trace into project.blsp. Only the unbound category gates —
+it is the one diagnostic that is not advice — and `--no-check` skips the pre-flight
+outright. **Cost: none measurable.** The checker already ran on this path; the gate reads a
+second counter. Same debug binary on a warm two-file project, best of 7: `nest run` 90 ms,
+`nest run --no-check` 88 ms. `nest run --check-boot` over this repo is unchanged by
+construction (it does not run the checker): 87 ms on this build against 70 ms on the
+installed release build of f790c416, the gap being the build profile.
+
+**The ledger.** `crates/lisp/src/renames.rs` — `(old, new, adr)`, 19 rows, ADR-302's public
+renames (`run!`→`each`, the eight `gui/*!`, both clipboard spellings, the two
+`reflect/*-load-path!`, `eval-server/baseline-globals!`, `telemetry/validate!`, the two
+`coverage/*begin!`, the two `test/*!`). The runtime error and the checker diagnostic both
+read it, so `unbound symbol: gui/font! — renamed to gui/font (ADR-302)` is what a
+`(catch e (error-message e))` sees and what `nest check` prints. The suffix is on the
+message, not the hint, for exactly that `catch`. `(%renames)` hands the table to Brood as
+`{old {:to new :adr adr}}` (`std/tool/renames.blsp` wraps it), and `nest check
+--fix-renames` now fixes a ledgered name first — qualified names included, which the
+search heuristic never handled — printing the ADR beside the fix.
+
+Tests: `tests/renames_test.blsp` (runtime message, checker message, no pointer for an
+unledgered name, every ledger row's old name unbound and new name bound, and the same from a
+spawned process) and three cases in `crates/nest/tests/boot_check_and_renames.rs` (the
+refusal, `--no-check`, ledger-first fixing that then satisfies the gate). `nest check` over
+the repo: the 263 warnings on the tree tonight are the in-flight data-first migration
+(`any?`/`every?`/`map` argument order) in files this change does not touch; none of them is
+in `std/tool/project.blsp`, `std/tool/renames.blsp` or `tests/renames_test.blsp`.
+
+
+### 2026-08-30, eleventh — `:discarded-catch`: a `(catch e nil)` cannot have read what it caught
+
+bedit ran for hours with ten unbound references (ADR-302's renames) because each sat in
+`(try (gui/font! …) (catch e nil))` — a handler that swallows an unbound symbol exactly as
+readily as the "no GUI build" it was written for. Nothing in the tree could say so: the
+checker's `try` handling (KI-67) descends for the *unbound* lint, but a name that resolves
+raises nothing statically, and at run time the catch ate it. New advisory lint,
+**`:discarded-catch`** (`crates/lisp/src/types/check/discarded_catch.rs`): a `catch` whose
+body is empty or a single constant — `nil`/`true`/`false`, a number, a string, a keyword, a
+`(quote …)`, an empty `(do)` — discards the error unread and warns; the binding's spelling
+is not an opt-out (`(catch _ nil)` is the pattern), while a body with any call in it
+(`(catch _ (fallback))`) is a working fallback and stays silent. Opt out with
+`(check-allow :discarded-catch …)`.
+
+Two decisions worth recording. **It reads the un-expanded forms**, beside the
+`match`-exhaustiveness and guard-purity passes, not the expanded tree the walker sees. The
+first cut sat in the walker's `%try` branch and reported 490 sites over `std/` + `tests/`
+— of which ~300 were `assert-error`, whose expansion is `(try (do … false) (catch e
+true))`: a constant the *macro* wrote and the author never sees. Only the surface form
+separates an author's catch from a macro's; there the count is 186, every one of them
+author-written. **The rule is syntactic and admits keywords**, so a did-it-throw assertion
+`(assert= :raised (try (do (f) :no-error) (catch e :raised)))` warns too. That is
+deliberate: the constant *is* the answer there, and the opt-out says so where a bare
+`:raised` cannot — but it means the in-tree sweep found no fault, only 183 wrappers (all
+with a one-line reason: parse probes, best-effort cache writes, feature probes, and the
+test-suite's did-it-throw shape). Three sites were fixed instead of wrapped: the REPL's
+`,apropos` / `,search` reported "nothing matching" when the search itself *threw* (now
+prints the error), and `debug/attach` turned a fault in its key loop into a quiet
+`:error` (now re-raises once the terminal is restored — `term/leave` was meant as a
+finally, not a swallow). Over bedit the lint reports 61 sites, several of which are the
+real thing: `(try (os/clipboard-get) (catch e nil))`, `(try (gui/held-key w) (catch e
+true))`, `(try (reflect/eval (list 'doc sym)) (catch e nil))` — a renamed primitive under
+any of those is silent again.
+
+## 2026-08-30 — the review pass: what the six changes got wrong, fixed
+
+A critical read of the day's six "silent degradation" changes, and the fixes it produced.
+
+- **`:discarded-catch` was over-broad.** As specified ("any constant") it flagged the idiomatic
+  did-it-throw assertion `(assert= :raised (try … (catch e :raised)))` and cost 128 `check-allow`
+  wrappers over tests for zero findings. A keyword/`true`/string/number is a *sentinel* — the author
+  encoding "it threw" as a value; the swallowing shape is `nil`/`false`/`(do)`, indistinguishable
+  from "no value", which is every one of bedit's cases. Narrowed to those three; 116 wrappers
+  unwrapped by script, 67 kept (each with a site-specific reason); still zero warnings.
+- **The `nest run` gate killed a `--watch` session at birth.** The gate ran inside `project/run`,
+  which a watch calls once at startup, so a dev loop with one stale name never came up — and a
+  watch exists to fix the program while it runs. `nest` now passes `watching?`; the refusal is
+  printed and the program starts anyway under `--watch`, halts otherwise.
+- **The tracer's teardown warned on every ordinary edit.** With traces re-installed per form, a
+  request whose *last* form redefined a traced function handed `untrace-all` a moved generation,
+  which it (rightly) refused to restore over — and reported, on the sandbox's stderr, every time
+  you edited a traced function. The server now re-installs once more after the final form, so the
+  teardown is an ordinary restore.
+- **`gui/available?`** (`%gui-compiled?`): the predicate to ask before a GUI side effect meant to
+  be skipped headlessly, instead of calling and catching — the catch is what swallowed the renames.
+  bedit's `gui-only` guard no longer matches an error string.
+- **Table reservation race closed** (`slots_init` lock, lock-free fast path): two first-users
+  could both `mmap`, leaking the loser's 64 MB of address space.
+- **Generation stamp ordering**: the `version` bump now happens under the generations lock, so
+  racing `def`s of one name stamp in counter order. Boot cost measured (`BROOD_BOOT_TRACE`, debug):
+  eval 3.3–5.1 ms warm, no visible change.
+- Not changed, recorded: `renames.rs` is hand-maintained (the next wave must add rows); the
+  rename hint lives in the message string by design; `downstream-bedit` is red on its first run
+  until bedit's rename fixes land and `BEDIT_REF` is bumped.
+
+## 2026-08-30 — Crash reports by default (ADR-305)
+
+Item A of the day's OTP-gap backlog. The premise needed correcting first: an unsupervised
+crash was not *silent* — `scheduler/pool.rs` prints `process N died: <located error>` and
+appends it to `.brood_crash_dump` (KI-72) — but it was one line, traceless, repeated per
+iteration of a crash loop, and reachable only as stderr.
+
+- **Kernel:** `process/sysmon.rs` holds a `Vec<SysMon>` keyed by subscriber pid instead of a
+  single last-wins slot (the reason a default subscriber was impossible: `watch-runtime` and
+  the MCP snapshot displaced it, and the MCP tool's `nil` cleared it). Per-kind armed bits in
+  one `AtomicU8`; a new `:exit-abnormal` selector filtered *before* the lock, so 100k clean
+  exits cost 100k relaxed loads. `proc/system-monitor` grew `:all` and `(nil pid)`; the
+  read form is now the caller's subscription. The kernel one-liner yields while any
+  abnormal-exit subscriber is armed.
+- **Brood:** `std/proc/crash-report.blsp` — listener, per-site dedup (first positioned
+  trace frame; a user `error` carries its position on the frame that entered it, not on the
+  map, and a tail-called frame carries none), non-crash reasons skipped, arming process
+  excluded, `{:sink f}` seam, synchronous `stop`. Armed via `arm-default` in `project/run`,
+  `project/run-bundle`, `repl/run`, and — for `brood file` — a preamble evaluated inside the
+  program's own process (`run_program_with_preamble`), so the top-level error is the CLI's
+  alone. `BROOD_NO_CRASH_REPORT=1` opts out; catalogued.
+- **Tests:** `tests/crash_report_test.blsp` (rendering, listener, dedup, deliberate exits,
+  starter exclusion, coexistence with `watch-runtime`, `arm-default`), three new
+  `sysmon_test` cases. Two lessons on the way: an isolated unit's tests share one mailbox,
+  so a sink must be drained per test; and `stop` had to wait for the listener's `:down` —
+  asynchronous, it let a dying listener report into the next test. Six suites × 3 runs green.
+- Written collection-first (`(map coll f)`, `(take coll n)`) to match the prelude change in
+  flight in the working tree.
+
+## 2026-08-30 — `try … finally` (ADR-306)
+
+Item C / borrowing #1 of the day's backlog. A `(finally cleanup…)` clause on `try`, as a
+prelude macro: the try-without-finally is wrapped in a second `%try` tagging `[:ok v]` /
+`[:threw e]`, cleanup runs, then yield or rethrow. Handler runs before cleanup; a throw
+from cleanup replaces the pending one; not run on `:kill` (OTP's `after` rule).
+
+The rethrow exposed an existing defect: `(catch e (throw e))` of a built-in error printed
+`error: {:kind :arity, …}` — the map the catch bound, dumped. `LispError::from_error_map`
+now rebuilds kind/message/position/hint/trace from such a map behind `throw`, payload
+kept, so the catch shape is unchanged and the rendering is the original's. Pinned by
+`crates/cli/tests/rethrow_rendering.rs`. Prelude order bit: `control.blsp` precedes
+`seq.blsp`, so the clause scan walks by hand rather than calling `any?`. Effects in the
+tests are observed through a mailbox — there is no cell to mutate.
+
+
+## 2026-08-30 (cont.) — data-first argument order (ADR-308): one pipe, `->>` deleted
+
+The `!` and `$` work above came from one nil; this came from the same pipeline. With `$` in
+hand the question became whether Brood should carry two argument conventions at all, and the
+answer was no — **for a reason that had to be checked rather than assumed**. Clojure has two
+because variadicity points opposite ways: `(map f c1 c2)` is variadic in *collections* so
+they must be last, `(conj coll x y z)` in *items* so the collection must be first. Brood has
+only the second: `map` is strictly `(f coll)` and `(map + [1 2] [10 20])` is an arity error.
+Collection-last was inherited style, not consequence. The ML defence (function-first pays
+for currying) does not apply either — Brood cannot curry while its stdlib is built on
+`& rest`. So: ~1780 call sites over 30 functions moved to collection-first, `reduce` kept
+both arities (its `& more` was only an optional-init slot, and data-first puts the varying
+slot last), and `->>`/`some->>`/`cond->>` were deleted. `into` stays `(to from)`; `$` covers
+it in a pipeline.
+
+**The reducer's parameters deliberately did NOT move.** Elixir writes `fn x, acc ->`, but
+Clojure/Haskell/OCaml/F#/Rust all put the accumulator first, and a pipe cannot see inside a
+callback, so the swap buys nothing while the failure modes are opposite: the outer swap
+fails **loudly** (a function where a collection belongs errors at once — this is what made
+1780 sites tractable), the reducer swap fails **silently** (`(+ acc x)` keeps working,
+`(cons x acc)` keeps running and builds garbage).
+
+**Cost, recorded because it generalises.** Ten distinct tooling bugs, six of them silent.
+The root error was treating "the function's name" as one string: a Brood call has **five**
+spellings — bare, qualified (`stream/map`), root-scoped (`/map`), macro-constructed
+(`(list '/mapv …)`, which does not exist until expansion) and string-embedded
+(`%load-string`, and `nest new`'s scaffold templates, which emit a *user's* project). Each
+was found by a separate suite run rather than enumerated up front. Worse, the **Rust checker
+encodes the positions structurally** — `sigs.rs` (curated sigs + callback demand),
+`infer.rs` (result inference for `map`/`keep`/`interpose`/`reduce`/`fold`), `walk.rs`
+(callback-signature synthesis) — and those degrade to `any` *silently*, so only one test
+(`introspection_test:319`) noticed. And `map` is the one function name that is also a
+**type** name: `(map -> int)` in a sig parses as a two-argument call, silently swapping 18
+signatures. `doctest`/`doc_examples` — which execute every docstring example in the tree —
+were the single most valuable completeness gate; they caught nine stale examples nothing
+else would have.
+
+Suite 5309 tests: 64 failures at the first green build, then 60 → 34 → 25 → 18 → 13 → 9 as
+each spelling and each checker site was closed. The residue is **not** argument order:
+`record_test`'s `usd` record leaks its ability impls into the shared registry and so into
+`std/`'s checker view — reproduced identically at HEAD with the same two files, i.e.
+pre-existing and order-dependent (the same shared-registry-vs-`%isolate` family as the
+`ability_test` orphan) — plus a wasm address-space cap and two environmental cases.
+
+## 2026-08-30 — Mailbox bounds (ADR-308)
+
+Item F — the one kernel item of the OTP-gap backlog. `(proc/flag :max-mailbox n)`
+mirrors `:max-heap`'s whole protocol on the queue axis: bound + sticky breach flag on
+the registry-reachable mailbox, armed by the two enqueue paths (wire +
+L1-parked; a selective-receive rebuild deliberately re-checks nothing), raised as
+catchable `E0046` by the flooded process at the four `:max-heap` safepoints **and at
+`receive` entry** — the case that decides the design, because a process parked on a
+never-matching pattern wakes per delivery and never passes a VM safepoint. Sender
+never blocked, nothing dropped; clear-inside-catch rescues, as with `:max-heap`.
+Five new tests in `process_limit_test.blsp` incl. the busy-spinner (safepoint route)
+and drain-and-recover.
+
 
 ### 2026-08-30, twelfth — CI back to green: the strict gate's 13, and the differential's cap
 

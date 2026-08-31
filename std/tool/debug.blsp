@@ -186,11 +186,28 @@ are just a Brood predicate, so no recompile and no cost on the false path. (A ma
 ;; through it; its `arglist` reads `(& args)` while traced.
 
 (defonce *traced-fns* {}) ; sym -> the original fn value (`untrace-fn` restores it)
+(defonce *trace-generations* {}) ; sym -> the rebinding generation the wrapper was bound at (`%global-generation`)
+(defn- debug-live (sym)
+  (if (bound? sym) (reflect/eval sym) (error "trace-fn: unbound symbol " sym)))
+
 (defn- debug-original (sym)
-  ;; The pre-instrumentation fn for `sym`: the registry entry when already traced
-  ;; (re-tracing must not capture a wrapper as the original), else the live value.
-  (or (get *traced-fns* sym)
-    (if (bound? sym) (reflect/eval sym) (error "trace-fn: unbound symbol " sym))))
+  ;; The pre-instrumentation fn for `sym`: the registry entry while OUR wrapper is still
+  ;; what is bound (re-tracing must not capture a wrapper as the original), else the
+  ;; live value — which, for a traced name whose rebinding generation has moved, is a
+  ;; REDEFINITION made under the trace. That live value is the original now; the
+  ;; registry's older one is exactly what must not be resurrected.
+  (let (recorded (get *traced-fns* sym)
+        generation (get *trace-generations* sym))
+    (if (and recorded generation (= generation (%global-generation sym)))
+      recorded
+      (debug-live sym))))
+
+(defn traced-current? (sym)
+  "True while `sym` is traced AND the binding is still the wrapper `trace-fn` installed —
+i.e. tracing it again would be a no-op. False for an untraced name and for a traced name
+redefined since (its rebinding generation moved), which `trace-fn` re-wraps."
+  (let (generation (get *trace-generations* sym))
+    (and generation (= generation (%global-generation sym)))))
 
 (defn- debug-rebind (sym replacement)
   ;; Rebind global `sym` to the fn value `replacement` — built as data and eval'd,
@@ -223,6 +240,14 @@ every other thing instrumentation does here: a second process running the same
 function stops being traced too."
   (let (orig (debug-original sym))
     (when (not (fn? orig)) (error "trace-fn: not a function: " sym))
+    ;; Already wrapped and untouched since: nothing to do (a second wrapper would trace
+    ;; every call twice). A redefined name falls through and is wrapped afresh.
+    (if (traced-current? sym)
+      sym
+      (trace-fn-install sym orig))))
+
+(defn- trace-fn-install (sym orig)
+  (do
     ;; REBIND FIRST, register second. A rebind can still be refused after every check
     ;; above passes — a reserved prelude/std name is the case (E0030, ADR-166) — and a
     ;; registry entry written before that refusal is a trap: the name is not traced, yet
@@ -230,19 +255,30 @@ function stops being traced too."
     ;; again, out of a caller that has long since handled the failed install. Ordering it
     ;; this way makes a failed `trace-fn` leave nothing behind, so callers that offer
     ;; names speculatively (an editor tracing whatever a snippet calls) can simply catch.
-    (debug-rebind sym
-      (fn (& args)
-        ;; `:spy-stop` from the sink = "everything from here is discarded". Put the
-        ;; original back (so no later call even builds an entry) and delegate in TAIL
-        ;; position — no post-call emit, no frame — so a traced tail loop is a tail loop
-        ;; again for the rest of its run.
-        (if (= :spy-stop (%spy-emit {:spy :call :fn sym :args args}))
-          (do (debug-rebind sym orig) (apply orig args))
-          (let (value (apply orig args))
-            (%spy-emit {:spy :return :fn sym :value value})
-            value))))
-    (%swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))
-    sym))
+    (let (wrapper (fn (& args)
+                    ;; `:spy-stop` from the sink = "everything from here is discarded". Put
+                    ;; the original back (so no later call even builds an entry) and
+                    ;; delegate in TAIL position — no post-call emit, no frame — so a traced
+                    ;; tail loop is a tail loop again for the rest of its run.
+                    (if (= :spy-stop (%spy-emit {:spy :call :fn sym :args args}))
+                      (do
+                        (debug-rebind sym orig)
+                        ;; the self-restore is OUR rebind — re-stamp so `untrace-fn`
+                        ;; does not read it as the user's redefinition
+                        (%swap-registry! debug/*trace-generations*
+                          (fn (m) (assoc m sym (%global-generation sym))))
+                        (apply orig args))
+                      (let (value (apply orig args))
+                        (%spy-emit {:spy :return :fn sym :value value})
+                        value))))
+      (debug-rebind sym wrapper)
+      (%swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))
+      ;; The generation the wrapper was bound at, so `untrace-fn` can tell "still my
+      ;; wrapper" from "redefined since" without comparing handles (a `def` promotes the
+      ;; closure, so the bound handle is never the local one).
+      (%swap-registry! debug/*trace-generations*
+        (fn (m) (assoc m sym (%global-generation sym))))
+      sym)))
 
 (defn break-fn (sym)
   "A function-boundary breakpoint: rebind `sym` so every call first parks the calling
@@ -262,11 +298,23 @@ context (`break`'s own rule), so a break-fn'd function still works un-debugged.
 
 (defn untrace-fn (sym)
   "Restore `sym` to its pre-`trace-fn`/`break-fn` definition and drop it from the
-registry. Unknown/untraced syms are a no-op (returns nil)."
-  (let (orig (get *traced-fns* sym))
+registry. Unknown/untraced syms are a no-op (returns nil).
+
+A name REDEFINED while it was traced keeps its new definition: the restore only happens
+while the global's rebinding generation (`%global-generation`) is still the one the
+wrapper was bound at. Putting the pre-trace body back over a `defn` the user has since
+made would silently discard their edit — and it did, in an editor whose every request
+traces and untraces (see `eval-server`). It is logged, not silent: the trace on that name
+ended at the redefinition, which is worth one line. (The wrapper's own `:spy-stop`
+self-restore re-stamps the generation, so it is not mistaken for a redefinition.)"
+  (let (orig (get *traced-fns* sym)
+        generation (get *trace-generations* sym))
     (when orig
-      (debug-rebind sym orig)
+      (if (and generation (not (= generation (%global-generation sym))))
+        (log/warn (str "untrace-fn: " sym " was redefined while traced — keeping the redefinition"))
+        (debug-rebind sym orig))
       (%swap-registry! debug/*traced-fns* (fn (m) (dissoc m sym)))
+      (%swap-registry! debug/*trace-generations* (fn (m) (dissoc m sym)))
       sym)))
 
 (defn untrace-all ()
@@ -277,7 +325,8 @@ server runs it after every traced request — and a single stubborn entry must n
 the rest of the image instrumented. So each restore is guarded, and the count is what
 was attempted."
   (let (syms (keys *traced-fns*))
-    (doseq (s syms) (try (untrace-fn s) (catch _ nil)))
+    ;; check-allow :discarded-catch — best-effort over user-typed input, or a name that was never traced
+    (doseq (s syms) (check-allow :discarded-catch (try (untrace-fn s) (catch _ nil))))
     (count syms)))
 
 (defn traced-fns ()
@@ -339,41 +388,41 @@ was attempted."
 ;; traces are data, not text, these are plain folds over the debugger's event log.
 (defn trace-entries (dbg)
   "The raw `:trace` events the debugger collected (each `{:pid :entry :seq …}`)."
-  (filter (fn (e) (= (get e :kind) :trace)) (dbg-events dbg)))
+  (filter (dbg-events dbg) (fn (e) (= (get e :kind) :trace))))
 (sig trace-entries ((or map pid) -> seqable))
 
 (defn observations (dbg)
   "Every `spy` node observation, flattened to `{:pid :form :value}`."
-  (seq/keep (fn (e)
-              (let (entry (get e :entry))
-                (when (= (get entry :spy) :node)
-                  {:pid (get e :pid) :form (get entry :form) :value (get entry :value)})))
-    (trace-entries dbg)))
+  (seq/keep (trace-entries dbg)
+    (fn (e)
+      (let (entry (get e :entry))
+        (when (= (get entry :spy) :node)
+          {:pid (get e :pid) :form (get entry :form) :value (get entry :value)})))))
 
 (defn hits (dbg)
   "How many times each traced form was observed, `{form-string -> count}`."
   ;; `pr-str`, deliberately, not the bounded printer: this string is a KEY (matched
   ;; against by `value-distribution`), and a key that elides is a key that collides.
   ;; Bounding belongs on the paths that paint, not the ones that identify.
-  (frequencies (map (fn (o) (pr-str (get o :form))) (observations dbg))))
+  (frequencies (map (observations dbg) (fn (o) (pr-str (get o :form))))))
 
 (defn value-distribution (dbg form-string)
   "The distribution of observed values for one traced form, `{value -> count}`."
-  (frequencies (seq/keep (fn (o) (when (= (pr-str (get o :form)) form-string) (get o :value)))
-                 (observations dbg))))
+  (frequencies (seq/keep (observations dbg)
+                 (fn (o) (when (= (pr-str (get o :form)) form-string) (get o :value))))))
 
 (defn modal-value (dbg form-string)
   "The most-common observed value for a form (nil if never seen) — the population's 'normal'."
   (let (dist (value-distribution dbg form-string))
     (if (empty? dist)
       nil
-      (first (first (sort-by (fn (kv) (- (second kv))) dist))))))
+      (first (first (sort-by dist (fn (kv) (- (second kv)))))))))
 
 (defn outliers (dbg form-string)
   "The observations of `form-string` whose value is NOT the modal one — the few rows to inspect when the population mostly agrees. Each is `{:pid :form :value}`."
   (let (modal (modal-value dbg form-string))
-    (filter (fn (o) (and (= (pr-str (get o :form)) form-string) (not (= (get o :value) modal))))
-      (observations dbg))))
+    (filter (observations dbg)
+      (fn (o) (and (= (pr-str (get o :form)) form-string) (not (= (get o :value) modal)))))))
 
 ;; ---- causal tree reconstruction ---------------------------------------------
 (defn causal-tree (dbg)
@@ -381,33 +430,33 @@ was attempted."
 list of root nodes, each `{:span :label :pid :value :children [...]}`. A span still
 running shows `:value :running`."
   (let (events (dbg-events dbg)
-        enters (filter (fn (e) (= (get e :kind) :span-enter)) events)
-        exits (filter (fn (e) (= (get e :kind) :span-exit)) events)
+        enters (filter events (fn (e) (= (get e :kind) :span-enter)))
+        exits (filter events (fn (e) (= (get e :kind) :span-exit)))
         value-of (fn (id)
-                   (let (ex (first (filter (fn (e) (= (get e :span) id)) exits)))
+                   (let (ex (first (filter exits (fn (e) (= (get e :span) id)))))
                      (if ex (get ex :value) :running)))
         children-of (fn (parent-id)
-                      (filter (fn (e) (= (get e :parent) parent-id)) enters)))
+                      (filter enters (fn (e) (= (get e :parent) parent-id)))))
     (letrec (build (fn (e)
                      {:span (get e :span)
                       :label (get e :label)
                       :pid (get e :pid)
                       :value (value-of (get e :span))
-                      :children (map build (children-of (get e :span)))}))
-      (map build (filter (fn (e) (nil? (get e :parent))) enters)))))
+                      :children (map (children-of (get e :span)) build)}))
+      (map (filter enters (fn (e) (nil? (get e :parent)))) build))))
 (sig causal-tree ((or map pid) -> seqable))
 
 (defn- causal-lines (nodes depth)
   "The causal tree as a flat list of indented, pid-tagged strings (one per span)."
-  (mapcat (fn (node)
-            (cons (str (apply str (map (constantly "  ") (range depth)))
-                    (get node :label)
-                    " ["
-                    (get node :pid)
-                    "] => "
-                    (pr-str-bounded (get node :value)))
-              (causal-lines (get node :children) (inc depth))))
-    nodes))
+  (mapcat nodes
+    (fn (node)
+      (cons (str (apply str (map (range depth) (constantly "  ")))
+              (get node :label)
+              " ["
+              (get node :pid)
+              "] => "
+              (pr-str-bounded (get node :value)))
+        (causal-lines (get node :children) (inc depth))))))
 (defn print-causal (dbg)
   "Pretty-print the causal tree (`causal-tree`) as an indented, pid-tagged outline."
   (doseq (line (causal-lines (causal-tree dbg) 0)) (io/puts line)))
@@ -420,18 +469,18 @@ cross-process causal tree, and the hottest traced forms. Rendered by both the
 (raw mode, where `\\n` would not return to column 0)."
   (let (state (dbg-state dbg))
     (append (cons "── parked processes ──"
-              (map (fn (entry)
-                     (str "  "
-                       (first entry)
-                       "  "
-                       (get (second entry) :label)
-                       "  "
-                       (pr-str-bounded (get (second entry) :vals))))
-                (get state :paused)))
+              (map (get state :paused)
+                (fn (entry)
+                  (str "  "
+                    (first entry)
+                    "  "
+                    (get (second entry) :label)
+                    "  "
+                    (pr-str-bounded (get (second entry) :vals))))))
       (cons "── causal tree ──" (causal-lines (causal-tree dbg) 0))
       (cons "── hot traced forms ──"
-        (map (fn (kv) (str "  " (second kv) "×  " (first kv)))
-          (sort-by (fn (kv) (- (second kv))) (hits dbg)))))))
+        (map (sort-by (hits dbg) (fn (kv) (- (second kv))))
+          (fn (kv) (str "  " (second kv) "×  " (first kv))))))))
 (defn report (dbg)
   "Print a session summary: parked processes (the break queue), the cross-process
 causal tree, and the hottest traced forms by hit count. The one-call overview."
@@ -478,9 +527,13 @@ tree grow as a workload runs; drive resume from another session or a timer."
 (enters raw mode); `watch` is the non-interactive read-only sibling. `term/leave`
 always runs, even on error, so the terminal is restored."
   (term/enter)
-  (let (result (try (debug-attach-loop dbg) (catch _ :error)))
+  ;; `term/leave` is a finally, not a swallow: a fault in the loop is re-raised once the
+  ;; terminal is restored, so it reaches the caller instead of reading as a quiet `:error`.
+  (let (result (try (debug-attach-loop dbg) (catch e [:attach-raised e])))
     (term/leave)
-    result))
+    (match result
+      ([:attach-raised e] (throw e))
+      (_ result))))
 
 ;; ---- single-step evaluation (spy + break fusion) ----------------------------
 ;; `spy` instruments every evaluated subexpression; if the sink PARKS at each node
@@ -533,7 +586,10 @@ the Nth if a number is given (`,resume 2`). No-op note when no session is active
         (if (= r "")
           (io/puts (str "resumed " (resume-all dbg) " parked"))
           (let (entries (vec (get (dbg-state dbg) :paused)))
-            (io/puts (debug-resume-nth dbg entries (try (reflect/eval-string r) (catch _ nil))))))))))
+            ;; check-allow :discarded-catch — best-effort over user-typed input, or a name that was never traced
+            (io/puts (debug-resume-nth dbg
+                       entries
+                       (check-allow :discarded-catch (try (reflect/eval-string r) (catch _ nil)))))))))))
 
 (defn- debug-repl-step (rest)
   "`,step` handler: advance a single parked process one step (resume the first parked;
@@ -613,9 +669,12 @@ no raw-terminal setup and works when piped."
             (= cmd "r")
               (do
                 (if (> (count parts) 1)
-                  (io/puts (debug-resume-nth dbg
-                             entries
-                             (try (reflect/eval-string (second parts)) (catch _ nil))))
+                  (io/puts
+                    (debug-resume-nth dbg
+                      entries
+                      ;; check-allow :discarded-catch — best-effort over user-typed input, or a name that was never traced
+                      (check-allow :discarded-catch
+                        (try (reflect/eval-string (second parts)) (catch _ nil)))))
                   (do (resume-all dbg) (io/puts "resumed all")))
                 ; let a resumed process reach its next break before redraw
                 (sleep 30)

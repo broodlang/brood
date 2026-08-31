@@ -16,7 +16,7 @@
   (test "16 concurrent 2M-iteration native loops checksum exactly"
     (let (me (self))
       (do
-        (fold (fn (_ k) (spawn (send me [:sum (sum-to 0 2000000 0)]))) nil (range 16))
+        (fold (range 16) nil (fn (_ k) (spawn (send me [:sum (sum-to 0 2000000 0)]))))
         (assert= (await-sums 16 0) (* 16 1999999000000))
         true)))
   (test "a float-crossing loop (deopt mid-run) still sums exactly"
@@ -42,6 +42,6 @@
   (test "8 concurrent collatz sweeps agree with the sequential result"
     (let (me (self) want (collatz-sum 1 20000 0))
       (do
-        (fold (fn (_ k) (spawn (send me [:sum (collatz-sum 1 20000 0)]))) nil (range 8))
+        (fold (range 8) nil (fn (_ k) (spawn (send me [:sum (collatz-sum 1 20000 0)]))))
         (assert= (await-sums 8 0) (* 8 want))
         true))))

@@ -299,10 +299,10 @@
 ;; interpreted `char-at` loop measuring ~85% of every motion). Linear; this row's job is
 ;; to keep it that way. Measure the SEQUENCE — one motion looks fine at any buffer size.
 (defn sexp-motions (k)
-  (let (text (string/join "" (sweep-src k nil)))
-    (fold (fn (p _) (let (np (point-forward text p)) (if (or (nil? np) (= np p)) p np)))
+  (let (text (string/join (sweep-src k nil) ""))
+    (fold (range 0 k)
       0
-      (range 0 k))))
+      (fn (p _) (let (np (point-forward text p)) (if (or (nil? np) (= np p)) p np))))))
 
 (row "agent  update  " n agent-updates)
 (row "gen    call" n gen-calls)

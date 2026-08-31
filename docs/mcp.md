@@ -263,7 +263,7 @@ everything via tools alone.
 - **The test registry resets per run.** `(describe …)` / `(test …)` *register*
   by accumulating into `*units*` (`std/tool/test.blsp`); in a long-lived image,
   `load`ing the same test file twice would register every unit twice and
-  inflate the `run-tests` count. The project test runners call `reset-units!`
+  inflate the `run-tests` count. The project test runners call `reset-units`
   before (re)loading test files, so each `run-tests` reflects exactly the
   current files — no fall back to a fresh `nest test` for a trustworthy count.
 

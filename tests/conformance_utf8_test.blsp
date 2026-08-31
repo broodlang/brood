@@ -22,13 +22,14 @@
 
 (defn- u8-decodes? (hex)
   "true if `hex` decodes as UTF-8, false if it is rejected."
-  (try (do (string/bytes-> (u8-bytes hex)) true) (catch e false)))
+  ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+  (check-allow :discarded-catch (try (do (string/bytes-> (u8-bytes hex)) true) (catch e false))))
 
 ;; Every sequence in `hexes` must be rejected; returns the offenders.
-(defn- u8-accepted (hexes) (filter u8-decodes? hexes))
+(defn- u8-accepted (hexes) (filter hexes u8-decodes?))
 
 ;; Every sequence in `hexes` must decode; returns the offenders.
-(defn- u8-rejected (hexes) (seq/remove u8-decodes? hexes))
+(defn- u8-rejected (hexes) (seq/remove hexes u8-decodes?))
 
 (defn- u8-file () (first (corpus-files "utf8")))
 

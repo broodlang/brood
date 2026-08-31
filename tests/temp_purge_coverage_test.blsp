@@ -33,15 +33,14 @@
 (def self-name (path/basename (reflect/current-file)))
 
 (defn- test-files ()
-  (filter (fn (e) (and (string/ends-with? e "_test.blsp") (not (= e self-name))))
-    (file/ls tests-dir)))
+  (filter (file/ls tests-dir)
+    (fn (e) (and (string/ends-with? e "_test.blsp") (not (= e self-name))))))
 
 ;; Every string literal appearing immediately after `marker`. Hand-rolled rather than
 ;; regex because std/regex is a deliberate subset with no capture groups: split on the
 ;; marker, then take each piece up to its closing quote.
 (defn- quoted-args (text marker)
-  (map (fn (p) (first (string/split p "\"")))
-    (rest (string/split text marker))))
+  (map (rest (string/split text marker)) (fn (p) (first (string/split p "\"")))))
 
 ;; The prefixes `file` passes to `temp-dir` and never purges. A purge line covers a prefix
 ;; it is a *prefix of* — `(purge-stale-temp "brood-file-")` legitimately covers
@@ -49,28 +48,27 @@
 (defn- unpurged-prefixes (text)
   (let (used (quoted-args text "(temp-dir \"")
         purged (quoted-args text "(purge-stale-temp \""))
-    (filter (fn (u) (not (any? (fn (p) (string/starts-with? u p)) purged))) used)))
+    (filter used (fn (u) (not (any? purged (fn (p) (string/starts-with? u p))))))))
 
 (describe "temp fixtures: every prefix used is purged at load (KI-30)"
 
   (test "no test file uses a `temp-dir` prefix it never purges"
     ;; Reported as `[file prefix]` pairs so a failure names the file to edit and the exact
     ;; line to add, rather than only asserting that some count is zero.
-    (let (offenders (fold (fn (acc f)
-                            (append acc
-                              (map (fn (p) [f p])
-                                (unpurged-prefixes (file/slurp (str tests-dir f))))))
+    (let (offenders (fold (test-files)
                       (list)
-                      (test-files)))
+                      (fn (acc f)
+                        (append acc
+                          (map (unpurged-prefixes (file/slurp (str tests-dir f))) (fn (p) [f p]))))))
       (assert= offenders (list))))
 
   ;; Guards the guard: if the scanner silently stopped finding anything — a renamed
   ;; primitive, a reformat that broke the `(temp-dir "` spelling it matches on — the test
   ;; above would pass vacuously and forever. It found 45 uses across 8 files when written.
   (test "the scanner actually finds the corpus's temp-dir uses"
-    (let (total (fold (fn (acc f)
-                        (+ acc
-                          (count (quoted-args (file/slurp (str tests-dir f)) "(temp-dir \""))))
+    (let (total (fold (test-files)
                   0
-                  (test-files)))
+                  (fn (acc f)
+                    (+ acc
+                      (count (quoted-args (file/slurp (str tests-dir f)) "(temp-dir \""))))))
       (is (>= total 20)))))

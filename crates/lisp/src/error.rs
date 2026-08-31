@@ -266,6 +266,13 @@ pub mod error_codes {
     /// it retires just the offender; every other process is untouched — unlike
     /// the ADR-043 *hard* cap, which aborts the whole OS process).
     pub const PROC_MEMORY_LIMIT: &str = "E0045";
+    /// This process's mailbox grew past its own `(proc/flag :max-mailbox n)`
+    /// bound (ADR-307). Raised at the next safepoint or `receive` **in that
+    /// process only** — the sender is never blocked and no message is dropped;
+    /// uncaught, it retires just the offender. The backpressure story stays a
+    /// library concern (`gen/call` with a timeout); this is the guard against a
+    /// receiver that cannot keep up quietly eating the machine.
+    pub const PROC_MAILBOX_LIMIT: &str = "E0046";
     /// File IO failed: `load` / `slurp` / `spit` / `make-dir` / `list-dir` /
     /// `cwd` / `check-file` couldn't read or write a path.
     pub const FILE_IO: &str = "E0050";
@@ -471,6 +478,9 @@ impl LispError {
     /// throws **don't** carry a code — the user controls the payload shape; if
     /// they want one, they throw a map with `:code` themselves.
     pub fn thrown(value: Value, heap: &crate::core::heap::Heap) -> Self {
+        if let Some(rebuilt) = Self::from_error_map(value, heap) {
+            return rebuilt;
+        }
         LispError(Box::new(LispErrorData {
             kind: ErrorKind::User,
             message: crate::syntax::printer::display(heap, value),
@@ -482,6 +492,76 @@ impl LispError {
             code: None,
             hint: None,
         }))
+    }
+
+    /// The inverse of [`to_value_map`](Self::to_value_map), for a **rethrow**: when
+    /// `(throw e)` is handed the map a `catch` bound for a built-in error, rebuild the
+    /// error it describes — kind, message, position, hint, trace — so it renders and
+    /// propagates as the original did (`arity error: f: expected 1 argument …` with its
+    /// `at` lines) instead of as `error: {:kind :arity, …}`, a printed map. The map
+    /// stays the payload, so a later `catch` binds exactly what was thrown (the
+    /// "throw shape == catch shape" contract). `finally` (ADR-306) rethrows this way,
+    /// which is what made the map dump a defect rather than a curiosity. `None` for
+    /// anything that is not a `{:kind <keyword> :message <string> …}` map — a user's
+    /// own map with those two keys reads as an error of that kind, which is the
+    /// shape's meaning.
+    fn from_error_map(value: Value, heap: &crate::core::heap::Heap) -> Option<Self> {
+        use crate::core::value::{intern, symbol_name_ref};
+        let Value::Map(map) = value else { return None };
+        let key = |name: &str| heap.map_get(map, Value::keyword(intern(name)));
+        let Value::Keyword(kind_sym) = key("kind")? else { return None };
+        let kind = match symbol_name_ref(kind_sym) {
+            "parse" => ErrorKind::Parse,
+            "unbound" => ErrorKind::Unbound,
+            "arity" => ErrorKind::Arity,
+            "type" => ErrorKind::Type,
+            "runtime" => ErrorKind::Runtime,
+            "user" => ErrorKind::User,
+            _ => return None,
+        };
+        let Value::Str(message_id) = key("message")? else { return None };
+        let string_of = |v: Option<Value>| match v {
+            Some(Value::Str(id)) => Some(heap.string(id).to_string()),
+            _ => None,
+        };
+        let int_of = |v: Option<Value>| match v {
+            Some(Value::Int(n)) => u32::try_from(n).ok(),
+            _ => None,
+        };
+        let pos_of = |line: Option<Value>, col: Option<Value>| {
+            Some(Pos {
+                line: int_of(line)?,
+                col: int_of(col).unwrap_or(0),
+            })
+        };
+        let trace = match key("trace") {
+            Some(list) => heap
+                .list_to_vec(list)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|frame| {
+                    let Value::Map(frame) = frame else { return None };
+                    let field = |name: &str| heap.map_get(frame, Value::keyword(intern(name)));
+                    Some(TraceFrame {
+                        name: string_of(field("fn")).map(|n| symbol_name_ref(intern(&n))),
+                        file: string_of(field("file")),
+                        pos: pos_of(field("line"), field("col")),
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        Some(LispError(Box::new(LispErrorData {
+            kind,
+            message: heap.string(message_id).to_string(),
+            trace,
+            control: None,
+            payload: Some(value),
+            pos: pos_of(key("line"), key("col")),
+            file: string_of(key("file")),
+            code: None,
+            hint: string_of(key("hint")),
+        })))
     }
 
     /// Project the structured fields into a Brood map for `catch` consumption.

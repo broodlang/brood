@@ -23,7 +23,7 @@
 ;; table[i][j] = LCS length of a[0..i-1] and b[0..j-1].
 
 (defn- diff-zero-row (n)
-  (into [] (map (fn (_) 0) (range (+ n 1)))))
+  (into [] (map (range (+ n 1)) (fn (_) 0))))
 (sig diff-zero-row (int -> vector))
 
 (defn- diff-build-table (a b m n)
@@ -85,10 +85,11 @@
         m (count av)
         n (count bv))
     (cond
-      (= m 0) (map (fn (v) [:insert v]) bv)
-      (= n 0) (map (fn (v) [:delete v]) av)
-      else (let (table (diff-build-table av bv m n))
-             (diff-backtrack table av bv m n nil)))))
+      (= m 0) (map bv (fn (v) [:insert v]))
+      (= n 0) (map av (fn (v) [:delete v]))
+      else
+        (let (table (diff-build-table av bv m n))
+          (diff-backtrack table av bv m n nil)))))
 
 (defn lines (a b)
   "Diff two strings line-by-line. `a` and `b` are split on `\\n` first.
@@ -103,14 +104,14 @@ Returns a list of `[:keep line]`, `[:delete line]`, `[:insert line]` ops.
 (defn summary (ops)
   "Count `[:keep]`, `[:delete]`, and `[:insert]` operations in a diff result.
 Returns `{:keeps n :deletes n :inserts n}`."
-  (fold (fn (acc op)
-          (let (tag (first op))
-            (cond
-              (= tag :keep) (assoc acc :keeps (+ (get acc :keeps) 1))
-              (= tag :delete) (assoc acc :deletes (+ (get acc :deletes) 1))
-              else (assoc acc :inserts (+ (get acc :inserts) 1)))))
+  (fold ops
     {:keeps 0 :deletes 0 :inserts 0}
-    ops))
+    (fn (acc op)
+      (let (tag (first op))
+        (cond
+          (= tag :keep) (assoc acc :keeps (+ (get acc :keeps) 1))
+          (= tag :delete) (assoc acc :deletes (+ (get acc :deletes) 1))
+          else (assoc acc :inserts (+ (get acc :inserts) 1)))))))
 (sig summary (seqable -> any))
 
 (defn patch (a ops)
@@ -119,19 +120,19 @@ only for verification (`:delete` and `:keep` ops are expected to match `a` in
 order); the output is built from `:keep` and `:insert` ops.
 
     (diff/patch [1 2 3] (diff/seq [1 2 3] [1 3]))   → (1 3)"
-  (map second (filter (fn (op) (not (= (first op) :delete))) ops)))
+  (map (filter ops (fn (op) (not (= (first op) :delete)))) second))
 (sig patch (any seqable -> (or nil (list any))))
 
 (defn unified (ops context-lines)
   "Format `ops` as a unified-diff-like list of strings, showing `context-lines`
 of context around each change. Returns a list of strings (one per line of output),
 each prefixed with ` ` (keep), `-` (delete), or `+` (insert)."
-  (map (fn (op)
-         (let (tag (first op)
-               val (second op))
-           (cond
-             (= tag :keep) (str " " val)
-             (= tag :delete) (str "-" val)
-             else (str "+" val))))
-    ops))
+  (map ops
+    (fn (op)
+      (let (tag (first op)
+            val (second op))
+        (cond
+          (= tag :keep) (str " " val)
+          (= tag :delete) (str "-" val)
+          else (str "+" val))))))
 (sig unified (seqable any -> (or nil (list string))))

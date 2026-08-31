@@ -49,8 +49,8 @@
     (assert= (docs/docs-entry 'doc-squared doc-squared)
       "### `(doc-squared x)`\n\nReturn x times itself.\n"))
   (test "a macro entry is tagged"
-    (defmacro doc-inc! (x) "Add one." `(+ ~x 1))
-    (assert= (docs/docs-entry 'doc-inc! doc-inc!) "### `(doc-inc! x)`  *(macro)*\n\nAdd one.\n"))
+    (defmacro doc-bump (x) "Add one." `(+ ~x 1))
+    (assert= (docs/docs-entry 'doc-bump doc-bump) "### `(doc-bump x)`  *(macro)*\n\nAdd one.\n"))
   (test "an undocumented function gets a placeholder"
     (defn doc-bare (x) (* x x))
     (assert= (docs/docs-entry 'doc-bare doc-bare) "### `(doc-bare x)`\n\n_Undocumented._\n"))
@@ -165,7 +165,7 @@
     ;; checker's non-tail-recursion warning is about — though 2000 does NOT overflow, so the
     ;; warning is about headroom, not an observed failure. `string-split` on N separators
     ;; yields N+1 pieces.
-    (let (src (apply str (map (fn (_) "[a](u)") (range 0 2000))))
+    (let (src (apply str (map (range 0 2000) (fn (_) "[a](u)"))))
       (assert= 2001 (count (string/split (docs/md-links src) "<a href="))))))
 
 ;; The namespaces the catalogue covers, read off the catalogue itself: every entry's
@@ -173,10 +173,10 @@
 ;; `table/…` entry someone adds opts the whole `table/` namespace into the check.
 (defn- doc-catalog-prefixes ()
   (into #{}
-    (seq/keep (fn (k)
-                (let (i (string/last-index-of k "/"))
-                  (when (>= i 0) (string/substring k 0 i))))
-      (keys doc-catalog/*catalog*))))
+    (seq/keep (keys doc-catalog/*catalog*)
+      (fn (k)
+        (let (i (string/last-index-of k "/"))
+          (when (>= i 0) (string/substring k 0 i)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The doc catalogue must not name things that do not exist.
@@ -200,14 +200,16 @@
     ;; check reads "not yet loaded" as "stale entry". Guarded: several catalogued
     ;; namespaces (`bit/`, `decimal/`, `system/`, `reflect/`) are kernel primitives with
     ;; no module file behind them, and `require-one` on those is expected to fail.
-    (fold (fn (_ m) (try (require-one (string/->symbol m)) (catch _ nil)))
+    ;; check-allow :discarded-catch — modules with no file behind them are expected to fail to load
+    (fold (doc-catalog-prefixes)
       nil
-      (doc-catalog-prefixes))
-    (let (forms (into #{} (map (fn (f) (if (pair? f) (first f) f)) (reflect/special-forms)))
-          missing (filter (fn (k)
-                            (let (s (string/->symbol k))
-                              (not (or (bound? s) (contains? forms s)))))
-                    (keys doc-catalog/*catalog*)))
+      (fn (_ m)
+        (check-allow :discarded-catch (try (require-one (string/->symbol m)) (catch _ nil)))))
+    (let (forms (into #{} (map (reflect/special-forms) (fn (f) (if (pair? f) (first f) f))))
+          missing (filter (keys doc-catalog/*catalog*)
+                    (fn (k)
+                      (let (s (string/->symbol k))
+                        (not (or (bound? s) (contains? forms s)))))))
       ;; Names, not just a count — a failure should say WHICH entry to remove.
       (assert= (sort missing) (list))))
   ;; A floor, not a target: the check above is vacuous against an empty/failed-to-load
@@ -254,14 +256,14 @@
                       (let (i (string/last-index-of nm "/"))
                         (or (< i 0)
                           (contains? (doc-catalog-prefixes) (string/substring nm 0 i)))))
-          candidates (filter (fn (s)
-                               (let (nm (->string s))
-                                 (and (not (includes? nm "--"))
-                                   (not (string/starts-with? nm "%"))
-                                   (not (reflect/private? s))
-                                   (in-remit? nm)
-                                   (or (fn? (reflect/eval s)) (= (type-of (reflect/eval s)) :macro)))))
-                       (reflect/global-names)))
+          candidates (filter (reflect/global-names)
+                       (fn (s)
+                         (let (nm (->string s))
+                           (and (not (includes? nm "--"))
+                             (not (string/starts-with? nm "%"))
+                             (not (reflect/private? s))
+                             (in-remit? nm)
+                             (or (fn? (reflect/eval s)) (= (type-of (reflect/eval s)) :macro)))))))
       ;; Qualified names in the covered namespaces are in the corpus now, so the floor
       ;; rises with it — 200 was the bare-core figure.
       (assert= true (> (count candidates) 350)))
@@ -269,7 +271,7 @@
                       (let (i (string/last-index-of nm "/"))
                         (or (< i 0)
                           (contains? (doc-catalog-prefixes) (string/substring nm 0 i)))))
-          uncatalogued (filter
+          uncatalogued (filter (reflect/global-names)
                          (fn (s)
                            (let (nm (->string s))
                              (and (not (includes? nm "--"))
@@ -277,7 +279,6 @@
                                (not (reflect/private? s)) ; not an internal helper
                                (in-remit? nm)
                                (or (fn? (reflect/eval s)) (= (type-of (reflect/eval s)) :macro))
-                               (= (doc-catalog/category-of nm) :other))))
-                         (reflect/global-names)))
+                               (= (doc-catalog/category-of nm) :other))))))
       ;; Names, not a count — a failure should say WHICH name needs a category.
-      (assert= (sort (map ->string uncatalogued)) (list)))))
+      (assert= (sort (map uncatalogued ->string)) (list)))))

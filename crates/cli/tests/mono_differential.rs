@@ -169,6 +169,57 @@ fn an_impl_registered_after_compile_time_is_still_the_one_called() {
 }
 
 #[test]
+fn a_stale_record_id_is_not_devirtualized_to_whatever_the_name_means_now() {
+    // KI-90. `mono_arg_identity` proves a direct-constructor call's identity by keywording
+    // the resolved global's name and confirming that keyword is in `*record-ids*`. The
+    // registry is keyed by NAME and a registration can outlive the module that made it
+    // (KI-89 shows ids whose constructor is no longer bound), so the name alone is not
+    // evidence: if it were, a later NON-record function of the same name would be
+    // devirtualized as if it were still the record constructor — a silently wrong impl.
+    //
+    // Here `shape` is a record, then rebound to a plain fn returning a bare map. The id
+    // `:mono-stale/shape` stays registered either way. The dynamic path answers "DEFAULT"
+    // for the plain-fn call (a bare map is not the record), and `BROOD_MONO=1` must agree.
+    let dir = std::env::temp_dir().join(format!("brood-mono-stale-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let file = dir.join("stale.blsp");
+    std::fs::write(
+        &file,
+        "(defmodule mono-stale)\n\
+         (defrecord shape (n))\n\
+         (defability Show (render [self] :-> string))\n\
+         (impl Show :default (render [x] \"DEFAULT\"))\n\
+         (impl Show mono-stale/shape (render [r] (str \"REC\" (get r :n))))\n\
+         (io/puts (str \"record: \" (render (shape 7))))\n\
+         (defn shape (n) {:n n})\n\
+         (io/puts (str \"rebound: \" (render (shape 7))))\n",
+    )
+    .expect("write fixture");
+
+    let mut answers = Vec::new();
+    for mono in [false, true] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+        cmd.arg(&file);
+        if mono {
+            cmd.env("BROOD_MONO", "1");
+        } else {
+            cmd.env_remove("BROOD_MONO");
+        }
+        support::dies_with_parent(&mut cmd);
+        let out = cmd.output().expect("run brood");
+        answers.push(String::from_utf8_lossy(&out.stdout).to_string());
+    }
+    assert_eq!(
+        answers[0], answers[1],
+        "BROOD_MONO=1 must answer exactly what the dynamic path answers for a name whose \
+         record id is registered but whose binding is no longer that record's constructor \
+         (KI-90)\n  dynamic:\n{}\n  mono:\n{}",
+        answers[0], answers[1]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_devirtualized_call_stays_correct_after_it_tiers_to_native() {
     // **The differential above cannot catch a JIT bug.** It runs the ability suite, where no
     // devirtualized call is executed often enough to tier past the bytecode VM — so the whole

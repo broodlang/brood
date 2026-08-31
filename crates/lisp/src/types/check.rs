@@ -121,6 +121,7 @@
 pub mod annot;
 mod ctx;
 pub(super) mod deps;
+mod discarded_catch;
 mod exhaustive;
 mod guard_effects;
 mod guards;
@@ -1530,6 +1531,11 @@ pub fn check_file_mode(
         // `if`-test on expansion). A guard runs on rejected clauses and, in a `receive`,
         // re-runs per mailbox scan, so an effect there fires on paths never selected.
         guard_effects::check_guards(heap, &forms, &mut out);
+        // Pass 3.8: discarded catch (advisory) — a `(catch e <constant>)` that swallows the
+        // error unread. Also reads the *un-expanded* forms: a `catch` clause survives only
+        // pre-expansion, and only there is an author-written catch distinguishable from
+        // the one `assert-error` builds.
+        discarded_catch::check_discarded_catches(heap, &forms, &mut out);
         // (The macro binding-capture lint was retired when automatic binding hygiene
         // shipped — ADR-066 amendment: a template's `let`/`fn` binders are alpha-renamed
         // to fresh gensyms by the expander, so a plain literal binder can no longer

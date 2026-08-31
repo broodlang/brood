@@ -141,7 +141,7 @@ an empty argument list.
 redundant slashes. An absolute path starts with the `\"/\"` component.
 
     (path/split \"a/b/c\")           → (\"a\" \"b\" \"c\")"
-  (let (parts (filter (fn (s) (not (= s ""))) (string/split p "/")))
+  (let (parts (filter (string/split p "/") (fn (s) (not (= s "")))))
     (if (string/starts-with? p "/") (cons "/" parts) parts)))
 (sig split (string -> (or (list string) nil)))
 
@@ -153,7 +153,7 @@ redundant slashes. An absolute path starts with the `\"/\"` component.
 
     (path/normalize \"a/./b/../c\")  → \"a/c\""
   (let (absolute (string/starts-with? p "/")
-        parts (filter (fn (s) (not (or (= s "") (= s ".")))) (string/split p "/"))
+        parts (filter (string/split p "/") (fn (s) (not (or (= s "") (= s ".")))))
         resolved (normalize-reduce parts nil absolute))
     (cond
       (nil? resolved) (if absolute "/" ".")
@@ -184,24 +184,25 @@ dropped and one `..` is emitted per remaining `base` component, so a fully
 divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../../x/y`).
 
     (path/relative-to \"/a/b/c\" \"/a\")   → \"b/c\""
-  (let (p-parts (filter (fn (s) (not (= s ""))) (string/split p "/"))
-        base-parts (filter (fn (s) (not (= s ""))) (string/split base "/")))
+  (let (p-parts (filter (string/split p "/") (fn (s) (not (= s ""))))
+        base-parts (filter (string/split base "/") (fn (s) (not (= s "")))))
     (relative-strip p-parts base-parts)))
 (sig relative-to (string string -> string))
 
 (defn- relative-strip (p-parts base-parts)
   (cond
     ;; consumed all of base — what remains of p is the relative path
-    (nil? base-parts) (if (nil? p-parts)
-                        "."
-                        (path-glue (first p-parts) (rest p-parts)))
+    (nil? base-parts)
+      (if (nil? p-parts)
+        "."
+        (path-glue (first p-parts) (rest p-parts)))
     ;; consumed all of p — need to go up for each remaining base component
-    (nil? p-parts) (path-glue ".." (map (fn (_) "..") (rest base-parts)))
+    (nil? p-parts) (path-glue ".." (map (rest base-parts) (fn (_) "..")))
     ;; common prefix: keep stripping
     (= (first p-parts) (first base-parts)) (relative-strip (rest p-parts) (rest base-parts))
     ;; diverged: one `..` per remaining base component, then p
     else
-      (let (ups (map (fn (_) "..") base-parts))
+      (let (ups (map base-parts (fn (_) "..")))
         (path-glue (first ups) (append (rest ups) p-parts)))))
 
 ;; ---- predicates -------------------------------------------------------------

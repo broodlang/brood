@@ -32,13 +32,13 @@
 
 ;; A row map keyed by keyword -> the same map keyed by the header string.
 (defn- csv-stringify-keys (m)
-  (fold (fn (acc pair) (let ([k v] pair) (assoc acc (->string k) v))) {} m))
+  (fold m {} (fn (acc pair) (let ([k v] pair) (assoc acc (->string k) v)))))
 
 (defn- csv-expected (stem)
-  (let (p (first (filter (fn (f) (= (csv-stem f) stem)) (csv-dir "json"))))
+  (let (p (first (filter (csv-dir "json") (fn (f) (= (csv-stem f) stem)))))
     (if (nil? p)
       (error "conformance-csv: no json expectation for " stem)
-      (into [] (map csv-stringify-keys (json/decode (file/slurp p)))))))
+      (into [] (map (json/decode (file/slurp p)) csv-stringify-keys)))))
 
 (defn- csv-actual (path) (into [] (csv/decode-maps (file/slurp path))))
 
@@ -66,7 +66,7 @@
   (test "every document parses to its expected rows"
     (let ([checked bad] (csv-scan (csv-dir "csvs") 0 nil))
       (is (> checked 10))
-      (assert= (take 3 bad) ())
+      (assert= (take bad 3) ())
       (assert= (count bad) 0))))
 
 ;; The rules the corpus exists to pin, spelled out inline — a reader can check these

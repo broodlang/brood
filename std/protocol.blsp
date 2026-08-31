@@ -38,5 +38,5 @@
       (mount [params])
       (render [model])
       (handle-event [name params model]))"
-  (let (ops (filter (fn (s) (pair? s)) specs))
+  (let (ops (filter specs (fn (s) (pair? s))))
     (list '%register-protocol (list 'quote bname) (list 'quote ops))))

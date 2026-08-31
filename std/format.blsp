@@ -215,7 +215,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
     (get *format-defn-family* (symbol (node-text head-node)) false)))
 
 (defn- first-structural-child (n)
-  (first (filter (fn (c) (not (trivia? c))) (vec->list (node-children n)))))
+  (first (filter (vec->list (node-children n)) (fn (c) (not (trivia? c))))))
 
 (defn multi-arity-defn? (head-node args)
   "True if `head-node` is a `defn`-family head and `args` (the head's structural args)
@@ -282,7 +282,7 @@ the name on the head line so every arm lands on its own line."
 (defn- single-line-seq (kids open close)
   ;; Render the structural children space-separated. Any comment, or any
   ;; un-inlineable child, sinks the attempt.
-  (let (forms (filter (fn (c) (not (trivia? c))) (vec->list kids)))
+  (let (forms (filter (vec->list kids) (fn (c) (not (trivia? c)))))
     (cond
       (any-comment? kids) nil
       (nil? forms) (str open close)
@@ -296,8 +296,8 @@ the name on the head line so every arm lands on its own line."
   (cond (= i n) false (comment? (seq/vector-ref kids i)) true else (any-comment-at kids (inc i) n)))
 
 (defn- single-line-seq-build (forms open close)
-  (let (parts (map single-line forms))
-    (if (any-nil? parts) nil (str open (string/join " " parts) close))))
+  (let (parts (map forms single-line))
+    (if (any-nil? parts) nil (str open (string/join parts " ") close))))
 
 (defn- any-nil? (xs) (cond (nil? xs) false (nil? (first xs)) true else (any-nil? (rest xs))))
 
@@ -407,7 +407,7 @@ the name on the head line so every arm lands on its own line."
   ;; Generic calls (head not in the headers table) also keep their *first*
   ;; arg on the head line — provided it is single-line — so the visual unit
   ;; `(head arg1)` survives the break.
-  (let (forms (filter (fn (c) (not (trivia? c))) (vec->list kids)))
+  (let (forms (filter (vec->list kids) (fn (c) (not (trivia? c)))))
     (cond
       (nil? forms) (str open close)
       else
@@ -438,7 +438,7 @@ the name on the head line so every arm lands on its own line."
                         ;; instead so the body walker emits the comment.
                         (comment-before-first-arg? kids) 0
                         else 1))
-          (let (header-args (take eff-hdr args)
+          (let (header-args (take args eff-hdr)
                 first-body-idx (kids-index-after-form kids eff-hdr)
                 header-line (render-head-line head header-args pair-bind (inc indent))
                 ;; Fill (pack args per line) only for a *generic call* — a head
@@ -707,14 +707,18 @@ if you are reintroducing hoisting, they are what you have to write back."
 
 ;; ---- pair body emit (cond / case clauses) -----------------------------------
 ;; Like render-body but consumes two structural forms per emission, joined by
-;; one space, one pair per line. Comments preserved on their own lines (a
-;; comment between the two members of a pair is rare and won't render ideally;
-;; the common case — a comment above a clause — works correctly).
+;; one space, one pair per line. Comments are preserved on their own lines. A
+;; comment BETWEEN the two members of a pair (a `cond` test with a comment above
+;; its result) splits the pair: the test is emitted alone, the comment follows, and
+;; the result lands on its own line at the value indent (+2) — the miser layout.
+;; `pending?` carries that split across the comment; without it the result was
+;; paired with the NEXT test and every later clause of the `cond` was shifted by
+;; one (an `else` indented as a value, its body at the test column).
 (defn- render-body-pairs (kids start-idx body-ind)
-  (render-body-pairs-at kids start-idx (seq/vector-length kids) body-ind 0 ""))
+  (render-body-pairs-at kids start-idx (seq/vector-length kids) body-ind 0 "" false))
 (sig render-body-pairs (vector int int -> string))
 
-(defn- render-body-pairs-at (kids i n body-ind nl acc)
+(defn- render-body-pairs-at (kids i n body-ind nl acc pending?)
   (if (= i n)
     acc
     (let (c (seq/vector-ref kids i))
@@ -725,7 +729,8 @@ if you are reintroducing hoisting, they are what you have to write back."
             n
             body-ind
             (+ nl (count-newlines (node-text c)))
-            acc)
+            acc
+            pending?)
         (comment? c)
           (render-body-pairs-at kids
             (inc i)
@@ -735,11 +740,28 @@ if you are reintroducing hoisting, they are what you have to write back."
             (str acc
               (if (>= nl 2) "\n\n" "\n")
               (indent-of body-ind)
-              (comment-strip-trailing-nl (node-text c))))
+              (comment-strip-trailing-nl (node-text c)))
+            pending?)
+        ;; The result of a test a comment split it from: its own line at the value
+        ;; indent, keeping a same-line trailing comment beside it.
+        pending?
+          (let (value-ind (+ body-ind 2)
+                tc (trailing-comment-at kids (inc i) n)
+                line (str acc (if (>= nl 2) "\n\n" "\n") (indent-of value-ind) (render c value-ind)))
+            (if (nil? tc)
+              (render-body-pairs-at kids (inc i) n body-ind 0 line false)
+              (render-body-pairs-at kids
+                (inc tc)
+                n
+                body-ind
+                0
+                (str line " " (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc))))
+                false)))
         ;; A structural clause. Pair it with the *next* form — but only if a form
         ;; is what comes next. If a comment intervenes first (or we're at the end),
         ;; emit this clause alone and let the loop handle the comment on its own
-        ;; line; pairing across a comment would step over and DROP it.
+        ;; line; pairing across a comment would step over and DROP it. The clause's
+        ;; result is then PENDING: the next form is its value, not a new test.
         else
           (let (j (kids-next-nonws kids (inc i) n))
             (if (or (= j n) (comment? (seq/vector-ref kids j)))
@@ -753,7 +775,8 @@ if you are reintroducing hoisting, they are what you have to write back."
                     n
                     body-ind
                     0
-                    (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind)))
+                    (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind))
+                    (not (= j n)))
                   (render-body-pairs-at kids
                     (inc tc)
                     n
@@ -764,7 +787,8 @@ if you are reintroducing hoisting, they are what you have to write back."
                       (indent-of body-ind)
                       (render c body-ind)
                       " "
-                      (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc)))))))
+                      (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc))))
+                    (not (= (kids-next-nonws kids (inc tc) n) n)))))
               (let (arendr (render c body-ind)
                     vnode (seq/vector-ref kids j)
                     ;; Miser drop (CL miser mode): if `key value` won't fit on one
@@ -774,15 +798,17 @@ if you are reintroducing hoisting, they are what you have to write back."
                     ;; full width (so e.g. each `:dependencies` entry gets room).
                     ;; The trigger is content-based (does the flat pair fit?), so it
                     ;; is idempotent. `value-ind` is +2 from the key's indent.
-                    vflat (single-line vnode)
-                    pair-fits (and vflat
-                                (<= (+ body-ind (string/length arendr) 1 (string/length vflat))
+                    ;; The test is what the value RENDERS as, not its flat form: a value
+                    ;; the author broke stays broken (`render` honours those newlines),
+                    ;; and gluing it to the key on the strength of a flat form that fits
+                    ;; left `else (let (x 1)` with the body hanging deep beneath.
+                    vrendr (render vnode (+ body-ind (string/length arendr) 1))
+                    pair-fits (and (not (includes? vrendr "\n"))
+                                (<= (+ body-ind (string/length arendr) 1 (string/length vrendr))
                                   (width)))
                     value-ind (+ body-ind 2)
                     pair-str (if pair-fits
-                               (str arendr
-                                 " "
-                                 (render vnode (+ body-ind (string/length arendr) 1)))
+                               (str arendr " " vrendr)
                                (str arendr "\n" (indent-of value-ind) (render vnode value-ind)))
                     tc (trailing-comment-at kids (inc j) n))
                 (if (nil? tc)
@@ -791,7 +817,8 @@ if you are reintroducing hoisting, they are what you have to write back."
                     n
                     body-ind
                     0
-                    (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) pair-str))
+                    (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) pair-str)
+                    false)
                   ;; Keep the pair's same-line trailing comment on the pair's line.
                   (render-body-pairs-at kids
                     (inc tc)
@@ -803,8 +830,9 @@ if you are reintroducing hoisting, they are what you have to write back."
                       (indent-of body-ind)
                       pair-str
                       " "
-                      (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc)))))))))))))
-(sig render-body-pairs-at (vector int int int int string -> string))
+                      (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc))))
+                    false)))))))))
+(sig render-body-pairs-at (vector int int int int string bool -> string))
 
 ;; Next non-WHITESPACE child at or after `i` (comments are NOT skipped — a
 ;; comment is a meaningful boundary the pair emitter must not pair across).
@@ -1085,7 +1113,8 @@ if you are reintroducing hoisting, they are what you have to write back."
   ;; whatever `file/dir?` + `file/ls` see, which is sufficient for the typical
   ;; project layout.
   (if (file/dir? dir)
-    (fold
+    (fold (file/ls dir)
+      nil
       (fn (acc entry)
         (let (p (path/join dir entry))
           (cond
@@ -1098,9 +1127,7 @@ if you are reintroducing hoisting, they are what you have to write back."
             ;; every setup, so formatting them just fights the resolver.
             (string/ends-with? entry ".lock.blsp") acc
             (string/ends-with? entry ".blsp") (cons p acc)
-            else acc)))
-      nil
-      (file/ls dir))
+            else acc))))
     nil))
 
 ;; The root's OWN .blsp files, non-recursively — `project.blsp` and any top-level
@@ -1109,15 +1136,15 @@ if you are reintroducing hoisting, they are what you have to write back."
 ;; `project.lock.blsp` is skipped by the `.lock.blsp` rule below, as before.
 (defn- format-root-files (root)
   (if (file/dir? root)
-    (fold (fn (acc entry)
-            (let (p (path/join root entry))
-              (cond
-                (file/dir? p) acc
-                (string/ends-with? entry ".lock.blsp") acc
-                (string/ends-with? entry ".blsp") (cons p acc)
-                else acc)))
+    (fold (file/ls root)
       nil
-      (file/ls root))
+      (fn (acc entry)
+        (let (p (path/join root entry))
+          (cond
+            (file/dir? p) acc
+            (string/ends-with? entry ".lock.blsp") acc
+            (string/ends-with? entry ".blsp") (cons p acc)
+            else acc))))
     nil))
 
 ;; The directories this project owns: its source and test paths, plus whatever
@@ -1134,9 +1161,9 @@ if you are reintroducing hoisting, they are what you have to write back."
   ;; plus each whitelisted tree. `distinct` because the whitelists can overlap
   ;; (`:format-paths ["."]`, or a test path nested inside a source path).
   (seq/distinct (append (format-root-files root)
-                  (fold (fn (acc dir) (%append-two (format-collect-blsp dir) acc))
+                  (fold (format-roots root)
                     nil
-                    (format-roots root)))))
+                    (fn (acc dir) (%append-two (format-collect-blsp dir) acc))))))
 
 (defn- format-require-root ()
   (let (root (project/find-root (file/cwd)))
@@ -1156,7 +1183,9 @@ if you are reintroducing hoisting, they are what you have to write back."
 ;; and appended the missing paren at the end. Being mid-edit with an unclosed paren
 ;; is completely routine (and format-on-save makes it automatic), so that turned a
 ;; half-typed file into silently different code.
-(defn- format-parses? (src) (try (do (reflect/read-all src) true) (catch _ false)))
+;; check-allow :discarded-catch — a probe: whether the source reads at all is the answer
+(defn- format-parses? (src)
+  (check-allow :discarded-catch (try (do (reflect/read-all src) true) (catch _ false))))
 
 (defn file (path)
   "Format the file at `path` in place. Returns `:unchanged`, `:rewrote`, or `:unparseable` — a file that does not parse is left untouched, since there is no program to re-lay-out and the tolerant CST would restructure it."
@@ -1201,7 +1230,7 @@ that does not parse is reported and skipped, never rewritten."
 
 ;; A tiny local set (a map to true) — avoids requiring `set` just for membership.
 (defn- format-set-of (coll)
-  (fold (fn (m x) (assoc m x true)) {} coll))
+  (fold coll {} (fn (m x) (assoc m x true))))
 
 ;; The .blsp files under the project that git reports as not-committed-clean
 ;; (modified/staged/untracked), intersected with the project's own file set so
@@ -1212,8 +1241,8 @@ that does not parse is reported and skipped, never rewritten."
   (let (changed (%git-changed-files root))
     (if (keyword? changed)
       :not-a-repo (let (project (format-set-of (format-every-blsp root)))
-        (filter (fn (p) (contains? project p))
-          (filter (fn (p) (string/ends-with? p ".blsp")) changed))))))
+        (filter (filter changed (fn (p) (string/ends-with? p ".blsp")))
+          (fn (p) (contains? project p)))))))
 
 (defn project-changed ()
   "Format only the .blsp files git reports as changed (modified/staged/untracked)
@@ -1255,12 +1284,13 @@ number of files rewritten."
             0)
         else
           (do
-            (fold (fn (_ entry)
-                    (io/puts (if (= (seq/vector-ref entry 1) :unparseable)
-                               (str "  does not parse: " (seq/vector-ref entry 0))
-                               (str "  needs formatting: " (seq/vector-ref entry 0)))))
-              nil changed)
-            (let (unparseable (count (filter (fn (e) (= (seq/vector-ref e 1) :unparseable)) changed))
+            (fold changed
+              nil
+              (fn (_ entry)
+                (io/puts (if (= (seq/vector-ref entry 1) :unparseable)
+                           (str "  does not parse: " (seq/vector-ref entry 0))
+                           (str "  needs formatting: " (seq/vector-ref entry 0))))))
+            (let (unparseable (count (filter changed (fn (e) (= (seq/vector-ref e 1) :unparseable))))
                   dirty (- (count changed) unparseable))
               (error "format: "
                 dirty

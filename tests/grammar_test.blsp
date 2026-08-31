@@ -12,7 +12,7 @@
   (test "special-keywords is exactly (reflect/special-forms) minus the def… heads"
     (let (kw (special-keywords))
       ;; def-heads get a distinct name-capturing rule, so they're excluded here
-      (is (every? (fn (k) (not (string/starts-with? k "def"))) kw))
+      (is (every? kw (fn (k) (not (string/starts-with? k "def")))))
       (is (not (includes? kw "defn")))
       (is (not (includes? kw "defmodule")))
       ;; everything else from the canonical list is present
@@ -22,7 +22,7 @@
       (is (includes? kw "->>"))
       ;; the count matches: the canonical list with def-heads filtered out
       (assert= (count kw)
-        (count (filter (fn (k) (not (string/starts-with? k "def"))) (reflect/special-forms))))))
+        (count (filter (reflect/special-forms) (fn (k) (not (string/starts-with? k "def"))))))))
 
   (test "(tmlanguage) is valid JSON of the TextMate shape"
     (let (g (decode (tmlanguage)))
@@ -85,8 +85,8 @@
       (is (includes? q "(#match? @keyword \"^def\"))"))
       ;; def-heads are matched by the ^def rule, not listed in the keyword alternation
       ;; (they DO appear below it, in the docstring rules' own #any-of? list)
-      (let (kw-line (seq/find (fn (l) (includes? l "#any-of? @keyword.control"))
-                      (string/split q "\n")))
+      (let (kw-line (seq/find (string/split q "\n")
+                      (fn (l) (includes? l "#any-of? @keyword.control"))))
         (is (not (includes? kw-line "\"defn\""))))
       ;; the docstring rules: child anchors state the position a regex can only guess
       (is (includes? q "@string.documentation"))

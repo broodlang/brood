@@ -163,14 +163,16 @@
 
   (test "call-timeout raises when the server never replies"
     (let (s (start silent nil))
-      (assert= (try (call-timeout s :anything 30) (catch e :timed-out)) :timed-out)))
+      (assert= (try (call-timeout s :anything 30) (catch e :timed-out))
+        :timed-out)))
 
   (test "call raises promptly when the server is already dead"
     (let (s (start silent nil))
       (stop s)
       (sleep 20)
       ;; the monitor on a dead pid fires [:down … :noproc] at once — no 2 s wait
-      (assert= (try (call-timeout s :anything 2000) (catch e :died)) :died)))
+      (assert= (try (call-timeout s :anything 2000) (catch e :died))
+        :died)))
 
   (test "a timed-out call leaves NOTHING addressed to it in the caller's mailbox"
     ;; Every exit path must demonitor and flush this call's envelopes. Anything left
@@ -179,7 +181,8 @@
     ;; is re-scanned by every later selective receive.
     (let (s (start silent nil)
           before (proc/mailbox-size (self)))
-      (assert= (try (call-timeout s :anything 20) (catch e :timed-out)) :timed-out)
+      (assert= (try (call-timeout s :anything 20) (catch e :timed-out))
+        :timed-out)
       ;; the server dies AFTER we gave up: a still-armed monitor would deliver a
       ;; [:down] here that nothing would ever consume
       (stop s)
@@ -189,7 +192,8 @@
   (test "a timed-out call does not poison the NEXT call on the same server"
     (let (s (start echoing nil))
       ;; 0 ms — give up before the server can possibly answer
-      (assert= (try (call-timeout s :ping 0) (catch e :timed-out)) :timed-out)
+      (assert= (try (call-timeout s :ping 0) (catch e :timed-out))
+        :timed-out)
       (sleep 60)
       ;; the abandoned call's reply must not be mistaken for this one's
       (assert= (call-timeout s :ping 2000) :pong))))

@@ -62,8 +62,13 @@ Before starting new work:
   flaky, fixing that takes priority over finishing the feature — don't commit forward.
 - **Build uncapped, run capped.** Put an address-space cap in front of every test, `nest check`,
   `nest run` (in a downstream project too — bedit is where KI-87 first showed) and `brood`
-  run — `( ulimit -v 4000000; cargo nextest run -p brood -j1 -E '…' )` — and keep `-j1`, so
-  one runaway is the whole spike. A *diverging* process is indistinguishable from a
+  run — `( ulimit -v 16000000; cargo nextest run -p brood -j1 -E '…' )` — and keep `-j1`, so
+  one runaway is the whole spike. **16 GB, not 4:** the runtime *reserves* ~3 GB of address
+  space before it does any work on a 28-core box — the allocator's per-thread arenas (20 ×
+  128 MB `PROT_NONE`) plus the worker stacks (28 × 16 MB) — so a 4 GB cap fails the first
+  test that creates a `table` (its 64 MB virtual region is merely the mapping that lands on
+  the wall; measured 2026-08-30 with `strace -e mmap`), and that failure is a Brood error
+  naming the cap, not a runaway. 16 GB still catches the KI-87 class (19 GB processes). A *diverging* process is indistinguishable from a
   heavy one until it has eaten the machine: KI-87 (a checker cycle guard that un-guarded) put
   three test processes at 19 GB each and a `nest run` at 54 GB, crashing the box three
   sessions running; under the cap the same runs die in ten seconds with the panic site named
@@ -221,7 +226,7 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          editor/display framework `std/editor/*` (buffer, display, ui,
                          keymap, face, highlight, lineedit, pane, layers, ansi, serve);
                          the process framework `std/proc/*` (`gen`, `supervisor`,
-                         `agent`); the net *library* `std/net/*` (`http`, `sse`, `tcp`,
+                         `agent`, `crash-report` — the default crash reporter, ADR-305); the net *library* `std/net/*` (`http`, `sse`, `tcp`,
                          `reconnect`); the toolchain `std/tool/*` — all four grouped on
                          disk but with BARE (single-segment) module names, so a qualified
                          call is `gen/spawn-server`, `http/get`, `test/run` — never a
@@ -246,7 +251,7 @@ The CLI is split (ADR-028, the `rustc`/`cargo` model): **`brood` runs the
 language**, **`nest` runs the project**. Both embed the `brood` lib (no
 subprocess); `nest` is a thin shell over `std/tool/project.blsp`. `nest` subcommands
 today: `new`, `test`, `check` (with `--fix-renames`, which applies the *unambiguous* half of
-a rename wave's recovery — ADR-257), `run` (with `--watch`, and `--check-boot`: load every
+a rename wave's recovery, consulting the rename ledger first — ADR-304), `run` (refuses to launch over an *unbound symbol* in the entry point's require-closure — the checker already ran there and bedit ignored it for hours; `--no-check` skips the pre-flight, ADR-304 — with `--watch`, and `--check-boot`: load every
 module, resolve `:main`, run **nothing**, exit nonzero — the question `check` and `test`
 both leave unasked, KI-66), `doc`, `format`, `repl`,
 `mcp` (an MCP server over the project), `observe` (the M3 process viewer),
@@ -296,7 +301,7 @@ failures. Second, **`make check` is not what CI runs** — it is clippy + tests,
 and the stress gate; v0.14.0 was tagged and pushed with `nest format --check` red for exactly
 that reason. `make green` reports the completed runs of the **CI workflow specifically** (the
 `Release` workflow goes green on commits whose CI failed) and runs the local gates `make check`
-omits; it prints **"no verdict"** rather than "green" when CI has concluded nothing recent.
+omits; it prints **"no verdict"** rather than "green" when CI has concluded nothing recent. CI also runs a **`downstream-bedit`** job — bedit pinned to `BEDIT_REF` in the workflow, `nest check` + `nest run --check-boot` + `nest test` against the commit under test, the gate the ADR-302 rename wave showed was missing — and `make smoke-bedit` (in `make green-all`) is the same three commands against `../bedit` locally.
 
 > **Clippy: `--all-features` is load-bearing, not thoroughness.** CI runs
 > `cargo clippy --all-targets --all-features -- -D warnings`; **a plain
@@ -471,6 +476,7 @@ contention races).
 | `BROOD_BOOT_TRACE=1` | Print the phase breakdown of the shared prelude build to stderr — the cold source boot (`[boot] builtins=… read=… expand=… eval=… freeze=…`, plus a `[boot-form]` line for any form whose expansion takes >300µs) **and, since 2026-08-26, the warm cache-hit path** (`[boot] parse=… eval=… freeze=…`), which previously reported only a total and so could not say whether a boot regression was in reading the cache, evaluating the prelude, or one `require` inside it. Works in release. This is the tool that found KI-61's two halves: 12.1 ms of the 26 ms warm boot was two `require-one` forms, 3.5 ms a second positioned read of the prelude (both now gone — ADR-246/247, warm boot 11.6 ms). |
 | `BROOD_JIT_CB_TRACE=1` | Trace JIT runtime-callback invocations to stderr (`[jit-cb] brood_rt_<name>(...)`). Debug builds only. Useful for diagnosing JIT-compiled code calling back into Rust (global lookup, slow calls, GC). |
 | `BROOD_NO_DROP_WARN=1` | **Opt-OUT** of the once-per-name warning that a message was **dropped for a registered name no process holds** (ADR-232) — default ON. The drop itself is unchanged Erlang semantics (`send` is fire-and-forget; a missing *name* is silent, only a missing *node* raises under `:send-errors`); what this prints is the fact that it happened, at the receiving node, which is the only party that knows. Default-on because a flag you must arm before the bug is a flag that is absent when it matters — see KI-39, whose retroactive self-reporting also failed to fire. Deduplicated per name, so a hot loop addressing a dead service warns once rather than flooding. This is the fix for **KI-36**'s root diagnosability gap, which cost twelve days and three sightings. |
+| `BROOD_NO_CRASH_REPORT=1` | **Opt-OUT** of the **default crash reporter** (ADR-305, `std/proc/crash-report.blsp`) — default ON in `brood file`, `nest run`, a released bundle and the REPL (never under `nest test`). A `proc/system-monitor` subscriber selecting `:exit-abnormal` prints one report per crash *site* — pid, reason, kind/code/position, hint, up to eight trace frames — for any process that exits with a reason other than `:normal`/`:kill`/`:shutdown`; the kernel's own `process N died: …` one-liner (no trace, repeated per iteration of a crash loop) stands down while one is armed. With this set the one-liner is back. Not a debug flag so much as the switch for a test harness or a host with its own reporting: pass `{:sink f}` to `crash-report/start` to capture reports as strings instead. |
 | `BROOD_NO_RELOAD_DIAG=1` | Silence the hot-reload `def` diagnostics (`[reload] arity changed …`, `[reload] macro … redefined`). For a tool that rebinds globals *deliberately and en masse* — `nest test --cover` wraps every project function in a variadic shim, so it sets this itself. Off-switch only; the default stays on so an accidental reload mismatch is still surfaced. In-language equivalent: bind the global `*reload-diagnostics*` to false (the kernel checks both), which is what a test exercising a deliberate arity change does. |
 | `BROOD_DUMP_CODE=<substr>` | Dump the **native disassembly** of each JIT'd arm whose `defn` name contains `<substr>` — the machine-code counterpart of `BROOD_JIT_DUMP_IR` (which stops at CLIF), for when a miscompile has to be read at the instruction level and gdb can't see the anonymous JIT pages. **Needs `--features jit`**; substring-filtered so one targeted arm doesn't bury you. |
 | `BROOD_TW_REENTRY=1` | **Opt-IN** to the tree-walker→VM router: a VM-eligible closure invoked from TREE-WALKED code runs through `vm_apply` instead of inheriting its caller's ~10× engine (before it, `apply_closure` never re-entered the VM, so ONE deferred call tree-walked everything beneath it — §7.3's expansion-constant mechanism). Bounded by `TW_REENTRY_BUDGET` (32) so mixed-eligibility mutual TAIL recursion stays flat (`tests/tw_reentry_test.blsp`). Measured: 60× on the viral shape, `startup` −6.9%, standard rows neutral. **Off by default (the BROOD_MKCLO pattern): routing exposes KI-88** — a pre-existing scheduler liveness bug where one spawn of a warm 50-burst is created+promoted but never scheduled (`breakage/chaos2_process_genserver`, deterministic; also at c4af2feb). Flip the default WITH KI-88's fix, re-running the full breakage suite. |
@@ -680,6 +686,63 @@ co-author trailer, overriding any default that would append one.
 3. Update `docs/language.md` (it documents the language *as implemented*).
 4. Tick it off in `ROADMAP.md`; add a dated entry to `docs/devlog.md`.
 5. If it reflects a real design choice, record an ADR in `docs/decisions.md`.
+
+## When you RENAME or REORDER a stdlib function
+
+A rename wave or an argument reorder is not a find-and-replace, and treating it as one cost
+ten bugs — six of them silent — during ADR-302/307. The trap is that "the function's name" is
+not one string. **Enumerate these before the first edit, not one suite run at a time.**
+
+**A call has five spellings.** A textual rewriter sees only the first:
+
+| spelling | example | notes |
+|---|---|---|
+| bare | `(map xs f)` | |
+| qualified | `(stream/map s f)`, `(string/join xs sep)` | `(join …)` does NOT match `(string/join …)` |
+| root-scoped | `(/map xs f)` | the `/name` prelude escape |
+| macro-constructed | `(list '/mapv 'args '%identity-of)` | **does not exist until expansion** — ungreppable as a call |
+| string-embedded | `%load-string`, `reflect/eval-string`, and `nest new`'s scaffold templates | executable, unlike a highlighter fixture |
+
+That last row needs a human read: a sweep finds ~118 strings containing `(map …)` and only
+~15 are executable. The scaffold templates matter most — they emit a *user's* project, and
+nothing in this repo's suite runs the code they generate.
+
+**The Rust checker encodes argument positions structurally**, and they degrade to `any`
+*silently* rather than erroring — `types/check/sigs.rs` (curated signatures + callback
+demand in `specialize_call`), `types/check/infer.rs` (result inference for
+`map`/`keep`/`interpose`/`reduce`/`fold`), `types/check/walk.rs` (callback-signature
+synthesis). Two gates now guard this and **both must stay green**:
+
+- `types::check::sigs::convention_tests::curated_combinators_put_the_callback_last` — asserts
+  every curated signature taking a callback puts it LAST. It caught a stale
+  `seq/index-where` on its first run.
+- `tests/introspection_test.blsp` "combinator result inference survives the argument order" —
+  pins a known-*precise* inferred type per combinator, so a stale position in `infer.rs`
+  fails by name instead of quietly widening to `any`. Pin a case the checker can actually
+  prove; `any` is what a broken position yields too.
+
+**`map` is a function name AND a type name.** `(map K V)` in a `sig` is a *type*, and the
+two-token form `(map -> int)` parses as a two-argument call — 18 signatures were silently
+swapped this way. Check `(sig …)` **and** `(sig! …)`.
+
+**Prefer the reorder that fails loudly.** Moving a collection into argument one fails at once
+(a function where a collection belongs errors), which is what made ~1780 sites tractable.
+Reordering a *callback's own* parameters fails silently — `(fn (acc x) (+ acc x))` keeps
+working, `(cons x acc)` keeps running and builds garbage. Do the first; refuse the second
+(ADR-308 keeps `(fn (acc x))` for exactly this reason).
+
+**`doctest` is the completeness gate.** `tests/doc_examples_test.blsp` and
+`tests/doctest_test.blsp` *execute* every indented `form → result` example in every
+docstring. They caught nine stale examples nothing else would have. Run them early, not last.
+
+**Two measurement rules, learned the hard way in the same session:**
+- **Assert the summary line is PRESENT**, never that failures are absent. `nest test | grep
+  "test failed"` returns empty both when the suite passes and when the runner died before
+  printing anything — and the pipeline's exit code is `grep`'s, not the runner's.
+- **Confirm the binary is fresh before believing any result.** A `cargo build` killed by a
+  command timeout leaves the old binary in place; the runtime says `this binary's baked-in
+  std/ is OLDER than …` on stderr, which a grep for failures filters away. Two diagnoses were
+  made against a stale build before this was noticed.
 
 ## Known next steps (see roadmap)
 

@@ -177,8 +177,17 @@ unsafe impl Send for DenseSlots {}
 unsafe impl Sync for DenseSlots {}
 
 impl DenseSlots {
+    /// The failure is a Brood error, not a panic. This reservation is the first
+    /// large mapping a *small* program makes, so it is the one that hits an
+    /// address-space cap that something else filled: on a 28-core box the
+    /// allocator's per-thread arenas (20 × 128 MB, `PROT_NONE`) and the worker
+    /// stacks (28 × 16 MB) reserve ~3 GB before any table exists, and under
+    /// `ulimit -v 4000000` the table's 64 MB is simply the mapping that lands on
+    /// the wall. As an `assert!` this aborted the process from inside a JIT
+    /// callback that cannot unwind, with a message blaming the table. As an error
+    /// it names the cause, is catchable, and the test that hit it fails alone.
     #[cfg(unix)]
-    fn new() -> Self {
+    fn try_new() -> Result<Self, LispError> {
         let bytes = DENSE_KEY_MAX as usize * std::mem::size_of::<AtomicU64>();
         // SAFETY: a fresh private anonymous mapping; MAP_ANONYMOUS pages read as
         // zero (= every slot EMPTY) and commit lazily on first write.
@@ -192,15 +201,21 @@ impl DenseSlots {
                 0,
             )
         };
-        assert!(
-            ptr != libc::MAP_FAILED,
-            "table: reserving the dense slot region failed"
-        );
-        DenseSlots(ptr as *const AtomicU64)
+        if ptr == libc::MAP_FAILED {
+            let os_error = std::io::Error::last_os_error();
+            return Err(LispError::runtime(format!(
+                "table: cannot reserve the {} MB dense slot region: {os_error}. The region is \
+                 virtual (committed a page at a time), so this is an address-space limit — an \
+                 `ulimit -v` below what the runtime reserves (allocator arenas + worker stacks, \
+                 ~3 GB on a 28-core box) or a `BROOD_MEM_LIMIT`; raise it or run with fewer cores",
+                bytes >> 20
+            )));
+        }
+        Ok(DenseSlots(ptr as *const AtomicU64))
     }
 
     #[cfg(not(unix))]
-    fn new() -> Self {
+    fn try_new() -> Result<Self, LispError> {
         // Fallback: one zeroed allocation (committed up front — the unix path's
         // lazy-commit is an optimization, not a semantic requirement).
         let layout =
@@ -209,9 +224,12 @@ impl DenseSlots {
         // (EMPTY) value; the region is leaked (never freed), matching the unix path.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            return Err(LispError::runtime(format!(
+                "table: cannot allocate the {} MB dense slot region",
+                layout.size() >> 20
+            )));
         }
-        DenseSlots(ptr as *const AtomicU64)
+        Ok(DenseSlots(ptr as *const AtomicU64))
     }
 
     /// The slot for dense index `i`. Callers only produce `i` via [`dense_idx`],
@@ -267,6 +285,9 @@ impl DenseSlots {
 /// fences — its SeqCst RMWs/stores/loads already carry that order per C11.
 struct Store {
     slots: OnceLock<DenseSlots>,
+    /// Serialises the one-time reservation of `slots`, so two first-users cannot both
+    /// `mmap` a region (the loser's would leak — 64 MB of address space, never freed).
+    slots_init: Mutex<()>,
     dense_count: AtomicUsize,
     /// Watermark: 1 + the highest dense index ever written.
     dense_max: AtomicUsize,
@@ -291,9 +312,21 @@ struct Store {
 }
 
 impl Store {
+    /// The dense slot region, reserved on first use. Fallible: see
+    /// [`DenseSlots::try_new`]. The fast path is one lock-free `get`; the reservation
+    /// itself runs under `slots_init`, re-checking after the lock so a racing
+    /// first-user finds the winner's region instead of mapping a second one.
     #[inline]
-    fn dense_slots(&self) -> &DenseSlots {
-        self.slots.get_or_init(DenseSlots::new)
+    fn dense_slots(&self) -> Result<&DenseSlots, LispError> {
+        if let Some(slots) = self.slots.get() {
+            return Ok(slots);
+        }
+        let _guard = self.slots_init.lock().unwrap_or_else(|e| e.into_inner());
+        if self.slots.get().is_none() {
+            let fresh = DenseSlots::try_new()?;
+            let _ = self.slots.set(fresh);
+        }
+        Ok(self.slots.get().expect("set under the init lock"))
     }
 
     /// The slot range every scan (count/migrate/snapshot/drop) must cover:
@@ -419,6 +452,7 @@ pub fn check_key(who: &str, key: Value) -> Result<(), LispError> {
 pub fn create() -> u64 {
     let idx = REGISTRY.push(Store {
         slots: OnceLock::new(),
+        slots_init: Mutex::new(()),
         dense_count: AtomicUsize::new(0),
         dense_max: AtomicUsize::new(0),
         jit_shared: AtomicBool::new(false),
@@ -527,7 +561,7 @@ pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
     if store.dense.load(Ordering::Acquire) {
         if let (Some(i), Some(word)) = (dense_idx(key), slot_enc(val)) {
             store.cover(i);
-            let old = store.dense_slots().slot(i).swap(word, Ordering::SeqCst);
+            let old = store.dense_slots()?.slot(i).swap(word, Ordering::SeqCst);
             if old != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
                 if old == SLOT_EMPTY {
                     store.dense_count.fetch_add(1, Ordering::Relaxed);
@@ -621,7 +655,7 @@ pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
                 }
                 store.cover(i);
                 let old = store
-                    .dense_slots()
+                    .dense_slots()?
                     .slot(i)
                     .swap(SLOT_EMPTY, Ordering::SeqCst);
                 if old != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
@@ -664,7 +698,7 @@ pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
     if store.dense.load(Ordering::Acquire) {
         if let Some(i) = dense_idx(key) {
             store.cover(i);
-            let slot = store.dense_slots().slot(i);
+            let slot = store.dense_slots()?.slot(i);
             let mut cur = slot.load(Ordering::SeqCst);
             loop {
                 let (cur_int, was_empty) = match cur {
@@ -821,7 +855,9 @@ pub(crate) fn jit_dense_base(id: u64) -> Option<(*const AtomicU64, *const Atomic
     if !store.dense.load(Ordering::SeqCst) {
         return None;
     }
+    // Reserve BEFORE latching: a store whose region cannot be reserved stays on the
+    // FFI path (which reports the error) rather than latched with no slots.
+    let slots = store.dense_slots().ok()?;
     store.jit_shared.store(true, Ordering::SeqCst);
-    let slots = store.dense_slots();
     Some((slots.0, &store.dense as *const AtomicBool))
 }

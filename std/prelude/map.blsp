@@ -85,8 +85,9 @@ a wrong-typed one.
   ;; entry check showing up through this call (an inlining-boundary effect, not
   ;; instruction cost — `nth` measured standalone is identical either way).
   ((coll k) (cond
-              (map? coll) (let (v (%map-get coll k nil))
-                            (if (nil? v) (%lookup-miss coll k v) v))
+              (map? coll)
+                (let (v (%map-get coll k nil))
+                  (if (nil? v) (%lookup-miss coll k v) v))
               (set? coll) (if (%set-has? coll k) k nil)
               (nil? coll) nil
               (string? coll)
@@ -156,7 +157,7 @@ A multi-key result prints in the map's internal order, not the order given."
 
     (dissoc {:a 1 :b 2} :b)   → {:a 1}
     (dissoc {:a 1} :zz)       → {:a 1}   ; absent key is a no-op"
-  (fold %map-dissoc m ks))
+  (fold ks m %map-dissoc))
 
 ;; `%map-pairs` (kernel) is the single map enumerator: the entries as a list of
 ;; [k v] vectors, in one O(n) pass. `keys`/`vals`/`contains?`/`reduce-kv` are all
@@ -175,7 +176,7 @@ stable one."
   ;; Unlike `get`'s, this branch is not hot: it already walks the whole map and allocates,
   ;; so the impl check sits up front rather than behind a miss.
   (let (ks (%keys-via-lookup m))
-    (if (nil? ks) (map first (seq m)) ks)))
+    (if (nil? ks) (map (seq m) first) ks)))
 
 (defn- %keys-via-lookup (m)
   "This map's own `lookup-keys`, or nil when it has no `Lookup` impl. Raw prims and a `bound?`
@@ -196,7 +197,7 @@ with bare `get`."
     (vals {:a 1})  → (1)
 
 Order matches [[keys]] — the map's internal order, not insertion order."
-  (map second (seq m)))
+  (map (seq m) second))
 (defn contains? (m k)
   "True if map `m` has key `k` (distinguishes a stored `nil`/`false` from
 absence). O(1) via the CHAMP hash path (`%map-get`), not an O(n) key scan: probe
@@ -232,7 +233,7 @@ can.)
     (merge {:a 1} {:a 9})        → {:a 9}    ; rightmost wins
     (merge {:a 1} nil)           → {:a 1}    ; nil maps are skipped
     (merge)                      → {}"
-  (reduce (fn (acc m) (if (nil? m) acc (into acc m))) {} maps))
+  (reduce maps {} (fn (acc m) (if (nil? m) acc (into acc m)))))
 
 (defn update (coll k f & args)
   "A collection like `coll` with the value at key/index `k` replaced by

@@ -90,7 +90,7 @@ leading instruction keyword (when the first word is one) plus quoted-string args
     (reverse acc)
     (let (e (math/min n (string/span-until src i "\n"))
           spans (dk-line-spans (string/substring src i e) i))
-      (dk-lex src (inc e) n (fold (fn (a s) (cons s a)) acc spans)))))
+      (dk-lex src (inc e) n (fold spans acc (fn (a s) (cons s a)))))))
 (sig dk-lex (string int int list -> list))
 
 (defn dockerfile-spans (src)

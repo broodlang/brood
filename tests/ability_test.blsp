@@ -273,7 +273,7 @@
 ;; argument (unbound-symbol error at every call). It now emits `(apply impl self … rest)`.
 (defability Cat (cat [self & rest] :-> any))
 (impl Cat :string (cat [s & rest] (apply str s rest)))
-(impl Cat :int (cat [n & rest] (fold + n rest)))
+(impl Cat :int (cat [n & rest] (fold rest n +)))
 
 (describe "variadic ops"
   (test "a & rest op dispatches on the first arg and receives the rest"
@@ -336,7 +336,7 @@
 (impl Kindly :vector (kindly [_] :vec))
 
 (defability Gather (gather [self & rest] :-> any))
-(impl Gather :int (gather [n & rest] (fold + n rest)))
+(impl Gather :int (gather [n & rest] (fold rest n +)))
 
 (defn abt-spawn-workers (parent xs)
   (when (not (empty? xs))
@@ -354,7 +354,7 @@
       (let (kinds (abt-collect 0 (count xs) nil))
         (assert= (count kinds) 6)
         ;; order is nondeterministic — assert every expected impl was reached
-        (is (every? (fn (k) (includes? kinds k)) (list :int :string :kw :float :bool :vec))))))
+        (is (every? (list :int :string :kw :float :bool :vec) (fn (k) (includes? kinds k)))))))
   (test "a variadic op runs in a spawned worker"
     (let (parent (self))
       (spawn (send parent [:sum (gather 1 2 3 4)]))
@@ -385,16 +385,16 @@
       (concurrently n
         (fn (i) (%register-impl (abt-conc-name i) (abt-conc-op i) :int (fn (x) i) nil)))
       ;; before the fix this lost roughly 40% of them
-      (assert= (count (seq/remove abt-conc-registered? (range n))) 0))))
+      (assert= (count (seq/remove (range n) abt-conc-registered?)) 0))))
 
 ;; ---- typed ability ops: the checker consumes an op's `:-> RET` return type ----
 ;; A static/advisory feature, so these assert on the checker's warnings (via
 ;; `check-string-structured`) rather than on runtime behaviour, which is unchanged.
 (defn abt-warns-of (src)
   "The advisory warning messages for source `src`."
-  (map (fn (w) (get w :message)) (reflect/check-string-structured src)))
+  (map (reflect/check-string-structured src) (fn (w) (get w :message))))
 (defn abt-warns-about? (src needle)
-  (any? (fn (w) (includes? w needle)) (abt-warns-of src)))
+  (any? (abt-warns-of src) (fn (w) (includes? w needle))))
 
 (describe "typed ability ops: :-> return types"
   (test "an op's declared return type flows into inference at the call site"
@@ -469,10 +469,20 @@
     ;; Over the whole image, not just this file's records — the property has to hold for
     ;; every `defrecord` the compiler might meet, including the stdlib's.
     (let (ids (keys *record-ids*)
-          orphans (filter (fn (id) (not (bound? (symbol (->string id))))) ids))
+          orphans (filter ids (fn (id) (not (bound? (symbol (->string id)))))))
       ;; Not vacuous: an empty or near-empty registry would satisfy the assertion below
       ;; while checking nothing (ADR-280). This file alone defines several records.
       (is (>= (count ids) 3))
+      ;; Name them on failure. This has fired once in ~14 full scoped runs and has never
+      ;; reproduced on demand, so the ONE thing the next sighting must not cost is another
+      ;; run to learn WHICH ids orphaned — the same lesson as ADR-232's default-on drop
+      ;; warning: a diagnostic you have to arm first is absent exactly when it matters.
+      ;; (Ruled out so far: `%isolate` not rolling back registry globals; a process spawned
+      ;; inside an isolate registering after restore; another process seeing the shared
+      ;; RUNTIME-region entry after the parent rolled back. All three test clean.)
+      (when (seq orphans)
+        (io/puts (str "orphaned record ids (registered, no bound constructor): " orphans)
+          :to *err*))
       (assert= nil (seq orphans)))))
 
 (describe "typed ability op parameters: (->string T) in an op spec (ADR-180)"
@@ -567,7 +577,7 @@
   (ncols [self] :-> int (count (columns self))) ; provided
   :derive-record (fn (flds)
     ;; a list of `impl` method forms: derive `columns` as the field values, in field order
-    (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (->string f)))) flds)]))))
+    (list `(columns [r] [~@(map flds (fn (f) `(get r ~(keyword (->string f)))))]))))
 (defrecord cpoint (x y) :derives [Columns])
 (defrecord crgb (r g b) :derives [Columns])
 

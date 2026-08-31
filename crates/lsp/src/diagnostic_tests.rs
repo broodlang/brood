@@ -13,7 +13,7 @@ fn warnings(src: &str) -> Vec<Diagnostic> {
 fn surfaces_the_callback_arity_warning_as_a_brood_warning() {
     // The Step-5+ arrow check (ADR-078) must reach the editor: `map` calls
     // its callback with one arg, but `cons` takes two.
-    let diags = warnings("(def r (map cons (list 1 2 3)))");
+    let diags = warnings("(def r (map (list 1 2 3) cons))");
     let hit = diags
         .iter()
         .find(|d| d.message.contains("callback") && d.message.contains("cons"))
@@ -24,7 +24,7 @@ fn surfaces_the_callback_arity_warning_as_a_brood_warning() {
 
 #[test]
 fn a_correct_arity_callback_produces_no_callback_warning() {
-    let diags = warnings("(def r (map inc (list 1 2 3)))");
+    let diags = warnings("(def r (map (list 1 2 3) inc))");
     assert!(
         diags.iter().all(|d| !d.message.contains("callback")),
         "a correct-arity callback must not warn: {:?}",

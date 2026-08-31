@@ -43,7 +43,7 @@ fn idle_worker_steals_fresh_backlog_under_load() {
         ;; A fan-out worker: build an n-entry map and send its size back. The size
         ;; is exactly n regardless of scheduling, so a burst's total is deterministic.
         (defn work ()
-          (send root [:r (count (reduce (fn (a x) (assoc a x x)) {} (range n)))]))
+          (send root [:r (count (reduce (range n) {} (fn (a x) (assoc a x x))))]))
 
         (defn fan (k) (when (> k 0) (do (spawn (work)) (fan (- k 1)))))
 

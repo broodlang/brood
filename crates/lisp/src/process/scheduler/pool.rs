@@ -677,7 +677,12 @@ fn handle_capture_outcome(
             // `nest run --watch` loses it the same way.
             let who = proc_descr(proc.pid);
             let why = e.located();
-            eprintln!("process {who} died: {why}");
+            // The one-liner yields to a subscriber listening for abnormal exits (the
+            // crash reporter, ADR-305), whose report carries the trace; the durable
+            // dump is written either way.
+            if !crate::process::sysmon::crash_reported_elsewhere() {
+                eprintln!("process {who} died: {why}");
+            }
             crate::cli_support::dump_process_death(&who, &why.to_string());
             deregister(
                 proc.pid,

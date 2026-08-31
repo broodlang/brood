@@ -1,5 +1,5 @@
 ;; sequence fns over lists, vectors, ranges, maps — all valid, no warnings.
-(io/puts (map inc (list 1 2)) (map inc [1 2]) (map inc (range 3)))
-(io/puts (fold + 0 [1 2 3]) (count {:a 1}) (first (keys {:a 1})))
-(io/puts (filter int? [1 "a" 2 nil 3.5]))
-(io/puts (sort-by count ["ccc" "a" "bb"]))
+(io/puts (map (list 1 2) inc) (map [1 2] inc) (map (range 3) inc))
+(io/puts (fold [1 2 3] 0 +) (count {:a 1}) (first (keys {:a 1})))
+(io/puts (filter [1 "a" 2 nil 3.5] int?))
+(io/puts (sort-by ["ccc" "a" "bb"] count))

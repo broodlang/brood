@@ -43,7 +43,7 @@
 
 ;; --- element-level (list E) / (vector E) checks --------------------------------
 
-(defn c-sum-list (xs) (reduce + 0 xs))
+(defn c-sum-list (xs) (reduce xs 0 +))
 (sig! c-sum-list ((list int) -> int))
 
 (defn c-first-vec (v) (first v))
@@ -140,10 +140,10 @@
 
 ;; --- rest params in sig! -------------------------------------------------------
 
-(defn c-sum (& xs) (reduce + 0 xs))
+(defn c-sum (& xs) (reduce xs 0 +))
 (sig! c-sum (& int -> int))
 
-(defn c-join-strs (sep & parts) (string/join sep parts))
+(defn c-join-strs (sep & parts) (string/join parts sep))
 (sig! c-join-strs (string & string -> string))
 
 (describe "rest param contracts (sig! with &)"
@@ -335,8 +335,8 @@
 
 (defn- stability-messages (src)
   "The stability diagnostics the checker reports for `src`."
-  (filter (fn (m) (or (includes? m "is deprecated") (includes? m "is beta")))
-    (map (fn (d) (get d :message)) (reflect/check-string-structured src))))
+  (filter (map (reflect/check-string-structured src) (fn (d) (get d :message)))
+    (fn (m) (or (includes? m "is deprecated") (includes? m "is beta")))))
 
 (describe "stability metadata (meta …)"
 
@@ -351,8 +351,7 @@
   (test "`:deprecated` warns at each use and names the replacement"
     (let (msgs (stability-messages "(defn u (s) (contract-test/m-old s))"))
       (assert= true
-        (any? (fn (m) (and (includes? m "is deprecated since 0.14.0") (includes? m "m-new")))
-          msgs))))
+        (any? msgs (fn (m) (and (includes? m "is deprecated since 0.14.0") (includes? m "m-new")))))))
 
   (test "a deprecation is ADVISORY — it prints, it does not gate the build"
     ;; The point of a deprecation is to say "this is going away" while the code still
@@ -365,8 +364,7 @@
   (test "`:beta` warns with its reason"
     (let (msgs (stability-messages "(defn u (s) (contract-test/m-wobbly s))"))
       (assert= true
-        (any? (fn (m) (includes? m "is beta — the options map may still change"))
-          msgs))))
+        (any? msgs (fn (m) (includes? m "is beta — the options map may still change"))))))
 
   (test "`(check-allow :deprecated …)` silences a deliberate use"
     ;; A library calls its own deprecated name from the shim that replaces it.
@@ -389,10 +387,10 @@
   (test "a use is diagnosed, pointing at `not`"
     (let (msgs (stability-messages "(defn u (a b) (not= a b))"))
       (assert= true
-        (any? (fn (m)
-                (and (includes? m "`not=` is deprecated since 0.19.1")
-                  (includes? m "use `not` instead")))
-          msgs))))
+        (any? msgs
+          (fn (m)
+            (and (includes? m "`not=` is deprecated since 0.19.1")
+              (includes? m "use `not` instead")))))))
 
   (test "it still WORKS — a deprecation is not a removal"
     ;; `check-allow` because this file is checked at zero warnings like every other, and

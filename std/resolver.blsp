@@ -121,13 +121,12 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
   "The subset of `pkg`'s REAL versions matching `constraint` (a version string; nil/\"\" =
 all). NONE never matches — a version constraint is about a selected version."
   (let (compiled (version/compile constraint))
-    (filter (fn (v) (and (not (= v pg-none)) (version/match? compiled v)))
-      (pg-universe ctx pkg))))
+    (filter (pg-universe ctx pkg) (fn (v) (and (not (= v pg-none)) (version/match? compiled v))))))
 
-(defn- pg-intersect (a b) (filter (fn (v) (includes? b v)) a))
-(defn- pg-subset? (a b) (every? (fn (v) (includes? b v)) a))
-(defn- pg-disjoint? (a b) (not (any? (fn (v) (includes? b v)) a)))
-(defn- pg-complement (ctx pkg s) (filter (fn (v) (not (includes? s v))) (pg-universe ctx pkg)))
+(defn- pg-intersect (a b) (filter a (fn (v) (includes? b v))))
+(defn- pg-subset? (a b) (every? a (fn (v) (includes? b v))))
+(defn- pg-disjoint? (a b) (not (any? a (fn (v) (includes? b v)))))
+(defn- pg-complement (ctx pkg s) (filter (pg-universe ctx pkg) (fn (v) (not (includes? s v)))))
 (defn- pg-empty? (s) (empty? s))
 
 ;; --- incompatibilities -----------------------------------------------------------
@@ -142,7 +141,7 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; The incompatibilities a package's release contributes: for each dep `[Q R]`, "P=V and Q
 ;; outside R is forbidden" — i.e. choosing P=V forces Q into R.
 (defn- pg-dep-ics (ctx pkg version)
-  (map
+  (map (or (provider-deps (get ctx :provider) pkg version) nil)
     (fn (dep)
       (let (dep-name (nth dep 0)
             dep-constraint (nth dep 1)
@@ -154,19 +153,18 @@ all). NONE never matches — a version constraint is about a selected version."
             terms (if (= dep-name pkg)
                     {pkg (pg-intersect (list version) forbidden)}
                     {pkg (list version) dep-name forbidden}))
-        (pg-ic terms [:dep pkg version dep-name dep-constraint])))
-    (or (provider-deps (get ctx :provider) pkg version) nil)))
+        (pg-ic terms [:dep pkg version dep-name dep-constraint])))))
 
 ;; The root requirements as incompatibilities: "root is chosen AND P is outside R" is
 ;; forbidden — so once the (always-decided) root is in, P must land in R. Binary, exactly a
 ;; dependency of the virtual root, which is what makes even a permissive requirement select P.
 (defn- pg-root-ics (ctx roots)
-  (map (fn (r)
-         (let (pkg (nth r 0) constraint (nth r 1))
-           (pg-ic {pg-root-pkg (list pg-root-version)
-                   pkg (pg-complement ctx pkg (pg-set-matching ctx pkg constraint))}
-             [:root pkg constraint])))
-    roots))
+  (map roots
+    (fn (r)
+      (let (pkg (nth r 0) constraint (nth r 1))
+        (pg-ic {pg-root-pkg (list pg-root-version)
+                pkg (pg-complement ctx pkg (pg-set-matching ctx pkg constraint))}
+          [:root pkg constraint])))))
 
 ;; --- the partial solution --------------------------------------------------------
 ;; An ordered list of ASSIGNMENTS (newest first) plus the derived state. A DECISION fixes a
@@ -209,21 +207,21 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; Drop every assignment above `level`, then rebuild `pos`/`decs` from what remains — the
 ;; backjump. `assigns` is newest-first, so kept assignments keep their order.
 (defn- pg-backtrack (state level)
-  (let (kept (filter (fn (a) (<= (get a :level) level)) (get state :assigns))
-        pos (fold (fn (m a)
-                    (assoc m
-                      (get a :pkg) (pg-intersect (get m (get a :pkg) (get a :set)) (get a :set))))
+  (let (kept (filter (get state :assigns) (fn (a) (<= (get a :level) level)))
+        pos (fold (reverse kept)
               {}
-              (reverse kept))
-        decs (fold (fn (m a) (if (get a :dec) (assoc m (get a :pkg) (get a :ver)) m))
+              (fn (m a)
+                (assoc m
+                  (get a :pkg) (pg-intersect (get m (get a :pkg) (get a :set)) (get a :set)))))
+        decs (fold (reverse kept)
                {}
-               (reverse kept)))
+               (fn (m a) (if (get a :dec) (assoc m (get a :pkg) (get a :ver)) m))))
     {:assigns kept
      :level level
      :pos pos
      :decs decs
      ;; every constrained-but-undecided package is required again after the backjump.
-     :pending (seq/keep (fn (pkg) (when (not (contains? decs pkg)) pkg)) (keys pos))}))
+     :pending (seq/keep (keys pos) (fn (pkg) (when (not (contains? decs pkg)) pkg)))}))
 
 ;; --- term / incompatibility relations --------------------------------------------
 
@@ -258,11 +256,10 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; not the whole growing set. Without this, a 300-package solve is quadratic in the number of
 ;; dependencies; with it, propagation is proportional to what actually touches each package.
 (defn- pg-index-add (index ics)
-  (fold (fn (idx ic)
-          (fold (fn (i pkg) (assoc i pkg (cons ic (get i pkg nil))))
-            idx
-            (keys (get ic :terms))))
-    index ics))
+  (fold ics
+    index
+    (fn (idx ic)
+      (fold (keys (get ic :terms)) idx (fn (i pkg) (assoc i pkg (cons ic (get i pkg nil))))))))
 
 ;; --- unit propagation ------------------------------------------------------------
 ;; Given the incompatibilities that mention a just-changed package, derive every forced
@@ -383,17 +380,18 @@ all). NONE never matches — a version constraint is about a selected version."
         ;; this package: if empty, the satisfier fully explains it and the package cancels;
         ;; otherwise the complement of that difference stays in the resolvent (pub's
         ;; `difference.inverse`), so the learned incompatibility is not weakened.
-        difference (filter (fn (v) (not (includes? ic-pkg-set v))) satisfier-set)
-        others (fold (fn (terms kv)
-                       (let (p (nth kv 0) s (nth kv 1))
-                         (if (= p pkg)
-                           terms
-                           (assoc terms
-                             p (if (contains? terms p)
-                                 (pg-intersect (get terms p) s)
-                                 s)))))
+        difference (filter satisfier-set (fn (v) (not (includes? ic-pkg-set v))))
+        others (fold (%map-pairs (get cause :terms))
                  (dissoc (get ic :terms) pkg)
-                 (%map-pairs (get cause :terms)))
+                 (fn (terms kv)
+                   (let (p (nth kv 0) s (nth kv 1))
+                     (if (= p pkg)
+                       terms
+                       (assoc terms
+                         p
+                           (if (contains? terms p)
+                             (pg-intersect (get terms p) s)
+                             s))))))
         merged (if (empty? difference)
                  others
                  (assoc others pkg (pg-complement ctx pkg difference))))
@@ -490,12 +488,10 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
           [:no-versions pkg]
           (let (version (pg-pick-version ctx pkg allowed)
                 dep-ics (pg-dep-ics ctx pkg version)
-                discovered (keys (fold (fn (m ic)
-                                         (fold (fn (mm k) (assoc mm k true))
-                                           m
-                                           (keys (get ic :terms))))
+                discovered (keys (fold dep-ics
                                    {}
-                                   dep-ics)))
+                                   (fn (m ic)
+                                     (fold (keys (get ic :terms)) m (fn (mm k) (assoc mm k true)))))))
             [:decide pkg version dep-ics discovered popped])))))
 
 ;; Newest allowed version, unless a `preferred` (locked) version is still allowed — then that,
@@ -505,7 +501,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
     (if (and pin (includes? allowed pin)) pin (first allowed))))
 
 (defn- pg-min-by (f items)
-  (fold (fn (best x) (if (< (f x) (f best)) x best)) (first items) (rest items)))
+  (fold (rest items) (first items) (fn (best x) (if (< (f x) (f best)) x best))))
 
 ;; --- error rendering: the derivation (pub-style structured proof) ----------------
 ;; The failing incompatibility's CAUSE is a left-leaning tree of resolution steps —
@@ -519,7 +515,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
   (let (lines (pg-report ctx ic)
         leaves (pg-cause-leaves (get ic :cause) nil))
     (str "dependency resolution failed:\n"
-      (string/join "\n" (map (fn (l) (str "  " l)) lines))
+      (string/join (map lines (fn (l) (str "  " l))) "\n")
       (pg-availability-lines ctx leaves))))
 
 ;; Whether a cause / incompatibility is an original fact (a leaf) rather than a [:derived …]
@@ -530,7 +526,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; A package's REAL versions (never NONE) an incompatibility term ALLOWS — the complement of
 ;; its forbidden set — for phrasing a step's consequence.
 (defn- pg-term-allows (ctx pkg forbidden)
-  (filter (fn (v) (not (= v pg-none))) (pg-complement ctx pkg forbidden)))
+  (filter (pg-complement ctx pkg forbidden) (fn (v) (not (= v pg-none)))))
 
 ;; The fact a derived incompatibility establishes going forward, phrased for prose. An
 ;; incompatibility forbids all its terms holding at once; dropping the (always-true) root term,
@@ -541,8 +537,8 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
   ;; empty-set term (`P → {}` forbids nothing, so its complement is the whole universe — rendering
   ;; it as "P must be <every version>" is both wrong and unbounded; such a term can arise as an
   ;; empty-intersection resolvent on the spine).
-  (let (reals (filter (fn (kv) (and (not (= (nth kv 0) pg-root-pkg)) (not (empty? (nth kv 1)))))
-                (%map-pairs (get ic :terms))))
+  (let (reals (filter (%map-pairs (get ic :terms))
+                (fn (kv) (and (not (= (nth kv 0) pg-root-pkg)) (not (empty? (nth kv 1)))))))
     (cond
       (empty? reals) "version solving failed"
       (= 1 (count reals))
@@ -551,10 +547,10 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
               allowed (pg-term-allows ctx pkg (nth kv 1)))
           (if (empty? allowed)
             (str "no version of " (->string pkg) " satisfies every requirement on it")
-            (str (->string pkg) " must be " (string/join " or " allowed))))
+            (str (->string pkg) " must be " (string/join allowed " or "))))
       else
         (str "the requirements on "
-          (string/join " and " (map (fn (kv) (->string (nth kv 0))) reals))
+          (string/join (map reals (fn (kv) (->string (nth kv 0)))) " and ")
           " cannot all hold"))))
 
 ;; One premise's rendering: an external cause is its plain fact; a derived cause is stated by
@@ -644,16 +640,16 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
     ([:dep pkg _ dep-name _] (list pkg dep-name))))
 
 (defn- pg-availability-lines (ctx leaves)
-  (let (pkgs (seq/distinct (apply append (map pg-leaf-packages leaves))))
+  (let (pkgs (seq/distinct (apply append (map leaves pg-leaf-packages))))
     (apply str
-      (map (fn (pkg)
-             (let (real (filter (fn (v) (not (= v pg-none))) (pg-universe ctx pkg)))
-               (str "\n  "
-                 (->string pkg)
-                 (if (empty? real)
-                   " has no versions available"
-                   (str " available: " (string/join ", " real))))))
-        pkgs))))
+      (map pkgs
+        (fn (pkg)
+          (let (real (filter (pg-universe ctx pkg) (fn (v) (not (= v pg-none)))))
+            (str "\n  "
+              (->string pkg)
+              (if (empty? real)
+                " has no versions available"
+                (str " available: " (string/join real ", "))))))))))
 
 (defn- pg-no-versions-msg (state ctx ics pkg)
   (let (universe (pg-universe ctx pkg))
@@ -662,7 +658,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
       (str "dependency resolution failed:\n  no version of "
         (->string pkg)
         " satisfies every requirement (available: "
-        (string/join ", " universe)
+        (string/join universe ", ")
         ")"))))
 
 ;; A requirement's constraint rendered as a trailing suffix — " <constraint>" for a real range,

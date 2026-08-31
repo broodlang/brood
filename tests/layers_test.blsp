@@ -38,7 +38,7 @@
   (test "collects a facet from active layers, highest-precedence (head) first"
     (let (ctx (push-layer (push-layer {:log ""} 'layers-test/layer-a) 'layers-test/layer-hi))
       ;; pushed a, then hi → hi is the head (highest precedence)
-      (assert= (map (fn (km) (get km "x")) (layer-collect ctx :keymap))
+      (assert= (map (layer-collect ctx :keymap) (fn (km) (get km "x")))
         (list 'layers-test/cmd-y 'layers-test/cmd-x))))
   (test "layers lacking the facet are dropped"
     (let (ctx (push-layer {:log ""} 'layers-test/layer-boom))
@@ -299,9 +299,9 @@
 (describe "system layers & active-layers"
   :isolated (test "active-layers resolves refs to maps, highest precedence first"
     (let (ctx (push-layer (push-layer {} 'layers-test/layer-a) 'layers-test/layer-hi))
-      (assert= (map (fn (l) (get l :name)) (active-layers ctx)) (list 'hi 'a))))
+      (assert= (map (active-layers ctx) (fn (l) (get l :name))) (list 'hi 'a))))
   (test "system layers are appended (lowest precedence) to every buffer"
     (register-type-layers :t-sys (list 'layers-test/layer-a))
     (register-system-layer 'layers-test/layer-b)
     (let (b (init-buffer-layers (set-buffer-type {} :t-sys)))
-      (assert= (map (fn (l) (get l :name)) (active-layers b)) (list 'a 'b)))))
+      (assert= (map (active-layers b) (fn (l) (get l :name))) (list 'a 'b)))))

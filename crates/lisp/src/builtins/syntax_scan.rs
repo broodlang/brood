@@ -660,12 +660,12 @@ pub(super) fn clipboard_get(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
     Ok(Value::nil())
 }
 
-/// `(clipboard-set! s)` — copy string `s` to the OS clipboard so other apps can paste
+/// `(clipboard-set s)` — copy string `s` to the OS clipboard so other apps can paste
 /// it; returns `s` (so it threads). A no-op (still returns `s`) when no clipboard is
 /// available or the `clipboard` feature is off, so callers needn't special-case headless
 /// builds. The editor's kill/copy commands call this so a kill is system-wide.
 pub(super) fn clipboard_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "clipboard-set!", arg(args, 0))?;
+    let s = expect_string(heap, "clipboard-set", arg(args, 0))?;
     #[cfg(feature = "clipboard")]
     clipboard::set_text(&s);
     #[cfg(not(feature = "clipboard"))]

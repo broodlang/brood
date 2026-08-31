@@ -27,7 +27,7 @@
         true)))
   (test "count is exact after heavy assoc/dissoc churn"
     (let (m (build {} 21 20000)
-          gone (fold (fn (mm k) (dissoc mm k)) m (keys m)))
+          gone (fold (keys m) m (fn (mm k) (dissoc mm k))))
       (do (assert= (count gone) 0) (assert= gone {}) true)))
   (test "assoc twice with the same key keeps one entry, last value wins"
     (let (m (assoc (assoc {} :k 1) :k 2))
@@ -42,7 +42,7 @@
   (test "keys/vals agree with get over a 10k map"
     (let (m (build {} 63 10000))
       (do
-        (fold (fn (_ k) (assert= (contains? m k) true)) nil (keys m))
+        (fold (keys m) nil (fn (_ k) (assert= (contains? m k) true)))
         (assert= (count (keys m)) (count m))
         (assert= (count (vals m)) (count m))
         true)))
@@ -61,7 +61,7 @@
     (let (v [1 2 3] v2 (assoc v 1 :x))
       (do (assert= v [1 2 3]) (assert= v2 [1 :x 3]) true)))
   (test "conj appends per element; nth/get agree"
-    (let (v (fold conj [] (range 1000)))
+    (let (v (fold (range 1000) [] conj))
       (do
         (assert= (count v) 1000)
         (assert= (nth v 999) 999)
@@ -77,30 +77,30 @@
   (test "map identity / composition"
     (let (xs (range 500))
       (do
-        (assert= (map (fn (x) x) xs) (seq xs))
-        (assert= (map (fn (x) (* 2 (+ x 1))) xs)
-          (map (fn (x) (* 2 x)) (map inc xs)))
+        (assert= (map xs (fn (x) x)) (seq xs))
+        (assert= (map xs (fn (x) (* 2 (+ x 1))))
+          (map (map xs inc) (fn (x) (* 2 x))))
         true)))
   (test "filter splits: (filter p) ++ (remove p) permutes the input"
     (let (xs (range 1000)
-          evens (filter (fn (x) (= (math/rem x 2) 0)) xs)
-          odds (seq/remove (fn (x) (= (math/rem x 2) 0)) xs))
+          evens (filter xs (fn (x) (= (math/rem x 2) 0)))
+          odds (seq/remove xs (fn (x) (= (math/rem x 2) 0))))
       (do
         (assert= (+ (count evens) (count odds)) 1000)
-        (assert= (fold + 0 evens) 249500)
-        (assert= (fold + 0 odds) 250000)
+        (assert= (fold evens 0 +) 249500)
+        (assert= (fold odds 0 +) 250000)
         true)))
   (test "fold is left-associative"
-    (assert= (fold (fn (acc x) (cons x acc)) () (list 1 2 3)) (list 3 2 1)))
+    (assert= (fold (list 1 2 3) () (fn (acc x) (cons x acc))) (list 3 2 1)))
   (test "take/drop partition"
     (let (xs (range 100))
       (do
-        (assert= (append (take 30 xs) (drop 30 xs)) (seq xs))
-        (assert= (take 0 xs) ())
-        (assert= (count (drop 100 xs)) 0)
+        (assert= (append (take xs 30) (drop xs 30)) (seq xs))
+        (assert= (take xs 0) ())
+        (assert= (count (drop xs 100)) 0)
         true)))
   (test "reverse is an involution; count-preserving"
-    (let (xs (map (fn (x) (* x 3)) (range 777)))
+    (let (xs (map (range 777) (fn (x) (* x 3))))
       (do
         (assert= (reverse (reverse xs)) (seq xs))
         (assert= (count (reverse xs)) 777)

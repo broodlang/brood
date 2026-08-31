@@ -50,7 +50,7 @@ definition, called from both ends."
 (defn- prefixed-by-any? (nm names)
   "Whether global `nm` is qualified by ANY module in `names` — i.e. some module already
 claims it by prefix."
-  (not (empty? (filter (fn (m) (string/starts-with? nm (str m "/"))) names))))
+  (not (empty? (filter names (fn (m) (string/starts-with? nm (str m "/")))))))
 
 (defn- %owner-prefix (nm)
   "The module a qualified name belongs to: everything before its LAST `/`, or nil when it
@@ -58,29 +58,29 @@ carries none. `:datetime/date` → `\"datetime\"`; a record declared in a nested
 the whole path (`editor/keymap/km` → `\"editor/keymap\"`)."
   (let (parts (string/split nm "/"))
     (when (> (count parts) 1)
-      (string/join "/" (take (- (count parts) 1) parts)))))
+      (string/join (take parts (- (count parts) 1)) "/"))))
 
 (defn- %reg-entries (reg pairs owner-fn)
   "Group `pairs` (a registry's `[key value]` list) by owning module, as
 `[registry-symbol [key] value]` triples ready for `%registry-update!`. `owner-fn` maps a
 `[key value]` pair to its module name, or nil to drop the entry — which is what a
 registration made at the root/REPL gets, since nothing materialises it back."
-  (fold (fn (acc kv)
-          (let ([k _v] kv
-                m (owner-fn kv))
-            (if (nil? m)
-              acc
-              (%map-assoc acc
-                m
-                (append (or (%map-get acc m nil) []) [[reg [k] (second kv)]])))))
+  (fold pairs
     {}
-    pairs))
+    (fn (acc kv)
+      (let ([k _v] kv
+            m (owner-fn kv))
+        (if (nil? m)
+          acc
+          (%map-assoc acc
+            m
+            (append (or (%map-get acc m nil) []) [[reg [k] (second kv)]])))))))
 
 (defn- %merge-by-module (a b)
   "Concatenate two module→entries maps."
-  (fold (fn (acc kv) (let ([m es] kv) (%map-assoc acc m (append (or (%map-get acc m nil) []) es))))
+  (fold (%map-pairs b)
     a
-    (%map-pairs b)))
+    (fn (acc kv) (let ([m es] kv) (%map-assoc acc m (append (or (%map-get acc m nil) []) es))))))
 
 (defn- %std-regs-by-module ()
   "Every non-impl registration a std module load performs, grouped by the module that
@@ -105,21 +105,20 @@ multimethod names by their own qualifier — each key names its owner, so none o
         two (fn (acc spec)
               ;; a two-level registry (`{k1 {k2 v}}`) flattened to `[reg [k1 k2] v]`
               (let ([reg outer owner-fn] spec)
-                (fold (fn (a kv)
-                        (let ([k1 inner] kv)
-                          (fold (fn (a2 kv2)
-                                  (let ([k2 v] kv2
-                                        m (owner-fn [[k1 k2] v]))
-                                    (if (nil? m)
-                                      a2
-                                      (%merge-by-module a2 {m [[reg [k1 k2] v]]}))))
-                            a
-                            (%map-pairs inner))))
+                (fold (%map-pairs outer)
                   acc
-                  (%map-pairs outer)))))
-    (fold two
-      (fold one
-        {}
+                  (fn (a kv)
+                    (let ([k1 inner] kv)
+                      (fold (%map-pairs inner)
+                        a
+                        (fn (a2 kv2)
+                          (let ([k2 v] kv2
+                                m (owner-fn [[k1 k2] v]))
+                            (if (nil? m)
+                              a2
+                              (%merge-by-module a2 {m [[reg [k1 k2] v]]})))))))))))
+    (fold [['*methods* *methods* method-owner]]
+      (fold
         [['*abilities* (%map-pairs *abilities*) ability-owner]
           ['*ability-owner* (%map-pairs *ability-owner*) (fn (kv) (->string (second kv)))]
           ['*sealed* (%map-pairs *sealed*) ability-owner]
@@ -130,10 +129,12 @@ multimethod names by their own qualifier — each key names its owner, so none o
           ['*multi-algebra* (%map-pairs *multi-algebra*) by-qualifier]
           ['*module-docs* (%map-pairs *module-docs*) (fn (kv) (first kv))]
           ;; single-level despite its PAIR key `[multimethod id-vector]`
-          ['*method-from* (%map-pairs *method-from*) (fn (kv) (->string (second kv)))]])
-      [['*methods* *methods* method-owner]])))
+          ['*method-from* (%map-pairs *method-from*) (fn (kv) (->string (second kv)))]]
+        {}
+        one)
+      two)))
 
-(defn- prune! (dir keep)
+(defn- prune (dir keep)
   "Delete all but the `max-keep` most recently modified `std-image-*.bin` under `dir`,
 never touching `keep`. Returns how many were removed.
 
@@ -144,15 +145,17 @@ library — the only machine that builds these — nothing is ever old enough fo
 catch, and measured 2026-08-27 this directory held **35 images, 74 MB**, all of them from that
 day. Dropping a live one is harmless: its binary rebuilds the image, or loads from source."
   (let (max-keep 4
-        mine (filter (fn (e)
-                       (and (string/starts-with? e "std-image-")
-                         (string/ends-with? e ".bin")
-                         (not (= (path/join dir e) keep))))
-               (file/ls dir))
+        mine (filter (file/ls dir)
+               (fn (e)
+                 (and (string/starts-with? e "std-image-")
+                   (string/ends-with? e ".bin")
+                   (not (= (path/join dir e) keep)))))
         ;; newest first, so everything past the cap is the tail
-        newest (sort-by (fn (e) (- 0 (or (file/mtime (path/join dir e)) 0))) mine)
-        doomed (drop max-keep newest))
-    (doseq (e doomed) (try (file/rm (path/join dir e)) (catch _ nil)))
+        newest (sort-by mine (fn (e) (- 0 (or (file/mtime (path/join dir e)) 0))))
+        doomed (drop newest max-keep))
+    ;; check-allow :discarded-catch — image-cache housekeeping; a module that will not load stays out of the image (the ADR-280 differential catches it)
+    (doseq (e doomed)
+      (check-allow :discarded-catch (try (file/rm (path/join dir e)) (catch _ nil))))
     (count doomed)))
 
 (defn %std-impls-by-module ()
@@ -163,16 +166,16 @@ vector of `[ability op key f from]`, the exact argument list `%register-impl` ta
 per-module attribution exact — there is no need to guess from the ability's or the id's
 owner. A registration whose `from` is nil came from the root/REPL and belongs to no module;
 it is dropped, since nothing materialises it back."
-  (fold (fn (acc kv)
-          (let ([prov from] kv
-                [aname op key] prov
-                f (get (get *impls* [aname op]) key))
-            (if (or (nil? from) (nil? f))
-              acc
-              (let (mn (->string from))
-                (%map-assoc acc mn (append (or (%map-get acc mn nil) []) [[aname op key f from]]))))))
+  (fold (%map-pairs *impl-from*)
     {}
-    (%map-pairs *impl-from*)))
+    (fn (acc kv)
+      (let ([prov from] kv
+            [aname op key] prov
+            f (get (get *impls* [aname op]) key))
+        (if (or (nil? from) (nil? f))
+          acc
+          (let (mn (->string from))
+            (%map-assoc acc mn (append (or (%map-get acc mn nil) []) [[aname op key f from]]))))))))
 
 (defn build (&optional modules)
   "Build (or rebuild) this binary's stdlib image and return `[path entry-count]`, or nil
@@ -197,22 +200,25 @@ since the prelude is always present."
     (when path
       (let (dir (path/dirname path)
             _ (when (not (file/dir? dir)) (file/mkdir dir))
-            ;; Drop older images before writing this one — see `prune!`.
-            _ (prune! dir path)
+            ;; Drop older images before writing this one — see `prune`.
+            _ (prune dir path)
             names (or modules (reflect/builtin-modules))
-            probed (fold (fn (acc m)
-                           (%map-assoc acc
-                             (->string m)
-                             (%isolate (fn ()
-                                         (let (before (into #{} (reflect/global-names))
-                                               _ (try (require-one m) (catch _ nil)))
-                                           (into #{}
-                                             (filter (fn (s) (not (contains? before s)))
-                                               (reflect/global-names))))))))
+            probed (fold names
                      {}
-                     names)
+                     (fn (acc m)
+                       (%map-assoc acc
+                         (->string m)
+                         (%isolate
+                           (fn ()
+                             (let (before (into #{} (reflect/global-names))
+                                   ;; check-allow :discarded-catch — image-cache housekeeping; a module that will not load stays out of the image (the ADR-280 differential catches it)
+                                   _ (check-allow :discarded-catch
+                                       (try (require-one m) (catch _ nil))))
+                               (into #{}
+                                 (filter (reflect/global-names) (fn (s) (not (contains? before s)))))))))))
             ;; now load them for real, so the globals being imaged are live in THIS heap
-            _ (doseq (m names) (try (require-one m) (catch _ nil)))
+            ;; check-allow :discarded-catch — image-cache housekeeping; a module that will not load stays out of the image (the ADR-280 differential catches it)
+            _ (doseq (m names) (check-allow :discarded-catch (try (require-one m) (catch _ nil))))
             ;; The edges every restored module needs replayed, held in a ROOT global so the
             ;; section that carries them belongs to no module — named `stdimage/…` it made
             ;; `stdimage` look already-loaded at boot, and its source then never loaded.
@@ -224,36 +230,36 @@ since the prelude is always present."
             ;; dispatchable, and the failure surfaces at `(send-response r)`, not at load.
             _ (%set-std-impls! (%std-impls-by-module))
             _ (%set-std-regs! (%std-regs-by-module))
-            roots (filter (fn (s) (not (prefixed-by-any? (->string s) names)))
-                    (reflect/global-names))
-            owner-of (fold (fn (acc g)
-                             (let (best (fold (fn (winner m)
-                                                (let (probe (%map-get probed (->string m) nil))
-                                                  (if (and probe
-                                                        (contains? probe g)
-                                                        (or (nil? winner)
-                                                          (< (count probe) (second winner))))
-                                                    [m (count probe)]
-                                                    winner)))
-                                          nil names))
-                               (if best (%map-assoc acc g (->string (first best))) acc)))
+            roots (filter (reflect/global-names)
+                    (fn (s) (not (prefixed-by-any? (->string s) names))))
+            owner-of (fold roots
                        {}
-                       roots)
+                       (fn (acc g)
+                         (let (best (fold names
+                                      nil
+                                      (fn (winner m)
+                                        (let (probe (%map-get probed (->string m) nil))
+                                          (if (and probe
+                                                (contains? probe g)
+                                                (or (nil? winner)
+                                                  (< (count probe) (second winner))))
+                                            [m (count probe)]
+                                            winner)))))
+                           (if best (%map-assoc acc g (->string (first best))) acc))))
             sections (append [["%std-edges" ['*std-require-edges*]]
                                ["%std-impls" ['*std-impls*]]
                                ["%std-regs" ['*std-regs*]]]
-                       (seq/keep
+                       (seq/keep names
                          (fn (m)
                            (let (mn (->string m)
                                  pfx (str mn "/")
-                                 owned (filter (fn (s) (string/starts-with? (->string s) pfx))
-                                         (reflect/global-names))
-                                 mine (filter (fn (g) (= (%map-get owner-of g nil) mn)) roots)
+                                 owned (filter (reflect/global-names)
+                                         (fn (s) (string/starts-with? (->string s) pfx)))
+                                 mine (filter roots (fn (g) (= (%map-get owner-of g nil) mn)))
                                  syms (apply vector (append owned mine)))
                              ;; A module contributing nothing would image as materialisable-but-empty,
                              ;; and a later require would restore no bindings rather than fall back.
-                             (when (> (count syms) 0) [mn syms])))
-                         names)))
+                             (when (> (count syms) 0) [mn syms]))))))
         [path (%image-write path sections (system/stdlib-id))]))))
 
 (defn install ()
@@ -296,12 +302,11 @@ instead of being inferred from a run that looked wrong."
        :others []}
       (let (dir (path/dirname path)
             present (if (file/dir? dir)
-                      (filter (fn (e) (string/starts-with? e "std-image-")) (file/list-files dir))
+                      (filter (file/list-files dir) (fn (e) (string/starts-with? e "std-image-")))
                       [])
             ;; The id sits between the `std-image-` prefix and the `.bin` suffix.
             ids (apply vector
-                  (map (fn (e) (string/substring e 10 (- (string/length e) 4)))
-                    present))
+                  (map present (fn (e) (string/substring e 10 (- (string/length e) 4)))))
             idx (%image-index path want)
             sections (if (nil? idx) nil (count idx)))
         (cond
@@ -325,7 +330,9 @@ with.
 `system/stdlib-id`, the same for every binary built from one tree."
   (let (path (image-path))
     (when path
-      (if (try (not (nil? (%image-index path (system/stdlib-id)))) (catch _ false))
+      ;; check-allow :discarded-catch — image-cache housekeeping; a module that will not load stays out of the image (the ADR-280 differential catches it)
+      (if (check-allow :discarded-catch
+            (try (not (nil? (%image-index path (system/stdlib-id)))) (catch _ false)))
         :present (do (build) :built)))))
 
 (defn ensure ()

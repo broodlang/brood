@@ -56,7 +56,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 ;; Names present in `after` but not `before` — the bindings a module introduced
 ;; between two (reflect/global-names) snapshots. global-names is sorted, so this is too.
-(defn- docs-added (before after) (filter (fn (s) (not (includes? before s))) after))
+(defn- docs-added (before after) (filter after (fn (s) (not (includes? before s)))))
 
 ;; --- rendering ---------------------------------------------------------------
 
@@ -81,12 +81,14 @@ module's namespace-rooted globals (ADR-070) back to it."
         ;; curated signature a primitive carries. `nil` for a name nothing types, which
         ;; is most of them, and that line is simply omitted. Guarded like the structured
         ;; record's: a name the checker cannot type must not fail the whole doc build.
-        arrow (try (reflect/type-signature sym) (catch _ nil))
+        ;; check-allow :discarded-catch — a name nothing can type / describe / locate is simply omitted from the docs
+        arrow (check-allow :discarded-catch (try (reflect/type-signature sym) (catch _ nil)))
         type-line (if (nil? arrow) "" (str "`" arrow "`\n\n"))
         ;; Stability metadata (ADR-283), where a `(meta …)` recorded any: when the name
         ;; appeared, whether it is going away, whether the surface is settled. `:since` is
         ;; documentation and this is the place it is spent.
-        m (try (%meta-of sym) (catch _ nil))
+        ;; check-allow :discarded-catch — a name nothing can type / describe / locate is simply omitted from the docs
+        m (check-allow :discarded-catch (try (%meta-of sym) (catch _ nil)))
         deprecated (when m (get m :deprecated))
         ;; `~~…~~` around the signature, inside the heading, when the name is going
         ;; away — GitHub-flavoured strikethrough, which is what every renderer of these
@@ -115,8 +117,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 ;; The "Definitions" section: every public function/macro the module added.
 (defn- docs-section-defs (syms)
-  (let (defs (filter (fn (s) (and (docs-documentable? (reflect/eval s)) (not (docs-private? s))))
-               syms))
+  (let (defs (filter syms
+               (fn (s) (and (docs-documentable? (reflect/eval s)) (not (docs-private? s))))))
     (if (empty? defs)
       ""
       ;; `(apply str (map …))` joins once. A `(str acc …)` fold recopies the whole
@@ -124,17 +126,17 @@ module's namespace-rooted globals (ADR-070) back to it."
       ;; markdown it generates — the same shape that made `write-lines` take 1888 ms for
       ;; 16 000 lines (std/file.blsp).
       (str "## Definitions\n\n"
-        (apply str (map (fn (s) (str (docs-entry s (reflect/eval s)) "\n")) defs))))))
+        (apply str (map defs (fn (s) (str (docs-entry s (reflect/eval s)) "\n"))))))))
 
 ;; The "Variables" section: public names the module bound to non-function values.
 (defn- docs-section-vars (syms)
-  (let (vars (filter (fn (s)
-                       (and (not (docs-documentable? (reflect/eval s)))
-                         (not (docs-private? s))))
-               syms))
+  (let (vars (filter syms
+               (fn (s)
+                 (and (not (docs-documentable? (reflect/eval s)))
+                   (not (docs-private? s))))))
     (if (empty? vars)
       ""
-      (str "## Variables\n\n" (apply str (map (fn (s) (str "- `" (->string s) "`\n")) vars))))))
+      (str "## Variables\n\n" (apply str (map vars (fn (s) (str "- `" (->string s) "`\n"))))))))
 
 ;; Assemble one module's Markdown from its title, module doc, and added names.
 (defn- docs-render (title mdoc syms)
@@ -158,7 +160,9 @@ module's namespace-rooted globals (ADR-070) back to it."
   to the delta."
   (let (src (file/slurp path)
         declared (docs-module-name src)
-        feature (try (project/project-file-feature path) (catch _ nil))
+        ;; check-allow :discarded-catch — a name nothing can type / describe / locate is simply omitted from the docs
+        feature (check-allow :discarded-catch
+                  (try (project/project-file-feature path) (catch _ nil)))
         before (reflect/global-names))
     (reflect/load path)
     (if feature
@@ -204,10 +208,10 @@ module's namespace-rooted globals (ADR-070) back to it."
       (error "doc: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (setup root)
     (let (dirs (project/abs-paths root *project-source-paths*)
-          files (fold (fn (acc d) (append acc (project/collect-sources d))) nil dirs))
+          files (fold dirs nil (fn (acc d) (append acc (project/collect-sources d)))))
       ;; One join over the whole project, not a per-file recopy of everything emitted
       ;; so far — this is the outermost of the three, so it was O(total-docs²).
-      (apply str (map (fn (f) (str (document-file f) "\n")) files)))))
+      (apply str (map files (fn (f) (str (document-file f) "\n")))))))
 
 ;; --- the complete builtin/prelude reference (`nest doc --all`) ---------------
 
@@ -221,7 +225,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 (defn document-all ()
   "The Markdown reference for every *public* global currently bound in the image — each builtin and prelude function/macro with its signature and one-line summary. The complete primitive reference (`nest doc --all`); read this once instead of probing names one at a time. Opt-in std modules (`display`, `buffer`, `ansi`, …) aren't loaded here — `nest doc <module>` documents those."
-  (let (syms (filter docs-public? (reflect/global-names)))
+  (let (syms (filter (reflect/global-names) docs-public?))
     (str "# Brood — global reference\n\n"
       "Every public global bound in a fresh image: the Rust builtins plus the "
       "`std/prelude` functions and macros — i.e. everything callable without a "
@@ -257,8 +261,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; The public documentable definitions among `syms`, as records (in `syms` order).
 (defn- docs-def-records (syms)
   (apply vector
-    (map (fn (s) (docs-def-record s (reflect/eval s)))
-      (filter (fn (s) (and (docs-documentable? (reflect/eval s)) (not (docs-private? s)))) syms))))
+    (map (filter syms (fn (s) (and (docs-documentable? (reflect/eval s)) (not (docs-private? s)))))
+      (fn (s) (docs-def-record s (reflect/eval s))))))
 
 ;; One module entry of the doc model: `{:module :doc :defs :qualified?}`. `:qualified? true`
 ;; — a project/library module IS a namespace, so its defs render as their call form
@@ -271,7 +275,8 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; A file's declared module name — the `(defmodule NAME …)` symbol — or nil if the file
 ;; has no module header. Read from source (the form is discarded once loaded).
 (defn- docs-module-name (src)
-  (let (form (try (reflect/read-first src) (catch _ nil)))
+  ;; check-allow :discarded-catch — a name nothing can type / describe / locate is simply omitted from the docs
+  (let (form (check-allow :discarded-catch (try (reflect/read-first src) (catch _ nil))))
     (when (and (pair? form) (= (first form) 'defmodule)) (->string (nth form 1)))))
 
 ;; Every global bound in module `modname`'s namespace (`modname/…`). Order-independent,
@@ -280,7 +285,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; dependencies to whichever file pulled them in.
 (defn- docs-namespace-syms (modname)
   (let (prefix (str modname "/"))
-    (filter (fn (s) (string/starts-with? (->string s) prefix)) (reflect/global-names))))
+    (filter (reflect/global-names) (fn (s) (string/starts-with? (->string s) prefix)))))
 
 (defn model-file (path)
   "The doc-model module entry for the file at `path`: load it, then collect its module's
@@ -292,7 +297,9 @@ module's namespace-rooted globals (ADR-070) back to it."
   outside a project, falls back to the load delta."
   (let (src (file/slurp path)
         declared (docs-module-name src)
-        feature (try (project/project-file-feature path) (catch _ nil))
+        ;; check-allow :discarded-catch — a name nothing can type / describe / locate is simply omitted from the docs
+        feature (check-allow :discarded-catch
+                  (try (project/project-file-feature path) (catch _ nil)))
         before (reflect/global-names))
     (reflect/load path)
     (if feature
@@ -320,11 +327,11 @@ module's namespace-rooted globals (ADR-070) back to it."
       (error "docs: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (setup root)
     (let (dirs (project/abs-paths root *project-source-paths*)
-          files (fold (fn (acc d) (append acc (project/collect-sources d))) nil dirs))
+          files (fold dirs nil (fn (acc d) (append acc (project/collect-sources d)))))
       {:name *project-name*
        :version *project-version*
        :guides (collect-guides root)
-       :modules (apply vector (map model-file files))})))
+       :modules (apply vector (map files model-file))})))
 
 ;; The full builtin+prelude reference (for `nest docs --all`), grouped by function
 ;; category via the shared `doc-catalog` — Math, Strings, Filesystem, Processes, … — so
@@ -338,18 +345,18 @@ module's namespace-rooted globals (ADR-070) back to it."
   ;; module binding has no def-site, ADR-218.)
   (let (namespaced? (fn (nm) (let (i (index-of nm "/")) (and i (> i 0))))
         language? (fn (s) (and (docs-public? s) (not (namespaced? (->string s)))))
-        syms (filter language? (reflect/global-names))
+        syms (filter (reflect/global-names) language?)
         category-of (fn (s) (doc-catalog/category-of (docs-bare s))))
     {:name "Brood"
      :version (try (system/brood-version) (catch _ nil))
      :modules (apply vector
-                (filter (fn (group) (not (empty? (get group :defs))))
-                  (map (fn (pair)
-                         (let ([key title] pair)
-                           (docs-module-model title
-                             nil
-                             (filter (fn (s) (= (category-of s) key)) syms))))
-                    doc-catalog/*category-order*)))}))
+                (filter (map doc-catalog/*category-order*
+                          (fn (pair)
+                            (let ([key title] pair)
+                              (docs-module-model title
+                                nil
+                                (filter syms (fn (s) (= (category-of s) key)))))))
+                  (fn (group) (not (empty? (get group :defs))))))}))
 
 (defn- write-site (out-dir model title)
   (when (not (file/dir? out-dir)) (file/mkdir out-dir))
@@ -436,10 +443,10 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- md-inline (text)
   (let (parts (string/split text "`"))
     (apply str
-      (map (fn (pair)
-             (let ([i seg] pair)
-               (if (odd? i) (str "<code>" (md-escape seg) "</code>") (md-links seg))))
-        (seq/zip (range (count parts)) parts)))))
+      (map (seq/zip (range (count parts)) parts)
+        (fn (pair)
+          (let ([i seg] pair)
+            (if (odd? i) (str "<code>" (md-escape seg) "</code>") (md-links seg))))))))
 
 ;; Emit a buffered paragraph or list when a block ends; a no-op for other modes.
 (defn- md-flush (state)
@@ -447,7 +454,7 @@ module's namespace-rooted globals (ADR-070) back to it."
     (cond
       (= mode :para)
         (assoc state
-          :out (str out "<p>" (md-inline (string/join " " (reverse buf))) "</p>")
+          :out (str out "<p>" (md-inline (string/join (reverse buf) " ")) "</p>")
           :mode :none
           :buf nil)
       (= mode :list)
@@ -455,14 +462,14 @@ module's namespace-rooted globals (ADR-070) back to it."
           :out
             (str out
               "<ul>"
-              (apply str (map (fn (l) (str "<li>" (md-inline l) "</li>")) (reverse buf)))
+              (apply str (map (reverse buf) (fn (l) (str "<li>" (md-inline l) "</li>"))))
               "</ul>")
           :mode :none
           :buf nil)
       ;; an unclosed ``` fence at end-of-input: emit what was buffered rather than drop it
       (= mode :code)
         (assoc state
-          :out (str out "<pre><code>" (md-escape (string/join "\n" (reverse buf))) "</code></pre>")
+          :out (str out "<pre><code>" (md-escape (string/join (reverse buf) "\n")) "</code></pre>")
           :mode :none
           :buf nil)
       else state)))
@@ -478,7 +485,7 @@ module's namespace-rooted globals (ADR-070) back to it."
             :out
               (str (get state :out)
                 "<pre><code>"
-                (md-escape (string/join "\n" (reverse (get state :buf))))
+                (md-escape (string/join (reverse (get state :buf)) "\n"))
                 "</code></pre>"))
           (assoc (md-flush state) :mode :code :buf nil))
       (= mode :code) (assoc state :buf (cons line (get state :buf)))
@@ -505,7 +512,7 @@ module's namespace-rooted globals (ADR-070) back to it."
   full CommonMark parser. Used for doc guides.
 
     (docs/markdown->html \"# hi\")   → \"<h1>hi</h1>\""
-  (get (md-flush (fold md-line {:out "" :mode :none :buf nil} (string/split md "\n"))) :out))
+  (get (md-flush (fold (string/split md "\n") {:out "" :mode :none :buf nil} md-line)) :out))
 (sig markdown->html (string -> any))
 
 ;; A guide's display title from its filename: `getting-started.md` -> `Getting started`.
@@ -523,9 +530,9 @@ module's namespace-rooted globals (ADR-070) back to it."
     (if (not (file/dir? dir))
       []
       (apply vector
-        (map (fn (path) {:title (guide-title path) :html (markdown->html (file/slurp path))})
-          (sort (filter (fn (p) (string/ends-with? p ".md"))
-                  (map (fn (f) (path/join dir f)) (file/ls dir)))))))))
+        (map (sort (filter (map (file/ls dir) (fn (f) (path/join dir f)))
+                     (fn (p) (string/ends-with? p ".md"))))
+          (fn (path) {:title (guide-title path) :html (markdown->html (file/slurp path))}))))))
 
 ;; --- doctests (`nest doctest`) -----------------------------------------------
 ;; A doctest is a docstring line of the form `<expr> ;=> <expected>` (the expression
@@ -542,7 +549,7 @@ module's namespace-rooted globals (ADR-070) back to it."
 
 ;; Every `expr ;=> expected` example in a docstring, in source order.
 (defn- doctests-in (docstring)
-  (filter (fn (x) (not (nil? x))) (map doctest-of-line (string/split docstring "\n"))))
+  (filter (map (string/split docstring "\n") doctest-of-line) (fn (x) (not (nil? x)))))
 
 ;; Evaluate one example: `[:ok]`, `[:fail actual expected]`, or `[:error message]`.
 (defn- run-one-doctest (expr-str expected-str)
@@ -556,21 +563,22 @@ module's namespace-rooted globals (ADR-070) back to it."
 ;; under `prefix`, e.g. `myproj/`), evaluated. Scoping to the project keeps the tooling's
 ;; own docstrings (this module's `;=>` examples, in prose) and the builtins out.
 (defn- collect-doctests (prefix)
-  (fold (fn (acc sym)
-          (if (not (string/starts-with? (->string sym) prefix))
-            acc
-            (let (v (try (reflect/eval sym) (catch _ nil))
-                  d (when v (try (doc v) (catch _ nil))))
-              (if (and (string? d) (includes? d ";=>"))
-                (append acc
-                  (map (fn (ex) [sym (nth ex 0) (nth ex 1) (run-one-doctest (nth ex 0) (nth ex 1))])
-                    (doctests-in d)))
-                acc))))
+  (fold (reflect/global-names)
     nil
-    (reflect/global-names)))
+    (fn (acc sym)
+      (if (not (string/starts-with? (->string sym) prefix))
+        acc
+        ;; check-allow :discarded-catch — a name nothing can type / describe / locate is simply omitted from the docs
+        (let (v (check-allow :discarded-catch (try (reflect/eval sym) (catch _ nil)))
+              d (when v (check-allow :discarded-catch (try (doc v) (catch _ nil)))))
+          (if (and (string? d) (includes? d ";=>"))
+            (append acc
+              (map (doctests-in d)
+                (fn (ex) [sym (nth ex 0) (nth ex 1) (run-one-doctest (nth ex 0) (nth ex 1))])))
+            acc))))))
 
 (defn- doctest-report (results)
-  (let (fails (filter (fn (r) (not (= (first (nth r 3)) :ok))) results))
+  (let (fails (filter results (fn (r) (not (= (first (nth r 3)) :ok)))))
     (doseq (r results)
       (let ([sym expr expected outcome] r)
         (match outcome

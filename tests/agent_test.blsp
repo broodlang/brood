@@ -95,14 +95,21 @@
     (let (a (agent/start (fn () 1)))
       (agent/stop a)
       (sleep 60)
-      (assert= :raised (try (do (agent/get a identity) :no-error) (catch e :raised)))
-      (assert= :raised (try (do (agent/update a inc) :no-error) (catch e :raised)))
+      ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+      (assert= :raised
+        (try (do (agent/get a identity) :no-error) (catch e :raised)))
+      (assert= :raised
+        (try (do (agent/update a inc) :no-error) (catch e :raised)))
       (assert= :raised
         (try (do (agent/get-and-update a (fn (n) [n n])) :no-error) (catch e :raised)))
-      (assert= :raised (try (do (agent/stop a) :no-error) (catch e :raised)))))
+      (assert= :raised
+        (try (do (agent/stop a) :no-error) (catch e :raised)))))
   (test "a crashed agent raises too"
     (let (a (agent/start (fn () 0)))
       ;; the update fn throws inside the agent, killing it
-      (try (agent/update a (fn (n) (error "agent boom"))) (catch e nil))
+      ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+      (check-allow :discarded-catch
+        (try (agent/update a (fn (n) (error "agent boom"))) (catch e nil)))
       (sleep 60)
-      (assert= :raised (try (do (agent/get a identity) :no-error) (catch e :raised))))))
+      (assert= :raised
+        (try (do (agent/get a identity) :no-error) (catch e :raised))))))

@@ -112,13 +112,13 @@
   ;; brute-force references: the same queries over the WHOLE-buffer CST, un-narrowed.
   (defn bf-enc (text point) (enclosing (tree text) point))
   (defn bf-forward (text point)
-    (let (nxt (first (filter (fn (f) (>= (get f :start) point)) (forms-of (bf-enc text point)))))
+    (let (nxt (first (filter (forms-of (bf-enc text point)) (fn (f) (>= (get f :start) point)))))
       (if (nil? nxt) point (get nxt :end))))
   (defn bf-backward (text point)
-    (let (prev (last (filter (fn (f) (<= (get f :end) point)) (forms-of (bf-enc text point)))))
+    (let (prev (last (filter (forms-of (bf-enc text point)) (fn (f) (<= (get f :end) point)))))
       (if (nil? prev) point (get prev :start))))
   (def many
-    (str (string/join "" (map (fn (i) (str "(defn f" i " () " i ")\n")) (range 300)))
+    (str (string/join (map (range 300) (fn (i) (str "(defn f" i " () " i ")\n"))) "")
       "(map g (h x))"))
   (def n (string/length many))
   (test "narrowed motion matches the whole-buffer walk at many points (incl. deep + boundaries)"
@@ -274,12 +274,13 @@
                   "  (indented)\n(top)\n" ; only column 0 counts
                   "no-forms-here\n" ; none at all
                   "(only)\n" "")
-          bad (fold (fn (acc text)
-                      (fold (fn (a p)
-                              (if (= (pair-old text p) (reflect/scan-form-start-2 text p))
-                                a
-                                (cons [text p] a)))
-                        acc
-                        (range 0 (+ 2 (string/length text)))))
-                nil texts))
+          bad (fold texts
+                nil
+                (fn (acc text)
+                  (fold (range 0 (+ 2 (string/length text)))
+                    acc
+                    (fn (a p)
+                      (if (= (pair-old text p) (reflect/scan-form-start-2 text p))
+                        a
+                        (cons [text p] a)))))))
       (assert= 0 (count bad)))))

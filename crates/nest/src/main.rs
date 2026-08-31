@@ -183,6 +183,14 @@ enum Cmd {
         )]
         check_boot: bool,
 
+        /// Skip the pre-flight check and launch regardless. By default `nest run`
+        /// checks the entry point's require-closure and refuses to start a program
+        /// that references a name it cannot call (ADR-304) — the failure that
+        /// produces at runtime is the least visible one there is. Other warnings
+        /// only print, never block.
+        #[arg(long = "no-check", conflicts_with = "check_boot")]
+        no_check: bool,
+
         /// Trailing arguments passed to the entry function as strings.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -905,6 +913,7 @@ fn run_main(cli: Cli) {
             main,
             name,
             check_boot,
+            no_check,
             args,
         } => {
             // A FILE runs standalone outside a project (documented); the bare
@@ -936,10 +945,13 @@ fn run_main(cli: Cli) {
             cmd_run(
                 &mut interp,
                 file.as_deref(),
-                &watch,
-                for_duration.as_deref(),
-                main.as_deref(),
-                name.as_deref(),
+                &RunOptions {
+                    watch: &watch,
+                    for_duration: for_duration.as_deref(),
+                    main: main.as_deref(),
+                    name: name.as_deref(),
+                    no_check,
+                },
                 &args,
             )
         }
@@ -1460,15 +1472,23 @@ fn parse_duration_ms(s: &str) -> Option<u64> {
     (ms.is_finite() && ms >= 0.0).then_some(ms as u64)
 }
 
-fn cmd_run(
-    interp: &mut Interp,
-    file: Option<&str>,
-    watch: &[String],
-    for_duration: Option<&str>,
-    main: Option<&str>,
-    name: Option<&str>,
-    args: &[String],
-) {
+/// The `nest run` flags, as parsed — everything but the positional FILE and args.
+struct RunOptions<'a> {
+    watch: &'a [String],
+    for_duration: Option<&'a str>,
+    main: Option<&'a str>,
+    name: Option<&'a str>,
+    no_check: bool,
+}
+
+fn cmd_run(interp: &mut Interp, file: Option<&str>, options: &RunOptions<'_>, args: &[String]) {
+    let RunOptions {
+        watch,
+        for_duration,
+        main,
+        name,
+        no_check,
+    } = *options;
     // A non-`.blsp` positional FILE inside a project is a *document* for the entry
     // point (the editor opens it), not a Brood script to run: route it to `:main` as
     // an argument, so `nest run notes.txt` edits notes.txt (vim/emacs style) instead
@@ -1577,7 +1597,16 @@ fn cmd_run(
     let wrap = !watch.is_empty() || timed.is_some();
     let run_form: String = match file {
         // No FILE: run the project's :main via std/tool/project.blsp.
-        None => format!("(project/run (list {}))", escaped_args),
+        // `no_check` reaches `run` as its second argument: the launch gate (ADR-304)
+        // is policy in project.blsp; this only carries the flag. The third says whether
+        // this is a `--watch` session — the gate then reports and starts anyway, since
+        // the point of a watch is to fix the program while it runs.
+        None => format!(
+            "(project/run (list {}) {} {})",
+            escaped_args,
+            if no_check { "true" } else { "false" },
+            if watch.is_empty() { "false" } else { "true" }
+        ),
         // FILE: run that file. Inside a project, set up the project so its
         // `src/` is on `*load-path*` (the file can `(require-one 'foo)` other
         // project modules), but *don't* eager-load every source — otherwise a

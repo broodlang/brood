@@ -821,6 +821,14 @@ pub(super) fn audio_beep(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     Ok(Value::Nil)
 }
 
+/// `(%gui-compiled?)` — was this runtime built with the GUI backend? The predicate an
+/// app asks BEFORE a `gui/*` call it means to skip headlessly, instead of calling and
+/// catching — a catch around a `gui/*` call swallows an unbound symbol just as readily
+/// as the missing backend, which is how a rename wave ran unnoticed for hours.
+pub(super) fn gui_compiled_p(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::boolean(cfg!(feature = "gui")))
+}
+
 /// `(gui-close id)` — close window `id` (the teardown for `gui-open`; idempotent).
 pub(super) fn gui_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "%gui-close", arg(args, 0))?;

@@ -101,7 +101,9 @@
     (let (deep (nest-list 400 1)
           p (pr-str deep))
       (is (not (nil? (index-of p "#<deep>"))))
-      (assert= :parse-error (try (do (reflect/read-string p) :read-ok) (catch e :parse-error)))))
+      ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+      (assert= :parse-error
+        (try (do (reflect/read-string p) :read-ok) (catch e :parse-error)))))
 
   (test "the human (display) form keeps the compact ellipsis"
     (is (not (nil? (index-of (str (nest-list 400 1)) "…"))))))
@@ -112,10 +114,13 @@
   (test "(quasiquote a b) raises rather than returning a and dropping b"
     ;; `quote` grew this rejection so a stray form can't vanish without a peep;
     ;; quasiquote had the same trap and silently returned `a`.
-    (assert= :error (try (reflect/eval (list 'quasiquote 'a 'b)) (catch e :error))))
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+    (assert= :error
+      (try (reflect/eval (list 'quasiquote 'a 'b)) (catch e :error))))
 
   (test "quote does the same"
-    (assert= :error (try (reflect/eval (list 'quote 'a 'b)) (catch e :error))))
+    (assert= :error
+      (try (reflect/eval (list 'quote 'a 'b)) (catch e :error))))
 
   (test "the degenerate no-operand forms agree with each other, and with (do)/(if)"
     ;; Nothing is being *dropped* here, so both follow the house rule for a
@@ -155,14 +160,20 @@
     (assert= "E0002" (get (try (reflect/read-string "(1 2") (catch e e)) :code)))
 
   (test "a genuinely malformed dotted list is still a hard error"
-    (assert= :error (try (do (reflect/read-string "(1 . 2 3)") :ok) (catch e :error))))
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+    (assert= :error
+      (try (do (reflect/read-string "(1 . 2 3)") :ok) (catch e :error))))
 
   (test "a lone . inside a vector/map/set literal is an error, not the symbol ."
     ;; `[1 . 2]` used to read as a THREE-element vector whose middle element was
     ;; the symbol `.`, with no diagnostic at all.
-    (assert= :error (try (do (reflect/read-string "[1 . 2]") :ok) (catch e :error)))
-    (assert= :error (try (do (reflect/read-string "{:a . 1}") :ok) (catch e :error)))
-    (assert= :error (try (do (reflect/read-string "#{1 . 2}") :ok) (catch e :error))))
+    ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
+    (assert= :error
+      (try (do (reflect/read-string "[1 . 2]") :ok) (catch e :error)))
+    (assert= :error
+      (try (do (reflect/read-string "{:a . 1}") :ok) (catch e :error)))
+    (assert= :error
+      (try (do (reflect/read-string "#{1 . 2}") :ok) (catch e :error))))
 
   (test "the symbol . itself is still writable, bar-quoted"
     (assert= (symbol ".") (reflect/read-string "|.|"))
@@ -193,8 +204,8 @@
     (sr-spawn (self) 20)
     (let (all (sr-collect 0 20 '()))
       (assert= 20 (count all))
-      (is (every? (fn (s) (contains? s 'a)) all))
-      (is (every? (fn (s) (= s (reflect/read-string (pr-str s)))) all)))))
+      (is (every? all (fn (s) (contains? s 'a))))
+      (is (every? all (fn (s) (= s (reflect/read-string (pr-str s)))))))))
 
 (describe "an improper argument list is reported like every other call-shape error"
   (test "it carries a source position and a hint"

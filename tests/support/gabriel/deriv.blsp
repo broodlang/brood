@@ -35,11 +35,12 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/deriv.inp
     "The symbolic derivative of expression `a` with respect to `x`."
     (cond
       (not (pair? a)) (if (= a 'x) 1 0)
-      (= (first a) '+) (cons '+ (map deriv (rest a)))
-      (= (first a) '-) (cons '- (map deriv (rest a)))
-      (= (first a) '*) (list '*
-                         a
-                         (cons '+ (map (fn (b) (list '/ (deriv b) b)) (rest a))))
+      (= (first a) '+) (cons '+ (map (rest a) deriv))
+      (= (first a) '-) (cons '- (map (rest a) deriv))
+      (= (first a) '*)
+        (list '*
+          a
+          (cons '+ (map (rest a) (fn (b) (list '/ (deriv b) b)))))
       (= (first a) '/)
         (list '-
           (list '/ (deriv (second a)) (third a))

@@ -128,7 +128,7 @@
 
 (defn- %pr-elide (parts over)
   "`parts` joined for display, with the `…` length marker appended when `over`."
-  (string/join " " (if over (append parts (list "…")) parts)))
+  (string/join (if over (append parts (list "…")) parts) " "))
 
 (defn- %pr-limit (items)
   "`[shown over?]` for `items` under `*print-length*` — at most that many items,
@@ -137,9 +137,9 @@ long collection is never walked past the limit."
   (let (lim *print-length*)
     (if (nil? lim)
       [items false]
-      (let (taken (take (inc lim) items)
+      (let (taken (take items (inc lim))
             over (> (count taken) lim))
-        [(if over (take lim taken) taken) over]))))
+        [(if over (take taken lim) taken) over]))))
 
 (defn- %pr-safely (thunk x)
   "Run `thunk`, falling back to `(pr-str x)` if it raises. The guard for a value
@@ -150,13 +150,13 @@ faithful printing instead of losing the bound on the whole value."
 
 (defn- %pr-bounded-seq (x level open close)
   (let ([shown over] (%pr-limit x))
-    (str open (%pr-elide (map (fn (i) (%pr-bounded i (inc level))) shown) over) close)))
+    (str open (%pr-elide (map shown (fn (i) (%pr-bounded i (inc level)))) over) close)))
 
 (defn- %pr-bounded-map (x level)
   (let ([shown over] (%pr-limit (%map-pairs x)))
     (str "{"
-      (%pr-elide (map (fn ([k v]) (str (%pr-bounded k (inc level)) " " (%pr-bounded v (inc level))))
-                   shown)
+      (%pr-elide (map shown
+                   (fn ([k v]) (str (%pr-bounded k (inc level)) " " (%pr-bounded v (inc level)))))
         over)
       "}")))
 

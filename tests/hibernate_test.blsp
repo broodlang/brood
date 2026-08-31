@@ -4,9 +4,9 @@
   (test "returns a byte count and leaves the process working"
     ;; A process that allocated, then hibernates, must still compute correctly —
     ;; the caches it dropped are rebuilt on the next call.
-    (let (before (fold + 0 (range 200))
+    (let (before (fold (range 200) 0 +)
           freed (proc/hibernate)
-          after (fold + 0 (range 200)))
+          after (fold (range 200) 0 +))
       (assert= before 19900)
       (assert= after 19900)
       (is (>= freed 0))))
@@ -19,6 +19,6 @@
   (test "a hibernated process still answers messages"
     (let (me (self)
           worker (spawn (receive
-                          ([:go n] (do (proc/hibernate) (send me [:sum (fold + 0 (range n))]))))))
+                          ([:go n] (do (proc/hibernate) (send me [:sum (fold (range n) 0 +)]))))))
       (send worker [:go 100])
       (assert= (receive ([:sum v] v)) 4950))))

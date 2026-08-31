@@ -569,6 +569,13 @@ pub(crate) fn vm_run_bc(
             attach_vm_trace(&mut e, &cur_arm, &frames);
             return Err(e);
         }
+        // Mailbox bound (ADR-307), same protocol as the heap limit above.
+        if let Some((len, limit)) = crate::process::take_current_mailbox_overflow() {
+            unwind(heap);
+            let mut e = crate::eval::proc_mailbox_limit_error(len, limit);
+            attach_vm_trace(&mut e, &cur_arm, &frames);
+            return Err(e);
+        }
         if capture {
             // State-capture preemption/kill (ADR-100 §8.1), in place of the coroutine
             // yield: the frame boundary is the safepoint. A pending hard `:kill` stops

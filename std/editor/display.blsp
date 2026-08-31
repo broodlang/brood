@@ -162,7 +162,7 @@ shape `std/observer` draws by hand. Returns one `text` op.
 can splice in conditional ops inline. Pass the result to a frontend (`term/draw`).
 
     (count (editor/display/frame (editor/display/clear)))   → 1"
-  (into [] (filter (fn (o) (not (nil? o))) ops)))
+  (into [] (filter ops (fn (o) (not (nil? o))))))
 
 ;; ---- interaction zones (hover / click hit-testing) --------------------------
 ;; `cursor-zone` (above) is a *render op* the frontend hit-tests to choose a pointer
@@ -183,20 +183,21 @@ hovered (rendered via `zone-cursor-ops`, as a `cursor-zone`). Pure data."
 the **last** match, so a zone painted later (visually on top) shadows an earlier one it
 overlaps — matching paint order. The model calls this on pointer-move (to find the hovered
 zone) and on click (to find the target)."
-  (fold (fn (hit z)
-          (let ([x y w h] (get z :rect))
-            (if (and (>= col x) (< col (+ x w)) (>= row y) (< row (+ y h)))
-              z
-              hit)))
-    nil zones))
+  (fold zones
+    nil
+    (fn (hit z)
+      (let ([x y w h] (get z :rect))
+        (if (and (>= col x) (< col (+ x w)) (>= row y) (< row (+ y h)))
+          z
+          hit)))))
 (sig zone-at (seqable any any -> any))
 
 (defn zone-cursor-ops (zones)
   "`cursor-zone` render ops for every zone in `zones` that requests a `:cursor` shape — so
 the one zone list the model hit-tests also drives the frontend's pointer shape. Zones with
 no `:cursor` contribute nothing."
-  (map (fn (z) (let ([x y w h] (get z :rect)) (cursor-zone x y w h (get z :cursor))))
-    (filter :cursor zones)))
+  (map (filter zones :cursor)
+    (fn (z) (let ([x y w h] (get z :rect)) (cursor-zone x y w h (get z :cursor))))))
 (sig zone-cursor-ops (seqable -> (or nil (list (tuple :cursor-zone any any any any any)))))
 
 ;; ---- floating cards (popups, menus, tooltips) -------------------------------
@@ -243,13 +244,13 @@ widest line plus one cell of padding each side; `face` fills the surface, `fg` s
 text, and `opts` forwards `:border`/`:radius` to `card-surface`. GUI rounds the card; the
 terminal draws a flat panel."
   (let (n (count lines)
-        w (+ 2 (fold (fn (m s) (math/max m (string/length s))) 0 lines))
+        w (+ 2 (fold lines 0 (fn (m s) (math/max m (string/length s)))))
         [mr mc] (card-rect (- anchor-row n) anchor-col w n cols rows))
     (append (card-surface mr mc w n face gui? opts)
-      (map (fn (i)
-             (let (s (nth lines i))
-               (text (+ mr i)
-                 mc
-                 (str " " s (string/repeat " " (math/max 0 (- w 1 (string/length s)))))
-                 fg)))
-        (range n)))))
+      (map (range n)
+        (fn (i)
+          (let (s (nth lines i))
+            (text (+ mr i)
+              mc
+              (str " " s (string/repeat " " (math/max 0 (- w 1 (string/length s)))))
+              fg)))))))

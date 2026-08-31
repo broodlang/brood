@@ -69,10 +69,12 @@ process's OS user can; that process is the trust boundary."
 ;; (or ambient/root) rebinding is. Empty (and silent) outside a project.
 ;; Best-effort — never raises.
 (defn- shadows-for (file)
-  (try
-    (let (root (project/find-root (file/cwd)))
-      (if (nil? root) nil (project/file-shadow-warnings file root)))
-    (catch _ nil)))
+  ;; check-allow :discarded-catch — shadow warnings are advisory: no project root means none
+  (check-allow :discarded-catch
+    (try
+      (let (root (project/find-root (file/cwd)))
+        (if (nil? root) nil (project/file-shadow-warnings file root)))
+      (catch _ nil))))
 
 (defn- load-checked (file)
   "Load `file` into the session image and report the result as `{:ok true
@@ -237,8 +239,9 @@ image stays in sync with disk."
                 {:ok false
                  :error (str "edit: :old occurs "
                           hits " times in " rel " — make it unique")}
-              else (let (_w (file/spit abs (string/replace text old new)))
-                     (write-result rel abs))))))
+              else
+                (let (_w (file/spit abs (string/replace text old new)))
+                  (write-result rel abs))))))
       (catch e
         {:ok false :error (error-shape e)}))))
 
@@ -331,7 +334,7 @@ Outside a Brood project, returns `{:error msg}`."
   "A `(proc/info pid)` stat map for every live process, dropping any that died
 mid-scan. The shared snapshot behind both the `processes` and `proc/info`
 tools — one definition of \"what we know about a process\"."
-  (seq/remove nil? (map proc/info (or (proc/list) []))))
+  (seq/remove (map (or (proc/list) []) proc/info) nil?))
 
 (defn processes-tool (args)
   "`processes` — snapshot every live green process with its runtime stats.
@@ -353,7 +356,7 @@ process carries that id."
   (let (id (get args :id))
     (when (not (int? id))
       (throw "proc/info: :id must be an integer"))
-    (or (seq/find (fn (p) (= (get p :id) id)) (process-infos))
+    (or (seq/find (process-infos) (fn (p) (= (get p :id) id)))
       {:error (str "no live process with id " id)})))
 
 (defn node-tool (args)
@@ -403,9 +406,10 @@ complementing the point-in-time `processes`/`node` snapshots."
         ms (math/min (or (get args :ms) 500) 5000)
         opt (get args :filter))
     ; e.g. {:gc true :gc-min-pause-us 1000}
-    ;; One global monitor slot (last-wins); arm on ourselves, then clear on the way
-    ;; out so we never leak it across calls. Events about the subscriber itself are
-    ;; never sent, so we only ever collect OTHER processes' activity.
+    ;; Our own subscription (one per pid, ADR-305 — it coexists with the crash
+    ;; reporter's); arm on ourselves, then clear ours on the way out so we never leak
+    ;; it across calls. Events about the subscriber itself are never sent, so we only
+    ;; ever collect OTHER processes' activity.
     (if opt (proc/system-monitor (self) opt) (proc/system-monitor (self)))
     (sleep ms)
     ; disarm before draining
@@ -425,12 +429,12 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
   (let (name (get args :name))
     (when (not (string? name))
       (throw "callers: :name must be a string"))
-    {:references (mapcat (fn (f)
-                           (try
-                             (map (fn (lc) {:file f :line (first lc) :col (second lc)})
-                               (reflect/references-in-source name (file/slurp f)))
-                             (catch _ nil)))
-                   (project/all-files *project-root*))}))
+    {:references (mapcat (project/all-files *project-root*)
+                   (fn (f)
+                     (try
+                       (map (reflect/references-in-source name (file/slurp f))
+                         (fn (lc) {:file f :line (first lc) :col (second lc)}))
+                       (catch _ nil))))}))
 
 (defn apropos-tool (args)
   "`apropos` — discover globals whose name contains a pattern. Returns
@@ -439,12 +443,12 @@ exist?\" without guessing names one at a time."
   (let (pattern (get args :pattern))
     (when (not (string? pattern))
       (throw "apropos: :pattern must be a string"))
-    {:matches (map ->string (apropos pattern))}))
+    {:matches (map (apropos pattern) ->string)}))
 
 (defn all-globals-tool (args)
   "`all-globals` — every globally bound name in the image. Returns
 `{:globals [name ...]}` (sorted strings)."
-  {:globals (map ->string (reflect/global-names))})
+  {:globals (map (reflect/global-names) ->string)})
 
 (defn doc-search-tool (args)
   "`doc-search` — find globals whose docstring contains a query string. Returns
@@ -452,8 +456,8 @@ exist?\" without guessing names one at a time."
   (let (query (get args :query))
     (when (not (string? query))
       (throw "doc-search: :query must be a string"))
-    {:results (map (fn (pair) {:name (->string (first pair)) :doc (second pair)})
-                (doc-search query))}))
+    {:results (map (doc-search query)
+                (fn (pair) {:name (->string (first pair)) :doc (second pair)}))}))
 
 (defn progress (progress &optional (total nil) (message nil))
   "Report incremental progress from a `nest mcp` tool handler (the streaming
@@ -525,25 +529,25 @@ like `reflect/eval`. Returns `{:error msg}` on failure."
   "Does an op spec `(->string [params] :-> ret? body…)` carry a body (a provided
 default) rather than being a bare required op? Skip the name + params, then the
 optional `:-> ret`, and check whether anything remains."
-  (let (tail (drop 2 spec)
-        tail (if (= (first tail) :->) (drop 2 tail) tail))
+  (let (tail (drop spec 2)
+        tail (if (= (first tail) :->) (drop tail 2) tail))
     (not (empty? tail))))
 
 (defn- ability-impls (aname ops)
   "The type keys (as strings) that implement any op of ability `aname`, unioned
 across its ops via the `*impls*` registry."
-  (let (op-names (map first ops)
-        type-keys (fold (fn (acc op)
-                          (let (methods (get *impls* [aname op]))
-                            (if methods (into acc (keys methods)) acc)))
+  (let (op-names (map ops first)
+        type-keys (fold op-names
                     #{}
-                    op-names))
-    (sort (map ->string (vec type-keys)))))
+                    (fn (acc op)
+                      (let (methods (get *impls* [aname op]))
+                        (if methods (into acc (keys methods)) acc)))))
+    (sort (map (vec type-keys) ->string))))
 
 (defn abilities-tool (args)
   "`abilities` — list every ability defined in the image, sorted. Returns
 `{:abilities [name …]}`. The discovery entry point for `ability`."
-  {:abilities (sort (map str (keys *abilities*)))})
+  {:abilities (sort (map (keys *abilities*) str))})
 
 (defn ability-tool (args)
   "`ability` — describe one ability: its ops (each with params and whether it's a
@@ -562,14 +566,14 @@ its owner namespace, whether it's derivable, and which types implement it. Retur
               reqs (%ability-requires aname)
               owner (%ability-owner-ns aname))
           {:name name-str
-           :ops (map (fn (spec)
-                       {:op (str (first spec))
-                        :params (map str (second spec))
-                        :provided (op-provided? spec)})
-                  ops)
+           :ops (map ops
+                  (fn (spec)
+                    {:op (str (first spec))
+                     :params (map (second spec) str)
+                     :provided (op-provided? spec)}))
            :sealed (not (nil? members))
-           :members (if members (map ->string members) [])
-           :requires (if reqs (map str reqs) [])
+           :members (if members (map members ->string) [])
+           :requires (if reqs (map reqs str) [])
            :owner (if owner (str owner) nil)
            :derivable (not (nil? (%ability-derive-recipe aname)))
            :impls (ability-impls aname ops)})))))

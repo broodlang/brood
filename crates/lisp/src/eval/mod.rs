@@ -362,6 +362,11 @@ fn eval_tail_loop(
             let limit = heap.proc_mem_limit().unwrap_or(0);
             return Err(proc_memory_limit_error(live, limit).or_form_pos(heap, expr));
         }
+        // Mailbox bound (`(proc/flag :max-mailbox n)`, ADR-307): the breach a sender
+        // armed raises here, in the flooded process only.
+        if let Some((len, limit)) = crate::process::take_current_mailbox_overflow() {
+            return Err(proc_mailbox_limit_error(len, limit).or_form_pos(heap, expr));
+        }
         // Reduction-counted preemption: bound the work a process does before it
         // yields its worker (fairness — a CPU-bound process can't monopolise a
         // core). Counted per *combination* (a function call / special form), which
@@ -1067,7 +1072,7 @@ fn eval_arguments(
 /// and `(:name person "unknown")` ≡ the 3-argument `get` (ADR-165).
 ///
 /// A keyword is the *only* non-function value Brood lets you call. The exception is
-/// paid for by one shape: `(map :name people)`, the accessor-as-a-value that a
+/// paid for by one shape: `(map people :name)`, the accessor-as-a-value that a
 /// higher-order op can take — without it every such call has to invent a throwaway
 /// binder (`(fn (p) (get p :name))`), which is 67 sites across the workspace and the
 /// most-reached-for shape in map-heavy code. Maps, vectors and sets stay
@@ -1241,7 +1246,7 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
         ValueRef::Fn(id) => apply_closure(heap, id, argv),
         // A keyword accessor (ADR-165). Handled *here*, in the shared apply, rather
         // than in the compiler: that is what makes a keyword a first-class value the
-        // higher-order ops can take — `(map :name people)`, `(apply :name (list p))`
+        // higher-order ops can take — `(map people :name)`, `(apply :name (list p))`
         // — which is the entire reason for the exception. A compile-time rewrite of
         // `(:k m)` would have covered only the syntactic head.
         ValueRef::Keyword(_) => apply_keyword(heap, callee, argv),
@@ -1527,7 +1532,14 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
 /// `-j 1`," not on every unbound being a race. (`docs/error-codes.md`.)
 pub(crate) fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
     let name = value::symbol_name(sym);
-    let e = LispError::unbound(format!("unbound symbol: {}", name));
+    // A deliberate rename (ADR-304's ledger) is appended to the MESSAGE, not carried as
+    // a hint: a `(try … (catch e (error-message e)))` sees the message only, and the
+    // caller most in need of the pointer is exactly the one that swallowed the error.
+    let e = LispError::unbound(format!(
+        "unbound symbol: {}{}",
+        name,
+        crate::renames::rename_hint(&name).unwrap_or_default()
+    ));
     // A construct an LLM reached for from another Lisp that Brood doesn't have —
     // point at the Brood way (`set!` → process, `loop` → tail recursion, …).
     if let Some(hint) = foreign_construct_hint(&name) {
@@ -1841,6 +1853,19 @@ pub(crate) fn proc_memory_limit_error(live: usize, limit: usize) -> LispError {
     .with_hint(
         "raise or clear the limit with (proc/flag :max-heap n), \
          or hold less live data (stream instead of accumulating)",
+    )
+}
+
+pub(crate) fn proc_mailbox_limit_error(len: usize, limit: usize) -> LispError {
+    LispError::runtime(format!(
+        "mailbox limit exceeded: {len} queued messages exceeds this process's \
+         :max-mailbox bound of {limit}"
+    ))
+    .with_code(crate::error::error_codes::PROC_MAILBOX_LIMIT)
+    .with_hint(
+        "drain the backlog (receive in a loop), raise or clear the bound with \
+         (proc/flag :max-mailbox n), or let it crash under a supervisor; \
+         senders are never blocked and nothing was dropped",
     )
 }
 
