@@ -99,8 +99,7 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
           ;; returned CORRUPT DATA — text that looks decoded but isn't — and is the one
           ;; outcome worse than either failing or raising. `:invalid` unwinds to the
           ;; public wrapper, which answers a failure naming the input.
-          :invalid
-          (let (hi (get url-hex-val (nth s (+ i 1)))
+          :invalid (let (hi (get url-hex-val (nth s (+ i 1)))
                 lo (get url-hex-val (nth s (+ i 2))))
             (if (and hi lo)
               (url-pct-decode-loop s (+ i 3) n (cons (+ (* hi 16) lo) acc))
