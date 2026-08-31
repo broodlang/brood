@@ -8576,3 +8576,12 @@ its full 180 s timeout rather than name a line. `brood-benchmarks` now checks th
 statically before running them. And the shared `package-ci.yml` "Start Postgres" step now
 prints `docker logs` on timeout: store-postgres went red there while its code was green,
 and the log said nothing at all.
+
+## 2026-08-31 — a bare `(fn)` panicked the recursion analyzer
+
+Three worker threads panicked at bedit startup: `recursion.rs` sliced a fn form's
+body as `&items[2..]`, and a bare `(fn)` — mid-edit source, which the advisory
+checker sees constantly — has length 1. The letrec path ran on an unguarded
+thread, so it was a hard panic, not the "checker internal error" the def path
+degrades to. Guarded with `items.get(2..)`; five malformed-fn shapes added to
+`atoms_and_malformed_forms_do_not_panic`.
