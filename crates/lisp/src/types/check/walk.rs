@@ -1554,6 +1554,38 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                 // so there's no real misuse to flag (the old `is_never` skip; under
                 // the dynamic reading a bare NEVER would else read as
                 // disjoint-from-everything).
+                // A function LITERAL in a slot with no room for a function: a
+                // lambda whose result can't be inferred (`(fn (x) x)`) has no
+                // arrow type, so it reads as dynamic and the gradual check below
+                // stays quiet — but its TAG is never in doubt. If the parameter
+                // is disjoint from fn/native entirely, the call is wrong whatever
+                // the lambda returns. This is the check that catches a
+                // pre-data-first `(map (fn (x) x) xs)` argument order, which the
+                // 0.20 migration showed failing only at runtime.
+                let fn_literal = matches!(arg, Value::Pair(_))
+                    && list_items(heap, arg)
+                        .as_deref()
+                        .and_then(|it| it.first().copied())
+                        .is_some_and(|h| matches!(h, Value::Sym(hs) if is_fn_head(hs)));
+                if fn_literal
+                    && param.is_disjoint(
+                        &Ty::of(crate::core::value::Tag::Fn)
+                            .union(Ty::of(crate::core::value::Tag::Native)),
+                    )
+                    && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+                {
+                    out.push((
+                        arg_pos(heap, arg, form),
+                        format!(
+                            "{}: argument {} expects {}, got a function ({})",
+                            name_of(s),
+                            i + 1,
+                            param,
+                            crate::syntax::printer::print(heap, arg),
+                        ),
+                    ));
+                    continue;
+                }
                 let g = gradual_of(heap, arg, ctx);
                 // Relax the parameter for the membership test in the two places the
                 // lattice deliberately under-approximates (see `relax_param_for_arg`),

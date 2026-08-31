@@ -8585,3 +8585,25 @@ checker sees constantly — has length 1. The letrec path ran on an unguarded
 thread, so it was a hard panic, not the "checker internal error" the def path
 degrades to. Guarded with `items.get(2..)`; five malformed-fn shapes added to
 `atoms_and_malformed_forms_do_not_panic`.
+
+## 2026-08-31 — the checker learns the shape of the migration's bugs
+
+bedit's seven 0.20-migration failures shared one shape — a callback or count in a
+seq combinator's collection slot (the pre-ADR-308 order) — and `nest check` was
+silent on every one. Two gaps, both closed:
+
+- **No curated domains** for `take`/`drop`/`mapcat`/`each`/`take-while`/
+  `drop-while`/`seq/keep`/`seq/remove` — their collection slot was unconstrained,
+  so `(take 5 xs)` and `(drop (math/max 0 n) xs)` typed clean. They now carry
+  data-first `seqable`-first signatures (results stay `any`; the precise results
+  still come from `infer.rs`'s arms — `seq/keep`'s inferred param improved
+  `any → seqable`, and the introspection pin moved with it).
+- **A fn literal with an uninferable result had no type at all** (`(fn (x) x)` —
+  deliberate: an all-`any` arrow misfires on result checks), so it read as
+  dynamic and passed every slot. New call-site rule in `walk.rs`: a literal
+  lambda against a parameter DISJOINT from fn/native is wrong whatever it
+  returns — `(map (fn (x) x) xs)` now warns "got a function".
+
+Zero-warning gate over std/ + tests/ stays at zero, bedit checks clean (no false
+positives, no stragglers), and `combinator_collection_slot_rejects_the_old_argument_order`
+pins five warning shapes and five data-first silences.
