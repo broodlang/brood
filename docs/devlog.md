@@ -8519,3 +8519,60 @@ because our sends and the sync query share one FIFO to the process, so the snaps
 always contains every in-flight edit of ours. Regression case in
 `tests/buffer_client_test.blsp`; bedit's original rapid-fire test then passed 15/15
 (3/10 red before).
+
+## 2026-08-31 — `spawn-monitor`, and the two gates that let a release ship unbuildable
+
+Three fixes, found by taking the 0.20.0 release through the whole downstream chain
+(store, s3, store-postgres, hatch, hive, bedit, the demos and the benchmarks) rather
+than by any test in this repo.
+
+**`spawn-monitor` (ADR-309).** `monitor` had the gap `spawn-link` was created to close,
+and no atomic counterpart. `(let (p (spawn expr) r (monitor p)) …)` is reliable only
+while the spawner does not yield between the two bindings; open a gap and the child
+exits first, `monitor` takes its already-dead branch, and the DOWN carries `:noproc`
+**instead of** the reason. Measured: adjacent, 0 of 300 runs lost it; with one 5 ms
+yield, 40 of 40. Nothing raises, so a test that checks "a DOWN arrived" passes on the
+bug, and a supervisor reading `:noproc` where `:normal` belonged restarts a
+`:transient` child that exited cleanly.
+
+Found by bedit's tutorial, not by us: lesson 32 *"When a process dies"* teaches this
+exact pattern, and under `taskset -c 0,1` its **shipped answer failed its own
+exercise** — `first: expected list, …, got keyword (:noproc)`. Two cores plus the
+tutor's boundary tracing (`eval-capturing` wraps the box's names) was enough. The
+lesson was right and the language was wrong.
+
+`tests/spawn_monitor_test.blsp` is sabotage-verified (registration moved out of the
+pre-enqueue window fails 5 of 7). One trap worth carrying forward, hit writing it: the
+gap must be opened with `sleep`, never `(receive (after 5 nil))` — an empty clause list
+matches anything, so a bare timed receive eats the `[:down …]` the test is waiting for
+and every case fails for the opposite reason to the one under test.
+
+**wasm32 had not built since 2dc7d2e6, and nothing asked.** `%gui-compiled?` shipped
+with `gui_compiled_p` in `terminal.rs` and an un-cfg'd registration in
+`builtins/mod.rs`, but no shim in `terminal_wasm.rs`. So brood 0.19.x and 0.20.0 could
+not be built for wasm32 at all — while `cargo build`, `cargo clippy --all-targets
+--all-features` and the entire suite stayed green, because none of them ever names that
+target and a host-target build cannot see a hole in a `#[cfg(target_arch = "wasm32")]`
+surface. It surfaced as a **failed Fly deploy**, which is the worst place to learn it:
+`crates/playground` is compiled during every hive deploy, so the reference page and the
+playground come from that build. CI now has a `wasm32 (the playground target)` job. The
+shim returns `false` rather than joining `wasm_unsupported_builtins!` — a predicate that
+exists so callers need not catch must not raise.
+
+**`nest publish` shipped the working directory.** `registry-build-tarball` ran `tar .`
+behind a fixed exclude list, so git-ignored build output went into a "source" release.
+bedit made it visible as HTTP 413 against hive's 12 MB cap — a 41 MB ignored `bedit`
+binary in its root — but size was only the symptom that got noticed: the same path
+publishes any untracked file, and a tarball whose contents depend on what you last built
+is not reproducible. Now `git ls-files --cached --exclude-standard`, with the
+whole-directory walk kept for a project that is not a repo. Two cases in
+`tests/package_test.blsp`, sabotage-verified, asserting on an ignored artifact *and* on a
+merely-untracked file — the second is the one no `.gitignore` would have caught.
+
+**Also, in the same sweep:** three benchmark rows were still on the old argument order
+with `nest check` reporting zero, because `bench/` sits outside `:source-paths` — one of
+them (`(take want pids)` in the collector) killed the process and made the row *hang* for
+its full 180 s timeout rather than name a line. `brood-benchmarks` now checks those files
+statically before running them. And the shared `package-ci.yml` "Start Postgres" step now
+prints `docker logs` on timeout: store-postgres went red there while its code was green,
+and the log said nothing at all.

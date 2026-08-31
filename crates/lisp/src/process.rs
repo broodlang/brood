@@ -42,7 +42,7 @@ mod mailbox;
 /// Diagnostic counters for the L1 local-send fast path (`BROOD_L1_STATS=1`).
 pub use mailbox::l1_stats;
 pub(crate) mod message;
-mod monitor;
+pub(crate) mod monitor;
 mod scheduler;
 /// The system monitor (kernel runtime events → one subscriber's mailbox).
 /// `pub` so the GC (`core/heap.rs`) and VM (`eval/compile`) emit sites and the
@@ -83,9 +83,9 @@ pub use scheduler::{
     native_stack_headroom_ok, old_gen_drained, parent_of, peak_threads, pid_value, preempt_count,
     report_drain_liveness, self_mailbox_seq, self_pid, set_deadline, set_max_parallel,
     set_test_no_workers, shutdown_runtime_parked, spawn, spawn_count, spawn_linked,
-    spawn_root_program, stack_budget, stack_overflow_check, steal_count, take_capture,
-    test_drive_quanta, tick, with_minting_runtime_tag, worker_threads, yield_now, GcBlockGuard,
-    MacroBlockGuard, NATIVE_STACK_MARGIN_BYTES, WORKER_STACK_BYTES,
+    spawn_monitored, spawn_root_program, stack_budget, stack_overflow_check, steal_count,
+    take_capture, test_drive_quanta, tick, with_minting_runtime_tag, worker_threads, yield_now,
+    GcBlockGuard, MacroBlockGuard, NATIVE_STACK_MARGIN_BYTES, WORKER_STACK_BYTES,
 };
 /// Currently-parked process count, runtime-wide — teardown/leak test hook.
 pub fn parked_process_count() -> usize {

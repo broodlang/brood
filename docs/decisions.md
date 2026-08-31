@@ -19606,3 +19606,69 @@ unbounded. A trap-exit `[:EXIT …]` message and a monitor `[:down …]` count l
 arrival — the bound is about queue length, not blame. `process-info` does not yet report
 the bound; add it with the observer work if wanted.
 
+
+---
+
+## ADR-309 — `spawn-monitor`: the monitor side of the atomic-spawn gap
+
+**Context.** ADR-067 added `spawn-link` because `(let (p (spawn expr)) (link p) p)` is
+racy: a child that exits inside the spawn→link gap is linked *dead*, and the kernel then
+reports `:noproc` **instead of the child's real exit reason**. The primitive registers the
+link while the child sits in `REGISTRY` but is not yet enqueued, so it cannot exit first.
+
+`monitor` has the identical gap and had no atomic counterpart. The idiomatic-looking
+
+```brood
+(let (p (spawn expr)
+      r (monitor p))
+  (receive ([:down ^r _ reason] …)))
+```
+
+is only reliable while the spawner does not yield between the two bindings — which is not
+a property of the code, but of the machine it runs on that day.
+
+**How it was found.** bedit's tutorial lesson 32, *"When a process dies"*, teaches exactly
+this pattern, and its shipped answer is `(first reason)` — the tag of `[:error …]`. Under
+`taskset -c 0,1` the lesson's own answer failed its own exercise with
+
+```
+✗ first: expected list, vector, set, map or bytes, got keyword (:noproc)
+```
+
+Two cores plus the tutor's boundary tracing (`eval-capturing` wraps the box's names) opened
+the gap wide enough for the child to crash first. Measured directly: with the two calls
+adjacent, **0 of 300** runs lost the reason; with a single 5 ms yield between them, **40 of
+40** did.
+
+**Decision.** Add `spawn-monitor`, returning `[pid ref]`, registering the monitor in the
+same pre-enqueue window `spawn-link` uses. `%spawn-monitor` is a Rust primitive for the
+same reason `%spawn-link` is: the atomicity *is* the critical section between `REGISTRY`
+insertion and enqueue, and no amount of Brood can reach inside it.
+
+**Why this is worth a primitive rather than a documented discipline.**
+
+- The failure is a **silent wrong answer**, not an error. The receive fires; the reason
+  merely says "already gone". A supervisor reading `:noproc` where `:normal` belonged
+  restarts a `:transient` child that exited cleanly — which is the same class of bug
+  ADR-067's docstring already warned about on the link side.
+- It is timing-dependent, so it passes every test on a fast machine and fails on a loaded
+  CI runner, which is the shape that costs the most to diagnose.
+- The two-step form *looks* correct, and reviewers had already worked around it rather than
+  fixed it: `tests/link_test.blsp` carries the comment "A bare `(spawn :ok)` exits
+  immediately and, under load, can be dead before `link` runs → `:noproc`". The workaround
+  (make the child wait for a `:go`) is noise in a test and impossible in a lesson.
+
+**Semantics.** One-shot and unidirectional, exactly like `monitor` — it does not kill, and
+`spawn-link` remains the symmetric, killing form. Monitoring a pid that is *genuinely*
+already dead is still `:noproc`; that is correct and unchanged. `demonitor` works on the
+returned ref as usual.
+
+**Guarded by** `tests/spawn_monitor_test.blsp`, sabotage-verified: moving the registration
+out of the pre-enqueue window fails 5 of its 7 cases. It pins the crash reason, the
+`:normal` reason (the supervisor-relevant one), the `[pid ref]` shape, lambda passthrough,
+the unchanged already-dead `:noproc`, and a 24-way concurrent fan-out.
+
+**A trap worth recording**, hit while writing those tests: the gap must be opened with
+`sleep`, never `(receive (after 5 nil))`. An empty clause list matches anything, so a bare
+timed receive **eats the very `[:down …]` the test is waiting for** and every case reads as
+a timeout — a test that fails for the opposite reason to the one it is checking.
