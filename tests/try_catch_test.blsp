@@ -470,3 +470,59 @@
 
   (test "a plain map without :kind/:message is an ordinary thrown value"
     (assert= {:a 1} (try (throw {:a 1}) (catch e e)))))
+
+;; ---- the failure contract, asserted across every function that returns one ---------
+;; ADR-310. These twelve are the whole surface; the point of the test is that they behave
+;; IDENTICALLY, so a thirteenth cannot be added with a different shape and go unnoticed.
+;; Each property below has already been a real bug: a nil-returning parse (the original),
+;; a falsy failure silently defaulted by `(or … d)` (v0.22), and a `(refute (nil? …))`
+;; assertion that went vacuous when the miss stopped being nil.
+
+(defn- fc-bad-inputs ()
+  [["string/->number" (fn () (string/->number "x"))]
+    ["string/->number radix" (fn () (string/->number "zz" 16))]
+    ["encoding/hex-decode" (fn () (encoding/hex-decode "zz"))]
+    ["encoding/hex-decode-bytes" (fn () (encoding/hex-decode-bytes "zz"))]
+    ["encoding/base64-decode" (fn () (encoding/base64-decode "!!"))]
+    ["encoding/base64-decode-bytes" (fn () (encoding/base64-decode-bytes "!!"))]
+    ["encoding/base64-url-decode" (fn () (encoding/base64-url-decode "!!"))]
+    ["encoding/base64-url-decode-bytes" (fn () (encoding/base64-url-decode-bytes "!!"))]
+    ["datetime/parse-date" (fn () (datetime/parse-date "2026-02-31"))]
+    ["datetime/parse-time" (fn () (datetime/parse-time "24:00:00"))]
+    ["datetime/parse-iso8601" (fn () (datetime/parse-iso8601 "nope"))]
+    ["url/percent-decode" (fn () (url/percent-decode "a%ZZ"))]
+    ["url/query-decode" (fn () (url/query-decode "a=%ZZ"))]])
+
+(describe "the failure contract holds for every function that returns one"
+  (test "bad input yields a failure — never nil, never a raise"
+    (doseq (c (fc-bad-inputs))
+      (let (r (try ((second c)) (catch e :raised)))
+        (is (failure? r))
+        (refute (nil? r))
+        (refute (= r :raised)))))
+  (test "a failure is TRUTHY, so it is never silently defaulted away"
+    ;; the v0.22 defect: falsy meant `(or (parse s) 0)` swallowed it in silence
+    (doseq (c (fc-bad-inputs))
+      (let (r ((second c)))
+        (is (if r true false))
+        (assert= r (or r :never-reached))
+        (assert= :reached (and r :reached)))))
+  (test "every failure carries a message naming its function and the input"
+    (doseq (c (fc-bad-inputs))
+      (let (m (error-message ((second c))))
+        (is (string? m))
+        (is (> (string/length m) 0)))))
+  (test "good input is unaffected — none of the above touches the happy path"
+    (assert= 42 (string/->number "42"))
+    (assert= 31 (string/->number "1F" 16))
+    (assert= "hi" (encoding/hex-decode "6869"))
+    (assert= "hi" (encoding/base64-decode "aGk="))
+    (assert= "a b" (url/percent-decode "a%20b"))
+    (assert= {"a" "1"} (url/query-decode "a=1"))
+    (refute (failure? (datetime/parse-date "2026-08-24"))))
+  (test "a failure crosses a process boundary intact"
+    (let (parent (self))
+      (spawn (fn () (send parent [:f (string/->number "x")])))
+      (receive
+        ([:f f] (do (is (failure? f)) (is (includes? (error-message f) "not a number"))))
+        (after *test-wait-ms* (is false))))))

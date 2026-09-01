@@ -4,6 +4,34 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.23.1 — 2026-09-01
+
+An audit release: v0.23.0 flipped `failure` to truthy, and this is the sweep that proves
+every function and every caller actually agrees. Three real defects, all found by the
+sweep rather than by a test.
+
+**Fixed — `std/net/sse`'s HTTP status could be a failure.** `(or n 0)` over a parsed
+status line. Written the day before, when a failure was falsy and `or` did default; the
+truthy flip broke it and no test noticed, because nothing feeds `sse` a malformed status
+line. A malformed one would have put `#failure{…}` in the status field.
+
+**Fixed — `url/query-decode` declared no signature**, so it inferred `any` while the
+other eleven reported `… | failure`. Now `(string -> (or map failure))`; all twelve
+report their failure arm.
+
+**Fixed — six vacuous assertions in `datetime_test`.** `(refute (nil? (parse-date …)))`
+proved a parse *succeeded* only while a miss was `nil`. A failure is not nil either, so
+those assertions had quietly become tautologies that pass on a failure. They now use
+`failure?`; sabotage-verified — the old form answers `true` on a failure, the new one
+`false`.
+
+**Added — a conformance test for the whole surface.** `tests/try_catch_test.blsp` asserts,
+for each of the twelve functions that return a failure, that bad input yields a failure
+(never nil, never a raise), that the failure is truthy so `(or … d)` cannot swallow it,
+that it carries a non-empty message, that the happy path is untouched, and that a failure
+survives a process boundary. Sabotage-verified: regressing one function to `nil` fails it
+in two places. A thirteenth function cannot now be added with a different shape unnoticed.
+
 ## v0.23.0 — 2026-09-01
 
 **Changed (breaking) — a `failure` is truthy.** It was falsy in v0.22.0, so that
