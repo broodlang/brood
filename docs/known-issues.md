@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-100 | **a real ~5-8% compute regression landed between v0.19.1 and v0.21.0 and nobody noticed for three releases** — every benchmark compute row is 4-10% slower than the published 0.19.1 column. Splits into boot +2.8ms (+14.5%, tracks the stdlib growing 5199 -> 5332 image bindings — feature cost) and JIT'd compute ~+5.5% (tier 1 moves only +1.1%, so it lives on the native path). Checksums unchanged — the rows compute the same answers | ⚠️ **OPEN 2026-09-01** — verified, not a coin flip: build-parity `make ab` mandelbrot **+8.1% vs a 0.9% floor** (solo, N=11), **+6.8% unpinned** (re-checked because `make ab` pins to one core and the new binary lowers MORE arms, 97 vs 85), identical checksum `6129302` on both arms. Bisected to **`2c822875..80bb25d8`**: `8a2aaa01` 223ms / `6589e74b` 221ms / `2c822875` 226ms still fast, `80bb25d8` (v0.21.0) 242ms already slow. EXCLUDED: the Cranelift `*_imm`->`_s` migration, the JIT hot-admission commit, ADR-310, and everything after v0.21.0 (+0.8%, noise). ~33 commits left to bisect; the compute half is unexplained |
 | KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe) |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
@@ -213,6 +214,48 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-100 — a ~5-8% compute regression rode in across three releases, unseen ⚠️ OPEN 2026-09-01
+
+**Symptom.** Refreshing the benchmark suite's Brood column at 0.22.0 (it was last measured
+at 0.19.1, `8a2aaa01`) found **every compute row 4-10% slower**. Checksums are unchanged on
+every row, so the programs compute exactly what they did — only time moved.
+
+**It is real, not a turbo plateau.** The box's governor makes a single harness invocation a
+coin flip (documented in the benchmarks repo: `regex` read 119.5 vs 139.3 ms back to back on
+one binary), so the whole chain was checked before believing it:
+- min over 3 interleaved harness invocations, the per-row minimum landing on all three (18/9/4);
+- **build-parity A/B** (`make ab` — both arms built through the same target, interleaved,
+  pinned, std-image **live on both**): mandelbrot **+8.1% against a 0.9% floor**, solo at N=11;
+- **unpinned** re-measurement, because `make ab` pins to one core and would charge the run for
+  background JIT compilation — and the new binary lowers *more* arms (97 vs 85), exactly the
+  confound CLAUDE.md warns about. It survived: **+6.8%**, precisely timed and interleaved;
+- an output check — every binary prints checksum `6129302`, so the arms do equal work.
+
+**Shape.** Boot **+2.8 ms (+14.5%)** and JIT'd compute **~+5.5%**. At **tier 1 compute moves
+only +1.1%**, so the compute half lives on the *native* path, not the interpreter. The boot
+half tracks the stdlib growing (startup image 5199 -> 5332 bindings) and is best read as
+feature cost; the compute half is unexplained.
+
+**Bisected to `2c822875..80bb25d8`** (~33 commits, mostly ci/docs/style/checker/gui). Base
+times for mandelbrot under the same treatment: `8a2aaa01` 223 ms, `6589e74b` 221 ms,
+`2c822875` 226 ms — still fast; `80bb25d8` (v0.21.0) 242 ms, `2210d922` (ADR-310) 242 ms —
+already slow. **Excluded:** the Cranelift `*_imm` -> `_s` migration, the JIT hot-admission
+commit (`2c822875`), ADR-310, and everything after v0.21.0 (+0.8%, noise) — so it is not from
+the 2026-08-31/09-01 session's work.
+
+**Why nobody saw it.** Nothing in the benchmarks repo measures timing except a hand-run
+harness; its daily gate proves the rows *run* and that checksums *agree*, and both stayed
+green through the whole regression. Hardening landed there rather than here:
+`bench/staleness.py` compares the commit the published column was measured at against the
+binary under test and fails on a version boundary (sabotage-verified). It measures nothing on
+purpose — a timing gate on a shared CI runner cannot tell a 7% regression from a turbo
+plateau, and a gate that cries wolf gets ignored.
+
+**Next step:** continue the bisect over the remaining window with the same protocol (each step
+needs the worktree's `nest` + `scripts/build-std-image.sh` built, or ab-bench refuses on a
+std-image mismatch — that guard is right and saved a biased comparison here). Measure
+`mandelbrot` at the default tier; it has the largest signal against the smallest floor.
 
 ## KI-99 — a dist handshake EOF'd under full-suite load, so a drop-warning test saw no send ⚠️ WATCHING 2026-08-31
 
