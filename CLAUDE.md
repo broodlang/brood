@@ -420,6 +420,21 @@ so this is cheap to check and there is no excuse for skipping it. Cross-check wi
 `BROOD_DEOPT_TRACE=1` (did it lower and then fall back?), and remember that a bailed arm
 never reaches the IR dump, so *absence* there is the signal.
 
+**Before optimising anything, COUNT THE CALLS. A code-reading is evidence about what a
+function does, never about how often it runs.** `compute-frontier.md` §7.8's top-ranked
+item was "confirmed by reading the cited code" and described a verdict "recomputed per
+activation, behind a global `Mutex`". It was implemented, measured, and reverted: `make ab
+--floor` read noise on every row, and a five-line probe then showed the function is called
+**21 times on `fib`**, 457 on `ackermann`, 2176 on `pfib` — against billions of
+activations. One `&&` above the call short-circuited it. The read was accurate and the
+conclusion was wrong.
+
+So: a `static AtomicUsize` and an `eprintln!` at the call site, one run, *then* decide. It
+costs minutes where a build-then-A/B round trip costs hours, and it is the only cheap way
+to tell a hot path from a plausible one. The same probe answers the follow-up question a
+profile does not — `perf record` names cost centres in the code you *have*, while the count
+tells you whether the code you are *about to write* would ever run.
+
 Cargo is the source of truth; a thin **`Makefile`** wraps the common commands as
 shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
 `make repl`, and `make benchmark`. **`make test` runs the suite via
@@ -691,9 +706,20 @@ co-author trailer, overriding any default that would append one.
    test fails its own process and the runtime survives. (Verified 2026-06-29; see
    `docs/devlog.md`. The crash-dump tooling below still targets genuine SIGSEGVs —
    e.g. a use-after-GC blow-up — not this case.)
-3. Update `docs/language.md` (it documents the language *as implemented*).
-4. Tick it off in `ROADMAP.md`; add a dated entry to `docs/devlog.md`.
-5. If it reflects a real design choice, record an ADR in `docs/decisions.md`.
+3. **Sabotage every guard you write — a guard that cannot fail is worse than none,
+   because it reads as coverage.** Break the fix, watch the test go red, restore. Three
+   guards written in one session on 2026-09-01 passed against the very bug they existed to
+   catch, and only the sabotage run exposed them: one asserted a *flag* the fix sets (a
+   regression that sets the flag without doing the work passed); one exercised the helper
+   the fix added instead of the entry point (`session::open`) the bug actually sat in; one
+   was anchored to a loop that runs before the files it greps exist. The pattern in all
+   three: **assert on the entry point a caller reaches, not on the piece you just wrote**.
+   When a change has no clean inverse to sabotage, find an argument from construction
+   instead (writing 1.6 MB to a child that never reads *cannot* return if the write is
+   synchronous, since a pipe buffer is 64 KiB) — do not settle for a weaker test.
+4. Update `docs/language.md` (it documents the language *as implemented*).
+5. Tick it off in `ROADMAP.md`; add a dated entry to `docs/devlog.md`.
+6. If it reflects a real design choice, record an ADR in `docs/decisions.md`.
 
 ## When you RENAME or REORDER a stdlib function
 
