@@ -9628,3 +9628,32 @@ several commands before it read as a wrong working directory. `ab-bench` worktre
 checkouts of this repo, so every relative path in them resolves plausibly and nothing errors.
 Use absolute paths for a build in a worktree, and treat an unexpected package path in build
 output as a location bug first.
+
+## 2026-09-02 — a CI flake that was a real bug: `tcp/set-binary` could not make a server binary
+
+CI went red on `36c92849` with `breakage/chaos2_tcp_stress` P38 echoing **512 bytes for a
+256-byte payload**. The commit's code was byte-identical to the green run before it, so this
+was a flake — and per this repo's own rule, the work.
+
+Not reproducible idle (0/40). Reproduced **2/30** under `taskset -c 0,1` with eight spinners,
+i.e. CI's loaded two-core shape. An instrumented repro that also reported what the *server*
+saw gave the answer in one line: `[256 :string]`. The socket delivered TEXT despite
+`(tcp/set-binary client true)` running before the `receive`, because an accepted socket is
+already reading when `[:tcp-accept …]` reaches its owner and `set_binary` only affects the
+*next* chunk. The lossy UTF-8 decode of 0x00–0xFF is 128 ASCII + 128 U+FFFD; re-encoding that
+string is 128 + 384 = 512. The number in the failure message was the diagnosis all along.
+
+The real finding is that **no correct binary server could be written**: `set_binary` rejected
+a listener outright, and on a stream it was always one scheduling decision too late. KI-102
+has the detail; the fix is Erlang's shape — a listener's mode is inherited by the sockets it
+accepts, fixed before any connection exists, so there is no window.
+
+Worth noting how close this came to being dismissed. "512 for 256" reads as a doubling, and a
+doubling reads as a framing bug in the wire path — which would have been a long hunt in the
+reactor. Printing the length **and type** the receiving side saw, rather than only the
+client's, cost one edit and pointed straight at the mode. When a byte count is wrong, ask what
+type the value has before asking who duplicated it.
+
+The guard is deterministic in both directions (server never calls `set-binary`; plus an
+inverse case so the fix cannot be a blanket "everything is binary"), which the original P38 —
+a timing hope that happened to pass on idle machines — was not.

@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-102 | **`tcp/set-binary` on an accepted socket is racy — a server could not reliably be binary** — `breakage/chaos2_tcp_stress` P38 echoed 512 bytes for a 256-byte payload under load: the accepted socket is already reading when `[:tcp-accept …]` reaches its owner, so a client that sends immediately gets its first chunk decoded as TEXT, and 128 ASCII + 128 U+FFFD re-encodes to 512 | ✅ **fixed 2026-09-02** — a listener's binary mode is now inherited by every socket it accepts (`gen_tcp:listen(Port, [binary])`'s shape), which has no window because the listener's mode is fixed before any connection exists. Guard `tests/tcp_test.blsp` "a listener's binary mode is inherited by the sockets it accepts" + its inverse, sabotage-verified |
 | KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. **MECHANISM FOUND**: instruction-fetch pressure, not work — icache misses +48%, iTLB +96%, dcache FLAT, instructions only +1.25%. §7.5 emits more code per arm; ADR-302 doubles the arms that lower (158 vs 76); together they spill the L1 icache/iTLB. `fib` (small footprint) is unaffected at 1.0010. **Huge pages are NOT the fix** (iTLB delta is <1% of the cycle delta — it is a symptom, not a cost). Two faces of one cause: `json` +23% INSTRUCTIONS (rooting-heavy), `mandelbrot` +48% icache with instructions flat (footprint); `fib`/`collatz`/`sort` are flat, so arm count is not the predictor. **RE-BASELINED at HEAD**: most of it is a FIXED per-run cost (~4 ms on `startup` with no workload; `bintree` a flat ~10-13 ms whatever N, ratio decaying 1.246 → 1.095 → 1.027 by amortization alone; profile shows cranelift `Verifier`+`regalloc2` on the JIT thread). Only `mandelbrot` shows genuine steady state, ~1.034 at both N=1400 and N=3000. So the published "every compute row 4-10% slower" is largely one constant measured at short sizes. `json`'s +23% is already gone at HEAD. Two separate fixes; start from the HEAD table, not the historical bisect. Probe harness in `target/ki100/` |
 | KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only — **falsified 2026-09-01**, see the status cell | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe). **Sighting 2026-09-01: CI's `make gcstress` step, run 5b20b307** — that step runs the file ALONE (a debug build, `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`), so the "full-suite context only" reading is wrong: it fires solo given the right timing, and GC stress on a loaded 2-core runner supplies it. Not reproducible here — 25/25 green under the same flags, and `make gcstress` clean in a full local pass — so the missing ingredient is machine load, not suite context. That makes CI's gcstress step a cheaper repro surface than a full suite run |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
@@ -215,6 +216,61 @@ runtime* was implied at any point — every sighting was a boot wait, never an a
 behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed.)
 
 ---
+
+## KI-102 — `tcp/set-binary` on an accepted socket is racy ✅ fixed 2026-09-02
+
+**Symptom.** `breakage/chaos2_tcp_stress.blsp` P38 ("binary mode round-trip") failed in CI:
+
+```
+=== P38: binary mode round-trip ===
+P38: payload length: 256
+P38: echo length: 512
+P38-correct: false
+```
+
+Intermittent — CI run 33563774646 red on a commit whose code was **byte-identical** to the
+run before it, which was green. Not reproducible on an idle box (0/40); reproduced **2/30**
+under `taskset -c 0,1` with eight spinners running, i.e. CI's loaded two-core shape.
+
+**Cause.** Not a framing or doubling bug in the wire path. An instrumented repro reporting
+what the *server* saw gave `[256 :string]` — the socket delivered the payload as TEXT
+despite `(tcp/set-binary client true)` having been called before the `receive`.
+
+An accepted socket is **already reading** by the time its owner is handed
+`[:tcp-accept …]`; `set_binary` is documented to take effect "for the next inbound chunk",
+so a client that sends the moment it connects can have its first chunk read and decoded
+before the call lands. The lossy UTF-8 decode of bytes 0x00–0xFF gives 128 ASCII characters
+plus 128 U+FFFD; echoing that *string* re-encodes it as UTF-8 at 1 and 3 bytes respectively
+— 128 + 384 = **512**. The number in the failure message is the whole diagnosis, once you
+know where it comes from.
+
+There was no way to write a correct binary server: `set_binary` explicitly rejected a
+listener, and on a stream it was always one scheduling decision too late.
+
+**Why it survived.** The race needs the client's first chunk to arrive inside the window
+between `accept` and the owner's `set-binary` — a scheduler outcome that essentially never
+happens on an idle multi-core box, which is where the suite is normally run. `tests/tcp_test.blsp`
+had no case for it at all, and every existing binary-mode test does its `set-binary` before
+any data is sent, so they close the window by accident. The breakage suite caught it only
+because it is the one place a client sends immediately on connect, and only on a loaded
+two-core runner.
+
+**Fix.** A listener's binary mode is now **inherited** by every socket it accepts
+(`crates/lisp/src/net.rs`: `accept_ready` seeds the accepted socket's flag from the
+listener's; `set_binary` accepts a listener instead of erroring). The listener's mode is
+fixed before any connection exists, so there is no window. This is
+`gen_tcp:listen(Port, [binary])`'s shape. A stream may still switch mode afterwards —
+inheritance only decides where it *starts*. P38 was updated to set the mode on its listener;
+0/40 failures under the load that produced 2/30 before.
+
+**Guard.** `tests/tcp_test.blsp`, two cases: "a listener's binary mode is inherited by the
+sockets it accepts" — where the server **never** calls `set-binary` on the stream, so
+without inheritance the payload deterministically arrives as `:string` — and its inverse, "a
+listener that was not set binary still accepts text-mode sockets", so the fix cannot be a
+blanket "everything is binary now". **Sabotage-verified**: with `accept_ready` changed to
+ignore the listener's flag, the first case fails (`a listener's binary mode is inherited by
+the sockets it accepts`) and the inverse still passes. Deterministic in both directions
+rather than a timing hope, which the original P38 was.
 
 ## KI-100 — a ~5-6% compute regression: two clean branches, a slow merge ⚠️ OPEN 2026-09-01
 
