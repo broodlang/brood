@@ -1319,9 +1319,52 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     Ok(peer)
 }
 
+/// Bound on a **name resolution**, which `connect_timeout` does not cover.
+///
+/// `to_socket_addrs` is a blocking libc call with no timeout of its own, and it runs on
+/// whichever thread dialled — for `node/connect` that is a scheduler worker, which the
+/// scheduler cannot preempt while it sits in a syscall (ADR-059). An unreachable DNS
+/// server takes the resolver's own timeout (commonly tens of seconds, and longer with
+/// retries across several `nameserver` lines), so a few reconnect attempts against a bad
+/// name were enough to wedge a meaningful slice of the ~nproc pool. KI-97 item 2.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Resolve `hostport` with a wall-clock bound, off the calling thread.
+///
+/// The resolve happens on a throwaway thread and the caller waits on a channel, so a
+/// hung resolver costs *that* thread rather than the worker we were called on. The
+/// thread is deliberately left to finish on its own if we time out: there is no way to
+/// cancel a blocking `getaddrinfo`, and detaching it is what keeps the caller bounded.
+/// That is safe because it touches nothing after the send — a closed channel is simply
+/// a dropped result — and the rate is bounded by the caller (a user-initiated
+/// `node/connect`, or `reconnect/watch`'s exponential backoff), not by inbound traffic.
+fn resolve_timeout(hostport: &str) -> io::Result<Vec<std::net::SocketAddr>> {
+    let (tx, rx) = mpsc::channel();
+    let owned = hostport.to_string();
+    std::thread::Builder::new()
+        .name("dist-resolve".into())
+        .spawn(move || {
+            let _ = tx.send(owned.to_socket_addrs().map(|it| it.collect::<Vec<_>>()));
+        })
+        .map_err(|e| io::Error::other(format!("cannot spawn resolver thread: {e}")))?;
+    match rx.recv_timeout(RESOLVE_TIMEOUT) {
+        Ok(res) => res,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("resolving {hostport} took longer than {RESOLVE_TIMEOUT:?}"),
+        )),
+        // The resolver thread vanished without answering (a panic in getaddrinfo's
+        // wrapper, say). Report it rather than hanging on a channel nobody will send to.
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(format!(
+            "resolver thread for {hostport} ended without a result"
+        ))),
+    }
+}
+
 /// Open the carrier for `addr`. Unix connects are local and effectively instant
-/// (or refuse immediately); TCP uses `connect_timeout` per resolved address, so
-/// a silently-dropping peer can't wedge the dialer at the kernel SYN timeout.
+/// (or refuse immediately); TCP bounds **both** halves — the name resolution via
+/// [`resolve_timeout`] and then `connect_timeout` per resolved address — so neither a
+/// wedged resolver nor a silently-dropping peer can pin the dialing thread.
 fn dial(addr: &str) -> io::Result<Stream> {
     if let Some(path) = addr.strip_prefix("unix:") {
         dial_unix(path)
@@ -1330,15 +1373,18 @@ fn dial(addr: &str) -> io::Result<Stream> {
         // address in turn — same multi-A-record behaviour as `TcpStream::connect`
         // while bounding the wait per attempt.
         let mut last_err: Option<io::Error> = None;
-        let stream = hostport.to_socket_addrs()?.find_map(|sa| {
-            match TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    last_err = Some(e);
-                    None
-                }
-            }
-        });
+        let stream =
+            resolve_timeout(hostport)?
+                .into_iter()
+                .find_map(
+                    |sa| match TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            last_err = Some(e);
+                            None
+                        }
+                    },
+                );
         Ok(Stream::Tcp(stream.ok_or_else(|| {
             last_err.unwrap_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "no addresses resolved")
@@ -1783,6 +1829,39 @@ mod tests {
         assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), 1);
         drop(s);
         assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), 0);
+    }
+
+    /// KI-97 item 2: a name resolution is bounded, and the bound is enforced off the
+    /// calling thread.
+    ///
+    /// `connect_timeout` covers the connect but not the lookup, and `to_socket_addrs` is a
+    /// blocking libc call with no timeout — on a scheduler worker, which cannot be
+    /// preempted mid-syscall (ADR-059), an unreachable DNS server pinned a worker for the
+    /// resolver's own timeout. There is no way to make a real resolver hang on demand
+    /// here, so this asserts the two properties that matter and can be checked: a normal
+    /// name still resolves, and a bad one fails rather than hanging.
+    #[test]
+    fn resolving_is_bounded_and_still_works() {
+        let started = Instant::now();
+        let ok = resolve_timeout("127.0.0.1:9").expect("a literal address must resolve");
+        assert!(!ok.is_empty(), "expected at least one address");
+        assert!(
+            started.elapsed() < RESOLVE_TIMEOUT,
+            "a literal address must not go anywhere near the bound"
+        );
+
+        // A syntactically valid but unresolvable name: the point is that it RETURNS.
+        let started = Instant::now();
+        let bad = resolve_timeout("invalid.invalid.:9");
+        assert!(
+            bad.is_err(),
+            "an unresolvable name must be an error, not a hang"
+        );
+        assert!(
+            started.elapsed() < RESOLVE_TIMEOUT * 4,
+            "resolution must be bounded, took {:?}",
+            started.elapsed()
+        );
     }
 
     /// KI-97 item 1: a peer that **trickles** must not outlive the handshake
