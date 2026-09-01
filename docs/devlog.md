@@ -9101,3 +9101,41 @@ by an item 2 fix. Two changes: `resolve_timeout` now **parses a literal `IP:port
 real deployments), and a failed spawn **falls back to an inline resolve** rather than
 failing the dial. Degrading to the old unbounded-but-working path beats inventing a new
 way to refuse connections. 6/6 green after; full suite clean.
+
+## 2026-09-01 (late) — KI-97 item 3 closed: nothing spawns a thread by faith any more
+
+`std::thread::spawn` **panics** when the OS refuses a thread, and the runtime spawned
+threads at attacker-influenced rates while treating that as impossible. Every site moved to
+`Builder::spawn`, which returns the error. Four findings, in descending nastiness:
+
+**The timer's `Once` was the worst thing in this item.** `call_once` is poisoned by a panic
+inside it, so one refused spawn made every later `call_once` panic — and `arm_timer` backs
+`sleep` and every `receive … (after ms …)`. A single transient EAGAIN therefore broke *all*
+timeouts runtime-wide, permanently, with no way back short of a restart. It is now a CAS
+that a failed spawn releases, so a later call retries and queued deadlines are late rather
+than lost.
+
+**`ensure_workers` lied about the pool.** It seeded `LIVE_EXECUTORS` with `n` and its
+fallback used the *panicking* `spawn`. So a second EAGAIN panicked inside `call_once`
+(poisoning `WORKERS_STARTED` too), and a short pool left the gauge above reality — and since
+`enqueue`'s safety net only fires at `LIVE_EXECUTORS == 0`, it could never spawn a drainer,
+stranding work with nothing alive to run it. Both gauges now reflect what actually started.
+
+**The dist acceptor died from one EAGAIN.** A refused per-connection thread panicked inside
+the accept loop, unwinding the acceptor and closing the listener for good. Pleasingly, the
+shed path needed no code: `Builder::spawn` drops the closure when it cannot start, which
+drops the accepted socket and the `HandshakeSlot` permit with it. Same treatment for the
+gossip dial — one thread per gossiped peer, up to 4096 per frame, the highest-rate spawn in
+the runtime — where a refusal now also clears the `PENDING_DIALS` marker so the peer stays
+dialable.
+
+**A lesson about my own test.** The first version of the timer guard asserted that the
+started-*flag* was set, and a `Once`-shaped sabotage passed it cleanly: the sabotage sets the
+flag without starting anything, which is exactly the bug. The test now asserts a genuinely
+new thread reached `timer_loop`, via a one-increment counter. Worth remembering — when the
+failure mode is "claims to have done X", an assertion on the claim is no assertion at all.
+The sabotage run is what exposed it; without it I would have shipped a guard that could
+never fail.
+
+Verified: suite 1332/1333 (only the documented wasm-under-cap exception), breakage suite
+37/37, scheduler/pool binaries ×3, distribution + child_cleanup 38/38, clippy on CI's flags.
