@@ -81,7 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **RootsBuf (`115faead`) is the standing suspect**. Next: a synthetic merge of ADR-302 with mainline before `115faead`. Probe harness in `target/ki100/` |
+| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. Next: a synthetic merge of ADR-302 with mainline before `115faead`. Probe harness in `target/ki100/` |
 | KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe) |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
@@ -240,6 +240,24 @@ std tree is identical across it. The whole delta is kernel-side: the mainline br
 re-lowering, default ON). Read the other way: **ADR-302's std is fast on the old kernel and
 the new kernel is fast on the old std; only ADR-302's std running on the new kernel is slow.**
 
+**Decomposition** (mandelbrot at `BENCH_N=1400`, min of 11, all interleaved against the
+same reference binary `2c822875`; synthetic merges built to order):
+
+| tree | ratio |
+|---|---|
+| `2dc7d2e6` — ADR-302's std alone | 1.021 |
+| ADR-302 + mainline **without** §7.5 | 1.030 |
+| ADR-302 + **RootsBuf only** (`115faead`) | **1.052** |
+| ADR-302 + all of §7.5 (the real merge) | **1.080** |
+| `25a558d4` — §7.5 **without** ADR-302's std | 0.992 |
+
+Read down the column: **§7.5 costs ~5 points on ADR-302's std and nothing at all on the old
+std** (0.992). `115faead` (RootsBuf) reproduces about half of that on its own, so it is a
+confirmed contributor rather than the whole story. The remaining split between increments 2
+and 3 is ~2 points against ~1% run-to-run noise, so it is **not** resolved — and note it sits
+awkwardly with `BROOD_NO_XCALL=1` (increment 3's off-switch) failing to close the gap. Do not
+build on that last split without more samples.
+
 **Narrowing so far.**
 - **Increment 3 is excluded**: `BROOD_NO_XCALL=1` does not close the gap (ratio 1.0595 with
   it set vs 1.0570 without). `BROOD_NO_INLINE=1` does not either (1.0548).
@@ -252,9 +270,12 @@ the new kernel is fast on the old std; only ADR-302's std running on the new ker
   mainline side), so a plausible shape is "the new root-stack representation costs more per
   frame, and ADR-302's std pushes many more frames" — unverified.
 
-**Next step.** Confirm or clear RootsBuf by building a synthetic merge of `2dc7d2e6` with
-mainline *before* `115faead` and probing it; if that is fast, increment 1 is the interaction.
-There is no runtime off-switch for RootsBuf, which is why a synthetic merge is the lever.
+**Next step.** The mechanism, not the commit: why does the new root-stack representation
+cost ~2% *only* when ADR-302's std is what is running? The merge inherits ADR-302's much
+larger lowering volume (160 arms vs 88) and presumably a different frame/rooting profile, so
+"more frames pushed through a costlier root stack" is the shape to test — `perf stat` on the
+two binaries, or the `ns_*` counters under `--features perf-stats`. Then account for the
+~2 points that RootsBuf does not explain.
 
 **Reproducing.** The harness is left in `target/ki100/` (gitignored): `probe.sh` is a
 `git bisect run` probe, `measure.sh` the raw timer, `bin/` the built binaries. The
