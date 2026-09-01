@@ -432,3 +432,87 @@ fn prealloc_caps_the_reservation_against_element_size_amplification() {
     // And a tiny frame is still bounded by its own remaining bytes.
     assert_eq!(prealloc(&Cursor::new(vec![0u8; 5]), usize::MAX), 5);
 }
+
+/// KI-97 item 4: a peer cannot grow this node's symbol interner without limit.
+///
+/// The interner is append-only by design — `NAMES` is a lock-free `boxcar::Vec` and nothing
+/// ever frees an id — which is right for a program's own symbols (bounded by its source) and
+/// wrong for wire symbols, whose spellings the *peer* chooses. A stream of distinct names
+/// grew `NAMES`, the global id map and every thread's intern cache, permanently.
+///
+/// Refusing to mint is not available (a legitimate peer may send a symbol we have never
+/// seen), so the bound is on the count and reaching it rejects the frame. Driven through
+/// `decode_frame`, not `get_sym`, so it guards the path a peer actually reaches.
+#[test]
+fn a_peer_cannot_mint_symbols_without_limit() {
+    // A known name costs nothing and must never be refused, however hot the link.
+    let known = value::intern("wire-symbol-cap-known");
+    for _ in 0..10_000 {
+        let f = Frame::Send {
+            target: Target::Name(known),
+            msg: Message::Int(1),
+        };
+        match read_full(&f) {
+            Frame::Send {
+                target: Target::Name(s),
+                ..
+            } => assert_eq!(s, known),
+            _ => panic!("wrong frame"),
+        }
+    }
+
+    // And a novel name still decodes normally under the cap — the bound must not break
+    // ordinary traffic, which is the whole risk of adding one.
+    let fresh = format!("wire-symbol-cap-fresh-{}", std::process::id());
+    let mut payload = vec![FRAME_SEND, TARGET_NAME];
+    put_str(&mut payload, &fresh);
+    encode_msg(&mut payload, &Message::Int(1)).unwrap();
+    let mut framed = (payload.len() as u32).to_be_bytes().to_vec();
+    framed.extend_from_slice(&payload);
+    match read_frame(&mut Cursor::new(framed)) {
+        Ok(Frame::Send {
+            target: Target::Name(s),
+            ..
+        }) => {
+            assert_eq!(value::symbol_name(s), fresh, "a new name must still decode");
+        }
+        other => panic!(
+            "a novel symbol under the cap must decode, got {:?}",
+            other.is_ok()
+        ),
+    }
+
+    // The bound itself: once the counter is at the ceiling, a NEW name is refused rather
+    // than minted. Drive the counter there directly — actually minting 2^20 names would
+    // make the test cost what the attack costs.
+    WIRE_SYMBOLS_MINTED.store(MAX_WIRE_SYMBOLS, std::sync::atomic::Ordering::Relaxed);
+    let over = format!("wire-symbol-cap-over-{}", std::process::id());
+    let mut payload = vec![FRAME_SEND, TARGET_NAME];
+    put_str(&mut payload, &over);
+    encode_msg(&mut payload, &Message::Int(1)).unwrap();
+    let mut framed = (payload.len() as u32).to_be_bytes().to_vec();
+    framed.extend_from_slice(&payload);
+    let err = read_frame(&mut Cursor::new(framed))
+        .err()
+        .expect("a new symbol past the cap must be refused");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert!(
+        value::intern_existing(&over).is_none(),
+        "the refused name must NOT have been interned — that is the leak"
+    );
+
+    // A name already known must still decode even at the cap: the bound is on growth, not
+    // on traffic, and getting that backwards would break every established link.
+    let f = Frame::Send {
+        target: Target::Name(known),
+        msg: Message::Int(1),
+    };
+    match read_full(&f) {
+        Frame::Send {
+            target: Target::Name(s),
+            ..
+        } => assert_eq!(s, known),
+        _ => panic!("a known symbol must still decode at the cap"),
+    }
+    WIRE_SYMBOLS_MINTED.store(0, std::sync::atomic::Ordering::Relaxed);
+}

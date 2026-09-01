@@ -81,7 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. Next: a synthetic merge of ADR-302 with mainline before `115faead`. Probe harness in `target/ki100/` |
+| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. **MECHANISM FOUND**: instruction-fetch pressure, not work — icache misses +48%, iTLB +96%, dcache FLAT, instructions only +1.25%. §7.5 emits more code per arm; ADR-302 doubles the arms that lower (158 vs 76); together they spill the L1 icache/iTLB. `fib` (small footprint) is unaffected at 1.0010. **Huge pages are NOT the fix** (iTLB delta is <1% of the cycle delta — it is a symptom, not a cost). Two faces of one cause: `json` +23% INSTRUCTIONS (rooting-heavy), `mandelbrot` +48% icache with instructions flat (footprint); `fib`/`collatz`/`sort` are flat, so arm count is not the predictor. Fix: reduce the work+code of RootsBuf's root handling per arm; iterate on `json`, whose instruction count is near noise-free. Probe harness in `target/ki100/` |
 | KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only — **falsified 2026-09-01**, see the status cell | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe). **Sighting 2026-09-01: CI's `make gcstress` step, run 5b20b307** — that step runs the file ALONE (a debug build, `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`), so the "full-suite context only" reading is wrong: it fires solo given the right timing, and GC stress on a loaded 2-core runner supplies it. Not reproducible here — 25/25 green under the same flags, and `make gcstress` clean in a full local pass — so the missing ingredient is machine load, not suite context. That makes CI's gcstress step a cheaper repro surface than a full suite run |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
@@ -89,7 +89,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-94 | **a green process's death ORPHANED its OS subprocesses** — `subprocess::close`'s only caller was the `proc-close` builtin and `retire_pid_tail` had no subprocess counterpart to `close_process_sockets`, so an owner that exited without closing leaked the OS child (never killed), its registry entry (forever), and both reader threads (draining into a dead pid) | ✅ **FIXED 2026-08-31** — `Proc` records its owner (the spawn subscriber) and `retire_pid_tail` calls `close_process_procs(pid)`: Erlang port semantics, a child dies with its owner (a deliberate semantic change). Guard in `tests/proc_test.blsp`, verified red (`:wrote`) on the pre-fix binary |
 | KI-95 | **`promote` forwards only closures/envs — DAG-shaped data is duplicated once per referrer, exponentially with nesting** — `heap.rs`'s `PromoteForward` comment reasons "acyclic ⇒ a finite tree to re-copy", but acyclic ≠ tree: immutable path-copying code produces DAGs everywhere, so every `def`/`spawn` of a value with shared substructure copies the shared part per reference into the append-only RUNTIME region, `2^n` with sharing depth, no cap | ✅ **FIXED 2026-08-31** — `PromoteForward` forwards pairs/vectors/maps/strings too (mirroring the GC flush tables), keyed on the handles' canonical identity (also closing a latent nursery/old `index()` collision in the closure/env tables); long spines stride-register (every 8th cell) so a bulk `def` stays cheap while growth stays O(n). Guards: 5 `promote_sharing_tests` (17 cells where pre-fix copied 131 071). Measured: `sort`/`spawn`/`startup`/`spawn-live`/`supervisor` all floor-level; `spawn`/`supervisor` **fewer** instructions than base |
 | KI-96 | **a remote monitor's `PENDING_REMOTE` entry survives its own `[:down …]`** — nothing removes the entry when the watched remote target dies and the peer's DOWN arrives, so (a) a long-lived watcher leaks one entry per dead remote monitor, and (b) a later node-down fires a SECOND `[:down mref pid :noconnection]` for an mref that already delivered — breaking the one-shot guarantee a `gen/call`-style pinned receive relies on | ✅ **FIXED 2026-08-31** — the DOWN now rides a dedicated `Frame::Down` (wire v7) instead of an ordinary `Send`, giving the watcher's node the hook the entry lacked: `deliver_remote_down` retires the pending entry, then delivers. Guard: `a_delivered_remote_monitor_does_not_fire_again_on_node_down` (two-node; sabotage-verified — retire disabled reproduces `SECOND-DOWN-BUG :noconnection`) |
-| KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31; item 1 FIXED, items 1 + 3 FIXED, item 2 three-of-four 2026-09-01** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading. **Item 1 (the pre-auth handshake trickle DoS) is closed**: a whole-handshake `Deadline` shim on both sides + a rate-limited shed warning, sabotage-verified. **Item 2**: `run-process`'s inherited stdin (a `git` credential prompt pinned a worker uncatchably) and `%node-connect`'s unbounded DNS resolve are both closed, each sabotage-verified; `proc-send`'s `write_all` now goes through a per-child writer thread (bounded queue, `dist`'s shape) — only `read-line`'s stdin lock remains, and that one is ADR-059 Phase 2 rather than a patch. **Item 3 fully closed**: the timer's poisoning `Once` (one EAGAIN broke every `sleep` forever), `ensure_workers` stranding `LIVE_EXECUTORS` above reality, the dist acceptor dying from a refused thread, and the poison-intolerant locks. Item 4 untouched |
+| KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31; item 1 FIXED, items 1 + 3 FIXED, item 2 three-of-four 2026-09-01** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading. **Item 1 (the pre-auth handshake trickle DoS) is closed**: a whole-handshake `Deadline` shim on both sides + a rate-limited shed warning, sabotage-verified. **Item 2**: `run-process`'s inherited stdin (a `git` credential prompt pinned a worker uncatchably) and `%node-connect`'s unbounded DNS resolve are both closed, each sabotage-verified; `proc-send`'s `write_all` now goes through a per-child writer thread (bounded queue, `dist`'s shape) — only `read-line`'s stdin lock remains, and that one is ADR-059 Phase 2 rather than a patch. **Item 3 fully closed**: the timer's poisoning `Once` (one EAGAIN broke every `sleep` forever), `ensure_workers` stranding `LIVE_EXECUTORS` above reality, the dist acceptor dying from a refused thread, and the poison-intolerant locks. **Item 4 fully closed**: the pre-auth 64 MiB allocation, unbounded wire-symbol interning, the ADR-232 dedup set, the edge-triggered accept drain, `tls_request`'s untimed connect + close-before-connect race, the never-reaped half-closed stream, `record_remote_link`'s missing liveness check, and unreaped sysmon subscriptions. **The only thing left in KI-97 is `read-line`'s stdin lock**, which is ADR-059 Phase 2 — a feature, not a patch |
 | KI-88 | **one spawn of a warm burst is created, promoted, registered — and never scheduled** — exactly one reader of a 50-process burst never executes its first instruction; no death line, and the collector times out. Gates `BROOD_TW_REENTRY`'s default (60× on the viral defer shape, measured and waiting) | ⚠️ **WATCHING 2026-08-31 — DORMANT.** Seen many times, root cause never found, and no reconstructable binary exhibits it: 10/10 pass at `62eac84c` with the router confirmed live, on top of session 4's 15/15 + 8/8 (incl. a pristine rebuild of the commit that failed 3/3 hours earlier). One candidate mechanism — `run_one`'s unprotected post-quantum tail, whose unwind produces this exact signature — was found and **closed** in session 5, so a future sighting is known not to be that. Next sighting: PRESERVE THE BINARY, arm `BROOD_SCHED_DBG=1`, take a core in the window |
 | KI-99 | **`a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 under a full `make test`** — B warned 0 times instead of 1, with `dist: incoming connection failed: failed to fill whole buffer` on B's stderr: the handshake hit EOF mid-frame under full-suite load, so the inbound send that should have been dropped-and-warned never arrived | ⚠️ **WATCHING 2026-08-31** — retry-absorbed (try 2 passed), 6/6 green solo after. One sighting, but the failure output was **captured** this time (KI-80's lesson), and it names the mechanism: a connection that never completed, not a dedup miscount. If it recurs, the question is why the handshake EOFs under load — `MAX_HANDSHAKE_FRAME`/`accept_link` timeout interaction is the place to look, and KI-97 item 1 touches that code |
 | KI-87 | **The checker diverged — `nest run` at 54 GB, three 19 GB `types::` test processes.** `InferGuard::enter` ended in `.then_some(InferGuard(sym))`; `bool::then_some` builds its argument eagerly, so a REFUSED entry built and dropped a guard whose `Drop` removed the in-flight symbol's mark — every cycle refusal un-guarded the symbol it refused (latent since 2026-07-07). The demand walk consulting a callee's inferred sig (`0f64f600`) made `require-one` ⇄ `%require-await` nest without bound, one stack segment per level | ✅ **FIXED 2026-08-29** — the guard is constructed only on the success path (`entered.then(\|\| InferGuard(sym))`). Guards sabotage-verified: a refused third `enter` stays refused, and the mutually recursive pair reproduces the exact `mmap failed to allocate stack` OOM under `ulimit -v` with the bug restored. Build uncapped, run capped |
@@ -270,7 +270,81 @@ build on that last split without more samples.
   mainline side), so a plausible shape is "the new root-stack representation costs more per
   frame, and ADR-302's std pushes many more frames" — unverified.
 
-**Next step.** The mechanism, not the commit: why does the new root-stack representation
+**MECHANISM FOUND 2026-09-01: instruction-fetch pressure, not work.** `perf stat` on the
+culprit pair (mandelbrot, `BENCH_N=1400`):
+
+| metric | `2dc7d2e6` (good) | `0f57e30b` (bad) | delta |
+|---|---|---|---|
+| instructions | 18.01 G | 18.24 G | **+1.25%** |
+| cycles | 6.12 G | 6.41 G | **+4.7%** |
+| L1-icache-load-misses | 12.3 M | 18.2 M | **+47.7%** |
+| iTLB-load-misses | 76 K | 149 K | **+96%** |
+| L1-dcache-load-misses | 5.57 M | 5.60 M | +0.5% (flat) |
+
+So the binary is not doing meaningfully more *work* (+1.25% instructions) — it is **stalling
+on instruction fetch**. IPC drops 2.94 → 2.85. Data cache is untouched, which rules out the
+obvious "worse data layout" reading.
+
+Three independent confirmations:
+- **Monotonic across three trees.** icache 12.5 M → 16.1 M → 19.0 M and iTLB 77 K → 117 K →
+  155 K for good → synthetic-without-§7.5 → the real merge, matching their 1.021 / 1.030 /
+  1.080 ratios. Instructions over the same three are 16.7 / 18.0 / 17.0 G — not monotonic,
+  which is the point.
+- **A small-footprint row is completely unaffected**: `fib` measures **1.0010** on the same
+  pair where mandelbrot measures 1.0548. Exactly what a footprint effect predicts and what a
+  per-operation cost would not.
+- **The growth is in RUNTIME-emitted code, not the kernel.** Both binaries are the same size
+  (34.06 vs 34.08 MB) and lower the same number of arms (158 vs 159 — `std/` is identical
+  between them), so what grew is the machine code emitted *per arm*.
+
+**Why it needs both halves, finally explained.** §7.5 emits more machine code per JIT'd arm;
+ADR-302's std causes roughly **twice as many arms to lower** (158 vs 76 on the old std). The
+old std's 76 fatter arms still fit; ADR-302's 158 do not, and the working set spills out of
+the L1 icache and the iTLB. Neither change crosses the threshold alone, which is exactly why
+both parents measure clean.
+
+**Refined 2026-09-01 — and the first fix direction was WRONG.** Huge pages are *not* worth
+doing. THP on this box is in `madvise` mode, so JIT code really does get 4 KiB pages and the
+lever is genuinely available — but the arithmetic kills it: the iTLB delta is ~73 K extra
+misses at ~20-30 cycles ≈ **1.5-2 M cycles, under 1%** of the 288 M-cycle delta. Huge pages
+reduce iTLB misses, not icache footprint, so the measurable win would be noise. **The iTLB
+doubling is a symptom of the footprint, not a cost worth attacking.** The icache delta by
+contrast is ~5.9 M extra misses at ~15-20 cycles ≈ **88-118 M cycles, 30-40%** of the delta.
+
+**The mechanism has two faces, and `json` shows the clearer one.** Per-row, same pair:
+
+| row | instructions | icache misses | ratio |
+|---|---|---|---|
+| `json` | **+23%** | +5% | **1.095** |
+| `mandelbrot` | +1.25% | **+48%** | 1.059 |
+| `fib` / `collatz` / `sort` | — | — | 0.99 / 1.00 / 1.00 (flat) |
+
+So §7.5 adds **real per-operation work** where rooting is frequent (`json` parses and
+allocates heavily: +23% instructions, confirmed stable over repeats, and the
+without-§7.5 synthetic sits with the good binary at 2.38 G) and **code-footprint** cost where
+many arms carry the inlined root handling (`mandelbrot`: instructions flat, icache +48%).
+Both are the same underlying change — RootsBuf's root-stack manipulation being larger and
+inlined — seen through two different workload shapes.
+
+**Not every row regresses**, which the published-column summary obscures: `fib`, `collatz`
+and `sort` are flat-to-faster between these two commits despite lowering the same number of
+arms (161-167). Arm *count* is not the predictor; the size of the **hot working set** and
+the **rooting rate** are.
+
+**Fix direction (corrected).** Reduce the work and the code the root handling costs per arm
+— that is the single lever behind both faces. **Iterate on `json`, not `mandelbrot`**: its
+signal is *instruction count*, which is nearly noise-free (±0.1% over repeats) where wall
+time on this box needs min-of-3 interleaved runs to mean anything. `BROOD_NO_XCALL=1` does
+not help, so this is not the deferred re-lowering ceremony; `115faead` (RootsBuf) is the
+commit to read.
+
+**A measurement trap recorded with it:** the first `json` instruction reading of the
+without-§7.5 synthetic came back 3.76 G — higher than either endpoint — and would have been
+recorded as "non-monotonic, therefore two unrelated mechanisms". Two repeats put it at
+2.40/2.39 G, in line with the good binary. One `perf stat` run is a sample, not a
+measurement, even for instruction counts.
+
+**Superseded next step** (kept for the record): why does the new root-stack representation
 cost ~2% *only* when ADR-302's std is what is running? The merge inherits ADR-302's much
 larger lowering volume (160 arms vs 88) and presumably a different frame/rooting profile, so
 "more frames pushed through a costlier root stack" is the shape to test — `perf stat` on the
@@ -687,16 +761,71 @@ here as they close.
    - **Poison-tolerant locks**, per `core/sync.rs`'s own policy: the timer thread's condvar
      waits (a poisoned wait killed every deadline runtime-wide) and the `net.rs` /
      `subprocess.rs` registry takes now recover instead of `.unwrap()`/`.expect()`.
-4. **Smaller, same families**: `session::open` allocates up to 64 MiB from a pre-auth
-   length prefix before the AEAD tag is checked (`dist/session.rs`); a non-`WouldBlock`
-   accept error breaks the edge-triggered drain and strands queued connections silently
-   (`net.rs`); `tls_request`'s untimed `TcpStream::connect` plus the close-before-connect
-   race leaves a live, uncloseable TLS socket (`net.rs`); a half-closed stream with no
-   `closing`/`idle` state is never reaped (`net.rs` housekeep); every wire-decoded symbol
-   interns permanently (`dist/wire.rs` `get_sym` — remote-controlled interner growth,
-   plus the ADR-232 dedup set beside it); `record_remote_link` skips the liveness check
-   its local counterparts make (`links.rs`); sysmon subscriptions are never reaped while
-   `ARMED == 0` (`process/sysmon.rs`).
+4. ~~**Smaller, same families**~~ ✅ **ALL FIXED 2026-09-01.**
+   - ~~`session::open` allocates up to 64 MiB from a length prefix before the AEAD tag is
+     checked~~ ✅ **FIXED** — `vec![0u8; len]` was the obvious spelling and the wrong one:
+     `len` is four bytes off the wire and the Poly1305 tag that proves the frame genuine is
+     inside the bytes not yet read, so the allocation happened strictly *before* anything
+     about the frame was authenticated. A peer spent 4 bytes to make us commit 64 MiB, then
+     stalled — ~16-million-to-one amplification, repeatable per link. `read_claimed` now
+     grows the buffer a 64 KiB chunk at a time *as bytes arrive*, so the cost is
+     proportional to what is delivered. Guard: `a_claimed_length_is_not_an_allocation`,
+     driven through `OpenKey::open` and sabotage-verified. (An earlier version called the
+     helper directly and passed with `open` reverted — it guarded the helper while the bug
+     sat at the call site. Exercise the entry point.)
+   - ~~every wire-decoded symbol interns permanently~~ ✅ **FIXED** — the interner is
+     append-only by design (`NAMES` is a lock-free `boxcar::Vec`; nothing frees an id),
+     which is right for a program's own symbols and wrong for wire symbols, whose spellings
+     the *peer* chooses: a stream of distinct names grew `NAMES`, the global id map and every
+     thread's intern cache, permanently. Refusing to mint is not available (a legitimate peer
+     may send a symbol we have not seen), so the bound is on the count —
+     `MAX_WIRE_SYMBOLS` (2^20, far above any real workload), past which the frame is rejected
+     and the reader tears that link down. A **known** name never touches the counter, so an
+     established link is unaffected. Guard: `a_peer_cannot_mint_symbols_without_limit`,
+     driven through `decode_frame` and sabotage-verified; it also pins that a refused name is
+     *not* interned, which is the leak itself.
+   - ~~the ADR-232 dedup set beside it~~ ✅ **FIXED** — same shape: for an inbound drop the
+     distinct names are the peer's to choose. Capped at 4096, past which it warns without
+     recording. A flood of distinct names is itself worth seeing, and the alternative is a
+     remote-controlled set that never shrinks.
+   - ~~a non-`WouldBlock` accept error breaks the edge-triggered drain~~ ✅ **FIXED** —
+     `Err(_) => break` ended the drain on any error, and the registration is
+     **edge-triggered**, so whatever was already queued in the backlog was stranded until
+     some *later* arrival happened to re-arm us. Silently. `ConnectionAborted` (a peer that
+     died between the readiness event and `accept`) is a fact about one connection, so it
+     now `continue`s; anything else still breaks but *says so*, since a listener that had
+     stopped accepting was previously indistinguishable from one nobody was connecting to.
+   - ~~`tls_request`'s untimed connect + the close-before-connect race~~ ✅ **FIXED** —
+     the connect is now bounded (`TLS_CONNECT_TIMEOUT`, 5 s, per resolved address) instead
+     of waiting out the kernel's multi-minute SYN timeout while holding the caller's
+     registry entry and request buffer. And the race is closed: the registry entry is
+     inserted *before* the connect, so an owner closing meanwhile removed it while the
+     thread went on to hand the socket to the reactor — installing a live connection under
+     an id nothing owned and nothing could close. The thread now re-checks the registry and
+     drops the stream instead. Its `.expect("spawn tls connect thread")` is gone too (item
+     3's panicking-spawn class).
+   - ~~a half-closed stream is never reaped~~ ✅ **FIXED** — the idle branch required
+     `!c.read_done`, which excluded a half-closed stream from the only reap that could
+     collect it: `accepted_at` is cleared once the owner claims the connection and `closing`
+     is only set by an explicit close, so a peer that shut its write half while the owner
+     never closed the socket leaked the entry and its fd for the runtime's life. `read_done`
+     now counts as quiet, gated on nothing being queued outbound — a half-close is a
+     legitimate "I am done sending, you may still reply", and reaping with unwritten data
+     would discard that reply.
+   - ~~`record_remote_link` skips the liveness check~~ ✅ **FIXED** — its doc had always
+     claimed it "returns whether `local_pid` is currently alive"; it returned `()`. The
+     check matters on the **inbound** side, where `to_pid` is wire data: a peer naming a
+     dead or never-existent pid created a `REMOTE_LINKS` entry nothing would ever remove,
+     because the sweep runs from `deregister`, which for that pid has already happened or
+     never will. Now checked inside the critical section (the shape `link` and
+     `add_monitor` already use), and a dead target gets `:noproc` sent back to the peer —
+     exactly what a *local* `link` to a dead pid delivers.
+   - ~~sysmon subscriptions are never reaped while `ARMED == 0`~~ ✅ **FIXED** — `clear_if`
+     gated on `armed()`, which is the mask of *selected kinds* and so is 0 for a subscriber
+     that selects nothing; such a subscriber was never reaped at all. Gated on the
+     subscription count now. Guard: `a_subscriber_selecting_nothing_is_still_reaped`,
+     sabotage-verified, and it asserts the `!armed()` precondition explicitly so the test
+     cannot quietly stop exercising the trap.
 
 Also recorded by the same audit, elsewhere: the four fixed bugs above (KI-91–94), the two
 correctness items KI-95/96 (both fixed later the same day), and the performance

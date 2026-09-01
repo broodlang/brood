@@ -614,7 +614,22 @@ fn accept_ready(
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            // A connection that died between the readiness event and `accept` — the peer
+            // reset it, or the kernel refused it. That is a fact about ONE connection, not
+            // about the listener, so skip it and keep draining: the registration is
+            // edge-triggered, so breaking here would strand every connection still queued
+            // in the backlog until some *later* arrival happened to re-arm us. Silently.
+            Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionAborted => continue,
+            Err(e) => {
+                // Anything else ends this drain (a genuinely broken listener, or fd
+                // exhaustion where continuing would spin). Say so — the old code returned
+                // here with no trace at all, so a listener that had stopped accepting was
+                // indistinguishable from one nobody was connecting to. Rate-limiting is
+                // unnecessary: reaching this breaks the loop, so it prints at most once per
+                // readiness event.
+                eprintln!("net: accept on listener {lid} failed ({e}); drain stopped");
+                break;
+            }
         }
     }
 }
@@ -1194,9 +1209,22 @@ fn housekeep(conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) {
                         doomed.push(id);
                     }
                 } else if let Some(idle) = c.idle {
-                    // Established (claimed, still reading) and gone quiet in both
-                    // directions past its armed bound.
-                    if c.reading && !c.read_done && now.duration_since(c.last_activity) >= idle {
+                    // Established and gone quiet in both directions past its armed bound.
+                    //
+                    // `read_done` (the peer sent EOF — a half-close) counts as quiet, and
+                    // deliberately so: the old condition required `!c.read_done`, which
+                    // excluded a half-closed stream from the only reap that could collect
+                    // it. Nothing else covered that state either — `accepted_at` is cleared
+                    // once the owner claims the connection, and `closing` is only set by an
+                    // explicit close — so a peer that shut down its write half while the
+                    // owner never closed the socket left an entry (and its fd) for the life
+                    // of the runtime. KI-97 item 4.
+                    //
+                    // Still gated on nothing being queued outbound: a half-close is a
+                    // legitimate "I am done sending, you may still reply", and reaping a
+                    // connection with unwritten data would discard that reply.
+                    let quiet = now.duration_since(c.last_activity) >= idle;
+                    if quiet && c.out.is_empty() && (c.reading || c.read_done) {
                         idle_reaps.push(id);
                     }
                 }
@@ -1540,6 +1568,11 @@ fn tls_config_with_ca(ca_pem: &str) -> std::io::Result<Arc<ClientConfig>> {
 /// honors `tcp-set-binary` like any other (set it right after this returns —
 /// nothing can arrive before the request is sent). `ca_pem` (private CAs, dev
 /// certs) replaces the Mozilla roots as the trust anchor for this request.
+/// Bound on the TLS client's TCP connect. Matches `dist`'s dial timeout: long enough for
+/// any healthy path, short enough that a silently-dropping host does not hold the caller's
+/// registry entry and request buffer for the kernel's multi-minute SYN timeout.
+const TLS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub fn tls_request(
     host: &str,
     port: u16,
@@ -1578,7 +1611,27 @@ pub fn tls_request(
                     return;
                 }
             };
-            match std::net::TcpStream::connect((host.as_str(), port)) {
+            // Bounded connect. `TcpStream::connect` waits out the kernel's SYN timeout —
+            // minutes against a host that silently drops — and although this runs on its
+            // own thread rather than a scheduler worker, that thread holds the caller's
+            // registry entry and its `request` buffer for the whole time.
+            let connected = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+                .and_then(|addrs| {
+                    let mut last: Option<std::io::Error> = None;
+                    for sa in addrs {
+                        match std::net::TcpStream::connect_timeout(&sa, TLS_CONNECT_TIMEOUT) {
+                            Ok(s) => return Ok(s),
+                            Err(e) => last = Some(e),
+                        }
+                    }
+                    Err(last.unwrap_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "tls: no addresses resolved",
+                        )
+                    }))
+                });
+            match connected {
                 Ok(std_stream) => {
                     if std_stream.set_nonblocking(true).is_err() {
                         sink.emit(tcp_error_msg(id, "tls: could not configure socket"));
@@ -1591,6 +1644,15 @@ pub fn tls_request(
                     // records go out one delayed-ACK apart — O(size) round-trips, seconds
                     // for a few hundred KB.
                     let _ = std_stream.set_nodelay(true);
+                    // The owner may have closed this handle while we were connecting: the
+                    // registry entry was inserted BEFORE the connect, and `close` removes
+                    // it. Handing the socket to the reactor now would install a live
+                    // connection under an id nothing owns and nothing can close — an fd and
+                    // a TLS session leaked for the life of the runtime. Dropping the stream
+                    // here closes it. KI-97 item 4.
+                    if !reg().contains_key(&id) {
+                        return;
+                    }
                     let stream = MioStream::from_std(std_stream);
                     reactor().cmd(Cmd::TlsClient {
                         id,
@@ -1608,7 +1670,13 @@ pub fn tls_request(
                 }
             }
         })
-        .expect("spawn tls connect thread");
+        .map_err(|e| {
+            // `Builder::spawn`, and its error handled rather than `.expect`ed: a refused
+            // thread (EAGAIN) would otherwise panic in whichever green process called this
+            // (KI-97 item 3's class). Undo the registry entry so the id does not linger.
+            reg().remove(&id);
+            std::io::Error::other(format!("tls: cannot start connect thread: {e}"))
+        })?;
     Ok(id)
 }
 
