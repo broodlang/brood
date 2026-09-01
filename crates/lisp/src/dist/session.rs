@@ -122,8 +122,7 @@ impl OpenKey {
                 format!("sealed frame length {len} out of range"),
             ));
         }
-        let mut ct = vec![0u8; len];
-        r.read_exact(&mut ct)?;
+        let ct = read_claimed(r, len)?;
         let nonce = nonce_bytes(self.counter);
         let pt = self
             .cipher
@@ -142,8 +141,118 @@ impl OpenKey {
     }
 }
 
+/// Largest slice this reads in one go while collecting a frame body.
+///
+/// The buffer grows a chunk at a time *as bytes actually arrive*, so a peer's claimed
+/// length never becomes an allocation on its own.
+const READ_CHUNK: usize = 64 * 1024;
+
+/// Read exactly `len` bytes **without trusting `len` for the allocation**.
+///
+/// `vec![0u8; len]` was the obvious spelling and the wrong one: `len` comes off the wire,
+/// and the Poly1305 tag that proves the frame genuine is inside the bytes we have not read
+/// yet — so the allocation happens strictly *before* anything about this frame is
+/// authenticated. A peer needed only to send a 4-byte prefix claiming `MAX_FRAME` to make
+/// us commit **64 MiB**, then stall or drop; repeated across links that is memory
+/// amplification of ~16 million to one, from traffic too small to look like an attack.
+/// (The peer is cookie-authenticated by then, so this is hardening rather than a hole —
+/// but "authenticated" is not "trusted with the allocator". KI-97 item 4.)
+///
+/// Growing per chunk makes the cost proportional to bytes *delivered*: a claim of 64 MiB
+/// backed by silence costs one chunk. Honest frames are unaffected beyond a few `realloc`s
+/// on the way up, and the ceiling is still enforced by the caller's range check.
+fn read_claimed(r: &mut impl Read, len: usize) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(len.min(READ_CHUNK));
+    while buf.len() < len {
+        let want = (len - buf.len()).min(READ_CHUNK);
+        let start = buf.len();
+        buf.resize(start + want, 0);
+        // A short read here (peer stalled or went away) leaves the buffer at its current
+        // size and propagates — nothing larger was ever reserved.
+        r.read_exact(&mut buf[start..])?;
+    }
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
+    /// KI-97 item 4: a claimed length must not become an allocation.
+    ///
+    /// `session::open` read its body with `vec![0u8; len]`, where `len` is four bytes off
+    /// the wire and the Poly1305 tag proving the frame genuine sits in the bytes not yet
+    /// read. A peer could therefore spend 4 bytes to make us commit **64 MiB** and then
+    /// stall — memory amplification of ~16 million to one, repeatable per link.
+    ///
+    /// The assertion is on the mechanism, not on a memory measurement (which would be
+    /// unreliable in-process): this reader records the largest slice it is ever asked to
+    /// fill. Pre-fix that is the full claimed length in one go; post-fix it is capped at
+    /// `READ_CHUNK` however large the claim.
+    ///
+    /// **Driven through `OpenKey::open`, not the helper.** An earlier version called
+    /// `read_claimed` directly and passed happily with `open` reverted to `vec![0u8; len]`
+    /// — it guarded the helper while the bug lived at the call site. Exercise the entry
+    /// point, or the guard is decorative.
+    #[test]
+    fn a_claimed_length_is_not_an_allocation() {
+        struct Recorder {
+            biggest: usize,
+            budget: usize,
+            prefix: Vec<u8>,
+        }
+        impl Read for Recorder {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                // The 4-byte length prefix first, verbatim; only the BODY reads are the
+                // ones whose size this is measuring.
+                if !self.prefix.is_empty() {
+                    let n = buf.len().min(self.prefix.len());
+                    buf[..n].copy_from_slice(&self.prefix[..n]);
+                    self.prefix.drain(..n);
+                    return Ok(n);
+                }
+                self.biggest = self.biggest.max(buf.len());
+                if self.budget == 0 {
+                    return Ok(0); // peer went away mid-frame — what the attack relies on
+                }
+                let n = buf.len().min(self.budget);
+                self.budget -= n;
+                Ok(n)
+            }
+        }
+
+        // Claim the largest body the range check admits, then deliver almost nothing.
+        let claim = MAX_FRAME + TAG_LEN;
+        let mut peer = Recorder {
+            biggest: 0,
+            budget: 128,
+            prefix: (claim as u32).to_be_bytes().to_vec(),
+        };
+        let mut key = OpenKey::new([7u8; KEY_LEN]);
+        // `Frame` has no `Debug`, so match rather than `expect_err`.
+        let err = match key.open(&mut peer) {
+            Err(e) => e,
+            Ok(_) => panic!("a peer that stops mid-frame must not yield a frame"),
+        };
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(
+            peer.biggest <= READ_CHUNK,
+            "open() asked to fill {} bytes for a claim of {claim} — the claim became an \
+             allocation, which is the bug",
+            peer.biggest
+        );
+    }
+
+    /// The complement: an honest frame of any size still round-trips byte-for-byte, so the
+    /// chunking cannot have introduced a truncation or a reordering.
+    #[test]
+    fn chunked_reads_still_deliver_the_whole_body() {
+        let body: Vec<u8> = (0..(READ_CHUNK * 2 + 12345))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let mut cursor = io::Cursor::new(body.clone());
+        let got = read_claimed(&mut cursor, body.len()).expect("honest frame");
+        assert_eq!(got, body, "a multi-chunk body must come back exactly");
+    }
+
     use super::*;
     use std::io::Cursor;
 

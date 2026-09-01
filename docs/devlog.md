@@ -9219,6 +9219,155 @@ Worth noting what this says about the empty-message crash that started it: it wa
 clean against a 1.7% base rate — suggestive, not proof, and the empty message that made it
 unreadable is fixed either way.
 
+## 2026-09-01 (night) — KI-100's mechanism: instruction fetch, not work
+
+`perf stat` on the culprit pair settled it in one run. Instructions **+1.25%**, cycles
+**+4.7%** — the binary is not doing more work, it is stalling. What moved: **L1-icache
+misses +47.7%, iTLB misses +96%**, with **data-cache misses flat (+0.5%)**. IPC 2.94 → 2.85.
+
+Three confirmations, because one perf run is a hypothesis:
+- **Monotonic across three trees.** icache 12.5 M → 16.1 M → 19.0 M and iTLB 77 K → 117 K →
+  155 K for good → synthetic-without-§7.5 → the real merge, tracking their 1.021 / 1.030 /
+  1.080 ratios. Instructions over the same three go 16.7 / 18.0 / 17.0 G — *not* monotonic,
+  which is the whole point.
+- **`fib` is completely unaffected: 1.0010**, on the same binaries where mandelbrot is
+  1.0548. A tiny hot loop has no footprint problem; a per-operation cost would have hit both.
+- **The growth is in runtime-emitted code.** Both binaries are the same size (34.06 vs
+  34.08 MB) and lower the same number of arms (158 vs 159 — `std/` is byte-identical between
+  them), so what grew is the machine code emitted *per arm*.
+
+That finally explains why it needs both halves. §7.5 emits more code per JIT'd arm; ADR-302's
+std makes roughly **twice as many arms lower** (158 vs 76 on the old std). The old std's 76
+fatter arms still fit in the icache; ADR-302's 158 do not. Neither change crosses the
+threshold alone — which is exactly why both parents measure clean and only the merge is slow.
+
+Fix direction: less emitted code per arm, or better JIT code locality — the **iTLB doubling**
+specifically suggests huge pages for the JIT region are worth trying, and hot/cold splitting
+after that. `BROOD_NO_XCALL=1` does not help, so it is not the deferred re-lowering ceremony;
+RootsBuf (`115faead`) reproduces about half the slowdown *and* about half the icache growth,
+which fits its inlined root-stack manipulation being the bigger part of the per-arm growth.
+
+Method note worth keeping: the earlier tier-split (tier 1 also regressing) had me looking for
+something both engines pay per operation. The right reading was that both engines pay for a
+*colder instruction stream*. When instructions are flat and cycles are not, stop looking for
+work and start looking at fetch.
+
+## 2026-09-01 (late night) — KI-97 item 4: the three remote-controlled growth paths
+
+All three are the same shape — a resource whose size the *peer* chooses and we never bound.
+
+**`session::open` allocated on a claim.** `vec![0u8; len]`, where `len` is four bytes off the
+wire and the Poly1305 tag that proves the frame genuine sits inside the bytes not yet read.
+The allocation therefore happened strictly *before* anything about the frame was
+authenticated: 4 bytes in, 64 MiB committed, then stall — about sixteen-million-to-one
+amplification, repeatable per link. `read_claimed` now grows a 64 KiB chunk at a time as
+bytes actually arrive, so the cost tracks what is delivered. (The peer is cookie-
+authenticated by then, so this is hardening rather than a hole — but authenticated is not
+"trusted with the allocator".)
+
+**The interner grew forever from wire names.** `NAMES` is an append-only `boxcar::Vec` and
+nothing ever frees an id — correct for a program's own symbols, which its source bounds, and
+wrong for wire symbols, whose spellings the peer picks. Refusing to mint isn't available (a
+legitimate peer may genuinely send a name we have never seen), so the bound is on the count:
+`MAX_WIRE_SYMBOLS` = 2^20, past which the frame is rejected and the link torn down. A name
+already known never touches the counter, so an established link pays nothing. The ADR-232
+drop-warning dedup set is the same story and is capped the same way.
+
+**A test lesson, repeated and worth stating plainly.** My first guard for the allocation bug
+called `read_claimed` directly — and passed cleanly with `open` reverted to `vec![0u8; len]`.
+It guarded the helper while the bug lived at the call site. This is the second time this
+session that a sabotage run has caught a guard asserting the wrong thing (the first was the
+timer flag). Both times the fix was to drive the *entry point a caller actually reaches*
+rather than the piece I had just written. A guard that cannot fail is worse than none,
+because it reads as coverage.
+
+Verified: suite 1336/1337 (only the documented wasm-under-cap exception), distribution 36/36,
+clippy on CI's flags.
+
+## 2026-09-01 (very late) — KI-97 item 4 closes; the whole entry is down to one feature
+
+The remaining five, each a leak or a silence rather than a crash:
+
+**The accept drain stranded its own backlog.** `Err(_) => break` on any error, under an
+**edge-triggered** registration — so whatever was already queued waited for some *later*
+arrival to re-arm us, and nothing was logged. `ConnectionAborted` (a peer that died between
+the readiness event and `accept`) is a fact about one connection and now `continue`s;
+anything else still breaks but says so. A listener that had stopped accepting used to look
+exactly like one nobody was connecting to.
+
+**`tls_request` could leave a socket nobody owned.** The registry entry is inserted *before*
+the connect, so an owner closing during it removed the entry while the thread went on to
+hand the socket to the reactor — a live TLS connection under an id nothing could close. The
+thread now re-checks the registry and drops the stream. Its connect is bounded at 5 s too
+(it was waiting out the kernel's SYN timeout while holding the caller's request buffer), and
+its `.expect("spawn tls connect thread")` is gone — item 3's class, found while here.
+
+**A half-closed stream was excluded from the only reap that could collect it.** The idle
+branch required `!c.read_done`. But `accepted_at` is cleared when the owner claims the
+connection and `closing` is only set by an explicit close, so a peer that shut its write
+half while the owner never closed the socket leaked the entry and its fd for the runtime's
+life. `read_done` now counts as quiet — gated on nothing queued outbound, because a
+half-close legitimately means "I am done sending, you may still reply".
+
+**`record_remote_link`'s doc had promised a check it never made.** "Returns whether
+`local_pid` is currently alive" — it returned `()`. That matters inbound, where `to_pid` is
+wire data: a peer naming a dead pid created a `REMOTE_LINKS` entry nothing would ever
+remove, since the sweep runs from `deregister`, which for that pid already happened or never
+will. Now checked inside the critical section, and a dead target gets `:noproc` back — what
+a *local* `link` to a dead pid already delivers. A doc comment describing absent behaviour is
+worth treating as a bug report.
+
+**sysmon reaped by the wrong question.** `clear_if` gated on `armed()`, the mask of
+*selected kinds*, which is 0 for a subscriber that selects nothing — so precisely those
+subscribers were never reaped. Gated on the subscription count now. The guard asserts the
+`!armed()` precondition explicitly, so it cannot quietly stop exercising the trap.
+
+**KI-97 is now down to one item**: `read-line`'s global stdin lock, which is ADR-059 Phase 2
+(terminal input on a reader thread, delivering to a mailbox) — a feature, deliberately not
+half-done.
+
+Verified: suite 1338/1339 (only the documented wasm-under-cap exception), distribution +
+serve/observe attach 38/38, http 50/50, clippy on CI's flags.
+
+## 2026-09-01 (end) — KI-100 refined, and my own fix direction retracted
+
+Went to implement huge pages for the JIT region — the direction I had recorded hours
+earlier — and killed it before writing a line. THP on this box is in `madvise` mode, so JIT
+code genuinely does get 4 KiB pages and the lever is real; the arithmetic is what refuses
+it. The iTLB delta is ~73 K extra misses at ~20-30 cycles ≈ **1.5-2 M cycles, under 1%** of
+the 288 M-cycle delta. Huge pages reduce iTLB misses, not icache footprint. **The iTLB
+doubling is a symptom of the footprint, not a cost worth attacking** — and a day's work
+would have bought noise. The icache delta is the real one: ~5.9 M extra misses ≈ 88-118 M
+cycles, 30-40% of the delta.
+
+Then per-row measurement showed the mechanism has **two faces**, and that `json` is the
+better lens than `mandelbrot`:
+
+  json         instructions +23%   icache  +5%   ratio 1.095
+  mandelbrot   instructions +1.2%  icache +48%   ratio 1.059
+  fib/collatz/sort                               ratio 0.99/1.00/1.00 (flat)
+
+§7.5 adds **real per-operation work** where rooting is frequent (json parses and allocates
+heavily) and **code footprint** where many arms carry the inlined root handling (mandelbrot
+is float compute that roots little). One cause — RootsBuf's root-stack manipulation being
+larger and inlined — through two workload shapes.
+
+Two things worth keeping. **Arm count is not the predictor**: fib, collatz and sort lower
+the same 161-167 arms as mandelbrot and are flat; what matters is the hot working set and
+the rooting rate. And **not every row regresses**, which the published-column phrasing
+("every compute row 4-10% slower") obscures — that column spans 0.19.1→0.22.0 and mixes in
+boot and stdlib growth, whereas this pair isolates §7.5.
+
+**Iterate on `json` from here**: its signal is instruction count, stable to ±0.1% over
+repeats, where wall time on this box needs min-of-3 interleaved invocations to mean
+anything. That alone should make the next session much faster than this one.
+
+**And a trap I nearly walked into.** The first `perf stat` of the without-§7.5 synthetic on
+json read 3.76 G instructions — higher than *either* endpoint — which I was one step from
+recording as "non-monotonic, therefore two unrelated mechanisms". Two repeats put it at
+2.40/2.39 G, in line with the good binary. One `perf stat` run is a sample, not a
+measurement; that holds even for instruction counts, which feel deterministic and are not
+(JIT compilation volume varies per run).
 ## 2026-09-02 — the type said `any` because the program was wrong
 
 A calculator written on the failure channel raised `conj: not a collection: #failure{…}`

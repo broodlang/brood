@@ -616,7 +616,9 @@ pub(crate) fn send_down(
 /// unreachable target gets). `local_pid` is the linker (self). Race-free against
 /// net-split exactly as `monitor_remote`: record before sending.
 pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) {
-    process::record_remote_link(local_pid, target_node, target_pid);
+    // `local_pid` is the calling process, so this is true by construction; binding it
+    // keeps the `#[must_use]`-ish intent visible rather than discarding a meaningful bool.
+    let _linked = process::record_remote_link(local_pid, target_node, target_pid);
     let sent = send_frame(
         target_node,
         &Frame::Link {
@@ -849,10 +851,23 @@ fn warn_dropped_to_unregistered_name(name: Symbol, whence: &str) {
     if QUIET.load(Ordering::Relaxed) {
         return;
     }
+    /// Ceiling on the dedup set. The set exists so a hot loop addressing a dead service
+    /// warns once rather than flooding, and its size is "the number of distinct names" —
+    /// which for an INBOUND drop is chosen by the peer, not by us. Past the cap we stop
+    /// growing and simply warn again: a flood of distinct names is itself worth seeing,
+    /// and the alternative is a remote-controlled set that never shrinks. KI-97 item 4.
+    const MAX_WARNED_NAMES: usize = 4096;
     static SEEN: std::sync::Mutex<Option<std::collections::HashSet<Symbol>>> =
         std::sync::Mutex::new(None);
     let first = match SEEN.lock() {
-        Ok(mut g) => g.get_or_insert_with(Default::default).insert(name),
+        Ok(mut g) => {
+            let seen = g.get_or_insert_with(Default::default);
+            if seen.len() >= MAX_WARNED_NAMES && !seen.contains(&name) {
+                true // at the cap: warn without recording, rather than grow
+            } else {
+                seen.insert(name)
+            }
+        }
         // A poisoned lock must not silence the diagnostic this exists to print.
         Err(_) => true,
     };
@@ -1644,7 +1659,19 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
                     // our half (keyed by the trusted connection `peer`, not the
                     // wire's `from_node`, same as the monitor handlers).
                     Frame::Link { from_pid, to_pid } => {
-                        process::record_remote_link(to_pid, peer, from_pid)
+                        // `to_pid` is wire data: the peer may name a pid that is dead or
+                        // never existed. Recording that would leak an entry forever (see
+                        // `record_remote_link`), so on a dead target we tell the peer
+                        // instead — its linked process gets `:noproc`, exactly what a
+                        // LOCAL `link` to a dead pid delivers.
+                        if !process::record_remote_link(to_pid, peer, from_pid) {
+                            send_link_exit(
+                                peer,
+                                from_pid,
+                                to_pid,
+                                Message::Keyword(value::intern(pk::NOPROC)),
+                            );
+                        }
                     }
                     Frame::Unlink { from_pid, to_pid } => {
                         process::drop_remote_link(to_pid, peer, from_pid)

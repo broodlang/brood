@@ -89,6 +89,16 @@ const WANT_DEOPT: u8 = 16;
 static ARMED: AtomicU8 = AtomicU8::new(0);
 static MONITORS: Mutex<Vec<SysMon>> = Mutex::new(Vec::new());
 
+/// How many subscriptions exist, regardless of which kinds they select.
+///
+/// [`ARMED`] cannot answer that: it is the mask of *selected kinds*, so a subscriber that
+/// selects nothing leaves it 0. `clear_if` used `armed()` as its early-out and therefore
+/// skipped reaping exactly those subscribers — their entries stayed in [`MONITORS`] for
+/// the life of the runtime, one per dead subscriber, and a process that re-subscribed in a
+/// loop grew the list without bound. Counting subscriptions separately keeps the death
+/// path's early-out just as cheap (one relaxed load) while making it correct. KI-97 item 4.
+static SUBSCRIBED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Is any subscriber armed? One relaxed load — the only cost every emit site
 /// pays when the feature is unused.
 #[inline]
@@ -133,6 +143,9 @@ fn refresh_bits(list: &[SysMon]) {
         }
     }
     ARMED.store(bits, Ordering::Relaxed);
+    // Updated in the same critical section as ARMED, so the two cannot disagree about
+    // whether anything is subscribed.
+    SUBSCRIBED.store(list.len(), Ordering::Relaxed);
 }
 
 /// Install `m` as its pid's subscription (replacing that pid's previous one, if
@@ -174,7 +187,10 @@ pub fn all() -> Vec<SysMon> {
 /// Disarm `dead_pid`'s subscription if it had one — called by `deregister` so a
 /// dead subscriber doesn't keep charging every event site in the runtime.
 pub(super) fn clear_if(dead_pid: u64) {
-    if !armed() {
+    // NOT `armed()`: that is the selected-KIND mask, which is 0 for a subscriber that
+    // selects nothing — and such a subscriber then never got reaped at all. Gate on
+    // whether any subscription exists.
+    if SUBSCRIBED.load(Ordering::Relaxed) == 0 {
         return;
     }
     let mut list = crate::core::sync::lock(&MONITORS);
@@ -287,4 +303,73 @@ pub fn emit_deopt(subject: u64, fn_name: Option<Symbol>) {
         None => Message::Nil,
     };
     fan_out(&targets, pk::SYS_DEOPT, subject, name);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// KI-97 item 4: a dead subscriber is reaped even when it selected no event kinds.
+    ///
+    /// `clear_if` gated on `armed()`, which is the mask of *selected kinds* — 0 for a
+    /// subscriber that selects nothing. Such a subscriber was therefore never removed from
+    /// `MONITORS`: one leaked entry per dead subscriber, for the life of the runtime, and a
+    /// process that re-subscribed in a loop grew the list without bound.
+    ///
+    /// The gate is now the subscription *count*, which is what the question actually is.
+    #[test]
+    fn a_subscriber_selecting_nothing_is_still_reaped() {
+        let quiet = SysMon {
+            pid: 987_654_321,
+            gc: false,
+            gc_min_pause_us: 0,
+            spawn: false,
+            exit: false,
+            exit_abnormal: false,
+            deopt: false,
+        };
+        install(quiet);
+        assert!(
+            current_for(quiet.pid).is_some(),
+            "the subscription must be installed"
+        );
+        // The precondition that made this leak: nothing is armed, because nothing is
+        // selected. If this ever stops holding the test is no longer exercising the bug.
+        assert!(
+            !armed(),
+            "a subscriber selecting no kinds must leave ARMED at 0 — that is the trap"
+        );
+
+        clear_if(quiet.pid);
+        assert!(
+            current_for(quiet.pid).is_none(),
+            "a dead subscriber must be reaped even with no kinds selected"
+        );
+    }
+
+    /// The complement: reaping still works for an ordinary subscriber, and an unrelated
+    /// pid's death leaves a live subscription alone.
+    #[test]
+    fn reaping_is_confined_to_the_dead_pid() {
+        let live = SysMon {
+            pid: 987_654_322,
+            gc: false,
+            gc_min_pause_us: 0,
+            spawn: true,
+            exit: false,
+            exit_abnormal: false,
+            deopt: false,
+        };
+        install(live);
+        clear_if(987_654_323); // some other process died
+        assert!(
+            current_for(live.pid).is_some(),
+            "an unrelated death must not disturb a live subscription"
+        );
+        clear_if(live.pid);
+        assert!(
+            current_for(live.pid).is_none(),
+            "its own death must reap it"
+        );
+    }
 }

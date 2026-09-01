@@ -200,12 +200,28 @@ pub fn unlink_self(target: u64) {
 /// on the linker's side and by the inbound `Frame::Link` handler on the peer's
 /// side, so both nodes hold their half. Returns whether `local_pid` is currently
 /// alive — the caller (linker side) fires an immediate `:noproc` if not.
-pub(crate) fn record_remote_link(local_pid: u64, node: Symbol, remote_pid: u64) {
+pub(crate) fn record_remote_link(local_pid: u64, node: Symbol, remote_pid: u64) -> bool {
+    // The liveness check this function's doc has always described, and which it did not
+    // actually make (KI-97 item 4). It matters on the INBOUND side: `to_pid` there comes
+    // off the wire, so a peer may name a local pid that is dead or never existed — and
+    // recording that creates a `REMOTE_LINKS` entry nothing will ever remove, because the
+    // sweep runs from `deregister`, which for that pid has already happened or never will.
+    // A peer could therefore grow the table permanently by naming pids.
+    //
+    // Checked INSIDE the critical section, the same shape as the local `link` and
+    // `monitor::add_monitor`: either we see it alive and insert before `deregister` can
+    // drain the bin (so deregister notifies the peer), or we see it gone and the caller
+    // reports that instead. Without the critical section there is a window where the entry
+    // is added after the sweep and lives forever.
     let mut t = lock(&REMOTE_LINKS);
+    if !REGISTRY.contains_key(local_pid) {
+        return false;
+    }
     let v = t.entry(local_pid).or_default();
     if !v.iter().any(|&(n, p)| n == node && p == remote_pid) {
         v.push((node, remote_pid));
     }
+    true
 }
 
 /// Drop the cross-node link `local_pid ↔ (node, remote_pid)` (best-effort).
