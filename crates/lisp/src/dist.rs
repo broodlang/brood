@@ -1339,14 +1339,29 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// a dropped result — and the rate is bounded by the caller (a user-initiated
 /// `node/connect`, or `reconnect/watch`'s exponential backoff), not by inbound traffic.
 fn resolve_timeout(hostport: &str) -> io::Result<Vec<std::net::SocketAddr>> {
+    // A literal `IP:port` needs no resolver at all — `to_socket_addrs` would parse it
+    // without touching DNS. Answer it inline: that is the overwhelmingly common address
+    // (every `127.0.0.1:port` in the suite, and most real deployments), and taking the
+    // fast path keeps a thread spawn off the dial path entirely.
+    if let Ok(sa) = hostport.parse::<std::net::SocketAddr>() {
+        return Ok(vec![sa]);
+    }
     let (tx, rx) = mpsc::channel();
     let owned = hostport.to_string();
-    std::thread::Builder::new()
+    if std::thread::Builder::new()
         .name("dist-resolve".into())
         .spawn(move || {
             let _ = tx.send(owned.to_socket_addrs().map(|it| it.collect::<Vec<_>>()));
         })
-        .map_err(|e| io::Error::other(format!("cannot spawn resolver thread: {e}")))?;
+        .is_err()
+    {
+        // Out of threads (EAGAIN under load). Falling back to an inline resolve is
+        // strictly better than failing the dial: it is exactly the old behaviour, so
+        // connectivity is preserved, and the unbounded wait it risks is the lesser of
+        // the two — refusing to connect because the machine is briefly thread-starved
+        // would be a new failure mode introduced by a hardening change.
+        return hostport.to_socket_addrs().map(|it| it.collect());
+    }
     match rx.recv_timeout(RESOLVE_TIMEOUT) {
         Ok(res) => res,
         Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(

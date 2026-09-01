@@ -44,6 +44,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -54,11 +55,27 @@ use crate::process::{chunk_flush, chunk_payload, spawn_io_source, Message};
 /// `Child` itself, used to reap (`wait`) and to `kill`. The stdout/stderr read
 /// halves are owned by their reader threads, not held here.
 struct Proc {
-    /// The child's stdin, behind its own lock so a blocking `proc-send` write
-    /// serializes per-child **without** holding the global registry lock — a
-    /// child that never drains its stdin must not stall every other `proc-*` op.
-    /// Dropped (sending EOF to the child) when the entry is removed.
-    stdin: Arc<Mutex<ChildStdin>>,
+    /// Queue into this child's **writer thread**, which owns its stdin.
+    ///
+    /// `proc-send` used to `write_all` on the calling thread. A pipe write is bounded by
+    /// the OS buffer, so a child that stops draining its stdin blocked that thread
+    /// forever — and for a green process that thread is a scheduler worker, which cannot
+    /// be preempted mid-syscall (ADR-059), so a handful of such sends drained the
+    /// ~nproc pool with no timeout or `try` able to recover. The old comment justified
+    /// this as "the blocking contract `tcp-send` also has", but `tcp-send` went async in
+    /// ADR-143, so nothing was left holding that contract up (KI-97 item 2).
+    ///
+    /// The shape is `dist`'s, which had the same problem and solved it the same way: one
+    /// writer thread per link, fed by a **bounded** channel, with a full queue treated as
+    /// "the peer is not draining" rather than something to buffer without limit. A single
+    /// writer also keeps writes serialized and whole, which a per-call timeout could not —
+    /// timing out mid-`write_all` would leave a **partial** message in the child's input
+    /// stream, silently corrupting its protocol, which is worse than the hang it fixes.
+    ///
+    /// Dropping this sender is what closes the child's stdin: the writer thread sees the
+    /// channel disconnect and drops its `ChildStdin`, sending EOF exactly as dropping the
+    /// old handle did.
+    writer: mpsc::SyncSender<Vec<u8>>,
     /// Shared with the stdout reader, which reaps the child on EOF. `proc-close`
     /// locks it briefly to `kill`; the reader locks it briefly to `try_wait`.
     /// Never held across a blocking call, so the two never deadlock.
@@ -98,6 +115,11 @@ struct ChildHandle {
 /// reached; these only bound the *daemon-closed-stdout-early* case.
 const REAP_POLL_MIN: Duration = Duration::from_millis(5);
 const REAP_POLL_MAX: Duration = Duration::from_millis(500);
+
+/// Depth of a child's pending-write queue. Deep enough that an ordinary burst never
+/// notices, shallow enough that a child which has stopped reading is reported rather
+/// than buffered without bound. `dist` uses the same shape for the same reason.
+const WRITE_QUEUE_CAP: usize = 1024;
 
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Proc>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -271,10 +293,11 @@ pub fn spawn(
         killed: std::sync::Condvar::new(),
     });
     let binary = Arc::new(AtomicBool::new(false));
+    let writer = start_stdin_writer(stdin);
     reg().insert(
         id,
         Proc {
-            stdin: Arc::new(Mutex::new(stdin)),
+            writer,
             child: child.clone(),
             binary: binary.clone(),
             owner: subscriber,
@@ -301,23 +324,70 @@ pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
     }
 }
 
-/// `(proc-send handle data)` — write all of `data` to the child's stdin (blocking)
-/// and flush. Errors if the handle is unknown or its stdin is closed.
+/// Own a child's stdin on a dedicated thread and write whatever arrives on the channel.
+///
+/// This is the thread that is *allowed* to block: it is not a scheduler worker, so a child
+/// that stops draining its stdin costs one parked thread instead of a slice of the pool
+/// (ADR-059). Each queued buffer is written whole and in order, so a message is never
+/// split — the property a per-call write timeout could not have preserved.
+///
+/// The loop ends when every sender is dropped (the registry entry removed by `proc-close`
+/// or owner death), and dropping `stdin` on the way out is what gives the child EOF.
+/// A write error also ends it: the child is gone, and its death is already reported to the
+/// owner as `[:proc-closed …]` by the stdout reader, which is the one report worth having.
+fn start_stdin_writer(mut stdin: ChildStdin) -> mpsc::SyncSender<Vec<u8>> {
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE_CAP);
+    let spawned = std::thread::Builder::new()
+        .name("proc-stdin".into())
+        .spawn(move || {
+            while let Ok(buf) = rx.recv() {
+                if stdin.write_all(&buf).is_err() || stdin.flush().is_err() {
+                    break;
+                }
+            }
+            // Explicit for the reader: this is the EOF the child waits for.
+            drop(stdin);
+        });
+    if spawned.is_err() {
+        // Out of threads. The receiver drops here, so every later `send` reports a
+        // disconnected writer rather than silently succeeding into a channel nobody
+        // drains — and stdin closes, which the child sees as EOF.
+        eprintln!("subprocess: cannot spawn stdin writer thread; this child accepts no input");
+    }
+    tx
+}
+
+/// `(proc-send handle data)` — queue `data` for the child's stdin.
+///
+/// **Non-blocking**, deliberately: the bytes are handed to this child's writer thread
+/// rather than written on the caller's, because the caller is usually a scheduler worker
+/// and a child that stops reading would otherwise pin it forever (KI-97 item 2; see
+/// [`Proc::writer`]). Writes still land whole and in order.
+///
+/// Errors if the handle is unknown, or if the queue is full — which means this child has
+/// stopped draining its stdin, a condition worth reporting rather than burying under an
+/// unbounded buffer. A *write* failure is not reported here (it happens later, on the
+/// writer thread); the child's death arrives as `[:proc-closed …]`, which is the signal
+/// that actually tells the owner what happened.
 pub fn send(id: u64, data: &[u8]) -> std::io::Result<()> {
-    // Clone the stdin handle out under a brief registry lock, then write outside
-    // it: a pipe write is bounded by the OS buffer, so a child that never drains
-    // its stdin would block here (the blocking contract `tcp-send` also has) —
-    // but only this child's stdin lock is held, never the global registry lock.
-    let stdin = {
+    // Clone the sender out under a brief registry lock, then queue outside it, so a
+    // full queue never stalls every other `proc-*` op.
+    let writer = {
         let reg = reg();
         match reg.get(&id) {
-            Some(p) => p.stdin.clone(),
+            Some(p) => p.writer.clone(),
             None => return Err(bad_proc()),
         }
     };
-    let mut stdin = stdin.lock().expect("subprocess stdin mutex");
-    stdin.write_all(data)?;
-    stdin.flush()
+    writer.try_send(data.to_vec()).map_err(|e| match e {
+        mpsc::TrySendError::Full(_) => std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!(
+                "proc-send: child {id} is not draining its stdin ({WRITE_QUEUE_CAP} writes queued)"
+            ),
+        ),
+        mpsc::TrySendError::Disconnected(_) => bad_proc(),
+    })
 }
 
 /// `(proc-close handle)` — terminate the child: kill it if still running, drop its

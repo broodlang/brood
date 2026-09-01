@@ -9066,3 +9066,38 @@ detached threads cannot be driven by an attacker.
 
 Still open in item 2: `proc-send`'s `write_all` under the per-child mutex, and `read-line`
 holding the global stdin lock.
+
+## 2026-09-01 (night) — KI-97 item 2 closes to one: `proc-send` gets a writer thread
+
+`proc-send` did `write_all` on the caller's thread. A pipe write is bounded by the OS
+buffer, so a child that stops draining its stdin blocked that thread forever — a scheduler
+worker, unpreemptable mid-syscall. The comment justified it as "the blocking contract
+`tcp-send` also has"; `tcp-send` went async in ADR-143, so nothing had been holding that up
+for some time.
+
+**The fix is a per-child writer thread over a bounded channel — `dist`'s shape**, which had
+the identical problem and solved it this way. What made the choice rather than a timeout:
+`libc` is available and a `poll`-bounded write was the obvious patch, but timing out
+mid-`write_all` leaves a **partial message** in the child's input stream. Silently
+corrupting a child's protocol is worse than the hang it fixes, and a single writer keeps
+every message whole and ordered by construction. A full queue is reported ("this child has
+stopped reading") instead of buffered without bound; dropping the sender still closes
+stdin, so EOF is unchanged.
+
+The guard is a proof rather than a smoke test: ~1.6 MB written to a `sleep 30` that never
+reads. A pipe buffer is ~64 KiB, so a synchronous `write_all` of that size *cannot* return
+— reaching the assertion after it establishes the write left the caller's thread. Worth
+noting because my first attempt at a sabotage run for this one was useless: stalling the
+writer thread breaks every proc test rather than isolating the fix, and the structural
+change has no clean in-place inverse. When a fix has no clean sabotage, look for an
+argument from construction instead of settling for a weaker test.
+
+**A self-inflicted flake, caught and fixed in the same session.** The DNS bound I added
+earlier spawns a thread per dial, and a full-suite run promptly produced a "no pong over
+tcp" flake in `dual_listen_serves_tcp_and_unix_at_once` — thread-spawn pressure (EAGAIN)
+turning a working dial into an error, which is KI-97 item 3's own failure class introduced
+by an item 2 fix. Two changes: `resolve_timeout` now **parses a literal `IP:port` inline**
+(no thread at all for the common address — every `127.0.0.1:port` in the suite and most
+real deployments), and a failed spawn **falls back to an inline resolve** rather than
+failing the dial. Degrading to the old unbounded-but-working path beats inventing a new
+way to refuse connections. 6/6 green after; full suite clean.

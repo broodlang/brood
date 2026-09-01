@@ -42,6 +42,29 @@
         (let (code (receive ([:proc-closed ^p c] c) (after *test-wait-ms* :timeout)))
           (is (nil? code)))))))
 
+(describe "proc: a child that stops reading cannot pin the caller (KI-97 item 2)"
+  :isolated
+  ;; `os/write` used to `write_all` on the CALLING thread. A pipe write is bounded by
+  ;; the OS buffer, so a child that never drains its stdin blocked that thread forever —
+  ;; and the caller is a scheduler worker, which cannot be preempted mid-syscall
+  ;; (ADR-059), so a handful of these drained the pool with nothing able to recover them.
+  ;; Writes now go to a per-child writer thread over a bounded queue.
+  ;;
+  ;; `sleep 30` never reads its stdin at all. This is a PROOF, not a smoke test: a pipe
+  ;; buffer is ~64 KiB, so a synchronous `write_all` of ~1.6 MB into a child that never
+  ;; reads cannot possibly return — it blocks once the buffer fills. Reaching the
+  ;; assertions below therefore establishes that the write no longer happens on this
+  ;; thread. (That is also why this needs no sabotage run to be convincing.)
+  (test "writing far past the pipe buffer to a non-reading child still returns"
+    (let (p (os/spawn "sleep" ["30"])
+          chunk (string/repeat "x" 8192))
+      ;; ~1.6 MB, far beyond any pipe buffer. Pre-fix this never returned.
+      (dotimes (i 200) (os/write p chunk))
+      ;; Still alive and still scheduling — the point of the whole exercise.
+      (assert= (type-of p) :subprocess)
+      (assert= (+ 1 1) 2)
+      (os/close p))))
+
 (describe "proc: binary mode is byte-faithful"
   :isolated
   ;; Binary mode governs the INBOUND decode only (ADR-141): the reader delivers
