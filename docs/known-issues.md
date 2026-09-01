@@ -81,7 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-100 | **a real ~5-8% compute regression landed between v0.19.1 and v0.21.0 and nobody noticed for three releases** — every benchmark compute row is 4-10% slower than the published 0.19.1 column. Splits into boot +2.8ms (+14.5%, tracks the stdlib growing 5199 -> 5332 image bindings — feature cost) and JIT'd compute ~+5.5% (tier 1 moves only +1.1%, so it lives on the native path). Checksums unchanged — the rows compute the same answers | ⚠️ **OPEN 2026-09-01** — verified, not a coin flip: build-parity `make ab` mandelbrot **+8.1% vs a 0.9% floor** (solo, N=11), **+6.8% unpinned** (re-checked because `make ab` pins to one core and the new binary lowers MORE arms, 97 vs 85), identical checksum `6129302` on both arms. Bisected to **`2c822875..80bb25d8`**: `8a2aaa01` 223ms / `6589e74b` 221ms / `2c822875` 226ms still fast, `80bb25d8` (v0.21.0) 242ms already slow. EXCLUDED: the Cranelift `*_imm`->`_s` migration, the JIT hot-admission commit, ADR-310, and everything after v0.21.0 (+0.8%, noise). ~33 commits left to bisect; the compute half is unexplained |
+| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **RootsBuf (`115faead`) is the standing suspect**. Next: a synthetic merge of ADR-302 with mainline before `115faead`. Probe harness in `target/ki100/` |
 | KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe) |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
@@ -215,47 +215,78 @@ behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed
 
 ---
 
-## KI-100 — a ~5-8% compute regression rode in across three releases, unseen ⚠️ OPEN 2026-09-01
+## KI-100 — a ~5-6% compute regression: two clean branches, a slow merge ⚠️ OPEN 2026-09-01
 
-**Symptom.** Refreshing the benchmark suite's Brood column at 0.22.0 (it was last measured
-at 0.19.1, `8a2aaa01`) found **every compute row 4-10% slower**. Checksums are unchanged on
-every row, so the programs compute exactly what they did — only time moved.
+**Symptom.** Refreshing the benchmark suite's Brood column at 0.22.0 (last measured at
+0.19.1, `8a2aaa01`) found **every compute row 4-10% slower**, with checksums unchanged on
+every row — the programs compute exactly what they did, only time moved.
 
-**It is real, not a turbo plateau.** The box's governor makes a single harness invocation a
-coin flip (documented in the benchmarks repo: `regex` read 119.5 vs 139.3 ms back to back on
-one binary), so the whole chain was checked before believing it:
-- min over 3 interleaved harness invocations, the per-row minimum landing on all three (18/9/4);
-- **build-parity A/B** (`make ab` — both arms built through the same target, interleaved,
-  pinned, std-image **live on both**): mandelbrot **+8.1% against a 0.9% floor**, solo at N=11;
-- **unpinned** re-measurement, because `make ab` pins to one core and would charge the run for
-  background JIT compilation — and the new binary lowers *more* arms (97 vs 85), exactly the
-  confound CLAUDE.md warns about. It survived: **+6.8%**, precisely timed and interleaved;
-- an output check — every binary prints checksum `6129302`, so the arms do equal work.
+**Bisected, 2026-09-01: the first bad commit is the MERGE `0f57e30b`, and both of its
+parents are fast.**
 
-**Shape.** Boot **+2.8 ms (+14.5%)** and JIT'd compute **~+5.5%**. At **tier 1 compute moves
-only +1.1%**, so the compute half lives on the *native* path, not the interpreter. The boot
-half tracks the stdlib growing (startup image 5199 -> 5332 bindings) and is best read as
-feature cost; the compute half is unexplained.
+| commit | what | mandelbrot vs a fixed reference |
+|---|---|---|
+| `2dc7d2e6` | ADR-302 data-first (the branch tip) | ratio **1.016 — good** |
+| `25a558d4` | mainline (carries §7.5 JIT increments 1-3) | ratio **0.992 — good** |
+| `0f57e30b` | **the merge of those two** | ratio **1.061 — BAD**, reproducible |
 
-**Bisected to `2c822875..80bb25d8`** (~33 commits, mostly ci/docs/style/checker/gui). Base
-times for mandelbrot under the same treatment: `8a2aaa01` 223 ms, `6589e74b` 221 ms,
-`2c822875` 226 ms — still fast; `80bb25d8` (v0.21.0) 242 ms, `2210d922` (ADR-310) 242 ms —
-already slow. **Excluded:** the Cranelift `*_imm` -> `_s` migration, the JIT hot-admission
-commit (`2c822875`), ADR-310, and everything after v0.21.0 (+0.8%, noise) — so it is not from
-the 2026-08-31/09-01 session's work.
+So neither side is slow on its own; the combination is. `git bisect run` over the window
+found it (probe below), and the merge was re-probed to be sure.
 
-**Why nobody saw it.** Nothing in the benchmarks repo measures timing except a hand-run
-harness; its daily gate proves the rows *run* and that checksums *agree*, and both stayed
-green through the whole regression. Hardening landed there rather than here:
-`bench/staleness.py` compares the commit the published column was measured at against the
-binary under test and fails on a version boundary (sabotage-verified). It measures nothing on
-purpose — a timing gate on a shared CI runner cannot tell a 7% regression from a turbo
-plateau, and a gate that cries wolf gets ignored.
+**What the merge actually changes.** `git diff 2dc7d2e6 0f57e30b -- std/` is **empty** — the
+std tree is identical across it. The whole delta is kernel-side: the mainline brought
+`115faead` (RootsBuf — `Heap.roots` from `Vec<Value>` to a `#[repr(C)]` buffer with
+(ptr,len,cap) at fixed offsets), `f832928f` (`BROOD_XCALL`, opt-in) and `3dc971d4` (hot
+re-lowering, default ON). Read the other way: **ADR-302's std is fast on the old kernel and
+the new kernel is fast on the old std; only ADR-302's std running on the new kernel is slow.**
 
-**Next step:** continue the bisect over the remaining window with the same protocol (each step
-needs the worktree's `nest` + `scripts/build-std-image.sh` built, or ab-bench refuses on a
-std-image mismatch — that guard is right and saved a biased comparison here). Measure
-`mandelbrot` at the default tier; it has the largest signal against the smallest floor.
+**Narrowing so far.**
+- **Increment 3 is excluded**: `BROOD_NO_XCALL=1` does not close the gap (ratio 1.0595 with
+  it set vs 1.0570 without). `BROOD_NO_INLINE=1` does not either (1.0548).
+- **It is NOT JIT-specific**, which corrects this entry's first draft: on *this pair* the gap
+  is **1.046 at tier 1** and 1.064 at tier 2. The earlier "tier 1 is flat" reading compared a
+  different, confounded pair (an old commit against the current tree). A tier-1 signal rules
+  out codegen and points at something the VM path also pays — which is what makes
+  **`115faead` (RootsBuf)** the standing suspect: the GC root stack is used at every tier.
+- The merge inherits ADR-302's much larger lowering volume (160 arms lowered vs 88 on the
+  mainline side), so a plausible shape is "the new root-stack representation costs more per
+  frame, and ADR-302's std pushes many more frames" — unverified.
+
+**Next step.** Confirm or clear RootsBuf by building a synthetic merge of `2dc7d2e6` with
+mainline *before* `115faead` and probing it; if that is fast, increment 1 is the interaction.
+There is no runtime off-switch for RootsBuf, which is why a synthetic merge is the lever.
+
+**Reproducing.** The harness is left in `target/ki100/` (gitignored): `probe.sh` is a
+`git bisect run` probe, `measure.sh` the raw timer, `bin/` the built binaries. The
+discriminator is a **ratio against a fixed reference binary, measured interleaved** — not an
+absolute time, because this box's governor wanders between turbo plateaus and an absolute
+threshold bisects the governor instead of the code. `BENCH_N=1400` so compute dominates and
+the separate boot effect (below) stays under 1%; `BROOD_NO_STDIMAGE=1` on every candidate for
+symmetry, which also avoids a per-worktree `nest` + image build.
+
+**A second, separate effect: boot +2.8 ms (+14.5%).** It tracks the stdlib growing (startup
+image 5199 -> 5332 bindings) and is best read as feature cost, not a defect. It is excluded
+from the measurement above by the large `BENCH_N`.
+
+**How it was verified before being believed** (the box makes a single number worthless):
+min-of-3 interleaved harness invocations; build-parity `make ab` (mandelbrot **+8.1% against
+a 0.9% floor**, solo at N=11); an **unpinned** re-run (**+6.8%**), because `make ab` pins to
+one core and the new binary lowers *more* arms, exactly the confound CLAUDE.md warns of; and
+an output check — every binary prints checksum `6129302`, so the arms do equal work.
+
+**Why nobody saw it for three releases.** Nothing in the benchmarks repo measures timing
+except a hand-run harness; its daily gate proves the rows *run* and that checksums *agree*,
+and both stayed green throughout. Hardening landed there: `bench/staleness.py` compares the
+commit the published column was measured at against the binary under test and fails on a
+version boundary (sabotage-verified). It measures nothing deliberately — a timing gate on a
+shared CI runner cannot separate a 7% regression from a turbo plateau, and a gate that cries
+wolf gets ignored.
+
+**A trap worth keeping.** `git log A..B` orders by date, not topology: `2dc7d2e6` appears
+inside the window while being an ancestor of *neither* endpoint measured earlier, so reading
+that list as a bisect order wrongly "excluded" ADR-302 — which turned out to be half the
+interaction. Check `git merge-base --is-ancestor` before reasoning about a range with merges
+in it, and bisect with `git bisect`, which understands the graph.
 
 ## KI-99 — a dist handshake EOF'd under full-suite load, so a drop-warning test saw no send ⚠️ WATCHING 2026-08-31
 

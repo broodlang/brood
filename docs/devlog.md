@@ -8998,3 +8998,38 @@ a malformed port in a `DATABASE_URL`.
 
 `seq/keep` also went back to dropping **only `nil`**. It had briefly dropped failures too,
 which is discarding something the caller never asked to discard.
+
+## 2026-09-01 (later) — KI-100 bisected: two clean branches, a slow merge
+
+`git bisect run` over the window, with a probe that compares each candidate against a
+**fixed reference binary, interleaved** (an absolute threshold would have bisected this
+box's governor, which wanders between turbo plateaus). Calibrated on the endpoints first:
+`2c822875` 1169 ms, `80bb25d8` 1239.5 ms, ratio 1.060, threshold 1.03.
+
+The answer is unusual and worth the entry: **the first bad commit is a MERGE, `0f57e30b`,
+and both of its parents are fast** — `2dc7d2e6` (ADR-302 data-first) 1.016, `25a558d4`
+(mainline, carrying §7.5 JIT increments 1-3) 0.992, their merge 1.061 and reproducible.
+
+`git diff 2dc7d2e6 0f57e30b -- std/` is **empty**, so the merge changes no Brood code at
+all — the whole delta is kernel-side. Read the other way round: ADR-302's std is fast on
+the old kernel, the new kernel is fast on the old std, and only the two together are slow.
+
+Narrowing: `BROOD_NO_XCALL=1` does not close the gap (1.0595 vs 1.0570) and neither does
+`BROOD_NO_INLINE=1` (1.0548), so §7.5 increment 3 is out. And the gap is **1.046 at tier
+1**, not just tier 2 — which corrects my own earlier claim that this was JIT-only. That
+claim came from comparing an old commit against the *current tree*, a confounded pair; on
+the real culprit pair the VM path pays it too. That points at increment 1, **RootsBuf**
+(`Heap.roots` from `Vec<Value>` to a `#[repr(C)]` buffer), which every tier uses. The merge
+also inherits ADR-302's much larger lowering volume (160 arms vs 88), so "the new root stack
+costs more per frame and ADR-302 pushes many more frames" is a plausible but unverified
+shape. Next step is a synthetic merge of ADR-302 with mainline *before* `115faead`; there is
+no runtime off-switch for RootsBuf, so that is the only lever.
+
+**Two method traps recorded, both of which bit me here.**
+1. **`git log A..B` orders by date, not topology.** `2dc7d2e6` appears inside the window
+   while being an ancestor of *neither* endpoint I had measured, so reading that list as a
+   bisect order let me "exclude" ADR-302 — which turned out to be half the interaction.
+   `git merge-base --is-ancestor` before reasoning about any range with merges in it.
+2. **A tier verdict is only about the pair you measured.** "Tier 1 is flat" was true of
+   old-commit-vs-current-tree and false of the pair that actually regressed. Re-derive the
+   discriminator on the culprit pair before believing it.
