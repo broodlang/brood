@@ -1028,8 +1028,43 @@ pub(super) fn get_fixed<const N: usize>(r: &mut Cursor<Vec<u8>>) -> io::Result<[
 }
 
 /// Read a symbol name and re-intern it into *this* runtime's interner.
+/// Ceiling on how many **new** symbol spellings this node will mint from the wire.
+///
+/// The interner is append-only by design (`NAMES` is a lock-free `boxcar::Vec`; nothing
+/// ever frees an id), which is right for a program's own symbols — they are bounded by its
+/// source. Wire symbols are not: the *peer* chooses the spellings, so a stream of distinct
+/// names grows `NAMES`, the global `IDS` map and every thread's intern cache without limit
+/// and without ever returning the memory. Refusing to mint is not an option — a legitimate
+/// peer may genuinely send a symbol we have never seen — so the bound is on the count.
+///
+/// Far above any real workload: a program's whole symbol table is typically thousands, and
+/// this is per-runtime across every link for the life of the process. Reaching it means a
+/// peer is minting names, which is a protocol abuse rather than traffic, so the frame is
+/// rejected and the reader tears that link down. KI-97 item 4.
+const MAX_WIRE_SYMBOLS: usize = 1 << 20;
+
+/// New spellings minted from wire data so far (never decremented — neither is the interner).
+static WIRE_SYMBOLS_MINTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn get_sym(r: &mut Cursor<Vec<u8>>) -> io::Result<Symbol> {
-    Ok(value::intern(&get_str(r)?))
+    let name = get_str(r)?;
+    // Already known: no growth, no accounting — the overwhelmingly common case, and it
+    // keeps a busy link off the counter entirely.
+    if let Some(id) = value::intern_existing(&name) {
+        return Ok(id);
+    }
+    if WIRE_SYMBOLS_MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MAX_WIRE_SYMBOLS {
+        // Roll the count back so a rejected frame does not itself advance the counter.
+        WIRE_SYMBOLS_MINTED.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "peer has minted {MAX_WIRE_SYMBOLS} distinct symbol names; refusing to grow \
+                 the interner further"
+            ),
+        ));
+    }
+    Ok(value::intern(&name))
 }
 
 #[cfg(test)]

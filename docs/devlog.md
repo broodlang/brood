@@ -9251,3 +9251,35 @@ Method note worth keeping: the earlier tier-split (tier 1 also regressing) had m
 something both engines pay per operation. The right reading was that both engines pay for a
 *colder instruction stream*. When instructions are flat and cycles are not, stop looking for
 work and start looking at fetch.
+
+## 2026-09-01 (late night) — KI-97 item 4: the three remote-controlled growth paths
+
+All three are the same shape — a resource whose size the *peer* chooses and we never bound.
+
+**`session::open` allocated on a claim.** `vec![0u8; len]`, where `len` is four bytes off the
+wire and the Poly1305 tag that proves the frame genuine sits inside the bytes not yet read.
+The allocation therefore happened strictly *before* anything about the frame was
+authenticated: 4 bytes in, 64 MiB committed, then stall — about sixteen-million-to-one
+amplification, repeatable per link. `read_claimed` now grows a 64 KiB chunk at a time as
+bytes actually arrive, so the cost tracks what is delivered. (The peer is cookie-
+authenticated by then, so this is hardening rather than a hole — but authenticated is not
+"trusted with the allocator".)
+
+**The interner grew forever from wire names.** `NAMES` is an append-only `boxcar::Vec` and
+nothing ever frees an id — correct for a program's own symbols, which its source bounds, and
+wrong for wire symbols, whose spellings the peer picks. Refusing to mint isn't available (a
+legitimate peer may genuinely send a name we have never seen), so the bound is on the count:
+`MAX_WIRE_SYMBOLS` = 2^20, past which the frame is rejected and the link torn down. A name
+already known never touches the counter, so an established link pays nothing. The ADR-232
+drop-warning dedup set is the same story and is capped the same way.
+
+**A test lesson, repeated and worth stating plainly.** My first guard for the allocation bug
+called `read_claimed` directly — and passed cleanly with `open` reverted to `vec![0u8; len]`.
+It guarded the helper while the bug lived at the call site. This is the second time this
+session that a sabotage run has caught a guard asserting the wrong thing (the first was the
+timer flag). Both times the fix was to drive the *entry point a caller actually reaches*
+rather than the piece I had just written. A guard that cannot fail is worse than none,
+because it reads as coverage.
+
+Verified: suite 1336/1337 (only the documented wasm-under-cap exception), distribution 36/36,
+clippy on CI's flags.
