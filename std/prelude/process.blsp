@@ -426,3 +426,65 @@ mailbox messages stay queued while waiting (selective receive)."
 ;; Membership is `includes?` (value in a sequence, `(includes? coll x)`) and `contains?`
 ;; (key in a map). The old `member?` — a reversed-args `(member? x xs)` duplicate of
 ;; `includes?` for lists — was removed; its call sites swapped to `(includes? xs x)`.
+
+;; ---- the default crash reporter, armed lazily (ADR-305, ADR-313) -------------
+;; The reporter itself is `std/proc/crash-report.blsp`, and CALLING into it pulls a
+;; nine-module require closure — `io/puts` alone brings `io`, `file`, `path`, `string`,
+;; `reflect` and `math`, and `os/env` another four. Measured 2026-09-01 at **9.0 ms of a
+;; ~24 ms `brood file` run** (10 modules materialised vs 1), paid by every run whether or
+;; not anything crashes. That is the wrong trade for a reporter whose whole job is to be
+;; ready for a rare event, on a runtime that explicitly cares about short-lived work
+;; (`nest check`, a one-shot script, a request handler).
+;;
+;; So the ARM is split from the REPORTING. What genuinely must happen before the program
+;; starts is the kernel SUBSCRIPTION: `sysmon::crash_reported_elsewhere` reads it to stand
+;; the kernel's own `process N died: …` one-liner down, and a crash that happens before we
+;; subscribe is a crash nobody reports. That costs one `proc/*` load and nothing else.
+;;
+;; Everything that formats a report is reached only through the qualified name in
+;; `%crash-reporter-shim` below, and ADR-246's autoload stubs resolve a qualified call at
+;; CALL time — so a run that never crashes never loads the module, and the first crash
+;; loads it before rendering anything. Semantics are unchanged either way: same
+;; subscription, same registered name, same reports.
+
+(defn- %crash-reporter-shim (starter)
+  "The armed-but-unloaded crash reporter: subscribed to the kernel's abnormal exits while
+holding no reference to `crash-report` until one fires. The first event loads the module
+and hands off to `crash-report/take-over`, which never returns. `:stop` disarms without
+ever loading it, so stopping a run that never crashed stays free.
+
+`crash-report/take-over` resolves through the `%autoload` stub declared in tools.blsp, not
+through the module machinery's own stubs: those are installed for a MODULE's references,
+and the prelude is compiled before any of that exists, so a bare qualified call here raises
+`unbound symbol` — as the first cut of this did, killing the reporter silently at the exact
+moment it was needed (the reporter is the one process whose own death nobody reports). The
+`prelude_hygiene` test enforces the declaration, which is why that mistake cannot recur."
+  (receive
+    (:stop (do (proc/system-monitor nil) nil))
+    (m (crash-report/take-over starter m))))
+
+(defn %crash-report-arm-default ()
+  "Arm the default crash reporter (ADR-305) unless `BROOD_NO_CRASH_REPORT` is set, and
+unless one is already running. Returns the listener pid, or nil when opted out.
+`brood file`, `nest run`, `project/run-bundle` and the REPL call this before the program
+starts; `nest test` deliberately does not.
+
+Lives in the prelude rather than in `crash-report` because a function that decides
+*whether* to arm must not need the module it might not arm — the previous
+`crash-report/arm-default` loaded all nine modules just to read an env var and, when the
+var was set, threw the result away. The env read is `%getenv` for the same reason:
+`os/env` is `(%getenv name)` behind four modules.
+
+The registered name is duplicated as a literal in `crash-report`'s `crash-report-name`;
+`stop`/`running?` find this listener through it, and `crash_report_test`'s stop-after-arm
+case fails if the two ever disagree."
+  (if (%getenv "BROOD_NO_CRASH_REPORT")
+    nil
+    (let (running (proc/whereis :crash-reporter))
+      (if running
+        running
+        (let (starter (self)
+              listener (spawn (%crash-reporter-shim starter)))
+          (proc/register :crash-reporter listener)
+          (proc/system-monitor listener {:exit-abnormal true})
+          listener)))))

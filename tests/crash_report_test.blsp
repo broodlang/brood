@@ -149,10 +149,31 @@ share one worker process)."
       (telemetry/stop)
       (stop)))
 
-  :isolated (test "arm-default honours BROOD_NO_CRASH_REPORT only when set; otherwise arms once"
+  :isolated (test "%crash-report-arm-default honours BROOD_NO_CRASH_REPORT only when set; otherwise arms once"
     (if (os/env "BROOD_NO_CRASH_REPORT")
-      (assert= nil (arm-default))
-      (let (pid (arm-default))
+      (assert= nil (%crash-report-arm-default))
+      (let (pid (%crash-report-arm-default))
         (is (not (nil? pid)))
-        (assert= pid (arm-default))
-        (stop)))))
+        (assert= pid (%crash-report-arm-default))
+        (stop))))
+
+  ;; The lazy arm registers the shim under the name `stop`/`running?` look up, and the
+  ;; literal `:crash-reporter` is written in BOTH the prelude and `crash-report-name`
+  ;; here. If those ever disagree the shim is armed but unreachable: `running?` answers
+  ;; false while a listener is subscribed, and `stop` returns having stopped nothing.
+  :isolated (test "the lazily-armed shim is found by running? and stop"
+    (stop)
+    (is (not (running?)))
+    (let (pid (%crash-report-arm-default))
+      (is (not (nil? pid)))
+      (is (running?))
+      (assert= 1 (count (proc/system-monitor :all)))
+      (stop)
+      (is (not (running?)))
+      (assert= 0 (count (proc/system-monitor :all))))))
+
+;; The laziness itself cannot be tested from THIS file: its own `(:use crash-report)`
+;; header loads the module before any test runs, so `*features*` already contains it.
+;; The guard lives in `crates/lisp/tests/crash_report_lazy.rs`, which runs a real
+;; `brood file` — the entry point a user actually reaches — and reads the module list
+;; out of `BROOD_IMAGE_TRACE`.

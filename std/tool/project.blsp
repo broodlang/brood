@@ -3017,7 +3017,7 @@ as unchanged (only when some were)."
             (when (not watching?) (system/halt 1)))))
       ;; Crash reports for whatever the program spawns and forgets (ADR-305); the
       ;; entry process itself is excluded — its crash is `nest run`'s to print.
-      (crash-report/arm-default)
+      (%crash-report-arm-default)
       (/apply (project-entry-fn "run" modname fname) args))))
 
 ;; --- the boot check (KI-66) --------------------------------------------------
@@ -3343,7 +3343,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (default module `main`, fn `main`). Errors if the entry fn is missing/uncallable."
   (let ([modname fname] (bundle-boot-load))
     (require-one modname)
-    (crash-report/arm-default)
+    (%crash-report-arm-default)
     (/apply (project-entry-fn "run-bundle" modname fname) args)))
 
 ;; The bundle half of the boot check (KI-66) — the one that matters, because it runs

@@ -530,7 +530,7 @@ impl Interp {
 
     /// [`run_program`](Self::run_program) with `preamble` evaluated first, inside the
     /// program's own process. The `brood file` entry point passes
-    /// `(crash-report/arm-default)` here (ADR-305): armed in the program's process the
+    /// `(%crash-report-arm-default)` here (ADR-305/309): armed in the program's process the
     /// reporter knows the program's pid and leaves its crash to the CLI's report.
     pub fn run_program_with_preamble(
         &mut self,

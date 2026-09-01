@@ -38,8 +38,10 @@ innermost trace frames — so a `spawn`ed process that raises is never silent.
     (crash-report/stop)           ; disarm
     (crash-report/start {:sink f}) ; f receives each report string instead of stderr
 
-`brood file.blsp`, `nest run`, a released bundle and the REPL arm it by default
-(`arm-default`); `BROOD_NO_CRASH_REPORT=1` opts out. `nest test` never arms it.
+`brood file.blsp`, `nest run`, a released bundle and the REPL arm it by default — through
+the prelude's `%crash-report-arm-default`, which subscribes without loading this module and
+calls `take-over` on the first crash (ADR-313). `BROOD_NO_CRASH_REPORT=1` opts out;
+`nest test` never arms it.
 
 A report looks like:
 
@@ -152,19 +154,48 @@ the reason itself. A crash loop whose message varies per iteration (`\"boom: 3\"
     (sink text)
     (io/puts text :to *err*)))
 
+(defn- crash-report-step (starter sink seen pid reason)
+  "Report `pid`'s exit if it is a crash at a site not already in `seen`; return the
+`seen` to carry forward. The single place the report/skip decision is made — the loop
+and `take-over` both go through it, so the lazy-arm handoff cannot drift from the
+eager one."
+  (if (or (= pid starter) (not (crash-report-crash? reason)))
+    seen
+    (let (site (crash-report-site reason))
+      (if (contains? seen site)
+        seen
+        (do
+          (crash-report-emit sink (render pid reason))
+          (conj seen site))))))
+
 (defn- crash-report-loop (starter sink seen)
   "The listener: report each abnormal exit once per site; `:stop` disarms."
   (receive
-    ([:system :exit pid reason] (if (or (= pid starter) (not (crash-report-crash? reason)))
-                                  (crash-report-loop starter sink seen)
-                                  (let (site (crash-report-site reason))
-                                    (if (contains? seen site)
-                                      (crash-report-loop starter sink seen)
-                                      (do
-                                        (crash-report-emit sink (render pid reason))
-                                        (crash-report-loop starter sink (conj seen site)))))))
+    ([:system :exit pid reason] (crash-report-loop starter
+                                  sink
+                                  (crash-report-step starter sink seen pid reason)))
     ([:system _ _ _] (crash-report-loop starter sink seen))
     (:stop (do (proc/system-monitor nil) nil))))
+
+(defn take-over (starter msg)
+  "Become the real reporter, handling `msg` — the first event the prelude's lazy shim
+(`%crash-reporter-shim`) received — then looping as usual. `starter` is the process that
+armed, whose own exit is never reported.
+
+Called only from that shim, and the qualified call to it is what loads this module: until
+a process actually crashes, none of this file exists in the image (ADR-313). Reporting to
+stderr, never a sink — a caller wanting a sink calls `start` explicitly, which loads the
+module eagerly because it is already talking to it.
+
+No `:stop` arm: the shim matches `:stop` itself and disarms without ever loading this
+file, so a `:stop` cannot reach here — the checker says so too, and said so out loud when
+this had one."
+  (match msg
+    ([:system :exit pid reason] (crash-report-loop starter
+                                  nil
+                                  (crash-report-step starter nil #{} pid reason)))
+    (_ (crash-report-loop starter nil #{}))))
+(sig take-over (pid any -> nil))
 
 (defn start (&optional opts)
   "Arm the crash reporter: spawn the listener, subscribe it to the kernel's abnormal
@@ -200,13 +231,3 @@ Returns nil."
   "Is a crash reporter armed?"
   (not (nil? (proc/whereis crash-report-name))))
 (sig running? (-> bool))
-
-(defn arm-default ()
-  "Arm the reporter the way the entry points do: unless `BROOD_NO_CRASH_REPORT` is
-set, and unless one is already running. Returns the listener pid, or nil when opted
-out. `brood file`, `nest run`, `project/run-bundle` and the REPL call this before
-the program starts; `nest test` deliberately does not."
-  (if (os/env "BROOD_NO_CRASH_REPORT")
-    nil
-    (start)))
-(sig arm-default (-> (or pid nil)))
