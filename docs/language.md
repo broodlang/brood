@@ -1139,9 +1139,18 @@ The **conditional / short-circuit threading** macros build on those, plus `doto`
 
 ```clojure
 (some-> {:a {:b 5}} (get :a) (get :b) inc)        ;=> 6      ; stop at the first nil step
+(ok-> "12" string/->number inc)                   ;=> 13     ; stop at the first FAILURE step
+(ok-> "q"  string/->number inc)                   ;=> #failure{…}  ; `inc` never runs
 (cond-> {} true (assoc :a 1) false (assoc :b 2))  ;=> {:a 1} ; apply a step only when its guard holds
 (doto (table/new) (table/put :a 1) (table/put :b 2))  ; run forms for effect, return the value
 ```
+
+`ok->` is `some->`'s **failure** sibling (ADR-312). The two channels are separate — a nil
+is absence, a failure is "that cannot be interpreted" — so `ok->` threads straight through
+a nil and `some->` threads straight through a failure. What falls out of a short-circuited
+`ok->` is **the failure itself**, not nil: the message is the whole reason a failure exists,
+and collapsing to nil would discard exactly what the caller built it to read. It is what
+lets a pipe end in a plain step instead of `(if (failure? $) $ (step $))`.
 
 `each` applies a function to
 each item for effect (`(each io/puts xs)`, the function form of `doseq`).

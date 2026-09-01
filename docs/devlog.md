@@ -9218,3 +9218,45 @@ Worth noting what this says about the empty-message crash that started it: it wa
 *downstream* of kernel 1. With the reason honoured, 150 consecutive runs of the file are
 clean against a 1.7% base rate — suggestive, not proof, and the empty message that made it
 unreadable is fixed either way.
+
+## 2026-09-02 — the type said `any` because the program was wrong
+
+A calculator written on the failure channel raised `conj: not a collection: #failure{…}`
+whenever a bad token was not the last one, and the checker had inferred `(string -> any)`
+for it. The two were the same fact: `reduce`'s accumulator fixpoint does not stabilise once
+the step can return a failure, and the inference threw that discovery away and widened.
+ADR-312 turns it into a warning and adds `ok->`, plus two unused-binder lints and one
+arity message. Details in the ADR; what is worth keeping here is what measurement killed.
+
+**Three premises died on contact, each after I had already written the code.**
+
+*"A guarded callback stabilises, so it stays silent."* No — `callback_ret` types every
+clause against the widened accumulator, including ones a `:when (failure? acc)` guard
+excludes, so the guarded program warned exactly like the unguarded one. A false positive on
+the fix the warning itself recommends is the worst kind. The rule is now deliberately
+narrower than the analysis could support: inline callbacks only, silent if `failure?`
+appears anywhere in them.
+
+*"`defn` never looks like a `fn` to a surface pass."* True of `nest check FILE`, which walks
+un-expanded forms, and false of `check-string-structured`, which walks expanded ones. So the
+first version of the lint warned **in the editor and not on the command line** for identical
+source. There is now a test pinning both entry points to the same answer, because a lint that
+disagrees with itself is worse than either answer alone.
+
+*"An `ok?` predicate is a harmless convenience."* Measured: `(if (ok? n) (+ n 1) 0)` warns
+`+: argument 1 expects number, got number | failure`, where `(not (failure? n))` is clean —
+the checker sees a user predicate as an opaque bool. A declared `(is (not failure))` guard
+does not rescue it. So `ok?` would have silently disabled narrowing at every call site,
+reintroducing the exact class that had the strict gate red for three releases, to save six
+characters. Rejected.
+
+**And one bug I introduced and an existing guard caught.** I rewrote the lint's iterative
+work-stack walker as a recursion while making the `defn` exemption structural;
+`checker_survives_a_deep_let_body` promptly overflowed its stack. It is a work stack again.
+That test exists for exactly this and it earned its keep.
+
+The scoping all landed where the numbers pointed rather than where the reasoning did: the
+unused-parameter lint fired 19 times across std/ + tests/, of which 16 were `defn` clauses
+(a published arglist, where an unused parameter is frequently the contract) and 3 anonymous.
+Restricted to anonymous `fn`s it fires 5 times, all catch-all arms of guarded dispatches
+(`((n) :zero)` after two `:when` arms), now `_`-prefixed. Zero across the tree afterwards.

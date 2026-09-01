@@ -1,0 +1,60 @@
+;; The unused-binder lints for anonymous `fn` clauses (a checker SURFACE pass, so it
+;; sees clauses as written — by the time the main walk runs, a pattern clause has been
+;; lowered to `match*` and its binders are synthetic `let`s the unused-`let` lint
+;; deliberately exempts; removing that exemption fires 69 times across std/ + tests/).
+;;
+;; The bug that motivated it: `(reduce toks '() (fn ((acc "+") "+") ((acc n) n)))`
+;; ignores the accumulator in every arm, so the fold never folds and the result is
+;; whatever the last token produced. Silent — and the inferred type degraded to `any`
+;; rather than saying so.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule unused-binding-test (:use test) (:use seq))
+
+(defn- warnings-for (src)
+  (mapv (or (reflect/check-string-structured src) []) (fn (d) (get d :message))))
+
+(defn- count-of (src want)
+  (count (keep (warnings-for src) (fn (m) (if (= m want) m nil)))))
+
+(defn- unused-count (src)
+  (count (keep (warnings-for src) (fn (m) (if (string/starts-with? m "unused ") m nil)))))
+
+(describe "checker: an unused PATTERN binding in an anonymous fn clause"
+  (test "the accumulator no arm reads is reported, once per clause"
+    (assert= (count-of "(reduce xs '() (fn ((acc \"+\") \"+\") ((acc n) n)))"
+               "unused pattern binding: acc")
+      2))
+
+  (test "a binder the body reads is not reported"
+    (assert= (unused-count "(reduce xs '() (fn ((acc \"+\") acc) ((acc n) (conj acc n))))") 0))
+
+  (test "per CLAUSE: used in one arm, unused in another, reports only the other"
+    (assert= (count-of "(reduce xs '() (fn ((acc \"+\") acc) ((acc n) n)))"
+               "unused pattern binding: acc")
+      1))
+
+  (test "the _ convention silences it"
+    (assert= (unused-count "(reduce xs '() (fn ((_acc \"+\") \"+\") ((_acc n) n)))") 0)))
+
+(describe "checker: an unused PARAMETER in an anonymous fn arity clause"
+  (test "an arity clause that never reads its parameter is reported"
+    (assert= (count-of "(map xs (fn ((x) 1) ((x y) y)))" "unused parameter: x") 2))
+
+  (test "a parameter used only in a :when guard is NOT unused"
+    ;; the guard is part of the clause — `n` is read by `(< n 0)`
+    (assert= (unused-count "(map xs (fn ((n) :when (< n 0) :neg) ((n) :when (> n 0) :pos)))") 0))
+
+  (test "a definition's own parameters are its published arglist and are never reported"
+    ;; introspection, LSP hover and `doc` all show them; an unused one is often the
+    ;; contract (an ability impl, a dispatch arm). Only genuinely anonymous fns are linted.
+    (assert= (unused-count "(defn f ((a) :one) ((a b) :two))") 0)
+    (assert= (unused-count "(def f (fn ((a) :one) ((a b) :two)))") 0))
+
+  (test "the CLI and the editor agree — the same source, both checker entry points"
+    ;; `nest check FILE` walks un-expanded forms (a `defn` is still a `defn`);
+    ;; `check-string-structured` walks expanded ones (`defn` is already `(def f (fn …))`).
+    ;; Deciding by which tree we were handed warned in the editor and not on the command
+    ;; line for identical source, so the exemption is structural instead.
+    (assert= (unused-count "(defn f ((a) :one) ((a b) :two))") 0)))

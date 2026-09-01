@@ -265,14 +265,16 @@
     (assert= (error-of (1 2 3)) "type error: cannot call non-function: 1"))
   (test "arity errors name the fn, the expected count, and what arrived"
     (defn one-arg (x) x)
-    (assert= (error-of (one-arg 1 2)) "arity error: suite-test/one-arg: expected 1 argument, got 2")
-    (assert= (error-of ((fn (a b) a) 1)) "arity error: fn: expected 2 arguments, got 1")
-    (assert= (error-of (cons 1)) "arity error: cons: expected 2 arguments, got 1"))
+    (assert= (error-of (one-arg 1 2))
+      "arity error: suite-test/one-arg: expected 1 argument (x), got 2")
+    (assert= (error-of ((fn (a b) a) 1)) "arity error: fn: expected 2 arguments (a b), got 1")
+    (assert= (error-of (cons 1)) "arity error: cons: expected 2 arguments (x xs), got 1"))
   (test "built-ins enforce their declared arity (no silent extra/missing args)"
-    (assert= (error-of (type-of)) "arity error: type-of: expected 1 argument, got 0")
-    (assert= (error-of (int? 1 2)) "arity error: int?: expected 1 argument, got 2")
+    (assert= (error-of (type-of)) "arity error: type-of: expected 1 argument (x), got 0")
+    (assert= (error-of (int? 1 2)) "arity error: int?: expected 1 argument (x), got 2")
     (assert= (error-of (%now 1 2)) "arity error: %now: expected 0 arguments, got 2")
-    (assert= (error-of (apply +)) "arity error: apply: expected at least 2 arguments, got 1"))
+    (assert= (error-of (apply +))
+      "arity error: apply: expected at least 2 arguments (f & args), got 1"))
   (test "parse errors surface through reflect/read-string"
     (assert= (error-of (reflect/read-string "(1 2")) "parse error: unclosed list (opened here)"))
   (test "throw hands the value back unchanged"

@@ -19804,3 +19804,66 @@ pending signal reports that signal's reason rather than `:normal`. `tests/exit_t
 carried eight assertions on the old spelling and was updated; the rest of the tree already
 expected the new one. Keeping the two words apart is also a safety property — a trapping
 peer that re-sends a reason it was handed must not thereby issue an untrappable kill.
+
+## ADR-312 — A failure the program does not handle must be said out loud, not widened to `any`
+
+**Context.** A calculator written on the failure channel (ADR-310) looked right and was not:
+
+```brood
+(reduce (string/split expr) '()
+  (fn (((x y & acc) "+") (conj acc (+ x y)))
+      ((acc num) (let (val (string/->number num))
+                   (if (number? val) (conj acc val) (failure "invalid token " num))))))
+```
+
+`(calc "1 q")` returns a failure and looks correct. `(calc "1 q 2")` **raises**
+`conj: not a collection: #failure{…}` — once a token fails, the failure *is* the
+accumulator, and the next token's clause `conj`s onto it. It only appears to work when the
+bad token is last.
+
+The checker had already found this and thrown it away. Its `reduce` result inference seeds
+the accumulator from `init`, takes a step, and needs a fixpoint; with a step that can return
+a failure the fixpoint does not stabilise, and it fell back to the `any`-seeded reading —
+**silently**. Identical folds differing only in whether the callback can fail measured
+`(string -> (or nil (list 1)))` against `(string -> (or failure nil))`, the list gone; in
+the full pipe, `any`. The imprecise type was not a checker weakness. It was the checker
+declining to commit to a type the program does not maintain, with the reason discarded.
+
+**Decision — four changes, one theme: say what was found.**
+
+1. **The fold lint.** Where the fixpoint fails *and* the accumulator gained a `failure`,
+   warn instead of widening.
+2. **`ok->`** — `some->`'s failure sibling, so the fix is a pipe step rather than a
+   hand-rolled guard. The failure itself falls out, never nil: the message is the whole
+   reason a failure exists. The channels stay separate — `ok->` threads through a nil,
+   `some->` threads through a failure.
+3. **Unused-binder lints** for anonymous `fn` clauses, per clause. The original bug's
+   first symptom was an accumulator no arm read.
+4. **One arity message**, carrying parameter names: `first: expected 1 argument (coll),
+   got 0`. The checker and the runtime had different wordings for the same defect.
+
+**What measurement changed.** Three premises died on contact:
+
+- *"A guarded callback stabilises, so it stays silent."* It does not — `callback_ret` types
+  **every** clause against the widened accumulator, including ones a `:when (failure? acc)`
+  guard excludes. The guarded program warned exactly like the unguarded one: a false
+  positive on the fix the warning recommends. The rule is now inline callbacks only, silent
+  if `failure?` appears anywhere in them, and a callback passed by name is out of scope.
+- *"`defn` never looks like a `fn` to the surface pass."* True of `nest check FILE`
+  (un-expanded forms) and false of `check-string-structured` (expanded), so the first
+  version warned **in the editor but not on the command line** for identical source. The
+  exemption is now structural.
+- *"An `ok?` predicate would be a harmless convenience."* It is not: the checker sees it as
+  an opaque bool, so `(if (ok? n) (+ n 1) 0)` warns `+: argument 1 expects number, got
+  number | failure` where `(not (failure? n))` is clean. A declared `(is (not failure))`
+  guard does not rescue it. `ok?` is therefore **rejected** — it would silently disable
+  narrowing at every site that used it.
+
+**Consequences.** The unused-parameter lint covers anonymous `fn`s only; a definition's own
+clause list is its published arglist, where an unused parameter is often the contract (19
+hits across std/ + tests/ → 5 → 0, the 5 being catch-all arms of guarded dispatches, now
+`_`-prefixed). `reduce-ok`/`first-ok`-style derivatives are **rejected**: `ok->` subsumes
+`first-ok` entirely, and a `-ok` per combinator is the combinatorial growth this repo
+forbids. A short-circuiting fold is deferred until the new warning shows the need — the
+concrete evidence ADR-011 asks for before adding a knob. `conj` still declares no domain,
+so `(conj <failure> x)` is silent when written directly; that is separate work.
