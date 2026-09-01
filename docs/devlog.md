@@ -9409,3 +9409,40 @@ unused-parameter lint fired 19 times across std/ + tests/, of which 16 were `def
 (a published arglist, where an unused parameter is frequently the contract) and 3 anonymous.
 Restricted to anonymous `fn`s it fires 5 times, all catch-all arms of guarded dispatches
 (`((n) :zero)` after two `:when` arms), now `_`-prefixed. Zero across the tree afterwards.
+
+## 2026-09-01 (end, again) — KI-100 re-baselined at HEAD: mostly a fixed per-run cost
+
+Started on the fix and immediately found the target had moved. Everything bisected earlier
+describes where the regression *entered* (`0f57e30b`, v0.20-era). Measured against the
+published baseline at **current HEAD**, it is a different animal:
+
+  startup    —      25.9 -> 30.0 ms   1.159   +4.1 ms   (no workload at all)
+  bintree    N=14   47.7 -> 59.5      1.246   +11.8 ms
+  bintree    N=200  105.7 -> 115.7    1.095   +10.0 ms
+  bintree    N=1500 495.6 -> 509.0    1.027   +13.4 ms
+  mandelbrot N=1400 1203 -> 1243      1.033   +40 ms
+  mandelbrot N=3000 5387 -> 5568      1.034   +181 ms
+
+**Two components, and conflating them made this look like one broad compute regression.**
+`bintree`'s delta is a flat ~10-13 ms whatever `N` is — its ratio decays 1.246 → 1.095 →
+1.027 purely by amortization — and `startup` is +4.1 ms with no workload. That is a **fixed
+per-run cost**: boot growth plus JIT compilation, and the profile agrees (HEAD shows
+cranelift `Verifier` 1.71% + `regalloc2` 1.40% on the `brood-jit` thread; the baseline's
+top-10 has neither). Only `mandelbrot` holds its ratio as work grows — ~1.034 at both N=1400
+and N=3000 — so that one is genuine throughput.
+
+The consequence is worth stating plainly: **the published column's "every compute row 4-10%
+slower" is largely one fixed cost, measured at short default sizes.** It is still worth
+fixing — this runtime explicitly cares about short-lived work — but it is a different fix
+from mandelbrot's ~3.4%, and reporting them as one number hid that for a day.
+
+**And `json`'s +23% instructions is already gone at HEAD.** `BROOD_NO_XCALL=1` closed it on
+the historical pair; on HEAD the lever makes no difference to `json` (2.27 vs 2.26 G) while
+still earning 13.9% on `bintree`. Something between v0.20 and v0.23 fixed that half. I had
+recommended iterating on `json` — that recommendation is withdrawn; it is the wrong row now.
+
+Three retractions in two sessions on this entry (huge pages, then json-as-the-lens, now the
+historical numbers themselves). The pattern behind all three is the same: I measured one
+pair, on one row, at one size, and generalized. The habit that would have caught each of
+them earlier is the one this repo already prescribes for the JIT — **sweep the size across
+orders of magnitude and watch whether the GAP moves**, not just whether the number does.
