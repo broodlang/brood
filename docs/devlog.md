@@ -9218,3 +9218,36 @@ Worth noting what this says about the empty-message crash that started it: it wa
 *downstream* of kernel 1. With the reason honoured, 150 consecutive runs of the file are
 clean against a 1.7% base rate — suggestive, not proof, and the empty message that made it
 unreadable is fixed either way.
+
+## 2026-09-01 (night) — KI-100's mechanism: instruction fetch, not work
+
+`perf stat` on the culprit pair settled it in one run. Instructions **+1.25%**, cycles
+**+4.7%** — the binary is not doing more work, it is stalling. What moved: **L1-icache
+misses +47.7%, iTLB misses +96%**, with **data-cache misses flat (+0.5%)**. IPC 2.94 → 2.85.
+
+Three confirmations, because one perf run is a hypothesis:
+- **Monotonic across three trees.** icache 12.5 M → 16.1 M → 19.0 M and iTLB 77 K → 117 K →
+  155 K for good → synthetic-without-§7.5 → the real merge, tracking their 1.021 / 1.030 /
+  1.080 ratios. Instructions over the same three go 16.7 / 18.0 / 17.0 G — *not* monotonic,
+  which is the whole point.
+- **`fib` is completely unaffected: 1.0010**, on the same binaries where mandelbrot is
+  1.0548. A tiny hot loop has no footprint problem; a per-operation cost would have hit both.
+- **The growth is in runtime-emitted code.** Both binaries are the same size (34.06 vs
+  34.08 MB) and lower the same number of arms (158 vs 159 — `std/` is byte-identical between
+  them), so what grew is the machine code emitted *per arm*.
+
+That finally explains why it needs both halves. §7.5 emits more code per JIT'd arm; ADR-302's
+std makes roughly **twice as many arms lower** (158 vs 76 on the old std). The old std's 76
+fatter arms still fit in the icache; ADR-302's 158 do not. Neither change crosses the
+threshold alone — which is exactly why both parents measure clean and only the merge is slow.
+
+Fix direction: less emitted code per arm, or better JIT code locality — the **iTLB doubling**
+specifically suggests huge pages for the JIT region are worth trying, and hot/cold splitting
+after that. `BROOD_NO_XCALL=1` does not help, so it is not the deferred re-lowering ceremony;
+RootsBuf (`115faead`) reproduces about half the slowdown *and* about half the icache growth,
+which fits its inlined root-stack manipulation being the bigger part of the per-arm growth.
+
+Method note worth keeping: the earlier tier-split (tier 1 also regressing) had me looking for
+something both engines pay per operation. The right reading was that both engines pay for a
+*colder instruction stream*. When instructions are flat and cycles are not, stop looking for
+work and start looking at fetch.
