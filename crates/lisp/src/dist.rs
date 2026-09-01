@@ -1155,13 +1155,35 @@ impl Drop for HandshakeSlot {
     }
 }
 
+/// Spawn a named background thread, reporting a refusal instead of panicking on it.
+///
+/// `std::thread::spawn` **panics** when the OS refuses a thread (EAGAIN under thread/fd
+/// pressure), and dist spawns threads at attacker-influenced rates: one per accepted
+/// connection, one per gossiped peer (up to 4096 in a single `Peers` frame). A panic in
+/// the accept loop unwinds the acceptor itself and the listener is gone for good — the
+/// node stops accepting inbound links until it restarts, from one transient EAGAIN.
+/// Returns whether the thread started, so each caller can shed that unit of work rather
+/// than lose the loop around it. KI-97 item 3.
+fn spawn_bg<F>(name: &str, f: F) -> bool
+where
+    F: FnOnce() + Send + 'static,
+{
+    match std::thread::Builder::new().name(name.to_string()).spawn(f) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("dist: cannot spawn {name} thread ({e}); shedding this work");
+            false
+        }
+    }
+}
+
 /// The accept loop, shared by both transports: pull the next link off `accept`
 /// and hand each to a panic-isolated per-connection thread. A transient accept
 /// error (EMFILE etc.) logs and re-loops with a tiny backoff rather than
 /// burn-looping or killing the acceptor.
 fn spawn_acceptor(accept: impl FnMut() -> io::Result<Stream> + Send + 'static) {
     let mut accept = accept;
-    std::thread::spawn(move || loop {
+    spawn_bg("dist-acceptor", move || loop {
         match accept() {
             Ok(stream) => {
                 // Shed past the in-flight-handshake cap *before* spawning a thread
@@ -1178,7 +1200,11 @@ fn spawn_acceptor(accept: impl FnMut() -> io::Result<Stream> + Send + 'static) {
                         continue;
                     }
                 };
-                std::thread::spawn(move || {
+                // `spawn_bg`, not `thread::spawn`: a refused thread here used to panic
+                // *inside the accept loop*, unwinding the acceptor and closing the
+                // listener permanently. Now the connection is simply refused and the
+                // node keeps accepting.
+                spawn_bg("dist-conn", move || {
                     // Hold the slot until the handshake finishes (this thread ends
                     // right after `establish` hands off to the steady-state reader
                     // and writer threads, which don't hold a slot).
@@ -1193,6 +1219,10 @@ fn spawn_acceptor(accept: impl FnMut() -> io::Result<Stream> + Send + 'static) {
                         }
                     }));
                 });
+                // No explicit shed on failure is needed: `Builder::spawn` drops the
+                // closure when it cannot start, which drops the accepted `stream` (closing
+                // the socket) and the `HandshakeSlot` permit with it. The connection is
+                // refused and the acceptor loops on, which is the whole point.
             }
             Err(e) => {
                 eprintln!("dist: accept error: {}", e);
@@ -1526,7 +1556,7 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
             value::symbol_name(peer)
         );
     }
-    std::thread::spawn(move || {
+    spawn_bg("dist-writer", move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             for payload in rx {
                 match seal.seal(&payload) {
@@ -1548,7 +1578,7 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
     // One shared Pong buffer per reader; sending is an `Arc::clone` (atomic
     // incr), not a `Vec` copy.
     let pong: Arc<[u8]> = Arc::from(encode_payload(&Frame::Pong).expect("encode Pong"));
-    std::thread::spawn(move || {
+    spawn_bg("dist-reader", move || {
         let mut r: &Stream = &reader_sock;
         // The receive cipher, owned solely by this reader (no lock needed). Each
         // `open` authenticates + decrypts one frame; a tag failure (a tampered,
@@ -1733,7 +1763,11 @@ fn mesh_consider(peers: Vec<(Symbol, String)>) {
         }
     }
     for (name, addr) in to_dial {
-        std::thread::spawn(move || {
+        // One thread per gossiped peer, and a `Peers` frame may name up to
+        // MAX_GOSSIP_PEERS of them — the highest-rate, most attacker-influenced spawn in
+        // the runtime. A refusal must drop this dial, not unwind the caller.
+        let pending_name = name;
+        if !spawn_bg("dist-dial", move || {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Best-effort: a peer may be unreachable or a simultaneous dial
                 // from the other side may win the tie-break — either way we just
@@ -1742,7 +1776,11 @@ fn mesh_consider(peers: Vec<(Symbol, String)>) {
                 let _ = node_connect(name, &addr);
             }));
             crate::core::sync::write(&PENDING_DIALS).remove(&name);
-        });
+        }) {
+            // The dial never started, so nothing will clear the in-flight marker we
+            // inserted above; drop it here or this peer could never be dialed again.
+            crate::core::sync::write(&PENDING_DIALS).remove(&pending_name);
+        }
     }
 }
 
