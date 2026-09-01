@@ -9328,3 +9328,43 @@ half-done.
 
 Verified: suite 1338/1339 (only the documented wasm-under-cap exception), distribution +
 serve/observe attach 38/38, http 50/50, clippy on CI's flags.
+
+## 2026-09-01 (end) — KI-100 refined, and my own fix direction retracted
+
+Went to implement huge pages for the JIT region — the direction I had recorded hours
+earlier — and killed it before writing a line. THP on this box is in `madvise` mode, so JIT
+code genuinely does get 4 KiB pages and the lever is real; the arithmetic is what refuses
+it. The iTLB delta is ~73 K extra misses at ~20-30 cycles ≈ **1.5-2 M cycles, under 1%** of
+the 288 M-cycle delta. Huge pages reduce iTLB misses, not icache footprint. **The iTLB
+doubling is a symptom of the footprint, not a cost worth attacking** — and a day's work
+would have bought noise. The icache delta is the real one: ~5.9 M extra misses ≈ 88-118 M
+cycles, 30-40% of the delta.
+
+Then per-row measurement showed the mechanism has **two faces**, and that `json` is the
+better lens than `mandelbrot`:
+
+  json         instructions +23%   icache  +5%   ratio 1.095
+  mandelbrot   instructions +1.2%  icache +48%   ratio 1.059
+  fib/collatz/sort                               ratio 0.99/1.00/1.00 (flat)
+
+§7.5 adds **real per-operation work** where rooting is frequent (json parses and allocates
+heavily) and **code footprint** where many arms carry the inlined root handling (mandelbrot
+is float compute that roots little). One cause — RootsBuf's root-stack manipulation being
+larger and inlined — through two workload shapes.
+
+Two things worth keeping. **Arm count is not the predictor**: fib, collatz and sort lower
+the same 161-167 arms as mandelbrot and are flat; what matters is the hot working set and
+the rooting rate. And **not every row regresses**, which the published-column phrasing
+("every compute row 4-10% slower") obscures — that column spans 0.19.1→0.22.0 and mixes in
+boot and stdlib growth, whereas this pair isolates §7.5.
+
+**Iterate on `json` from here**: its signal is instruction count, stable to ±0.1% over
+repeats, where wall time on this box needs min-of-3 interleaved invocations to mean
+anything. That alone should make the next session much faster than this one.
+
+**And a trap I nearly walked into.** The first `perf stat` of the without-§7.5 synthetic on
+json read 3.76 G instructions — higher than *either* endpoint — which I was one step from
+recording as "non-monotonic, therefore two unrelated mechanisms". Two repeats put it at
+2.40/2.39 G, in line with the good binary. One `perf stat` run is a sample, not a
+measurement; that holds even for instruction counts, which feel deterministic and are not
+(JIT compilation volume varies per run).
