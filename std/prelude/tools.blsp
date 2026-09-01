@@ -1487,6 +1487,14 @@ and that every declared arity still matches its module's actual definition."
   (distinct 1)
   (vector-ref 2))
 
+;; std/proc/crash-report.blsp — the default crash reporter (ADR-305), reached from the
+;; lazy arm in process.blsp. `take-over` is the ONLY name the prelude references, and it
+;; is called exactly once per run, by the shim process, on the first abnormal exit — so
+;; the stub is what keeps a nine-module require closure out of every run that never
+;; crashes (ADR-313, 9.0 ms of a ~24 ms `brood file`).
+(%autoload crash-report
+  (take-over 2))
+
 ;; ═══ Abilities + the Display protocol (core) ════════════════════════════════
 ;; Open generic functions with nominal dispatch — Brood's unified polymorphism seam
 ;; (ADR-168/172). Folded into the prelude (was std/ability.blsp + std/show.blsp) so

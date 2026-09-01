@@ -367,10 +367,17 @@ fn run_files(interp: &mut Interp, files: &[String]) {
         // per-message cross-thread futex) and its top-level `receive`s park-and-capture,
         // instead of the root thread blocking on its mailbox condvar.
         // The default crash reporter (ADR-305) is armed as the program's first form, in
-        // its own process; `BROOD_NO_CRASH_REPORT=1` is honoured inside `arm-default`.
-        if let Err(e) =
-            interp.run_program_with_preamble("(crash-report/arm-default)", &src, Some(path.clone()))
-        {
+        // its own process; `BROOD_NO_CRASH_REPORT=1` is honoured inside
+        // `%crash-report-arm-default`. That arm is a PRELUDE function, not
+        // `crash-report/arm-default`, and deliberately: calling into the module to decide
+        // whether to arm loaded its nine-module require closure on every run, crash or not
+        // (9.0 ms of ~24 ms — ADR-313). The prelude version subscribes to the kernel and
+        // loads the reporter only when something actually crashes.
+        if let Err(e) = interp.run_program_with_preamble(
+            "(%crash-report-arm-default)",
+            &src,
+            Some(path.clone()),
+        ) {
             // Restore the terminal first: a TUI program that entered raw mode and
             // then threw never reached its `term-raw-leave`, and `process::exit`
             // skips Drop guards. Without this the shell is left wedged in raw mode

@@ -4,6 +4,29 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Faster startup — the default crash reporter now arms lazily (ADR-313).** Every
+`brood file`, `nest run`, bundle and REPL run materialised ten stdlib modules before the
+program began, because the arm lived inside `std/proc/crash-report.blsp` and reaching it
+loaded the module. That cost **9.0 ms of a ~24 ms run**, crash or no crash. The kernel
+subscription — the part that genuinely cannot wait — now happens in the prelude, and the
+reporter loads on the first crash. Reports, dedup, the registered name and
+`BROOD_NO_CRASH_REPORT=1` behave exactly as before.
+
+Measured against `5669890d` with `ab-bench --floor --all`: `startup` −11.8%, `spawn`
+−11.8%, `bintree` −11.3%, `primes` −8.4%, `nqueens` −7.4%, `matmul` −5.8%, `fib` −5.7%,
+every other row inside its noise floor and nothing regressed. Compute rows improve because
+nine fewer modules is ~13% fewer JIT-lowered arms — a partial fix for KI-100.
+
+**Fixed — `BROOD_NO_CRASH_REPORT=1` now actually avoids the cost it exists to avoid.** It
+previously suppressed the reporter's `spawn` but not the module load, because the env check
+sat inside the function the qualified call had already loaded the module to reach.
+
+**Removed — `crash-report/arm-default`.** Entry points call the prelude's
+`%crash-report-arm-default` instead; `crash-report/start`, `stop` and `running?` are
+unchanged. `crash-report/take-over` is new, and is the lazy handoff's entry point.
+
 ## v0.23.1 — 2026-09-01
 
 An audit release: v0.23.0 flipped `failure` to truthy, and this is the sweep that proves

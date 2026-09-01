@@ -9518,3 +9518,52 @@ or cries wolf, in one sitting.
 kill/rejoin cycles plus 40 wrong-cookie attackers, and the remote-spawn variant shipping
 closures across a dying mesh — `crashed=0` every run. That is the stability signal we did
 not have this morning, and could not have had while the harness could not start a node.
+
+## 2026-09-01 (perf) — the default crash reporter cost 9 ms on every run; it now arms lazily
+
+Went looking for startup cost with a probe rather than a profile, because the profile is
+flat: no symbol is over 5% of a `brood file` run. Decomposing an empty program instead —
+`--version` for process load, `BROOD_BOOT_TRACE` for boot, a `ProbeInterp` drop guard around
+`Interp::new` — put ~1.2 ms in process load, ~10.6 ms in `Interp::new` (which *is* the
+prelude boot, the per-process heap on top of the shared bundle being nearly free), and left
+~11 ms unaccounted after it. `BROOD_IMAGE_TRACE=1` named the missing half in one line:
+**ten std modules materialising for a program that does nothing**, headed by `crash-report`.
+
+The cause is ADR-229 loading by inference. `crash-report/arm-default` lived inside the
+module, so reaching it to *read an env var* loaded the module, and `io/puts` pulled `io`,
+`file`, `path`, `string`, `reflect` and `math` behind it. `BROOD_NO_CRASH_REPORT=1` did not
+help, because the check sat inside the function the call had already loaded the module to
+reach — the documented opt-out saved the `spawn` and none of the cost. Measured at **9.0 ms
+of ~24 ms**, interleaved best-of-31, two rounds, spread ±0.06 ms.
+
+ADR-313 has the design. The short version: the *subscription* is the only part that must
+happen before the program starts (the kernel reads it to stand its own death one-liner
+down), so that moved to the prelude and the reporting stayed where it was, reached through
+one `%autoload`ed call in the shim's `receive`.
+
+**Two things worth keeping from how it went wrong.** The first cut used a bare
+`crash-report/take-over` in the prelude, on the assumption that ADR-246's autoload stubs
+would resolve it. They do not — those are installed by the module machinery, and the prelude
+is compiled before it exists — so the shim raised `unbound symbol` and died. That is the
+worst failure this component can have: the reporter is the one process whose own death
+nobody reports, so the symptom was *empty stderr*, and the end-to-end CLI test was the only
+thing that could see it. It was written before the bug, which is the whole argument for
+writing the end-to-end half of a laziness change first. `prelude_hygiene` then named the
+correct mechanism in its own failure message, and the checker separately flagged the
+now-dead `:stop` arm in `take-over` — two gates each doing exactly the job they were added
+for.
+
+**Second: the win is bigger than the module loads.** `ab-bench --floor --all` reports
+`startup` −11.8%, `spawn` −11.8%, `bintree` −11.3%, `primes` −8.4%, `nqueens` −7.4%,
+`matmul` −5.8%, `fib` −5.7%, everything else inside its floor and nothing regressed. Compute
+rows have no business improving from a startup change — until you count arms: nine fewer
+modules is **~13% fewer JIT-lowered arms** (bintree 108 → 94, fib 95 → 84). That is KI-100's
+mechanism exactly, reached from the other end, and it is a partial fix for its component 1.
+
+Verification, since this touches the prelude and a sysmon subscriber: full `make test`
+(only the documented `wasm_sandbox_limits` 16 GB-cap exception, 7/7 uncapped);
+distribution + `live_migration` + `serve_attach` + `net_reactor_death` **5× looped, 39/39
+each time**; hot-reload files 5× looped; `crash_report`/`supervisor` under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; clippy `--all-features`; `nest format --check`;
+`check-examples`, `check-corpora`, `check-stress` including both dist chaos harnesses
+(`crashed=0`).

@@ -393,6 +393,20 @@ larger lowering volume (160 arms vs 88) and presumably a different frame/rooting
 two binaries, or the `ns_*` counters under `--features perf-stats`. Then account for the
 ~2 points that RootsBuf does not explain.
 
+**PARTIAL FIX 2026-09-01 (ADR-313), from the other end.** Component 1 — the fixed per-run
+cost — is substantially the *default crash reporter's require closure*, not only cranelift.
+`crash-report/arm-default` lived inside the module, so arming it loaded ten std modules on
+every `brood file` run: **9.0 ms of ~24 ms**. Arming now happens in the prelude and the
+reporter loads on the first crash. Beyond the startup saving this cuts **~13% of JIT-lowered
+arms** (bintree 108 → 94, fib 95 → 84, startup 10 → 6), which is this entry's own icache /
+arm-count mechanism — so it moves component 2 as well: `ab-bench --floor --all` vs
+`5669890d` reads `startup` −11.8%, `spawn` −11.8%, `bintree` −11.3%, `primes` −8.4%,
+`nqueens` −7.4%, `matmul` −5.8%, `fib` −5.7%, nothing regressed. **This entry stays OPEN**:
+the measurement above is against HEAD, not against the 0.19.1 baseline the published column
+carries, so how much of the original 4–10% remains is an open question until the column is
+re-measured. Re-baseline before continuing, and note that the remaining `mandelbrot`
+steady-state ~3.4% is a different fix from the per-run constant.
+
 **Reproducing.** The harness is left in `target/ki100/` (gitignored): `probe.sh` is a
 `git bisect run` probe, `measure.sh` the raw timer, `bin/` the built binaries. The
 discriminator is a **ratio against a fixed reference binary, measured interleaved** — not an

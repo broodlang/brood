@@ -19867,3 +19867,78 @@ hits across std/ + tests/ → 5 → 0, the 5 being catch-all arms of guarded dis
 forbids. A short-circuiting fold is deferred until the new warning shows the need — the
 concrete evidence ADR-011 asks for before adding a knob. `conj` still declares no domain,
 so `(conj <failure> x)` is silent when written directly; that is separate work.
+
+## ADR-313 — the default crash reporter arms lazily: subscribe in the prelude, load on the first crash
+
+**Context.** ADR-305 made the crash reporter default-ON in `brood file`, `nest run`, a
+released bundle and the REPL, for ADR-232's reason: a flag you must arm before the bug is a
+flag that is absent when it matters (KI-36/KI-39). The arm was `crash-report/arm-default` —
+a function living *inside* `std/proc/crash-report.blsp`, so reaching it loaded the module.
+
+That load is not small. `crash-report` calls `io/puts` and `os/env`, and by ADR-229 a
+qualified call loads by inference: `io` alone brings `file`, `path`, `string`, `reflect` and
+`math`; `os` brings four more. Measured 2026-09-01 on an empty program, **ten modules
+materialised instead of one, costing 9.0 ms of a ~24 ms run** (interleaved best-of-31, two
+rounds, spread ±0.06 ms). Every `brood file` invocation paid it, crash or no crash — and
+`BROOD_NO_CRASH_REPORT=1` did not avoid it, because the env check sat *inside* the function
+the qualified call had already loaded the module to reach. The documented opt-out saved the
+`spawn` and none of the cost.
+
+**Decision.** Split the ARM from the REPORTING.
+
+- The arm moves to the prelude as `%crash-report-arm-default` (`std/prelude/process.blsp`).
+  It reads the opt-out with `%getenv` — `os/env` is literally `(%getenv name)` behind four
+  modules — then spawns `%crash-reporter-shim` and subscribes it with
+  `proc/system-monitor`.
+- The **subscription is what must be eager.** `sysmon::crash_reported_elsewhere` reads it to
+  stand the kernel's own `process N died: …` one-liner down, and a crash occurring before we
+  subscribe is a crash nobody reports. Nothing else has to happen up front.
+- The shim holds no reference to `crash-report` except one call in its `receive` body:
+  `(crash-report/take-over starter m)`. `:stop` it answers itself, so disarming a run that
+  never crashed stays free.
+- `crash-report` gains `take-over`, which handles that first event and then enters the
+  ordinary loop. The report/skip decision moved into `crash-report-step`, so the loop and
+  the handoff cannot drift apart.
+
+**Semantics are unchanged**: same subscription, same registered name, same reports, same
+per-site dedup, same opt-out. Only *when* the module loads changed.
+
+**The prelude cannot use ADR-246's autoload stubs**, and this is the trap worth recording.
+Those stubs are installed by the module machinery for a *module's* references; the prelude
+is compiled before any of it exists, so a bare `crash-report/take-over` there raises
+`unbound symbol` at call time. The first cut of this did exactly that, and the failure mode
+is the worst available: the reporter is the one process whose own death nobody reports, so
+it died silently at the moment it was needed and stderr was simply empty. The prelude's
+mechanism is the `%autoload` declaration in `std/prelude/tools.blsp`, which
+`prelude_hygiene::prelude_code_references_no_unloaded_module_wrapper` **enforces** — that
+test is what caught the mistake, and it names the fix in its own failure message.
+
+A second, unlooked-for saving falls out of the prelude location: `proc/whereis`,
+`proc/register` and `proc/system-monitor` are Rust builtins (ADR-251/252), and a prelude
+reference to them resolves directly rather than inferring a module load. The arm therefore
+loads **no** modules, not one — ten to one, rather than the ten to two that was expected.
+
+**Measured** (`scripts/ab-bench.sh --floor --all`, working tree vs `5669890d`, best-of-7):
+`startup` **−11.8%**, `spawn` −11.8%, `bintree` −11.3%, `primes` −8.4%, `nqueens` −7.4%,
+`matmul` −5.8%, `fib` −5.7%; every other row inside its own noise floor and **nothing
+regressed**. The compute rows are not a coincidence and are the interesting part: nine
+fewer modules is **~13% fewer JIT-lowered arms** (bintree 108 → 94, fib 95 → 84, startup
+10 → 6), which is precisely KI-100's mechanism — instruction-fetch pressure driven by how
+many arms carry native code, plus the per-run cranelift compile constant. This is a partial
+fix for KI-100's component 1, arrived at from the other end.
+
+**Guards**, all sabotage-verified:
+- `crates/lisp/tests/crash_report_lazy.rs` — arming must not bind any `crash-report` name,
+  and the opt-out must load neither the reporter nor `os`. Red under an eager
+  `require-one`.
+- `crates/cli/tests/crash_report_default.rs` — a real `brood file` whose spawned process
+  divides by zero must still print `[crash] … division by zero`, and the opt-out must still
+  suppress it. This is the half a laziness change breaks, and it went red on the genuine
+  `unbound symbol` bug above before it went green.
+- `tests/crash_report_test.blsp` — the lazily-armed shim is found by `running?`/`stop`.
+  The registered name `:crash-reporter` is a literal in *both* the prelude and
+  `crash-report-name`; red when they disagree.
+- `prelude_hygiene::every_autoload_declaration_matches_its_module` pins `take-over`'s arity.
+
+**Rejected: making the CLI decide in Rust and skip the preamble.** It fixes the opt-out
+path only, leaving the default path — the one everybody runs — paying the full cost.
