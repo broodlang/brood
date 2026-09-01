@@ -29,12 +29,8 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, LazyLock, Mutex};
-// Only `TIMER_STARTED` uses it, and that is native-only — wasm32 has no timer thread to
-// spawn once, so importing it unconditionally warns on that target.
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Once;
 use web_time::Instant;
 
 /// Min-heap of `(deadline, pid, gen)`: `Reverse` turns the max-heap into
@@ -46,8 +42,30 @@ type TimerQueue = BinaryHeap<Reverse<(Instant, u64, u64)>>;
 /// its deadline so it can fire its `after` clause.
 static TIMERS: LazyLock<(Mutex<TimerQueue>, Condvar)> =
     LazyLock::new(|| (Mutex::new(BinaryHeap::new()), Condvar::new()));
+/// Whether the timer thread is running (native only — wasm has no timer thread; its
+/// cooperative pump fires due timers itself).
+///
+/// **Not a `Once`, deliberately.** `Once::call_once` is *poisoned* by a panic inside it,
+/// and `std::thread::spawn` panics when the OS refuses a thread (EAGAIN under fd/thread
+/// pressure). One such refusal therefore made every later `call_once` panic — and this
+/// runs from `arm_timer`, which backs `sleep` and every `receive … (after ms …)`, so a
+/// single transient failure permanently broke all timeouts runtime-wide. KI-97 item 3.
+///
+/// A plain CAS instead: exactly one caller wins the right to spawn, and if the spawn
+/// fails it **releases the flag** so a later `arm_timer` retries. Deadlines armed in the
+/// meantime stay queued and are serviced once a spawn succeeds, so the degradation is
+/// "timeouts are late until threads are available" rather than "timeouts are dead".
 #[cfg(not(target_arch = "wasm32"))]
-static TIMER_STARTED: Once = Once::new();
+static TIMER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// How many timer threads have actually entered [`timer_loop`].
+///
+/// One relaxed increment for the life of a process, and it buys the only assertion that
+/// distinguishes "the flag is set" from "a thread is really running" — which is exactly
+/// the difference between the fixed code and a `Once`-shaped regression that marks itself
+/// started without starting anything.
+#[cfg(not(target_arch = "wasm32"))]
+static TIMER_THREADS_STARTED: AtomicUsize = AtomicUsize::new(0);
 
 /// Arrange to wake green process `pid` at `deadline`. `gen` is the process's park
 /// generation (stamped by the caller in `wait_for_message`) — the timer fires the
@@ -57,9 +75,7 @@ static TIMER_STARTED: Once = Once::new();
 /// scheduler pump fires due timers itself (`fire_next_timer`); we only record the deadline.
 pub(super) fn arm_timer(pid: u64, deadline: Instant, gen: u64) {
     #[cfg(not(target_arch = "wasm32"))]
-    TIMER_STARTED.call_once(|| {
-        std::thread::spawn(timer_loop);
-    });
+    ensure_timer_thread();
     let (lock, cv) = &*TIMERS;
     let mut q = crate::core::sync::lock(lock);
     q.push(Reverse((deadline, pid, gen)));
@@ -180,18 +196,56 @@ pub(crate) fn fire_next_timer() -> bool {
     }
 }
 
+/// Start the timer thread if it is not already running; safe to call on every arm.
+///
+/// Uses `Builder::spawn`, which *returns* the OS error rather than panicking on it, so a
+/// refused thread is handled instead of unwinding through `arm_timer` into whichever green
+/// process happened to call `sleep`.
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_timer_thread() {
+    if TIMER_STARTED.load(Ordering::Acquire) {
+        return;
+    }
+    // Only the CAS winner spawns; a loser simply proceeds, since the winner is starting
+    // the thread that will drain the queue it is about to push onto.
+    if TIMER_STARTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    if let Err(e) = std::thread::Builder::new()
+        .name("brood-timer".into())
+        .spawn(timer_loop)
+    {
+        // Release the claim so the next `arm_timer` tries again — the whole point of not
+        // using a `Once` here. Queued deadlines are not lost, only late.
+        TIMER_STARTED.store(false, Ordering::Release);
+        eprintln!(
+            "brood: cannot start the timer thread ({e}); timeouts are delayed until one starts"
+        );
+    }
+}
+
 /// Sleep until the nearest deadline, then wake every process whose deadline passed.
 #[cfg(not(target_arch = "wasm32"))]
 fn timer_loop() {
+    TIMER_THREADS_STARTED.fetch_add(1, Ordering::Relaxed);
     let (lock, cv) = &*TIMERS;
     let mut q = crate::core::sync::lock(lock);
     loop {
         match q.peek().copied() {
-            None => q = cv.wait(q).unwrap(),
+            // `unwrap_or_else(into_inner)`, not `unwrap`: a poisoned condvar wait would
+            // otherwise kill the timer thread and with it every deadline in the runtime —
+            // exactly the cascade `core/sync.rs` exists to refuse (KI-97 item 3).
+            None => q = cv.wait(q).unwrap_or_else(|e| e.into_inner()),
             Some(Reverse((deadline, _, _))) => {
                 let now = Instant::now();
                 if now < deadline {
-                    q = cv.wait_timeout(q, deadline - now).unwrap().0;
+                    q = cv
+                        .wait_timeout(q, deadline - now)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
                 } else {
                     let mut due = Vec::new();
                     while let Some(&Reverse((d, pid, gen))) = q.peek() {
@@ -217,6 +271,74 @@ fn timer_loop() {
 
 #[cfg(test)]
 mod tests {
+    /// KI-97 item 3: starting the timer thread must be **retryable**, not a `Once`.
+    ///
+    /// `Once::call_once` is poisoned by a panic inside it, and `std::thread::spawn` panics
+    /// when the OS refuses a thread (EAGAIN). Because `arm_timer` backs `sleep` and every
+    /// `receive … (after ms …)`, one transient refusal used to break *all* timeouts in the
+    /// runtime, permanently and unrecoverably.
+    ///
+    /// The OS cannot be made to refuse a thread on demand here, so this asserts the
+    /// property that makes recovery possible: the started-flag is a plain CAS that a
+    /// failed spawn releases, so `ensure_timer_thread` is safe to call repeatedly and
+    /// leaves the flag set once a thread is actually running.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_timer_thread_start_is_retryable_not_a_once() {
+        /// Wait for the spawned thread to actually reach `timer_loop` — the count is
+        /// incremented by the thread itself, so it lags the spawn by a scheduling hop.
+        fn started_at_least(n: usize) -> bool {
+            for _ in 0..200 {
+                if TIMER_THREADS_STARTED.load(Ordering::Relaxed) >= n {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            false
+        }
+
+        // Idempotent: many calls start exactly one thread, and none of them panics.
+        for _ in 0..50 {
+            super::ensure_timer_thread();
+        }
+        assert!(started_at_least(1), "a timer thread must be running");
+        assert!(
+            TIMER_STARTED.load(Ordering::Acquire),
+            "and the flag must say so"
+        );
+        let after_first = TIMER_THREADS_STARTED.load(Ordering::Relaxed);
+        assert_eq!(
+            after_first, 1,
+            "repeated calls must not start extra threads"
+        );
+
+        // The recovery shape: releasing the flag is what a FAILED spawn does, and a later
+        // call must then start a real thread again. Asserting on the thread count rather
+        // than the flag is the point — a regression that marks itself started without
+        // starting anything (which is what a `Once` effectively did after poisoning)
+        // passes a flag check and fails this one.
+        TIMER_STARTED.store(false, Ordering::Release);
+        super::ensure_timer_thread();
+        assert!(
+            started_at_least(2),
+            "a released flag must yield a genuinely NEW timer thread — this is what a \
+             `Once` could not do"
+        );
+
+        // And timeouts still work end to end after all that.
+        let (lock, _) = &*TIMERS;
+        let before = crate::core::sync::lock(lock).len();
+        arm_timer(
+            u64::MAX,
+            Instant::now() + std::time::Duration::from_secs(3600),
+            0,
+        );
+        assert!(
+            crate::core::sync::lock(lock).len() > before,
+            "arm_timer must still queue a deadline"
+        );
+    }
+
     use super::*;
 
     /// Superseded timer entries must be **compacted**, not merely reaped at their

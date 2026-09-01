@@ -128,7 +128,7 @@ static REGISTRY: LazyLock<Mutex<HashMap<u64, Ctl>>> = LazyLock::new(|| Mutex::ne
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn reg() -> std::sync::MutexGuard<'static, HashMap<u64, Ctl>> {
-    REGISTRY.lock().expect("socket registry mutex")
+    crate::core::sync::lock(&REGISTRY)
 }
 
 /// True once the reactor thread has exited — a caught panic, or a fatal `poll` error.

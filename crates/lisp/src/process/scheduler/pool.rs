@@ -433,24 +433,52 @@ pub(crate) fn ensure_workers() {
         if TEST_NO_WORKERS.load(Ordering::SeqCst) || cfg!(target_arch = "wasm32") {
             return;
         }
-        // The pool's `n` fixed workers are all live executors from the moment they're
+        // The pool's fixed workers are all live executors from the moment they're
         // started (each will run work). Seed the gauge here — not per-worker on entry —
         // so it's correct before the first `enqueue` can observe it (which would otherwise
-        // see 0 and spawn a spurious startup drainer).
+        // see 0 and spawn a spurious startup drainer). Seeded with `n` and **corrected
+        // below to the number that actually started**: an over-count is not cosmetic here,
+        // because `enqueue`'s safety net only fires at `LIVE_EXECUTORS == 0`, so a gauge
+        // stranded above reality means work can be queued with nothing alive to run it and
+        // no drainer will ever be spawned (KI-97 item 3).
         LIVE_EXECUTORS.store(n, Ordering::SeqCst);
         // A process body runs directly on its worker thread (ADR-100 §8.4 — no coroutine
         // stack), and nested native / tree-walked sub-calls recurse here, so the worker
         // stack must be at least `stack_budget`'s reference size (`WORKER_STACK_BYTES`),
         // else a deep native recursion would overflow the default ~2 MiB thread stack
         // *before* the guard trips a clean error. The reservation is virtual/lazy.
+        let mut live = 0usize;
         for wid in 0..n {
             let started = std::thread::Builder::new()
                 .stack_size(WORKER_STACK_BYTES)
                 .spawn(move || worker_loop(wid))
-                .is_ok();
-            if !started {
-                std::thread::spawn(move || worker_loop(wid));
+                .is_ok()
+                // Retry once at the default stack size: the big reservation is the most
+                // likely thing to be refused, and a worker with a small stack is far
+                // better than no worker (a deep native recursion on it trips the stack
+                // guard, which is a clean Brood error). `Builder::spawn` again, NOT
+                // `thread::spawn` — the panicking variant here used to unwind inside
+                // `call_once`, which both poisoned `WORKERS_STARTED` (every later
+                // `ensure_workers` then panicked) and blew up whichever caller happened
+                // to start the pool.
+                || std::thread::Builder::new()
+                    .name(format!("brood-worker-{wid}"))
+                    .spawn(move || worker_loop(wid))
+                    .is_ok();
+            if started {
+                live += 1;
             }
+        }
+        if live != n {
+            // Correct both gauges to reality, then say so: a pool smaller than requested
+            // is a real degradation, and a silent one would present later as unexplained
+            // latency under load.
+            ACTIVE_WORKERS.store(live, Ordering::SeqCst);
+            LIVE_EXECUTORS.store(live, Ordering::SeqCst);
+            eprintln!(
+                "brood: only {live} of {n} scheduler workers could be started; \
+                 the runtime is running with a reduced pool"
+            );
         }
     });
 }
