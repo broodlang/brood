@@ -9567,3 +9567,41 @@ each time**; hot-reload files 5× looped; `crash_report`/`supervisor` under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; clippy `--all-features`; `nest format --check`;
 `check-examples`, `check-corpora`, `check-stress` including both dist chaos harnesses
 (`crashed=0`).
+
+## 2026-09-01 (perf, cont.) — `pos_at` was re-walking the source 21x for column numbers
+
+With the crash reporter's nine modules gone, boot is now **10.0 ms of a 13.2 ms** empty run
+(76%), so the boot path is where the remaining startup cost lives. Its phases:
+`read_all` 5.6 ms, eval 2.9 ms, freeze 1.3 ms, `builtins::register` 0.44 ms, file read
+0.17 ms.
+
+Profiling that run turns up no single hotspot — `env_get` 9.8%, the reader proper ~10%,
+freeze ~6%, interning ~5.8%, and **position machinery ~5.4%** (`do_count_chars` 2.74% +
+`Scanner::pos_at` 1.24% + `Scanner::new` 1.38%). Counting the calls rather than reading the
+code: `pos_at` runs **9781 times walking 4.81 MB across a 222 KB file** — 21.6× the source
+re-counted, because the boot cache writes one whole *expanded top-level form per line* and
+every query inside a form re-walks from that form's start. Stubbing the column out entirely
+put the ceiling at **0.66 ms** (parse 5.62 → 4.96).
+
+**The obvious fix does not work, and that is the part worth keeping.** A whole-file
+`is_ascii()` flag makes the column arithmetic — except the prelude's docstrings carry `→`
+and `·`, so the cache holds 1909 non-ASCII bytes across 270 of its 549 lines and the fast
+path never fires on the one input it was written for. Measured: parse 5.62 → 5.62 ms, i.e.
+nothing. What works is a **memo** of the last `(line, idx, col)`: queries run forward as the
+parser scans, so a hit walks only from the previous query, and total work becomes linear in
+the source instead of quadratic in form size. Parse 5.62 → 5.15 ms, and the whole empty run
+15.50 → 14.93 ms — **~0.55 ms, 3.6%**, reproducible across three interleaved best-of-41
+rounds.
+
+`ab-bench --floor --all` reports every row as noise including `startup` at +0.0%, which is
+not a contradiction: that row prints whole milliseconds, so 0.55 ms cannot appear in it.
+This is the case for measuring the phase directly rather than trusting a benchmark row to
+resolve it.
+
+The guard is `the_ascii_fast_path_agrees_with_the_char_walk_everywhere`, which compares
+`pos_at` against an independently written char-walk at every char boundary of eight sources
+(ASCII, multibyte, one very long line) in three query orders — forward for the memo's hit
+path, backward and zig-zag for its two fallbacks. Sabotage-verified twice: dropping the
+1-based `+1` from the arithmetic path, and dropping the same-line guard from the memo. The
+second is the one that matters, because a memo carried across a line boundary is a silently
+wrong column, never a crash.
