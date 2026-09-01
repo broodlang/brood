@@ -81,7 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. **MECHANISM FOUND**: instruction-fetch pressure, not work — icache misses +48%, iTLB +96%, dcache FLAT, instructions only +1.25%. §7.5 emits more code per arm; ADR-302 doubles the arms that lower (158 vs 76); together they spill the L1 icache/iTLB. `fib` (small footprint) is unaffected at 1.0010. **Huge pages are NOT the fix** (iTLB delta is <1% of the cycle delta — it is a symptom, not a cost). Two faces of one cause: `json` +23% INSTRUCTIONS (rooting-heavy), `mandelbrot` +48% icache with instructions flat (footprint); `fib`/`collatz`/`sort` are flat, so arm count is not the predictor. Fix: reduce the work+code of RootsBuf's root handling per arm; iterate on `json`, whose instruction count is near noise-free. Probe harness in `target/ki100/` |
+| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. **MECHANISM FOUND**: instruction-fetch pressure, not work — icache misses +48%, iTLB +96%, dcache FLAT, instructions only +1.25%. §7.5 emits more code per arm; ADR-302 doubles the arms that lower (158 vs 76); together they spill the L1 icache/iTLB. `fib` (small footprint) is unaffected at 1.0010. **Huge pages are NOT the fix** (iTLB delta is <1% of the cycle delta — it is a symptom, not a cost). Two faces of one cause: `json` +23% INSTRUCTIONS (rooting-heavy), `mandelbrot` +48% icache with instructions flat (footprint); `fib`/`collatz`/`sort` are flat, so arm count is not the predictor. **RE-BASELINED at HEAD**: most of it is a FIXED per-run cost (~4 ms on `startup` with no workload; `bintree` a flat ~10-13 ms whatever N, ratio decaying 1.246 → 1.095 → 1.027 by amortization alone; profile shows cranelift `Verifier`+`regalloc2` on the JIT thread). Only `mandelbrot` shows genuine steady state, ~1.034 at both N=1400 and N=3000. So the published "every compute row 4-10% slower" is largely one constant measured at short sizes. `json`'s +23% is already gone at HEAD. Two separate fixes; start from the HEAD table, not the historical bisect. Probe harness in `target/ki100/` |
 | KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only — **falsified 2026-09-01**, see the status cell | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe). **Sighting 2026-09-01: CI's `make gcstress` step, run 5b20b307** — that step runs the file ALONE (a debug build, `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`), so the "full-suite context only" reading is wrong: it fires solo given the right timing, and GC stress on a loaded 2-core runner supplies it. Not reproducible here — 25/25 green under the same flags, and `make gcstress` clean in a full local pass — so the missing ingredient is machine load, not suite context. That makes CI's gcstress step a cheaper repro surface than a full suite run |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
@@ -337,6 +337,47 @@ signal is *instruction count*, which is nearly noise-free (±0.1% over repeats) 
 time on this box needs min-of-3 interleaved runs to mean anything. `BROOD_NO_XCALL=1` does
 not help, so this is not the deferred re-lowering ceremony; `115faead` (RootsBuf) is the
 commit to read.
+
+**RE-BASELINED AT HEAD 2026-09-01 — the shape is different from the historical pair, and
+most of it is a FIXED per-run cost.** Everything above bisects where the regression
+*entered* (`0f57e30b`, v0.20-era). Measured against the published baseline at **current
+HEAD** (v0.23.x) it has moved, so work the numbers below, not the ones above:
+
+| row | N | old | HEAD | ratio | absolute Δ |
+|---|---|---|---|---|---|
+| `startup` | — | 25.9 ms | 30.0 ms | 1.159 | **+4.1 ms** |
+| `json` | 4 | 37.3 | 42.2 | 1.132 | +4.9 ms |
+| `json` | default | 132.9 | 144.6 | 1.087 | +11.6 ms |
+| `bintree` | 14 | 47.7 | 59.5 | 1.246 | +11.8 ms |
+| `bintree` | 200 (default) | 105.7 | 115.7 | 1.095 | +10.0 ms |
+| `bintree` | 1500 | 495.6 | 509.0 | **1.027** | +13.4 ms |
+| `mandelbrot` | 540 | 208.8 | 226.0 | 1.082 | +17.2 ms |
+| `mandelbrot` | 1400 | 1203.3 | 1243.4 | 1.033 | +40.1 ms |
+| `mandelbrot` | 3000 | 5386.7 | 5567.9 | **1.034** | +181.2 ms |
+
+Two components, and conflating them is what made this look like one big compute regression:
+
+1. **A fixed per-run cost.** `startup` alone is **+4.1 ms** with no workload at all, and
+   `bintree`'s delta is a flat ~10-13 ms whatever `N` is — its ratio decays 1.246 → 1.095 →
+   1.027 purely by amortization. The profile says where: HEAD spends visible time in
+   cranelift's `Verifier` (1.71%) and `regalloc2` (1.40%) on the `brood-jit` thread that the
+   baseline's top-10 does not show — **more/fatter JIT compilation per run**, plus the boot
+   growth already noted. This dominates the published column because the suite runs rows at
+   short default sizes, so a ~10 ms constant reads as 5-10% of wall.
+2. **A genuine steady-state cost, and only on some rows.** `mandelbrot` holds **~1.033-1.034
+   at both N=1400 and N=3000** — it scales with work, so it is real throughput, matching the
+   icache finding. `bintree` at N=1500 is 1.027 and still falling, i.e. mostly component 1.
+
+**What this changes.** "Every compute row 4-10% slower" (the published column) is largely
+**one fixed cost measured at short sizes**, not a broad throughput loss. That cost is still
+worth fixing — this runtime explicitly cares about short-lived work (`nest check`, a
+one-shot script, a request handler) — but it is a different fix from the ~3.4% on
+`mandelbrot`, and it should be reported separately rather than as one number.
+
+**Also corrected: `json`'s +23% instructions is gone at HEAD.** `BROOD_NO_XCALL=1` closed it
+on the historical pair, and on HEAD the lever now makes no difference on `json` (2.27 vs
+2.26 G) while still *earning* 13.9% on `bintree`. Something between v0.20 and v0.23 fixed
+that half. Do not start from the historical analysis.
 
 **A measurement trap recorded with it:** the first `json` instruction reading of the
 without-§7.5 synthetic came back 3.76 G — higher than either endpoint — and would have been
