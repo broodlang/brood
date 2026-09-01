@@ -89,7 +89,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-94 | **a green process's death ORPHANED its OS subprocesses** — `subprocess::close`'s only caller was the `proc-close` builtin and `retire_pid_tail` had no subprocess counterpart to `close_process_sockets`, so an owner that exited without closing leaked the OS child (never killed), its registry entry (forever), and both reader threads (draining into a dead pid) | ✅ **FIXED 2026-08-31** — `Proc` records its owner (the spawn subscriber) and `retire_pid_tail` calls `close_process_procs(pid)`: Erlang port semantics, a child dies with its owner (a deliberate semantic change). Guard in `tests/proc_test.blsp`, verified red (`:wrote`) on the pre-fix binary |
 | KI-95 | **`promote` forwards only closures/envs — DAG-shaped data is duplicated once per referrer, exponentially with nesting** — `heap.rs`'s `PromoteForward` comment reasons "acyclic ⇒ a finite tree to re-copy", but acyclic ≠ tree: immutable path-copying code produces DAGs everywhere, so every `def`/`spawn` of a value with shared substructure copies the shared part per reference into the append-only RUNTIME region, `2^n` with sharing depth, no cap | ✅ **FIXED 2026-08-31** — `PromoteForward` forwards pairs/vectors/maps/strings too (mirroring the GC flush tables), keyed on the handles' canonical identity (also closing a latent nursery/old `index()` collision in the closure/env tables); long spines stride-register (every 8th cell) so a bulk `def` stays cheap while growth stays O(n). Guards: 5 `promote_sharing_tests` (17 cells where pre-fix copied 131 071). Measured: `sort`/`spawn`/`startup`/`spawn-live`/`supervisor` all floor-level; `spawn`/`supervisor` **fewer** instructions than base |
 | KI-96 | **a remote monitor's `PENDING_REMOTE` entry survives its own `[:down …]`** — nothing removes the entry when the watched remote target dies and the peer's DOWN arrives, so (a) a long-lived watcher leaks one entry per dead remote monitor, and (b) a later node-down fires a SECOND `[:down mref pid :noconnection]` for an mref that already delivered — breaking the one-shot guarantee a `gen/call`-style pinned receive relies on | ✅ **FIXED 2026-08-31** — the DOWN now rides a dedicated `Frame::Down` (wire v7) instead of an ordinary `Send`, giving the watcher's node the hook the entry lacked: `deliver_remote_down` retires the pending entry, then delivers. Guard: `a_delivered_remote_monitor_does_not_fire_again_on_node_down` (two-node; sabotage-verified — retire disabled reproduces `SECOND-DOWN-BUG :noconnection`) |
-| KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31; item 1 FIXED, items 1 + 3 FIXED, item 2 three-of-four 2026-09-01** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading. **Item 1 (the pre-auth handshake trickle DoS) is closed**: a whole-handshake `Deadline` shim on both sides + a rate-limited shed warning, sabotage-verified. **Item 2**: `run-process`'s inherited stdin (a `git` credential prompt pinned a worker uncatchably) and `%node-connect`'s unbounded DNS resolve are both closed, each sabotage-verified; `proc-send`'s `write_all` now goes through a per-child writer thread (bounded queue, `dist`'s shape) — only `read-line`'s stdin lock remains, and that one is ADR-059 Phase 2 rather than a patch. **Item 3 fully closed**: the timer's poisoning `Once` (one EAGAIN broke every `sleep` forever), `ensure_workers` stranding `LIVE_EXECUTORS` above reality, the dist acceptor dying from a refused thread, and the poison-intolerant locks. **Item 4**: the pre-auth 64 MiB allocation, unbounded wire-symbol interning and the ADR-232 dedup set are closed (each sabotage-verified); five smaller `net.rs`/`links.rs`/`sysmon.rs` items remain |
+| KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31; item 1 FIXED, items 1 + 3 FIXED, item 2 three-of-four 2026-09-01** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading. **Item 1 (the pre-auth handshake trickle DoS) is closed**: a whole-handshake `Deadline` shim on both sides + a rate-limited shed warning, sabotage-verified. **Item 2**: `run-process`'s inherited stdin (a `git` credential prompt pinned a worker uncatchably) and `%node-connect`'s unbounded DNS resolve are both closed, each sabotage-verified; `proc-send`'s `write_all` now goes through a per-child writer thread (bounded queue, `dist`'s shape) — only `read-line`'s stdin lock remains, and that one is ADR-059 Phase 2 rather than a patch. **Item 3 fully closed**: the timer's poisoning `Once` (one EAGAIN broke every `sleep` forever), `ensure_workers` stranding `LIVE_EXECUTORS` above reality, the dist acceptor dying from a refused thread, and the poison-intolerant locks. **Item 4 fully closed**: the pre-auth 64 MiB allocation, unbounded wire-symbol interning, the ADR-232 dedup set, the edge-triggered accept drain, `tls_request`'s untimed connect + close-before-connect race, the never-reaped half-closed stream, `record_remote_link`'s missing liveness check, and unreaped sysmon subscriptions. **The only thing left in KI-97 is `read-line`'s stdin lock**, which is ADR-059 Phase 2 — a feature, not a patch |
 | KI-88 | **one spawn of a warm burst is created, promoted, registered — and never scheduled** — exactly one reader of a 50-process burst never executes its first instruction; no death line, and the collector times out. Gates `BROOD_TW_REENTRY`'s default (60× on the viral defer shape, measured and waiting) | ⚠️ **WATCHING 2026-08-31 — DORMANT.** Seen many times, root cause never found, and no reconstructable binary exhibits it: 10/10 pass at `62eac84c` with the router confirmed live, on top of session 4's 15/15 + 8/8 (incl. a pristine rebuild of the commit that failed 3/3 hours earlier). One candidate mechanism — `run_one`'s unprotected post-quantum tail, whose unwind produces this exact signature — was found and **closed** in session 5, so a future sighting is known not to be that. Next sighting: PRESERVE THE BINARY, arm `BROOD_SCHED_DBG=1`, take a core in the window |
 | KI-99 | **`a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 under a full `make test`** — B warned 0 times instead of 1, with `dist: incoming connection failed: failed to fill whole buffer` on B's stderr: the handshake hit EOF mid-frame under full-suite load, so the inbound send that should have been dropped-and-warned never arrived | ⚠️ **WATCHING 2026-08-31** — retry-absorbed (try 2 passed), 6/6 green solo after. One sighting, but the failure output was **captured** this time (KI-80's lesson), and it names the mechanism: a connection that never completed, not a dedup miscount. If it recurs, the question is why the handshake EOFs under load — `MAX_HANDSHAKE_FRAME`/`accept_link` timeout interaction is the place to look, and KI-97 item 1 touches that code |
 | KI-87 | **The checker diverged — `nest run` at 54 GB, three 19 GB `types::` test processes.** `InferGuard::enter` ended in `.then_some(InferGuard(sym))`; `bool::then_some` builds its argument eagerly, so a REFUSED entry built and dropped a guard whose `Drop` removed the in-flight symbol's mark — every cycle refusal un-guarded the symbol it refused (latent since 2026-07-07). The demand walk consulting a callee's inferred sig (`0f64f600`) made `require-one` ⇄ `%require-await` nest without bound, one stack segment per level | ✅ **FIXED 2026-08-29** — the guard is constructed only on the success path (`entered.then(\|\| InferGuard(sym))`). Guards sabotage-verified: a refused third `enter` stays refused, and the mutually recursive pair reproduces the exact `mmap failed to allocate stack` OOM under `ulimit -v` with the bug restored. Build uncapped, run capped |
@@ -727,7 +727,7 @@ here as they close.
    - **Poison-tolerant locks**, per `core/sync.rs`'s own policy: the timer thread's condvar
      waits (a poisoned wait killed every deadline runtime-wide) and the `net.rs` /
      `subprocess.rs` registry takes now recover instead of `.unwrap()`/`.expect()`.
-4. **Smaller, same families.** **Three fixed 2026-09-01; four remain.**
+4. ~~**Smaller, same families**~~ ✅ **ALL FIXED 2026-09-01.**
    - ~~`session::open` allocates up to 64 MiB from a length prefix before the AEAD tag is
      checked~~ ✅ **FIXED** — `vec![0u8; len]` was the obvious spelling and the wrong one:
      `len` is four bytes off the wire and the Poly1305 tag that proves the frame genuine is
@@ -754,13 +754,44 @@ here as they close.
      distinct names are the peer's to choose. Capped at 4096, past which it warns without
      recording. A flood of distinct names is itself worth seeing, and the alternative is a
      remote-controlled set that never shrinks.
-   - **Still open:** a non-`WouldBlock` accept error breaks the edge-triggered drain and
-     strands queued connections silently (`net.rs`); `tls_request`'s untimed
-     `TcpStream::connect` plus the close-before-connect race leaves a live, uncloseable TLS
-     socket (`net.rs`); a half-closed stream with no `closing`/`idle` state is never reaped
-     (`net.rs` housekeep); `record_remote_link` skips the liveness check its local
-     counterparts make (`links.rs`); sysmon subscriptions are never reaped while `ARMED == 0`
-     (`process/sysmon.rs`).
+   - ~~a non-`WouldBlock` accept error breaks the edge-triggered drain~~ ✅ **FIXED** —
+     `Err(_) => break` ended the drain on any error, and the registration is
+     **edge-triggered**, so whatever was already queued in the backlog was stranded until
+     some *later* arrival happened to re-arm us. Silently. `ConnectionAborted` (a peer that
+     died between the readiness event and `accept`) is a fact about one connection, so it
+     now `continue`s; anything else still breaks but *says so*, since a listener that had
+     stopped accepting was previously indistinguishable from one nobody was connecting to.
+   - ~~`tls_request`'s untimed connect + the close-before-connect race~~ ✅ **FIXED** —
+     the connect is now bounded (`TLS_CONNECT_TIMEOUT`, 5 s, per resolved address) instead
+     of waiting out the kernel's multi-minute SYN timeout while holding the caller's
+     registry entry and request buffer. And the race is closed: the registry entry is
+     inserted *before* the connect, so an owner closing meanwhile removed it while the
+     thread went on to hand the socket to the reactor — installing a live connection under
+     an id nothing owned and nothing could close. The thread now re-checks the registry and
+     drops the stream instead. Its `.expect("spawn tls connect thread")` is gone too (item
+     3's panicking-spawn class).
+   - ~~a half-closed stream is never reaped~~ ✅ **FIXED** — the idle branch required
+     `!c.read_done`, which excluded a half-closed stream from the only reap that could
+     collect it: `accepted_at` is cleared once the owner claims the connection and `closing`
+     is only set by an explicit close, so a peer that shut its write half while the owner
+     never closed the socket leaked the entry and its fd for the runtime's life. `read_done`
+     now counts as quiet, gated on nothing being queued outbound — a half-close is a
+     legitimate "I am done sending, you may still reply", and reaping with unwritten data
+     would discard that reply.
+   - ~~`record_remote_link` skips the liveness check~~ ✅ **FIXED** — its doc had always
+     claimed it "returns whether `local_pid` is currently alive"; it returned `()`. The
+     check matters on the **inbound** side, where `to_pid` is wire data: a peer naming a
+     dead or never-existent pid created a `REMOTE_LINKS` entry nothing would ever remove,
+     because the sweep runs from `deregister`, which for that pid has already happened or
+     never will. Now checked inside the critical section (the shape `link` and
+     `add_monitor` already use), and a dead target gets `:noproc` sent back to the peer —
+     exactly what a *local* `link` to a dead pid delivers.
+   - ~~sysmon subscriptions are never reaped while `ARMED == 0`~~ ✅ **FIXED** — `clear_if`
+     gated on `armed()`, which is the mask of *selected kinds* and so is 0 for a subscriber
+     that selects nothing; such a subscriber was never reaped at all. Gated on the
+     subscription count now. Guard: `a_subscriber_selecting_nothing_is_still_reaped`,
+     sabotage-verified, and it asserts the `!armed()` precondition explicitly so the test
+     cannot quietly stop exercising the trap.
 
 Also recorded by the same audit, elsewhere: the four fixed bugs above (KI-91–94), the two
 correctness items KI-95/96 (both fixed later the same day), and the performance

@@ -616,7 +616,9 @@ pub(crate) fn send_down(
 /// unreachable target gets). `local_pid` is the linker (self). Race-free against
 /// net-split exactly as `monitor_remote`: record before sending.
 pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) {
-    process::record_remote_link(local_pid, target_node, target_pid);
+    // `local_pid` is the calling process, so this is true by construction; binding it
+    // keeps the `#[must_use]`-ish intent visible rather than discarding a meaningful bool.
+    let _linked = process::record_remote_link(local_pid, target_node, target_pid);
     let sent = send_frame(
         target_node,
         &Frame::Link {
@@ -1657,7 +1659,19 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
                     // our half (keyed by the trusted connection `peer`, not the
                     // wire's `from_node`, same as the monitor handlers).
                     Frame::Link { from_pid, to_pid } => {
-                        process::record_remote_link(to_pid, peer, from_pid)
+                        // `to_pid` is wire data: the peer may name a pid that is dead or
+                        // never existed. Recording that would leak an entry forever (see
+                        // `record_remote_link`), so on a dead target we tell the peer
+                        // instead — its linked process gets `:noproc`, exactly what a
+                        // LOCAL `link` to a dead pid delivers.
+                        if !process::record_remote_link(to_pid, peer, from_pid) {
+                            send_link_exit(
+                                peer,
+                                from_pid,
+                                to_pid,
+                                Message::Keyword(value::intern(pk::NOPROC)),
+                            );
+                        }
                     }
                     Frame::Unlink { from_pid, to_pid } => {
                         process::drop_remote_link(to_pid, peer, from_pid)
