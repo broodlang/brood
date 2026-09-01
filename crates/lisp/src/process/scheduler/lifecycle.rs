@@ -159,6 +159,24 @@ pub(super) fn retire_root_ctx(pid: u64) {
     retire_pid_tail(pid, reason);
 }
 
+/// A short phrase for `pid`'s PENDING exit reason — **peeked, never taken**: the
+/// retire path owns the reason and must still find it there. Used to give the
+/// `Control::Kill` signal a message, so a kill that escapes to a top-level reporter
+/// says what killed the process instead of rendering as a bare `runtime error:`
+/// with nothing after it.
+pub fn pending_kill_phrase(pid: u64) -> Option<String> {
+    let mailbox = REGISTRY.get(pid)?;
+    let reason = crate::core::sync::lock(&mailbox.state).kill.clone()?;
+    Some(match reason {
+        Message::Keyword(k) => format!(":{}", value::symbol_name(k)),
+        Message::Vector(ref items) => match items.first() {
+            Some(Message::Keyword(k)) => format!("[:{} …]", value::symbol_name(*k)),
+            _ => "an exit signal".to_string(),
+        },
+        _ => "an exit signal".to_string(),
+    })
+}
+
 /// The untrappable hard-kill reason — Erlang's `exit(pid, kill)`. A `:kill` exit
 /// fires at the next reduction tick (`preempt`); any other reason is the soft
 /// signal that waits for the next `receive` iteration.
@@ -175,6 +193,17 @@ pub(super) fn is_kill_reason(reason: &Message) -> bool {
 /// idempotent (double-exit, exit-of-dead are safe).
 pub fn exit(pid: u64, reason: Message) {
     let hard = is_kill_reason(&reason);
+    // `:kill` is the *directive* "die untrappably", not a death reason — hardness rides
+    // `kill_hard`, independent of the reason (see `exit_propagate`). Storing it verbatim
+    // reported `:kill` to monitors and links, which no reader expects: `docs/language.md`
+    // and `std/proc/supervisor` both name `:killed`, and `crash-report`'s deliberate-exit
+    // list has `:killed` and not `:kill`, so a deliberate kill printed a crash report.
+    // Every other path here already defaults to `:killed`; this was the one that didn't.
+    let reason = if hard {
+        Message::Keyword(value::intern(pk::KILLED))
+    } else {
+        reason
+    };
     exit_with(pid, reason, hard);
 }
 

@@ -9134,3 +9134,50 @@ Both fixes carry sabotage-verified guards —
 `types::check::tests::failure_narrowing_clears_the_failure_from_the_else_branch` (red with
 the table line commented out) and three cases in `tests/package_test.blsp` (red against the
 pre-fix binary, where `"1.x.3"` bumps happily and only the missing-segment case raises).
+
+## 2026-09-01 (night) — the breakage suite was printing wrong answers and exiting 0
+
+CI's `breakage suite` job went red on `3bcfff10` with `chaos2_process_links.blsp:60:1:
+runtime error:` — a message with nothing after the colon. Pulling that thread found three
+kernel defects, five test bugs, and the reason none of them had ever failed a run.
+
+**The suite could not fail on a wrong answer.** These files self-check by printing
+`P16-correct: false` and carrying on; only a crash or a nonzero exit failed the job. So
+`P16` had been printing `false` on *every run for a long time* — 12/12 locally — while the
+file exited 0. `make breakagetests` now greps each file's output for `correct: false` and
+fails the run, which immediately found three more files in the same state.
+
+**Kernel 1: a soft exit signal's reason was discarded if the body ended first.** ADR-311.
+`(exit (self) :badness)` reported `:normal`, so links did not cascade and monitors read a
+clean exit. Not a race — it reproduced with the link established first and with
+`spawn-link`, which has no window at all.
+
+**Kernel 2: `:kill` leaked from the directive channel into the reason channel.** ADR-311.
+Monitors saw `:kill`; the stdlib, the docs and the kernel's own five defaults all say
+`:killed`, and `crash-report` carried an undocumented `:kill` clause to cope.
+
+**Kernel 3: a kill that escaped to a top-level reporter printed nothing.** `Control::Kill`
+is normally intercepted, so its `LispError` had an empty message — which is what
+`runtime error:` with a blank line was. It now names the reason (`killed by an exit
+signal: :badness`), peeked from the mailbox at construction.
+
+**`(spawn (defn f …) (f …))` is the NAMED spawn, not an implicit body.** This is the one
+worth remembering. `defn` returns its name symbol, and `(spawn name expr)` is idempotent —
+so `chaos2_process_genserver`'s P43 registered all 100 clients under `do-increments` and
+**exactly one ran**: final count 20-30 against an expected 1000, for a workload a clean
+rewrite completes correctly. The shape is invisible on inspection; it reads as a two-form
+body. `spawn` now refuses a definition form in the name position (naming a process after a
+`defn` is never meaningful, so the guard cannot false-positive), and that guard promptly
+found four more sites across three other files.
+
+The other test bugs: P66 asserted a 100-link cascade reached a process **it never linked
+to**; P23 gave every ring node `rounds-left 0`, so the second node reported done on the
+first hop and the "500-process ring" compared 2 against 1501; P42 assumed a *blocking*
+`tcp/connect` and so passed or failed on how fast loopback refuses — it threw on CI and
+returned a live socket here, on the same commit. It now accepts either refusal path, and
+both were observed in five local runs.
+
+Worth noting what this says about the empty-message crash that started it: it was
+*downstream* of kernel 1. With the reason honoured, 150 consecutive runs of the file are
+clean against a 1.7% base rate — suggestive, not proof, and the empty message that made it
+unreadable is fixed either way.

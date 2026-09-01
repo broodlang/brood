@@ -82,7 +82,16 @@ plumbing for the `spawn` special forms."
   (if (empty? more)
     `(%spawn ~(%spawn-body-thunk head))
     (if (empty? (rest more))
-      `(%spawn-named ~head ~(%spawn-body-thunk (first more)))
+      ;; `(spawn (defn f …) (f …))` READS as a two-form body and is not one: the name
+      ;; position takes any expression, `defn` returns its own name symbol, so every
+      ;; spawn registers under that one name and — this form being idempotent — only
+      ;; the FIRST actually starts a process. Silent, and it cost `breakage/
+      ;; chaos2_process_genserver` its P43 assertion for a long time (100 clients, 1
+      ;; running). Naming a process after a definition form is never meaningful, so
+      ;; refuse it at expansion rather than run one process and look like a hundred.
+      (if (and (pair? head) (contains? #{'def 'def- 'defn 'defn- 'defmacro} (first head)))
+        (throw "spawn: a definition form cannot be a process name. (spawn name expr) is the NAMED, idempotent form, so (spawn (defn f ...) (f ...)) registers every spawn under the same name and only the first one runs. Move the definition out of the spawn, or wrap the body in (do ...).")
+        `(%spawn-named ~head ~(%spawn-body-thunk (first more))))
       (throw "spawn: expected (spawn expr) or (spawn name expr)"))))
 
 (defmacro spawn-link (expr)

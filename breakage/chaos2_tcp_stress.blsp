@@ -216,11 +216,21 @@
 (let (ls (tcp/listen "127.0.0.1" 0)
       port (tcp/local-port ls))
   (tcp/close ls)
-  ;; Now try to connect — should raise, not panic
+  ;; `tcp/connect` is NON-blocking, so a refusal reaches us one of two ways and both
+  ;; are correct: the syscall refuses inline and this throws, or the socket comes back
+  ;; and the reactor reports the failure as `[:tcp-closed sock]` / `[:tcp-error sock …]`.
+  ;; Asserting only the first made this depend on how fast the loopback stack refuses —
+  ;; it threw on CI and returned a live socket here, on the same commit.
   (let (r (try
             (tcp/connect "127.0.0.1" port)
             (catch e (str "error: " (error-message e)))))
     (io/puts "P42: result:" r)
-    (io/puts "P42-correct (error string):" (string? r))))
+    (let (outcome (if (string? r)
+                    :refused-inline (receive
+                      ([:tcp-closed _] :refused-by-message)
+                      ([:tcp-error _ _] :refused-by-message)
+                      (after 5000 :never-refused))))
+      (io/puts "P42: refusal arrived as:" outcome)
+      (io/puts "P42-correct (refused either way):" (not (= :never-refused outcome))))))
 
 (io/puts "=== chaos2_tcp_stress DONE ===")

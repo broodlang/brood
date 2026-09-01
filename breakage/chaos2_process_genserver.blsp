@@ -27,15 +27,19 @@
       server (spawn (counter-server 0))
       n-clients 100)
   ;; Each client sends 10 increments of 1, waits for each ack
+  ;; The definition lives OUTSIDE the spawn. Inside it, `(spawn (defn …) (…))` is the
+  ;; two-argument NAMED form — `defn` returns its name symbol, so all 100 spawns
+  ;; registered under `do-increments` and, that form being idempotent, only the first
+  ;; actually ran (final count 20-30, never 1000). `spawn` now refuses that shape.
+  (defn do-increments (server me remaining client)
+    (if (= remaining 0)
+      (send me [:client-done client])
+      (do
+        (send server [:incr 1 (self)])
+        (receive ([:ok _] :ok) (after 5000 :timeout))
+        (do-increments server me (- remaining 1) client))))
   (dotimes (i n-clients)
-    (spawn (defn do-increments (server me remaining)
-             (if (= remaining 0)
-               (send me [:client-done i])
-               (do
-                 (send server [:incr 1 (self)])
-                 (receive ([:ok _] :ok) (after 5000 :timeout))
-                 (do-increments server me (- remaining 1)))))
-      (do-increments server me 10)))
+    (spawn (do-increments server me 10 i)))
 
   ;; Wait for all clients to finish
   (defn wait-clients (n)

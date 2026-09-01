@@ -79,20 +79,20 @@
 ;; Have one process continuously allocating while another sends it messages.
 ;; Any stale-pointer bug in the allocating process would corrupt the received value.
 (let (me (self))
-  (let (receiver (spawn
-                   ;; Continuously allocate (build and discard lists)
-                   ;; while also receiving messages
-                   (defn recv-loop (n acc)
-                     (if (= n 0)
-                       (send me [:p59 acc])
-                       ;; Interleave allocation with receive
-                       (let (_ (range (math/rem n 100)))
-                         ; allocate a small list
-                         (let (msg (receive
-                                     ([:val v] v)
-                                     (after 0 nil)))
-                           (recv-loop (- n 1) (if msg (+ acc msg) acc))))))
-                   (recv-loop 10000 0)))
+  ;; Continuously allocate (build and discard lists) while also receiving messages.
+  ;; The definition is OUTSIDE the spawn: `(spawn (defn f …) (f …))` is the two-argument
+  ;; NAMED form, not an implicit body, and `spawn` now refuses it.
+  (defn recv-loop (n acc)
+    (if (= n 0)
+      (send me [:p59 acc])
+      ;; Interleave allocation with receive
+      (let (_ (range (math/rem n 100)))
+        ; allocate a small list
+        (let (msg (receive
+                    ([:val v] v)
+                    (after 0 nil)))
+          (recv-loop (- n 1) (if msg (+ acc msg) acc))))))
+  (let (receiver (spawn (recv-loop 10000 0)))
     ;; Send 10k numbered messages as fast as possible
     (doseq (i (range 10000))
       (send receiver [:val i]))
@@ -107,12 +107,12 @@
 (let (me (self)
       n-senders 50
       msgs-each 100)
-  (let (receiver (spawn (defn drain-60 (expected acc)
-                          (if (= expected 0)
-                            (send me [:p60 acc])
-                            (let (v (receive (v v) (after 10000 :timeout)))
-                              (drain-60 (- expected 1) (+ acc (if (int? v) v 0))))))
-                   (drain-60 (* n-senders msgs-each) 0)))
+  (defn drain-60 (expected acc)
+    (if (= expected 0)
+      (send me [:p60 acc])
+      (let (v (receive (v v) (after 10000 :timeout)))
+        (drain-60 (- expected 1) (+ acc (if (int? v) v 0))))))
+  (let (receiver (spawn (drain-60 (* n-senders msgs-each) 0)))
     ;; Spawn senders
     (dotimes (i n-senders)
       (spawn

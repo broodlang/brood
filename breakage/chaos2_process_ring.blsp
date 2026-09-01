@@ -19,7 +19,13 @@
         (send done-pid [:done tok])
         (do
           (send next-pid (+ tok 1))
-          (ring-node next-pid (- rounds-left 1) done-pid))))))
+          ;; Only the counting node (node 0) decrements; every other node forwards for
+          ;; as long as the token keeps coming. Handing them `0` — as the wiring below
+          ;; did — made the SECOND node report `[:done 2]` on the first hop, so the ring
+          ;; never went round once and `P23-correct` compared 2 against 1501.
+          (ring-node next-pid
+            (if (= rounds-left :forever) :forever (- rounds-left 1))
+            done-pid))))))
 
 (let (me (self)
       n 500
@@ -47,7 +53,7 @@
       (send (get ring-pids i)
         {:next (get ring-pids next-i)
          :done me
-         :rounds (if (= i 0) rounds 0)})))
+         :rounds (if (= i 0) rounds :forever)})))
 
   ;; Start the token: send to node 0 (it has rounds set)
   ;; Actually node 0 starts the token itself since it has rounds-left > 0
