@@ -228,19 +228,19 @@
   (test "a guard gates an arity clause, falling through to a later clause"
     (let (classify (fn ((n) :when (< n 0) :negative)
                      ((n) :when (= n 0) :zero)
-                     ((n) :positive)))
+                     ((_n) :positive)))
       (assert= :negative (classify -5))
       (assert= :zero (classify 0))
       (assert= :positive (classify 7))))
   (test "a guard sees every param of a multi-arg clause"
-    (let (cmp (fn ((a b) :when (> a b) :gt) ((a b) :when (< a b) :lt) ((a b) :eq)))
+    (let (cmp (fn ((a b) :when (> a b) :gt) ((a b) :when (< a b) :lt) ((_a _b) :eq)))
       (assert= :gt (cmp 3 1))
       (assert= :lt (cmp 1 3))
       (assert= :eq (cmp 2 2))))
   (test "guards combine with mixed arities"
     (let (area (fn ((r) :when (> r 0) (* 3 r r))
                  ((w h) :when (and (> w 0) (> h 0)) (* w h))
-                 ((r) :bad)))
+                 ((_r) :bad)))
       (assert= 12 (area 2))
       (assert= 12 (area 3 4))
       (assert= :bad (area -1))))
@@ -262,7 +262,7 @@
           (catch e (includes? (str (error-message e)) "guard-dispatched")))))
   (test "across processes: a guarded fn dispatches correctly in spawned workers"
     (let (me (self)
-          sign (fn ((n) :when (< n 0) :neg) ((n) :when (> n 0) :pos) ((n) :zero))
+          sign (fn ((n) :when (< n 0) :neg) ((n) :when (> n 0) :pos) ((_n) :zero))
           _ (map (list -2 0 2) (fn (k) (spawn (fn () (send me [k (sign k)])))))
           results (fold (range 3) nil (fn (acc _) (cons (receive) acc)))
           table (fold results {} (fn (mp pair) (assoc mp (first pair) (second pair)))))

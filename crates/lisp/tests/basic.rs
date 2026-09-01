@@ -515,11 +515,11 @@ fn native_arity_is_enforced_centrally() {
     // Too few, too many, and a variadic minimum — all caught before the builtin runs.
     assert_eq!(
         err("(type-of)"),
-        "arity error: type-of: expected 1 argument, got 0"
+        "arity error: type-of: expected 1 argument (x), got 0"
     );
     assert_eq!(
         err("(cons 1)"),
-        "arity error: cons: expected 2 arguments, got 1"
+        "arity error: cons: expected 2 arguments (x xs), got 1"
     );
     assert_eq!(
         err("(%now 1 2)"),
@@ -527,12 +527,12 @@ fn native_arity_is_enforced_centrally() {
     );
     assert_eq!(
         err("(apply +)"),
-        "arity error: apply: expected at least 2 arguments, got 1"
+        "arity error: apply: expected at least 2 arguments (f & args), got 1"
     );
     // The same gate applies when a builtin is reached through `apply`.
     assert_eq!(
         err("(apply cons (list 1))"),
-        "arity error: cons: expected 2 arguments, got 1"
+        "arity error: cons: expected 2 arguments (x xs), got 1"
     );
 }
 

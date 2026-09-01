@@ -620,7 +620,7 @@ fn check_value_leaf(
 /// *anywhere* in `form` — recursively, including in binder positions and
 /// inside `quote`? Used by the unused-`let`-binding lint. False negatives are
 /// acceptable (a shadowed reference counted as "used"); zero false positives.
-fn sym_appears_in(heap: &Heap, form: Value, sym: Symbol) -> bool {
+pub(super) fn sym_appears_in(heap: &Heap, form: Value, sym: Symbol) -> bool {
     // A worklist, not recursion: it recursed on the CDR too, so a long flat list was as
     // deep as it was long, and a deep `let` body — the one shape the deep-form tests
     // did not build — overflowed the stack.
@@ -1475,18 +1475,52 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
             }
         }
 
+        // **Fold-leaks-failure lint** (ADR-312). A `reduce`/`fold` whose step can return a
+        // failure hands one back as the next step's accumulator; unless the callback has a
+        // case for that, the fold runs code its author never wrote. Silent before this:
+        // the result inference discovered exactly this (its accumulator fixpoint failed)
+        // and threw the reason away, widening to `any` — so the symptom was an imprecise
+        // type rather than the bug it had just found.
+        if (value::symbol_is(s, "reduce") || value::symbol_is(s, "fold"))
+            && !ctx.is_lexical_local(s)
+            && super::infer::fold_leaks_failure(heap, &items, ctx)
+        {
+            out.push((
+                heap.form_pos_only(form),
+                format!(
+                    "{}: the callback can return a failure, which becomes the next step's \
+                     accumulator — no clause handles one, so a later element runs against it",
+                    name_of(s)
+                ),
+            ));
+        }
+
         // Arity check (independent of sig — they're separate concerns).
         if let Some(a) = arity {
             let argc = items.len() - 1;
             if !a.accepts(argc) {
+                // Same wording as the RUNTIME's arity error (`eval::arity_message`), and
+                // the same parameter names: the checker used to say "wrong number of
+                // arguments — expected 1, got 0" where running it said "expected 1
+                // argument, got 0", so one defect read as two unrelated messages.
+                // Computed exactly as `eval::arity_message` does — including "at least N"
+                // (not `arity_str`'s "N or more") and the singular/plural rule — so the
+                // two never drift apart again.
+                let (expected, n) = match a.max {
+                    Some(m) if m == a.min => (a.min.to_string(), a.min),
+                    Some(m) => (format!("{} to {}", a.min, m), m),
+                    None => (format!("at least {}", a.min), a.min),
+                };
+                let noun = if n == 1 { "argument" } else { "arguments" };
+                let name = name_of(s);
                 out.push((
                     heap.form_pos_only(form),
-                    format!(
-                        "{}: wrong number of arguments — expected {}, got {}",
-                        name_of(s),
-                        arity_str(a),
-                        argc,
-                    ),
+                    match super::sigs::param_names_of(heap, s) {
+                        Some(p) => {
+                            format!("{name}: expected {expected} {noun} ({p}), got {argc}")
+                        }
+                        None => format!("{name}: expected {expected} {noun}, got {argc}"),
+                    },
                 ));
             }
         }
@@ -1882,7 +1916,8 @@ fn check_fn_seeded(
         }
         for &clause in forms {
             if let Some(citems) = list_items(heap, clause) {
-                for &body_form in citems.get(1..).unwrap_or(&[]) {
+                let body = citems.get(1..).unwrap_or(&[]);
+                for &body_form in body {
                     check_into(heap, body_form, &scope, out);
                 }
             }
@@ -2235,7 +2270,7 @@ pub(super) fn is_fn_value_form(heap: &Heap, form: Value) -> bool {
     fn_form_items(heap, form).is_some()
 }
 
-fn fn_form_items(heap: &Heap, form: Value) -> Option<Vec<Value>> {
+pub(super) fn fn_form_items(heap: &Heap, form: Value) -> Option<Vec<Value>> {
     let items = list_items(heap, form)?;
     match items.first()? {
         &Value::Sym(s) if is_fn_head(s) => Some(items),

@@ -1553,14 +1553,15 @@ fn optional_sig_params_parse_and_check() {
     );
     assert!(
         w.iter()
-            .all(|m| !m.contains("number of arguments") && !m.contains("expects string")),
+            .all(|m| !m.contains(", got ") && !m.contains("expects string")),
         "supplying the optional arg with the right type must not warn: {w:?}"
     );
     let w = file_warnings(
         "(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 \"x\" 2)",
     );
     assert!(
-        w.iter().any(|m| m.contains("number of arguments")),
+        w.iter()
+            .any(|m| m.contains("expected 1 to 2 arguments, got 3")),
         "one arg beyond required+optional must still be an arity error: {w:?}"
     );
 
@@ -3708,10 +3709,10 @@ fn arity_message_handles_range_and_variadic() {
     assert!(warnings("(%map-get {})")
         .iter()
         .any(|w| w.contains("%map-get") && w.contains("2 to 3")));
-    // `apply` is `at_least(2)` → "expected 2 or more"; 1 is too few.
+    // `apply` is `at_least(2)` → "expected at least 2 arguments"; 1 is too few.
     assert!(warnings("(apply f)")
         .iter()
-        .any(|w| w.contains("apply") && w.contains("2 or more")));
+        .any(|w| w.contains("apply") && w.contains("at least 2 arguments")));
 }
 
 #[test]
@@ -5748,7 +5749,7 @@ fn same_file_call_with_too_few_arguments_is_flagged() {
     let ws = file_warnings("(defn f (x y) x)\n(defn g () (f 1))");
     assert!(
         ws.iter()
-            .any(|w| w.contains("f: wrong number of arguments — expected 2, got 1")),
+            .any(|w| w.contains("f: expected 2 arguments, got 1")),
         "{ws:?}"
     );
 }
@@ -5772,7 +5773,7 @@ fn same_file_variadic_and_optional_arities_admit_their_range() {
     let ws = file_warnings("(defn v (a & rest) a)\n(defn use () (v))");
     assert!(
         ws.iter()
-            .any(|w| w.contains("v: wrong number of arguments — expected 1 or more, got 0")),
+            .any(|w| w.contains("v: expected at least 1 argument, got 0")),
         "{ws:?}"
     );
 }
@@ -5784,7 +5785,7 @@ fn same_file_multi_arity_admits_every_arm() {
     let ws = file_warnings("(defn f ((x) x) ((x y) x))\n(defn g () (f 1 2 3))");
     assert!(
         ws.iter()
-            .any(|w| w.contains("f: wrong number of arguments — expected 1 to 2, got 3")),
+            .any(|w| w.contains("f: expected 1 to 2 arguments, got 3")),
         "{ws:?}"
     );
 }
@@ -5797,7 +5798,7 @@ fn the_definition_beats_a_disagreeing_sig_for_arity() {
     let ws = file_warnings("(sig f (int -> int))\n(defn f (a b) a)\n(defn g () (f 5))");
     assert!(
         ws.iter()
-            .any(|w| w.contains("f: wrong number of arguments — expected 2, got 1")),
+            .any(|w| w.contains("f: expected 2 arguments, got 1")),
         "{ws:?}"
     );
 }
@@ -7283,7 +7284,7 @@ fn an_arrow_parameter_has_an_exact_arity() {
         "#,
     );
     assert!(
-        w.iter().any(|s| s.contains("expected 1, got 2")),
+        w.iter().any(|s| s.contains("expected 1 argument, got 2")),
         "too many arguments through an arrow parameter: {w:?}"
     );
 
@@ -7294,7 +7295,7 @@ fn an_arrow_parameter_has_an_exact_arity() {
         "#,
     );
     assert!(
-        w.iter().any(|s| s.contains("expected 1, got 0")),
+        w.iter().any(|s| s.contains("expected 1 argument, got 0")),
         "too few arguments through an arrow parameter: {w:?}"
     );
 
@@ -7310,7 +7311,8 @@ fn an_arrow_parameter_has_an_exact_arity() {
     ] {
         let w = file_warnings(src);
         assert!(
-            w.iter().all(|s| !s.contains("wrong number of arguments")),
+            w.iter()
+                .all(|s| !s.contains(": expected") || !s.contains(", got")),
             "correct call flagged for `{src}`: {w:?}"
         );
     }

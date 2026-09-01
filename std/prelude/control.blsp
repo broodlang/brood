@@ -167,6 +167,27 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
     (some-> nil inc)   → nil   ; short-circuits on nil"
   (let (v (gensym "v")) `(let (~v ~x) ~(%some-thread-build v forms %thread-first-step))))
 
+;; The failure sibling of `%some-thread-build`. Same shape, different sentinel — and it
+;; hands the FAILURE itself onward rather than a nil, because the whole point of a failure
+;; is the message it carries (ADR-310); collapsing to nil would discard exactly what the
+;; caller built it to read.
+(check-allow :non-tail-recursion
+  (defn- %ok-thread-build (place forms step)
+    (if (empty? forms)
+      place
+      `(if (failure? ~place)
+         ~place
+         (let (~place ~(step place (first forms)))
+           ~(%ok-thread-build place (rest forms) step))))))
+(defmacro ok-> (x & forms)
+  "Thread `x` through `forms` as each one's *first* argument (like `->`), but stop as soon as a step yields a **failure**, which then falls out as the result — the failure sibling of `some->`.
+
+The steps after a failure never run, so a pipe does not have to end in `(if (failure? $) $ (step $))` to keep a bad value out of the last call.
+
+    (ok-> \"12\" string/->number inc)   → 13
+    (failure? (ok-> \"q\" string/->number inc))   → true   ; `inc` never runs"
+  (let (v (gensym "v")) `(let (~v ~x) ~(%ok-thread-build v forms %thread-first-step))))
+
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
   (defn- %cond-thread-build (place clauses step)

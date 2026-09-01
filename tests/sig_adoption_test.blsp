@@ -129,14 +129,13 @@
           "declares 1 argument(s) but the definition takes 2")))
   (test "…and the definition, not the sig, is what the call is checked against"
     (is (warns-about? "(sig q3 (int -> int)) (defn q3 (a b) a) (defn c () (q3 5))"
-          "wrong number of arguments — expected 2, got 1")))
+          "expected 2 arguments, got 1")))
   (test "a sig that merely narrows a multi-arm definition stays silent"
     (refute (warns-about? "(sig f (int -> int)) (defn f ((a) a) ((a b) a))" "sig f:")))
   (test "a sig for a name the file never defines is reported"
     (is (warns-about? "(sig ghost (int -> int))" "nothing named `ghost` is defined here")))
   (test "a same-file call is arity-checked at all"
-    (is (warns-about? "(defn f (x y) x) (defn c () (f 1))"
-          "wrong number of arguments — expected 2, got 1"))
+    (is (warns-about? "(defn f (x y) x) (defn c () (f 1))" "expected 2 arguments, got 1"))
     (refute (warns-about? "(defn f (x y) x) (defn c () (f 1 2))" "wrong number"))))
 
 (describe "a parameter's type is its domain (ADR-261)"

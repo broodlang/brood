@@ -38,7 +38,7 @@ fn a_rethrown_arity_error_renders_as_an_arity_error() {
     let (stderr, ok) = run(&path);
     assert!(!ok);
     assert!(
-        stderr.contains("arity error: f: expected 1 argument, got 2"),
+        stderr.contains("arity error: f: expected 1 argument (x), got 2"),
         "stderr: {stderr}"
     );
     assert!(!stderr.contains("{:kind"), "map dump leaked: {stderr}");

@@ -2668,7 +2668,7 @@ fn lower_let(heap: &mut Heap, items: &[Value]) -> Option<Value> {
 /// A multi-clause `fn` clause is `(param-list body...)` where the param-list is
 /// itself a list (or `()`). A vector head is *not* a clause (param lists are
 /// lists, ADR-010) — that disambiguates a single tuple param from a clause.
-fn is_clause(heap: &Heap, f: Value) -> bool {
+pub(crate) fn is_clause(heap: &Heap, f: Value) -> bool {
     match f.unpack() {
         ValueRef::Pair(p) => matches!(heap.car(p).unpack(), ValueRef::Pair(_) | ValueRef::Nil),
         _ => false,

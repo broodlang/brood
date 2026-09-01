@@ -39,6 +39,30 @@
   (test "some->> threads as last arg"
     (assert= [2 4] (some-> [1 2 3 4] (map inc) (filter even?) (into [] $)))))
 
+(describe "ok-> — the failure sibling of some->"
+  (test "threads like -> when nothing fails"
+    (assert= 13 (ok-> "12" string/->number inc)))
+
+  (test "a failure falls out ITSELF, carrying its message"
+    ;; not nil: the message is the whole reason a failure exists (ADR-310), and
+    ;; collapsing to nil would discard exactly what the caller built it to read
+    (let (r (ok-> "q" string/->number inc))
+      (is (failure? r))
+      (is (string/starts-with? (error-message r) "string/->number:"))))
+
+  (test "the steps after a failure never run"
+    ;; a step that would RAISE on a failure proves it was skipped, not merely ignored
+    (is (failure? (ok-> "q" string/->number (+ 1)))))
+
+  (test "nil is not a failure, so ok-> threads straight through it"
+    ;; the two channels are separate — `some->` stops on nil, `ok->` does not
+    (assert= nil (ok-> nil identity)))
+
+  (test "it ends a pipe that would otherwise need an explicit failure guard"
+    (let (parse (fn (s) (ok-> s string/->number (* 2))))
+      (assert= 24 (parse "12"))
+      (is (failure? (parse "q"))))))
+
 (describe "cond-> / cond->>"
   (test "cond-> applies a step only when its guard is truthy"
     (assert= {:a 1} (cond-> {} true (assoc :a 1) false (assoc :b 2)))

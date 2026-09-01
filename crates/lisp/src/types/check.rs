@@ -264,6 +264,175 @@ fn defn_clauses(heap: &Heap, form: Value) -> Option<(Symbol, Vec<Value>)> {
     Some((name, rest.to_vec()))
 }
 
+/// **Unused pattern-binder lint**, run on the UN-EXPANDED tree.
+///
+/// A pattern clause's binder that its own body never reads is dead, and in a fold
+/// callback it is worse than dead: `(fn ((acc "+") "+") ((acc num) (string/->number num)))`
+/// ignores the accumulator in both arms, so the `reduce` never folds and the result is
+/// whatever the last element produced. Nothing caught this. The unused-binding lint only
+/// ever looked at `let`, and by the time the checker's main walk runs, a pattern clause
+/// has been lowered to `match*` — where its binders become SYNTHETIC lets, which that lint
+/// deliberately exempts (removing that exemption fires 69 times across std/ + tests/, so
+/// it is load-bearing). Hence a surface pass: here the clause is still as written.
+///
+/// Per CLAUSE, because each clause has its own binder list, so `_`-prefixing one that is
+/// deliberately ignored costs nothing — the same escape the `let` lint uses. A whole-fn
+/// rule would be unsound: one arm may legitimately ignore what another arm reads.
+fn lint_unused_pattern_binders(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
+    lint_binders_walk(heap, form, true, out);
+}
+
+/// `lint_this` says whether *this* form, if it is a `fn`, is anonymous — it is cleared
+/// only for the `fn` that is a definition's value. Children always reset it to true.
+///
+/// The distinction has to be made STRUCTURALLY, not by which tree we happen to be handed:
+/// `nest check FILE` runs this over un-expanded forms (where a `defn` is still a `defn`
+/// and never looked like a `fn`), while `check-string-structured` — the editor/LSP path —
+/// runs it over expanded ones (where `defn` has already become `(def name (fn …))`). The
+/// first version relied on that accident and so warned in the editor but not on the
+/// command line for the same source, which is worse than either answer alone.
+fn lint_binders_walk(
+    heap: &Heap,
+    root: Value,
+    root_lint: bool,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    // An explicit work stack, not recursion: this walks arbitrary user source, and the
+    // checker is expected to survive deeply nested forms (`checker_survives_a_deep_let_body`
+    // overflows a debug-build stack on the recursive version).
+    let mut work = vec![(root, root_lint)];
+    while let Some((v, lint_this)) = work.pop() {
+        match v {
+            Value::Vector(id) => {
+                work.extend(heap.vector(id).iter().map(|&e| (e, true)));
+            }
+            Value::Pair(_) => {
+                let Some(items) = list_items(heap, v) else {
+                    continue;
+                };
+                // `Value` has no `PartialEq`; the definition's value is positionally items[2].
+                let mut definition_value: Option<usize> = None;
+                if let Some(&Value::Sym(head)) = items.first() {
+                    // Quoted/quasiquoted subtrees are data, and `comment` never runs.
+                    if value::symbol_is(head, kw::QUOTE)
+                        || value::symbol_is(head, kw::QUASIQUOTE)
+                        || value::symbol_is(head, kw::COMMENT)
+                    {
+                        continue;
+                    }
+                    if lint_this && walk::is_fn_head(head) {
+                        lint_fn_pattern_clauses(heap, &items, out);
+                    }
+                    // `(def name (fn …))` — `defn`'s expansion. That `fn`'s parameters are
+                    // the definition's PUBLISHED arglist (introspection, LSP hover, `doc`),
+                    // where an unused one is frequently the contract: an ability impl, a
+                    // callback of fixed shape, a dispatch arm. Only genuinely anonymous
+                    // `fn`s are linted.
+                    if value::symbol_is(head, kw::DEF) && items.len() >= 3 {
+                        definition_value = Some(2);
+                    }
+                }
+                for (i, it) in items.into_iter().enumerate() {
+                    work.push((it, definition_value != Some(i)));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The per-clause half of [`lint_unused_pattern_binders`]. Only fires for a clause-style
+/// `fn` with at least one PATTERN head — an arity-only `fn` keeps plain symbol params,
+/// which are a callable's arity contract rather than a destructuring binding.
+fn lint_fn_pattern_clauses(heap: &Heap, items: &[Value], out: &mut Vec<(Option<Pos>, String)>) {
+    let forms = match items.get(1..) {
+        Some([Value::Str(_), rest @ ..]) if !rest.is_empty() => rest,
+        Some(rest) => rest,
+        None => return,
+    };
+    if forms.is_empty()
+        || !forms
+            .iter()
+            .all(|&c| crate::eval::macros::is_clause(heap, c))
+    {
+        return;
+    }
+    let heads: Vec<Value> = forms
+        .iter()
+        .filter_map(|&c| list_items(heap, c)?.first().copied())
+        .collect();
+    if heads.len() != forms.len() {
+        return;
+    }
+    // A clause whose head holds a non-symbol is a PATTERN clause (lowered to `match*`);
+    // one of only symbols is an arity clause (a native multi-arity arm). Both bind
+    // per-clause names, so both are linted — the wording differs so the reader knows
+    // which construct is being talked about.
+    let any_pattern = heads.iter().any(|&h| {
+        list_items(heap, h).is_some_and(|ps| ps.iter().any(|p| !matches!(p, Value::Sym(_))))
+    });
+    let noun = if any_pattern {
+        "unused pattern binding"
+    } else {
+        "unused parameter"
+    };
+    for &clause in forms {
+        let Some(citems) = list_items(heap, clause) else {
+            continue;
+        };
+        let (Some(&plist), body) = (citems.first(), &citems[1..]) else {
+            continue;
+        };
+        if body.is_empty() || heap.is_synthetic(clause) {
+            continue;
+        }
+        let Some(pos) = heap.form_pos_only(clause) else {
+            continue;
+        };
+        let mut binders = Vec::new();
+        collect_clause_binders(heap, plist, &mut binders);
+        for b in binders {
+            let name = value::symbol_name(b);
+            if name.starts_with('_') || name.contains("__") {
+                continue; // the ignore convention, and gensym temporaries
+            }
+            if !body.iter().any(|&f| walk::sym_appears_in(heap, f, b)) {
+                out.push((Some(pos), format!("{noun}: {name}")));
+            }
+        }
+    }
+}
+
+/// Binder symbols of a clause head list. Like `walk::pattern_syms`, except a `(%pin x)`
+/// subtree is skipped entirely: `^x` COMPARES against `x`, so the symbol there is a use
+/// of an outer binding, not a binder this clause introduces — flagging it would false-
+/// positive on every pinned `receive` clause (`[:down ^ref _ reason]`).
+fn collect_clause_binders(heap: &Heap, pat: Value, out: &mut Vec<Symbol>) {
+    match pat {
+        Value::Sym(s) => {
+            let nm = value::symbol_name(s);
+            if nm != "&" && nm != "_" {
+                out.push(s);
+            }
+        }
+        Value::Pair(_) | Value::Vector(_) => {
+            let items = match pat {
+                Value::Vector(id) => heap.vector(id).to_vec(),
+                _ => list_items(heap, pat).unwrap_or_default(),
+            };
+            if let Some(&Value::Sym(h)) = items.first() {
+                if value::symbol_name(h) == "%pin" {
+                    return;
+                }
+            }
+            for it in items {
+                collect_clause_binders(heap, it, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Walk `form` (un-expanded) for inline pattern-clause `fn` literals and record each
 /// one's `(heads, tail)` arms in `ctx` under its printed clause-head-list key — the side
 /// channel [`sigs::clause_lambda_ret`] reads back at call sites, where the expanded tree
@@ -1515,6 +1684,7 @@ pub fn check_file_mode(
             // finds its way back here from a combinator call site.
             for &form in &forms {
                 record_fn_literal_clauses(heap, form, &mut ctx);
+                lint_unused_pattern_binders(heap, form, &mut out);
             }
             // Iterate to a fixed point; break as soon as a pass records nothing new. The cap
             // bounds a pathological deep chain (the tail just stays deferred — sound).

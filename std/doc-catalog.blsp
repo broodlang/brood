@@ -525,6 +525,7 @@
    "file/slurp" :filesystem
    "file/slurp-bytes" :filesystem
    "some->" :control
+   "ok->" :control
    "%some-thread-build" :control
    "sort" :collections
    "spawn" :processes

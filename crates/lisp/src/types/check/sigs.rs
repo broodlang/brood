@@ -2359,6 +2359,45 @@ pub(super) fn arity_of(heap: &Heap, sym: Symbol) -> Option<Arity> {
     }
 }
 
+/// The callee's parameter NAMES, rendered `coll` / `acc x` / `coll x & more`, or `None`
+/// when the name resolves to neither a primitive nor a closure. Mirrors [`arity_of`]'s
+/// lookup so the checker's arity warning can name what is missing, exactly as the runtime
+/// error does — the two used to disagree in wording as well as in content.
+pub(super) fn param_names_of(heap: &Heap, sym: Symbol) -> Option<String> {
+    match super::deps::obs_global(heap, sym)? {
+        Value::Native(id) => {
+            let p = heap.native(id).params;
+            (!p.is_empty()).then(|| p.join(" "))
+        }
+        Value::Fn(cid) => {
+            // The arms differ; name the FIRST, which is the one a reader sees at the top
+            // of the definition. A multi-arm callee's real contract is its arity list,
+            // which the message already carries.
+            let c = heap.closure(cid);
+            let arm = c.arms.first()?;
+            let mut parts: Vec<String> = arm
+                .params
+                .iter()
+                .map(|&x| crate::core::value::symbol_name(x))
+                .collect();
+            if !arm.optionals.is_empty() {
+                parts.push("&optional".to_string());
+                parts.extend(
+                    arm.optionals
+                        .iter()
+                        .map(|(n, _)| crate::core::value::symbol_name(*n)),
+                );
+            }
+            if let Some(r) = arm.rest {
+                parts.push("&".to_string());
+                parts.push(crate::core::value::symbol_name(r));
+            }
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        _ => None,
+    }
+}
+
 /// A human-readable rendering of an `Arity` for a "wrong number of args"
 /// warning — `exact(2)` → "2"; `range(2,3)` → "2 to 3"; `at_least(2)` → "2 or
 /// more".

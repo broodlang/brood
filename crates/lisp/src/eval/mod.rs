@@ -1480,7 +1480,13 @@ fn arity_error_for(cl: &Closure, got: usize) -> LispError {
         .unwrap_or_else(|| "fn".to_string());
     if cl.arms.len() == 1 {
         let arm = &cl.arms[0];
-        return LispError::arity(arity_message(&who, arm.min_arity(), arm.max_arity(), got));
+        return LispError::arity(arity_message(
+            &who,
+            arm.min_arity(),
+            arm.max_arity(),
+            got,
+            &arm_param_names(arm),
+        ));
     }
     let mut accepted: Vec<String> = cl
         .arms
@@ -1512,6 +1518,7 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
             nat.arity.min,
             nat.arity.max,
             argv.len(),
+            &nat.params.join(" "),
         )));
     }
     let func = nat.func;
@@ -1902,14 +1909,43 @@ pub(crate) fn deadline_error() -> LispError {
 /// declared [`Arity`](crate::core::value::Arity)) and user closures (from their parameter list): a closure
 /// with `min..=max` required/optional params passes `Some(max)`; `& rest` (and a
 /// variadic builtin) passes `None`.
-fn arity_message(who: &str, min: usize, max: Option<usize>, got: usize) -> String {
+/// The arity error text, with the callee's parameter NAMES: `first: expected 1 argument
+/// (coll), got 0`. "expected 1 argument, got 0" states the count and nothing else; the
+/// names say WHAT is missing, which is the actionable half and was already recorded —
+/// every primitive registers them (`first` declares `&["coll"]`) and every closure arm
+/// carries them. `params` is pre-rendered and may be empty, in which case the message is
+/// exactly what it was before. `types::check::walk` builds the same string for the
+/// checker's warning, so the two never disagree in wording again.
+fn arity_message(who: &str, min: usize, max: Option<usize>, got: usize, params: &str) -> String {
     let (expected, n) = match max {
         Some(m) if min == m => (min.to_string(), min),
         Some(m) => (format!("{} to {}", min, m), m),
         None => (format!("at least {}", min), min),
     };
     let noun = if n == 1 { "argument" } else { "arguments" };
-    format!("{}: expected {} {}, got {}", who, expected, noun, got)
+    if params.is_empty() {
+        format!("{}: expected {} {}, got {}", who, expected, noun, got)
+    } else {
+        format!(
+            "{}: expected {} {} ({}), got {}",
+            who, expected, noun, params, got
+        )
+    }
+}
+
+/// The parameter list of a closure arm, as the source spells it: `acc x`, `x & more`,
+/// `n &optional m`. Used by the arity error so it can name what is missing.
+fn arm_param_names(arm: &crate::core::value::ClosureArm) -> String {
+    let mut parts: Vec<String> = arm.params.iter().map(|&p| value::symbol_name(p)).collect();
+    if !arm.optionals.is_empty() {
+        parts.push("&optional".to_string());
+        parts.extend(arm.optionals.iter().map(|(n, _)| value::symbol_name(*n)));
+    }
+    if let Some(r) = arm.rest {
+        parts.push("&".to_string());
+        parts.push(value::symbol_name(r));
+    }
+    parts.join(" ")
 }
 
 pub(crate) fn make_closure(
