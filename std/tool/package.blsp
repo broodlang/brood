@@ -1997,9 +1997,13 @@ published is refused. Backs `nest publish`."
 (defn- semver-bump (cur level)
   (let (p (map (string/split cur ".") string/->number)
         bad (fn () (error "semver-bump: malformed version " cur " (expected MAJOR.MINOR.PATCH)"))
-        ma (or (nth p 0) (bad))
-        mi (or (nth p 1) (bad))
-        pa (or (nth p 2) (bad)))
+        ;; `number?`, not `or`: a non-numeric segment parses to a FAILURE, which is
+        ;; truthy (ADR-310), so `or` would hand it on to `inc` instead of reaching
+        ;; `bad`. One test covers both a missing segment (nil) and an unparseable one.
+        segment (fn (index) (let (parsed (nth p index)) (if (number? parsed) parsed (bad))))
+        ma (segment 0)
+        mi (segment 1)
+        pa (segment 2))
     (cond
       (= level "major") (str (inc ma) ".0.0")
       (= level "minor") (str ma "." (inc mi) ".0")
