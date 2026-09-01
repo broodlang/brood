@@ -125,7 +125,7 @@ static REGISTRY: LazyLock<Mutex<HashMap<u64, Proc>>> = LazyLock::new(|| Mutex::n
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn reg() -> std::sync::MutexGuard<'static, HashMap<u64, Proc>> {
-    REGISTRY.lock().expect("subprocess registry mutex")
+    crate::core::sync::lock(&REGISTRY)
 }
 
 // ---- message builders (off-heap; symbols are a global interner) ----
@@ -226,7 +226,7 @@ fn start_stdout_reader(
             }
         }
         // stdout is at EOF: reap the child for its exit status.
-        let mut guard = child.child.lock().expect("subprocess child mutex");
+        let mut guard = crate::core::sync::lock(&child.child);
         let mut backoff = REAP_POLL_MIN;
         let code = loop {
             match guard.try_wait() {
@@ -238,10 +238,13 @@ fn start_stdout_reader(
                 // grows to `REAP_POLL_MAX` so a long-lived daemon child costs a couple of
                 // wakeups a second rather than 200.
                 Ok(None) => {
+                    // Poison-tolerant, like every other lock take in the runtime
+                    // (`core/sync.rs`): a panic elsewhere must not strand this reaper,
+                    // which is what emits the child's final `[:proc-closed …]`.
                     let (g, _) = child
                         .killed
                         .wait_timeout(guard, backoff)
-                        .expect("subprocess child mutex");
+                        .unwrap_or_else(|e| e.into_inner());
                     guard = g;
                     backoff = (backoff * 2).min(REAP_POLL_MAX);
                 }
@@ -402,7 +405,7 @@ pub fn close(id: u64) {
         // Brief lock (kill doesn't block) — the stdout reaper waits on the condvar rather
         // than holding this mutex across a blocking `wait()`, so we never contend.
         {
-            let mut c = child.child.lock().expect("subprocess child mutex");
+            let mut c = crate::core::sync::lock(&child.child);
             let _ = c.kill();
         }
         // Rouse the reaper so it reaps *now* instead of at its next backoff tick, and the
