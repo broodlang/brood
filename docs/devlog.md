@@ -9446,3 +9446,32 @@ historical numbers themselves). The pattern behind all three is the same: I meas
 pair, on one row, at one size, and generalized. The habit that would have caught each of
 them earlier is the one this repo already prescribes for the JIT — **sweep the size across
 orders of magnitude and watch whether the GAP moves**, not just whether the number does.
+
+## 2026-09-01 (last) — §7.8 item 1 built, measured, and reverted: the premise was wrong
+
+Took the top-ranked perf candidate and implemented it: the static half of `arm_scalar_kind`
+memoized in a per-arm `OnceLock` (leaving the two genuinely dynamic inputs, `i64_too_deep`
+and `self_global_ok`, live at each call), plus an `AtomicBool` so the empty `I64_TOO_DEEP`
+set costs no `Mutex`. Correct, semantics-preserving, JIT suites and the breakage suite green.
+
+`make ab --floor` at N=9 said **noise on every row**: fib +2.5% (floor 1.6%), pfib −1.9%
+(0.4%), ackermann +0.2% (1.2%), bintree +2.2% (2.2%).
+
+So I counted the calls instead of theorising about why. A five-line probe:
+
+  fib 21 · bintree 394 · ackermann 457 · pfib 2176
+
+— over entire runs, against billions of activations. The item's premise ("recomputed per
+activation") is simply false: the gate is
+`(arm.inline_name.is_some() || xcall_relower) && !inline_installed && !declines_inline_upgrade(arm)`
+and the `&&` chain **short-circuits** long before the verdict for the arms that matter.
+
+Reverted rather than shipped — it added a field to a hot struct for nothing — and §7.8 item
+1 is now struck through as measured-and-ruled-out, with the counts, so nobody rebuilds it.
+
+**The transferable bit, and it applies to the rest of §7.8.** That item was "confirmed by
+reading the cited code", and the reading was accurate about what the function *does* and
+wrong about how often it *runs*. One `&&` above the call was the whole story. Before
+building any remaining item on that list: **count the calls first**. A probe settles in one
+run what a careful read cannot, and it costs minutes against the hours a build-then-A/B
+round trip takes. I have added that instruction to the section header.
