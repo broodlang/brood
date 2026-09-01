@@ -3490,6 +3490,25 @@ fn guards_for_number_and_list_unions_narrow_to_the_union() {
 }
 
 #[test]
+fn failure_narrowing_clears_the_failure_from_the_else_branch() {
+    // ADR-310 appended `Failure` as a tag but not to the predicate table, so
+    // `failure?` narrowed nothing: the idiomatic default — the very shape
+    // `failure?`'s own docstring teaches — left `number | failure` flowing into
+    // arithmetic, and std went red on 14 strict warnings it could not silence.
+    let w = warnings("(let (n (string/->number s)) (if (failure? n) 0 (inc n)))");
+    assert!(
+        !w.iter().any(|s| s.contains("inc")),
+        "the else of (failure? n) must narrow n to number: {w:?}"
+    );
+    // And the then-branch really does hold a failure — a failure is not a list.
+    let w = warnings("(if (failure? x) (first x) nil)");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("failure")),
+        "the then-branch of (failure? x) must narrow x to failure: {w:?}"
+    );
+}
+
+#[test]
 fn and_narrows_the_then_branch_on_every_conjunct() {
     // A truthy `and` proves ALL conjuncts, so the second (and third) conjunct's
     // narrowing must reach the then-branch, not just the first (ADR-011 gap close).

@@ -9102,6 +9102,38 @@ real deployments), and a failed spawn **falls back to an inline resolve** rather
 failing the dial. Degrading to the old unbounded-but-working path beats inventing a new
 way to refuse connections. 6/6 green after; full suite clean.
 
+## 2026-09-01 (late) — the strict gate was red for three releases, and it was right
+
+CI had been failing on the `nest check --strict` gate over `std/` since `97358339`, through
+`1519fe01` (the v0.23.1 release) and every commit after — 14 warnings, all of them the same
+shape: `number | failure` reaching arithmetic. Two distinct causes hid behind one gate.
+
+**The checker gap: ADR-310 appended `Tag::Failure` but not `failure?` to `Ty::tested_by`.**
+Every other type predicate is in that table — `set?`, `ref?`, `table?` — so `failure?` was
+the only one that narrowed nothing. The cost lands on the exact idiom `failure?`'s own
+docstring teaches: `(let (n (parse s)) (if (failure? n) 0 n))` typed its else-branch as
+`number | failure`, so code that handled the failure *correctly* still could not satisfy the
+gate. Eleven of the fourteen warnings (`std/version.blsp`, `std/datetime.blsp`,
+`std/tool/project.blsp`) were this, and the fix is the one missing line.
+
+**The real defect the other three named: `package/semver-bump` had stopped validating.**
+`(or (nth p 0) (bad))` was written when an unparseable segment came back falsy. After the
+truthy flip the failure *satisfied* the `or`, so `bad` never fired and `(inc <failure>)` ran
+— `nest publish` would bump a malformed version to garbage rather than raising. Rewritten to
+test `number?` once, which covers a missing segment and an unparseable one together.
+
+Worth recording because of what this says about the gate stack: the release was cut, tagged,
+pushed and verified against 5394 Brood tests and 1329 Rust tests, and **not one of them
+touched this** — no test feeds `semver-bump` a malformed version. The strict checker was the
+only thing in the repo that knew, it had been saying so for three releases, and the run list
+it was saying it in was a wall of red that read as "the usual". Same lesson as KI-68/69: a
+red gate is evidence even when the suites are green, and *especially* when it is the gate
+`make check` does not run.
+
+Both fixes carry sabotage-verified guards —
+`types::check::tests::failure_narrowing_clears_the_failure_from_the_else_branch` (red with
+the table line commented out) and three cases in `tests/package_test.blsp` (red against the
+pre-fix binary, where `"1.x.3"` bumps happily and only the missing-segment case raises).
 ## 2026-09-01 (late) — KI-97 item 3 closed: nothing spawns a thread by faith any more
 
 `std::thread::spawn` **panics** when the OS refuses a thread, and the runtime spawned

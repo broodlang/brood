@@ -1436,3 +1436,18 @@
   ;; The bug this replaces: "" is not "unknown", it is "runs anywhere".
   (test "the derived constraint is never empty"
     (refute (= (package/publish-brood-constraint nil) ""))))
+
+;; ADR-310 made a failure TRUTHY, which quietly disarmed this function's validation:
+;; `(or (nth p 0) (bad))` was written when an unparseable segment came back falsy, so
+;; after the flip the failure itself satisfied the `or` and rode on into `inc` — a
+;; malformed version bumped to garbage instead of raising. The strict checker caught it
+;; ("inc: argument 1 expects number, got number | failure"); nothing else did.
+(describe "package: semver-bump rejects a version it cannot parse"
+  (test "a well-formed version bumps on each level"
+    (assert= (package/semver-bump "1.2.3" "patch") "1.2.4")
+    (assert= (package/semver-bump "1.2.3" "minor") "1.3.0")
+    (assert= (package/semver-bump "1.2.3" "major") "2.0.0"))
+  (test "a non-numeric segment raises rather than bumping a failure"
+    (assert-error (package/semver-bump "1.x.3" "patch")))
+  (test "a missing segment raises too"
+    (assert-error (package/semver-bump "1.2" "patch"))))
