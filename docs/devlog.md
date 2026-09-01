@@ -8917,3 +8917,43 @@ Lesson for the next `Value` variant: the tripwire's bound is not the only thing 
 go stale silently, and its failure mode impersonates the scariest bug class in the tree.
 Grep for guards keyed to the *old* signal (`nil?`, discriminant bounds) when a kind or a
 contract changes — the type checker cannot see either.
+
+## 2026-09-01 — the benchmark refresh found a regression the whole gate stack was blind to
+
+Refreshing the benchmarks' Brood column (three releases stale, 0.19.1 -> 0.22.0) turned up
+**every compute row 4-10% slower**. Filed as **KI-100**; it is not from this session's work.
+
+The interesting part is how nearly it went out as a published "Brood got slower" column
+without anyone knowing whether it was true. Four checks stood between:
+1. **min-of-3 interleaved** harness invocations, which the benchmarks repo mandates because
+   one invocation is a governor coin flip. The per-row minimum landed on all three
+   invocations (18/9/4) — a healthy spread, and `persistent-map` alone swung 14.4% across them.
+2. **Build-parity A/B** (`make ab`), which builds both arms through the same target and
+   interleaves them: mandelbrot +8.1% against a 0.9% floor.
+3. **Unpinned** re-measurement — `make ab` pins to one core, so it charges the benchmark for
+   background JIT compilation, and the new binary lowers MORE arms (97 vs 85). That is the
+   exact confound CLAUDE.md warns about, and it had to be ruled out. It survived: +6.8%.
+4. **An output check**: all arms print checksum `6129302`. Worth doing because the row files
+   were rewritten for ADR-302's data-first order and run against pre-ADR-302 binaries here —
+   a silently-different computation would have made the whole comparison meaningless.
+
+Tier-splitting then did the real work: **tier 1 compute moves only +1.1% while tier 2 moves
++5.5%**, so the compute half lives on the native path. Boot is separately +2.8ms (+14.5%),
+which tracks the stdlib growing 5199 -> 5332 image bindings — feature cost, not a defect.
+Bisected to `2c822875..80bb25d8`, *excluding* three plausible suspects (the Cranelift
+`*_imm`->`_s` migration, the JIT hot-admission commit, ADR-310) and everything after v0.21.0.
+
+A false lead worth recording: the absolute delta is ~20ms at BOTH tiers, which reads as a
+constant per-run cost and pointed at boot. It is not — tier 1's compute is 10x longer, so the
+same absolute number is a much smaller fraction. Compare *fractions per tier*, not absolutes.
+
+**Hardening** (landed in brood-benchmarks): the regression survived three releases because
+every gate there checks that rows RUN and that checksums AGREE — both stayed green.
+`bench/staleness.py` now compares the commit the published column was measured at against the
+binary under test and fails on a version boundary, wired into the daily job. It measures
+nothing deliberately: a timing gate on a shared runner cannot separate a 7% regression from a
+turbo plateau, and an untrustworthy gate is worse than none.
+
+Also here: `MAX_VALUE_DISCRIMINANT` is `#[cfg(debug_assertions)]`-gated to match its only
+consumer, so release builds no longer carry an unused constant (CI's clippy runs the dev
+profile and never saw it; `make ab`'s release-fast build did).

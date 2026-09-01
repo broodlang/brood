@@ -632,6 +632,9 @@ pub enum Value {
 /// exactly like a JIT frame-slot corruption (the bug #2 family) when nothing was
 /// corrupt at all. [`max_value_discriminant_is_the_last_variant`] stops that recurring:
 /// it does not compile if a variant is appended without updating this.
+/// Gated to match its only consumer (`dbg_check_args`, also debug-assertions only), so a
+/// release build does not carry an unused constant.
+#[cfg(debug_assertions)]
 pub(crate) const MAX_VALUE_DISCRIMINANT: u8 = 26;
 
 /// The **unpacked** view of a [`Value`] — the form you `match` against.
@@ -1455,7 +1458,7 @@ mod runtime_gen_handle_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod discriminant_bound_tests {
     use super::*;
 
