@@ -6684,6 +6684,14 @@ precisely the coincidence that deserves writing down rather than explaining away
 > spawn-time ownership generation the `%isolate` comment already names as the missing
 > primitive. A scheduler/runner design session with fresh eyes — do not patch it
 > piecemeal from here.
+>
+> **Sighting 2026-09-01 (late).** Fired on a plain `nest test -j1` at `3bcfff10` + the
+> strict-gate fix, WITH the stdlib images live (so the source-path lever is sufficient
+> but not necessary): `ability_test.blsp:471` — "every registered record id names a bound
+> constructor" — i.e. the orphan seen from the *registry* side rather than the checker's.
+> 94/94 solo immediately after, on the same binary. No new information beyond confirming
+> the class is still live on the current tree; the binary was not preserved because the
+> delete-the-images lever supersedes it.
 
 **Symptom.** In a scoped `nest test` run, `std_check_test` ("the standard library carries no
 checker warnings") fails with ~15 warnings about a record defined in **another test file**:
