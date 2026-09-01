@@ -1124,6 +1124,10 @@ impl Ty {
             "socket?" => Ty::of(Tag::Socket),
             "subprocess?" => Ty::of(Tag::Subprocess),
             "table?" => Ty::of(Tag::Table),
+            // ADR-310 appended `Failure` as a tag; a predicate over it narrows
+            // like any other, so `(if (failure? n) 0 n)` types the else branch
+            // without the failure in it.
+            "failure?" => Ty::of(Tag::Failure),
             // `fn?` holds for both Brood closures and Rust builtins.
             "fn?" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),
             "number?" => Ty::NUMBER,
