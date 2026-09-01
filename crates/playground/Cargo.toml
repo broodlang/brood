@@ -17,6 +17,12 @@ brood = { path = "../lisp", default-features = false }
 # Pinned to the installed wasm-bindgen CLI — the crate and CLI versions must match.
 wasm-bindgen = "=0.2.100"
 
-[profile.release]
-opt-level = "s"
-lto = true
+# NOTE: no `[profile.*]` here. `brood-playground` is a workspace *member*, and cargo
+# ignores a non-root package's profiles — it says so on every build. This crate carried
+# `opt-level = "s"` + `lto = true` to shrink the wasm, and neither ever applied: the
+# playground is built from the workspace root (`cargo build --release -p brood-playground
+# --target wasm32-unknown-unknown`, hive's Dockerfile and scripts/wasm-receive-timeout-repro.sh),
+# so it got the DEFAULT release profile. To actually size-optimize the wasm the setting has
+# to be a root profile — and it cannot go in a root `[profile.release]`, because
+# `release-lean` and `release-fast` (what `make install` and `make ab` build) inherit from
+# it and would silently take `opt-level = "s"` with them.

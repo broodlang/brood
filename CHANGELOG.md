@@ -4,6 +4,33 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.22.1 — 2026-09-01
+
+A tag-hygiene release: v0.22.0's contents are unchanged, but its tag sat on a commit
+whose `downstream-bedit` CI job could not pass (it still pinned the pre-ADR-310 bedit).
+This tag is cut on a commit where every gate is green, and picks up two build warnings.
+
+**Fixed — `make install` built with two warnings, neither visible to `make green`.**
+
+`MAX_VALUE_DISCRIMINANT` read as dead code in a plain `--release` build. Its only
+non-test consumer is `dbg_check_args`, which is `#[cfg(debug_assertions)]`, so an
+install build has no user for it. `cargo clippy --all-targets --all-features` cannot
+see this — the test target keeps the constant live — which is why it only ever showed
+up in a real install. Now gated `#[cfg(any(debug_assertions, test))]`, matching its
+consumers.
+
+`crates/playground/Cargo.toml` carried a `[profile.release]`, and cargo ignores a
+workspace *member*'s profiles — it says so on every build of the workspace. The
+`opt-level = "s"` + `lto = true` there were meant to shrink the playground wasm and
+**never applied**: it is built from the workspace root (hive's Dockerfile and
+`scripts/wasm-receive-timeout-repro.sh` both do `cargo build --release -p
+brood-playground --target wasm32-unknown-unknown`), so it got the default release
+profile. The section is removed and replaced by a comment recording why it cannot
+simply move to a root `[profile.release]`: `release-lean` and `release-fast` — what
+`make install` and `make ab` build — inherit from it and would silently pick up
+`opt-level = "s"`. Sizing the wasm properly needs its own root profile plus a
+`--profile` flag at the two build sites; the shipped wasm is unchanged by this release.
+
 ## v0.22.0 — 2026-08-31
 
 **Changed (breaking) — a known failure is a returned value, not `nil` (ADR-310).** A
