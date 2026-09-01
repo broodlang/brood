@@ -849,10 +849,23 @@ fn warn_dropped_to_unregistered_name(name: Symbol, whence: &str) {
     if QUIET.load(Ordering::Relaxed) {
         return;
     }
+    /// Ceiling on the dedup set. The set exists so a hot loop addressing a dead service
+    /// warns once rather than flooding, and its size is "the number of distinct names" —
+    /// which for an INBOUND drop is chosen by the peer, not by us. Past the cap we stop
+    /// growing and simply warn again: a flood of distinct names is itself worth seeing,
+    /// and the alternative is a remote-controlled set that never shrinks. KI-97 item 4.
+    const MAX_WARNED_NAMES: usize = 4096;
     static SEEN: std::sync::Mutex<Option<std::collections::HashSet<Symbol>>> =
         std::sync::Mutex::new(None);
     let first = match SEEN.lock() {
-        Ok(mut g) => g.get_or_insert_with(Default::default).insert(name),
+        Ok(mut g) => {
+            let seen = g.get_or_insert_with(Default::default);
+            if seen.len() >= MAX_WARNED_NAMES && !seen.contains(&name) {
+                true // at the cap: warn without recording, rather than grow
+            } else {
+                seen.insert(name)
+            }
+        }
         // A poisoned lock must not silence the diagnostic this exists to print.
         Err(_) => true,
     };
