@@ -326,6 +326,12 @@ smoke-bedit: ## Run bedit's gates (nest check, --check-boot, nest test) against 
 	# bedit is where a brood regression surfaces first (the ADR-302 rename wave, 2026-08-30,
 	# broke an installed brood with std/ + tests/ green). Uses ../bedit (or BEDIT_DIR) and the
 	# NEWEST nest under target/ (or NEST=...); a missing checkout is a note, not a failure.
+	# TRAP: "newest" is not "most capable". The tree-sitter grammars are opt-in
+	# (`--features brood/treesit-grammars`), and anything that builds the workspace in
+	# debug — `cargo nextest run --workspace`, notably — leaves a grammar-less
+	# target/debug/nest newer than your featured release build. bedit's ruby/elixir mode
+	# tests then fail (3 of them) and read as a regression. Pass NEST=... explicitly after
+	# a workspace test run, and note the script prints which binary it chose.
 	@./scripts/smoke-bedit.sh $(ARGS)
 
 doctor: ## Report the things that make a measurement or a gate lie (build drift, strays, boot cache, litter)
