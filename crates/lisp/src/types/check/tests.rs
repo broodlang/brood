@@ -3503,7 +3503,8 @@ fn failure_narrowing_clears_the_failure_from_the_else_branch() {
     // And the then-branch really does hold a failure — a failure is not a list.
     let w = warnings("(if (failure? x) (first x) nil)");
     assert!(
-        w.iter().any(|s| s.contains("first") && s.contains("failure")),
+        w.iter()
+            .any(|s| s.contains("first") && s.contains("failure")),
         "the then-branch of (failure? x) must narrow x to failure: {w:?}"
     );
 }
