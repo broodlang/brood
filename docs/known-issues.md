@@ -91,6 +91,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-96 | **a remote monitor's `PENDING_REMOTE` entry survives its own `[:down …]`** — nothing removes the entry when the watched remote target dies and the peer's DOWN arrives, so (a) a long-lived watcher leaks one entry per dead remote monitor, and (b) a later node-down fires a SECOND `[:down mref pid :noconnection]` for an mref that already delivered — breaking the one-shot guarantee a `gen/call`-style pinned receive relies on | ✅ **FIXED 2026-08-31** — the DOWN now rides a dedicated `Frame::Down` (wire v7) instead of an ordinary `Send`, giving the watcher's node the hook the entry lacked: `deliver_remote_down` retires the pending entry, then delivers. Guard: `a_delivered_remote_monitor_does_not_fire_again_on_node_down` (two-node; sabotage-verified — retire disabled reproduces `SECOND-DOWN-BUG :noconnection`) |
 | KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31; item 1 FIXED, items 1 + 3 FIXED, item 2 three-of-four 2026-09-01** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading. **Item 1 (the pre-auth handshake trickle DoS) is closed**: a whole-handshake `Deadline` shim on both sides + a rate-limited shed warning, sabotage-verified. **Item 2**: `run-process`'s inherited stdin (a `git` credential prompt pinned a worker uncatchably) and `%node-connect`'s unbounded DNS resolve are both closed, each sabotage-verified; `proc-send`'s `write_all` now goes through a per-child writer thread (bounded queue, `dist`'s shape) — only `read-line`'s stdin lock remains, and that one is ADR-059 Phase 2 rather than a patch. **Item 3 fully closed**: the timer's poisoning `Once` (one EAGAIN broke every `sleep` forever), `ensure_workers` stranding `LIVE_EXECUTORS` above reality, the dist acceptor dying from a refused thread, and the poison-intolerant locks. **Item 4 fully closed**: the pre-auth 64 MiB allocation, unbounded wire-symbol interning, the ADR-232 dedup set, the edge-triggered accept drain, `tls_request`'s untimed connect + close-before-connect race, the never-reaped half-closed stream, `record_remote_link`'s missing liveness check, and unreaped sysmon subscriptions. **The only thing left in KI-97 is `read-line`'s stdin lock**, which is ADR-059 Phase 2 — a feature, not a patch |
 | KI-88 | **one spawn of a warm burst is created, promoted, registered — and never scheduled** — exactly one reader of a 50-process burst never executes its first instruction; no death line, and the collector times out. Gates `BROOD_TW_REENTRY`'s default (60× on the viral defer shape, measured and waiting) | ⚠️ **WATCHING 2026-08-31 — DORMANT.** Seen many times, root cause never found, and no reconstructable binary exhibits it: 10/10 pass at `62eac84c` with the router confirmed live, on top of session 4's 15/15 + 8/8 (incl. a pristine rebuild of the commit that failed 3/3 hours earlier). One candidate mechanism — `run_one`'s unprotected post-quantum tail, whose unwind produces this exact signature — was found and **closed** in session 5, so a future sighting is known not to be that. Next sighting: PRESERVE THE BINARY, arm `BROOD_SCHED_DBG=1`, take a core in the window |
+| KI-101 | **both distributed chaos harnesses had been dead for months, and reported it as a CRASH** — `scripts/fuzz/dist_chaos.sh` and `dist_chaos_remote_spawn.sh` build their node programs as shell heredocs, so no `.blsp` gate can see them. The v0.9/v0.10 namespacing waves renamed `node-start`→`node/start`, `register`→`proc/register`, `nodes`→`node/list`, `connect`→`node/connect`, `start-remote-spawn`→`node/serve-spawns`, and later `each` became a reserved stdlib name. Every node died at startup and each script dutifully printed `crashed=1` — **indistinguishable from a real runtime crash**, which is worse than not running at all | ✅ **FIXED 2026-09-01** — both repaired (all six renames, plus the harness's own helpers prefixed `chaos-` so a future stdlib addition cannot collide again) and now **self-reporting**: a definition-time error in `nN.blsp` prints `HARNESS ROT … this run tested NOTHING`, names the error, and exits 2 instead of blaming the runtime. Deliberately excludes `runtime error` — this harness kills nodes on purpose, so "connect: Connection refused" is an expected outcome and matching it would cry wolf on every healthy run. Sabotage-verified on both rot kinds (unbound symbol, reserved-name collision) and on the clean path. **With them actually running, dist is clean**: 10-node churn with kill/rejoin cycles and 40 wrong-cookie attackers, `crashed=0` across runs |
 | KI-99 | **`a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 under a full `make test`** — B warned 0 times instead of 1, with `dist: incoming connection failed: failed to fill whole buffer` on B's stderr: the handshake hit EOF mid-frame under full-suite load, so the inbound send that should have been dropped-and-warned never arrived | ⚠️ **WATCHING 2026-08-31** — retry-absorbed (try 2 passed), 6/6 green solo after. One sighting, but the failure output was **captured** this time (KI-80's lesson), and it names the mechanism: a connection that never completed, not a dedup miscount. If it recurs, the question is why the handshake EOFs under load — `MAX_HANDSHAKE_FRAME`/`accept_link` timeout interaction is the place to look, and KI-97 item 1 touches that code |
 | KI-87 | **The checker diverged — `nest run` at 54 GB, three 19 GB `types::` test processes.** `InferGuard::enter` ended in `.then_some(InferGuard(sym))`; `bool::then_some` builds its argument eagerly, so a REFUSED entry built and dropped a guard whose `Drop` removed the in-flight symbol's mark — every cycle refusal un-guarded the symbol it refused (latent since 2026-07-07). The demand walk consulting a callee's inferred sig (`0f64f600`) made `require-one` ⇄ `%require-await` nest without bound, one stack segment per level | ✅ **FIXED 2026-08-29** — the guard is constructed only on the success path (`entered.then(\|\| InferGuard(sym))`). Guards sabotage-verified: a refused third `enter` stays refused, and the mutually recursive pair reproduces the exact `mmap failed to allocate stack` OOM under `ulimit -v` with the bug restored. Build uncapped, run capped |
 | KI-86 | **`runtime_collector`'s three promotion tests failed under `cargo test`** — `expected ≥3000 promoted closures, got total=231`, with the count-based collector switched OFF by the test and one closure promoted per iteration | ⚠️ **WATCHING 2026-08-29** — precondition removed, mechanism inferred: `BROOD_RT_GC_FLOOR` is read once per process (`OnceLock`), two tests in the binary `set_var` it to 128/256, and under plain `cargo test` the leaked floor armed the `Interp`'s scheduler WORKER heaps (which share the runtime region) — a worker safepoint aged the runtime and the main heap's `cur_code()` count dropped. Fix: `Heap::set_rt_gc_floor` per test heap, no env. Not reproducible on demand on a quiet box (a worker has to wake); 4/4 green under load since |
@@ -423,6 +424,47 @@ inside the window while being an ancestor of *neither* endpoint measured earlier
 that list as a bisect order wrongly "excluded" ADR-302 — which turned out to be half the
 interaction. Check `git merge-base --is-ancestor` before reasoning about a range with merges
 in it, and bisect with `git bisect`, which understands the graph.
+
+## KI-101 — the distributed chaos harnesses were dead, and said "crash" ✅ FIXED 2026-09-01
+
+**Symptom.** `scripts/fuzz/dist_chaos.sh` reported `crashed=1` with `n0..n9 exit=1 (CRASH?)`
+on every run — for months. Nothing was crashing. Every node was failing to *start*:
+
+```
+n0.blsp:1:1: unbound error: unbound symbol: node-start
+```
+
+**Why nothing caught it.** Both harnesses build their node programs as **shell heredocs**,
+so they are invisible to `nest check`, to `make check-corpora` (which scans `.blsp` files in
+`examples/ stress/ fuzz-stress/ breakage/`) and to every other gate. The v0.9/v0.10
+namespacing waves renamed `node-start`→`node/start`, `register`→`proc/register`,
+`nodes`→`node/list`, `connect`→`node/connect` and `start-remote-spawn`→`node/serve-spawns`;
+later `each` became a reserved stdlib name and broke the sibling a second time. This is
+KI-42/KI-44's class exactly, in a directory those entries did not reach.
+
+**The part that makes it worse than simply not running:** the failure *presented as a
+finding*. `exit=1` is not in the script's expected set (`0|137|143`), so it printed `CRASH?`
+and set `crashed=1` — a stability harness confidently reporting a runtime crash that never
+happened. A dead gate that stays quiet wastes an opportunity; one that cries wolf spends
+someone's afternoon.
+
+**Fix.** Both scripts repaired, their own helpers prefixed `chaos-` so a future stdlib
+addition cannot collide with them again, and both made **self-reporting**: a
+definition-time error attributed to `nN.blsp` prints `HARNESS ROT … this run tested
+NOTHING`, names the error, and exits 2 — instead of blaming the runtime.
+
+Two details worth keeping, each found by the guard misbehaving before it worked:
+- It matches only **definition-time** kinds (`unbound`/`type`/`arity`/`syntax`/`name`),
+  never `runtime error`. This harness kills nodes deliberately, so
+  `connect: Connection refused` is an *expected* outcome; an earlier version matched it and
+  would have reported rot on every healthy run.
+- Its first placement anchored on `for i in $(seq 0 7)`, which in the sibling is the
+  **port-init** loop near the top — so the check ran before any `.err` file existed and
+  silently never fired. It is now anchored to the exit-collection loop.
+
+**With the harnesses actually running, the runtime is clean**: 10-node churn with kill and
+rejoin cycles plus 40 wrong-cookie attackers hammering the seed's handshake, and the
+remote-spawn variant shipping closures across a dying mesh — `crashed=0` on every run.
 
 ## KI-99 — a dist handshake EOF'd under full-suite load, so a drop-warning test saw no send ⚠️ WATCHING 2026-08-31
 
