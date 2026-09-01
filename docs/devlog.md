@@ -9475,3 +9475,46 @@ wrong about how often it *runs*. One `&&` above the call was the whole story. Be
 building any remaining item on that list: **count the calls first**. A probe settles in one
 run what a careful read cannot, and it costs minutes against the hours a build-then-A/B
 round trip takes. I have added that instruction to the section header.
+
+## 2026-09-01 (stability sweep) — the correctness tools, and what they found
+
+Asked for correctness/stability work rather than perf, and the honest position was that the
+*known* list is nearly empty — KI-97 is down to `read-line` (a scoped feature) and every
+other open item is a watch that will not reproduce. So the question became: are there
+*unknown* ones? Ran the tools that answer that.
+
+**Clean:** all eleven differential fuzz generators (metamorphic 1050 checks, then
+arithmetic/numeric/match/trycatch/tier_transition/quasiquote/strings/rope/syntax/checker at
+60 programs × 4 engine configs each) — 0 divergences, 0 crashes, 0 oracle failures.
+`make gcstress` all clean. That is a real result: the VM/JIT/tree-walker agree and the GC
+tripwire stays silent under stress.
+
+**Not clean: the harnesses themselves.** Both distributed chaos scripts had been dead for
+months — filed as **KI-101**. Every node failed to start on `unbound symbol: node-start`,
+because the v0.9/v0.10 namespacing waves renamed five names out from under heredoc'd node
+programs that no `.blsp` gate can see, and `each` later became a reserved stdlib name and
+broke the sibling a second time. KI-42/KI-44's class, in a directory those entries never
+reached.
+
+**The bit that makes it worse than a quiet dead gate:** the failure *presented as a
+finding*. `exit=1` is outside the script's expected set, so it printed `CRASH?` and
+`crashed=1` — a stability harness confidently reporting a runtime crash that never happened.
+A dead gate that stays quiet wastes an opportunity; one that cries wolf spends an afternoon.
+
+Both repaired, helpers prefixed `chaos-` against the next stdlib addition, and both now
+self-report: a definition-time error in `nN.blsp` prints `HARNESS ROT … this run tested
+NOTHING` and exits 2 rather than blaming the runtime.
+
+**Two guard bugs, each caught by testing the guard rather than trusting it.** The first
+version matched the bare phrase "unbound symbol" — which appears in the prose of the
+checker's *"catch discards the error unread"* warning, so every clean run reported rot. The
+second matched any `error:`, including `connect: Connection refused` — an *expected* outcome
+in a harness that kills nodes on purpose. And in the sibling the block was anchored on
+`for i in $(seq 0 7)`, which there is the **port-init** loop near the top, so it ran before
+any `.err` existed and silently never fired. Three ways to write a guard that does nothing
+or cries wolf, in one sitting.
+
+**And with the harnesses actually running, the runtime is clean**: 10-node churn with
+kill/rejoin cycles plus 40 wrong-cookie attackers, and the remote-spawn variant shipping
+closures across a dying mesh — `crashed=0` every run. That is the stability signal we did
+not have this morning, and could not have had while the harness could not start a node.
