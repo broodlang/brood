@@ -9605,3 +9605,26 @@ path, backward and zig-zag for its two fallbacks. Sabotage-verified twice: dropp
 1-based `+1` from the arithmetic path, and dropping the same-line guard from the memo. The
 second is the one that matters, because a memo carried across a line boundary is a silently
 wrong column, never a crash.
+
+**Two process failures from the same session, both worth recording.**
+
+*An inserted test stole an existing one's attribute.* Adding
+`the_ascii_fast_path_agrees_with_the_char_walk_everywhere` immediately above
+`pos_at_counts_lines_and_columns_through_multibyte` put the new function between that test's
+`#[test]` and its `fn`, so the new one carried two attributes and **the old one silently
+stopped being a test** — it became dead code, and the scanner suite went from 11 tests to 11
+tests, the same number, because one was added as another was lost. Nothing failed. The only
+signal was rustc's `duplicate_macro_attributes` + `dead_code` pair, which is easy to skim
+past in a build log. Count the tests before and after inserting one, and never anchor an
+insertion on a `fn` line that has attributes above it.
+
+*A `cd` into an `ab-bench` worktree silently redirected six commands.* `cd target/ab/<sha> &&
+cargo build` left the shell there, so a full suite run, clippy, `nest format --check` and a
+commit all executed against the **baseline checkout** rather than the working tree — the
+suite passed, the gates passed, and none of it had tested the change, because that tree does
+not contain it. The commit that resulted carried only the devlog entry. The tell was cargo
+printing package paths under `target/ab/9b9492e5/crates/`, which read as a cargo oddity for
+several commands before it read as a wrong working directory. `ab-bench` worktrees are full
+checkouts of this repo, so every relative path in them resolves plausibly and nothing errors.
+Use absolute paths for a build in a worktree, and treat an unexpected package path in build
+output as a location bug first.
