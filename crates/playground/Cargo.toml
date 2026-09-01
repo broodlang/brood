@@ -17,6 +17,8 @@ brood = { path = "../lisp", default-features = false }
 # Pinned to the installed wasm-bindgen CLI — the crate and CLI versions must match.
 wasm-bindgen = "=0.2.100"
 
-[profile.release]
-opt-level = "s"
-lto = true
+# NOTE: no `[profile.*]` here, deliberately. `brood-playground` is a workspace *member*,
+# and cargo ignores a non-root package's profiles — it said so on every build of the
+# workspace. This crate used to carry `opt-level = "s"` + `lto = true` to shrink the wasm
+# and neither ever applied. Those settings now live at the workspace root as
+# `[profile.release-wasm]`; build this crate with `--profile release-wasm`.

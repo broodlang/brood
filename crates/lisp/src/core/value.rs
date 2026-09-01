@@ -632,9 +632,13 @@ pub enum Value {
 /// exactly like a JIT frame-slot corruption (the bug #2 family) when nothing was
 /// corrupt at all. [`max_value_discriminant_is_the_last_variant`] stops that recurring:
 /// it does not compile if a variant is appended without updating this.
-/// Gated to match its only consumer (`dbg_check_args`, also debug-assertions only), so a
-/// release build does not carry an unused constant.
-#[cfg(debug_assertions)]
+///
+/// Gated to match its consumers: the only non-test reader is `dbg_check_args`, which is
+/// `#[cfg(debug_assertions)]`, so a plain `--release` build (what `make install` does)
+/// has no user for it and warns dead-code. `cargo clippy --all-targets` does NOT catch
+/// that — the test target keeps it live — so the warning only ever appeared in a real
+/// install build.
+#[cfg(any(debug_assertions, test))]
 pub(crate) const MAX_VALUE_DISCRIMINANT: u8 = 26;
 
 /// The **unpacked** view of a [`Value`] — the form you `match` against.
@@ -1458,7 +1462,7 @@ mod runtime_gen_handle_tests {
     }
 }
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 mod discriminant_bound_tests {
     use super::*;
 
