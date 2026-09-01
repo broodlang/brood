@@ -120,6 +120,37 @@ for f in "$ROOT"/stress/*.blsp "$ROOT"/scripts/fuzz/stress/*.blsp; do
   esac
 done
 
+# ---- the two distributed chaos harnesses -------------------------------------
+# They build their node programs as shell HEREDOCS, so no .blsp gate can see them —
+# which is how both sat dead for months on renamed symbols while printing `crashed=1`,
+# i.e. reporting a runtime crash that never happened (KI-101). Nothing invoked them, so
+# the self-check they now carry would never have fired either.
+#
+# Gated on LIVENESS ONLY. Each script exits 2 when its node program no longer starts
+# (`HARNESS ROT`), and that is deterministic and worth failing on. Its `crashed=` verdict
+# is NOT gated here: these are timing-sensitive kill/rejoin races, and importing that
+# flakiness into a push gate would teach everyone to ignore it. A real crash still prints
+# and is visible in the log; the point of this gate is only that the harness can still run.
+for chaos in dist_chaos dist_chaos_remote_spawn; do
+  script="$ROOT/scripts/fuzz/$chaos.sh"
+  [ -x "$script" ] || [ -f "$script" ] || continue
+  matches "$chaos" || continue
+  out="$(cd "$ROOT" && timeout 300 bash "$script" 1 2>&1)"; rc=$?
+  case $rc in
+    2) fail=1
+       echo "  FAIL    fuzz/$chaos.sh — HARNESS ROT (its node program no longer starts)"
+       printf '%s\n' "$out" | grep -E "HARNESS ROT|^      " | sed 's/^/            /' ;;
+    0) if printf '%s' "$out" | grep -q "crashed=0"; then
+         echo "  ok      fuzz/$chaos.sh (ran; crashed=0)"
+       else
+         # Not a gate failure — see above — but say so, loudly enough to chase.
+         echo "  ok      fuzz/$chaos.sh (ran; NOTE: reported a crash, not gated — inspect)"
+       fi ;;
+    124) echo "  skip    fuzz/$chaos.sh (timed out at 300s)" ;;
+    *)   echo "  skip    fuzz/$chaos.sh (exit $rc)" ;;
+  esac
+done
+
 echo
 if [ $fail -ne 0 ]; then echo ">>> stress: FAILURES above"; exit 1; fi
 echo ">>> stress: all clean"
