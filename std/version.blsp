@@ -39,7 +39,11 @@ compare what a human typed in a manifest, not to validate it (that is
 
     (version/core \"1.2.3-rc1\")   → (1 2 3)"
   (let (core (first (string/split (first (string/split v "+")) "-")))
-    (map (string/split core ".") (fn (p) (or (string/->number p) 0)))))
+    ;; Deliberately lenient: this reads what a human typed in a manifest, so a
+    ;; non-numeric segment is 0 rather than an error. `failure?` states that — a
+    ;; failure is truthy, so `(or … 0)` would hand the failure back instead.
+    (map (string/split core ".")
+      (fn (p) (let (n (string/->number p)) (if (failure? n) 0 n))))))
 (sig core (string -> (or nil (list (or nil number)))))
 
 (defn- digit-run? (s)
@@ -113,12 +117,16 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
 (defn- compare-id (x y)
   ;; numeric identifiers compare numerically and rank BELOW alphanumeric ones; two
   ;; alphanumeric identifiers compare in ASCII order.
+  ;; "Parsed as a number" is `(not (failure? …))`, not truthiness: a failure is
+  ;; truthy, so `(and nx ny)` used to accept `"rc"` and hand it to `<`.
   (let (nx (string/->number x)
-        ny (string/->number y))
+        ny (string/->number y)
+        nx? (not (failure? nx))
+        ny? (not (failure? ny)))
     (cond
-      (and nx ny) (cond (< nx ny) -1 (> nx ny) 1 else 0)
-      nx -1
-      ny 1
+      (and nx? ny?) (cond (< nx ny) -1 (> nx ny) 1 else 0)
+      nx? -1
+      ny? 1
       else (/compare x y))))
 
 (defn- compare-parts (a b)

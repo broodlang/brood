@@ -8917,3 +8917,44 @@ Lesson for the next `Value` variant: the tripwire's bound is not the only thing 
 go stale silently, and its failure mode impersonates the scariest bug class in the tree.
 Grep for guards keyed to the *old* signal (`nil?`, discriminant bounds) when a kind or a
 contract changes — the type checker cannot see either.
+
+## 2026-09-01 — a failure is truthy: the migration that cost nothing was the tell
+
+v0.22.0 made a `failure` **falsy**, and the headline evidence was that eleven of thirteen
+call sites needed no edit. That number was the warning, not the win. The sites needing no
+edit were the ones *silently swallowing* the failure — `version/core` read `"1.x"` as
+`(1 0)` and a test asserted it, its name spelling out the problem: *"a non-numeric segment
+reads as 0 rather than raising"*. ADR-310 states that an "unable" is never quietly
+defaulted; falsiness broke that rule by default, in the ADR that states it.
+
+It surfaced from a real wrong answer. `(calc "1 1 + - 1")` returned **1**: the parse
+failure was `conj`ed onto the RPN stack, buried under later pushes, and `first` never
+looked. Three more inputs did the same. Then the obvious fix —
+`(or (seq/find stack failure?) (first stack))` — *also* silently returned 1, because a
+failure is falsy and `or` skipped the one it had just found. Falsiness cannot separate
+"it failed" from "there is nothing here", which is the exact collapse the kind exists to
+undo.
+
+Two designs were prototyped and both rejected before landing this one. **Propagation**
+(`conj`/`first` pass a failure through) made the original nine-line `calc` correct with
+no call-site change at all, but cost **+9.5%** on a conj-hot loop (210 → 230 ms,
+reproducible) — and, measured on the way, `conj` is **33× slower than `cons`** (210 ms vs
+7 ms for 200k ops) because it is a Brood `cond` chain of five type tests. That gap is the
+real perf story and is worth its own look. **A checker lint** was rejected because the
+checker types `(seq/find xs failure?)` as `any`, so it would not fire on the shape that
+started this.
+
+Flipping truthiness was then measured rather than argued: seven files broke, **every one
+loudly**, with a type error naming the failure and its cause. None was a silent wrong
+branch. Each was a place that should have been stating its intent and now does.
+
+The lesson is about coverage, not truthiness. Nine further sites relied on falsiness for
+defaulting and **the suite passed on all nine**, because nothing exercised a bad parse:
+`std/net/http`'s response status (a malformed status line would have put a failure map in
+the `status` field), `nest`'s check-cache knob, both `nest new` scaffold templates, and
+four test env knobs. A grep for `(or (<parser> …) default)` found them; no test would
+have. Downstream, bedit, hive, hatch-demo and brood-terminal had five more, hive's live —
+a malformed port in a `DATABASE_URL`.
+
+`seq/keep` also went back to dropping **only `nil`**. It had briefly dropped failures too,
+which is discarding something the caller never asked to discard.

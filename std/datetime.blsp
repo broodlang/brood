@@ -369,10 +369,10 @@ A numeric offset is applied, yielding the equivalent UTC instant — every datet
 produces is UTC.
 
     (datetime/->iso (datetime/parse-iso8601 \"2026-01-02T03:04:05+02:00\"))   → \"2026-01-02T01:04:05.000Z\""
-  ;; The inner `(and d t)` needs no change now that `parse-date`/`parse-time` answer a
-  ;; FAILURE instead of nil: a failure is falsy, so a bad component short-circuits here
-  ;; exactly as a nil did, and the outer `or` turns the whole thing into one failure
-  ;; naming the input the caller actually passed.
+  ;; The component guards test `failure?`, not truthiness: `parse-date`/`parse-time`
+  ;; answer a FAILURE on bad input and a failure is truthy, so `(and d t)` would accept
+  ;; one and hand it to `date+time`. The outer `or` then turns any of these into one
+  ;; failure naming the input the caller actually passed.
   (or
     (let (parts (string/split s "T"))
       (when (= (count parts) 2)
@@ -381,11 +381,12 @@ produces is UTC.
               oi (dt-offset-index time-part))
           (if (< oi 0)
             (let (t (parse-time time-part))
-              (when (and d t) (date+time d t)))
+              (when (and (not (failure? d)) (not (failure? t))) (date+time d t)))
             (let (t (parse-time (string/substring time-part 0 oi))
                   off (dt-parse-offset-ms (string/substring time-part oi (string/length time-part))))
               ;; subtract: a local time east of UTC names an EARLIER UTC instant
-              (when (and d t off) (add (date+time d t) (- off))))))))
+              (when (and (not (failure? d)) (not (failure? t)) off)
+                (add (date+time d t) (- off))))))))
     (failure "datetime/parse-iso8601: not an ISO 8601 datetime: " (pr-str s))))
 
 ;; ---- duration helpers -------------------------------------------------------

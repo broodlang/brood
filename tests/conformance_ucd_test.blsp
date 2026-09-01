@@ -242,7 +242,9 @@
 ;; default here overwrote the wrapper's 16 back to 1, the sweep stayed full, and the
 ;; wrapper went on timing out. The environment is read at the same moment, by the code
 ;; that needs it, so there is no ordering to get wrong.
-(def- nt-part1-of (math/max 1 (or (string/->number (or (os/env "BROOD_UCD_PART1_OF") "")) 1)))
+(def- nt-part1-of
+  (math/max 1
+    (let (n (string/->number (or (os/env "BROOD_UCD_PART1_OF") ""))) (if (failure? n) 1 n))))
 
 ;; Every `*ucd-part1-of*`-th case of the pre-collected Part1 list, from offset `k`.
 (defn- nt-slice-scan (lines k n idx ran bad)

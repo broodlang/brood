@@ -346,8 +346,9 @@
       ;; like `seq/interpose`: `keep` lives in `seq` (ADR-227), so an arm matching the
       ;; bare name never fired at all and the element type was silently lost. The
       ;; element type has the callback's nil REMOVED — dropping nil is what `keep`
-      ;; does, so `(or nil number)` narrows to `number` (see infer.rs).
-      (assert= "(seqable -> (or nil (list number)))"
+      ;; does — but NOT its failure: `keep` drops only nil, so a failure the callback
+      ;; produced stays in the element type, which is what makes it visible here.
+      (assert= "(seqable -> (or nil (list (or failure number))))"
         (sig-of "(defn icb-k (xs) (seq/keep xs (fn (x) (string/->number x))))" "icb-k"))))
 
   ;; An INLINE pattern-clause literal is two spellings of the named `token` reducer the

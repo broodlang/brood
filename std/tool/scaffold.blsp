@@ -499,7 +499,8 @@ test discovery, lints, release, config)."
     "      ([:task-error ^h _msg] (errors/error-response 500))\n"
     "      ([:task-timeout ^h] (errors/error-response 504)))))\n" "\n" "(defn port ()\n"
     "  \"Serve on $HATCH_PORT if set and numeric, else 5000.\"\n"
-    "  (or (string/->number (or (os/env \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
+    "  (let (n (string/->number (or (os/env \"HATCH_PORT\") \"\")))\n"
+    "    (if (failure? n) 5000 n)))\n" "\n" "(defn serve ()\n"
     "  \"Start the HTTP listener on `(port)`.\"\n"
     "  (server/start (port) adapter (live/live-dispatcher) {}))\n"))
 
@@ -691,7 +692,8 @@ test discovery, lints, release, config)."
     "      ([:task-error ^h _msg] (error-json 500 \"internal server error\"))\n"
     "      ([:task-timeout ^h] (error-json 504 \"request timed out\")))))\n" "\n" "(defn port ()\n"
     "  \"Serve on $HATCH_PORT if set and numeric, else 5000.\"\n"
-    "  (or (string/->number (or (os/env \"HATCH_PORT\") \"\")) 5000))\n" "\n" "(defn serve ()\n"
+    "  (let (n (string/->number (or (os/env \"HATCH_PORT\") \"\")))\n"
+    "    (if (failure? n) 5000 n)))\n" "\n" "(defn serve ()\n"
     "  \"Start the HTTP listener on `(port)` — no ws-handler, so no live layer.\"\n"
     "  (server/start (port) adapter))\n"))
 

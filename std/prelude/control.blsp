@@ -310,7 +310,7 @@ is not `nil`, so absence and failure stay distinct; and `error-message` reads it
 
     (failure \"not a range: \" (pr-str s))
     (failure? (failure \"nope\"))            → true
-    (or (failure \"nope\") :default)         → :default"
+    (if (failure \"nope\") :yes :no)         → :yes   ; truthy — never silently absent"
   (%failure (apply str parts)))
 
 ;; `(catch Type e body…)` — Clojure/Java's *typed* catch. Brood's `catch` binds

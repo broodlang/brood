@@ -633,11 +633,6 @@ impl Ty {
         Ty::ANY
             .difference(Ty::of(Tag::Nil))
             .difference(Ty::bool_lit(false))
-            // A `failure` is falsy at runtime (`eval::truthy`), so it must be falsy
-            // here too — this is what makes `(or (string/->number s) 0)` narrow to a
-            // number rather than reporting `number | failure`. One definition, so
-            // every guard, `or`/`and` and `if` narrowing agrees with the evaluator.
-            .difference(Ty::of(Tag::Failure))
     }
 
     /// Is this type known only by what it is NOT — `any`, or `any` less a guard's

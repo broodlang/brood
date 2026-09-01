@@ -1549,12 +1549,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let (coll, f) = super::sigs::combinator_args(items)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         let b = callback_ret(heap, f, &[a], ctx).map(|t| {
-            // `keep` drops nil AND failure — both mean "nothing produced" — so both
-            // come off the element type.
-            let non_nil = t
-                .clone()
-                .difference(Ty::of(Tag::Nil))
-                .difference(Ty::of(Tag::Failure));
+            let non_nil = t.clone().difference(Ty::of(Tag::Nil));
             // A callback that only ever yields nil keeps an empty list, i.e. `nil`.
             // Reporting `list<never>` would be true but useless downstream, so keep
             // the unstripped type in that one case.

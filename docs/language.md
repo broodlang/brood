@@ -77,12 +77,17 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 
 ### Truthiness
 
-Only `nil`, `false` and a **`failure`** are falsy. **Everything else is truthy**,
-including `0`, `""`, and empty collections like `[]`, `{}`, and `#{}`.
+Only `nil` and `false` are falsy. **Everything else is truthy**, including `0`, `""`,
+empty collections like `[]`, `{}`, `#{}` — **and a `failure`**.
 
-A failure is falsy on purpose: it stands where a function used to answer `nil` on bad
-input, so `(or (string/->number s) 0)` and `(if n …)` keep working unchanged, while the
-value itself can still say what went wrong. See [Errors](#errors).
+A failure being truthy is deliberate. It was falsy for one release, so that
+`(or (string/->number s) 0)` would keep working unchanged; that turned out to be the
+problem rather than the feature. The call sites needing no edit were the ones *silently
+swallowing* the failure — `(or (string/->number p) 0)` read `"x"` as `0` and said
+nothing. Falsiness also cannot separate "it failed" from "there is nothing here", which
+is the very collapse this design exists to undo: `nil` means absence, a failure means it
+could not be produced. To treat a failure as absent you now say so, with `failure?`.
+See [Errors](#errors).
 
 > **The one asymmetry — an empty *list* is falsy.** The rule is purely
 > `nil`/`false`, but the **empty list is `nil`** (`()` ≡ `nil`), so a list is the
@@ -1567,13 +1572,17 @@ A function that cannot interpret its input returns a **`failure`**: its own kind
 (error-message (string/->number "abc"))   ;=> "string/->number: not a number: \"abc\""
 ```
 
-**A failure is falsy**, so it short-circuits everywhere `nil` did — which is why adopting
-it changed almost no call sites:
+**A failure is truthy**, like every value that is not `nil` or `false`. So it never
+quietly disappears into a default — you handle it, or it flows onward and the next
+operation reports it:
 
 ```clojure
-(or (string/->number s) 0)                ; defaults, exactly as when this answered nil
-(if (string/->number s) :yes :no)         ; branches, exactly as before
-(seq/keep lines string/->number)          ; `keep` drops failures as well as nils
+(or (string/->number s) 0)                ; the FAILURE, not 0 — it is truthy
+(if (string/->number s) :yes :no)         ; :yes — there IS a value, just not a number
+(seq/keep lines string/->number)          ; keeps them: `keep` drops only nil
+
+(let (n (string/->number s))              ; the way to default, said out loud
+  (if (failure? n) 0 n))
 ```
 
 **It is not `nil`, though**, and that is the point: `nil` means *absence* — a lookup
@@ -2941,15 +2950,15 @@ Three functions, and which one you want depends on the *type you need*, not on t
 (decimal/of "1.50")         ;=> 1.50M   an exact decimal
 ```
 
-**Text it cannot read yields a `failure`, not `nil`** (ADR-310) — falsy, so
-`(or (string/->number s) 0)` still defaults, but it names the offending input instead of
-vanishing. `decimal/of` is the exception and *raises*: a parse failing is data, a
-constructor failing is a bug.
+**Text it cannot read yields a `failure`, not `nil`** (ADR-310) — a truthy value naming
+the offending input, so it cannot vanish into a default unnoticed. `decimal/of` is the
+exception and *raises*: a parse failing is data, a constructor failing is a bug.
 
 ```clojure
 (string/->number "3abc")                 ;=> a failure — no partial parse
-(or (string/->number "3abc") 0)          ;=> 0
 (failure? (string/->number "3abc"))      ;=> true
+(let (n (string/->number s))             ; defaulting, stated explicitly
+  (if (failure? n) 0 n))
 ```
 
 **`string/->number` decides int-vs-float from the digits**, so `"3"` gives you an `int`

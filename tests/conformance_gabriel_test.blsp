@@ -161,7 +161,8 @@
 ;; long note on `BROOD_UCD_PART1_OF` in tests/conformance_ucd_test.blsp for why a global
 ;; default here would silently overwrite the wrapper's value and leave the knob inert.
 (def- gb-nboyer-max-n
-  (math/max 1 (or (string/->number (or (os/env "BROOD_GABRIEL_NBOYER_MAX_N") "")) 2)))
+  (math/max 1
+    (let (n (string/->number (or (os/env "BROOD_GABRIEL_NBOYER_MAX_N") ""))) (if (failure? n) 2 n))))
 
 ;; The two heavier sizes, kept out of the default budget. `:slow` raises the batch
 ;; timeout (a `:conformance` tag does too) rather than skipping them, so they really do
