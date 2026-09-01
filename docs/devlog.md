@@ -9283,3 +9283,48 @@ because it reads as coverage.
 
 Verified: suite 1336/1337 (only the documented wasm-under-cap exception), distribution 36/36,
 clippy on CI's flags.
+
+## 2026-09-01 (very late) — KI-97 item 4 closes; the whole entry is down to one feature
+
+The remaining five, each a leak or a silence rather than a crash:
+
+**The accept drain stranded its own backlog.** `Err(_) => break` on any error, under an
+**edge-triggered** registration — so whatever was already queued waited for some *later*
+arrival to re-arm us, and nothing was logged. `ConnectionAborted` (a peer that died between
+the readiness event and `accept`) is a fact about one connection and now `continue`s;
+anything else still breaks but says so. A listener that had stopped accepting used to look
+exactly like one nobody was connecting to.
+
+**`tls_request` could leave a socket nobody owned.** The registry entry is inserted *before*
+the connect, so an owner closing during it removed the entry while the thread went on to
+hand the socket to the reactor — a live TLS connection under an id nothing could close. The
+thread now re-checks the registry and drops the stream. Its connect is bounded at 5 s too
+(it was waiting out the kernel's SYN timeout while holding the caller's request buffer), and
+its `.expect("spawn tls connect thread")` is gone — item 3's class, found while here.
+
+**A half-closed stream was excluded from the only reap that could collect it.** The idle
+branch required `!c.read_done`. But `accepted_at` is cleared when the owner claims the
+connection and `closing` is only set by an explicit close, so a peer that shut its write
+half while the owner never closed the socket leaked the entry and its fd for the runtime's
+life. `read_done` now counts as quiet — gated on nothing queued outbound, because a
+half-close legitimately means "I am done sending, you may still reply".
+
+**`record_remote_link`'s doc had promised a check it never made.** "Returns whether
+`local_pid` is currently alive" — it returned `()`. That matters inbound, where `to_pid` is
+wire data: a peer naming a dead pid created a `REMOTE_LINKS` entry nothing would ever
+remove, since the sweep runs from `deregister`, which for that pid already happened or never
+will. Now checked inside the critical section, and a dead target gets `:noproc` back — what
+a *local* `link` to a dead pid already delivers. A doc comment describing absent behaviour is
+worth treating as a bug report.
+
+**sysmon reaped by the wrong question.** `clear_if` gated on `armed()`, the mask of
+*selected kinds*, which is 0 for a subscriber that selects nothing — so precisely those
+subscribers were never reaped. Gated on the subscription count now. The guard asserts the
+`!armed()` precondition explicitly, so it cannot quietly stop exercising the trap.
+
+**KI-97 is now down to one item**: `read-line`'s global stdin lock, which is ADR-059 Phase 2
+(terminal input on a reader thread, delivering to a mailbox) — a feature, deliberately not
+half-done.
+
+Verified: suite 1338/1339 (only the documented wasm-under-cap exception), distribution +
+serve/observe attach 38/38, http 50/50, clippy on CI's flags.
