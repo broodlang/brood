@@ -60,7 +60,9 @@ use guards::{gc_block_set, macro_block_set, stack_base_set};
 mod lifecycle;
 pub(crate) use lifecycle::exit_propagate;
 use lifecycle::{deregister, proc_descr, retire_root_ctx};
-pub use lifecycle::{exit, pending_kill_phrase, spawn, spawn_linked, spawn_monitored, spawn_root_program};
+pub use lifecycle::{
+    exit, pending_kill_phrase, spawn, spawn_linked, spawn_monitored, spawn_root_program,
+};
 
 // The worker pool + run-queue execution loop lives in a child module; shared
 // scheduling state stays in the root (reached via `use super::*`). Re-export the
