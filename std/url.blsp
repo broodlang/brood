@@ -202,6 +202,7 @@ invalid %XX sequence (the failure propagates rather than landing in the map).
   (if (= s "")
     {}
     (url-parse-query-pairs (string/split s "&") {})))
+(sig query-decode (string -> (or map failure)))
 
 ;; ---- URL parsing ------------------------------------------------------------
 ;;

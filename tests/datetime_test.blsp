@@ -357,9 +357,9 @@
   (test "a zero day"
     (is (failure? (datetime/parse-date "2026-01-00"))))
   (test "leap days follow the real calendar"
-    (refute (nil? (datetime/parse-date "2024-02-29")))
+    (refute (failure? (datetime/parse-date "2024-02-29")))
     (is (failure? (datetime/parse-date "2026-02-29")))
-    (refute (nil? (datetime/parse-date "2000-02-29")))
+    (refute (failure? (datetime/parse-date "2000-02-29")))
     (is (failure? (datetime/parse-date "1900-02-29"))))
   (test "ordinary dates still parse"
     (let (d (datetime/parse-date "2026-08-24"))
@@ -374,13 +374,13 @@
     (is (failure? (datetime/parse-time "24:00:00")))
     (is (failure? (datetime/parse-time "12:60:00")))
     (is (failure? (datetime/parse-time "12:00:60")))
-    (refute (nil? (datetime/parse-time "23:59:59"))))
+    (refute (failure? (datetime/parse-time "23:59:59"))))
   (test "junk after the Z fails, not silently truncated"
     (is (failure? (datetime/parse-time "12:00:00Zjunk")))
-    (refute (nil? (datetime/parse-time "12:00:00Z"))))
+    (refute (failure? (datetime/parse-time "12:00:00Z"))))
   (test "a non-numeric fraction fails, not 0 ms"
     (is (failure? (datetime/parse-time "12:00:00.xyz")))
-    (refute (nil? (datetime/parse-time "12:00:00.250")))))
+    (refute (failure? (datetime/parse-time "12:00:00.250")))))
 
 (describe "parse-iso8601 — validation flows through"
   (test "an impossible hour fails"
@@ -388,4 +388,4 @@
   (test "an impossible date fails"
     (is (failure? (datetime/parse-iso8601 "2026-02-31T00:00:00Z"))))
   (test "a real timestamp still parses"
-    (refute (nil? (datetime/parse-iso8601 "2026-08-24T12:34:56.789Z")))))
+    (refute (failure? (datetime/parse-iso8601 "2026-08-24T12:34:56.789Z")))))

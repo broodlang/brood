@@ -102,7 +102,9 @@ the type to `\"message\"` and the data to `\"\"` (the SSE spec's defaults). Pure
   (let (line (first (string/split head "\n"))
         parts (string/split line " ")
         n (string/->number (nth parts 1 "0")))
-    (or n 0)))
+    ;; `failure?`, not `or`: a malformed status line parses to a TRUTHY failure, so
+    ;; `(or n 0)` would put a `#failure{…}` where the status code belongs.
+    (if (failure? n) 0 n)))
 
 ;; ---- server-side framing (the inverse of the parser above) ------------------
 ;; Pair with `http`'s streaming seam: a handler returns `(stream-response 200
