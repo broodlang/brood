@@ -313,9 +313,22 @@ pub(super) fn interrupt_taken(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult
 }
 
 /// `(run-process prog args)` — run external program `prog` with `args` (a list or
-/// vector of strings), inheriting stdio, and return its exit code as an integer
+/// vector of strings), inheriting stdout/stderr, and return its exit code as an integer
 /// (-1 if killed by a signal). The Emacs `call-process` analogue: the general
 /// subprocess mechanism (used by the project scaffolder's `git init`).
+///
+/// **stdin is `/dev/null`, deliberately** (KI-97). `Command::status()` inherits all three
+/// streams, and an inherited stdin is an unbounded, *uncatchable* block on a scheduler
+/// worker: a child that reads it — `git` hitting a credential prompt is the realistic
+/// case, and `std/tool/workspace.blsp` runs `git` across sibling repos — waits forever on
+/// a terminal nobody is typing at. The scheduler cannot preempt a thread parked in a
+/// syscall (ADR-059), so a handful of those wedge the whole ~nproc pool, and no timeout
+/// or `try` can recover them. With `/dev/null` the child reads EOF and fails fast, which
+/// is a diagnosable error instead of a hung runtime.
+///
+/// This also matches the analogue rather than departing from it: Emacs `call-process`
+/// takes an INFILE and uses `/dev/null` when it is nil. A genuinely interactive child
+/// needs a different primitive (one that does not run on a worker), not this one.
 pub(super) fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pv = arg(args, 0);
     let prog = match pv {
@@ -340,7 +353,11 @@ pub(super) fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             }
         }
     }
-    match std::process::Command::new(&prog).args(&argv).status() {
+    match std::process::Command::new(&prog)
+        .args(&argv)
+        .stdin(std::process::Stdio::null())
+        .status()
+    {
         Ok(status) => Ok(Value::int(status.code().unwrap_or(-1) as i64)),
         Err(e) => Err(LispError::runtime(format!("run-process: {}: {}", prog, e))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)

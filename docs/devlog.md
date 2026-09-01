@@ -9033,3 +9033,36 @@ no runtime off-switch for RootsBuf, so that is the only lever.
 2. **A tier verdict is only about the pair you measured.** "Tier 1 is flat" was true of
    old-commit-vs-current-tree and false of the pair that actually regressed. Re-derive the
    discriminator on the culprit pair before believing it.
+
+## 2026-09-01 (evening) — KI-97 item 2: two of the four worker-pinning calls closed
+
+Both are ADR-059 violations — a native blocking call on a scheduler worker, which cannot
+be preempted mid-syscall, so the pool drains and no `try` or timeout in Brood can recover.
+
+**`run-process` inherited stdin.** `Command::status()` inherits all three streams, so a
+child that reads stdin waits forever on a terminal nobody is typing at. The realistic
+trigger is `git` hitting a credential prompt, and `std/tool/workspace.blsp` runs `git`
+across sibling repos — reachable from the shipped toolchain, not hypothetical. Now
+`/dev/null`. Worth noting this *restores* the analogue rather than breaking it: Emacs
+`call-process` uses `/dev/null` when INFILE is nil, and every in-tree caller is `git`/`sh`
+needing no stdin. (`%os-cmd` was never affected — `Command::output()` nulls stdin.)
+
+The guard is the interesting part. Under an ordinary test harness stdin is already at EOF,
+so a child reading it returns instantly and the bug is **invisible** — a naive test passes
+before and after and proves nothing. The test therefore spawns `brood` with a *pipe* as
+stdin and never writes or closes it, which is the only shape in which the hazard exists.
+Sabotage-verified: without the fix it hangs the full 20 s while the sibling exit-code test
+still passes (so the fix could not have been "always return 0").
+
+**`%node-connect`'s DNS resolve.** `connect_timeout` bounded the connect but never the
+lookup, and `to_socket_addrs` is a blocking libc call with no timeout of its own — an
+unreachable DNS server pinned the dialing worker for the resolver's own timeout, tens of
+seconds and longer with retries across several `nameserver` lines. `resolve_timeout` now
+runs it on a throwaway thread under a 5 s bound. The thread is deliberately **detached** on
+timeout: a blocking `getaddrinfo` cannot be cancelled, so detaching it is exactly what keeps
+the *caller* bounded, and it touches nothing after its send. Call rate is set by a
+user-initiated `node/connect` or `reconnect/watch`'s backoff, not by inbound traffic, so the
+detached threads cannot be driven by an attacker.
+
+Still open in item 2: `proc-send`'s `write_all` under the per-child mutex, and `read-line`
+holding the global stdin lock.
