@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/lisp", "crates/cli", "crates/nest", "crates/lsp", "crates/playground"]
 
 [workspace.package]
-version = "0.22.1"
+version = "0.22.2"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["Wilhelm Kirschbaum"]
@@ -86,6 +86,26 @@ debug = "line-tables-only"
 [profile.release-lean]
 inherits = "release"
 strip = true
+lto = true
+codegen-units = 1
+
+# The **playground wasm** (`crates/playground`), which is downloaded by every visitor to
+# the site, so bytes matter more than throughput — `opt-level = "s"` over the default `3`.
+#
+# This lives HERE, not in `crates/playground/Cargo.toml`, because cargo ignores a
+# workspace *member's* profiles: the crate carried exactly these two settings and they had
+# never applied (the wasm was built with the default `release`), which cargo warned about
+# on every single build of the workspace. It also cannot go in a root `[profile.release]`,
+# because `release-lean` and `release-fast` — what `make install` and `make ab` build —
+# inherit from it and would silently take `opt-level = "s"` with them, quietly changing
+# the benchmark baseline.
+#
+# Every site that builds the wasm must pass `--profile release-wasm` (and read from
+# `target/wasm32-unknown-unknown/release-wasm/`): hive's Dockerfile, CI's wasm job, and
+# `scripts/wasm-receive-timeout-repro.sh`.
+[profile.release-wasm]
+inherits = "release"
+opt-level = "s"
 lto = true
 codegen-units = 1
 
