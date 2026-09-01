@@ -130,7 +130,10 @@
         (link child)
         (send me [:node (self)])
         (receive (:quit :ok) (after 15000 :timeout)))))
-  (spawn (build-chain 99 nil me))
+  ;; LINK to the head — without this the cascade has nowhere to reach us from, and the
+  ;; `after 30000` below reported `:timeout` as a propagation failure for a chain that
+  ;; was never connected to this process at all.
+  (link (spawn (build-chain 99 nil me)))
   ;; Wait for the tail to announce itself
   (let (tail (receive ([:tail p] p) (after 10000 :timeout)))
     ;; Drain the other node announcements

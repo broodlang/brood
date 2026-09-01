@@ -40,15 +40,16 @@
 ;;; ---- P69: heavy allocation while receiving large messages ----
 (io/puts "=== P69: alloc during large-message receive ===")
 (let (me (self))
-  (let (worker (spawn
-                 (defn recv-and-alloc (n)
-                   (if (= n 0)
-                     (send me :p69-done)
-                     (let (msg (receive (v v) (after 10000 :timeout)))
-                       ;; Allocate a bunch after receiving
-                       (let (_ (range 500))
-                         (recv-and-alloc (- n 1))))))
-                 (recv-and-alloc 100)))
+  ;; The definition is OUTSIDE the spawn: `(spawn (defn f …) (f …))` is the two-argument
+  ;; NAMED form, not an implicit body, and `spawn` now refuses it.
+  (defn recv-and-alloc (n)
+    (if (= n 0)
+      (send me :p69-done)
+      (let (msg (receive (v v) (after 10000 :timeout)))
+        ;; Allocate a bunch after receiving
+        (let (_ (range 500))
+          (recv-and-alloc (- n 1))))))
+  (let (worker (spawn (recv-and-alloc 100)))
     ;; Send 100 moderately large messages
     (doseq (i (range 100))
       (send worker (into [] (range (math/rem (* i 17) 200)))))
@@ -148,16 +149,16 @@
       (let (young-val (cons n (cons (* n n) nil)))
         (send worker [:check young-val])
         (p73-make-and-send worker (- n 1)))))
-  (let (worker (spawn (defn check-loop (expected)
-                        (if (= expected 0)
-                          (send me :p73-done)
-                          (let (r (receive ([:check v] v) (after 10000 :timeout)))
-                            (let (n (first r)
-                                  n2 (first (rest r)))
-                              (when (not (= (* n n) n2))
-                                (send me [:p73-error n n2]))
-                              (check-loop (- expected 1))))))
-                 (check-loop 5000)))
+  (defn check-loop (expected)
+    (if (= expected 0)
+      (send me :p73-done)
+      (let (r (receive ([:check v] v) (after 10000 :timeout)))
+        (let (n (first r)
+              n2 (first (rest r)))
+          (when (not (= (* n n) n2))
+            (send me [:p73-error n n2]))
+          (check-loop (- expected 1))))))
+  (let (worker (spawn (check-loop 5000)))
     (p73-make-and-send worker 5000)
     (let (r (receive
               (:p73-done :ok)

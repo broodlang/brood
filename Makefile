@@ -276,8 +276,12 @@ breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwi
 			*) pre="" ;; \
 		esac; \
 		if [ -n "$$pre" ]; then echo ">>> (with $$pre)"; fi; \
-		env $$pre $$bin --test "$$f"; \
-		rc=$$?; \
+		out=$$(env $$pre $$bin --test "$$f" 2>&1); rc=$$?; \
+		printf '%s\n' "$$out"; \
+		if printf '%s' "$$out" | grep -qE 'correct[^:]*: *false'; then \
+			rc=1; \
+			echo ">>> WRONG RESULT ($$f): a self-check printed 'correct: false'"; \
+		fi; \
 		if [ $$rc -ne 0 ]; then \
 			fail=1; \
 			if [ $$rc -gt 128 ]; then echo ">>> CRASH ($$f): exit $$rc (signal $$((rc-128)) — likely SIGSEGV / stack overflow)"; \

@@ -326,7 +326,18 @@ impl LispError {
     /// The untrappable kill control signal — an `(exit …)` interrupting a process
     /// blocked in a native-nested `receive`. See [`Control::Kill`].
     pub fn kill_signal() -> Self {
-        LispError::control(Control::Kill)
+        // Normally intercepted (`is_kill_signal`) long before anything renders it, so
+        // the message was left empty — but a ROOT process has no such interception, and
+        // an exit signal that killed a `brood file` run printed `runtime error:` with
+        // nothing after the colon. Naming the reason costs a peek at the mailbox on a
+        // path that only runs when the process is already dying.
+        let mut e = LispError::control(Control::Kill);
+        let pid = crate::process::self_pid();
+        e.message = match crate::process::pending_kill_phrase(pid) {
+            Some(reason) => format!("killed by an exit signal: {reason}"),
+            None => "killed by an exit signal".to_string(),
+        };
+        e
     }
 
     /// Is this the [`Control::Kill`] signal? `vm_run_bc` uses it to turn an unwinding

@@ -19767,3 +19767,40 @@ checker sees the union; but the mechanism is real and the raising design did not
 it. A pipe also still ends in a raise, one step late: `(-> s string/->number (* 2))`
 reports `*: expected number, got failure(…)` rather than aborting at the parse — better
 than today's `got nil`, which named nothing, and the price of the value being local.
+
+## ADR-311 — An exit signal's reason survives the body, and `:kill` is a directive, not a reason
+
+**Context.** Three defects in the exit path, all found by breakage-suite self-checks that
+printed a wrong answer without failing anything.
+
+A **soft** exit signal is documented as taking effect at the target's next `receive`. A
+body that ends without reaching one therefore never ran the check, and `handle_capture_outcome`'s
+`Done` arm retired with `:normal` unconditionally — discarding the pending reason. So
+`(exit (self) :badness)` in a short body reported a *clean* exit: links did not cascade,
+monitors read `:normal`, and a supervisor saw an orderly shutdown where a process had
+deliberately terminated itself with a cause. The signal was accepted and then dropped.
+
+Separately, `(exit pid :kill)` stored `:kill` as the death reason. Every place the kernel
+had to *invent* a reason already used `:killed` (five sites), `std/proc/supervisor` reports
+`:killed`, and `crash-report`'s documented deliberate-exit list names `:killed` — its
+undocumented `:kill` clause existed only to absorb the inconsistency. `exit_propagate`'s
+own comment already states the principle ("hardness and reason are independent"): `:kill`
+is the *directive* that the death be untrappable, carried by the `kill_hard` flag, and it
+was leaking into the *reason* channel beside it.
+
+**Decision.** An undelivered exit signal outlives the body: the `Done` arm takes the
+mailbox's pending reason and retires with it, falling back to `:normal` only when there is
+none. And `exit` translates a `:kill` directive to a `:killed` reason at the boundary, so
+no reader ever sees `:kill` as a cause of death.
+
+**Why not make a self-exit immediate instead.** That fixes only the self case. The same
+loss applies to `(exit other :badness)` whenever `other` finishes its work without another
+`receive` — the general shape is "a signal that was accepted and never delivered", and
+honouring it at teardown covers every target rather than one.
+
+**Consequences.** A breaking change to what monitors and trapping links observe: a killed
+process now reports `:killed`, and a process that ran off the end of its body with a
+pending signal reports that signal's reason rather than `:normal`. `tests/exit_test.blsp`
+carried eight assertions on the old spelling and was updated; the rest of the tree already
+expected the new one. Keeping the two words apart is also a safety property — a trapping
+peer that re-sends a reason it was handed must not thereby issue an untrappable kill.

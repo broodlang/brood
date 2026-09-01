@@ -678,9 +678,16 @@ fn handle_capture_outcome(
     }
     match outcome {
         Ok(Ok(VmOutcome::Done(_))) => {
+            // A **soft** exit signal waits for the target's next `receive` — but a body
+            // that ends without reaching one never runs that check, and retiring
+            // `:normal` here DISCARDED the reason outright: `(exit (self) :badness)` in
+            // a short body reported a clean exit, so links did not cascade and monitors
+            // read `:normal`. The signal outlives the body, so take it as the reason;
+            // absent one, the body really did finish normally.
+            let pending = crate::core::sync::lock(&mailbox.state).kill.take();
             deregister(
                 proc.pid,
-                Message::Keyword(value::intern(pk::NORMAL)),
+                pending.unwrap_or_else(|| Message::Keyword(value::intern(pk::NORMAL))),
                 Some(&proc.heap),
             );
         }
