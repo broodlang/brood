@@ -442,10 +442,10 @@ keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
         lines (string/split head "\r\n")
         status (string/split (first lines) " "))
     ;; `or`, not `(if (nil? n) …)`: since ADR-310 an unparsable status token comes back
-    ;; as a `#failure{…}`, which is NOT nil — the old guard passed it straight through and
-    ;; a malformed status line put a failure map in the `status` field. A failure is falsy,
-    ;; so `or` defaults on both "no token" and "not a number".
-    (response (or (string/->number (or (nth status 1) "0")) 0)
+    ;; as a `#failure{…}`, which is neither nil NOR falsy — so neither a `nil?` guard nor
+    ;; an `or` default catches it, and a malformed status line would put a failure map in
+    ;; the `status` field. `failure?` is the only thing that asks the real question.
+    (response (let (n (string/->number (or (nth status 1) "0"))) (if (failure? n) 0 n))
       (http-parse-headers (rest lines))
       body)))
 (sig parse-response ((or bytes string) -> response))

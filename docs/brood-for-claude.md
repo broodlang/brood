@@ -1020,11 +1020,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `try`/`catch`, or let the supervisor have it), while a **known failure comes back as a
   value** — `(string/->number "abc")`, the `encoding` decoders, `datetime/parse-*`,
   `url/percent-decode`. Test with `failure?`, read with `error-message`, build one with
-  `(failure "…")`. It is **falsy**, so `(or (string/->number s) 0)` defaults and
-  `(if n …)` branches exactly as they would have with `nil` — but it is *not* `nil`,
-  which still means absence (`get`, `nth`, `os/env`, `first` of empty). There are **no
-  call-site wrappers**: no `attempt`, no `result`, no `ok->`. `seq/keep` drops failures
-  as well as nils, so `(seq/keep lines string/->number)` keeps the numbers.
+  `(failure "…")`. It is **truthy** — like every non-`nil`, non-`false` value — so it
+  never vanishes into a default: `(or (string/->number s) 0)` yields the *failure*, not
+  `0`. To default, say so: `(let (n (string/->number s)) (if (failure? n) 0 n))`. It is
+  also *not* `nil`, which still means absence (`get`, `nth`, `os/env`, `first` of empty).
+  There are **no call-site wrappers**: no `attempt`, no `result`, no `ok->`. `seq/keep`
+  drops only `nil`, so a failure is kept rather than silently dropped.
 - **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-loads
   it — ADR-227): `abs` `ceil` `round` `round-to` (round to N decimals, stays a number)
   `pow` `sqrt` `clamp` `sum` `product`, the sign/parity predicates `positive?`

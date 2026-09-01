@@ -74,9 +74,9 @@
   "True if `x` is a **failure** — the value a function returns when it cannot
 interpret its input, as opposed to raising.
 
-A failure is falsy, so `(or (string/->number s) 0)` defaults exactly as it did when
-the answer was `nil`; reach for `failure?` when you want to know *that* it failed,
-and read `:message` when you want to know why.
+A failure is **truthy**, so it never vanishes into an `(or … default)` — reach for
+`failure?` to ask whether something failed, and `error-message` to read why. That is
+also how you default deliberately: `(let (n (parse s)) (if (failure? n) 0 n))`.
 
     (failure? (string/->number \"abc\"))   → true
     (failure? (string/->number \"42\"))    → false

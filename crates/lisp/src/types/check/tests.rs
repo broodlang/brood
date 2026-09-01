@@ -5353,8 +5353,8 @@ fn get_with_a_default_replaces_the_absence_nil_by_the_default_type() {
 
 #[test]
 fn an_inferred_return_sees_the_truthy_half_of_an_or_default() {
-    // `string/->number` is `number | failure`; `(or it -1)` can only be a number, since a
-    // failure is falsy. The inferred
+    // `(or E -1)` where E is `number | failure` yields `number | failure`: a failure is
+    // TRUTHY, so `or` hands it back rather than silently defaulting it away. The inferred
     // return (`expr_ty`, not the walk) used to union both branches of the expansion's `if`
     // under the unnarrowed scope and report `nil | number`.
     let interp = crate::Interp::new();
@@ -5373,7 +5373,10 @@ fn an_inferred_return_sees_the_truthy_half_of_an_or_default() {
     let number = Ty::NUMBER;
     // The expanded `(let (g E) (if g g -1))`.
     let t = ret("(fn (s) (or (string/->number s) -1))").expect("typed");
-    assert!(t.is_subtype(&number) && t.is_disjoint(&nil), "{t}");
+    assert!(
+        t.is_subtype(&number.clone().union(Ty::of(Tag::Failure))) && t.is_disjoint(&nil),
+        "{t}"
+    );
     // A predicate guard narrows the same way.
     let t = ret("(fn (s) (let (g (string/->number s)) (if (int? g) g -1)))").expect("typed");
     assert!(t.is_subtype(&Ty::of(Tag::Int)), "{t}");
@@ -5388,15 +5391,17 @@ fn an_inferred_return_sees_the_truthy_half_of_an_or_default() {
         let form = reader::read_one(&mut heap, src).expect("parse");
         super::infer::expr_ty(&heap, form, &Ctx::default())
     };
+    // The SURFACE `or` is short-circuit exact too: it yields the first TRUTHY operand,
+    // and a failure is truthy — so a failing parse is the result, never the default.
     let t = surface("(or (string/->number \"1\") -1)").expect("typed");
-    assert!(t.is_subtype(&number) && t.is_disjoint(&nil), "{t}");
-    // `and` yields the first FALSY operand or the last one — so a failing parse is the
-    // value, exactly as a nil used to be. `string | failure`, and never a number.
-    let t = surface("(and (string/->number \"1\") \"yes\")").expect("typed");
     assert!(
-        t.is_subtype(&Ty::of(Tag::Str).union(Ty::of(Tag::Failure))),
+        t.is_subtype(&number.clone().union(Ty::of(Tag::Failure))) && t.is_disjoint(&nil),
         "{t}"
     );
+    // `and` yields the first falsy operand or the last one. A failure is truthy, so it
+    // never short-circuits here: the result is the last operand, a string.
+    let t = surface("(and (string/->number \"1\") \"yes\")").expect("typed");
+    assert!(t.is_subtype(&Ty::of(Tag::Str)), "{t}");
 }
 
 // ---- an extremum returns one of its operands ----
@@ -7630,11 +7635,11 @@ fn strict_mode_keeps_the_overlap_reading_for_a_bound_that_is_only_a_subtraction(
     );
 }
 
-// The truthy half of `(or x default)` — `any` less the falsy kinds — is a guard's
-// leftover, not a 21-tag union: it renders as a negation.
+// The truthy half of `(or x default)` — `any` less `nil` and `false` — is a guard's
+// leftover, not a 21-tag union: it renders as `(not (nil | false))`.
 #[test]
 fn a_guards_truthy_leftover_renders_as_a_negation() {
-    assert_eq!(Ty::truthy().to_string(), "(not (nil | failure | false))");
+    assert_eq!(Ty::truthy().to_string(), "(not (nil | false))");
     assert_eq!(
         Ty::ANY.difference(Ty::of(Tag::Nil)).to_string(),
         "(not nil)"

@@ -2138,7 +2138,9 @@ Returns nil when there is nothing to report."
 ;; / per-file), noted as future work (ADR-119). Tunable via `BROOD_CHECK_CACHE_MAX`.
 (defn- project-cache-max-files ()
   (let (e (os/env "BROOD_CHECK_CACHE_MAX"))
-    (if (and e (not (= e ""))) (or (string/->number e) 50000) 50000)))
+    (if (and e (not (= e "")))
+      (let (n (string/->number e)) (if (failure? n) 50000 n))
+      50000)))
 
 ;; Return `{path -> [mtime counts privs def-names]}` for `files` by scanning them
 ;; all, in parallel. NOT disk-cached: the per-file scan is now native

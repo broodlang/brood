@@ -29,8 +29,10 @@
     (is (failure? (string/->number "")))
     (is (failure? (string/->number " 5")))
     (is (includes? (error-message (string/->number "3abc")) "not a number: \"3abc\""))
-    (assert= (or (string/->number "x") 0) 0)
-    (assert= (if (string/->number "x") :truthy :falsy) :falsy)
+    ;; A failure is TRUTHY and is not nil: neither `or` nor `if` will quietly treat it
+    ;; as "no value", which is what stops a bad parse from becoming a silent default.
+    (assert= (or (string/->number "x") 0) (string/->number "x"))
+    (assert= (if (string/->number "x") :truthy :falsy) :truthy)
     (is (not (nil? (string/->number "x")))))
   (test "str is string/->number's inverse"
     (assert= (str 42) "42")

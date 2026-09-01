@@ -20,17 +20,23 @@ use crate::core::value::{
 };
 use crate::error::{LispError, LispResult};
 
-/// Truthiness: `nil`, `false` and a **failure** are falsy.
+/// Truthiness: only `nil` and `false` are falsy.
 ///
-/// A failure joins the falsy set so it short-circuits `if`/`when`/`or`/`and`
-/// exactly where a `nil`-on-failure used to — which is what lets a strict
-/// function start returning one without rewriting its callers — while still
-/// carrying *why* it failed, which `nil` never did.
+/// A **failure is truthy**, deliberately. It was falsy for one release, on the
+/// argument that it should short-circuit wherever a `nil`-on-failure used to, so
+/// callers would need no edits. That is exactly what was wrong with it: the call
+/// sites that needed no edit were the ones *silently swallowing* the failure —
+/// `(or (string/->number p) 0)` turned `"x"` into `0` and said nothing, which is
+/// the "an unable is never defaulted" rule broken by default. Measured on the
+/// tree: flipping to truthy broke seven files, and every one broke *loudly*, with
+/// a type error naming the failure and its cause. None was a silent wrong branch.
+///
+/// So a failure behaves like any other value here: to treat one as absent you say
+/// so, with `failure?`. Falsiness cannot distinguish "it failed" from "there is
+/// nothing here" — `nil` means absence, a failure means it could not be produced,
+/// and collapsing them is what this design set out to stop.
 pub fn truthy(v: Value) -> bool {
-    !matches!(
-        v.unpack(),
-        ValueRef::Nil | ValueRef::Bool(false) | ValueRef::Failure(_)
-    )
+    !matches!(v.unpack(), ValueRef::Nil | ValueRef::Bool(false))
 }
 
 /// Evaluate `form` and attach its source position to any error.

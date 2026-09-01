@@ -19717,11 +19717,24 @@ distinct `Value` kind (the 24th `Tag`), carrying `:message` and naming the input
 
 1. **It is not `nil`.** Absence and failure stop sharing a signal; `nil` goes back to
    meaning "the lookup found nothing", which accessors (`get`, `nth`, `os/env`) keep.
-2. **It is falsy.** `eval::truthy` is `Nil | Bool(false) | Failure`. This is what makes
-   the change nearly free at the call sites: `(or (string/->number p) 0)` defaults
-   exactly as before, `(if n …)` branches as before, `(and …)` short-circuits as before
-   — while anything that *looks* at the value now learns why. Eleven of thirteen call
-   sites needed **no edit at all**, confirmed by their suites passing untouched.
+2. **It is truthy** — like every value that is not `nil` or `false`. It was falsy in the
+   first cut of this ADR, on the argument that `(or (string/->number p) 0)` would then
+   keep working and the migration would be nearly free. Eleven of thirteen call sites
+   did need no edit, and that turned out to be the objection rather than the evidence:
+   the sites needing no edit were the ones **silently swallowing** the failure.
+   `version/core` read `"1.x"` as `(1 0)`; a test asserted it, and its name said so
+   ("a non-numeric segment reads as 0 rather than raising"). That is clause 4 —
+   "unable" is never defaulted — broken by default, in the very ADR that states it.
+
+   Flipping to truthy was measured before it was chosen: it broke **seven files, every
+   one loudly**, with a type error naming the failure and its cause
+   (`<: expected number, got failure(… not a number: "rc")`). Not one was a silent wrong
+   branch. Each was a place that should have been saying what it meant, and now does —
+   `(let (n (parse p)) (if (failure? n) 0 n))` where a default is genuinely intended.
+
+   Falsiness also cannot separate "it failed" from "there is nothing here": both are
+   falsy, so `(or (seq/find xs failure?) (first xs))` silently skips the failure it just
+   found. That collapse is precisely what this ADR set out to undo.
 3. **Raising stays the other channel**, unchanged, for bugs and the unexpected: wrong
    type, wrong arity, unbound symbol, a broken invariant. The two cannot be confused
    because they do not travel the same way — one is handed back, the other unwinds —

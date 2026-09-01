@@ -31,7 +31,8 @@
 ;; Read from the ENVIRONMENT at the point of use, not from a global the wrapper defines
 ;; first: the wrapper's `def` would run before this file loads (the mistake the UCD knob's
 ;; comment records).
-(def- jdr-of (math/max 1 (or (string/->number (or (os/env "BROOD_JDR_OF") "")) 1)))
+(def- jdr-of
+  (math/max 1 (let (n (string/->number (or (os/env "BROOD_JDR_OF") ""))) (if (failure? n) 1 n))))
 
 (defn- jdr-parse (path)
   (try (do (json/decode (file/slurp path)) :ok) (catch e :rejected)))

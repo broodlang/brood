@@ -575,10 +575,7 @@ for a higher-order op that wants a fixed answer.
   (fn (rf) (fn (acc x) (if (pred x) acc (rf acc x)))))
 (defn %xkeep (f)
   "The `keep` stage as a transducer — internal; published as `seq/xkeep`."
-  ;; A `failure` drops for the same reason a nil does: both say \"nothing was
-  ;; produced here\". Keeping failures would let them accumulate into the result
-  ;; list, which is the one way a returned failure can travel far from its cause.
-  (fn (rf) (fn (acc x) (let (y (f x)) (if (or (nil? y) (failure? y)) acc (rf acc y))))))
+  (fn (rf) (fn (acc x) (let (y (f x)) (if (nil? y) acc (rf acc y))))))
 
 ;; ---- transducers, as public surface (ADR-161) -------------------------------
 ;; The stage constructors above stayed private for a reason that expired: the `l*`

@@ -51,7 +51,7 @@
 (defn- dt-in-range? (s)
   (let (i (index-of (string/lower s) "e"))
     (or (< i 0)
-      (< (abs (or (string/->number (string/substring s (inc i))) 0)) 400))))
+      (< (abs (let (n (string/->number (string/substring s (inc i)))) (if (failure? n) 0 n))) 400))))
 
 (defn- dt-unquote (w)
   (if (and (> (string/length w) 1) (or (string/starts-with? w "'") (string/starts-with? w "\"")))

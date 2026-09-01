@@ -4,6 +4,45 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.23.0 — 2026-09-01
+
+**Changed (breaking) — a `failure` is truthy.** It was falsy in v0.22.0, so that
+`(or (string/->number s) 0)` would keep working and adopting the kind would cost almost
+no edits. That was the wrong reading of the evidence: the call sites needing no edit were
+the ones **silently swallowing** the failure. `version/core` read `"1.x"` as `(1 0)`, and
+a test asserted it — its name was the confession, *"a non-numeric segment reads as 0
+rather than raising"*. ADR-310's own rule is that an "unable" is never quietly defaulted,
+and falsiness broke that rule by default.
+
+Flipping to truthy was measured before it was chosen. It broke **seven files, every one
+loudly** — a type error naming the failure and its cause, e.g.
+`<: expected number, got failure(… not a number: "rc")`. Not one was a silent wrong
+branch. Falsiness also could not separate *"it failed"* from *"there is nothing here"*:
+both were falsy, so `(or (seq/find xs failure?) (first xs))` silently skipped the very
+failure it had just found — the collapse ADR-310 exists to undo.
+
+**Migrating.** The break is loud wherever the failing path has coverage, and silent
+where it does not — so the sweep matters more than the suite. Nine sites in this repo
+relied on falsiness for defaulting and the suite passed on all of them, because nothing
+exercised a bad parse: `std/net/http`'s response status, `nest`'s check-cache knob, the
+two `nest new` scaffold templates, and four test env knobs. Each becomes explicit:
+
+    (or (string/->number s) 0)                        ; was: silent default
+    (let (n (string/->number s)) (if (failure? n) 0 n))  ; now: says what it means
+
+Grep for `(or (<parser> …) default)`, `(and (<parser> …) …)` and `(if (<parser> …) …)`
+over the twelve ADR-310 functions; a `nil?` guard on one of them is still wrong for the
+original reason and now wrong for a second.
+
+**Also fixed.** `seq/keep` drops **only `nil`** again. It briefly dropped failures too,
+which is dropping something the caller never asked to drop — a failure now stays in the
+result, and to discard one you say so by returning `nil` for it in the callback.
+
+**Downstream.** bedit, hatch, hive, hatch-demo, brood-terminal each had one or more
+falsiness-dependent defaults, all fixed and green (1379 / 969 / 107 / 102 / 51 tests).
+hive's was live: a malformed port in a `DATABASE_URL` would have put a failure map in
+the connection config.
+
 ## v0.22.2 — 2026-09-01
 
 **Fixed — the playground wasm is size-optimized again: 8.69 MB → 7.13 MB (−17.9%).**
