@@ -43,11 +43,13 @@ rustup target list --installed | grep -qx wasm32-unknown-unknown \
   || { echo "wasm32-unknown-unknown target not installed (rustup target add wasm32-unknown-unknown)"; exit 2; }
 
 echo "== building crates/playground for wasm32 =="
-cargo build --release -p brood-playground --target wasm32-unknown-unknown
+# `--profile release-wasm` (workspace root): the size-optimized profile the shipped wasm
+# uses. Building `--release` here would exercise a different binary than the site serves.
+cargo build --profile release-wasm -p brood-playground --target wasm32-unknown-unknown
 
 mkdir -p "$OUT"
 wasm-bindgen --target nodejs --out-dir "$OUT/pkg" \
-  "$ROOT/target/wasm32-unknown-unknown/release/brood_playground.wasm"
+  "$ROOT/target/wasm32-unknown-unknown/release-wasm/brood_playground.wasm"
 
 cat > "$OUT/repro.js" <<'JS'
 const p = require("./pkg/brood_playground.js");

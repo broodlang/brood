@@ -96,7 +96,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - run: cargo build --release --target wasm32-unknown-unknown -p brood-playground
+      # `--profile release-wasm`, matching hive's Dockerfile: CI must compile the wasm the
+      # site actually ships, not a differently-optimized one.
+      - run: cargo build --profile release-wasm --target wasm32-unknown-unknown -p brood-playground
 
   # Clippy runs ALONE, in parallel with the test job, and that is the point.
   #
