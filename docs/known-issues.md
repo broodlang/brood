@@ -81,7 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. Next: a synthetic merge of ADR-302 with mainline before `115faead`. Probe harness in `target/ki100/` |
+| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. **MECHANISM FOUND**: instruction-fetch pressure, not work — icache misses +48%, iTLB +96%, dcache FLAT, instructions only +1.25%. §7.5 emits more code per arm; ADR-302 doubles the arms that lower (158 vs 76); together they spill the L1 icache/iTLB. `fib` (small footprint) is unaffected at 1.0010. Fix direction: less code per arm, or JIT code locality (hot/cold split, huge pages). Probe harness in `target/ki100/` |
 | KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only — **falsified 2026-09-01**, see the status cell | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe). **Sighting 2026-09-01: CI's `make gcstress` step, run 5b20b307** — that step runs the file ALONE (a debug build, `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`), so the "full-suite context only" reading is wrong: it fires solo given the right timing, and GC stress on a loaded 2-core runner supplies it. Not reproducible here — 25/25 green under the same flags, and `make gcstress` clean in a full local pass — so the missing ingredient is machine load, not suite context. That makes CI's gcstress step a cheaper repro surface than a full suite run |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
@@ -270,7 +270,47 @@ build on that last split without more samples.
   mainline side), so a plausible shape is "the new root-stack representation costs more per
   frame, and ADR-302's std pushes many more frames" — unverified.
 
-**Next step.** The mechanism, not the commit: why does the new root-stack representation
+**MECHANISM FOUND 2026-09-01: instruction-fetch pressure, not work.** `perf stat` on the
+culprit pair (mandelbrot, `BENCH_N=1400`):
+
+| metric | `2dc7d2e6` (good) | `0f57e30b` (bad) | delta |
+|---|---|---|---|
+| instructions | 18.01 G | 18.24 G | **+1.25%** |
+| cycles | 6.12 G | 6.41 G | **+4.7%** |
+| L1-icache-load-misses | 12.3 M | 18.2 M | **+47.7%** |
+| iTLB-load-misses | 76 K | 149 K | **+96%** |
+| L1-dcache-load-misses | 5.57 M | 5.60 M | +0.5% (flat) |
+
+So the binary is not doing meaningfully more *work* (+1.25% instructions) — it is **stalling
+on instruction fetch**. IPC drops 2.94 → 2.85. Data cache is untouched, which rules out the
+obvious "worse data layout" reading.
+
+Three independent confirmations:
+- **Monotonic across three trees.** icache 12.5 M → 16.1 M → 19.0 M and iTLB 77 K → 117 K →
+  155 K for good → synthetic-without-§7.5 → the real merge, matching their 1.021 / 1.030 /
+  1.080 ratios. Instructions over the same three are 16.7 / 18.0 / 17.0 G — not monotonic,
+  which is the point.
+- **A small-footprint row is completely unaffected**: `fib` measures **1.0010** on the same
+  pair where mandelbrot measures 1.0548. Exactly what a footprint effect predicts and what a
+  per-operation cost would not.
+- **The growth is in RUNTIME-emitted code, not the kernel.** Both binaries are the same size
+  (34.06 vs 34.08 MB) and lower the same number of arms (158 vs 159 — `std/` is identical
+  between them), so what grew is the machine code emitted *per arm*.
+
+**Why it needs both halves, finally explained.** §7.5 emits more machine code per JIT'd arm;
+ADR-302's std causes roughly **twice as many arms to lower** (158 vs 76 on the old std). The
+old std's 76 fatter arms still fit; ADR-302's 158 do not, and the working set spills out of
+the L1 icache and the iTLB. Neither change crosses the threshold alone, which is exactly why
+both parents measure clean.
+
+**Fix direction.** Reduce emitted code per arm, or improve JIT code locality (hot/cold
+splitting, or huge pages for the JIT region — the iTLB doubling specifically suggests the
+latter is worth a try). Note `BROOD_NO_XCALL=1` does **not** help, so this is not the
+deferred re-lowering ceremony; `115faead` (RootsBuf) reproduces about half the slowdown and
+about half the icache growth, consistent with its inlined root-stack manipulation being the
+larger part of the per-arm growth.
+
+**Superseded next step** (kept for the record): why does the new root-stack representation
 cost ~2% *only* when ADR-302's std is what is running? The merge inherits ADR-302's much
 larger lowering volume (160 arms vs 88) and presumably a different frame/rooting profile, so
 "more frames pushed through a costlier root stack" is the shape to test — `perf stat` on the
