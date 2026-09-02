@@ -5990,6 +5990,59 @@ template plus three behavioural probes that define `get`/`reverse`/`bound?` and 
 value comes back. It pins `receive` as the known exception, so a *new* offender fails the build.
 Sabotage-verified: removing `defrecord`'s escape fails both the scan and the probe.
 
+## KI-103 — a `:max-mailbox` breach re-trips inside its own handler, killing the remedy ⚠️ OPEN 2026-09-02
+
+**Symptom.** A process that catches E0046 and follows the error's own hint is killed part-way
+through following it:
+
+```
+[crash] exited: mailbox limit exceeded: 15 queued messages exceeds this process's :max-mailbox bound of 8
+        kind :runtime  code E0046  at …:11:24
+        hint: drain the backlog (receive in a loop), raise or clear the bound with
+              (proc/flag :max-mailbox n), or let it crash under a supervisor
+        at proc/flag          ← killed INSIDE the call the hint recommends
+```
+
+**Repro** (both engines; ~1 in 3 under the VM, ~3 in 4 under `BROOD_VM=0`, which is ~10x
+slower and so widens the window):
+
+```brood
+(let (me (self)
+      w (spawn (do (proc/flag :max-mailbox 8)
+                   (send me [:ready (self)])
+                   (try (receive (:never nil))
+                        (catch e (do (proc/flag :max-mailbox nil)   ; ← killed here
+                                     …drain…
+                                     (send me [:recovered …])))))))
+  (receive ([:ready ^w] nil) (after 10000 (error "no ready")))
+  (dotimes (_ 32) (send w :flood))
+  (receive ([:recovered c n] [c n]) (after 12000 :TIMEOUT)))
+```
+
+**Mechanism, and it is deliberate.** `Mailbox::take_overflow_hit`'s own comment states it:
+"Clearing on read means the raise happens exactly once; **still over the bound at the next
+enqueue, it re-arms**." Every subsequent `send` that finds the queue over the bound re-arms
+the sticky flag, and the handler's very next safepoint — which is *inside* `proc/flag` —
+takes it. While a flood continues, the window between catching E0046 and clearing the bound
+is never wide enough, so the documented remedy is unreachable. Only "let it crash under a
+supervisor", the third option in the hint, actually works.
+
+**Why it was not seen.** `tests/process_limit_test.blsp`'s "the handler can drain and clear
+the bound — the process recovers" is a correct test of this, and it mostly passes under the
+VM. `make test-both` should have caught it on the tree-walker — except that target ran its
+two halves as separate recipe lines, so make ABORTED after the VM half, which fails on every
+capped run here (`wasm_sandbox_limits_test` under the 16 GB ulimit). The differential gate
+had therefore been checking one engine. That is fixed (2026-09-02); this is the first thing
+the second half found.
+
+**Proposed fix, not yet made because it changes ADR-307's semantics.** Give the bound
+hysteresis: once a breach has been *raised*, do not re-arm until the bound is set again.
+That makes the bound one-shot per arming — a process that catches E0046 gets a guaranteed
+window to drain or clear, and one that ignores it is not re-killed for the same flood. The
+alternative readings (re-arm only when the queue drops back under the bound; make `proc/flag`
+itself uninterruptible) are both narrower and both leave the general "catch and drain" shape
+racy. Needs a decision before it is written.
+
 ## KI-74 — one `cargo test -p brood --lib` run reported a failure it would not name ✅ FIXED 2026-08-29
 
 **What was seen.** A single run of the lib suite ended `test result: FAILED. 607 passed; 1

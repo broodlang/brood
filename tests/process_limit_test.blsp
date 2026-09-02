@@ -110,6 +110,12 @@
           ([:down ^m _ [:error e]] [(get e :kind) (get e :code)])
           (after 30000 :timeout)))))
 
+  ;; KI-103: this is a correct test of a BROKEN feature, and it fails intermittently — the
+  ;; worker is killed inside `(proc/flag :max-mailbox nil)` by the same breach it is
+  ;; clearing, because every further `send` over the bound re-arms the sticky flag. It
+  ;; mostly passes under the VM and fails ~3 in 4 under `BROOD_VM=0`. Left asserting the
+  ;; INTENDED behaviour rather than weakened to match the defect: the day the bound grows
+  ;; hysteresis, this goes green on its own and nothing has to be remembered.
   (test "the handler can drain and clear the bound — the process recovers"
     (let (me (self)
           expected 32
@@ -134,15 +140,25 @@
                            ;; and lost under a full concurrent suite run, where it drained
                            ;; fewer than 32 and failed. A timeout is a failure deadline
                            ;; here, never a wait.
+                           ;; Drain until the parent's `:done` SENTINEL, not until a count
+                           ;; or a clock. Both of those were races: `(after 100 n)` beat the
+                           ;; sender on an idle machine and lost under a loaded suite, and
+                           ;; counting to 32 with a 30 s backstop then raced the PARENT's own
+                           ;; 30 s — a slow run (the tree-walker is ~10x) reported after the
+                           ;; parent had given up, so the failure read `:timeout` rather than
+                           ;; a count. Message order is preserved per sender, so `:done`
+                           ;; cannot arrive before the floods that precede it: the sentinel
+                           ;; makes the count exact with no timing in it at all. The `after`
+                           ;; that remains is an anti-hang deadline and nothing else.
                            (letrec (drain (fn (n)
-                                            (if (= n expected)
-                                              n
-                                              (receive
-                                                (:flood (drain (+ n 1)))
-                                                (after 30000 n)))))
+                                            (receive
+                                              (:flood (drain (+ n 1)))
+                                              (:done n)
+                                              (after *test-wait-ms* n))))
                              (send me [:recovered (get e :code) (drain 0)]))))))))
       (receive ([:ready ^worker] nil) (after 30000 (error "no ready")))
       (flood worker expected)
+      (send worker :done)
       (let ([code drained] (receive ([:recovered c n] [c n]) (after 30000 [:timeout 0])))
         (assert= "E0046" code)
         (assert= expected drained))))
