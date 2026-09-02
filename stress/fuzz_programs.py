@@ -115,8 +115,9 @@ class Gen:
             h = self.name("h")
             k = r.randint(1, 9)
             op = r.choice(["+", "*", "bit/xor"])
-            lines.append("(defn " + h + " (x) (fold + 0 (map (fn (y) (" + op
-                         + " y (math/rem x " + str(k + 1) + "))) (range " + str(k) + "))))")
+            lines.append("(defn " + h + " (x) (fold (map (range " + str(k)
+                         + ") (fn (y) (" + op + " y (math/rem x " + str(k + 1)
+                         + ")))) 0 +))")
             helpers.append((h, 1))
         # a match-dispatch helper: builds a shape from its arg and matches it —
         # exercises the fail-thunk match lowering + destructures under every tier
@@ -149,11 +150,11 @@ class Gen:
             mname = self.name("mp")
             lines.append(
                 "(defn " + mname + " (x)\n"
-                "  (let (m (fold (fn (mm i) (assoc mm (math/rem (+ x i) 16) (bit/and (* i x) 255)))\n"
-                "                {} (range 8)))\n"
+                "  (let (m (fold (range 8) {}\n"
+                "                (fn (mm i) (assoc mm (math/rem (+ x i) 16) (bit/and (* i x) 255)))))\n"
                 "    (let (m2 (merge (dissoc m (math/rem x 16)) {99 (bit/and x 255)}))\n"
                 "      (bit/and (+ (count m2) (get m2 (math/rem (+ x 3) 16) 0)\n"
-                "                  (fold + 0 (map (fn (k) (get m2 k 0)) (keys m2))))\n"
+                "                  (fold (map (keys m2) (fn (k) (get m2 k 0))) 0 +))\n"
                 "               268435455))))")
             helpers.append((mname, 1))
         # a NESTED-CLOSURE helper: three closures deep, each capturing outer
@@ -236,7 +237,8 @@ class Gen:
             m = r.randint(2, 9)
             lines.append(
                 "(defn " + rrn + " (x)\n"
-                "  (reduce (fn (acc i) (bit/and (" + op + " acc (* i (math/rem x " + str(m) + "))) 268435455)) 0 (range " + str(k) + ")))")
+                "  (reduce (range " + str(k) + ") 0\n"
+                "    (fn (acc i) (bit/and (" + op + " acc (* i (math/rem x " + str(m) + "))) 268435455))))")
             helpers.append((rrn, 1))
         # the driver bit-ands the helper result, so it must be int-returning; the
         # float helper `g` is exercised on its own (and by the pure `flt`/`accf`

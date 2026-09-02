@@ -9920,3 +9920,48 @@ edit-diffing machinery is one `git show` away.
 **The reusable part:** an optimisation kept "in case" still has to be paid for — in surface
 area, in docs, in the tests that guard code nobody runs. `compute_edit` had a careful
 multibyte-soundness suite guarding a function with no callers.
+
+## 2026-09-02 (stability) — the bug hunt found three dead gates, not three bugs
+
+Ran the manual hunting tooling end to end. The runtime came out clean: **ASAN 0 reports**
+across 20 test binaries, **TSAN 0 races**, loom clean, `gcstress` all clean, the fuzz
+differential clean on all 11 generators (150 programs each × 4 engine configs). Everything
+found was a **gate that could not do its job**, which is its own class of finding — and all
+three had been broken for days or weeks without anyone noticing, because none of them runs
+in CI.
+
+**1. `make asan` could not pass.** It set `BROOD_STACK_BUDGET=64 MiB` to survive ASAN's
+fatter frames, but the budget must stay *under* `WORKER_STACK_BYTES` (16 MiB) or the
+stale-base backstop can never fire — which is exactly what
+`the_stack_guard_thresholds_are_ordered_and_non_degenerate` asserts. That test landed
+2026-08-29 with KI-82's fix; the workaround dated from 2026-08-17 and still claimed "with
+64 MiB both tests pass". No budget satisfies both: the instrumented boot measured
+**16 768 736 bytes against a 16 777 216-byte stack**, an 8 KB window. The wrong constant was
+the *stack*, so ASAN builds now get `--cfg brood_asan` and a 64 MiB one.
+
+**2. My own crash-report test leaked an env var — KI-86 again.** `make asan` runs plain
+`cargo test`, where a binary's tests share ONE process on parallel threads, so
+`set_var("BROOD_NO_CRASH_REPORT")` in one reached the other and made it assert the reporter
+had failed to arm. nextest had hidden it by giving every test its own process. Split into
+its own binary, the same fix `net_reactor_death.rs` already uses.
+
+**3. Two stress gates were dead from rename waves — and the fuzzer had predicted it.**
+`stress/fuzz_programs.py` still emitted `(map f coll)` / `(fold f init coll)` /
+`(reduce f init coll)`, the pre-ADR-302 order, so **14 of 25 seeds "diverged"** on checker
+warnings rather than engine behaviour and the real signal was buried in noise. Its own
+LIVENESS comment describes this happening after the *previous* wave ("every seed reported
+ok, and the differential gate was hollow for weeks"). Fixed: 25/25 agree, and a 90-seed
+sweep is clean.
+
+`stress/scaling.sh` was worse — dead twice over. Its probe called `bit-and`, `now` and
+`println`, all renamed away, so it printed nothing; and once those were fixed the timing was
+in **nanoseconds** against a `best=999999` sentinel that assumes milliseconds, so it would
+still have reported "no timing". That gate exists to catch a lock serialising the workers,
+and it now reads 2 workers 73 ms → 12 workers 21 ms = **3.47×**. Stress suite: 33 passed, 0
+failed (was 31/2).
+
+**The pattern worth keeping.** `make check-corpora` statically checks `stress/` for names
+that no longer resolve — and could not see either of these, because one program is built by
+a Python generator and the other lives in a shell heredoc. Those are precisely the
+"macro-constructed" and "string-embedded" spellings CLAUDE.md's rename-wave section lists as
+ungreppable. The rename checklist is right; the corpus gate cannot enforce it.

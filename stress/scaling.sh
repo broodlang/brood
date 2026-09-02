@@ -35,13 +35,13 @@ cat > "$prog" <<'EOF'
 (def tasks 24)
 (def me (self))
 (defn burn (i acc)
-  (if (>= i 2000000) acc (burn (+ i 1) (bit-and (+ (* acc 1103515245) 12345) 2147483647))))
+  (if (>= i 2000000) acc (burn (+ i 1) (bit/and (+ (* acc 1103515245) 12345) 2147483647))))
 (defn fan (i) (if (>= i tasks) nil (do (spawn (send me [:r (burn 0 i)])) (fan (+ i 1)))))
 (defn collect (got acc) (if (= got tasks) acc (collect (+ got 1) (receive ([:r v] (+ acc v))))))
-(def t0 (now))
+(def t0 (os/now-ns))
 (fan 0)
 (def total (collect 0 0))
-(println (- (now) t0))
+(io/puts (math/quot (- (os/now-ns) t0) 1000000))  ;; MILLISECONDS — see best_of's 999999 sentinel
 EOF
 
 # Best-of-3 each: this is a minimum-of-samples measurement, not an average — a
