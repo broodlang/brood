@@ -47,7 +47,10 @@ so this needs no new introspection surface."
     "*std-impls*" "*std-regs*" "*std-require-edges*"})
 
 (let (names (filter (sort (reflect/global-names))
-                    (fn (n) (not (contains? install-bookkeeping n)))))
+                    ;; `reflect/global-names` yields SYMBOLS. Comparing one against a set of
+                    ;; strings is silently always-false, which made the first cut of this
+                    ;; exclusion a no-op that passed locally and failed on CI.
+                    (fn (n) (not (contains? install-bookkeeping (->string n))))))
   (io/puts "GLOBALS " (count names))
   (doseq (n names)
     (io/puts n
@@ -99,6 +102,22 @@ fn an_imaged_boot_and_a_source_boot_agree_on_every_global() {
             .unwrap_or_else(|| panic!(
                 "the {label} arm printed no GLOBALS header — the dump program did not run, so                  this test can conclude nothing.\nstdout:\n{out}\nstderr:\n{err}"
             ));
+        // The exclusion must actually exclude. Its first cut compared a symbol against a
+        // set of strings and silently dropped nothing — invisible locally, red on CI.
+        for excluded in [
+            "*image-sources*",
+            "*std-image-file*",
+            "*std-image-sections*",
+            "*std-impls*",
+            "*std-regs*",
+            "*std-require-edges*",
+        ] {
+            assert!(
+                !out.lines().any(|l| l.starts_with(excluded)),
+                "the {label} arm's dump still contains {excluded}, so the install-bookkeeping \
+                 exclusion is a no-op — it is comparing the wrong type again"
+            );
+        }
         let n: usize = header["GLOBALS ".len()..].trim().parse().unwrap_or(0);
         assert!(
             n > 500,
