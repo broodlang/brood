@@ -36,6 +36,18 @@ so this needs no new introspection surface."
   (try (do (%binding (list (symbol n)) [nil] (fn () nil)) true)
     (catch _ (check-allow :discarded-catch false))))
 
+(defn- loc-of (n)
+  "A def site as `[basename line col]`. The FULL path is deliberately dropped: each arm runs
+under its own XDG_CACHE_HOME, so the materialised `prelude.blsp` lives at a different
+absolute path in each, and comparing those compares the harness rather than the boot. The
+basename plus line:col still fails on a missing, wrong or shifted def site — which is the
+thing worth catching (an imaged boot that records none takes stdlib `M-.` down)."
+  (let (l (reflect/source-location n))
+    (if (nil? l)
+      "nil"
+      (let (parts (string/split (->string (first l)) "/"))
+        (->string [(nth parts (- (count parts) 1)) (nth l 1) (nth l 2)])))))
+
 (let (names (sort (reflect/global-names)))
   (io/puts "GLOBALS " (count names))
   (doseq (n names)
@@ -43,59 +55,82 @@ so this needs no new introspection surface."
              " kind=" (->string (type-of (reflect/eval (symbol n))))
              " private=" (->string (reflect/private? (symbol n)))
              " sig=" (->string (reflect/type-signature n))
-             " loc=" (->string (reflect/source-location n))
+             " loc=" (loc-of n)
              " dyn=" (->string (dyn? n)))))
 "#;
 
-fn dump(use_image: bool) -> (String, String) {
-    let path = std::env::temp_dir().join("brood-prelude-differential.blsp");
-    let mut f = std::fs::File::create(&path).expect("create dump program");
-    f.write_all(DUMP.as_bytes()).expect("write dump program");
+/// One arm's private cache directory. Each arm gets its own, because the three artifacts
+/// that live in `~/.cache/brood` — the prelude image, the expanded-prelude text cache and
+/// the stdlib image — interact, and a differential has to own everything that differs
+/// between its arms. Sharing the real cache is what made the first version of this test
+/// green here and red on CI: whichever artifacts happened to be on disk decided the answer.
+fn arm_cache(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("brood-prelude-diff-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create arm cache dir");
+    dir
+}
+
+fn run_arm(
+    program: &std::path::Path,
+    cache: &std::path::Path,
+    use_image: bool,
+) -> (String, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
     cmd.env("BROOD_NO_CHECK", "1")
         .env("BROOD_NO_CRASH_REPORT", "1")
-        .env("BROOD_BOOT_TRACE", "1");
+        .env("BROOD_BOOT_TRACE", "1")
+        // Own the cache: no stdlib image exists under a fresh dir, so BOTH arms load std
+        // modules from source. That asymmetry is what we are not testing, so remove it.
+        .env("XDG_CACHE_HOME", cache)
+        // Pin the engine. Without this the tree-walker CI job (`BROOD_VM=0`) ran this test
+        // against a different engine than it was written for, and it is the boot path that
+        // is under test, not the evaluator.
+        .env("BROOD_TIER", "1")
+        .env_remove("BROOD_VM")
+        .env_remove("BROOD_NO_JIT")
+        .env_remove("BROOD_NO_STDIMAGE")
+        .env_remove("BROOD_COVERAGE");
     if use_image {
         cmd.env("BROOD_PRELUDE_IMAGE", "1");
+    } else {
+        cmd.env_remove("BROOD_PRELUDE_IMAGE");
     }
-    let out = cmd.arg(&path).output().expect("run brood");
+    let out = cmd.arg(program).output().expect("run brood");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
 }
 
-/// Runs with **no exclusions** — every global is compared. An earlier version excluded the
-/// six stdlib-image install-bookkeeping names because the two arms disagreed about them,
-/// and one of those disagreements *was* a live bug: the imaged boot restored a stale
-/// `*image-sources*`, whose symptom was `unbound symbol: io/puts` on a tree where nothing
-/// was wrong with `io`. Excluding a global because the arms disagree is excluding the
-/// evidence. They agree now that `%std-image-install` is replayed on the imaged path, so
-/// the exclusions are gone and must stay gone.
-/// **`#[ignore]`d: this test is not yet environment-stable, and that is a defect in the
-/// TEST, not a verdict on the image.** It passes repeatedly here and fails on CI — including
-/// on the plain `test` job, not only the `BROOD_VM=0` one, whose engine it also fails to pin
-/// across its two `brood` subprocesses. Its arms depend on on-disk cache state
-/// (`~/.cache/brood`: the prelude image, the text cache, and the stdlib image, which
-/// interact), and it does not control that state; a differential that compares two boots
-/// has to own everything that differs between them.
-///
-/// It is ignored rather than deleted or weakened. The version that passed did so by
-/// excluding the six install-bookkeeping globals, one of which was a live bug — so getting
-/// green by narrowing the comparison is the one move already known to be wrong here.
-///
-/// Run with `--run-ignored all`. Making it deterministic — pin `BROOD_TIER`, give each arm
-/// its own `XDG_CACHE_HOME`, and build both artifacts inside the test — is the first task of
-/// finishing ADR-314, ahead of turning the image on.
-#[ignore = "not yet environment-stable: green here, red on CI; see ADR-314"]
+/// Run one arm to a steady state: the first invocation cold-boots and WRITES that arm's
+/// artifacts, the second reads them. Returns the second. Built inside the test so the
+/// answer never depends on what a previous run, or a setup script, happened to leave.
+fn dump(program: &std::path::Path, cache: &std::path::Path, use_image: bool) -> (String, String) {
+    let _warm = run_arm(program, cache, use_image);
+    run_arm(program, cache, use_image)
+}
+
+fn dump_program() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "brood-prelude-differential-{}.blsp",
+        std::process::id()
+    ));
+    let mut f = std::fs::File::create(&path).expect("create dump program");
+    f.write_all(DUMP.as_bytes()).expect("write dump program");
+    path
+}
+
+/// Deterministic by construction: each arm owns its cache directory and its engine, and
+/// builds its own artifacts. An earlier version shared the real `~/.cache/brood` and pinned
+/// neither, which made it green here and red on CI — whichever of the three interacting
+/// artifacts happened to be on disk decided the answer.
 #[test]
 fn an_imaged_boot_and_a_source_boot_agree_on_every_global() {
-    // Warm both artifacts first: the very first run of a fresh binary boots from source and
-    // writes them, and comparing against that run would compare source with source.
-    let _ = dump(true);
-
-    let (image_out, image_err) = dump(true);
-    let (text_out, text_err) = dump(false);
+    let program = dump_program();
+    let (image_cache, text_cache) = (arm_cache("image"), arm_cache("text"));
+    let (image_out, image_err) = dump(&program, &image_cache, true);
+    let (text_out, text_err) = dump(&program, &text_cache, false);
 
     // ASSERT THE DUMP IS PRESENT, never merely that the arms agree. The first cut of this
     // test compared two EMPTY strings — the dump program died on an unbound `seq/sort`, and

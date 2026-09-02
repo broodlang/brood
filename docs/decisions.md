@@ -19980,14 +19980,30 @@ evaluation reaches past it.
 
 **The differential passed with the bug present**, because it excluded the six
 install-bookkeeping globals — one of which *was* the bug. Excluding a global because the two
-arms disagree about it is excluding the evidence. The exclusions are now gone and the test
-compares **every** global. It stays that way — but the test is now `#[ignore]`d, because it
-is **not environment-stable**: green repeatedly here, red on CI, including on the plain
-`test` job. Its arms depend on `~/.cache/brood` state (three interacting artifacts) and on
-the engine, and it controls neither. A differential must own everything that differs between
-its arms. Making it deterministic — pin `BROOD_TIER`, give each arm its own
-`XDG_CACHE_HOME`, build both artifacts inside the test — is the first task of finishing this
-ADR, ahead of turning the image on.
+arms disagree about it is excluding the evidence. The exclusions are gone and the test compares
+**every** global. It is now deterministic by construction: each arm owns its own
+`XDG_CACHE_HOME` (so the three interacting artifacts cannot leak between them or in from the
+machine), pins `BROOD_TIER` and clears the engine variables, and builds its own artifacts by
+running twice. Green 4/4 here and under `BROOD_VM=0`, `BROOD_NO_JIT=1` and
+`BROOD_NO_STDIMAGE=1` — the three CI environments, one of which used to break it.
+Sabotage-verified: dropping the def sites and dropping the `defdyn` marks each turn it red.
+
+**One gap it does NOT cover, stated rather than papered over.** Dropping the
+`%std-image-install` replay — the fix for bug 1 — leaves it GREEN, because giving each arm a
+private, stable cache removes the very interaction the bug needs: a stdlib image that
+*moves* under a live prelude image. A test that deletes the stdlib image instead does not
+reproduce it either (a missing file fails the section read cleanly and `require` falls back
+to source; the bug needs the file to exist with *different offsets*). Producing two
+differing-but-valid stdlib images inside a test needs two binaries with different baked-in
+module sets, and `nest stdimage` has no module-subset flag, so it is not cheaply
+reproducible.
+
+**Manual reproduction, for whoever finishes this:** build the stdlib image with a lean
+`nest`, boot once so the prelude image captures its directory, then rebuild the stdlib image
+with a full `nest` (different module coverage, same key, different offsets) and boot again.
+Before the replay that produced `unbound symbol: io/puts`. A test that can be written for it
+is worth more than this paragraph — but a test that passes under sabotage is worth less than
+nothing, which is why there is not one here.
 
 **Why the default is still off.** Not for a known defect — there is no reproducing failure
 left. It is off because this feature interacts with two other on-disk caches in
