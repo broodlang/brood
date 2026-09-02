@@ -27,40 +27,49 @@ if [ "$CORES" -lt 8 ]; then
   exit 0
 fi
 
-prog=$(mktemp /tmp/brood_scaling_XXXX.blsp)
-trap 'rm -f "$prog"' EXIT
-cat > "$prog" <<'EOF'
-;; Independent CPU-bound processes: no messages between them, no shared data, so
-;; anything less than near-linear speedup is the runtime's own serialization.
-(def tasks 24)
-(def me (self))
-(defn burn (i acc)
-  (if (>= i 2000000) acc (burn (+ i 1) (bit/and (+ (* acc 1103515245) 12345) 2147483647))))
-(defn fan (i) (if (>= i tasks) nil (do (spawn (send me [:r (burn 0 i)])) (fan (+ i 1)))))
-(defn collect (got acc) (if (= got tasks) acc (collect (+ got 1) (receive ([:r v] (+ acc v))))))
-(def t0 (os/now-ns))
-(fan 0)
-(def total (collect 0 0))
-(io/puts (math/quot (- (os/now-ns) t0) 1000000))  ;; MILLISECONDS — see best_of's 999999 sentinel
-EOF
+# The probe is a REAL FILE, not a heredoc. Embedded in this script it was invisible to
+# `check-corpora`, which statically checks `stress/**.blsp` for names that no longer
+# resolve — so a rename wave killed it silently (2026-09-02). As a `.blsp` it is checked
+# before anyone runs it.
+prog="$(cd "$(dirname "$0")" && pwd)/scaling_probe.blsp"
+[ -f "$prog" ] || { echo "FAIL  scaling — missing $prog"; exit 1; }
 
 # Best-of-3 each: this is a minimum-of-samples measurement, not an average — a
 # co-scheduled neighbour can only ever make a sample slower.
+# Milliseconds, best of 3. The sentinel is absurd for a MILLISECOND reading and ordinary for
+# a nanosecond one, which is how this gate died once: the probe moved to `os/now-ns`, every
+# reading was silently larger than the seed, `best` never moved, and the caller reported "no
+# timing" — indistinguishable from a probe that printed nothing. `saw_reading` separates the
+# two, because they need opposite fixes.
+SENTINEL=999999
+# Emits "<best> <last-raw-reading>" on one line. Both values have to come back through
+# stdout: `best_of` is called in a command substitution, which is a SUBSHELL, so a global
+# assigned inside it never reaches the caller — the first cut of this diagnostic set one and
+# always reported "printed nothing", including for the nanosecond case it exists to name.
 best_of() { # $1 = BROOD_J
-  local best=999999 i t
+  local best=$SENTINEL i t saw=""
   for i in 1 2 3; do
     t=$(BROOD_J="$1" "$BROOD" "$prog" 2>/dev/null | tail -1 | tr -dc '0-9')
     [ -n "$t" ] || continue
+    saw="$t"
     [ "$t" -lt "$best" ] && best=$t
   done
-  echo "$best"
+  echo "$best $saw"
 }
 
-small=$(best_of 2)
-large=$(best_of "$CORES")
+read -r small small_saw <<<"$(best_of 2)"
+read -r large large_saw <<<"$(best_of "$CORES")"
+saw_reading="${large_saw:-$small_saw}"
 
-if [ "$small" = "999999" ] || [ "$large" = "999999" ] || [ "$large" -eq 0 ]; then
-  echo "FAIL  scaling — the probe produced no timing (brood=$BROOD)"
+if [ "$small" = "$SENTINEL" ] || [ "$large" = "$SENTINEL" ] || [ "$large" -eq 0 ]; then
+  if [ -n "$saw_reading" ]; then
+    echo "FAIL  scaling — the probe printed $saw_reading, which never beats the $SENTINEL"
+    echo "      sentinel. That sentinel assumes MILLISECONDS; check what the probe prints:"
+    echo "      $prog"
+  else
+    echo "FAIL  scaling — the probe printed nothing at all (brood=$BROOD)."
+    echo "      Run it directly to see why: $BROOD $prog"
+  fi
   exit 1
 fi
 

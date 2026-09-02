@@ -739,7 +739,19 @@ not one string. **Enumerate these before the first edit, not one suite run at a 
 | string-embedded | `%load-string`, `reflect/eval-string`, and `nest new`'s scaffold templates | executable, unlike a highlighter fixture |
 
 That last row needs a human read: a sweep finds ~118 strings containing `(map …)` and only
-~15 are executable. The scaffold templates matter most — they emit a *user's* project, and
+~15 are executable.
+
+**The two files no gate can see: `stress/fuzz_programs.py` and `stress/scaling_probe.blsp`'s
+driver.** The stress tooling writes Brood from Python and shell, so `check-corpora` — which
+statically checks `stress/**.blsp` for names that no longer resolve — never saw either.
+ADR-302 left the fuzz generator emitting `(map f coll)` for three days: 14 of 25 seeds
+reported "diverged" on *checker warnings* rather than engine behaviour, so the differential
+arm was noise, and the file's own comment records the SAME thing happening after the
+previous wave. The scaling probe was worse: it called `bit-and`/`now`/`println`, printed
+nothing, and its gate reported "no timing" to nobody, because nothing runs it outside a
+manual `make stress`. Both are now covered — the probe is a real `.blsp` the corpus gate
+reads, the generator says `STALE GENERATOR` instead of blaming the checker, and the nightly
+runs the suite — but a generator cannot be static-checked, so **grep the Python too**. The scaffold templates matter most — they emit a *user's* project, and
 nothing in this repo's suite runs the code they generate.
 
 **The Rust checker encodes argument positions structurally**, and they degrade to `any`

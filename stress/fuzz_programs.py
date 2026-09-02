@@ -653,8 +653,29 @@ def main():
             live += 1
             if (w := check_soundness(path)) is not None:
                 bad += 1
-                print(f"CHECKER FALSE POSITIVE seed={seed} ({path} kept):")
-                print("  " + w[:400].replace(chr(10), chr(10) + "  "))
+                # BLAME THE RIGHT FILE. A generated program that RUNS but trips an
+                # argument-type warning on a core combinator is almost never a checker
+                # bug — it is this generator emitting a stale ARGUMENT ORDER. That is the
+                # `unbound symbol` case one level up in disguise: a rename wave that moved
+                # arguments instead of names, so nothing is unbound and the DEAD PROGRAM
+                # check above sees nothing wrong. It happened with ADR-302's data-first
+                # wave (`(map f coll)` -> `(map coll f)`), where 14 of 25 seeds reported
+                # here and sent the reader to investigate the checker for twenty minutes.
+                combinators = ("map", "fold", "reduce", "filter", "keep", "seq/find")
+                stale_order = [
+                    ln for ln in w.splitlines()
+                    if "argument" in ln and "expects" in ln
+                    and any(f"{c}: argument" in ln for c in combinators)
+                ]
+                if stale_order:
+                    print(f"STALE GENERATOR seed={seed} ({path} kept): the generator emits "
+                          "a combinator's arguments in an order this build rejects.")
+                    print("  Fix Gen's emission, not the checker. Offending warnings:")
+                    for ln in stale_order[:4]:
+                        print("    " + ln.strip())
+                else:
+                    print(f"CHECKER FALSE POSITIVE seed={seed} ({path} kept):")
+                    print("  " + w[:400].replace(chr(10), chr(10) + "  "))
                 continue
         vals = set(results.values())
         if len(vals) != 1:
