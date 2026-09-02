@@ -118,13 +118,22 @@ what incremental search rides on (formerly the separate `index-of`).
 ;; `includes?` follows it for the same reason — the membership question over any
 ;; collection, string included, not a string op that happens to accept a vector.
 (defn includes? (coll x)
-  "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), and maps (membership among values — use `contains?` for keys).
+  "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), sets, and maps (membership among values — use `contains?` for keys).
 
     (includes? [1 2 3] 2)         → true
     (includes? \"hello\" \"ell\")     → true
+    (includes? #{1 2 3} 2)        → true    ; O(log n), the trie — same as contains?
     (includes? {:a 1} 1)          → true    ; VALUES, not keys
     (includes? {:a 1} :a)         → false   ; use contains? for that"
   (cond
+    ;; A set answers from its trie, never by scanning itself. Without this arm a set fell
+    ;; through to `index-of` and gave the right answer the slow way — 64x slower than
+    ;; `contains?` on 500 elements — and nothing said so, because the result was correct.
+    ;; That is the worst shape a performance bug can have: bedit's playground put one such
+    ;; call in a per-keystroke loop and it became 287ms of a 309ms pass, on a 500-form
+    ;; buffer, with no failing test to point at. `includes?` is the membership question
+    ;; people reach for first; it has to be the fast one wherever a fast one exists.
+    (set? coll) (%set-has? coll x)
     (map? coll) (includes? (vals coll) x)
     else (>= (index-of coll x) 0)))
 

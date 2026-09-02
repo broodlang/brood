@@ -112,7 +112,24 @@
     (assert= (count (rest #{1 2 3})) 2))
   (test "vec / seq realise a set to its elements"
     (assert= (count (vec #{1 2 3})) 3)
-    (assert= (sort (vec #{3 1 2})) (list 1 2 3))))
+    (assert= (sort (vec #{3 1 2})) (list 1 2 3)))
+  ;; `includes?` is the membership question people reach for first, so it has to answer a
+  ;; set from the TRIE, not by scanning it. It used to fall through to `index-of` and give
+  ;; the right answer the slow way — the worst shape a performance bug can have, since no
+  ;; test can see it. bedit's playground had one such call in a per-keystroke loop and it
+  ;; cost 287ms of a 309ms pass on a 500-form buffer.
+  (test "includes? answers a set the same way contains? does"
+    (is (includes? #{10 20} 10))
+    (refute (includes? #{10 20} 0))
+    (assert= (includes? #{10 20} 10) (contains? #{10 20} 10))
+    (assert= (includes? #{10 20} 0) (contains? #{10 20} 0))
+    ;; …and a set of sets still asks about ELEMENTS, not about their contents
+    (is (includes? #{#{1} #{2}} #{1}))
+    (refute (includes? #{#{1} #{2}} 1))
+    ;; nested/structural elements answer by value, like every other set operation
+    (is (includes? #{[1 2] [3 4]} [3 4]))
+    (refute (includes? #{[1 2]} [3 4]))
+    (refute (includes? #{} :anything))))
 
 (describe "set algebra"
   (test "union"
