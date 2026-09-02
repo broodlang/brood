@@ -19948,10 +19948,37 @@ path only, leaving the default path — the one everybody runs — paying the fu
 
 ## ADR-314 — The prelude image: materialise the prelude's bindings, don't re-evaluate its forms
 
-**Status:** accepted (2026-09-02). Implemented in
-`crates/lisp/src/builtins/startup_image.rs` (`write_prelude_image` /
-`load_prelude_image`) and `crates/lisp/src/lib.rs` (`boot_from_prelude_image`, tried ahead
-of the text cache). Opt-out: `BROOD_NO_PRELUDE_IMAGE=1`.
+**Status:** **OPT-IN, not default** (2026-09-02) — shipped default-on and reverted to
+opt-in the same day; `BROOD_PRELUDE_IMAGE=1` enables it. Implemented in
+`crates/lisp/src/builtins/startup_image.rs` (`write_prelude_image` / `load_prelude_image`)
+and `crates/lisp/src/lib.rs` (`boot_from_prelude_image`, tried ahead of the text cache).
+
+**Why it is not on: two real breakages the differential passed through.**
+1. **A stale `*image-sources*`.** `%std-image-install` runs as a top-level form during
+   prelude *evaluation*, so the imaged path never ran it and restored a snapshot of a
+   previous install instead — the section directory of whatever stdlib image existed when
+   the prelude image was written. That file is keyed on `stdlib-id`, so a rebuild with
+   different module coverage (a lean `nest` vs a full one — which
+   `scripts/build-std-image.sh` does routinely) reuses the same PATH with different
+   offsets, and every section read lands on garbage. Symptom: `unbound symbol: io/puts` on
+   a tree where nothing is wrong with `io`. **Fixed** by replaying `(%std-image-install)`
+   after materialising.
+2. **Module-level names are missing.** The prelude's evaluation loads modules, so a source
+   boot ends with `file/list-files`, `file/read-lines` and friends bound; an imaged boot
+   does not carry them, and — because `*features*` says the module is loaded — they never
+   autoload either. `crash-report/take-over` likewise stays the `%autoload` stub. **Not
+   fixed**; this is what keeps the default off.
+
+Both are the rule this ADR quotes and then failed to apply in full: *materialising defines
+bindings and evaluates nothing*, so anything the evaluation **did** must be replayed, not
+only what it recorded. The first bug is a "did"; the second is a snapshot boundary drawn in
+the wrong place — the prelude image draws its line at the prelude, but the prelude's own
+evaluation reaches past it.
+
+**The differential passed with both bugs present**, because it excluded the six
+install-bookkeeping globals — one of which *was* the first bug. Do not re-enable this
+without a differential that is clean with **no** exclusions; the six now agree once the
+install is replayed, so that bar is reachable.
 
 **Context — this supersedes ADR-138's rejected alternative, on numbers ADR-138 did not
 have.** That ADR cached the *expanded prelude as text*, which removed the ~27 ms macro

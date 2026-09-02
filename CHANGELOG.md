@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Faster startup — the prelude image (ADR-314), now OPT-IN (`BROOD_PRELUDE_IMAGE=1`).**
+Shipped default-on and reverted to opt-in the same day: an imaged boot restored a stale
+stdlib-image section directory (fixed) and does not carry the module-level names the
+prelude's own evaluation binds, so `file/list-files` came back unbound (not fixed). The
+default path is unchanged from v0.23.1. Original description follows.
+
 **Faster startup — the prelude is materialised, not re-evaluated (ADR-314).** Every
 `brood`, `nest` and `brood-lsp` invocation rebuilt the prelude by reading and evaluating 544
 cached forms. The cold boot now writes the prelude's *bindings* as well, and a warm boot

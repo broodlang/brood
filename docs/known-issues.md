@@ -463,6 +463,30 @@ carries, so how much of the original 4–10% remains is an open question until t
 re-measured. Re-baseline before continuing, and note that the remaining `mandelbrot`
 steady-state ~3.4% is a different fix from the per-run constant.
 
+**FURTHER 2026-09-02 — ADR-314, and a clean sighting of this entry's mechanism in both
+directions.** The prelude image (boot 9.36 → 5.32 ms) removes more of component 1's fixed
+per-run cost. Measured against `5669890d` with `ab-bench --floor`, the session's three
+changes together give `spawn` −15.9%, `reduce` −16.7%, `loop` −11.2%, `fib` −10.5%,
+`strings` −9.6%, `sort` −6.8%, `pingpong` −3.3%.
+
+`ring` is the one row that moved the other way, **+2.9% against a 0.6% floor**, agreed by
+three independent measurements — and `perf stat` says it is this entry's mechanism, not new
+work:
+
+| metric | `5669890d` | HEAD | delta |
+|---|---|---|---|
+| instructions | 7.738 G | 7.646 G | **flat / slightly fewer** |
+| cycles | 4.067 G | 4.418 G | **+5%** |
+| L1-icache-load-misses | 246 M | 269 M | **+11%** |
+| lowered arms | 160 | 150 | **−10** |
+
+Same instructions, more stalls. Note the arm count went **down** while icache misses went
+**up**, which is the sharpest confirmation yet of this entry's own conclusion that *arm count
+is not the predictor* — loading nine fewer modules changes which arms exist and how the
+shared region is laid out, and `ring`'s hot working set happens to span it worse while
+`pingpong`'s spans it better. Not pursued: it is sub-threshold, one-sided, and the huge-page
+lever this entry already priced out is the only obvious handle on layout.
+
 **Reproducing.** The harness is left in `target/ki100/` (gitignored): `probe.sh` is a
 `git bisect run` probe, `measure.sh` the raw timer, `bin/` the built binaries. The
 discriminator is a **ratio against a fixed reference binary, measured interleaved** — not an
