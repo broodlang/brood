@@ -421,33 +421,6 @@ pub(super) fn tree_sitter_parse(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     crate::treesit::parse(heap, &src, &lang)
 }
 
-/// `(tree-sitter-reparse key source lang)` — incremental re-parse keyed by buffer
-/// id `key`; same positioned CST as `tree-sitter-parse`, less work. Mechanism in
-/// `crate::treesit` (feature-gated).
-pub(super) fn tree_sitter_reparse(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let key = expect_int(heap, "tree-sitter-reparse", arg(args, 0))?;
-    let src = expect_string(heap, "tree-sitter-reparse", arg(args, 1))?;
-    let lang = match arg(args, 2) {
-        Value::Keyword(s) => value::symbol_name(s),
-        v => {
-            return Err(LispError::wrong_type(
-                heap,
-                "tree-sitter-reparse",
-                "keyword",
-                v,
-            ))
-        }
-    };
-    crate::treesit::parse_incremental(heap, key, &src, &lang)
-}
-
-/// `(tree-sitter-forget key)` — drop the cached incremental tree(s) for buffer
-/// `key`; returns the count dropped. Call when a buffer closes.
-pub(super) fn tree_sitter_forget(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let key = expect_int(heap, "tree-sitter-forget", arg(args, 0))?;
-    Ok(Value::int(crate::treesit::forget(key)))
-}
-
 /// `(system/reload-defs path)` — like `load`, but only re-evaluates **definitions**
 /// (`def`/`defmacro` and `def…`-named macros: `defn`, `defmodule`, `defdyn`,
 /// `defonce`, user definers). All other top-level forms — `(require …)`,
