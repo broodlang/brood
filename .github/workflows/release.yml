@@ -52,7 +52,28 @@ jobs:
             echo "::error::CHANGELOG.md has no '## $tag' section."
             exit 1
           fi
-          echo "tag, Cargo.toml and CHANGELOG agree"
+
+          # The version lives in FOUR places and only two were checked. `project.blsp` is
+          # brood's own manifest, so a stale one makes `nest`'s project report a version the
+          # binaries do not have; `std/system.blsp`'s docstring is rendered on the hosted
+          # reference page (introspected from the runtime — brood.fly.dev), and its `;; =>`
+          # form is NOT the ` → ` shape `doc_examples_test` executes, so nothing catches a
+          # stale one. Both were bumped by hand for v0.24.0, which is exactly the kind of
+          # step that gets forgotten once.
+          manifest_version="$(sed -n 's/^ *:version "\(.*\)"/\1/p' project.blsp | head -1)"
+          if [ "$manifest_version" != "$cargo_version" ]; then
+            echo "::error::project.blsp :version ($manifest_version) does not match" \
+                 "Cargo.toml ($cargo_version)."
+            exit 1
+          fi
+
+          if ! grep 'system/brood-version)' std/system.blsp | grep -q "$cargo_version"; then
+            echo "::error::std/system.blsp's (system/brood-version) example does not show" \
+                 "$cargo_version. It is rendered on the hosted reference page and no test" \
+                 "executes it — the ' => ' form is not the doctest gate's ' -> ' form."
+            exit 1
+          fi
+          echo "tag, Cargo.toml, project.blsp, std/system.blsp and CHANGELOG agree"
 
   build:
     needs: verify
