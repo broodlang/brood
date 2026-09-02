@@ -9850,3 +9850,39 @@ replaced), and one more O(notes × buffer) hot spot — asking a *string* which 
 is on, once per note. That one was a toolkit question answered by hand: the rope already
 indexes lines (`text/char->line`), so the fix deleted ~45 lines of hand-rolled line
 arithmetic rather than adding any.
+
+## 2026-09-02 (perf) — the tree-sitter fontify walk was `mapcat` per level; the parse was never the cost
+
+Asked in bedit whether making tree-sitter parsing INCREMENTAL (`%tree-sitter-reparse`, which
+has been in the kernel unused) would speed up editing an Elixir buffer. Measured first, on a
+2000-line file, per keystroke:
+
+| | ms |
+|---|---|
+| `ed-window-spans` — the real path | 14.2 |
+| ├ `%tree-sitter-parse` (241-line window) | 2.8 |
+| └ the Brood-side walk in `fontify` | ~11.4 |
+
+**The parse is 20% of it.** The editor already windows fontify to the viewport ±32 lines
+(plus a 200-line lead-in), so it parses ~240 lines, not 2000 — which is most of what
+incrementality would have bought. Incremental reparse of that window is 0.9 ms, so the whole
+prize is ~1.9 ms of 14.2.
+
+The 80% was `ts-spans` in `std/editor/treesit.blsp`, written as a `mapcat` per level. Every
+node's spans are rebuilt into a fresh list once for each ANCESTOR it has: O(nodes × depth)
+allocation for a walk that is O(nodes) of work. One accumulator, reversed once: **10.5 ms ->
+6.8 ms** on a 1866-node tree, identical output. Per keystroke, 14.2 -> ~9.7 ms.
+
+Two things measured and REJECTED, which is the useful half:
+
+- An ASCII fast path in `ts-alpha?` (the anonymous-keyword heuristic case-folds a char to
+  test it for a letter, twice, per node). `string/->codepoints` on a one-char string costs
+  about what two case-folds cost: 4.8 -> 4.5 ms, inside the noise. Dropped.
+- Incremental reparse itself, for now. It needs a stable integer buffer identity — which
+  bedit does not have — plus a change to the `:fontify` mode-service contract (`text ->
+  spans` today, shared by every mode) and a `%tree-sitter-forget` on buffer close. That is a
+  new concept plumbed through the mode layer to take a sub-frame 9.7 ms down to 7.8 ms.
+
+The reusable part is the same one as KI-104 earlier today: the obvious spelling was the slow
+one, and no test could see it because the output was right. `mapcat` at every level of a
+recursive walk is the shape to distrust.
