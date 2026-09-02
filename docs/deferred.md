@@ -552,7 +552,7 @@ CLOS-style method combination and AOP advice are exactly the action-at-a-distanc
 "keep the language as small as possible" rule exists to refuse.
 
 **The shape Brood actually needs is `declare`, and it has two live customers.** Both fall
-out of ADR-313:
+out of ADR-315:
 
 1. **The impossible-`failure?` lint cannot be made complete without it.** It reports a guard
    that can never fire, and it is sound only because the gradual bound is an upper bound. To
@@ -570,7 +570,7 @@ infers `pure`/`nothrow`/`@nogc`/`@safe` for templates and `auto` functions preci
 making every author write them is a tax nobody pays. A Brood "can fail" bit should be
 inferred bottom-up from the body and only *declarable* where inference stops.
 
-**And there is a third customer, if the design goes further.** ADR-313 rejected an absorbing
+**And there is a third customer, if the design goes further.** ADR-315 rejected an absorbing
 failure partly because absorption stops at the primitive boundary: a `defn` handed a failure
 runs its body and answers with its own, losing the cause. Making calls **failure-strict**
 would fix that and cannot be unconditional — `failure?` and `error-message` are themselves

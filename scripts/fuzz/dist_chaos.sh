@@ -12,13 +12,13 @@ for i in $(seq 0 9); do PORT[$i]=$(( base + i )); done
 seed=${PORT[0]}
 mknode() {  # idx connectport extra
   local i=$1 conn=$2 cookie=${3:-$CK} c=""
-  [ "$conn" != "0" ] && c="(connect \"x@127.0.0.1:$conn\")"
+  [ "$conn" != "0" ] && c="(node/connect \"x@127.0.0.1:$conn\")"
   cat > "$D/n$i.blsp" <<EOF
-(node-start :n$i "127.0.0.1:${PORT[$i]}" "$cookie")
+(node/start :n$i "127.0.0.1:${PORT[$i]}" "$cookie")
 $c
-(register :srv (self))
+(proc/register :srv (self))
 (defn pa (ns) (when (not (empty? ns)) (do (try (send {:name :srv :node (first ns)} [:ping]) (catch e nil)) (pa (rest ns)))))
-(defn pg (k) (if (= k 0) :done (do (pa (nodes)) (sleep 20) (pg (- k 1)))))
+(defn pg (k) (if (= k 0) :done (do (pa (node/list)) (sleep 20) (pg (- k 1)))))
 (spawn (pg 6000))
 (defn drain () (receive ([:ping] (drain)) (after 120000 :done)))
 (drain)
@@ -31,7 +31,7 @@ mknode 0 0; sleep 0.8
 for i in 1 2 3 4 5; do mknode $i $seed; sleep 0.1; done
 sleep 3
 # wrong-cookie attacker hammering the seed's handshake
-( for j in $(seq 1 40); do echo "(try (do (node-start :atk$j \"127.0.0.1:$((base+50+j))\" \"WRONG-cookie-16+x\") (connect \"x@127.0.0.1:$seed\") (sleep 50)) (catch e nil))" | $BIN /dev/stdin >/dev/null 2>&1 & done; wait ) &
+( for j in $(seq 1 40); do echo "(try (do (node/start :atk$j \"127.0.0.1:$((base+50+j))\" \"WRONG-cookie-16+x\") (node/connect \"x@127.0.0.1:$seed\") (sleep 50)) (catch e nil))" | $BIN /dev/stdin >/dev/null 2>&1 & done; wait ) &
 # churn: several kill+rejoin cycles
 kill -9 ${PID[2]} ${PID[4]} 2>/dev/null; sleep 0.5
 mknode 6 $seed; sleep 0.1; mknode 7 ${PORT[3]}; sleep 1.5   # n7 joins via n3 (not seed)
@@ -39,6 +39,26 @@ kill -9 ${PID[0]} 2>/dev/null; sleep 1                       # hub dies
 mknode 8 ${PORT[5]}; sleep 0.1; mknode 9 ${PORT[1]}; sleep 1.5
 kill -9 ${PID[6]} ${PID[1]} 2>/dev/null; sleep 1
 kill -9 ${PID[3]} 2>/dev/null; sleep 1
+# Harness rot is not a finding — it must not look like one. These node programs are
+# heredocs inside a shell script, so `nest check` and `make check-corpora` (which scan
+# .blsp files) cannot see them: when the v0.9/v0.10 namespacing waves renamed
+# `node-start`/`register`/`nodes`, every node here died at startup and the script kept
+# reporting `crashed=1` — indistinguishable from a real crash, and unnoticed for months.
+# An unbound symbol means THIS FILE is stale, not that the runtime is broken. Same lesson
+# as KI-42/KI-44 in brood-benchmarks, whose smoke gate checks for exactly this string.
+# Matches the DEFINITION-time error kinds attributed to the harness's own `nN.blsp` —
+# unbound symbol, reserved-name collision (`each` became a stdlib name and broke this
+# script a second time), arity, syntax. Deliberately NOT `runtime error`: this harness kills
+# nodes on purpose, so "connect: Connection refused" is an EXPECTED outcome here, and
+# treating it as rot would cry wolf on every healthy run. Anchored to the filename too: the checker's "catch discards the error unread" WARNING contains the words
+# "hides an unbound symbol" in its prose, and matching the bare phrase made every clean run
+# report rot.
+if grep -qE "^n[0-9]+\.blsp:[0-9]+:[0-9]+: (unbound|type|arity|syntax|name) error:" n*.err 2>/dev/null; then
+  echo ">>> RUN$RUN HARNESS ROT — a node failed to start, so this run tested NOTHING:"
+  grep -hE "^n[0-9]+\.blsp:[0-9]+:[0-9]+: (unbound|type|arity|syntax|name) error:" n*.err 2>/dev/null | sed 's/^/      /' | sort -u | head -5
+  echo ">>> fix the node program in $(basename "$0"); the runtime is not implicated."
+  exit 2
+fi
 # collect ALL exit codes (distinguish my SIGKILL=137 from crashes 134/139/132/101)
 for i in $(seq 0 9); do
   kill -9 ${PID[$i]} 2>/dev/null

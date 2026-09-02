@@ -4,6 +4,47 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## Unreleased
+
+**Faster startup — the prelude image (ADR-314), now OPT-IN (`BROOD_PRELUDE_IMAGE=1`).**
+Shipped default-on and reverted to opt-in the same day: an imaged boot restored a stale
+stdlib-image section directory (fixed) and does not carry the module-level names the
+prelude's own evaluation binds, so `file/list-files` came back unbound (not fixed). The
+default path is unchanged from v0.23.1. Original description follows.
+
+**Faster startup — the prelude is materialised, not re-evaluated (ADR-314).** Every
+`brood`, `nest` and `brood-lsp` invocation rebuilt the prelude by reading and evaluating 544
+cached forms. The cold boot now writes the prelude's *bindings* as well, and a warm boot
+restores them structurally: boot **9.36 → 5.40 ms**, whole empty run **13.5 → 8.3 ms
+(−39%)**. Only the warm path changes — the first boot after a rebuild still does the full
+source boot and simply writes one more artifact. `BROOD_NO_PRELUDE_IMAGE=1` falls back to
+the text cache, which falls back to the source boot, so a bad or absent artifact costs a
+slower boot and never a wrong one. The image stands aside under `BROOD_COVERAGE`.
+
+Together with the lazy crash reporter below, a `brood file` run's fixed cost is down from
+~24 ms to ~8 ms.
+
+**Faster startup — the default crash reporter now arms lazily (ADR-313).** Every
+`brood file`, `nest run`, bundle and REPL run materialised ten stdlib modules before the
+program began, because the arm lived inside `std/proc/crash-report.blsp` and reaching it
+loaded the module. That cost **9.0 ms of a ~24 ms run**, crash or no crash. The kernel
+subscription — the part that genuinely cannot wait — now happens in the prelude, and the
+reporter loads on the first crash. Reports, dedup, the registered name and
+`BROOD_NO_CRASH_REPORT=1` behave exactly as before.
+
+Measured against `5669890d` with `ab-bench --floor --all`: `startup` −11.8%, `spawn`
+−11.8%, `bintree` −11.3%, `primes` −8.4%, `nqueens` −7.4%, `matmul` −5.8%, `fib` −5.7%,
+every other row inside its noise floor and nothing regressed. Compute rows improve because
+nine fewer modules is ~13% fewer JIT-lowered arms — a partial fix for KI-100.
+
+**Fixed — `BROOD_NO_CRASH_REPORT=1` now actually avoids the cost it exists to avoid.** It
+previously suppressed the reporter's `spawn` but not the module load, because the env check
+sat inside the function the qualified call had already loaded the module to reach.
+
+**Removed — `crash-report/arm-default`.** Entry points call the prelude's
+`%crash-report-arm-default` instead; `crash-report/start`, `stop` and `running?` are
+unchanged. `crash-report/take-over` is new, and is the lazy handoff's entry point.
+
 ## v0.23.1 — 2026-09-01
 
 An audit release: v0.23.0 flipped `failure` to truthy, and this is the sweep that proves

@@ -1154,10 +1154,10 @@ channels (ADR-310) — so `ok->` threads straight through a nil.
 ```
 
 A plain `->` does **not** stop: no primitive absorbs a failure, so `(-> "q"
-string/->number inc)` raises. Stopping is something you say (ADR-313) — `ok->` here,
+string/->number inc)` raises. Stopping is something you say (ADR-315) — `ok->` here,
 `with` for a chain of named steps, and a fold stops once its accumulator is a failure.
 
-There is **no `some->`** (deleted by ADR-313). It stopped on `nil`, which since ADR-310
+There is **no `some->`** (deleted by ADR-315). It stopped on `nil`, which since ADR-310
 means only "the lookup found nothing" and is an ordinary value everywhere else in the
 language — a pipe for a channel that is not one. `get-in` covers the nil-chaining it
 existed for.
@@ -1201,7 +1201,7 @@ the cause. The binding target may destructure (`(with ([a b] (pair-of x)) …)`)
 is bound to a temporary and tested first, so a failure never reaches a pattern that could
 not match it.
 
-This is deliberately **not** Elixir's `with`, which Brood had until ADR-313. Elixir needs
+This is deliberately **not** Elixir's `with`, which Brood had until ADR-315. Elixir needs
 `{:ok, a} <- expr` because it has no failure kind — the tuple *shape* carries the signal,
 so every step spells out a pattern for "kept going" and an `:else` section re-matches the
 shapes that did not. Brood has a failure kind, so both are redundant: what falls out is

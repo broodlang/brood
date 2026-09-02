@@ -581,4 +581,50 @@
           (tcp/close s)
           (tcp/close ls)
           (assert= (string/bytes-> (nth r 0)) "LINE\r\n\r\n")
-          (assert= (string/bytes-> (nth r 1)) "TAIL"))))))
+          (assert= (string/bytes-> (nth r 1)) "TAIL")))))
+
+  ;; KI-102. An accepted socket is ALREADY READING by the time its owner is handed
+  ;; `[:tcp-accept …]`, so `tcp/set-binary` on the stream cannot make a server reliably
+  ;; binary: a client that sends immediately can have its first chunk decoded as text
+  ;; before the call lands. Setting the mode on the LISTENER has no such window, because
+  ;; it is fixed before any connection exists.
+  ;;
+  ;; The server here NEVER calls `set-binary` on the stream — that is the whole point.
+  ;; Without inheritance the payload arrives as a `:string`, which is what made
+  ;; `breakage/chaos2_tcp_stress` P38 flaky: 256 raw bytes came back as 512, the UTF-8
+  ;; re-encoding of the 128 ASCII chars plus 128 U+FFFD replacements a lossy decode
+  ;; produced. Deterministic in both directions, so it is a real guard rather than a
+  ;; timing hope.
+  (test "a listener's binary mode is inherited by the sockets it accepts"
+    (let (payload (apply bytes (range 256))
+          ls (tcp/listen "127.0.0.1" 0))
+      (tcp/set-binary ls true)
+      (let (port (tcp/local-port ls)
+            c (tcp/connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp/controlling-process s (self))
+        (tcp/send c payload)
+        (let (data (receive ([:tcp ^s d] d) (after 5000 :timeout)))
+          (tcp/close c)
+          (tcp/close s)
+          (tcp/close ls)
+          ;; The type is the assertion that matters: `:string` here means the accepted
+          ;; socket started in text mode and the raw bytes were already mangled.
+          (assert= (type-of data) :bytes)
+          (assert= data payload)))))
+
+  ;; The inverse, so the inheritance cannot be a blanket "everything is binary now":
+  ;; a listener left alone still accepts text-mode sockets.
+  (test "a listener that was not set binary still accepts text-mode sockets"
+    (let (ls (tcp/listen "127.0.0.1" 0))
+      (let (port (tcp/local-port ls)
+            c (tcp/connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp/controlling-process s (self))
+        (tcp/send c "plain text")
+        (let (data (receive ([:tcp ^s d] d) (after 5000 :timeout)))
+          (tcp/close c)
+          (tcp/close s)
+          (tcp/close ls)
+          (assert= (type-of data) :string)
+          (assert= data "plain text"))))))

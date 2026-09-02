@@ -564,12 +564,23 @@ fn accept_ready(
     tls: Option<Arc<ServerConfig>>,
     out: &mut Vec<(u64, Rx, Message, MailboxSink)>,
 ) {
+    // The mode every socket accepted here starts in, read once per readiness rather than
+    // per connection. An accepted socket is already reading by the time its owner gets
+    // `[:tcp-accept …]`, so `tcp-set-binary` on the *stream* cannot close the window: a
+    // client that sends immediately can have its first chunk decoded as text before the
+    // call lands, and raw bytes then come back as U+FFFD-riddled UTF-8 (KI-102). Setting
+    // the mode on the LISTENER has no window, because it is fixed before any connection
+    // exists — the shape `gen_tcp:listen(Port, [binary])` has in Erlang.
+    let inherited = reg()
+        .get(&lid)
+        .map(|c| c.binary.load(Ordering::Acquire))
+        .unwrap_or(false);
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
                 let cid = NEXT_ID.fetch_add(1, Ordering::Relaxed);
                 let owner = subscriber.load(Ordering::Acquire);
-                let binary = Arc::new(AtomicBool::new(false));
+                let binary = Arc::new(AtomicBool::new(inherited));
                 let (csink, ccell) = sink_pair(owner);
                 let port = stream.local_addr().ok().map(|a| a.port());
                 reg().insert(
@@ -1416,18 +1427,27 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
 
 /// `(tcp-set-binary sock on)` — switch `sock`'s **inbound decode** between text
 /// mode (default: UTF-8 strings) and binary mode (byte-faithful `bytes`
-/// values). Outbound is unaffected (ADR-141). Takes effect for the next
-/// inbound chunk. Errors if `sock` is gone or a listener.
+/// values). Outbound is unaffected (ADR-141).
+///
+/// On a **stream** this takes effect for the next inbound chunk, which means it cannot be
+/// used to make an *accepted* connection binary reliably: the socket is already reading
+/// when its owner is handed `[:tcp-accept …]`, so a client that sends immediately can have
+/// its first chunk decoded as text first (KI-102 — 256 raw bytes came back as 512, the
+/// UTF-8 re-encoding of 128 ASCII plus 128 U+FFFD).
+///
+/// On a **listener** it sets the mode every socket that listener accepts *starts* in, which
+/// has no such window — the listener's mode is fixed before any connection exists. This is
+/// the reliable way to run a binary server, and mirrors `gen_tcp:listen(Port, [binary])`.
+/// A stream may still switch mode afterwards; inheritance only decides where it starts.
 pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
     let reg = reg();
     match reg.get(&id) {
-        Some(ctl) if matches!(ctl.kind, Kind::Stream | Kind::TlsStream) => {
+        // Every kind: a stream switches its own mode, a listener sets what its accepted
+        // sockets start in. `TlsListener` inherits the same way `Listener` does.
+        Some(ctl) => {
             ctl.binary.store(on, Ordering::Release);
             Ok(())
         }
-        Some(_) => Err(invalid(
-            "tcp-set-binary: socket is a listener, not a stream",
-        )),
         None => Err(bad_socket()),
     }
 }

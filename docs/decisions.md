@@ -8975,7 +8975,10 @@ JIT-internal fast-link deopts that re-enter without passing it are uncounted
 
 ## ADR-138 — The boot cache: expanded-prelude text, not a binary heap snapshot
 
-**Status:** accepted (2026-07-19). Implemented in `crates/lisp/src/lib.rs`
+**Status:** accepted (2026-07-19); its rejected alternative (1) **adopted 2026-09-02 as
+ADR-314**, on numbers this ADR did not have — the residual it calls "only ~4 ms" grew to
+9.36 ms of a 12.4 ms run, and the binary-format cost it priced in was since paid by the
+stdlib image (ADR-256/281). The text cache remains, as the fallback beneath the image. Implemented in `crates/lisp/src/lib.rs`
 (`boot_from_cache`/`boot_from_source` around the `SHARED` bundle), with
 `build_id_string` shared from `builtins/system.rs` and
 `gensym_counter`/`gensym_floor` in `core/value.rs`. Opt-out:
@@ -19868,7 +19871,194 @@ forbids. A short-circuiting fold is deferred until the new warning shows the nee
 concrete evidence ADR-011 asks for before adding a knob. `conj` still declares no domain,
 so `(conj <failure> x)` is silent when written directly; that is separate work.
 
-## ADR-313 — Stopping on a failure is a mechanism you reach for, not something primitives do
+## ADR-313 — the default crash reporter arms lazily: subscribe in the prelude, load on the first crash
+
+**Context.** ADR-305 made the crash reporter default-ON in `brood file`, `nest run`, a
+released bundle and the REPL, for ADR-232's reason: a flag you must arm before the bug is a
+flag that is absent when it matters (KI-36/KI-39). The arm was `crash-report/arm-default` —
+a function living *inside* `std/proc/crash-report.blsp`, so reaching it loaded the module.
+
+That load is not small. `crash-report` calls `io/puts` and `os/env`, and by ADR-229 a
+qualified call loads by inference: `io` alone brings `file`, `path`, `string`, `reflect` and
+`math`; `os` brings four more. Measured 2026-09-01 on an empty program, **ten modules
+materialised instead of one, costing 9.0 ms of a ~24 ms run** (interleaved best-of-31, two
+rounds, spread ±0.06 ms). Every `brood file` invocation paid it, crash or no crash — and
+`BROOD_NO_CRASH_REPORT=1` did not avoid it, because the env check sat *inside* the function
+the qualified call had already loaded the module to reach. The documented opt-out saved the
+`spawn` and none of the cost.
+
+**Decision.** Split the ARM from the REPORTING.
+
+- The arm moves to the prelude as `%crash-report-arm-default` (`std/prelude/process.blsp`).
+  It reads the opt-out with `%getenv` — `os/env` is literally `(%getenv name)` behind four
+  modules — then spawns `%crash-reporter-shim` and subscribes it with
+  `proc/system-monitor`.
+- The **subscription is what must be eager.** `sysmon::crash_reported_elsewhere` reads it to
+  stand the kernel's own `process N died: …` one-liner down, and a crash occurring before we
+  subscribe is a crash nobody reports. Nothing else has to happen up front.
+- The shim holds no reference to `crash-report` except one call in its `receive` body:
+  `(crash-report/take-over starter m)`. `:stop` it answers itself, so disarming a run that
+  never crashed stays free.
+- `crash-report` gains `take-over`, which handles that first event and then enters the
+  ordinary loop. The report/skip decision moved into `crash-report-step`, so the loop and
+  the handoff cannot drift apart.
+
+**Semantics are unchanged**: same subscription, same registered name, same reports, same
+per-site dedup, same opt-out. Only *when* the module loads changed.
+
+**The prelude cannot use ADR-246's autoload stubs**, and this is the trap worth recording.
+Those stubs are installed by the module machinery for a *module's* references; the prelude
+is compiled before any of it exists, so a bare `crash-report/take-over` there raises
+`unbound symbol` at call time. The first cut of this did exactly that, and the failure mode
+is the worst available: the reporter is the one process whose own death nobody reports, so
+it died silently at the moment it was needed and stderr was simply empty. The prelude's
+mechanism is the `%autoload` declaration in `std/prelude/tools.blsp`, which
+`prelude_hygiene::prelude_code_references_no_unloaded_module_wrapper` **enforces** — that
+test is what caught the mistake, and it names the fix in its own failure message.
+
+A second, unlooked-for saving falls out of the prelude location: `proc/whereis`,
+`proc/register` and `proc/system-monitor` are Rust builtins (ADR-251/252), and a prelude
+reference to them resolves directly rather than inferring a module load. The arm therefore
+loads **no** modules, not one — ten to one, rather than the ten to two that was expected.
+
+**Measured** (`scripts/ab-bench.sh --floor --all`, working tree vs `5669890d`, best-of-7):
+`startup` **−11.8%**, `spawn` −11.8%, `bintree` −11.3%, `primes` −8.4%, `nqueens` −7.4%,
+`matmul` −5.8%, `fib` −5.7%; every other row inside its own noise floor and **nothing
+regressed**. The compute rows are not a coincidence and are the interesting part: nine
+fewer modules is **~13% fewer JIT-lowered arms** (bintree 108 → 94, fib 95 → 84, startup
+10 → 6), which is precisely KI-100's mechanism — instruction-fetch pressure driven by how
+many arms carry native code, plus the per-run cranelift compile constant. This is a partial
+fix for KI-100's component 1, arrived at from the other end.
+
+**Guards**, all sabotage-verified:
+- `crates/lisp/tests/crash_report_lazy.rs` — arming must not bind any `crash-report` name,
+  and the opt-out must load neither the reporter nor `os`. Red under an eager
+  `require-one`.
+- `crates/cli/tests/crash_report_default.rs` — a real `brood file` whose spawned process
+  divides by zero must still print `[crash] … division by zero`, and the opt-out must still
+  suppress it. This is the half a laziness change breaks, and it went red on the genuine
+  `unbound symbol` bug above before it went green.
+- `tests/crash_report_test.blsp` — the lazily-armed shim is found by `running?`/`stop`.
+  The registered name `:crash-reporter` is a literal in *both* the prelude and
+  `crash-report-name`; red when they disagree.
+- `prelude_hygiene::every_autoload_declaration_matches_its_module` pins `take-over`'s arity.
+
+**Rejected: making the CLI decide in Rust and skip the preamble.** It fixes the opt-out
+path only, leaving the default path — the one everybody runs — paying the full cost.
+
+## ADR-314 — The prelude image: materialise the prelude's bindings, don't re-evaluate its forms
+
+**Status:** **OPT-IN, not default** (2026-09-02) — shipped default-on and reverted to
+opt-in the same day; `BROOD_PRELUDE_IMAGE=1` enables it. Implemented in
+`crates/lisp/src/builtins/startup_image.rs` (`write_prelude_image` / `load_prelude_image`)
+and `crates/lisp/src/lib.rs` (`boot_from_prelude_image`, tried ahead of the text cache).
+
+**Why it is not on: two real breakages the differential passed through.**
+1. **A stale `*image-sources*`.** `%std-image-install` runs as a top-level form during
+   prelude *evaluation*, so the imaged path never ran it and restored a snapshot of a
+   previous install instead — the section directory of whatever stdlib image existed when
+   the prelude image was written. That file is keyed on `stdlib-id`, so a rebuild with
+   different module coverage (a lean `nest` vs a full one — which
+   `scripts/build-std-image.sh` does routinely) reuses the same PATH with different
+   offsets, and every section read lands on garbage. Symptom: `unbound symbol: io/puts` on
+   a tree where nothing is wrong with `io`. **Fixed** by replaying `(%std-image-install)`
+   after materialising.
+2. **Module-level names are missing.** The prelude's evaluation loads modules, so a source
+   boot ends with `file/list-files`, `file/read-lines` and friends bound; an imaged boot
+   does not carry them, and — because `*features*` says the module is loaded — they never
+   autoload either. `crash-report/take-over` likewise stays the `%autoload` stub. **Not
+   fixed**; this is what keeps the default off.
+
+Both are the rule this ADR quotes and then failed to apply in full: *materialising defines
+bindings and evaluates nothing*, so anything the evaluation **did** must be replayed, not
+only what it recorded. The first bug is a "did"; the second is a snapshot boundary drawn in
+the wrong place — the prelude image draws its line at the prelude, but the prelude's own
+evaluation reaches past it.
+
+**The differential passed with both bugs present**, because it excluded the six
+install-bookkeeping globals — one of which *was* the first bug. Do not re-enable this
+without a differential that is clean with **no** exclusions; the six now agree once the
+install is replayed, so that bar is reachable.
+
+**Context — this supersedes ADR-138's rejected alternative, on numbers ADR-138 did not
+have.** That ADR cached the *expanded prelude as text*, which removed the ~27 ms macro
+expansion, and explicitly rejected "full `SharedCode`/heap serialization" as **"0.7 ms
+upside, a binary format + relocation story downside"**. That arithmetic was right in July:
+parse + eval + freeze together were ~4 ms of a ~6.5 ms warm boot.
+
+Two things changed. The residual grew — the prelude is bigger, and by 2026-09-02 a warm boot
+was **9.36 ms of a 12.4 ms empty run (76%)**, i.e. no longer a residual but the whole cost.
+And the "binary format" bill has since been paid in full by the **stdlib startup image**
+(ADR-256/281): a sectioned artifact, a value codec that round-trips closures, and ADR-280's
+differential. The expensive part of the rejected alternative already exists and is in
+production.
+
+**Decision.** The cold boot writes one more artifact — the prelude's **bindings**, encoded
+with the same `encode_section` the module image uses — and a warm boot rebuilds them
+structurally instead of reading and evaluating 544 forms. `BROOD_NO_PRELUDE_IMAGE=1` falls
+back to the text cache, which falls back to the source boot, so a bad or absent artifact
+costs a slower boot and never a wrong one.
+
+**Only the warm path is optimized, deliberately.** The cold boot may cost whatever it costs
+— it runs once per binary build — so it still does the full source boot and simply writes an
+extra file at the end. That asymmetry is the whole design: every subsequent invocation of
+`brood`, `nest` and `brood-lsp` collects the saving.
+
+**Measured** (best-of-41, interleaved, two rounds, net of harness floor): boot **9.36 → 5.40
+ms**, whole empty run **13.5 → 8.3 ms — 39%**. The warm path is register 0.55 ms, image 3.7
+ms (806 entries), freeze 1.1 ms.
+
+**What has to be written, and the rule behind it.** `image_matches_source.rs` states it for
+modules and it holds identically here: *materialising defines bindings and evaluates
+nothing*, so anything the evaluation would have **recorded** must be written explicitly.
+Building this turned up three omissions in a row, each silent:
+
+- the **`defdyn` marks** (`value::DYNAMICS`, a process-global set, not a binding) — without
+  them `binding` rejected `*require-parent*` and every `require` in the language died;
+- **`*out*` and its kin**, lost to a filter that skipped bindings whose *value* was a
+  native. The correct skip-set is *the names `builtins::register` creates*, snapshotted in
+  the cold boot right after registration: a prelude `def` can bind a primitive under a name
+  registration never re-creates, and `io/puts` went with it;
+- **def sites**, so stdlib `M-.` went dark — the one user-visible thing ADR-138 kept a whole
+  positioned read alive to preserve.
+
+Plus `meta` (ADR-283) and privacy, both carried for the same reason.
+
+**Stands aside under `BROOD_COVERAGE`**, exactly as the stdlib image does (ADR-281):
+coverage instruments the compiler and a materialised binding is never compiled, so an imaged
+prelude reports as uninstrumented and takes attribution down a path the source boot never
+takes. The text cache evaluates real forms, so falling through to it keeps coverage honest.
+
+**Guard.** `crates/cli/tests/prelude_image_matches_source.rs` — two real `brood` processes,
+one per boot path, compared per global on name, kind, privacy, declared signature, source
+location and dynamic-ness. Values are deliberately not compared, for the reason the module
+differential gives: two closures built by different routes are not `=`, and every defect
+here has been a missing name or a lost attribute. **Sabotage-verified three ways** —
+dropping def sites, dropping the `defdyn` marks, and restoring the wrong (value-is-native)
+filter each turn it red.
+
+**The differential excludes the stdlib image's install bookkeeping** — the same six names
+`image_matches_source.rs` excludes (`*image-sources*`, `*std-image-file*`,
+`*std-image-sections*`, `*std-impls*`, `*std-regs*`, `*std-require-edges*`), and for the
+same reason: their values track how far *that* install has got (`%std-image-tables!` clears
+`*std-image-sections*` once any module materialises), so they differ by module load order
+between two runs rather than by anything the prelude image carries. This was found by CI,
+not locally — the two arms happened to agree on this box and disagreed on the runner.
+
+The exclusion then failed to exclude, twice over: `reflect/global-names` yields **symbols**,
+and testing one for membership in a set of strings is silently always-false, so the filter
+was a no-op that passed here and stayed red on CI. The test now asserts each excluded name
+is genuinely absent from both dumps, which is the same discipline as the `GLOBALS` header
+check below — *an exclusion that quietly excludes nothing is indistinguishable from one that
+works, until the thing it was meant to hide disagrees.*
+
+**The guard's own near-miss is worth recording.** Its first cut compared two *empty* strings
+— the dump program died on an unbound `seq/sort`, and `"" == ""` is agreement, so it passed
+a deliberate sabotage. It now asserts the dump's `GLOBALS n` header is **present** and that
+the line count matches it, before comparing anything. That is
+`never-assert-the-absence-of-failures` applied to a differential, and it is the reason this
+gate can be trusted.
+## ADR-315 — Stopping on a failure is a mechanism you reach for, not something primitives do
 
 **Date:** 2026-09-01
 

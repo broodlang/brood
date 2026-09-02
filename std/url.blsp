@@ -186,7 +186,7 @@ where a decoded query stops being decodable is the query, not one field."
     acc
     (let (part (first parts)
           eq (index-of part "="))
-      ;; `with`, not a `cond` of two `failure?` arms (ADR-313): "the first component that
+      ;; `with`, not a `cond` of two `failure?` arms (ADR-315): "the first component that
       ;; cannot be decoded is the answer" is what this says, and the guards were four lines
       ;; spelling it out. Either key or value may fail; whichever does falls out.
       (with (k (url-qdecode-str (if (< eq 0) part (string/substring part 0 eq)))

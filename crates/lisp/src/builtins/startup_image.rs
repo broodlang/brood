@@ -664,3 +664,222 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     }
     Ok(Value::int(done))
 }
+
+// ─── The PRELUDE image (ADR-314) ───────────────────────────────────────────────
+//
+// The sectioned image above serves *modules*, which are `require`d into a live runtime.
+// The prelude is a different shape: it is built once per OS process, into a throwaway
+// builder heap that is then frozen into the shared read-only region, and every `brood`,
+// `nest` and `brood-lsp` invocation pays for it before running a single user form.
+//
+// ADR-138 chose to cache the prelude as expanded *text*, which removed the ~27 ms macro
+// expansion and left parse + eval + freeze — "only ~4 ms" at the time. That residual is now
+// **9.4 ms of a 12.4 ms empty run (76%)**: the prelude has grown, and everything else got
+// faster. So the same value-materialising trick the module image uses is applied here: the
+// cold boot writes the prelude's bindings, and a warm boot rebuilds them structurally
+// instead of reading and evaluating 544 forms.
+//
+// Only the *warm* path is optimized, deliberately. The cold boot may cost whatever it costs
+// — it happens once per binary build — so it keeps doing the full source boot and simply
+// writes one more artifact at the end.
+
+/// Serialize the prelude's `meta` facts (ADR-283). Four optional fields; a `use_instead`
+/// rides as its spelling, since symbol ids are not stable across processes.
+fn put_meta(out: &mut Vec<u8>, m: &crate::core::heap::NameMeta) {
+    for s in [&m.since, &m.deprecated, &m.beta] {
+        match s {
+            Some(v) => {
+                out.push(1);
+                put_str(out, v);
+            }
+            None => out.push(0),
+        }
+    }
+    match m.use_instead {
+        Some(sym) => {
+            out.push(1);
+            put_str(out, &value::symbol_name(sym));
+        }
+        None => out.push(0),
+    }
+}
+
+fn get_meta(r: &mut Cursor<Vec<u8>>) -> Option<crate::core::heap::NameMeta> {
+    let opt = |r: &mut Cursor<Vec<u8>>| -> Option<Option<String>> {
+        let p = r.position() as usize;
+        let tag = *r.get_ref().get(p)?;
+        r.set_position((p + 1) as u64);
+        if tag == 0 {
+            Some(None)
+        } else {
+            Some(Some(get_str(r)?))
+        }
+    };
+    let since = opt(r)?;
+    let deprecated = opt(r)?;
+    let beta = opt(r)?;
+    let use_instead = opt(r)?.map(|s| value::intern(&s));
+    Some(crate::core::heap::NameMeta {
+        since,
+        deprecated,
+        use_instead,
+        beta,
+    })
+}
+
+/// Write the prelude image for `fingerprint` to `path`: every non-native binding in `root`,
+/// plus declared sigs, privacy and `meta`. Best-effort — an error simply means the next boot
+/// takes the text-cache path, exactly as a missing file does.
+pub(crate) fn write_prelude_image(
+    heap: &mut Heap,
+    root: EnvId,
+    skip: &std::collections::HashSet<value::Symbol>,
+    path: &std::path::Path,
+    fingerprint: &str,
+) -> Result<(), LispError> {
+    // `skip` is the set of names bound immediately after `builtins::register` — exactly
+    // what the warm path re-creates for itself, and therefore the only thing safe to leave
+    // out (395 of ~1109 bindings).
+    //
+    // The tempting filter is "skip any binding whose VALUE is a native", and it is wrong:
+    // a prelude `(def *out* <native>)` binds a primitive under a name `register` never
+    // rebinds, so dropping it left `*out*` unbound and every `io/puts` dead. The set of
+    // names the registration creates is the precise question, and the caller is the only
+    // place that can answer it.
+    let syms: Vec<Value> = heap
+        .env_chain_names(root)
+        .into_iter()
+        .filter(|s| !skip.contains(s))
+        .map(Value::Sym)
+        .collect();
+
+    let (mut body, _count) = encode_section(
+        heap,
+        &syms,
+        true,
+        &mut 0u64,
+        &mut 0u64,
+        &mut std::collections::HashMap::new(),
+    )?;
+
+    // `meta` is not part of a module section's vocabulary (a module re-runs
+    // `%register-meta` when it loads); the prelude is *inserted*, so nothing re-runs it.
+    let meta = heap.name_meta_snapshot();
+    put_u32(&mut body, meta.len() as u32);
+    for (sym, m) in &meta {
+        put_str(&mut body, &value::symbol_name(*sym));
+        put_meta(&mut body, m);
+    }
+
+    // `defdyn`-ness lives in a process-global set (`value::DYNAMICS`), not in the binding,
+    // so restoring the VALUE of `*require-parent*` without its mark leaves `binding` — and
+    // therefore every `require` — rejecting it. `value::dynamic_names`'s own doc-comment
+    // anticipates exactly this for the module image; the prelude needs it for the same
+    // reason and more urgently, since the prelude is where the dynamics are declared.
+    let dyns = value::dynamic_names();
+    put_u32(&mut body, dyns.len() as u32);
+    for n in &dyns {
+        put_str(&mut body, n);
+    }
+
+    // Def sites, so stdlib `M-.` works on an imaged boot exactly as it does on the text
+    // cache's (ADR-138 kept a whole positioned read alive for this; here it is 30 bytes a
+    // name). The file is written per entry rather than hoisted: prelude def sites all name
+    // the same materialised copy today, but nothing in the format should assume that.
+    let sites = heap.def_sites_snapshot();
+    put_u32(&mut body, sites.len() as u32);
+    for (sym, loc) in &sites {
+        put_str(&mut body, &value::symbol_name(*sym));
+        put_str(&mut body, &loc.file);
+        put_u32(&mut body, loc.pos.line);
+        put_u32(&mut body, loc.pos.col);
+    }
+
+    let mut out = Vec::with_capacity(body.len() + 64);
+    out.extend_from_slice(PRELUDE_MAGIC);
+    put_str(&mut out, fingerprint);
+    out.extend_from_slice(&body);
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| LispError::runtime("prelude image: no parent dir"))?;
+    std::fs::create_dir_all(dir).map_err(|e| LispError::runtime(format!("prelude image: {e}")))?;
+    // Temp + rename, so a concurrently booting process never reads a torn file — the same
+    // discipline the text cache uses, and it matters more here (many nextest processes).
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, &out).map_err(|e| LispError::runtime(format!("prelude image: {e}")))?;
+    std::fs::rename(&tmp, path).map_err(|e| LispError::runtime(format!("prelude image: {e}")))?;
+    Ok(())
+}
+
+const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v1\n";
+
+/// Restore a prelude image into `root`. `None` for any miss — absent, stale, truncated,
+/// or a value that will not decode — and the caller falls back to the text cache. Returns
+/// the number of entries defined.
+pub(crate) fn load_prelude_image(
+    heap: &mut Heap,
+    root: EnvId,
+    path: &std::path::Path,
+    fingerprint: &str,
+) -> Option<usize> {
+    let bytes = std::fs::read(path).ok()?;
+    if !bytes.starts_with(PRELUDE_MAGIC) {
+        return None;
+    }
+    let mut r = Cursor::new(bytes);
+    r.set_position(PRELUDE_MAGIC.len() as u64);
+    if get_str(&mut r)? != fingerprint {
+        return None;
+    }
+    let count = get_u32(&mut r)?;
+    let mut done = 0usize;
+    for _ in 0..count {
+        let p = r.position() as usize;
+        if p >= r.get_ref().len() {
+            return None;
+        }
+        let kind = r.get_ref()[p];
+        r.set_position((p + 1) as u64);
+        let name = get_str(&mut r)?;
+        if kind == KIND_PRIVATE {
+            heap.mark_private(value::intern(&name));
+            done += 1;
+            continue;
+        }
+        let msg = decode_msg(&mut r).ok()?;
+        let v = from_message(heap, &msg);
+        let sym = value::intern(&name);
+        // No deferral dance here (contrast `image_load_section`): this heap is fresh and
+        // holds only the natives `register` just bound, so there are no autoload stubs to
+        // open early and nothing to overwrite out of order. Definition order is free.
+        define_image_entry(heap, root, kind, sym, v, false).ok()?;
+        done += 1;
+    }
+    let meta_count = get_u32(&mut r)?;
+    for _ in 0..meta_count {
+        let name = get_str(&mut r)?;
+        let m = get_meta(&mut r)?;
+        heap.set_name_meta(value::intern(&name), m);
+    }
+    let dyn_count = get_u32(&mut r)?;
+    for _ in 0..dyn_count {
+        let name = get_str(&mut r)?;
+        value::mark_dynamic(value::intern(&name));
+    }
+    let site_count = get_u32(&mut r)?;
+    for _ in 0..site_count {
+        let name = get_str(&mut r)?;
+        let file = get_str(&mut r)?;
+        let line = get_u32(&mut r)?;
+        let col = get_u32(&mut r)?;
+        heap.set_def_site(
+            value::intern(&name),
+            crate::core::heap::SourceLoc {
+                file,
+                pos: crate::error::Pos { line, col },
+            },
+        );
+    }
+    Some(done)
+}

@@ -109,14 +109,20 @@
   (def binary-payload (apply bytes (range 256)))
 
   ;; Server: owns the listener; accept, switch to binary mode, receive and echo
+  ;; Binary mode is set on the LISTENER, not on the accepted stream. Setting it on the
+  ;; stream is racy and was this phase's flake (KI-102): the accepted socket is already
+  ;; reading when `[:tcp-accept …]` arrives, so this client — which sends the moment it
+  ;; connects — could get its 256 raw bytes decoded as text first, and they came back as
+  ;; 512 (128 ASCII + 128 U+FFFD, re-encoded as UTF-8). Reproduced 2/30 under load on two
+  ;; cores; the listener's mode is fixed before any connection exists, so it has no window.
   (spawn (let (ls (tcp/listen "127.0.0.1" 0))
+           (tcp/set-binary ls true)
            (send me [:p38-port (tcp/local-port ls)])
            (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
              (if (= :timeout client)
                (tcp/close ls)
                (do
                  (tcp/controlling-process client (self))
-                 (tcp/set-binary client true)
                  (let (data (receive ([:tcp _ d] d) (after 5000 :timeout)))
                    (when (not (= :timeout data)) (tcp/send client data))
                    (tcp/close client)

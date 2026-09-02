@@ -50,14 +50,14 @@ pub const RENAMES: &[(&str, &str, &str)] = &[
     ("coverage/line-begin!", "coverage/line-begin", "ADR-302"),
     ("test/reset-units!", "test/reset-units", "ADR-302"),
     ("test/register-test!", "test/register-test", "ADR-302"),
-    // ADR-313 — `some->` deleted: it stopped on `nil`, which since ADR-310 means only "the
+    // ADR-315 — `some->` deleted: it stopped on `nil`, which since ADR-310 means only "the
     // lookup found nothing" and is an ordinary value everywhere else, so it was a pipe for
     // a channel that is not one. Ledgered rather than left bare because the failure a
     // caller gets is the least informative one we have (`unbound symbol: some->`) and where
     // it went lives only in the ADR — exactly the gap ADR-304 exists to close. (`ok->` and
-    // `with` both survive ADR-313; `with` changed shape, which is a semantic break the
+    // `with` both survive ADR-315; `with` changed shape, which is a semantic break the
     // ledger cannot express — see the ADR.)
-    ("some->", "->", "ADR-313"),
+    ("some->", "->", "ADR-315"),
 ];
 
 /// Where `old` went, if it is a ledgered rename: `(new, adr)`.

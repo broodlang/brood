@@ -1026,7 +1026,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   also *not* `nil`, which still means absence (`get`, `nth`, `os/env`, `first` of empty).
   There are **no call-site wrappers** (`attempt`, `result`) and no primitive absorbs a
   failure — `(+ 1 <failure>)` raises and `(conj acc <failure>)` stores. To stop on one you
-  say so, with the three ADR-313 mechanisms: **`ok->`** (the failure pipe — the first
+  say so, with the three ADR-315 mechanisms: **`ok->`** (the failure pipe — the first
   failing step short-circuits and falls out), **`with`** (the failure `let` — bindings like
   `let`'s, the first failing value short-circuits; this is the one that reaches a chain of
   YOUR OWN functions, because it binds rather than threads), and a **fold that stops once

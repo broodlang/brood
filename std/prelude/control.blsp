@@ -151,7 +151,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose.
 ;; once. The thread-LAST variants are gone with ADR-308: one argument convention needs
 ;; only one pipe, and `$` covers a step wanting the value elsewhere.
 ;;
-;; `some->` is gone (ADR-313): it stopped on `nil`, which since ADR-310 means only "the
+;; `some->` is gone (ADR-315): it stopped on `nil`, which since ADR-310 means only "the
 ;; lookup found nothing" and is an ordinary value everywhere else in the language — a pipe
 ;; for a channel that is not one. `get-in` covers the nil-chaining it existed for.
 
@@ -240,7 +240,7 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
 ;; `with` — the FAILURE let. Bindings read exactly like `let`'s; the first value that is a
 ;; failure short-circuits the whole form to that failure, so the steps after it never run.
 ;;
-;; This is deliberately NOT Elixir's `with`, which we had and removed (ADR-313). Elixir
+;; This is deliberately NOT Elixir's `with`, which we had and removed (ADR-315). Elixir
 ;; needs `{:ok, a} <- expr` because it has no failure kind — the tuple SHAPE carries the
 ;; signal, so every step must spell out a pattern for "kept going", and an `:else` section
 ;; must then re-match the shapes that did not. Brood has a failure kind, so the pattern is

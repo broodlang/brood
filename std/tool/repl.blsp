@@ -867,7 +867,7 @@ by the outermost invocation only."
         history (if interactive (repl-load-history) '()))
     (when (os/stdout-tty?) (io/write (str *repl-banner* "\n") :to *err*))
     ;; A process spawned at the prompt and left to crash reports itself (ADR-305).
-    (crash-report/arm-default)
+    (%crash-report-arm-default)
     ;; `%in-ns` must run in the LOOP process (its persistent `compile_ns` is what each
     ;; `reflect/eval-string` inherits), not the parent — and only there does it see the ambient
     ;; package context that roots the module name. A no-op when `*repl-start-ns*` is nil

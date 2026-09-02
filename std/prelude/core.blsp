@@ -245,7 +245,7 @@ this by implementing the `Display` ability, which takes over this name below.
           (fold (%vector-ref parts 0) acc ((%vector-ref parts 1) f)))
         (%fold-loop f acc (seq coll))))))
 (defn- %fold-loop (f acc coll)
-  ;; ADR-313: a fold STOPS once the accumulator is a failure. Neither `with` nor `ok->`
+  ;; ADR-315: a fold STOPS once the accumulator is a failure. Neither `with` nor `ok->`
   ;; can reach this case — the accumulator is threaded by the combinator, not by the
   ;; caller, so there is no binding or pipe step to put a sentinel on. Without it, a
   ;; callback that returns a failure hands it to the NEXT step, which raises
