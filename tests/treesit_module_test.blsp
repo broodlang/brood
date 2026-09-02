@@ -98,6 +98,53 @@
       (refute (editor/treesit/anonymous-keyword? {:named false :text "("}))
       (refute (editor/treesit/anonymous-keyword? {:named false :text "="}))
       (refute (editor/treesit/anonymous-keyword? {:named true :text "foo"}))))
+
+  ;; ---- the windowed-fontify restart ----------------------------------------
+  ;; Measured in bedit against a WHOLE-FILE parse (the only honest baseline): on ordinary
+  ;; code this cuts a 245-line window to 45 and 29 ms to 5 ms with zero span differences;
+  ;; inside a heredoc it declines and matches the full lead-in exactly.
+  (describe "treesit column0-restart"
+    (def rs-delims ["\"\"\"" "'''"])
+
+    (test "restarts at the previous column-0 line"
+      (let (src "defmodule A do\n  def a do\n    1\n  end\nend\n"
+            pos (index-of src "    1"))
+        ;; the enclosing top-level form, not the indented line the viewport starts on
+        (assert= (editor/treesit/column0-restart src pos rs-delims) 0)))
+
+    (test "a column-0 line IS its own restart point"
+      (let (src "defmodule A do\nend\ndefmodule B do\nend\n"
+            pos (index-of src "defmodule B"))
+        (assert= (editor/treesit/column0-restart src pos rs-delims) pos)))
+
+    ;; the whole reason for the guard: prose in a heredoc that looks like code
+    (test "declines a candidate inside an open heredoc"
+      (let (src "defmodule A do\n  @moduledoc \"\"\"\ndef not_code(x) do\nmore prose\n"
+            pos (index-of src "more prose"))
+        ;; one delimiter seen and not closed -> fall back to the top of the window
+        (assert= (editor/treesit/column0-restart src pos rs-delims) 0)))
+
+    (test "accepts again once the heredoc has closed"
+      (let (src "defmodule A do\n  @moduledoc \"\"\"\nprose\n  \"\"\"\nend\ndefmodule B do\n"
+            pos (index-of src "defmodule B"))
+        (assert= (editor/treesit/column0-restart src pos rs-delims) pos)))
+
+    (test "no delimiters to count means every column-0 line is taken"
+      (let (src "a\n  b\nc\n" pos (index-of src "c"))
+        (assert= (editor/treesit/column0-restart src pos []) pos)))
+
+    (test "the top of the window is always a valid answer"
+      (assert= (editor/treesit/column0-restart "" 0 rs-delims) 0)
+      ;; nothing above is in column 0 — there is nowhere to cut, so keep the whole window
+      (assert= (editor/treesit/column0-restart "  indented only\n" 0 rs-delims) 0))
+
+    ;; the caller passes a line start, but an offset mid-line must still answer about THAT
+    ;; line rather than about the character it happens to land on
+    (test "an offset inside a line is normalised to the line"
+      (let (src "defmodule A do\n  some indented thing\n")
+        (assert= (editor/treesit/column0-restart src 20 rs-delims) 0)
+        (assert= (editor/treesit/column0-restart src 5 rs-delims) 0))))
+
   (describe "treesit structural navigation"
     (test "point-forward lands at the end of the next named node"
       ;; from col 0 the next top-level node is the whole `def…end` method

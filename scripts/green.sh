@@ -199,6 +199,20 @@ if [ "$do_local" = 1 ]; then
       (shopt -s globstar nullglob; "$nest" check std/**/*.blsp tests/**/*.blsp examples/**/*.blsp 2>&1) |
         grep "warning:" | head -8 | sed 's/^/       /'
     fi
+
+    # The STRICT gate over std/ — a separate CI job, and one this script did not run
+    # (2026-09-02). A positively-known bound is read by inclusion there, so `number` where
+    # `int` is declared is a warning; std has been at zero since 2026-08-30. It costs the
+    # same seconds as the gate above and it is the difference between finding a bad
+    # signature here and finding it in a CI log: correcting `reflect/current-ns` to admit
+    # nil made `%in-ns`'s own signature read as a type error, and only CI saw it.
+    if (shopt -s globstar nullglob; "$nest" check --strict std/**/*.blsp >/dev/null 2>&1); then
+      ok "nest check --strict std/ (zero warnings)"
+    else
+      red "nest check --strict std/"
+      (shopt -s globstar nullglob; "$nest" check --strict std/**/*.blsp 2>&1) |
+        grep "warning:" | head -8 | sed 's/^/       /'
+    fi
   fi
 
   if cargo fmt --all --check >/dev/null 2>&1; then ok "cargo fmt --all --check"

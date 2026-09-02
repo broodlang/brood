@@ -95,6 +95,63 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
   (ts-spans (%tree-sitter-parse text lang) face-of))
 (sig fontify (string keyword any -> any))
 
+;; ---- where a windowed fontify may restart -------------------------------------
+
+(defn- ts-col0? (src i)
+  ;; A line beginning with something other than whitespace. `i` may sit one past the end —
+  ;; a window whose last line has no newline, or an empty buffer — and `string/char-at`
+  ;; raises there rather than answering nil, so the bound is checked here.
+  (and (< i (string/length src))
+    (let (c (string/char-at src i))
+      (and (not (= c " ")) (not (= c "\t")) (not (= c "\n")) (not (= c "\r"))))))
+
+(defn- ts-back-to-col0 (src at)
+  (let (nl (string/last-index-of src "\n" at))
+    (if (< nl 0) 0 (if (ts-col0? src (inc nl)) (inc nl) (ts-back-to-col0 src nl)))))
+
+(defn- ts-count-upto (src needle upto acc from)
+  (let (i (index-of src needle from))
+    (if (or (< i 0) (>= i upto))
+      acc
+      (ts-count-upto src needle upto (inc acc) (+ i (string/length needle))))))
+;; Declared because the body is SELF-RECURSIVE, and the checker deliberately does not
+;; specialize those (it would type an accumulator loop from its first base case). Undeclared,
+;; the count read `number`, and `column0-restart`'s `(math/rem opened 2)` — which wants an
+;; int — was a strict-gate warning. A counter is an int; saying so is one line.
+(sig ts-count-upto (string string int int int -> int))
+
+(defn column0-restart (src pos delimiters)
+  "A `:fontify-restart` answer for a tree-sitter mode: the offset of the nearest line at or
+before `pos` beginning in column 0, or 0 when that line cannot be shown to lie outside a
+multi-line string.
+
+**Why a mode wants one.** An editor fontifies a WINDOW — the viewport plus a lead-in, so a
+construct opening above the screen is still in scope. A mode with no restart parses that
+lead-in in full on every keystroke: 245 lines for a 44-row viewport, five times more text
+than is on screen (18 ms of a 25 ms keystroke, measured in bedit on a 10k-line Elixir file).
+A restart says where the lead-in may be cut, and for a language whose top-level constructs
+begin in column 0 — Elixir, Ruby, Python, Go, Rust — the previous such line is that place.
+
+**Why the guard.** A column-0 line INSIDE a heredoc is not a restart point: parse from there
+and the prose of an `@moduledoc` colours as code. So a candidate is accepted only when the
+number of `delimiters` occurrences before it is EVEN — every multi-line string opened in this
+window is also closed above the candidate. `delimiters` is a vector of the language's PAIRED
+multi-line string markers (Elixir's triple-quote and triple-apostrophe). A language whose
+heredocs have no paired marker — Ruby's `<<~EOS`, whose terminator is arbitrary text — has
+nothing to count, and should keep the lead-in rather than pass a list that cannot decide.
+
+**What it does not fix.** A construct opening ABOVE the window is invisible to this guard —
+and to the lead-in it replaces. Both mis-colour there, identically. That is the ceiling of
+any windowed fontify rather than of this rule: measured against a whole-file parse, the
+restart is never wrong where the lead-in is right, and is right everywhere the lead-in is."
+  ;; `pos` is a line start when `ed-window-src` calls this, but normalising to one anyway
+  ;; makes the answer total: an offset in the middle of a line asks about that line, and the
+  ;; result is always a line start, never an offset into one.
+  (let (line-start (let (nl (string/last-index-of src "\n" pos)) (if (< nl 0) 0 (inc nl)))
+        candidate (if (ts-col0? src line-start) line-start (ts-back-to-col0 src line-start))
+        opened (fold delimiters 0 (fn (n d) (+ n (ts-count-upto src d candidate 0 0)))))
+    (if (= 0 (math/rem opened 2)) candidate 0)))
+
 ;; ---- structural navigation --------------------------------------------------
 ;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp
 ;; convention), so these motions read the whole-buffer tree directly instead — a
