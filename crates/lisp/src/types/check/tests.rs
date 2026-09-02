@@ -478,11 +478,17 @@ fn narrowing_division_names_a_bug_and_clears_two_correct_programs() {
 #[test]
 fn bytes_and_map_entries_carry_their_element_types() {
     assert_eq!(ty_str("(first (string/->bytes \"ab\"))"), "nil | int");
-    assert_eq!(ty_str("(map (string/->bytes \"ab\") inc)"), "nil | list<int>");
+    assert_eq!(
+        ty_str("(map (string/->bytes \"ab\") inc)"),
+        "nil | list<int>"
+    );
     // a closed record states its keys, so its entries are exact
     assert_eq!(ty_str("(first {:a 1 :b 2})"), "(tuple :a | :b, 1 | 2)");
     assert_eq!(ty_str("(nth (first {:a 1 :b 2}) 0)"), ":a | :b");
-    assert_eq!(ty_str("(map {:a 1 :b 2} (fn (kv) (first kv)))"), "list<:a | :b>");
+    assert_eq!(
+        ty_str("(map {:a 1 :b 2} (fn (kv) (first kv)))"),
+        "list<:a | :b>"
+    );
     // `{}` has no entries, and says so: no key type inhabits it, and it is not
     // provably non-empty either
     assert_eq!(ty_str("(first {})"), "nil | vector<never>");
@@ -7526,9 +7532,8 @@ fn an_unguarded_failure_is_reported_in_both_modes() {
         );
     }
     // …a user function's declared domain, and a declared return, the same way
-    let into_a_defn = format!(
-        "{producer}(sig r (string -> int))\n(defn r (s) 1)\n(defn q (s) (r (p s)))"
-    );
+    let into_a_defn =
+        format!("{producer}(sig r (string -> int))\n(defn r (s) 1)\n(defn q (s) (r (p s)))");
     assert!(
         file_warnings_mode(&into_a_defn, false)
             .iter()
@@ -7550,16 +7555,17 @@ fn an_unguarded_failure_is_reported_in_both_modes() {
 fn a_handled_or_merely_unknown_failure_is_not_reported() {
     let producer = "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n";
     // 1. guarded with `failure?` — the whole point of the value being one
-    let guarded = format!(
-        "{producer}(defn q (s) (let (v (p s)) (if (failure? v) 0 (string/length v))))"
-    );
+    let guarded =
+        format!("{producer}(defn q (s) (let (v (p s)) (if (failure? v) 0 (string/length v))))");
     assert!(file_warnings_mode(&guarded, false).is_empty(), "{guarded}");
     // 2. a position that ACCEPTS a failure: `failure?` and `error-message` take any, and
     //    `=` compares anything — a test asserting a failure came back must stay silent
-    let accepted = format!(
-        "{producer}(defn q (s) (failure? (p s)))\n(defn r (s) (error-message (p s)))"
+    let accepted =
+        format!("{producer}(defn q (s) (failure? (p s)))\n(defn r (s) (error-message (p s)))");
+    assert!(
+        file_warnings_mode(&accepted, false).is_empty(),
+        "{accepted}"
     );
-    assert!(file_warnings_mode(&accepted, false).is_empty(), "{accepted}");
     // 3. an UNANNOTATED value. `any` admits a failure the way it admits everything; a
     //    bound known only by exclusion says nothing positive, so neither may be read as
     //    "this can fail" — that would fire on every unannotated parameter in the language.
@@ -7963,7 +7969,6 @@ fn discarded_catch_check_allow_suppresses_only_its_category() {
     );
 }
 
-
 #[test]
 fn zz_probe_failure() {
     let cases = [
@@ -7974,7 +7979,13 @@ fn zz_probe_failure() {
         ("guarded — must stay silent", "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n(defn q (s) (let (v (p s)) (if (failure? v) 0 (string/length v))))"),
     ];
     for (name, src) in cases {
-        eprintln!("PROBE [{name}] plain   = {:?}", file_warnings_mode(src, false));
-        eprintln!("PROBE [{name}] strict  = {:?}", file_warnings_mode(src, true));
+        eprintln!(
+            "PROBE [{name}] plain   = {:?}",
+            file_warnings_mode(src, false)
+        );
+        eprintln!(
+            "PROBE [{name}] strict  = {:?}",
+            file_warnings_mode(src, true)
+        );
     }
 }
