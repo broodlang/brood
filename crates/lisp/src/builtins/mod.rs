@@ -3330,7 +3330,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "%in-ns",
         Arity::exact(1),
-        Sig::new(vec![sym], sym),
+        // `(or symbol nil)` on BOTH sides, not `symbol`: `in_ns` has always treated nil as
+        // "clear back to ROOT" — it is the restore half of the save/set/restore bracket
+        // `reflect/current-ns` opens, and that function returns nil at root. The signature
+        // said `symbol`, so the prelude's own bracket in `%contracts-apply-pending!`
+        // (`(let (prev (reflect/current-ns)) … (%in-ns prev))`) reported an argument-type
+        // warning for code that is correct. Same defect as `reflect/current-ns`'s own
+        // signature one function above, found by the same ADR-315 diagnostics: an
+        // implementation that accepts nil and a declaration that does not.
+        Sig::new(
+            vec![sym.union(Ty::of(Tag::Nil))],
+            sym.union(Ty::of(Tag::Nil)),
+        ),
         &[],
         "",
         in_ns,
