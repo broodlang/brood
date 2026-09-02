@@ -62,23 +62,9 @@ fn arming_the_default_reporter_does_not_load_the_crash_report_module() {
     );
 }
 
-#[test]
-fn the_opt_out_arms_nothing_and_still_loads_nothing() {
-    // `BROOD_NO_CRASH_REPORT` is read with `%getenv`, not `os/env`, precisely so that
-    // deciding NOT to arm cannot load `os` + `string` + `reflect` + `math`.
-    unsafe { std::env::set_var("BROOD_NO_CRASH_REPORT", "1") };
-    let mut interp = Interp::new();
-    let armed = interp
-        .eval_str("(%crash-report-arm-default)")
-        .expect("arm-default under the opt-out");
-    assert_eq!(interp.print(armed), "nil", "the opt-out did not opt out");
-    assert!(
-        !bound(&mut interp, REPORTER_ONLY_NAME),
-        "opting OUT of the crash reporter still loaded it"
-    );
-    assert!(
-        !bound(&mut interp, "os/env"),
-        "the opt-out path loaded `os` — read the env var with %getenv, not os/env"
-    );
-    unsafe { std::env::remove_var("BROOD_NO_CRASH_REPORT") };
-}
+// `the_opt_out_arms_nothing_and_still_loads_nothing` lives in `crash_report_optout.rs`, in
+// its OWN test binary. It sets `BROOD_NO_CRASH_REPORT` in the process environment, and
+// `make asan` runs plain `cargo test`, which puts every test in one process on parallel
+// threads — so the variable leaked into the test above and made it assert that arming had
+// failed. Exactly KI-86's shape (two tests `set_var`-ing a flag the runtime reads once).
+// nextest hid it by giving each test its own process; a separate binary fixes it for both.

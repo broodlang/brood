@@ -354,3 +354,6 @@ harness = false
 [[bench]]
 name = "stdlib"
 harness = false
+
+[lints]
+workspace = true

@@ -33,3 +33,6 @@ perf-stats = ["brood/perf-stats"]
 # (No `jit` passthrough: nest depends on brood with default features, which now
 # include `jit`, so the JIT is already on. A lean `--no-default-features` release
 # re-adds it with `--features brood/jit` directly — see the Makefile's JIT_FEATURES.)
+
+[lints]
+workspace = true

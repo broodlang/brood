@@ -22,3 +22,6 @@ wasm-bindgen = "=0.2.100"
 # workspace. This crate used to carry `opt-level = "s"` + `lto = true` to shrink the wasm
 # and neither ever applied. Those settings now live at the workspace root as
 # `[profile.release-wasm]`; build this crate with `--profile release-wasm`.
+
+[lints]
+workspace = true

@@ -39,3 +39,6 @@ clap = { version = "4", features = ["derive"] }
 # days later). Tests only, and already in the tree via the brood lib.
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+[lints]
+workspace = true

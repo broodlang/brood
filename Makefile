@@ -399,15 +399,17 @@ loom: ## Loom model-check of the dense-table migration protocol (exhaustive inte
 	cargo test -p brood --release --features brood/loom-model --test loom_table_protocol
 
 asan: ## AddressSanitizer over the kernel-exercising Rust tests (needs nightly + rust-src; system-alloc so ASAN can intercept allocations instead of mimalloc's un-instrumented arena). Catches genuine OOB / use-after-free in the unsafe substrate (mmap table, JIT codegen buffers) that TSAN and the logical GC tripwires miss. `--tests` skips doctests, which don't LINK under ASAN + -Zbuild-std (a toolchain quirk, not a finding).
-	# BROOD_STACK_BUDGET is raised because ASAN's redzones make every Rust frame far
-	# fatter: the prelude's macro-expansion recursion measured **15.2 MB** of stack under
-	# instrumentation against the 12 MiB default, so the runtime's own "recursion too deep"
-	# guard fired during BOOT and took `differential.rs` down with it (the panic poisoned a
-	# LazyLock, so the second test failed as a cascade). That looked like an ASAN finding and
-	# was not one — ASAN itself reported nothing on 581 passing tests. Left unset, this gate
-	# silently cannot run the differential corpus, which is most of its value. Found
-	# 2026-08-17; with 64 MiB both tests pass and ASAN's checks still apply unchanged.
-	BROOD_STACK_BUDGET=67108864 RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --tests
+	# `--cfg brood_asan` sizes `WORKER_STACK_BYTES` to 64 MiB for this build, because ASAN's
+	# redzones roughly double every Rust frame: the instrumented prelude boot measured
+	# 16 768 736 bytes against the ordinary 16 MiB stack, i.e. 8 KB of headroom.
+	#
+	# This used to be `BROOD_STACK_BUDGET=64 MiB` instead, which is LARGER than the stack and
+	# so disables the stale-base backstop — `the_stack_guard_thresholds_are_ordered_and_non_
+	# degenerate` asserts it cannot be, and that test landed 2026-08-29 while the workaround
+	# dated from 2026-08-17. This gate could not pass from that day until 2026-09-02, and
+	# nothing noticed because ASAN is manual, not CI. No budget satisfies both constraints;
+	# the wrong constant was the stack.
+	RUSTFLAGS="-Zsanitizer=address --cfg brood_asan" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --tests
 
 repl: ## Start the REPL
 	$(CLI)
