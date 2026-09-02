@@ -19988,22 +19988,31 @@ running twice. Green 4/4 here and under `BROOD_VM=0`, `BROOD_NO_JIT=1` and
 `BROOD_NO_STDIMAGE=1` — the three CI environments, one of which used to break it.
 Sabotage-verified: dropping the def sites and dropping the `defdyn` marks each turn it red.
 
-**One gap it does NOT cover, stated rather than papered over.** Dropping the
-`%std-image-install` replay — the fix for bug 1 — leaves it GREEN, because giving each arm a
-private, stable cache removes the very interaction the bug needs: a stdlib image that
-*moves* under a live prelude image. A test that deletes the stdlib image instead does not
-reproduce it either (a missing file fails the section read cleanly and `require` falls back
-to source; the bug needs the file to exist with *different offsets*). Producing two
-differing-but-valid stdlib images inside a test needs two binaries with different baked-in
-module sets, and `nest stdimage` has no module-subset flag, so it is not cheaply
-reproducible.
+**The gap it does NOT cover, and three failed attempts to close it.** Dropping the
+`%std-image-install` replay leaves the differential GREEN. Three reproductions were written
+for the original `unbound symbol: io/puts` failure and **all three passed under that
+sabotage**, i.e. none of them reproduces it:
 
-**Manual reproduction, for whoever finishes this:** build the stdlib image with a lean
-`nest`, boot once so the prelude image captures its directory, then rebuild the stdlib image
-with a full `nest` (different module coverage, same key, different offsets) and boot again.
-Before the replay that produced `unbound symbol: io/puts`. A test that can be written for it
-is worth more than this paragraph — but a test that passes under sabotage is worth less than
-nothing, which is why there is not one here.
+1. *Delete the stdlib image under a live prelude image.* A missing file fails the section
+   read cleanly and `require` falls back to source. Harmless.
+2. *Rebuild the stdlib image with a different LAYOUT* (`stdimage/build` takes a module list,
+   so one binary can write a full image and then a four-module one at the same path and
+   fingerprint). Also harmless — a wrong-offset read fails to decode and falls back.
+3. *A module whose section holds only a prelude-owned prefixed name.* When the module is
+   left out of the build there is no section at all, and `require` loads from source.
+
+So the mechanism recorded above — "a stale `*image-sources*` makes section reads land on
+garbage" — is **not confirmed**, and the two earlier accounts of this bug in this ADR's
+history were wrong too. What is known: the failure was real and repeatable by hand at the
+time (a `crash-report` section of 227 bytes against a healthy 20552), it involved a stdlib
+image written by a *lean* `nest` and read by a *full* `brood`, and it stopped happening after
+the replay landed. Whether the replay is the fix or merely perturbed the state is unproven.
+
+The replay is kept on its own merits: the source path runs `%std-image-install` during
+prelude evaluation, so an imaged path that skips it is not replaying what the evaluation
+did, which is this ADR's own stated rule. But **it is not evidence the image is safe**, and
+that — not any known defect — is why the default stays off. A `⚠️ watching`-shaped situation,
+in ADR clothing.
 
 **Why the default is still off.** Not for a known defect — there is no reproducing failure
 left. It is off because this feature interacts with two other on-disk caches in
