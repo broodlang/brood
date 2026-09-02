@@ -183,7 +183,7 @@ impl Drop for GcBlockGuard {
 /// STACK, not the budget, and the fix is to give the instrumented build a stack that matches
 /// the frames it actually builds. Set by `--cfg brood_asan` from the `asan` make target.
 #[cfg(all(not(target_arch = "wasm32"), brood_asan))]
-pub const WORKER_STACK_BYTES: usize = 64 * 1024 * 1024;
+pub const WORKER_STACK_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(all(not(target_arch = "wasm32"), not(brood_asan)))]
 pub const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(target_arch = "wasm32")]
