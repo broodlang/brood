@@ -269,7 +269,10 @@ The steps after a failure never run, so a pipe does not have to end in `(if (fai
 
 Where `ok->` is the failure pipe for steps with nothing to name, `with` is the failure `let` for a chain of named ones — including steps that are your own functions, which `ok->` cannot reach because it threads a value rather than binding it.
 
+Bindings are ONE flat list, exactly like `let`'s — not a list per pair. `(with (a e1) (b e2) body)` binds only `a`, and `(b e2)` becomes a body form that calls `b`, which is the confusing `unbound symbol: b` that shape produces.
+
     (with (n (string/->number \"12\")) (inc n))   → 13
+    (with (n (string/->number \"4\") d (* n 2)) d)   → 8   ; two bindings, ONE list
     (failure? (with (n (string/->number \"q\")) (inc n)))   → true   ; `inc` never runs"
   (%with-build bindings body))
 ;; ---- local loops: just use `letrec` -----------------------------------------
