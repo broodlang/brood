@@ -747,3 +747,20 @@ was hidden in fact, only in principle.) The manifest name now carries the mode, 
 keeps its own warm cache, the way `"checks"` and `"checks-run"` already do; the new
 `reflect/strict-checking?` is how Brood asks. `crates/nest/tests/check_cache_mode.rs` runs
 plain-then-strict-then-plain over one unchanged file and is sabotage-verified.
+
+**A review pass found one of these unsound, the same day (2026-09-02).** The length fact
+read "has a first element" off a record's SHAPE, and a shape survives a union with `nil`:
+`(first (if p {:a 1} nil))` answered `(tuple :a, 1)` and dropped the `nil` every caller has
+to handle. `provably_non_empty` now requires the type to be ONLY that collection, which is
+what `is_subtype` states and a tag test would not. Two details worth keeping:
+
+- The **record** gate is the one that fires. The vector one cannot — a union with `nil`
+  widens a tuple shape away (`nil | (tuple 1)` is `nil | vector<1>`), so `tuple_elems()`
+  already declines. Sabotage said so: removing the vector gate reddened nothing. It is kept
+  as a defence, with the union-widening property pinned by its own lattice test, so the day
+  that widening improves the gate is already in place and the pin says why. A guard that
+  cannot fail reads as coverage; a guard that cannot fail *and says so* does not.
+- The rule was checked from the other side too — every position that legitimately CARRIES a
+  failure stays silent: `=`, storage in a collection, a vector literal, `str`, returning it,
+  and above all `ok->` and `with`. A lint that fired on the two mechanisms ADR-315 provides
+  as the answer to it would be fighting the language.

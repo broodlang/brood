@@ -339,8 +339,7 @@ pub(super) fn check_deps_fp(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lis
 /// cache reads it to key its manifest: a stored verdict is only reusable by a run in the
 /// mode that produced it, and without the key a plain `nest check` poisons the cache for
 /// the next `nest check --strict`, which then reports what the plain run found.
-pub(super) fn check_strict(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
-    let _ = heap;
+pub(super) fn check_strict(_args: &[Value], _env: EnvId, _heap: &mut Heap) -> LispResult {
     Ok(Value::Bool(crate::types::strict_checking()))
 }
 

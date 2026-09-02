@@ -497,6 +497,22 @@ fn bytes_and_map_entries_carry_their_element_types() {
     assert_eq!(ty_str("(first [1 2])"), "1");
 }
 
+// `nil` is the EMPTY case, and a union with one does not stop carrying the shape it was
+// unioned with — so "this has a first element" has to be read off a type that is ONLY that
+// collection, not off the shape alone. Reading the shape alone made `(first (if p {:a 1}
+// nil))` answer `(tuple :a, 1)` and silently drop the `nil` every caller has to handle.
+#[test]
+fn a_nil_union_is_not_provably_non_empty() {
+    assert_eq!(
+        ty_str("(first (if (bound? 'x) {:a 1} nil))"),
+        "nil | vector<:a | 1>"
+    );
+    assert_eq!(ty_str("(first (if (bound? 'x) [1 2] nil))"), "1 | 2 | nil");
+    // …while the collection on its own still carries the fact
+    assert_eq!(ty_str("(first {:a 1})"), "(tuple :a, 1)");
+    assert_eq!(ty_str("(first [1 2])"), "1");
+}
+
 // An OPEN record may carry keys nothing declares, so "these are the entries" does not
 // hold for one — the same gate every other closed-shape rule needs. It is also the gate
 // that keeps a NOMINAL record out: a record is modelled open, and one may implement
@@ -7566,7 +7582,25 @@ fn a_handled_or_merely_unknown_failure_is_not_reported() {
         file_warnings_mode(&accepted, false).is_empty(),
         "{accepted}"
     );
-    // 3. an UNANNOTATED value. `any` admits a failure the way it admits everything; a
+    // 3. the language's OWN failure mechanisms (ADR-315). A lint that fired on `ok->` and
+    //    `with` would be fighting the two idioms the answer to it is written in.
+    let mechanisms = format!(
+        "{producer}(defn q (s) (ok-> s (p) (string/length)))\n\
+         (defn r (s) (with (v (p s)) (string/length v)))"
+    );
+    assert!(
+        file_warnings_mode(&mechanisms, false).is_empty(),
+        "{mechanisms}"
+    );
+    // 4. a position that carries a failure rather than consuming it — `=`, a collection it
+    //    is stored in, a message, `str`, and simply returning it. ADR-315 left storage
+    //    deliberately silent: what it added was somewhere to SAY stop, not a guess.
+    let carried = format!(
+        "{producer}(defn q (s) (= (p s) \"x\"))\n(defn r (s) (conj (list) (p s)))\n\
+         (defn u (s) [(p s)])\n(defn v (s) (str (p s)))\n(defn w (s) (p s))"
+    );
+    assert!(file_warnings_mode(&carried, false).is_empty(), "{carried}");
+    // 5. an UNANNOTATED value. `any` admits a failure the way it admits everything; a
     //    bound known only by exclusion says nothing positive, so neither may be read as
     //    "this can fail" — that would fire on every unannotated parameter in the language.
     let unknown = "(defmodule t)\n(defn q (x) (string/length x))\n                   (defn r (x) (when x (string/length x)))";
