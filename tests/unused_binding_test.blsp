@@ -103,3 +103,16 @@
   (test "and a called special form is untouched"
     (assert= (count (or (reflect/check-string-structured "(defn g (xs) (map xs (fn (x) x)))") []))
       0)))
+
+(describe "checker: `:when` written inside the head list"
+  (test "names the misplacement, not the match error it causes"
+    ;; `((acc num :when (string? num)) body)` becomes a FOUR-parameter head, so the clause
+    ;; stops matching and every call dies with `[:match-error :fn …]` naming the clauses
+    ;; rather than the slip. Nothing said anything until this.
+    (let (msgs (warnings-for "(defn f (xs) (reduce xs '() (fn ((acc num :when (string? num)) acc))))"))
+      (is (any? msgs (fn (m) (string/starts-with? m "`:when` belongs after the head list"))))))
+
+  (test "and the correct spelling is silent"
+    (assert= (count (or (reflect/check-string-structured "(defn f (xs) (reduce xs '() (fn ((acc num) :when (string? num) acc))))")
+                      []))
+      0)))

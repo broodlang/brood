@@ -1190,6 +1190,10 @@ never run:
   receipt)                                ; lookup's failure falls out; charge never runs
 ```
 
+The bindings are **one flat list**, exactly like `let`'s — not a list per pair. Writing
+`(with (a e1) (b e2) body)` binds only `a`; `(b e2)` then becomes a body form that *calls*
+`b`, which surfaces as a puzzling `unbound symbol: b`.
+
 Where `ok->` threads a value, `with` *binds* one — which is why `with` is the mechanism
 that reaches a chain of **your own** functions. A failure threaded into a user-defined step
 does not stop it: the body runs, branches on the failure, and answers with its own, losing

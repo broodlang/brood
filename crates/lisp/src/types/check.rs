@@ -364,6 +364,34 @@ fn lint_fn_pattern_clauses(heap: &Heap, items: &[Value], out: &mut Vec<(Option<P
     if heads.len() != forms.len() {
         return;
     }
+    // `:when` INSIDE the head list. It is clause syntax and belongs after the list —
+    // `((acc num) :when (string? num) body…)` — so a head list containing it silently
+    // becomes two extra parameters, the arity stops matching, and every call dies with a
+    // `[:match-error :fn …]` that names the clauses rather than the mistake. There is
+    // nothing else it can plausibly be: a head list holds patterns, and a pattern matching
+    // the literal keyword `:when` in a parameter position is not a thing anyone writes.
+    for (&clause, &head) in forms.iter().zip(&heads) {
+        let Some(ps) = list_items(heap, head) else {
+            continue;
+        };
+        if ps
+            .iter()
+            .any(|p| matches!(p, Value::Keyword(k) if value::symbol_is(*k, "when")))
+        {
+            if let Some(pos) = heap.form_pos_only(clause) {
+                out.push((
+                    Some(pos),
+                    concat!(
+                        "`:when` belongs after the head list, not inside it — ",
+                        "write `((a b) :when (guard a) body…)`. Inside, it is two more ",
+                        "parameters, so the clause stops matching and every call fails ",
+                        "with a match error",
+                    )
+                    .to_string(),
+                ));
+            }
+        }
+    }
     // A clause whose head holds a non-symbol is a PATTERN clause (the whole `fn` is then
     // lowered to `match*`); one of only symbols is an arity clause (a native multi-arity
     // arm). Both bind per-clause names, so both are linted — the wording differs so the
