@@ -118,45 +118,8 @@
         (assert= (get miss :start) (get miss :end))))
     (test "valid source carries no :error or :missing nodes"
       (let (root (%tree-sitter-parse "x = 1\n" :ruby))
-        (is (nil? (tst-search root (fn (n) (or (get n :error) (get n :missing)))))))))
+        (is (nil? (tst-search root (fn (n) (or (get n :error) (get n :missing))))))))))
 
-  ;; ---- incremental reparse ---------------------------------------------------
-  ;; `tree-sitter-reparse` caches the prior tree per buffer key and edits it in
-  ;; place; the result must be IDENTICAL to a from-scratch `tree-sitter-parse`
-  ;; (incrementality is a pure optimization), across inserts/deletes/multibyte.
-
-  (describe "tree-sitter-reparse"
-    ; already gone
-    (test "incremental result equals a from-scratch parse after each edit"
-      (let (k 9001
-            ; identical (no-op reparse)
-            edits (list "x = 1\n"
-                    ; initial
-                    ; insert a char
-                    "x = 12\n"
-                    ; append a line
-                    "x = 12\ny = 3\n"
-                    ; delete the line
-                    "x = 12\n"
-                    ; multibyte edit
-                    "café = 12\n"
-                    ; larger change
-                    "def f\n  café\nend\n" "def f\n  café\nend\n")
-            ok (reduce edits
-                 true
-                 (fn (acc s)
-                   (and acc
-                     (= (%tree-sitter-reparse k s :ruby)
-                       (%tree-sitter-parse s :ruby))))))
-        (is ok)
-        ;; forget drops the buffer's cached tree and reports the count.
-        (assert= (%tree-sitter-forget k) 1)
-        (assert= (%tree-sitter-forget k) 0)))
-    (test "first reparse with no cache equals a fresh parse"
-      (let (k 9002)
-        (assert= (%tree-sitter-reparse k "y = 2\n" :elixir)
-          (%tree-sitter-parse "y = 2\n" :elixir))
-        (%tree-sitter-forget k)))))
 ;; ---- errors ----------------------------------------------------------------
 ;; Runs regardless of grammars: an unknown language throws whether or not any
 ;; grammar is built in.

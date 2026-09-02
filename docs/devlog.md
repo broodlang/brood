@@ -9886,3 +9886,37 @@ Two things measured and REJECTED, which is the useful half:
 The reusable part is the same one as KI-104 earlier today: the obvious spelling was the slow
 one, and no test could see it because the output was right. `mapcat` at every level of a
 recursive walk is the shape to distrust.
+
+## 2026-09-02 (later) — deleting `tree-sitter-reparse`: ADR-093 asked for a profile, and the profile said no
+
+ADR-093 shipped the eager whole-slice projection and named its own cost: "no **incremental
+reparse** … Incremental reparse / lazy node access remain available as a later optimisation
+behind the *same* Brood-facing data shape **if a large-file profile ever demands it**." The
+builtins were then written ahead of that condition and nothing ever called them.
+
+The profile has now been run, in bedit, on 1k/10k/50k-line Elixir files. It does not demand
+them, and the margin is not close:
+
+| | ms |
+|---|---|
+| a keystroke's whole fontify | 3.5 |
+| └ the tree-sitter parse inside it | 0.8 |
+| the same parse, incremental, best case (cache hit, zero edit) | 0.3 |
+
+**0.5 ms of 3.5 ms, as an upper bound.** The reason is that the editor fontifies a WINDOW: a
+viewport plus a lead-in, now cut at the previous top-level form
+(`editor/treesit/column0-restart`), which is 45 lines. Incrementality pays for re-parsing a
+whole file; there is no whole file here to re-parse. The cost that mattered was never the
+parse — it was the projection walk (fixed earlier today: `mapcat` per level, 10.5 -> 6.8 ms)
+and the size of the window (245 lines -> 45).
+
+So: `%tree-sitter-reparse`, `%tree-sitter-forget`, the `TREE_CACHE`, `compute_edit` and its
+soundness tests are gone — ~280 lines of `treesit.rs`, two builtins, two rows of
+`docs/primitives.md`. This is not a reversal of ADR-093; it is ADR-093's own conditional
+resolving to "no", and the module now matches what that ADR described. Greenfield: deleted
+rather than kept warm. If a future consumer ever parses whole files rather than windows, the
+edit-diffing machinery is one `git show` away.
+
+**The reusable part:** an optimisation kept "in case" still has to be paid for — in surface
+area, in docs, in the tests that guard code nobody runs. `compute_edit` had a careful
+multibyte-soundness suite guarding a function with no callers.

@@ -2279,24 +2279,6 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &["source", "lang"],
         "Parse source (a string) with the tree-sitter grammar named by keyword lang into a positioned CST — the SAME node-map shape as parse-source-positioned (`{:kind :start :end :named}`; leaves add :text, nodes with children add :kids), :kind a keyword of the tree-sitter node type and :named false for anonymous tokens (keywords/punctuation). Char offsets, so std/sexp + the editor's fontify navigate it unchanged. The generic mechanism is in the default build, but the kernel ships NO language grammar — a grammar is opt-in (e.g. --features treesit-ruby, or treesit-grammars for all). Errors if the named language's grammar isn't built in, or if the runtime was built without --features treesit.",
         tree_sitter_parse);
-    // Incremental re-parse keyed by a buffer id (same CST shape, less work), and
-    // a cache-eviction hook for when a buffer closes. §C.
-    def(
-        heap,
-        "%tree-sitter-reparse",
-        Arity::exact(3),
-        Sig::new(vec![int, string, kw], map_ty),
-        &["key", "source", "lang"],
-        "Like tree-sitter-parse, but incremental: caches the last (source, tree) for integer buffer id `key` and re-uses it (deriving the edit by diffing the old source) so only the changed region is re-scanned. Same positioned CST as tree-sitter-parse — incrementality is a pure optimization. Identical source re-uses the cached tree with no re-parse. Call tree-sitter-forget when the buffer closes.",
-        tree_sitter_reparse);
-    def(
-        heap,
-        "%tree-sitter-forget",
-        Arity::exact(1),
-        Sig::new(vec![int], int),
-        &["key"],
-        "Drop every cached incremental tree for integer buffer id `key` (all languages); returns the count dropped. Call when a buffer closes so tree-sitter-reparse's cache can't grow unbounded.",
-        tree_sitter_forget);
     def(
         heap,
         "reflect/load",
