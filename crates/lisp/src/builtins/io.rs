@@ -993,6 +993,53 @@ pub(super) fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// the prefix is the syntax this function exists to replace). Out of `2..=36` the radix
 /// is a caller bug, so it raises rather than answering `nil`, which would be
 /// indistinguishable from unparseable text.
+/// How `string/->number` reads a string — heap-free, allocation-free, and the SINGLE
+/// classification both the runtime below and the type checker use.
+///
+/// The checker specializes `(string/->number "1")` to the literal `1` rather than the
+/// declared `number | failure`, which is only honest if it decides parseability exactly the
+/// way the runtime does. Two implementations of "is this text a number" would drift, and the
+/// drift would be a type that contradicts the value — so there is one, called twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumericText {
+    /// Parses as an `i64` — the checker can name the exact literal.
+    Int(i64),
+    /// An integer past the `i64` range: a bignum, never a lossy `f64`.
+    Big,
+    /// Parses only as a float (never reached when a radix is given — a radix describes an
+    /// integer notation).
+    Float,
+    /// `string/->number` answers a `failure` for this text.
+    NotANumber,
+}
+
+/// Classify `s` the way [`string_to_number`] does. `radix` mirrors the optional second
+/// argument; out-of-range radices are the caller's problem (the runtime raises, and the
+/// checker simply declines to specialize).
+pub(crate) fn classify_numeric_text(s: &str, radix: Option<u32>) -> NumericText {
+    if let Some(radix) = radix {
+        if !(2..=36).contains(&radix) {
+            return NumericText::NotANumber;
+        }
+        return match i64::from_str_radix(s, radix) {
+            Ok(i) => NumericText::Int(i),
+            Err(_) => match num_bigint::BigInt::parse_bytes(s.as_bytes(), radix) {
+                Some(_) => NumericText::Big,
+                None => NumericText::NotANumber,
+            },
+        };
+    }
+    if let Ok(i) = s.parse::<i64>() {
+        NumericText::Int(i)
+    } else if s.parse::<num_bigint::BigInt>().is_ok() {
+        NumericText::Big
+    } else if s.parse::<f64>().is_ok() {
+        NumericText::Float
+    } else {
+        NumericText::NotANumber
+    }
+}
+
 pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "string/->number", arg(args, 0))?;
     if args.len() >= 2 {
@@ -1003,21 +1050,33 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
             )));
         }
         let radix = radix as u32;
-        return Ok(match i64::from_str_radix(&s, radix) {
-            Ok(i) => Value::int(i),
-            // Same no-demotion reasoning as the decimal path below: past i64 the value is
-            // a bignum, never a lossy f64.
-            Err(_) => match num_bigint::BigInt::parse_bytes(s.as_bytes(), radix) {
-                Some(n) => heap.alloc_bigint(n),
-                None => heap.alloc_failure(&format!(
-                    "string/->number: not a base-{radix} integer: {s:?}"
-                )),
-            },
+        // Same no-demotion reasoning as the decimal path below: past i64 the value is a
+        // bignum, never a lossy f64. Classification is shared with the checker.
+        return Ok(match classify_numeric_text(&s, Some(radix)) {
+            NumericText::Int(i) => Value::int(i),
+            NumericText::Big | NumericText::Float => {
+                match num_bigint::BigInt::parse_bytes(s.as_bytes(), radix) {
+                    Some(n) => heap.alloc_bigint(n),
+                    None => heap.alloc_failure(&format!(
+                        "string/->number: not a base-{radix} integer: {s:?}"
+                    )),
+                }
+            }
+            NumericText::NotANumber => heap.alloc_failure(&format!(
+                "string/->number: not a base-{radix} integer: {s:?}"
+            )),
         });
     }
-    if let Ok(i) = s.parse::<i64>() {
-        Ok(Value::int(i))
-    } else if let Ok(n) = s.parse::<num_bigint::BigInt>() {
+    match classify_numeric_text(&s, None) {
+        NumericText::Int(i) => return Ok(Value::int(i)),
+        NumericText::NotANumber => {
+            // Text this cannot interpret is a *known failure*, not an absence: it comes
+            // back naming the input, so anything that looks at the value learns why.
+            return Ok(heap.alloc_failure(&format!("string/->number: not a number: {s:?}")));
+        }
+        NumericText::Big | NumericText::Float => {}
+    }
+    if let Ok(n) = s.parse::<num_bigint::BigInt>() {
         // An integer too big for i64 is a bignum — mirroring the reader's
         // over-range literal path — NOT a lossy f64 (which silently rounded
         // `(str big)` away from round-tripping, kernel audit).

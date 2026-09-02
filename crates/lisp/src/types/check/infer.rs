@@ -1536,6 +1536,53 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             return Some(Ty::map_of(key_ty, val_ty));
         }
     }
+    // `(string/->number "1")` is `1`, not `number | failure`. The declared signature has to
+    // admit a failure because most calls can fail — but a call whose argument is a known
+    // string cannot, and saying otherwise puts `failure` in the type of code that has no
+    // way to produce one. That is the reverse of ADR-310's intent: the failure belongs where
+    // it can actually happen.
+    //
+    // Keyed on the argument's TYPE rather than its form, so a narrowed variable is covered
+    // too — `(if (= expr "1") (string/->number expr) 0)` reads `expr` as the singleton `"1"`
+    // in the then-branch, which is exactly where a reader is most surprised to be told the
+    // result might fail. A union of literals is answered as the union of their results.
+    //
+    // Parseability is decided by `builtins::io::classify_numeric_text`, the same function
+    // the runtime calls, so the type can never contradict the value it describes.
+    if value::symbol_is(head, "string/->number") && (items.len() == 2 || items.len() == 3) {
+        if let Some(lits) = expr_ty(heap, items[1], ctx)
+            .as_ref()
+            .and_then(Ty::as_lit_str)
+            .map(|set| set.iter().cloned().collect::<Vec<_>>())
+        {
+            // A radix, if present, must itself be a literal in range; otherwise decline.
+            let radix = match items.get(2) {
+                None => Some(None),
+                Some(&Value::Int(r)) if (2..=36).contains(&r) => Some(Some(r as u32)),
+                Some(_) => None,
+            };
+            if let Some(radix) = radix {
+                if !lits.is_empty() {
+                    let mut out: Option<Ty> = None;
+                    for lit in &lits {
+                        let t = match crate::builtins::classify_numeric_text(lit, radix) {
+                            crate::builtins::NumericText::Int(n) => Ty::int_lit(n),
+                            // A bignum's tag is not `int`, and a float is not either; name
+                            // the honest widening rather than guess a tag.
+                            crate::builtins::NumericText::Big => Ty::NUMBER,
+                            crate::builtins::NumericText::Float => Ty::of(Tag::Float),
+                            crate::builtins::NumericText::NotANumber => Ty::of(Tag::Failure),
+                        };
+                        out = Some(match out {
+                            None => t,
+                            Some(acc) => acc.union(t),
+                        });
+                    }
+                    return out;
+                }
+            }
+        }
+    }
     // `(map coll f)` → `nil | list<B>`, `B` = the callback's return type applied
     // to `coll`'s element type. Unknown callback / element → flat `list`.
     if value::symbol_is(head, "map") {
