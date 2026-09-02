@@ -16,7 +16,11 @@
   (test "from string" (assert= (symbol "hello") 'hello))
   (test "from symbol" (assert= (symbol 'hello) 'hello))
   (test "from keyword" (assert= (symbol :hello) 'hello))
-  (test "result is a symbol" (is (symbol? (symbol "x"))) (refute (keyword? (symbol "x"))))
+  (test "result is a symbol"
+    (is (symbol? (symbol "x")))
+    ;; check-allow: asserting the predicate is FALSE is the point; the checker agreeing
+    ;; that it can never be true is not a finding here.
+    (check-allow :type-mismatch (refute (keyword? (symbol "x")))))
   ;; Symbols are interned: two `symbol` calls with the same spelling are `=`.
   (test "interning" (assert= (symbol "abc") (symbol "abc"))))
 
@@ -24,7 +28,9 @@
   (test "from string" (assert= (keyword "hello") :hello))
   (test "from symbol" (assert= (keyword 'hello) :hello))
   (test "from keyword" (assert= (keyword :hello) :hello))
-  (test "result is a keyword" (is (keyword? (keyword "x"))) (refute (symbol? (keyword "x"))))
+  (test "result is a keyword"
+    (is (keyword? (keyword "x")))
+    (check-allow :type-mismatch (refute (symbol? (keyword "x")))))
   (test "interning" (assert= (keyword "abc") (keyword "abc"))))
 
 (describe "round-trips"

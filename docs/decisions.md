@@ -19971,11 +19971,31 @@ unexpected.
   exemptions, both measured rather than guessed: a **gensym** argument is not the author's
   test (`ok->`, `with` and the `match` lowering all emit `(if (pred g__N) …)` over
   temporaries — 27 of the first run's 84 hits), and for the wider predicate set a
-  written-out **literal** is skipped (a further 32 hits, all deliberate negative assertions
-  in the predicate test files). Scoped to `failure?`, it fires **zero** times across
-  `std/` + `tests/` and so ships at no triage cost. The same test over every predicate in
-  `Ty::tested_by` reports 25, of which **4 are in `std/`** and want triage — widening is
-  left for that pass, which is the ADR-011 order.
+  written-out **literal** is skipped (a further 32 hits, all deliberate negative
+  assertions). It covers **every** predicate in `Ty::tested_by`, and widening it paid for
+  itself: of the 25 remaining hits, 4 were in `std/` and **three were real**.
+
+  - `reflect/current-ns` declared `symbol` while its own docstring said "or nil at the
+    root namespace", so `%defonce-qualified-name`'s `(nil? ns)` — a load-bearing guard —
+    read as dead. The signature was wrong; it is `(or symbol nil)` now.
+  - `std/prelude/tools.blsp` guarded `nil?` on `%str-last-index-of`, which the comment
+    directly above it says answers **-1**, never nil. Vestigial from the version that had
+    the bug that comment records.
+  - `std/prelude/control.blsp` tested `(and (pair? params) (not (nil? params)))`; `nil`
+    is the empty list and is not a pair, so the second arm could never run.
+
+  The fourth is a **checker gap, not a program bug**, and is annotated rather than papered
+  over: `std/tool/repl.blsp` guards `(symbol? start-ns)` on a global that `nest` rebinds
+  **from Rust** (`(def repl/*repl-start-ns* …)` in `crates/nest/src/main.rs`). A global's
+  bound is taken from its initializer, so the checker believes it is forever `nil` — which
+  is exactly what ADR-023 forbids ("redefinable globals are `dynamic()`"). Fixing that at
+  the source is its own change. The 21 remaining hits are one shape — `(refute (pred x))`
+  or `(is (not (pred x)))`, a deliberate assertion that the predicate is false — and carry
+  `check-allow :type-mismatch`, which is what that directive is for. That is the lint's
+  standing cost, and it is real: it fired once in **bedit** on the same shape the moment
+  the widened checker reached it, so every future negative predicate assertion pays one
+  line. Worth it against three live defects in `std/` that nothing else could have named,
+  but recorded here rather than discovered later.
 - **A branchless `(if test)` types as `nil`.** It fell through to "unknown", and unknown is
   contagious: `(defn calc (expr) (if (not (failure? (string/->number expr)))))` read as
   `(string -> any)`, and every check that needs a pinned body type went quiet on it —

@@ -876,8 +876,14 @@ by the outermost invocation only."
           ;; plain `let` binding of it. A type predicate is what occurrence typing
           ;; narrows on, and it is the better guard anyway: a non-symbol value
           ;; here (someone `def`s it to a string) now skips rather than erroring.
-          (let (start-ns *repl-start-ns*)
-            (when (symbol? start-ns) (%in-ns start-ns)))
+          ;; check-allow: the checker pins `*repl-start-ns*` to its initializer (`nil`) and so
+          ;; calls this guard dead, but `nest` rebinds it FROM RUST — `(def repl/*repl-start-ns*
+          ;; (first *project-main*))` in crates/nest/src/main.rs — which no static reading can
+          ;; see. ADR-023 says a redefinable global is `dynamic()`; a global's bound being taken
+          ;; from its initial value is the gap, recorded rather than papered over.
+          (check-allow :type-mismatch
+            (let (start-ns *repl-start-ns*)
+              (when (symbol? start-ns) (%in-ns start-ns))))
           (repl-loop interactive history))))
     (when (and owner (= *repl-sigint-owner* token))
       (%restore-interrupt-handler)

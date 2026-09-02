@@ -122,11 +122,14 @@
           d (datetime/date 2026 6 7)
           t (datetime/time-of-day 1 2 3 4))
       (is (datetime? dt))
-      (is (not (datetime? d)))
+      (check-allow :type-mismatch
+        (is (not (datetime? d))))
       (is (date? d))
-      (is (not (date? dt)))
+      (check-allow :type-mismatch
+        (is (not (date? dt))))
       (is (time-of-day? t))
-      (is (not (time-of-day? d)))))
+      (check-allow :type-mismatch
+        (is (not (time-of-day? d))))))
   (test "a look-alike map is none of them"
     (is (not (date? {:year 2026 :month 6 :day 7})))
     (is (not (= (datetime/date 2026 6 7) {:year 2026 :month 6 :day 7}))))

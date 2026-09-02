@@ -16,7 +16,8 @@
     (is (pid? (self)))
     (is (pid? (spawn (receive (:go nil)))))
     (refute (pid? 7))
-    (refute (pid? (ref)))
+    (check-allow :type-mismatch
+      (refute (pid? (ref))))
     (assert= (type-of (self)) :pid))
 
   (test "a pid is equal to itself; distinct processes differ"

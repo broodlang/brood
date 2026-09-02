@@ -1559,6 +1559,37 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // since by now `match` has already macroexpanded to this) is enough
         // to flag a literal-enum scrutinee whose clauses don't cover every
         // member. See `match_exhaustiveness_gap`.
+        // A SPECIAL FORM's name sitting in an ARGUMENT slot: the commonest paren slip in
+        // the language. `(reduce xs '() fn (acc token) acc)` reported only
+        // `unbound symbol: acc`, twice — a symptom two levels down — and said nothing about
+        // the `fn` that lost its parentheses. `is_unbound` deliberately exempts a syntactic
+        // keyword (it is not a global and never will be), which is why nothing spoke up.
+        //
+        // Checked HERE, in the call walk, rather than in `check_value_leaf`: that path is
+        // gated on whole-file operand checking and on `evaluates_args`, and the editor's
+        // entry (`check-string-structured`, which is what bedit's `:diagnostics` service
+        // calls) did not reach it — the diagnostic would have shown on the command line and
+        // not where the slip is actually made. A local of that name is exempt: several
+        // keyword names are ordinary words, and both `std/editor/keymap.blsp` and
+        // `std/prelude/control.blsp` bind a local called `binding`.
+        if !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
+            for &arg in &items[1..] {
+                if let Value::Sym(a) = arg {
+                    let nm = name_of(a);
+                    if !ctx.is_local(a) && super::guards::is_syntactic_keyword(&nm) {
+                        out.push((
+                            arg_pos(heap, arg, form),
+                            format!(
+                                "{nm} is a special form, not a value — it has to be called, \
+                                 as `({nm} …)`; a missing pair of parentheses turns its own \
+                                 parts into arguments here"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
         if value::symbol_is(s, "throw") && items.len() == 2 {
             if let Some(msg) = match_exhaustiveness_gap(heap, items[1], ctx) {
                 out.push((heap.form_pos_only(form), msg));
@@ -1601,18 +1632,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
             && author_wrote_it
             && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
         {
-            // Scoped to `failure?` for now. The same test is sound for every predicate in
-            // `Ty::tested_by` and finds real things — measured across std/ + tests/ it
-            // reports 25, of which 4 are in `std/` and want triage. But the other 21 are
-            // deliberate negative assertions in the predicate test files (`(map? t)` where
-            // `t` is a table), each needing a `check-allow`, and that is a separate pass.
-            // `failure?` alone fires ZERO times tree-wide, so it ships now at no triage
-            // cost — which is the ADR-011 order: the narrow one first, widen on evidence.
-            let scoped = value::symbol_is(s, "failure?");
-            if let Some(tested) = scoped
-                .then(|| super::guards::predicate_guard_ty(heap, Some(ctx), s))
-                .flatten()
-            {
+            if let Some(tested) = super::guards::predicate_guard_ty(heap, Some(ctx), s) {
                 let bound = gradual_of(heap, items[1], ctx).bound;
                 if !bound.is_never() && bound != Ty::ANY && bound.is_disjoint(&tested) {
                     out.push((

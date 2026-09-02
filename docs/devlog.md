@@ -9462,8 +9462,35 @@ only "the lookup found nothing" — a pipe for a channel that is not one, with n
 Also learned, and worth keeping: **the checker did not flag an impossible predicate at all**
 — `(if (failure? 42) 0 1)` passed `nest check` silently. I had asserted the opposite as the
 reason `failure` could not leave the type unions; it was a prediction, not a measurement, and
-it was wrong. It flags one now, scoped to `failure?` (0 hits tree-wide, so no triage debt);
-the same test over every predicate reports 25, of which 4 are in `std/` and want a look.
+it was wrong. It flags one now, for every predicate in `Ty::tested_by`, and the widening paid for
+itself immediately: `reflect/current-ns` declared `symbol` while its own docstring said
+"or nil at the root namespace", so a load-bearing `(nil? ns)` guard read as dead; a `nil?`
+guarded a function the comment above it says answers **-1**; and a `nil?` sat behind a
+`pair?` that had already excluded nil. Three live defects the checker had never had a way
+to mention. A fourth hit is a checker gap rather than a program bug and is annotated as
+one: `*repl-start-ns*` is rebound **from Rust** by `nest`, and a global's bound is taken
+from its initializer, so the checker believes it is forever nil — precisely what ADR-023
+says must not happen. The other 21 hits are all `(refute (pred x))` / `(is (not (pred x)))`,
+deliberate assertions that a predicate is false, and carry `check-allow`.
+
+**And the commonest paren slip in the language finally says what it is.**
+`(reduce xs '() fn (acc token) acc)` — a `fn` that lost its parentheses — reported
+`unbound symbol: acc`, twice, a symptom two levels down, and said nothing about the `fn`.
+`is_unbound` deliberately exempts a syntactic keyword (it is not a global and never will
+be), so nothing spoke up. It now reports "fn is a special form, not a value — it has to be
+called, as `(fn …)`". Two things the measurement decided: a LOCAL of that name is exempt
+(several keyword names are ordinary words — both `std/editor/keymap.blsp` and
+`std/prelude/control.blsp` bind a local called `binding`, and eight of the first run's hits
+were those), and the check lives in the CALL walk rather than in `check_value_leaf`, which
+is gated on whole-file operand checking and on `evaluates_args`. Placed there it fired for
+`nest check FILE` and not for `check-string-structured` — which is exactly what bedit's
+`:diagnostics` service calls, so the diagnostic would have shown on the command line and
+not where the slip is made. ADR-312 recorded that asymmetry biting the other way; this is
+the second time, and both entries now name the same trap.
+
+One rule was tried and dropped for lack of evidence: skipping a bare module-level global.
+It fires on nothing (a module `def` reads as local to the checker's context) and would not
+have caught the `repl.blsp` case anyway, since that global is read into a `let` first.
 
 **And a branchless `(if test)` typed as `any`, which is how the whole thing stayed invisible.**
 `control_flow_ty` handled `(if t then)` and `(if t then else)` and nothing else, so

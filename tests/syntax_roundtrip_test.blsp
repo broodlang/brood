@@ -100,13 +100,15 @@
     ;; data, so readable output uses the unreadable `#<deep>` marker.
     (let (deep (nest-list 400 1)
           p (pr-str deep))
-      (is (not (nil? (index-of p "#<deep>"))))
+      (check-allow :type-mismatch
+        (is (not (nil? (index-of p "#<deep>")))))
       ;; check-allow :discarded-catch — a did-it-throw assertion: the caught error is the answer
       (assert= :parse-error
         (try (do (reflect/read-string p) :read-ok) (catch e :parse-error)))))
 
   (test "the human (display) form keeps the compact ellipsis"
-    (is (not (nil? (index-of (str (nest-list 400 1)) "…"))))))
+    (check-allow :type-mismatch
+      (is (not (nil? (index-of (str (nest-list 400 1)) "…")))))))
 
 (describe "quote and quasiquote take at most one form"
   ;; Built as data and `reflect/eval`ed so the malformed shapes are values, not source

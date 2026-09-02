@@ -75,13 +75,16 @@
     (is (bool? true))
     (refute (bool? nil))
     (is (string? "s"))
-    (refute (string? 's))
+    (check-allow :type-mismatch
+      (refute (string? 's)))
     (is (symbol? 's))
     (refute (symbol? :s))
     (is (keyword? :k))
-    (refute (keyword? 'k))
+    (check-allow :type-mismatch
+      (refute (keyword? 'k)))
     (is (vector? [1]))
-    (refute (vector? (list 1)))
+    (check-allow :type-mismatch
+      (refute (vector? (list 1))))
     (is (pair? (list 1)))
     (refute (pair? nil))
     (is (nil? nil))
@@ -92,7 +95,8 @@
     (is (fn? cons))
     (is (fn? (fn (x) x)))
     (refute (fn? 1))
-    (refute (fn? 'inc))))
+    (check-allow :type-mismatch
+      (refute (fn? 'inc)))))
 
 (describe "type-of"
   (test "reports the runtime tag as a keyword"
