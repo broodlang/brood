@@ -330,6 +330,19 @@ fn arity_of_sig(sg: &Sig) -> Arity {
     }
 }
 
+/// Clip `s` to `max` characters with a trailing ellipsis. A diagnostic names the *reason*;
+/// it is not a place to print a type in full. An inferred record shape runs to hundreds of
+/// characters — hive's `docs/runnable` rendered a 700-character tuple-of-tuples into one
+/// warning, which is unreadable on any terminal and buries the sentence that matters. The
+/// full type is a hover away.
+fn elide(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
 fn unbound_msg(nm: &str) -> String {
     let mut msg = format!("{}{}", UNBOUND_PREFIX, nm);
     // A deliberate rename says where the name went (ADR-304) — the same suffix the
@@ -1620,8 +1633,8 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                         format!(
                             "{}: this can never be true — {} is {}, which is never {}",
                             name_of(s),
-                            crate::syntax::printer::print(heap, items[1]),
-                            bound,
+                            elide(&crate::syntax::printer::print(heap, items[1]), 60),
+                            elide(&bound.to_string(), 80),
                             tested,
                         ),
                     ));

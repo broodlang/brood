@@ -52,6 +52,10 @@ use terminal::*;
 use tooling::*;
 
 pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_captured_stdout};
+// The checker specializes `(string/->number "1")` to the literal `1`, and may only do so by
+// deciding parseability exactly as the runtime does — so it calls the runtime's own
+// classifier rather than growing a second one that could drift (`types::check::infer`).
+pub(crate) use io::{classify_numeric_text, NumericText};
 pub use os::set_script_args;
 pub use terminal::{restore_raw, restore_terminal, restore_terminal_on_exit};
 pub use tooling::{DOC_FORMS, SPECIAL_FORMS};

@@ -293,8 +293,8 @@ fn guard_assertion_inner(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     // with two operands it IS `%eq` — so a `cond` clause `(= item :done)` narrows the
     // clauses below it exactly as the primitive spelling does.
     if items.len() == 3 && (head_name == kw::EQ_PRIM || head_name == "=") {
-        if let Some((sym, ty)) =
-            literal_eq_guard(items[1], items[2]).or_else(|| literal_eq_guard(items[2], items[1]))
+        if let Some((sym, ty)) = literal_eq_guard(heap, items[1], items[2])
+            .or_else(|| literal_eq_guard(heap, items[2], items[1]))
         {
             // **The else-branch narrows exactly when the guard's type is exactly the
             // values `=` compares against** — a literal set, whose complement became
@@ -559,7 +559,7 @@ pub(super) fn or_same_var_narrowing(heap: &Heap, test: Value, ctx: &Ctx) -> Opti
 /// `(a, type-of(b))`. Used by `guard_assertion`'s `%eq` arm to recognise both
 /// `(%eq sym lit)` and `(%eq lit sym)`. Returns `None` when `b` is itself a
 /// variable — equality between two unknowns asserts nothing.
-fn literal_eq_guard(a: Value, b: Value) -> Option<(Symbol, Ty)> {
+fn literal_eq_guard(heap: &Heap, a: Value, b: Value) -> Option<(Symbol, Ty)> {
     let Value::Sym(s) = a else { return None };
     // A literal is anything that's not a symbol / pair / vector / map.
     // Strings, ints, floats, keywords, booleans, nil all self-evaluate and
@@ -567,6 +567,14 @@ fn literal_eq_guard(a: Value, b: Value) -> Option<(Symbol, Ty)> {
     // could be unknown.
     match b {
         Value::Sym(_) | Value::Pair(_) | Value::Vector(_) | Value::Map(_) => None,
+        // A STRING literal is read through the heap. `Ty::of_value` is heap-free by
+        // design, so it can only answer the flat `string` tag — which made `(= m "x")`
+        // narrow `m` to `string` where `(= n 1)` narrows `n` to `1`, and left the else
+        // branch one-sided into the bargain (the `exact` test above already asks for
+        // `as_lit_str`). Int and keyword literals have refined here since ADR-120; this
+        // is strings catching up, and it is what lets `(if (= expr "1") (string/->number
+        // expr) 0)` know its parse cannot fail.
+        Value::Str(id) => Some((s, Ty::str_lit(&heap.string(id)))),
         other => Some((s, Ty::of_value(other))),
     }
 }

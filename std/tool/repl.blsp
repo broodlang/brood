@@ -823,13 +823,13 @@ the loop spawns so its `def`s are in place for the first prompt."
 ;; sets it to the project's `:main` module (the interactive half of package rooting,
 ;; ADR-070); it is rooted through the ambient package context in the loop process. A
 ;; plain `def` (not a `defdyn`) so it reaches the spawned loop across `spawn`.
-;; `(or symbol nil)`, declared rather than inferred. `nest` rebinds this FROM RUST —
-;; `(def repl/*repl-start-ns* (first *project-main*))` in crates/nest/src/main.rs — which no
-;; static reading can see, so inference pins it to its initializer and calls the `symbol?`
-;; guard below dead. The sig states the truth instead of suppressing the category, which is
-;; what a `check-allow` there would have done.
-(sig *repl-start-ns* (or symbol nil))
 (def *repl-start-ns* nil)
+;; `(or symbol nil)`, declared rather than inferred, and BELOW the `def` — a `sig` above its
+;; own definition breaks the module under `BROOD_CONTRACTS=1`, which `sig_placement.rs` gates
+;; tree-wide. `nest` rebinds this FROM RUST — `(def repl/*repl-start-ns* (first
+;; *project-main*))` in crates/nest/src/main.rs — which no static reading can see, so
+;; inference pins it to its initializer and calls the `symbol?` guard below dead.
+(sig *repl-start-ns* (or symbol nil))
 
 (defn run ()
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and
