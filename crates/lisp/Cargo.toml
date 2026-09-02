@@ -107,7 +107,7 @@ jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "de
 # language = a `treesit-<lang>` feature here + one cfg'd arm in `src/treesit.rs`.
 # (Dynamic runtime grammar loading — no compile-time enum at all — is the planned
 # end state; see ROADMAP.md.)
-treesit = ["dep:tree-sitter"]
+treesit = ["dep:tree-sitter", "dep:tree-sitter-language", "dep:libloading"]
 treesit-ruby = ["treesit", "dep:tree-sitter-ruby"]
 treesit-elixir = ["treesit", "dep:tree-sitter-elixir"]
 # Convenience bundle: every demo grammar. The test suite + `make install` build
@@ -130,6 +130,13 @@ web-time = "1"
 # parser. The grammar crates expose a `tree_sitter_language::LanguageFn` (`LANGUAGE`)
 # that `tree_sitter::Language` converts from, decoupling them from the core version.
 tree-sitter = { version = "0.27", optional = true }
+# Runtime grammar loading (`tree-sitter-load-grammar`): dlopen a grammar shared library and
+# build a `Language` from its entry point. `tree-sitter-language` carries the sanctioned
+# `LanguageFn::from_raw`, so no transmute is needed. Both are tiny; the alternative —
+# tree-sitter's own `wasm` feature — wants wasmtime-c-api 48 while this runtime is on
+# wasmtime 47, i.e. a second copy of wasmtime or a version coupled to tree-sitter's cadence.
+tree-sitter-language = { version = "0.1", optional = true }
+libloading = { version = "0.8", optional = true }
 tree-sitter-ruby = { version = "0.23", optional = true }
 tree-sitter-elixir = { version = "0.3", optional = true }
 # Lock-free, append-only vector for the shared RUNTIME code region: stable

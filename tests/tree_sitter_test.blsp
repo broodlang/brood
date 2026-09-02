@@ -127,3 +127,60 @@
 (describe "tree-sitter-parse errors"
   (test "an unknown language throws"
     (assert-error (%tree-sitter-parse "x" :python))))
+
+;; ---- grammars loaded at runtime ---------------------------------------------
+;; The kernel ships no language list (ADR-093's follow-up): a grammar it was not built with
+;; is loaded from a shared library at runtime. These tests build one from the vendored Elixir
+;; sources if a C compiler is around, and otherwise assert only the failure modes — which is
+;; the half that must never crash.
+
+(def tsd-so "/tmp/brood-ts-dyn/libtree-sitter-elixir.so")
+
+(describe "tree-sitter-load-grammar: the failure modes are errors, never crashes"
+  (test "a library that is not there"
+    (let (e (check-allow :discarded-catch
+              (try (%tree-sitter-load-grammar "/nonexistent/libtree-sitter-nope.so" :nope)
+                (catch e (error-message e)))))
+      (is (string? e))
+      (is (includes? e "tree-sitter-load-grammar"))))
+
+  (test "a real library that exports no such grammar"
+    ;; every platform has some shared library; this one is never a tree-sitter grammar
+    (let (candidates ["/lib/x86_64-linux-gnu/libc.so.6" "/usr/lib/libc.so.6" "/usr/lib/libSystem.B.dylib"]
+          found (seq/find candidates file/exists?))
+      (when found
+        (let (e (check-allow :discarded-catch
+                  (try (%tree-sitter-load-grammar found :definitely-not-a-language)
+                    (catch e (error-message e)))))
+          (is (string? e))
+          (is (includes? e "exports no tree_sitter_"))))))
+
+  (test "an unknown language names the way to load one"
+    (let (e (check-allow :discarded-catch
+              (try (%tree-sitter-parse "x" :nosuchlang) (catch e (error-message e)))))
+      (is (includes? e "tree-sitter-load-grammar")))))
+
+(when (file/exists? tsd-so)
+  ;; `lang` names the GRAMMAR, because the library's entry point is named for it: a
+  ;; `libtree-sitter-elixir.so` exports `tree_sitter_elixir` and nothing else, so there is no
+  ;; alias to register it under. This is the load path either way — under a build with
+  ;; `treesit-grammars` it proves a loaded grammar overrides the bundled one, and under a
+  ;; bare `cargo test` (no grammar features at all) it is the ONLY way `:elixir` parses.
+  (describe "a grammar loaded from a shared library"
+    (test "loads, registers, and parses like a built-in one"
+      (let (abi (%tree-sitter-load-grammar tsd-so :elixir))
+        (is (int? abi))
+        (is (> abi 0))
+        (let (tree (%tree-sitter-parse "defmodule A do\n  def a, do: 1\nend\n" :elixir))
+          (assert= (:kind tree) :source)
+          (is (> (count (:kids tree)) 0))
+          (refute (get tree :error)))))
+
+    (test "loading it twice is a refresh, not a leak of stale parsers"
+      ;; the parser pool holds parsers bound to the OLD language object, so a reload clears
+      ;; this language's pool; without that, the next parse could use a parser bound to a
+      ;; grammar that is no longer registered
+      (let (a (%tree-sitter-load-grammar tsd-so :elixir)
+            b (%tree-sitter-load-grammar tsd-so :elixir))
+        (assert= a b)
+        (assert= (:kind (%tree-sitter-parse "x = 1\n" :elixir)) :source)))))

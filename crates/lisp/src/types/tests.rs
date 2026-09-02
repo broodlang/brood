@@ -275,6 +275,32 @@ fn elem_of_a_tuple_shape_unioned_with_a_bare_pair_is_unknown() {
     );
 }
 
+// `bytes` and `map` answer for their elements by KIND rather than by a refinement — an
+// octet, and a `[key value]` entry. Both derivations speak for the whole term, so both
+// require that the term admit exactly ONE collection: a value that may be a map or a list
+// has unknown elements, the same reason a tuple beside a `pair` does.
+#[test]
+fn a_derived_element_type_needs_the_term_to_admit_one_collection() {
+    assert_eq!(Ty::of(Tag::Bytes).elem_ty(), Some(Ty::of(Tag::Int)));
+    assert_eq!(
+        Ty::map_of(Ty::of(Tag::Str), Ty::of(Tag::Int)).elem_ty(),
+        Some(Ty::tuple_of(vec![Ty::of(Tag::Str), Ty::of(Tag::Int)]))
+    );
+    // a map the checker knows nothing about declines: an unrefined map type covers a
+    // NOMINAL record too, and a record may implement Seqable — walking as whatever that
+    // impl yields rather than as entries
+    assert_eq!(Ty::of(Tag::Map).elem_ty(), None);
+    // two collections in one term: neither derivation may speak. (A refinement the type
+    // CARRIES is a different matter — it was put on the sequence members deliberately,
+    // and a demand like "a seqable of numbers" is exactly that shape.)
+    let bytes_or_vector = Ty::of(Tag::Bytes).union(Ty::of(Tag::Vector));
+    assert_eq!(bytes_or_vector.elem_ty(), None, "{bytes_or_vector}");
+    // …and the derivations must not reach the RENDERER, which speaks only for the
+    // element-refinement-bearing kinds: `bytes` is `bytes`, not `bytes<int>`
+    assert_eq!(Ty::of(Tag::Bytes).to_string(), "bytes");
+    assert_eq!(Ty::of(Tag::Map).to_string(), "map");
+}
+
 #[test]
 fn subtyping_is_reflexive_and_transitive() {
     let s = sample_tys();

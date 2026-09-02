@@ -98,6 +98,11 @@ const SEQ_BITS: u32 =
 /// The map tag — the one tag a key/value refinement applies to.
 const MAP_BIT: u32 = 1u32 << bit(Tag::Map);
 
+/// The bytes tag. Not refinement-bearing — a `bytes` is a sequence of octets, so its
+/// element type is fixed by the kind rather than carried — but [`Ty::elem_ty`] names it
+/// to answer for that fixed element type.
+const BYTES_BIT: u32 = 1u32 << bit(Tag::Bytes);
+
 /// The vector tag alone (not `pair` too) — the one tag a *positional* tuple
 /// refinement applies to. Deliberately narrower than `SEQ_BITS`: a tuple is a
 /// fixed-arity, per-position-typed shape, which only ever makes sense for a
@@ -1052,21 +1057,63 @@ impl Ty {
     /// case anyway.
     pub fn elem_ty(&self) -> Option<Ty> {
         let this = self.single()?;
-        if let Some(e) = this.elem.as_deref() {
-            return Some(e.clone());
+        // A refinement the type CARRIES describes every sequence member it was put on,
+        // and is the answer wherever it is present.
+        if let Some(elem) = this.elem.as_deref() {
+            return Some(elem.clone());
         }
-        // A tuple shape refines the VECTOR member only. When the term also admits a
-        // `pair`, that member's elements are unknown, so the term's are — and reporting
-        // the tuple's elements for the whole term was a FALSE POSITIVE: `(tuple 0) ∪ pair`
-        // (a fold whose init is `[0]` and whose step conses strings) answered `0` for
-        // `first`, and `(takes-str (first …))` warned "expects string, got 0" on a value
-        // that was the string "t" at runtime. Unknown is the only sound answer here.
-        if this.tags & SEQ_BITS != VECTOR_BIT {
-            return None;
+        // Otherwise the element type can still be DERIVED from the kind — for the three
+        // collections below. Each derivation speaks for the whole term, so each requires
+        // the term to admit exactly one collection: when it admits a second, that
+        // member's elements are not covered and the term's are unknown. Answering for one
+        // member is the accepting direction of unsound — it produced a checker false
+        // positive, `(tuple 0) ∪ pair` (a fold whose init is `[0]` and whose step conses
+        // strings) answering `0` for `first`, so `(takes-str (first …))` warned "expects
+        // string, got 0" on a value that was the string "t" at runtime.
+        match this.tags & (SEQ_BITS | MAP_BIT | BYTES_BIT) {
+            // A tuple has no plain `elem`, but its per-position types taken together are
+            // exactly as sound a bound (every element of a `tuple<int, string>` is an
+            // `int | string`). Positions only ever describe a VECTOR.
+            VECTOR_BIT => this
+                .tuple
+                .as_ref()
+                .map(|elems| elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t))),
+            // `bytes` is a sequence of octets: its element type is fixed by the kind, so
+            // it needs no refinement to carry one.
+            BYTES_BIT => Some(Ty::of(Tag::Int)),
+            // A map walks as its `[key value]` entries — a two-element VECTOR, verified
+            // against the runtime rather than assumed. What is known of the key and the
+            // value comes from whichever refinement the map carries: `map_kv` states them
+            // directly, and a CLOSED record shape states them exactly (its keys are the
+            // declared ones and nothing else — an OPEN shape may carry keys nothing
+            // declares, so it declines). A map the checker knows nothing about declines
+            // too — see the Seqable note below.
+            MAP_BIT => {
+                let (key, value) = if let Some((k, v)) = this.map_kv.as_deref() {
+                    (k.clone(), v.clone())
+                } else if let (Some(fields), Some(false)) =
+                    (self.record_fields(), self.record_is_open())
+                {
+                    fields.iter().fold(
+                        (Ty::NEVER, Ty::NEVER),
+                        |(keys, values), (name, (ty, _optional))| {
+                            (keys.union(Ty::keyword_lit(*name)), values.union(ty.clone()))
+                        },
+                    )
+                } else {
+                    // Neither: decline. An OPEN shape says nothing about the keys a
+                    // value carries, and a NOMINAL record is open — which is the case
+                    // that must not be answered, because a record may implement Seqable
+                    // and then it walks as whatever that impl yields rather than as
+                    // entries. `tests/queue_test.blsp` maps over a queue, and the
+                    // "an entry is at least a pair of unknowns" fallback this replaces
+                    // typed its elements as `(tuple any, any)` and flagged the callback.
+                    return None;
+                };
+                Some(Ty::tuple_of(vec![key, value]))
+            }
+            _ => None,
         }
-        this.tuple
-            .as_ref()
-            .map(|elems| elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t)))
     }
 
     /// The type of a concrete value — the bridge from a runtime value to its type.
@@ -2703,6 +2750,38 @@ impl GradualTy {
             return self.bound.is_subtype(&expected);
         }
         if self.dynamic {
+            // **A failure is never a valid materialisation** of a domain that excludes
+            // one — checked by inclusion in both modes, where every other arm of a union
+            // gets the overlap reading. This is the converse of the impossible-`failure?`
+            // lint (ADR-315): that one names a guard that cannot fire, this one names a
+            // value that can fail where nothing guards it.
+            //
+            // Why `failure` and not, say, `nil`, when the merely-wider rule exists
+            // precisely to keep the checker out of the way (docs/type-gating.md B1): the
+            // two are different channels by construction (ADR-310). `nil` means
+            // **nothing** and is a legitimate result everywhere — `(get m :absent)` is an
+            // answer, and reading `(or T nil)` into `T` by inclusion would fire on every
+            // accessor in the language. A **failure** means a value of the expected type
+            // could not be produced; it is not an answer anybody's domain accepts, and a
+            // failure reaching a primitive that cannot use it RAISES (ADR-315 kept that
+            // deliberately). So this reports a guaranteed error on a reachable path, not
+            // a merely-wider type.
+            //
+            // The failure arm has to be POSITIVELY known — it comes from a declared or
+            // inferred signature, i.e. someone said the function can fail. A bound known
+            // only by exclusion (`any`, or a guard's `(not nil)`) admits a failure the way
+            // it admits everything, and says nothing; reading that as "can fail" would
+            // fire on every unannotated parameter.
+            //
+            // Reload safety is unaffected: a `def` that stops returning failures changes
+            // the signature the next check reads, and this warning goes with it.
+            let failure = Ty::of(Tag::Failure);
+            if !self.bound.is_known_only_by_exclusion()
+                && !self.bound.is_disjoint(&failure)
+                && expected.is_disjoint(&failure)
+            {
+                return false;
+            }
             // Some inhabited materialisation fits — i.e. `bound` is not *provably
             // disjoint* from `expected`. Uses [`Ty::is_disjoint`], not
             // `intersect().is_never()`: the two agree on flat tags, but only

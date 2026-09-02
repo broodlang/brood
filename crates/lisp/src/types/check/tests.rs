@@ -417,6 +417,104 @@ fn integer_division_yields_int_or_ratio() {
     );
 }
 
+// The decidable half of the division residue. `(/ x 2)` is genuinely `int | ratio` and
+// stays so — but four shapes the roadmap listed as blockers for ever flagging that residue
+// are not undecidable at all, they were merely unread: a literal ±1 divisor, and operands
+// whose int-literal sets the checker already carries (ADR-117). Narrow first, flag second.
+#[test]
+fn a_decidable_division_types_exactly() {
+    // every operand a known int literal: fold it
+    assert_eq!(ty_str("(/ 6 3)"), "int");
+    assert_eq!(ty_str("(/ 5 2)"), "ratio");
+    assert_eq!(ty_str("(/ 6 3 2)"), "int");
+    assert_eq!(ty_str("(/ 6 4 2)"), "ratio");
+    // unary `/` is the reciprocal, so its single operand is the DIVISOR
+    assert_eq!(ty_str("(/ 2)"), "ratio");
+    assert_eq!(ty_str("(/ 1)"), "int");
+    // a literal ±1 divisor keeps the numerator's kind, whatever the numerator is
+    assert_eq!(ty_str("(let (x (+ 1 2)) (/ x 1))"), "int");
+    assert_eq!(ty_str("(let (x (+ 1 2)) (/ x -1))"), "int");
+    assert_eq!(ty_str("(/ 3/2 1)"), "ratio");
+    // …and the literal itself is NOT carried through: `(/ 6 -1)` is -6, not 6
+    assert_eq!(ty_str("(/ 6 -1)"), "int");
+    // what stays deferred: an unknown numerator over a divisor that is not ±1
+    assert_eq!(ty_str("(let (x (+ 1 2)) (/ x 2))"), "int | ratio");
+    // a literal SET that lands on both kinds is exactly `int | ratio` — the answer the
+    // caller already gives, so the fold stops rather than walking the rest of it
+    assert_eq!(ty_str("(/ (first (list 6 5)) 2)"), "int | ratio");
+    // a zero divisor RAISES (E0040), so the checker declines rather than typing an
+    // expression that cannot produce a value
+    assert_eq!(ty_str("(/ 6 0)"), "int | ratio");
+    // float contagion is still checked first
+    assert_eq!(ty_str("(/ 6.0 3)"), "float");
+}
+
+// What the narrowing is FOR, in both directions: the bug it can now name, and the two
+// correct programs it stops holding an unprovable union over.
+#[test]
+fn narrowing_division_names_a_bug_and_clears_two_correct_programs() {
+    // `/` is exact, not integer division — the mistake a newcomer brings from another
+    // language. `(/ 5 2)` is 5/2, and declaring `int` over it is now provably wrong.
+    let ws = file_warnings("(defmodule t)\n(sig c (int -> int))\n(defn c (x) (/ 5 2))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("declared return type int") && w.contains("ratio")),
+        "{ws:?}"
+    );
+    // …while the decidable-int cases stop being merely-wider and go silent
+    let ws = file_warnings("(defmodule t)\n(sig d (int -> int))\n(defn d (x) (/ x 1))");
+    assert!(ws.is_empty(), "{ws:?}");
+    let ws = file_warnings("(defmodule t)\n(sig e (int -> int))\n(defn e (x) (/ 6 3))");
+    assert!(ws.is_empty(), "{ws:?}");
+    // the genuinely undecidable one stays silent too — this is the residue, unchanged
+    let ws = file_warnings("(defmodule t)\n(sig f (int -> int))\n(defn f (x) (/ x 2))");
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+// The two `seqable` members that carried no element type. Both are decided by the KIND
+// rather than by a refinement, which is why neither had one: a `bytes` is a sequence of
+// octets, and a map walks as its `[key value]` entries (a two-element VECTOR — checked
+// against the runtime, not assumed).
+#[test]
+fn bytes_and_map_entries_carry_their_element_types() {
+    assert_eq!(ty_str("(first (string/->bytes \"ab\"))"), "nil | int");
+    assert_eq!(ty_str("(map (string/->bytes \"ab\") inc)"), "nil | list<int>");
+    // a closed record states its keys, so its entries are exact
+    assert_eq!(ty_str("(first {:a 1 :b 2})"), "(tuple :a | :b, 1 | 2)");
+    assert_eq!(ty_str("(nth (first {:a 1 :b 2}) 0)"), ":a | :b");
+    assert_eq!(ty_str("(map {:a 1 :b 2} (fn (kv) (first kv)))"), "list<:a | :b>");
+    // `{}` has no entries, and says so: no key type inhabits it, and it is not
+    // provably non-empty either
+    assert_eq!(ty_str("(first {})"), "nil | vector<never>");
+    // A vector literal is a TUPLE, whose arity is part of its type — so it is provably
+    // non-empty, the same length fact a `list<T>` carries, and `first` drops the `nil`.
+    assert_eq!(ty_str("(first [1 2])"), "1");
+}
+
+// An OPEN record may carry keys nothing declares, so "these are the entries" does not
+// hold for one — the same gate every other closed-shape rule needs. It is also the gate
+// that keeps a NOMINAL record out: a record is modelled open, and one may implement
+// Seqable, in which case it walks as whatever that impl yields rather than as entries
+// (`tests/queue_test.blsp` maps over a queue — the checker gate caught this, not a
+// unit test, which is why the rule is narrower than the first cut).
+#[test]
+fn an_open_record_yields_no_entry_type() {
+    // closed: the entry's value position is exactly the declared field type
+    let ws = file_warnings(
+        "(defmodule t)\n(sig g ((record :name string) -> int))\n(defn g (m) (nth (first m) 1))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("declared return type int") && w.contains("string")),
+        "{ws:?}"
+    );
+    // open: the undeclared keys could be anything, so there is nothing to report
+    let ws = file_warnings(
+        "(defmodule t)\n(sig h ((record &open :name string) -> int))\n(defn h (m) (nth (first m) 1))",
+    );
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
 // Ratios close over `+ - *` exactly as ints do: `(+ 1/2 1/2)` is 1 and `(* 2 1/2)` is 1.
 // The case used to defer to `+`'s declared signature, which is widened to `number | map`
 // for `Num` records — sound, and noise as the answer to an all-numeric expression.
@@ -501,7 +599,9 @@ fn precision_rules_give_the_exact_type_where_it_is_provable() {
         // a range is a range of integers
         ("(range 5)", "list<int>"),
         // a numeric operator as a callback / a fold / spread — the same closure rules
-        ("(map [1 2] inc)", "nil | list<int>"),
+        // a two-element vector literal is a TUPLE, whose arity is part of its type — so
+        // it is provably non-empty and `map` keeps that (the `nil` arm is the empty case)
+        ("(map [1 2] inc)", "list<int>"),
         ("(reduce [1 2] +)", "int"),
         ("(reduce [1 2] 0 +)", "int"),
         ("(apply + [1 2])", "int"),
@@ -7408,6 +7508,65 @@ fn a_type_variable_inside_or_binds_to_the_rest_of_the_argument() {
     );
 }
 
+// A value that can be a `failure`, reaching a position that cannot take one, is reported
+// in BOTH modes — the converse of ADR-315's impossible-`failure?` lint. That one names a
+// guard that cannot fire; this one names a failure nothing guards, which is the direction
+// deferred.md recorded as needing an effect system. It does not: the union already says
+// which functions can fail, so what was missing was the reporting rule.
+#[test]
+fn an_unguarded_failure_is_reported_in_both_modes() {
+    let producer = "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n";
+    let flows_into_a_native = format!("{producer}(defn q (s) (string/length (p s)))");
+    for strict in [false, true] {
+        let ws = file_warnings_mode(&flows_into_a_native, strict);
+        assert!(
+            ws.iter()
+                .any(|w| w.contains("expects string, got string | failure")),
+            "strict={strict}: {ws:?}"
+        );
+    }
+    // …a user function's declared domain, and a declared return, the same way
+    let into_a_defn = format!(
+        "{producer}(sig r (string -> int))\n(defn r (s) 1)\n(defn q (s) (r (p s)))"
+    );
+    assert!(
+        file_warnings_mode(&into_a_defn, false)
+            .iter()
+            .any(|w| w.contains("string | failure")),
+        "a user function's domain excludes a failure too"
+    );
+    let declared_return = format!("{producer}(sig q (string -> string))\n(defn q (s) (p s))");
+    assert!(
+        file_warnings_mode(&declared_return, false)
+            .iter()
+            .any(|w| w.contains("declared return type string") && w.contains("failure")),
+        "a declared return excludes a failure too"
+    );
+}
+
+// The three shapes that must stay SILENT, which is what keeps the rule from being a
+// strictness change in disguise.
+#[test]
+fn a_handled_or_merely_unknown_failure_is_not_reported() {
+    let producer = "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n";
+    // 1. guarded with `failure?` — the whole point of the value being one
+    let guarded = format!(
+        "{producer}(defn q (s) (let (v (p s)) (if (failure? v) 0 (string/length v))))"
+    );
+    assert!(file_warnings_mode(&guarded, false).is_empty(), "{guarded}");
+    // 2. a position that ACCEPTS a failure: `failure?` and `error-message` take any, and
+    //    `=` compares anything — a test asserting a failure came back must stay silent
+    let accepted = format!(
+        "{producer}(defn q (s) (failure? (p s)))\n(defn r (s) (error-message (p s)))"
+    );
+    assert!(file_warnings_mode(&accepted, false).is_empty(), "{accepted}");
+    // 3. an UNANNOTATED value. `any` admits a failure the way it admits everything; a
+    //    bound known only by exclusion says nothing positive, so neither may be read as
+    //    "this can fail" — that would fire on every unannotated parameter in the language.
+    let unknown = "(defmodule t)\n(defn q (x) (string/length x))\n                   (defn r (x) (when x (string/length x)))";
+    assert!(file_warnings_mode(unknown, false).is_empty(), "{unknown}");
+}
+
 // Strict mode (`nest check --strict`): a dynamic value with a precise bound is checked by
 // inclusion. `(h x)` is `dynamic(number)` — consistent with `int` by overlap (the default,
 // reload-safe reading), rejected strictly. A bare `dynamic()` (`any`) stays consistent in
@@ -7802,4 +7961,20 @@ fn discarded_catch_check_allow_suppresses_only_its_category() {
             .any(|m| m.starts_with(discarded_catch::DISCARDED_CATCH_PREFIX)),
         "a mismatched category must not suppress the discarded-catch lint: {w:?}"
     );
+}
+
+
+#[test]
+fn zz_probe_failure() {
+    let cases = [
+        ("arg into a native", "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n(defn q (s) (string/length (p s)))"),
+        ("arg into a local defn", "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n(sig r (string -> int))\n(defn r (s) 1)\n(defn q (s) (r (p s)))"),
+        ("declared return", "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n(sig q (string -> string))\n(defn q (s) (p s))"),
+        ("arithmetic", "(defmodule t)\n(sig p (string -> (or number failure)))\n(defn p (s) 1)\n(defn q (s) (* 2 (p s)))"),
+        ("guarded — must stay silent", "(defmodule t)\n(sig p (string -> (or string failure)))\n(defn p (s) s)\n(defn q (s) (let (v (p s)) (if (failure? v) 0 (string/length v))))"),
+    ];
+    for (name, src) in cases {
+        eprintln!("PROBE [{name}] plain   = {:?}", file_warnings_mode(src, false));
+        eprintln!("PROBE [{name}] strict  = {:?}", file_warnings_mode(src, true));
+    }
 }
