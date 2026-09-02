@@ -526,3 +526,64 @@ full repaint" possible) and nothing else new — writing to the handle is the ex
 lines of harness — see `../bedit/tools/drive.py`, which documents the three ways such a
 harness lies to you (face escapes splitting phrases, the stream being history rather than the
 screen, and slow first paint).
+
+## 11. Function modifiers — the prior art, and the one shape Brood actually needs
+
+**The question.** Can a *modifier* on a function slightly change how it behaves, and has it
+been done? It has, four separate times, and the four families differ in *what* they change —
+which is the distinction that decides which one (if any) Brood wants.
+
+| family | the modifier changes | examples |
+|---|---|---|
+| **wrap** | behaviour *around* the call | Python/TypeScript decorators, [Apache Hamilton's "function modifiers"](https://hamilton.apache.org/concepts/function-modifiers/), CLOS `:before`/`:after`/`:around` method combination, AOP advice |
+| **declare** | a property the compiler *checks* | D's `pure` / `nothrow` / `@safe` / `@nogc`, Rust attributes, Ada aspects, type qualifiers |
+| **effect** | the *type*, with a handler interpreting it | [Koka's row-polymorphic effect types](https://arxiv.org/abs/1406.2061), Eff, OCaml 5, Unison abilities |
+| **call** | how the *call itself* proceeds | (rare as a user-facing surface; Rust's `?` is the closest, and it is a call-site marker rather than a declaration) |
+
+The families converge more than they look: [Lindley showed aspect-oriented programming is
+expressible with effect handlers](https://homepages.inf.ed.ac.uk/slindley/papers/aeia.pdf),
+and a decorator is the degenerate wrap-only handler.
+
+**Brood already has the "wrap" family, twice, unnamed.** A `sig` under `BROOD_CONTRACTS=1`
+wraps the function in a checking shim; `nest test --cover` wraps every project function in a
+variadic shim. Both are ad hoc, both are off by default, and neither is spelled as a
+modifier. That is two data points for a `wrap` surface and not yet a reason to build one —
+CLOS-style method combination and AOP advice are exactly the action-at-a-distance the
+"keep the language as small as possible" rule exists to refuse.
+
+**The shape Brood actually needs is `declare`, and it has two live customers.** Both fall
+out of ADR-313:
+
+1. **The impossible-`failure?` lint cannot be made complete without it.** It reports a guard
+   that can never fire, and it is sound only because the gradual bound is an upper bound. To
+   report the *converse* — a value that can fail where nothing guards it — the checker has to
+   know which functions can yield a failure. Inference gets most of it (does the body call
+   `failure`, or a producer that can fail); what it cannot see through is a Rust builtin and a
+   redefinable global, which is exactly where a declaration earns its keep.
+2. **Getting `failure` out of the type unions.** ADR-310 clause 7 put `failure` in the union;
+   the wish is that it appear "only where we handle it or need it". That is a separate
+   channel, i.e. an effect — but with exactly ONE effect there is no need for Koka's row
+   polymorphism. It reduces to a boolean per function, which is D's `nothrow`.
+
+**The lesson from D is the important one: the winning form is INFERRED, not written.** D
+infers `pure`/`nothrow`/`@nogc`/`@safe` for templates and `auto` functions precisely because
+making every author write them is a tax nobody pays. A Brood "can fail" bit should be
+inferred bottom-up from the body and only *declarable* where inference stops.
+
+**And there is a third customer, if the design goes further.** ADR-313 rejected an absorbing
+failure partly because absorption stops at the primitive boundary: a `defn` handed a failure
+runs its body and answers with its own, losing the cause. Making calls **failure-strict**
+would fix that and cannot be unconditional — `failure?` and `error-message` are themselves
+`defn`s, so `(failure? f)` would return `f` instead of `true`. It needs a per-function
+opt-out, which is a `declare`-family modifier used by the `call` family. That is the only
+route by which a plain `let` could fully replace `with`.
+
+**Trigger to pick this back up.**
+- The impossible-predicate lint growing a converse ("this can fail and nothing checks it"),
+  which is the first thing that genuinely cannot be built without the bit.
+- Or `number | failure` in hovers becoming a complaint in practice rather than in principle.
+- Or a third ad-hoc function wrapper appearing beside contracts and coverage.
+
+**Workaround today.** `sig` already carries a declaration surface, `check-allow` is already a
+marker the checker reads, and `with` / `ok->` / the short-circuiting fold cover the
+control-flow half without any new declaration at all.
