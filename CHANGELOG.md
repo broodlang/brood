@@ -6,6 +6,75 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.24.0 — stopping on a failure, and the checker learning to say what it found
+
+**BREAKING: `some->` is deleted, and `with` has a different shape** (ADR-315). `some->`
+stopped on `nil`, which since ADR-310 means only "the lookup found nothing" and is an
+ordinary value everywhere else in the language — a pipe for a channel that is not one, with
+`get-in` covering the nil-chaining it existed for. It is in the ADR-304 rename ledger, so a
+stale caller is pointed at `->` rather than left with a bare unbound symbol.
+
+`with` was Elixir's — flat `pattern expr` pairs with an `:else` section. It is now the
+**failure `let`**: bindings read exactly like `let`'s, and the first value that is a failure
+short-circuits the whole form. Elixir needs `{:ok, a} <- expr` because it has no failure
+kind; Brood has one, so the pattern is redundant and so is `:else`. Bindings are ONE flat
+list — `(with (a e1) (b e2) body)` binds only `a`, and `(b e2)` becomes a body form that
+calls `b`.
+
+**Stopping on a failure is a mechanism you reach for, not something primitives do**
+(ADR-315). An absorbing failure was built end to end and rejected: it stops at the primitive
+boundary, so a `defn` handed a failure runs its body and answers with its own, losing the
+cause — and refusing a failure as a collection element silently changed `[:error f]`'s
+shape, so a `receive` clause stopped matching. Three mechanisms instead, and no primitive
+changed: **`ok->`** (the failure pipe), **`with`** (the failure `let` — the one that reaches
+a chain of your own functions, because it binds rather than threads), and a **fold that
+stops once its accumulator is a failure** (the case neither of the others can reach, since
+the accumulator is threaded by the combinator). `examples/rpn.blsp` is the worked example.
+
+**BREAKING: a `:max-mailbox` bound is one-shot per arming** (KI-103). A process that caught
+E0046 and did what the error's hint told it to — `(proc/flag :max-mailbox n)` — was killed
+*inside that call*, because every further send over the bound re-armed the sticky flag and
+the handler's next safepoint is in `proc/flag`. Taking the flag now latches it until the
+bound is set again. A process that catches and then ignores is no longer re-killed for the
+same flood.
+
+**The checker says what it found.** Five diagnostics that were silent:
+
+- A **type predicate that can never be true** — `(failure? n)` on something with no way to
+  be one. Widening it from `failure?` to every predicate found three live defects in `std/`:
+  `reflect/current-ns` declared `symbol` while its own docstring said "or nil at the root
+  namespace", a `nil?` guarded a function documented to answer `-1`, and a `nil?` sat behind
+  a `pair?` that had already excluded nil.
+- A **special form's name in an argument slot**. `(reduce xs '() fn (acc token) acc)` — a
+  `fn` that lost its parentheses — reported `unbound symbol: acc`, twice, a symptom two
+  levels down.
+- **`:when` written inside the head list**, which silently becomes two more parameters, so
+  the clause stops matching and every call fails with a match error.
+- A **bare symbol evaluated for effect**, which is also how `f(x)` call syntax reads to a
+  Lisp reader — `string?(num)` is the symbol `string?` followed by the list `(num)`. A
+  QUALIFIED name is exempt: `mod/name` auto-loads its module (ADR-227), so reading one is
+  not effect-free.
+- **A branchless `(if test)` types as `nil`** instead of falling through to unknown. Unknown
+  is contagious: a paren slip that dropped both branches read as `(string -> any)` and
+  silenced every check needing a pinned body type — including the declared-return check that
+  would have named the missing branches.
+
+**Better types.** A callback's parameters are now seeded from what the combinator hands
+over, for every element-consuming combinator and for clause-form literals, so
+`(map ["s"] (fn (p) (+ p 1)))` is reported instead of silently typed `any`. A known string
+parses at check time — `(string/->number "1")` is `1`, not `number | failure` — decided by
+the same function the runtime calls, so the type cannot contradict the value. And `=` now
+refines a **string** literal as it already did ints and keywords.
+
+**Gates that were not gating.** `make test-both` ran its two halves as separate recipe
+lines, so make aborted after the VM half and the tree-walker half never ran on any machine
+where the VM half fails — here, every capped run. Fixing it surfaced KI-103 immediately, and
+root-caused KI-98 (recorded a fortnight earlier as not reproducible) as the same defect.
+`examples/` joins the zero-warning checker gate, and a new gate pins the checker's two entry
+points — `nest check` and the editor's `check-string-structured` — against each other on the
+shapes where they have twice diverged.
+
+
 **Faster startup — the prelude image (ADR-314), now OPT-IN (`BROOD_PRELUDE_IMAGE=1`).**
 Shipped default-on and reverted to opt-in the same day: an imaged boot restored a stale
 stdlib-image section directory (fixed) and does not carry the module-level names the

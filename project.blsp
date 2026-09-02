@@ -24,7 +24,7 @@
   ;; Nothing derives one from the other, so `version_matches_cargo` in
   ;; crates/lisp/tests/manifest_version.rs asserts they agree — this said 0.1.0 for
   ;; twelve releases before that test existed.
-  :version "0.23.1"
+  :version "0.24.0"
   :source-paths ["tests/support"]
   :test-paths ["tests"]
   :format-paths ["std" "examples" "scripts" "stress" "breakage"])
