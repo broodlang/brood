@@ -1534,10 +1534,41 @@ before it ships. Ranked by expected value.
    deferred to budget rollover (`scheduler.rs` `tick_reporting_hard_kill`); these
    weren't. A relaxed load-before-swap alone removes the fence from the ~always-zero
    case. Rows: `loop`/`collatz`/`sieve` at ceiling 1, `pingpong`/`ring`.
-3. **`gc_due()` sums eleven slab `len()`s, 2–3× per call** (`heap.rs`
-   `slab_live_count`; its doc still says "six small usizes"). Executed per call, per
-   self-tail back edge, and at each `vm_run_bc` loop top. A live counter maintained at
-   alloc/free sites makes it one load + compare.
+3. ~~**`gc_due()` sums eleven slab `len()`s, 2–3× per call.**~~ ❌ **MEASURED AND RULED OUT
+   2026-09-02 — small, and the reading is wrong twice.** Counted with a probe on `gc_due`
+   itself, whole runs, warm:
+
+   | row | `gc_due` calls | upper-bound share |
+   |---|---|---|
+   | `json` | 950 313 | ~2.6% |
+   | `pingpong` | 819 611 | ~1.5% |
+   | `sort` | 382 945 | ~1.2% |
+   | `fib` | 225 039 | ~0.9% |
+   | (empty program) | 4 998 | — |
+
+   Two corrections to the audit text. **It is not 2–3× per call**: `slab_live_count` has
+   exactly one caller (`local_live_count`), which `gc_due` calls once — one sum per
+   `gc_due`, not two or three. And it is **not per activation**: `fib` makes 225 k calls
+   against billions of activations, so this rides safepoints, not the call path.
+
+   The share column is a generous UPPER bound (22 ops/call at 0.5 cycles/op); the real
+   figure is smaller, because `gc_due`, `local_live_count` and `slab_live_count` do not
+   appear **anywhere** in a warm `perf` profile of `json` — they inline and fall below the
+   report's floor. Against that, the proposed fix puts a counter on every alloc and free
+   site, which is the hottest code in the kernel and where a missed decrement silently
+   corrupts the GC threshold rather than crashing. Not worth it.
+
+   **Third item on this list whose premise did not survive counting** (see item 1, and the
+   `env_get` note below). The pattern is now unmistakable: a source audit is evidence about
+   what code *does* and none at all about how often it runs.
+
+   > **Related, same session:** a warm profile of `json` was taken because `env_get` showed
+   > at **9.95%** on a first profiling run and looked like a new finding. It is not: that
+   > run booted a freshly built binary with a cold prelude cache, so the sample was
+   > dominated by prelude *evaluation*. Warm, `env_get` does not appear in the profile at
+   > all. Warm the boot cache for the exact binary you are profiling before reading a
+   > startup-adjacent symbol — three separate wrong conclusions in this repo now trace to
+   > cold-vs-warm.
 4. **The interpreter's call-IC hit clones an `Arc` it only pointer-compares**
    (`vm_cache.rs` `vm_call_ic_hit` → `exec_chunk.rs` self-tail check). The JIT-side
    mirror already returns `Copy` data for exactly this reason (its doc prices the RMW at
