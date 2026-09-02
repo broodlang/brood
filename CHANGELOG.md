@@ -6,6 +6,82 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.25.0 — a failure nothing guards, and grammars the kernel was never built with
+
+**The checker reports a failure nothing guards** (ADR-316) — the converse of v0.24.0's
+impossible-`failure?` lint. That one names a guard that cannot fire; this one names a value
+that can fail where nothing checks it. `docs/deferred.md` had it blocked behind an inferred
+"can fail" bit in D's `nothrow` shape, and measuring first showed the premise was false:
+`failure` is a **tag** (ADR-310), so it rides the ordinary union — the producers declare it,
+and an unannotated wrapper *infers* it (`nest check --suggest-sigs` writes
+`(string -> (or failure number))` for `(defn parse (s) (string/->number s))`). The checker
+always knew which functions can fail. What was missing was a reporting rule: `number |
+failure` handed to a `number` parameter is *consistent* under the gradual overlap reading,
+so it passed in silence.
+
+A failure is now never a valid materialisation of a domain that excludes one — read by
+inclusion in **both** modes, where every other arm of a union keeps the overlap reading.
+`nil` deliberately keeps it: the two are different channels by construction, `nil` means
+"nothing" and is a legitimate answer everywhere, while a failure is not an answer at all and
+one reaching a primitive raises. Two conditions keep it from being a strictness change in
+disguise: the failure arm must be POSITIVELY known (an `any` bound admits a failure the way
+it admits everything), and a position that accepts one — `failure?`, `error-message`, `=`,
+`keep` — is silent.
+
+Measured before shipping: it fires on the failure sites and nothing else. **0** across
+`std/`, **6** across `tests/`+`examples/` (written-out literals that cannot fail, whose
+type still carries the arm), and **8** in bedit — every one a guard written before ADR-310
+made a failure **truthy**, which one walks straight through into arithmetic that raises.
+
+**A gate that could not have failed.** The incremental check-result cache (ADR-119) was
+keyed on mtime + dependency fingerprint + require-closure, none of which move when
+`--strict` is added — so a plain `nest check` cached its verdicts and the following
+`nest check --strict` over the same files *reused* them. CI runs the two gates back to back
+over `std/**`: the strict gate would have reported the plain gate's findings and exited 0,
+and nobody would have seen anything but green. The manifest name now carries the mode, so
+each keeps its own warm cache; `reflect/strict-checking?` is how Brood asks.
+
+**Better types, two more places.** The decidable half of `(/ int int)` is decided rather
+than widened to `int | ratio`: a literal ±1 divisor keeps the numerator's kind, known
+literal sets fold exactly (`(/ 6 3)` is `int`, `(/ 5 2)` is `ratio`, and unary `/` — the
+reciprocal — makes `(/ 2)` a `ratio`), and a zero divisor declines, because `(/ 6 0)` raises
+and typing it would state the arithmetic rather than the language. That pays in both
+directions: two correct programs stop carrying an unprovable union, and `int` declared over
+`(/ 5 2)` is now a named finding — Brood's `/` is exact, which is the mistake a newcomer
+brings from a language where int division truncates.
+
+And the two `seqable` members that carried no element type now have one, decided by the kind
+rather than a refinement: `bytes` is a sequence of octets, and a map walks as its
+`[key value]` entries. Derived at the one choke point every consumer goes through, so
+`first`/`nth`/`map`/`filter`/`fold` picked them up together. A nominal record declines — it
+is modelled open, and one may implement Seqable, in which case it walks as whatever that
+impl yields. The "has a first element" length fact also reaches a tuple and a closed record,
+so `(first [1 2])` is `1`.
+
+**Tree-sitter grammars load at runtime** — ADR-093's named end state. `tree-sitter-load-grammar`
+takes a shared library and registers its grammar under a language keyword, so a language the
+runtime was never built with parses like a built-in one with no rebuild. `.so` rather than
+`.wasm` on two measurements: tree-sitter 0.27's `wasm` feature wants a second copy of an
+enormous dependency at a different version, and dlopen's failure modes are all ordinary
+errors (a grammar from another ABI era is a message, not a crash). Load is 78 µs and parsing
+runs at full native speed. The kernel takes a PATH, not a search convention — where an
+application keeps its grammars is the application's business.
+
+**BREAKING: `%tree-sitter-reparse` and `%tree-sitter-forget` are deleted.** ADR-093 shipped
+the eager whole-slice projection and made incremental reparse conditional on a large-file
+profile ever demanding it. The profile has now been run, in bedit, on 1k/10k/50k-line files,
+and the margin is not close: a keystroke's whole fontify is 3.5 ms, the parse inside it
+0.8 ms, an incremental reparse of the same window 0.3 ms at best — 0.5 ms of 3.5 ms as an
+upper bound. An editor fontifies a WINDOW, and incrementality pays for re-parsing a whole
+file; there is no whole file here. The costs that did matter were the projection walk
+(`mapcat` at every level of a recursive tree walk — O(nodes × depth) allocation for O(nodes)
+of work) and the window size, both fixed. Neither builtin ever had a caller.
+
+**CI gates that had stopped being able to fail.** `make asan` could not pass at all, and
+fixing it turned up two real defects; three stress gates were dead from earlier rename
+waves — the fuzzer had predicted its own. A nightly now repeats the suite with the GC
+tripwires armed.
+
 ## v0.24.0 — stopping on a failure, and the checker learning to say what it found
 
 **BREAKING: `some->` is deleted, and `with` has a different shape** (ADR-315). `some->`
