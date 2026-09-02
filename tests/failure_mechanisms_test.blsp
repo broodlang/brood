@@ -87,7 +87,33 @@
       (assert= (error-message r) "string/->number: not a number: \"q\"")))
 
   (test "a fold with no failure is untouched"
-    (assert= (reduce [1 2 3] 0 +) 6)))
+    (assert= (reduce [1 2 3] 0 +) 6))
+
+  (test "on every collection kind, not just the list path"
+    ;; `fold` dispatches a vector to `%vector-reduce` and a range to `%range-reduce`, both
+    ;; Rust, and only the list path carries the guard. They still answer with the failure
+    ;; because `conj` is itself built on `fold` and short-circuits — they run the remaining
+    ;; steps against a failed accumulator rather than stopping, which costs work but never
+    ;; the answer.
+    (letrec (step (fn (acc s) (with (n (string/->number s)) (conj acc n))))
+      (assert= (error-message (reduce '("1" "q" "2") '() step))
+        "string/->number: not a number: \"q\"")
+      (assert= (error-message (reduce ["1" "q" "2"] '() step))
+        "string/->number: not a number: \"q\"")))
+
+  (test "ADR-312's exemplar now answers, where it used to raise"
+    ;; `(calc "1 q 2")` raised `conj: not a collection` — the fold fed the failure back as
+    ;; the next step's accumulator. It yields the failure now, which is why ADR-312's
+    ;; fold-leaks-failure LINT is gone: it warned that "a later element runs against it",
+    ;; and that is no longer what happens.
+    (letrec (calc (fn (expr)
+                    (reduce (string/split expr)
+                      '()
+                      (fn (acc num)
+                        (let (val (string/->number num))
+                          (if (number? val) (conj acc val) (failure "invalid token " num)))))))
+      (assert= (error-message (calc "1 q 2")) "invalid token q")
+      (assert= (calc "1 2") '(2 1)))))
 
 (describe "ADR-313: the calculator that started it"
   (defn- calc (expr)

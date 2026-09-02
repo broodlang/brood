@@ -20003,6 +20003,20 @@ unexpected.
   branches. The evaluator yields `nil` either way, so the type is exactly `nil`. Zero new
   warnings tree-wide.
 
+**This supersedes ADR-312's fold lint, which is deleted.** That lint warned "the callback
+can return a failure, which becomes the next step's accumulator — no clause handles one, so
+a later element runs against it". With the short-circuiting fold that sentence is false:
+ADR-312's own exemplar, `(calc "1 q 2")`, used to raise `conj: not a collection` and now
+answers `#failure{"invalid token q"}`. The lint was firing on correct code, which is the
+false-positive class ADR-312 itself called "the worst kind". Its analysis
+(`infer::fold_leaks_failure`, a fixpoint over the accumulator) goes with it.
+
+A detail worth recording: the short-circuit is carried by `%fold-loop`, the LIST path. A
+vector goes to `%vector-reduce` and a range to `%range-reduce`, both Rust, and neither
+stops. They still answer with the failure — because `conj` is itself built on `fold` and so
+short-circuits — but they run the remaining steps against a failed accumulator. That costs
+work, never the answer, and is pinned by a test.
+
 **Consequences.** `(conj acc <failure>)` still stores silently — deliberately: what this ADR
 adds is somewhere to say "stop here", not a primitive that guesses. Absorption's merged
 `:causes` went with it: with no absorption there is no point at which several failures meet.

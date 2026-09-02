@@ -9488,6 +9488,18 @@ is gated on whole-file operand checking and on `evaluates_args`. Placed there it
 not where the slip is made. ADR-312 recorded that asymmetry biting the other way; this is
 the second time, and both entries now name the same trap.
 
+**ADR-312's fold lint is deleted, because ADR-313 made its sentence false.** It warned that
+"a later element runs against" a failed accumulator; with the short-circuiting fold, ADR-312's
+own exemplar `(calc "1 q 2")` — which used to raise `conj: not a collection` — now answers
+`#failure{"invalid token q"}`. The lint was firing on correct code, which ADR-312 itself
+called the worst kind of false positive. Found by checking whether the lint still fired
+before building its converse, rather than by it going red.
+
+The measurement also turned up a detail worth pinning: the short-circuit lives in
+`%fold-loop`, the LIST path. A vector and a range take Rust fast paths that do not stop —
+they still answer with the failure, because `conj` is built on `fold` and short-circuits, but
+they run the remaining steps against a failed accumulator. Work, never the answer.
+
 One rule was tried and dropped for lack of evidence: skipping a bare module-level global.
 It fires on nothing (a module `def` reads as local to the checker's context) and would not
 have caught the `repl.blsp` case anyway, since that global is read into a `let` first.
