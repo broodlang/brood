@@ -15,10 +15,12 @@ interleaved, net of harness floor):
   prelude shim; the reporter loads on the first crash. Base RSS fell 72.6 → 60.1 MB.
 - **ADR-314 — the prelude image. SHIPPED DEFAULT-ON AND REVERTED TO OPT-IN THE SAME DAY.**
   Boot 9.36 → 5.32 ms when enabled (`BROOD_PRELUDE_IMAGE=1`), but two real breakages: a
-  stale stdlib-image section directory (fixed, by replaying `%std-image-install`) and
-  module-level names the prelude's evaluation binds that the image does not carry —
-  `file/list-files` comes back unbound and `crash-report/take-over` stays the autoload
-  stub. **Read ADR-314 before touching it.** The startup figures below are therefore the
+  ONE real breakage — a stale stdlib-image section directory, symptom `unbound symbol:
+  io/puts` — now fixed by replaying `%std-image-install` on the imaged path. The apparent
+  second breakage (`file/list-files` unbound) was that same bug seen against a pre-fix
+  artifact. **Read ADR-314 before touching it.** No reproducing failure remains; the
+  default is off because the feature interacts with two other on-disk caches and this
+  session drew three wrong conclusions about it, twice from stale artifacts. The startup figures below are therefore the
   *achievable* ones, not what the default currently does.
 - **`pos_at` memo** — the scanner re-walked the source 21× for column numbers; 0.55 ms.
 
@@ -35,13 +37,12 @@ a row — the `defdyn` marks, `*out*` (a prelude `def` binding a native under a 
 `builtins::register` never re-creates), and def sites. `prelude_image_matches_source.rs` is
 the differential that catches the fourth; run it, don't reason about it.
 
-**Next — finish ADR-314.** Its differential passed while both bugs were live because it
-excluded the six install-bookkeeping globals, one of which *was* the first bug. Those six
-now agree once the install is replayed, so the bar to aim for is: **the differential clean
-with no exclusions**. The remaining divergence is six `file/*` names plus one sig; the
-shape to chase is that the prelude image draws its snapshot boundary at the prelude while
-the prelude's own evaluation loads modules past it, and `*features*` then claims those
-modules are loaded so they never autoload either. `ring` is +2.9% against a 0.6% floor and is
+**Next — decide on ADR-314's default.** The differential now compares **every** global with
+no exclusions and passes, which is a stronger gate than the one that shipped; all four
+artifact states pass (cold, warm, stdlib image rebuilt under a live prelude image, and
+rebuilt by a different `nest`). What is missing is not a fix but *confidence*: turn it on
+deliberately, with a benchmark refresh in the same change, rather than drifting into it.
+Worth 39% of startup. `ring` is +2.9% against a 0.6% floor and is
 **not** new work (instructions flat, icache +11%, arms 160 → 150): it is KI-100's layout
 mechanism, recorded there, and deliberately not pursued.
 

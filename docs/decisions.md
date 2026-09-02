@@ -19963,11 +19963,14 @@ and `crates/lisp/src/lib.rs` (`boot_from_prelude_image`, tried ahead of the text
    offsets, and every section read lands on garbage. Symptom: `unbound symbol: io/puts` on
    a tree where nothing is wrong with `io`. **Fixed** by replaying `(%std-image-install)`
    after materialising.
-2. **Module-level names are missing.** The prelude's evaluation loads modules, so a source
-   boot ends with `file/list-files`, `file/read-lines` and friends bound; an imaged boot
-   does not carry them, and — because `*features*` says the module is loaded — they never
-   autoload either. `crash-report/take-over` likewise stays the `%autoload` stub. **Not
-   fixed**; this is what keeps the default off.
+2. **Module-level names missing** — `file/list-files` unbound, `crash-report/take-over`
+   still the `%autoload` stub. **Not a second bug: this was bug 1, observed against a
+   prelude image written before its fix.** Once the install is replayed, all four artifact
+   states pass — cold, warm, the stdlib image rebuilt underneath a live prelude image, and
+   rebuilt by a *different* `nest` (the layout change that produced the original failure).
+   Recorded because the retraction is the lesson: the same stale-artifact trap that caused
+   the bug then corrupted the diagnosis of it, in a session that had already been caught by
+   it twice.
 
 Both are the rule this ADR quotes and then failed to apply in full: *materialising defines
 bindings and evaluates nothing*, so anything the evaluation **did** must be replayed, not
@@ -19975,10 +19978,18 @@ only what it recorded. The first bug is a "did"; the second is a snapshot bounda
 the wrong place — the prelude image draws its line at the prelude, but the prelude's own
 evaluation reaches past it.
 
-**The differential passed with both bugs present**, because it excluded the six
-install-bookkeeping globals — one of which *was* the first bug. Do not re-enable this
-without a differential that is clean with **no** exclusions; the six now agree once the
-install is replayed, so that bar is reachable.
+**The differential passed with the bug present**, because it excluded the six
+install-bookkeeping globals — one of which *was* the bug. Excluding a global because the two
+arms disagree about it is excluding the evidence. The exclusions are now gone and the test
+compares **every** global; it passes, which makes it a strictly stronger gate than the one
+that shipped. It stays gone.
+
+**Why the default is still off.** Not for a known defect — there is no reproducing failure
+left. It is off because this feature interacts with two other on-disk caches in
+state-dependent ways, three separate wrong conclusions were drawn about it in one session
+(two of them from measuring against stale artifacts), and the default costs nothing to leave
+alone: it is exactly v0.23.1's behaviour. Flipping it on is a deliberate decision to take,
+not one to drift into.
 
 **Context — this supersedes ADR-138's rejected alternative, on numbers ADR-138 did not
 have.** That ADR cached the *expanded prelude as text*, which removed the ~27 ms macro
