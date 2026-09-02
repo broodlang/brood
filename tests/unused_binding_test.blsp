@@ -116,3 +116,35 @@
     (assert= (count (or (reflect/check-string-structured "(defn f (xs) (reduce xs '() (fn ((acc num) :when (string? num) acc))))")
                       []))
       0)))
+
+(describe "checker: a callback's parameters are typed from what the combinator hands over"
+  (test "an element-consuming combinator seeds a single-clause callback"
+    ;; `(map ["s"] (fn (p) (+ p 1)))` was silent: `p` bound `any`, and `any` is consistent
+    ;; with `number`. Only `fold`/`reduce` had a callback seed.
+    (assert= (count-of "(defn f () (map [\"s\"] (fn (p) (+ p 1))))"
+               "+: argument 1 expects number, got \"s\" (p)")
+      1))
+
+  (test "and a CLAUSE-form callback too"
+    ;; `lambda_literal_arity` bails on the clause form, so a callback written to match on
+    ;; its element got no seed at all — the shape people reach for first
+    (assert= (count-of "(defn f () (map [\"s\"] (fn ((p) (+ p 1)))))"
+               "+: argument 1 expects number, got \"s\" (p)")
+      1))
+
+  (test "a correct callback stays silent"
+    (assert= (count (or (reflect/check-string-structured "(defn f () (map [1 2] (fn (p) (+ p 1))))")
+                      []))
+      0)))
+
+(describe "checker: a bare symbol evaluated for effect"
+  (test "reports the `f(x)` shape, which is two forms and not a call"
+    (let (msgs (warnings-for "(defn a (n) (do string?(n) 1))"))
+      (is (any? msgs (fn (m) (includes? m "is how `string?(x)` reads to the reader"))))))
+
+  (test "a QUALIFIED name read for effect is the auto-load idiom, not dead code"
+    ;; `mod/name` auto-loads its module (ADR-227) — `introspection_test` opens with
+    ;; `(do rand/int term/raw-enter … nil)` for exactly that reason, so reading a name is
+    ;; NOT always effect-free
+    (assert= (count (or (reflect/check-string-structured "(defn a () (do rand/int 1))") []))
+      0)))

@@ -1859,6 +1859,12 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
     // template's spliced binders (`(wp v (+ a b))` where `wp` binds `a`/`b`).
     let head_is_macro =
         matches!(items.first(), Some(&Value::Sym(s)) if resolves_to_macro(heap, ctx, s));
+    // A `do`'s non-final forms are a body sequence, so a bare symbol among them is
+    // evaluated and discarded — see `lint_discarded_symbols`, which also recognises the
+    // `f(x)` shape that lands there.
+    if matches!(items.first(), Some(&Value::Sym(s)) if value::symbol_is(s, kw::DO)) {
+        lint_discarded_symbols(heap, &items[1..], form, ctx, out);
+    }
     if !head_is_macro {
         // A `fold`/`reduce` callback written as a `fn` literal is walked with its
         // parameters SEEDED: the accumulator to the fold's own result type (the fixpoint
@@ -1866,7 +1872,8 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // induction) and the element to the collection's element type. Unseeded, `h` in
         // `(fold s 5381 (fn (h c) (bit/xor (* h 31) …)))` read as `any` and `(* h 31)` as
         // `number`, while the fold as a whole was already known to be an int.
-        let seeded_callback = fold_callback_seed(heap, form, &items, ctx);
+        let seeded_callback = fold_callback_seed(heap, form, &items, ctx)
+            .or_else(|| element_callback_seed(heap, &items, ctx));
         for (i, &item) in items.iter().enumerate() {
             match &seeded_callback {
                 Some((idx, sig)) if *idx == i => {
@@ -1893,6 +1900,50 @@ fn check_fn_bound(
     out: &mut Vec<(Option<Pos>, String)>,
     tys: &[Ty],
 ) {
+    // A CLAUSE-style callback — `(fn ((acc n) …) (((x y & r) "+") …))` — gets the seed too,
+    // per clause and through `bind_head`, so a destructuring head's binders are typed from
+    // the position they destructure. Without this the whole seed was dropped for anything
+    // multi-clause and every binder read `any`, which is why `(+ x y)` over a list of
+    // strings went unreported in exactly the shape that motivated the seeding.
+    //
+    // Each clause is walked in its OWN scope: unlike the unseeded path, which unions every
+    // clause's params to keep them from looking unbound, a type belongs to one clause and
+    // carrying it into a sibling's body would be a fresh way to be wrong.
+    let clause_forms = {
+        let forms = &items[1..];
+        let forms = match forms.first() {
+            Some(Value::Str(_)) if forms.len() > 1 => &forms[1..],
+            _ => forms,
+        };
+        // CLAUSE form, one clause or many: every form is `(head-list body…)`. Keyed on the
+        // shape rather than on `fn_is_arity_multi_clause`, which is false for a single
+        // clause — and a single-clause `(fn ((p) …))` then fell to the param-list path
+        // below, where `(p)` is not the parameter list but the whole clause.
+        (!forms.is_empty()
+            && forms
+                .iter()
+                .all(|&c| crate::eval::macros::is_clause(heap, c)))
+        .then_some(forms)
+    };
+    if let Some(forms) = clause_forms {
+        for &clause in forms {
+            let Some(citems) = list_items(heap, clause) else {
+                continue;
+            };
+            let Some(&plist) = citems.first() else {
+                continue;
+            };
+            let mut scope = ctx.clone();
+            let heads = list_items(heap, plist).unwrap_or_default();
+            for (i, &h) in heads.iter().enumerate() {
+                scope = super::sigs::bind_head(heap, scope, h, tys.get(i).cloned());
+            }
+            for &body_form in &citems[1..] {
+                check_into(heap, body_form, &scope, out);
+            }
+        }
+        return;
+    }
     let Some(&params_form) = items.get(1) else {
         return;
     };
@@ -1904,6 +1955,7 @@ fn check_fn_bound(
         (Some(Value::Str(_)), Some(_)) => 3,
         _ => 2,
     };
+    lint_discarded_symbols(heap, &items[body_start..], items[0], &scope, out);
     for &body_form in &items[body_start..] {
         check_into(heap, body_form, &scope, out);
     }
@@ -1940,6 +1992,153 @@ fn fold_callback_seed(
         .and_then(|t| t.elem_ty())
         .unwrap_or(Ty::ANY);
     Some((items.len() - 1, Sig::new(vec![acc, elem], Ty::ANY)))
+}
+
+/// A bare symbol in a NON-FINAL body position: evaluated, discarded, and — since reading a
+/// name has no effect — dead. It is worth a diagnostic on its own, and it is also how
+/// `f(x)` call syntax reads to a Lisp reader: `string?(num)` is not a call, it is the symbol
+/// `string?` followed by the list `(num)`, so the symbol lands in exactly this position.
+/// That is the slip this catches, and `foreign_construct_hint` cannot: it keys on unbound
+/// NAMES, and `string?` is bound.
+///
+/// `_`-prefixed names are exempt (the deliberate-discard convention), and so is a symbol
+/// that is not resolvable — an unbound one already has its own, better diagnostic.
+fn lint_discarded_symbols(
+    heap: &Heap,
+    body: &[Value],
+    parent: Value,
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    if body.len() < 2 || ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
+        return;
+    }
+    for (i, &form) in body.iter().enumerate().take(body.len() - 1) {
+        let Value::Sym(sym) = form else { continue };
+        let name = name_of(sym);
+        if name.starts_with('_') || is_gensym_sym(sym) || is_unbound(heap, ctx, sym) {
+            continue;
+        }
+        let followed_by_list = matches!(body.get(i + 1), Some(Value::Pair(_)));
+        // A QUALIFIED name read for effect is a real idiom, not dead code: `mod/name`
+        // auto-loads its module (ADR-227), which is exactly why
+        // `(do rand/int term/raw-enter … nil)` sits at the top of `introspection_test` —
+        // "referencing the function values auto-requires the module without calling them",
+        // as its own comment says. So reading a name is NOT always effect-free, and the
+        // premise this lint started from was wrong. It stays exempt unless a list follows
+        // it, which is the `mod/f(x)` shape rather than the auto-load one.
+        if name.contains('/') && !followed_by_list {
+            continue;
+        }
+        let msg = if followed_by_list {
+            format!(
+                "{name} is evaluated here and discarded — and the form after it is a list, \
+                 which is how `{name}(x)` reads to the reader: two forms, not a call. \
+                 A call is `({name} x)`"
+            )
+        } else {
+            format!("{name} is evaluated here and discarded — reading a name has no effect")
+        };
+        out.push((arg_pos(heap, form, parent), msg));
+    }
+}
+
+/// How many arguments a CLAUSE-form `fn` literal takes, when every clause agrees — the
+/// clause-shaped sibling of [`lambda_literal_arity`], which bails on this form. `None` when
+/// the literal is not clause-shaped, has no clauses, or its clauses disagree (a genuinely
+/// multi-arity callback, which no combinator calls at two arities anyway).
+fn clause_literal_takes(heap: &Heap, f: Value) -> Option<usize> {
+    let items = list_items(heap, f)?;
+    if !matches!(items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
+        return None;
+    }
+    let parts = &items[1..];
+    let parts = match parts.first() {
+        Some(Value::Str(_)) if parts.len() > 1 => &parts[1..],
+        _ => parts,
+    };
+    if parts.is_empty()
+        || !parts
+            .iter()
+            .all(|&c| crate::eval::macros::is_clause(heap, c))
+    {
+        return None;
+    }
+    let mut takes: Option<usize> = None;
+    for &clause in parts {
+        let heads = list_items(heap, list_items(heap, clause)?.first().copied()?)?;
+        match takes {
+            None => takes = Some(heads.len()),
+            Some(n) if n == heads.len() => {}
+            Some(_) => return None,
+        }
+    }
+    takes
+}
+
+/// The element-consuming combinators: their callback takes ONE argument, the element.
+/// Only names whose callback is called with exactly the element — `sort-by`'s key fn,
+/// `group-by`'s classifier, `map`'s transform — never one that is handed an index or a
+/// pair alongside it.
+const ELEMENT_CALLBACK_COMBINATORS: &[&str] = &[
+    "map",
+    "mapv",
+    "mapcat",
+    "filter",
+    "remove",
+    "keep",
+    "each",
+    "take-while",
+    "drop-while",
+    "sort-by",
+    "group-by",
+    "any?",
+    "all?",
+    "none?",
+    "count-if",
+    "find",
+];
+
+/// For `(map coll f)` and its siblings whose `f` is a ONE-parameter `fn` literal:
+/// `(1, (elem -> any))` — the seed for walking it.
+///
+/// The fold seed above existed; these did not, so a callback param bound `any` and its body
+/// went unchecked: `(map ["s"] (fn (p) (+ p 1)))` was silent, because `any` is consistent
+/// with `number`. The element type is exactly what the combinator promises to hand over, so
+/// binding it is the same move `fold_callback_seed` already makes for the accumulator.
+///
+/// Bound as an INFERRED type (`check_fn_bound`, `dynamic_within`) rather than a declared
+/// one, for the reason that function's own comment gives: an element type read by inclusion
+/// would flag correct code where the collection's type is an over-approximation.
+fn element_callback_seed(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+) -> Option<(usize, crate::types::Sig)> {
+    let Some(&Value::Sym(head)) = items.first() else {
+        return None;
+    };
+    let name = name_of(head);
+    if !ELEMENT_CALLBACK_COMBINATORS.contains(&name.as_str()) || items.len() < 3 {
+        return None;
+    }
+    // Same source of truth for argument order as the fold seed (ADR-308).
+    let (coll_arg, f) = super::sigs::combinator_args(items)?;
+    let f_items = list_items(heap, f)?;
+    if !matches!(f_items.first(), Some(&Value::Sym(h)) if is_fn_head(h)) {
+        return None;
+    }
+    // Arity 1, however the literal is written. `lambda_literal_arity` deliberately bails on
+    // the CLAUSE form (its parts are clause lists, not bare symbols), so a clause callback
+    // — the shape people reach for the moment they want to match on the element — got no
+    // seed at all. Accept it when every clause takes exactly one head.
+    let takes_one = matches!(lambda_literal_arity(heap, f), Some(a) if a.min == 1 && a.max == Some(1))
+        || clause_literal_takes(heap, f) == Some(1);
+    if !takes_one {
+        return None;
+    }
+    let elem = expr_ty(heap, coll_arg, ctx).and_then(|t| t.elem_ty())?;
+    Some((items.len() - 1, crate::types::Sig::new(vec![elem], Ty::ANY)))
 }
 
 /// `(fn (params...) docstring? body...)` (and `lambda` — the same closure
@@ -1990,6 +2189,7 @@ fn check_fn_seeded(
         for &clause in forms {
             if let Some(citems) = list_items(heap, clause) {
                 let body = citems.get(1..).unwrap_or(&[]);
+                lint_discarded_symbols(heap, body, clause, &scope, out);
                 for &body_form in body {
                     check_into(heap, body_form, &scope, out);
                 }
