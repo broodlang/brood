@@ -2,6 +2,12 @@
 resolver = "2"
 members = ["crates/lisp", "crates/cli", "crates/nest", "crates/lsp", "crates/playground"]
 
+[workspace.lints.rust]
+# `brood_asan` is set by the `asan` make target (`--cfg brood_asan`) so the instrumented
+# build can size `WORKER_STACK_BYTES` for ASAN's fatter frames. Registered here so an
+# ordinary build does not warn about an unknown cfg under `-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(brood_asan)'] }
+
 [workspace.package]
 version = "0.24.0"
 edition = "2021"

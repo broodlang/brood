@@ -171,7 +171,20 @@ impl Drop for GcBlockGuard {
 /// 12 MiB budget and under the 16 MiB backstop, so the guard raised
 /// `recursion too deep` on a program three frames deep. Sizing this to the real stack
 /// makes the backstop fire and rebase instead, which is what it exists to do.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// **AddressSanitizer is a third size, and it has to be.** ASAN's redzones roughly double
+/// every Rust frame, so the instrumented prelude boot measured **16 768 736 bytes** against
+/// this 16 MiB stack — 8 KB of headroom. `make asan` had been papering over that with
+/// `BROOD_STACK_BUDGET=64 MiB`, which is larger than the stack and therefore disables the
+/// stale-base backstop entirely; `the_stack_guard_thresholds_are_ordered_and_non_degenerate`
+/// (added with KI-82's fix) asserts it cannot be, so the gate could not pass at all from the
+/// day that test landed. There is no budget that satisfies both — the window between "enough
+/// for an instrumented boot" and "under the stack" is those 8 KB. The wrong constant was the
+/// STACK, not the budget, and the fix is to give the instrumented build a stack that matches
+/// the frames it actually builds. Set by `--cfg brood_asan` from the `asan` make target.
+#[cfg(all(not(target_arch = "wasm32"), brood_asan))]
+pub const WORKER_STACK_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(all(not(target_arch = "wasm32"), not(brood_asan)))]
 pub const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(target_arch = "wasm32")]
 pub const WORKER_STACK_BYTES: usize = 1024 * 1024;
