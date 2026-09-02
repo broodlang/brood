@@ -1475,26 +1475,6 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
             }
         }
 
-        // **Fold-leaks-failure lint** (ADR-312). A `reduce`/`fold` whose step can return a
-        // failure hands one back as the next step's accumulator; unless the callback has a
-        // case for that, the fold runs code its author never wrote. Silent before this:
-        // the result inference discovered exactly this (its accumulator fixpoint failed)
-        // and threw the reason away, widening to `any` — so the symptom was an imprecise
-        // type rather than the bug it had just found.
-        if (value::symbol_is(s, "reduce") || value::symbol_is(s, "fold"))
-            && !ctx.is_lexical_local(s)
-            && super::infer::fold_leaks_failure(heap, &items, ctx)
-        {
-            out.push((
-                heap.form_pos_only(form),
-                format!(
-                    "{}: the callback can return a failure, which becomes the next step's \
-                     accumulator — no clause handles one, so a later element runs against it",
-                    name_of(s)
-                ),
-            ));
-        }
-
         // Arity check (independent of sig — they're separate concerns).
         if let Some(a) = arity {
             let argc = items.len() - 1;
