@@ -6696,7 +6696,22 @@ One detail worth knowing: the two *explicitly* imaged arms build and install the
 imaged even in the source-path job — which is what you want, since it means that job covers
 **both** paths rather than losing the imaged one.
 
-## KI-79 — one `live_migration` failure on the commit that moved the JIT preempt handler ⚠️ WATCHING 2026-08-28
+## KI-79 — one `live_migration` failure on the commit that moved the JIT preempt handler ✅ FIXED 2026-09-02
+
+> **Resolution 2026-09-02.** The liveness check is a **deadline** now, not a burst count.
+> The budget had already gone 40 → 400 and still went red once; raising a fixed count is the
+> wrong lever, because a loaded machine does not need more attempts so much as more *time*,
+> and a count spends the same number of slower bursts before giving up. The loop still exits
+> on the first burst that migrates (0.2 s on a healthy machine) and now keeps trying for 45 s
+> — well under nextest's 120 s cap, so a genuine scheduler failure still reports as this
+> assertion rather than as a timeout. Under `BROOD_GC_STRESS` the fixed 5 bursts and the
+> skipped liveness assertion are unchanged.
+>
+> Found by generalising the fix for a `process_limit_test` flake the same day: a
+> `(receive … (after 100 …))` that was a wall clock standing in for synchronisation. Same
+> defect class in a different language — *assert a condition, not an observation within a
+> window* — which is why this entry closes on that day's sweep rather than on its own.
+
 
 **Symptom.** CI on `12b31fc2` (`perf(jit): outline the fast link's cold outcomes`):
 

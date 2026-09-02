@@ -97,14 +97,27 @@ fn deep_receive_continuations_resume_correctly_across_workers() {
     // The correctness guard is the part worth having under stress — it is what caught the
     // ADR-210 deopt-resume bug — so it still runs, just over few enough bursts to fit the
     // cap. Migration liveness is covered by every non-stress run of this same test.
+    //
+    // KI-79 (2026-09-02): the budget is a DEADLINE, not a burst count. It was 40, then 400
+    // after measuring 20 concurrent copies — and still went red once on CI at 400. Raising
+    // a fixed count is the wrong lever: a loaded machine does not need more attempts so much
+    // as more TIME, and a count spends the same number of slower bursts before giving up.
+    // A deadline gives a slow machine as many attempts as it can fit and costs a healthy one
+    // nothing, because the loop still exits on the first burst that migrates (usually the
+    // first). Same lesson as the `after 100` graces in the Brood concurrency tests, in Rust.
     let gc_stress = std::env::var_os("BROOD_GC_STRESS").is_some();
-    let bursts: usize = if gc_stress { 5 } else { 400 };
+    // Well under nextest's 120 s per-test cap (`.config/nextest.toml`), so a genuine
+    // scheduler failure still reports as this assertion rather than as a timeout.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    let max_bursts: usize = if gc_stress { 5 } else { usize::MAX };
     let mut migrated = false;
-    for _ in 0..bursts {
+    let mut bursts = 0usize;
+    for _ in 0..max_bursts {
         let v = interp
             .eval_str(&format!("(burst {})", k))
             .expect("burst errored");
         let got = interp.print(v);
+        bursts += 1;
         assert_eq!(
             got,
             expected.to_string(),
@@ -114,10 +127,15 @@ fn deep_receive_continuations_resume_correctly_across_workers() {
             migrated = true;
             break;
         }
+        // Under stress the loop is a fixed 5 bursts and the liveness assertion is skipped,
+        // so the deadline must not cut that short.
+        if !gc_stress && std::time::Instant::now() >= deadline {
+            break;
+        }
     }
     assert!(
         migrated || gc_stress,
-        "no live migration observed across {} bursts of {} deep-receive processes — \
+        "no live migration observed across {} bursts of {} deep-receive processes (45s budget) — \
          capture-mode processes never resumed on a different worker. If this is the only \
          failure and the machine was loaded, suspect scheduler starvation rather than the \
          capture machinery: the per-burst correctness assertion above passed every time.",

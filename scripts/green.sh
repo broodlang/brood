@@ -186,11 +186,17 @@ if [ "$do_local" = 1 ]; then
 
     # The checker's one hard reject, batch-only by design (ADR-123/124/125/126). Held at zero
     # since 2026-07-31; a warning here is a real finding or a missing justified `check-allow`.
-    if (shopt -s globstar nullglob; "$nest" check std/**/*.blsp tests/**/*.blsp >/dev/null 2>&1); then
-      ok "nest check std/ + tests/ (zero warnings)"
+    #
+    # `examples/` is in the gate too (2026-09-02). `make check-examples` RUNS them and fails
+    # on an unbound symbol, which is a different question: it never asked the checker. They
+    # are the first Brood a reader sees — `examples/rpn.blsp` is the worked example of
+    # ADR-313's mechanisms — so they should be held to what `std/` is held to. They were
+    # already at zero when this was added, so it locks in rather than costs anything.
+    if (shopt -s globstar nullglob; "$nest" check std/**/*.blsp tests/**/*.blsp examples/**/*.blsp >/dev/null 2>&1); then
+      ok "nest check std/ + tests/ + examples/ (zero warnings)"
     else
-      red "nest check std/ + tests/"
-      (shopt -s globstar nullglob; "$nest" check std/**/*.blsp tests/**/*.blsp 2>&1) |
+      red "nest check std/ + tests/ + examples/"
+      (shopt -s globstar nullglob; "$nest" check std/**/*.blsp tests/**/*.blsp examples/**/*.blsp 2>&1) |
         grep "warning:" | head -8 | sed 's/^/       /'
     fi
   fi
