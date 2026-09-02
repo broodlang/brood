@@ -22,7 +22,7 @@ mod os;
 mod pkg;
 mod selfhost_macros;
 mod sequences;
-mod startup_image;
+pub(crate) mod startup_image;
 mod syntax_scan;
 mod system;
 #[cfg(not(target_arch = "wasm32"))]
@@ -3343,7 +3343,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         // root namespace", and the signature did not. That is not cosmetic — the checker
         // read `(nil? (reflect/current-ns))` in `%defonce-qualified-name` as a test that
         // can never be true, i.e. it called a load-bearing guard dead. Found by the
-        // impossible-predicate lint (ADR-313).
+        // impossible-predicate lint (ADR-315).
         Sig::new(vec![], sym.union(Ty::of(Tag::Nil))),
         &[],
         "The current compilation namespace as a symbol, or nil at the root namespace (top level).\n\n    (reflect/current-ns)   → nil",

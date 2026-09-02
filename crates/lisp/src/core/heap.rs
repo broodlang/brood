@@ -4633,6 +4633,25 @@ impl Heap {
     ///
     /// [`current_file`]: Self::current_file
     /// [`note_definition`]: Self::note_definition
+    /// Every recorded def site, for the prelude image (ADR-314) to carry. The imaged boot
+    /// evaluates no `def`, so nothing calls [`Heap::record_def_site`] there and stdlib
+    /// `M-.` would go dark — the one user-visible thing ADR-138's text cache took care to
+    /// keep working on its own fast path.
+    pub fn def_sites_snapshot(&self) -> Vec<(Symbol, SourceLoc)> {
+        self.runtime
+            .def_sites_read()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
+    }
+
+    /// Reinstate a def site verbatim — the restore half of [`Heap::def_sites_snapshot`].
+    /// Unlike `record_def_site` this takes the file explicitly rather than reading
+    /// `current_file`, because the imaged boot is not "inside" a file when it runs.
+    pub fn set_def_site(&self, name: Symbol, loc: SourceLoc) {
+        self.runtime.def_sites_write().insert(name, loc);
+    }
+
     pub fn record_def_site(&mut self, name: Symbol, pos: crate::error::Pos) {
         let Some(file) = self.cold().and_then(|c| c.current_file.clone()) else {
             return;

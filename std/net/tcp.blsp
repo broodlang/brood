@@ -77,7 +77,13 @@ are Rust.")
 (sig local-port (socket -> (or int nil)))
 
 (defn set-binary (sock on)
-  "Switch sock's INBOUND decode between text mode (default) and binary mode; outbound `tcp/send` is unaffected (ADR-141). In binary mode inbound `[:tcp sock data]` delivers data as a byte-faithful `bytes` value (not a string) — for length-prefixed / control-byte protocols like WebSocket framing or a database wire protocol. Text mode delivers a UTF-8 string. Returns nil; throws if sock is gone or a listener."
+  "Switch sock's INBOUND decode between text mode (default) and binary mode; outbound `tcp/send` is unaffected (ADR-141). In binary mode inbound `[:tcp sock data]` delivers data as a byte-faithful `bytes` value (not a string) — for length-prefixed / control-byte protocols like WebSocket framing or a database wire protocol. Text mode delivers a UTF-8 string. Returns nil; throws if sock is gone.
+
+**On a SERVER, set this on the LISTENER, not on the accepted socket.** A listener's mode is what every socket it accepts starts in, and it is fixed before any connection exists. Setting it on an accepted stream is racy: that socket is already reading by the time `[:tcp-accept …]` reaches its owner, so a client that sends immediately can have its first chunk decoded as text before the call lands — and raw bytes then arrive mangled (KI-102: 256 bytes came back as 512, the UTF-8 re-encoding of 128 ASCII plus 128 U+FFFD). A stream may still switch mode afterwards; inheritance only decides where it starts.
+
+    (let (ls (tcp/listen \"127.0.0.1\" 0))
+      (tcp/set-binary ls true)     ;; every accepted socket starts binary
+      …)"
   (%tcp-set-binary sock on))
 (sig set-binary (socket bool -> nil))
 

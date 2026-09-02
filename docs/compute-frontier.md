@@ -1490,8 +1490,35 @@ Every item below was confirmed by reading the cited code; **none has an A/B numb
 so each owes the full protocol (`make ab` + `ab-vm`, floors, image `:live`, JIT engaged)
 before it ships. Ranked by expected value.
 
-1. **The i64/inline-upgrade eligibility verdict is recomputed per activation, behind a
-   global `Mutex`.** `jit_runtime.rs`'s upgrade check calls
+1. ~~**The i64/inline-upgrade eligibility verdict is recomputed per activation, behind a
+   global `Mutex`.**~~ ❌ **MEASURED AND RULED OUT 2026-09-01 — the premise is wrong; do not
+   re-attempt.** It is *not* called per activation. The gate reads
+   `if (arm.inline_name.is_some() || xcall_relower) && !arm.inline_installed.load(Acquire)
+   && !ActiveBackend::declines_inline_upgrade(arm)`, and the `&&` chain **short-circuits**:
+   the verdict is only reached for an arm that has an inline derivation or wants xcall
+   re-lowering. Counted directly with a probe, over whole runs:
+
+   | row | `declines_inline_upgrade` calls |
+   |---|---|
+   | `fib` | **21** |
+   | `bintree` | 394 |
+   | `ackermann` | 457 |
+   | `pfib` | 2 176 |
+
+   Against billions of activations, that is not a hot path at all. The fix was nevertheless
+   built and measured — the static half of `arm_scalar_kind` memoized in a per-arm
+   `OnceLock` (the two dynamic inputs, `i64_too_deep` and `self_global_ok`, left live), plus
+   an `AtomicBool` fast path so the empty `I64_TOO_DEEP` set costs no lock. `make ab
+   --floor` at N=9: `fib` +2.5% (floor 1.6%), `pfib` −1.9% (0.4%), `ackermann` +0.2% (1.2%),
+   `bintree` +2.2% (2.2%) — **every row noise**. Reverted rather than shipped: it added a
+   field to a hot struct for no measurable gain.
+
+   **The lesson for the rest of this list:** this item was "confirmed by reading the cited
+   code", and the reading was correct about what the function does and wrong about how often
+   it runs. A `&&` chain above the call was all it took. Before building any remaining item
+   here, *count the calls* — a five-line probe settles in one run what a careful read cannot.
+
+   Original text, for the record: it calls `jit_runtime.rs`'s upgrade check calls
    `declines_inline_upgrade(arm)` on every entry while `inline_installed` is false — and
    for the scalar-register class (`fib`/`ack`) it stays false *forever*, so every
    activation pays `I64_TOO_DEEP.lock()` (a real `std::sync::Mutex` in

@@ -1,4 +1,4 @@
-;; ADR-313 — the three mechanisms for stopping on a failure, and the shape each covers.
+;; ADR-315 — the three mechanisms for stopping on a failure, and the shape each covers.
 ;;
 ;; The bug they exist for: a calculator written on the failure channel returned `1` for
 ;; "1 - 1" (the failure was conj'd mid-list, where `first` never looked) and RAISED for
@@ -14,7 +14,7 @@
 
 (defn- bad () (string/->number "q"))
 
-(describe "ADR-313: no primitive absorbs — that stays the raising channel"
+(describe "ADR-315: no primitive absorbs — that stays the raising channel"
   (test "arithmetic on a failure still raises, as it did before"
     ;; the mechanisms are opt-in; nothing changed underneath them
     (is (try (do (+ 1 (bad)) false) (catch _ true))))
@@ -22,12 +22,12 @@
   (test "and a collection still STORES one — which is why the mechanisms are needed"
     ;; this is the original defect, deliberately left in place: `conj` declares no domain,
     ;; so it stores a failure silently and the fold that did so answered `1` for "1 - 1".
-    ;; What ADR-313 adds is somewhere to say "stop here", not a primitive that guesses.
+    ;; What ADR-315 adds is somewhere to say "stop here", not a primitive that guesses.
     (let (stored (conj '(1) (bad)))
       (is (pair? stored))
       (is (failure? (first stored))))))
 
-(describe "ADR-313: `ok->` — the failure pipe"
+(describe "ADR-315: `ok->` — the failure pipe"
   (test "threads like -> when nothing fails"
     (assert= (ok-> "12" string/->number inc) 13))
 
@@ -43,7 +43,7 @@
   (test "nil is not a sentinel — absence and failure are separate channels"
     (assert= (ok-> nil identity) nil)))
 
-(describe "ADR-313: `with` — the failure let"
+(describe "ADR-315: `with` — the failure let"
   (test "binds like let when every step produces a value"
     (assert= (with (n (string/->number "12")) (inc n)) 13))
 
@@ -76,7 +76,7 @@
   (test "the body may be several forms; the last is the result"
     (assert= (with (n (string/->number "1")) (inc n) (+ n 41)) 42)))
 
-(describe "ADR-313: a fold stops once its accumulator is a failure"
+(describe "ADR-315: a fold stops once its accumulator is a failure"
   (test "the callback's failure ends the fold instead of reaching the next step"
     ;; without this the failure becomes the accumulator and the NEXT item raises
     ;; (`conj: not a collection`) one step later, naming the wrong thing
@@ -115,7 +115,7 @@
       (assert= (error-message (calc "1 q 2")) "invalid token q")
       (assert= (calc "1 2") '(2 1)))))
 
-(describe "ADR-313: the calculator that started it"
+(describe "ADR-315: the calculator that started it"
   (defn- calc (expr)
     (ok-> expr
       (string/split)
@@ -130,11 +130,11 @@
   (test "a bad token anywhere yields a failure naming it"
     (is (failure? (calc "-")))
     (is (failure? (calc "1 -")))
-    (is (failure? (calc "1 - 1"))) ; answered 1 before ADR-313
-    (is (failure? (calc "1 - 1 +"))) ; raised before ADR-313
+    (is (failure? (calc "1 - 1"))) ; answered 1 before ADR-315
+    (is (failure? (calc "1 - 1 +"))) ; raised before ADR-315
     (assert= (error-message (calc "1 - 1")) "string/->number: not a number: \"-\"")))
 
-(describe "ADR-313: across processes"
+(describe "ADR-315: across processes"
   ;; a failure is a value with its own Tag, so it must survive the deep copy a send makes
   ;; between per-process heaps, and the mechanisms must hold in a spawned process's own
   ;; engine rather than only in the one that built the value
@@ -172,7 +172,7 @@
 
 (defn- impossible-count (src) (impossible-count-of src "failure?"))
 
-(describe "ADR-313: a `failure?` test that can never be true is reported"
+(describe "ADR-315: a `failure?` test that can never be true is reported"
   (test "on a value whose type has no way to be a failure"
     ;; the guard reads as doing work and is not — the branch behind it is dead
     (assert= (impossible-count "(defn b (s) (if (failure? (string/length s)) 0 1))") 1)
@@ -207,7 +207,7 @@
     (assert= (impossible-count "(defn f () (ok-> \"12\" str))") 0)
     (assert= (impossible-count "(defn g () (with (n 1) (inc n)))") 0)))
 
-(describe "ADR-313: a branchless `if` types as nil, not `any`"
+(describe "ADR-315: a branchless `if` types as nil, not `any`"
   (test "an `if` with a test and no branches yields nil at runtime"
     (assert= (if true) nil)
     (assert= (if false) nil))

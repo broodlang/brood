@@ -420,6 +420,21 @@ so this is cheap to check and there is no excuse for skipping it. Cross-check wi
 `BROOD_DEOPT_TRACE=1` (did it lower and then fall back?), and remember that a bailed arm
 never reaches the IR dump, so *absence* there is the signal.
 
+**Before optimising anything, COUNT THE CALLS. A code-reading is evidence about what a
+function does, never about how often it runs.** `compute-frontier.md` §7.8's top-ranked
+item was "confirmed by reading the cited code" and described a verdict "recomputed per
+activation, behind a global `Mutex`". It was implemented, measured, and reverted: `make ab
+--floor` read noise on every row, and a five-line probe then showed the function is called
+**21 times on `fib`**, 457 on `ackermann`, 2176 on `pfib` — against billions of
+activations. One `&&` above the call short-circuited it. The read was accurate and the
+conclusion was wrong.
+
+So: a `static AtomicUsize` and an `eprintln!` at the call site, one run, *then* decide. It
+costs minutes where a build-then-A/B round trip costs hours, and it is the only cheap way
+to tell a hot path from a plausible one. The same probe answers the follow-up question a
+profile does not — `perf record` names cost centres in the code you *have*, while the count
+tells you whether the code you are *about to write* would ever run.
+
 Cargo is the source of truth; a thin **`Makefile`** wraps the common commands as
 shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
 `make repl`, and `make benchmark`. **`make test` runs the suite via
@@ -510,6 +525,7 @@ contention races).
 | `BROOD_CONTRACTS=1` | Arm **runtime type contracts** from `sig` declarations (implemented in `std/prelude/core.blsp`, not Rust — a `sig` wraps the function in a checking shim). The runtime counterpart of `nest check`'s static advice. Turns every plain `(sig …)` into a **rebinding**, so a `sig` above its `defn` fails the module's load — `crates/lisp/tests/sig_placement.rs` gates that tree-wide. |
 | `BROOD_NO_STDIMAGE=1` | **Opt-OUT** of the stdlib **startup image** (ADR-256/281) — **default ON since 2026-08-28**. A `require`d std module materialises its bindings from `~/.cache/brood/std-image-<stdlib-id>.bin` instead of re-reading and re-evaluating its source: `json` 6.5 → 1.7 ms, `http` 12.0 → 3.6 ms, and a three-module **script 46.5 → 36.2 ms** — a saving a short-lived run pays on every invocation, where a long-lived one amortises it away. Safe by construction: the key is a **content hash** of every baked-in `.blsp` plus the git sha, so a stale image cannot be read, and with none present `install` returns nil in ~30 µs. The runtime never BUILDS one (~1 s, which would land on the short-lived runs it helps); **`nest` writes it**. Stands aside under `BROOD_COVERAGE` — coverage instruments the compiler, and a materialised module is never compiled. It was default-on once before and reverted the same day (KI-72); what justifies the flip now is not that one fix but **ADR-280's differential**, which loads every module from source and from the image and requires the resulting state to match — the first construction-level gate this feature has had. **The trap to know:** the id moves with every commit and every `std/` edit, so an image silently goes stale and the run you believe is imaged is reading source. `(stdimage/status)` reports `:live`/`:stale`/`:absent`/`:unreadable` with the wanted id beside what is on disk, and an explicit `BROOD_STDIMAGE=1` whose install misses now prints a line. |
 | `BROOD_IMAGE_TRACE=1` | Name every module actually **materialised from an image** (`[image] json`), and time the boot install. The complement to the section-load line, which reports only that a section was read: this is what distinguishes a module served by the image from one that loaded from source anyway. **Reach for it before believing any image measurement** — a suite that reports "99 sections installed" and 0 `[image]` lines has exercised none of the image path. Works in release. |
+| `BROOD_PRELUDE_IMAGE=1` | **Opt-IN** to the **prelude image** (ADR-314) — **default OFF**, having shipped on and been reverted the same day (an imaged boot restored a stale stdlib-image directory, and still does not carry the module-level names the prelude's evaluation binds — `file/list-files` comes back unbound). Read ADR-314 before re-enabling. A warm boot materialises the prelude's ~806 bindings from `~/.cache/brood/prelude-expanded-<id>.img` instead of reading and evaluating the 544 expanded forms in the text cache beside it: **boot 9.36 → 5.32 ms, a whole empty run 13.5 → 8.3 ms**. Set it to fall back to ADR-138's text cache (which itself falls back to the source boot), for an A/B or to bisect a suspected bad artifact. The cold boot is unaffected by design — it does the full source boot and writes both artifacts, because only *subsequent* boots are worth optimizing. Stands aside on its own under `BROOD_COVERAGE` (coverage instruments the compiler; a materialised binding is never compiled). The trap to know: this restores **bindings**, so anything the evaluation merely *recorded* — `defdyn` marks, def sites, `meta`, privacy — has to be written explicitly, and three of those were missed in a row while building it. `crates/cli/tests/prelude_image_matches_source.rs` is the differential that now catches the fourth. |
 | `BROOD_NO_CHECK_CACHE=1` | Bypass the incremental `nest check` result cache (ADR-129) — recheck everything from scratch. Reach for it when a checker change is in flight and cached results would mask it. Implemented in `std/tool/project.blsp`. |
 | `BROOD_TEST_NO_SCOPE=1` | Revert `nest test` from the default **per-file scoped** run (each file `load`ed inside its own `%isolate`) to the legacy load-all-then-run-all path. The escape hatch for a suite that genuinely relies on cross-file top-level `def`s; also the A/B lever for the promoted-code accumulation the scoped path fixed. Presence-checked, so any value enables it. Implemented in `std/tool/project.blsp`. |
 | `BROOD_HISTORY=<path>` | Override where the REPL stores its history (`std/tool/repl.blsp`). |
@@ -691,9 +707,20 @@ co-author trailer, overriding any default that would append one.
    test fails its own process and the runtime survives. (Verified 2026-06-29; see
    `docs/devlog.md`. The crash-dump tooling below still targets genuine SIGSEGVs —
    e.g. a use-after-GC blow-up — not this case.)
-3. Update `docs/language.md` (it documents the language *as implemented*).
-4. Tick it off in `ROADMAP.md`; add a dated entry to `docs/devlog.md`.
-5. If it reflects a real design choice, record an ADR in `docs/decisions.md`.
+3. **Sabotage every guard you write — a guard that cannot fail is worse than none,
+   because it reads as coverage.** Break the fix, watch the test go red, restore. Three
+   guards written in one session on 2026-09-01 passed against the very bug they existed to
+   catch, and only the sabotage run exposed them: one asserted a *flag* the fix sets (a
+   regression that sets the flag without doing the work passed); one exercised the helper
+   the fix added instead of the entry point (`session::open`) the bug actually sat in; one
+   was anchored to a loop that runs before the files it greps exist. The pattern in all
+   three: **assert on the entry point a caller reaches, not on the piece you just wrote**.
+   When a change has no clean inverse to sabotage, find an argument from construction
+   instead (writing 1.6 MB to a child that never reads *cannot* return if the write is
+   synchronous, since a pipe buffer is 64 KiB) — do not settle for a weaker test.
+4. Update `docs/language.md` (it documents the language *as implemented*).
+5. Tick it off in `ROADMAP.md`; add a dated entry to `docs/devlog.md`.
+6. If it reflects a real design choice, record an ADR in `docs/decisions.md`.
 
 ## When you RENAME or REORDER a stdlib function
 

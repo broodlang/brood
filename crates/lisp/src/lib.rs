@@ -119,6 +119,23 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     // a warm boot skips `eval::macros::compile` entirely. Any mismatch or
     // failure falls back to the source boot, which rewrites the cache.
     if std::env::var_os("BROOD_NO_BOOT_CACHE").is_none() {
+        // ADR-314: the prelude image rebuilds the bindings structurally, skipping the
+        // read + eval the text cache still pays. Tried first; any miss falls through to
+        // the text cache, and that to the source boot, so a bad artifact costs a slower
+        // boot and never a wrong one.
+        // OPT-IN, not default (2026-09-02). Shipped default-on and found broken the same
+        // day: the imaged boot restored a STALE `*image-sources*` (fixed below by replaying
+        // the install) and, separately, does not carry the module-level names the prelude's
+        // own evaluation binds — `file/list-files` and friends come back unbound, and
+        // `crash-report/take-over` stays the autoload stub. The differential in
+        // `crates/cli/tests/prelude_image_matches_source.rs` passed while BOTH were true,
+        // because it excluded the very globals that were wrong. Default stays OFF until it
+        // is clean with no exclusions. `BROOD_PRELUDE_IMAGE=1` opts in for that work.
+        if std::env::var_os("BROOD_PRELUDE_IMAGE").is_some() {
+            if let Some(bundle) = boot_from_prelude_image() {
+                return bundle;
+            }
+        }
         if let Some(bundle) = boot_from_cache() {
             return bundle;
         }
@@ -218,6 +235,99 @@ fn boot_cache_header_prefix() -> String {
         ";; brood-boot-cache v2 {} gensym=",
         builtins::build_id_string()
     )
+}
+
+/// The prelude image for THIS binary, beside the text cache and keyed the same way.
+fn prelude_image_path() -> Option<std::path::PathBuf> {
+    let p = boot_cache_path()?;
+    Some(p.with_extension("img"))
+}
+
+/// Boot the shared bundle by **materialising** the prelude's bindings (ADR-314) rather
+/// than reading and evaluating its forms. `None` for any miss — absent, stale, truncated,
+/// or a value that will not decode — and the caller falls back to the text cache.
+///
+/// The tail is identical to the other two paths: a builder heap with the natives
+/// registered, the bindings installed, then `freeze_as_shared_code`. Only *how the
+/// bindings arrive* differs, which is what keeps the three paths interchangeable.
+fn boot_from_prelude_image() -> Option<SharedBundle> {
+    // Stand aside under coverage, exactly as the stdlib image does (ADR-281): coverage
+    // instruments the COMPILER, and a materialised binding is never compiled, so an imaged
+    // prelude would report as uninstrumented and — worse — take the attribution machinery
+    // down a path the source boot never takes. The text cache still evaluates real forms,
+    // so falling through to it keeps coverage honest.
+    if std::env::var_os("BROOD_COVERAGE").is_some() {
+        return None;
+    }
+    let t_start = web_time::Instant::now();
+    let path = prelude_image_path()?;
+    let mut heap = Heap::new();
+    let root = heap.new_env(None);
+    heap.set_global(root);
+    builtins::register(&mut heap, root);
+    let t_register = t_start.elapsed();
+    // Parity with the text path: materialise the on-disk prelude copy the def sites name,
+    // so stdlib `M-.` can actually open the file the image points at.
+    heap.set_current_file(prelude_source_path());
+    let n = builtins::startup_image::load_prelude_image(
+        &mut heap,
+        root,
+        &path,
+        &builtins::build_id_string(),
+    )?;
+    heap.set_current_file(None);
+    // REPLAY what the prelude's evaluation DID, not just what it recorded. The prelude has a
+    // top-level form that runs `%std-image-install`, and the imaged path never evaluates it —
+    // so without this the boot restores a *snapshot* of a previous install: `*image-sources*`
+    // comes back holding the section directory of whatever stdlib image existed when this
+    // prelude image was written. That file is keyed on `stdlib-id`, so a rebuild with
+    // different module coverage (a lean `nest` vs a full one — exactly what
+    // `scripts/build-std-image.sh` can do) reuses the same PATH with different offsets, and
+    // every section read then lands on garbage. Observed as `unbound symbol: io/puts` on a
+    // tree where nothing was wrong with `io`.
+    //
+    // Re-running the install is the faithful replay: it is what the source and text paths do
+    // at this point, and it overwrites the stale directory with the current one.
+    let install = syntax::reader::read_all(&mut heap, "(%std-image-install)").ok()?;
+    for form in install {
+        let _ = eval::eval(&mut heap, form, root);
+    }
+    let t_load = t_start.elapsed();
+    // The image carries no gensym counter of its own: the names baked into its closures
+    // were minted by the caching boot, so the floor the text cache records applies here
+    // too. Read it from that file's header if it is present; a missing one only means a
+    // runtime `gensym` starts lower, which is safe (it can still never collide, because
+    // the image's own names are already interned).
+    if let Some(text_path) = boot_cache_path() {
+        if let Ok(head) = std::fs::read_to_string(&text_path) {
+            if let Some(line) = head.lines().next() {
+                if let Some(rest) = line.strip_prefix(&boot_cache_header_prefix()) {
+                    if let Ok(g) = rest.trim().parse::<u64>() {
+                        core::value::gensym_floor(g);
+                    }
+                }
+            }
+        }
+    }
+    let private = heap.private_names_snapshot();
+    let name_meta = heap.name_meta_snapshot();
+    let t_pre_freeze = t_start.elapsed();
+    let (code, bindings) = heap.freeze_as_shared_code(root);
+    if std::env::var_os("BROOD_BOOT_TRACE").is_some() {
+        eprintln!(
+            "[boot] register={:?} image={:?} ({n} entries) freeze={:?} — total={:?} (prelude image)",
+            t_register,
+            t_load - t_register,
+            t_start.elapsed() - t_pre_freeze,
+            t_start.elapsed()
+        );
+    }
+    Some(SharedBundle {
+        code: Arc::new(code),
+        bindings,
+        private,
+        meta: name_meta,
+    })
 }
 
 /// Boot the shared bundle from the expanded-prelude cache. `None` (fall back
@@ -327,6 +437,11 @@ fn boot_from_source() -> SharedBundle {
     let root = heap.new_env(None);
     heap.set_global(root);
     builtins::register(&mut heap, root);
+    // Snapshot what registration alone bound: the prelude image may omit exactly these,
+    // because the warm path calls `register` too. Taken here rather than derived from the
+    // values later — "is a native" is not the same question (a prelude `def` can bind one).
+    let builtin_names: std::collections::HashSet<core::value::Symbol> =
+        heap.env_chain_names(root).into_iter().collect();
     let t_builtins = t_start.elapsed();
     // Record each prelude def's source location against a materialized, on-disk
     // copy of the prelude, so the LSP can jump `M-.` into the standard library
@@ -400,6 +515,21 @@ fn boot_from_source() -> SharedBundle {
     let t_mark = web_time::Instant::now();
     let private = heap.private_names_snapshot();
     let name_meta = heap.name_meta_snapshot();
+    // ADR-314: write the prelude image before the freeze consumes the builder heap. The
+    // cold boot is allowed to be slow — it runs once per binary build — so this is pure
+    // addition; every later boot skips the read+eval this one just did. Best-effort: a
+    // failure leaves the next boot on the text-cache path, which is where it was before.
+    if cache_ok {
+        if let Some(img) = prelude_image_path() {
+            let _ = builtins::startup_image::write_prelude_image(
+                &mut heap,
+                root,
+                &builtin_names,
+                &img,
+                &builtins::build_id_string(),
+            );
+        }
+    }
     let (code, bindings) = heap.freeze_as_shared_code(root);
     let t_freeze = t_mark.elapsed();
     if cache_ok {
@@ -530,7 +660,7 @@ impl Interp {
 
     /// [`run_program`](Self::run_program) with `preamble` evaluated first, inside the
     /// program's own process. The `brood file` entry point passes
-    /// `(crash-report/arm-default)` here (ADR-305): armed in the program's process the
+    /// `(%crash-report-arm-default)` here (ADR-305/309): armed in the program's process the
     /// reporter knows the program's pid and leaves its crash to the CLI's report.
     pub fn run_program_with_preamble(
         &mut self,

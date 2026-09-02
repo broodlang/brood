@@ -1590,7 +1590,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         }
 
         // A type predicate whose argument CANNOT hold that type: the test can never be
-        // true, so the branch behind it is dead. This is the check ADR-313 wanted for the
+        // true, so the branch behind it is dead. This is the check ADR-315 wanted for the
         // failure channel — `(failure? n)` on something that has no way to be a failure is
         // a guard the author believes is doing work and is not — and it costs nothing to
         // ask it of every predicate in the table, since `Ty::tested_by` already names what

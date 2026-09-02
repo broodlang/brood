@@ -81,7 +81,8 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. **MECHANISM FOUND**: instruction-fetch pressure, not work — icache misses +48%, iTLB +96%, dcache FLAT, instructions only +1.25%. §7.5 emits more code per arm; ADR-302 doubles the arms that lower (158 vs 76); together they spill the L1 icache/iTLB. `fib` (small footprint) is unaffected at 1.0010. **Huge pages are NOT the fix** (iTLB delta is <1% of the cycle delta — it is a symptom, not a cost). Two faces of one cause: `json` +23% INSTRUCTIONS (rooting-heavy), `mandelbrot` +48% icache with instructions flat (footprint); `fib`/`collatz`/`sort` are flat, so arm count is not the predictor. Fix: reduce the work+code of RootsBuf's root handling per arm; iterate on `json`, whose instruction count is near noise-free. Probe harness in `target/ki100/` |
+| KI-102 | **`tcp/set-binary` on an accepted socket is racy — a server could not reliably be binary** — `breakage/chaos2_tcp_stress` P38 echoed 512 bytes for a 256-byte payload under load: the accepted socket is already reading when `[:tcp-accept …]` reaches its owner, so a client that sends immediately gets its first chunk decoded as TEXT, and 128 ASCII + 128 U+FFFD re-encodes to 512 | ✅ **fixed 2026-09-02** — a listener's binary mode is now inherited by every socket it accepts (`gen_tcp:listen(Port, [binary])`'s shape), which has no window because the listener's mode is fixed before any connection exists. Guard `tests/tcp_test.blsp` "a listener's binary mode is inherited by the sockets it accepts" + its inverse, sabotage-verified |
+| KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. **MECHANISM FOUND**: instruction-fetch pressure, not work — icache misses +48%, iTLB +96%, dcache FLAT, instructions only +1.25%. §7.5 emits more code per arm; ADR-302 doubles the arms that lower (158 vs 76); together they spill the L1 icache/iTLB. `fib` (small footprint) is unaffected at 1.0010. **Huge pages are NOT the fix** (iTLB delta is <1% of the cycle delta — it is a symptom, not a cost). Two faces of one cause: `json` +23% INSTRUCTIONS (rooting-heavy), `mandelbrot` +48% icache with instructions flat (footprint); `fib`/`collatz`/`sort` are flat, so arm count is not the predictor. **RE-BASELINED at HEAD**: most of it is a FIXED per-run cost (~4 ms on `startup` with no workload; `bintree` a flat ~10-13 ms whatever N, ratio decaying 1.246 → 1.095 → 1.027 by amortization alone; profile shows cranelift `Verifier`+`regalloc2` on the JIT thread). Only `mandelbrot` shows genuine steady state, ~1.034 at both N=1400 and N=3000. So the published "every compute row 4-10% slower" is largely one constant measured at short sizes. `json`'s +23% is already gone at HEAD. Two separate fixes; start from the HEAD table, not the historical bisect. Probe harness in `target/ki100/` |
 | KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only — **falsified 2026-09-01**, see the status cell | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe). **Sighting 2026-09-01: CI's `make gcstress` step, run 5b20b307** — that step runs the file ALONE (a debug build, `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`), so the "full-suite context only" reading is wrong: it fires solo given the right timing, and GC stress on a loaded 2-core runner supplies it. Not reproducible here — 25/25 green under the same flags, and `make gcstress` clean in a full local pass — so the missing ingredient is machine load, not suite context. That makes CI's gcstress step a cheaper repro surface than a full suite run |
 | KI-91 | **`receive`'s consume path removed the matched message by a STALE INDEX** — a clause `:when` guard running a consuming nested `receive` shifts the queue with the mailbox lock released (the documented `reinsert_at_seq` hazard), and the *match* path still did `queue.remove(*i)`: a neighbouring message was silently deleted while the matched one stayed queued to be delivered again | ✅ **FIXED 2026-08-31** — a candidate's identity is its arrival `seq`: the consume path re-identifies by seq (O(1) fast path, binary-search fallback), and each scan-loop top re-anchors the cursor against the last examined seq. Guard `tests/receive_consume_test.blsp` case 1, sabotage-verified (`[:dup 1]` + a lost `[:tail 2]` with `remove(*i)` restored) |
 | KI-92 | **an L1-delivered `nil` message aliased a FREE msg-roots slot** — the slot table's free sentinel was `Value::Nil`, i.e. slot *content*, and `nil` is a legal message: the next delivery reused the slot and two queued envelopes read one slot (the receiver saw the second message where `nil` belonged and `nil` where the second belonged) | ✅ **FIXED 2026-08-31** — freeness is tracked out of band (`MsgRoots { slots, free }`), which also makes `msg_root_add` O(1) instead of an O(live) scan under the sender-side mailbox lock; a double-free now trips a `debug_assert`. Guard `tests/receive_consume_test.blsp` case 2, sabotage-verified |
@@ -91,6 +92,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-96 | **a remote monitor's `PENDING_REMOTE` entry survives its own `[:down …]`** — nothing removes the entry when the watched remote target dies and the peer's DOWN arrives, so (a) a long-lived watcher leaks one entry per dead remote monitor, and (b) a later node-down fires a SECOND `[:down mref pid :noconnection]` for an mref that already delivered — breaking the one-shot guarantee a `gen/call`-style pinned receive relies on | ✅ **FIXED 2026-08-31** — the DOWN now rides a dedicated `Frame::Down` (wire v7) instead of an ordinary `Send`, giving the watcher's node the hook the entry lacked: `deliver_remote_down` retires the pending entry, then delivers. Guard: `a_delivered_remote_monitor_does_not_fire_again_on_node_down` (two-node; sabotage-verified — retire disabled reproduces `SECOND-DOWN-BUG :noconnection`) |
 | KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31; item 1 FIXED, items 1 + 3 FIXED, item 2 three-of-four 2026-09-01** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading. **Item 1 (the pre-auth handshake trickle DoS) is closed**: a whole-handshake `Deadline` shim on both sides + a rate-limited shed warning, sabotage-verified. **Item 2**: `run-process`'s inherited stdin (a `git` credential prompt pinned a worker uncatchably) and `%node-connect`'s unbounded DNS resolve are both closed, each sabotage-verified; `proc-send`'s `write_all` now goes through a per-child writer thread (bounded queue, `dist`'s shape) — only `read-line`'s stdin lock remains, and that one is ADR-059 Phase 2 rather than a patch. **Item 3 fully closed**: the timer's poisoning `Once` (one EAGAIN broke every `sleep` forever), `ensure_workers` stranding `LIVE_EXECUTORS` above reality, the dist acceptor dying from a refused thread, and the poison-intolerant locks. **Item 4 fully closed**: the pre-auth 64 MiB allocation, unbounded wire-symbol interning, the ADR-232 dedup set, the edge-triggered accept drain, `tls_request`'s untimed connect + close-before-connect race, the never-reaped half-closed stream, `record_remote_link`'s missing liveness check, and unreaped sysmon subscriptions. **The only thing left in KI-97 is `read-line`'s stdin lock**, which is ADR-059 Phase 2 — a feature, not a patch |
 | KI-88 | **one spawn of a warm burst is created, promoted, registered — and never scheduled** — exactly one reader of a 50-process burst never executes its first instruction; no death line, and the collector times out. Gates `BROOD_TW_REENTRY`'s default (60× on the viral defer shape, measured and waiting) | ⚠️ **WATCHING 2026-08-31 — DORMANT.** Seen many times, root cause never found, and no reconstructable binary exhibits it: 10/10 pass at `62eac84c` with the router confirmed live, on top of session 4's 15/15 + 8/8 (incl. a pristine rebuild of the commit that failed 3/3 hours earlier). One candidate mechanism — `run_one`'s unprotected post-quantum tail, whose unwind produces this exact signature — was found and **closed** in session 5, so a future sighting is known not to be that. Next sighting: PRESERVE THE BINARY, arm `BROOD_SCHED_DBG=1`, take a core in the window |
+| KI-101 | **both distributed chaos harnesses had been dead for months, and reported it as a CRASH** — `scripts/fuzz/dist_chaos.sh` and `dist_chaos_remote_spawn.sh` build their node programs as shell heredocs, so no `.blsp` gate can see them. The v0.9/v0.10 namespacing waves renamed `node-start`→`node/start`, `register`→`proc/register`, `nodes`→`node/list`, `connect`→`node/connect`, `start-remote-spawn`→`node/serve-spawns`, and later `each` became a reserved stdlib name. Every node died at startup and each script dutifully printed `crashed=1` — **indistinguishable from a real runtime crash**, which is worse than not running at all | ✅ **FIXED 2026-09-01** — both repaired (all six renames, plus the harness's own helpers prefixed `chaos-` so a future stdlib addition cannot collide again) and now **self-reporting**: a definition-time error in `nN.blsp` prints `HARNESS ROT … this run tested NOTHING`, names the error, and exits 2 instead of blaming the runtime. Deliberately excludes `runtime error` — this harness kills nodes on purpose, so "connect: Connection refused" is an expected outcome and matching it would cry wolf on every healthy run. Sabotage-verified on both rot kinds (unbound symbol, reserved-name collision) and on the clean path. **With them actually running, dist is clean**: 10-node churn with kill/rejoin cycles and 40 wrong-cookie attackers, `crashed=0` across runs |
 | KI-99 | **`a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 under a full `make test`** — B warned 0 times instead of 1, with `dist: incoming connection failed: failed to fill whole buffer` on B's stderr: the handshake hit EOF mid-frame under full-suite load, so the inbound send that should have been dropped-and-warned never arrived | ⚠️ **WATCHING 2026-08-31** — retry-absorbed (try 2 passed), 6/6 green solo after. One sighting, but the failure output was **captured** this time (KI-80's lesson), and it names the mechanism: a connection that never completed, not a dedup miscount. If it recurs, the question is why the handshake EOFs under load — `MAX_HANDSHAKE_FRAME`/`accept_link` timeout interaction is the place to look, and KI-97 item 1 touches that code |
 | KI-87 | **The checker diverged — `nest run` at 54 GB, three 19 GB `types::` test processes.** `InferGuard::enter` ended in `.then_some(InferGuard(sym))`; `bool::then_some` builds its argument eagerly, so a REFUSED entry built and dropped a guard whose `Drop` removed the in-flight symbol's mark — every cycle refusal un-guarded the symbol it refused (latent since 2026-07-07). The demand walk consulting a callee's inferred sig (`0f64f600`) made `require-one` ⇄ `%require-await` nest without bound, one stack segment per level | ✅ **FIXED 2026-08-29** — the guard is constructed only on the success path (`entered.then(\|\| InferGuard(sym))`). Guards sabotage-verified: a refused third `enter` stays refused, and the mutually recursive pair reproduces the exact `mmap failed to allocate stack` OOM under `ulimit -v` with the bug restored. Build uncapped, run capped |
 | KI-86 | **`runtime_collector`'s three promotion tests failed under `cargo test`** — `expected ≥3000 promoted closures, got total=231`, with the count-based collector switched OFF by the test and one closure promoted per iteration | ⚠️ **WATCHING 2026-08-29** — precondition removed, mechanism inferred: `BROOD_RT_GC_FLOOR` is read once per process (`OnceLock`), two tests in the binary `set_var` it to 128/256, and under plain `cargo test` the leaked floor armed the `Interp`'s scheduler WORKER heaps (which share the runtime region) — a worker safepoint aged the runtime and the main heap's `cur_code()` count dropped. Fix: `Heap::set_rt_gc_floor` per test heap, no env. Not reproducible on demand on a quiet box (a worker has to wake); 4/4 green under load since |
@@ -215,6 +217,61 @@ behaviour under test. (KI-37 was open for a few hours on 2026-08-07 and is fixed
 
 ---
 
+## KI-102 — `tcp/set-binary` on an accepted socket is racy ✅ fixed 2026-09-02
+
+**Symptom.** `breakage/chaos2_tcp_stress.blsp` P38 ("binary mode round-trip") failed in CI:
+
+```
+=== P38: binary mode round-trip ===
+P38: payload length: 256
+P38: echo length: 512
+P38-correct: false
+```
+
+Intermittent — CI run 33563774646 red on a commit whose code was **byte-identical** to the
+run before it, which was green. Not reproducible on an idle box (0/40); reproduced **2/30**
+under `taskset -c 0,1` with eight spinners running, i.e. CI's loaded two-core shape.
+
+**Cause.** Not a framing or doubling bug in the wire path. An instrumented repro reporting
+what the *server* saw gave `[256 :string]` — the socket delivered the payload as TEXT
+despite `(tcp/set-binary client true)` having been called before the `receive`.
+
+An accepted socket is **already reading** by the time its owner is handed
+`[:tcp-accept …]`; `set_binary` is documented to take effect "for the next inbound chunk",
+so a client that sends the moment it connects can have its first chunk read and decoded
+before the call lands. The lossy UTF-8 decode of bytes 0x00–0xFF gives 128 ASCII characters
+plus 128 U+FFFD; echoing that *string* re-encodes it as UTF-8 at 1 and 3 bytes respectively
+— 128 + 384 = **512**. The number in the failure message is the whole diagnosis, once you
+know where it comes from.
+
+There was no way to write a correct binary server: `set_binary` explicitly rejected a
+listener, and on a stream it was always one scheduling decision too late.
+
+**Why it survived.** The race needs the client's first chunk to arrive inside the window
+between `accept` and the owner's `set-binary` — a scheduler outcome that essentially never
+happens on an idle multi-core box, which is where the suite is normally run. `tests/tcp_test.blsp`
+had no case for it at all, and every existing binary-mode test does its `set-binary` before
+any data is sent, so they close the window by accident. The breakage suite caught it only
+because it is the one place a client sends immediately on connect, and only on a loaded
+two-core runner.
+
+**Fix.** A listener's binary mode is now **inherited** by every socket it accepts
+(`crates/lisp/src/net.rs`: `accept_ready` seeds the accepted socket's flag from the
+listener's; `set_binary` accepts a listener instead of erroring). The listener's mode is
+fixed before any connection exists, so there is no window. This is
+`gen_tcp:listen(Port, [binary])`'s shape. A stream may still switch mode afterwards —
+inheritance only decides where it *starts*. P38 was updated to set the mode on its listener;
+0/40 failures under the load that produced 2/30 before.
+
+**Guard.** `tests/tcp_test.blsp`, two cases: "a listener's binary mode is inherited by the
+sockets it accepts" — where the server **never** calls `set-binary` on the stream, so
+without inheritance the payload deterministically arrives as `:string` — and its inverse, "a
+listener that was not set binary still accepts text-mode sockets", so the fix cannot be a
+blanket "everything is binary now". **Sabotage-verified**: with `accept_ready` changed to
+ignore the listener's flag, the first case fails (`a listener's binary mode is inherited by
+the sockets it accepts`) and the inverse still passes. Deterministic in both directions
+rather than a timing hope, which the original P38 was.
+
 ## KI-100 — a ~5-6% compute regression: two clean branches, a slow merge ⚠️ OPEN 2026-09-01
 
 **Symptom.** Refreshing the benchmark suite's Brood column at 0.22.0 (last measured at
@@ -338,6 +395,47 @@ time on this box needs min-of-3 interleaved runs to mean anything. `BROOD_NO_XCA
 not help, so this is not the deferred re-lowering ceremony; `115faead` (RootsBuf) is the
 commit to read.
 
+**RE-BASELINED AT HEAD 2026-09-01 — the shape is different from the historical pair, and
+most of it is a FIXED per-run cost.** Everything above bisects where the regression
+*entered* (`0f57e30b`, v0.20-era). Measured against the published baseline at **current
+HEAD** (v0.23.x) it has moved, so work the numbers below, not the ones above:
+
+| row | N | old | HEAD | ratio | absolute Δ |
+|---|---|---|---|---|---|
+| `startup` | — | 25.9 ms | 30.0 ms | 1.159 | **+4.1 ms** |
+| `json` | 4 | 37.3 | 42.2 | 1.132 | +4.9 ms |
+| `json` | default | 132.9 | 144.6 | 1.087 | +11.6 ms |
+| `bintree` | 14 | 47.7 | 59.5 | 1.246 | +11.8 ms |
+| `bintree` | 200 (default) | 105.7 | 115.7 | 1.095 | +10.0 ms |
+| `bintree` | 1500 | 495.6 | 509.0 | **1.027** | +13.4 ms |
+| `mandelbrot` | 540 | 208.8 | 226.0 | 1.082 | +17.2 ms |
+| `mandelbrot` | 1400 | 1203.3 | 1243.4 | 1.033 | +40.1 ms |
+| `mandelbrot` | 3000 | 5386.7 | 5567.9 | **1.034** | +181.2 ms |
+
+Two components, and conflating them is what made this look like one big compute regression:
+
+1. **A fixed per-run cost.** `startup` alone is **+4.1 ms** with no workload at all, and
+   `bintree`'s delta is a flat ~10-13 ms whatever `N` is — its ratio decays 1.246 → 1.095 →
+   1.027 purely by amortization. The profile says where: HEAD spends visible time in
+   cranelift's `Verifier` (1.71%) and `regalloc2` (1.40%) on the `brood-jit` thread that the
+   baseline's top-10 does not show — **more/fatter JIT compilation per run**, plus the boot
+   growth already noted. This dominates the published column because the suite runs rows at
+   short default sizes, so a ~10 ms constant reads as 5-10% of wall.
+2. **A genuine steady-state cost, and only on some rows.** `mandelbrot` holds **~1.033-1.034
+   at both N=1400 and N=3000** — it scales with work, so it is real throughput, matching the
+   icache finding. `bintree` at N=1500 is 1.027 and still falling, i.e. mostly component 1.
+
+**What this changes.** "Every compute row 4-10% slower" (the published column) is largely
+**one fixed cost measured at short sizes**, not a broad throughput loss. That cost is still
+worth fixing — this runtime explicitly cares about short-lived work (`nest check`, a
+one-shot script, a request handler) — but it is a different fix from the ~3.4% on
+`mandelbrot`, and it should be reported separately rather than as one number.
+
+**Also corrected: `json`'s +23% instructions is gone at HEAD.** `BROOD_NO_XCALL=1` closed it
+on the historical pair, and on HEAD the lever now makes no difference on `json` (2.27 vs
+2.26 G) while still *earning* 13.9% on `bintree`. Something between v0.20 and v0.23 fixed
+that half. Do not start from the historical analysis.
+
 **A measurement trap recorded with it:** the first `json` instruction reading of the
 without-§7.5 synthetic came back 3.76 G — higher than either endpoint — and would have been
 recorded as "non-monotonic, therefore two unrelated mechanisms". Two repeats put it at
@@ -350,6 +448,44 @@ larger lowering volume (160 arms vs 88) and presumably a different frame/rooting
 "more frames pushed through a costlier root stack" is the shape to test — `perf stat` on the
 two binaries, or the `ns_*` counters under `--features perf-stats`. Then account for the
 ~2 points that RootsBuf does not explain.
+
+**PARTIAL FIX 2026-09-01 (ADR-313), from the other end.** Component 1 — the fixed per-run
+cost — is substantially the *default crash reporter's require closure*, not only cranelift.
+`crash-report/arm-default` lived inside the module, so arming it loaded ten std modules on
+every `brood file` run: **9.0 ms of ~24 ms**. Arming now happens in the prelude and the
+reporter loads on the first crash. Beyond the startup saving this cuts **~13% of JIT-lowered
+arms** (bintree 108 → 94, fib 95 → 84, startup 10 → 6), which is this entry's own icache /
+arm-count mechanism — so it moves component 2 as well: `ab-bench --floor --all` vs
+`5669890d` reads `startup` −11.8%, `spawn` −11.8%, `bintree` −11.3%, `primes` −8.4%,
+`nqueens` −7.4%, `matmul` −5.8%, `fib` −5.7%, nothing regressed. **This entry stays OPEN**:
+the measurement above is against HEAD, not against the 0.19.1 baseline the published column
+carries, so how much of the original 4–10% remains is an open question until the column is
+re-measured. Re-baseline before continuing, and note that the remaining `mandelbrot`
+steady-state ~3.4% is a different fix from the per-run constant.
+
+**FURTHER 2026-09-02 — ADR-314, and a clean sighting of this entry's mechanism in both
+directions.** The prelude image (boot 9.36 → 5.32 ms) removes more of component 1's fixed
+per-run cost. Measured against `5669890d` with `ab-bench --floor`, the session's three
+changes together give `spawn` −15.9%, `reduce` −16.7%, `loop` −11.2%, `fib` −10.5%,
+`strings` −9.6%, `sort` −6.8%, `pingpong` −3.3%.
+
+`ring` is the one row that moved the other way, **+2.9% against a 0.6% floor**, agreed by
+three independent measurements — and `perf stat` says it is this entry's mechanism, not new
+work:
+
+| metric | `5669890d` | HEAD | delta |
+|---|---|---|---|
+| instructions | 7.738 G | 7.646 G | **flat / slightly fewer** |
+| cycles | 4.067 G | 4.418 G | **+5%** |
+| L1-icache-load-misses | 246 M | 269 M | **+11%** |
+| lowered arms | 160 | 150 | **−10** |
+
+Same instructions, more stalls. Note the arm count went **down** while icache misses went
+**up**, which is the sharpest confirmation yet of this entry's own conclusion that *arm count
+is not the predictor* — loading nine fewer modules changes which arms exist and how the
+shared region is laid out, and `ring`'s hot working set happens to span it worse while
+`pingpong`'s spans it better. Not pursued: it is sub-threshold, one-sided, and the huge-page
+lever this entry already priced out is the only obvious handle on layout.
 
 **Reproducing.** The harness is left in `target/ki100/` (gitignored): `probe.sh` is a
 `git bisect run` probe, `measure.sh` the raw timer, `bin/` the built binaries. The
@@ -382,6 +518,47 @@ inside the window while being an ancestor of *neither* endpoint measured earlier
 that list as a bisect order wrongly "excluded" ADR-302 — which turned out to be half the
 interaction. Check `git merge-base --is-ancestor` before reasoning about a range with merges
 in it, and bisect with `git bisect`, which understands the graph.
+
+## KI-101 — the distributed chaos harnesses were dead, and said "crash" ✅ FIXED 2026-09-01
+
+**Symptom.** `scripts/fuzz/dist_chaos.sh` reported `crashed=1` with `n0..n9 exit=1 (CRASH?)`
+on every run — for months. Nothing was crashing. Every node was failing to *start*:
+
+```
+n0.blsp:1:1: unbound error: unbound symbol: node-start
+```
+
+**Why nothing caught it.** Both harnesses build their node programs as **shell heredocs**,
+so they are invisible to `nest check`, to `make check-corpora` (which scans `.blsp` files in
+`examples/ stress/ fuzz-stress/ breakage/`) and to every other gate. The v0.9/v0.10
+namespacing waves renamed `node-start`→`node/start`, `register`→`proc/register`,
+`nodes`→`node/list`, `connect`→`node/connect` and `start-remote-spawn`→`node/serve-spawns`;
+later `each` became a reserved stdlib name and broke the sibling a second time. This is
+KI-42/KI-44's class exactly, in a directory those entries did not reach.
+
+**The part that makes it worse than simply not running:** the failure *presented as a
+finding*. `exit=1` is not in the script's expected set (`0|137|143`), so it printed `CRASH?`
+and set `crashed=1` — a stability harness confidently reporting a runtime crash that never
+happened. A dead gate that stays quiet wastes an opportunity; one that cries wolf spends
+someone's afternoon.
+
+**Fix.** Both scripts repaired, their own helpers prefixed `chaos-` so a future stdlib
+addition cannot collide with them again, and both made **self-reporting**: a
+definition-time error attributed to `nN.blsp` prints `HARNESS ROT … this run tested
+NOTHING`, names the error, and exits 2 — instead of blaming the runtime.
+
+Two details worth keeping, each found by the guard misbehaving before it worked:
+- It matches only **definition-time** kinds (`unbound`/`type`/`arity`/`syntax`/`name`),
+  never `runtime error`. This harness kills nodes deliberately, so
+  `connect: Connection refused` is an *expected* outcome; an earlier version matched it and
+  would have reported rot on every healthy run.
+- Its first placement anchored on `for i in $(seq 0 7)`, which in the sibling is the
+  **port-init** loop near the top — so the check ran before any `.err` file existed and
+  silently never fired. It is now anchored to the exit-collection loop.
+
+**With the harnesses actually running, the runtime is clean**: 10-node churn with kill and
+rejoin cycles plus 40 wrong-cookie attackers hammering the seed's handshake, and the
+remote-spawn variant shipping closures across a dying mesh — `crashed=0` on every run.
 
 ## KI-99 — a dist handshake EOF'd under full-suite load, so a drop-warning test saw no send ⚠️ WATCHING 2026-08-31
 

@@ -207,7 +207,7 @@
                  (letrec (go (fn (i acc) (if (= i 3) acc (go (inc i) (string/interp "{acc}{i}")))))
                    (go 0 ""))]))
       (assert= "012" (receive ([:result r] r)))))
-  ;; These three used the `with` macro until ADR-313 deleted it; they are `match`, which
+  ;; These three used the `with` macro until ADR-315 deleted it; they are `match`, which
   ;; is what `with` expanded to. The cross-process property they cover is unchanged and is
   ;; the reason they are here: a tuple a worker BUILT survives the deep copy a send makes
   ;; between per-process heaps and still destructures on the receiving side.

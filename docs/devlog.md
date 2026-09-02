@@ -9410,7 +9410,298 @@ unused-parameter lint fired 19 times across std/ + tests/, of which 16 were `def
 Restricted to anonymous `fn`s it fires 5 times, all catch-all arms of guarded dispatches
 (`((n) :zero)` after two `:when` arms), now `_`-prefixed. Zero across the tree afterwards.
 
-## 2026-09-01 (later) — stopping on a failure is a mechanism, not a primitive (ADR-313)
+## 2026-09-01 (end, again) — KI-100 re-baselined at HEAD: mostly a fixed per-run cost
+
+Started on the fix and immediately found the target had moved. Everything bisected earlier
+describes where the regression *entered* (`0f57e30b`, v0.20-era). Measured against the
+published baseline at **current HEAD**, it is a different animal:
+
+  startup    —      25.9 -> 30.0 ms   1.159   +4.1 ms   (no workload at all)
+  bintree    N=14   47.7 -> 59.5      1.246   +11.8 ms
+  bintree    N=200  105.7 -> 115.7    1.095   +10.0 ms
+  bintree    N=1500 495.6 -> 509.0    1.027   +13.4 ms
+  mandelbrot N=1400 1203 -> 1243      1.033   +40 ms
+  mandelbrot N=3000 5387 -> 5568      1.034   +181 ms
+
+**Two components, and conflating them made this look like one broad compute regression.**
+`bintree`'s delta is a flat ~10-13 ms whatever `N` is — its ratio decays 1.246 → 1.095 →
+1.027 purely by amortization — and `startup` is +4.1 ms with no workload. That is a **fixed
+per-run cost**: boot growth plus JIT compilation, and the profile agrees (HEAD shows
+cranelift `Verifier` 1.71% + `regalloc2` 1.40% on the `brood-jit` thread; the baseline's
+top-10 has neither). Only `mandelbrot` holds its ratio as work grows — ~1.034 at both N=1400
+and N=3000 — so that one is genuine throughput.
+
+The consequence is worth stating plainly: **the published column's "every compute row 4-10%
+slower" is largely one fixed cost, measured at short default sizes.** It is still worth
+fixing — this runtime explicitly cares about short-lived work — but it is a different fix
+from mandelbrot's ~3.4%, and reporting them as one number hid that for a day.
+
+**And `json`'s +23% instructions is already gone at HEAD.** `BROOD_NO_XCALL=1` closed it on
+the historical pair; on HEAD the lever makes no difference to `json` (2.27 vs 2.26 G) while
+still earning 13.9% on `bintree`. Something between v0.20 and v0.23 fixed that half. I had
+recommended iterating on `json` — that recommendation is withdrawn; it is the wrong row now.
+
+Three retractions in two sessions on this entry (huge pages, then json-as-the-lens, now the
+historical numbers themselves). The pattern behind all three is the same: I measured one
+pair, on one row, at one size, and generalized. The habit that would have caught each of
+them earlier is the one this repo already prescribes for the JIT — **sweep the size across
+orders of magnitude and watch whether the GAP moves**, not just whether the number does.
+
+## 2026-09-01 (last) — §7.8 item 1 built, measured, and reverted: the premise was wrong
+
+Took the top-ranked perf candidate and implemented it: the static half of `arm_scalar_kind`
+memoized in a per-arm `OnceLock` (leaving the two genuinely dynamic inputs, `i64_too_deep`
+and `self_global_ok`, live at each call), plus an `AtomicBool` so the empty `I64_TOO_DEEP`
+set costs no `Mutex`. Correct, semantics-preserving, JIT suites and the breakage suite green.
+
+`make ab --floor` at N=9 said **noise on every row**: fib +2.5% (floor 1.6%), pfib −1.9%
+(0.4%), ackermann +0.2% (1.2%), bintree +2.2% (2.2%).
+
+So I counted the calls instead of theorising about why. A five-line probe:
+
+  fib 21 · bintree 394 · ackermann 457 · pfib 2176
+
+— over entire runs, against billions of activations. The item's premise ("recomputed per
+activation") is simply false: the gate is
+`(arm.inline_name.is_some() || xcall_relower) && !inline_installed && !declines_inline_upgrade(arm)`
+and the `&&` chain **short-circuits** long before the verdict for the arms that matter.
+
+Reverted rather than shipped — it added a field to a hot struct for nothing — and §7.8 item
+1 is now struck through as measured-and-ruled-out, with the counts, so nobody rebuilds it.
+
+**The transferable bit, and it applies to the rest of §7.8.** That item was "confirmed by
+reading the cited code", and the reading was accurate about what the function *does* and
+wrong about how often it *runs*. One `&&` above the call was the whole story. Before
+building any remaining item on that list: **count the calls first**. A probe settles in one
+run what a careful read cannot, and it costs minutes against the hours a build-then-A/B
+round trip takes. I have added that instruction to the section header.
+
+## 2026-09-01 (stability sweep) — the correctness tools, and what they found
+
+Asked for correctness/stability work rather than perf, and the honest position was that the
+*known* list is nearly empty — KI-97 is down to `read-line` (a scoped feature) and every
+other open item is a watch that will not reproduce. So the question became: are there
+*unknown* ones? Ran the tools that answer that.
+
+**Clean:** all eleven differential fuzz generators (metamorphic 1050 checks, then
+arithmetic/numeric/match/trycatch/tier_transition/quasiquote/strings/rope/syntax/checker at
+60 programs × 4 engine configs each) — 0 divergences, 0 crashes, 0 oracle failures.
+`make gcstress` all clean. That is a real result: the VM/JIT/tree-walker agree and the GC
+tripwire stays silent under stress.
+
+**Not clean: the harnesses themselves.** Both distributed chaos scripts had been dead for
+months — filed as **KI-101**. Every node failed to start on `unbound symbol: node-start`,
+because the v0.9/v0.10 namespacing waves renamed five names out from under heredoc'd node
+programs that no `.blsp` gate can see, and `each` later became a reserved stdlib name and
+broke the sibling a second time. KI-42/KI-44's class, in a directory those entries never
+reached.
+
+**The bit that makes it worse than a quiet dead gate:** the failure *presented as a
+finding*. `exit=1` is outside the script's expected set, so it printed `CRASH?` and
+`crashed=1` — a stability harness confidently reporting a runtime crash that never happened.
+A dead gate that stays quiet wastes an opportunity; one that cries wolf spends an afternoon.
+
+Both repaired, helpers prefixed `chaos-` against the next stdlib addition, and both now
+self-report: a definition-time error in `nN.blsp` prints `HARNESS ROT … this run tested
+NOTHING` and exits 2 rather than blaming the runtime.
+
+**Two guard bugs, each caught by testing the guard rather than trusting it.** The first
+version matched the bare phrase "unbound symbol" — which appears in the prose of the
+checker's *"catch discards the error unread"* warning, so every clean run reported rot. The
+second matched any `error:`, including `connect: Connection refused` — an *expected* outcome
+in a harness that kills nodes on purpose. And in the sibling the block was anchored on
+`for i in $(seq 0 7)`, which there is the **port-init** loop near the top, so it ran before
+any `.err` existed and silently never fired. Three ways to write a guard that does nothing
+or cries wolf, in one sitting.
+
+**And with the harnesses actually running, the runtime is clean**: 10-node churn with
+kill/rejoin cycles plus 40 wrong-cookie attackers, and the remote-spawn variant shipping
+closures across a dying mesh — `crashed=0` every run. That is the stability signal we did
+not have this morning, and could not have had while the harness could not start a node.
+
+## 2026-09-01 (perf) — the default crash reporter cost 9 ms on every run; it now arms lazily
+
+Went looking for startup cost with a probe rather than a profile, because the profile is
+flat: no symbol is over 5% of a `brood file` run. Decomposing an empty program instead —
+`--version` for process load, `BROOD_BOOT_TRACE` for boot, a `ProbeInterp` drop guard around
+`Interp::new` — put ~1.2 ms in process load, ~10.6 ms in `Interp::new` (which *is* the
+prelude boot, the per-process heap on top of the shared bundle being nearly free), and left
+~11 ms unaccounted after it. `BROOD_IMAGE_TRACE=1` named the missing half in one line:
+**ten std modules materialising for a program that does nothing**, headed by `crash-report`.
+
+The cause is ADR-229 loading by inference. `crash-report/arm-default` lived inside the
+module, so reaching it to *read an env var* loaded the module, and `io/puts` pulled `io`,
+`file`, `path`, `string`, `reflect` and `math` behind it. `BROOD_NO_CRASH_REPORT=1` did not
+help, because the check sat inside the function the call had already loaded the module to
+reach — the documented opt-out saved the `spawn` and none of the cost. Measured at **9.0 ms
+of ~24 ms**, interleaved best-of-31, two rounds, spread ±0.06 ms.
+
+ADR-315 has the design. The short version: the *subscription* is the only part that must
+happen before the program starts (the kernel reads it to stand its own death one-liner
+down), so that moved to the prelude and the reporting stayed where it was, reached through
+one `%autoload`ed call in the shim's `receive`.
+
+**Two things worth keeping from how it went wrong.** The first cut used a bare
+`crash-report/take-over` in the prelude, on the assumption that ADR-246's autoload stubs
+would resolve it. They do not — those are installed by the module machinery, and the prelude
+is compiled before it exists — so the shim raised `unbound symbol` and died. That is the
+worst failure this component can have: the reporter is the one process whose own death
+nobody reports, so the symptom was *empty stderr*, and the end-to-end CLI test was the only
+thing that could see it. It was written before the bug, which is the whole argument for
+writing the end-to-end half of a laziness change first. `prelude_hygiene` then named the
+correct mechanism in its own failure message, and the checker separately flagged the
+now-dead `:stop` arm in `take-over` — two gates each doing exactly the job they were added
+for.
+
+**Second: the win is bigger than the module loads.** `ab-bench --floor --all` reports
+`startup` −11.8%, `spawn` −11.8%, `bintree` −11.3%, `primes` −8.4%, `nqueens` −7.4%,
+`matmul` −5.8%, `fib` −5.7%, everything else inside its floor and nothing regressed. Compute
+rows have no business improving from a startup change — until you count arms: nine fewer
+modules is **~13% fewer JIT-lowered arms** (bintree 108 → 94, fib 95 → 84). That is KI-100's
+mechanism exactly, reached from the other end, and it is a partial fix for its component 1.
+
+Verification, since this touches the prelude and a sysmon subscriber: full `make test`
+(only the documented `wasm_sandbox_limits` 16 GB-cap exception, 7/7 uncapped);
+distribution + `live_migration` + `serve_attach` + `net_reactor_death` **5× looped, 39/39
+each time**; hot-reload files 5× looped; `crash_report`/`supervisor` under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; clippy `--all-features`; `nest format --check`;
+`check-examples`, `check-corpora`, `check-stress` including both dist chaos harnesses
+(`crashed=0`).
+
+## 2026-09-01 (perf, cont.) — `pos_at` was re-walking the source 21x for column numbers
+
+With the crash reporter's nine modules gone, boot is now **10.0 ms of a 13.2 ms** empty run
+(76%), so the boot path is where the remaining startup cost lives. Its phases:
+`read_all` 5.6 ms, eval 2.9 ms, freeze 1.3 ms, `builtins::register` 0.44 ms, file read
+0.17 ms.
+
+Profiling that run turns up no single hotspot — `env_get` 9.8%, the reader proper ~10%,
+freeze ~6%, interning ~5.8%, and **position machinery ~5.4%** (`do_count_chars` 2.74% +
+`Scanner::pos_at` 1.24% + `Scanner::new` 1.38%). Counting the calls rather than reading the
+code: `pos_at` runs **9781 times walking 4.81 MB across a 222 KB file** — 21.6× the source
+re-counted, because the boot cache writes one whole *expanded top-level form per line* and
+every query inside a form re-walks from that form's start. Stubbing the column out entirely
+put the ceiling at **0.66 ms** (parse 5.62 → 4.96).
+
+**The obvious fix does not work, and that is the part worth keeping.** A whole-file
+`is_ascii()` flag makes the column arithmetic — except the prelude's docstrings carry `→`
+and `·`, so the cache holds 1909 non-ASCII bytes across 270 of its 549 lines and the fast
+path never fires on the one input it was written for. Measured: parse 5.62 → 5.62 ms, i.e.
+nothing. What works is a **memo** of the last `(line, idx, col)`: queries run forward as the
+parser scans, so a hit walks only from the previous query, and total work becomes linear in
+the source instead of quadratic in form size. Parse 5.62 → 5.15 ms, and the whole empty run
+15.50 → 14.93 ms — **~0.55 ms, 3.6%**, reproducible across three interleaved best-of-41
+rounds.
+
+`ab-bench --floor --all` reports every row as noise including `startup` at +0.0%, which is
+not a contradiction: that row prints whole milliseconds, so 0.55 ms cannot appear in it.
+This is the case for measuring the phase directly rather than trusting a benchmark row to
+resolve it.
+
+The guard is `the_ascii_fast_path_agrees_with_the_char_walk_everywhere`, which compares
+`pos_at` against an independently written char-walk at every char boundary of eight sources
+(ASCII, multibyte, one very long line) in three query orders — forward for the memo's hit
+path, backward and zig-zag for its two fallbacks. Sabotage-verified twice: dropping the
+1-based `+1` from the arithmetic path, and dropping the same-line guard from the memo. The
+second is the one that matters, because a memo carried across a line boundary is a silently
+wrong column, never a crash.
+
+**Two process failures from the same session, both worth recording.**
+
+*An inserted test stole an existing one's attribute.* Adding
+`the_ascii_fast_path_agrees_with_the_char_walk_everywhere` immediately above
+`pos_at_counts_lines_and_columns_through_multibyte` put the new function between that test's
+`#[test]` and its `fn`, so the new one carried two attributes and **the old one silently
+stopped being a test** — it became dead code, and the scanner suite went from 11 tests to 11
+tests, the same number, because one was added as another was lost. Nothing failed. The only
+signal was rustc's `duplicate_macro_attributes` + `dead_code` pair, which is easy to skim
+past in a build log. Count the tests before and after inserting one, and never anchor an
+insertion on a `fn` line that has attributes above it.
+
+*A `cd` into an `ab-bench` worktree silently redirected six commands.* `cd target/ab/<sha> &&
+cargo build` left the shell there, so a full suite run, clippy, `nest format --check` and a
+commit all executed against the **baseline checkout** rather than the working tree — the
+suite passed, the gates passed, and none of it had tested the change, because that tree does
+not contain it. The commit that resulted carried only the devlog entry. The tell was cargo
+printing package paths under `target/ab/9b9492e5/crates/`, which read as a cargo oddity for
+several commands before it read as a wrong working directory. `ab-bench` worktrees are full
+checkouts of this repo, so every relative path in them resolves plausibly and nothing errors.
+Use absolute paths for a build in a worktree, and treat an unexpected package path in build
+output as a location bug first.
+
+## 2026-09-02 — a CI flake that was a real bug: `tcp/set-binary` could not make a server binary
+
+CI went red on `36c92849` with `breakage/chaos2_tcp_stress` P38 echoing **512 bytes for a
+256-byte payload**. The commit's code was byte-identical to the green run before it, so this
+was a flake — and per this repo's own rule, the work.
+
+Not reproducible idle (0/40). Reproduced **2/30** under `taskset -c 0,1` with eight spinners,
+i.e. CI's loaded two-core shape. An instrumented repro that also reported what the *server*
+saw gave the answer in one line: `[256 :string]`. The socket delivered TEXT despite
+`(tcp/set-binary client true)` running before the `receive`, because an accepted socket is
+already reading when `[:tcp-accept …]` reaches its owner and `set_binary` only affects the
+*next* chunk. The lossy UTF-8 decode of 0x00–0xFF is 128 ASCII + 128 U+FFFD; re-encoding that
+string is 128 + 384 = 512. The number in the failure message was the diagnosis all along.
+
+The real finding is that **no correct binary server could be written**: `set_binary` rejected
+a listener outright, and on a stream it was always one scheduling decision too late. KI-102
+has the detail; the fix is Erlang's shape — a listener's mode is inherited by the sockets it
+accepts, fixed before any connection exists, so there is no window.
+
+Worth noting how close this came to being dismissed. "512 for 256" reads as a doubling, and a
+doubling reads as a framing bug in the wire path — which would have been a long hunt in the
+reactor. Printing the length **and type** the receiving side saw, rather than only the
+client's, cost one edit and pointed straight at the mode. When a byte count is wrong, ask what
+type the value has before asking who duplicated it.
+
+The guard is deterministic in both directions (server never calls `set-binary`; plus an
+inverse case so the fix cannot be a blanket "everything is binary"), which the original P38 —
+a timing hope that happened to pass on idle machines — was not.
+
+## 2026-09-02 (perf) — the prelude is materialised now, not re-evaluated: startup −39%
+
+With the crash reporter's nine modules gone (ADR-313) and `pos_at` memoized, boot was
+**9.36 ms of a 12.4 ms empty run — 76%**, so the boot path was the only thing left worth
+attacking. ADR-314 has the design; the headline is boot **9.36 → 5.40 ms** and the whole
+empty run **13.5 → 8.3 ms**, best-of-41 interleaved over two rounds.
+
+**The interesting part is that this reverses an explicit ADR-138 rejection, and was right to.**
+That ADR priced full heap serialization at *"0.7 ms upside, a binary format + relocation
+story downside"* — correct in July, when parse+eval+freeze were ~4 ms of a 6.5 ms boot. Two
+things moved since: the residual became the whole cost, and the stdlib image (ADR-256/281)
+built and shipped the exact machinery ADR-138 was unwilling to pay for. Re-reading a
+rejection against current numbers is cheap; assuming it still holds is what costs.
+
+**Three silent omissions, all the same shape**, and `image_matches_source.rs`'s header had
+already named that shape for modules: *materialising defines bindings and evaluates nothing,
+so anything the evaluation recorded must be written explicitly.*
+
+1. The `defdyn` marks live in a process-global set, not in any binding — so `binding`
+   rejected `*require-parent*` and every `require` in the language died. 185 tests red.
+2. `*out*` vanished to a filter that skipped bindings whose *value* was a native. The right
+   question is which names `builtins::register` **creates**, snapshotted in the cold boot
+   right after registration — a prelude `def` can bind a primitive under a name registration
+   never re-creates, and `io/puts` went with it.
+3. Def sites, so stdlib `M-.` went dark — the one user-visible thing ADR-138 kept a whole
+   positioned read alive to preserve.
+
+None crashed at the site of the mistake; each surfaced as a wave of unrelated failures. The
+durable answer is the differential (`prelude_image_matches_source.rs`), which compares two
+real `brood` processes — one per boot path — per global on name, kind, privacy, signature,
+source location and dynamic-ness.
+
+**And that guard nearly shipped unable to fail.** Its first cut compared two *empty* strings:
+the dump program died on an unbound `seq/sort`, and `"" == ""` is agreement, so a deliberate
+sabotage of the def-site code **passed**. It now asserts the `GLOBALS n` header is present
+and that the line count matches it before comparing anything. Same lesson as
+`grep "test failed"` on a runner that never printed: *assert the evidence is present, never
+that failure is absent.* Sabotage-verified three ways afterwards — dropped def sites, dropped
+`defdyn` marks, and the wrong filter restored — and all three go red.
+
+One inherited rule worth stating: the image **stands aside under `BROOD_COVERAGE`**, exactly
+as the stdlib image does (ADR-281). Coverage instruments the compiler; a materialised binding
+is never compiled. `std_attribution` caught that and was the last failure to go.
+## 2026-09-01 (later) — stopping on a failure is a mechanism, not a primitive (ADR-315)
 
 The calculator from ADR-312, rewritten on `ok->` as that ADR recommends, was still wrong —
 and wrong in the way that is hardest to see, because two of its five inputs looked right:
@@ -9488,7 +9779,7 @@ is gated on whole-file operand checking and on `evaluates_args`. Placed there it
 not where the slip is made. ADR-312 recorded that asymmetry biting the other way; this is
 the second time, and both entries now name the same trap.
 
-**ADR-312's fold lint is deleted, because ADR-313 made its sentence false.** It warned that
+**ADR-312's fold lint is deleted, because ADR-315 made its sentence false.** It warned that
 "a later element runs against" a failed accumulator; with the short-circuiting fold, ADR-312's
 own exemplar `(calc "1 q 2")` — which used to raise `conj: not a collection` — now answers
 `#failure{"invalid token q"}`. The lint was firing on correct code, which ADR-312 itself
