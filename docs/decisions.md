@@ -20010,6 +20010,15 @@ here has been a missing name or a lost attribute. **Sabotage-verified three ways
 dropping def sites, dropping the `defdyn` marks, and restoring the wrong (value-is-native)
 filter each turn it red.
 
+**The differential excludes the stdlib image's install bookkeeping** — the same six names
+`image_matches_source.rs` excludes (`*image-sources*`, `*std-image-file*`,
+`*std-image-sections*`, `*std-impls*`, `*std-regs*`, `*std-require-edges*`), and for the
+same reason: their values track how far *that* install has got (`%std-image-tables!` clears
+`*std-image-sections*` once any module materialises), so they differ by module load order
+between two runs rather than by anything the prelude image carries. This was found by CI,
+not locally — the two arms happened to agree on this box and disagreed on the runner, which
+makes it the second thing about this guard that only a red run could teach.
+
 **The guard's own near-miss is worth recording.** Its first cut compared two *empty* strings
 — the dump program died on an unbound `seq/sort`, and `"" == ""` is agreement, so it passed
 a deliberate sabotage. It now asserts the dump's `GLOBALS n` header is **present** and that

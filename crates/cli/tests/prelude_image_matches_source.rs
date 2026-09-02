@@ -36,7 +36,18 @@ so this needs no new introspection surface."
   (try (do (%binding (list (symbol n)) [nil] (fn () nil)) true)
     (catch _ (check-allow :discarded-catch false))))
 
-(let (names (sort (reflect/global-names)))
+(def- install-bookkeeping
+  ;; The stdlib IMAGE install's own bookkeeping (ADR-256), excluded for exactly the reason
+  ;; `image_matches_source.rs` excludes the same six names: their values track how far that
+  ;; install has got — `%std-image-tables!` clears `*std-image-sections*` to nil once any
+  ;; module materialises — so they differ by module LOAD ORDER between two runs, not by
+  ;; anything the prelude image does or does not carry. Excluded by name rather than by
+  ;; dropping every `*…*` global, which would hide a real omission.
+  #{"*image-sources*" "*std-image-file*" "*std-image-sections*"
+    "*std-impls*" "*std-regs*" "*std-require-edges*"})
+
+(let (names (filter (sort (reflect/global-names))
+                    (fn (n) (not (contains? install-bookkeeping n)))))
   (io/puts "GLOBALS " (count names))
   (doseq (n names)
     (io/puts n
