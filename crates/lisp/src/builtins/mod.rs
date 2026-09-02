@@ -22,7 +22,7 @@ mod os;
 mod pkg;
 mod selfhost_macros;
 mod sequences;
-mod startup_image;
+pub(crate) mod startup_image;
 mod syntax_scan;
 mod system;
 #[cfg(not(target_arch = "wasm32"))]
