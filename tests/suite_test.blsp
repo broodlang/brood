@@ -212,9 +212,7 @@
       (defn %slot-noisy () (table/put calls :n (inc (table/get calls :n 0))) 4)
       (assert= 8 (-> (%slot-noisy) (+ $ $)))
       (assert= 1 (table/get calls :n))))
-  (test "some-> / cond-> inherit $ from the shared placement helper"
-    (assert= (some-> 5 (- 10 $)) 5)
-    (assert= (some-> nil (- 10 $)) nil)
+  (test "cond-> inherits $ from the shared placement helper"
     (assert= (cond-> 5 true (- 10 $)) 5))
   :isolated (test "a $ pipeline deep-copies across a send and runs on the receiver"
     (let (me (self))

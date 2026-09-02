@@ -545,6 +545,15 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
             }
             (3, None) if then_ctx.is_dead() => Some(Ty::of(Tag::Nil)),
             (3, None) => Some(expr_ty(heap, items[2], &then_ctx)?.union(Ty::of(Tag::Nil))),
+            // `(if test)` — a test and NO branches. The evaluator runs the test for effect
+            // and yields `nil` whichever way it goes, so the type is exactly `nil`. It fell
+            // through to `None` here, and "unknown" is contagious: the enclosing `defn`
+            // degraded to `(string -> any)` and every check that depends on a pinned body
+            // type went quiet on it — including the declared-return check, which is the one
+            // thing that would have pointed at the missing branches. The shape is almost
+            // always a paren slip, so it is exactly where the checker should be loudest,
+            // not silent.
+            (2, _) => Some(Ty::of(Tag::Nil)),
             _ => None,
         };
     }

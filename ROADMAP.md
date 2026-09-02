@@ -67,11 +67,11 @@ Three linked changes, all landed:
   only; the Scheme reading was vacuous here anyway (it marks *mutation*, which Brood has
   none of — ADR-026). 38 names renamed; `run!` became **`each`**, since six modules define
   their own `run`.
-- **ADR-303 — the `$` placeholder** in `->` / `->>` / `some->` / `cond->`: a step naming
+- **ADR-303 — the `$` placeholder** in `->` / `->>` / `cond->`: a step naming
   `$`, at any depth and inside vector and map literals, receives the threaded value there.
   Bound once to a gensym, so `(-> (expensive) (+ $ $))` evaluates once; `'$` stays a symbol.
 - **ADR-308 — data-first argument order.** The collection is argument one
-  (`Enum.map(enum, fun)`), `reduce` keeps both arities, and `->>`/`some->>`/`cond->>` are
+  (`Enum.map(enum, fun)`), `reduce` keeps both arities, and `->>`/`cond->>` are
   **deleted** — one convention needs one pipe. ~1780 call sites over 30 functions. The
   reducer's own `(fn (acc x))` params deliberately did *not* move (that swap fails silently;
   the outer one fails loudly), and `into` stays `(to from)`.

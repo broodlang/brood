@@ -9409,3 +9409,84 @@ unused-parameter lint fired 19 times across std/ + tests/, of which 16 were `def
 (a published arglist, where an unused parameter is frequently the contract) and 3 anonymous.
 Restricted to anonymous `fn`s it fires 5 times, all catch-all arms of guarded dispatches
 (`((n) :zero)` after two `:when` arms), now `_`-prefixed. Zero across the tree afterwards.
+
+## 2026-09-01 (later) — stopping on a failure is a mechanism, not a primitive (ADR-313)
+
+The calculator from ADR-312, rewritten on `ok->` as that ADR recommends, was still wrong —
+and wrong in the way that is hardest to see, because two of its five inputs looked right:
+
+```
+(calc "1 1 +")    => 2
+(calc "1 - 1 +")  => RAISES  +: expected number, got failure (…not a number: "-")
+(calc "1 -")      => #failure{…}        ← right by accident
+(calc "1 - 1")    => 1                  ← the failure is buried mid-list
+(calc "-")        => #failure{…}        ← right by accident
+```
+
+`conj` prepends, so a stored failure is only visible when the bad token happens to be last.
+`nest check` was silent on the whole thing.
+
+**An absorbing failure was built end to end, and then thrown away.** Handed to any primitive
+that could not use it, a failure came back out; it could never become a collection element;
+several meeting in one operation merged into one carrying every cause. The seam was
+`LispError::wrong_type` — the single constructor behind all 106 "expected X, got Y" sites —
+so it cost nothing on the happy path. It made the calculator correct **with no edit at all**.
+Two findings killed it, both from running rather than reading:
+
+- **It stops at the wrong boundary.** A `defn` handed a failure runs its body and answers
+  with its own. `(charge <failure> 250)` took its else branch and returned
+  `#failure{"declined"}`, losing `"no such user: 9"` — so every chain of fallible *user*
+  functions, the case `with` exists for, was still broken. Fixing that means failure-strict
+  calls, which cannot be unconditional (`failure?` is itself a `defn`) and so needs a
+  per-function marker plus an argument scan on the hottest path.
+- **Silent absorption breaks shapes.** Refusing a failure as a collection element made
+  `[:f (parse "x")]` collapse to the bare failure, so a worker's tagged reply changed shape
+  and the receiver's `([:f f] …)` clause silently stopped matching. `tests/try_catch_test.blsp`
+  caught that — not the new test file, and not the per-file runner either; only the
+  Rust-driven suite did, because my file-at-a-time sweep called the tree green while it was
+  red. Sparing literals fixed the case and left the boundary arbitrary (`(conj [] f)` refuses,
+  `[f]` does not).
+
+**What shipped instead:** three mechanisms, no primitive changed. `ok->` (the failure pipe,
+restored), `with` rewritten as the failure `let` — bindings exactly like `let`'s, the first
+failure short-circuits, no `{:ok, _}` pattern and no `:else`, because Brood *has* a failure
+kind where Elixir has only a tuple shape — and a fold that stops once its accumulator is a
+failure. That last one is the case neither of the others can reach: the accumulator is
+threaded by the combinator, so there is no binding or pipe step to hang a sentinel on. It is
+the short-circuiting fold ADR-312 deferred pending evidence.
+
+`some->` is deleted (ledgered under ADR-304). It stopped on `nil`, which since ADR-310 means
+only "the lookup found nothing" — a pipe for a channel that is not one, with no call site in
+`std/` outside its own docstring.
+
+Also learned, and worth keeping: **the checker did not flag an impossible predicate at all**
+— `(if (failure? 42) 0 1)` passed `nest check` silently. I had asserted the opposite as the
+reason `failure` could not leave the type unions; it was a prediction, not a measurement, and
+it was wrong. It flags one now, scoped to `failure?` (0 hits tree-wide, so no triage debt);
+the same test over every predicate reports 25, of which 4 are in `std/` and want a look.
+
+**And a branchless `(if test)` typed as `any`, which is how the whole thing stayed invisible.**
+`control_flow_ty` handled `(if t then)` and `(if t then else)` and nothing else, so
+`(defn calc (expr) (if (not (failure? (string/->number expr)))))` — a paren slip that drops
+both branches — read as `(string -> any)`. Unknown is contagious: every check needing a
+pinned body type went quiet, *including the declared-return check that would have named the
+missing branches*. It types as `nil` now (the evaluator yields nil either way), zero new
+warnings tree-wide.
+
+**The migration cost nothing.** Swept every project under `~/src/broodlang`: not one uses
+`some->`, and not one used the old pattern-driven `with`, so both breaking changes broke
+nothing downstream. `std/url.blsp`'s query decoder is the single place the new `with`
+replaced existing code — two `(failure? k) k` arms became one `with`. `std/datetime.blsp`
+keeps its guards deliberately: its outer `or` re-reports any component failure against the
+input the caller passed, which propagating the component's message would lose.
+`examples/rpn.blsp` is the worked example — the smallest program that needs all three
+mechanisms, and shows the fourth move none of them make (replacing a cause with a better one).
+
+**Two bedit bugs fixed while looking at its diagnostics** (`../bedit`, its own repo):
+`results/note-text` appended `:warn` unconditionally, but that key carries two things — the
+tutor stores an advisory *string*, the checker's diagnostics store a plain `true` flag that
+the glyph and face lookups read — so every warning rendered as `⚠ unbound symbol: acc   true`.
+Only a string is text now. And a ghost note is capped at 64 columns: a checker message can
+run to a couple of hundred, and drawn from the end of an already-indented line it walked off
+the right edge with the readable half off-screen. The full text was always one keystroke
+away in the echo row.

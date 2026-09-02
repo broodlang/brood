@@ -1,0 +1,183 @@
+;; ADR-313 — the three mechanisms for stopping on a failure, and the shape each covers.
+;;
+;; The bug they exist for: a calculator written on the failure channel returned `1` for
+;; "1 - 1" (the failure was conj'd mid-list, where `first` never looked) and RAISED for
+;; "1 - 1 +". The two inputs that looked correct were correct by accident — `conj`
+;; prepends, so a stored failure is only visible when the bad token happens to be last.
+;;
+;; Stopping is NOT built into the primitives: `(+ 1 <failure>)` still raises, exactly as
+;; before. You reach for a mechanism where you mean one — `ok->` for a pipeline, `with` for
+;; a chain of named steps, and a fold that stops once its accumulator has failed, because
+;; that accumulator is threaded by the combinator where neither of the others can reach it.
+
+(defmodule failure-mechanisms-test (:use test))
+
+(defn- bad () (string/->number "q"))
+
+(describe "ADR-313: no primitive absorbs — that stays the raising channel"
+  (test "arithmetic on a failure still raises, as it did before"
+    ;; the mechanisms are opt-in; nothing changed underneath them
+    (is (try (do (+ 1 (bad)) false) (catch _ true))))
+
+  (test "and a collection still STORES one — which is why the mechanisms are needed"
+    ;; this is the original defect, deliberately left in place: `conj` declares no domain,
+    ;; so it stores a failure silently and the fold that did so answered `1` for "1 - 1".
+    ;; What ADR-313 adds is somewhere to say "stop here", not a primitive that guesses.
+    (let (stored (conj '(1) (bad)))
+      (is (pair? stored))
+      (is (failure? (first stored))))))
+
+(describe "ADR-313: `ok->` — the failure pipe"
+  (test "threads like -> when nothing fails"
+    (assert= (ok-> "12" string/->number inc) 13))
+
+  (test "a failure falls out ITSELF, carrying its message"
+    (let (r (ok-> "q" string/->number inc))
+      (is (failure? r))
+      (assert= (error-message r) "string/->number: not a number: \"q\"")))
+
+  (test "the steps after a failure never run"
+    ;; `(* 2)` and `(+ 5)` would each raise on a failure — reaching neither is the point
+    (is (failure? (ok-> "q" string/->number (* 2) (+ 5)))))
+
+  (test "nil is not a sentinel — absence and failure are separate channels"
+    (assert= (ok-> nil identity) nil)))
+
+(describe "ADR-313: `with` — the failure let"
+  (test "binds like let when every step produces a value"
+    (assert= (with (n (string/->number "12")) (inc n)) 13))
+
+  (test "the first failing step short-circuits and falls out"
+    (let (r (with (n (string/->number "q")) (inc n)))
+      (is (failure? r))
+      (assert= (error-message r) "string/->number: not a number: \"q\"")))
+
+  (test "it reaches a chain of YOUR OWN functions, which `ok->` cannot"
+    ;; this is why `with` exists. Threading a failure into a user-defined step does not
+    ;; stop it: the body runs, branches on the failure, and answers with its own — so the
+    ;; CAUSE is lost. Here `charge` never runs at all.
+    (letrec (lookup (fn (id) (if (= id 1) {:card "4242"} (failure "no such user: " (pr-str id))))
+             charge (fn (card cents) (if (= card "4242") {:receipt cents} (failure "declined")))
+             pay (fn (id cents)
+                   (with (account (lookup id) card (get account :card) receipt (charge card cents))
+                     receipt)))
+      (assert= (pay 1 250) {:receipt 250})
+      (assert= (error-message (pay 9 250)) "no such user: 9")))
+
+  (test "a later step sees the earlier bindings"
+    (assert= (with (a (string/->number "3") b (* a 4)) b) 12))
+
+  (test "the binding target may destructure"
+    ;; the value is bound to a temporary and TESTED first, so a failure never reaches a
+    ;; pattern that could not match it
+    (assert= (with ([a b] [1 2]) (+ a b)) 3)
+    (is (failure? (with ([a b] (failure "nope")) (+ a b)))))
+
+  (test "the body may be several forms; the last is the result"
+    (assert= (with (n (string/->number "1")) (inc n) (+ n 41)) 42)))
+
+(describe "ADR-313: a fold stops once its accumulator is a failure"
+  (test "the callback's failure ends the fold instead of reaching the next step"
+    ;; without this the failure becomes the accumulator and the NEXT item raises
+    ;; (`conj: not a collection`) one step later, naming the wrong thing
+    (let (r (reduce ["1" "q" "2"]
+              '()
+              (fn (acc s) (with (n (string/->number s)) (conj acc n)))))
+      (is (failure? r))
+      (assert= (error-message r) "string/->number: not a number: \"q\"")))
+
+  (test "a fold with no failure is untouched"
+    (assert= (reduce [1 2 3] 0 +) 6)))
+
+(describe "ADR-313: the calculator that started it"
+  (defn- calc (expr)
+    (ok-> expr
+      (string/split)
+      (reduce '()
+        (fn (((x y & acc) "+") (conj acc (+ x y)))
+          ((acc num) (with (n (string/->number num)) (conj acc n)))))
+      (first)))
+
+  (test "a well-formed expression is unaffected"
+    (assert= (calc "1 1 +") 2))
+
+  (test "a bad token anywhere yields a failure naming it"
+    (is (failure? (calc "-")))
+    (is (failure? (calc "1 -")))
+    (is (failure? (calc "1 - 1"))) ; answered 1 before ADR-313
+    (is (failure? (calc "1 - 1 +"))) ; raised before ADR-313
+    (assert= (error-message (calc "1 - 1")) "string/->number: not a number: \"-\"")))
+
+(describe "ADR-313: across processes"
+  ;; a failure is a value with its own Tag, so it must survive the deep copy a send makes
+  ;; between per-process heaps, and the mechanisms must hold in a spawned process's own
+  ;; engine rather than only in the one that built the value
+  (test "a tagged failure survives a send and still short-circuits a with"
+    (let (me (self)
+          _ (spawn (fn () (send me [:parsed (string/->number "q")]))))
+      (receive
+        ([:parsed p] (is (failure? p))
+          (is (failure? (with (n p) (inc n))))))))
+
+  (test "with and ok-> hold in a spawned process"
+    (let (me (self)
+          _ (spawn (fn ()
+                     (send me
+                       [(failure? (ok-> "q" string/->number inc))
+                         (failure? (with (n (string/->number "q")) (inc n)))]))))
+      (receive
+        ([piped bound] (is piped)
+          (is bound)))))
+
+  (test "many processes each short-circuit independently and fan in"
+    (let (me (self)
+          n 8
+          _ (each (range n)
+              (fn (i) (spawn (fn () (send me (failure? (with (v (string/->number "q")) (+ i v)))))))))
+      (assert= (count (map (range n) (fn (_) (receive (ok ok))))) n))))
+
+;; ---- the checker side -------------------------------------------------------------
+(defn- warnings-for (src)
+  (mapv (or (reflect/check-string-structured src) []) (fn (d) (get d :message))))
+
+(defn- impossible-count (src)
+  (count (seq/keep (warnings-for src)
+           (fn (m) (if (string/starts-with? m "failure?: this can never") m nil)))))
+
+(describe "ADR-313: a `failure?` test that can never be true is reported"
+  (test "on a value whose type has no way to be a failure"
+    ;; the guard reads as doing work and is not — the branch behind it is dead
+    (assert= (impossible-count "(defn b (s) (if (failure? (string/length s)) 0 1))") 1)
+    (assert= (impossible-count "(defn c (s) (let (n (string/length s)) (if (failure? n) 0 n)))") 1))
+
+  (test "a written-out literal is reported too"
+    ;; ADR-312 recorded a lint that warned in the editor and not on the command line, so
+    ;; this is pinned against `check-string-structured` (the EXPANDED pass the editor calls)
+    ;; rather than only against `nest check FILE`: both must agree.
+    (assert= (impossible-count "(defn a () (if (failure? 42) 0 1))") 1))
+
+  (test "and NOT on a value that can be one"
+    ;; `string/->number` carries `failure` in its result, so the guard is real
+    (assert= (impossible-count "(defn d (s) (let (n (string/->number s)) (if (failure? n) 0 n)))")
+      0))
+
+  (test "nor on an unknown value — an untyped parameter proves nothing"
+    (assert= (impossible-count "(defn e (x) (if (failure? x) 0 x))") 0))
+
+  (test "nor on a macro's own guard, which the author did not write"
+    ;; `ok->` and `with` both emit `(if (failure? g__N) …)` over a gensym; where the step
+    ;; provably cannot fail the guard IS dead, but there is nothing for anyone to fix
+    (assert= (impossible-count "(defn f () (ok-> \"12\" str))") 0)
+    (assert= (impossible-count "(defn g () (with (n 1) (inc n)))") 0)))
+
+(describe "ADR-313: a branchless `if` types as nil, not `any`"
+  (test "an `if` with a test and no branches yields nil at runtime"
+    (assert= (if true) nil)
+    (assert= (if false) nil))
+
+  (test "so the checker types it, instead of degrading the whole function to any"
+    ;; it fell through to \"unknown\", and unknown is contagious: the enclosing `defn` read
+    ;; as `(string -> any)` and every check needing a pinned body type went quiet — including
+    ;; the declared-return check, the one thing that would have named the missing branches
+    (let (msgs (warnings-for "(sig h (string -> int)) (defn h (s) (if (failure? (string/->number s))))"))
+      (is (any? msgs (fn (m) (includes? m "yields nil")))))))

@@ -524,9 +524,10 @@
    "sleep" :processes
    "file/slurp" :filesystem
    "file/slurp-bytes" :filesystem
-   "some->" :control
    "ok->" :control
-   "%some-thread-build" :control
+   "%ok-thread-build" :control
+   "with" :control
+   "%with-build" :control
    "sort" :collections
    "spawn" :processes
    "%spawn-body-thunk" :processes
@@ -597,11 +598,8 @@
    "when" :control
    "when-let" :control
    "proc/whereis" :processes
-   "with" :control
-   "%with-build" :control
    "with-err-str" :io
    "with-out-str" :io
-   "%with-split-else" :control
    "math/zero?" :predicates
    "%zip-acc" :collections
    "hash-map" :maps

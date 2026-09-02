@@ -1133,24 +1133,34 @@ crossing the boundary is threaded correctly by *neither* macro:
 A form with no `$` threads exactly as before, so this is purely additive. The value is
 bound **once** and the binding substituted, so a step may name `$` repeatedly without
 re-evaluating it — `(-> (expensive) (+ $ $))` calls `expensive` once. A quoted `'$` is
-the symbol, not a hole. `some->`/`cond->` and their thread-last variants inherit it.
+the symbol, not a hole. `cond->` inherits it.
 
-The **conditional / short-circuit threading** macros build on those, plus `doto`:
+The **conditional threading** macros build on those, plus `doto`:
 
 ```clojure
-(some-> {:a {:b 5}} (get :a) (get :b) inc)        ;=> 6      ; stop at the first nil step
-(ok-> "12" string/->number inc)                   ;=> 13     ; stop at the first FAILURE step
-(ok-> "q"  string/->number inc)                   ;=> #failure{…}  ; `inc` never runs
 (cond-> {} true (assoc :a 1) false (assoc :b 2))  ;=> {:a 1} ; apply a step only when its guard holds
 (doto (table/new) (table/put :a 1) (table/put :b 2))  ; run forms for effect, return the value
 ```
 
-`ok->` is `some->`'s **failure** sibling (ADR-312). The two channels are separate — a nil
-is absence, a failure is "that cannot be interpreted" — so `ok->` threads straight through
-a nil and `some->` threads straight through a failure. What falls out of a short-circuited
-`ok->` is **the failure itself**, not nil: the message is the whole reason a failure exists,
-and collapsing to nil would discard exactly what the caller built it to read. It is what
-lets a pipe end in a plain step instead of `(if (failure? $) $ (step $))`.
+**`ok->`** is the **failure** pipe: the first step yielding a failure short-circuits, and
+that failure falls out carrying its message, so a pipe does not have to end in
+`(if (failure? $) $ (step $))`. `nil` is not a sentinel — absence and failure are separate
+channels (ADR-310) — so `ok->` threads straight through a nil.
+
+```clojure
+(ok-> "12" string/->number inc)          ;=> 13
+(ok-> "q"  string/->number (* 2) (+ 5))  ;=> #failure{…}   ; neither * nor + ran
+(ok-> nil identity)                      ;=> nil           ; nil is not a sentinel
+```
+
+A plain `->` does **not** stop: no primitive absorbs a failure, so `(-> "q"
+string/->number inc)` raises. Stopping is something you say (ADR-313) — `ok->` here,
+`with` for a chain of named steps, and a fold stops once its accumulator is a failure.
+
+There is **no `some->`** (deleted by ADR-313). It stopped on `nil`, which since ADR-310
+means only "the lookup found nothing" and is an ordinary value everywhere else in the
+language — a pipe for a channel that is not one. `get-in` covers the nil-chaining it
+existed for.
 
 `each` applies a function to
 each item for effect (`(each io/puts xs)`, the function form of `doseq`).
@@ -1169,30 +1179,29 @@ destructure):
 (when-let (v (get m :k)) (use v))         ; body only when truthy
 ```
 
-**`with`** — Elixir's `with`, spelled as flat `pattern expr` pairs (the `let`
-shape). Each `expr` is matched against its `pattern` in order; the first value
-that fails its pattern **short-circuits**, and the body runs only when every step
-matched, with all bindings in scope. It's pure sugar over nested `match` (no new
-special form):
+**`with`** — the **failure `let`**. Bindings read exactly like `let`'s; the first value
+that is a failure short-circuits the whole form to that failure, so the steps after it
+never run:
 
 ```clojure
-(with ([:ok account] (lookup user)
-       [:ok card]    (payment-method account)
-       [:ok receipt] (charge card 10))
-  receipt)                                  ; a step's [:error …] falls straight through
+(with (account (lookup user)
+       card    (payment-method account)
+       receipt (charge card 10))
+  receipt)                                ; lookup's failure falls out; charge never runs
 ```
 
-A trailing **`:else`** section is a set of `match` clauses run against the value
-that short-circuited (like Elixir's `else`); with no `:else`, that value is
-returned as-is:
+Where `ok->` threads a value, `with` *binds* one — which is why `with` is the mechanism
+that reaches a chain of **your own** functions. A failure threaded into a user-defined step
+does not stop it: the body runs, branches on the failure, and answers with its own, losing
+the cause. The binding target may destructure (`(with ([a b] (pair-of x)) …)`); the value
+is bound to a temporary and tested first, so a failure never reaches a pattern that could
+not match it.
 
-```clojure
-(with ([:ok user] (lookup id))
-  user
-  :else
-  ([:error :not-found] {:error "no such user"})
-  ([:error e]          {:error e}))
-```
+This is deliberately **not** Elixir's `with`, which Brood had until ADR-313. Elixir needs
+`{:ok, a} <- expr` because it has no failure kind — the tuple *shape* carries the signal,
+so every step spells out a pattern for "kept going" and an `:else` section re-matches the
+shapes that did not. Brood has a failure kind, so both are redundant: what falls out is
+always a failure, and `if`/`match`/`failure?` handle it at the call site.
 
 **Local loops** — there is **no `loop`/`recur`**; Brood has proper tail calls, so a
 self-contained loop is a `letrec`-bound closure you call by name (it closes over the

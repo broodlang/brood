@@ -1565,6 +1565,70 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
             }
         }
 
+        // A type predicate whose argument CANNOT hold that type: the test can never be
+        // true, so the branch behind it is dead. This is the check ADR-313 wanted for the
+        // failure channel — `(failure? n)` on something that has no way to be a failure is
+        // a guard the author believes is doing work and is not — and it costs nothing to
+        // ask it of every predicate in the table, since `Ty::tested_by` already names what
+        // each one proves.
+        //
+        // Sound because `GradualTy::bound` is an UPPER bound ("every materialisation is
+        // ⊆ bound", asserted by `soundness_oracle`): if the bound is disjoint from the
+        // tested type, no runtime value can satisfy the predicate. A `dynamic` bound is
+        // therefore fine to judge — dynamic means it may materialise NARROWER, never
+        // wider. `ANY` and `NEVER` are skipped: the first knows nothing, the second marks
+        // a branch a guard already proved unreachable.
+        // A GENSYM argument is not the author's test. `ok->`, `with` and the `match`
+        // lowering all emit `(if (pred g__N) …)` over a temporary they made up: where the
+        // checker can prove that step's value is not of the tested type, the guard is
+        // indeed dead — but the macro had to emit it and there is nothing to fix. Ten of
+        // the first run's `failure?` hits were `ok->`/`with`'s own expansion and twelve
+        // `pair?` hits were `match`'s. Same exemption the unused-binder lints already make.
+        //
+        // And only a NAME or a computed expression is worth judging. A predicate applied
+        // to a written-out literal — `(decimal? 1.5)`, `(ref? 0)` — is either a deliberate
+        // negative assertion (which is what 53 of the first run's 57 remaining hits were,
+        // in the predicate test files) or a mistake already visible on the line. The lint
+        // earns its keep where the type came from INFERENCE and the reader cannot see it.
+        // …though only for the WIDER predicate set. `failure?` had no literal hits at all
+        // across std/ + tests/, and `(failure? 42)` is precisely the "checked where it
+        // cannot exist" case worth naming, so the literal skip does not apply to it.
+        let judged = value::symbol_is(s, "failure?")
+            || matches!(items.get(1), Some(Value::Sym(_)) | Some(Value::Pair(_)));
+        let author_wrote_it =
+            judged && !matches!(items.get(1), Some(&Value::Sym(a)) if is_gensym_sym(a));
+        if items.len() == 2
+            && author_wrote_it
+            && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+        {
+            // Scoped to `failure?` for now. The same test is sound for every predicate in
+            // `Ty::tested_by` and finds real things — measured across std/ + tests/ it
+            // reports 25, of which 4 are in `std/` and want triage. But the other 21 are
+            // deliberate negative assertions in the predicate test files (`(map? t)` where
+            // `t` is a table), each needing a `check-allow`, and that is a separate pass.
+            // `failure?` alone fires ZERO times tree-wide, so it ships now at no triage
+            // cost — which is the ADR-011 order: the narrow one first, widen on evidence.
+            let scoped = value::symbol_is(s, "failure?");
+            if let Some(tested) = scoped
+                .then(|| super::guards::predicate_guard_ty(heap, Some(ctx), s))
+                .flatten()
+            {
+                let bound = gradual_of(heap, items[1], ctx).bound;
+                if !bound.is_never() && bound != Ty::ANY && bound.is_disjoint(&tested) {
+                    out.push((
+                        arg_pos(heap, items[1], form),
+                        format!(
+                            "{}: this can never be true — {} is {}, which is never {}",
+                            name_of(s),
+                            crate::syntax::printer::print(heap, items[1]),
+                            bound,
+                            tested,
+                        ),
+                    ));
+                }
+            }
+        }
+
         if let Some(sig) = sig {
             for (i, &arg) in items[1..].iter().enumerate() {
                 let Some(param) = sig.param(i) else { continue };
