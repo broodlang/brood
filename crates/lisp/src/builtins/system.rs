@@ -421,6 +421,25 @@ pub(super) fn tree_sitter_parse(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     crate::treesit::parse(heap, &src, &lang)
 }
 
+/// `(tree-sitter-load-grammar path lang)` — load a grammar shared library at
+/// runtime and register it under `lang`. Mechanism in `crate::treesit`
+/// (feature-gated); this just unwraps the args.
+pub(super) fn tree_sitter_load_grammar(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "tree-sitter-load-grammar", arg(args, 0))?;
+    let lang = match arg(args, 1) {
+        Value::Keyword(s) => value::symbol_name(s),
+        v => {
+            return Err(LispError::wrong_type(
+                heap,
+                "tree-sitter-load-grammar",
+                "keyword",
+                v,
+            ))
+        }
+    };
+    crate::treesit::load_grammar(&path, &lang)
+}
+
 /// `(system/reload-defs path)` — like `load`, but only re-evaluates **definitions**
 /// (`def`/`defmacro` and `def…`-named macros: `defn`, `defmodule`, `defdyn`,
 /// `defonce`, user definers). All other top-level forms — `(require …)`,

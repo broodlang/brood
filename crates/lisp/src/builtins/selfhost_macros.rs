@@ -335,6 +335,15 @@ pub(super) fn check_deps_fp(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lis
     Ok(heap.alloc_string(&fp))
 }
 
+/// `(check-strict?)` — is strict checking on for this process? The incremental check
+/// cache reads it to key its manifest: a stored verdict is only reusable by a run in the
+/// mode that produced it, and without the key a plain `nest check` poisons the cache for
+/// the next `nest check --strict`, which then reports what the plain run found.
+pub(super) fn check_strict(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let _ = heap;
+    Ok(Value::Bool(crate::types::strict_checking()))
+}
+
 /// `(check-file-structured path)` — the data-shaped counterpart of
 /// `check-file`. Returns a list of `{:file :line :col :message}` maps (or
 /// `{:file :message}` for warnings without a position — the advisory

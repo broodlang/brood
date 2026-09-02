@@ -578,9 +578,17 @@ would fix that and cannot be unconditional — `failure?` and `error-message` ar
 opt-out, which is a `declare`-family modifier used by the `call` family. That is the only
 route by which a plain `let` could fully replace `with`.
 
+**Superseded in part (2026-09-02, ADR-316).** The first customer below shipped, and it
+needed none of this: the converse lint ("this can fail and nothing checks it") turned out
+not to need a "can fail" bit at all, because `failure` is a TAG and the union already
+carries it — an unannotated wrapper *infers* `(string -> (or failure number))`. What was
+missing was a reporting rule, not knowledge. The second customer is rejected rather than
+deferred: the union in the hover is what makes the lint possible. The `wrap` and
+failure-strict-call halves below stand as written.
+
 **Trigger to pick this back up.**
-- The impossible-predicate lint growing a converse ("this can fail and nothing checks it"),
-  which is the first thing that genuinely cannot be built without the bit.
+- ~~The impossible-predicate lint growing a converse ("this can fail and nothing checks
+  it")~~ — **shipped without the bit** (ADR-316). This trigger is spent.
 - Or `number | failure` in hovers becoming a complaint in practice rather than in principle.
 - Or a third ad-hoc function wrapper appearing beside contracts and coverage.
 

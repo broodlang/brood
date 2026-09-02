@@ -2281,6 +2281,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         tree_sitter_parse);
     def(
         heap,
+        "%tree-sitter-load-grammar",
+        Arity::exact(2),
+        Sig::new(vec![string, kw], int),
+        &["path", "lang"],
+        "Load a tree-sitter grammar from the shared library at `path` and register it under the language keyword `lang`, so tree-sitter-parse can use it like a built-in grammar; returns its ABI version. This is how a language the runtime was not built with gets parsed at all — the kernel deliberately knows no path convention, so the caller names the library and an application keeps its own grammar directory. A grammar loaded this way overrides a bundled one of the same name. Errors (never crashes) on a missing file, a library exporting no tree_sitter_<lang>, or a grammar built for an incompatible tree-sitter ABI; it is native code, though, so load only from a directory the user controls. Feature `treesit`.",
+        tree_sitter_load_grammar);
+    def(
+        heap,
         "reflect/load",
         Arity::exact(1),
         Sig::new(vec![string], any),
@@ -3049,6 +3057,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &["path"],
         "Parse the file at path (no eval) and return `{:module <name-or-nil> :requires [<module-name> …]}` — its own module name and the modules it directly `:use`s / `:use-internals`. The edge list `project.blsp` closes transitively into each file's check-file reachability set (KI-17).",
         module_direct_requires);
+    def(
+        heap,
+        "%check-strict?",
+        Arity::exact(0),
+        Sig::new(vec![], bool_ty),
+        &[],
+        "Is STRICT checking on for this process (`nest check --strict`, or BROOD_CHECK_STRICT=1)? A verdict depends on the mode that produced it, so the incremental check cache keys its manifest on this — without it a plain run's cached verdicts are reused by a strict one, and the strict gate silently reports less than it found.",
+        check_strict,
+    );
     def(
         heap,
         "%check-deps-fp",

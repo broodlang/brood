@@ -50,6 +50,103 @@ pub fn parse(heap: &mut Heap, src: &str, lang: &str) -> LispResult {
     Ok(node_to_positioned(heap, tree.root_node(), src, &b2c))
 }
 
+/// `(tree-sitter-load-grammar path lang)` — load a tree-sitter grammar from a
+/// shared library at runtime and register it under the language keyword `lang`,
+/// so `tree-sitter-parse` can use it like a built-in one. Returns the grammar's
+/// ABI version.
+///
+/// **Why this rather than a search path.** The kernel does not know where an
+/// application keeps its grammars, and should not: a path convention is policy.
+/// This takes the library the caller chose, which leaves "look in
+/// `~/.config/bedit/grammars`, named for the file's mode" entirely in the editor,
+/// and leaves the kernel with the mechanism it can actually own — dlopen the
+/// library, find `tree_sitter_<lang>`, check the ABI, remember it.
+///
+/// **The library is leaked, deliberately.** A `Language` is a pointer into the
+/// loaded object's static tables, so unmapping the library would dangle every
+/// tree ever parsed with it. Grammars are loaded once and used for the life of
+/// the process; `std::mem::forget` says that in one line, where an `Arc` holding
+/// the `Library` alongside every `Language` would say it in many and still never
+/// drop.
+///
+/// Failure is an ordinary error at every step — a missing file, a library with no
+/// such grammar, a grammar built for an incompatible tree-sitter. None of them is
+/// a crash. What this cannot make safe is a *hostile* library: it is native code
+/// and runs with the process's privileges, exactly like an Emacs dynamic module,
+/// so an application should load only from a directory its user controls.
+#[cfg(feature = "treesit")]
+pub fn load_grammar(path: &str, lang: &str) -> LispResult {
+    // Brood keywords are spelled with hyphens and C identifiers cannot be, so `:c-sharp`
+    // asks for `tree_sitter_c_sharp` — which is exactly what the tree-sitter-c-sharp grammar
+    // exports. The library's entry point is named for the GRAMMAR, so `lang` names the
+    // grammar rather than being a nickname for it; there is no aliasing here and shouldn't
+    // be, since the mode that asks to parse `:c-sharp` is the same name on both sides.
+    let symbol = format!("tree_sitter_{}", lang.replace('-', "_"));
+    // SAFETY: dlopen'ing a caller-chosen library and calling the grammar constructor it
+    // exports. The symbol type is tree-sitter's documented grammar entry point, and the
+    // Language it yields is validated against the host's ABI range below before any use.
+    let language = unsafe {
+        let lib = libloading::Library::new(path)
+            .map_err(|e| LispError::runtime(format!("tree-sitter-load-grammar: {path}: {e}")))?;
+        let entry: libloading::Symbol<unsafe extern "C" fn() -> *const ()> =
+            lib.get(symbol.as_bytes()).map_err(|e| {
+                LispError::runtime(format!(
+                    "tree-sitter-load-grammar: {path} exports no {symbol}: {e}"
+                ))
+            })?;
+        let f = *entry;
+        std::mem::forget(lib); // the grammar's tables must stay mapped — see above
+        tree_sitter::Language::new(tree_sitter_language::LanguageFn::from_raw(f))
+    };
+    // `set_language` is the ABI gate: it range-checks the grammar's version against what
+    // this tree-sitter can drive, so a grammar from another era is a message, not a crash.
+    tree_sitter::Parser::new()
+        .set_language(&language)
+        .map_err(|e| {
+            LispError::runtime(format!(
+                "tree-sitter-load-grammar: {path}: {lang} is not usable by this runtime \
+                 (grammar ABI {}, this build drives {}..={}): {e}",
+                language.abi_version(),
+                tree_sitter::MIN_COMPATIBLE_LANGUAGE_VERSION,
+                tree_sitter::LANGUAGE_VERSION
+            ))
+        })?;
+    let abi = language.abi_version() as i64;
+    DYNAMIC
+        .lock()
+        .expect("treesit dynamic grammars")
+        .insert(lang.to_string(), language);
+    // A re-load replaces the entry, so a grammar can be swapped without restarting; the
+    // parser pool is keyed by language name and holds parsers bound to the OLD language, so
+    // it is cleared for this one rather than left to hand out stale parsers.
+    PARSER_POOL
+        .lock()
+        .expect("treesit parser pool")
+        .remove(lang);
+    Ok(Value::int(abi))
+}
+
+/// Grammars loaded at runtime by [`load_grammar`], keyed by language name. Consulted
+/// BEFORE the compile-time arms, so loading one deliberately overrides a bundled grammar of
+/// the same name — the point of being able to load one at all is to move faster than the
+/// runtime's release cycle.
+#[cfg(feature = "treesit")]
+static DYNAMIC: LazyLock<Mutex<HashMap<String, tree_sitter::Language>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "treesit")]
+fn dynamic_language(lang: &str) -> Option<tree_sitter::Language> {
+    DYNAMIC.lock().expect("treesit dynamic grammars").get(lang).cloned()
+}
+
+#[cfg(not(feature = "treesit"))]
+pub fn load_grammar(_path: &str, lang: &str) -> LispResult {
+    Err(LispError::runtime(format!(
+        "tree-sitter-load-grammar: :{lang}: this runtime was built without tree-sitter \
+         (rebuild with --features treesit)"
+    )))
+}
+
 /// The grammar for a language keyword's name. Each arm is gated on its own
 /// `treesit-<lang>` feature — the kernel ships no grammar by default (a `treesit`
 /// build with no grammar feature has zero arms and reports every language as not
@@ -62,14 +159,20 @@ pub fn parse(heap: &mut Heap, src: &str, lang: &str) -> LispResult {
     allow(unused_variables)
 )]
 fn language_for(lang: &str) -> Result<tree_sitter::Language, LispError> {
+    // A grammar loaded at runtime wins over a bundled one of the same name: loading one is a
+    // deliberate act, and the reason to do it is usually that the bundled grammar is behind.
+    if let Some(l) = dynamic_language(lang) {
+        return Ok(l);
+    }
     match lang {
         #[cfg(feature = "treesit-ruby")]
         "ruby" => Ok(tree_sitter_ruby::LANGUAGE.into()),
         #[cfg(feature = "treesit-elixir")]
         "elixir" => Ok(tree_sitter_elixir::LANGUAGE.into()),
         other => Err(LispError::runtime(format!(
-            "tree-sitter-parse: language :{other} is not built into this runtime \
-             (rebuild with --features treesit-{other}, or treesit-grammars for all)"
+            "tree-sitter-parse: no grammar for :{other} — load one at runtime with \
+             (tree-sitter-load-grammar \"/path/to/libtree-sitter-{other}.so\" :{other}), \
+             or build it in with --features treesit-{other}"
         ))),
     }
 }

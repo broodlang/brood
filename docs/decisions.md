@@ -20257,3 +20257,75 @@ no project used the old pattern-driven `with`, so the two breaking changes broke
 `(failure? k) k` guard arms). `std/datetime.blsp` deliberately keeps its `not (failure? …)`
 guards: its outer `or` re-reports any component failure against the input the caller
 actually passed, which propagating the component's own message would lose.
+
+## ADR-316 — A failure is never a valid materialisation
+
+**Date:** 2026-09-02
+
+**Context.** [ADR-315](#adr-315--stopping-on-a-failure-is-a-mechanism-you-reach-for-not-something-primitives-do)
+shipped a lint for the *impossible* `failure?` — a guard that cannot fire — and
+`docs/deferred.md` recorded the converse as blocked: reporting "a value that can fail and
+nothing guards it" would need the checker to know which functions can yield a failure,
+which was written up as wanting an inferred "can fail" bit in D's `nothrow` shape, a
+`declare`-family modifier, a second effect channel.
+
+**Measured first, and the premise was false.** The checker already knows. `failure` is a
+tag (ADR-310 clause 7), so it rides the ordinary union: `string/->number` and the six
+`encoding` decoders declare it in their signatures, and an unannotated wrapper *infers* it
+— `(defn parse (s) (string/->number s))` suggests `(string -> (or failure number))` with no
+annotation anywhere. Nothing needed declaring. What was missing was not knowledge but a
+**reporting rule**: `number | failure` handed to a `number` parameter is *consistent* under
+the gradual overlap reading (ADR-110, `docs/type-gating.md` B1), so it passed in silence.
+
+**Decision.** In `GradualTy::consistent_with_mode`, a **failure is never a valid
+materialisation** of a domain that excludes one. A value whose bound positively includes
+`failure`, reaching a position whose type is disjoint from `failure`, is reported — in
+plain mode as well as strict, where every other arm of a union keeps the overlap reading.
+
+**Why `failure` and not `nil`,** when the overlap reading exists precisely to keep the
+checker out of the way. The two are different channels by construction (ADR-310's closing
+paragraph states them): `nil` means **nothing**, exclusively, and is a legitimate answer
+everywhere — `(get m :absent)` is nil because a missing key is an absence — so reading
+`(or T nil)` into `T` by inclusion would fire on every accessor in the language, which is
+exactly the false-positive class B1 was written to avoid. A **failure** means a value of
+the expected type could not be produced. It is not an answer any domain accepts, and
+ADR-315 deliberately kept the rule that a failure reaching a primitive that cannot use it
+**raises**. So this reports a guaranteed error on a reachable path, not a merely-wider type.
+
+Two conditions keep it from being a strictness change in disguise:
+
+- **The failure arm must be POSITIVELY known.** A bound known only by exclusion (`any`, or
+  a `(when x …)` guard's `(not nil)`) admits a failure the way it admits everything and
+  says nothing positive; reading that as "can fail" would fire on every unannotated
+  parameter. `Ty::is_known_only_by_exclusion` is the same gate strict mode uses.
+- **A position that accepts a failure is silent.** `failure?` and `error-message` take
+  `any`, `=` compares anything, and `keep` drops failures — none of them are reported.
+
+**Reload safety is unaffected:** a `def` that stops returning failures changes the
+signature the next check reads, and the warning goes with it.
+
+**The cost, measured rather than argued** — the rule fires on exactly the failure sites and
+nothing else. **0** across `std/`; **6** across `tests/` + `examples/`, every one a
+written-out literal that cannot fail (a valid hex string, a valid date) whose *type* still
+carries the arm — those carry `check-allow :type-mismatch`, the standing cost ADR-315
+already established for the converse lint; and **8** in bedit, the one real downstream
+application, **every one a genuine bug**. They share a shape, and it is the migration
+hazard ADR-310 created when it made a failure **truthy**:
+
+```brood
+(let (n (debugger-leading-int line))          ; number | failure
+  (when (and n (>= n 1) …) …))                ; a failure is truthy, so `>=` RAISES
+```
+
+A `nil?`/truthiness guard written before failures existed is walked straight through by
+one. ADR-310 predicted this ("the sites needing no edit were the ones silently swallowing
+the failure") and flipped truthiness *because* the resulting breakage was loud; what it
+could not do was name the sites in advance. This rule names them.
+
+**What this closes.** `docs/deferred.md`'s first customer for a `declare`-family modifier —
+the impossible-`failure?` lint growing a converse — which was also its stated trigger to
+pick the whole design back up. That trigger is spent: the converse exists and needed no new
+declaration channel. The second customer (getting `failure` out of the type unions) is
+**rejected outright now** rather than deferred: the union in the hover is what makes this
+lint possible, and its own trigger — "`number | failure` in hovers becoming a complaint in
+practice rather than in principle" — has never fired.

@@ -51,6 +51,7 @@
    "reflect/check-file-deps" :meta
    "reflect/check-file-structured" :meta
    "reflect/check-string-structured" :meta
+   "reflect/strict-checking?" :meta
    "seq/chunk-by" :collections
    "seq/chunk-every" :collections
    "math/clamp" :math
