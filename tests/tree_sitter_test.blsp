@@ -139,18 +139,21 @@
 (describe "tree-sitter-load-grammar: the failure modes are errors, never crashes"
   (test "a library that is not there"
     (let (e (check-allow :discarded-catch
-              (try (%tree-sitter-load-grammar "/nonexistent/libtree-sitter-nope.so" :nope)
+              (try
+                (%tree-sitter-load-grammar "/nonexistent/libtree-sitter-nope.so" :nope)
                 (catch e (error-message e)))))
       (is (string? e))
       (is (includes? e "tree-sitter-load-grammar"))))
 
   (test "a real library that exports no such grammar"
     ;; every platform has some shared library; this one is never a tree-sitter grammar
-    (let (candidates ["/lib/x86_64-linux-gnu/libc.so.6" "/usr/lib/libc.so.6" "/usr/lib/libSystem.B.dylib"]
+    (let (candidates ["/lib/x86_64-linux-gnu/libc.so.6"
+                       "/usr/lib/libc.so.6" "/usr/lib/libSystem.B.dylib"]
           found (seq/find candidates file/exists?))
       (when found
         (let (e (check-allow :discarded-catch
-                  (try (%tree-sitter-load-grammar found :definitely-not-a-language)
+                  (try
+                    (%tree-sitter-load-grammar found :definitely-not-a-language)
                     (catch e (error-message e)))))
           (is (string? e))
           (is (includes? e "exports no tree_sitter_"))))))

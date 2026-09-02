@@ -136,7 +136,11 @@ static DYNAMIC: LazyLock<Mutex<HashMap<String, tree_sitter::Language>>> =
 
 #[cfg(feature = "treesit")]
 fn dynamic_language(lang: &str) -> Option<tree_sitter::Language> {
-    DYNAMIC.lock().expect("treesit dynamic grammars").get(lang).cloned()
+    DYNAMIC
+        .lock()
+        .expect("treesit dynamic grammars")
+        .get(lang)
+        .cloned()
 }
 
 #[cfg(not(feature = "treesit"))]

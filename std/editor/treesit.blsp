@@ -162,6 +162,103 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
         opened (fold delimiters 0 (fn (n d) (+ n (ts-count-upto src d candidate 0 0)))))
     (if (= 0 (math/rem opened 2)) candidate 0)))
 
+;; ---- indentation -------------------------------------------------------------
+;; The `:indent` service's other half. Brood indents by parsing `[defun-start, bol)` and
+;; asking what is still OPEN — the reader leaves an unclosed form as an unclosed node. That
+;; trick does not transfer: tree-sitter's error recovery collapses an unterminated `do` into
+;; an ERROR node rather than an open block, so a truncated slice reports `:ERROR` for nearly
+;; every line and knows nothing about the nesting (measured on Elixir: 7 of 9 lines).
+;;
+;; So the slice is the whole ENCLOSING TOP-LEVEL FORM — column-0 line before `bol` to the
+;; next column-0 line — which parses completely and therefore correctly. That is O(one form)
+;; rather than O(buffer), and it is the same boundary [[column0-restart]] uses for
+;; fontification, for the same reason: in every language whose top level begins in column 0,
+;; that is where one form ends and the next begins.
+
+(defn- ts-col0-after (src from)
+  ;; the offset of the next column-0 line strictly after `from`, or the end of `src`
+  (let (nl (index-of src "\n" from))
+    (cond
+      (< nl 0) (string/length src)
+      (>= (inc nl) (string/length src)) (string/length src)
+      (ts-col0? src (inc nl)) (inc nl)
+      else (ts-col0-after src (inc nl)))))
+
+(defn- ts-line-at (src at)
+  (let (e (index-of src "\n" at)) (string/substring src at (if (< e 0) (string/length src) e))))
+
+(defn- ts-form-end (src from dedent)
+  "Where the top-level form containing `from` ends: the next column-0 line, and then past
+every column-0 line that merely CLOSES the form.
+
+A form's own terminator lives in column 0 — `end` in Ruby and Elixir, `}` in a C-like — so
+stopping at the first column-0 line cuts the form off before its closer and the tree comes
+back one level shallow, silently. (Ruby showed it on every line of a class; Elixir hid it,
+because losing its outermost `do_block` happened to cancel against a dedent.)"
+  (let (e (ts-col0-after src from))
+    (if (and (< e (string/length src)) (contains? dedent (ts-first-token (ts-line-at src e))))
+      (ts-form-end src e dedent)
+      e)))
+
+(defn- ts-chain (node p acc)
+  ;; the kinds of every node containing offset `p`, outermost first
+  (let (hit (seq/find (or (get node :kids) [])
+              (fn (k) (and (<= (get k :start) p) (< p (get k :end))))))
+    (if (nil? hit)
+      (reverse (cons (get node :kind) acc))
+      (ts-chain hit p (cons (get node :kind) acc)))))
+
+(defn- ts-first-token (line)
+  ;; the first whitespace-delimited word of `line`, or ""
+  (let (t (string/triml line)) (or (first (string/split t " ")) "")))
+
+(defn indent-column (text lang bol spec)
+  "The column the line beginning at offset `bol` should be indented to — a `:indent` service
+for a tree-sitter mode, given a per-language `spec`.
+
+    {:width 2                        ; columns per level
+     :blocks #{:do_block :body}      ; node kinds that open one
+     :dedent #{\"end\" \"else\"}         ; line-leading tokens that close one
+     :dedent-levels 1}               ; how many the closing token backs out of
+
+**Mechanism here, kinds there.** Which node opens a level is the one thing only the language
+knows, and it is a set of names — so a language's whole indent policy is four entries, and
+this walks the tree. The nesting level is the number of enclosing `:blocks` nodes.
+
+**Where a line is measured from is the subtle part.** An ordinary line is measured at its
+first non-blank character, because a block node may not begin until its first statement —
+Ruby's `body_statement` starts at the `def` it contains, so measuring at the line START puts
+you outside the very block you are in. A CLOSING line is measured at the line start instead,
+because a closer sits outside what it closes; measuring `end` at the `end` would put it
+inside the block again in some grammars and not others.
+
+`:dedent-levels` is what remains of that difference, and it is per-language because the
+grammars genuinely differ: Elixir's `do_block` spans its own `end`, so a closer measured at
+the line start is still inside it and must back out one; Ruby's `body_statement` stops before
+`end`, so the closer is already out and backs out none. Both are checked line-for-line
+against real source.
+
+Deliberately not a full indent engine: no alignment to an open bracket's column, no operator
+continuation rules. It answers the shape that block-structured languages share, which is the
+shape `nest format` answers for Brood, and it is checked line-for-line against real source in
+`tests/treesit_module_test.blsp`."
+  (let (lo (column0-before text bol)
+        hi (math/max (ts-form-end text (math/max bol (inc lo)) (get spec :dedent #{})) bol)
+        slice (string/substring text lo hi)
+        eol (let (i (index-of text "\n" bol)) (if (< i 0) (string/length text) i))
+        line (string/substring text bol eol)
+        closing (contains? (get spec :dedent #{}) (ts-first-token line))
+        ;; an ordinary line measures at its first non-blank, a closing line at the line start
+        at (if closing bol (+ bol (- (string/length line) (string/length (string/triml line)))))
+        chain (if (= (string/trim slice) "")
+                '()
+                (check-allow :discarded-catch
+                  (try (ts-chain (%tree-sitter-parse slice lang) (- at lo) '()) (catch _ '()))))
+        blocks (get spec :blocks #{})
+        level (count (filter (or chain '()) (fn (k) (contains? blocks k))))
+        level (if closing (- level (get spec :dedent-levels 1)) level))
+    (* (get spec :width 2) (math/max 0 level))))
+
 ;; ---- structural navigation --------------------------------------------------
 ;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp
 ;; convention), so these motions read the whole-buffer tree directly instead — a
