@@ -110,12 +110,11 @@
           ([:down ^m _ [:error e]] [(get e :kind) (get e :code)])
           (after 30000 :timeout)))))
 
-  ;; KI-103: this is a correct test of a BROKEN feature, and it fails intermittently — the
-  ;; worker is killed inside `(proc/flag :max-mailbox nil)` by the same breach it is
-  ;; clearing, because every further `send` over the bound re-arms the sticky flag. It
-  ;; mostly passes under the VM and fails ~3 in 4 under `BROOD_VM=0`. Left asserting the
-  ;; INTENDED behaviour rather than weakened to match the defect: the day the bound grows
-  ;; hysteresis, this goes green on its own and nothing has to be remembered.
+  ;; This failed intermittently until KI-103 was fixed — the worker was killed inside
+  ;; `(proc/flag :max-mailbox nil)` by the same breach it was clearing, because every
+  ;; further `send` over the bound re-armed the sticky flag. It was left asserting the
+  ;; INTENDED behaviour rather than weakened to match the defect, and went green on its own
+  ;; when the bound grew its one-shot latch.
   (test "the handler can drain and clear the bound — the process recovers"
     (let (me (self)
           expected 32
@@ -162,6 +161,69 @@
       (let ([code drained] (receive ([:recovered c n] [c n]) (after 30000 [:timeout 0])))
         (assert= "E0046" code)
         (assert= expected drained))))
+
+  (test "the bound is ONE-SHOT per arming — a breach does not re-arm itself (KI-103)"
+    ;; The fix. A handler needs a guaranteed window to act on E0046, and it had none: every
+    ;; send that found the queue still over the bound re-armed the flag, so the very next
+    ;; safepoint — inside `proc/flag`, the call the hint recommends — killed the process.
+    ;; The bound now fires once per arming. Here the handler does NOT clear the bound and
+    ;; still survives to report, which is precisely what could not happen before.
+    (let (me (self)
+          worker (spawn
+                   (do
+                     (proc/flag :max-mailbox 8)
+                     (send me [:ready (self)])
+                     (try
+                       (receive (:never nil))
+                       (catch e
+                         ;; deliberately does NOT clear the bound
+                         (letrec (drain (fn (n)
+                                          (receive
+                                            (:flood (drain (+ n 1)))
+                                            (:done n)
+                                            (after *test-wait-ms* n))))
+                           (send me [:survived (get e :code) (drain 0)])))))))
+      (receive ([:ready ^worker] nil) (after 30000 (error "no ready")))
+      (flood worker 32)
+      (send worker :done)
+      (let ([code n] (receive ([:survived c n] [c n]) (after 30000 [:timeout 0])))
+        (assert= "E0046" code)
+        (assert= 32 n))))
+
+  (test "setting the bound again re-arms it"
+    ;; One-shot per ARMING, not once per process. Two things make this observable and both
+    ;; were learned by getting them wrong: the second flood must be sent AFTER the re-set,
+    ;; because the flag arms on ENQUEUE and messages already queued do not re-trip a freshly
+    ;; armed bound; and the handler must DRAIN before re-arming, because re-setting while the
+    ;; queue is still over the bound arms immediately and the next safepoint trips again
+    ;; outside the inner `try`, killing the worker. That second one is the bound working as
+    ;; specified, not a defect — it just hides the property under test.
+    (let (me (self)
+          worker (spawn (do
+                          (proc/flag :max-mailbox 4)
+                          (send me [:ready (self)])
+                          (try
+                            (receive (:never nil))
+                            (catch _
+                              (do
+                                (letrec (drain (fn ()
+                                                 (receive
+                                                   (:flood (drain))
+                                                   (:done nil)
+                                                   (after *test-wait-ms* nil))))
+                                  (drain))
+                                (proc/flag :max-mailbox 4)
+                                (send me [:re-armed (self)])
+                                (try
+                                  (receive (:never nil))
+                                  (catch e2 (send me [:twice (get e2 :code)])))))))))
+      (receive ([:ready ^worker] nil) (after 30000 (error "no ready")))
+      (flood worker 16)
+      (send worker :done)
+      (receive ([:re-armed ^worker] nil) (after 30000 (error "never re-armed")))
+      (flood worker 16)
+      (assert= "E0046"
+        (receive ([:twice c] c) (after 30000 :timeout)))))
 
   (test "a busy (non-receiving) flooded process trips at a safepoint"
     (let (me (self)

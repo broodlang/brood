@@ -148,6 +148,20 @@ pub(super) struct Mailbox {
     /// clearing the flag (`(proc/flag :max-mailbox nil)`) clears a pending trip,
     /// so a handler that drains and clears genuinely recovers.
     pub(super) overflow_hit: AtomicUsize,
+    /// Has a breach already been RAISED for the current arming? (KI-103.) Set when a probe
+    /// takes `overflow_hit`, cleared whenever the bound is set. While it is true no further
+    /// enqueue re-arms, which is what gives the handler a window.
+    ///
+    /// Without it the bound was unusable in the way its own error message advertises: every
+    /// send that found the queue still over the limit re-armed the sticky flag, and the
+    /// handler's very next safepoint — which is *inside* `(proc/flag :max-mailbox …)`, the
+    /// call the E0046 hint tells you to make — took it and killed the process. Only "let it
+    /// crash under a supervisor", the third of the hint's three options, actually worked.
+    ///
+    /// So the bound is ONE-SHOT PER ARMING: it fires once, the catcher gets a guaranteed
+    /// window to drain or re-set it, and re-setting re-arms the protection. A process that
+    /// catches and then ignores is not re-killed for the same flood — which is the honest
+    /// reading anyway, since the alternative is a breach it cannot act on.
     /// **Park generation** — monotonic counter bumped each time this process parks
     /// in `receive` *with a deadline* (see `wait_for_message`). It implements lazy
     /// cancellation of superseded timer entries: each `arm_timer` stamps the entry
@@ -547,16 +561,52 @@ impl Mailbox {
     pub(super) fn note_mailbox_bound(&self, queue_len: usize) {
         let limit = self.max_mailbox.load(Ordering::Relaxed);
         if limit != 0 && queue_len > limit {
-            self.overflow_hit.store(queue_len, Ordering::Relaxed);
+            // Arm only from CLEAN, with a compare-exchange (KI-103). A plain
+            // check-then-store loses the race that made this bug survive its first fix: a
+            // sender reads "not yet raised", the receiver's probe latches, and the sender
+            // stores anyway — arming AFTER the latch, so the handler's next safepoint takes
+            // it and dies inside `proc/flag`, the very call it was making to recover. One
+            // word, one atomic operation, no window. Losing the CAS means someone armed
+            // first or the latch is set; both are fine, so the result is ignored.
+            let _ = self.overflow_hit.compare_exchange(
+                0,
+                queue_len,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
         }
     }
 
-    /// Take the sticky breach flag — the receiver-side probe (safepoints + `receive`
-    /// entry). Clearing on read means the raise happens exactly once; still over the
-    /// bound at the next enqueue, it re-arms.
+    /// A value no queue length can take, so one word carries three states: `0` clean,
+    /// `1..` armed with the breaching length, `LATCHED` already raised for this arming.
+    const OVERFLOW_LATCHED: usize = usize::MAX;
+
+    /// Take the sticky breach flag — the receiver-side probe (safepoints + `receive` entry).
+    /// Taking LATCHES it, so the bound is one-shot per arming (KI-103): the handler that
+    /// catches E0046 gets a guaranteed window to drain or re-set the bound, where before
+    /// every further enqueue re-armed and killed it mid-recovery. Setting the bound again
+    /// (`set_max_mailbox`) clears the latch and re-arms the protection.
     pub(super) fn take_overflow_hit(&self) -> Option<(usize, usize)> {
-        let len = self.overflow_hit.swap(0, Ordering::Relaxed);
-        (len != 0).then(|| (len, self.max_mailbox.load(Ordering::Relaxed)))
+        // Take AND latch in one compare-exchange: a plain `swap(LATCHED)` would latch a
+        // mailbox that never breached, and a `swap(0)` is the race this replaced.
+        loop {
+            let v = self.overflow_hit.load(Ordering::Relaxed);
+            if v == 0 || v == Self::OVERFLOW_LATCHED {
+                return None;
+            }
+            if self
+                .overflow_hit
+                .compare_exchange_weak(
+                    v,
+                    Self::OVERFLOW_LATCHED,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return Some((v, self.max_mailbox.load(Ordering::Relaxed)));
+            }
+        }
     }
 
     pub(super) fn pending_hard_kill(&self) -> bool {
@@ -1863,11 +1913,15 @@ pub fn mailbox_len(pid: u64) -> Option<usize> {
 /// Set (or with `None` clear) `pid`'s mailbox bound, returning the previous one —
 /// the `(proc/flag :max-mailbox n)` mechanism (ADR-307). Clearing also clears a
 /// pending breach, so doing it inside a `catch` genuinely rescues the process.
+///
+/// EITHER direction re-arms the one-shot latch (KI-103): setting a bound is the act that
+/// arms the protection, so a process that raises its bound after a breach is protected
+/// again at the new value, and one that clears it starts clean if it sets a bound later.
 pub fn set_max_mailbox(pid: u64, limit: Option<usize>) -> Option<usize> {
     with_mailbox(pid, |mb| {
-        if limit.is_none() {
-            mb.overflow_hit.store(0, Ordering::Relaxed);
-        }
+        // Storing 0 both clears a pending breach and lifts the one-shot LATCH, in either
+        // direction: setting a bound is the act that arms the protection (KI-103).
+        mb.overflow_hit.store(0, Ordering::Relaxed);
         let prev = mb.max_mailbox.swap(limit.unwrap_or(0), Ordering::Relaxed);
         (prev != 0).then_some(prev)
     })
