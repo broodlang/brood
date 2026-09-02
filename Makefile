@@ -157,10 +157,25 @@ test-both: ## Run the whole suite through BOTH engines (tree-walker + VM) — th
 	# (BROOD_VM=0) so a regression in either is caught. `differential.rs` additionally
 	# checks per-expression engine agreement within one run.
 	@command -v cargo-nextest >/dev/null 2>&1 || { echo ">>> cargo-nextest not found — run 'make ensure-nextest'"; exit 1; }
-	@echo ">>> suite under the VM (default engine)"
-	BROOD_VM=1 cargo nextest run --no-fail-fast
-	@echo ">>> suite under the tree-walker (BROOD_VM=0 escape hatch)"
-	BROOD_VM=0 cargo nextest run --no-fail-fast
+	# BOTH halves run, whatever the first one does, and the target fails at the end if
+	# either did. They used to be two recipe lines, which meant make ABORTED after the VM
+	# half — so on any machine where the VM half has a failure the tree-walker half never
+	# ran at all, and the differential gate silently checked one engine. That is exactly
+	# what happens here every capped run: `wasm_sandbox_limits_test` fails under the 16 GB
+	# ulimit CLAUDE.md prescribes, so the escape hatch had not been exercised in a long
+	# time. A gate that stops before the thing it exists to check is the KI-68/KI-69 class.
+	@vm=0; tw=0; \
+	 echo ">>> suite under the VM (default engine)"; \
+	 BROOD_VM=1 cargo nextest run --no-fail-fast || vm=$$?; \
+	 echo ">>> suite under the tree-walker (BROOD_VM=0 escape hatch)"; \
+	 BROOD_VM=0 cargo nextest run --no-fail-fast || tw=$$?; \
+	 if [ $$vm -ne 0 ] || [ $$tw -ne 0 ]; then \
+	   echo ">>> test-both FAILED — VM exit $$vm, tree-walker exit $$tw"; \
+	   echo ">>> (a red on ONE engine is a differential finding; a red on BOTH is usually"; \
+	   echo ">>>  the shared cause — judge the wasm files uncapped before believing either)"; \
+	   exit 1; \
+	 fi; \
+	 echo ">>> test-both: both engines green"
 
 # Nothing is skipped: all 23 breakage files gate. Kept as a mechanism for the next file that
 # needs it — name a file here and the runner prints the skip on every run rather than hiding it.
