@@ -755,7 +755,17 @@ fn drain_report_wires_through_the_scheduler() {
     // Once the worker has left the registry, the root is the only live process and it
     // already acked clean → gen 0 is drained. Poll briefly for the worker's exit to
     // finish (its `:released` send races a hair ahead of deregistration).
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // 5 s is generous for an ordinary build and NOT for an instrumented one: under ASAN
+    // every allocation is intercepted and the whole runtime moves at roughly a tenth speed,
+    // so the worker's exit-and-deregister loses the race with this deadline and the test
+    // reports "gen 0 is dead" — a scheduler conclusion drawn from a stopwatch. Found by the
+    // nightly's first ASAN run (2026-09-02); it is not reachable locally because the `jit`
+    // binary ahead of it exhausts any sane local timeout first.
+    #[cfg(brood_asan)]
+    let budget = Duration::from_secs(60);
+    #[cfg(not(brood_asan))]
+    let budget = Duration::from_secs(5);
+    let deadline = Instant::now() + budget;
     let drained = loop {
         if process::old_gen_drained(&interp.heap) {
             break true;
