@@ -251,7 +251,13 @@ this by implementing the `Display` ability, which takes over this name below.
   ;; callback that returns a failure hands it to the NEXT step, which raises
   ;; (`conj: not a collection`) one item later, naming the wrong thing. This is the
   ;; short-circuiting fold ADR-312 deferred pending evidence; the calculator is it.
-  (if (failure? acc)
+  ;;
+  ;; Spelled with the kernel prims, NOT `failure?`. This is the workhorse behind `map`,
+  ;; `filter`, `reduce`, `conj` and `into`, so the guard runs once per ELEMENT: `failure?`
+  ;; is a `defn`, which costs a closure call and — since `predicates.blsp` is concatenated
+  ;; after this file — a late-bound global lookup, per item. `type-of` and `%eq` are prims
+  ;; the VM inlines. Same shape as the `seq` guard above and for the same reason.
+  (if (%eq (type-of acc) :failure)
     acc
     (if (empty? coll) acc (%fold-loop f (f acc (first coll)) (rest coll)))))
 
