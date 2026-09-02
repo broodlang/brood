@@ -83,3 +83,90 @@ jobs:
           name: gcstress-logs
           path: /tmp/gcstress.*.log
           if-no-files-found: warn
+
+  # The manual gates. Everything here was previously run only when someone remembered,
+  # and on 2026-09-02 all three turned out to have been broken for days or weeks —
+  # silently, because a gate nobody runs reports nothing:
+  #
+  #   * `make asan` could not pass at all (its `BROOD_STACK_BUDGET` workaround was larger
+  #     than the stack, which a test added later correctly rejects — four days red);
+  #   * the program fuzzer emitted a pre-ADR-302 argument order, so 14 of 25 seeds
+  #     "diverged" on checker warnings and buried any real signal;
+  #   * the parallel-scaling probe called three renamed-away names, printed nothing, and
+  #     had reported "no timing" to nobody since the rename wave.
+  #
+  # None of that is a runtime bug and all of it is a hole in the net. Nightly turns
+  # "broken for weeks" into "broken for a day".
+  stress:
+    name: stress suite (fuzz differential, scaling, property/race, 3 engines)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # `stress/run.sh` wants the debug-assertions release binary its harnesses assume.
+      - name: Build (release, debug-assertions armed)
+        run: RUSTFLAGS="-C debug-assertions=on" cargo build --release -p cli
+
+      # The scaling arm SKIPS itself under 8 cores (GitHub's runners are 2-4), so this is
+      # the fuzz differential, the property/race corpus and the checker-soundness corpus.
+      # That is the half that caught the stale generator; the scaling half stays local.
+      - name: make stress
+        run: ./stress/run.sh
+
+      - name: Upload divergent seeds (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-fuzz-seeds
+          path: stress/fuzz_out/
+          if-no-files-found: warn
+
+  # ASAN over the kernel-exercising tests: genuine OOB / use-after-free in the unsafe
+  # substrate (the mmap table, the JIT codegen buffers) that TSAN and the logical GC
+  # tripwires cannot see.
+  #
+  # Runs EVERYTHING, with a long timeout rather than a skip filter. The `jit` binary's
+  # cases warm the JIT with real iteration counts and take many minutes under
+  # instrumentation, so the temptation is to filter them out — but the obvious filter
+  # (`--skip jit_`) matches none of them (they are named `..._under_jit`), which would be a
+  # no-op that reads exactly like a working exclusion. A slow nightly job is honest; a
+  # filter that silently skips nothing is the failure mode this whole section exists for.
+  asan:
+    name: AddressSanitizer (kernel tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: make asan
+        run: make asan
+
+  # ThreadSanitizer and the loom model check. Both are fast; they are here rather than in
+  # CI only because they need a nightly toolchain.
+  tsan-loom:
+    name: ThreadSanitizer + loom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: make tsan
+        run: make tsan
+
+      - name: make loom
+        run: make loom

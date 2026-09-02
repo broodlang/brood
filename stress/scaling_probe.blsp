@@ -1,0 +1,26 @@
+;; The parallel-scaling probe, driven by `stress/scaling.sh`.
+;;
+;; A REAL FILE on purpose. This lived in a shell heredoc, and that made it invisible to
+;; every gate the repo has: `check-corpora` statically checks `stress/**.blsp` for names
+;; that no longer resolve, and a program embedded in a `.sh` is not one of those. So a
+;; rename wave killed it silently — it called `bit-and`, `now` and `println` long after all
+;; three were renamed, printed nothing at all, and the gate reported "the probe produced no
+;; timing" to nobody, because nothing runs this outside a manual `make stress` (found
+;; 2026-09-02). As a `.blsp` it is checked statically, before anyone runs it.
+;;
+;; Prints ONE integer: elapsed MILLISECONDS. `scaling.sh`'s `best_of` seeds its minimum at
+;; 999999, so a nanosecond reading is silently never smaller than the sentinel — which is
+;; the second way this probe was dead. Keep the unit and that sentinel in agreement.
+
+;; Independent CPU-bound processes: no messages between them, no shared data, so
+;; anything less than near-linear speedup is the runtime's own serialization.
+(def tasks 24)
+(def me (self))
+(defn burn (i acc)
+  (if (>= i 2000000) acc (burn (+ i 1) (bit/and (+ (* acc 1103515245) 12345) 2147483647))))
+(defn fan (i) (if (>= i tasks) nil (do (spawn (send me [:r (burn 0 i)])) (fan (+ i 1)))))
+(defn collect (got acc) (if (= got tasks) acc (collect (+ got 1) (receive ([:r v] (+ acc v))))))
+(def t0 (os/now-ns))
+(fan 0)
+(def total (collect 0 0))
+(io/puts (math/quot (- (os/now-ns) t0) 1000000)) ;; MILLISECONDS — see best_of's 999999 sentinel
