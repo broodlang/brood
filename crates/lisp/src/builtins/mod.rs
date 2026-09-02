@@ -2281,6 +2281,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         tree_sitter_parse);
     def(
         heap,
+        "%tree-sitter-load-grammar",
+        Arity::exact(2),
+        Sig::new(vec![string, kw], int),
+        &["path", "lang"],
+        "Load a tree-sitter grammar from the shared library at `path` and register it under the language keyword `lang`, so tree-sitter-parse can use it like a built-in grammar; returns its ABI version. This is how a language the runtime was not built with gets parsed at all — the kernel deliberately knows no path convention, so the caller names the library and an application keeps its own grammar directory. A grammar loaded this way overrides a bundled one of the same name. Errors (never crashes) on a missing file, a library exporting no tree_sitter_<lang>, or a grammar built for an incompatible tree-sitter ABI; it is native code, though, so load only from a directory the user controls. Feature `treesit`.",
+        tree_sitter_load_grammar);
+    def(
+        heap,
         "reflect/load",
         Arity::exact(1),
         Sig::new(vec![string], any),
