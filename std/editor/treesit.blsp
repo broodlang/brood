@@ -120,6 +120,20 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 ;; int — was a strict-gate warning. A counter is an int; saying so is one line.
 (sig ts-count-upto (string string int int int -> int))
 
+(defn column0-before (src pos)
+  "The offset of the nearest line at or before `pos` that begins in column 0 with something
+other than whitespace, or 0 when there is none — the CANDIDATE restart point, ungurded.
+
+Separate from [[column0-restart]] because the guard is the language-specific half. Elixir can
+decide safety by counting paired heredoc markers, which is what `column0-restart` does; Ruby
+cannot (its `<<~EOS` terminator is arbitrary text) and needs to scan for its own openers. Both
+want the same candidate, and neither should re-derive it."
+  ;; `pos` is a line start when `ed-window-src` calls this, but normalising to one anyway
+  ;; makes the answer total: an offset in the middle of a line asks about that line, and the
+  ;; result is always a line start, never an offset into one.
+  (let (line-start (let (nl (string/last-index-of src "\n" pos)) (if (< nl 0) 0 (inc nl))))
+    (if (ts-col0? src line-start) line-start (ts-back-to-col0 src line-start))))
+
 (defn column0-restart (src pos delimiters)
   "A `:fontify-restart` answer for a tree-sitter mode: the offset of the nearest line at or
 before `pos` beginning in column 0, or 0 when that line cannot be shown to lie outside a
@@ -144,11 +158,7 @@ nothing to count, and should keep the lead-in rather than pass a list that canno
 and to the lead-in it replaces. Both mis-colour there, identically. That is the ceiling of
 any windowed fontify rather than of this rule: measured against a whole-file parse, the
 restart is never wrong where the lead-in is right, and is right everywhere the lead-in is."
-  ;; `pos` is a line start when `ed-window-src` calls this, but normalising to one anyway
-  ;; makes the answer total: an offset in the middle of a line asks about that line, and the
-  ;; result is always a line start, never an offset into one.
-  (let (line-start (let (nl (string/last-index-of src "\n" pos)) (if (< nl 0) 0 (inc nl)))
-        candidate (if (ts-col0? src line-start) line-start (ts-back-to-col0 src line-start))
+  (let (candidate (column0-before src pos)
         opened (fold delimiters 0 (fn (n d) (+ n (ts-count-upto src d candidate 0 0)))))
     (if (= 0 (math/rem opened 2)) candidate 0)))
 
