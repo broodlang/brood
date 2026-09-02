@@ -1,0 +1,85 @@
+name: Nightly
+
+# CI answers "did this commit pass?" — once. It cannot answer the question CLAUDE.md
+# actually asks, which is "is this tree green?", because a one-in-N race passes N-1 runs
+# out of N and a single pass is not evidence. Everything here is the repetition and the
+# armed tripwires that a per-push gate cannot afford to run.
+#
+# The class this exists for, concretely: KI-103 was a check-then-act race on the mailbox
+# overflow flag. Both engines were already covered per push (CI's `test` and
+# `differential` jobs), the breakage suite was already green, and none of it mattered —
+# the failure needed a particular interleaving, so it showed up as an intermittent red
+# that looked like a flaky test and was filed as "not reproducible" for a fortnight.
+#
+# Nightly, not per-push, deliberately: these are minutes-expensive and their findings are
+# rarely attributable to one commit anyway. A red here is a bug hunt, not a bisect.
+
+on:
+  schedule:
+    # 03:00 UTC — after the day's pushes, before the next morning.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+# Unlike CI's, this concurrency group does NOT cancel in progress: a nightly that is
+# cancelled by a manual dispatch has told nobody anything, and the whole value here is
+# in runs that actually finish.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  # A one-in-N race needs N runs. Three independent runners rather than three serial
+  # iterations, so wall-clock stays one suite and a single red run is still legible.
+  repeat:
+    name: suite, run ${{ matrix.run }} of 3
+    runs-on: ubuntu-latest
+    strategy:
+      # Every run finishes: "runs 1 and 3 passed, 2 failed" is the actual finding, and
+      # fail-fast would throw away the frequency, which is the most useful thing a flake
+      # tells you.
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+
+      # Identical to CI's `test` step on purpose. A nightly that runs a DIFFERENT command
+      # from the per-push gate cannot tell a flake from a configuration difference.
+      - name: Test (nextest)
+        run: cargo nextest run --no-fail-fast --features brood/treesit-grammars
+
+  # `make gcstress` runs nowhere else. The breakage job arms the GC tripwire but collects
+  # on a threshold, so a handle held across a collection is only caught when a collection
+  # happens to land inside the window — which is how KI-57 survived every green run and
+  # that job both. GC_STRESS collects at every safepoint, which makes the window a
+  # certainty; GC_VERIFY adds the whole-graph walk that catches a handle *stored* stale
+  # rather than dereferenced. The target builds DEBUG on purpose (see its comment: an
+  # optimised build reports KI-57 clean on the faithful pre-fix code).
+  gcstress:
+    name: GC stress + verify (concurrency and mailbox tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: make gcstress
+        run: make gcstress
+
+      # The target writes a per-file log and prints only the first few lines of a
+      # failure; keep the whole thing, because a use-after-GC report is a path through
+      # the heap graph and the interesting part is rarely in the first five lines.
+      - name: Upload the stress logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcstress-logs
+          path: /tmp/gcstress.*.log
+          if-no-files-found: warn
