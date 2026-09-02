@@ -301,6 +301,21 @@ fn a_derived_element_type_needs_the_term_to_admit_one_collection() {
     assert_eq!(Ty::of(Tag::Map).to_string(), "map");
 }
 
+// A union with `nil` WIDENS a tuple away — `nil | (tuple 1)` is `nil | vector<1>`. Pinned
+// because `infer::provably_non_empty` leans on it: `nil` is the empty case, so reading "has
+// a first element" off a tuple shape is only sound while a shape cannot survive beside a
+// nil. It also keeps that function's vector gate honest — the gate cannot fire today, and
+// this test is what would tell us the day the union starts preserving the shape.
+#[test]
+fn a_union_with_nil_widens_a_tuple_shape_away() {
+    let t = Ty::tuple_of(vec![Ty::int_lit(1)]).union(Ty::of(Tag::Nil));
+    assert_eq!(t.to_string(), "nil | vector<1>");
+    assert!(t.tuple_elems().is_none(), "{t}");
+    // …and the record shape, which does NOT widen, is why that case needs its own gate
+    let r = Ty::of(Tag::Map).union(Ty::of(Tag::Nil));
+    assert!(!r.is_subtype(&Ty::of(Tag::Map)), "{r}");
+}
+
 #[test]
 fn subtyping_is_reflexive_and_transitive() {
     let s = sample_tys();

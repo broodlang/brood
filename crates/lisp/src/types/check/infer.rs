@@ -1816,14 +1816,24 @@ fn provably_non_empty(t: &Ty) -> bool {
     if t.is_subtype(&Ty::of(Tag::Pair)) {
         return true;
     }
-    // A tuple states its arity, and a CLOSED record states its keys — so either can
-    // carry the same "has a first element" fact a `list<T>` does. (An open record
-    // cannot: it says nothing about a value that declares no field at all. An optional
-    // field cannot either — it may be absent, which is the empty case.)
-    if let Some(elems) = t.tuple_elems() {
-        return !elems.is_empty();
+    // A tuple states its arity, and a CLOSED record states its keys — so either can carry
+    // the same "has a first element" fact a `list<T>` does. (An open record cannot: it says
+    // nothing about a value that declares no field at all. An optional field cannot either
+    // — it may be absent, which is the empty case.)
+    //
+    // Each needs the type to be ONLY that collection, because `nil` is the EMPTY case:
+    // `nil | {a: int}` carries a closed record shape and a required field, and reading the
+    // shape alone made `(first (if p {:a 1} nil))` answer `(tuple :a, 1)`, dropping the
+    // `nil` every caller has to handle. The RECORD gate is the one that fires; the vector
+    // one is defensive, since a union with nil currently widens a tuple shape away
+    // (`a_union_with_nil_widens_a_tuple_shape_away` pins that, so the day it stops the
+    // gate is already there and the pin says why).
+    if t.is_subtype(&Ty::of(Tag::Vector)) {
+        if let Some(elems) = t.tuple_elems() {
+            return !elems.is_empty();
+        }
     }
-    if t.record_is_open() == Some(false) {
+    if t.is_subtype(&Ty::of(Tag::Map)) && t.record_is_open() == Some(false) {
         return t
             .record_fields()
             .is_some_and(|fields| fields.values().any(|(_ty, required)| *required));
