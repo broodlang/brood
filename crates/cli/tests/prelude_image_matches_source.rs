@@ -65,6 +65,13 @@ fn dump(use_image: bool) -> (String, String) {
     )
 }
 
+/// Runs with **no exclusions** — every global is compared. An earlier version excluded the
+/// six stdlib-image install-bookkeeping names because the two arms disagreed about them,
+/// and one of those disagreements *was* a live bug: the imaged boot restored a stale
+/// `*image-sources*`, whose symptom was `unbound symbol: io/puts` on a tree where nothing
+/// was wrong with `io`. Excluding a global because the arms disagree is excluding the
+/// evidence. They agree now that `%std-image-install` is replayed on the imaged path, so
+/// the exclusions are gone and must stay gone.
 #[test]
 fn an_imaged_boot_and_a_source_boot_agree_on_every_global() {
     // Warm both artifacts first: the very first run of a fresh binary boots from source and
