@@ -1610,6 +1610,16 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
 ;; cold run pays a one-time full sequential check (parallel dep-capture is deferred —
 ;; it needs the recorder moved into the per-process context). Manifest = `{path ->
 ;; [mtime warnings dep-keys fp]}`, merged like the extract cache (anti-thrash).
+;; The on-disk manifest name for a check-result cache, keyed by the CHECKING MODE.
+;; A verdict depends on the mode that produced it, so a plain run's entries are not a
+;; strict run's to reuse — without this key `nest check` poisoned the cache and the
+;; following `nest check --strict` reported what the plain run had found (measured on a
+;; four-warning probe file: 1 warning instead of 5, and CI runs the two gates back to
+;; back over the same files). Two names rather than one invalidating key so each mode
+;; keeps its own warm cache, the way `"checks"` and `"checks-run"` already do.
+(defn- project-check-manifest (base)
+  (if (reflect/strict-checking?) (str base "-strict") base))
+
 (defn- project-check-files-cached (files root closures manifest strict?)
   ;; `manifest` names the on-disk verdict manifest: `"checks"` for `nest check`,
   ;; `"checks-run"` for `nest run`'s pre-flight. Separate because the two commands see
@@ -1695,7 +1705,7 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
         (or (project-cache-off?) (nil? root) (>= (count files) (project-cache-max-files)))
           (project-check-files-fresh files
             closures)
-        else (project-check-files-cached files root closures "checks" true)))))
+        else (project-check-files-cached files root closures (project-check-manifest "checks") true)))))
 
 ;; Make sure the project is set up and all its sources are loaded — the
 ;; precondition for the checker to resolve cross-file names through the
@@ -2339,7 +2349,11 @@ reaches is `nest check`/`nest test`'s business."
         (project-check-duplicate-defs extracts source-set)
         (if (or (project-cache-off?) (>= (count want) (project-cache-max-files)))
           (project-check-files-shared want reach)
-          (project-check-files-cached want root (project-require-closures want) "checks-run" false))))))
+          (project-check-files-cached want
+            root
+            (project-require-closures want)
+            (project-check-manifest "checks-run")
+            false))))))
 
 ;; --- `nest check --fix-renames` — the migration aid --------------------------
 ;; A rename wave breaks every downstream repo, and the recovery was a manual loop: run

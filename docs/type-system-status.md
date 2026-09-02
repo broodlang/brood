@@ -650,3 +650,100 @@ resolves a `:use`d std module from the BINARY's baked-in std, so a cross-module 
 is only visible after a rebuild — a batch that edits one module and checks another must
 rebuild in between, or it verifies the old sig.
 
+## Narrow first: the division residue, and the two kinds that had no elements (2026-09-02)
+
+Two items the "what's left" list had recorded as small and left alone. Both are
+tightenings in the safe direction, and both were sized by *running* the corpus rather
+than by reading the rule.
+
+**The decidable half of `(/ int int)`.** The roadmap's order was narrow first, flag
+second: `int | ratio` is the honest answer for `(/ x 2)`, but the entry listed four
+shapes that are not undecidable at all, and until they stop landing in that union no
+declared-`int` residue can ever be flagged. Three are decided at the **type** level off
+the int-literal refinement (ADR-117), which means `numeric_result` owns them and a
+callback (`(map xs (fn (n) (/ n 1)))`) and a fold get them for free:
+
+- a literal **±1 divisor** keeps the numerator's kind — `(/ x 1)` is `x`, `(/ x -1)` is
+  `-x`, so `int` stays `int` and `ratio` stays `ratio`. The numerator's own literal set
+  is deliberately dropped rather than carried through: `(/ 6 -1)` is `-6`.
+- every operand a **known int literal** folds exactly: `(/ 6 3)` is `int`, `(/ 5 2)` is
+  `ratio`, `(/ 6 4 2)` is `ratio`, and unary `/` — the reciprocal — makes `(/ 2)` a
+  `ratio`. A literal *set* landing on both kinds stops the fold and keeps `int | ratio`,
+  which is the answer already given.
+- a **zero divisor declines**. `(/ 6 0)` raises E0040, and typing an expression that
+  cannot produce a value would be stating the arithmetic instead of what the language
+  does.
+
+The fourth and fifth shapes — `(/ (* 2 x) 2)` and `(/ x x)` — are left. Both need
+form-level syntactic analysis, and neither is a shape anybody writes; they were artifacts
+of probing the rule, not findings from a corpus.
+
+The payoff is in both directions, which is what makes narrowing worth more than the
+deferral it unblocks. Two correct programs stop carrying an unprovable union — and
+`(defn c (x) (/ 5 2))` declared `(int -> int)` is now a **named finding**, because Brood's
+`/` is exact and `5/2` is a ratio. That is the mistake a newcomer brings from a language
+where `/` on ints truncates, and nothing else in the tree could name it.
+
+**`bytes` and a map's entries.** The two `seqable` members with no element type. Neither
+needs a refinement, because the kind decides the answer: a `bytes` is a sequence of
+octets, and a map walks as its `[key value]` entries — a two-element **vector**, checked
+against the runtime rather than assumed. Both are derived inside `Ty::elem_ty`, the choke
+point every consumer already goes through, so `first`/`nth`/`map`/`filter`/`fold` picked
+them up at once: `(first (string/->bytes s))` is `nil | int`, and
+`(map m (fn (kv) (first kv)))` over a closed shape is `list<:a | :b>`.
+
+Two gates came out of building it, and each was found by running something rather than by
+reasoning about it:
+
+- **A derivation may only speak when the term admits ONE collection.** A refinement the
+  type *carries* is a different matter — it was put on the sequence members deliberately,
+  and "a seqable of numbers" is exactly that shape, which is how a `& rest` binder's
+  demand is spelled. But a *derived* answer speaks for the whole term, so `bytes | vector`
+  has unknown elements. The unit suite caught the first cut, which tightened the carried
+  case too and broke that demand.
+- **An open shape yields nothing, and that gate is what keeps NOMINAL records out.** The
+  first cut answered `(tuple any, any)` for a map it knew nothing about — reasoning that an
+  entry is at least a pair of unknowns. It is not: a record is modelled open, a record may
+  implement Seqable, and then it walks as whatever that impl yields. `tests/queue_test.blsp`
+  maps over a queue, and the **checker gate** flagged its callback — a false positive that
+  no unit test would have produced, since the shape only exists in a file that defines an
+  ability impl.
+
+**And the length fact reaches two more shapes.** `provably_non_empty` was `⊆ pair`. A tuple
+states its arity and a closed record states its keys, so either carries the same "has a
+first element" fact a `list<T>` does: `(first [1 2])` is `1`, not `1 | nil`, and
+`(map [1 2] inc)` is `list<int>`. An optional field cannot carry it — it may be absent,
+which is the empty case.
+
+## The converse lint, which needed no effect system (2026-09-02)
+
+`deferred.md` had the "this can fail and nothing guards it" lint blocked behind an inferred
+`nothrow`-shaped bit, on the reasoning that the checker cannot know which functions yield a
+failure. **It already knows.** `failure` is a tag, so it rides the ordinary union: the
+producers declare it, and an unannotated wrapper infers it — `nest check --suggest-sigs`
+writes `(string -> (or failure number))` for `(defn parse (s) (string/->number s))` with no
+annotation anywhere. The gap was a *reporting* rule, and it is one line of lattice: a
+**failure is never a valid materialisation** of a domain that excludes one, so it is read
+by inclusion in both modes where every other arm of a union keeps the overlap reading
+(ADR-316 carries the argument for why `failure` and not `nil`).
+
+Measured before shipping, because the cost is the whole question: the rule fires on exactly
+the failure sites and nothing else — **0** across `std/`, **6** across `tests/` +
+`examples/`, and **8** in bedit. The six are written-out literals that cannot fail whose
+*type* still carries the arm, and carry `check-allow`. The eight are all real bugs, and all
+one shape — a `nil?`/truthiness guard written before ADR-310 made a failure **truthy**, so
+a failure walks straight through it into arithmetic that raises. That is the migration
+hazard ADR-310 predicted and could not name; this names it.
+
+Found while measuring, and worth more than the lint on its own: **the incremental check
+cache was not keyed on the checking mode.** A verdict depends on the mode that produced it,
+and the cache stored mtime, dependency fingerprint and require-closure — none of which move
+when `--strict` is added. So a plain `nest check` cached its verdicts and the next
+`nest check --strict` over the same files reused them, reporting what the plain run had
+found. CI runs the two gates back to back over `std/**`; the strict gate would have gone
+quiet the moment the plain one warmed the cache, and a passing run is all anyone would have
+seen. (`std/` really is strict-clean — checked with `BROOD_NO_CHECK_CACHE=1` — so nothing
+was hidden in fact, only in principle.) The manifest name now carries the mode, so each
+keeps its own warm cache, the way `"checks"` and `"checks-run"` already do; the new
+`reflect/strict-checking?` is how Brood asks. `crates/nest/tests/check_cache_mode.rs` runs
+plain-then-strict-then-plain over one unchanged file and is sabotage-verified.

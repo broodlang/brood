@@ -98,4 +98,8 @@
     (let (me (self))
       ; no-op; salt read happens in worker too
       (scram-test-spawn-workers me 0)
-      (assert= 16 (count (encoding/base64-decode-bytes scram-test-salt-b64))))))
+      ;; check-allow :type-mismatch — a written-out valid base64 literal cannot fail to
+      ;; decode, but `base64-decode-bytes` is `bytes | failure` and nothing guards it.
+      (assert= 16
+        (check-allow :type-mismatch
+          (count (encoding/base64-decode-bytes scram-test-salt-b64)))))))

@@ -9965,3 +9965,98 @@ that no longer resolve — and could not see either of these, because one progra
 a Python generator and the other lives in a shell heredoc. Those are precisely the
 "macro-constructed" and "string-embedded" spellings CLAUDE.md's rename-wave section lists as
 ungreppable. The rename checklist is right; the corpus gate cannot enforce it.
+## 2026-09-02 (types) — narrow before you flag: the decidable half of `/`, and the two kinds with no elements
+
+Two items off the type system's "what's left" list, both recorded as small and both larger
+in payoff than the entry suggested. Full write-up in `type-system-status.md`.
+
+**`(/ int int)`.** The roadmap's own order was *narrow first, flag second* — `int | ratio`
+is the honest answer for `(/ x 2)`, and until the shapes that are NOT undecidable stop
+landing in that union, flagging a declared-`int` residue would false-positive on correct
+code (measured 2026-08-28: 4 of 5). Three of them are decided at the **type** level off
+the int-literal refinement, so `numeric_result` owns them and a callback and a fold share
+them: a literal ±1 divisor keeps the numerator's kind, known literal sets fold exactly,
+and a zero divisor declines (`(/ 6 0)` raises — typing it would state the arithmetic
+rather than the language). The remaining two, `(/ (* 2 x) 2)` and `(/ x x)`, need
+form-level analysis for expressions nobody writes, and stay unwritten.
+
+Narrowing pays in the other direction too, which is the part the entry did not anticipate:
+`(defn c (x) (/ 5 2))` declared `(int -> int)` is now a **named finding**. Brood's `/` is
+exact, so that is the mistake a newcomer brings from a language where int division
+truncates, and nothing in the tree could name it before.
+
+**`bytes` and a map's entries** — the two `seqable` members carrying no element type.
+Neither needs a refinement: a `bytes` is a sequence of octets, and a map walks as its
+`[key value]` entries (a two-element vector — checked against the runtime, not assumed).
+Derived inside `Ty::elem_ty`, the choke point every consumer already goes through, so
+`first`/`nth`/`map`/`filter`/`fold` picked them up together.
+
+Two gates, each found by running something rather than reasoning:
+
+- The first cut tightened the **carried** `elem` refinement as well as the derived one,
+  and broke a `& rest` binder's demand — "a seqable of numbers" is a refinement someone
+  put on the members deliberately. Only the derivations need the one-collection gate.
+- The first cut also answered `(tuple any, any)` for a map it knew nothing about, on the
+  reasoning that an entry is at least a pair of unknowns. It is not: a record is modelled
+  **open**, a record may implement Seqable, and then it walks as whatever that impl
+  yields. The **checker gate over `std/` + `tests/`** caught it — `tests/queue_test.blsp`
+  maps over a queue — and no unit test would have, because the shape only exists in a file
+  that defines an ability impl. That is the second time this month the zero-warning gate
+  has been the thing that found a false positive rather than a bug.
+
+Also: `provably_non_empty` reaches a tuple and a closed record, so `(first [1 2])` is `1`.
+
+Every guard sabotage-verified: each of the four (division fold, bytes/map derivation, the
+open-record gate, the length fact) reddens a test by name when broken. Both CI checker
+gates at zero, 719 lib tests green.
+
+## 2026-09-02 (types) — the converse failure lint needed no effect system, and the strict gate could not have failed
+
+Asked for the inferred "can fail" bit `deferred.md` had blocked the converse lint behind
+(D's `nothrow`, a `declare`-family modifier, a second effect channel). **Measured first,
+and the premise was false.** ADR-310 made `failure` a TAG, so it rides the ordinary union:
+the producers declare it, and an unannotated wrapper *infers* it —
+`nest check --suggest-sigs` writes `(string -> (or failure number))` for
+`(defn parse (s) (string/->number s))` with nothing annotated. The checker already knew
+which functions can fail. What was missing was a reporting rule, and the gradual overlap
+reading (B1) was swallowing it: `number | failure` into a `number` parameter is
+*consistent*, so it passed in silence.
+
+ADR-316 is that rule — a failure is never a valid materialisation of a domain that excludes
+one — with the argument for why `failure` and not `nil` (different channels by
+construction: `nil` is a legitimate answer everywhere, a failure is not an answer at all,
+and one reaching a primitive raises). Two conditions keep it from being a strictness change
+in disguise: the failure arm must be POSITIVELY known (an `any` bound admits a failure the
+way it admits everything), and a position that accepts one is silent.
+
+**The cost, measured before shipping.** 0 across `std/`, 6 across `tests/` + `examples/`,
+8 in bedit — exactly the failure sites, nothing else, and the 462-case lattice/checker
+suite unmoved. The six are written-out literals that cannot fail whose type still carries
+the arm (`check-allow`, the standing cost ADR-315 already established). The eight are all
+real bugs and all one shape:
+
+```brood
+(let (n (debugger-leading-int line))          ; number | failure
+  (when (and n (>= n 1) …) …))                ; a failure is TRUTHY, so `>=` raises
+```
+
+A `nil?`/truthiness guard written before failures existed, walked straight through by one.
+ADR-310 predicted the class and flipped truthiness because the breakage was loud; what it
+could not do was name the sites. **Not applied to bedit yet** — that is a downstream repo
+and CI pins it.
+
+**And a gate that could not have failed.** The incremental check-result cache (ADR-119) was
+keyed on mtime + dependency fingerprint + require-closure, none of which move when
+`--strict` is added — so a plain `nest check` cached its verdicts and the following
+`nest check --strict` over the same files *reused* them. CI runs the two gates back to back
+over `std/**`. The strict gate would have reported the plain gate's findings and exited 0,
+and nobody would have seen anything but green. `std/` is genuinely strict-clean (verified
+with `BROOD_NO_CHECK_CACHE=1`), so nothing was hidden in fact — but the gate had stopped
+being able to fail, which is the `make green` lesson in a new place. Fixed by keying the
+manifest name on the mode (`reflect/strict-checking?`, a new primitive), so each mode keeps
+its own warm cache. `crates/nest/tests/check_cache_mode.rs` is the regression, and it goes
+red when the keying is removed.
+
+The measurement habit is the reusable part: three days of design were queued behind a
+premise ("the checker cannot know which functions can fail") that one run of
+`--suggest-sigs` refuted.

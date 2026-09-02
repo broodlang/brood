@@ -947,6 +947,13 @@ pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
     if is_additive(head) && int_shifted && strict_ratios == 1 {
         return Some(ratio);
     }
+    // A division the checker can decide exactly — narrow before the `int | ratio`
+    // fallback, which is the honest answer only where the split is undecidable.
+    if is_division && all_int_or_ratio {
+        if let Some(t) = division_result(tys) {
+            return Some(t);
+        }
+    }
     // Ratios close over `+ - *` exactly as ints do, and `/` is exact over them too
     // (`(/ 3/2 1/2)` → 3). This used to fall through to the declared signature — widened
     // to `number | map` for `Num` records — which is a true type for the operator and
@@ -959,6 +966,107 @@ pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
         return Some(num);
     }
     None
+}
+
+/// The exact kind of a `/` whose operands the checker can decide — the *narrow first*
+/// half of the "merely-wider" residue (ROADMAP, § Merely-wider inference case). Brood's
+/// division is exact, so `int / int` is genuinely `int | ratio` and a body declared
+/// `int` cannot be flagged until the cases that ARE decidable stop landing in that
+/// union. Two are, both off the int-literal refinement (ADR-117):
+///
+/// - **A literal ±1 divisor.** `(/ x 1)` is `x` and `(/ x -1)` is `-x`, so the result is
+///   the numerator's kind whatever the numerator is. The numerator's *literal* set is
+///   deliberately dropped rather than carried through — `(/ 6 -1)` is `-6`.
+/// - **Every operand a known int literal.** Fold the division and report whether the
+///   results are integral: `(/ 6 3)` is `int`, `(/ 5 2)` is `ratio`, `(/ 2)` (unary `/`
+///   is the reciprocal) is `ratio`. A literal *set* landing on both keeps `int | ratio`.
+///
+/// `None` defers to the caller's `int | ratio`, which is always sound — it contains
+/// every answer this function can give. A **zero divisor defers too**: `(/ 6 0)` raises
+/// E0040, and typing an expression that cannot produce a value would be stating the
+/// arithmetic instead of what the language does.
+fn division_result(tys: &[Ty]) -> Option<Ty> {
+    let int = Ty::of(Tag::Int);
+    let ratio = Ty::of(Tag::Ratio);
+
+    // Every divisor a literal ±1: the numerator's kind survives unchanged.
+    if tys.len() >= 2
+        && tys[1..].iter().all(|t| {
+            t.as_lit_int()
+                .is_some_and(|set| set.iter().all(|&n| n == 1 || n == -1))
+        })
+    {
+        if tys[0].is_subtype(&int) {
+            return Some(int);
+        }
+        if tys[0].is_subtype(&ratio) {
+            return Some(ratio);
+        }
+    }
+
+    // Every operand a known int literal: fold each combination exactly. The cap keeps a
+    // wide enumerated type (`(or 200 404 500)`) from turning a type query into a
+    // cross-product walk; over the cap the `int | ratio` answer is still correct.
+    const MAX_COMBINATIONS: usize = 64;
+    let mut sets: Vec<Vec<i64>> = Vec::with_capacity(tys.len());
+    for t in tys {
+        if !t.is_subtype(&int) {
+            return None;
+        }
+        sets.push(t.as_lit_int()?.iter().copied().collect());
+    }
+    let combinations = sets
+        .iter()
+        .try_fold(1usize, |acc, set| acc.checked_mul(set.len()))?;
+    if combinations == 0 || combinations > MAX_COMBINATIONS {
+        return None;
+    }
+
+    let (mut any_int, mut any_ratio) = (false, false);
+    let mut odometer = vec![0usize; sets.len()];
+    loop {
+        let values: Vec<i64> = sets.iter().zip(&odometer).map(|(set, &i)| set[i]).collect();
+        // Unary `/` is the reciprocal — `(/ 2)` is `1/2` — so the numerator is 1 and the
+        // single operand is the divisor.
+        let (numerator, divisors) = if values.len() == 1 {
+            (1i128, &values[..])
+        } else {
+            (values[0] as i128, &values[1..])
+        };
+        let mut denominator = 1i128;
+        for &d in divisors {
+            if d == 0 {
+                return None;
+            }
+            denominator = denominator.checked_mul(d as i128)?;
+        }
+        if numerator % denominator == 0 {
+            any_int = true;
+        } else {
+            any_ratio = true;
+        }
+        // Both kinds reachable: the union is the exact answer, which the caller already
+        // gives — stop rather than walk the rest.
+        if any_int && any_ratio {
+            return None;
+        }
+        let mut place = odometer.len();
+        loop {
+            if place == 0 {
+                return match (any_int, any_ratio) {
+                    (true, false) => Some(int),
+                    (false, true) => Some(ratio),
+                    _ => None,
+                };
+            }
+            place -= 1;
+            odometer[place] += 1;
+            if odometer[place] < sets[place].len() {
+                break;
+            }
+            odometer[place] = 0;
+        }
+    }
 }
 
 /// A record shape and whether it is open — for the sinks that carry a shape forward.
@@ -1705,7 +1813,22 @@ fn list_result(elem: Option<Ty>) -> Option<Ty> {
 /// is `nil`)? The one length fact the lattice states, and the source of every "no `nil`
 /// here" tightening below. A vector or set may be empty whatever its element type.
 fn provably_non_empty(t: &Ty) -> bool {
-    t.is_subtype(&Ty::of(Tag::Pair))
+    if t.is_subtype(&Ty::of(Tag::Pair)) {
+        return true;
+    }
+    // A tuple states its arity, and a CLOSED record states its keys — so either can
+    // carry the same "has a first element" fact a `list<T>` does. (An open record
+    // cannot: it says nothing about a value that declares no field at all. An optional
+    // field cannot either — it may be absent, which is the empty case.)
+    if let Some(elems) = t.tuple_elems() {
+        return !elems.is_empty();
+    }
+    if t.record_is_open() == Some(false) {
+        return t
+            .record_fields()
+            .is_some_and(|fields| fields.values().any(|(_ty, required)| *required));
+    }
+    false
 }
 
 /// [`list_result`] for a combinator that keeps its input's LENGTH class — `map`, `sort`,
