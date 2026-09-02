@@ -6,6 +6,18 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**Faster startup — the prelude is materialised, not re-evaluated (ADR-314).** Every
+`brood`, `nest` and `brood-lsp` invocation rebuilt the prelude by reading and evaluating 544
+cached forms. The cold boot now writes the prelude's *bindings* as well, and a warm boot
+restores them structurally: boot **9.36 → 5.40 ms**, whole empty run **13.5 → 8.3 ms
+(−39%)**. Only the warm path changes — the first boot after a rebuild still does the full
+source boot and simply writes one more artifact. `BROOD_NO_PRELUDE_IMAGE=1` falls back to
+the text cache, which falls back to the source boot, so a bad or absent artifact costs a
+slower boot and never a wrong one. The image stands aside under `BROOD_COVERAGE`.
+
+Together with the lazy crash reporter below, a `brood file` run's fixed cost is down from
+~24 ms to ~8 ms.
+
 **Faster startup — the default crash reporter now arms lazily (ADR-313).** Every
 `brood file`, `nest run`, bundle and REPL run materialised ten stdlib modules before the
 program began, because the arm lived inside `std/proc/crash-report.blsp` and reaching it

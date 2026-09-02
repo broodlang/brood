@@ -8975,7 +8975,10 @@ JIT-internal fast-link deopts that re-enter without passing it are uncounted
 
 ## ADR-138 — The boot cache: expanded-prelude text, not a binary heap snapshot
 
-**Status:** accepted (2026-07-19). Implemented in `crates/lisp/src/lib.rs`
+**Status:** accepted (2026-07-19); its rejected alternative (1) **adopted 2026-09-02 as
+ADR-314**, on numbers this ADR did not have — the residual it calls "only ~4 ms" grew to
+9.36 ms of a 12.4 ms run, and the binary-format cost it priced in was since paid by the
+stdlib image (ADR-256/281). The text cache remains, as the fallback beneath the image. Implemented in `crates/lisp/src/lib.rs`
 (`boot_from_cache`/`boot_from_source` around the `SHARED` bundle), with
 `build_id_string` shared from `builtins/system.rs` and
 `gensym_counter`/`gensym_floor` in `core/value.rs`. Opt-out:
@@ -19942,3 +19945,74 @@ fix for KI-100's component 1, arrived at from the other end.
 
 **Rejected: making the CLI decide in Rust and skip the preamble.** It fixes the opt-out
 path only, leaving the default path — the one everybody runs — paying the full cost.
+
+## ADR-314 — The prelude image: materialise the prelude's bindings, don't re-evaluate its forms
+
+**Status:** accepted (2026-09-02). Implemented in
+`crates/lisp/src/builtins/startup_image.rs` (`write_prelude_image` /
+`load_prelude_image`) and `crates/lisp/src/lib.rs` (`boot_from_prelude_image`, tried ahead
+of the text cache). Opt-out: `BROOD_NO_PRELUDE_IMAGE=1`.
+
+**Context — this supersedes ADR-138's rejected alternative, on numbers ADR-138 did not
+have.** That ADR cached the *expanded prelude as text*, which removed the ~27 ms macro
+expansion, and explicitly rejected "full `SharedCode`/heap serialization" as **"0.7 ms
+upside, a binary format + relocation story downside"**. That arithmetic was right in July:
+parse + eval + freeze together were ~4 ms of a ~6.5 ms warm boot.
+
+Two things changed. The residual grew — the prelude is bigger, and by 2026-09-02 a warm boot
+was **9.36 ms of a 12.4 ms empty run (76%)**, i.e. no longer a residual but the whole cost.
+And the "binary format" bill has since been paid in full by the **stdlib startup image**
+(ADR-256/281): a sectioned artifact, a value codec that round-trips closures, and ADR-280's
+differential. The expensive part of the rejected alternative already exists and is in
+production.
+
+**Decision.** The cold boot writes one more artifact — the prelude's **bindings**, encoded
+with the same `encode_section` the module image uses — and a warm boot rebuilds them
+structurally instead of reading and evaluating 544 forms. `BROOD_NO_PRELUDE_IMAGE=1` falls
+back to the text cache, which falls back to the source boot, so a bad or absent artifact
+costs a slower boot and never a wrong one.
+
+**Only the warm path is optimized, deliberately.** The cold boot may cost whatever it costs
+— it runs once per binary build — so it still does the full source boot and simply writes an
+extra file at the end. That asymmetry is the whole design: every subsequent invocation of
+`brood`, `nest` and `brood-lsp` collects the saving.
+
+**Measured** (best-of-41, interleaved, two rounds, net of harness floor): boot **9.36 → 5.40
+ms**, whole empty run **13.5 → 8.3 ms — 39%**. The warm path is register 0.55 ms, image 3.7
+ms (806 entries), freeze 1.1 ms.
+
+**What has to be written, and the rule behind it.** `image_matches_source.rs` states it for
+modules and it holds identically here: *materialising defines bindings and evaluates
+nothing*, so anything the evaluation would have **recorded** must be written explicitly.
+Building this turned up three omissions in a row, each silent:
+
+- the **`defdyn` marks** (`value::DYNAMICS`, a process-global set, not a binding) — without
+  them `binding` rejected `*require-parent*` and every `require` in the language died;
+- **`*out*` and its kin**, lost to a filter that skipped bindings whose *value* was a
+  native. The correct skip-set is *the names `builtins::register` creates*, snapshotted in
+  the cold boot right after registration: a prelude `def` can bind a primitive under a name
+  registration never re-creates, and `io/puts` went with it;
+- **def sites**, so stdlib `M-.` went dark — the one user-visible thing ADR-138 kept a whole
+  positioned read alive to preserve.
+
+Plus `meta` (ADR-283) and privacy, both carried for the same reason.
+
+**Stands aside under `BROOD_COVERAGE`**, exactly as the stdlib image does (ADR-281):
+coverage instruments the compiler and a materialised binding is never compiled, so an imaged
+prelude reports as uninstrumented and takes attribution down a path the source boot never
+takes. The text cache evaluates real forms, so falling through to it keeps coverage honest.
+
+**Guard.** `crates/cli/tests/prelude_image_matches_source.rs` — two real `brood` processes,
+one per boot path, compared per global on name, kind, privacy, declared signature, source
+location and dynamic-ness. Values are deliberately not compared, for the reason the module
+differential gives: two closures built by different routes are not `=`, and every defect
+here has been a missing name or a lost attribute. **Sabotage-verified three ways** —
+dropping def sites, dropping the `defdyn` marks, and restoring the wrong (value-is-native)
+filter each turn it red.
+
+**The guard's own near-miss is worth recording.** Its first cut compared two *empty* strings
+— the dump program died on an unbound `seq/sort`, and `"" == ""` is agreement, so it passed
+a deliberate sabotage. It now asserts the dump's `GLOBALS n` header is **present** and that
+the line count matches it, before comparing anything. That is
+`never-assert-the-absence-of-failures` applied to a differential, and it is the reason this
+gate can be trusted.

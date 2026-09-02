@@ -9657,3 +9657,47 @@ type the value has before asking who duplicated it.
 The guard is deterministic in both directions (server never calls `set-binary`; plus an
 inverse case so the fix cannot be a blanket "everything is binary"), which the original P38 —
 a timing hope that happened to pass on idle machines — was not.
+
+## 2026-09-02 (perf) — the prelude is materialised now, not re-evaluated: startup −39%
+
+With the crash reporter's nine modules gone (ADR-313) and `pos_at` memoized, boot was
+**9.36 ms of a 12.4 ms empty run — 76%**, so the boot path was the only thing left worth
+attacking. ADR-314 has the design; the headline is boot **9.36 → 5.40 ms** and the whole
+empty run **13.5 → 8.3 ms**, best-of-41 interleaved over two rounds.
+
+**The interesting part is that this reverses an explicit ADR-138 rejection, and was right to.**
+That ADR priced full heap serialization at *"0.7 ms upside, a binary format + relocation
+story downside"* — correct in July, when parse+eval+freeze were ~4 ms of a 6.5 ms boot. Two
+things moved since: the residual became the whole cost, and the stdlib image (ADR-256/281)
+built and shipped the exact machinery ADR-138 was unwilling to pay for. Re-reading a
+rejection against current numbers is cheap; assuming it still holds is what costs.
+
+**Three silent omissions, all the same shape**, and `image_matches_source.rs`'s header had
+already named that shape for modules: *materialising defines bindings and evaluates nothing,
+so anything the evaluation recorded must be written explicitly.*
+
+1. The `defdyn` marks live in a process-global set, not in any binding — so `binding`
+   rejected `*require-parent*` and every `require` in the language died. 185 tests red.
+2. `*out*` vanished to a filter that skipped bindings whose *value* was a native. The right
+   question is which names `builtins::register` **creates**, snapshotted in the cold boot
+   right after registration — a prelude `def` can bind a primitive under a name registration
+   never re-creates, and `io/puts` went with it.
+3. Def sites, so stdlib `M-.` went dark — the one user-visible thing ADR-138 kept a whole
+   positioned read alive to preserve.
+
+None crashed at the site of the mistake; each surfaced as a wave of unrelated failures. The
+durable answer is the differential (`prelude_image_matches_source.rs`), which compares two
+real `brood` processes — one per boot path — per global on name, kind, privacy, signature,
+source location and dynamic-ness.
+
+**And that guard nearly shipped unable to fail.** Its first cut compared two *empty* strings:
+the dump program died on an unbound `seq/sort`, and `"" == ""` is agreement, so a deliberate
+sabotage of the def-site code **passed**. It now asserts the `GLOBALS n` header is present
+and that the line count matches it before comparing anything. Same lesson as
+`grep "test failed"` on a runner that never printed: *assert the evidence is present, never
+that failure is absent.* Sabotage-verified three ways afterwards — dropped def sites, dropped
+`defdyn` marks, and the wrong filter restored — and all three go red.
+
+One inherited rule worth stating: the image **stands aside under `BROOD_COVERAGE`**, exactly
+as the stdlib image does (ADR-281). Coverage instruments the compiler; a materialised binding
+is never compiled. `std_attribution` caught that and was the last failure to go.
