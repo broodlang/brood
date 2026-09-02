@@ -272,8 +272,12 @@
           (tfn-rewrap 3)))
       ;; drain BOTH entries — an isolated describe shares one process across its tests,
       ;; and a `:call` left in the mailbox would surface in the next test's receive
-      (assert= '(3) (receive ([:spy-entry {:spy :call :args a}] a) (after 200 :none)))
-      (assert= 3000 (receive ([:spy-entry {:spy :return :value v}] v) (after 200 :none)))
+      ;; `*test-wait-ms*`: both WAIT for an entry that is expected, so the timeout is a
+      ;; failure deadline. (The `:quiet` assertions elsewhere in this file stay short —
+      ;; those prove ABSENCE, where a short wait is the whole point.)
+      (assert= '(3) (receive ([:spy-entry {:spy :call :args a}] a) (after *test-wait-ms* :none)))
+      (assert= 3000
+        (receive ([:spy-entry {:spy :return :value v}] v) (after *test-wait-ms* :none)))
       (untrace-fn 'debug-test/tfn-rewrap)
       (assert= 3000 (tfn-rewrap 3)))) ; the redefinition is what remains
   (test "REGRESSION: a REFUSED trace registers nothing, so teardown stays clean"

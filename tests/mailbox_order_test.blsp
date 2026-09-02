@@ -52,9 +52,12 @@
       (table/put box :done true)
       ;; Eat the three oldest queued messages out from under the scan.
       (table/put box
-        :ate [(receive ([:junk n] n) (after 500 :none))
-          (receive ([:junk n] n) (after 500 :none))
-          (receive ([:junk n] n) (after 500 :none))])
+        ;; `*test-wait-ms*`, not a short grace: these WAIT for a message that is expected
+        ;; to arrive, so the timeout is a failure deadline and never a synchronisation. A
+        ;; short one passes on an idle machine and loses under a loaded suite run.
+        :ate [(receive ([:junk n] n) (after *test-wait-ms* :none))
+          (receive ([:junk n] n) (after *test-wait-ms* :none))
+          (receive ([:junk n] n) (after *test-wait-ms* :none))])
       (let (r (ref))
         ;; Minted HERE, so every message already queued predates it: this is the ref
         ;; whose receive-mark the perturbed queue has to survive. It must also be the
@@ -105,7 +108,7 @@
       (let (r (table/get box :ref))
         (assert= (receive ([:reply ^r v] v) (after *test-wait-ms* :LOST-THE-REPLY)) :ok))
       ;; And nothing the perturbed scan touched was dropped or duplicated.
-      (assert= (receive ([:junk n] n) (after 500 :LOST-JUNK)) 3)
-      (assert= (receive ([:go] :got-go) (after 500 :LOST-GO)) :got-go)
-      (assert= (receive ([:noise] :got-noise) (after 500 :LOST-NOISE)) :got-noise)
+      (assert= (receive ([:junk n] n) (after *test-wait-ms* :LOST-JUNK)) 3)
+      (assert= (receive ([:go] :got-go) (after *test-wait-ms* :LOST-GO)) :got-go)
+      (assert= (receive ([:noise] :got-noise) (after *test-wait-ms* :LOST-NOISE)) :got-noise)
       (send srv :stop))))
