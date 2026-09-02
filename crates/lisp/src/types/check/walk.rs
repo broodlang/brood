@@ -107,7 +107,7 @@ fn name_of(s: Symbol) -> String {
 /// lint and the broadened dead-clause lint (ADR-131) — exempt it: warning on a
 /// name the user can't rename is noise. (A rare hand-written `x__1` is only a
 /// missed warning, which these lints already tolerate.)
-fn is_gensym_sym(s: Symbol) -> bool {
+pub(super) fn is_gensym_sym(s: Symbol) -> bool {
     name_of(s)
         .rsplit_once("__")
         .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
@@ -1503,24 +1503,20 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                 // the same parameter names: the checker used to say "wrong number of
                 // arguments — expected 1, got 0" where running it said "expected 1
                 // argument, got 0", so one defect read as two unrelated messages.
-                // Computed exactly as `eval::arity_message` does — including "at least N"
-                // (not `arity_str`'s "N or more") and the singular/plural rule — so the
-                // two never drift apart again.
-                let (expected, n) = match a.max {
-                    Some(m) if m == a.min => (a.min.to_string(), a.min),
-                    Some(m) => (format!("{} to {}", a.min, m), m),
-                    None => (format!("at least {}", a.min), a.min),
-                };
-                let noun = if n == 1 { "argument" } else { "arguments" };
-                let name = name_of(s);
+                // The SAME function the runtime raises with, not a second implementation
+                // of the same sentence. The checker used to say "wrong number of arguments
+                // — expected 1, got 0" where running it said "expected 1 argument, got 0";
+                // a comment promising the two will not drift is not a mechanism, calling
+                // one function is.
                 out.push((
                     heap.form_pos_only(form),
-                    match super::sigs::param_names_of(heap, s) {
-                        Some(p) => {
-                            format!("{name}: expected {expected} {noun} ({p}), got {argc}")
-                        }
-                        None => format!("{name}: expected {expected} {noun}, got {argc}"),
-                    },
+                    crate::eval::arity_message(
+                        &name_of(s),
+                        a.min,
+                        a.max,
+                        argc,
+                        &super::sigs::param_names_of(heap, s).unwrap_or_default(),
+                    ),
                 ));
             }
         }

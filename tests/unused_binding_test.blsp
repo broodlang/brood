@@ -38,6 +38,29 @@
   (test "the _ convention silences it"
     (assert= (unused-count "(reduce xs '() (fn ((_acc \"+\") \"+\") ((_acc n) n)))") 0)))
 
+(describe "checker: the unused-binder exemptions match the sibling unused-let lint"
+  (test "a gensym temporary is exempt, but a user name merely CONTAINING __ is not"
+    ;; the first version tested `name.contains("__")`, which is a guess: it exempts
+    ;; gensyms and silently swallows `my__thing` too. The interner knows the difference.
+    (assert= (count-of "(map xs (fn ((my__thing) :a) ((my__thing y) y)))"
+               "unused parameter: my__thing")
+      2))
+
+  (test "a binder shadowing a builtin is exempt, as it is in a let"
+    ;; you do not accidentally name a binder after a builtin, so an unused shadow is a
+    ;; deliberate scope-isolation test — and `_`-prefixing cannot express it, because
+    ;; that changes the very name being shadowed
+    (assert= (unused-count "(map xs (fn ((list) :a) ((list y) y)))") 0))
+
+  (test "the wording follows the LOWERING, which is per fn and not per clause"
+    ;; one pattern head anywhere sends the whole dispatch through `match*`, so every
+    ;; clause's binders are pattern binders — including the all-symbol head. Deciding
+    ;; per clause called that one a "parameter", describing a construct the program
+    ;; does not have.
+    (let (src "(map xs (fn ((a) :plain) ((b \"lit\") :pat)))")
+      (assert= (count-of src "unused pattern binding: a") 1)
+      (assert= (count-of src "unused pattern binding: b") 1))))
+
 (describe "checker: an unused PARAMETER in an anonymous fn arity clause"
   (test "an arity clause that never reads its parameter is reported"
     (assert= (count-of "(map xs (fn ((x) 1) ((x y) y)))" "unused parameter: x") 2))
