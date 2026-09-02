@@ -275,6 +275,20 @@
     (assert= (error-of (%now 1 2)) "arity error: %now: expected 0 arguments, got 2")
     (assert= (error-of (apply +))
       "arity error: apply: expected at least 2 arguments (f & args), got 1"))
+  (test "a definition whose NAME position holds a non-symbol says so, and where"
+    ;; `(defn (expr) expr)` used to report a bare "expected a symbol" — not which form
+    ;; was wrong, not what arrived, and naming `def`, a form the author never typed.
+    ;; The commonest slip has an obvious diagnosis and it is now stated.
+    (assert= (error-of (reflect/eval (reflect/read-first "(defn (expr) expr)")))
+      (str "defn: the name must be a symbol, got (expr) — that is a parameter "
+        "list where the name belongs; the shape is (defn NAME (params...) body...)"))
+    (assert= (error-of (reflect/eval (reflect/read-first "(defn 42 (x) x)")))
+      (str "defn: the name must be a symbol, got 42 — the shape is "
+        "(defn NAME (params...) body...)"))
+    ;; and the generic `def` path names the operation and prints what arrived
+    (assert= (error-of (reflect/eval (reflect/read-first "(def (x) 1)")))
+      "type error: def: name: expected a symbol, got pair ((x))"))
+
   (test "parse errors surface through reflect/read-string"
     (assert= (error-of (reflect/read-string "(1 2")) "parse error: unclosed list (opened here)"))
   (test "throw hands the value back unchanged"

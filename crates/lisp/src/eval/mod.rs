@@ -491,6 +491,8 @@ fn eval_tail_loop(
                         .or_form_pos(heap, expr));
                     }
                     let name = as_symbol(
+                        heap,
+                        "def: name",
                         args.first()
                             .copied()
                             .ok_or_else(|| LispError::runtime("def: missing name"))?,
@@ -746,7 +748,7 @@ fn eval_tail_loop(
                     // operand-stack-rooted helper.
                     let mut i = 0;
                     while i < binds.len() {
-                        let bind_name = as_symbol(binds[i])?;
+                        let bind_name = as_symbol(heap, "binding name", binds[i])?;
                         heap.env_define(scope, bind_name, Value::nil());
                         i += 2;
                     }
@@ -1916,7 +1918,13 @@ pub(crate) fn deadline_error() -> LispError {
 /// carries them. `params` is pre-rendered and may be empty, in which case the message is
 /// exactly what it was before. `types::check::walk` builds the same string for the
 /// checker's warning, so the two never disagree in wording again.
-fn arity_message(who: &str, min: usize, max: Option<usize>, got: usize, params: &str) -> String {
+pub(crate) fn arity_message(
+    who: &str,
+    min: usize,
+    max: Option<usize>,
+    got: usize,
+    params: &str,
+) -> String {
     let (expected, n) = match max {
         Some(m) if min == m => (min.to_string(), min),
         Some(m) => (format!("{} to {}", min, m), m),
@@ -2157,7 +2165,7 @@ fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
                 let r = items.get(i + 1).copied().ok_or_else(|| {
                     LispError::runtime("expected a symbol after & in parameter list")
                 })?;
-                rest = Some(as_symbol(r)?);
+                rest = Some(as_symbol(heap, "& rest parameter", r)?);
                 if i + 2 < items.len() {
                     return Err(LispError::runtime("& rest must be the last parameter"));
                 }
@@ -2175,7 +2183,7 @@ fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
         if in_optional {
             optionals.push(parse_optional(heap, items[i])?);
         } else {
-            required.push(as_symbol(items[i])?);
+            required.push(as_symbol(heap, "parameter", items[i])?);
         }
         i += 1;
     }
@@ -2189,6 +2197,8 @@ fn parse_optional(heap: &Heap, form: Value) -> Result<(Symbol, Value), LispError
         ValueRef::Pair(_) | ValueRef::Vector(_) => {
             let parts = heap.seq_items(form)?;
             let name = as_symbol(
+                heap,
+                "&optional parameter",
                 parts
                     .first()
                     .copied()
@@ -2228,10 +2238,14 @@ fn name_value(heap: &mut Heap, val: Value, name: Symbol) -> Value {
     }
 }
 
-fn as_symbol(v: Value) -> Result<Symbol, LispError> {
+/// A binding position must hold a symbol. `who` names what was being parsed, and the
+/// offending value is printed — a bare "expected a symbol" told the reader neither which
+/// form was wrong nor what arrived there, which for `(defn (expr) expr)` is the whole
+/// question (the parameter list is sitting where the name belongs).
+fn as_symbol(heap: &Heap, who: &str, v: Value) -> Result<Symbol, LispError> {
     match v.unpack() {
         ValueRef::Sym(s) => Ok(s),
-        _ => Err(LispError::type_err("expected a symbol")),
+        _ => Err(LispError::wrong_type(heap, who, "a symbol", v)),
     }
 }
 
@@ -2369,7 +2383,7 @@ fn bind_sequential(
         let n = binds.len();
         let mut i = 0;
         while i < n {
-            let bind_name = as_symbol(heap.read_root(binds_r[i]))?;
+            let bind_name = as_symbol(heap, "binding name", heap.read_root(binds_r[i]))?;
             let rhs = heap.read_root(binds_r[i + 1]);
             let scope_now = heap.read_root_env(scope_rt);
             let val = eval_at(heap, rhs, scope_now)?;

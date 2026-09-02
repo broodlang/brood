@@ -53,11 +53,35 @@
                  "Define `name` as a macro: a `fn` run at expansion time on the unevaluated argument forms, whose returned form replaces the call."
                  `(def ~name (%make-macro (fn ~@body))))))
 
+;; Reject a non-symbol in the NAME position at expansion time. Without it the mistake
+;; reaches `def`, whose complaint is about `def` — a form the author never typed — and the
+;; commonest slip has an obvious diagnosis worth stating: `(defn (expr) expr)` is a
+;; parameter list sitting where the name belongs, i.e. the name was simply left out.
+;;
+;; Written on PRIMITIVES only (`%eq`/`type-of`/`str`/`pr-str`/`throw`) and bound with a
+;; plain `(def … (fn …))`: this file is the first the prelude concatenates, so `symbol?`
+;; (predicates.blsp) and `defn-` itself do not exist yet — the same bootstrap reason the
+;; append helpers above take that shape.
+(def %defn-check-name
+  (fn (who name)
+    (if (%eq (type-of name) :symbol)
+      nil
+      (throw (str who
+               ": the name must be a symbol, got "
+               (pr-str name)
+               (if (%eq (type-of name) :pair)
+                 " — that is a parameter list where the name belongs; the shape is "
+                 " — the shape is ")
+               "("
+               who
+               " NAME (params...) body...)")))))
+
 ;; `defn` itself: forwards everything after the name to `fn`, so it inherits
 ;; both single-clause — (defn f (x) ...) => (def f (fn (x) ...)) — and the
 ;; multi-clause pattern form — (defn f ((0) 1) ((n) ...)) => (def f (fn ((0) 1) ((n) ...))).
 (defmacro defn (name & clauses)
   "Define a global function `name`, forwarding the clauses to `fn` — so it supports both the single-clause form `(defn f (x) body...)` and multi-clause pattern dispatch."
+  (%defn-check-name 'defn name)
   `(def ~name (fn ~@clauses)))
 
 ;; `defn-` / `def-` — the PRIVATE variants (ADR-146). Identical to `defn`/`def`
@@ -69,6 +93,7 @@
 ;; exists when `%mark-private` qualifies it.
 (defmacro defn- (name & clauses)
   "Define a MODULE-PRIVATE function `name` (ADR-146) — like `defn`, but the name is not exported and a cross-module reference to it is a compile error."
+  (%defn-check-name 'defn- name)
   `(do (def ~name (fn ~@clauses)) (%mark-private '~name)))
 (defmacro def- (name value)
   "Define a MODULE-PRIVATE global `name` (ADR-146) — like `def`, but the name is not exported outside its module."

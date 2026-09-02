@@ -364,10 +364,14 @@ fn lint_fn_pattern_clauses(heap: &Heap, items: &[Value], out: &mut Vec<(Option<P
     if heads.len() != forms.len() {
         return;
     }
-    // A clause whose head holds a non-symbol is a PATTERN clause (lowered to `match*`);
-    // one of only symbols is an arity clause (a native multi-arity arm). Both bind
-    // per-clause names, so both are linted — the wording differs so the reader knows
-    // which construct is being talked about.
+    // A clause whose head holds a non-symbol is a PATTERN clause (the whole `fn` is then
+    // lowered to `match*`); one of only symbols is an arity clause (a native multi-arity
+    // arm). Both bind per-clause names, so both are linted — the wording differs so the
+    // reader knows which construct is meant. It is decided once for the whole `fn`, NOT
+    // per clause, because the LOWERING is per fn: one pattern head anywhere sends the
+    // entire dispatch through `match*`, so every clause's binders are then pattern
+    // binders, including a head that happens to be all symbols. Naming that one a
+    // "parameter" would describe a construct the program does not have.
     let any_pattern = heads.iter().any(|&h| {
         list_items(heap, h).is_some_and(|ps| ps.iter().any(|p| !matches!(p, Value::Sym(_))))
     });
@@ -393,8 +397,18 @@ fn lint_fn_pattern_clauses(heap: &Heap, items: &[Value], out: &mut Vec<(Option<P
         collect_clause_binders(heap, plist, &mut binders);
         for b in binders {
             let name = value::symbol_name(b);
-            if name.starts_with('_') || name.contains("__") {
-                continue; // the ignore convention, and gensym temporaries
+            // The `_`-prefix ignore convention, and real gensym temporaries — via the
+            // interner's own predicate, not a `contains("__")` guess, which also swallowed
+            // a legitimate `my__thing`.
+            if name.starts_with('_') || walk::is_gensym_sym(b) {
+                continue;
+            }
+            // The same shadowing exemption the sibling unused-`let` lint applies: you do
+            // not accidentally name a binder after a builtin, so a shadow left unused is a
+            // deliberate scope-isolation test, and `_`-prefixing cannot express it (that
+            // changes the name being shadowed).
+            if sigs::is_globally_bound(heap, b) || sigs::curated_sig(b).is_some() {
+                continue;
             }
             if !body.iter().any(|&f| walk::sym_appears_in(heap, f, b)) {
                 out.push((Some(pos), format!("{noun}: {name}")));
@@ -421,7 +435,9 @@ fn collect_clause_binders(heap: &Heap, pat: Value, out: &mut Vec<Symbol>) {
                 _ => list_items(heap, pat).unwrap_or_default(),
             };
             if let Some(&Value::Sym(h)) = items.first() {
-                if value::symbol_name(h) == "%pin" {
+                // `symbol_is` compares without allocating the spelling — the idiom the
+                // parameter-list walkers already use.
+                if value::symbol_is(h, "%pin") {
                     return;
                 }
             }
