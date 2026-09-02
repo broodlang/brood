@@ -112,6 +112,7 @@
 
   (test "the handler can drain and clear the bound — the process recovers"
     (let (me (self)
+          expected 32
           worker (spawn
                    (do
                      (proc/flag :max-mailbox 8)
@@ -122,20 +123,29 @@
                          ;; drain everything, lift the bound, prove we lived
                          (do
                            (proc/flag :max-mailbox nil)
-                           ;; `after 0` would stop at whatever had ARRIVED: the bound
-                           ;; trips at message 9 of 32, so the handler starts draining
-                           ;; while `flood` is still sending. A short grace collects the
-                           ;; rest — it is only paid once, when the mailbox truly empties.
+                           ;; The bound trips at message 9 of 32, so the handler starts
+                           ;; draining while `flood` is still sending — `after 0` would
+                           ;; stop at whatever had ARRIVED. Drain until the expected count
+                           ;; is in hand, with a long backstop that only expires if
+                           ;; something is genuinely broken.
+                           ;;
+                           ;; This used a 100 ms grace, which is a wall clock standing in
+                           ;; for synchronisation: it beat the sender on an idle machine
+                           ;; and lost under a full concurrent suite run, where it drained
+                           ;; fewer than 32 and failed. A timeout is a failure deadline
+                           ;; here, never a wait.
                            (letrec (drain (fn (n)
-                                            (receive
-                                              (:flood (drain (+ n 1)))
-                                              (after 100 n))))
+                                            (if (= n expected)
+                                              n
+                                              (receive
+                                                (:flood (drain (+ n 1)))
+                                                (after 30000 n)))))
                              (send me [:recovered (get e :code) (drain 0)]))))))))
       (receive ([:ready ^worker] nil) (after 30000 (error "no ready")))
-      (flood worker 32)
+      (flood worker expected)
       (let ([code drained] (receive ([:recovered c n] [c n]) (after 30000 [:timeout 0])))
         (assert= "E0046" code)
-        (assert= 32 drained))))
+        (assert= expected drained))))
 
   (test "a busy (non-receiving) flooded process trips at a safepoint"
     (let (me (self)

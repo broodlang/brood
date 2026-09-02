@@ -1,0 +1,93 @@
+;; The checker has TWO entry points over the same source, and they must not disagree.
+;;
+;;   `reflect/check-file`             — the SURFACE forms, as written. What `nest check` uses.
+;;   `reflect/check-string-structured` — the EXPANDED forms. What an editor uses; bedit's
+;;                                       brood-mode `:diagnostics` service calls exactly this.
+;;
+;; A diagnostic that reaches one and not the other shows up in your editor and not on the
+;; command line, or the reverse — and both directions have now happened:
+;;
+;;   ADR-312  a `defn` looked like a `fn` to the surface pass but not the expanded one, so a
+;;            lint warned IN THE EDITOR and not on the command line for identical source.
+;;   ADR-313  the special-form-as-a-value diagnostic was first placed in `check_value_leaf`,
+;;            which is gated on whole-file operand checking; it fired for `nest check FILE`
+;;            and not for the editor — the worse direction, since the editor is where the
+;;            paren slip is made.
+;;
+;; Sweeping `std/` cannot catch this: all 114 files agree, because the shapes that diverge
+;; are mistakes, and `std/` has none. So the gate is a corpus of the mistakes themselves.
+;; Add a row here whenever a new diagnostic lands.
+
+(defmodule checker-pass-agreement-test (:use test))
+
+(defn- message-of (d)
+  ;; the two entries answer different SHAPES: `check-string-structured` a map, `check-file`
+  ;; a formatted `path:line:col: warning: message` string. Only the message is comparable.
+  (if (map? d)
+    (get d :message)
+    (let (i (index-of d ": warning: "))
+      (if (< i 0) d (string/substring d (+ i 11) (string/length d))))))
+
+(defn- messages (diags)
+  (sort (mapv (or diags []) message-of)))
+
+(defn- both-passes (src)
+  "[expanded surface] — the two entry points' message sets for the same source text."
+  (let (path (path/temp "agree"))
+    (file/spit path src)
+    (let (expanded (messages (reflect/check-string-structured src))
+          surface (messages (reflect/check-file path)))
+      (file/rm path)
+      [expanded surface])))
+
+(defn- agree? (src)
+  (let ([expanded surface] (both-passes src))
+    (= expanded surface)))
+
+(defn- both-report (src want)
+  "Both passes report a message starting with `want` — the check that actually matters."
+  ;; `includes?`, not `starts-with?`: some messages are prefixed with the qualified name
+  ;; of the definition they are about (`t/f: declared return type …`).
+  (let ([expanded surface] (both-passes src)
+        has? (fn (ms) (any? ms (fn (m) (includes? m want)))))
+    (and (has? expanded) (has? surface))))
+
+(describe "the surface and expanded checker passes agree"
+  (test "a special form that lost its parentheses (ADR-313)"
+    ;; the case that motivated this file: `fn` used as a value, reported by only one pass
+    (let (src "(defmodule t)\n(defn calc (xs) (reduce xs '() fn (acc token) acc))\n")
+      (is (both-report src "fn is a special form, not a value"))
+      (is (agree? src))))
+
+  (test "an impossible type predicate on a NAME (ADR-313)"
+    (let (src "(defmodule t)\n(defn a (s) (if (failure? (string/length s)) 0 1))\n")
+      (is (both-report src "failure?: this can never be true"))
+      (is (agree? src))))
+
+  (test "an impossible type predicate on a LITERAL (ADR-313)"
+    ;; a literal is the shape most likely to be folded away before the expanded pass sees it
+    (let (src "(defmodule t)\n(defn a () (if (failure? 42) 0 1))\n")
+      (is (both-report src "failure?: this can never be true"))
+      (is (agree? src))))
+
+  (test "an unused parameter in an anonymous fn clause (ADR-312)"
+    ;; the lint whose FIRST version warned in the editor and not on the command line
+    (let (src "(defmodule t)\n(defn f (xs) (map xs (fn ((x) 1) ((x y) y))))\n")
+      (is (both-report src "unused parameter"))
+      (is (agree? src))))
+
+  (test "an unbound symbol"
+    (let (src "(defmodule t)\n(defn f () (nosuchname 1))\n")
+      (is (both-report src "unbound symbol"))
+      (is (agree? src))))
+
+  (test "a declared return type the body cannot produce"
+    (let (src "(defmodule t)\n(sig f (string -> int))\n(defn f (s) (if (failure? (string/->number s))))\n")
+      (is (both-report src "declared return type"))
+      (is (agree? src))))
+
+  (test "and clean source is clean in both"
+    (let (src "(defmodule t)\n(defn f (xs) (map xs (fn (x) (+ x 1))))\n")
+      (let ([expanded surface] (both-passes src))
+        (is (empty? expanded))
+        (is (empty? surface))))))
