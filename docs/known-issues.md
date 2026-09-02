@@ -406,7 +406,21 @@ somewhere specific. If it recurs: the question is why a local handshake EOFs und
 `accept_link`'s per-read `SO_RCVTIMEO` and `read_frame_capped` are the code — the same
 pair KI-97 item 1 rewrites for the trickle-DoS deadline, so that fix should re-test this.
 
-## KI-98 — `process_limit_test.blsp:114` timed out under a full `nest test`, twice in five runs ⚠️ WATCHING 2026-08-31
+## KI-98 — `process_limit_test.blsp:114` timed out under a full `nest test`, twice in five runs ✅ ROOT-CAUSED 2026-09-02 → KI-103
+
+> **Resolution 2026-09-02: this is KI-103**, and the hypothesis below is wrong. The worker
+> is not missing a wake — it is **killed inside `(proc/flag :max-mailbox nil)`**, the call the
+> E0046 hint tells it to make, because every further `send` over the bound re-arms the sticky
+> flag and the handler's next safepoint is in `proc/flag`. So `[:recovered …]` is never sent
+> and the parent times out, exactly as recorded.
+>
+> "Not reproducible on demand" is also no longer true, and the reason it looked that way is
+> instructive: the window is narrow on the VM (~1 in 3 in a minimal repro) and wide on the
+> tree-walker (~3 in 4, it being ~10x slower). `make test-both` should have made that obvious
+> a fortnight ago, but that target ran its two halves as separate recipe lines and aborted
+> after the VM half — so the escape hatch had not been exercised. Fixing the gate is what
+> surfaced this. See KI-103 for the mechanism and the proposed fix.
+
 
 **Symptom.** In a full `nest test`, "proc/flag :max-mailbox › the handler can drain and
 clear the bound — the process recovers" fails with `code = :timeout` after its 30 s
@@ -6026,6 +6040,11 @@ the sticky flag, and the handler's very next safepoint — which is *inside* `pr
 takes it. While a flood continues, the window between catching E0046 and clearing the bound
 is never wide enough, so the documented remedy is unreachable. Only "let it crash under a
 supervisor", the third option in the hint, actually works.
+
+**Earlier sighting.** KI-98 (2026-08-31) is this defect, recorded as a not-reproducible
+watch item with a missed-wake hypothesis (the KI-88 family). That hypothesis is wrong, and
+the reason it stayed unreproducible is that the window is narrow on the VM and wide on the
+tree-walker — which the differential gate would have shown, had it been running both halves.
 
 **Why it was not seen.** `tests/process_limit_test.blsp`'s "the handler can drain and clear
 the bound — the process recovers" is a correct test of this, and it mostly passes under the
