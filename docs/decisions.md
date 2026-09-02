@@ -20016,8 +20016,14 @@ filter each turn it red.
 same reason: their values track how far *that* install has got (`%std-image-tables!` clears
 `*std-image-sections*` once any module materialises), so they differ by module load order
 between two runs rather than by anything the prelude image carries. This was found by CI,
-not locally — the two arms happened to agree on this box and disagreed on the runner, which
-makes it the second thing about this guard that only a red run could teach.
+not locally — the two arms happened to agree on this box and disagreed on the runner.
+
+The exclusion then failed to exclude, twice over: `reflect/global-names` yields **symbols**,
+and testing one for membership in a set of strings is silently always-false, so the filter
+was a no-op that passed here and stayed red on CI. The test now asserts each excluded name
+is genuinely absent from both dumps, which is the same discipline as the `GLOBALS` header
+check below — *an exclusion that quietly excludes nothing is indistinguishable from one that
+works, until the thing it was meant to hide disagrees.*
 
 **The guard's own near-miss is worth recording.** Its first cut compared two *empty* strings
 — the dump program died on an unbound `seq/sort`, and `"" == ""` is agreement, so it passed
