@@ -57,6 +57,24 @@
         (assert= (first cspan) 6)
         (assert= (second cspan) 12)))
 
+    ;; The walk builds ONE accumulator and reverses it once, rather than `mapcat`-ing a
+    ;; fresh list per level (O(nodes × depth) allocation for O(nodes) of work — the dominant
+    ;; half of an editor's per-keystroke fontify). Source order is therefore a property of
+    ;; the reversal, not of the concatenation, so it is worth pinning on something DEEP:
+    ;; a nested method body whose spans must still come out ascending and unduplicated.
+    (test "source order survives nesting, at depth"
+      (let (src "class A\n  def a # one\n    if x # two\n      y # three\n    end\n  end\nend\n"
+            spans (editor/treesit/fontify src :ruby (editor/treesit/face-of-kinds rb-faces))
+            starts (map spans first)
+            comments (filter spans
+                       (fn (sp) (= (nth sp 2) (editor/face/face :syntax/comment)))))
+        ;; every span, at every depth, in source order and none emitted twice
+        (assert= starts (sort starts))
+        (assert= (count (seq/distinct starts)) (count starts))
+        ;; the three comments come out at their three nesting levels, delimiter included
+        (assert= (map comments (fn (sp) (string/substring src (first sp) (second sp))))
+          (list "# one" "# two" "# three"))))
+
     (test "an unmapped kind yields no span for that node (descends instead)"
       ;; with an empty table nothing is coloured
       (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-kinds {})))
