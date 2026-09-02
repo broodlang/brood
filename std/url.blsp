@@ -185,13 +185,16 @@ where a decoded query stops being decodable is the query, not one field."
   (if (empty? parts)
     acc
     (let (part (first parts)
-          eq (index-of part "=")
-          k (url-qdecode-str (if (< eq 0) part (string/substring part 0 eq)))
-          v (if (< eq 0) "" (url-qdecode-str (string/substring part (+ eq 1) (string/length part)))))
-      (cond
-        (failure? k) k
-        (failure? v) v
-        else (url-parse-query-pairs (rest parts) (assoc acc k v))))))
+          eq (index-of part "="))
+      ;; `with`, not a `cond` of two `failure?` arms (ADR-313): "the first component that
+      ;; cannot be decoded is the answer" is what this says, and the guards were four lines
+      ;; spelling it out. Either key or value may fail; whichever does falls out.
+      (with (k (url-qdecode-str (if (< eq 0) part (string/substring part 0 eq)))
+              v
+              (if (< eq 0)
+                ""
+                (url-qdecode-str (string/substring part (+ eq 1) (string/length part)))))
+        (url-parse-query-pairs (rest parts) (assoc acc k v))))))
 
 (defn query-decode (s)
   "Parse a query string `key=value&key=value` into a string→string map,

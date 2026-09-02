@@ -19867,3 +19867,128 @@ hits across std/ + tests/ → 5 → 0, the 5 being catch-all arms of guarded dis
 forbids. A short-circuiting fold is deferred until the new warning shows the need — the
 concrete evidence ADR-011 asks for before adding a knob. `conj` still declares no domain,
 so `(conj <failure> x)` is silent when written directly; that is separate work.
+
+## ADR-313 — Stopping on a failure is a mechanism you reach for, not something primitives do
+
+**Date:** 2026-09-01
+
+**Context.** ADR-310 made a failure a returned *value* and logged its own residual risk:
+"a failure, being a value, can be stored — `(conj acc f)` keeps one." ADR-312 hit that risk,
+added `ok->` and a fold lint, and closed by naming what was left: "`conj` still declares no
+domain, so `(conj <failure> x)` is silent when written directly; that is separate work."
+This is that work, and the case that forced it shows why the earlier answers were not enough:
+
+```brood
+(defn calc (expr)
+  (ok-> expr
+    (string/split)
+    (reduce '()
+      (fn (((x y & acc) "+") (conj acc (+ x y)))
+          ((acc num) (conj acc (string/->number num)))))
+    (first)))
+```
+
+Measured before this ADR: `(calc "1 -")` and `(calc "-")` answered with a failure and looked
+right; `(calc "1 - 1")` answered **`1`**, and `(calc "1 - 1 +")` **raised**
+`+: expected number, got failure`. The two that looked right were right by accident — `conj`
+prepends, so a stored failure is only visible when the bad token happens to be last.
+`nest check` was silent on all of it.
+
+**The alternative that was built, measured, and rejected.** The first implementation made a
+failure **absorbing**: handed to any primitive that could not use it, it came back out, and
+it could never become a collection element. It was built end to end — the seam at
+`LispError::wrong_type`, the three native-call seams, storage refusal in the constructors,
+merged `:causes` — and it *worked*: the calculator above became correct with no edit at all.
+It is rejected anyway, for two reasons found by running it.
+
+- **It stops at the primitive boundary, which is the wrong boundary.** A `defn` handed a
+  failure runs its body, branches on it, and answers with its own. Measured:
+  `(charge <failure> 250)` did not stop — it took its else branch and returned
+  `#failure{"declined"}`, **losing the cause** (`"no such user: 9"`). Every chain of
+  fallible *user* functions — the exact case `with` exists for — was still broken. Making
+  calls failure-strict would fix that and cannot be unconditional: `failure?` and
+  `error-message` are themselves `defn`s, so it would need a per-function opt-out marker
+  and an argument scan on the hottest path in the runtime.
+- **Silent absorption breaks shapes.** Refusing a failure as a collection element made
+  `[:f (parse "x")]` collapse to the bare failure, so a worker's tagged reply changed shape
+  and the receiver's `([:f f] …)` clause **silently stopped matching**
+  (`tests/try_catch_test.blsp` caught it). Narrowing the rule to spare literals fixed that
+  case and left the boundary arbitrary — `(conj [] f)` refuses, `[f]` does not.
+
+Absorbing everywhere also has no honest type story: the checker must then either widen every
+downstream call to `T | failure` — noise at every site — or lie.
+
+**Decision.** A primitive's behaviour is **unchanged**: a failure reaching one still raises,
+exactly as before. Stopping on a failure is something you *say*, with one of three
+mechanisms, chosen to cover the three shapes a failure can be produced in.
+
+1. **`ok->` — the failure pipe.** Threads first-argument like `->`; the first step yielding
+   a failure short-circuits and that failure falls out, never nil (the message is the whole
+   reason a failure exists). `nil` is not a sentinel here: absence and failure are separate
+   channels, so `ok->` threads straight through a nil.
+2. **`with` — the failure `let`.** Bindings read exactly like `let`'s; the first value that
+   is a failure short-circuits the form to that failure. This is the mechanism that reaches
+   a chain of **your own** functions, which `ok->` cannot, because it *binds* rather than
+   threads — the later steps never run at all. The target may still destructure: the value
+   is bound to a temporary and tested first, so a failure never reaches a pattern that could
+   not match it.
+
+   This **replaces** Elixir's `with`, which the tree had. Elixir needs `{:ok, a} <- expr`
+   because it has no failure kind — the tuple SHAPE carries the signal, so every step must
+   spell out a pattern for "kept going", and an `:else` section must re-match the shapes that
+   did not. Brood has a failure kind, so the pattern is redundant and so is `:else`. Every
+   call site of the old `with` in this tree matched `[:ok x]` tuples, the shape ADR-310
+   rejected as "structurally at war with `->`" — evidence that the pattern-driven form was
+   answering a question this language does not have.
+3. **A fold stops once its accumulator is a failure.** Neither of the above can reach this:
+   the accumulator is threaded by the combinator, so there is no binding or pipe step to put
+   a sentinel on. Without it, a callback returning a failure hands it to the *next* step,
+   which raises one item later naming the wrong thing. This is the short-circuiting fold
+   ADR-312 deferred pending evidence; the calculator is that evidence.
+
+**`some->` is deleted** (ledgered under ADR-304, so a stale caller is pointed at `->`). It
+stopped on `nil`, which since ADR-310 means only "the lookup found nothing" and is an
+ordinary value everywhere else in the language — a pipe for a channel that is not one, with
+`get-in` already covering the nil-chaining it was written for. It had no call site in `std/`
+outside its own docstring and tests.
+
+**What this makes true.** The calculator is correct with one `with` in its callback and the
+`ok->` it already had — every input answers 2, failure, failure, failure, failure — and the
+failure that falls out names the *cause* (`not a number: "-"`), not whatever the next step
+complained about.
+
+**The channels, restated.** `nil` means **nothing** — exclusively. `(get m :absent)` is nil
+because a missing key is an absence, and that stays. A **failure** means a value of the
+expected type could not be produced. A **raise** stays the third channel, for bugs and the
+unexpected.
+
+**Two checker changes shipped with it.**
+
+- **An impossible `failure?` is reported.** `(failure? n)` where `n` has no way to be a
+  failure is a guard the author believes is doing work and is not; the branch behind it is
+  dead. Sound because `GradualTy::bound` is an *upper* bound (`soundness_oracle` asserts
+  it), so a bound disjoint from `failure` means no runtime value can satisfy the test. Two
+  exemptions, both measured rather than guessed: a **gensym** argument is not the author's
+  test (`ok->`, `with` and the `match` lowering all emit `(if (pred g__N) …)` over
+  temporaries — 27 of the first run's 84 hits), and for the wider predicate set a
+  written-out **literal** is skipped (a further 32 hits, all deliberate negative assertions
+  in the predicate test files). Scoped to `failure?`, it fires **zero** times across
+  `std/` + `tests/` and so ships at no triage cost. The same test over every predicate in
+  `Ty::tested_by` reports 25, of which **4 are in `std/`** and want triage — widening is
+  left for that pass, which is the ADR-011 order.
+- **A branchless `(if test)` types as `nil`.** It fell through to "unknown", and unknown is
+  contagious: `(defn calc (expr) (if (not (failure? (string/->number expr)))))` read as
+  `(string -> any)`, and every check that needs a pinned body type went quiet on it —
+  including the declared-return check, the one thing that would have named the missing
+  branches. The evaluator yields `nil` either way, so the type is exactly `nil`. Zero new
+  warnings tree-wide.
+
+**Consequences.** `(conj acc <failure>)` still stores silently — deliberately: what this ADR
+adds is somewhere to say "stop here", not a primitive that guesses. Absorption's merged
+`:causes` went with it: with no absorption there is no point at which several failures meet.
+Migration cost across every project in the tree was **nil** — no project used `some->`, and
+no project used the old pattern-driven `with`, so the two breaking changes broke nothing.
+`std/url.blsp`'s query decoder is the one place the new `with` replaced existing code (two
+`(failure? k) k` guard arms). `std/datetime.blsp` deliberately keeps its `not (failure? …)`
+guards: its outer `or` re-reports any component failure against the input the caller
+actually passed, which propagating the component's own message would lose.

@@ -62,7 +62,7 @@ def  fn  quote  quasiquote  if  do  let  letrec
 Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (lowers to `(def name (%make-macro (fn …)))`), `defn`, `defn-` / `def-`, `defdyn`, `binding`,
 `cond`, `when`, `unless`, `and`, `or`, `match`, `try` / `catch`, `->` / `as->`,
-`some->` / `cond->` / `doto`, `if-let` / `when-let`,
+`ok->` / `cond->` / `doto`, `if-let` / `when-let`,
 `fmt` (string interpolation), `receive`, `spawn`.
 
 ## Defining things
@@ -1024,8 +1024,14 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   never vanishes into a default: `(or (string/->number s) 0)` yields the *failure*, not
   `0`. To default, say so: `(let (n (string/->number s)) (if (failure? n) 0 n))`. It is
   also *not* `nil`, which still means absence (`get`, `nth`, `os/env`, `first` of empty).
-  There are **no call-site wrappers**: no `attempt`, no `result`, no `ok->`. `seq/keep`
-  drops only `nil`, so a failure is kept rather than silently dropped.
+  There are **no call-site wrappers** (`attempt`, `result`) and no primitive absorbs a
+  failure — `(+ 1 <failure>)` raises and `(conj acc <failure>)` stores. To stop on one you
+  say so, with the three ADR-313 mechanisms: **`ok->`** (the failure pipe — the first
+  failing step short-circuits and falls out), **`with`** (the failure `let` — bindings like
+  `let`'s, the first failing value short-circuits; this is the one that reaches a chain of
+  YOUR OWN functions, because it binds rather than threads), and a **fold that stops once
+  its accumulator is a failure** (the case neither of the others can reach, since the
+  accumulator is threaded by the combinator).
 - **`math` module** (`math/…`, or `(:use math)`; a qualified `math/sqrt` auto-loads
   it — ADR-227): `abs` `ceil` `round` `round-to` (round to N decimals, stays a number)
   `pow` `sqrt` `clamp` `sum` `product`, the sign/parity predicates `positive?`

@@ -1,0 +1,65 @@
+(defmodule rpn)
+
+;; A reverse-Polish calculator, written on the failure channel (ADR-310/313).
+;;
+;; It is here because it is the smallest program that needs all three ways of stopping on
+;; a failure, and shows where each one belongs:
+;;
+;;   `with`   inside the fold's step — a failure produced while classifying a token stops
+;;            THAT step, and never reaches the `conj` below it
+;;   the fold itself stops once its accumulator is a failure, so the tokens after a bad
+;;            one are not evaluated against it (neither `with` nor `ok->` can reach this —
+;;            the accumulator is threaded by `reduce`, not by the caller)
+;;   `ok->`   for the pipe, so `result` never runs on a failed stack
+;;
+;; And it shows the one thing none of them do: `classify` deliberately REPLACES the
+;; parser's failure with its own, because "not a number" is about digits and what the
+;; caller needs to hear is that the token is not a symbol this calculator knows.
+
+(def- ops {"+" + "-" - "*" * "/" /})
+
+;; A token is an operator, a number, or a mistake — and the mistake is the interesting
+;; case, so it says which token and what was wrong with it.
+(defn- classify (token)
+  (let (f (get ops token))
+    (cond
+      f [:op f]
+      ;; `with` propagates a cause; here we want to REPLACE it — the parser's
+      ;; "not a number" is about digits, and what the user needs to hear is that the
+      ;; token is not a symbol this calculator knows. So: test, and say our own thing.
+      else
+        (let (n (string/->number token))
+          (if (failure? n)
+            (failure (pr-str token) " is not a valid symbol")
+            [:num n])))))
+
+(defn- step (stack token)
+  (with (t (classify token))
+    (match t
+      ([:num n] (conj stack n))
+      ([:op f] (match stack
+                 ((b a & rest) (conj rest (f a b)))
+                 (_ (failure "not enough operands for " (pr-str token))))))))
+
+(defn- result (stack)
+  ;; NOTE the patterns are LIST patterns — `conj` prepends onto a list, so the stack is
+  ;; `(top next …)`. A vector pattern `[x]` would never match it, which is the kind of
+  ;; near-miss that reads as "the code is wrong" instead of "the pattern is".
+  (match stack
+    (nil (failure "empty expression"))
+    ((x) x)
+    (_ (failure (count stack) " values left on the stack: " (pr-str stack)))))
+
+(defn rpn (expr)
+  (ok-> expr (string/split) (seq/remove $ (fn (t) (= t ""))) (reduce '() step) (result)))
+
+(defn- show (src)
+  (io/puts (str (string/pad-right (pr-str src) 18)
+             " => "
+             (try (pr-str (rpn src)) (catch e (str "RAISES: " (error-message e)))))))
+(show "3 4 +")
+(show "5 1 2 + 4 * -")
+(show "3 foo +")
+(show "3 +")
+(show "3 4")
+(show "")
