@@ -365,10 +365,15 @@
     (refute (failure? (datetime/parse-date "2000-02-29")))
     (is (failure? (datetime/parse-date "1900-02-29"))))
   (test "ordinary dates still parse"
+    ;; check-allow :type-mismatch — the parse of a written-out valid date cannot fail,
+    ;; but its TYPE still carries the failure arm, and reading a component off it
+    ;; unguarded is what the checker reports (correctly) everywhere else.
     (let (d (datetime/parse-date "2026-08-24"))
-      (assert= 2026 (datetime/date-year d))
-      (assert= 8 (datetime/date-month d))
-      (assert= 24 (datetime/date-day d)))))
+      (refute (failure? d))
+      (check-allow :type-mismatch
+        (assert= 2026 (datetime/date-year d))
+        (assert= 8 (datetime/date-month d))
+        (assert= 24 (datetime/date-day d))))))
 
 (describe "parse-time — out-of-range components fail"
   (test "a negative component"

@@ -69,6 +69,12 @@ answers `((render [x]))`."
   "Recompute the fingerprint of a file's dep-keys (from check-file-deps) against the current global image. The incremental check cache reuses a file's warnings iff this equals the stored fingerprint."
   (%check-deps-fp dep-keys))
 
+(defn strict-checking? ()
+  "Is STRICT checking on for this process (`nest check --strict`, or `BROOD_CHECK_STRICT=1`)? A verdict depends on the mode that produced it, which is why the incremental check cache keys its manifest on this.
+
+    (reflect/strict-checking?)   → false"
+  (%check-strict?))
+
 (defn check-file (path & more)
   "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file. `required-mods` is the file's transitive require-closure (module-name strings) — the KI-17 reachability set that flags a qualified `mod/name` whose module the file never requires; omit it (single-file / editor) to disable that lint."
   (if (empty? more) (%check-file path) (%check-file path (first more))))

@@ -1788,6 +1788,22 @@ Runtime housekeeping (both items landed):
 
 ### Language core & types
 
+- ✅ **The converse failure lint — "this can fail and nothing guards it"** (2026-09-02,
+  ADR-316). `deferred.md` had it blocked behind an inferred "can fail" bit in D's `nothrow`
+  shape; measuring first showed the premise was false. `failure` is a **tag** (ADR-310), so
+  it rides the ordinary union — the producers declare it and an unannotated wrapper infers
+  it — and what was missing was a *reporting* rule, not knowledge. A failure is now never a
+  valid materialisation of a domain that excludes one, read by inclusion in **both** modes
+  where every other arm of a union keeps the gradual overlap reading. Cost measured before
+  shipping: 0 across `std/`, 6 across `tests/`+`examples/` (written-out literals that
+  cannot fail, carrying `check-allow`), **8 in bedit — every one a real bug**, and all one
+  shape: a `nil?`/truthiness guard written before ADR-310 made a failure truthy, which a
+  failure walks straight through into arithmetic that raises. ⬜ **bedit's eight are not
+  fixed** — downstream repo, CI pins it. Also fixed on the way: the incremental check cache
+  was not keyed on the checking MODE, so a plain `nest check` poisoned it for the following
+  `nest check --strict` — CI runs the two gates back to back, so the strict gate had
+  stopped being able to fail (`crates/nest/tests/check_cache_mode.rs`).
+
 - 🟡 **Elixir-loved ergonomics — borrow the beloved features that fit a small,
   immutable Lisp** (2026-07-28). Survey of what Brood still lacks vs. Elixir's
   most-liked features (pipe / `with` / pattern-matching / OTP / specs / `mix` /
@@ -1892,6 +1908,18 @@ Runtime housekeeping (both items landed):
     catches a declared `float` return, and a result fed somewhere non-numeric, at no cost in
     false positives. `int.union(ratio)` in `numeric_call_ty`; tests in `check::tests` +
     `tests/sig_adoption_test.blsp`.
+  - ✅ **Narrowed first, as the plan below ordered** (2026-09-02). Three of the four shapes
+    listed as blockers are decided off the int-literal refinement (ADR-117), at the TYPE
+    level so a callback and a fold share them: a literal **±1 divisor** keeps the
+    numerator's kind (`(/ x 1)` is `int`), and operands whose literal sets are known fold
+    exactly (`(/ 6 3)` is `int`, `(/ 5 2)` is `ratio`, unary `(/ 2)` is `ratio`). A zero
+    divisor declines — `(/ 6 0)` raises, and typing an expression that cannot produce a
+    value would state the arithmetic rather than the language. The narrowing pays twice:
+    the two correct programs stop carrying an unprovable union, and `int` declared over
+    `(/ 5 2)` is now a **named finding** — `/` is exact, not integer division, which is the
+    mistake a newcomer brings from another language. The fourth and fifth shapes,
+    `(/ (* 2 x) 2)` and `(/ x x)`, are left: both need form-level syntactic analysis for
+    expressions nobody writes.
   - ⬜ **The residue stays deferred — now measured, not argued** (2026-08-28). A body of
     `int | ratio` **declared `int`** is correct whenever the numerator is even. The
     deferral is *architectural*, not an omission: the body grades as **dynamic**, so

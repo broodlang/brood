@@ -3059,6 +3059,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         module_direct_requires);
     def(
         heap,
+        "%check-strict?",
+        Arity::exact(0),
+        Sig::new(vec![], bool_ty),
+        &[],
+        "Is STRICT checking on for this process (`nest check --strict`, or BROOD_CHECK_STRICT=1)? A verdict depends on the mode that produced it, so the incremental check cache keys its manifest on this — without it a plain run's cached verdicts are reused by a strict one, and the strict gate silently reports less than it found.",
+        check_strict,
+    );
+    def(
+        heap,
         "%check-deps-fp",
         Arity::exact(1),
         Sig::new(vec![any], string),
