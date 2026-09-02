@@ -81,6 +81,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
+| KI-104 | **`includes?` scanned a set instead of asking its trie — a correct answer given 64x too slowly** — `includes?` is the membership question people reach for first, and it special-cased maps (searching values) but not sets, so `(includes? #{…} x)` fell through to `index-of` and walked the set. The result was always right, so no test could see it | ✅ **FIXED 2026-09-02** — a `(set? coll) (%set-has? coll x)` arm ahead of the map arm in `std/prelude/seq.blsp`; 500 lookups over a 500-element set went 29 ms -> 0.4 ms, matching `contains?`. Guarded by `set_test.blsp` "includes? answers a set the same way contains? does" |
 | KI-102 | **`tcp/set-binary` on an accepted socket is racy — a server could not reliably be binary** — `breakage/chaos2_tcp_stress` P38 echoed 512 bytes for a 256-byte payload under load: the accepted socket is already reading when `[:tcp-accept …]` reaches its owner, so a client that sends immediately gets its first chunk decoded as TEXT, and 128 ASCII + 128 U+FFFD re-encodes to 512 | ✅ **fixed 2026-09-02** — a listener's binary mode is now inherited by every socket it accepts (`gen_tcp:listen(Port, [binary])`'s shape), which has no window because the listener's mode is fixed before any connection exists. Guard `tests/tcp_test.blsp` "a listener's binary mode is inherited by the sockets it accepts" + its inverse, sabotage-verified |
 | KI-100 | **a ~5-6% compute regression: two clean branches, a slow merge** — every benchmark compute row 4-10% slower than the published 0.19.1 column, checksums unchanged. Separately, boot +2.8ms (+14.5%), which tracks the stdlib growing (5199 -> 5332 image bindings) and reads as feature cost | ⚠️ **OPEN 2026-09-01** — **bisected**: the first bad commit is the MERGE `0f57e30b`, and both parents are fast (`2dc7d2e6` ADR-302 data-first, ratio 1.016; `25a558d4` mainline with §7.5 JIT increments 1-3, ratio 0.992; the merge 1.061, reproducible). `std/` is IDENTICAL across the merge, so the delta is kernel-side: ADR-302's std is fast on the old kernel and the new kernel is fast on the old std — only the combination is slow. Increment 3 excluded (`BROOD_NO_XCALL` doesn't close it); present at **tier 1 too** (1.046), so not codegen — **§7.5 costs ~5 points on ADR-302's std and 0 on the old std**; RootsBuf (`115faead`) alone reproduces about half of that (1.030 -> 1.052), confirmed contributor but not the whole story. **MECHANISM FOUND**: instruction-fetch pressure, not work — icache misses +48%, iTLB +96%, dcache FLAT, instructions only +1.25%. §7.5 emits more code per arm; ADR-302 doubles the arms that lower (158 vs 76); together they spill the L1 icache/iTLB. `fib` (small footprint) is unaffected at 1.0010. **Huge pages are NOT the fix** (iTLB delta is <1% of the cycle delta — it is a symptom, not a cost). Two faces of one cause: `json` +23% INSTRUCTIONS (rooting-heavy), `mandelbrot` +48% icache with instructions flat (footprint); `fib`/`collatz`/`sort` are flat, so arm count is not the predictor. **RE-BASELINED at HEAD**: most of it is a FIXED per-run cost (~4 ms on `startup` with no workload; `bintree` a flat ~10-13 ms whatever N, ratio decaying 1.246 → 1.095 → 1.027 by amortization alone; profile shows cranelift `Verifier`+`regalloc2` on the JIT thread). Only `mandelbrot` shows genuine steady state, ~1.034 at both N=1400 and N=3000. So the published "every compute row 4-10% slower" is largely one constant measured at short sizes. `json`'s +23% is already gone at HEAD. Two separate fixes; start from the HEAD table, not the historical bisect. Probe harness in `target/ki100/` |
 | KI-98 | **`process_limit_test.blsp:114` ("the handler can drain and clear the bound — the process recovers") timed out at 30 s under a full `nest test`, twice in five runs** — the flooded worker's `[:recovered …]` never arrived: either the parked receiver never re-entered `receive_match` after its breach armed (a missed wake), or the E0046 raise/drain hung. Full-suite context only — **falsified 2026-09-01**, see the status cell | ⚠️ **WATCHING 2026-08-31** — not reproducible on demand: 16 solo runs green, 10 runs under 8-way CPU load green; only full-suite context shows it (~3/8 — the third sighting was a full tree-walker half, so it is engine-independent). Sighted on a tree carrying the KI-91/92 mailbox fixes, but those touch the scan/consume path, not delivery/wake, and a 3-run pre-fix control neither fired nor rules anything out (samples too small either way). If it recurs: the run's own log names it; capture whether the worker's E0046 was raised at all (`BROOD_SCHED_DBG=1` run/park lines for the worker pid is the next probe). **Sighting 2026-09-01: CI's `make gcstress` step, run 5b20b307** — that step runs the file ALONE (a debug build, `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`), so the "full-suite context only" reading is wrong: it fires solo given the right timing, and GC stress on a loaded 2-core runner supplies it. Not reproducible here — 25/25 green under the same flags, and `make gcstress` clean in a full local pass — so the missing ingredient is machine load, not suite context. That makes CI's gcstress step a cheaper repro surface than a full suite run |
@@ -6181,7 +6182,63 @@ template plus three behavioural probes that define `get`/`reverse`/`bound?` and 
 value comes back. It pins `receive` as the known exception, so a *new* offender fails the build.
 Sabotage-verified: removing `defrecord`'s escape fails both the scan and the probe.
 
-## KI-103 — a `:max-mailbox` breach re-trips inside its own handler, killing the remedy ⚠️ OPEN 2026-09-02
+## KI-104 — `includes?` scanned a set instead of asking its trie ✅ FIXED 2026-09-02
+
+**Symptom.** None visible. `(includes? #{…} x)` returned the correct answer; it just did so
+by walking the set. On 500 elements, 500 lookups cost 29 ms where `contains?` cost 0.4 ms —
+**64x**. Nothing failed, so nothing pointed at it.
+
+**Cause.** `includes?` (`std/prelude/seq.blsp`) dispatched on `map?` — searching a map's
+VALUES, which is its documented behaviour — and let everything else fall through to
+`index-of`. A set is not a map (`map?` is false on `#{…}`, ADR-060), so it took the sequence
+path. `contains?` had the fast arm (`(if (set? m) (%set-has? m k) …)`) and `includes?` did
+not, which made the *less* obvious of the two functions the correct one to reach for.
+
+**Where it was found.** In bedit, not here. The playground's `realign-evaluated` asks "did
+this record match anything?" once per record; written as `includes?` over a `#{}` of matched
+keys, that one call was **287 ms of a 309 ms pass on a 500-form buffer, on the keystroke
+path** — the editor was unusable above about a page of code. The bedit-side fix was to say
+`contains?`; the language-side fix is that saying `includes?` should not have been a trap.
+
+**Fix.** One arm, ahead of the map arm:
+
+```lisp
+(set? coll) (%set-has? coll x)
+```
+
+**Guard.** `tests/set_test.blsp`, "includes? answers a set the same way contains? does" —
+which asserts agreement with `contains?` rather than a bare true/false, so the two cannot
+drift apart again. It cannot catch a *slow* regression; the equivalence is what is testable,
+and the arm is what makes it fast.
+
+**The reusable part.** A performance bug that returns the right answer has no failing test
+to find it, so the only defence is that the obvious spelling is the fast one. When a type
+gains a fast membership path, every function that answers "is this in that" has to learn it,
+not just the one that motivated the primitive.
+
+## KI-103 — a `:max-mailbox` breach re-trips inside its own handler, killing the remedy ✅ FIXED 2026-09-02
+
+> **Resolution 2026-09-02.** The bound is **one-shot per arming**. Taking the breach flag
+> now LATCHES it, so no further enqueue re-arms until the bound is set again — which gives
+> the handler the window it never had. Setting the bound (either direction, `n` or `nil`)
+> clears the latch, so a process that re-sets its bound is protected again.
+>
+> **The first fix was wrong and the repro said so**, which is the part worth keeping. A
+> separate `overflow_raised: AtomicBool` checked before arming is a check-then-act race: a
+> sender reads "not yet raised", the receiver's probe latches, and the sender stores anyway
+> — arming *after* the latch, so the handler still died inside `proc/flag`. It moved the
+> failure rate from ~3 in 4 to ~1 in 10 and looked like a residual second bug. It was the
+> same bug. The flag is now ONE word with three states (`0` clean, `1..` armed with the
+> breaching length, `usize::MAX` latched), armed with `compare_exchange` from clean and
+> taken-and-latched with `compare_exchange` — no window to lose.
+>
+> Measured after: minimal repro 20/20 under the tree-walker (was ~1 in 4), and
+> `process_limit_test` 12/12 on each engine (was ~1 in 4 under the tree-walker). Two
+> regression tests pin the semantics: a handler that does NOT clear the bound still survives
+> to report, and re-setting the bound re-arms it. The second needs a drain and a handshake to
+> be observable — re-arming while the queue is still over the bound trips again immediately,
+> which is the bound working as specified.
+
 
 **Symptom.** A process that catches E0046 and follows the error's own hint is killed part-way
 through following it:

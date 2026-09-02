@@ -9820,3 +9820,33 @@ Only a string is text now. And a ghost note is capped at 64 columns: a checker m
 run to a couple of hundred, and drawn from the end of an already-indented line it walked off
 the right edge with the readable half off-screen. The full text was always one keystroke
 away in the echo row.
+
+## 2026-09-02 (later) — `includes?` scanned a set; the bug was found in bedit and fixed here (KI-104)
+
+`(includes? #{…} x)` walked the set. It always answered correctly — it just did so in O(n)
+where the trie answers in O(log n), and `contains?` had had the fast arm all along. On 500
+elements, 500 lookups: **29 ms vs 0.4 ms**. `includes?` dispatched on `map?` (searching a
+map's values, which is right) and let a set fall through to `index-of`; a set is not a map
+(ADR-060), so the *less* obvious of the two membership functions was the correct one to
+reach for, with nothing to say so.
+
+**Found downstream, which is the interesting part.** bedit's playground re-keys its
+per-form records to the current text on every keystroke, and asked "did this record match
+anything?" once per record as `includes?` over a `#{}` of matched keys. That one call was
+287 ms of a 309 ms pass on a 500-form buffer — the editor was unusable above about a page of
+code, with no failing test anywhere, because every answer was right. The editor found a
+language wart by being fast enough elsewhere that this one stood out.
+
+A performance bug that returns the correct answer has no failing test to find it, so the
+only real defence is that the obvious spelling is the fast one. When a type gains a fast
+membership path, every function answering "is this in that" has to learn it — not just the
+one that motivated the primitive. The guard in `set_test.blsp` asserts agreement with
+`contains?` rather than a bare true/false, so the two cannot drift apart again.
+
+**Also, in bedit** (`../bedit`, its own repo): the same pass turned up two real bugs in the
+playground's async path (results stranded invisible when a reply landed on a buffer the user
+then reverted; a landed result painting *beside* the `⋯ evaluating…` it should have
+replaced), and one more O(notes × buffer) hot spot — asking a *string* which line an offset
+is on, once per note. That one was a toolkit question answered by hand: the rope already
+indexes lines (`text/char->line`), so the fix deleted ~45 lines of hand-rolled line
+arithmetic rather than adding any.
