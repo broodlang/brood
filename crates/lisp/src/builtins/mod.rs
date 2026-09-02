@@ -3330,7 +3330,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "%in-ns",
         Arity::exact(1),
-        Sig::new(vec![sym], sym),
+        // `(or symbol nil)` both ways. `in_ns`'s own comment states that nil is intended —
+        // it "clears the namespace back to ROOT … the restore half of a save/set/restore
+        // bracket", and `reflect/current-ns` answers nil at root precisely so a bracket can
+        // save and put it back. The signature said `symbol`, which made
+        // `%contracts-apply-pending!`'s restore read as a type error under
+        // `nest check --strict` the moment `reflect/current-ns` stopped claiming it always
+        // answers a symbol. The call was right; this was the lie.
+        Sig::new(
+            vec![sym.union(Ty::of(Tag::Nil))],
+            sym.union(Ty::of(Tag::Nil)),
+        ),
         &[],
         "",
         in_ns,
