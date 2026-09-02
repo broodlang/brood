@@ -755,8 +755,16 @@
                                      (buf-relay-loop bp tag report)))))
 (defn buf-relay (bp tag report)
   (do (subscribe-buffer bp buffer-text) (buf-relay-loop bp tag report)))
-(defn drain-relayed (acc)
-  (receive ([:relayed t v txt] (drain-relayed (cons [t v txt] acc))) (after 500 (reverse acc))))
+(defn drain-relayed (want acc)
+  "Collect `want` relayed messages. The count is KNOWN — one per subscriber — so waiting for
+it is exact, where a wall clock is a race: this drained on a 500 ms grace, which beat the
+senders on an idle machine and is the shape that flaked `process_limit_test` under a loaded
+suite run. `*test-wait-ms*` is a failure deadline, reached only if a relay never comes."
+  (if (= (count acc) want)
+    (reverse acc)
+    (receive
+      ([:relayed t v txt] (drain-relayed want (cons [t v txt] acc)))
+      (after *test-wait-ms* (reverse acc)))))
 
 (describe "buffer process — subscribe / push (the collaboration seam)"
   :isolated (test "a subscriber is seeded, then pushed each edit with a bumped version"
@@ -793,10 +801,13 @@
           bp (spawn-buffer (make-buffer "")))
       (spawn (buf-relay bp :a me))
       (spawn (buf-relay bp :b me))
-      ; let both subscribe + seed
-      (receive (after 300 nil))
+      ;; Wait for BOTH seeds rather than sleeping 300 ms: each subscriber relays the seed
+      ;; before anything else, so two relayed messages IS "both are subscribed" — and it
+      ;; must be established before the edit, or a late subscriber seeds with "Z" and the
+      ;; test proves nothing about the push.
+      (assert= (count (drain-relayed 2 ())) 2)
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "Z")))
-      (let (zs (filter (drain-relayed ()) (fn (m) (= (nth m 2) "Z"))))
+      (let (zs (filter (drain-relayed 2 ()) (fn (m) (= (nth m 2) "Z"))))
         (is (includes? (map zs (fn (m) (nth m 0))) :a))
         (is (includes? (map zs (fn (m) (nth m 0))) :b)))
       (stop-buffer bp)))

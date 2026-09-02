@@ -258,7 +258,7 @@ jobs:
         run: |
           shopt -s globstar nullglob
           cargo run -q -p nest --features brood/treesit-grammars -- \
-            check std/**/*.blsp tests/**/*.blsp
+            check std/**/*.blsp tests/**/*.blsp examples/**/*.blsp
 
       # The STRICT gate over the standard library (2026-08-30): a positively-known bound
       # is read by inclusion, so `number` where `int` is declared, or `nil | string`
