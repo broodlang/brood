@@ -36,21 +36,7 @@ so this needs no new introspection surface."
   (try (do (%binding (list (symbol n)) [nil] (fn () nil)) true)
     (catch _ (check-allow :discarded-catch false))))
 
-(def- install-bookkeeping
-  ;; The stdlib IMAGE install's own bookkeeping (ADR-256), excluded for exactly the reason
-  ;; `image_matches_source.rs` excludes the same six names: their values track how far that
-  ;; install has got — `%std-image-tables!` clears `*std-image-sections*` to nil once any
-  ;; module materialises — so they differ by module LOAD ORDER between two runs, not by
-  ;; anything the prelude image does or does not carry. Excluded by name rather than by
-  ;; dropping every `*…*` global, which would hide a real omission.
-  #{"*image-sources*" "*std-image-file*" "*std-image-sections*"
-    "*std-impls*" "*std-regs*" "*std-require-edges*"})
-
-(let (names (filter (sort (reflect/global-names))
-                    ;; `reflect/global-names` yields SYMBOLS. Comparing one against a set of
-                    ;; strings is silently always-false, which made the first cut of this
-                    ;; exclusion a no-op that passed locally and failed on CI.
-                    (fn (n) (not (contains? install-bookkeeping (->string n))))))
+(let (names (sort (reflect/global-names)))
   (io/puts "GLOBALS " (count names))
   (doseq (n names)
     (io/puts n
@@ -69,8 +55,8 @@ fn dump(use_image: bool) -> (String, String) {
     cmd.env("BROOD_NO_CHECK", "1")
         .env("BROOD_NO_CRASH_REPORT", "1")
         .env("BROOD_BOOT_TRACE", "1");
-    if !use_image {
-        cmd.env("BROOD_NO_PRELUDE_IMAGE", "1");
+    if use_image {
+        cmd.env("BROOD_PRELUDE_IMAGE", "1");
     }
     let out = cmd.arg(&path).output().expect("run brood");
     (
@@ -102,22 +88,6 @@ fn an_imaged_boot_and_a_source_boot_agree_on_every_global() {
             .unwrap_or_else(|| panic!(
                 "the {label} arm printed no GLOBALS header — the dump program did not run, so                  this test can conclude nothing.\nstdout:\n{out}\nstderr:\n{err}"
             ));
-        // The exclusion must actually exclude. Its first cut compared a symbol against a
-        // set of strings and silently dropped nothing — invisible locally, red on CI.
-        for excluded in [
-            "*image-sources*",
-            "*std-image-file*",
-            "*std-image-sections*",
-            "*std-impls*",
-            "*std-regs*",
-            "*std-require-edges*",
-        ] {
-            assert!(
-                !out.lines().any(|l| l.starts_with(excluded)),
-                "the {label} arm's dump still contains {excluded}, so the install-bookkeeping \
-                 exclusion is a no-op — it is comparing the wrong type again"
-            );
-        }
         let n: usize = header["GLOBALS ".len()..].trim().parse().unwrap_or(0);
         assert!(
             n > 500,

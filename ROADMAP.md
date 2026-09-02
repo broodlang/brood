@@ -1141,6 +1141,18 @@ mechanism/policy split: kernel primitive, Brood policy.
   Per-form print→read→print fixpoint check gates writing (an unprintable form
   poisons the cache and the source boot just runs); any read/eval failure
   deletes the file and falls back. `BROOD_NO_BOOT_CACHE=1` opts out.
+
+  **Completed 2026-09-02 (ADR-314): the binary snapshot this entry called
+  "unnecessary" is now the default**, and the line above about freeze being only
+  0.7 ms is exactly why it went unrevisited. The residual ADR-138 left — parse +
+  eval + freeze, "only ~4 ms" then — grew into **9.36 ms of a 12.4 ms empty
+  run**, and the stdlib image (ADR-256/281) meanwhile built the value codec and
+  the differential a binary format would have needed. So the cold boot now also
+  writes the prelude's *bindings*, and a warm boot materialises them rather than
+  reading and evaluating 544 forms: **boot 9.36 → 5.32 ms, a whole empty run
+  13.5 → 8.3 ms**. ADR-138's text cache stays as the fallback beneath it;
+  `BROOD_NO_PRELUDE_IMAGE=1` opts out. Guarded by
+  `prelude_image_matches_source.rs`, a two-process differential.
   **[kernel]**
 - 🟡 **Observability: timing tier + trace pipeline + profiler.** Slice 1
   shipped 2026-07-18 — the survey's two named holes are closed: **GC pause

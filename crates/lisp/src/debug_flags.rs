@@ -333,6 +333,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "skip the expanded-prelude boot cache — a cold boot is ~11x a warm one, so this is visible",
     ),
     f(
+        "BROOD_PRELUDE_IMAGE",
+        ENGINE,
+        "opt IN to the prelude image (ADR-314) — boot 9.4ms -> 5.3ms, but OFF by default: an imaged boot does not carry the module-level names the prelude evaluation binds",
+    ),
+    f(
         "BROOD_NO_CHECK",
         ENGINE,
         "skip the implicit advisory type-check before a run (raw eval, e.g. when timing)",

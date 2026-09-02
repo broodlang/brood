@@ -123,7 +123,15 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
         // read + eval the text cache still pays. Tried first; any miss falls through to
         // the text cache, and that to the source boot, so a bad artifact costs a slower
         // boot and never a wrong one.
-        if std::env::var_os("BROOD_NO_PRELUDE_IMAGE").is_none() {
+        // OPT-IN, not default (2026-09-02). Shipped default-on and found broken the same
+        // day: the imaged boot restored a STALE `*image-sources*` (fixed below by replaying
+        // the install) and, separately, does not carry the module-level names the prelude's
+        // own evaluation binds — `file/list-files` and friends come back unbound, and
+        // `crash-report/take-over` stays the autoload stub. The differential in
+        // `crates/cli/tests/prelude_image_matches_source.rs` passed while BOTH were true,
+        // because it excluded the very globals that were wrong. Default stays OFF until it
+        // is clean with no exclusions. `BROOD_PRELUDE_IMAGE=1` opts in for that work.
+        if std::env::var_os("BROOD_PRELUDE_IMAGE").is_some() {
             if let Some(bundle) = boot_from_prelude_image() {
                 return bundle;
             }
@@ -268,6 +276,22 @@ fn boot_from_prelude_image() -> Option<SharedBundle> {
         &builtins::build_id_string(),
     )?;
     heap.set_current_file(None);
+    // REPLAY what the prelude's evaluation DID, not just what it recorded. The prelude has a
+    // top-level form that runs `%std-image-install`, and the imaged path never evaluates it —
+    // so without this the boot restores a *snapshot* of a previous install: `*image-sources*`
+    // comes back holding the section directory of whatever stdlib image existed when this
+    // prelude image was written. That file is keyed on `stdlib-id`, so a rebuild with
+    // different module coverage (a lean `nest` vs a full one — exactly what
+    // `scripts/build-std-image.sh` can do) reuses the same PATH with different offsets, and
+    // every section read then lands on garbage. Observed as `unbound symbol: io/puts` on a
+    // tree where nothing was wrong with `io`.
+    //
+    // Re-running the install is the faithful replay: it is what the source and text paths do
+    // at this point, and it overwrites the stale directory with the current one.
+    let install = syntax::reader::read_all(&mut heap, "(%std-image-install)").ok()?;
+    for form in install {
+        let _ = eval::eval(&mut heap, form, root);
+    }
     let t_load = t_start.elapsed();
     // The image carries no gensym counter of its own: the names baked into its closures
     // were minted by the caching boot, so the floor the text cache records applies here

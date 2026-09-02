@@ -5,7 +5,47 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Addendum 2026-08-31 (latest) — KI-97 item 1 FIXED: the handshake has a wall clock.**
+**Addendum 2026-09-02 (latest) — startup is 64% cheaper; three fixes, all guarded.**
+A `brood file` run's fixed cost went **22.8 ms → 8.3 ms** (empty program, best-of-41
+interleaved, net of harness floor):
+
+- **ADR-313 — the default crash reporter arms lazily.** `crash-report/arm-default` lived
+  inside the module, so reaching it to read an env var loaded **ten** stdlib modules on
+  every run: 9.0 ms. The kernel subscription (the only part that cannot wait) is now a
+  prelude shim; the reporter loads on the first crash. Base RSS fell 72.6 → 60.1 MB.
+- **ADR-314 — the prelude image. SHIPPED DEFAULT-ON AND REVERTED TO OPT-IN THE SAME DAY.**
+  Boot 9.36 → 5.32 ms when enabled (`BROOD_PRELUDE_IMAGE=1`), but two real breakages: a
+  stale stdlib-image section directory (fixed, by replaying `%std-image-install`) and
+  module-level names the prelude's evaluation binds that the image does not carry —
+  `file/list-files` comes back unbound and `crash-report/take-over` stays the autoload
+  stub. **Read ADR-314 before touching it.** The startup figures below are therefore the
+  *achievable* ones, not what the default currently does.
+- **`pos_at` memo** — the scanner re-walked the source 21× for column numbers; 0.55 ms.
+
+**The trap that cost the most here, twice: a gate that could not fail.** The prelude
+differential's first cut compared two *empty* strings (its dump program died on an unbound
+`seq/sort`, and `"" == ""` is agreement) and **passed a deliberate sabotage**. Its
+bookkeeping exclusion then compared symbols against a set of strings — silently
+always-false, green locally, red on CI. Both are now self-checking. If you add anything to
+this area, sabotage the guard before believing it.
+
+**What ADR-314 needs from you if you touch the prelude:** it restores *bindings*, so
+anything the evaluation merely **recorded** must be written explicitly. Three were missed in
+a row — the `defdyn` marks, `*out*` (a prelude `def` binding a native under a name
+`builtins::register` never re-creates), and def sites. `prelude_image_matches_source.rs` is
+the differential that catches the fourth; run it, don't reason about it.
+
+**Next — finish ADR-314.** Its differential passed while both bugs were live because it
+excluded the six install-bookkeeping globals, one of which *was* the first bug. Those six
+now agree once the install is replayed, so the bar to aim for is: **the differential clean
+with no exclusions**. The remaining divergence is six `file/*` names plus one sig; the
+shape to chase is that the prelude image draws its snapshot boundary at the prelude while
+the prelude's own evaluation loads modules past it, and `*features*` then claims those
+modules are loaded so they never autoload either. `ring` is +2.9% against a 0.6% floor and is
+**not** new work (instructions flat, icache +11%, arms 160 → 150): it is KI-100's layout
+mechanism, recorded there, and deliberately not pursued.
+
+**Addendum 2026-08-31 — KI-97 item 1 FIXED: the handshake has a wall clock.**
 The pre-auth timeout was `SO_RCVTIMEO` (per read, restarted by every byte), so a
 trickling peer held a `HandshakeSlot` for hours and 128 of them took inbound dist down
 silently. Now a `Deadline` shim bounds the whole exchange (15 s) on both the accept and
