@@ -81,3 +81,25 @@
     ;; Deciding by which tree we were handed warned in the editor and not on the command
     ;; line for identical source, so the exemption is structural instead.
     (assert= (unused-count "(defn f ((a) :one) ((a b) :two))") 0)))
+
+;; ---- a special form used as a value ------------------------------------------------
+;; Not an unused-binder lint, but it lives here because it is the same family: a checker
+;; diagnostic about a name in a position it cannot occupy. `is_unbound` deliberately
+;; exempts a syntactic keyword — `fn` is not a global and never will be — which left the
+;; commonest paren slip in the language silent, reporting a symptom two levels down.
+
+(describe "checker: a special form's name in a VALUE position"
+  (test "names the form that lost its parentheses, not a symptom two levels down"
+    ;; `(reduce '() fn (acc token) acc)` used to report only `unbound symbol: acc`, twice
+    (let (msgs (warnings-for "(defn calc (xs) (reduce xs '() fn (acc token) acc))"))
+      (is (any? msgs (fn (m) (string/starts-with? m "fn is a special form, not a value"))))))
+
+  (test "a LOCAL of that name is an ordinary variable, not a slip"
+    ;; several keyword names are ordinary words — `std/editor/keymap.blsp` and
+    ;; `std/prelude/control.blsp` both bind a local called `binding`, and reading it is fine
+    (assert= (count-of "(defn f (binding) (str binding))" "binding is a special form, not a value")
+      0))
+
+  (test "and a called special form is untouched"
+    (assert= (count (or (reflect/check-string-structured "(defn g (xs) (map xs (fn (x) x)))") []))
+      0)))

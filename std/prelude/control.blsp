@@ -426,7 +426,9 @@ line is EXECUTED by `doctest` (tests/doc_examples_test.blsp), so it has to be ru
           (pr-str clause)
           "` — did you mean `(catch "
           (let (params (second clause))
-            (if (and (pair? params) (not (nil? params)))
+            ;; `pair?` alone: `nil` is the empty list and is not a pair, so the `nil?`
+            ;; arm could never run.
+            (if (pair? params)
               (str (first params))
               "e"))
           " ...)`? Syntax: (try body... (catch e handler...))")

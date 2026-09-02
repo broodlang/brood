@@ -265,7 +265,8 @@
       (detach-all)
       (attach :any [:runtime :nodeup] (fn (e m md) (send me :spurious)))
       (let (w (watch-nodes 20))
-        (is (not (nil? w)))
+        (check-allow :type-mismatch
+          (is (not (nil? w))))
         ; several poll cycles, no peers → no emits
         (sleep 80)
         (stop-watch-nodes w))

@@ -3335,7 +3335,12 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "reflect/current-ns",
         Arity::exact(0),
-        Sig::new(vec![], sym),
+        // `(or symbol nil)`, not `symbol`: the docstring below has always said "nil at the
+        // root namespace", and the signature did not. That is not cosmetic — the checker
+        // read `(nil? (reflect/current-ns))` in `%defonce-qualified-name` as a test that
+        // can never be true, i.e. it called a load-bearing guard dead. Found by the
+        // impossible-predicate lint (ADR-313).
+        Sig::new(vec![], sym.union(Ty::of(Tag::Nil))),
         &[],
         "The current compilation namespace as a symbol, or nil at the root namespace (top level).\n\n    (reflect/current-ns)   → nil",
         current_ns,

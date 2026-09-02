@@ -34,7 +34,8 @@
     (is (map? {:a 1 :b 2}))
     (assert= (type-of {}) :map)
     (refute (map? 3))
-    (refute (map? (list 1 2)))
+    (check-allow :type-mismatch
+      (refute (map? (list 1 2))))
     (refute (map? [1 2])))
   (test "the empty map"
     (is (empty? {}))

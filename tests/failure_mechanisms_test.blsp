@@ -140,9 +140,11 @@
 (defn- warnings-for (src)
   (mapv (or (reflect/check-string-structured src) []) (fn (d) (get d :message))))
 
-(defn- impossible-count (src)
+(defn- impossible-count-of (src pred)
   (count (seq/keep (warnings-for src)
-           (fn (m) (if (string/starts-with? m "failure?: this can never") m nil)))))
+           (fn (m) (if (string/starts-with? m (str pred ": this can never")) m nil)))))
+
+(defn- impossible-count (src) (impossible-count-of src "failure?"))
 
 (describe "ADR-313: a `failure?` test that can never be true is reported"
   (test "on a value whose type has no way to be a failure"
@@ -163,6 +165,15 @@
 
   (test "nor on an unknown value — an untyped parameter proves nothing"
     (assert= (impossible-count "(defn e (x) (if (failure? x) 0 x))") 0))
+
+  (test "for every predicate, not just failure? — and widening it found three real ones"
+    ;; `reflect/current-ns` declared `symbol` while its own docstring said "or nil at the
+    ;; root namespace", so `(nil? (reflect/current-ns))` read as dead; a `nil?` guarded a
+    ;; function documented to answer -1; a `nil?` sat behind a `pair?` that already
+    ;; excluded nil. All three were live code the checker had never had a way to mention.
+    (assert= (impossible-count-of "(defn a (s) (if (nil? (string/length s)) 0 1))" "nil?") 1)
+    (assert= (impossible-count-of "(defn b (s) (if (map? (string/length s)) 0 1))" "map?") 1)
+    (assert= (impossible-count-of "(defn c (m) (if (map? m) 0 1))" "map?") 0))
 
   (test "nor on a macro's own guard, which the author did not write"
     ;; `ok->` and `with` both emit `(if (failure? g__N) …)` over a gensym; where the step

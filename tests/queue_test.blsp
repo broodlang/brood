@@ -107,13 +107,16 @@
   (test "queue? / pq? are true only for the real thing"
     (is (queue? (queue/empty)))
     (is (queue? (queue/push (queue/empty) 1)))
-    (is (not (queue? (pq/empty))))
+    (check-allow :type-mismatch
+      (is (not (queue? (pq/empty)))))
     (is (pq? (pq/empty)))
     (is (pq? (pq/insert (pq/empty) 1 :a)))
-    (is (not (pq? (queue/empty)))))
+    (check-allow :type-mismatch
+      (is (not (pq? (queue/empty))))))
   (test "neither is a plain collection in disguise"
     (is (not (queue? {:front nil :back nil :size 0})))
-    (is (not (pq? (list [1 :a]))))
+    (check-allow :type-mismatch
+      (is (not (pq? (list [1 :a])))))
     (is (not (= (queue/empty) {:front nil :back nil :size 0}))))
   (test "each carries its record id"
     (assert= (record-id (queue/empty)) :queue/queue)

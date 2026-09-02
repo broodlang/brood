@@ -400,7 +400,9 @@ OWNING module provides (see the block comment above). The runtime side of a
   ;; moment the first root-named pending contract existed (found by contracts_mode on
   ;; the ADR-301 merge).
   (let (i (%str-last-index-of qname-str "/" (string/length qname-str)))
-    (if (or (nil? i) (< i 0)) nil (string/substring qname-str 0 i))))
+    ;; `(< i 0)` alone — `%str-last-index-of` answers -1, never nil, which is exactly what
+    ;; the note above records. The `nil?` was vestigial from the version that had the bug.
+    (if (< i 0) nil (string/substring qname-str 0 i))))
 (defn- %contracts-apply-pending! (key)
   ;; Apply only THIS module's entries, and apply them AS the module: `sig!` on a
   ;; `defn-` name is a private reference, legal only when the compile namespace is

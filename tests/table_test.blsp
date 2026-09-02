@@ -218,7 +218,8 @@
       (is (table? t))
       (is (not (table? {})))
       (is (not (table? nil)))
-      (is (not (map? t)))
+      (check-allow :type-mismatch
+        (is (not (map? t))))
       (assert= (type-of t) :table)
       (is (not (= t {})))
       (is (not (= t nil)))))

@@ -206,7 +206,8 @@
 
   (test "self-monitor returns a ref without erroring (no special-case)"
     (let (me (self) ref (monitor me))
-      (is (not (nil? ref)))))
+      (check-allow :type-mismatch
+        (is (not (nil? ref))))))
 
   (test "hot reload race: a global redefined mid-loop doesn't crash the worker"
     ;; ADR: a `def` of an existing global rebinds it; in-flight calls keep

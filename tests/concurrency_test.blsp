@@ -202,7 +202,8 @@
   (test "a ref is its own type, distinct from int"
     (is (ref? (ref)))
     (assert= (type-of (ref)) :ref)
-    (refute (int? (ref)))
+    (check-allow :type-mismatch
+      (refute (int? (ref))))
     (refute (ref? 0)))
   (test "every ref is distinct; a ref equals itself"
     (let (r (ref)) (is (= r r)) (refute (= (ref) (ref))))))
