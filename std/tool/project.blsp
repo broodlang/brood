@@ -2525,6 +2525,141 @@ more than one namespace, and a name that moved behind `%`. Backs `nest check --f
             (get entry :informative?))
       (str "(sig " (get entry :name) " " rendered ")"))))
 
+(defn- sig-head-token (line kw name)
+  "Does `line` open `(defn name …)` / `(defn- name …)` for `kw`? Returns `name` when it
+does, so the caller writes the sig under the spelling the SOURCE uses."
+  (let (t (string/triml line)
+        head (str kw name)
+        n (string/length head))
+    (when (string/starts-with? t head)
+      (let (after (if (> (string/length t) n) (string/substring t n (inc n)) ""))
+        (when (or (= after "") (= after " ") (= after "(")) name)))))
+
+(defn- sig-defn-name-at (line name)
+  "The spelling of `name` this line declares, or nil. `file-signatures` reports names
+QUALIFIED (`regex/regex-peek`) while the definition is usually written bare — except
+in `std/reflect.blsp` and friends, where the `defn` head carries the module itself
+(`(defn reflect/read-string …)`). Try both, and keep whichever the file actually
+wrote, so the sig names the function the way its definition does."
+  (let (bare (let (i (index-of name "/"))
+               (if (and i (>= i 0)) (string/substring name (inc i) (string/length name)) name)))
+    (or (sig-head-token line "(defn " name)
+      (sig-head-token line "(defn- " name)
+      (sig-head-token line "(defn " bare)
+      (sig-head-token line "(defn- " bare))))
+
+(defn- sig-line-indent (line)
+  (let (t (string/triml line)) (string/substring line 0 (- (string/length line) (string/length t)))))
+
+(defn- sig-insertions (path lines)
+  "`[[line-number sig-text] …]` for `path`, one per signature worth declaring, in file
+order. A signature whose definition cannot be located is dropped — and counted by the
+caller, which would rather write nothing than guess a line."
+  (seq/keep (reflect/file-signatures path)
+    (fn (entry)
+      (when (not (nil? (suggestion-line entry)))
+        (let (name (get entry :name)
+              hit (seq/find (range (count lines))
+                    (fn (k) (not (nil? (sig-defn-name-at (nth lines k) name))))))
+          (when hit
+            [hit
+              (str (sig-line-indent (nth lines hit))
+                "(sig "
+                (sig-defn-name-at (nth lines hit) name)
+                " "
+                (get entry :sig)
+                ")")]))))))
+
+(defn- sig-splice (lines at text)
+  (into (into (into [] (take lines at)) [text]) (drop lines at)))
+
+(defn- sig-apply-all (lines insertions)
+  "Insert every `[line text]`, LAST FIRST.
+
+Order is the whole correctness argument. Each insertion pushes every later line down
+by one, so applying them top-down writes the second sig one line early, the third two
+early, and so on — which is exactly how the editor's declare-sig action corrupted
+`std/regex.blsp` when several were accepted against one snapshot (the head of the
+following definition ended up spliced onto the tail of the previous one, and the file
+stopped parsing). Applied bottom-up, no edit can move another's target."
+  (fold (reverse (sort (fn (a b) (< (first a) (first b))) insertions))
+    lines
+    (fn (acc entry) (sig-splice acc (first entry) (second entry)))))
+
+(defn- sig-fix-file (path write?)
+  "Add the missing signatures to one file. Returns `[added skipped]`; writes nothing
+and reports `skipped` when the result would not parse, or when a definition could not
+be located."
+  (let (text (file/slurp path)
+        lines (into [] (string/split text "\n"))
+        wanted (count (filter (reflect/file-signatures path)
+                        (fn (e) (not (nil? (suggestion-line e))))))
+        insertions (sig-insertions path lines)
+        found (count insertions))
+    (if (= found 0)
+      [0 (- wanted found)]
+      (let (updated (string/join (sig-apply-all lines insertions) "\n")
+            ;; The gate: a rewrite that does not parse is never written. This is the
+            ;; check the editor action had no way to make — it edits a buffer, not a
+            ;; file, and cannot see the result before the client applies it.
+            parses (check-allow :discarded-catch
+                     (try (do (reflect/read-all updated) true) (catch _ false))))
+        (if (not parses)
+          (do
+            (io/puts (str "  " path ": REFUSED — the result would not parse; nothing written"))
+            [0 wanted])
+          (do
+            (when write? (file/spit path updated))
+            (io/puts (str "  "
+                       path
+                       ": "
+                       found
+                       " signature"
+                       (if (= found 1) "" "s")
+                       (if write? " written" " (dry run)")
+                       (if (> (- wanted found) 0)
+                         (str ", " (- wanted found) " skipped — definition not located")
+                         "")))
+            [found (- wanted found)]))))))
+
+(defn fix-sigs (files write?)
+  "Write the checker's inferred `(sig …)` above every function that lacks one, in
+place. With `files` empty, the whole project. Backs `nest check --fix-sigs`.
+
+The bulk, safe counterpart of the editor's declare-sig action. That action is correct
+for ONE signature; accepting several against a single snapshot drifts, because every
+insertion moves the lines below it. This applies them last-first, and re-parses each
+file before writing it, so a file is either correct or untouched.
+
+`nest check --suggest-sigs` prints the same set and changes nothing."
+  (let (targets (if (empty? files)
+                  (let (root (find-root (file/cwd)))
+                    (when (nil? root)
+                      (error "fix-sigs: not in a Brood project (no project.blsp found from "
+                        (file/cwd)
+                        ")"))
+                    (source-files root))
+                  files)
+        totals (fold targets
+                 [0 0]
+                 (fn (acc path)
+                   (let ([added skipped] (sig-fix-file path write?))
+                     [(+ (first acc) added) (+ (second acc) skipped)]))))
+    (io/puts (str "\nfix-sigs: "
+               (first totals)
+               " signature"
+               (if (= (first totals) 1) "" "s")
+               (if write? " written across " " would be written across ")
+               (count targets)
+               " file"
+               (if (= (count targets) 1) "" "s")
+               (if (> (second totals) 0)
+                 (str "; "
+                   (second totals)
+                   " skipped (definition not located, or the file would not parse)")
+                 "")))
+    0))
+
 (defn suggest-sigs (files)
   "Print the `(sig …)` declarations the checker would write for every function that
 lacks one, grouped by file. With `files` empty, the whole project. Writes nothing.

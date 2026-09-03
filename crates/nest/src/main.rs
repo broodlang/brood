@@ -336,6 +336,15 @@ enum Cmd {
         #[arg(long = "suggest-sigs", conflicts_with = "fix_renames")]
         suggest_sigs: bool,
 
+        /// Write those `(sig …)` declarations into the files, above the definitions
+        /// they describe. The safe bulk form of the editor's declare-sig action: that
+        /// action is correct for one signature, but several accepted against a single
+        /// snapshot drift, because each insertion moves every line below it. This
+        /// applies them last-first and re-parses each file before writing, so a file
+        /// is either correct or untouched. `--suggest-sigs` is the dry run.
+        #[arg(long = "fix-sigs", conflicts_with_all = ["fix_renames", "suggest_sigs"])]
+        fix_sigs: bool,
+
         /// Strict mode: a call result or inferred global with a PRECISE type is checked
         /// by inclusion, not overlap — `number` handed to an `int` parameter warns. Off
         /// by default because the overlap rule is what keeps a check quiet across a
@@ -858,12 +867,13 @@ fn run_main(cli: Cli) {
             fix_renames,
             dry_run,
             suggest_sigs,
+            fix_sigs,
             strict,
         } => {
             brood::types::set_strict_checking(
                 strict || std::env::var_os("BROOD_CHECK_STRICT").is_some_and(|v| v == "1"),
             );
-            if files.is_empty() && !suggest_sigs {
+            if files.is_empty() && !suggest_sigs && !fix_sigs {
                 require_project(
                     "check",
                     Some("To check one file outside a project: nest check <file>.blsp"),
@@ -877,6 +887,21 @@ fn run_main(cli: Cli) {
                     .join(" ");
                 let code = format!(
                     "(project/load-config) (require-one 'test) (project/suggest-sigs (list {list}))"
+                );
+                match run_for_value(&mut interp, &code) {
+                    brood::core::value::Value::Int(0) => {}
+                    _ => std::process::exit(1),
+                }
+                return;
+            }
+            if fix_sigs {
+                let list = files
+                    .iter()
+                    .map(|f| format!("{f:?}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let code = format!(
+                    "(project/load-config) (require-one 'test) (project/fix-sigs (list {list}) true)"
                 );
                 match run_for_value(&mut interp, &code) {
                     brood::core::value::Value::Int(0) => {}
