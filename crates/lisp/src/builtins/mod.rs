@@ -2300,6 +2300,34 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &["source", "lang"],
         "Parse source (a string) with the tree-sitter grammar named by keyword lang into a positioned CST — the SAME node-map shape as parse-source-positioned (`{:kind :start :end :named}`; leaves add :text, nodes with children add :kids), :kind a keyword of the tree-sitter node type and :named false for anonymous tokens (keywords/punctuation). Char offsets, so std/sexp + the editor's fontify navigate it unchanged. The generic mechanism is in the default build, but the kernel ships NO language grammar — a grammar is opt-in (e.g. --features treesit-ruby, or treesit-grammars for all). Errors if the named language's grammar isn't built in, or if the runtime was built without --features treesit.",
         tree_sitter_parse);
+    // The positional queries. `%tree-sitter-parse` projects the WHOLE tree into Brood
+    // maps — 9,561 of them for a 22 KB Elixir file — and every consumer that only wants
+    // to know what encloses a point then walks that to read about ten. These answer in
+    // O(depth) without building the rest.
+    def(
+        heap,
+        "%tree-sitter-chain",
+        Arity::exact(3),
+        Sig::new(vec![string, kw, int], vec_ty),
+        &["source", "lang", "offset"],
+        "The nodes containing char `offset`, outermost first, each as {:kind :start :end :named :container} WITHOUT its children. The enclosing-context query an indenter or backward-up-list wants, answered in O(depth) instead of by projecting the whole tree and walking it. Same grammar rules and errors as %tree-sitter-parse.",
+        tree_sitter_chain);
+    def(
+        heap,
+        "%tree-sitter-kids",
+        Arity::exact(3),
+        Sig::new(vec![string, kw, int], vec_ty),
+        &["source", "lang", "offset"],
+        "The named children of the deepest node STRICTLY containing char `offset`, each as {:kind :start :end :named :container} without its own children — the sibling list every structural motion needs (forward-sexp is the next one starting at or after point). Strict containment is what makes a point at a node's start belong to its parent, so forward-sexp steps over the form at point rather than into it. Same grammar rules and errors as %tree-sitter-parse.",
+        tree_sitter_kids);
+    def(
+        heap,
+        "%tree-sitter-spans",
+        Arity::exact(4),
+        Sig::new(vec![string, kw, list_ty.union(vec_ty), any], vec_ty),
+        &["source", "lang", "kinds", "keywords?"],
+        "The fontify query: [start end kind] for the OUTERMOST nodes whose :kind is in `kinds` (a list/vector of keywords), in source order, not descending into one that matched. With keywords? true, an anonymous token beginning with a letter is also reported, as kind :__keyword__ — the cross-language keyword rule, which no grammar names. Which kinds get which face stays with the caller; what this avoids is projecting every node into a map to read its kind and discard the rest, which is what a windowed fontify did on every keystroke.",
+        tree_sitter_spans);
     def(
         heap,
         "%tree-sitter-load-grammar",

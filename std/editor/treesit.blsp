@@ -87,12 +87,30 @@ the cost is O(nodes × depth) allocation for a walk that is O(nodes) of actual w
 the tree-sitter parse it walks."
   (reverse (ts-spans-into node face-of '())))
 
-(defn fontify (text lang face-of)
+(defn fontify (text lang kind->face-name &optional (keywords? true))
   "A `:fontify` service: `[start end face]` colour spans for `text` parsed as the
-tree-sitter language keyword `lang` (`:ruby`/`:elixir`), with `face-of` a node→face
-function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
-`(text)` service closing over its `lang` and table."
-  (ts-spans (%tree-sitter-parse text lang) face-of))
+tree-sitter language keyword `lang` (`:ruby`/`:elixir`), from a `{:node-kind
+:syntax/face-name}` table. Faces are resolved live, so a `(face-set :syntax/…)`
+restyles the editor on its next frame. With `keywords?` (the default), an anonymous
+alphabetic token is a `:syntax/keyword` — the cross-language rule that lets a table name
+only the handful of *named* nodes it colours.
+
+Takes the TABLE, not the node→face closure it used to. The selection happens inside
+`%tree-sitter-spans` now, which walks the tree in Rust and returns spans only for the
+kinds asked for — and a closure cannot say which kinds those are. Fontify is the one
+consumer that genuinely visits every node, so it was the one paying for the whole-tree
+projection: thousands of Brood maps per keystroke, built to read `:kind` off each and
+discard the rest. `face-of-kinds` / `face-of-syntax` remain for anything that wants the
+node→face function itself."
+  (let (kinds (into [] (map kind->face-name first))
+        raw (%tree-sitter-spans text lang kinds keywords?))
+    ;; a LIST, as before — the `:fontify` contract, and what `shift-spans` and the view
+    ;; consume; returning a vector here compared unequal to every list in sight
+    (seq/keep raw
+      (fn (sp)
+        (let (kind (nth sp 2)
+              name (if (= kind :__keyword__) :syntax/keyword (get kind->face-name kind)))
+          (when name [(nth sp 0) (nth sp 1) (face name)]))))))
 (sig fontify (string keyword any -> any))
 
 ;; ---- where a windowed fontify may restart -------------------------------------
@@ -163,39 +181,20 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
     (if (= 0 (math/rem opened 2)) candidate 0)))
 
 ;; ---- indentation -------------------------------------------------------------
-;; ---- indentation -------------------------------------------------------------
 ;; The `:indent` service's other half. Brood indents by parsing `[defun-start, bol)` and
 ;; asking what is still OPEN — the reader leaves an unclosed form as an unclosed node. That
 ;; trick does not transfer: tree-sitter's error recovery collapses an unterminated `do` into
-;; an ERROR node rather than an open block, so a truncated slice reports `:ERROR` for nearly
-;; every line and knows nothing about the nesting (measured on Elixir: 7 of 9 lines).
+;; an ERROR node rather than an open block, so a truncated slice knows nothing about the
+;; nesting (measured on Elixir: 7 of 9 lines).
 ;;
-;; So the slice has to be text that PARSES, and the level is how many block nodes enclose the
-;; line inside it. Which slice, though, has no single answer, so [[indent-column]] takes two
-;; and keeps the deeper: the enclosing top-level form by the column-0 convention (cheap, and
-;; right for a file that is already indented), and a fixed window either side (right for a
-;; flush-left file, where the column-0 convention degenerates to "the previous line"). A
-;; slice that begins inside a form can only ever lose enclosing blocks, never invent them, so
-;; between two clean readings the deeper one is the better-informed one — and a slice that
-;; did not parse is not a reading at all. When neither parses, which is the ordinary state of
-;; a line someone is still typing, [[indent-column]] falls back to the previous non-blank
-;; line's own indentation plus a level when that line ends in an opening token.
-
-(def *indent-window* 40000)
-;; How far the indenter reads around the line when the column-0 convention fails it (~800
-;; lines). Bounded so one keypress cannot become a whole-buffer parse on a large file; a
-;; top-level form longer than this is past the point where its indentation is the reader's
-;; problem.
-
-(defn- ts-broken? (node)
-  ;; Does this tree contain a parse error anywhere? tree-sitter marks its recovery with
-  ;; `:error` and `:missing`, and either means the text does not stand on its own — the
-  ;; ordinary state of a buffer someone is typing into, and the state in which no tree can
-  ;; say what is open, because an unterminated `do` collapses rather than staying open. That
-  ;; is why `indent-column` has a second answer at all.
-  (or (get node :error)
-    (get node :missing)
-    (any? (or (get node :kids) []) ts-broken?)))
+;; The level is how many block nodes enclose the line, and [[chain]] answers that from the
+;; real root in O(depth). This used to slice the text into WINDOWS and parse each — one by
+;; the column-0 convention, one a fixed span either side — and keep the deeper reading,
+;; because a slice beginning inside a form loses enclosing blocks while a whole-file parse
+;; cost a projection of every node. Both of those problems are gone: there is no slice to
+;; be wrong about, and the query builds ten nodes rather than nine thousand. What remains
+;; is the one case no tree can answer — text that does not parse yet, which is the ordinary
+;; state of a line being typed — and there the lexical fallback carries the previous line.
 
 (defn- ts-prev-nonblank (text bol)
   ;; `[indent last-token]` of the nearest non-blank line before `bol`, or nil when there is
@@ -225,6 +224,21 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
 (defn- ts-first-token (line)
   ;; the first whitespace-delimited word of `line`, or ""
   (let (t (string/triml line)) (or (first (string/split t " ")) "")))
+
+(defn- ts-opens-with? (line token)
+  "Does `line` begin with `token` at a WORD BOUNDARY? `end)` closes a block and `endless`
+does not, and splitting on whitespace cannot tell them apart — which is how the closing
+line of `Enum.reduce(xs, %{}, fn … end)`, a shape Elixir is full of, kept a level it had
+already left."
+  (let (t (string/triml line)
+        n (string/length token))
+    (and (string/starts-with? t token)
+      (or (= (string/length t) n)
+        (not (regex/matches? "[A-Za-z0-9_]" (string/substring t n (inc n))))))))
+
+(defn- ts-closing? (line dedent)
+  "Whether `line` starts with any of the `dedent` tokens."
+  (any? (into [] dedent) (fn (d) (ts-opens-with? line d))))
 
 (defn indent-column (text lang bol spec)
   "The column the line beginning at offset `bol` should be indented to — a `:indent` service
@@ -259,50 +273,49 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
   (let (width (get spec :width 2)
         eol (let (i (index-of text "\n" bol)) (if (< i 0) (string/length text) i))
         line (string/substring text bol eol)
-        closing (contains? (get spec :dedent #{}) (ts-first-token line))
+        closing (ts-closing? line (get spec :dedent #{}))
         ;; an ordinary line measures at its first non-blank, a closing line at the line start
         at (if closing bol (+ bol (- (string/length line) (string/length (string/triml line)))))
         blocks (get spec :blocks #{})
-        ;; The level from ONE slice, or nil when that slice cannot answer — it did not parse,
-        ;; so anything it says about nesting is a reading of recovered wreckage.
-        level-in (fn (lo hi)
-                   (let (slice (string/substring text lo hi)
-                         tree (if (= (string/trim slice) "")
-                                nil
-                                (check-allow :discarded-catch
-                                  (try (%tree-sitter-parse slice lang) (catch _ nil)))))
-                     (when (and tree (not (ts-broken? tree)))
-                       (let (n (count (filter (ts-chain tree (- at lo) '())
-                                        (fn (k) (contains? blocks k)))))
-                         (math/max 0 (if closing (- n (get spec :dedent-levels 1)) n))))))
-        ;; Two readings, and the DEEPER one wins. The cheap slice is the enclosing top-level
-        ;; form by the column-0 convention — right, and enough, for a file that is already
-        ;; indented. In a FLUSH-LEFT file that convention says nothing: every line begins at
-        ;; column 0, so the slice starts one line up, and the danger is not that it fails but
-        ;; that it SUCCEEDS — `def run do / :ok / end` parses perfectly on its own and reports
-        ;; one level where there are two. A slice beginning inside a form can only ever lose
-        ;; enclosing blocks, never invent them, so between two clean readings the deeper one
-        ;; is the better-informed one, and a reading that did not parse is no reading at all.
-        narrow-lo (column0-before text (math/max 0 (dec bol)))
-        readings (seq/keep [(level-in narrow-lo
-                              (math/min (string/length text) (+ narrow-lo *indent-window*)))
-                             (level-in (math/max 0 (- bol *indent-window*))
-                               (math/min (string/length text) (+ bol *indent-window*)))]
-                   (fn (x) x))
-        structural (when (not (empty? readings)) (fold readings 0 math/max)))
-    (if structural
-      (* width structural)
-      ;; The tree could not say. Carry the previous non-blank line's own indentation, one
-      ;; level deeper when that line OPENS something — which is what every editor does while
-      ;; you type, and the only thing available here: a half-written `do` is not an open block
-      ;; in the tree, it is an error node, so there is no structure left to ask.
+        chain (%tree-sitter-chain text lang at)
+        broken (get (first chain) :broken)
+        ;; Two kinds of opener, and they differ in ONE way: whether a node that begins on
+        ;; the line being indented counts for that line.
+        ;;
+        ;; `:blocks` always counts. A `do`-shaped block opens at a keyword on an earlier
+        ;; line, so the question never arises — and Ruby's `body_statement` deliberately
+        ;; begins AT its first statement, so it must count for that statement's own line
+        ;; or every method body loses a level.
+        ;;
+        ;; `:brackets` counts only when it opened on an earlier line, because a bracket
+        ;; can open on the very line being indented, and then it is not enclosing that
+        ;; line — it is starting on it:
+        ;;
+        ;;     [                 <- the list starts here; this line is at the OUTER level
+        ;;       {:a, 1},        <- inside it, one deeper
+        ;;     ]
+        ;;
+        ;; Counting a list for its own opening line pushes `[` in by a level, and the same
+        ;; mistake appears on every `%{`, `{` and `fn` that begins a line.
+        brackets (get spec :brackets #{})
+        n (count (filter chain
+                   (fn (node)
+                     (let (k (get node :kind))
+                       (or (contains? blocks k)
+                         (and (contains? brackets k) (< (get node :start) bol))))))))
+    (if broken
+      ;; No tree can say what is open while the text does not parse — an unterminated
+      ;; `do` collapses into an error node rather than staying open — which is the
+      ;; ordinary state of a line someone is still typing. Carry the previous non-blank
+      ;; line's own indentation, one level deeper when that line OPENS something, which
+      ;; is what every editor does and the only thing available here.
       (let (previous (ts-prev-nonblank text bol))
         (if (nil? previous)
           0
           (let ([indent last-token] previous
                 opened (contains? (get spec :opens #{}) last-token))
-            (math/max 0 (+ indent (if opened width 0) (if closing (- width) 0)))))))))
-(sig indent-column (string any int countable -> number))
+            (math/max 0 (+ indent (if opened width 0) (if closing (- width) 0))))))
+      (* width (math/max 0 (if closing (- n (get spec :dedent-levels 1)) n))))))
 
 ;; ---- structural navigation --------------------------------------------------
 ;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp
@@ -328,79 +341,83 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
 (defn- ts-root? (node root)
   (and (= (get node :start) (get root :start)) (= (get node :end) (get root :end))))
 
+;; Each motion is one positional query. They used to parse the whole text into Brood
+;; maps and walk it — 9,561 nodes for a 22 KB Elixir file — to read a single list of
+;; siblings, which is why structural motion felt slower the bigger the file got.
+;; `%tree-sitter-kids` hands over exactly that list.
+
+(defn- ts-siblings (text lang point)
+  "The named children of the node strictly containing `point` — the siblings a motion
+steps through."
+  (%tree-sitter-kids text lang point))
+
 (defn point-forward (text lang point)
   "End of the next named node at or after `point` within the enclosing node;
 unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
-  (let (root (%tree-sitter-parse text lang)
-        enc (ts-enclosing root point)
-        nxt (seq/find (ts-named-kids enc) (fn (f) (>= (get f :start) point))))
+  (let (nxt (seq/find (ts-siblings text lang point) (fn (f) (>= (get f :start) point))))
     (if (nil? nxt) point (get nxt :end))))
 (sig point-forward (string keyword any -> any))
 
 (defn point-backward (text lang point)
   "Start of the previous named node ending at or before `point` (`backward-sexp`)."
-  (let (root (%tree-sitter-parse text lang)
-        enc (ts-enclosing root point)
-        prev (last (filter (ts-named-kids enc) (fn (f) (<= (get f :end) point)))))
+  (let (prev (last (filter (ts-siblings text lang point) (fn (f) (<= (get f :end) point)))))
     (if (nil? prev) point (get prev :start))))
 (sig point-backward (string keyword any -> any))
 
 (defn point-list-forward (text lang point)
   "End of the next child CONTAINER at or after `point` — leaf nodes are stepped over, not
 stopped at (Emacs `forward-list`); unchanged if none."
-  (let (root (%tree-sitter-parse text lang)
-        enc (ts-enclosing root point)
-        nxt (seq/find (ts-named-kids enc)
-              (fn (f) (and (ts-container? f) (>= (get f :start) point)))))
+  (let (nxt (seq/find (ts-siblings text lang point)
+              (fn (f) (and (get f :container) (>= (get f :start) point)))))
     (if (nil? nxt) point (get nxt :end))))
 (sig point-list-forward (string keyword any -> any))
 
 (defn point-list-backward (text lang point)
   "Start of the previous child CONTAINER ending at or before `point` — leaves stepped over
 (Emacs `backward-list`); unchanged if none."
-  (let (root (%tree-sitter-parse text lang)
-        enc (ts-enclosing root point)
-        prev (last (filter (ts-named-kids enc)
-                     (fn (f) (and (ts-container? f) (<= (get f :end) point))))))
+  (let (prev (last (filter (ts-siblings text lang point)
+                     (fn (f) (and (get f :container) (<= (get f :end) point))))))
     (if (nil? prev) point (get prev :start))))
 (sig point-list-backward (string keyword any -> any))
 
+(defn- ts-enclosing-node (text lang point)
+  "The deepest node STRICTLY containing `point`, or nil at the top level — the last
+container on the chain that neither begins nor ends at `point` itself."
+  (last (filter (%tree-sitter-chain text lang point)
+          (fn (n) (and (get n :container) (< (get n :start) point) (< point (get n :end)))))))
+
 (defn point-up (text lang point)
   "Start of the enclosing node (`backward-up-list`); unchanged at top level."
-  (let (root (%tree-sitter-parse text lang)
-        enc (ts-enclosing root point))
-    (if (ts-root? enc root) point (get enc :start))))
+  (let (enc (ts-enclosing-node text lang point))
+    (if (nil? enc) point (get enc :start))))
 (sig point-up (string keyword any -> any))
 
 (defn point-up-forward (text lang point)
   "End of the enclosing node — the forward counterpart of `point-up` (Emacs `up-list`);
 unchanged at top level."
-  (let (root (%tree-sitter-parse text lang)
-        enc (ts-enclosing root point))
-    (if (ts-root? enc root) point (get enc :end))))
+  (let (enc (ts-enclosing-node text lang point))
+    (if (nil? enc) point (get enc :end))))
 (sig point-up-forward (string keyword any -> any))
 
 (defn point-down (text lang point)
-  "Start of the next child container at or after `point` (`down-list`); unchanged
-if none."
-  (let (root (%tree-sitter-parse text lang)
-        enc (ts-enclosing root point)
-        lst (seq/find (ts-named-kids enc)
-              (fn (f) (and (ts-container? f) (>= (get f :start) point)))))
-    (if (nil? lst) point (get lst :start))))
-(sig point-down (string keyword any -> any))
+  "INSIDE the next child container at or after `point` (`down-list`); unchanged if none.
 
-;; check-allow: deliberately non-tail — depth = syntax-tree nesting at point.
-(check-allow :non-tail-recursion
-  (defn- ts-chain-rest (node point)
-    "The containers strictly enclosing `point` below `node`, outermost first — each a
-  container that contains the next. `()` at the leaf."
-    (let (hit (seq/find (or (get node :kids) [])
-                (fn (k)
-                  (and (ts-container? k)
-                    (< (get k :start) point)
-                    (< point (get k :end))))))
-      (if (nil? hit) () (cons hit (ts-chain-rest hit point))))))
+Emacs' `down-list` moves *into* one level (`|(a b)` → `(|a b)`). A tree has no delimiter
+to step over, so \"inside\" is that container's first child lying ahead of point — not its
+own start, which is usually where point already is (a container and its opening token
+begin together: `defmodule` is its own call's first named child, both at the same
+offset), and a motion that cannot move is worse than one that overshoots."
+  (let (lst (seq/find (ts-siblings text lang point)
+              (fn (f) (and (get f :container) (>= (get f :start) point)))))
+    (if (nil? lst)
+      point
+      (let (inner (seq/find (ts-siblings text lang (inc (get lst :start)))
+                    (fn (k) (> (get k :start) point))))
+        (cond
+          inner (get inner :start)
+          (> (get lst :start) point) (get lst :start)
+          else point)))))
+(sig point-down (string keyword any -> any))
 
 (def- ts-def-kinds
   ;; node KINDS that are themselves definitions — most grammars (Ruby, …) name them
@@ -412,23 +429,33 @@ if none."
   ;; key off the callee text). Extend for a macro-defined construct in another grammar.
   (list "def" "defp" "defmacro" "defmacrop" "defmodule" "defprotocol" "defimpl"))
 
+(defn- ts-head-word (text node)
+  "The identifier a node BEGINS with, read from the source. A chain node carries no
+children, so an Elixir `call`'s callee is taken lexically from its start rather than from
+a first child — which is the same token either way, and does not require the tree."
+  (let (from (get node :start)
+        limit (math/min (get node :end) (+ from 32)))
+    (letrec (scan (fn (i)
+                    (if (or (>= i limit)
+                          (not (regex/matches? "[A-Za-z0-9_?!]" (string/substring text i (inc i)))))
+                      (string/substring text from i)
+                      (scan (inc i)))))
+      (scan from))))
+
 (defn- ts-defun? (text node)
   "Whether `node` is a definition for `beginning-of-defun`: a definition-*kind* node (Ruby
 `method`/`class`/`module`, …) or a `call` whose callee text is a `def`-family macro (Elixir,
 where `def`/`defmodule`/… are calls, not distinct node kinds)."
   (let (k (->string (get node :kind)))
     (or (includes? ts-def-kinds k)
-      (and (= k "call")
-        (let (head (first (ts-named-kids node)))
-          (and (not (nil? head))
-            (includes? ts-def-macros (string/substring text (get head :start) (get head :end)))))))))
+      (and (= k "call") (includes? ts-def-macros (ts-head-word text node))))))
 
 (defn- ts-defun-edge (text lang point edge)
   "The `edge` (`:start` / `:end`) of the enclosing **definition**: the deepest `def` /
 `class` / `module` / … containing `point`, falling back to the top-level form, then `point`.
 The shared body of `point-defun-start` / `point-defun-end`."
-  (let (root (%tree-sitter-parse text lang)
-        chain (ts-chain-rest root point)
+  (let (chain (filter (%tree-sitter-chain text lang point)
+                (fn (n) (and (get n :container) (< (get n :start) point) (< point (get n :end)))))
         defuns (filter chain (fn (n) (ts-defun? text n))))
     (cond
       (not (empty? defuns)) (get (last defuns) edge)

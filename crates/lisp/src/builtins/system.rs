@@ -421,6 +421,50 @@ pub(super) fn tree_sitter_parse(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     crate::treesit::parse(heap, &src, &lang)
 }
 
+/// `(tree-sitter-chain source lang offset)` / `(tree-sitter-kids source lang offset)` —
+/// the two positional queries. Mechanism in `crate::treesit`; these unwrap the args.
+fn ts_lang(heap: &Heap, who: &'static str, v: Value) -> Result<String, LispError> {
+    match v {
+        Value::Keyword(s) => Ok(value::symbol_name(s)),
+        other => Err(LispError::wrong_type(heap, who, "keyword", other)),
+    }
+}
+
+pub(super) fn tree_sitter_chain(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "tree-sitter-chain", arg(args, 0))?;
+    let lang = ts_lang(heap, "tree-sitter-chain", arg(args, 1))?;
+    let offset = expect_int(heap, "tree-sitter-chain", arg(args, 2))?;
+    crate::treesit::chain(heap, &src, &lang, offset)
+}
+
+pub(super) fn tree_sitter_kids(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "tree-sitter-kids", arg(args, 0))?;
+    let lang = ts_lang(heap, "tree-sitter-kids", arg(args, 1))?;
+    let offset = expect_int(heap, "tree-sitter-kids", arg(args, 2))?;
+    crate::treesit::kids(heap, &src, &lang, offset)
+}
+
+pub(super) fn tree_sitter_spans(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "tree-sitter-spans", arg(args, 0))?;
+    let lang = ts_lang(heap, "tree-sitter-spans", arg(args, 1))?;
+    let mut kinds: Vec<String> = Vec::new();
+    for k in heap.seq_items(arg(args, 2))? {
+        match k {
+            Value::Keyword(s) => kinds.push(value::symbol_name(s)),
+            other => {
+                return Err(LispError::wrong_type(
+                    heap,
+                    "tree-sitter-spans",
+                    "keyword",
+                    other,
+                ))
+            }
+        }
+    }
+    let keywords = !matches!(arg(args, 3), Value::Nil | Value::Bool(false));
+    crate::treesit::spans(heap, &src, &lang, kinds, keywords)
+}
+
 /// `(tree-sitter-load-grammar path lang)` — load a grammar shared library at
 /// runtime and register it under `lang`. Mechanism in `crate::treesit`
 /// (feature-gated); this just unwraps the args.
