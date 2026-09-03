@@ -3432,8 +3432,12 @@ dropped its `(hibernate)`), [`memory-review.md`](memory-review.md) §6,
 
 ## ADR-059 — Blocking work delivers to a mailbox; it never pins a worker
 
-**Status:** accepted (2026-05-29). Phase 1 (GUI observer input) implemented; the
-general pattern (terminal, sockets, an offload pool) is planned.
+**Status:** accepted (2026-05-29). Phase 1 (GUI observer input) implemented 2026-05-29;
+sockets ride the net reactor (ADR-143); the offload pool shipped 2026-07-22 (ADR-144);
+**Phase 2, terminal input, shipped 2026-09-03**: `read-line` is a prelude function parking
+on a token from `%read-line-start`, and one `brood-stdin` reader thread does the blocking
+read and delivers `[:stdin token line]` to the caller's mailbox — the last untimed blocking
+call on a scheduler worker (KI-97 item 2). Guard: `crates/cli/tests/read_line_parks.rs`.
 
 **Context.** The green scheduler has a small worker pool (≈`nproc`); green
 processes are cheap but workers are scarce. A process that makes a **native

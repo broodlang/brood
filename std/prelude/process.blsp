@@ -423,6 +423,22 @@ mailbox messages stay queued while waiting (selective receive)."
       ([:offload ^tok result] result)
       ([:offload-error ^tok e] (throw e)))))
 
+;; `read-line` is the same seam as `offload`, for terminal input (ADR-059 Phase 2): the
+;; kernel's stdin reader thread does the blocking read and delivers the line, so a process
+;; waiting on a terminal holds no scheduler worker. Before this the read took the global
+;; stdin lock on the calling worker, and a few processes waiting for input nobody typed
+;; pinned the whole pool (KI-97 item 2).
+(defn read-line ()
+  "Read one line from stdin, returning it as a string with the trailing newline
+stripped, or `nil` at end of input (EOF / Ctrl-D). Parks only this process — the
+read happens on the kernel's stdin reader thread, which serves callers in request
+order — so other mailbox messages stay queued while waiting (selective receive)."
+  (let (tok (%read-line-start))
+    (receive
+      ([:stdin ^tok line] line)
+      ([:stdin-error ^tok e] (throw e)))))
+(sig read-line (-> (or nil string)))
+
 ;; Membership is `includes?` (value in a sequence, `(includes? coll x)`) and `contains?`
 ;; (key in a map). The old `member?` — a reversed-args `(member? x xs)` duplicate of
 ;; `includes?` for lists — was removed; its call sites swapped to `(includes? xs x)`.

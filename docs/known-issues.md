@@ -881,8 +881,8 @@ here as they close.
    testing: `now_millis()` counts from process start, so 0 is a legitimate timestamp in
    the first millisecond and the obvious `0` "never warned" sentinel would have swallowed
    the first warning of a flood that began at startup — the sentinel is `u64::MAX`.
-2. **Untimed blocking calls on scheduler workers** (ADR-059 violations). **Three of the four are fixed
-   2026-09-01; the fourth is ADR-059 Phase 2, not a patch.**
+2. ~~**Untimed blocking calls on scheduler workers**~~ (ADR-059 violations) ✅ **ALL FOUR FIXED** —
+   three on 2026-09-01, the fourth (`read-line`, ADR-059 Phase 2) on 2026-09-03.
    - ~~`os/run-process`'s `status()` with **inherited stdin**~~ ✅ **FIXED** — it now hands
      the child `/dev/null`, so a `git` credential prompt reads EOF and fails fast instead
      of pinning a worker forever with no timeout or `try` able to recover it. This matches
@@ -916,10 +916,17 @@ here as they close.
      `tests/proc_test.blsp` writes ~1.6 MB to a `sleep 30` that never reads — a **proof**
      rather than a smoke test, since a pipe buffer is ~64 KiB and a synchronous `write_all`
      of that size into a non-reading child cannot return.
-   - **Still open: `read-line` holding the global stdin lock** (`builtins/io.rs`). Unlike
-     the other three this is not a patch: doing it properly *is* **ADR-059 Phase 2**
-     (terminal input on a reader thread delivering to a mailbox), which changes `read-line`
-     from a blocking call into a park. Left whole rather than half-done.
+   - ~~`read-line` holding the global stdin lock~~ ✅ **FIXED 2026-09-03 — ADR-059 Phase 2.**
+     The kernel now has one `brood-stdin` reader thread behind `%read-line-start` (a token
+     primitive, `builtins/io.rs`), and `read-line` is a prelude function that parks on the
+     token in a selective receive — `offload`'s seam, applied to terminal input. A process
+     waiting for a line holds no worker; the thread serves callers in request order (the only
+     sensible sharing rule for one line-oriented stream) and delivers `nil` at EOF to every
+     later caller. A refused thread spawn is retried by the next call, not latched (item 3's
+     rule). Guard: `crates/cli/tests/read_line_parks.rs` — 256 processes waiting in
+     `read-line` on a never-written pipe, then a 200-spawn wave that must complete;
+     sabotage-verified (the old synchronous shape hangs the program to nextest's cap, since
+     even the root's resume from `sleep` needs a worker). With this, item 2 is closed.
    - Not affected, checked while here: `%os-cmd` uses `Command::output()`, which nulls
      stdin. It stays untimed, but a long-running child there is doing what was asked.
 3. ~~**Thread-spawn panic classes**~~ ✅ **FIXED 2026-09-01.** `std::thread::spawn`

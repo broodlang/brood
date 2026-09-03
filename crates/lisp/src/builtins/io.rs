@@ -1432,25 +1432,102 @@ pub(super) fn bytes_to_value(bytes: impl AsRef<[u8]>, heap: &mut Heap) -> Value 
     heap.alloc_bytes(crate::core::blob::SharedBlob::new(bytes.as_ref()))
 }
 
-/// `(read-line)` — read one line from stdin, returning it as a string with the
-/// trailing newline stripped, or `nil` at end of input (EOF / Ctrl-D). The one
-/// irreducible I/O mechanism the Brood-hosted REPL (`std/tool/repl.blsp`) can't
-/// bootstrap; line *editing* on a TTY comes free from the terminal's cooked
-/// mode, so this stays a plain blocking read.
-pub(super) fn read_line(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use std::io::BufRead;
-    let mut line = String::new();
-    let n = std::io::stdin().lock().read_line(&mut line).map_err(|e| {
-        LispError::runtime(format!("read-line: {}", e))
+/// `(%read-line-start)` — ask the stdin reader thread for the next line and return a
+/// token at once; the thread later delivers `[:stdin token line]` (`line` is `nil` at EOF)
+/// or `[:stdin-error token err]` to the calling process's mailbox. The Brood `read-line`
+/// (`std/prelude/process.blsp`) parks on that token in a selective receive, so a process
+/// waiting for terminal input holds **no scheduler worker** — ADR-059 Phase 2, and the
+/// last of KI-97's untimed blocking calls.
+///
+/// Before this, `read-line` took the global stdin lock on the calling worker. A process
+/// waiting for a line that never came (an interactive terminal nobody typed into, a pipe
+/// the parent never wrote) pinned that worker for good, and a handful of them pinned the
+/// pool: every other process starved with nothing amiss on their side. One reader thread
+/// serialises requests in arrival order, which is also the only sensible sharing rule for
+/// a single line-oriented stream.
+pub(super) fn read_line_start(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let token = STDIN_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (sink, _cell) = crate::process::sink_pair(crate::process::self_pid());
+    stdin_reader_send(StdinReq { token, sink }).map_err(|e| {
+        LispError::runtime(format!("read-line: cannot start the stdin reader: {e}"))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    if n == 0 {
-        return Ok(Value::nil()); // EOF
+    Ok(Value::Int(token))
+}
+
+struct StdinReq {
+    token: i64,
+    sink: crate::process::MailboxSink,
+}
+
+static STDIN_TOKEN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+/// The reader thread's request queue. `None` until the first `read-line`, and reset to
+/// `None` if the thread is ever gone, so a refused spawn (EAGAIN under thread pressure —
+/// KI-97 item 3) is retried by the next call rather than latched for the process's life.
+static STDIN_READER: std::sync::Mutex<Option<std::sync::mpsc::Sender<StdinReq>>> =
+    std::sync::Mutex::new(None);
+
+fn stdin_reader_send(req: StdinReq) -> std::io::Result<()> {
+    let mut slot = crate::core::sync::lock(&STDIN_READER);
+    if let Some(tx) = slot.as_ref() {
+        match tx.send(req) {
+            Ok(()) => return Ok(()),
+            // The thread is gone (it only exits when every sender is dropped, which
+            // cannot happen while the slot holds one — but a panic would). Restart it.
+            Err(std::sync::mpsc::SendError(back)) => {
+                *slot = None;
+                return start_stdin_reader(&mut slot, back);
+            }
+        }
     }
-    while line.ends_with('\n') || line.ends_with('\r') {
-        line.pop();
+    start_stdin_reader(&mut slot, req)
+}
+
+fn start_stdin_reader(
+    slot: &mut Option<std::sync::mpsc::Sender<StdinReq>>,
+    first: StdinReq,
+) -> std::io::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel::<StdinReq>();
+    std::thread::Builder::new()
+        .name("brood-stdin".into())
+        .spawn(move || stdin_reader_loop(rx))?;
+    let _ = tx.send(first);
+    *slot = Some(tx);
+    Ok(())
+}
+
+/// The reader thread: one blocking `read_line` per request, in request order. The thread
+/// owns the stdin lock for exactly one line at a time and no worker ever touches it.
+fn stdin_reader_loop(rx: std::sync::mpsc::Receiver<StdinReq>) {
+    use crate::process::Message;
+    use std::io::BufRead;
+    for StdinReq { token, sink } in rx {
+        let mut line = String::new();
+        let msg = match std::io::stdin().lock().read_line(&mut line) {
+            Ok(0) => stdin_msg("stdin", token, Message::Nil),
+            Ok(_) => {
+                while line.ends_with('\n') || line.ends_with('\r') {
+                    line.pop();
+                }
+                stdin_msg("stdin", token, Message::Str(line))
+            }
+            Err(e) => {
+                let err = LispError::runtime(format!("read-line: {}", e))
+                    .with_code(crate::error::error_codes::FILE_IO);
+                stdin_msg("stdin-error", token, crate::process::error_reason(&err))
+            }
+        };
+        sink.emit(msg);
     }
-    Ok(heap.alloc_string(&line))
+}
+
+fn stdin_msg(tag: &str, token: i64, payload: crate::process::Message) -> crate::process::Message {
+    use crate::process::Message;
+    Message::Vector(vec![
+        Message::Keyword(value::intern(tag)),
+        Message::Int(token),
+        payload,
+    ])
 }
 
 /// `(file/slurp path)` — read the whole file at `path` and return it as a string. The

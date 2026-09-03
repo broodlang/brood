@@ -10166,3 +10166,29 @@ in the workspace, strips comments and strings, and requires a file that calls
 Also this session: 93 GB of stale debug test binaries (23 generations of each, ~150 MB
 apiece) had the root filesystem at 97%; KI-86's own entry records phantom failures from a
 full disk, so `rm -rf target/debug` before anything else. A five-minute rebuild.
+
+## 2026-09-03 (runtime) — `read-line` parks a process, not a worker: ADR-059 Phase 2, and KI-97 closes
+
+The last open item of KI-97's "untimed blocking calls on scheduler workers" was `read-line`,
+a Rust builtin that took the global stdin lock on whichever worker the caller sat on. A
+process waiting for a line that never came — a terminal nobody typed into, a pipe the parent
+never wrote — pinned that worker for good, and as many such processes as there are workers
+pinned the pool. ADR-059 predicted the fix in May ("terminal input via a reader thread") and
+the runtime has had the seam since ADR-144: `offload` hands blocking work to another thread
+and parks the caller in a selective receive on a token.
+
+`read-line` is now that shape. `%read-line-start` returns a token and queues the request to
+one `brood-stdin` thread, which does the blocking read and delivers `[:stdin token line]`
+(`nil` at EOF, `[:stdin-error token e]` on an I/O error) to the caller's mailbox; the prelude
+`read-line` parks on the token. Write-the-language-in-the-language: the policy moved from
+Rust into six lines of Brood next to `offload`, and the three callers (`repl`'s piped path,
+`eval-server`, `debug`) did not change. One thread serves callers in request order, which is
+also the only sensible sharing rule for a single line-oriented stream; a refused spawn is
+retried by the next call rather than latched (KI-97 item 3's lesson).
+
+**The guard is causal**: 256 processes wait in `read-line` on a pipe that is held open and
+never written, then a 200-spawn wave must complete. Sabotage — putting the synchronous read
+back — does not print `WAVE 0`; it **hangs the whole program** to nextest's 2-minute cap,
+because the root process's own resume from `(sleep 300)` needs a worker too. That is the
+hazard stated more sharply than the entry had it: not "other processes starve" but "the
+program freezes", with no diagnostic (the new stranded-work watchdog would at least name it).
