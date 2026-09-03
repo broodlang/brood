@@ -194,8 +194,8 @@ the `nest mcp` tools of the same names.")
      :see "docs/language.md §Syntax"}
     {:intent "a regular expression / match a pattern in a string"
      :keywords ["regex" "regexp" "pattern" "match string" "#\"\"" "re-find" "re-matches"]
-     :idiom "There is no `#\"…\"` regex literal — pass the pattern as a plain string. `(regex/match? pat s)` searches anywhere, `(regex/matches? pat s)` anchors both ends. (`^`/`$` anchor within a search.)"
-     :example "(regex/match? \"[0-9]+\" \"abc123\")   ; => true"
+     :idiom "There is no `#\"…\"` regex literal — pass the pattern as a plain string. `(regex/match? pat s)` searches anywhere, `(regex/matches? pat s)` anchors both ends (`^`/`$` anchor within a search). For WHERE it matched and what the `(...)` groups caught, `(regex/find pat s)` returns `{:start :end :text :groups}` (nil for no match), `find-all` every match, and `replace`/`split` build on those."
+     :example "(regex/find \"(\\\\w+)=(\\\\d+)\" \"x=1\")   ; => {:text \"x=1\" :start 0 :end 3 :groups [… \"x\" … \"1\"]}"
      :see "std/regex.blsp"}))
 
 (defn- explain-matches? (q entry)
