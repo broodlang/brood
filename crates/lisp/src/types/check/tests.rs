@@ -8100,3 +8100,110 @@ fn zz_probe_failure() {
         );
     }
 }
+
+/// Where a guard's narrowing reaches, as a matrix — every guard shape crossed with every
+/// way of denoting the guarded value, over CORRECT programs that must draw no warning.
+///
+/// ADR-316 reports a failure nothing guards, so every hole in this matrix is a **false
+/// positive**, not merely lost precision — the one class this checker is not allowed to
+/// have. It is a table rather than five separate tests because the bugs found on the way
+/// here were all of the form "it narrows in shape A and not shape B", and a table is the
+/// only arrangement in which that is visible at a glance.
+///
+/// `KnownGap` rows are the reach boundary, recorded rather than hidden. A gap that starts
+/// passing fails this test too — that is deliberate: it means the boundary moved and the
+/// note explaining it is now wrong.
+#[test]
+fn a_guard_narrows_across_every_shape_and_value_form() {
+    #[derive(PartialEq)]
+    enum Expect {
+        Silent,
+        /// Reported today, with the reason. Not a defect in the guard machinery.
+        KnownGap(&'static str),
+    }
+    use Expect::*;
+
+    let base = "(defmodule t)\n\
+                (sig mine (string -> (or string failure)))\n(defn mine (s) s)\n";
+    // How the guarded value is denoted. A LOCAL always works; a repeated CALL works only
+    // where the callee is known deterministic (`guards::DETERMINISTIC_UNARY`).
+    let values: [(&str, &str, &str, Expect); 3] = [
+        ("local", "v", "(let (v (string/->number s))", Silent),
+        ("listed-path", "(string/->number s)", "(do", Silent),
+        (
+            "user-fn-path",
+            "(mine s)",
+            "(do",
+            KnownGap(
+                "a user function is not in DETERMINISTIC_UNARY, so the repeated call is not \
+                 one path and the guard cannot reach the second occurrence. Binding it in a \
+                 `let` works. Closing this needs inferred determinism, not a longer list.",
+            ),
+        ),
+    ];
+    let guards = [
+        ("if", "(if (failure? {V}) 0 {U})"),
+        ("not", "(if (not (failure? {V})) {U} 0)"),
+        ("when+error", "(do (when (failure? {V}) (error \"x\")) {U})"),
+        ("cond", "(cond (failure? {V}) 0 else {U})"),
+        ("nested-if", "(if (failure? {V}) 0 (if true {U} 0))"),
+    ];
+
+    let mut wrong = Vec::new();
+    for (vname, v, open, expect) in &values {
+        for (gname, tmpl) in guards {
+            let use_site = if *vname == "user-fn-path" || v.contains("mine") {
+                format!("(string/length {v})")
+            } else {
+                format!("(+ 1 {v})")
+            };
+            let body = tmpl.replace("{V}", v).replace("{U}", &use_site);
+            let src = format!("{base}(defn q (s) {open} {body}))");
+            let silent = file_warnings_mode(&src, false).is_empty();
+            match (expect, silent) {
+                (Silent, false) => wrong.push(format!(
+                    "{vname}/{gname}: a correct program was REPORTED — a false positive"
+                )),
+                (KnownGap(_), true) => wrong.push(format!(
+                    "{vname}/{gname}: the recorded gap is closed; delete the KnownGap note"
+                )),
+                _ => {}
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// The narrowing must reach the CALLER, not just the body — the walk and inference are two
+/// separate readings and three times in one session a rule landed in only one of them. When
+/// that happens the function checks clean and its inferred RETURN still carries the arm the
+/// guard removed, so every call site is reported instead of the callee. There is no way to
+/// see that from inside the function, which is why this is its own test.
+#[test]
+fn a_guards_narrowing_reaches_the_caller_through_the_inferred_return() {
+    // `f` must RETURN the narrowed value, or the test proves nothing: an `f` that answers
+    // `(str v)` is a string whether or not the guard narrowed, which is how the first
+    // version of this test passed with the inference half deleted.
+    let base = "(defmodule t)\n";
+    for (name, def) in [
+        (
+            "if",
+            "(defn f (s) (let (v (string/->number s)) (if (failure? v) 0 v)))",
+        ),
+        (
+            "when+error",
+            "(defn f (s) (let (v (string/->number s)) (when (failure? v) (error \"x\")) v))",
+        ),
+        (
+            "listed-path",
+            "(defn f (s) (if (failure? (string/->number s)) 0 (string/->number s)))",
+        ),
+    ] {
+        let src = format!("{base}{def}\n(defn caller (s) (+ 1 (f s)))");
+        assert!(
+            file_warnings_mode(&src, false).is_empty(),
+            "[{name}] the callee is silent but its caller is not — the narrowing reached the \
+             walk and not the inferred return:\n{src}"
+        );
+    }
+}
