@@ -269,9 +269,134 @@ already left."
       (or (= (string/length t) n)
         (not (regex/matches? "[A-Za-z0-9_]" (string/substring t n (inc n))))))))
 
-(defn- ts-closing? (line dedent)
-  "Whether `line` starts with any of the `dedent` tokens."
-  (any? (into [] dedent) (fn (d) (ts-opens-with? line d))))
+(defn- ts-dedent-tokens (dedent)
+  "The tokens of a `:dedent`, which may be a SET (all backing out `:dedent-levels`) or a
+MAP of token → levels. A map because grammars disagree per token, not per language: in
+Ruby a `body_statement` stops before its `end`, so `end` is already outside and backs out
+nothing — but it SPANS its own `ensure`, so `ensure` must back out one. One number for
+the language cannot say both, and with only a set Ruby's `ensure` sat a level too deep in
+every method that had one."
+  (if (map? dedent) (into [] (map dedent first)) (into [] dedent)))
+
+(defn- ts-closing-token (line dedent)
+  "The closing token `line` begins with, or nil.
+
+A closing DELIMITER counts whether or not the language listed it, because it needs no
+listing: `ts-dedent-levels` works out what it closes from the chain. Requiring it in the
+table was the bug that came with making delimiters self-deciding — the entries were
+removed from the tables as redundant, and with them went the only thing that recognised
+those lines as closing at all, so every `}` on its own line stopped dedenting."
+  (let (t (string/triml line)
+        first-char (when (> (string/length t) 0) (string/substring t 0 1)))
+    (if (and first-char (includes? ")]}" first-char))
+      first-char
+      (seq/find (ts-dedent-tokens dedent) (fn (d) (ts-opens-with? line d))))))
+
+(def- ts-closers "([{")
+
+(defn- ts-delimiter? (token)
+  (and token (= 1 (string/length token)) (includes? ")]}" token)))
+
+(defn- ts-dedent-levels (spec token brackets-counted)
+  "How many levels `token` backs out of.
+
+A closing DELIMITER decides for itself: it leaves the bracket it closes, so it backs out
+one iff a bracket was counted for this line and none otherwise. That cannot be a table
+entry, because the same `}` plays two grammatical roles — closing a Ruby hash, whose node
+still encloses the closing line, and closing a `{ |x| … }` block, whose `block_body` ended
+before it. One number for `}` is wrong in whichever case it was not written for, and both
+appear in the same file.
+
+Everything else is a keyword, and a keyword's answer IS per language — `end` is outside
+its `body_statement` while `ensure` is inside one — so it comes from the table."
+  (if (ts-delimiter? token)
+    (math/min 1 brackets-counted)
+    (let (dedent (get spec :dedent #{}))
+      (if (and (map? dedent) (not (nil? (get dedent token))))
+        (get dedent token)
+        (get spec :dedent-levels 1)))))
+
+(defn- ts-line-start (text at)
+  "The offset of the start of the line containing `at`."
+  (let (nl (string/last-index-of text "\n" at)) (if (< nl 0) 0 (inc nl))))
+
+(defn- ts-aligns? (text open)
+  "Does the bracket at offset `open` have CONTENT after it on its own line?
+
+That is the whole distinction every formatter draws. A bracket that ends its line opens a
+HANGING indent — its contents go one level in:
+
+    __all__ = [
+        'field',
+
+A bracket with something after it on the line opens an ALIGNED one — its contents line up
+under that first item, wherever it happens to sit:
+
+    __all__ = ['dataclass',
+               'field',
+
+The second is not a level at all; it is a column, and it is why counting blocks alone
+could never produce it. Roughly a quarter of the Python stdlib's lines and a tenth of
+Ruby's are aligned this way."
+  (let (after (inc open)
+        eol (let (i (index-of text "\n" after)) (if (< i 0) (string/length text) i)))
+    (and (< after eol) (not (= (string/trim (string/substring text after eol)) "")))))
+
+(defn- ts-align-column (text bol chain brackets)
+  "The column a continuation line aligns to, or nil when it is not one.
+
+The innermost bracket enclosing the line, when that bracket opened with content after it.
+Only a real delimiter counts — `(`, `[`, `{` — because a `:brackets` entry may be a
+CONSTRUCT rather than a delimiter (Elixir's `fn … end`), and a construct has no column to
+align under."
+  (let (inner (last (filter chain
+                      (fn (node)
+                        (and (contains? brackets (get node :kind))
+                          (< (get node :start) bol)
+                          (includes? "([{"
+                            (string/substring text
+                              (get node :start)
+                              (inc (get node :start)))))))))
+    (when (and inner (ts-aligns? text (get inner :start)))
+      (inc (- (get inner :start) (ts-line-start text (get inner :start)))))))
+
+(defn- ts-next-nonblank-bol (text bol)
+  "The start of the next NON-BLANK line after the one at `bol`, or nil at the end.
+
+Blank lines are skipped rather than consulted, because a blank line's own answer is the
+block level — the very thing a comment above the first statement is trying not to use.
+A comment, a blank, then the code it describes is the ordinary shape of a docstring-style
+comment in Python, and stopping at the blank put the comment in column 0."
+  (letrec (scan (fn (from)
+                  (let (eol (let (i (index-of text "\n" from))
+                              (if (< i 0) (string/length text) i))
+                        next-bol (inc eol))
+                    (cond
+                      (>= next-bol (string/length text)) nil
+                      (= ""
+                        (string/trim (let (e (index-of text "\n" next-bol))
+                                       (string/substring text
+                                         next-bol
+                                         (if (< e 0) (string/length text) e)))))
+                        (scan next-bol)
+                      else next-bol))))
+    (scan bol)))
+
+;; check-allow: deliberately non-tail — the depth is a run of consecutive comment
+;; lines, and it stops at the first line that is code.
+(check-allow :non-tail-recursion
+  (defn- ts-comment-column (text lang bol chain spec)
+    "The column for a COMMENT line — the column of the next line that is code — or nil
+when this line is not a comment.
+
+A comment belongs to what follows it, which is how every editor treats it and the only
+answer that survives the grammars. Ruby's `body_statement` begins at its first
+STATEMENT, and a comment is not one, so the doc comment above a method sits outside the
+method's body and counting blocks puts it a level short — every documented method in the
+Ruby stdlib. Asking what the next code line does is right there and right everywhere."
+    (when (and (not (empty? chain)) (contains? *comment-kinds* (get (last chain) :kind)))
+      (let (next-bol (ts-next-nonblank-bol text bol))
+        (when next-bol (indent-column text lang next-bol spec))))))
 
 (defn indent-column (text lang bol spec)
   "The column the line beginning at offset `bol` should be indented to — a `:indent` service
@@ -306,7 +431,8 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
   (let (width (get spec :width 2)
         eol (let (i (index-of text "\n" bol)) (if (< i 0) (string/length text) i))
         line (string/substring text bol eol)
-        closing (ts-closing? line (get spec :dedent #{}))
+        closing-token (ts-closing-token line (get spec :dedent #{}))
+        closing (not (nil? closing-token))
         ;; an ordinary line measures at its first non-blank, a closing line at the line start
         at (if closing bol (+ bol (- (string/length line) (string/length (string/triml line)))))
         blocks (get spec :blocks #{})
@@ -331,11 +457,27 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
         ;; Counting a list for its own opening line pushes `[` in by a level, and the same
         ;; mistake appears on every `%{`, `{` and `fn` that begins a line.
         brackets (get spec :brackets #{})
-        n (count (filter chain
-                   (fn (node)
-                     (let (k (get node :kind))
-                       (or (contains? blocks k)
-                         (and (contains? brackets k) (< (get node :start) bol))))))))
+        openers (filter chain
+                  (fn (node)
+                    (let (k (get node :kind))
+                      (or (contains? blocks k)
+                        (and (contains? brackets k) (< (get node :start) bol))))))
+        ;; Brackets that open on the SAME LINE count once between them. `frozenset({`
+        ;; opens two, and charging a level for each put the contents at 8 where Python
+        ;; puts them at 4 — the rule everywhere is that a line introduces at most one
+        ;; level however many delimiters it opens. Blocks are exempt: a `do` block and
+        ;; the `def` around it legitimately share a line and legitimately nest.
+        keys (seq/distinct
+               (map openers
+                 (fn (node)
+                   (if (contains? blocks (get node :kind))
+                     ;; keyed by identity, so every block still counts
+                     [(get node :kind) (get node :start)]
+                     ;; keyed by LINE, so co-opening brackets collapse
+                     [:bracket (ts-line-start text (get node :start))]))))
+        n (count keys)
+        ;; how many of those levels a closing delimiter could be leaving
+        brackets-counted (count (filter keys (fn (k) (= (first k) :bracket)))))
     (if broken
       ;; No tree can say what is open while the text does not parse — an unterminated
       ;; `do` collapses into an error node rather than staying open — which is the
@@ -347,8 +489,14 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
           0
           (let ([indent last-token] previous
                 opened (contains? (get spec :opens #{}) last-token))
-            (math/max 0 (+ indent (if opened width 0) (if closing (- width) 0))))))
-      (* width (math/max 0 (if closing (- n (get spec :dedent-levels 1)) n))))))
+            (math/max 0
+              (+ indent
+                (if opened width 0)
+                (if closing (- (* width (ts-dedent-levels spec closing-token brackets-counted))) 0))))))
+      (or (ts-comment-column text lang bol chain spec)
+        (ts-align-column text bol chain (get spec :brackets #{}))
+        (* width
+          (math/max 0 (if closing (- n (ts-dedent-levels spec closing-token brackets-counted)) n)))))))
 
 ;; ---- structural navigation --------------------------------------------------
 ;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp
