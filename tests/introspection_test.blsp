@@ -463,3 +463,36 @@
   (test "a bound builtin does not imply a working feature"
     (is (bound? 'gui/open))
     (is (or (system/feature? :gui) (not (system/feature? :gui))))))
+
+;; ---- reflect/resolves? -------------------------------------------------------
+;; `bound?` asks the current SCOPE, and a module-qualified name is not in any scope
+;; until its module is loaded — so `(bound? 'regex/find)` is false in a fresh image
+;; whether or not `regex/find` exists. That made the question a documentation check
+;; actually asks — "does the name this prose cites exist?" — unanswerable, which is why
+;; bedit's tutorial carried a gate for exactly that which could not be written and
+;; silently passed instead.
+
+(describe "reflect/resolves?"
+  (test "a qualified name that exists resolves, loading its module to find out"
+    (is (reflect/resolves? 'regex/find))
+    (is (reflect/resolves? 'json/decode)))
+  (test "a qualified name that does not exist does not"
+    (is (not (reflect/resolves? 'regex/no-such-function)))
+    (is (not (reflect/resolves? 'json/no-such-function))))
+  ;; a module that will not load is, to a caller asking whether a citation works, a
+  ;; citation that does not work — false rather than a raise
+  (test "a module that cannot load answers false rather than raising"
+    (is (not (reflect/resolves? 'no-such-module-anywhere/x))))
+  (test "a bare name is just bound?"
+    (is (reflect/resolves? 'map))
+    (is (reflect/resolves? 'reflect/resolves?))
+    (is (not (reflect/resolves? 'definitely-not-a-global-anywhere))))
+  ;; `/` is the division operator, not a qualified name with an empty module
+  (test "the division operator is a name, not a qualification"
+    (is (reflect/resolves? '/)))
+  ;; The difference from `bound?`, stated directly — this is the whole point. The
+  ;; module is picked for being one nothing else here loads, so `bound?` is false on a
+  ;; cold image while `resolves?` still answers.
+  (test "it answers where bound? cannot"
+    (is (reflect/resolves? 'uuid/v4))
+    (is (not (reflect/resolves? 'uuid/no-such-function)))))

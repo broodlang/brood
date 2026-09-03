@@ -151,6 +151,7 @@
    "seq/shuffle" :collections
    "math/sin" :math
    "reflect/source-deps" :meta
+   "reflect/resolves?" :meta
    "reflect/source-location" :meta
    "reflect/source-signatures" :meta
    "file/spit-bytes-append" :filesystem
