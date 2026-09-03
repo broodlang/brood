@@ -20322,6 +20322,25 @@ one. ADR-310 predicted this ("the sites needing no edit were the ones silently s
 the failure") and flipped truthiness *because* the resulting breakage was loud; what it
 could not do was name the sites in advance. This rule names them.
 
+**Addendum (2026-09-03) — the shape that does not bind.** v0.25.0 shipped this rule with a
+false positive, which is the one class the checker is not allowed to have. Reported from a
+hover: `(defn calc (expr) (if (failure? (string/->number expr)) 0 (string/->number expr)))`
+inferred `(string -> (or failure number))`, so every numeric use of `calc` was reported —
+on a function that provably cannot return a failure. The guard was there; the value simply
+was not *bound*, so nothing carried the narrowing to the second occurrence.
+
+The fix is a `PathKey::Call` step, and it needed no new soundness argument: `path_types`
+already narrows a re-evaluated access expression (`(get r :age)` is a call to `get`), on the
+grounds that Brood data is immutable so the base cannot change between evaluations. A
+deterministic unary parser is the same case — `guards::DETERMINISTIC_UNARY` lists the twelve
+`T | failure` producers, an **allow**-list because the other polarity would silently admit
+`os/env`, `now`, `random` and everything added later. Two details: the narrowing had to be
+added to `guards::branch_scopes` as well as the checking walk's copy, because the INFERRED
+return type is what the lint reads; and it is seeded with the guarded expression's own type,
+without which the else branch reads `¬failure` — true, and wider than the `number` it
+structurally is. Zero warnings moved across `std/`, `tests/`, `examples/` and seven
+downstream repos: it removes false positives and creates none.
+
 **What this closes.** `docs/deferred.md`'s first customer for a `declare`-family modifier —
 the impossible-`failure?` lint growing a converse — which was also its stated trigger to
 pick the whole design back up. That trigger is spent: the converse exists and needed no new
