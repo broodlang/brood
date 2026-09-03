@@ -175,3 +175,77 @@
         (sleep 300)
         ;; The handle must be dead: a write to it errors ("no such subprocess").
         (assert= (try (do (os/write p "x") :wrote) (catch e :closed)) :closed)))))
+
+;; ---- pseudo-terminals --------------------------------------------------------
+;; The difference a pty makes is not cosmetic: a program that asks `isatty` and is
+;; told no drops its prompt, its line editing and its unbuffered output. That is why
+;; an editor cannot host a REPL over pipes, and it is the whole reason `spawn-pty`
+;; exists — so the property to assert is exactly that the child sees a terminal.
+
+(defn- pty-drain (acc)
+  "Everything the child writes until it exits or falls quiet."
+  (receive
+    ([:proc p d] (pty-drain (str acc d)))
+    ([:proc-closed p code] acc)
+    (after *test-wait-ms* acc)))
+
+(describe "proc: a pty child is in a terminal, a piped one is not"
+  ;; The same command, the same shell, the same question — two answers.
+  :isolated (test "isatty says yes under spawn-pty"
+    (let (_p (os/spawn-pty "sh" ["-c" "if [ -t 0 ]; then echo TTY; else echo PIPE; fi"])
+          out (pty-drain ""))
+      (assert= "TTY" (string/trim out))))
+
+  :isolated (test "and no under spawn — which is what pipes are for"
+    (let (_p (os/spawn "sh" ["-c" "if [ -t 0 ]; then echo TTY; else echo PIPE; fi"])
+          out (pty-drain ""))
+      (assert= "PIPE" (string/trim out)))))
+
+(describe "proc: a pty carries one channel, not two"
+  ;; A terminal has no separate error stream — the child's stderr IS its terminal.
+  ;; Anything expecting `[:proc-err …]` from a pty is expecting the wrong shape.
+  :isolated (test "stderr arrives on the same stream as stdout"
+    (let (_p (os/spawn-pty "sh" ["-c" "echo out; echo err >&2"])
+          out (pty-drain ""))
+      (is (includes? out "out"))
+      (is (includes? out "err")))))
+
+(describe "proc: a pty has a size"
+  :isolated (test "the child is told the window it was given"
+    (let (_p (os/spawn-pty "sh" ["-c" "stty size"] {:cols 100 :rows 30})
+          out (pty-drain ""))
+      ;; `stty size` prints "rows cols"
+      (assert= "30 100" (string/trim out))))
+
+  :isolated (test "resize-pty changes it, which is how a full-screen child redraws"
+    (let (p (os/spawn-pty "sh" ["-c" "sleep 0.3; stty size"] {:cols 80 :rows 24})
+          _ (os/resize-pty p 120 40)
+          out (pty-drain ""))
+      (assert= "40 120" (string/trim out))))
+
+  :isolated (test "resizing a piped child is refused rather than silently ignored"
+    (let (p (os/spawn "cat" []))
+      (assert= :refused (try (do (os/resize-pty p 80 24) :resized) (catch e :refused)))
+      (os/close p))))
+
+;; The reason all of the above exists: an interactive interpreter, hosted.
+(defn- pty-await (acc want)
+  "Read until `want` appears. An interactive child never exits and never falls
+quiet on its own, so waiting for EOF here would mean waiting out the timeout —
+twice — for a test whose answer arrived in milliseconds."
+  (if (includes? acc want)
+    acc
+    (receive
+      ([:proc p d] (pty-await (str acc d) want))
+      ([:proc-closed p code] acc)
+      (after *test-wait-ms* acc))))
+
+(describe "proc: an interactive REPL under a pty"
+  :isolated (test "a shell prompts, echoes and answers — none of which it does on a pipe"
+    (let (p (os/spawn-pty "sh" ["-i"] {:cols 80 :rows 24})
+          _ (os/write p "echo forty-two\n")
+          out (pty-await "" "forty-two")
+          _ (os/close p))
+      ;; the echo of what was typed is itself the proof of a terminal: a pipe has no
+      ;; echo, because there is no line discipline to do it
+      (is (includes? out "forty-two")))))

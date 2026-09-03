@@ -93,6 +93,10 @@ struct Proc {
     /// forever: the registry entry leaked, and both reader threads kept draining
     /// output into a dead pid's mailbox (a no-op delivery) for the child's life.
     owner: u64,
+    /// The pty master fd, for a child spawned by [`spawn_pty`]; `None` for a plain
+    /// piped child. Only `pty_resize` reads it — the reader and writer already hold
+    /// their own `File` clones of it.
+    pty: Option<std::os::fd::RawFd>,
 }
 
 /// The `Child` plus a condvar the reaper waits on.
@@ -197,9 +201,9 @@ fn start_pipe_reader<R: Read + Send + 'static>(
 /// does. Deferring `[:proc-closed]` to the child's actual exit is the contract; what
 /// changed is that waiting for it no longer costs a 200 Hz poll for the child's whole
 /// lifetime. On exit, drop the registry entry.
-fn start_stdout_reader(
+fn start_stdout_reader<R: Read + Send + 'static>(
     id: u64,
-    out: ChildStdout,
+    out: R,
     child: Arc<ChildHandle>,
     subscriber: u64,
     binary: Arc<AtomicBool>,
@@ -304,6 +308,7 @@ pub fn spawn(
             child: child.clone(),
             binary: binary.clone(),
             owner: subscriber,
+            pty: None,
         },
     );
     start_stdout_reader(id, stdout, child, subscriber, binary.clone());
@@ -338,7 +343,7 @@ pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
 /// or owner death), and dropping `stdin` on the way out is what gives the child EOF.
 /// A write error also ends it: the child is gone, and its death is already reported to the
 /// owner as `[:proc-closed …]` by the stdout reader, which is the one report worth having.
-fn start_stdin_writer(mut stdin: ChildStdin) -> mpsc::SyncSender<Vec<u8>> {
+fn start_stdin_writer<W: Write + Send + 'static>(mut stdin: W) -> mpsc::SyncSender<Vec<u8>> {
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE_CAP);
     let spawned = std::thread::Builder::new()
         .name("proc-stdin".into())
@@ -436,4 +441,257 @@ fn bad_proc() -> std::io::Error {
         std::io::ErrorKind::NotFound,
         "no such subprocess (already closed?)",
     )
+}
+
+// ---- pseudo-terminals ------------------------------------------------------
+//
+// A pipe is the wrong shape for a program that expects a *terminal*. `iex -S mix`,
+// `python`, `psql`, a shell — each asks `isatty(0)` and, told no, drops its prompt,
+// its line editing and usually its echo, then line-buffers its output so nothing
+// arrives until it exits. That is why an editor cannot host a REPL over `proc-spawn`:
+// the child is not misbehaving, it is correctly declining to be interactive.
+//
+// A pty is the missing primitive, and it is the same seam as everything else here —
+// so a pty child reuses the whole `Proc` registry, `proc-send`, `proc-close`, the
+// owner-death cleanup and the message protocol. Two things differ, both inherent:
+//
+//   * ONE fd carries both directions, so there is no separate stderr; the child's
+//     stderr is its terminal, and everything arrives as `[:proc handle data]`. A
+//     caller that needs the streams apart wants pipes, not a terminal.
+//   * a terminal has a SIZE, and programs lay out against it (and are told when it
+//     changes), so `pty_resize` exists and is expected to be called.
+//
+// The child gets its own session and a controlling terminal (`setsid` + `TIOCSCTTY`
+// in `pre_exec`), which is what makes job control and ^C work rather than delivering
+// signals to the editor.
+
+#[cfg(unix)]
+mod pty {
+    use std::os::fd::{FromRawFd, RawFd};
+
+    /// Set a pty's window size. Programs read this at start and on `SIGWINCH`.
+    pub(super) fn set_winsize(fd: RawFd, cols: u16, rows: u16) -> std::io::Result<()> {
+        let ws = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: `fd` is a pty master we opened; `ws` is the struct TIOCSWINSZ expects.
+        let rc = unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) };
+        if rc == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Open a pty pair, returning `(master, slave)` raw fds.
+    ///
+    /// `posix_openpt` + `grantpt` + `unlockpt` + `ptsname` rather than `openpty`,
+    /// because that quartet is plain POSIX in `libc` while `openpty` lives in
+    /// `libutil` and needs an extra link on some platforms.
+    pub(super) fn open_pair() -> std::io::Result<(RawFd, RawFd)> {
+        // SAFETY: each call is the documented POSIX sequence, and every return is
+        // checked before the next step uses it.
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            if master < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(master);
+                return Err(e);
+            }
+            // `ptsname_r` is the thread-safe form and is Linux-only; macOS has only
+            // `ptsname`, whose static buffer is safe here because the name is copied
+            // out before this function returns and no other thread calls it.
+            #[cfg(target_os = "linux")]
+            let slave = {
+                let mut name = [0 as libc::c_char; 256];
+                if libc::ptsname_r(master, name.as_mut_ptr(), name.len()) != 0 {
+                    let e = std::io::Error::last_os_error();
+                    libc::close(master);
+                    return Err(e);
+                }
+                libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let slave = {
+                let name = libc::ptsname(master);
+                if name.is_null() {
+                    let e = std::io::Error::last_os_error();
+                    libc::close(master);
+                    return Err(e);
+                }
+                libc::open(name, libc::O_RDWR | libc::O_NOCTTY)
+            };
+            if slave < 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(master);
+                return Err(e);
+            }
+            Ok((master, slave))
+        }
+    }
+
+    /// A `Stdio` on a fresh dup of `fd`, so each of the child's three descriptors owns
+    /// its own file and closing one does not close the others.
+    pub(super) fn stdio_dup(fd: RawFd) -> std::io::Result<std::process::Stdio> {
+        // SAFETY: `fd` is open; `dup` returns a new owned descriptor, which `File`
+        // takes ownership of and `Stdio` then consumes.
+        let dup = unsafe { libc::dup(fd) };
+        if dup < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(std::process::Stdio::from(unsafe {
+            std::fs::File::from_raw_fd(dup)
+        }))
+    }
+}
+
+/// `(pty-spawn prog args opts)` — spawn `prog` under a **pseudo-terminal**, so it
+/// behaves as it would in a terminal: prompts, line editing, unbuffered output.
+///
+/// Same handle type and same messages as [`spawn`], except that there is no
+/// `[:proc-err …]` stream — a terminal has one channel, and the child's stderr goes
+/// to it. `cols`/`rows` set the initial window size; [`pty_resize`] changes it.
+#[cfg(unix)]
+pub fn spawn_pty(
+    prog: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    env: &[(String, String)],
+    subscriber: u64,
+    cols: u16,
+    rows: u16,
+) -> std::io::Result<u64> {
+    use std::os::unix::process::CommandExt;
+
+    let (master, slave) = pty::open_pair()?;
+    pty::set_winsize(master, cols, rows)?;
+
+    let mut command = Command::new(prog);
+    command
+        .args(args)
+        .stdin(pty::stdio_dup(slave)?)
+        .stdout(pty::stdio_dup(slave)?)
+        .stderr(pty::stdio_dup(slave)?);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    for (k, v) in env {
+        command.env(k, v);
+    }
+    // A terminal-oriented program wants to know it has one.
+    if !env.iter().any(|(k, _)| k == "TERM") && std::env::var_os("TERM").is_none() {
+        command.env("TERM", "xterm-256color");
+    }
+    // SAFETY: runs in the forked child before exec. `setsid` detaches it from our
+    // session and `TIOCSCTTY` makes the pty its controlling terminal — which is what
+    // sends ^C and SIGWINCH to the CHILD rather than to the editor hosting it. Both
+    // are async-signal-safe syscalls, the only thing permitted between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn();
+    // The parent holds the master only; the child has its own dups of the slave.
+    // SAFETY: `slave` is ours and no longer referenced here.
+    unsafe { libc::close(slave) };
+    let child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            // SAFETY: master is ours and nothing else holds it.
+            unsafe { libc::close(master) };
+            return Err(e);
+        }
+    };
+
+    // One fd, two directions: the reader and the writer each get their own `File`
+    // over a dup, so an EOF on one does not close the other out from under it, and
+    // the registry keeps `master` itself for resizing.
+    // SAFETY: two independent dups of the master, each owned by one `File`.
+    let (read_file, write_file) = unsafe {
+        use std::os::fd::FromRawFd;
+        let r = libc::dup(master);
+        let w = libc::dup(master);
+        if r < 0 || w < 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(master);
+            return Err(e);
+        }
+        (std::fs::File::from_raw_fd(r), std::fs::File::from_raw_fd(w))
+    };
+
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let child = Arc::new(ChildHandle {
+        child: Mutex::new(child),
+        killed: std::sync::Condvar::new(),
+    });
+    let binary = Arc::new(AtomicBool::new(false));
+    let writer = start_stdin_writer(write_file);
+    reg().insert(
+        id,
+        Proc {
+            writer,
+            child: child.clone(),
+            binary: binary.clone(),
+            owner: subscriber,
+            pty: Some(master),
+        },
+    );
+    start_stdout_reader(id, read_file, child, subscriber, binary);
+    Ok(id)
+}
+
+/// `(pty-resize handle cols rows)` — tell a pty child its terminal changed size.
+/// A no-op error for a handle that is not a pty, or is already closed.
+#[cfg(unix)]
+pub fn pty_resize(id: u64, cols: u16, rows: u16) -> std::io::Result<()> {
+    let reg = reg();
+    let Some(p) = reg.get(&id) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "pty-resize: unknown or closed handle",
+        ));
+    };
+    let Some(fd) = p.pty else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pty-resize: this child was spawned with pipes, not a pty",
+        ));
+    };
+    pty::set_winsize(fd, cols, rows)
+}
+
+#[cfg(not(unix))]
+pub fn spawn_pty(
+    _prog: &str,
+    _args: &[String],
+    _cwd: Option<&str>,
+    _env: &[(String, String)],
+    _subscriber: u64,
+    _cols: u16,
+    _rows: u16,
+) -> std::io::Result<u64> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "pty-spawn: pseudo-terminals are a Unix facility",
+    ))
+}
+
+#[cfg(not(unix))]
+pub fn pty_resize(_id: u64, _cols: u16, _rows: u16) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "pty-resize: pseudo-terminals are a Unix facility",
+    ))
 }
