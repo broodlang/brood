@@ -989,3 +989,87 @@
   (test "a manifest that is not a (project …) form is passed through untouched"
     (assert= (project/bundle-augment-manifest "(something :else 1)" [])
       "(something :else 1)")))
+
+;; ---- fix-sigs: the bulk, safe form of the editor's declare-sig action ---------
+;; The action writes one `(sig …)` above one `defn`, and is correct doing it. Accepting
+;; SEVERAL against one snapshot is not: every insertion pushes the lines below it down,
+;; so the second edit lands a line early and the third two early. That is how
+;; `std/regex.blsp` ended up with `(defn- regex-repeat-copies      else nil)))` — the
+;; head of the following definition spliced onto the tail of the previous one — and
+;; stopped parsing. This applies them last-first, where no edit can move another's
+;; target, and re-parses before writing.
+
+(defn pt-sig-dir ()
+  (let (dir (str "/tmp/brood-fixsigs-" (:id (proc/info (self)))))
+    (file/mkdir dir)
+    dir))
+
+(defn pt-sig-file (dir name text)
+  (let (path (path/join dir name))
+    (file/spit path text)
+    path))
+
+(describe "project/fix-sigs"
+  ;; Two definitions, so the second's insertion point is one the first would move.
+  (def pt-two-defns
+    (string/join ["(defmodule pt-two)"
+                   "" "(defn- alpha (a b)" "  (+ (string/length a) b))" "" "(defn- beta (s)"
+                   "  (string/length s))"]
+      "\n"))
+
+  :isolated (test "every signature lands directly above its own definition"
+    (let (dir (pt-sig-dir)
+          path (pt-sig-file dir "two.blsp" pt-two-defns))
+      (project/fix-sigs (list path) true)
+      (let (lines (into [] (string/split (file/slurp path) "\n")))
+        ;; each `(sig x …)` is immediately followed by the `defn` of x — the property
+        ;; the drifting application breaks
+        (is (every? (range (count lines))
+              (fn (i)
+                (let (l (nth lines i ""))
+                  (if (not (string/starts-with? (string/triml l) "(sig "))
+                    true
+                    (let (name (nth (string/split (string/triml l) " ") 1 "")
+                          next-line (string/triml (nth lines (inc i) "")))
+                      (or (string/starts-with? next-line (str "(defn- " name " "))
+                        (string/starts-with? next-line (str "(defn " name " ")))))))))
+        ;; and nothing of the original was disturbed
+        (is (includes? (file/slurp path) "(defn- alpha (a b)"))
+        (is (includes? (file/slurp path) "(defn- beta (s)")))))
+
+  :isolated (test "the rewritten file still parses — which is the gate before writing"
+    (let (dir (pt-sig-dir)
+          path (pt-sig-file dir "parses.blsp" pt-two-defns))
+      (project/fix-sigs (list path) true)
+      ;; read-all raises on a malformed file; the point is that it does not
+      (is (> (count (reflect/read-all (file/slurp path))) 0))))
+
+  :isolated (test "a dry run reports the same set and changes nothing"
+    (let (dir (pt-sig-dir)
+          path (pt-sig-file dir "dry.blsp" pt-two-defns)
+          before (file/slurp path))
+      (project/fix-sigs (list path) false)
+      (assert= (file/slurp path) before)))
+
+  :isolated (test "a file whose signatures are already declared is left alone"
+    (let (dir (pt-sig-dir)
+          path (pt-sig-file dir "done.blsp" pt-two-defns))
+      (project/fix-sigs (list path) true)
+      (let (once (file/slurp path))
+        (project/fix-sigs (list path) true)
+        (assert= (file/slurp path) once))))
+
+  ;; A definition the locator cannot find is skipped rather than guessed at — the
+  ;; insertion point is the one thing this must never approximate.
+  :isolated (test "a definition it cannot locate is skipped, not guessed"
+    (let (dir (pt-sig-dir)
+          ;; the head is split across lines, so no single line opens `(defn- odd `
+          path (pt-sig-file dir
+                 "odd.blsp"
+                 (string/join ["(defmodule pt-odd)" "(defn-" "  odd (s)" "  (string/length s))"]
+                   "\n"))
+          before (file/slurp path))
+      (project/fix-sigs (list path) true)
+      ;; unchanged, and still parses
+      (assert= (file/slurp path) before)
+      (is (> (count (reflect/read-all (file/slurp path))) 0)))))

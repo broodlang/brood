@@ -602,6 +602,226 @@ mod tests {
         );
     }
 
+    /// Apply a declare-sig action to `src` at `at` and return the resulting document.
+    /// Applying the edit is the point: an edit that looks plausible in isolation can
+    /// still land on the wrong line, and the only way to see that is to perform it.
+    fn apply_declare_sig(src: &str, at: u32) -> Option<String> {
+        let mut interp = Interp::new();
+        let root = brood::syntax::cst::parse(src);
+        let scope = brood::syntax::scope::analyze(&root, src);
+        let li = LineIndex::new(src);
+        let offset_of = |r: Range| li.offset(src, r.start);
+        let acts = code_actions(
+            &mut interp,
+            &uri(),
+            &root,
+            src,
+            &scope,
+            &li,
+            offset_of,
+            &[],
+            at,
+        );
+        let edit = acts.iter().find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.title.starts_with("Declare signature") => {
+                Some(ca.edit.as_ref()?.changes.as_ref()?[&uri()][0].clone())
+            }
+            _ => None,
+        })?;
+        // Apply it the way a client would: resolve the LSP Range back to byte offsets
+        // and splice. A zero-width range is an insertion.
+        let start = li.offset(src, edit.range.start) as usize;
+        let end = li.offset(src, edit.range.end) as usize;
+        let mut out = String::with_capacity(src.len() + edit.new_text.len());
+        out.push_str(&src[..start]);
+        out.push_str(&edit.new_text);
+        out.push_str(&src[end..]);
+        Some(out)
+    }
+
+    /// The corruption this guards against, seen in the wild on `std/regex.blsp`:
+    /// applying the action produced `(defn- regex-repeat-copies      else nil)))` —
+    /// the head of the FOLLOWING definition spliced onto the tail of the previous
+    /// one — which stopped the file parsing and made the module's own exports read
+    /// as unbound.
+    ///
+    /// Two things make the real file different from the one-line fixture the older
+    /// test used, and either could move a position: the target sits far down the
+    /// file, and the lines above it are full of non-ASCII (`→`, `…`, `×`), where an
+    /// LSP `character` is a UTF-16 count and a byte offset is not.
+    #[test]
+    fn declare_sig_does_not_disturb_the_text_around_it() {
+        let src = "\
+;; a header with non-ASCII: → … × µ ✓ ✗
+;; and another: the arrow → again, and an ellipsis …
+
+(defn- first-fn (pcs i acc)
+  ;; → a comment with an arrow
+  (if (nil? i) [acc i] (first-fn pcs (inc i) acc)))
+
+(defn- second-fn (atom k acc)
+  (if (<= k 0) acc (second-fn atom (dec k) (cons atom acc))))
+";
+        // point at `first-fn`'s head
+        let at = src.find("first-fn").unwrap() as u32;
+        let Some(applied) = apply_declare_sig(src, at) else {
+            return; // the checker inferred nothing worth writing — not this test's subject
+        };
+
+        // Nothing of the original may be lost or spliced: the only difference is one
+        // whole added line.
+        let before: Vec<&str> = src.lines().collect();
+        let after: Vec<&str> = applied.lines().collect();
+        assert_eq!(
+            after.len(),
+            before.len() + 1,
+            "exactly one line added\n--- before ---\n{src}\n--- after ---\n{applied}"
+        );
+        let added = after
+            .iter()
+            .position(|l| l.starts_with("(sig "))
+            .expect("the sig line is in the result");
+        let mut without: Vec<&str> = after.clone();
+        without.remove(added);
+        assert_eq!(
+            without, before,
+            "removing the added line restores the original exactly\n{applied}"
+        );
+
+        // and the result still parses
+        assert!(
+            brood::syntax::cst::parse(&applied)
+                .children
+                .iter()
+                .all(|n| n.kind != NodeKind::Error),
+            "the edited document still parses\n{applied}"
+        );
+    }
+
+    /// The same, for a definition that is the LAST form in the file and is preceded by
+    /// one whose closing parens sit on their own line — the exact neighbourhood of the
+    /// `regex-brace` / `regex-repeat-copies` pair that was corrupted.
+    #[test]
+    fn declare_sig_on_a_defn_following_a_multiline_form() {
+        let src = "\
+(defn- brace (pcs i)
+  (let ([lo-text i2] (digits pcs i \"\"))
+    (cond
+      (= lo-text \"\") nil
+      else nil)))
+
+(defn- copies (atom k acc)
+  (if (<= k 0) acc (copies atom (dec k) (cons atom acc))))
+";
+        let at = src.find("copies (atom").unwrap() as u32;
+        let Some(applied) = apply_declare_sig(src, at) else {
+            return;
+        };
+        assert!(
+            !applied.contains("(defn- copies      else nil)))"),
+            "the following defn's head must not be spliced onto the previous form\n{applied}"
+        );
+        assert!(
+            applied.contains("(defn- copies (atom k acc)"),
+            "the defn itself survives intact\n{applied}"
+        );
+        assert!(
+            brood::syntax::cst::parse(&applied)
+                .children
+                .iter()
+                .all(|n| n.kind != NodeKind::Error),
+            "the edited document still parses\n{applied}"
+        );
+    }
+
+    /// Where the corruption actually comes from. Each edit is correct against the
+    /// document it was computed from, and every insertion pushes every later line down
+    /// by one — so a client that collects several declare-sig actions from ONE snapshot
+    /// and applies them in order writes the second into the wrong line, the third two
+    /// lines out, and so on. This reproduces that, and is the reason
+    /// `nest check --fix-sigs` exists: it applies them bottom-up, where no edit can
+    /// move the target of another.
+    #[test]
+    fn several_edits_from_one_snapshot_drift_when_applied_top_down() {
+        let src = "\
+(defn- alpha (a b)
+  (+ (string/length a) b))
+
+(defn- beta (s)
+  (string/length s))
+";
+        let mut interp = Interp::new();
+        let root = brood::syntax::cst::parse(src);
+        let scope = brood::syntax::scope::analyze(&root, src);
+        let li = LineIndex::new(src);
+        let offset_of = |r: Range| li.offset(src, r.start);
+        let sig_edit = |interp: &mut Interp, at: u32| {
+            let acts = code_actions(interp, &uri(), &root, src, &scope, &li, offset_of, &[], at);
+            acts.iter().find_map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca)
+                    if ca.title.starts_with("Declare signature") =>
+                {
+                    Some(ca.edit.as_ref()?.changes.as_ref()?[&uri()][0].clone())
+                }
+                _ => None,
+            })
+        };
+        let first = sig_edit(&mut interp, src.find("alpha").unwrap() as u32);
+        let second = sig_edit(&mut interp, src.find("beta").unwrap() as u32);
+        let (Some(first), Some(second)) = (first, second) else {
+            return; // nothing inferred worth declaring — not this test's subject
+        };
+
+        // Both were computed against `src`; a naive client applies them in order.
+        let apply = |doc: &str, e: &TextEdit| {
+            let li = LineIndex::new(doc);
+            let start = li.offset(doc, e.range.start) as usize;
+            let end = li.offset(doc, e.range.end) as usize;
+            format!("{}{}{}", &doc[..start], e.new_text, &doc[end..])
+        };
+        let top_down = apply(&apply(src, &first), &second);
+
+        // The second sig lands one line early — inside the previous form's tail —
+        // because the first insertion moved everything below it down.
+        let beta_line = top_down
+            .lines()
+            .position(|l| l.starts_with("(defn- beta"))
+            .expect("beta survives");
+        let beta_sig_line = top_down
+            .lines()
+            .position(|l| l.starts_with("(sig beta"))
+            .expect("beta's sig was written");
+        assert_ne!(
+            beta_sig_line + 1,
+            beta_line,
+            "this test documents the DRIFT; if the sig now sits directly above its \
+             defn, top-down application became safe and this test should be retired\n{top_down}"
+        );
+
+        // Bottom-up — later edits first — is correct, and is what the bulk writer does.
+        let bottom_up = apply(&apply(src, &second), &first);
+        let beta_line = bottom_up
+            .lines()
+            .position(|l| l.starts_with("(defn- beta"))
+            .unwrap();
+        let beta_sig_line = bottom_up
+            .lines()
+            .position(|l| l.starts_with("(sig beta"))
+            .unwrap();
+        assert_eq!(
+            beta_sig_line + 1,
+            beta_line,
+            "applied bottom-up, each sig sits directly above its own defn\n{bottom_up}"
+        );
+        assert!(
+            brood::syntax::cst::parse(&bottom_up)
+                .children
+                .iter()
+                .all(|n| n.kind != NodeKind::Error),
+            "and the result parses\n{bottom_up}"
+        );
+    }
+
     #[test]
     fn the_declared_edit_is_a_parseable_sig_line_above_the_defn() {
         let src = "(defn f (s) (string/length s))";
