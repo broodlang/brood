@@ -102,7 +102,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_SCHED_DBG",
         SCHED,
-        "trace every enqueue, quantum start (body source prefix) and quantum outcome per pid — the per-pid lifecycle counters cannot show (KI-88's tool)",
+        "trace every enqueue, quantum start (body source prefix) and quantum outcome per pid, and arm the quantum-age ledger (KI-88's tool). The stranded-work watchdog — pool-wide starvation with queued work, KI-88's never-scheduled signature — reports without this flag",
     ),
     f(
         "BROOD_ROUTE_DBG",
@@ -113,6 +113,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "BROOD_FAULT_QUANTUM_TAIL",
         SCHED,
         "=<n>: FAULT INJECTION — panic on the nth quantum's post-drive tail. Proves that path stays survivable (the worker lives, the process is retired, not silently dropped); nothing an ordinary program does provokes one",
+    ),
+    f(
+        "BROOD_FAULT_STRANDED",
+        SCHED,
+        "FAULT INJECTION — over-count STEALABLE by one at pool start, so the pool believes a process is queued that no worker can find. Proves the stranded-work watchdog (KI-88's never-scheduled signature) actually fires; nothing an ordinary program does provokes one",
     ),
     // ---- JIT ----
     f(

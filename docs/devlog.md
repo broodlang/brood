@@ -10120,3 +10120,49 @@ This is the `make green` lesson in its original form, and CLAUDE.md states it ou
 cancelled CI run is not evidence**, and the run list is not to be hand-read. I did both, and
 then built a mechanism on top. The tell was available and ignored: the two "different" runs
 reported the same failure at the same timestamp, which is what one run read twice looks like.
+
+## 2026-09-03 (stability) — a watchdog for the process that never ran, and a rule for the env var that leaked twice
+
+Two guards, one lesson each.
+
+**KI-88 gets an instrument that is on when it matters.** The entry's signature is a process
+created, promoted, registered — and never scheduled. Every sighting happened in a run nobody
+had instrumented, and the one existing instrument (the quantum ledger, `BROOD_SCHED_DBG`)
+only sees a process a thread is *inside*; a never-scheduled process has no ledger entry, no
+death line, and surfaces as a collector timeout thirty seconds later with the evidence gone.
+`scheduler/pool.rs` now carries a default-ON **stranded-work watchdog**: when `STEALABLE`
+says work is queued but no worker has found anything to run for 3 s, it prints one report
+naming every queued pid and every worker's parked/dirty/busy state, then latches until
+progress resumes. The invariant is that queued work is found within one `STEAL_BACKOFF`
+(every parked worker re-probes on it, `try_steal` scans every queue), so a persistent
+find-nothing window with work queued is starvation by definition. Healthy-path cost is two
+relaxed stores per quantum and one relaxed load on the (cold) park path.
+
+The first cut counted find-nothing cycles (512) and claimed "~5 s". Twelve parked workers
+burn 512 cycles in 0.4 s. A trip point that depends on the core count cannot be reasoned
+about from a log, so the window is wall-clock.
+
+A detector nobody has seen fire is indistinguishable from one that cannot, so it has a
+fault: `BROOD_FAULT_STRANDED=1` over-counts `STEALABLE` by one at pool start — precisely
+what a stranded process looks like from the probe's side. `crates/cli/tests/
+stranded_watchdog.rs` asserts the report under the fault and its absence without (a
+watchdog that reports on a healthy idle pool is noise that trains everyone to ignore the real
+one). Sabotage-verified: commenting out the probe fails the fault run, passes the control.
+Building the guard found one defect in the report — the reporter holds its own queue lock, so
+its own row read `<locked>`.
+
+**KI-86's shape recurred, so it is now a rule the tree enforces.** On 2026-09-02 `make asan`
+(plain `cargo test`: one process, parallel threads) had a `set_var("BROOD_NO_CRASH_REPORT")`
+in one test reach its sibling and make it report the crash reporter "did not arm" — the
+second time an env mutation crossed tests in a binary, with a different variable. Both fixes
+were "give it its own binary", and nextest hides the hazard completely, which is exactly why
+it keeps coming back on the harnesses that still use libtest (`make asan`, `make tsan`, a
+bare `cargo test`). `crates/lisp/tests/env_isolation.rs` walks every integration-test file
+in the workspace, strips comments and strings, and requires a file that calls
+`set_var`/`remove_var` to hold at most ONE `#[test]`, and a `#[cfg(test)]` module under
+`src/` to hold none. Sabotage-verified: a second `#[test]` appended to
+`crash_report_optout.rs` fails it by name.
+
+Also this session: 93 GB of stale debug test binaries (23 generations of each, ~150 MB
+apiece) had the root filesystem at 97%; KI-86's own entry records phantom failures from a
+full disk, so `rm -rf target/debug` before anything else. A five-minute rebuild.
