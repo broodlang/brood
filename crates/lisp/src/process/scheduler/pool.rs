@@ -73,6 +73,89 @@ fn ledger_watchdog() {
     });
 }
 
+/// KI-88's OTHER half — the case the quantum ledger above cannot see. The ledger tracks a
+/// process a thread is *inside*; a process that is enqueued and **never scheduled at all**
+/// ("created, promoted, registered — never executes its first instruction") has no ledger
+/// entry, no death line, and today surfaces only as a collector timeout thirty seconds
+/// later, with the evidence gone.
+///
+/// The invariant this watches: work on a queue is found within one `STEAL_BACKOFF`, because
+/// every parked worker re-probes on that timeout and `try_steal` scans every queue. So a
+/// full find-nothing cycle — own queue empty, steal found nothing, nothing grace-deferred —
+/// while `STEALABLE` says work exists is *individually* normal (a process can be mid-pull,
+/// its decrement pending) but **cannot persist**: any progress anywhere resets the window in
+/// `run_one`. Seconds of it mean pool-wide starvation with queued work, which is KI-88
+/// witnessed live.
+///
+/// Default-ON, for KI-36's reason (a diagnostic you must arm before the bug is absent when
+/// it matters — KI-88 has been sighted only in runs nobody had instrumented). The healthy-
+/// path cost is two relaxed stores in `run_one` and one relaxed load on the park path,
+/// which is already the cold path. The report names the stranded pids — the one fact every
+/// previous sighting lacked — then latches until progress resumes.
+///
+/// The window is measured in wall time, not find-nothing cycles: a cycle count's meaning
+/// scales with how many workers are parked (12 parked workers burn 512 cycles in ~0.4 s at
+/// the 10 ms backoff, one worker takes 5 s), and a diagnostic whose trip point depends on
+/// the core count is one you cannot reason about from a log.
+static STRANDED_SINCE: AtomicU64 = AtomicU64::new(0);
+static STRANDED_LATCH: AtomicBool = AtomicBool::new(false);
+/// Far past any transient (a quantum is bounded in milliseconds), well before the suite's
+/// 30 s collector timeout kills the evidence.
+const STRANDED_REPORT_AFTER_NS: u64 = 3_000_000_000;
+
+fn stranded_probe(reporter: usize) {
+    if STEALABLE.load(Ordering::SeqCst) == 0 {
+        STRANDED_SINCE.store(0, Ordering::Relaxed);
+        return;
+    }
+    let now = now_nanos().max(1);
+    let since = STRANDED_SINCE.load(Ordering::Relaxed);
+    if since == 0 {
+        // First find-nothing cycle with work queued: open the window. A lost race here
+        // merely lets another prober open it a few nanoseconds later.
+        let _ = STRANDED_SINCE.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
+        return;
+    }
+    let age = now.saturating_sub(since);
+    if age >= STRANDED_REPORT_AFTER_NS
+        && STRANDED_LATCH
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        let mut lines = String::new();
+        for (wid, (lock, _)) in WORKERS.iter().enumerate() {
+            // The reporter holds its own queue lock (the caller checked it empty), so
+            // `try_lock` on it would report a phantom `<locked>`.
+            let pids: Vec<u64> = if wid == reporter {
+                Vec::new()
+            } else {
+                match lock.try_lock() {
+                    Ok(q) => q.iter().map(|p| p.pid).collect(),
+                    Err(_) => {
+                        lines.push_str(&format!("  w{wid}: <locked>\n"));
+                        continue;
+                    }
+                }
+            };
+            lines.push_str(&format!(
+                "  w{wid}: parked={} dirty={} busy={} queue={pids:?}\n",
+                WORKER_PARKED[wid].load(Ordering::Relaxed),
+                WORKER_DIRTY[wid].load(Ordering::Relaxed),
+                WORKER_BUSY[wid].load(Ordering::Relaxed),
+            ));
+        }
+        eprintln!(
+            "[sched] STRANDED WORK (KI-88 signature): stealable={} but no worker has found \
+             anything to run for {} ms (live_executors={}, parked={}). Any pid listed below \
+             that never runs is the stranded one — preserve this binary and the log.\n{lines}",
+            STEALABLE.load(Ordering::SeqCst),
+            age / 1_000_000,
+            LIVE_EXECUTORS.load(Ordering::SeqCst),
+            PARKED_COUNT.load(Ordering::Relaxed),
+        );
+    }
+}
+
 pub(crate) fn sched_dbg() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BROOD_SCHED_DBG").is_some())
@@ -469,6 +552,7 @@ pub(crate) fn ensure_workers() {
                 live += 1;
             }
         }
+        fault_stranded_work();
         if live != n {
             // Correct both gauges to reality, then say so: a pool smaller than requested
             // is a real degradation, and a silent one would present later as unexplained
@@ -523,6 +607,9 @@ fn worker_loop(wid: usize) {
             continue;
         }
         if q.is_empty() {
+            // A full find-nothing cycle: own queue empty, steal empty, nothing deferred.
+            // Feeds the stranded-work detector above; healthy runs reset it in `run_one`.
+            stranded_probe(wid);
             // Publish that we are parked BEFORE releasing the queue lock in `wait_timeout`,
             // so an enqueuer that takes the lock after us is guaranteed to see the flag and
             // send the wake. Clearing it after we wake keeps the count honest.
@@ -575,6 +662,9 @@ fn run_one_timed(mut proc: Box<Process>) {
     // Pulled to run: the single `STEALABLE` decrement site, paired with the increment in
     // `enqueue`, whether its owner drained it or a thief stole it.
     STEALABLE.fetch_sub(1, Ordering::Relaxed);
+    // Progress: something is running, so the pool is not stranded. Re-arm the detector.
+    STRANDED_SINCE.store(0, Ordering::Relaxed);
+    STRANDED_LATCH.store(false, Ordering::Relaxed);
     set_status(&mailbox, ST_RUNNING); // about to resume on this worker
 
     // Pure diagnostics (`peak_threads()`): no invariant needs a total order with other
@@ -651,6 +741,19 @@ fn run_one_timed(mut proc: Box<Process>) {
         // blind would double-count the ordinary path.
     }
     ledger_exit();
+}
+
+/// Fault injection for the stranded-work watchdog (`BROOD_FAULT_STRANDED=1`): over-count
+/// `STEALABLE` by one at pool start, so the pool believes a process is queued that no
+/// worker can ever find — which is precisely what a stranded process looks like from the
+/// probe's side. Exists so `stranded_probe` is *testable*: the failure it watches for has
+/// never been provoked on demand (KI-88 is dormant), and a detector nobody has seen fire is
+/// indistinguishable from one that cannot. See `crates/cli/tests/stranded_watchdog.rs`.
+fn fault_stranded_work() {
+    if std::env::var_os("BROOD_FAULT_STRANDED").is_some() {
+        STEALABLE.fetch_add(1, Ordering::SeqCst);
+        eprintln!("[sched] BROOD_FAULT_STRANDED: STEALABLE over-counted by one at pool start");
+    }
 }
 
 /// Fault injection for the quantum tail (`BROOD_FAULT_QUANTUM_TAIL=<n>`): panic on the
