@@ -136,6 +136,17 @@ pub(super) const DETERMINISTIC_UNARY: &[&str] = &[
     "url/query-decode",
 ];
 
+/// Is this path's base a GLOBAL — a `def`/`defdyn` name rather than a local binding?
+///
+/// Asked of the heap rather than the `Ctx`, deliberately: a `Ctx` only knows the binders it
+/// happens to track, and inference reaches `branch_scopes` through contexts that track
+/// none — so `!ctx.is_local(..)` rejects ordinary parameters and silently switches the
+/// narrowing off (measured: 8 strict warnings over `std/`, all of them locals). "Not
+/// globally bound" is the property that actually matters and the heap always knows it.
+fn base_is_global(heap: &Heap, base: Symbol) -> bool {
+    super::sigs::is_globally_bound(heap, base)
+}
+
 /// Peel a (possibly nested) access chain down to its base symbol and the ordered
 /// [`PathKey`]s, base-outward: `(get r :age)` → `(r, [Field :age])`,
 /// `(nth (get cfg :items) 0)` → `(cfg, [Field :items, Index 0])`. Recognises
@@ -501,7 +512,11 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
     // an inferred RETURN type kept a `failure` arm the guard had just ruled out, and
     // ADR-316 then reported that arm at every call site — a false positive on a function
     // that cannot fail.
-    if let Some(pg) = path_guard_assertion(heap, test) {
+    // The base must not be a GLOBAL. Immutability is what makes the two occurrences the
+    // same value, and it covers a local binding — never a global, which another process can
+    // `def` between the guard and the use (late binding over the shared code region,
+    // ADR-013). A `defdyn` is the same case: its root binding is a global.
+    if let Some(pg) = path_guard_assertion(heap, test).filter(|pg| !base_is_global(heap, pg.base)) {
         // Seed both sides with the guarded expression's OWN type. `narrow_path` intersects
         // with whatever the path already narrowed to, which starts at `any` — so without
         // this the else branch reads `¬failure`, a true statement and a wider one than the
