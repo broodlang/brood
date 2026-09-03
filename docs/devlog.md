@@ -10192,3 +10192,36 @@ back — does not print `WAVE 0`; it **hangs the whole program** to nextest's 2-
 because the root process's own resume from `(sleep 300)` needs a worker too. That is the
 hazard stated more sharply than the entry had it: not "other processes starve" but "the
 program freezes", with no diagnostic (the new stranded-work watchdog would at least name it).
+
+## 2026-09-03 (CI) — the strict gate was red all day, and the downstream smoke told two other stories
+
+`make green` reported the last five completed CI runs failed, back to the morning's merge
+commit. Two jobs, three causes, bisected with `nest` built per commit in a throwaway worktree
+against a scratch clone of bedit at CI's pin.
+
+**Strict gate over std: eight warnings, all in today's new code** (`ansi/render`, the treesit
+motions). Every one was the shape the handoff already names — a private helper with no `sig`,
+so `n`/`col`/`end`/`i` inferred `number` or `ordered` and flowed into `range`,
+`string/substring`, `dec` and the int-taking motions. Fixed by declaring the helpers
+(`ansi-csi-end`, `ansi-strip`, `ansi-pad`, `ansi-truncate`, `ansi-write`, `ansi-render-loop`),
+two typed accessors for a tree-sitter node's offsets (`ts-start`/`ts-end`: a `get` on a map
+says `any`, and `(inc any)` is `number`; the kernel writes ints, so the accessors state the
+invariant once), `string/char-at` in place of a one-character `substring`, and one real
+maybe-nil: `(string/length (last lines))`, where `last` of an empty vector is nil. Strict and
+plain both 0; contracts mode (where a `sig` is a runtime check) green.
+
+**The downstream smoke is red for two reasons that both live in bedit, not here:**
+1. bedit's "every backticked identifier in lesson prose is bound" gate matches words against
+   `[a-zA-Z][a-zA-Z0-9/*!?<>=+-]*`. The OLD regex engine returned false for every string
+   against that class — even `"x"` — so the gate was vacuous, and `7ace2be9` (ranges, lazy
+   quantifiers, groups) made it real: the prose has 13 backticked words that are not bound
+   names. A gate that could not fail, found from the other side of a repo boundary.
+2. `b248be2b` changed `editor/treesit/fontify` to take the kind→face TABLE instead of the
+   closure; bedit at the pin still passes `modes/ruby-face-of`, and the call now raises
+   (`empty?: expected collection, got fn`), so nothing is coloured and the `C-M-f` test that
+   renders first fails with it.
+Both need a bedit commit and then a `BEDIT_REF` bump.
+
+Trap of the session, again: the first probe of the new `fontify` ran a `target/debug/brood`
+that reported `ec38a54d` — two commits stale — and so "proved" the old contract. The
+version line is printed for exactly this reason; read it before believing a probe.
