@@ -341,6 +341,7 @@ Ruby's are aligned this way."
   (let (after (inc open)
         eol (let (i (index-of text "\n" after)) (if (< i 0) (string/length text) i)))
     (and (< after eol) (not (= (string/trim (string/substring text after eol)) "")))))
+(sig ts-aligns? (string int -> bool))
 
 (defn- ts-align-column (text bol chain brackets)
   "The column a continuation line aligns to, or nil when it is not one.
@@ -352,11 +353,11 @@ align under."
   (let (inner (last (filter chain
                       (fn (node)
                         (and (contains? brackets (get node :kind))
-                          (< (get node :start) bol)
+                          (< (ts-start node) bol)
                           (includes? "([{"
                             (string/substring text
-                              (get node :start)
-                              (inc (get node :start)))))))))
+                              (ts-start node)
+                              (inc (ts-start node)))))))))
     (when (and inner (ts-aligns? text (get inner :start)))
       (inc (- (get inner :start) (ts-line-start text (get inner :start)))))))
 
