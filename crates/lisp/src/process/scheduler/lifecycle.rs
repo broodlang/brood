@@ -518,7 +518,17 @@ pub fn spawn_root_program(
         body: Value::nil(),
         program: Some(Box::new(prog)),
         resume: None,
-        capture: Vec::new(),
+        // Inherit the caller's capture stack, exactly as `spawn` does above. A ROOT
+        // program is still someone's callee: the wasm playground calls
+        // `begin_stdout_capture` and then runs the snippet through here, so with an
+        // empty stack every `io/puts` went to the real stdout — which in a browser is
+        // nowhere, and the snippet's output silently vanished from the page.
+        capture: CURRENT.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(|ctx| ctx.capture.clone())
+                .unwrap_or_default()
+        }),
         queued_at: 0,
         spawns_since_park: 0,
     }));
