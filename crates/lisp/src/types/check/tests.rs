@@ -8207,3 +8207,57 @@ fn a_guards_narrowing_reaches_the_caller_through_the_inferred_return() {
         );
     }
 }
+
+/// The narrowing declines wherever the two occurrences are not provably the same value.
+/// This is the SOUND direction of `PathKey::Call` — every row here is a case where
+/// narrowing would be wrong, and the mechanism has to notice on its own, because nothing
+/// downstream would.
+///
+/// The identity is a canonical key, `(base symbol, [ordered steps])`, computed
+/// independently for each occurrence — so two occurrences meet only by normalising to the
+/// same key. That is what makes the first row work and every other row decline.
+///
+/// Each row guards a DIFFERENT mechanism, which is worth knowing before reading a failure:
+/// the base half of the key, the step half, `Ctx`'s invalidation on rebinding, and
+/// `path_of` requiring a symbol base. None of them guards the allow-list — widening
+/// `path_of` to accept any unary call leaves this test green, because these all decline for
+/// other reasons. The allow-list's boundary is the `KnownGap` row in
+/// `a_guard_narrows_across_every_shape_and_value_form`.
+#[test]
+fn a_repeated_call_narrows_only_when_it_is_provably_the_same_value() {
+    let reported = |src: &str| !file_warnings_mode(src, false).is_empty();
+
+    // Same base, same step: one key, so the guard reaches the second occurrence.
+    assert!(!reported(
+        "(defmodule t)\n\
+         (defn q (expr) (if (failure? (string/->number expr)) 0 (+ 1 (string/->number expr))))"
+    ));
+    // A DIFFERENT base — `expr` vs `exprs`, which is one keystroke apart and a different
+    // value. Different key, no narrowing.
+    assert!(reported(
+        "(defmodule t)\n\
+         (defn q (expr exprs) \
+            (if (failure? (string/->number expr)) 0 (+ 1 (string/->number exprs))))"
+    ));
+    // A different FUNCTION over the same base: also a different key.
+    assert!(reported(
+        "(defmodule t)\n\
+         (defn q (expr) \
+            (if (failure? (string/->number expr)) 0 (+ 1 (encoding/hex-decode expr))))"
+    ));
+    // The base REBOUND between the guard and the use: `Ctx` drops every path keyed on a
+    // symbol that is rebound, so the shadowed occurrence is a fresh unknown.
+    assert!(reported(
+        "(defmodule t)\n\
+         (defn q (expr) (if (failure? (string/->number expr)) 0 \
+            (let (expr \"zz\") (+ 1 (string/->number expr)))))"
+    ));
+    // No symbol base at all. `(io/read-line)` cannot be keyed, which is exactly right:
+    // it is the case where two evaluations genuinely differ, and the shape that cannot be
+    // narrowed is the shape that must not be.
+    assert!(reported(
+        "(defmodule t)\n\
+         (defn q () (if (failure? (string/->number (io/read-line))) 0 \
+            (+ 1 (string/->number (io/read-line)))))"
+    ));
+}
