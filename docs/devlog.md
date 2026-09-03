@@ -10060,3 +10060,35 @@ red when the keying is removed.
 The measurement habit is the reusable part: three days of design were queued behind a
 premise ("the checker cannot know which functions can fail") that one run of
 `--suggest-sigs` refuted.
+
+## 2026-09-03 (types) — the standard library was telling the checker to forget
+
+A hover said `(string -> any)` for a body yielding `0 | bool`. Not imprecision:
+`std/regex.blsp` DECLARED `(sig match? (any string -> any))`, and a declared sig is
+authoritative. Measured across std by stripping each file's declarations and asking
+inference what it would have said — 119 declared `-> any` returns, 31 where inference proves
+better. 28 adopted, 3 skipped as artifacts, 5 `?`-predicates fixed by reading their bodies
+(one is `(or nil bool)`: `(and lead …)` yields `lead` when falsy).
+
+The finding is the second half. Narrowing `project/find-root` to `(or nil string)` took the
+strict gate 0 → 17, and 16 were correct code:
+
+```brood
+(when (nil? root) (error "not in a Brood project …"))
+(project/setup root)      ; ← "expects string, got nil | string"
+```
+
+Brood has no early return, so "refuse and stop" is `(when bad (error …))`, and the checker
+did not know that reaching the next form proves the guard false. **The wide `-> any` was not
+laziness — it was the only way to silence a rule the checker was missing.** That is worth
+remembering the next time a swathe of signatures looks lazy: a declaration that says nothing
+is sometimes load-bearing, and the thing to fix is what forced it.
+
+`diverging_guard_scope` closes it, in both arms (`when` and `unless`). And it had to be
+added twice — the walk (`check_let`) and inference (`sequence_scope`) — because inference
+types a body as its last form and never looked at what came before. With only the walk, the
+function checked clean and its inferred RETURN still carried the nil, so the callers were
+reported instead of it. That is the third time this session that a narrowing landed in one
+of the two and not the other; the rule is now explicit in the status doc.
+
+Strict 17 → 0, plain 0, seven downstream repos 0. Both halves sabotage-verified.
