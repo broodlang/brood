@@ -70,3 +70,167 @@
     (is (matches? "abc" "abc"))
     (is (not (matches? "abc" "abcd")))
     (is (not (matches? "abc" "xabc")))))
+
+;; ---- character-set ranges and classes ---------------------------------------
+;; `[0-9]` used to be a set of the three characters `0`, `-` and `9`: the dash was a
+;; member, so `[0-9]` matched "-" and did NOT match "5". Nothing said so — the pattern
+;; simply gave wrong answers — and `std/tool/explain.blsp` shipped `[0-9]+` against
+;; "abc123" as an example of a call returning true, which it did not.
+(describe "regex character sets: ranges"
+  (test "a-z spans the range, and is not three literal characters"
+    (is (match? "[0-9]" "5"))
+    (is (match? "[0-9]+" "abc123"))
+    (is (not (match? "[0-9]" "-")))
+    (is (match? "[a-z]" "m"))
+    (is (not (match? "[a-z]" "M")))
+    (is (match? "[A-Za-z]" "M")))
+  (test "a dash that cannot open a range is a literal member"
+    (is (match? "[a-]" "-")) ; last in the set
+    (is (match? "[a\\-z]" "-")) ; escaped
+    (is (not (match? "[a\\-z]" "m")))) ; …so it is NOT a range
+  (test "negation applies to the whole set, ranges included"
+    (is (match? "[^a-z]" "M"))
+    (is (not (match? "[^a-z]" "m"))))
+  (test "classes may be written inside a set, beside chars and ranges"
+    (is (matches? "[\\d]+" "42"))
+    (is (matches? "[\\w.-]+" "foo-bar.ex"))
+    (is (not (matches? "[\\w.-]+" "foo/bar")))
+    (is (matches? "[\\s,]+" " , ")))
+  (test "an unterminated set still takes what it has, as before"
+    (is (match? "[abc" "b"))))
+
+;; ---- counted repetition ------------------------------------------------------
+(describe "regex {m,n} repetition"
+  (test "{m} is exactly m"
+    (is (matches? "a{3}" "aaa"))
+    (is (not (matches? "a{3}" "aa")))
+    (is (not (matches? "a{3}" "aaaa"))))
+  (test "{m,} is m or more"
+    (is (matches? "a{2,}" "aa"))
+    (is (matches? "a{2,}" "aaaaa"))
+    (is (not (matches? "a{2,}" "a"))))
+  (test "{m,n} is a bounded range"
+    (is (matches? "a{2,3}" "aa"))
+    (is (matches? "a{2,3}" "aaa"))
+    (is (not (matches? "a{2,3}" "a")))
+    (is (not (matches? "a{2,3}" "aaaa"))))
+  (test "it repeats the preceding atom, group or class"
+    (is (matches? "(ab){2}" "abab"))
+    (is (matches? "\\d{3}" "123"))
+    (is (matches? "[a-c]{2}" "ca")))
+  ;; A brace that is not a well-formed repetition is the character it looks like —
+  ;; the same forgiveness the rest of this parser extends to a stray metacharacter.
+  (test "a malformed brace is a literal brace"
+    (is (matches? "a{x}" "a{x}"))
+    (is (matches? "a{" "a{"))
+    (is (matches? "a{2" "a{2")))
+  (test "a repetition too large to expand is refused out loud, not hung on"
+    (assert= (get (try (match? "a{1,100000}" "aaa") (catch e e)) :kind) :parse)))
+
+;; ---- lazy quantifiers --------------------------------------------------------
+;; `a*?` used to parse as `a*` followed by a LITERAL `?`, which is what a parser does
+;; when it has no notion of laziness and `?` is just another character.
+(describe "regex lazy quantifiers"
+  (test "*? +? ?? take the shortest match, not the longest"
+    (assert= (get (find "a+" "caaab") :text) "aaa")
+    (assert= (get (find "a+?" "caaab") :text) "a")
+    (assert= (get (find "<.*>" "<a><b>") :text) "<a><b>")
+    (assert= (get (find "<.*?>" "<a><b>") :text) "<a>"))
+  (test "they still match the same LANGUAGE — only the choice differs"
+    (is (matches? "a*?" ""))
+    (is (matches? "a+?" "aaa"))
+    (is (matches? "a??" "a"))))
+
+;; ---- captures ----------------------------------------------------------------
+(describe "regex find: where, and which groups"
+  (defn- txt (m) (when m (get m :text)))
+  (defn- gtxt (m k) (let (g (nth (get m :groups) k nil)) (when g (get g :text))))
+
+  (test "a match carries its own half-open span"
+    (let (m (find "\\d+" "a1b22c333"))
+      (assert= (get m :text) "1")
+      (assert= (get m :start) 1)
+      (assert= (get m :end) 2)))
+  (test "no match is nil, not an empty match"
+    (is (nil? (find "zzz" "abc"))))
+  (test "groups are numbered by their opening paren, left to right"
+    (let (m (find "([\\w.]+):(\\d+)" "at worker.ex:42 today"))
+      (assert= (get m :text) "worker.ex:42")
+      (assert= (get m :start) 3)
+      (assert= (gtxt m 0) "worker.ex")
+      (assert= (gtxt m 1) "42")
+      (assert= (get (nth (get m :groups) 1) :start) 13)))
+  (test "a nested group is numbered after the one enclosing it"
+    (let (m (find "((a)(b))c" "abc"))
+      (assert= (gtxt m 0) "ab")
+      (assert= (gtxt m 1) "a")
+      (assert= (gtxt m 2) "b")))
+  (test "a group that did not participate is nil, not \"\""
+    (let (m (find "(a)|(b)" "zzb"))
+      (assert= (get m :text) "b")
+      (is (nil? (gtxt m 0)))
+      (assert= (gtxt m 1) "b")))
+  (test "(?:...) groups, and are not numbered"
+    (let (m (find "(?:ab)+(c)" "ababc"))
+      (assert= (get m :text) "ababc")
+      (assert= (count (get m :groups)) 1)
+      (assert= (gtxt m 0) "c")))
+  (test "a repeated group keeps its LAST iteration, as everywhere else"
+    (assert= (gtxt (find "(?:(\\w)-)+" "a-b-c-") 0) "c"))
+  (test "leftmost wins, and anchors still mean the whole string"
+    (assert= (txt (find "a|ab" "xxab")) "a")
+    (is (nil? (find "^a" "ba")))
+    (assert= (txt (find "b$" "ab")) "b"))
+  (test "the match is greedy or lazy as the pattern asked"
+    (assert= (txt (find "\\w+" "hello world")) "hello")))
+
+(describe "regex find-all"
+  (test "every non-overlapping match, left to right"
+    (assert= (into [] (map (find-all "\\d+" "a1b22c333") (fn (m) (get m :text)))) ["1" "22" "333"]))
+  (test "no matches is an empty vector"
+    (assert= (find-all "z" "abc") []))
+  (test "an empty match advances rather than repeating forever"
+    ;; `a*` matches "" at every position it cannot match an `a`; the guard is what
+    ;; makes this terminate at all, so the assertion is really that it returns.
+    (assert= (count (find-all "a*" "bb")) 3))
+  (test "matches do not overlap"
+    (assert= (into [] (map (find-all "aa" "aaaa") (fn (m) (get m :start)))) [0 2])))
+
+(describe "regex replace"
+  (test "a template splices $0, the groups, and $$"
+    (assert= (replace "(\\w+)@(\\w+)" "a@b" "$2@$1") "b@a")
+    (assert= (replace "\\d+" "a1b22" "[$0]") "a[1]b[22]")
+    (assert= (replace "a" "a" "$$") "$"))
+  (test "a function computes the replacement from the match"
+    (assert= (replace "\\d+" "a1b22" (fn (m) (str "<" (get m :text) ">"))) "a<1>b<22>"))
+  (test "a group that did not participate expands to nothing"
+    (assert= (replace "(a)|(b)" "b" "[$1]") "[]"))
+  (test "no match leaves the string alone"
+    (assert= (replace "z" "abc" "!") "abc")))
+
+(describe "regex split"
+  (test "splits on the pattern, dropping the separators"
+    (assert= (split "\\s*,\\s*" "a , b,c") ["a" "b" "c"]))
+  (test "adjacent separators leave an empty piece"
+    (assert= (split "," "a,,b") ["a" "" "b"]))
+  (test "no match is the whole string, one piece"
+    (assert= (split "z" "abc") ["abc"])))
+
+;; The two engines share a parser and an NFA construction, so the property worth
+;; asserting is that they never disagree about whether there is a match at all.
+(defn- agree? (pattern s) (= (match? pattern s) (not (nil? (find pattern s)))))
+
+(describe "regex engines agree on the same patterns"
+  (test "across sets, quantifiers, alternation and anchors"
+    (is (agree? "[a-z]+" "abc"))
+    (is (agree? "[a-z]+" "123"))
+    (is (agree? "a{2,3}" "aa"))
+    (is (agree? "a{2,3}" "a"))
+    (is (agree? "^ab" "abc"))
+    (is (agree? "^ab" "xabc"))
+    (is (agree? "c$" "abc"))
+    (is (agree? "c$" "abcd"))
+    (is (agree? "(foo|bar)+baz" "foobarbaz"))
+    (is (agree? "(foo|bar)+baz" "foobar"))
+    (is (agree? "\\d+" ""))
+    (is (agree? "a*" ""))))
