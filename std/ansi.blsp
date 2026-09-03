@@ -27,6 +27,7 @@ the public entry point; the helpers are private (`--`).")
     (>= i n) i
     (ansi-csi-final? (nth v i)) (+ i 1)
     else (ansi-csi-end v (+ i 1) n)))
+(sig ansi-csi-end (vector int int -> int))
 
 (defn- ansi-strip (v i n out)
   "Tail-recursive scan: copy `v[i..n]` to the reversed char list `out`, dropping ANSI
@@ -44,6 +45,7 @@ escape sequences and carriage returns."
         (= c "\r") (ansi-strip v (+ i 1) n out)
         ; bare CR: drop
         else (ansi-strip v (+ i 1) n (cons c out))))))
+(sig ansi-strip (vector int int (or nil list) -> string))
 
 (defn strip (s)
   "`s` with all ANSI escape sequences and bare carriage returns removed.
@@ -85,12 +87,14 @@ Fast path: a chunk with no ESC byte only needs its CRs dropped (a single
   (if (>= (string/length s) n)
     s
     (str s (string/join (map (range (- n (string/length s))) (fn (_) " ")) ""))))
+(sig ansi-pad (string int -> string))
 
 (defn- ansi-truncate (s col)
   "`s` cut at `col`. Deliberately NOT `ansi-pad` first: a cursor may sit past the end
 of a short line, and erasing from there erases nothing — padding it out to the cursor
 would write spaces where the program asked for deletion."
   (string/substring s 0 (math/min col (string/length s))))
+(sig ansi-truncate (string int -> string))
 
 (defn- ansi-write (lines row col text)
   "Overwrite `text` at (row, col), extending the line if it ends short."
@@ -99,6 +103,7 @@ would write spaces where the program asked for deletion."
         after-start (math/min (string/length l) (+ col (string/length text)))
         after (string/substring l after-start (string/length l)))
     (ansi-set-line lines row (str before text after))))
+(sig ansi-write (vector int int string -> vector))
 
 (defn- ansi-param (params default)
   "The numeric parameter of a CSI, or `default` — `ESC[A` and `ESC[1A` are the same."
@@ -158,6 +163,7 @@ right answer for colour (`m`) and the honest one for what this does not model."
               (ansi-render-loop v end n lines2 row2 col2))
             (ansi-render-loop v (math/min n (+ i 2)) n lines row col))
         else (ansi-render-loop v (inc i) n (ansi-write lines row col c) row (inc col))))))
+(sig ansi-render-loop (vector int int vector int int -> string))
 
 (defn render (text chunk)
   "`text` with `chunk` — a run of terminal output — applied to it, honouring the cursor
@@ -185,5 +191,5 @@ no wrapping, no alternate screen."
         (count v)
         lines
         (math/max 0 (dec (count lines)))
-        (string/length (last lines))))))
+        (string/length (or (last lines) ""))))))
 (sig render (string string -> string))

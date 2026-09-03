@@ -351,6 +351,14 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
 steps through."
   (%tree-sitter-kids text lang point))
 
+;; A node's offsets are ints by construction (the kernel writes them), but a `get` on a map
+;; says `any`, and `(inc any)` is `number` — which the int-taking motions then refuse under
+;; the strict gate. Two typed accessors state the invariant once.
+(defn- ts-start (node) (get node :start))
+(sig ts-start (map -> int))
+(defn- ts-end (node) (get node :end))
+(sig ts-end (map -> int))
+
 (defn point-forward (text lang point)
   "End of the next named node at or after `point` within the enclosing node;
 unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
@@ -411,7 +419,7 @@ offset), and a motion that cannot move is worse than one that overshoots."
               (fn (f) (and (get f :container) (>= (get f :start) point)))))
     (if (nil? lst)
       point
-      (let (inner (seq/find (ts-siblings text lang (inc (get lst :start)))
+      (let (inner (seq/find (ts-siblings text lang (inc (ts-start lst)))
                     (fn (k) (> (get k :start) point))))
         (cond
           inner (get inner :start)
@@ -433,11 +441,11 @@ offset), and a motion that cannot move is worse than one that overshoots."
   "The identifier a node BEGINS with, read from the source. A chain node carries no
 children, so an Elixir `call`'s callee is taken lexically from its start rather than from
 a first child — which is the same token either way, and does not require the tree."
-  (let (from (get node :start)
-        limit (math/min (get node :end) (+ from 32)))
+  (let (from (ts-start node)
+        limit (math/min (ts-end node) (+ from 32)))
     (letrec (scan (fn (i)
                     (if (or (>= i limit)
-                          (not (regex/matches? "[A-Za-z0-9_?!]" (string/substring text i (inc i)))))
+                          (not (regex/matches? "[A-Za-z0-9_?!]" (string/char-at text i))))
                       (string/substring text from i)
                       (scan (inc i)))))
       (scan from))))
