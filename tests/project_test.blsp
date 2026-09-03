@@ -1059,6 +1059,21 @@
         (project/fix-sigs (list path) true)
         (assert= (file/slurp path) once))))
 
+  ;; A `defn` nested inside a wrapper form is never touched, which is what keeps the
+  ;; insertion from landing INSIDE that wrapper — `(check-allow :kw (sig f …) (defn f …))`
+  ;; would parse and mean something else. It holds because `file-signatures` reports
+  ;; top-level definitions only; asserted here so a change there cannot quietly make
+  ;; this writer unsafe.
+  :isolated (test "a defn inside a wrapper form is left alone"
+    (let (dir (pt-sig-dir)
+          src (string/join ["(defmodule pt-wrap)"
+                             "(check-allow :discarded-catch" "  (defn- risky (s)"
+                             "    (try (string/length s) (catch e 0))))"]
+                "\n")
+          path (pt-sig-file dir "wrap.blsp" src))
+      (project/fix-sigs (list path) true)
+      (assert= (file/slurp path) src)))
+
   ;; A definition the locator cannot find is skipped rather than guessed at — the
   ;; insertion point is the one thing this must never approximate.
   :isolated (test "a definition it cannot locate is skipped, not guessed"

@@ -96,7 +96,11 @@ struct Proc {
     /// The pty master fd, for a child spawned by [`spawn_pty`]; `None` for a plain
     /// piped child. Only `pty_resize` reads it — the reader and writer already hold
     /// their own `File` clones of it.
-    pty: Option<std::os::fd::RawFd>,
+    /// A raw fd as a plain `i32` rather than `std::os::fd::RawFd`: that module does not
+    /// exist on `wasm32-unknown-unknown`, and this struct is not itself unix-gated, so
+    /// naming the alias here broke the playground's build. `RawFd` IS `i32` on every
+    /// unix target; the unix-only code converts at its own boundary.
+    pty: Option<i32>,
 }
 
 /// The `Child` plus a condvar the reaper waits on.
