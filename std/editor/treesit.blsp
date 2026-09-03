@@ -163,42 +163,55 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
     (if (= 0 (math/rem opened 2)) candidate 0)))
 
 ;; ---- indentation -------------------------------------------------------------
+;; ---- indentation -------------------------------------------------------------
 ;; The `:indent` service's other half. Brood indents by parsing `[defun-start, bol)` and
 ;; asking what is still OPEN — the reader leaves an unclosed form as an unclosed node. That
 ;; trick does not transfer: tree-sitter's error recovery collapses an unterminated `do` into
 ;; an ERROR node rather than an open block, so a truncated slice reports `:ERROR` for nearly
 ;; every line and knows nothing about the nesting (measured on Elixir: 7 of 9 lines).
 ;;
-;; So the slice is the whole ENCLOSING TOP-LEVEL FORM — column-0 line before `bol` to the
-;; next column-0 line — which parses completely and therefore correctly. That is O(one form)
-;; rather than O(buffer), and it is the same boundary [[column0-restart]] uses for
-;; fontification, for the same reason: in every language whose top level begins in column 0,
-;; that is where one form ends and the next begins.
+;; So the slice has to be text that PARSES, and the level is how many block nodes enclose the
+;; line inside it. Which slice, though, has no single answer, so [[indent-column]] takes two
+;; and keeps the deeper: the enclosing top-level form by the column-0 convention (cheap, and
+;; right for a file that is already indented), and a fixed window either side (right for a
+;; flush-left file, where the column-0 convention degenerates to "the previous line"). A
+;; slice that begins inside a form can only ever lose enclosing blocks, never invent them, so
+;; between two clean readings the deeper one is the better-informed one — and a slice that
+;; did not parse is not a reading at all. When neither parses, which is the ordinary state of
+;; a line someone is still typing, [[indent-column]] falls back to the previous non-blank
+;; line's own indentation plus a level when that line ends in an opening token.
 
-(defn- ts-col0-after (src from)
-  ;; the offset of the next column-0 line strictly after `from`, or the end of `src`
-  (let (nl (index-of src "\n" from))
-    (cond
-      (< nl 0) (string/length src)
-      (>= (inc nl) (string/length src)) (string/length src)
-      (ts-col0? src (inc nl)) (inc nl)
-      else (ts-col0-after src (inc nl)))))
+(def *indent-window* 40000)
+;; How far the indenter reads around the line when the column-0 convention fails it (~800
+;; lines). Bounded so one keypress cannot become a whole-buffer parse on a large file; a
+;; top-level form longer than this is past the point where its indentation is the reader's
+;; problem.
 
-(defn- ts-line-at (src at)
-  (let (e (index-of src "\n" at)) (string/substring src at (if (< e 0) (string/length src) e))))
+(defn- ts-broken? (node)
+  ;; Does this tree contain a parse error anywhere? tree-sitter marks its recovery with
+  ;; `:error` and `:missing`, and either means the text does not stand on its own — the
+  ;; ordinary state of a buffer someone is typing into, and the state in which no tree can
+  ;; say what is open, because an unterminated `do` collapses rather than staying open. That
+  ;; is why `indent-column` has a second answer at all.
+  (or (get node :error)
+    (get node :missing)
+    (any? (or (get node :kids) []) ts-broken?)))
 
-(defn- ts-form-end (src from dedent)
-  "Where the top-level form containing `from` ends: the next column-0 line, and then past
-every column-0 line that merely CLOSES the form.
-
-A form's own terminator lives in column 0 — `end` in Ruby and Elixir, `}` in a C-like — so
-stopping at the first column-0 line cuts the form off before its closer and the tree comes
-back one level shallow, silently. (Ruby showed it on every line of a class; Elixir hid it,
-because losing its outermost `do_block` happened to cancel against a dedent.)"
-  (let (e (ts-col0-after src from))
-    (if (and (< e (string/length src)) (contains? dedent (ts-first-token (ts-line-at src e))))
-      (ts-form-end src e dedent)
-      e)))
+(defn- ts-prev-nonblank (text bol)
+  ;; `[indent last-token]` of the nearest non-blank line before `bol`, or nil when there is
+  ;; none — what the indenter carries when no tree can answer.
+  (if (<= bol 0)
+    nil
+    (let (nl (string/last-index-of text "\n" bol)
+          ls (if (< nl 0) 0 (let (p (string/last-index-of text "\n" nl)) (if (< p 0) 0 (inc p))))
+          le (if (< nl 0) (math/max 0 (dec bol)) nl)
+          l (string/substring text ls le))
+      (cond
+        (and (< nl 0) (= (string/trim l) "")) nil
+        (= (string/trim l) "") (ts-prev-nonblank text ls)
+        else
+          [(- (string/length l) (string/length (string/triml l)))
+            (or (last (string/split (string/trim l) " ")) "")]))))
 
 (defn- ts-chain (node p acc)
   ;; the kinds of every node containing offset `p`, outermost first
@@ -242,23 +255,52 @@ Deliberately not a full indent engine: no alignment to an open bracket's column,
 continuation rules. It answers the shape that block-structured languages share, which is the
 shape `nest format` answers for Brood, and it is checked line-for-line against real source in
 `tests/treesit_module_test.blsp`."
-  (let (lo (column0-before text bol)
-        hi (math/max (ts-form-end text (math/max bol (inc lo)) (get spec :dedent #{})) bol)
-        slice (string/substring text lo hi)
+  (let (width (get spec :width 2)
         eol (let (i (index-of text "\n" bol)) (if (< i 0) (string/length text) i))
         line (string/substring text bol eol)
         closing (contains? (get spec :dedent #{}) (ts-first-token line))
         ;; an ordinary line measures at its first non-blank, a closing line at the line start
         at (if closing bol (+ bol (- (string/length line) (string/length (string/triml line)))))
-        chain (if (= (string/trim slice) "")
-                '()
-                (check-allow :discarded-catch
-                  (try (ts-chain (%tree-sitter-parse slice lang) (- at lo) '()) (catch _ '()))))
         blocks (get spec :blocks #{})
-        level (count (filter (or chain '()) (fn (k) (contains? blocks k))))
-        level (if closing (- level (get spec :dedent-levels 1)) level))
-    (* (get spec :width 2) (math/max 0 level))))
-(sig indent-column (string any int countable -> number))
+        ;; The level from ONE slice, or nil when that slice cannot answer — it did not parse,
+        ;; so anything it says about nesting is a reading of recovered wreckage.
+        level-in (fn (lo hi)
+                   (let (slice (string/substring text lo hi)
+                         tree (if (= (string/trim slice) "")
+                                nil
+                                (check-allow :discarded-catch
+                                  (try (%tree-sitter-parse slice lang) (catch _ nil)))))
+                     (when (and tree (not (ts-broken? tree)))
+                       (let (n (count (filter (ts-chain tree (- at lo) '())
+                                        (fn (k) (contains? blocks k)))))
+                         (math/max 0 (if closing (- n (get spec :dedent-levels 1)) n))))))
+        ;; Two readings, and the DEEPER one wins. The cheap slice is the enclosing top-level
+        ;; form by the column-0 convention — right, and enough, for a file that is already
+        ;; indented. In a FLUSH-LEFT file that convention says nothing: every line begins at
+        ;; column 0, so the slice starts one line up, and the danger is not that it fails but
+        ;; that it SUCCEEDS — `def run do / :ok / end` parses perfectly on its own and reports
+        ;; one level where there are two. A slice beginning inside a form can only ever lose
+        ;; enclosing blocks, never invent them, so between two clean readings the deeper one
+        ;; is the better-informed one, and a reading that did not parse is no reading at all.
+        narrow-lo (column0-before text (math/max 0 (dec bol)))
+        readings (seq/keep [(level-in narrow-lo
+                              (math/min (string/length text) (+ narrow-lo *indent-window*)))
+                             (level-in (math/max 0 (- bol *indent-window*))
+                               (math/min (string/length text) (+ bol *indent-window*)))]
+                   (fn (x) x))
+        structural (when (not (empty? readings)) (fold readings 0 math/max)))
+    (if structural
+      (* width structural)
+      ;; The tree could not say. Carry the previous non-blank line's own indentation, one
+      ;; level deeper when that line OPENS something — which is what every editor does while
+      ;; you type, and the only thing available here: a half-written `do` is not an open block
+      ;; in the tree, it is an error node, so there is no structure left to ask.
+      (let (previous (ts-prev-nonblank text bol))
+        (if (nil? previous)
+          0
+          (let ([indent last-token] previous
+                opened (contains? (get spec :opens #{}) last-token))
+            (math/max 0 (+ indent (if opened width 0) (if closing (- width) 0)))))))))
 
 ;; ---- structural navigation --------------------------------------------------
 ;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp
@@ -266,7 +308,6 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
 ;; motion fires once per chord, and tree-sitter parsing is C-fast. A container is
 ;; any node with `:kids`; a "form" is a NAMED node (anonymous tokens — keywords,
 ;; punctuation — are skipped, like sexp skips whitespace/comments).
-
 (defn- ts-container? (node) (get node :kids))
 
 (defn- ts-named-kids (node)
