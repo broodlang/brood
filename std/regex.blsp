@@ -12,24 +12,50 @@
 ;;   .                   any one character
 ;;   * + ?               greedy quantifiers (on the preceding atom or group)
 ;;   ^ $                 start / end of string anchors
-;;   [...] [^...]        a character set / negated set (explicit chars; NO ranges yet)
+;;   *? +? ??            lazy quantifiers — the shortest match, not the longest
+;;   {m} {m,} {m,n}      counted repetition (expanded to the above at parse time)
+;;   [...] [^...]        a character set / negated set: literal chars, `a-z` RANGES,
+;;                       and `\d`/`\w`/`\s` classes written inside the brackets
 ;;   \d \w \s            digit / word (letter|digit|_) / whitespace classes
 ;;   \. \* …             escape — a metacharacter taken literally
 ;;   |                   alternation
-;;   (...)               grouping (quantifiable; not a capture)
+;;   (...)  (?:...)      a CAPTURING group, and a non-capturing one
 ;;
-;; NOT yet: ranges `[a-z]`, backreferences, lookaround, capture groups, `{m,n}`.
+;; NOT yet: backreferences, lookaround, named groups.
 ;; The NFA simulation is O(states × input), so even a pathological pattern stays
 ;; linear (unlike the old backtracker). Framework/tooling tier, opt-in.
+;;
+;; ---- TWO ENGINES over one parser --------------------------------------------
+;; `match?`/`matches?` answer a BOOLEAN, and do it on the bitset engine below: a
+;; state set is one integer, transitions are memoised into a lazy DFA, and the
+;; per-char loop is pure integer work that JIT-tiers. Nothing in this file is
+;; allowed to slow that down — it is the `regex` benchmark row.
+;;
+;; `find`/`find-all`/`replace`/`split` answer WHERE, and with which groups. A
+;; subset construction cannot carry capture positions (the whole point of a bitset
+;; is that it forgets which thread it came from), so those run a second engine: a
+;; Pike VM — an ordered thread list, each thread carrying its own capture slots,
+;; still linear in the input, and still no backtracking. It is the slower engine
+;; because it does strictly more work, and it is only ever entered by the calls
+;; that need what it knows.
+;;
+;; Both compile from the same AST. The capture-bearing NFA differs only by its
+;; `:save` states, so the two share every parse rule and every char test; the
+;; bitset engine's state vector is bit-for-bit what it was before captures existed.
 
 (defmodule regex
   "A small regular-expression engine in pure Brood, compiled to a Thompson NFA.
-`(regex/match? pattern s)` searches `s` for `pattern` (anchors
-`^`/`$` tie to the string's start/end); `(regex/matches? pattern s)` requires the
-whole string to match. The pattern is parsed and NFA-compiled once, then memoised.
-Subset: literals, `.`, `* + ?`, `^ $`, `[...]`/`[^...]` sets (explicit chars),
-`\\d \\w \\s`, escapes, `|`, and `(...)` groups. No ranges, captures, or
-backreferences yet.")
+
+`(regex/match? pattern s)` searches `s` for `pattern` (anchors `^`/`$` tie to the
+string's start/end); `(regex/matches? pattern s)` requires the whole string to
+match. `(regex/find pattern s)` returns WHERE it matched and what each `(...)`
+group captured, `find-all` every non-overlapping match, and `replace`/`split`
+build on those. The pattern is parsed and NFA-compiled once, then memoised.
+
+Subset: literals, `.`, `* + ?` (and their lazy `*? +? ??` forms), `{m,n}`,
+`^ $`, `[...]`/`[^...]` sets with ranges and classes, `\\d \\w \\s`, escapes,
+`|`, capturing `(...)` and non-capturing `(?:...)`. No backreferences or
+lookaround.")
 
 ;; ---- parse: pattern string -> AST -------------------------------------------
 ;; A pattern parses to a list of BRANCHES (the top-level alternation); each branch
@@ -50,32 +76,65 @@ backreferences yet.")
       (nil? c) [{:t :lit :c "\\"} i]
       ; trailing backslash → literal
       else [{:t :lit :c c} (inc i)])))
-(defn- regex-set-chars (pcs i acc)
-  "Collect set members until the closing `]`; returns [chars next]."
+(defn- regex-set-range? (pcs i)
+  "Is there an `a-z` range starting at `i`? A `-` LAST in the set (`[a-]`) is a
+literal member, which is why the character after it has to exist and not be `]`."
+  (let (d (regex-peek pcs (inc i))
+        hi (regex-peek pcs (+ i 2)))
+    (and (= d "-") (not (nil? hi)) (not (= hi "]")))))
+
+(defn- regex-set-body (pcs i chars ranges classes)
+  "Collect a set's members until the closing `]`; returns [chars ranges classes next].
+Three kinds live side by side inside one `[...]`: literal chars, `a-z` ranges, and
+the `\\d`/`\\w`/`\\s` classes — so `[\\w.-]` (every character a file path is made
+of) says what it looks like it says."
   (let (c (regex-peek pcs i))
     (cond
-      (nil? c) [acc i]
+      (nil? c) [chars ranges classes i]
       ; unterminated set → take what we have
-      (= c "]") [acc (inc i)]
+      (= c "]") [chars ranges classes (inc i)]
       ; consume the ]
-      else (regex-set-chars pcs (inc i) (cons c acc)))))
+      (= c "\\")
+        (let (e (regex-peek pcs (inc i)))
+          (cond
+            (= e "d") (regex-set-body pcs (+ i 2) chars ranges (cons :digit classes))
+            (= e "w") (regex-set-body pcs (+ i 2) chars ranges (cons :word classes))
+            (= e "s") (regex-set-body pcs (+ i 2) chars ranges (cons :space classes))
+            ; a trailing backslash is itself
+            (nil? e) (regex-set-body pcs (inc i) (cons "\\" chars) ranges classes)
+            ; `\]`, `\-`, `\\` → that char, literally
+            else (regex-set-body pcs (+ i 2) (cons e chars) ranges classes)))
+      (regex-set-range? pcs i)
+        (regex-set-body pcs
+          (+ i 3)
+          chars
+          (cons [(string/char->int c) (string/char->int (regex-peek pcs (+ i 2)))] ranges)
+          classes)
+      else (regex-set-body pcs (inc i) (cons c chars) ranges classes))))
 
 (defn- regex-set (pcs i)
   "Parse a `[...]` set whose body starts at `i` (just past `[`); returns [atom next]."
   (let (neg (= (regex-peek pcs i) "^")
         start (if neg (inc i) i)
-        [chars nxt] (regex-set-chars pcs start (list)))
-    ;; Store members as a STRING so membership is a native `includes?` (one
+        [chars ranges classes nxt] (regex-set-body pcs start (list) (list) (list)))
+    ;; Store the plain members as a STRING so membership is a native `includes?` (one
     ;; Rust scan) instead of `any?` walking a list of 1-char strings per input char.
-    [{:t :set :neg neg :chars (apply str chars)} nxt]))
+    ;; Ranges and classes are lists beside it, almost always EMPTY — and the whole
+    ;; test runs once per distinct (state-set, char) behind the DFA memo either way.
+    [{:t :set :neg neg :chars (apply str chars) :ranges ranges :classes classes} nxt]))
 
 (defn- regex-atom (pcs i)
   "Parse one atom at `i`; returns [atom next]."
   (let (c (regex-peek pcs i))
     (cond
       (= c "(")
-        (let ([alt nxt] (regex-alt pcs (inc i)))
-          [{:t :group :alt alt} (inc nxt)])
+      ;; `(?:` opens a group that only groups; a bare `(` also CAPTURES, and is
+      ;; numbered by the pass below rather than here (the number is the order of
+      ;; the opening parens, which a recursive-descent parser sees in the right
+      ;; order but would have to thread a counter through every rule to record).
+        (let (noncap (and (= (regex-peek pcs (inc i)) "?") (= (regex-peek pcs (+ i 2)) ":"))
+              [alt nxt] (regex-alt pcs (if noncap (+ i 3) (inc i))))
+          [{:t :group :alt alt :cap (not noncap)} (inc nxt)])
       ; (inc nxt) skips the ')'
       (= c "[") (regex-set pcs (inc i))
       (= c ".") [{:t :any} (inc i)]
@@ -84,14 +143,84 @@ backreferences yet.")
       (= c "\\") (regex-escape pcs (inc i))
       else [{:t :lit :c c} (inc i)])))
 
+(defn- regex-digits-at (pcs i acc)
+  "Consume digits at `i`; returns [text next] (text is \"\" when there are none)."
+  (let (c (regex-peek pcs i))
+    (if (and c (includes? "0123456789" c))
+      (regex-digits-at pcs (inc i) (str acc c))
+      [acc i])))
+
+;; The most a `{m,n}` may expand to. Repetition is expanded into copies of the atom
+;; (there is no counting state in a Thompson NFA), so `a{1,100000}` would be 100k
+;; states and a hang that looks like a bug in the engine rather than in the pattern.
+;; A pattern asking for more than this is refused out loud, which is the one place
+;; this parser raises: every other malformation degrades to literal characters,
+;; because a stray `{` or `*` in a hand-written pattern usually MEANT the character.
+(def *max-repeat* 1000)
+
+(defn- regex-brace (pcs i)
+  "Parse `{m}` / `{m,}` / `{m,n}` whose body starts at `i` (just past `{`); returns
+[lo hi next] with `hi` nil for an open end, or nil when this is not a repetition at
+all — in which case the caller treats the `{` as the literal character it looks like."
+  (let ([lo-text i2] (regex-digits-at pcs i "")
+        c (regex-peek pcs i2))
+    (cond
+      (= lo-text "") nil
+      (= c "}") [(reflect/read-string lo-text) (reflect/read-string lo-text) (inc i2)]
+      (= c ",")
+        (let ([hi-text i3] (regex-digits-at pcs (inc i2) ""))
+          (when (= (regex-peek pcs i3) "}")
+            [(reflect/read-string lo-text)
+              (if (= hi-text "") nil (reflect/read-string hi-text))
+              (inc i3)]))
+      else nil)))
+
+(defn- regex-repeat-copies (atom k acc)
+  (if (<= k 0) acc (regex-repeat-copies atom (dec k) (cons atom acc))))
+
+(defn- regex-repeat-opts (atom greedy k acc)
+  (if (<= k 0)
+    acc
+    (regex-repeat-opts atom greedy (dec k) (cons {:q :opt :a atom :greedy greedy} acc))))
+
+(defn- regex-repeat (atom lo hi greedy)
+  "Expand `atom{lo,hi}` into a non-capturing group holding `lo` required copies plus
+the optional tail — `a{2,4}` is `(?:aaa?a?)`, `a{2,}` is `(?:aaa*)`. Counted
+repetition is sugar; the NFA has no counters."
+  (when (> (or hi lo) *max-repeat*)
+    (throw {:kind :parse
+            :message (str "regex: {" lo "," (or hi "") "} repeats more than " *max-repeat* " times")}))
+  (let (required (regex-repeat-copies atom lo (list))
+        tail (if (nil? hi)
+               (list {:q :star :a atom :greedy greedy})
+               (regex-repeat-opts atom greedy (- hi lo) (list))))
+    {:t :group :alt (list (append required tail)) :cap false}))
+
+(defn- regex-lazy? (pcs i)
+  "A `?` directly after a quantifier makes it lazy (`a*?`), rather than being a
+quantifier of its own. It used to parse as a literal `?`, which no other engine
+does and nothing could have wanted."
+  (= (regex-peek pcs i) "?"))
+
 (defn- regex-piece (pcs i)
   "Parse an atom plus an optional quantifier; returns [piece next]."
   (let ([atom i2] (regex-atom pcs i)
-        q (regex-peek pcs i2))
+        q (regex-peek pcs i2)
+        lazy (regex-lazy? pcs (inc i2))
+        greedy (not lazy)
+        after (if lazy (+ i2 2) (inc i2)))
     (cond
-      (= q "*") [{:q :star :a atom} (inc i2)]
-      (= q "+") [{:q :plus :a atom} (inc i2)]
-      (= q "?") [{:q :opt :a atom} (inc i2)]
+      (= q "*") [{:q :star :a atom :greedy greedy} after]
+      (= q "+") [{:q :plus :a atom :greedy greedy} after]
+      (= q "?") [{:q :opt :a atom :greedy greedy} after]
+      (= q "{")
+        (let (brace (regex-brace pcs (inc i2)))
+          (if (nil? brace)
+            ; not a repetition — the `{` was just a brace
+            [atom i2]
+            (let ([lo hi nxt] brace
+                  lazy2 (regex-lazy? pcs nxt))
+              [(regex-repeat atom lo hi (not lazy2)) (if lazy2 (inc nxt) nxt)])))
       else [atom i2])))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
@@ -118,6 +247,53 @@ backreferences yet.")
 (defn- regex-parse (pattern)
   "Parse `pattern` into its list of top-level branches."
   (first (regex-alt (apply vector (string/->list pattern)) 0)))
+
+;; ---- number the capture groups ----------------------------------------------
+;; A second pass rather than a counter threaded through the parser: group N is the
+;; Nth OPENING paren left to right, which is exactly a pre-order walk of the tree
+;; the parser just built. Threading it through `regex-alt`/`regex-seq`/`regex-piece`
+;; instead would change the return shape of every rule to carry a number that only
+;; groups care about. Each pass returns [node' next-number].
+
+;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
+(check-allow :non-tail-recursion
+  (defn- regex-number-atom (a k)
+    (if (= (get a :t) :group)
+      ;; the group's own number is claimed BEFORE its body is walked, so an outer
+      ;; group is always numbered lower than the groups nested inside it
+      (let (mine (if (get a :cap) k nil)
+            [alt k2] (regex-number-alt (get a :alt) (if (get a :cap) (inc k) k)))
+        [(assoc (assoc a :alt alt) :gid mine) k2])
+      [a k])))
+
+(check-allow :non-tail-recursion
+  (defn- regex-number-piece (p k)
+    (if (nil? (get p :q))
+      (regex-number-atom p k)
+      (let ([a k2] (regex-number-atom (get p :a) k))
+        [(assoc p :a a) k2]))))
+
+(check-allow :non-tail-recursion
+  (defn- regex-number-seq (pieces k)
+    (if (empty? pieces)
+      [(list) k]
+      (let ([p k2] (regex-number-piece (first pieces) k)
+            [rest-pieces k3] (regex-number-seq (rest pieces) k2))
+        [(cons p rest-pieces) k3]))))
+
+(check-allow :non-tail-recursion
+  (defn- regex-number-alt (branches k)
+    (if (empty? branches)
+      [(list) k]
+      (let ([b k2] (regex-number-seq (first branches) k)
+            [rest-branches k3] (regex-number-alt (rest branches) k2))
+        [(cons b rest-branches) k3]))))
+
+(defn- regex-parse-numbered (pattern)
+  "Parse `pattern` and number its capture groups; returns [branches group-count].
+Group 0 is the whole match, so the numbering starts at 1 and the count excludes it."
+  (let ([branches k] (regex-number-alt (regex-parse pattern) 1))
+    [branches (dec k)]))
 
 ;; ---- compile: AST -> Thompson NFA -------------------------------------------
 ;; The NFA is a flat vector of STATES; index 0 is always the accepting `:match`
@@ -146,69 +322,111 @@ backreferences yet.")
     (cond
       (= t :lit) {:kind :lit :c (get a :c)}
       (= t :any) {:kind :any}
-      (= t :set) {:kind :set :neg (get a :neg) :chars (get a :chars)}
+      (= t :set)
+        {:kind :set
+         :neg (get a :neg)
+         :chars (get a :chars)
+         :ranges (or (get a :ranges) (list))
+         :classes (or (get a :classes) (list))}
       (= t :class) {:kind :class :k (get a :k)}
       else {:kind :any})))
 
-(defn- regex-nfa-atom (a nx states)
+;; Every `regex-nfa-*` takes `cap`: false builds the capture-free machine the bitset
+;; engine runs (and produces exactly the state vector it produced before captures
+;; existed — a `:group` is still only its body), true wraps each capturing group in
+;; the `:save` states the Pike VM reads. One construction, two machines; the
+;; alternative was a second copy of these five functions drifting against the first.
+;;
+;; `:greedy` decides which way a quantifier's `:split` points. `:a` is tried before
+;; `:b`, so a greedy `*` puts the BODY first (match more, back off only if the rest
+;; fails) and a lazy `*?` puts the exit first. The bitset engine cannot tell the two
+;; apart — a boolean does not care which of two accepting paths was taken — so this
+;; matters only to the Pike VM, where thread order IS the answer.
+
+(defn- regex-nfa-atom (a nx states cap)
   "Compile one atom into states leading to `nx`; returns [start states']."
   (let (t (get a :t))
     (cond
-      (= t :group) (regex-nfa-alt (get a :alt) nx states)
+      (= t :group)
+        (if (and cap (get a :gid))
+          ;; save(2g) → body → save(2g+1) → nx. Built back to front, like everything
+          ;; here: the closing save exists before the body that has to reach it.
+          (let (g (get a :gid)
+                [close st1] (regex-push states {:t :save :slot (inc (* 2 g)) :next nx})
+                [body st2] (regex-nfa-alt (get a :alt) close st1 cap))
+            (regex-push st2 {:t :save :slot (* 2 g) :next body}))
+          (regex-nfa-alt (get a :alt) nx states cap))
       (= t :bol) (regex-push states {:t :bol :next nx})
       (= t :eol) (regex-push states {:t :eol :next nx})
       else (regex-push states {:t :char :test (regex-atom->test a) :next nx}))))
 
-(defn- regex-nfa-piece (p nx states)
+(defn- regex-split (as nx greedy)
+  "A quantifier's fork, pointed the way its greediness asks: body first when greedy,
+exit first when lazy."
+  (if greedy {:t :split :a as :b nx} {:t :split :a nx :b as}))
+
+(defn- regex-nfa-piece (p nx states cap)
   "Compile a piece (atom + optional quantifier) leading to `nx`; [start states']."
-  (let (q (get p :q))
+  (let (q (get p :q)
+        greedy (not (= false (get p :greedy))))
     (cond
-      (nil? q) (regex-nfa-atom p nx states)
+      (nil? q) (regex-nfa-atom p nx states cap)
       (= q :opt)
-        (let ([as st1] (regex-nfa-atom (get p :a) nx states))
-          (regex-push st1 {:t :split :a as :b nx}))
+        (let ([as st1] (regex-nfa-atom (get p :a) nx states cap))
+          (regex-push st1 (regex-split as nx greedy)))
       ;; `*`: L = split(body, nx); body loops back to L; enter at L (zero-or-more).
       (= q :star)
         (let (li (count states)
               st0 (into states [{:t :split :a 0 :b 0}])
-              [as st1] (regex-nfa-atom (get p :a) li st0)
-              st2 (assoc st1 li {:t :split :a as :b nx}))
+              [as st1] (regex-nfa-atom (get p :a) li st0 cap)
+              st2 (assoc st1 li (regex-split as nx greedy)))
           [li st2])
       ;; `+`: same wiring, but enter at the body (one required), then L loops.
       (= q :plus)
         (let (li (count states)
               st0 (into states [{:t :split :a 0 :b 0}])
-              [as st1] (regex-nfa-atom (get p :a) li st0)
-              st2 (assoc st1 li {:t :split :a as :b nx}))
+              [as st1] (regex-nfa-atom (get p :a) li st0 cap)
+              st2 (assoc st1 li (regex-split as nx greedy)))
           [as st2])
-      else (regex-nfa-atom p nx states))))
+      else (regex-nfa-atom p nx states cap))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
 (check-allow :non-tail-recursion
-  (defn- regex-nfa-seq (pieces nx states)
+  (defn- regex-nfa-seq (pieces nx states cap)
     "Chain a branch's pieces; each piece's exit is the next piece's start. [start states']."
     (if (empty? pieces)
       [nx states]
-      (let ([rest-start st1] (regex-nfa-seq (rest pieces) nx states))
-        (regex-nfa-piece (first pieces) rest-start st1)))))
+      (let ([rest-start st1] (regex-nfa-seq (rest pieces) nx states cap))
+        (regex-nfa-piece (first pieces) rest-start st1 cap)))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
 (check-allow :non-tail-recursion
-  (defn- regex-nfa-alt (branches nx states)
-    "Fan out over alternation branches with `:split` states; returns [start states']."
+  (defn- regex-nfa-alt (branches nx states cap)
+    "Fan out over alternation branches with `:split` states; returns [start states'].
+`:a` is the earlier branch, so alternation is first-match-wins for the Pike VM."
     (cond
       (empty? branches) [nx states]
-      (empty? (rest branches)) (regex-nfa-seq (first branches) nx states)
+      (empty? (rest branches)) (regex-nfa-seq (first branches) nx states cap)
       else
-        (let ([b-start st1] (regex-nfa-seq (first branches) nx states)
-              [rest-start st2] (regex-nfa-alt (rest branches) nx st1))
+        (let ([b-start st1] (regex-nfa-seq (first branches) nx states cap)
+              [rest-start st2] (regex-nfa-alt (rest branches) nx st1 cap))
           (regex-push st2 {:t :split :a b-start :b rest-start})))))
 
 (defn- regex-nfa (branches)
-  "Compile the parsed branch list into {:states vec :start idx :match idx}."
+  "Compile the parsed branch list into {:states vec :start idx :match idx} — the
+capture-free machine the bitset engine runs."
   (let (states0 [{:t :match}]
-        [start st] (regex-nfa-alt branches 0 states0))
+        [start st] (regex-nfa-alt branches 0 states0 false))
     {:states st :start start :match 0}))
+
+(defn- regex-nfa-capturing (branches)
+  "The same machine with `:save` states — including slots 0/1 around the whole
+pattern, so the overall match is group 0 and needs no special case anywhere."
+  (let (states0 [{:t :match}]
+        [close st0] (regex-push states0 {:t :save :slot 1 :next 0})
+        [body st1] (regex-nfa-alt branches close st0 true)
+        [start st2] (regex-push st1 {:t :save :slot 0 :next body}))
+    {:states st2 :start start :match 0}))
 
 ;; A pattern is almost always a literal reused across many match calls (a loop, a
 ;; filter), so memoise the *compiled NFA*: pattern string -> {:states …}. This
@@ -278,6 +496,27 @@ object's per-call clone-out stays a few words — see the cache note above."
     (= k :word) (or (regex-letter? c) (includes? "0123456789" c) (= c "_"))
     else false))
 
+(defn- regex-in-ranges? (ranges code)
+  "Is `code` inside any `[lo hi]` of `ranges`? (Almost always an empty list.)"
+  (if (empty? ranges)
+    false
+    (let ([lo hi] (first ranges))
+      (if (and (>= code lo) (<= code hi)) true (regex-in-ranges? (rest ranges) code)))))
+
+(defn- regex-in-classes? (classes c)
+  (if (empty? classes)
+    false
+    (if (regex-class-match? (first classes) c) true (regex-in-classes? (rest classes) c))))
+
+(defn- regex-set-member? (test c)
+  "Membership in a `[...]`: the literal chars, then any range, then any class. The
+three are checked in that order because the char string is the common case and the
+other two lists are usually empty. Negation applies to the whole verdict, so
+`[^a-z]` is every character that is not in the range."
+  (or (includes? (get test :chars) c)
+    (regex-in-ranges? (get test :ranges) (string/char->int c))
+    (regex-in-classes? (get test :classes) c)))
+
 (defn- regex-char-test? (test c)
   "Does the single char `c` satisfy a compiled `:char` state's `test`?"
   (let (k (get test :kind))
@@ -285,7 +524,7 @@ object's per-call clone-out stays a few words — see the cache note above."
       (= k :any) true
       (= k :lit) (= c (get test :c))
       (= k :set)
-        (let (m (includes? (get test :chars) c))
+        (let (m (regex-set-member? test c))
           (if (get test :neg) (not m) m))
       (= k :class) (regex-class-match? (get test :k) c)
       else false)))
@@ -446,6 +685,141 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table/get
           (+ i 1)
           (bit/or nxt2 startmid))))))
 
+;; ---- the Pike VM: where a match is, and what its groups caught ---------------
+;; The bitset engine above answers "is there a match" by forgetting everything about
+;; HOW: a state set is one integer, and an integer cannot say which thread reached
+;; which state, let alone where that thread opened group 2. Captures need the thread
+;; kept, so `find` runs a different machine over the same NFA.
+;;
+;; A Pike VM is the Thompson simulation with the state SET replaced by an ordered
+;; list of threads, each carrying its own capture slots. Two rules give it Perl's
+;; leftmost-first semantics without backtracking:
+;;
+;;   1. the list is in PRIORITY order, and the first thread to reach a given state
+;;      wins it (`added` below) — a lower-priority thread arriving at a state
+;;      someone already holds is simply dropped, which is what bounds the list to
+;;      the state count and keeps the whole thing linear in the input;
+;;   2. a thread reaching `:match` is the answer so far, and CUTS every thread
+;;      behind it at that position — but not the ones ahead of it, which are
+;;      higher-priority and may still match longer (this is what makes `a+` greedy
+;;      and `a+?` lazy, given which way `regex-split` pointed their forks).
+;;
+;; Cost: a vector per live thread instead of one integer, and no DFA memo — there is
+;; nothing to memoise when the answer depends on the path. That is the price of the
+;; extra information, and it is why `match?` does not pay it.
+
+(def- regex-cap-cache (table/new))
+
+(defn- regex-cap-compile (pattern)
+  "The capture-bearing machine for `pattern`, memoised: {:states :start :ngroups :nslots}.
+Separate from `regex-cache` so a pattern used both ways compiles both machines and a
+pattern used one way compiles one."
+  (let (hit (table/get regex-cap-cache pattern))
+    (if (nil? hit)
+      (let ([branches ngroups] (regex-parse-numbered pattern)
+            nfa (regex-nfa-capturing branches)
+            obj {:states (get nfa :states)
+                 :start (get nfa :start)
+                 :ngroups ngroups
+                 ;; two slots per group (open, close) — plus group 0, the whole match
+                 :nslots (* 2 (inc ngroups))})
+        (table/put regex-cap-cache pattern obj)
+        obj)
+      hit)))
+
+(defn- regex-cap-blank (nslots)
+  "Capture slots with nothing recorded yet — a group that never participates in the
+match keeps its nils and comes back as `nil` rather than as an empty string."
+  (into [] (map (range nslots) (fn (_) nil))))
+
+;; check-allow: deliberately non-tail — the fork depth is the NFA's nesting, bounded
+;; by the state count, not by the length of the subject.
+(check-allow :non-tail-recursion
+  (defn- regex-cap-add (states pc caps pos n added acc)
+    "Add thread `pc` and its epsilon closure to `acc`, in priority order; returns
+[added acc]. `added` is the bitset of states already claimed at this position — the
+FIRST arrival keeps the state, and it is that rule, not a search, that resolves
+ambiguity in favour of the higher-priority path."
+    (if (regex-bit? added pc)
+      [added acc]
+      (let (added2 (bit/or added (bit/shift-left 1 pc))
+            st (nth states pc)
+            t (get st :t))
+        (cond
+          ;; `:a` before `:b` — the fork's preferred side goes in front
+          (= t :split)
+            (let ([a1 c1] (regex-cap-add states (get st :a) caps pos n added2 acc))
+              (regex-cap-add states (get st :b) caps pos n a1 c1))
+          (= t :save)
+            (regex-cap-add states (get st :next) (assoc caps (get st :slot) pos) pos n added2 acc)
+          (= t :bol)
+            (if (= pos 0) (regex-cap-add states (get st :next) caps pos n added2 acc) [added2 acc])
+          (= t :eol)
+            (if (= pos n) (regex-cap-add states (get st :next) caps pos n added2 acc) [added2 acc])
+          ;; `:char` and `:match` are where a thread comes to rest for this position
+          else [added2 (into acc [[pc caps]])])))))
+
+(defn- regex-cap-scan (states threads j code pos n best added acc)
+  "Walk the threads at `pos` in priority order, seeding the list for `pos + 1`.
+Returns [best added acc]. The first `:match` becomes the best-so-far and stops the
+walk — everything after it is lower priority, so it cannot improve on this."
+  (if (>= j (count threads))
+    [best added acc]
+    (let ([pc caps] (nth threads j)
+          st (nth states pc))
+      (if (= (get st :t) :match)
+        [caps added acc]
+        (if (and (not (nil? code)) (regex-char-test? (get st :test) (string/int->char code)))
+          (let ([added2 acc2] (regex-cap-add states (get st :next) caps (inc pos) n added acc))
+            (regex-cap-scan states threads (inc j) code pos n best added2 acc2))
+          (regex-cap-scan states threads (inc j) code pos n best added acc))))))
+
+(defn- regex-cap-run (states start nslots codes n pos threads added best)
+  "Run the VM from `pos` to the end of input; returns the winning capture slots, or nil.
+A fresh start thread is injected at every position — at the BACK of the list, so a
+match beginning further left always outranks one beginning further right — and only
+until something matches, after which a later start could only be worse."
+  (if (> pos n)
+    best
+    (let ([added2 threads2] (if (nil? best)
+                              (regex-cap-add states
+                                start
+                                (regex-cap-blank nslots)
+                                pos
+                                n
+                                added
+                                threads)
+                              [added threads]))
+      (if (empty? threads2)
+        best
+        (let (code (if (< pos n) (nth codes pos) nil)
+              [best2 added3 next-threads] (regex-cap-scan states threads2 0 code pos n best 0 []))
+          (regex-cap-run states start nslots codes n (inc pos) next-threads added3 best2))))))
+
+(defn- regex-cap-group (s caps k)
+  "Group `k` as {:start :end :text}, or nil when it never participated."
+  (let (a (nth caps (* 2 k)) b (nth caps (inc (* 2 k))))
+    (when (and a b) {:start a :end b :text (string/substring s a b)})))
+
+(defn- regex-cap-match (obj s caps)
+  "Shape the winning slots into the match map `find` returns."
+  (assoc (regex-cap-group s caps 0)
+    :groups (into [] (map (range 1 (inc (get obj :ngroups))) (fn (k) (regex-cap-group s caps k))))))
+
+(defn- regex-find-at (obj s codes n from)
+  "The leftmost match at or after `from`, or nil. Positions stay absolute, so `^`
+still means the start of the whole string even when scanning a later suffix."
+  (let (caps (regex-cap-run (get obj :states)
+               (get obj :start)
+               (get obj :nslots)
+               codes
+               n
+               from
+               []
+               0
+               nil))
+    (when caps (regex-cap-match obj s caps))))
+
 ;; ---- public entry points ----------------------------------------------------
 ;; The n == 0 edge (empty input) is the one case where the precomputed closures
 ;; are wrong (`$` fires at position 0 too), so it recomputes both closures live.
@@ -499,3 +873,114 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
         0
         (nth obj 2)))))
 (sig matches? (any string -> bool))
+
+;; ---- where, and with which groups -------------------------------------------
+
+(defn find (pattern s)
+  "The leftmost match of `pattern` in `s`, or nil. The match is
+`{:start :end :text :groups [...]}` — half-open char offsets, the matched text, and
+one entry per `(...)` group in the pattern (each itself `{:start :end :text}`, or
+nil for a group that did not participate). Group numbering is the order of the
+opening parens; `(?:...)` groups are not numbered.
+
+    (get (regex/find \"([\\\\w.]+):(\\\\d+)\" \"at worker.ex:42\") :text)     → \"worker.ex:42\"
+    (get (regex/find \"([\\\\w.]+):(\\\\d+)\" \"at worker.ex:42\") :start)    → 3
+    (get (second (get (regex/find \"(a)-(b)\" \"a-b\") :groups)) :text)   → \"b\"
+    (regex/find \"zzz\" \"abc\")                                          → nil
+
+Leftmost-first, like Perl and unlike POSIX: of two matches starting at the same
+place, the one the pattern's own alternation and greediness prefer wins."
+  (let (obj (regex-cap-compile pattern)
+        codes (string/->codepoints s))
+    (regex-find-at obj s codes (count codes) 0)))
+(sig find (any string -> any))
+
+(defn- regex-find-all-loop (obj s codes n from acc)
+  (if (> from n)
+    acc
+    (let (m (regex-find-at obj s codes n from))
+      (if (nil? m)
+        acc
+        (regex-find-all-loop obj
+          s
+          codes
+          n
+          ;; an empty match would otherwise be found forever in the same spot
+          (if (= (get m :end) (get m :start)) (inc (get m :end)) (get m :end))
+          (into acc [m]))))))
+
+(defn find-all (pattern s)
+  "Every non-overlapping match of `pattern` in `s`, left to right, as a vector of the
+maps `find` returns (empty when there are none). Scanning resumes at each match's
+end, and steps one character past an EMPTY match so a pattern that can match nothing
+(`a*`) terminates instead of finding the same empty match forever.
+
+    (map (regex/find-all \"\\\\d+\" \"a1b22c333\") (fn (m) (get m :text)))   → (\"1\" \"22\" \"333\")"
+  (let (obj (regex-cap-compile pattern)
+        codes (string/->codepoints s))
+    (regex-find-all-loop obj s codes (count codes) 0 [])))
+(sig find-all (any string -> any))
+
+;; ---- replace / split, both written on find-all ------------------------------
+
+(defn- regex-expand-loop (template m i acc)
+  "Expand `$0`..`$9` (and `$$` for a literal dollar) in a replacement template."
+  (if (>= i (string/length template))
+    acc
+    (let (c (string/substring template i (inc i))
+          d (when (< (inc i) (string/length template)) (string/substring template (inc i) (+ i 2))))
+      (cond
+        (and (= c "$") (= d "$")) (regex-expand-loop template m (+ i 2) (str acc "$"))
+        (and (= c "$") d (includes? "0123456789" d))
+          (let (k (reflect/read-string d)
+                g (if (= k 0) m (nth (get m :groups) (dec k) nil)))
+            (regex-expand-loop template m (+ i 2) (str acc (if g (get g :text) ""))))
+        else (regex-expand-loop template m (inc i) (str acc c))))))
+
+(defn- regex-replace-loop (s matches j at acc replacement)
+  (if (>= j (count matches))
+    (str acc (string/substring s at (string/length s)))
+    (let (m (nth matches j)
+          piece (if (fn? replacement)
+                  (replacement m)
+                  (regex-expand-loop replacement m 0 "")))
+      (regex-replace-loop s
+        matches
+        (inc j)
+        (get m :end)
+        (str acc (string/substring s at (get m :start)) piece)
+        replacement))))
+
+(defn replace (pattern s replacement)
+  "Replace every non-overlapping match of `pattern` in `s`. `replacement` is either a
+template string, where `$0` is the whole match, `$1`..`$9` are the groups and `$$` is
+a literal dollar, or a FUNCTION of the match map — which is the one to reach for when
+the new text has to be computed rather than spliced.
+
+    (regex/replace \"(\\\\w+)@(\\\\w+)\" \"a@b\" \"$2@$1\")                     → \"b@a\"
+    (regex/replace \"\\\\d+\" \"a1b22\" (fn (m) (str \"<\" (get m :text) \">\")))   → \"a<1>b<22>\"
+
+A group that did not participate expands to the empty string."
+  (regex-replace-loop s (find-all pattern s) 0 0 "" replacement))
+(sig replace (any string any -> string))
+
+(defn- regex-split-loop (s matches j at acc)
+  (if (>= j (count matches))
+    (into acc [(string/substring s at (string/length s))])
+    (let (m (nth matches j))
+      (regex-split-loop s
+        matches
+        (inc j)
+        (get m :end)
+        (into acc [(string/substring s at (get m :start))])))))
+
+(defn split (pattern s)
+  "Split `s` on every non-overlapping match of `pattern`, returning the pieces between
+them — the regex counterpart of `string/split`, which separates on a literal.
+
+    (regex/split \"\\\\s*,\\\\s*\" \"a , b,c\")   → [\"a\" \"b\" \"c\"]
+
+Separators are dropped, and an empty piece between two adjacent separators is kept, so
+the result always has one more element than there were matches."
+  (regex-split-loop s (find-all pattern s) 0 0 []))
+(sig split (any string -> any))
