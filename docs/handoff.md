@@ -5,7 +5,14 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Addendum 2026-09-03 (latest) — two guards landed, no open bug.** (1) KI-88's signature
+**Addendum 2026-09-03 (latest) — KI-97 is closed: `read-line` no longer pins a worker (ADR-059
+Phase 2).** One `brood-stdin` reader thread behind `%read-line-start`; `read-line` is a prelude
+function parking on the token (`offload`'s seam). Guard `crates/cli/tests/read_line_parks.rs`,
+sabotage-verified — the old shape freezes the whole program, not just the readers. **Next:**
+decide ADR-314's default (below) — the only listed item left; it is a decision to take
+deliberately, with a benchmark refresh, not a bug.
+
+**Addendum 2026-09-03 — two guards landed, no open bug.** (1) KI-88's signature
 — a process enqueued and never scheduled — is now watched for by default: `scheduler/pool.rs`
 reports once, with every queued pid and worker state, when work is queued but no worker has
 found anything for 3 s. Fault-injected (`BROOD_FAULT_STRANDED=1`), sabotage-verified

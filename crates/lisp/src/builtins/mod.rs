@@ -1978,12 +1978,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "read-line",
+        "%read-line-start",
         Arity::exact(0),
-        Sig::nullary(string.union(nil_ty)),
+        Sig::nullary(int),
         &[],
-        "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input.",
-        read_line);
+        "Ask the stdin reader thread for the next line; returns a token at once, and `[:stdin token line]` (nil at end of input) or `[:stdin-error token err]` arrives in this process's mailbox. Policy is the prelude `read-line`, which parks on the token (ADR-059).",
+        read_line_start,
+    );
     // `println` is Brood over `print` (std/prelude.blsp).
     def(
         heap,
