@@ -1874,17 +1874,69 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // `number`, while the fold as a whole was already known to be an int.
         let seeded_callback = fold_callback_seed(heap, form, &items, ctx)
             .or_else(|| element_callback_seed(heap, &items, ctx));
+        // A body sequence threads its scope: a **guard that diverges** narrows every form
+        // after it (see [`diverging_guard_scope`]). Only for a `do` — in any other form
+        // the items are arguments, evaluated in one scope, and there is no "after".
+        let is_body = matches!(items.first(), Some(&Value::Sym(s)) if value::symbol_is(s, kw::DO));
+        let mut seq_ctx = ctx.clone();
         for (i, &item) in items.iter().enumerate() {
+            let item_ctx = if is_body { &seq_ctx } else { ctx };
             match &seeded_callback {
                 Some((idx, sig)) if *idx == i => {
                     if let Some(fn_items) = list_items(heap, item) {
-                        check_fn_bound(heap, &fn_items, ctx, out, &sig.params);
+                        check_fn_bound(heap, &fn_items, item_ctx, out, &sig.params);
                     }
                 }
-                _ => check_into(heap, item, ctx, out),
+                _ => check_into(heap, item, item_ctx, out),
+            }
+            if is_body {
+                if let Some(next) = diverging_guard_scope(heap, item, &seq_ctx) {
+                    seq_ctx = next;
+                }
             }
         }
     }
+}
+
+/// The scope the forms **after** `form` are checked in, when `form` is a guard that
+/// **diverges** — `(when (nil? root) (error …))`, which expansion lowers to a branchless
+/// `(if COND (error …))`. If the condition held, the body would raise and there would be no
+/// "after"; so reaching the next form proves the condition false, exactly as an `if`'s else
+/// branch does. `None` when `form` is not that shape.
+///
+/// This is the language's *early return*. Brood has none — no `return`, no `guard` — so the
+/// idiom for "refuse and stop" is a `when` over `error`, and it is everywhere: sixteen call
+/// sites in `std/` guard `project/find-root`'s nil this way and then use the value. Without
+/// this rule every one of them reads as an unguarded `nil | string`, and the only way to
+/// silence that is to declare the producer's return as `any` — which is how it was hidden.
+///
+/// Sound because the narrowing is the ordinary else-scope of the condition, applied on the
+/// path where the then-branch provably cannot have run: `Ty::is_never` is only true for a
+/// body that yields nothing, and a body that yields nothing did not fall through.
+pub(super) fn diverging_guard_scope(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ctx> {
+    let items = list_items(heap, form)?;
+    let &Value::Sym(head) = items.first()? else {
+        return None;
+    };
+    // Post-expansion. `(when t b)` is `(if t (do b) nil)` and `(unless t b)` is
+    // `(if t nil (do b))`, so BOTH arms have to be considered — and a hand-written
+    // branchless `(if t b)` is the same shape and the same argument.
+    if !value::symbol_is(head, kw::IF) || !(items.len() == 3 || items.len() == 4) {
+        return None;
+    }
+    let (test, then) = (items[1], items[2]);
+    let diverges =
+        |form: Value| super::infer::expr_ty(heap, form, ctx).is_some_and(|t| t.is_never());
+    let (then_ctx, else_ctx) = super::guards::branch_scopes(heap, test, ctx);
+    // The THEN arm cannot have run, so the sequel is the else-scope — the `when` case.
+    if diverges(then) {
+        return Some(else_ctx);
+    }
+    // …and symmetrically for `unless`, where the diverging arm is the else.
+    if items.len() == 4 && diverges(items[3]) {
+        return Some(then_ctx);
+    }
+    None
 }
 
 /// Walk a single-clause `fn` literal with each parameter bound to an INFERRED bound —
@@ -3291,8 +3343,14 @@ fn check_let(
         }
         i += 2;
     }
+    // The body is a SEQUENCE, so a guard that diverges narrows every form after it
+    // (`diverging_guard_scope`) — the `(when (nil? root) (error …))` early-return idiom.
+    let mut scope = scope;
     for &body_form in &items[2..] {
         check_into(heap, body_form, &scope, out);
+        if let Some(next) = diverging_guard_scope(heap, body_form, &scope) {
+            scope = next;
+        }
     }
     // Unused let binding lint. For each bound name, warn if it never appears
     // as a Value::Sym in any part of its visible scope: subsequent binding

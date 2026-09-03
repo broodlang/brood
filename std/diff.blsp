@@ -112,7 +112,7 @@ Returns `{:keeps n :deletes n :inserts n}`."
           (= tag :keep) (assoc acc :keeps (+ (get acc :keeps) 1))
           (= tag :delete) (assoc acc :deletes (+ (get acc :deletes) 1))
           else (assoc acc :inserts (+ (get acc :inserts) 1)))))))
-(sig summary (seqable -> any))
+(sig summary (seqable -> (or map vector)))
 
 (defn patch (a ops)
   "Apply diff `ops` to sequence `a`, producing sequence `b`. `a` is provided

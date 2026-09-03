@@ -258,6 +258,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
         level (count (filter (or chain '()) (fn (k) (contains? blocks k))))
         level (if closing (- level (get spec :dedent-levels 1)) level))
     (* (get spec :width 2) (math/max 0 level))))
+(sig indent-column (string any int countable -> number))
 
 ;; ---- structural navigation --------------------------------------------------
 ;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp

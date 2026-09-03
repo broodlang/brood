@@ -1491,7 +1491,7 @@ to delete no longer exists as written)."
       (<= ahi lo) [(+ lo delta) (+ hi delta) repl]
       (>= alo hi) splice
       else (let (p (+ alo alen)) [p p repl]))))
-(sig splice-transform (vector vector -> any))
+(sig splice-transform (vector vector -> vector))
 
 (defn splice-transform-all (splice applieds)
   "`splice` transformed over each of `applieds` in order (oldest first)."

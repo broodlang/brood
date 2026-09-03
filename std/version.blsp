@@ -386,4 +386,4 @@ the user when it declines a plugin, instead of a bare false."
             have (get versions nm))
         (when (or (nil? have) (not (satisfies? have constraint)))
           [nm constraint have])))))
-(sig unsatisfied (any map -> any))
+(sig unsatisfied (any map -> (or nil (list (tuple any any any)))))

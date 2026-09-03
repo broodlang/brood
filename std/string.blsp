@@ -268,7 +268,7 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
         words (filter (string/split flat " ") (fn (w) (not (= w ""))))
         [cur done] (fold words ["" ()] (fn (acc w) (fill-pack acc w width))))
     (join (reverse (if (= cur "") done (cons cur done))) "\n")))
-(sig fill (string any -> any))
+(sig fill (string any -> string))
 
 ;; (restored: this is string's repeat, not the sequence one)
 (defn repeat (s n)

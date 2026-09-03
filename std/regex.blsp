@@ -478,7 +478,7 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
         n
         0
         (nth obj 2)))))
-(sig match? (any string -> any))
+(sig match? (any string -> bool))
 
 (defn matches? (pattern s)
   "True if `pattern` matches the **entire** string `s` (anchored both ends).
@@ -498,4 +498,4 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
         n
         0
         (nth obj 2)))))
-(sig matches? (any string -> any))
+(sig matches? (any string -> bool))

@@ -38,7 +38,7 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported.
     (apply str
       (cons (first parts)
         (map (rest parts) (fn (p) (template-marker p data)))))))
-(sig render (string any -> any))
+(sig render (string any -> string))
 
 ;; One piece following a `{{`: `key}}rest` → the substituted value + `rest`. A piece with
 ;; no closing `}}` is an unterminated marker, emitted verbatim (`{{` included) — the same

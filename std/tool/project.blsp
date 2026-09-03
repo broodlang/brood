@@ -469,7 +469,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (file/exists? (path/join dir "project.blsp")) dir
     (= dir (path/dirname dir)) nil
     else (find-root (path/dirname dir))))
-(sig find-root (string -> any))
+(sig find-root (string -> (or nil string)))
 
 (defn abs-paths (root rels)
   "Resolve each relative path in `rels` against `root`, returning the list of absolute paths."
@@ -509,7 +509,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
             (string/ends-with? entry ".blsp") (cons p acc)
             else acc))))
     nil))
-(sig collect-sources (string -> any))
+(sig collect-sources (string -> list))
 
 ;; A source file that carries co-located tests (ADR-225): it has a top-level
 ;; `deftest` or `describe` form. Detection is by FORM — not filename, not module
@@ -1011,14 +1011,14 @@ empty `:enhances` (an ordinary library) satisfies-all vacuously, so it must not 
                (let (enhances (manifest-enhances (path/join (path/join dir dep-name) "project.blsp")))
                  (and (get enhances app-symbol)
                    (version/satisfies-all? host enhances)))))))))
-(sig enhancers-in (string (or keyword string symbol) any -> any))
+(sig enhancers-in (string (or keyword string symbol) any -> (vector string)))
 
 (defn installed-enhancers (root app app-version)
   "The names of packages installed under `root/_deps` that enhance `app` at a satisfied
 `app-version` — `enhancers-in` over a project's dependency dir. The runtime sibling of the
 registry's `?enhances=` query (`nest search --enhances`)."
   (enhancers-in (path/join root "_deps") app app-version))
-(sig installed-enhancers (string any any -> any))
+(sig installed-enhancers (string any any -> (vector string)))
 
 (defn- project-plugin-format-headers (root plugin-name)
   "The `:format-headers` a `:format-plugins` entry contributes — read from that
@@ -1145,7 +1145,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; any stale value from a prior setup in a long-lived tooling image).
   (def *format-headers-extra* (project-effective-format-headers root))
   root)
-(sig setup (string -> any))
+(sig setup (string -> string))
 
 ;; Register the project's OWN modules as package-rooted under its `:name`, and set the
 ;; ambient package context so every source loaded from here on roots (ADR-070). A no-op
@@ -1190,7 +1190,7 @@ resolve in the advisory checker. Returns the project root."
   ;; is unchanged, and writes one when it isn't — no separate build step, ever.
   (load-sources-cached root)
   root)
-(sig setup-tooling-image (string -> any))
+(sig setup-tooling-image (string -> string))
 
 ;; If the manifest declared :dependencies, resolve them (writing/refreshing
 ;; project.lock.blsp) and append each dep's source dir to *load-path* so its

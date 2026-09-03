@@ -42,7 +42,7 @@
 (defn token-replace (text old new)
   "`text` with every whole-token `old` replaced by `new` (substrings left alone)."
   (apply str (reverse (tr-loop text old new (string/length old) 0 nil))))
-(sig token-replace (any string any -> any))
+(sig token-replace (any string any -> string))
 
 (defn- apply-pairs (text pairs)
   (fold pairs text (fn (t p) (token-replace t (first p) (second p)))))
