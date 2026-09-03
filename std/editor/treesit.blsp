@@ -32,6 +32,39 @@ Per-language face tables + keymaps are policy in the editor. `(require
 'editor/treesit)`."
   (:use editor/face))
 
+;; ---- what a language mode must answer ---------------------------------------
+;; The CONTRACT, named once. Every service below is generic — the editor's view asks a
+;; buffer for `:fontify` and its RET asks for `:indent` without naming a language — so
+;; "which services exist" is a fact about the seam, not about any one language, and
+;; belongs where the seam does.
+;;
+;; It is data so that both sides can read it instead of remembering it: a registration
+;; can refuse a language that does not answer the required set, and a test can enumerate
+;; the set × the languages rather than listing the pairs by hand. Three times now a
+;; command written to be language-agnostic was reachable in only one language — RET,
+;; then `C-M-SPC` — and each time it was found by someone pressing the key, because
+;; nothing anywhere said what the full set was.
+
+(def language-contract
+  {
+   ;; Without these a mode is not usable as a code mode at all.
+   ;;   :ts-lang   the grammar keyword — also what marks the mode as tree-sitter-backed,
+   ;;              which is how the polymorphic motions choose their backend
+   ;;   :fontify   text -> ([start end face] …)
+   ;;   :indent    text, line-start -> column
+   :required [:ts-lang :fontify :indent]
+   ;; Provide when the language has the thing; absence is a fact, not a gap.
+   ;;   :fontify-restart  where a windowed fontify may safely begin (heredocs)
+   ;;   :comment-syntax   the line-comment prefix, for comment/uncomment
+   :optional [:fontify-restart :comment-syntax]})
+
+(defn missing-services (layer)
+  "The `language-contract` services `layer` fails to provide — `()` when it is complete.
+What a registration checks before accepting a language, so an incomplete mode fails at
+load with the list rather than at the keypress that needed it."
+  (filter (get language-contract :required) (fn (k) (nil? (get layer k)))))
+(sig missing-services (any -> any))
+
 ;; ---- fontify ----------------------------------------------------------------
 
 (defn face-of-kinds (kind->face-name)
@@ -346,6 +379,13 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
 ;; siblings, which is why structural motion felt slower the bigger the file got.
 ;; `%tree-sitter-kids` hands over exactly that list.
 
+;; A node's offsets, stated once. `%tree-sitter-parse` always puts an int in `:start` and
+;; `:end`, but it declares a bare `map`, so every `(get node :start)` reads as `any` and any
+;; arithmetic on it widens to `number` — which is then rejected wherever an offset is wanted.
+;; Reading them through here says what the kernel guarantees.
+(defn- ts-start (node) (get node :start))
+(sig ts-start (map -> int))
+
 (defn- ts-siblings (text lang point)
   "The named children of the node strictly containing `point` — the siblings a motion
 steps through."
@@ -411,7 +451,7 @@ offset), and a motion that cannot move is worse than one that overshoots."
               (fn (f) (and (get f :container) (>= (get f :start) point)))))
     (if (nil? lst)
       point
-      (let (inner (seq/find (ts-siblings text lang (inc (get lst :start)))
+      (let (inner (seq/find (ts-siblings text lang (inc (ts-start lst)))
                     (fn (k) (> (get k :start) point))))
         (cond
           inner (get inner :start)
@@ -429,18 +469,22 @@ offset), and a motion that cannot move is worse than one that overshoots."
   ;; key off the callee text). Extend for a macro-defined construct in another grammar.
   (list "def" "defp" "defmacro" "defmacrop" "defmodule" "defprotocol" "defimpl"))
 
+;; Hoisted out of `ts-head-word`'s `letrec`: a LOCAL function cannot carry a `sig`, so the
+;; index it threads read as `number` and every `string/substring` on it was reported. At top
+;; level it can say `int`, which is what it is.
+(defn- ts-head-word-scan (text from limit i)
+  (if (or (>= i limit) (not (regex/matches? "[A-Za-z0-9_?!]" (string/substring text i (inc i)))))
+    (string/substring text from i)
+    (ts-head-word-scan text from limit (inc i))))
+(sig ts-head-word-scan (string int int int -> string))
+
 (defn- ts-head-word (text node)
   "The identifier a node BEGINS with, read from the source. A chain node carries no
 children, so an Elixir `call`'s callee is taken lexically from its start rather than from
 a first child — which is the same token either way, and does not require the tree."
   (let (from (get node :start)
         limit (math/min (get node :end) (+ from 32)))
-    (letrec (scan (fn (i)
-                    (if (or (>= i limit)
-                          (not (regex/matches? "[A-Za-z0-9_?!]" (string/substring text i (inc i)))))
-                      (string/substring text from i)
-                      (scan (inc i)))))
-      (scan from))))
+    (ts-head-word-scan text from limit from)))
 
 (defn- ts-defun? (text node)
   "Whether `node` is a definition for `beginning-of-defun`: a definition-*kind* node (Ruby
