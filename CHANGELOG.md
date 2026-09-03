@@ -6,6 +6,38 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.25.2 — declarations that said nothing, and the guard idiom that forced them
+
+**33 standard-library signatures stop saying `any`.** A hover reporting `(string -> any)`
+for a plainly-`bool` body turned out not to be imprecision: `std/regex.blsp` *declared*
+`(sig match? (any string -> any))`, and a declared sig is authoritative — the library was
+telling the checker to forget what it knew. Measured by stripping each file's declarations
+and asking inference what it would have said: of 119 declared `-> any` returns, inference
+proves something narrower for 31. Adopted 28 (an inferred return is an upper bound on what
+the body yields, so declaring it cannot lie), skipped three whose inferred type is an
+artifact rather than a contract. Five `?`-predicates were fixed by reading their bodies:
+four are `bool`, and one is `(or nil bool)` because `(and lead …)` yields `lead` when falsy.
+
+**A guard that diverges now narrows the rest of the body.** Brood has no early return, so
+"refuse and stop" is spelled `(when bad (error …))` — and the checker did not know that
+reaching the next form proves the guard false. Narrowing `project/find-root` to its honest
+`(or nil string)` exposed this immediately: sixteen correct call sites that guard exactly
+that way were reported. So the wide `-> any` was never laziness; it was the only way to
+silence a rule the checker was missing.
+
+A body form of the shape `(if COND THEN [ELSE])` where one arm is `never` now narrows every
+form after it to that arm's complement — `when` and `unless` both. It applies in the walk
+*and* in inference: inference types a body as its last form and never looked at what came
+before, so with only the walk a guarded function checked clean while its inferred RETURN
+still carried the `nil`, reporting its callers instead of it.
+
+The strict gate over `std/` went 17 → 0 with the rule in place; plain 0; seven downstream
+repos 0.
+
+**Also gated: the narrow-through allow-list.** `DETERMINISTIC_UNARY` (v0.25.1) is hard-coded
+and its drift is silent — a parser missing from it re-creates the false positive that
+release fixed. Two mechanical checks now read the source of truth rather than a copy.
+
 ## v0.25.1 — a guard narrows through a parser
 
 **Fixes a false positive in v0.25.0's new failure lint** (ADR-316), which is the one class

@@ -764,3 +764,53 @@ what `is_subtype` states and a tag test would not. Two details worth keeping:
   failure stays silent: `=`, storage in a collection, a vector literal, `str`, returning it,
   and above all `ok->` and `with`. A lint that fired on the two mechanisms ADR-315 provides
   as the answer to it would be fighting the language.
+
+## Declarations that said nothing, and the guard idiom that forced them (2026-09-03)
+
+A hover reported `(string -> any)` for a body that plainly yields `0 | bool`. The checker
+was not being imprecise: `std/regex.blsp` **declared** `(sig match? (any string -> any))`,
+and a declared sig is authoritative (ADR-259). The library was telling the checker to forget
+what it knew. `handoff.md` records this trap for *curated* sigs and
+`no_declared_std_sig_widens_its_curated_signature` gates that half; a Brood function with no
+curated counterpart had nothing watching it.
+
+**Measured by asking inference.** Strip each file's `(sig …)` lines, run `--suggest-sigs`,
+compare: 119 declared `-> any` returns, and inference proves something narrower for **31**.
+Adopting an inferred return is sound — it is an upper bound on what the body yields — so 28
+were taken verbatim. Three were skipped because the inferred type is an artifact rather than
+a contract: a datetime cover from ADR-299's operator domain, a raw record shape (the same
+thing `--suggest-sigs` was taught not to print), and an `ordered` from an extremum. The five
+`?`-predicates were fixed by *reading the bodies*, not by adopting: four are `bool`, and
+`format/multi-arity-defn?` is `(or nil bool)`, because `(and lead …)` yields `lead` when it
+is falsy — a Brood predicate is not automatically a `bool`.
+
+**Then the part worth keeping.** Narrowing `project/find-root` to its honest `(or nil
+string)` took the strict gate from 0 to 17, and 16 were one shape:
+
+```brood
+(let (root (project/find-root (file/cwd)))
+  (when (nil? root) (error "not in a Brood project …"))
+  (project/setup root)      ; ← "expects string, got nil | string"
+  …)
+```
+
+Every one of those sites is **correct**. Brood has no early return — no `return`, no
+`guard` — so "refuse and stop" is `(when bad (error …))`, and the checker did not know that
+reaching the next form proves the guard false. Which reframes the whole exercise: the wide
+`-> any` was not laziness, it was the only way to silence a rule the checker was missing.
+Fixing the signatures without fixing that would have pushed sixteen false positives into
+`std/`.
+
+`walk::diverging_guard_scope` — a body form `(if COND THEN [ELSE])` with one arm typed
+`never` narrows every following form to that arm's complement. Both directions, since
+`(when t b)` lowers to `(if t (do b) nil)` and `(unless t b)` to `(if t nil (do b))`. Sound
+because it is the ordinary else-scope of the condition, applied on the path where the other
+arm provably did not run.
+
+**It had to be added twice**, which is the same walk/inference split that let ADR-316
+false-positive two days running: `check_let` for the walk, `infer::sequence_scope` for
+inference. Inference types a body as its LAST form and never looked at the forms before it —
+right for values, wrong for scope. With only the walk, the guarded function checked clean
+and its inferred *return* still carried the `nil`, so every caller was reported instead of
+it. Twice now the lesson has been the same: **a narrowing that only the walk knows is a
+narrowing the callers do not get.**

@@ -9,7 +9,7 @@ members = ["crates/lisp", "crates/cli", "crates/nest", "crates/lsp", "crates/pla
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(brood_asan)'] }
 
 [workspace.package]
-version = "0.25.1"
+version = "0.25.2"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["Wilhelm Kirschbaum"]
