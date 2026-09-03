@@ -149,7 +149,12 @@ of) says what it looks like it says."
     (if (and c (includes? "0123456789" c))
       (regex-digits-at pcs (inc i) (str acc c))
       [acc i])))
-(sig regex-digits-at (countable int string -> (tuple string int)))
+;; `i` is an int, and the checker cannot prove it: the index is threaded through
+;; `regex-alt`/`regex-branch`, which live in a `letrec` inside `regex-parse` — a local
+;; function cannot carry a `sig`, so the mutual recursion has nowhere to be annotated.
+;; `number` is the strongest thing provable across this family, and it is true. Lifting
+;; those two to top-level `defn-`s would let the whole chain say `int`.
+(sig regex-digits-at (countable number string -> (tuple string number)))
 
 ;; The most a `{m,n}` may expand to. Repetition is expanded into copies of the atom
 ;; (there is no counting state in a Thompson NFA), so `a{1,100000}` would be 100k
@@ -176,7 +181,6 @@ all — in which case the caller treats the `{` as the literal character it look
               (inc i3)]))
       else nil)))
 
-(sig regex-brace (countable int -> any))
 
 (defn- regex-repeat-copies (atom k acc)
   (if (<= k 0) acc (regex-repeat-copies atom (dec k) (cons atom acc))))
