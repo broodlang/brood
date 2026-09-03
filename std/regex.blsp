@@ -149,6 +149,7 @@ of) says what it looks like it says."
     (if (and c (includes? "0123456789" c))
       (regex-digits-at pcs (inc i) (str acc c))
       [acc i])))
+(sig regex-digits-at (countable int string -> (tuple string int)))
 
 ;; The most a `{m,n}` may expand to. Repetition is expanded into copies of the atom
 ;; (there is no counting state in a Thompson NFA), so `a{1,100000}` would be 100k
@@ -174,6 +175,8 @@ all — in which case the caller treats the `{` as the literal character it look
               (if (= hi-text "") nil (reflect/read-string hi-text))
               (inc i3)]))
       else nil)))
+
+(sig regex-brace (countable int -> any))
 
 (defn- regex-repeat-copies (atom k acc)
   (if (<= k 0) acc (regex-repeat-copies atom (dec k) (cons atom acc))))
@@ -936,6 +939,7 @@ end, and steps one character past an EMPTY match so a pattern that can match not
                 g (if (= k 0) m (nth (get m :groups) (dec k) nil)))
             (regex-expand-loop template m (+ i 2) (str acc (if g (get g :text) ""))))
         else (regex-expand-loop template m (inc i) (str acc c))))))
+(sig regex-expand-loop (string any int string -> string))
 
 (defn- regex-replace-loop (s matches j at acc replacement)
   (if (>= j (count matches))

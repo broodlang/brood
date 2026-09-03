@@ -2947,8 +2947,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "%os-cmd",
         Arity::at_least(1),
         Sig::new(vec![string, seq], map_ty),
-        &["prog", "&", "args"],
-        "Run prog (with optional args list) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}.",
+        &["prog", "&", "args", "dir"],
+        "Run prog (with optional args list, and an optional working directory) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}.",
         os_cmd);
     def(
         heap,

@@ -133,6 +133,14 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             cmd.arg(expect_string(heap, "%os-cmd", *a)?);
         }
     }
+    // Optional third argument: the working directory to run in. Without it a caller
+    // that needs one has to go through `sh -c "cd '<dir>' && ..."`, which re-introduces
+    // a shell (and its quoting) purely to change directory — `git` avoids that with
+    // `-C` and the async `proc-spawn` path already takes a root, so this was the one
+    // place with nowhere to put it. Nil means inherit, as before.
+    if args.len() > 2 && !matches!(arg(args, 2), Value::Nil) {
+        cmd.current_dir(expect_string(heap, "%os-cmd", arg(args, 2))?);
+    }
     let output = cmd.output().map_err(|e| {
         LispError::runtime(format!("%os-cmd: {prog}: {e}"))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)

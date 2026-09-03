@@ -78,14 +78,25 @@ started an operating-system process while the bare `spawn` special form started 
 
 (defn cmd (prog & rest)
   "Run `prog` (a string) and return `{:stdout s :stderr s :exit n}`.
-An optional second argument is a list or vector of string arguments.
+An optional second argument is a list or vector of string arguments, and an optional
+third is the **working directory** to run in (nil inherits this process's).
 
     (os/cmd \"ls\" [\"-la\" \"/tmp\"])
-    (os/cmd \"date\")"
-  (let (args (if (nil? rest) nil (first rest)))
-    (if (nil? args)
-      (%os-cmd prog)
-      (%os-cmd prog args))))
+    (os/cmd \"date\")
+    (os/cmd \"mix\" [\"help\"] \"/path/to/project\")
+
+The directory is passed to the child rather than applied here, so it does not disturb
+this process's cwd and two calls in different directories cannot race — which is what
+made the alternative (`cd` in a `sh -c` string) both a quoting hazard and a shell you
+did not want."
+  ;; `rest` is the variadic parameter here, which shadows the `rest` FUNCTION — so the
+  ;; second optional argument is reached by index, not by walking.
+  (let (args (if (nil? rest) nil (first rest))
+        dir (if (nil? rest) nil (nth rest 1 nil)))
+    (cond
+      (and (nil? args) (nil? dir)) (%os-cmd prog)
+      (nil? dir) (%os-cmd prog args)
+      else (%os-cmd prog (or args []) dir))))
 
 (defn cmd-ok? (result)
   "True if the command result has exit code 0."

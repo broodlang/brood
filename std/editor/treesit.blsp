@@ -212,6 +212,7 @@ restart is never wrong where the lead-in is right, and is right everywhere the l
         else
           [(- (string/length l) (string/length (string/triml l)))
             (or (last (string/split (string/trim l) " ")) "")]))))
+(sig ts-prev-nonblank (string int -> (or nil (tuple int string))))
 
 (defn- ts-chain (node p acc)
   ;; the kinds of every node containing offset `p`, outermost first
@@ -301,6 +302,7 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
           (let ([indent last-token] previous
                 opened (contains? (get spec :opens #{}) last-token))
             (math/max 0 (+ indent (if opened width 0) (if closing (- width) 0)))))))))
+(sig indent-column (string any int countable -> number))
 
 ;; ---- structural navigation --------------------------------------------------
 ;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp
