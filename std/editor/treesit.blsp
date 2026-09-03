@@ -32,6 +32,39 @@ Per-language face tables + keymaps are policy in the editor. `(require
 'editor/treesit)`."
   (:use editor/face))
 
+;; ---- what a language mode must answer ---------------------------------------
+;; The CONTRACT, named once. Every service below is generic — the editor's view asks a
+;; buffer for `:fontify` and its RET asks for `:indent` without naming a language — so
+;; "which services exist" is a fact about the seam, not about any one language, and
+;; belongs where the seam does.
+;;
+;; It is data so that both sides can read it instead of remembering it: a registration
+;; can refuse a language that does not answer the required set, and a test can enumerate
+;; the set × the languages rather than listing the pairs by hand. Three times a command
+;; written to be language-agnostic turned out to be reachable in only one language — RET,
+;; indentation, then `C-M-SPC` — and each time it was found by someone pressing the key,
+;; because nothing anywhere said what the full set was.
+
+(def language-contract
+  {
+   ;; Without these a mode is not usable as a code mode at all.
+   ;;   :ts-lang   the grammar keyword — also what marks the mode as tree-sitter-backed,
+   ;;              which is how the polymorphic motions choose their backend
+   ;;   :fontify   text -> ([start end face] …)
+   ;;   :indent    text, line-start -> column
+   :required [:ts-lang :fontify :indent]
+   ;; Provide when the language has the thing; absence is a fact, not a gap.
+   ;;   :fontify-restart  where a windowed fontify may safely begin (heredocs)
+   ;;   :comment-syntax   the line-comment prefix, for comment/uncomment
+   :optional [:fontify-restart :comment-syntax]})
+
+(defn missing-services (layer)
+  "The `language-contract` services `layer` fails to provide — `()` when it is complete.
+What a registration checks before accepting a language, so an incomplete mode fails at
+load with the list rather than at the keypress that needed it."
+  (filter (get language-contract :required) (fn (k) (nil? (get layer k)))))
+(sig missing-services (any -> list))
+
 ;; ---- fontify ----------------------------------------------------------------
 
 (defn face-of-kinds (kind->face-name)
