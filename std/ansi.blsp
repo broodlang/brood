@@ -27,7 +27,7 @@ the public entry point; the helpers are private (`--`).")
     (>= i n) i
     (ansi-csi-final? (nth v i)) (+ i 1)
     else (ansi-csi-end v (+ i 1) n)))
-(sig ansi-csi-end (seqable int int -> int))
+(sig ansi-csi-end (vector int int -> int))
 
 (defn- ansi-strip (v i n out)
   "Tail-recursive scan: copy `v[i..n]` to the reversed char list `out`, dropping ANSI
@@ -45,7 +45,7 @@ escape sequences and carriage returns."
         (= c "\r") (ansi-strip v (+ i 1) n out)
         ; bare CR: drop
         else (ansi-strip v (+ i 1) n (cons c out))))))
-(sig ansi-strip (seqable int int seqable -> string))
+(sig ansi-strip (vector int int (or nil list) -> string))
 
 (defn strip (s)
   "`s` with all ANSI escape sequences and bare carriage returns removed.
@@ -79,10 +79,8 @@ Fast path: a chunk with no ESC byte only needs its CRs dropped (a single
 
 (defn- ansi-set-line (lines row text)
   (if (>= row (count lines)) (into lines [text]) (assoc lines row text)))
-(sig ansi-set-line (seqable int string -> vector))
 
 (defn- ansi-line (lines row) (if (< row (count lines)) (nth lines row) ""))
-(sig ansi-line (seqable int -> string))
 
 (defn- ansi-pad (s n)
   "`s` at least `n` long, space-filled — a cursor may sit past the end of its line."
@@ -105,16 +103,13 @@ would write spaces where the program asked for deletion."
         after-start (math/min (string/length l) (+ col (string/length text)))
         after (string/substring l after-start (string/length l)))
     (ansi-set-line lines row (str before text after))))
-(sig ansi-write (seqable int int string -> vector))
+(sig ansi-write (vector int int string -> vector))
 
 (defn- ansi-param (params default)
   "The numeric parameter of a CSI, or `default` — `ESC[A` and `ESC[1A` are the same."
   (if (= params "")
     default
-    ;; A CSI parameter is an INTEGER by spec: `number?` also admitted a float, which is
-    ;; wrong for the format and left every row/col derived from it untypeable.
-    (let (n (string/->number params)) (if (int? n) n default))))
-(sig ansi-param (string int -> int))
+    (let (n (string/->number params)) (if (number? n) n default))))
 
 (defn- ansi-csi (lines row col params final)
   "Apply one CSI; returns [lines row col]. Anything not listed is a no-op, which is the
@@ -144,7 +139,6 @@ right answer for colour (`m`) and the honest one for what this does not model."
             row col]
           [lines row col])
       else [lines row col])))
-(sig ansi-csi (seqable int int string string -> (tuple seqable int int)))
 
 (defn- ansi-render-loop (v i n lines row col)
   (if (>= i n)
@@ -169,7 +163,7 @@ right answer for colour (`m`) and the honest one for what this does not model."
               (ansi-render-loop v end n lines2 row2 col2))
             (ansi-render-loop v (math/min n (+ i 2)) n lines row col))
         else (ansi-render-loop v (inc i) n (ansi-write lines row col c) row (inc col))))))
-(sig ansi-render-loop (seqable int int seqable int int -> string))
+(sig ansi-render-loop (vector int int vector int int -> string))
 
 (defn render (text chunk)
   "`text` with `chunk` — a run of terminal output — applied to it, honouring the cursor
