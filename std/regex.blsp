@@ -181,7 +181,6 @@ all — in which case the caller treats the `{` as the literal character it look
               (inc i3)]))
       else nil)))
 
-
 (defn- regex-repeat-copies (atom k acc)
   (if (<= k 0) acc (regex-repeat-copies atom (dec k) (cons atom acc))))
 
