@@ -5,7 +5,19 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Addendum 2026-09-02 (latest) — startup is 64% cheaper; three fixes, all guarded.**
+**Addendum 2026-09-03 (latest) — two guards landed, no open bug.** (1) KI-88's signature
+— a process enqueued and never scheduled — is now watched for by default: `scheduler/pool.rs`
+reports once, with every queued pid and worker state, when work is queued but no worker has
+found anything for 3 s. Fault-injected (`BROOD_FAULT_STRANDED=1`), sabotage-verified
+(`crates/cli/tests/stranded_watchdog.rs`). If that line ever appears in a run, keep the
+binary and the log — it is the first time the stranded pid will have been named. If it
+appears with every queue EMPTY, that is a `STEALABLE` accounting leak, a different finding.
+(2) KI-86's class (an env var set in one test reaching its siblings under plain `cargo
+test`) recurred on 2026-09-02, so `crates/lisp/tests/env_isolation.rs` now requires an
+env-mutating test to live alone in its binary. **Next:** ADR-314's default (below), or KI-97
+items 2–4.
+
+**Addendum 2026-09-02 — startup is 64% cheaper; three fixes, all guarded.**
 A `brood file` run's fixed cost went **22.8 ms → 8.3 ms** (empty program, best-of-41
 interleaved, net of harness floor):
 
