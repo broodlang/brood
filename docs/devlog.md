@@ -10092,3 +10092,31 @@ reported instead of it. That is the third time this session that a narrowing lan
 of the two and not the other; the rule is now explicit in the status doc.
 
 Strict 17 → 0, plain 0, seven downstream repos 0. Both halves sabotage-verified.
+
+## 2026-09-03 (correction) — there was no flake; I read a cancelled run's log
+
+`aaff6a02`'s commit message claims it "closes an intermittent strict-gate failure" and that
+"the inferred domain of an undeclared parameter depended on load order, so the gate could
+pass or fail on the same tree". **Both halves are wrong.** The message is pushed and stays
+as written; this is the correction.
+
+What actually happened. `std/editor/treesit.blsp:247` reported `string/substring: argument 3
+expects int, got ordered (hi)`, and I attributed that failure to `0958495a` — a test-only
+commit whose `std/` is byte-identical to the green `f5f982e3`. Same inputs, different
+verdict, therefore nondeterminism. The reasoning was sound and the input was not:
+**`0958495a`'s run was CANCELLED**, superseded by the next push. I resolved a run id with
+`gh run list --limit 1` at a moment when the newest run was that cancelled one, read the
+*failed* run's log, and pinned it on the wrong commit. The failure belonged to `084cd119`,
+which added 97 lines to that file — the whole `indent-column` indentation feature, with an
+undeclared `bol`.
+
+So the sequence is completely deterministic: green before the feature, red when it landed
+with an undeclared parameter, green once `indent-column` declares its parameters. The strict
+gate did exactly its job. Nothing was flaky, and the "load order" mechanism was a hypothesis
+I stated as fact and never tested — the 6/6 clean loop I ran to "confirm" it used the FIXED
+binary, so it could only ever come back clean.
+
+This is the `make green` lesson in its original form, and CLAUDE.md states it outright: **a
+cancelled CI run is not evidence**, and the run list is not to be hand-read. I did both, and
+then built a mechanism on top. The tell was available and ignored: the two "different" runs
+reported the same failure at the same timestamp, which is what one run read twice looks like.
