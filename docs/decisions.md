@@ -6829,6 +6829,56 @@ bare `cargo test` stays green. **End state:** dynamic runtime grammar loading
 neither grammar nor language list; deferred until a real editor mode needs it
 (ADR-011).
 
+**Follow-up (2026-09-03) — the end state landed: grammars load at runtime, and the
+generic policy grew an indenter.** The deferral above named its trigger ("until a real
+editor mode needs it") and bedit tripped it: wanting Elixir meant either compiling a
+`treesit-elixir` into everyone's kernel or loading a grammar the user already has. So the
+mechanism is one more builtin, `(tree-sitter-load-grammar path lang)` — dlopen the shared
+library, look up `tree_sitter_<lang>`, gate it on the ABI range this tree-sitter drives,
+and remember it in a registry `tree-sitter-parse` consults before the compile-time arms.
+It takes a **path**, not a search directory: where an application keeps its grammars is
+policy, and the kernel has no business knowing about `~/.config/bedit/grammars` (bedit's
+`load-user-grammars` owns that convention, and loads at startup rather than at module
+load, because a module's top-level side effects do not replay when an image is
+materialised — ADR-314). The loaded `Library` is `mem::forget`-ed deliberately: a
+`Language` is a pointer into the object's static tables, so unmapping it would dangle
+every tree ever parsed with it. Every failure is an ordinary error, ABI mismatch
+included — `set_language` range-checks the grammar's version, so a grammar from another
+era is a message rather than a crash. What it cannot make safe is a *hostile* library:
+this is native code with the process's privileges, exactly like an Emacs dynamic module,
+which is why the path comes from the caller and the convention above points at a
+directory the user controls.
+
+**Why `.so` and not `.wasm`.** The `.wasm` route looks free — brood already links
+wasmtime — and is not: tree-sitter's own wasm grammar support is built on
+`wasmtime-c-api` 48, while the kernel's `wasm` feature is on wasmtime 47, so taking it
+would mean two incompatible wasmtimes in one process. `.so` is also what every grammar
+already ships as, and what `tree-sitter build` emits. Sandboxing is the thing `.wasm`
+would have bought, and it is worth revisiting whenever the two versions converge; it is
+not worth a second runtime today.
+
+**The other half: indentation.** ADR-103 shipped fontify and structural motion over the
+projected tree, and left indenting to each mode. It generalises the same way the face
+tables do — `(indent-column text lang bol spec)` in `std/editor/treesit.blsp`, where the
+`spec` is the whole per-language part: `:blocks` (node kinds that open a level),
+`:dedent` (line-leading tokens that close one), `:dedent-levels`, `:opens`, `:width`.
+The level is the number of enclosing `:blocks` nodes, which is trivial given a tree, and
+the entire difficulty is **which text to parse**. Brood's own indenter parses
+`[defun-start, bol)` and asks what is still open; that does not transfer, because
+tree-sitter recovers an unterminated `do` into an `:ERROR` node instead of leaving a
+block open, so a truncated slice knows nothing about the nesting (7 of 9 lines on
+Elixir). The answer is two readings and keep the deeper: the enclosing top-level form by
+the column-0 convention, and a fixed window either side of the line. A slice beginning
+inside a form can only lose enclosing blocks, never invent them, so between two clean
+readings the deeper one is better informed — and a slice that did not parse is not a
+reading at all. This matters because the failure of the single cheap reading is not that
+it errors but that it *succeeds*: in a flush-left file, `def run do / :ok / end` parses
+perfectly on its own and reports one level where there are two. When neither slice
+parses — the ordinary state of a line being typed — it carries the previous non-blank
+line's indentation, one level deeper when that line ends in an `:opens` token, which is
+what every editor does and the only thing available once the structure is gone.
+
+
 ## ADR-104 — Persistent child processes: a `Value::Subprocess` over the mailbox seam, not a richer `%os-cmd`
 
 **Status:** accepted (2026-06-13). Implemented: `crate::proc`, the `proc-spawn` /
