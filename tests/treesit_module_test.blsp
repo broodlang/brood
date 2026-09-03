@@ -42,7 +42,7 @@
   ; named ⇒ not a keyword
   (describe "treesit fontify"
     (test "produces ascending, non-overlapping [start end face] spans"
-      (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-kinds rb-faces)))
+      (let (spans (editor/treesit/fontify rb :ruby rb-faces false))
         (is (not (empty? spans)))
         ;; every span is [start end face] with start < end, and starts ascend
         (is (every? spans (fn (s) (< (first s) (second s)))))
@@ -50,7 +50,7 @@
 
     (test "colours a whole comment node (delimiter + content) as one span"
       (let (src "x = 1 # note\n"
-            spans (editor/treesit/fontify src :ruby (editor/treesit/face-of-kinds rb-faces))
+            spans (editor/treesit/fontify src :ruby rb-faces false)
             cspan (first (filter spans (fn (s) (= (nth s 2) (editor/face/face :syntax/comment))))))
         (refute (nil? cspan))
         ; "# note" starts at col 6
@@ -64,7 +64,7 @@
     ;; a nested method body whose spans must still come out ascending and unduplicated.
     (test "source order survives nesting, at depth"
       (let (src "class A\n  def a # one\n    if x # two\n      y # three\n    end\n  end\nend\n"
-            spans (editor/treesit/fontify src :ruby (editor/treesit/face-of-kinds rb-faces))
+            spans (editor/treesit/fontify src :ruby rb-faces false)
             starts (map spans first)
             comments (filter spans
                        (fn (sp) (= (nth sp 2) (editor/face/face :syntax/comment)))))
@@ -77,13 +77,13 @@
 
     (test "an unmapped kind yields no span for that node (descends instead)"
       ;; with an empty table nothing is coloured
-      (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-kinds {})))
+      (let (spans (editor/treesit/fontify rb :ruby {} false))
         (is (empty? spans))))
 
     (test "face-of-syntax colours keywords via the anonymous-token heuristic"
       ;; the table names NO keywords; `def`/`end` (anonymous alphabetic tokens) are
       ;; coloured :syntax/keyword by `face-of-syntax` — the path the editor modes use.
-      (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-syntax {}))
+      (let (spans (editor/treesit/fontify rb :ruby {})
             kw (editor/face/face :syntax/keyword)
             kw-spans (filter spans (fn (s) (= (nth s 2) kw))))
         ; def + end

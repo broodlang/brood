@@ -40,14 +40,261 @@ use std::sync::{LazyLock, Mutex};
 /// on an unknown language, or when the runtime wasn't built `--features treesit`.
 #[cfg(feature = "treesit")]
 pub fn parse(heap: &mut Heap, src: &str, lang: &str) -> LispResult {
+    let tree = parse_cached(src, lang)?;
+    let b2c = byte_to_char_offsets(src);
+    Ok(node_to_positioned(heap, tree.root_node(), src, &b2c))
+}
+
+/// The last few parses, keyed by (language, source).
+///
+/// An editor asks the SAME text several questions in a row — fontify while redrawing,
+/// then the enclosing chain when you press RET, then a sibling list when you press
+/// C-M-f — and each one was re-parsing from scratch. Parsing 22 KB of Elixir is ~10 ms,
+/// which is the whole cost of a structural motion once the projection is gone, so
+/// repeated motion over an unchanged buffer went from paying it every time to paying it
+/// once.
+///
+/// Small and exact: four entries, and a hit requires the source to be EQUAL, not merely
+/// hashed the same. A miss is only ever a re-parse, so the cache can never be wrong —
+/// but a false hit would hand back a tree for different text, which would be.
+#[cfg(feature = "treesit")]
+static TREE_CACHE: LazyLock<Mutex<Vec<(String, String, tree_sitter::Tree)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+#[cfg(feature = "treesit")]
+const TREE_CACHE_CAP: usize = 4;
+
+/// Parse `src` with `lang`, reusing the cached tree when the text is unchanged.
+#[cfg(feature = "treesit")]
+fn parse_cached(src: &str, lang: &str) -> Result<tree_sitter::Tree, LispError> {
+    {
+        let mut cache = TREE_CACHE.lock().expect("treesit tree cache");
+        if let Some(i) = cache
+            .iter()
+            .position(|(l, s, _)| l == lang && s.as_str() == src)
+        {
+            // move to the back: most-recently-used, so the eviction below drops the
+            // buffer nobody is working in
+            let hit = cache.remove(i);
+            let tree = hit.2.clone();
+            cache.push(hit);
+            return Ok(tree);
+        }
+    }
     let language = language_for(lang)?;
     let mut parser = checkout_parser(lang, &language)?;
     let tree = parser.parse(src, None);
     return_parser(lang, parser);
     let tree =
-        tree.ok_or_else(|| LispError::runtime(format!("tree-sitter-parse: {lang}: parse failed")))?;
+        tree.ok_or_else(|| LispError::runtime(format!("tree-sitter: {lang}: parse failed")))?;
+    {
+        let mut cache = TREE_CACHE.lock().expect("treesit tree cache");
+        if cache.len() >= TREE_CACHE_CAP {
+            cache.remove(0);
+        }
+        cache.push((lang.to_string(), src.to_string(), tree.clone()));
+    }
+    Ok(tree)
+}
+
+/// One node, WITHOUT its children — `{:kind :start :end :named :container}`.
+///
+/// `:container` replaces the presence of `:kids`, which is how the full projection says
+/// "this node has children"; the point of these queries is not to build them.
+#[cfg(feature = "treesit")]
+fn node_shallow(heap: &mut Heap, node: tree_sitter::Node, b2c: &[u32]) -> Value {
+    let kw = |k: &str| Value::keyword(value::intern(k));
+    heap.map_from_pairs(vec![
+        (kw("kind"), kw(node.kind())),
+        (kw("start"), Value::int(b2c[node.start_byte()] as i64)),
+        (kw("end"), Value::int(b2c[node.end_byte()] as i64)),
+        (kw("named"), Value::boolean(node.is_named())),
+        (kw("container"), Value::boolean(node.child_count() > 0)),
+    ])
+}
+
+/// The byte offset for a char offset — the inverse of `byte_to_char_offsets`, by binary
+/// search over it, so a caller's char position can address the byte-indexed tree.
+#[cfg(feature = "treesit")]
+fn char_to_byte(b2c: &[u32], ch: u32) -> usize {
+    match b2c.binary_search(&ch) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    }
+}
+
+/// `(tree-sitter-chain source lang offset)` — the nodes containing char `offset`,
+/// outermost first, each without its children.
+///
+/// **Why this exists rather than walking `tree-sitter-parse`'s result.** That call
+/// projects the WHOLE tree into Brood maps: 9,561 of them for a 22 KB Elixir file. Every
+/// consumer that wants "what encloses this point" — an indenter, `backward-up-list`,
+/// a which-function display — then walks that to read about ten of them, and pays ~17 ms
+/// to do it. The editor calls it on every RET, twice, and it was a quarter of a second of
+/// every keypress. The tree already knows the answer in O(depth); this hands it over.
+#[cfg(feature = "treesit")]
+pub fn chain(heap: &mut Heap, src: &str, lang: &str, offset: i64) -> LispResult {
+    let tree = parse_cached(src, lang)?;
     let b2c = byte_to_char_offsets(src);
-    Ok(node_to_positioned(heap, tree.root_node(), src, &b2c))
+    let byte = char_to_byte(&b2c, offset.max(0) as u32);
+    let mut out: Vec<Value> = Vec::new();
+    let mut node = tree.root_node();
+    let broken = node.has_error();
+    loop {
+        // `:broken` on the outermost entry: does the tree contain an error anywhere?
+        // O(1) from tree-sitter, and the one thing a caller cannot work out from a
+        // chain — which only ever sees one path.
+        let n = match (
+            node.parent().is_none() && broken,
+            node_shallow(heap, node, &b2c),
+        ) {
+            (true, Value::Map(id)) => heap.map_assoc(
+                id,
+                Value::keyword(value::intern("broken")),
+                Value::boolean(true),
+            ),
+            (_, v) => v,
+        };
+        out.push(n);
+        // The deepest child strictly containing the byte. `named_child` is not enough:
+        // an anonymous token can be the one that contains it, and the chain of KINDS is
+        // what a caller counts, so the walk follows every child.
+        let mut cursor = node.walk();
+        let next = node
+            .children(&mut cursor)
+            .find(|c| c.start_byte() <= byte && byte < c.end_byte());
+        match next {
+            Some(c) => node = c,
+            None => break,
+        }
+    }
+    Ok(heap.alloc_vector(out))
+}
+
+/// `(tree-sitter-kids source lang offset)` — the named children of the deepest node
+/// STRICTLY containing char `offset`, each without its own children.
+///
+/// The sibling list every structural motion needs: `forward-sexp` is "the next one of
+/// these starting at or after point", `down-list` is "the first child of the next one
+/// that is a container". Same reason as [`chain`]: those motions were each projecting
+/// the whole tree to read one list.
+#[cfg(feature = "treesit")]
+pub fn kids(heap: &mut Heap, src: &str, lang: &str, offset: i64) -> LispResult {
+    let tree = parse_cached(src, lang)?;
+    let b2c = byte_to_char_offsets(src);
+    let byte = char_to_byte(&b2c, offset.max(0) as u32);
+    // STRICTLY containing, so a point sitting exactly at a node's start belongs to that
+    // node's parent — which is what makes `forward-sexp` step OVER the form at point
+    // rather than into it.
+    let mut node = tree.root_node();
+    loop {
+        let mut cursor = node.walk();
+        let next = node
+            .children(&mut cursor)
+            .find(|c| c.child_count() > 0 && c.start_byte() < byte && byte < c.end_byte());
+        match next {
+            Some(c) => node = c,
+            None => break,
+        }
+    }
+    let mut cursor = node.walk();
+    let out: Vec<tree_sitter::Node> = node.named_children(&mut cursor).collect();
+    let vals: Vec<Value> = out
+        .into_iter()
+        .map(|c| node_shallow(heap, c, &b2c))
+        .collect();
+    Ok(heap.alloc_vector(vals))
+}
+
+/// Collect `[start end kind]` for the OUTERMOST nodes whose kind is wanted.
+#[cfg(feature = "treesit")]
+fn spans_into(
+    heap: &mut Heap,
+    node: tree_sitter::Node,
+    src: &str,
+    b2c: &[u32],
+    wanted: &std::collections::HashSet<String>,
+    keywords: bool,
+    out: &mut Vec<Value>,
+) {
+    let kind = node.kind();
+    // An anonymous token whose text starts with a letter is a language keyword — the
+    // cross-language rule, so a table need only name the handful of NAMED nodes it
+    // colours. Reported under its own kind so the caller maps it like any other.
+    let is_keyword = keywords
+        && !node.is_named()
+        && src[node.start_byte()..node.end_byte()]
+            .chars()
+            .next()
+            .is_some_and(char::is_alphabetic);
+    if wanted.contains(kind) || is_keyword {
+        let k = if wanted.contains(kind) {
+            kind
+        } else {
+            "__keyword__"
+        };
+        let span = vec![
+            Value::int(b2c[node.start_byte()] as i64),
+            Value::int(b2c[node.end_byte()] as i64),
+            Value::keyword(value::intern(k)),
+        ];
+        let v = heap.alloc_vector(span);
+        out.push(v);
+        return; // coloured whole: do not descend
+    }
+    let mut cursor = node.walk();
+    let children: Vec<tree_sitter::Node> = node.children(&mut cursor).collect();
+    for c in children {
+        spans_into(heap, c, src, b2c, wanted, keywords, out);
+    }
+}
+
+/// `(tree-sitter-spans source lang kinds keywords?)` — the fontify query: `[start end
+/// kind]` for the outermost nodes whose kind is in `kinds`, in source order.
+///
+/// **Why the kernel takes the kind set.** Fontify is the one consumer that genuinely
+/// walks the WHOLE tree, so it was the one paying the full projection — thousands of
+/// Brood maps built per keystroke to read `:kind` off each and throw the rest away. The
+/// set is data the caller supplies and the answer is spans, so which kinds get which
+/// face — the actual policy — stays entirely in the editor; what moves here is only the
+/// walk, which is where the allocation was.
+///
+/// `keywords?` adds the cross-language rule that an anonymous token beginning with a
+/// letter is a keyword, reported as kind `:__keyword__`. It is a flag rather than a kind
+/// because no grammar names it: keywords surface as anonymous tokens of every kind.
+#[cfg(feature = "treesit")]
+pub fn spans(
+    heap: &mut Heap,
+    src: &str,
+    lang: &str,
+    kinds: Vec<String>,
+    keywords: bool,
+) -> LispResult {
+    let tree = parse_cached(src, lang)?;
+    let b2c = byte_to_char_offsets(src);
+    let wanted: std::collections::HashSet<String> = kinds.into_iter().collect();
+    let mut out: Vec<Value> = Vec::new();
+    spans_into(
+        heap,
+        tree.root_node(),
+        src,
+        &b2c,
+        &wanted,
+        keywords,
+        &mut out,
+    );
+    Ok(heap.alloc_vector(out))
+}
+
+#[cfg(not(feature = "treesit"))]
+pub fn spans(
+    heap: &mut crate::core::heap::Heap,
+    src: &str,
+    lang: &str,
+    _kinds: Vec<String>,
+    _keywords: bool,
+) -> LispResult {
+    parse(heap, src, lang)
 }
 
 /// `(tree-sitter-load-grammar path lang)` — load a tree-sitter grammar from a
@@ -273,6 +520,16 @@ fn node_to_positioned(heap: &mut Heap, node: tree_sitter::Node, src: &str, b2c: 
     if node.is_missing() {
         pairs.push((kw("missing"), Value::boolean(true)));
     }
+    // `:broken` on the ROOT: does this tree contain an error ANYWHERE? tree-sitter
+    // keeps that as a bit on every node, so asking is O(1) — where deciding it in
+    // Brood means walking the whole projected tree, which is what the indenter was
+    // doing on every keypress (two trees, thousands of nodes, ~250 ms on a 22 KB
+    // Elixir file). Only the root carries it: a caller wanting per-node state has
+    // `:error`/`:missing` already, and putting a redundant flag on every node would
+    // grow every tree to save one lookup.
+    if node.parent().is_none() && node.has_error() {
+        pairs.push((kw("broken"), Value::boolean(true)));
+    }
     if node.child_count() == 0 {
         let text = heap.alloc_string(&src[node.start_byte()..node.end_byte()]);
         pairs.push((kw("text"), text));
@@ -299,4 +556,14 @@ pub fn parse(_heap: &mut crate::core::heap::Heap, _src: &str, lang: &str) -> Lis
         "tree-sitter-parse: :{lang}: this runtime was built without tree-sitter \
          (rebuild with --features treesit)"
     )))
+}
+
+#[cfg(not(feature = "treesit"))]
+pub fn chain(heap: &mut crate::core::heap::Heap, src: &str, lang: &str, _o: i64) -> LispResult {
+    parse(heap, src, lang)
+}
+
+#[cfg(not(feature = "treesit"))]
+pub fn kids(heap: &mut crate::core::heap::Heap, src: &str, lang: &str, _o: i64) -> LispResult {
+    parse(heap, src, lang)
 }
