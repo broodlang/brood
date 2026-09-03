@@ -172,11 +172,17 @@ scheduler.** What is behind OTP is *around* supervision, and nearly all of it is
 needs a Brood-specific form to respect an ADR.
 
 - ✅ **1. `finally`** — item C above (ADR-306).
-- ⬜ **2. A complete regex engine.** Every other Lisp has ranges, captures and `{m,n}`;
-  `std/regex.blsp`'s pure-Brood NFA has none, which blocks the Fowler/rust-regex corpora
-  (External conformance corpora). Ranges and `{m,n}` are parser work; captures need a
-  tagged NFA (Pike VM) — still linear, still Brood. The dogfood rule's ideal case: if it is
-  slow, the VM is missing something and that is the finding.
+- ✅ **2. A complete regex engine** (2026-09-03). Ranges, classes inside sets, `{m,n}`,
+  lazy `*? +? ??`, capturing `(...)` and non-capturing `(?:...)`, plus `find` / `find-all` /
+  `replace` / `split`. It went exactly as predicted: ranges and `{m,n}` were parser work
+  (`{m,n}` expands to copies — a Thompson NFA has no counters), and captures needed a
+  second engine, a **Pike VM** — an ordered thread list carrying capture slots, still
+  linear, still Brood. Both engines compile from one parser and one NFA construction (a
+  `cap` flag decides whether `:save` states are emitted), so `match?`/`matches?` keep the
+  bitset+lazy-DFA machine untouched and unslowed — measured 511 ms → 492 ms on 80k boolean
+  calls. The first customer was bedit wanting Emacs' `compilation-error-regexp-alist`,
+  which a boolean-only engine cannot express at all. Remaining: backreferences, lookaround,
+  named groups. Still open for the corpora below.
 - ⬜ **3. `iterate` / generators without unbounded laziness** *(shape)*. Not a lazy cons: a
   seqview stage `(seq/iterate f x)` consumed only by the fused `seq/l*` pipeline or a `take`,
   plus `std/stream` as the process-backed generator for anything that crosses a `send`.
@@ -1560,7 +1566,7 @@ corpus is a script run away for an exhaustive local pass.
 | 1 | **parse-number-fxx-test-data** (Apache-2.0) | decimal→f64 parsing; 5.2M cases incl. every historically-fatal input (`2.2250738585072011e-308`, half-way ties, 800-digit mantissas) | ✅ 2026-07-25 |
 | 2 | **dectest** (Cowlishaw/IBM, ICU licence) | IEEE 754 decimal arithmetic — the definitive suite; Python vendors it as `Lib/test/decimaltestdata`. **Found 2 real scale bugs** (below) | ✅ 2026-07-25 |
 | 3 | **UCD test files** (Unicode licence) | `GraphemeBreakTest` + `NormalizationTest` — cursor motion in `std/editor/*` lives or dies here. Needed two new primitives (`string->graphemes`, `string-normalize`); `WordBreakTest`/`LineBreakTest`/`CaseFolding` still open, each needs its own surface | ✅ 2026-07-25 |
-| 4 | **Fowler testregex** + **rust-lang/regex `testdata/*.toml`** | POSIX regex semantics, leftmost-first vs leftmost-longest, capture groups | ⬜ **blocked** — `std/regex` is a deliberate subset (no ranges, captures, `{m,n}`, backrefs), so the corpora would be ~95% skips. Wire when the engine grows those |
+| 4 | **Fowler testregex** + **rust-lang/regex `testdata/*.toml`** | POSIX regex semantics, leftmost-first vs leftmost-longest, capture groups | ⬜ **unblocked, not wired** — the engine grew ranges, `{m,n}` and captures (item 2 above), so the corpora are now mostly *runnable* rather than mostly skips. Backreferences and lookaround are still out, and Brood is deliberately leftmost-**first** (Perl), so the POSIX leftmost-longest expectations need a semantics column, not a pass/fail |
 | 5 | **JSONTestSuite** (MIT) | the `y_`/`n_`/`i_` minefield cases against `std/json`. **Found an RFC violation + KI-11** (below) | ✅ 2026-07-25 |
 | 6 | **CommonMark `spec.json`** (BSD-2) | ~650 examples against the markdown renderer | ⬜ **blocked** — there is no `std/markdown`; nothing to test yet |
 | 7 | **WPT `urltestdata.json`** (BSD-3) | WHATWG URL parsing against `std/url` | ⬜ **blocked** — `std/url` is RFC 3986 with no base-URL resolution, IDNA or per-component encode sets; WHATWG is a different spec, so this would be ~90% skips |
