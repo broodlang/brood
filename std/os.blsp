@@ -132,6 +132,36 @@ exit status, or nil if signalled). Returns a subprocess handle. Throws if prog c
 spawned."
   (%proc-spawn prog args opts))
 
+(defn spawn-pty (prog args &optional opts)
+  "Spawn `prog` under a **pseudo-terminal** — like [[spawn]], but the child gets a
+terminal instead of a pipe, and so behaves the way it does for a person.
+
+This is the difference between hosting a REPL and not. `iex -S mix`, `python`, `psql`,
+a shell — each asks `isatty` and, told no, drops its prompt, drops line editing, and
+line-buffers its output so nothing arrives until it exits. None of that is
+misbehaviour; it is a program correctly declining to be interactive. Under a pty it
+prompts, echoes and streams.
+
+Same handle, messages and options as [[spawn]], plus `:cols` / `:rows` for the initial
+size (default 80×24) — with one inherent difference: a terminal has ONE channel, so
+the child's stderr arrives as `[:proc handle data]` like everything else and there is
+no `[:proc-err …]` stream. A caller that needs the two apart wants pipes.
+
+The child gets its own session and controlling terminal, so job control and ^C reach
+IT rather than the program hosting it. Unix only.
+
+    (let (p (os/spawn-pty \"bash\" [\"-i\"] {:cols 100 :rows 30}))
+      (os/write p \"echo hi\\n\"))"
+  (%pty-spawn prog args opts))
+
+(defn resize-pty (p cols rows)
+  "Tell pty child `p` its terminal is now `cols` × `rows`; it sees `SIGWINCH` and
+redraws. Call it when the window showing the child changes size — a full-screen program
+lays out against this and has no other way to learn. Returns nil; throws if `p` is
+unknown, closed, or was spawned with pipes."
+  (%pty-resize p cols rows))
+(sig resize-pty (subprocess int int -> nil))
+
 (defn write (p data)
   "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a
 string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those,

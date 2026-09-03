@@ -865,6 +865,63 @@ pub(super) fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     }
 }
 
+/// `(pty-spawn prog args opts)` — like `proc-spawn`, but the child runs under a
+/// pseudo-terminal, so it behaves the way it does in a terminal instead of the way it
+/// does on a pipe. Same options plus `:cols` / `:rows` (default 80×24).
+pub(super) fn pty_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let prog = expect_string(heap, "pty-spawn", arg(args, 0))?;
+    let mut argv = Vec::new();
+    for a in heap.seq_items(arg(args, 1))? {
+        argv.push(expect_string(heap, "pty-spawn", a)?);
+    }
+    let mut cwd: Option<String> = None;
+    let mut env: Vec<(String, String)> = Vec::new();
+    let mut cols: u16 = 80;
+    let mut rows: u16 = 24;
+    if let Value::Map(opts) = arg(args, 2) {
+        if let Some(v) = heap.map_get(opts, Value::keyword(value::intern("cwd"))) {
+            if !matches!(v, Value::Nil) {
+                cwd = Some(expect_string(heap, "pty-spawn :cwd", v)?);
+            }
+        }
+        if let Some(Value::Map(e)) = heap.map_get(opts, Value::keyword(value::intern("env"))) {
+            for (k, v) in heap.map_entries(e) {
+                env.push((
+                    expect_string(heap, "pty-spawn :env key", k)?,
+                    expect_string(heap, "pty-spawn :env value", v)?,
+                ));
+            }
+        }
+        if let Some(v) = heap.map_get(opts, Value::keyword(value::intern("cols"))) {
+            if !matches!(v, Value::Nil) {
+                cols = expect_int(heap, "pty-spawn :cols", v)?.clamp(1, 10_000) as u16;
+            }
+        }
+        if let Some(v) = heap.map_get(opts, Value::keyword(value::intern("rows"))) {
+            if !matches!(v, Value::Nil) {
+                rows = expect_int(heap, "pty-spawn :rows", v)?.clamp(1, 10_000) as u16;
+            }
+        }
+    }
+    let owner = crate::process::self_pid();
+    match crate::subprocess::spawn_pty(&prog, &argv, cwd.as_deref(), &env, owner, cols, rows) {
+        Ok(id) => Ok(Value::subprocess(id)),
+        Err(e) => Err(LispError::runtime(format!("pty-spawn {}: {}", prog, e))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)),
+    }
+}
+
+/// `(pty-resize handle cols rows)` — tell a pty child its window changed size, which
+/// is how a full-screen program learns to redraw (it sees `SIGWINCH`).
+pub(super) fn pty_resize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_subprocess(heap, "pty-resize", arg(args, 0))?;
+    let cols = expect_int(heap, "pty-resize", arg(args, 1))?.clamp(1, 10_000) as u16;
+    let rows = expect_int(heap, "pty-resize", arg(args, 2))?.clamp(1, 10_000) as u16;
+    crate::subprocess::pty_resize(id, cols, rows)
+        .map_err(|e| LispError::runtime(format!("pty-resize: {}", e)))?;
+    Ok(Value::nil())
+}
+
 pub(super) fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-send", arg(args, 0))?;
     let out = send_payload(heap, "proc-send", arg(args, 1))?;

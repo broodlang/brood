@@ -1460,6 +1460,26 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &["prog", "args", "opts"],
         "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be spawned.",
         proc_spawn);
+    // The same seam under a pseudo-terminal, for a child that expects to BE in a
+    // terminal — a REPL, a shell, anything that asks `isatty` and drops its prompt,
+    // its line editing and its unbuffered output when told no. One fd carries both
+    // directions, so a pty child has no separate `[:proc-err …]` stream.
+    def(
+        heap,
+        "%pty-spawn",
+        Arity::range(2, 3),
+        Sig::with_rest(vec![string, list_ty.union(vec_ty)], map_ty, subprocess_ty),
+        &["prog", "args", "opts"],
+        "Spawn prog under a pseudo-terminal, so it behaves as it would in a terminal (prompt, line editing, unbuffered output) rather than as it does on a pipe. Same handle, messages and options as %proc-spawn, plus :cols/:rows for the initial window size (default 80x24) — except that a terminal has ONE channel, so the child's stderr arrives as [:proc handle data] too and there is no [:proc-err …]. The child gets its own session and controlling terminal, so job control and ^C reach IT. Unix only.",
+        pty_spawn);
+    def(
+        heap,
+        "%pty-resize",
+        Arity::exact(3),
+        Sig::new(vec![subprocess_ty, int, int], nil_ty),
+        &["p", "cols", "rows"],
+        "Tell pty child p its terminal is now cols x rows; it sees SIGWINCH and redraws. Returns nil; throws if p is unknown, closed, or was spawned with pipes rather than a pty.",
+        pty_resize);
     def(
         heap,
         "%proc-send",
