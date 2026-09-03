@@ -3114,7 +3114,7 @@ fn check_if(
                 .iter()
                 .map(|k| match k {
                     PathKey::Field(s) => Some(*s),
-                    PathKey::Index(_) => None,
+                    PathKey::Index(_) | PathKey::Call(_) => None,
                 })
                 .collect();
             let t = match all_fields {

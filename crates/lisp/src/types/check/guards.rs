@@ -106,6 +106,36 @@ pub(super) struct PathGuard {
     pub(super) then_only: bool,
 }
 
+/// The unary primitives a guard may narrow **through** — a call to one of these is a
+/// [`PathKey::Call`] step, so `(if (failure? (string/->number s)) d (string/->number s))`
+/// types the second occurrence as `number`, not `number | failure`.
+///
+/// The soundness argument is the one `path_types` already rests on: Brood data is
+/// immutable, so an argument cannot change between two evaluations, and each of these is a
+/// function of its argument alone — the two occurrences denote one value. Every entry here
+/// is a *parser*, which is not a coincidence: these are the functions that answer
+/// `T | failure` (ADR-310), so they are the ones people guard and re-evaluate.
+///
+/// **An allow-list, deliberately.** The opposite polarity — "narrow through anything not
+/// known to be effectful" — would silently admit `os/env`, `now`, `random` and every
+/// primitive added later, each of which can answer differently the second time; that is
+/// the direction that makes the bound stop being an upper bound. An unlisted head simply
+/// does not narrow, which costs precision and nothing else.
+pub(super) const DETERMINISTIC_UNARY: &[&str] = &[
+    "string/->number",
+    "encoding/hex-decode",
+    "encoding/hex-decode-bytes",
+    "encoding/base64-decode",
+    "encoding/base64-url-decode",
+    "encoding/base64-decode-bytes",
+    "encoding/base64-url-decode-bytes",
+    "datetime/parse-date",
+    "datetime/parse-time",
+    "datetime/parse-iso8601",
+    "url/percent-decode",
+    "url/query-decode",
+];
+
 /// Peel a (possibly nested) access chain down to its base symbol and the ordered
 /// [`PathKey`]s, base-outward: `(get r :age)` → `(r, [Field :age])`,
 /// `(nth (get cfg :items) 0)` → `(cfg, [Field :items, Index 0])`. Recognises
@@ -150,6 +180,12 @@ pub(super) fn path_of(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<PathKey>)
             (items[1], PathKey::Index(1))
         } else if value::symbol_is(head, "third") && items.len() == 2 {
             (items[1], PathKey::Index(2))
+        } else if items.len() == 2
+            && DETERMINISTIC_UNARY
+                .iter()
+                .any(|name| value::symbol_is(head, name))
+        {
+            (items[1], PathKey::Call(head))
         } else {
             return None;
         };
@@ -459,6 +495,31 @@ pub(super) fn branch_scopes(heap: &Heap, test: Value, ctx: &Ctx) -> (Ctx, Ctx) {
         }
         None => (ctx.clone(), ctx.clone()),
     };
+    // A **path** guard narrows both branches too — `(if (failure? (parse s)) d (parse s))`
+    // types the else occurrence as the non-failure half. The checking walk layers this
+    // separately (with a base-record refinement inference does not need); without it here,
+    // an inferred RETURN type kept a `failure` arm the guard had just ruled out, and
+    // ADR-316 then reported that arm at every call site — a false positive on a function
+    // that cannot fail.
+    if let Some(pg) = path_guard_assertion(heap, test) {
+        // Seed both sides with the guarded expression's OWN type. `narrow_path` intersects
+        // with whatever the path already narrowed to, which starts at `any` — so without
+        // this the else branch reads `¬failure`, a true statement and a wider one than the
+        // `number` the expression structurally has, and the inferred return says
+        // `(not failure)` where it should say `number`.
+        let guarded = list_items(heap, test)
+            .and_then(|items| items.get(1).copied())
+            .and_then(|e| super::infer::expr_ty(heap, e, ctx))
+            .unwrap_or(Ty::ANY);
+        then_ctx = then_ctx.narrow_path(
+            pg.base,
+            pg.keys.clone(),
+            guarded.clone().intersect(pg.ty.clone()),
+        );
+        if !pg.then_only {
+            else_ctx = else_ctx.narrow_path(pg.base, pg.keys, guarded.intersect(pg.ty.negate()));
+        }
+    }
     for g in and_conjunct_guards(heap, test, ctx) {
         then_ctx = then_ctx.narrow(g.sym, g.ty);
     }

@@ -7565,6 +7565,44 @@ fn an_unguarded_failure_is_reported_in_both_modes() {
     );
 }
 
+// A guard narrows THROUGH a deterministic parser, so re-evaluating it in the branch is the
+// value the guard just tested. Without this, `(if (failure? (parse s)) d (parse s))` — the
+// spelling that does not bind — inferred `… | failure`, and ADR-316 then reported that arm
+// at every call site: a false positive on a function that provably cannot fail, which is
+// the one class this checker is not allowed to have.
+#[test]
+fn a_guard_narrows_through_a_deterministic_parser() {
+    let calc = "(defmodule t)\n\
+                (defn calc (expr) (if (failure? (string/->number expr)) 0 (string/->number expr)))\n";
+    // the value flows out and is used as a number — silent, because it cannot be a failure
+    let used = format!("{calc}(defn use-it (s) (+ 1 (calc s)))");
+    assert!(file_warnings_mode(&used, false).is_empty(), "{used}");
+    // …and a `number` return may be declared over it
+    let declared = "(defmodule t)\n(sig calc (string -> number))\n\
+         (defn calc (expr) (if (failure? (string/->number expr)) 0 (string/->number expr)))";
+    assert!(file_warnings_mode(declared, false).is_empty(), "{declared}");
+
+    // What must NOT be narrowed away, or the fix would just be a hole in the lint:
+    // an unguarded parse still reports…
+    let unguarded = "(defmodule t)\n(defn calc (expr) (+ 1 (string/->number expr)))";
+    assert!(
+        file_warnings_mode(unguarded, false)
+            .iter()
+            .any(|w| w.contains("number | failure")),
+        "an unguarded parse must still report"
+    );
+    // …and a guard on a DIFFERENT argument narrows nothing, since the path is keyed by its
+    // base symbol — `(parse a)` and `(parse b)` are two paths, not one.
+    let other_arg = "(defmodule t)\n\
+         (defn calc (a b) (if (failure? (string/->number a)) 0 (+ 1 (string/->number b))))";
+    assert!(
+        file_warnings_mode(other_arg, false)
+            .iter()
+            .any(|w| w.contains("number | failure")),
+        "a guard on another argument must not narrow this one"
+    );
+}
+
 // The three shapes that must stay SILENT, which is what keeps the rule from being a
 // strictness change in disguise.
 #[test]
