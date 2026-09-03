@@ -228,6 +228,44 @@
       (assert= :refused (try (do (os/resize-pty p 80 24) :resized) (catch e :refused)))
       (os/close p))))
 
+;; A pty costs a descriptor, and a descriptor that is never closed is a leak that only
+;; shows up as a process that dies after a few hundred sessions. `close` used to
+;; destructure the registry entry as `Proc { child, .. }`, which dropped the master fd on
+;; the floor — it is a bare integer with no `Drop` — so every REPL opened cost one fd for
+;; the life of the editor.
+(describe "proc: a pty session gives its descriptors back"
+  :isolated (test "opening and closing many sessions does not accumulate fds"
+    (let (count-fds (fn ()
+                      ;; a count that did not parse is a broken measurement, not a zero —
+                      ;; silently treating it as one would make this gate unable to fail
+                      (let (r (os/cmd "sh" ["-c" "ls /proc/self/fd | wc -l"])
+                            n (string/->number (string/trim (get r :stdout))))
+                        (if (number? n) n (error "fd count did not parse: " (get r :stdout)))))
+          ;; a couple of warm-up sessions first: the first spawn allocates thread-local
+          ;; and reader-thread state that is not per-session, and counting from zero
+          ;; would charge that to the loop
+          _ (letrec (warm (fn (n)
+                            (when (> n 0)
+                              (let (p (os/spawn-pty "sh" ["-c" "exit 0"]))
+                                (sleep 30)
+                                (os/close p)
+                                (warm (dec n))))))
+              (warm 3))
+          _ (sleep 200)
+          before (count-fds)
+          _ (letrec (churn (fn (n)
+                             (when (> n 0)
+                               (let (p (os/spawn-pty "sh" ["-c" "exit 0"]))
+                                 (sleep 30)
+                                 (os/close p)
+                                 (churn (dec n))))))
+              (churn 12))
+          _ (sleep 400)
+          after (count-fds))
+      ;; twelve sessions leaked twelve fds before the fix; a couple of descriptors of
+      ;; slack absorbs reader threads still winding down
+      (is (< (- after before) 6)))))
+
 ;; The reason all of the above exists: an interactive interpreter, hosted.
 (defn- pty-await (acc want)
   "Read until `want` appears. An interactive child never exits and never falls
