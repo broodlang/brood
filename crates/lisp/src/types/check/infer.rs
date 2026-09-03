@@ -827,11 +827,7 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     // which is what the registry-derived sig says and what made `(+ 1 (math/min i n))` read
     // as `number + ordered` under `--strict`). Every operand must type; one unknown defers to
     // the sig. Sound: the union of the operands is exactly the set of values it can return.
-    let is_extremum = value::symbol_is(head, "math/max")
-        || value::symbol_is(head, "math/min")
-        || value::symbol_is(head, "%max")
-        || value::symbol_is(head, "%min");
-    if is_extremum {
+    if is_extremum(head) {
         let args = items.get(1..)?;
         let mut acc: Option<Ty> = None;
         for &arg in args {
@@ -855,6 +851,16 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         tys.push(expr_ty(heap, arg, ctx)?);
     }
     numeric_result(head, &tys)
+}
+
+/// The extremum operators — the ones that answer with one of their operands rather than a
+/// value computed from them. One definition, read by both the form-level
+/// [`numeric_call_ty`] and the type-level [`numeric_result`] a callback goes through.
+fn is_extremum(head: Symbol) -> bool {
+    value::symbol_is(head, "math/max")
+        || value::symbol_is(head, "math/min")
+        || value::symbol_is(head, "%max")
+        || value::symbol_is(head, "%min")
 }
 
 /// The **additive** ring operators — `+ - inc dec`, i.e. the ring minus `*`. What sets
@@ -909,6 +915,21 @@ fn numeric_op_kind(head: Symbol) -> Option<(bool, bool, bool, bool)> {
 /// - Otherwise, every operand a number → `number`, still narrower than the operator's
 ///   declared domain (`number`, or `number | <the records with num/* methods>` — ADR-299).
 pub(super) fn numeric_result(head: Symbol, tys: &[Ty]) -> Option<Ty> {
+    // An extremum hands back ONE OF ITS OPERANDS, so its result is their union — the rule
+    // `numeric_call_ty` applies to the written-out form. It belongs here too, because a
+    // CALLBACK never reaches that path: `(fold readings 0 math/max)` asked `sig_of` instead
+    // and got the operator's whole registry domain (`ordered`, ADR-299), so a fold of ints
+    // read as `ordered` and its use as an int was reported.
+    if is_extremum(head) {
+        if tys.is_empty() {
+            return None;
+        }
+        return tys
+            .iter()
+            .cloned()
+            .reduce(|acc, t| acc.union(t))
+            .filter(|t| t.is_subtype(&Ty::NUMBER));
+    }
     let (is_contagious, is_int_closed, is_ring, is_division) = numeric_op_kind(head)?;
     if tys.is_empty() {
         return None;
