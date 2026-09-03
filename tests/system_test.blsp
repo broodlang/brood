@@ -47,7 +47,31 @@
     (let (r (os/cmd "true"))
       (is (contains? r :stdout))
       (is (contains? r :stderr))
-      (is (contains? r :exit)))))
+      (is (contains? r :exit))))
+
+  ;; The optional third argument: the directory to run IN. Without it, a caller that
+  ;; needs one has to build a `sh -c "cd '<dir>' && ..."` string — a shell, and its
+  ;; quoting, purely to change directory. `git` sidesteps that with `-C` and
+  ;; `proc-spawn` already takes a root, so this was the one call with nowhere to put it.
+  (test "an optional working directory runs the child there"
+    (assert= "/tmp" (string/trim (get (os/cmd "pwd" [] "/tmp") :stdout)))
+    (assert= "/usr" (string/trim (get (os/cmd "pwd" [] "/usr") :stdout))))
+  (test "omitting it, or passing nil, inherits this process's directory"
+    (let (here (string/trim (get (os/cmd "pwd") :stdout)))
+      (assert= here (string/trim (get (os/cmd "pwd" []) :stdout)))
+      (assert= here (string/trim (get (os/cmd "pwd" [] nil) :stdout)))))
+  ;; the child is told where to run; this process never moves, so two calls in
+  ;; different directories cannot interfere
+  (test "it does not change the caller's own directory"
+    (let (before (file/cwd)
+          _ (os/cmd "pwd" [] "/tmp"))
+      (assert= before (file/cwd))))
+  (test "arguments and a directory compose"
+    (assert= "tmp" (string/trim (get (os/cmd "sh" ["-c" "basename $(pwd)"] "/tmp") :stdout))))
+  (test "a directory that does not exist is an ordinary failed command, not a crash"
+    (let (r (check-allow :discarded-catch
+              (try (os/cmd "pwd" [] "/no/such/directory/anywhere") (catch e [:raised e]))))
+      (is (or (= (first r) :raised) (not (= 0 (get r :exit))))))))
 
 (describe "os/cmd-ok?"
   (test "true for exit 0"
