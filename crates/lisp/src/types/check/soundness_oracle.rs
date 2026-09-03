@@ -162,6 +162,43 @@ fn expr_ty_is_a_sound_overapproximation_of_runtime_values() {
         "(last [1 2 3])",
         "(nth [10 20 30] 1)",
         "(first [])",
+        // ---- 2026-09-03: the rules added this session, each checked against the value ----
+        // exact division: the folded cases and the ±1 divisor (v0.25.0)
+        "(/ 6 3)",
+        "(/ 5 2)",
+        "(/ 2)",
+        "(/ 6 4 2)",
+        "(/ 6 -1)",
+        "(/ -7 2)",
+        "(/ -6 3)",
+        "(/ 3/2 1)",
+        "(/ 3/2 -1)",
+        "(/ 1 3)",
+        "(/ 0 5)",
+        "(let (r (/ 1 2)) (/ r 1))",
+        "(let (x (+ 1 2)) (/ x 1))",
+        "(let (x (+ 1 2)) (/ x -1))",
+        "(let (x (+ 1 2)) (/ x 2))",
+        // element types derived from the KIND rather than a refinement (v0.25.0)
+        "(first (string/->bytes \"ab\"))",
+        "(nth (string/->bytes \"ab\") 0)",
+        "(map (string/->bytes \"ab\") inc)",
+        "(first {:a 1 :b 2})",
+        "(nth (first {:a 1 :b 2}) 0)",
+        "(nth (first {:a 1 :b 2}) 1)",
+        "(first {})",
+        "(map {:a 1 :b 2} (fn (kv) (first kv)))",
+        // the length fact, and the `nil` union that must NOT carry it
+        "(first [1 2])",
+        "(first (if (bound? 'no-such-global) {:a 1} nil))",
+        "(first (if (bound? 'no-such-global) [1 2] nil))",
+        // a guard narrowing THROUGH a deterministic parser (v0.25.1)
+        "(let (s \"12\") (if (failure? (string/->number s)) 0 (string/->number s)))",
+        "(let (s \"xy\") (if (failure? (string/->number s)) 0 (string/->number s)))",
+        "(let (s \"12\") (if (failure? (string/->number s)) (string/->number s) 0))",
+        // a guard that DIVERGES narrowing the rest of the body (v0.25.2)
+        "(let (r \"x\") (when (nil? r) (error \"no\")) r)",
+        "(let (r \"x\") (unless r (error \"no\")) r)",
         // higher-order results (parametric — ADR-078)
         "(map [1 2 3] inc)",
         "(filter [1 2 3 4] math/even?)",
