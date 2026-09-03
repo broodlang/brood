@@ -3149,7 +3149,12 @@ fn check_if(
     // Layer a **path** narrowing on top (occurrence typing through a `(get base
     // :key)` access): `(if (int? (get r :age)) …)` types `(get r :age)` as `int`
     // in the then-branch (and `¬int` in the else, for a biconditional predicate).
-    let (then_ctx, else_ctx) = match path_guard_assertion(heap, test) {
+    // The base must not be a GLOBAL — see the note in `guards::branch_scopes`:
+    // immutability makes a local stable between the guard and the use, and says nothing
+    // about a global, which another process can `def` in between.
+    let (then_ctx, else_ctx) = match path_guard_assertion(heap, test)
+        .filter(|pg| !super::sigs::is_globally_bound(heap, pg.base))
+    {
         Some(pg) => {
             // Precise field-access narrowing for the exact path (both branches).
             let t = then_ctx.narrow_path(pg.base, pg.keys.clone(), pg.ty.clone());
