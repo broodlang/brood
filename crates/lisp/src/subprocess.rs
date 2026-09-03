@@ -99,7 +99,7 @@ struct Proc {
     /// A raw fd as a plain `i32` rather than `std::os::fd::RawFd`: that module does not
     /// exist on `wasm32-unknown-unknown`, and this struct is not itself unix-gated, so
     /// naming the alias here broke the playground's build. `RawFd` IS `i32` on every
-    /// unix target; the unix-only code converts at its own boundary.
+    /// unix target; the unix-only code below converts at its own boundary.
     pty: Option<i32>,
 }
 
@@ -261,7 +261,10 @@ fn start_stdout_reader<R: Read + Send + 'static>(
             }
         };
         drop(guard);
-        reg().remove(&id);
+        // The entry leaves the registry here for a child that exited on its own, so this
+        // is the removal site that has to give its fds back — see `release`.
+        let removed = reg().remove(&id);
+        release(removed);
         sink.emit(closed_msg(id, code));
     });
 }
@@ -410,18 +413,37 @@ pub fn close(id: u64) {
         let mut reg = reg();
         reg.remove(&id)
     };
-    if let Some(Proc { child, .. }) = removed {
+    if let Some(p) = &removed {
         // Brief lock (kill doesn't block) — the stdout reaper waits on the condvar rather
         // than holding this mutex across a blocking `wait()`, so we never contend.
         {
-            let mut c = crate::core::sync::lock(&child.child);
+            let mut c = crate::core::sync::lock(&p.child.child);
             let _ = c.kill();
         }
         // Rouse the reaper so it reaps *now* instead of at its next backoff tick, and the
         // `[:proc-closed …]` follows the kill promptly.
-        child.killed.notify_all();
-        // `stdin` (in `removed`) drops here, sending EOF to the child too.
+        p.child.killed.notify_all();
     }
+    // `stdin` (in `removed`) drops here, sending EOF to the child too.
+    release(removed);
+}
+
+/// Release what a removed registry entry owned beyond its Rust values — today, a pty
+/// child's master fd, which is a bare `RawFd` with no `Drop`.
+///
+/// Called from BOTH places an entry can leave the registry: `close`, and the reaper when
+/// a child exits by itself. That second one is the common case and the one that leaked —
+/// `close` cleaning up was not enough, because for a child that has already exited the
+/// reaper had removed the entry first and `close` then found nothing.
+fn release(entry: Option<Proc>) {
+    #[cfg(unix)]
+    if let Some(Proc { pty: Some(fd), .. }) = entry {
+        // SAFETY: dup'd for this entry, which has just been removed, so there is no
+        // other owner and it cannot be closed twice.
+        unsafe { libc::close(fd) };
+    }
+    #[cfg(not(unix))]
+    let _ = entry;
 }
 
 /// Close every subprocess owned by `pid` — the process-death hook, called from the
@@ -471,7 +493,7 @@ fn bad_proc() -> std::io::Error {
 
 #[cfg(unix)]
 mod pty {
-    use std::os::fd::{FromRawFd, RawFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
     /// Set a pty's window size. Programs read this at start and on `SIGWINCH`.
     pub(super) fn set_winsize(fd: RawFd, cols: u16, rows: u16) -> std::io::Result<()> {
@@ -489,12 +511,16 @@ mod pty {
         Ok(())
     }
 
-    /// Open a pty pair, returning `(master, slave)` raw fds.
+    /// Open a pty pair, returning `(master, slave)` as OWNED descriptors.
+    ///
+    /// Owned rather than raw so that every `?` on the way through [`super::spawn_pty`]
+    /// closes them. There are several such exits before the registry takes the master,
+    /// and a raw fd leaked on each one.
     ///
     /// `posix_openpt` + `grantpt` + `unlockpt` + `ptsname` rather than `openpty`,
     /// because that quartet is plain POSIX in `libc` while `openpty` lives in
     /// `libutil` and needs an extra link on some platforms.
-    pub(super) fn open_pair() -> std::io::Result<(RawFd, RawFd)> {
+    pub(super) fn open_pair() -> std::io::Result<(OwnedFd, OwnedFd)> {
         // SAFETY: each call is the documented POSIX sequence, and every return is
         // checked before the next step uses it.
         unsafe {
@@ -535,13 +561,15 @@ mod pty {
                 libc::close(master);
                 return Err(e);
             }
-            Ok((master, slave))
+            // SAFETY: both are freshly opened descriptors with no other owner.
+            Ok((OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)))
         }
     }
 
     /// A `Stdio` on a fresh dup of `fd`, so each of the child's three descriptors owns
     /// its own file and closing one does not close the others.
-    pub(super) fn stdio_dup(fd: RawFd) -> std::io::Result<std::process::Stdio> {
+    pub(super) fn stdio_dup(fd: &OwnedFd) -> std::io::Result<std::process::Stdio> {
+        let fd = fd.as_raw_fd();
         // SAFETY: `fd` is open; `dup` returns a new owned descriptor, which `File`
         // takes ownership of and `Stdio` then consumes.
         let dup = unsafe { libc::dup(fd) };
@@ -573,14 +601,14 @@ pub fn spawn_pty(
     use std::os::unix::process::CommandExt;
 
     let (master, slave) = pty::open_pair()?;
-    pty::set_winsize(master, cols, rows)?;
+    pty::set_winsize(std::os::fd::AsRawFd::as_raw_fd(&master), cols, rows)?;
 
     let mut command = Command::new(prog);
     command
         .args(args)
-        .stdin(pty::stdio_dup(slave)?)
-        .stdout(pty::stdio_dup(slave)?)
-        .stderr(pty::stdio_dup(slave)?);
+        .stdin(pty::stdio_dup(&slave)?)
+        .stdout(pty::stdio_dup(&slave)?)
+        .stderr(pty::stdio_dup(&slave)?);
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
@@ -607,33 +635,19 @@ pub fn spawn_pty(
         });
     }
     let child = command.spawn();
-    // The parent holds the master only; the child has its own dups of the slave.
-    // SAFETY: `slave` is ours and no longer referenced here.
-    unsafe { libc::close(slave) };
-    let child = match child {
-        Ok(c) => c,
-        Err(e) => {
-            // SAFETY: master is ours and nothing else holds it.
-            unsafe { libc::close(master) };
-            return Err(e);
-        }
-    };
+    // The parent keeps only the master: the child has its own dups of the slave, and
+    // dropping ours is what lets the master see EOF when the child exits.
+    drop(slave);
+    let child = child?;
 
-    // One fd, two directions: the reader and the writer each get their own `File`
-    // over a dup, so an EOF on one does not close the other out from under it, and
-    // the registry keeps `master` itself for resizing.
-    // SAFETY: two independent dups of the master, each owned by one `File`.
-    let (read_file, write_file) = unsafe {
-        use std::os::fd::FromRawFd;
-        let r = libc::dup(master);
-        let w = libc::dup(master);
-        if r < 0 || w < 0 {
-            let e = std::io::Error::last_os_error();
-            libc::close(master);
-            return Err(e);
-        }
-        (std::fs::File::from_raw_fd(r), std::fs::File::from_raw_fd(w))
-    };
+    // One fd, two directions: the reader and the writer each get their own `File` over
+    // a dup, so EOF on one does not close the other out from under it, while the
+    // registry keeps the master itself for resizing.
+    let read_file = std::fs::File::from(master.try_clone()?);
+    let write_file = std::fs::File::from(master.try_clone()?);
+    // Hand the master to the registry as a raw fd — deliberately, and `close` releases
+    // it. Everything above this line was owned, so no earlier exit could leak it.
+    let master = std::os::fd::IntoRawFd::into_raw_fd(master);
 
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let child = Arc::new(ChildHandle {

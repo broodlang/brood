@@ -66,3 +66,70 @@
           got (strip (apply str (repeat 2000 line))))
       (assert= (string/length want) (string/length got))
       (assert= want got))))
+
+;; ---- ansi/render: the escapes as LAYOUT, not as noise ------------------------
+;; `strip` deletes the escapes, which is right for a build log and wrong for a
+;; pseudo-terminal, where they are how the program draws. The case that motivated
+;; `render` is an interactive line editor: `iex` echoes what you typed, then moves up
+;; a line, erases, and prints the line again with its prompt. Stripped, both copies
+;; survive and the buffer shows the input twice.
+
+(defn- esc (s) (str (string/int->char 27) s))
+
+(describe "ansi/render — a line editor's redraw"
+  ;; Captured from a real `iex` under a pty: echo, ESC[A ESC[J, reprint, result, prompt.
+  (test "the redraw replaces the echo instead of doubling it"
+    (assert= (ansi/render ""
+               (str "1 + 41\r\n"
+                 (esc "[A")
+                 (esc "[J")
+                 "iex(1)> 1 + 41\r\n"
+                 (esc "[33m")
+                 "42"
+                 (esc "[0m")
+                 "\r\niex(2)> "))
+      "iex(1)> 1 + 41\n42\niex(2)> "))
+
+  (test "which is exactly what strip cannot do"
+    ;; the same input through `strip` keeps both copies — not a defect in `strip`,
+    ;; but the reason `render` exists beside it
+    (is (includes? (ansi/strip (str "1 + 41\r\n" (esc "[A") (esc "[J") "iex(1)> 1 + 41\r\n"))
+          "1 + 41\niex(1)> 1 + 41"))))
+
+(describe "ansi/render — the vocabulary it models"
+  (test "carriage return overwrites from the start of the line"
+    (assert= (ansi/render "abc" "\rX") "Xbc")
+    (assert= (ansi/render "abc" "\rXYZ!") "XYZ!"))
+  (test "newline starts a line, and ordinary text appends"
+    (assert= (ansi/render "a" "\nb") "a\nb")
+    (assert= (ansi/render "plain" " more") "plain more"))
+  (test "cursor left/right move without writing"
+    (assert= (ansi/render "hello" (esc "[2D")) "hello")
+    (assert= (ansi/render "hello" (str (esc "[2D") "X")) "helXo"))
+  (test "erase to end of line truncates there"
+    (assert= (ansi/render "hello world" (str (esc "[6D") (esc "[K"))) "hello")
+    (assert= (ansi/render "hello world" (str (esc "[6D") (esc "[K") "there")) "hellothere"))
+  (test "erase to end of display drops the lines below too"
+    ;; the cursor sits at column 5 (the length of "three"), past the end of "one" —
+    ;; erasing from there must not pad the short line out to meet it
+    (assert= (ansi/render "one\ntwo\nthree" (str (esc "[2A") (esc "[J"))) "one")
+    (assert= (ansi/render "one\ntwo" (str (esc "[A") (esc "[J") "ONE")) "oneONE"))
+  (test "column and next/previous line"
+    (assert= (ansi/render "hello" (str (esc "[1G") "J")) "Jello")
+    ;; `[K` erases the LINE, not what is below it — the line under the cursor stays
+    (assert= (ansi/render "one\ntwo" (str (esc "[F") (esc "[K") "X")) "X\ntwo"))
+  ;; colour is the sequence it sees most, and the one it must ignore rather than model
+  (test "colour and unmodelled sequences are dropped, not written"
+    (assert= (ansi/render "" (str (esc "[33m") "42" (esc "[0m"))) "42")
+    (assert= (ansi/render "" (str (esc "[?25l") "x" (esc "[?25h"))) "x")))
+
+(describe "ansi/render — the boundaries it does not pretend to cover"
+  ;; Stated as tests so the limits are a decision rather than a surprise. A program
+  ;; that positions absolutely or draws full-screen needs a real emulator.
+  (test "absolute positioning is ignored rather than approximated"
+    (assert= (ansi/render "abc" (str (esc "[1;1H") "X")) "abcX"))
+  (test "text with no escapes at all takes the append path unchanged"
+    (assert= (ansi/render "abc" "def") "abcdef")
+    (assert= (ansi/render "" "") ""))
+  (test "a lone ESC that opens nothing takes its byte with it"
+    (assert= (ansi/render "a" (str (string/int->char 27) "7b")) "ab")))

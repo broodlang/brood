@@ -56,3 +56,134 @@ Fast path: a chunk with no ESC byte only needs its CRs dropped (a single
       (ansi-strip v 0 (count v) ()))
     (string/replace s "\r" "")))
 (sig strip (string -> any))
+
+;; ---- rendering terminal output into text -------------------------------------
+;; [[strip]] throws away the escapes, which is right for a build log — append-only text
+;; that happens to be coloured — and wrong for a pseudo-terminal, where those escapes
+;; ARE the layout. An interactive line editor redraws: `iex` echoes what you typed, then
+;; emits `ESC[A ESC[J` (up one line, erase to end) and prints the line again with its
+;; prompt. Stripped, both copies survive and the buffer shows the input twice.
+;;
+;; [[render]] applies the small subset of that vocabulary which line-oriented programs
+;; actually use, and drops the rest. It is deliberately NOT a terminal emulator: no
+;; absolute positioning, no scroll regions, no alternate screen, no wrapping — a
+;; full-screen program under this will look wrong, and should be given a real emulator
+;; rather than a better guess here.
+;;
+;; The cursor is (row, col) into the lines of the text handed in, and starts at its END.
+;; That is exact when the previous chunk left the cursor there — which is what a REPL
+;; does, since the last thing it writes is its prompt — and it is the assumption a
+;; caller inherits by passing a tail rather than a whole buffer.
+
+(defn- ansi-set-line (lines row text)
+  (if (>= row (count lines)) (into lines [text]) (assoc lines row text)))
+
+(defn- ansi-line (lines row) (if (< row (count lines)) (nth lines row) ""))
+
+(defn- ansi-pad (s n)
+  "`s` at least `n` long, space-filled — a cursor may sit past the end of its line."
+  (if (>= (string/length s) n)
+    s
+    (str s (string/join (map (range (- n (string/length s))) (fn (_) " ")) ""))))
+
+(defn- ansi-truncate (s col)
+  "`s` cut at `col`. Deliberately NOT `ansi-pad` first: a cursor may sit past the end
+of a short line, and erasing from there erases nothing — padding it out to the cursor
+would write spaces where the program asked for deletion."
+  (string/substring s 0 (math/min col (string/length s))))
+
+(defn- ansi-write (lines row col text)
+  "Overwrite `text` at (row, col), extending the line if it ends short."
+  (let (l (ansi-pad (ansi-line lines row) col)
+        before (string/substring l 0 col)
+        after-start (math/min (string/length l) (+ col (string/length text)))
+        after (string/substring l after-start (string/length l)))
+    (ansi-set-line lines row (str before text after))))
+
+(defn- ansi-param (params default)
+  "The numeric parameter of a CSI, or `default` — `ESC[A` and `ESC[1A` are the same."
+  (if (= params "")
+    default
+    (let (n (string/->number params)) (if (number? n) n default))))
+
+(defn- ansi-csi (lines row col params final)
+  "Apply one CSI; returns [lines row col]. Anything not listed is a no-op, which is the
+right answer for colour (`m`) and the honest one for what this does not model."
+  (let (n (ansi-param params 1))
+    (cond
+      ; cursor up / down / forward / back
+      (= final "A") [lines (math/max 0 (- row n)) col]
+      (= final "B") [lines (+ row n) col]
+      (= final "C") [lines row (+ col n)]
+      (= final "D") [lines row (math/max 0 (- col n))]
+      ; carriage-return-and-move-line
+      (= final "E") [lines (+ row n) 0]
+      (= final "F") [lines (math/max 0 (- row n)) 0]
+      ; column
+      (= final "G") [lines row (math/max 0 (dec n))]
+      ; erase in line: 0/absent = to end (the only form a line editor emits)
+      (= final "K")
+        (if (= (ansi-param params 0) 0)
+          [(ansi-set-line lines row (ansi-truncate (ansi-line lines row) col)) row col]
+          [lines row col])
+      ; erase in display: 0/absent = from the cursor to the end of everything
+      (= final "J")
+        (if (= (ansi-param params 0) 0)
+          [(into []
+             (take (ansi-set-line lines row (ansi-truncate (ansi-line lines row) col)) (inc row)))
+            row col]
+          [lines row col])
+      else [lines row col])))
+
+(defn- ansi-render-loop (v i n lines row col)
+  (if (>= i n)
+    (string/join lines "\n")
+    (let (c (nth v i))
+      (cond
+        (= c "\n")
+          (ansi-render-loop v
+            (inc i)
+            n
+            (ansi-set-line lines (inc row) (ansi-line lines (inc row)))
+            (inc row)
+            0)
+        (= c "\r") (ansi-render-loop v (inc i) n lines row 0)
+        ;; a lone ESC that is not a CSI: it and the byte after it are dropped
+        (= c "\e")
+          (if (and (< (inc i) n) (= (nth v (inc i)) "["))
+            (let (end (ansi-csi-end v (+ i 2) n)
+                  params (string/join (into [] (take (drop v (+ i 2)) (math/max 0 (- end i 3)))) "")
+                  final (if (> end (+ i 2)) (nth v (dec end)) "")
+                  [lines2 row2 col2] (ansi-csi lines row col params final))
+              (ansi-render-loop v end n lines2 row2 col2))
+            (ansi-render-loop v (math/min n (+ i 2)) n lines row col))
+        else (ansi-render-loop v (inc i) n (ansi-write lines row col c) row (inc col))))))
+
+(defn render (text chunk)
+  "`text` with `chunk` — a run of terminal output — applied to it, honouring the cursor
+and erase sequences a line-oriented program uses rather than deleting them.
+
+Use this for a pseudo-terminal, where the escapes do the layout; use [[strip]] for
+append-only output that is merely coloured. The cursor starts at the END of `text`, so
+pass the region the child may still redraw (the last handful of lines) rather than a
+whole scrollback — the cost is linear in what you pass, and nothing above the cursor
+can be reached by the sequences modelled here.
+
+    (ansi/render \"1 + 41\" (str (string/int->char 27) \"[2Dx\"))   → \"1 + x1\"
+
+Models: `\\r`, `\\n`, cursor up/down/forward/back (`A`–`D`), next/previous line (`E`/`F`),
+column (`G`), erase-to-end-of-line (`K`) and erase-to-end-of-display (`J`). Everything
+else — colour included — is dropped. NOT a terminal emulator: no absolute positioning,
+no wrapping, no alternate screen."
+  (if (and (not (includes? chunk "\e")) (not (includes? chunk "\r")))
+    ;; the common case: ordinary output, which only ever appends
+    (str text chunk)
+    (let (lines (into [] (string/split text "\n"))
+          v (into [] (string/->list chunk)))
+      (ansi-render-loop v
+        0
+        (count v)
+        lines
+        (math/max 0 (dec (count lines)))
+        (string/length (last lines))))))
+(sig render (string string -> string))
