@@ -6,7 +6,7 @@ Distinct from `os`, which is the OPERATING SYSTEM around it (`os/env`, `os/cmd`,
 
     (system/argv)            ;; => [\"brood\" \"script.blsp\"]
     (system/script-args)     ;; => [\"--verbose\"]   — everything after `--`
-    (system/brood-version)   ;; => \"0.25.0\"
+    (system/brood-version)   ;; => \"0.25.1\"
     (system/halt 0)          ;; exit with code 0
 
 The environment/subprocess half moved to `os` on 2026-08-27: `system/env` was literally

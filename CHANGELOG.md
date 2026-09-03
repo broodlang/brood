@@ -6,6 +6,28 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.25.1 — a guard narrows through a parser
+
+**Fixes a false positive in v0.25.0's new failure lint** (ADR-316), which is the one class
+this checker is not allowed to have.
+
+    (defn calc (expr) (if (failure? (string/->number expr)) 0 (string/->number expr)))
+
+inferred `(string -> (or failure number))`, so every numeric use of `calc` was reported —
+on a function that provably cannot return a failure. The guard was there; the value simply
+was not *bound*, so nothing carried the narrowing to the second occurrence. The `let`-bound
+spelling was always correct.
+
+A guard now narrows **through** a deterministic unary parser. This needed no new soundness
+argument: the checker already narrows a re-evaluated access expression (`(get r :age)` is a
+call to `get`), because Brood data is immutable so the base cannot change between two
+evaluations, and a parser of an immutable argument is the same case. The twelve
+`T | failure` producers are an allow-list, deliberately — the other polarity would silently
+admit `os/env`, `now` and `random`.
+
+Zero warnings moved across `std/`, `tests/`, `examples/` and seven downstream repos: it
+removes false positives and creates none.
+
 ## v0.25.0 — a failure nothing guards, and grammars the kernel was never built with
 
 **The checker reports a failure nothing guards** (ADR-316) — the converse of v0.24.0's
