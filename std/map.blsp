@@ -33,11 +33,11 @@ access, or call qualified (`map/update-vals`).")
 (defn update-vals (m f)
   "A map like `m` with `f` applied to every value."
   (into {} (map (%map-pairs m) (fn (p) [(first p) (f (second p))]))))
-(sig update-vals (map any -> any))
+(sig update-vals (map any -> map))
 (defn update-keys (m f)
   "A map like `m` with `f` applied to every key (later keys win on a collision)."
   (into {} (map (%map-pairs m) (fn (p) [(f (first p)) (second p)]))))
-(sig update-keys (map any -> any))
+(sig update-keys (map any -> map))
 
 (defn select-keys (m ks)
   "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped)."

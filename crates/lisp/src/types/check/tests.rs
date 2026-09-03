@@ -7565,6 +7565,45 @@ fn an_unguarded_failure_is_reported_in_both_modes() {
     );
 }
 
+// A guard that DIVERGES narrows everything after it. Brood has no early return — no
+// `return`, no `guard` — so "refuse and stop" is spelled `(when bad (error …))`, and it is
+// everywhere. Without this rule the value stays as wide as it was declared, and the only way
+// to silence the callers is to declare the producer `-> any`, which is how a whole family of
+// std signatures came to say nothing.
+#[test]
+fn a_diverging_guard_narrows_the_rest_of_the_body() {
+    let base = "(defmodule t)\n(sig p (string -> (or nil string)))\n(defn p (s) s)\n\
+                (sig q (string -> int))\n(defn q (s) 1)\n";
+    // `when` — the diverging arm is the THEN, so the sequel gets the else-scope
+    let guarded =
+        format!("{base}(defn f (s) (let (r (p s)) (when (nil? r) (error \"no\")) (q r)))");
+    assert!(file_warnings_mode(&guarded, true).is_empty(), "{guarded}");
+    // `unless` — the diverging arm is the ELSE, so the sequel gets the then-scope
+    let unless = format!("{base}(defn f (s) (let (r (p s)) (unless r (error \"no\")) (q r)))");
+    assert!(file_warnings_mode(&unless, true).is_empty(), "{unless}");
+    // …and it reaches the INFERRED RETURN, not just the walk: a function that guards and
+    // then answers the value must advertise the narrowed type, or its callers are reported
+    // instead of it.
+    let via_return = format!(
+        "{base}(defn root (s) (let (r (p s)) (when (nil? r) (error \"no\")) r))\n\
+         (defn use-it (s) (q (root s)))"
+    );
+    assert!(
+        file_warnings_mode(&via_return, true).is_empty(),
+        "{via_return}"
+    );
+
+    // What must STILL warn, or the rule is just a hole: a guard that does not diverge
+    // proves nothing about the sequel.
+    let non_diverging = format!("{base}(defn f (s) (let (r (p s)) (when (nil? r) 0) (q r)))");
+    assert!(
+        file_warnings_mode(&non_diverging, true)
+            .iter()
+            .any(|w| w.contains("nil | string")),
+        "a `when` that falls through proves nothing: {non_diverging}"
+    );
+}
+
 // A guard narrows THROUGH a deterministic parser, so re-evaluating it in the branch is the
 // value the guard just tested. Without this, `(if (failure? (parse s)) d (parse s))` — the
 // spelling that does not bind — inferred `… | failure`, and ADR-316 then reported that arm

@@ -590,7 +590,10 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     // `(do … last)` → ty(last). Empty `(do)` is `nil`.
     if value::symbol_is(head, kw::DO) {
         return match items.last() {
-            Some(&last) if items.len() > 1 => expr_ty(heap, last, ctx),
+            Some(&last) if items.len() > 1 => {
+                let scope = sequence_scope(heap, &items[1..items.len() - 1], ctx);
+                expr_ty(heap, last, &scope)
+            }
             _ => Some(Ty::of(Tag::Nil)),
         };
     }
@@ -631,6 +634,7 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         if items.len() < 3 {
             return None;
         }
+        let scope = sequence_scope(heap, &items[2..items.len() - 1], &scope);
         return expr_ty(heap, last, &scope);
     }
     // `(cond test1 res1 test2 res2 … :else resN)` — union of the *result*
@@ -1067,6 +1071,25 @@ fn division_result(tys: &[Ty]) -> Option<Ty> {
             odometer[place] = 0;
         }
     }
+}
+
+/// The scope the LAST form of a body sequence is typed in, after folding every preceding
+/// form's [`diverging guard`](super::walk::diverging_guard_scope) into it.
+///
+/// Inference types a `do`/`let` body as the type of its last form and never looked at the
+/// forms before it — which is right for values (they are evaluated for effect) and wrong for
+/// SCOPE: `(when (nil? root) (error …))` proves `root` is not nil for everything after it,
+/// and that includes the body's result. Without this the walk narrowed (no warning inside
+/// the function) while the inferred RETURN still carried the `nil`, so every caller was
+/// reported instead — the same walk/inference split that let ADR-316 false-positive.
+fn sequence_scope(heap: &Heap, earlier: &[Value], ctx: &Ctx) -> Ctx {
+    let mut scope = ctx.clone();
+    for &form in earlier {
+        if let Some(next) = super::walk::diverging_guard_scope(heap, form, &scope) {
+            scope = next;
+        }
+    }
+    scope
 }
 
 /// A record shape and whether it is open — for the sinks that carry a shape forward.

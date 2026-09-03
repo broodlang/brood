@@ -197,13 +197,13 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   "True if `head-node` names a form whose first header arg is a pair-list."
   (and (= (node-kind head-node) :symbol)
     (get *format-pair-bindings* (symbol (node-text head-node)) false)))
-(sig pair-bindings? (vector -> any))
+(sig pair-bindings? (vector -> bool))
 
 (defn pair-body? (head-node)
   "True if `head-node` names a form whose body emits in pairs."
   (and (= (node-kind head-node) :symbol)
     (get *format-pair-body* (symbol (node-text head-node)) false)))
-(sig pair-body? (vector -> any))
+(sig pair-body? (vector -> bool))
 
 ;; The `defn` family: forms whose second header arg is a PARAMS list — unless the
 ;; function is multi-arity/multi-pattern, in which case that slot holds the first ARM
@@ -228,7 +228,7 @@ the name on the head line so every arm lands on its own line."
       (and (= (node-kind slot) :list)
         (let (lead (first-structural-child slot))
           (and lead (or (= (node-kind lead) :list) (= (node-kind lead) :vector))))))))
-(sig multi-arity-defn? (vector any -> any))
+(sig multi-arity-defn? (vector any -> (or nil bool)))
 
 ;; ---- the inlineability check ------------------------------------------------
 ;; Every LEAF node kind that re-emits as exactly its own source text. ONE
@@ -1011,7 +1011,7 @@ if you are reintroducing hoisting, they are what you have to write back."
 
     (string/trim (format/source \"(a  b)\"))   → \"(a b)\""
   (let (root (reflect/parse-source src)) (cst-root (node-children root))))
-(sig source (string -> any))
+(sig source (string -> string))
 
 (defn cst-root (kids)
   "Render the root's child nodes `kids` — the top-level forms — into the formatted source string, with exactly one trailing newline."
@@ -1024,7 +1024,7 @@ if you are reintroducing hoisting, they are what you have to write back."
   ;; that clears a row, and it was mistakenly cleared once on the small-N numbers alone.
   (let (out (apply str (reverse (format-cst-root-walk kids 0 (seq/vector-length kids) 0 ()))))
     (cond (= out "") "" (string/ends-with? out "\n") out else (str out "\n"))))
-(sig cst-root (vector -> any))
+(sig cst-root (vector -> string))
 
 ;; The walker threads `nl-since-last`: the newline count between the last
 ;; emitted block and the cursor. Whitespace adds its newline count; a comment

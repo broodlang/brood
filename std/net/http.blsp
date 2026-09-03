@@ -267,7 +267,7 @@ request/response splitting)."
           ": "
           (http-crlf-free "header value" (second kv))
           "\r\n")))))
-(sig render-headers (map -> any))
+(sig render-headers (map -> string))
 
 (defn render-response (resp)
   "Render a response map into the HTTP/1.0 wire **iolist** (ADR-139) — hand it to

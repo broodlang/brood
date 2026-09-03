@@ -116,7 +116,7 @@ typed inside the regions, so it is stable while they work."
                 [(get region :end) (cons (string/substring text pos (get region :start)) parts)])))
         [pos parts] r)
     (apply str (reverse (cons (string/substring text pos (string/length text)) parts)))))
-(sig skeleton (string seqable -> any))
+(sig skeleton (string seqable -> string))
 
 (defn protected-spans (text regions)
   "The COMPLEMENT of `regions` over `text` — the `[lo hi)` ranges *outside* every editable

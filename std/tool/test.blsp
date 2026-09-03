@@ -1470,12 +1470,12 @@ the test rather than hanging the run."
   "Count the results in `results` that have at least one failed assertion (a failing test, not the total number of failed assertions)."
   ; tests with at least one failed assertion
   (fold results 0 (fn (acc r) (if (r-failed? r) (+ acc 1) acc))))
-(sig count-failed (seqable -> any))
+(sig count-failed (seqable -> int))
 (defn count-skipped (results)
   "Count the results in `results` that were skipped — registered with `:skip` but never run."
   ; tests that registered but were never run (`:skip`)
   (fold results 0 (fn (acc r) (if (r-skipped? r) (+ acc 1) acc))))
-(sig count-skipped (seqable -> any))
+(sig count-skipped (seqable -> int))
 (defn- count-failures (results)
   ; total failed assertions across tests
   (fold results 0 (fn (acc r) (+ acc (count (r-fails r))))))
