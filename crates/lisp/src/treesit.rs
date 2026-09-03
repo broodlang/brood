@@ -64,9 +64,61 @@ static TREE_CACHE: LazyLock<Mutex<Vec<(String, String, tree_sitter::Tree)>>> =
 #[cfg(feature = "treesit")]
 const TREE_CACHE_CAP: usize = 4;
 
-/// Parse `src` with `lang`, reusing the cached tree when the text is unchanged.
+/// The edit that turns `old` into `new`, derived from their common prefix and suffix.
+///
+/// tree-sitter reparses INCREMENTALLY, but only if it is told what changed — and the
+/// editor never tells us: it hands over a whole buffer, because that is what a pure
+/// `text -> spans` service is. The change is recoverable anyway. Bytes before the first
+/// difference and after the last are identical, so the edit is exactly "the span between
+/// them was replaced". That is precise for any single contiguous change — a keystroke, a
+/// paste, a kill — and still CORRECT for a scattered one, merely wider than necessary,
+/// since a larger replaced range only makes tree-sitter reparse more.
+///
+/// `None` when the texts are equal, or when the derived edit spans most of a large
+/// document, where reparsing from the old tree buys nothing over a fresh parse.
+#[cfg(feature = "treesit")]
+fn derive_edit(old: &str, new: &str) -> Option<tree_sitter::InputEdit> {
+    let ob = old.as_bytes();
+    let nb = new.as_bytes();
+    let mut start = 0usize;
+    let max_pre = ob.len().min(nb.len());
+    while start < max_pre && ob[start] == nb[start] {
+        start += 1;
+    }
+    let mut back = 0usize;
+    while back < max_pre - start && ob[ob.len() - 1 - back] == nb[nb.len() - 1 - back] {
+        back += 1;
+    }
+    let old_end = ob.len() - back;
+    let new_end = nb.len() - back;
+    if start == old_end && start == new_end {
+        return None; // identical
+    }
+    if (old_end - start) * 4 > ob.len() && ob.len() > 4096 {
+        return None; // a change spanning most of it is a new document, not an edit
+    }
+    // Byte offsets only. The row/column `Point`s matter to a client that renders from
+    // the tree's positions; the parse itself is byte-addressed, and zeros are consistent.
+    let zero = tree_sitter::Point::new(0, 0);
+    Some(tree_sitter::InputEdit {
+        start_byte: start,
+        old_end_byte: old_end,
+        new_end_byte: new_end,
+        start_position: zero,
+        old_end_position: zero,
+        new_end_position: zero,
+    })
+}
+
+/// Parse `src` with `lang`, reusing the cached tree when the text is unchanged and
+/// reparsing incrementally from it when the text merely changed.
 #[cfg(feature = "treesit")]
 fn parse_cached(src: &str, lang: &str) -> Result<tree_sitter::Tree, LispError> {
+    // An exact hit is free; a NEAR hit — the same buffer one keystroke later — is the
+    // common case while typing, and is what decides how a large file feels. A full parse
+    // of 250 KB of Elixir is ~500 ms, so paying it per edit is the whole of "the editor
+    // is sluggish"; reparsing from the previous tree is ~1 ms.
+    let mut reuse: Option<tree_sitter::Tree> = None;
     {
         let mut cache = TREE_CACHE.lock().expect("treesit tree cache");
         if let Some(i) = cache
@@ -80,15 +132,30 @@ fn parse_cached(src: &str, lang: &str) -> Result<tree_sitter::Tree, LispError> {
             cache.push(hit);
             return Ok(tree);
         }
+        // No exact match: take this language's most recent text — the buffer being typed
+        // in — and derive the edit that turns it into this one.
+        if let Some((_, old_src, old_tree)) = cache.iter().rev().find(|(l, _, _)| l == lang) {
+            if let Some(edit) = derive_edit(old_src, src) {
+                let mut t = old_tree.clone();
+                t.edit(&edit);
+                reuse = Some(t);
+            }
+        }
     }
     let language = language_for(lang)?;
     let mut parser = checkout_parser(lang, &language)?;
-    let tree = parser.parse(src, None);
+    let tree = parser.parse(src, reuse.as_ref());
     return_parser(lang, parser);
     let tree =
         tree.ok_or_else(|| LispError::runtime(format!("tree-sitter: {lang}: parse failed")))?;
     {
         let mut cache = TREE_CACHE.lock().expect("treesit tree cache");
+        // One entry per language, not four generations of the buffer being typed in:
+        // the older versions can never be asked for again, and keeping them evicts the
+        // other files that can.
+        if let Some(i) = cache.iter().position(|(l, _, _)| l == lang) {
+            cache.remove(i);
+        }
         if cache.len() >= TREE_CACHE_CAP {
             cache.remove(0);
         }
@@ -370,6 +437,15 @@ pub fn load_grammar(path: &str, lang: &str) -> LispResult {
         .lock()
         .expect("treesit parser pool")
         .remove(lang);
+    // The tree cache is keyed by language name too, and holds trees SHAPED BY the old
+    // grammar. An exact hit would hand one back for the new one, and an incremental
+    // reparse would hand it to the new grammar's parser as the tree to edit from — which
+    // is not merely stale but ill-formed, and fails the parse outright. Same reasoning as
+    // the pool above; the cache simply arrived later than the comment did.
+    TREE_CACHE
+        .lock()
+        .expect("treesit tree cache")
+        .retain(|(l, _, _)| l != lang);
     Ok(Value::int(abi))
 }
 

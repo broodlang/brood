@@ -379,10 +379,22 @@ shape `nest format` answers for Brood, and it is checked line-for-line against r
 ;; siblings, which is why structural motion felt slower the bigger the file got.
 ;; `%tree-sitter-kids` hands over exactly that list.
 
+(defdyn *comment-kinds*
+  ;; Node kinds that a structural motion steps OVER rather than stopping at. A comment is
+  ;; not a form: Emacs gives comments whitespace syntax, so `forward-sexp` skips them,
+  ;; and a tree-sitter tree makes them ordinary named nodes — so `C-M-f` from a comment
+  ;; landed at the comment's end and `C-M-b` from a definition landed on the comment
+  ;; above it, neither of which is a structural move.
+  ;;
+  ;; The names are a convention across grammars rather than a rule, so this is a dynvar:
+  ;; a grammar spelling comments otherwise is one `defdyn` away, not a patch.
+  #{:comment :line_comment :block_comment :comment_block})
+
 (defn- ts-siblings (text lang point)
   "The named children of the node strictly containing `point` — the siblings a motion
-steps through."
-  (%tree-sitter-kids text lang point))
+steps through, comments excluded (see [[*comment-kinds*]])."
+  (filter (%tree-sitter-kids text lang point)
+    (fn (n) (not (contains? *comment-kinds* (get n :kind))))))
 
 ;; A node's offsets are ints by construction (the kernel writes them), but a `get` on a map
 ;; says `any`, and `(inc any)` is `number` — which the int-taking motions then refuse under
