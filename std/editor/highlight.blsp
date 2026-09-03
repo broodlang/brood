@@ -229,7 +229,7 @@ string). `toks` is the stream AFTER the string."
 
 ;; ---- the lexer walk ---------------------------------------------------------
 
-(defn- hl-spans (toks stack acc)
+(defn- hl-spans (toks stack acc specials)
   "Walk the `scan-tokens` stream into `[start end face]` colour spans, carrying the
 form `stack` (head position, and enough shape to tell a docstring from a string).
 `:symbol` needs position — head + special form → keyword face, head → call face, else
@@ -239,36 +239,43 @@ uncoloured — and `:string` needs it too (doc vs. value). Accumulates in revers
     (let ([s e kind text] (first toks)
           more (rest toks))
       (cond
-        (= kind :open) (hl-spans more (hl-push (hl-advance stack true) text) acc)
-        (= kind :close) (hl-spans more (rest stack) acc)
-        (= kind :comment) (hl-spans more stack (cons [s e (face :syntax/comment)] acc))
+        (= kind :open) (hl-spans more (hl-push (hl-advance stack true) text) acc specials)
+        (= kind :close) (hl-spans more (rest stack) acc specials)
+        (= kind :comment) (hl-spans more stack (cons [s e (face :syntax/comment)] acc) specials)
         ; a comment starts no form — the stack is untouched
         (= kind :symbol)
           (let (head? (hl-head? stack)
                 f (cond
-                    (and head? (special-form? text)) (face :syntax/special)
+                    (and head? (= true (get specials text))) (face :syntax/special)
                     head? (face :syntax/function)
                     else nil))
-            (hl-spans more (hl-name stack text) (if (nil? f) acc (cons [s e f] acc))))
+            (hl-spans more (hl-name stack text) (if (nil? f) acc (cons [s e f] acc)) specials))
         (= kind :string)
           (let (f (if (hl-doc? stack more) (face :syntax/doc) (face :syntax/string)))
-            (hl-spans more (hl-advance stack false) (cons [s e f] acc)))
+            (hl-spans more (hl-advance stack false) (cons [s e f] acc) specials))
         else
           (let (f (face (get hl-kind->face-name kind)))
             ; :number / :keyword
             (hl-spans more
               (hl-advance stack false)
-              (if (nil? f) acc (cons [s e f] acc))))))))
+              (if (nil? f) acc (cons [s e f] acc))
+              specials))))))
 
-(defn highlight-spans (src)
-  "Lexically tokenize Brood `src` into a list of `[start end face]` colour spans
+(defn highlight-spans (src &optional (specials hl-special-set))
+  "Lexically tokenize Lisp `src` into a list of `[start end face]` colour spans
 (character offsets, end-exclusive) for the tokens that carry a colour — comments,
 strings (a `def…` form's docstring apart from a string value), numbers, keywords, and
 head-position symbols (special forms vs calls).
 Whitespace and plain variable references carry no span (the default colour). The
 per-character scan is the native `scan-tokens`; this only assigns faces over the token
-stream (O(tokens)), so it stays fast enough for per-frame fontification."
-  (hl-spans (reflect/scan-tokens src) '() '()))
+stream (O(tokens)), so it stays fast enough for per-frame fontification.
+
+`specials` is the SET of head symbols that colour as keywords rather than as calls —
+`{\"defun\" true …}` — and defaults to Brood's. Everything else this does is true of any
+s-expression language: parens, `;` comments, `\"` strings, numbers. Passing another
+dialect's set is therefore the whole of teaching it to colour, which is what an elisp or
+Scheme mode needs and all it needs."
+  (hl-spans (reflect/scan-tokens src) '() '() specials))
 (sig highlight-spans (string -> any))
 
 ;; ---- windowed highlighting (fontify just a viewport) ------------------------
