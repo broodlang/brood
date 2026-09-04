@@ -792,7 +792,17 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; live in `*module-files*`, ADR-070). Its registrations belong to whoever loads it.
 (defn- image-foreign-owner? (m) (not (contains? *module-files* m)))
 
-(defn image-prune-foreign-registrations ()
+(defn- image-preexisting-reg-keys (before-regs)
+  "The `[registry key]` pairs already registered BEFORE this project's sources loaded, as a
+set. Everything in it belongs to the prelude (or the binary), not to any module this load
+brought in — so no module load will ever replay it, and pruning it loses it for good."
+  (fold (keys before-regs)
+    #{}
+    (fn (acc m)
+      (fold (get before-regs m) acc (fn (acc2 t) (conj acc2 [(get t 0) (get t 1)]))))))
+(sig image-preexisting-reg-keys (map -> set))
+
+(defn image-prune-foreign-registrations (before-regs)
   "Remove from the live registries every registration OWNED by a module this project's
 image does not carry — a std module (or anything else outside `*module-files*`) that
 happened to be loaded in the session that built the image. Returns how many were removed.
@@ -811,17 +821,36 @@ foreign ones here is the project-image half of the same rule — the std module 
 its own entries when it loads, from source or from its image. Root-level registrations
 (an unqualified key, no owner) and project/dependency-owned ones are kept.
 
+**`before-regs` is what the prune must NOT touch** (KI-106). Ownership is decided by the
+QUALIFIER of a registration's key, which is not always its registrar: `num/mul`'s qualifier
+is `num`, and `std/num.blsp` is a real module — but the `(defmulti num/mul :commutative)`
+that registers it lives in the PRELUDE. So the entry was judged foreign, pruned, and baked
+out of the image, and loading `num` never put it back because `num` never registered it.
+An imaged boot then restored a `*multi-algebra*` holding one entry instead of five, the
+checker lost every `num/*` algebra, and every commutative mirror it derives from them went
+with it — `(* 3 (usd 500))` warned `no num/mul method for [:int :record-test/usd]` while
+the runtime dispatched it correctly.
+
+The rule that fixes it needs no name heuristics: a registration that was already there
+before this project loaded a single file cannot be owned by anything this load brought in.
+Skip those, prune the rest.
+
 `write-image` calls this inside an `%isolate`, so the pruning is rolled back the moment
-the image is written and the running session keeps every registration it had."
+the image is written and the running session keeps every registration it had — but the
+image on disk keeps whatever the prune left, which is why pruning too much is silent and
+permanent rather than transient."
   (let (regs (stdimage/registrations-by-module)
         impls (stdimage/%std-impls-by-module)
+        keep (image-preexisting-reg-keys before-regs)
         n-regs (fold (filter (keys regs) image-foreign-owner?)
                  0
                  (fn (n m)
                    (fold (get regs m)
                      n
                      (fn (n2 t)
-                       (do (%registry-update! (get t 0) :dissoc (get t 1) nil) (+ n2 1))))))
+                       (if (contains? keep [(get t 0) (get t 1)])
+                         n2
+                         (do (%registry-update! (get t 0) :dissoc (get t 1) nil) (+ n2 1)))))))
         n-impls (fold (filter (keys impls) image-foreign-owner?)
                   0
                   (fn (n m)
@@ -835,9 +864,9 @@ the image is written and the running session keeps every registration it had."
                           (%registry-update! '*impl-from* :dissoc [[aname op key]] nil)
                           (+ n2 1)))))))
     (+ n-regs n-impls)))
-(sig image-prune-foreign-registrations (-> int))
+(sig image-prune-foreign-registrations (map -> int))
 
-(defn write-image (root before)
+(defn write-image (root before before-regs)
   "Snapshot the bindings this project load produced into `root`'s image, grouped into
 per-module sections. `before` is the `(reflect/global-names)` list captured *before* the sources
 were loaded. Returns the entry count. Written from a scope in which registrations owned by
@@ -846,11 +875,11 @@ modules the image does not carry are pruned (`image-prune-foreign-registrations`
   (let (dir (path/dirname (image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
     (%isolate (fn ()
-                (image-prune-foreign-registrations)
+                (image-prune-foreign-registrations before-regs)
                 (%image-write (image-path root)
                   (project-image-sections before)
                   (project-image-fingerprint root))))))
-(sig write-image (string any -> any))
+(sig write-image (string any map -> any))
 
 ;; Install `root`'s image as a source of features, if it is current. Materialises the root
 ;; section (registries + declared sigs — small, and needed before anything else) and hands
@@ -1009,6 +1038,10 @@ program's and the LSP's protocol channel stays clean."
                   :to *err*)
               t0 (os/now-ns)
               before (reflect/global-names)
+              ;; Captured HERE, beside `before`, and for the same reason: what the prune may
+              ;; remove is decided by what this load introduced, so both baselines have to be
+              ;; taken before a single source file is read (KI-106).
+              before-regs (stdimage/registrations-by-module)
               _ (/apply load-sources (cons root opts))
               t-load (math/quot (- (os/now-ns) t0) 1000000)
               ;; A project whose globals are not all portable — a `table` global is the
@@ -1019,7 +1052,7 @@ program's and the LSP's protocol channel stays clean."
               wrote (cond
                       (image-usable?)
                         (try
-                          (write-image root before)
+                          (write-image root before before-regs)
                           (catch e
                             ;; No once-per-key guard needed: this is the cold path, which
                             ;; already prints Building/Built exactly once per build.
