@@ -761,6 +761,26 @@ comparison, paid only by a module that actually materialises."
 
 (def- *std-image-sections* nil)
 
+;; How many sections THIS process installed from the stdlib image at boot, or nil if it
+;; installed none. Deliberately separate from `*std-image-sections*` beside it, which is a
+;; transient stash of three section coordinates and is CLEARED on the first materialise —
+;; so it cannot answer the question anyone actually asks, which is "did this run use the
+;; image?".
+;;
+;; That question had no answer at all, and the cost of not having one is the whole reason
+;; this exists. `%std-image-install` returns its count to a boot form that discards it, and
+;; a miss is silent by design (correct: on the default path an absent image is ordinary).
+;; So the only way to ask was `(stdimage/status)`, which reads what is on DISK NOW — and
+;; those are different facts the moment anything rebuilds the image mid-command, which
+;; `nest` does on every command after a `std/` edit. A reader would then see `:live` for a
+;; run that had loaded every module from source.
+(def- *std-image-installed* nil)
+
+(defn- %std-image-installed ()
+  "Sections installed from the stdlib image at boot, or nil if none — what THIS process
+did, as opposed to what is on disk now. See [[stdimage/status]], which reports both."
+  *std-image-installed*)
+
 (defn- %std-image-tables! ()
   "Load the image's three bookkeeping sections — require-edges, ability impls, other
 registrations — the first time a module actually materialises, and clear the stash so later
@@ -947,7 +967,19 @@ case `require` keeps loading stdlib modules from source exactly as before."
           (def *std-image-file* path)
           (%add-image-source! path
             (dissoc (dissoc (dissoc idx "%std-edges") "%std-impls") "%std-regs"))
-          (count (keys idx)))))))
+          ;; Record the count durably as well as returning it: the caller is the boot form,
+          ;; which discards it, and `*std-image-sections*` above is cleared on the first
+          ;; materialise. See `*std-image-installed*` for why the on-disk state is not a
+          ;; substitute for this.
+          (let (n (count (keys idx)))
+            ;; `def-`, not `def`: the name is private, and a plain `def` rebinding it drops
+            ;; the privacy mark — which shows up as an imaged module disagreeing with its own
+            ;; source about this binding's visibility. ADR-280's differential
+            ;; (`crates/lisp/tests/image_matches_source.rs`) caught exactly that on the first
+            ;; run after this was added, which is what that gate is for. Every write to a
+            ;; private global has to say private, not just the first one.
+            (def- *std-image-installed* n)
+            n))))))
 
 (defn- %require-record-edge! (key)
   ;; `reflect/current-ns` first: it is the module whose FILE is being loaded, which is the accurate

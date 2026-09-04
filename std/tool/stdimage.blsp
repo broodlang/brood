@@ -276,7 +276,16 @@ serves everything."
 
 (defn status ()
   "Why this binary is, or is not, using a stdlib image — as
-`{:state :live|:absent|:stale|:no-cache :want <id> :path <path> :sections <n> :others [<id>…]}`.
+`{:state :live|:absent|:stale|:no-cache :installed <n>|nil :want <id> :path <path> :sections <n> :others [<id>…]}`.
+
+**`:installed` and `:state` answer different questions, and confusing them has cost real
+time.** `:state` reads what is on DISK NOW; `:installed` is how many sections THIS process
+actually materialised at boot, or nil if it ran from source. They disagree whenever anything
+writes an image mid-command — which `nest` does on *every* command after a `std/` edit, so
+the very run that triggers the rebuild loads from source while `:state` already says `:live`.
+They also disagree under `BROOD_NO_STDIMAGE=1`, where a perfectly good image is on disk and
+deliberately unused. When you want to know what a measurement or a test run actually did,
+read `:installed`.
 
 `%std-image-install` answers `nil` for **absent**, **stale** and **unreadable** alike, and
 that single silence is the most expensive thing about this feature. Every wrong measurement
@@ -296,6 +305,7 @@ instead of being inferred from a run that looked wrong."
       ;; cache directory. Reporting both as `:no-cache` would send a reader looking for a
       ;; directory that was never going to be consulted.
       {:state (if (%build-stdimage?) :no-cache :disabled)
+       :installed (%std-image-installed)
        :want want
        :path nil
        :sections 0
@@ -308,12 +318,16 @@ instead of being inferred from a run that looked wrong."
             ids (apply vector
                   (map present (fn (e) (string/substring e 10 (- (string/length e) 4)))))
             idx (%image-index path want)
+            inst (%std-image-installed)
             sections (if (nil? idx) nil (count idx)))
         (cond
-          (not (nil? sections)) {:state :live :want want :path path :sections sections :others ids}
-          (file/exists? path) {:state :unreadable :want want :path path :sections 0 :others ids}
-          (empty? ids) {:state :absent :want want :path path :sections 0 :others ids}
-          else {:state :stale :want want :path path :sections 0 :others ids})))))
+          (not (nil? sections))
+            {:state :live :installed inst :want want :path path :sections sections :others ids}
+          (file/exists? path)
+            {:state :unreadable :installed inst :want want :path path :sections 0 :others ids}
+          (empty? ids)
+            {:state :absent :installed inst :want want :path path :sections 0 :others ids}
+          else {:state :stale :installed inst :want want :path path :sections 0 :others ids})))))
 
 (defn ensure-built ()
   "Build this binary's stdlib image if there is not already a CURRENT one on disk, and say
