@@ -20464,3 +20464,50 @@ file the shape. If the watchdog line ever prints, KI-88 reopens with the pid nam
 binary and the log. `BROOD_TW_REENTRY=1` is gone (no alias: it would be a flag the runtime
 ignores).
 
+
+## ADR-319 — `--debug-flags` lists every flag the runtime reads, and both directions are gated
+
+**Context.** `debug_flags.rs` (ADR-less until now) shipped as a deliberately *curated* subset:
+"the flags for performance triage and A/B", with editor/GUI/audio and test-only flags omitted,
+and with only one direction asserted — a catalogued name must still exist in the source, so a
+rename cannot leave a line telling a reader to set something the runtime ignores. The reverse
+was left unasserted on the stated reasoning that "a test that forced every new flag in here
+would push editor and test-only flags into a performance list."
+
+What that produced, measured 2026-09-04: the runtime reads **101** distinct `BROOD_*` names
+under `crates/*/src` and `std/`, and **58** were catalogued. The 43 in the gap were not the
+editor flags the rationale imagined. They included `BROOD_J` (the worker count),
+`BROOD_REDUCTIONS` (the quantum), `BROOD_STEAL_GRACE_NS`, `BROOD_NO_STEAL_WAKE`, every GC
+tuning knob (`BROOD_GC_MAJOR`, `BROOD_GC_TENURE`, `BROOD_GC_GROWTH`, `BROOD_MAJOR_GROWTH`),
+four JIT levers (`BROOD_NO_HOF_JIT`, `BROOD_NO_JIT_ICALL`, `BROOD_NO_DEOPT_RESUME`,
+`BROOD_MKCLO`) and the two self-inliner knobs. Every one of them is a performance flag. The
+curation had not been keeping non-performance flags out; it had been failing to keep
+performance flags in, because nothing made adding one a step you could not skip.
+
+**Decision.** The catalogue is **complete** — every `BROOD_*` the runtime reads has an entry —
+and the triage question is answered by **ordering**, not omission: `GROUP_ORDER` puts
+attribution / JIT / optimizer levers / GC / scheduler / engine first and the two new groups
+(diagnostics-and-checking, host environment) last. Printing is driven by `GROUP_ORDER` rather
+than by adjacency in the array, so an entry added beside its siblings no longer splits its
+group and prints the heading twice.
+
+Three tests hold it, each sabotage-verified:
+- `every_catalogued_flag_exists_in_the_source` (as before) — no stale line.
+- `every_runtime_flag_is_catalogued` — scans `crates/*/src` + `std/` for *quoted* `"BROOD_…"`
+  literals and fails naming the file. It found `BROOD_EMBED_RUNTIME` on its first run, which
+  a hand grep of `crates/*/src` had missed because it is read in `crates/nest/build.rs`.
+- `every_group_is_in_the_print_order` — a group missing from `GROUP_ORDER` would make its
+  flags vanish from the output *silently*, which is the same failure the catalogue exists to
+  prevent.
+
+Scope is deliberately the runtime's own reads: `crates/*/tests` is excluded, because its
+fixtures name env vars that are not flags (`BROOD_SURELY_MISSING_VAR_XYZ`). Build-time names
+(`BROOD_GIT_SHA`, `BROOD_STDLIB_HASH`, `BROOD_EMBED_RUNTIME`) are exempted by an explicit
+`NON_FLAGS` allow-list — exempted, rather than forgotten.
+
+**Consequences.** `brood --debug-flags` is now the answer to "which knob do I reach for",
+including for the scheduler and the GC, where it previously answered nothing. `CLAUDE.md`'s
+table keeps its distinct job: it is the *annotated* form, carrying the measurement history
+behind each default, and is not required to grow a row per flag. Adding a flag now costs one
+catalogue line, enforced — which is the point: the gap did not open through carelessness, it
+opened because closing it was optional.

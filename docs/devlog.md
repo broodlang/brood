@@ -10331,3 +10331,44 @@ reports `0 tests` for most of them and the verdict is the exit code plus a grep 
 `correct: false` (the Makefile recipe does exactly that). Read the recipe before
 reproducing a gate by hand.
 
+
+## 2026-09-04 (later) — the flag catalogue is complete, and gated in both directions (ADR-319)
+
+Handoff work-queue item 1. The runtime read 101 `BROOD_*` names; `debug_flags.rs` catalogued
+58. The 43-name gap was not the editor/GUI residue the file's own rationale predicted — it was
+the worker count, the reduction budget, the steal grace, every GC tuning knob and four JIT
+levers. So the curation was reversed in the only direction that matters: the list is complete,
+the triage groups print first, and the two new groups (diagnostics-and-checking, host
+environment) print last.
+
+The load-bearing part is the new test, not the 43 entries: `every_runtime_flag_is_catalogued`
+scans `crates/*/src` + `std/` for quoted `"BROOD_…"` literals and fails naming the file it
+found. **It caught one on its first run** — `BROOD_EMBED_RUNTIME`, which my own grep of
+`crates/*/src` had missed because it is read in `crates/nest/build.rs`. That is the whole
+argument for the test in one instance: the hand method that produced the list also produced
+the omission.
+
+Sabotage, per the rule: a fake `BROOD_TOTALLY_UNCATALOGUED` read added to `coverage.rs` fails
+the test naming the file, and dropping `HOST` from `GROUP_ORDER` fails
+`every_group_is_in_the_print_order` — the case that matters, since a group missing from the
+print order would drop seven flags from the output in silence.
+
+Also fixed, found while auditing: `crates/lisp/tests/jit.rs` told the reader to run
+`BROOD_JIT_INLINE=1` to exercise the self-inliner. The self-inliner has been **default-ON**
+since the two-stage tiering work (2026-06-17) and the runtime stopped reading that name when
+the default flipped — so the note instructed you to arm nothing, and read the default
+backwards while doing it. Exactly the class `every_catalogued_flag_exists_in_the_source`
+exists to prevent, living in a test file rather than in the catalogue.
+
+Nothing was deleted: no read turned out to be a dead lever, and no name in CLAUDE.md's table
+is absent from the source (checked both ways).
+
+**Trap of the day, worth the line:** judging the documented 16 GB-cap exception
+(`tests/wasm_sandbox_limits_test.blsp`, expected 7/7 uncapped) read **3 passed, 4 failed**
+— and the top failure named the reason if you looked past the assertion diffs: `unbound
+symbol: %wasm-load`. `make release` builds `brood` with `--no-default-features` plus
+gui/treesit/jit/stdimage/dev-tools, so **the release binary has no `wasm` feature at all**
+and `wasm/instantiate` denies everything. Under `target/debug/brood` (default features, which
+include `wasm`) the same file is 7/7. So "judge it uncapped" means uncapped *with a binary
+that has the feature under test* — three of the four failures were plain `:denied` assertion
+diffs that read exactly like a real sandbox regression.

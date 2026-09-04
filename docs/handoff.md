@@ -5,7 +5,162 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Addendum 2026-09-04 (later, latest) — the tree-walker→VM router is default-ON (ADR-318),
+## Work queue — written 2026-09-04 for the next session (read this first, then the addenda)
+
+State when written: `main` = `5f2c89e6`, pushed, CI green on the previous tip; no open bug in
+`known-issues.md`; the tree-walker→VM router is default-ON (ADR-318). Pick items **in order**.
+One item per session is fine. Each item says what to do, how to verify, and what "done" means.
+
+### Rules that apply to every item (they are all in CLAUDE.md; these are the ones that bite)
+
+1. **Green first.** Before starting: `make green --local` must print `green`. If it says the
+   .blsp gates did not run because a binary is stale, run `make release` (in the background —
+   it takes more than the 10-minute foreground limit) and re-run.
+2. **Build uncapped, run capped.** Never put `ulimit -v` in front of `cargo build`. Put
+   `( ulimit -v 16000000; … )` in front of every test run, with `-j1`.
+3. **Long commands die at 10 minutes in the foreground.** `make release`, `cargo nextest run
+   -p brood -j1`, a full `make ab` sweep: run them with `run_in_background`, write to a log
+   file, and grep the log for `FAIL|TIMEOUT|Summary` at the end. Background tasks are
+   sometimes killed on this box; if one dies, re-run it in the foreground split in halves.
+4. **Known exception:** `tests/wasm_sandbox_limits_test.blsp` fails under the 16 GB cap and
+   passes uncapped (7/7). A capped suite run whose ONLY red is that file is green.
+5. **Breakage files are programs, not test suites.** `brood --test breakage/x.blsp` prints
+   `0 tests` for most of them; the verdict is exit code 0 AND no `correct: false` line in the
+   output. `make breakagetests` does this for you.
+6. **Perf:** use `make ab BASE=HEAD ARGS="--floor"` and `make ab-vm BASE=HEAD`, never hand-timed
+   loops. A row is a regression only above `max(5%, 2 × floor)`. A delta that is small but many
+   floor-multiples gets a `perf stat` probe: flat instructions + higher icache misses = code
+   layout (KI-100), record it and move on.
+7. **Every guard you write: sabotage it.** Break the fix, see the test go red, restore.
+8. **Git:** commit straight to `main`, no branch, no `Co-Authored-By` trailer, never `rebase`/
+   `stash`/`reset`/`checkout`. Before pushing: `git fetch`, `git merge --ff-only origin/main`
+   (or `git merge origin/main` if diverged), rebuild, re-run the suite, then push.
+9. **Docs per change:** a dated `docs/devlog.md` entry; an ADR in `docs/decisions.md` for a
+   design choice (take the number after the last `## ADR-` heading in that file — 318 when
+   this was written); a KI row in `docs/known-issues.md` for a bug (the number after the
+   highest existing row — 101 when this was written); update this file's top addendum.
+
+### Item 1 — Retire and catalogue the environment flags (cheap, reduces surface)
+
+**Why.** The runtime reads 96 `BROOD_*` variables; the catalogue in
+`crates/lisp/src/debug_flags.rs` lists 60. Twenty are `BROOD_NO_*` opt-outs of defaults that
+have held for weeks.
+
+**Do.**
+1. List the gap: `comm -23 <(grep -rhoE 'BROOD_[A-Z0-9_]+' crates/lisp/src --include=*.rs |
+   sort -u) <(grep -oE '"BROOD_[A-Z0-9_]+"' crates/lisp/src/debug_flags.rs | tr -d '"' | sort -u)`.
+2. For each uncatalogued flag: find where it is read (`grep -rn NAME crates/lisp/src`), read
+   the comment, and either **add it to the catalogue** (one `f(NAME, GROUP, "…")` entry) or
+   **delete the read and the branch behind it** if it is a dead experiment lever. Do not delete
+   an opt-out whose default shipped less than 30 days ago (check the CLAUDE.md flag table).
+3. Make the catalogue test bidirectional: in `debug_flags.rs` tests, add a test that scans
+   `crates/lisp/src` for `BROOD_[A-Z0-9_]+` string literals and fails on any name not in the
+   catalogue (allow-list the few that are not flags, e.g. `BROOD_GIT_SHA`, `BROOD_STDLIB_HASH`,
+   `BROOD_COOKIE`). Sabotage: add a fake read, watch it fail.
+4. Update the CLAUDE.md flag table for anything deleted.
+
+**Verify.** `cargo nextest run -p brood -E 'binary(brood) & test(debug_flags)'` (capped), then
+`make green --local`, then clippy: `cargo clippy --all-targets --all-features -- -D warnings`.
+**Done when** the two counts match and the new test is in.
+
+### Item 2 — Decide ADR-314's default: the prelude image (39% of startup)
+
+**Why.** `BROOD_PRELUDE_IMAGE=1` cuts an empty `brood file` run from 13.5 to 8.3 ms. It shipped
+default-on once and was reverted the same day; the fix is in, the differential
+`crates/cli/tests/prelude_image_matches_source.rs` passes with no exclusions. What is missing is
+a deliberate flip with a benchmark refresh.
+
+**Do.** Read ADR-314 in `docs/decisions.md` first (search `## ADR-314`). Then:
+1. Flip the read in the kernel so the image is ON unless `BROOD_NO_PRELUDE_IMAGE=1` (find it:
+   `grep -rn PRELUDE_IMAGE crates/lisp/src`). Remove the opt-in spelling; do not alias it.
+2. Update `debug_flags.rs`, the CLAUDE.md flag row, `(stdimage/status)`-style status text if it
+   mentions the flag.
+3. Run, in this order: `cargo nextest run -p cli -E 'binary(prelude_image_matches_source)'`;
+   `crates/cli/tests/` fully (`cargo nextest run -p cli -j1`, capped); the full suite
+   (`target/debug/nest test`, capped); all four artifact states the ADR lists (cold cache,
+   warm, stdlib image rebuilt under a live prelude image, rebuilt by a different `nest`) —
+   the ADR says how; `make ab BASE=HEAD ARGS="--floor"` (expect `startup` to drop, other rows
+   noise); `make smoke-bedit` (downstream app).
+4. Devlog entry with the startup numbers; amend ADR-314 with a dated "default flipped" note.
+
+**Trap.** The image id changes with every commit and every `std/` edit, so a stale artifact
+makes the run silently take the source path. Check `(stdimage/status)` reports `:live` before
+believing any measurement. **Done when** the suite, the differential, bedit and the A/B are
+green with the flag defaulted on.
+
+### Item 3 — Re-read the two remaining watch rows: KI-79 and KI-80
+
+**Do.** In `docs/known-issues.md`, find the index rows for KI-79 and KI-80 (still marked ⚠️)
+and their sections. For each: try the recorded repro 10× on the current binary. Either (a) it
+reproduces — fix it (it is then the only open bug and outranks everything else here), or (b)
+it does not — write a dated resolution note in the section and change the row to
+✅/📦, following the KI-88 archive note as the template (`## KI-88` section).
+**Done when** neither row carries ⚠️.
+
+### Item 4 — Move `nest`'s dispatch into Brood (the biggest "write the language in the language" gap)
+
+**Why.** `crates/nest/src/main.rs` is 2,700 lines of Rust argument parsing and dispatch over
+`std/tool/project.blsp`. The `brood` binary already bootstraps into `(repl-run)`; `nest`
+should be the same thin shell.
+
+**Do (incrementally, one subcommand per commit).**
+1. Read `crates/nest/src/main.rs` and `std/tool/project.blsp`; list which subcommands already
+   have a Brood function (`project/check`, `project/run`, `project/run-tests`, …) and which
+   logic lives only in Rust.
+2. Add a `std/tool/nest.blsp` with `(nest/main argv)` that parses argv (use `os/argv`-style
+   vectors; `nest completions` needs the same table) and calls the `project/*` functions.
+3. Move one subcommand at a time: `doc`, `format`, `completions` first (pure), `test`/`check`/
+   `run` next, package-manager commands last. Each move deletes the Rust arm.
+4. Keep `main.rs` for what genuinely needs Rust: process exit codes, the `--brood-*` reserved
+   argv namespace (ADR-257), MCP transport if it is Rust today.
+
+**Verify per step.** `cargo nextest run -p nest -j1` (capped) — these tests run the real binary;
+`make green --local`; `make smoke-bedit`. **Done when** `main.rs` is under ~300 lines.
+
+### Item 5 — Split `crates/lisp/src/core/heap.rs` (7,500 lines)
+
+**Do.** The GC, CHAMP, equality and VM-cache pieces are already child modules under `heap/`
+(`use super::*` reaches private items). Move the next cohesive groups the same way, one per
+commit, no behaviour change: source positions + definition sites; the env chain + globals;
+the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --all-targets
+--all-features -- -D warnings`, `cargo nextest run -p brood -j1` (background, capped).
+**Done when** `heap.rs` is under ~3,000 lines and the layout table in CLAUDE.md is updated.
+
+### Item 6 — Perf mechanisms (only after 1–5, each is a multi-session piece)
+
+- **`MakeClosure` into the JIT subset** — `docs/compute-frontier.md`, search `MakeClosure is
+  not in the JIT subset`; the landing order is written there. Gate with `make ab` on `nqueens`.
+- **Zero-copy message passing** — `docs/runtime-frontier.md` A2/A3. Read A3's warning before
+  touching promotion: promoting to share grows the append-only region without bound.
+- **A gate on new bare names** — `ROADMAP.md`, "The bare namespace is a FLOW". A test that
+  fails when the bare-name count rises above the recorded number unless the ROADMAP is edited.
+
+### Item 7 — Documentation debt (do a slice whenever a session has spare time)
+
+- **Docstring examples**: 29% coverage. Every indented `form → result` example in a docstring
+  is executed by `tests/doc_examples_test.blsp`, so each added example is a test. Pick a std
+  module, add examples, run that test file.
+- **Archive split**: `docs/decisions.md` is 1.3 MB, `known-issues.md` 0.5 MB, `devlog.md`
+  0.7 MB. Move closed KI sections older than 60 days to `docs/known-issues-archive.md` (keep
+  the index row and add a link); move ADRs superseded by a later ADR to
+  `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
+  and duplicate numbers — run `make green --local` after each move.
+
+**Addendum 2026-09-04 (latest) — work-queue item 1 is DONE: the flag catalogue is complete and
+gated both ways (ADR-319).** `brood --debug-flags` now prints every `BROOD_*` the runtime
+reads (was 58 of 101), triage groups first and the two new groups — diagnostics-and-checking,
+host environment — last; printing is driven by `GROUP_ORDER`, so an entry no longer splits its
+group and prints the heading twice. The load-bearing piece is
+`debug_flags::tests::every_runtime_flag_is_catalogued`, which scans `crates/*/src` + `std/` for
+quoted `"BROOD_…"` literals and names the file: **it caught `BROOD_EMBED_RUNTIME` on its first
+run**, which the hand grep that produced the 43-name list had missed (it is read in
+`crates/nest/build.rs`). Both sabotages verified. Nothing was deleted — no read turned out to
+be a dead lever, and CLAUDE.md's table has no stale name in either direction. One stale
+instruction was fixed on the way: `crates/lisp/tests/jit.rs` told you to run `BROOD_JIT_INLINE=1`
+to exercise the self-inliner, which has been default-ON since 2026-06-17 under a name the
+runtime no longer reads. **Next: item 2 (ADR-314's prelude-image default).**
+
+**Addendum 2026-09-04 (later) — the tree-walker→VM router is default-ON (ADR-318),
 KI-88 archived as dormant with the watchdog as its tripwire.** `BROOD_NO_TW_REENTRY=1` is the
 opt-out; `BROOD_TW_REENTRY=1` no longer exists. Gate: suite 5510/5511 in 217 s (vs 268–316 s
 with the router off the same day), breakage 23/23 with the genserver repro 30/30, A/B at both
