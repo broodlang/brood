@@ -6346,6 +6346,32 @@ the tests written for the feature.*
 `std/** + tests/** + examples/**` warns again. So it depends on what shares the process, not
 on a particular companion file. A count- or GC-sensitive registry effect would fit that shape.
 
+**Narrowed 2026-09-04, after filing.** Four facts that cut the search down:
+
+1. **The runtime is correct on both arms.** A program that does `(defrecord usd (cents))`,
+   `(defmethod num/mul [usd :int] …)` and then `(* 3 (usd 500))` answers `1500` with the image
+   on and off, and `(get *multi-algebra* 'num/mul)` is `:commutative` on both. So the derive
+   itself works; this is the **checker's** view of the world, not the dispatcher's.
+2. **Only the DERIVED mirror is lost.** Line 137 is `(* 3 (usd 500))` — the `[:int usd]`
+   commutative mirror, which `%register-method` derives at load time. The *declared*
+   `[usd :int]` on line 135 never warns. One warning, not two.
+3. **That is exactly the entry the checker cannot see in the file.** `MultiInfo`
+   (`types/check/protocol.rs`) unions "this file's `register-method` forms" with "the runtime
+   `*methods*` registry". A declared method is a form in the file; a derived mirror exists
+   **only** in the runtime registry. So the failing lookup is precisely the one that depends on
+   the registry rather than on the source text.
+4. **It explains the non-monotonic scope.** `std/**` + `tests/**` is clean, `tests/**` alone
+   warns. With `std/**` in the set, `std/num.blsp` is checked from source, so its `defmulti`
+   and `defmethod` forms are *evaluated* and the registry is populated that way. Without it,
+   `num` arrives materialised from the stdlib image — and under the *prelude* image the derived
+   entry does not reach the checker's `*methods*` snapshot.
+
+So the question to answer next is narrow: **why does the runtime `*methods*` registry, as read
+by `MultiInfo`, lack the derived mirror when the prelude was materialised rather than
+evaluated** — while the same registry read from the same process at runtime has it. Suspect the
+globals snapshot/restore `check` wraps its cross-file load in (`%isolate`), interacting with a
+registry global that is a materialised binding rather than one created by evaluating `def-`.
+
 **Where to look.** The checker resolves the record's identity and then finds no impl under it,
 which is the shape of KI-89 (orphaned `*record-ids*` writes, whose diagnostic
 `BROOD_REG_TRACE=1` prints each registry write with the writer's ancestry chain and every
