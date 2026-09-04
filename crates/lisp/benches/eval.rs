@@ -194,7 +194,7 @@ fn cons_build(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
-/// End-to-end Brood `(sort < …)` — the workload that motivated the campaign.
+/// End-to-end Brood `(sort … <)` — the workload that motivated the campaign.
 /// Forces the in-language `%merge-sort` path (custom comparator), not the Rust
 /// `%sort-asc` fast-path, so it reflects interpreter dispatch over list-walking.
 /// Data is built in-language (xorshift) so parsing stays out of the hot region.
@@ -208,7 +208,7 @@ fn sort_brood(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
                    z (bit/xor y (bit/shift-left y 17))) \
                (gen (- n 1) z (cons (math/rem (bit/and z 1048575) 1000000) acc)))))) \
          (def data (gen {n} 123456789 nil)) \
-         (count (sort < data))"
+         (count (sort data <))"
     );
     bencher
         .with_inputs(|| interp_on(eng))

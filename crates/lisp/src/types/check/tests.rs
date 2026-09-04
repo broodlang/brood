@@ -5622,6 +5622,46 @@ fn mutually_recursive_loaded_functions_infer_in_bounded_time() {
     );
 }
 
+/// The sequence ACCESSORS carry their domain. `second`/`third` always did; `first`,
+/// `rest`, `nth` and `last` — the primitives the other two are built out of — carried
+/// no signature at all, so `(nth 7 0)` and `(first "ab")` type-checked in silence and
+/// failed at runtime. The domain is `seqable`, which is what their own Rust
+/// `wrong_type` message names ("list, vector, set, map or bytes") — a string is not in
+/// it, and neither is any scalar.
+#[test]
+fn the_sequence_accessors_reject_a_non_seqable_argument() {
+    for (call, culprit) in [
+        ("(first 7)", "first"),
+        ("(rest \"ab\")", "rest"),
+        ("(last :k)", "last"),
+        ("(nth \"ab\" 0)", "nth"),
+        ("(nth 7 0)", "nth"),
+    ] {
+        let ws = file_warnings(&format!("(defmodule test/mod)\n(defn f () {call})"));
+        assert!(
+            ws.iter()
+                .any(|w| w.contains(culprit) && w.contains("seqable")),
+            "expected a seqable-domain warning for {call}, got {ws:?}"
+        );
+    }
+}
+
+/// …and stays silent on every argument that genuinely works, which is the half that
+/// decides whether the signature above is shippable. A RECORD is the load-bearing case:
+/// it is a `map` to the type system and it IS indexable (through its Seqable view), so
+/// a domain that excluded `map` — reality, since a plain map raises — would false-flag
+/// every `(first some-record)`. Soundness over completeness: the signature deliberately
+/// admits the plain map it cannot distinguish.
+#[test]
+fn the_sequence_accessors_stay_silent_on_what_actually_works() {
+    let src = "(defmodule test/mod)\n        (defrecord point (x y))\n        (defn a (v) (first v))\n        (defn b () (first [1 2]))\n        (defn c () (first {:a 1}))\n        (defn d () (first (point 1 2)))\n        (defn e () (nth (list 1 2) 0))\n        (defn f () (nth nil 0))\n        (defn g (v) (nth v 0 :missing))";
+    let ws = file_warnings(src);
+    assert!(
+        !ws.iter().any(|w| w.contains("seqable")),
+        "no seqable warning should fire on valid accessor uses, got {ws:?}"
+    );
+}
+
 // ---- unused :use import lint (Pass 4.5) ----
 
 #[test]
@@ -5632,6 +5672,20 @@ fn unused_use_import_is_flagged() {
         ws.iter()
             .any(|w| w.contains("unused :use import") && w.contains("io")),
         "expected unused :use import warning for io, got {ws:?}"
+    );
+}
+
+/// A module imported only for a MACRO is used. The macro head does not survive
+/// expansion, so scanning only the expanded tree reported `gen` — whose `defserver`
+/// is the single most likely reason to import it — as unused, and the fix it advised
+/// (delete the `:use`) leaves the file unable to expand at all.
+#[test]
+fn a_use_import_reached_only_through_a_macro_is_not_unused() {
+    let ws =
+        file_warnings("(defmodule test/mod (:use gen))\n(defserver s (n)\n  (cast :inc (+ n 1)))");
+    assert!(
+        !ws.iter().any(|w| w.contains("unused :use import")),
+        "a macro-only :use import is load-bearing, got {ws:?}"
     );
 }
 
@@ -6728,12 +6782,22 @@ fn file_signatures_reads_pattern_clauses() {
            ((acc val) (conj acc (string/->number val))))",
     );
     assert_eq!(sigs.len(), 1, "{sigs:?}");
-    assert_eq!(sigs[0].1, "(any, string) -> any", "{sigs:?}");
+    // `acc` is not `any`: every clause body hands it to `conj`, whose declared domain now
+    // flows BACKWARDS into the parameter. That narrowing is the point of giving `conj` a
+    // signature, so it is pinned rather than relaxed — a change to `conj`'s domain has to
+    // come past this line on purpose.
+    assert_eq!(
+        sigs[0].1, "(nil | pair | vector | map | set, string) -> any",
+        "{sigs:?}"
+    );
     // Two arms that agree on a position keep it: a literal head pins its type. The return
-    // stays `any` — `(conj acc …)` over an unconstrained `acc` says nothing flat; it is the
+    // stays `any` — `conj` is declared `-> any`, so its result says nothing flat; it is the
     // call-site specialization test below that types it from what a combinator hands over.
     let sigs = signatures("(defn op ((acc \"+\") (conj acc 1)) ((acc \"-\") (conj acc 2)))");
-    assert_eq!(sigs[0].1, "(any, string) -> any", "{sigs:?}");
+    assert_eq!(
+        sigs[0].1, "(nil | pair | vector | map | set, string) -> any",
+        "{sigs:?}"
+    );
 }
 
 #[test]

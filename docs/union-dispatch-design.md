@@ -177,7 +177,7 @@ does, that is the odd one out:
 Records get strictness and a visible extension point; the numeric tower gets a hidden kernel
 default. **Decision: cross-type comparison raises unless the program supplies a resolver** —
 either a declared method for the type pair, or a comparator function at the call site (which
-`(sort less? coll)` already provides).
+`(sort coll less?)` already provides).
 
 ### The blast radius, measured rather than assumed
 

@@ -70,7 +70,11 @@ For an even-length sequence, returns the mean of the two middle values.
       (if (= (math/rem n 2) 1)
         (nth sorted mid)
         (/ (+ (nth sorted (- mid 1)) (nth sorted mid)) 2)))))
-(sig median (seqable -> number))
+;; `(or list vector set)`, not `seqable`, for the three that SORT: `sort` materialises
+;; through `Heap::seq_items` and raises on a string, a map or bytes, so `seqable` here
+;; promised a domain the body cannot honour. The fold-only functions above keep the
+;; wider declaration — they never sort.
+(sig median ((or list vector set) -> number))
 
 (defn percentile (xs p)
   "The `p`-th percentile (0–100) of `xs` using the nearest-rank method.
@@ -85,14 +89,14 @@ For an even-length sequence, returns the mean of the two middle values.
           rank (math/max 1 (ceil (* (/ p 100.0) n)))
           idx (math/min (- n 1) (- rank 1)))
       (nth sorted idx))))
-(sig percentile (seqable number -> number))
+(sig percentile ((or list vector set) number -> number))
 
 (defn quantile (xs q)
   "The `q`-th quantile (0.0–1.0) of `xs` using the nearest-rank method.
 
     (stats/quantile [1 2 3 4] 0.5)   → 2"
   (percentile xs (* q 100)))
-(sig quantile (seqable number -> number))
+(sig quantile ((or list vector set) number -> number))
 
 ;; ---- range and spread --------------------------------------------------------
 
