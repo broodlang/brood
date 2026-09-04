@@ -20002,8 +20002,11 @@ path only, leaving the default path — the one everybody runs — paying the fu
 
 ## ADR-314 — The prelude image: materialise the prelude's bindings, don't re-evaluate its forms
 
-**Status:** **OPT-IN, not default** (2026-09-02) — shipped default-on and reverted to
-opt-in the same day; `BROOD_PRELUDE_IMAGE=1` enables it. Implemented in
+**Status:** **OPT-IN** (`BROOD_PRELUDE_IMAGE=1`). Since 2026-09-04 that is for a **known,
+reproducible defect** — KI-106, a multi-file `nest check` losing a record's ability impl —
+rather than for the unproven history that kept it off before. The 2026-09-04 attempt to flip
+the default reproduced and fixed the original blocker (KI-105) and then found this one; see
+the amendment at the end of this ADR. Implemented in
 `crates/lisp/src/builtins/startup_image.rs` (`write_prelude_image` / `load_prelude_image`)
 and `crates/lisp/src/lib.rs` (`boot_from_prelude_image`, tried ahead of the text cache).
 
@@ -20056,8 +20059,10 @@ sabotage**, i.e. none of them reproduces it:
    left out of the build there is no section at all, and `require` loads from source.
 
 So the mechanism recorded above — "a stale `*image-sources*` makes section reads land on
-garbage" — is **not confirmed**, and the two earlier accounts of this bug in this ADR's
-history were wrong too. What is known: the failure was real and repeatable by hand at the
+garbage" — was **not confirmed at the time of writing**, and the two earlier accounts of this
+bug in this ADR's history were wrong too. **It was confirmed on 2026-09-04** — the hypothesis
+was right and the three reproductions were each wrong in the same way; see the amendment at
+the end of this ADR. What is known: the failure was real and repeatable by hand at the
 time (a `crash-report` section of 227 bytes against a healthy 20552), it involved a stdlib
 image written by a *lean* `nest` and read by a *full* `brood`, and it stopped happening after
 the replay landed. Whether the replay is the fix or merely perturbed the state is unproven.
@@ -20068,12 +20073,13 @@ did, which is this ADR's own stated rule. But **it is not evidence the image is 
 that — not any known defect — is why the default stays off. A `⚠️ watching`-shaped situation,
 in ADR clothing.
 
-**Why the default is still off.** Not for a known defect — there is no reproducing failure
-left. It is off because this feature interacts with two other on-disk caches in
-state-dependent ways, three separate wrong conclusions were drawn about it in one session
-(two of them from measuring against stale artifacts), and the default costs nothing to leave
-alone: it is exactly v0.23.1's behaviour. Flipping it on is a deliberate decision to take,
-not one to drift into.
+**Why the default was off (2026-09-02 — 2026-09-04).** Not for a known defect — there was no
+reproducing failure. It was off because this feature interacts with two other on-disk caches
+in state-dependent ways, three separate wrong conclusions were drawn about it in one session
+(two of them from measuring against stale artifacts), and the default cost nothing to leave
+alone: it was exactly v0.23.1's behaviour. Flipping it on is a deliberate decision to take,
+not one to drift into. **That decision was taken on 2026-09-04, and the "no reproducing
+failure" premise turned out to be the thing to attack rather than to rely on** — see below.
 
 **Context — this supersedes ADR-138's rejected alternative, on numbers ADR-138 did not
 have.** That ADR cached the *expanded prelude as text*, which removed the ~27 ms macro
@@ -20132,8 +20138,8 @@ here has been a missing name or a lost attribute. **Sabotage-verified three ways
 dropping def sites, dropping the `defdyn` marks, and restoring the wrong (value-is-native)
 filter each turn it red.
 
-**The differential excludes the stdlib image's install bookkeeping** — the same six names
-`image_matches_source.rs` excludes (`*image-sources*`, `*std-image-file*`,
+**Historical (superseded): the differential USED TO exclude the stdlib image's install
+bookkeeping** — the same six names `image_matches_source.rs` excludes (`*image-sources*`, `*std-image-file*`,
 `*std-image-sections*`, `*std-impls*`, `*std-regs*`, `*std-require-edges*`), and for the
 same reason: their values track how far *that* install has got (`%std-image-tables!` clears
 `*std-image-sections*` once any module materialises), so they differ by module load order
@@ -20153,6 +20159,77 @@ a deliberate sabotage. It now asserts the dump's `GLOBALS n` header is **present
 the line count matches it, before comparing anything. That is
 `never-assert-the-absence-of-failures` applied to a differential, and it is the reason this
 gate can be trusted.
+**Amendment 2026-09-04 — the flip was attempted, found two bugs, fixed one, and was reverted.
+The default stays off, now for a reason you can reproduce in one command.** Deciding this
+default meant working the four artifact states this ADR names, rather than re-reading the
+argument. The fourth — *the stdlib image re-laid by
+a different writer* — reproduced the original `unbound symbol: io/puts` on the first attempt
+and 5 times out of 5, against 0 of 5 with `BROOD_NO_PRELUDE_IMAGE=1`.
+
+`%add-image-source!` **appends**. An imaged boot restores `*image-sources*` holding a snapshot
+of whatever install was live when the prelude image was written; replaying `%std-image-install`
+appends the current directory beside it, leaving **two entries for the same file path** with
+the stale one first, and `%image-section-for` scans in install order. `(count *image-sources*)`
+reads **2** on the imaged arm against **1** on the source arm.
+
+The detail that hid it for three attempts: **the stale entry's path still exists and reads
+fine.** A missing file, or an offset past the end, fails cleanly and `require` falls back to
+source. Same path, different layout, still readable — the read succeeds and returns garbage.
+Each of the three earlier reproductions broke exactly that condition, which is why all three
+were green under sabotage. So the replay was a *partial* fix: it corrected the directory it
+appended and left the stale one in front of it.
+
+Fix: `%std-image-reinstall!` (`std/prelude/tools.blsp`) clears the registry to its `def-`
+values before installing, and the imaged boot calls that instead. Guarded by
+`crates/cli/tests/prelude_image_survives_a_relaid_stdlib_image.rs`, sabotage-verified —
+**after its first cut passed its own sabotage** by arming the repro in the wrong order (the
+prelude image was written before any stdlib image existed, so its snapshot was empty). It now
+discards the prelude artifacts, re-cold-boots with the full image live, and asserts that
+arming boot was genuinely a source boot.
+
+Two further gaps closed while flipping:
+- the imaged boot replayed the install from **Rust**, bypassing the Brood-level
+  `BROOD_IMAGE_TRACE` line. `BROOD_IMAGE_TRACE` is the documented way to tell an imaged run
+  from one that quietly fell back to source, so with the image default-on it would have gone
+  quiet on the path everyone now takes. It is emitted from the replay too.
+- `prelude_image_matches_source.rs` set only the opt-in spelling. With the default flipped the
+  arms had to swap, and it now clears **both** spellings on both arms, so an ambient
+  `BROOD_PRELUDE_IMAGE=1` cannot make the source arm take the image path and the differential
+  compare the image with itself. Sabotage-verified: with both arms imaged, the test refuses.
+
+**Then the gate caught a SECOND, unrelated defect, and the flip was reverted (KI-106).** With
+the image on, `nest check <any other file> tests/record_test.blsp` warns `*: no num/mul method
+for [:int :record-test/usd]`; with `BROOD_NO_PRELUDE_IMAGE=1` the same command is clean. Two
+files in one process is the entire repro — one file alone is clean, order does not matter, and
+it reproduces on the **pre-fix binary at HEAD** under `BROOD_PRELUDE_IMAGE=1`, so it is not
+something the KI-105 fix introduced. It reddens CI's zero-warning checker gate, which is a
+hard reject (ADR-123/124/125/126), so the default cannot go on. Reverted to opt-in; everything
+else from the attempt is kept, because none of it depends on the default.
+
+**What this ADR should now say about its own history.** The old justification — "off because
+three wrong conclusions were drawn about it and the default costs nothing to leave alone" — was
+an argument from unease. It has been replaced by two named bugs, one fixed with a
+sabotage-verified gate and one with a one-line repro. That is the difference between a feature
+you are nervous about and a feature you know the state of, and it is what the next attempt
+should build on: fix KI-106, re-run the four artifact states, re-run `nest check` over
+`std/ + tests/ + examples/` **with the image on** (the gate that caught it), then flip.
+
+The measurements from the attempt, for whoever picks it up: `make ab BASE=HEAD --floor`,
+best-of-7 over 30 rows, image on versus off — `startup` **−11.1% (best-of-11, 0.0% floor)** and
+**−15.2%** in the 30-row sweep, `errors-deep` −6.7%, `pipeline` −13.5%, `reduce` −7.1%,
+`sieve` −7.3%, `strings` −6.8%, every other row inside its floor and **no regressions** (the
+three positives — `ackermann` +2.8%, `spawn-live` +7.7%, `spawn` +1.5% — are all under their
+own measured floors of 5.3%, 13.7% and 3.1%). Release-build boot 21.6 → 13.5 ms. The win is
+real and it is concentrated exactly where predicted: short-lived runs.
+
+The rule this records: **"we could not reproduce it" is a description of the attempts, not of
+the bug.** This ADR kept the win switched off on the strength of three failed reproductions
+that were each wrong the same way. When a real failure resists reproduction, enumerate the
+conditions it needs and vary them one at a time — the condition none of the three attempts
+preserved was the cheapest one to state. And the corollary the second bug supplies: **run the
+project's own gates under the flag, not just the feature's tests.** KI-106 was invisible to
+both differentials and to all 1377 suite cases; `nest check` over the tree found it at once.
+
 ## ADR-315 — Stopping on a failure is a mechanism you reach for, not something primitives do
 
 **Date:** 2026-09-01

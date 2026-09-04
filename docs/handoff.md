@@ -146,7 +146,33 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-04 (latest) — work-queue item 1 is DONE: the flag catalogue is complete and
+**Addendum 2026-09-04 (latest) — work-queue item 2 is ANSWERED, and the answer is NO: the
+prelude image stays opt-in, now for a reproducible reason (ADR-314, KI-105 fixed, KI-106 open).**
+The item assumed the flip was paperwork. It was not. Working ADR-314's four artifact states
+reproduced its "unreproducible" original failure on the first attempt (5/5 imaged, 0/5 opted
+out) — `%add-image-source!` appends, so an imaged boot's restored `*image-sources*` snapshot
+plus the replay left TWO directories for the same file path, stale one first, and that path
+still reads, so a bad offset returns garbage instead of failing back to source. **Fixed**
+(`%std-image-reinstall!`, in Brood) and gated by
+`crates/cli/tests/prelude_image_survives_a_relaid_stdlib_image.rs` — whose first cut passed its
+own sabotage because it armed the state in the wrong order.
+
+**Then `nest check` over `std/ + tests/ + examples/` with the image on found KI-106**, which is
+open: `nest check <any other file> tests/record_test.blsp` loses a record's ability impl. Two
+files is the whole repro; it reproduces on the pre-fix binary at HEAD, so it is old. It reddens
+CI's zero-warning gate, so the default was reverted to opt-in.
+
+**Nothing else about the image caught it** — both differentials pass and all 1377 suite cases
+pass with the image default-on. The generalisable bit: *evaluate a flag by running the
+project's gates under it, not only the tests written for the feature.*
+
+**The win is now measured**, for whoever picks this up: `startup` −11.1% (0.0% floor),
+`pipeline` −13.5%, `sieve` −7.3%, `reduce` −7.1%, `strings` −6.8%, `errors-deep` −6.7%, no
+regressions across 30 rows; release boot 21.6 → 13.5 ms. **Item 2 becomes: fix KI-106, then
+re-run the four artifact states AND the checker gate under the flag, then flip.**
+**Next: item 3 (re-read KI-79/KI-80).**
+
+**Addendum 2026-09-04 (later) — work-queue item 1 is DONE: the flag catalogue is complete and
 gated both ways (ADR-319).** `brood --debug-flags` now prints every `BROOD_*` the runtime
 reads (was 58 of 101), triage groups first and the two new groups — diagnostics-and-checking,
 host environment — last; printing is driven by `GROUP_ORDER`, so an entry no longer splits its

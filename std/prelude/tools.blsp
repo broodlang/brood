@@ -949,6 +949,34 @@ case `require` keeps loading stdlib modules from source exactly as before."
             (dissoc (dissoc (dissoc idx "%std-edges") "%std-impls") "%std-regs"))
           (count (keys idx)))))))
 
+(defn- %std-image-reinstall! ()
+  "Install the stdlib image from a PRISTINE registry. The entry point for a boot from the
+PRELUDE image (ADR-314), which restores bindings rather than evaluating the prelude, and so
+brings back a *snapshot* of whatever install was live when that image was written.
+
+`%add-image-source!` appends, so replaying `%std-image-install` over that snapshot leaves
+TWO directories for the same file — the stale one first, and `%image-section-for` scans in
+install order. The stale entry's path still exists (it is the same file), so the read
+succeeds and returns garbage from the current file at an old offset rather than failing
+cleanly and falling back to source. Observed as `unbound symbol: io/puts` on a tree where
+nothing is wrong with `io`, and reproducible on demand: write the prelude image with a full
+stdlib image live, rebuild the stdlib image with fewer modules, boot. That is the failure
+ADR-314 recorded as unconfirmed after three attempts to reproduce it; all three broke the
+same-path-still-readable condition that makes the garbage read possible.
+
+So clear the registry to the values `def-` gives it on a source boot, then install. Sound
+because nothing else can have installed yet: this runs during boot, before any project
+image and before any `require`."
+  (def *image-sources* (list))
+  (def *image-path* nil)
+  (def *image-sections* {})
+  (def *std-image-sections* nil)
+  (def *std-image-file* nil)
+  (def *std-require-edges* nil)
+  (def *std-impls* nil)
+  (def *std-regs* nil)
+  (%std-image-install))
+
 (defn- %require-record-edge! (key)
   ;; `reflect/current-ns` first: it is the module whose FILE is being loaded, which is the accurate
   ;; parent for every require in that file — the `(:use …)` clauses `defmodule` expands and
