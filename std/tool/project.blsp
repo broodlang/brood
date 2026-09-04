@@ -788,21 +788,108 @@ manifest is read, naming the key, not later inside whoever consumes the map."
             (or (= k "") (not (contains? *module-files* k)))))
         (fn (k) [k (get grouped k)])))))
 
+;; A module this image does NOT carry: neither the project's own nor a dependency's (both
+;; live in `*module-files*`, ADR-070). Its registrations belong to whoever loads it.
+(defn- image-foreign-owner? (m) (not (contains? *module-files* m)))
+
+(defn image-prune-foreign-registrations ()
+  "Remove from the live registries every registration OWNED by a module this project's
+image does not carry — a std module (or anything else outside `*module-files*`) that
+happened to be loaded in the session that built the image. Returns how many were removed.
+
+The registries travel in the image's root section as whole values, and a value snapshot
+carries the build session's load state with it: on 2026-09-03 the image of this very repo
+held `:tempo/tempo`, `:pq/pq`, `:queue/queue`, `:multimap/multimap`, `:log/line-backend`
+… — record ids of std modules the BUILD had loaded but an imaged boot never does — so
+every scoped `nest test` started with seven registered record ids whose constructors did
+not exist, an ability table that disagreed with the modules present, and any test asserting
+over the registries (`ability_test.blsp:471`) red from its first instruction. That was
+KI-89's residual. A registration is data about a module: it must arrive with that module,
+which the stdlib image already gets right by replaying each module's registrations as it
+materialises (`stdimage/registrations-by-module`, `%replay-std-regs!`). Pruning the
+foreign ones here is the project-image half of the same rule — the std module re-registers
+its own entries when it loads, from source or from its image. Root-level registrations
+(an unqualified key, no owner) and project/dependency-owned ones are kept.
+
+`write-image` calls this inside an `%isolate`, so the pruning is rolled back the moment
+the image is written and the running session keeps every registration it had."
+  (let (regs (stdimage/registrations-by-module)
+        impls (stdimage/%std-impls-by-module)
+        n-regs (fold (filter (keys regs) image-foreign-owner?)
+                 0
+                 (fn (n m)
+                   (fold (get regs m)
+                     n
+                     (fn (n2 t)
+                       (do (%registry-update! (get t 0) :dissoc (get t 1) nil) (+ n2 1))))))
+        n-impls (fold (filter (keys impls) image-foreign-owner?)
+                  0
+                  (fn (n m)
+                    (fold (get impls m)
+                      n
+                      (fn (n2 r)
+                        (let (aname (get r 0)
+                              op (get r 1)
+                              key (get r 2))
+                          (%registry-update! '*impls* :dissoc [[aname op] key] nil)
+                          (%registry-update! '*impl-from* :dissoc [[aname op key]] nil)
+                          (+ n2 1)))))))
+    (+ n-regs n-impls)))
+(sig image-prune-foreign-registrations (-> int))
+
 (defn write-image (root before)
   "Snapshot the bindings this project load produced into `root`'s image, grouped into
 per-module sections. `before` is the `(reflect/global-names)` list captured *before* the sources
-were loaded. Returns the entry count."
+were loaded. Returns the entry count. Written from a scope in which registrations owned by
+modules the image does not carry are pruned (`image-prune-foreign-registrations`); the
+`%isolate` puts them back once the file is on disk."
   (let (dir (path/dirname (image-path root)))
     (when (not (file/dir? dir)) (file/mkdir dir))
-    (%image-write (image-path root)
-      (project-image-sections before)
-      (project-image-fingerprint root))))
+    (%isolate (fn ()
+                (image-prune-foreign-registrations)
+                (%image-write (image-path root)
+                  (project-image-sections before)
+                  (project-image-fingerprint root))))))
 (sig write-image (string any -> any))
 
 ;; Install `root`'s image as a source of features, if it is current. Materialises the root
 ;; section (registries + declared sigs — small, and needed before anything else) and hands
 ;; `require` the directory for everything else, so each module materialises on first use.
 ;; Returns the section count, or nil for a miss (absent, stale, corrupt).
+;; `[registry-symbol value]` for every registry the kernel knows in this process — the
+;; state a root-section load is about to overwrite.
+(defn- project-registry-snapshot ()
+  (map (%registry-names) (fn (r) [r (reflect/eval r)])))
+
+;; Union of two registry values, `live` winning on a key both hold; a two-level registry
+;; (`*impls*` `{[ability op] {id f}}`, `*methods*`) unions its inner maps too.
+(defn- project-registry-merge-values (image live)
+  (cond
+    (nil? live) image
+    (nil? image) live
+    (and (map? image) (map? live))
+      (fold (%map-pairs live)
+        image
+        (fn (acc kv)
+          (let ([k v] kv
+                cur (%map-get acc k nil))
+            (%map-assoc acc
+              k
+              (if (and (map? v) (map? cur))
+                (fold (%map-pairs v) cur (fn (a2 kv2) (%map-assoc a2 (first kv2) (second kv2))))
+                v)))))
+    else live))
+
+;; Re-merge the pre-load registrations into whatever the root section installed. Through
+;; `%registry-cas!` — the registry write path — never `def`, which in module code would
+;; bind `project/*impls*` and leave the real registry untouched.
+(defn- project-registry-merge-live! (live)
+  (doseq (kv live)
+    (let ([r before] kv
+          after (reflect/eval r))
+      (when (not (= after before))
+        (%registry-cas! r after (project-registry-merge-values after before))))))
+
 (defn- project-install-image (root fp)
   (let (path (image-path root)
         idx (%image-index path fp))
@@ -817,7 +904,17 @@ were loaded. Returns the entry count."
           (%set-image-source! path (dissoc idx ""))
           (let (root-sec (get idx ""))
             (when root-sec
-              (%image-load-section path (first root-sec) (second root-sec))
+              ;; The root section REPLACES every registry global with the image's value —
+              ;; which cannot be allowed to erase what modules loaded BEFORE this point had
+              ;; registered (KI-89): `nest` boots with `datetime`, `io`, `project` … already
+              ;; loaded, and their impls were being wiped by an image whose `*impls*` did not
+              ;; happen to contain them (it did by accident before write-time pruning; with
+              ;; it, `Temporal/->iso` lost its `:datetime/date` impl on every imaged boot).
+              ;; So: snapshot the live registries, load the section, merge the live entries
+              ;; back — live wins on a conflict, because it is the loaded module's own word.
+              (let (live (project-registry-snapshot))
+                (%image-load-section path (first root-sec) (second root-sec))
+                (project-registry-merge-live! live))
               ;; The root section carries the registries, so `*require-edges*` only exists
               ;; after that load — and it is also where a headerless file's defs live, so its
               ;; own load-time requires are recorded under `""` and have to be replayed here

@@ -5,6 +5,25 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**Addendum 2026-09-04 (latest) — the file-boundary quiesce guard was red one run in three,
+and it was right: the runner's own worker/driver were still retiring at the boundary.**
+`collect-loop` retired a worker at its result and dropped its `:down`; `drain-runner` flushed the
+driver's `:down` with `(after 0)`, which only consumes one already there. Both now await the
+exit (KI-89 §2b). Suite 5508/5509 (wasm-cap exception) in 271 s. The session's work below is
+otherwise as described and was verified again on 2026-09-04 (local green gates, the new Rust
+guards, the nest guards); see `git log` for whether it has been committed.
+
+**Addendum 2026-09-03 (later) — the open watch items were worked through: three closed,
+one recommended for archive.** KI-86 reproduced deterministically (the stdlib-image rebaseline
+re-armed an opted-out collector; opt-out now sticky), KI-99's recorded mechanism was the
+harness's own probe (port slicing by `NEXTEST_TEST_GLOBAL_SLOT` closes the plausible cause),
+KI-89's residual was the PROJECT STARTUP IMAGE (ADR-317: prune foreign-owned registrations at
+write, merge live ones at install, `%registry-names` includes the prelude's) plus per-file
+quiescence in the scoped runner; KI-88 ran 325 more clean runs and the entry now recommends
+archiving with the watchdog armed. `make install` was a week stale (8162245c); refreshed, with
+stable 1.98.1 and nextest 0.9.143. **Next:** the owner's call on KI-88/`BROOD_TW_REENTRY`, then
+ADR-314's default as before. Full story in `docs/devlog.md` 2026-09-03 (stability).
+
 **Addendum 2026-09-03 (latest) — KI-97 is closed: `read-line` no longer pins a worker (ADR-059
 Phase 2).** One `brood-stdin` reader thread behind `%read-line-start`; `read-line` is a prelude
 function parking on the token (`offload`'s seam). Guard `crates/cli/tests/read_line_parks.rs`,

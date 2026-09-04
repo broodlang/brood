@@ -45,21 +45,39 @@
   ;; module pulled their definer in FIRST, so `*lineedit-keymap*` landed in `repl`'s section
   ;; and restoring `editor/lineedit` gave the module without it. Attribution now probes each
   ;; module in isolation and takes the SMALLEST introduced set containing the name.
+  ;;
+  ;; Measured in a SUBPROCESS, because "the names a require introduces" is only measurable
+  ;; in a runtime where the module is not loaded yet — and under the scoped `nest test` it
+  ;; already is: the project's startup image brings `repl` and `editor/lineedit` in before
+  ;; the first test file runs (they are dependencies of what the tooling image loads), so
+  ;; the in-process form of this test read `own` as empty of `*lineedit-keymap*` on every
+  ;; scoped run while passing solo (KI-89, 2026-09-03 — it was filed as an orphan leak).
+  ;; `exe` is resolved as the race test below does: beside the runner or one level up.
   (test "a root global is attributed to the module that defines it, not to a dependent"
-    (let (own (%isolate (fn ()
-                          (let (before (into #{} (reflect/global-names))
-                                _ (require-one 'editor/lineedit))
-                            (into #{}
-                              (filter (reflect/global-names) (fn (s) (not (contains? before s))))))))
-          via (%isolate (fn ()
-                          (let (before (into #{} (reflect/global-names))
-                                _ (require-one 'repl))
-                            (into #{}
-                              (filter (reflect/global-names) (fn (s) (not (contains? before s)))))))))
-      ;; both see the name; the definer's set is the smaller one, which is what build picks
-      (is (contains? own '*lineedit-keymap*))
-      (is (contains? via '*lineedit-keymap*))
-      (is (< (count own) (count via)))))
+    (let (dir (path/dirname (or (os/exe-path) ""))
+          exe (first (filter [(path/join dir "brood") (path/join dir ".." "brood")] file/exists?))
+          prog (path/temp "stdimage-attrib-")
+          _ (file/spit prog
+              (string/join ["(let (introduced (fn (mod)"
+                             "                    (%isolate (fn ()"
+                             "                      (let (before (into #{} (reflect/global-names))"
+                             "                            _ (require-one mod))"
+                             "                        (into #{} (filter (reflect/global-names)"
+                             "                                    (fn (s) (not (contains? before s)))))))))"
+                             "      own (introduced 'editor/lineedit)"
+                             "      via (introduced 'repl))"
+                             "  ;; both see the name; the definer's set is the smaller one, which is what build picks"
+                             "  (io/puts (str \"own=\" (contains? own '*lineedit-keymap*)"
+                             "             \" via=\" (contains? via '*lineedit-keymap*)"
+                             "             \" smaller=\" (< (count own) (count via)))))"]
+                "\n"))
+          result (if exe (os/cmd exe [prog]) nil))
+      ;; `exe` nil means no brood binary beside the runner — a legitimate environment, not a
+      ;; failure. Assert it separately so a skip is visible rather than silently green.
+      (is (or (nil? exe) (string? exe)))
+      (when result
+        (is (= (get result :exit) 0))
+        (is (= (os/cmd-out result) "own=true via=true smaller=true")))))
 
   ;; The require-edges section is keyed on a ROOT name for the same reason in reverse: as
   ;; `stdimage/*std-edges*` it made `stdimage` look already-loaded the moment that section
