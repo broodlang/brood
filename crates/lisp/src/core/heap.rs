@@ -6438,6 +6438,24 @@ impl Heap {
     ///
     /// Sorted by spelling, like `(reflect/global-names)` — a set iterates in hash order, and a
     /// caller diffing two runs or asserting on the set wants neither that nor interner order.
+    /// Record `names` as registries without writing them — the prelude-image loader's
+    /// counterpart of the insert `registry_update` does on every write. A materialised
+    /// prelude never calls `%registry-update!`, so the set the source boot built by
+    /// evaluating `(defmulti num/add :commutative)` and friends has to be carried in the
+    /// image and re-marked here; `freeze_as_shared_code` then reads it into
+    /// `SharedCode::registry_names` exactly as it does after a source boot. Without this the
+    /// imaged boot's set was 10 names to the source boot's 12 — missing `*multi-algebra*` and
+    /// `*multi-ret*`, the two only the prelude itself writes — and `project-registry-snapshot`
+    /// stopped protecting them across a section load (KI-106, the KI-89 mechanism again).
+    pub fn mark_registry_names(&self, names: &[Symbol]) {
+        let mut guard = self
+            .runtime
+            .registry_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.extend(names.iter().copied());
+    }
+
     pub fn registry_names(&self) -> Vec<Symbol> {
         let mut names: Vec<Symbol> = self
             .runtime

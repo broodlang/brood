@@ -191,6 +191,16 @@ BREAKAGE_SKIP :=
 # documented backstop working, not a bug (it briefly looked like one on 2026-08-13).
 BREAKAGE_ENV_map_volcano := BROOD_MEM_SOFT_LIMIT=4000000000 BROOD_MEM_LIMIT=6000000000
 
+check-imaged: ## Run the checker gate WITH the prelude image on (KI-106) — the feature's own tests all passed while `nest check` went red
+	# Every test written FOR the prelude image passed on 2026-09-04 — the boot differential,
+	# the stale-directory guard, all 1377 suite cases — and `nest check` over std/+tests/+
+	# examples/ went red on the first run with the image on (a multi-file check lost every
+	# derived multimethod mirror). The feature's tests are shaped by what its authors thought
+	# could break; the project's gates are not. So run the project's gate UNDER the flag.
+	# The script warms nest's own per-binary image first and ASSERTS the boot took the image
+	# path — a gate that quietly ran the source path and printed "clean" proves nothing.
+	@./scripts/check-imaged.sh
+
 check-examples: ## Run every `examples/` program and fail on an unbound symbol — the gate `examples/` never had
 	# `examples/` sits outside `make test`, `nest check` AND the breakage suite, so nothing
 	# ever ran it — and it rotted three ways unnoticed: `examples/editor` has called a module
@@ -333,7 +343,7 @@ green: ## Answer one question honestly: is this tree green? (completed CI runs +
 	# `--local` skips the CI half, `--remote` skips the local half.
 	@./scripts/green.sh $(ARGS)
 
-green-all: check-examples check-stress smoke-bedit ## `make green` plus clippy (CI's flags), the two slow .blsp corpus gates and the bedit smoke
+green-all: check-examples check-stress check-imaged smoke-bedit ## `make green` plus clippy (CI's flags), the two slow .blsp corpus gates and the bedit smoke
 	@./scripts/green.sh --clippy
 	@echo "green-all: clippy, the .blsp gates and the bedit smoke passed too. Still not run: make test, breakage, tree-walker differential."
 

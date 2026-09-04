@@ -18,6 +18,11 @@
 //! Three misses, no crash, and 185 failing tests pointing anywhere but here. A differential
 //! is the only shape that catches the *fourth* one by construction.
 //!
+//! Also compared, once per arm: the **registry-name set** (`%registry-names`). KI-106 was a
+//! disagreement there with every per-global attribute identical — the imaged boot never ran
+//! the prelude's `%registry-update!` calls, so `*multi-algebra*`/`*multi-ret*` were bound but
+//! not *marked*, and a multi-file `nest check` lost every derived multimethod mirror.
+//!
 //! What is compared, per global: **name**, **kind** (`:fn`/`:macro`/`:native`/data — the
 //! distinction `KIND_MACRO` exists to preserve), **privacy** (ADR-146), **declared
 //! signature**, **source location** and **dynamic-ness**. Values are deliberately not
@@ -48,6 +53,7 @@ thing worth catching (an imaged boot that records none takes stdlib `M-.` down).
       (let (parts (string/split (->string (first l)) "/"))
         (->string [(nth parts (- (count parts) 1)) (nth l 1) (nth l 2)])))))
 
+(io/puts "REGISTRIES " (->string (%registry-names)))
 (let (names (sort (reflect/global-names)))
   (io/puts "GLOBALS " (count names))
   (doseq (n names)
@@ -156,10 +162,19 @@ fn an_imaged_boot_and_a_source_boot_agree_on_every_global() {
             "the {label} arm dumped only {n} globals; the prelude has ~1050, so the dump is \
              truncated and a diff over it proves nothing"
         );
+        // Count from the header on: the REGISTRIES line precedes it.
         assert_eq!(
-            out.lines().count(),
+            out.lines().skip_while(|l| !l.starts_with("GLOBALS ")).count(),
             n + 1,
             "the {label} arm's line count does not match its own header — the dump stopped early"
+        );
+        // The registry-name SET is compared too, not only the globals. KI-106: both arms
+        // agreed on every global's name/kind/sig/site while the imaged one was missing
+        // `*multi-algebra*` and `*multi-ret*` from the set `%registry-update!` maintains —
+        // a fact recorded beside the bindings, invisible to a per-global diff.
+        assert!(
+            out.lines().next().is_some_and(|l| l.starts_with("REGISTRIES") && l.contains('(')),
+            "the {label} arm printed no REGISTRIES line"
         );
     }
 

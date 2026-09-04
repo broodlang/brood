@@ -238,3 +238,75 @@ fn every_ki_reference_resolves_to_a_known_issue() {
         dangling.join("\n  ")
     );
 }
+
+/// A KI's status lives in TWO places — the index row and the `## KI-N` heading — and the
+/// index is the one that goes stale, because it is not where you are working when you fix
+/// something. KI-79 and KI-80 were both fixed (2026-09-02, 2026-08-29) with dated resolutions
+/// in their sections while their rows still read `⚠️ WATCHING`; a work-queue item was then
+/// written on 2026-09-04 to re-run repros for two bugs that no longer existed.
+///
+/// The row's status cell LEADS with the current glyph and keeps older text after it as
+/// history, so the check is on the first glyph only: a section closed (✅ / 📦 / ☑️) must not
+/// have a row whose cell still opens with an open glyph (⚠️ / 👀), and vice versa.
+#[test]
+fn ki_index_row_status_agrees_with_its_section() {
+    let root = workspace_root();
+    let text = std::fs::read_to_string(root.join("docs/known-issues.md")).expect("known-issues");
+    const CLOSED: &[&str] = &["✅", "📦", "☑️"];
+    const OPEN: &[&str] = &["⚠️", "👀"];
+    let first_glyph = |s: &str| -> Option<&'static str> {
+        let mut best: Option<(usize, &'static str)> = None;
+        for g in CLOSED.iter().chain(OPEN.iter()) {
+            if let Some(i) = s.find(g) {
+                if best.is_none_or(|(bi, _)| i < bi) {
+                    best = Some((i, g));
+                }
+            }
+        }
+        best.map(|(_, g)| g)
+    };
+    let mut rows: BTreeMap<u32, &'static str> = BTreeMap::new();
+    let mut sections: BTreeMap<u32, &'static str> = BTreeMap::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("| KI-") {
+            let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let Ok(n) = n.parse::<u32>() else { continue };
+            // the status cell is the LAST cell
+            let cell = line.trim_end_matches('|').rsplit('|').next().unwrap_or("");
+            if let Some(g) = first_glyph(cell) {
+                rows.insert(n, g);
+            }
+        } else if let Some(rest) = line.strip_prefix("## KI-") {
+            let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let Ok(n) = n.parse::<u32>() else { continue };
+            // the heading's glyph is its CURRENT status (the last one on the line)
+            let mut last: Option<(usize, &'static str)> = None;
+            for g in CLOSED.iter().chain(OPEN.iter()) {
+                if let Some(i) = rest.rfind(g) {
+                    if last.is_none_or(|(li, _)| i > li) {
+                        last = Some((i, g));
+                    }
+                }
+            }
+            if let Some((_, g)) = last {
+                sections.insert(n, g);
+            }
+        }
+    }
+    assert!(rows.len() > 20 && sections.len() > 20, "parsed {} rows / {} sections — format changed?", rows.len(), sections.len());
+    let mut disagree = Vec::new();
+    for (n, sg) in &sections {
+        let Some(rg) = rows.get(n) else { continue };
+        let s_closed = CLOSED.contains(sg);
+        let r_closed = CLOSED.contains(rg);
+        if s_closed != r_closed {
+            disagree.push(format!("KI-{n}: section says {sg}, index row leads with {rg}"));
+        }
+    }
+    assert!(
+        disagree.is_empty(),
+        "index rows whose leading status disagrees with their section — update the row in the same \
+         commit as the fix (lead with the new status; keep the old text after it as history):\n  {}",
+        disagree.join("\n  ")
+    );
+}
