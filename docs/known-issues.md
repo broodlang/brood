@@ -92,12 +92,13 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-94 | **a green process's death ORPHANED its OS subprocesses** — `subprocess::close`'s only caller was the `proc-close` builtin and `retire_pid_tail` had no subprocess counterpart to `close_process_sockets`, so an owner that exited without closing leaked the OS child (never killed), its registry entry (forever), and both reader threads (draining into a dead pid) | ✅ **FIXED 2026-08-31** — `Proc` records its owner (the spawn subscriber) and `retire_pid_tail` calls `close_process_procs(pid)`: Erlang port semantics, a child dies with its owner (a deliberate semantic change). Guard in `tests/proc_test.blsp`, verified red (`:wrote`) on the pre-fix binary |
 | KI-95 | **`promote` forwards only closures/envs — DAG-shaped data is duplicated once per referrer, exponentially with nesting** — `heap.rs`'s `PromoteForward` comment reasons "acyclic ⇒ a finite tree to re-copy", but acyclic ≠ tree: immutable path-copying code produces DAGs everywhere, so every `def`/`spawn` of a value with shared substructure copies the shared part per reference into the append-only RUNTIME region, `2^n` with sharing depth, no cap | ✅ **FIXED 2026-08-31** — `PromoteForward` forwards pairs/vectors/maps/strings too (mirroring the GC flush tables), keyed on the handles' canonical identity (also closing a latent nursery/old `index()` collision in the closure/env tables); long spines stride-register (every 8th cell) so a bulk `def` stays cheap while growth stays O(n). Guards: 5 `promote_sharing_tests` (17 cells where pre-fix copied 131 071). Measured: `sort`/`spawn`/`startup`/`spawn-live`/`supervisor` all floor-level; `spawn`/`supervisor` **fewer** instructions than base |
 | KI-96 | **a remote monitor's `PENDING_REMOTE` entry survives its own `[:down …]`** — nothing removes the entry when the watched remote target dies and the peer's DOWN arrives, so (a) a long-lived watcher leaks one entry per dead remote monitor, and (b) a later node-down fires a SECOND `[:down mref pid :noconnection]` for an mref that already delivered — breaking the one-shot guarantee a `gen/call`-style pinned receive relies on | ✅ **FIXED 2026-08-31** — the DOWN now rides a dedicated `Frame::Down` (wire v7) instead of an ordinary `Send`, giving the watcher's node the hook the entry lacked: `deliver_remote_down` retires the pending entry, then delivers. Guard: `a_delivered_remote_monitor_does_not_fire_again_on_node_down` (two-node; sabotage-verified — retire disabled reproduces `SECOND-DOWN-BUG :noconnection`) |
-| KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ⚠️ **OPEN 2026-08-31; item 1 FIXED, items 1 + 3 FIXED, item 2 three-of-four 2026-09-01** — the section carries the full list with file:line; none observed in the wild, all confirmed by reading. **Item 1 (the pre-auth handshake trickle DoS) is closed**: a whole-handshake `Deadline` shim on both sides + a rate-limited shed warning, sabotage-verified. **Item 2**: `run-process`'s inherited stdin (a `git` credential prompt pinned a worker uncatchably) and `%node-connect`'s unbounded DNS resolve are both closed, each sabotage-verified; `proc-send`'s `write_all` now goes through a per-child writer thread (bounded queue, `dist`'s shape) — only `read-line`'s stdin lock remains, and that one is ADR-059 Phase 2 rather than a patch. **Item 3 fully closed**: the timer's poisoning `Once` (one EAGAIN broke every `sleep` forever), `ensure_workers` stranding `LIVE_EXECUTORS` above reality, the dist acceptor dying from a refused thread, and the poison-intolerant locks. **Item 4 fully closed**: the pre-auth 64 MiB allocation, unbounded wire-symbol interning, the ADR-232 dedup set, the edge-triggered accept drain, `tls_request`'s untimed connect + close-before-connect race, the never-reaped half-closed stream, `record_remote_link`'s missing liveness check, and unreaped sysmon subscriptions. **The only thing left in KI-97 is `read-line`'s stdin lock**, which is ADR-059 Phase 2 — a feature, not a patch |
+| KI-97 | **consolidated hardening gaps from the 2026-08-31 stability audit** — pre-auth handshake trickle DoS (per-read timeout, no total deadline: 128 slow sockets silently disable inbound dist), untimed blocking calls on scheduler workers (`proc-send`, `os/run-process` with inherited stdin, `read-line`, `%node-connect` DNS), thread-spawn panic classes (`Once` poisoning in the timer, `LIVE_EXECUTORS` stranding in `ensure_workers`, gossip thread-per-peer unwinding the dist acceptor), and smaller items | ✅ **FIXED 2026-09-03** — every item closed; `read-line` (ADR-059 Phase 2, KI-97 closes) was the last. History: ⚠️ OPEN 2026-08-31; item 1 FIXED, items 1 + 3 FIXED, item 2 three-of-four 2026-09-01 — the section carries the full list with file:line; none observed in the wild, all confirmed by reading. **Item 1 (the pre-auth handshake trickle DoS) is closed**: a whole-handshake `Deadline` shim on both sides + a rate-limited shed warning, sabotage-verified. **Item 2**: `run-process`'s inherited stdin (a `git` credential prompt pinned a worker uncatchably) and `%node-connect`'s unbounded DNS resolve are both closed, each sabotage-verified; `proc-send`'s `write_all` now goes through a per-child writer thread (bounded queue, `dist`'s shape) — only `read-line`'s stdin lock remains, and that one is ADR-059 Phase 2 rather than a patch. **Item 3 fully closed**: the timer's poisoning `Once` (one EAGAIN broke every `sleep` forever), `ensure_workers` stranding `LIVE_EXECUTORS` above reality, the dist acceptor dying from a refused thread, and the poison-intolerant locks. **Item 4 fully closed**: the pre-auth 64 MiB allocation, unbounded wire-symbol interning, the ADR-232 dedup set, the edge-triggered accept drain, `tls_request`'s untimed connect + close-before-connect race, the never-reaped half-closed stream, `record_remote_link`'s missing liveness check, and unreaped sysmon subscriptions. **The only thing left in KI-97 is `read-line`'s stdin lock**, which is ADR-059 Phase 2 — a feature, not a patch |
 | KI-88 | **one spawn of a warm burst is created, promoted, registered — and never scheduled** — exactly one reader of a 50-process burst never executes its first instruction; no death line, and the collector times out. Gates `BROOD_TW_REENTRY`'s default (60× on the viral defer shape, measured and waiting) | ⚠️ **WATCHING 2026-08-31 — DORMANT.** Seen many times, root cause never found, and no reconstructable binary exhibits it: 10/10 pass at `62eac84c` with the router confirmed live, on top of session 4's 15/15 + 8/8 (incl. a pristine rebuild of the commit that failed 3/3 hours earlier). One candidate mechanism — `run_one`'s unprotected post-quantum tail, whose unwind produces this exact signature — was found and **closed** in session 5, so a future sighting is known not to be that. **Session 6 (2026-09-03): the runtime now watches for the signature itself** — a default-ON stranded-work watchdog in `scheduler/pool.rs` reports (once, with every queued pid and every worker's state) when `STEALABLE` says work is queued but no worker has found anything to run for 3 s; fault-injected via `BROOD_FAULT_STRANDED=1`, sabotage-verified. Next sighting: the report names the pid; PRESERVE THE BINARY, arm `BROOD_SCHED_DBG=1`, take a core in the window |
+| KI-89 | **a test file's ability impls leak into `std/`'s checker view** — record/ability registrations outliving the scope that made them: std record ids with no constructor (`ability_test.blsp:471`), `*lineedit-keymap*` pre-bound (`stdimage_test.blsp:60`), an impl table disagreeing with the modules present (`Temporal/->iso: no impl for :tempo/tempo`) | ✅ **FIXED 2026-09-03** — the 2026-08-31 resurrection race was real and is fixed; the RESIDUAL was the **project startup image**: registries written wholesale carried the build session's load state (orphan ids from boot on every imaged run), restored wholesale they clobbered what boot-loaded modules had registered, and `%registry-names` omitted the prelude's registries so the merge could not protect `num/add`. Plus the scoped runner now quiesces (kills + awaits stragglers) at every file boundary, and the `stdimage_test` attribution test measures in a subprocess (the scoped runner preloads `repl`/`editor/lineedit`). Four guards, sabotage-verified; 2 consecutive imaged full runs green modulo the wasm-cap exception |
 | KI-101 | **both distributed chaos harnesses had been dead for months, and reported it as a CRASH** — `scripts/fuzz/dist_chaos.sh` and `dist_chaos_remote_spawn.sh` build their node programs as shell heredocs, so no `.blsp` gate can see them. The v0.9/v0.10 namespacing waves renamed `node-start`→`node/start`, `register`→`proc/register`, `nodes`→`node/list`, `connect`→`node/connect`, `start-remote-spawn`→`node/serve-spawns`, and later `each` became a reserved stdlib name. Every node died at startup and each script dutifully printed `crashed=1` — **indistinguishable from a real runtime crash**, which is worse than not running at all | ✅ **FIXED 2026-09-01** — both repaired (all six renames, plus the harness's own helpers prefixed `chaos-` so a future stdlib addition cannot collide again) and now **self-reporting**: a definition-time error in `nN.blsp` prints `HARNESS ROT … this run tested NOTHING`, names the error, and exits 2 instead of blaming the runtime. Deliberately excludes `runtime error` — this harness kills nodes on purpose, so "connect: Connection refused" is an expected outcome and matching it would cry wolf on every healthy run. Sabotage-verified on both rot kinds (unbound symbol, reserved-name collision) and on the clean path. **With them actually running, dist is clean**: 10-node churn with kill/rejoin cycles and 40 wrong-cookie attackers, `crashed=0` across runs |
-| KI-99 | **`a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 under a full `make test`** — B warned 0 times instead of 1, with `dist: incoming connection failed: failed to fill whole buffer` on B's stderr: the handshake hit EOF mid-frame under full-suite load, so the inbound send that should have been dropped-and-warned never arrived | ⚠️ **WATCHING 2026-08-31** — retry-absorbed (try 2 passed), 6/6 green solo after. One sighting, but the failure output was **captured** this time (KI-80's lesson), and it names the mechanism: a connection that never completed, not a dedup miscount. If it recurs, the question is why the handshake EOFs under load — `MAX_HANDSHAKE_FRAME`/`accept_link` timeout interaction is the place to look, and KI-97 item 1 touches that code |
+| KI-99 | **`a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 under a full `make test`** — B warned 0 times instead of 1, with `dist: incoming connection failed: failed to fill whole buffer` on B's stderr: the handshake hit EOF mid-frame under full-suite load, so the inbound send that should have been dropped-and-warned never arrived | ✅ **CLOSED 2026-09-03** — the stderr line was the harness's own connect-and-drop probe (prints on every run); 27/27 solo incl. 15 under load; the plausible full-suite cause — same-slice port collisions under nextest — is fixed + guarded (`NEXTEST_TEST_GLOBAL_SLOT` slicing). Was: ⚠️ WATCHING 2026-08-31 — retry-absorbed (try 2 passed), 6/6 green solo after. One sighting, but the failure output was **captured** this time (KI-80's lesson), and it names the mechanism: a connection that never completed, not a dedup miscount. If it recurs, the question is why the handshake EOFs under load — `MAX_HANDSHAKE_FRAME`/`accept_link` timeout interaction is the place to look, and KI-97 item 1 touches that code |
 | KI-87 | **The checker diverged — `nest run` at 54 GB, three 19 GB `types::` test processes.** `InferGuard::enter` ended in `.then_some(InferGuard(sym))`; `bool::then_some` builds its argument eagerly, so a REFUSED entry built and dropped a guard whose `Drop` removed the in-flight symbol's mark — every cycle refusal un-guarded the symbol it refused (latent since 2026-07-07). The demand walk consulting a callee's inferred sig (`0f64f600`) made `require-one` ⇄ `%require-await` nest without bound, one stack segment per level | ✅ **FIXED 2026-08-29** — the guard is constructed only on the success path (`entered.then(\|\| InferGuard(sym))`). Guards sabotage-verified: a refused third `enter` stays refused, and the mutually recursive pair reproduces the exact `mmap failed to allocate stack` OOM under `ulimit -v` with the bug restored. Build uncapped, run capped |
-| KI-86 | **`runtime_collector`'s three promotion tests failed under `cargo test`** — `expected ≥3000 promoted closures, got total=231`, with the count-based collector switched OFF by the test and one closure promoted per iteration | ⚠️ **WATCHING 2026-08-29** — precondition removed, mechanism inferred: `BROOD_RT_GC_FLOOR` is read once per process (`OnceLock`), two tests in the binary `set_var` it to 128/256, and under plain `cargo test` the leaked floor armed the `Interp`'s scheduler WORKER heaps (which share the runtime region) — a worker safepoint aged the runtime and the main heap's `cur_code()` count dropped. Fix: `Heap::set_rt_gc_floor` per test heap, no env. Not reproducible on demand on a quiet box (a worker has to wake); 4/4 green under load since. **Recurred 2026-09-02** with `BROOD_NO_CRASH_REPORT` under `make asan` (same shape, fixed the same way), so since 2026-09-03 `crates/lisp/tests/env_isolation.rs` makes the rule structural: an env-mutating test lives alone in its binary |
+| KI-86 | **`runtime_collector`'s three promotion tests failed under `cargo test`** — `expected ≥3000 promoted closures, got total=231`, with the count-based collector switched OFF by the test and one closure promoted per iteration | ✅ **ROOT-CAUSED + FIXED 2026-09-03** — reproduced deterministically with `BROOD_RT_GC_FLOOR=128` and zero scheduler activity: the stdlib-image install's `rt_gc_rebaseline_all_live` re-armed a heap that had opted out (single-owner compaction, not a worker); the opt-out is now sticky, guarded + sabotage-verified. The inferred mechanism below was wrong. Was: ⚠️ WATCHING 2026-08-29 — precondition removed, mechanism inferred: `BROOD_RT_GC_FLOOR` is read once per process (`OnceLock`), two tests in the binary `set_var` it to 128/256, and under plain `cargo test` the leaked floor armed the `Interp`'s scheduler WORKER heaps (which share the runtime region) — a worker safepoint aged the runtime and the main heap's `cur_code()` count dropped. Fix: `Heap::set_rt_gc_floor` per test heap, no env. Not reproducible on demand on a quiet box (a worker has to wake); 4/4 green under load since. **Recurred 2026-09-02** with `BROOD_NO_CRASH_REPORT` under `make asan` (same shape, fixed the same way), so since 2026-09-03 `crates/lisp/tests/env_isolation.rs` makes the rule structural: an env-mutating test lives alone in its binary |
 | KI-85 | **The checker produced a FALSE POSITIVE — its one hard invariant.** `(takes-str (first (fold (fn (a x) (cons x a)) [0] ["t"])))` warned `expects string, got 0` on a value that was the string `"t"` at runtime. A tuple shape (`[0]` → `(tuple 0)`) refines the VECTOR member only, but once the fold's result merged into one `pair \| vector` term, `elem_ty`/`tuple_elems` reported the tuple's elements for the whole term, pair member included | ✅ **FIXED 2026-08-29** — both accessors answer only for a term whose seq members the shape actually describes (`tuple_elems` only on a pure vector — a `nil` member makes `first` nil, a `pair` member makes it unknown). Found by an adversarial probe of the set-theoretic model; the same session closed a second gap the probe exposed — a lambda LITERAL passed as a callback was never checked at all (`callback_sig` answered `None`), so `(g (fn (x) (str x)))` against `((int -> int) -> int)` was silent; it is now typed under the arrow's own domain and the existing result-disjointness rule catches it, with no `⊆`-on-an-inferred-return false positives (`(+ x 1)` under `x : int` is `int`). Guards sabotage-verified |
 | KI-84 | **An imaged start of a project lost every buffer type's layers** — `nest test` in bedit: the run that WROTE `.brood/image.bin` passed 1306/1306, every run that READ it failed 99 (`*git-status*` not read-only, `.blsp` buffers not in brood-mode, gutters gone). `editor/layers/*type-layers*` was `{}` at module-load time on a warm start | ✅ **FIXED 2026-08-29** — the **stdlib** image's `editor/layers` section carries the module's registries as their pristine seeds (`{}`), and materialising an embedded module was a raw define: it overwrote the 26-entry registry the PROJECT image had just restored. A source load runs `defonce` there and keeps the binding; the image did not. Fix: with `reserve` (an embedded module from the pristine image) a bound DATA global keeps its binding; a bound FUNCTION (an ADR-246 stub, KI-72) is still replaced, and a project image (later state) still overwrites. Guard sabotage-verified |
 | KI-83 | **The monomorphization differential compared TIMING CHATTER as if it were an answer.** Under full-suite load, `cli::mono_differential` failed with "monomorphization changed an ANSWER" while both arms reported `92 tests, 92 passed, 0 failed` — the diff was one line: the framework's per-test slow annotation (`concurrent impl registration (KI-22) › … 13.9s`), printed only when a test crosses `*test-slow-ms*` (1 s), which under 4-way nextest parallelism one arm's nested run did and the other's did not. `without_timings` stripped only `ms wall`/`Slow tests` lines | ✅ **FIXED 2026-08-29** — the filter now also drops any line whose last token is a duration (`13.9s`, `2ms`); a real divergence in such a line is theoretically maskable, but a *failing* test already fails the `*_ok` asserts before the comparison runs. Sabotage-verified offline on the exact captured outputs: the old comparison fails on them, the new one passes, and a `92 passed`→`91 passed` mutation still diverges. Same species as [KI-80](#ki-80): a nested suite run under load emitting load-dependent output that an outer gate treats as signal |
@@ -562,7 +563,27 @@ Two details worth keeping, each found by the guard misbehaving before it worked:
 rejoin cycles plus 40 wrong-cookie attackers hammering the seed's handshake, and the
 remote-spawn variant shipping closures across a dying mesh — `crashed=0` on every run.
 
-## KI-99 — a dist handshake EOF'd under full-suite load, so a drop-warning test saw no send ⚠️ WATCHING 2026-08-31
+## KI-99 — a dist handshake EOF'd under full-suite load, so a drop-warning test saw no send ✅ CLOSED 2026-09-03 (the recorded mechanism was the harness probe; the plausible cause is fixed)
+
+> **Resolution 2026-09-03.** The stderr line this entry reads as the cause is **routine**:
+> the harness's `wait_until_listening` is a bare `TcpStream::connect` that is dropped at
+> once, so B's acceptor reads EOF mid-frame and prints
+> `dist: incoming connection failed: failed to fill whole buffer` on **every** run of this
+> test — reproduced with a two-line probe against a lone node. It is only ever *seen* on
+> a failing run, because the assertion message is the only thing that prints B's stderr.
+> So the link between A and B was not shown to have failed, and the reading below is
+> withdrawn. Not reproducible: 27/27 solo, of which 15 under a detached 12-thread CPU
+> hog (load ≈ 7). What *can* make B warn zero times under a full `make test` is a **port
+> collision between concurrently running test processes**: `free_port` sliced its band by
+> `pid % 162`, both processes start at offset 0 of their slice, and a `brood` child burns
+> a pid per thread (~16), so two live test processes sitting exactly 162 pids apart got
+> the *same* first port — the KI-27/KI-38 class, and consistent with a one-in-many
+> full-suite sighting. Fixed in `crates/cli/tests/support/mod.rs`: the slice is now
+> nextest's `NEXTEST_TEST_GLOBAL_SLOT` (unique among tests running at any instant), pid
+> only as the plain-`cargo test` fallback. Guard:
+> `concurrent_nextest_slots_never_share_a_port_slice` in `distribution.rs`,
+> sabotage-verified. If the 0-warnings shape ever recurs, read **A's** stderr (the
+> assertion prints it) before B's.
 
 **Symptom.** In a full `make test`, `cli::distribution
 a_dropped_send_to_an_unregistered_name_warns_once` failed try 1 (passing on try 2):
@@ -854,7 +875,7 @@ seam is the dist inbound path that recognises a monitor DOWN frame; failing that
 tombstone consulted by `handle_node_down`. Needs a two-node test: monitor, kill target,
 receive DOWN, then drop the node — assert no second DOWN.
 
-## KI-97 — consolidated hardening gaps from the 2026-08-31 stability audit ⚠️ OPEN 2026-08-31
+## KI-97 — consolidated hardening gaps from the 2026-08-31 stability audit ✅ FIXED 2026-09-03 (all four items; `read-line` — ADR-059 Phase 2 — was the last)
 
 One entry so the audit's remaining confirmed-by-reading findings have a number; none has
 been observed in the wild. Ranked. Each is independently fixable; strike through items
@@ -1205,6 +1226,19 @@ cored. If the report ever appears with `stealable=N` and **every queue empty**, 
 different finding — a `STEALABLE` accounting leak (an enqueue without a matching pull) — and
 worth its own entry.
 
+**Session 7 (2026-09-03, later) — 325 more runs, still dormant; the archive question.** The
+canonical repro (`BROOD_TW_REENTRY=1` on the full chaos2 gen-server file, the armed
+`-C debug-assertions=on` release build) at HEAD `0fb44bed`: **150/150** plain (under a
+concurrent cargo build), **60/60** pinned to two cores (`taskset -c 0,1`), **100/100** under a
+detached 12-thread CPU hog, **15/15** under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. The
+stranded-work watchdog never printed. Together with sessions 4–6 that is 358 consecutive clean
+runs across five timing regimes on three builds, against a bug last seen on one destroyed
+incremental build. Nothing here proves it gone — nobody found the cause — but nothing
+reconstructable exhibits it, and the tripwire that would name the pid is on by default in
+every binary. Recommendation recorded here for the owner's call: **archive as dormant with the
+watchdog armed**, and decide the `BROOD_TW_REENTRY` default on its own perf protocol rather than
+on this entry — the entry no longer has a repro to hold it hostage with.
+
 ## KI-87 — the checker's cycle guard released the symbol it refused: `nest run` at 54 GB, three 19 GB test processes ✅ FIXED 2026-08-29
 
 **Symptom.** `nest run` on bedit sat at 100% CPU with nothing running, RSS climbing past
@@ -1253,7 +1287,28 @@ a machine-swapping OOM into a ten-second clean failure with the panic site named
 let the cap leak into a *build*: the linker inherited it and died with `LLVM ERROR: out of
 memory`. Build uncapped, run capped.
 
-## KI-86 — `runtime_collector`'s three promotion tests failed under `cargo test` ⚠️ WATCHING 2026-08-29 (precondition removed; mechanism inferred, not reproduced on demand)
+## KI-86 — `runtime_collector`'s three promotion tests failed under `cargo test` ✅ ROOT-CAUSED + FIXED 2026-09-03 (reproduced deterministically; the recorded mechanism was wrong)
+
+> **Resolution 2026-09-03.** Reproduced **deterministically, on a quiet box, with no
+> scheduler activity at all**: `BROOD_RT_GC_FLOOR=128 cargo test -p brood --test
+> runtime_collector` fails `superseded_global_versions_are_reclaimable` every time
+> (`total=213`), and `BROOD_SCHED_DBG=1` prints **zero** `[sched] run` lines during it —
+> no worker process ever ran. The "worker heap ages the runtime" mechanism below is
+> therefore wrong; a gdb breakpoint on `age_runtime` never fires either. What happens:
+> the test's `set_rt_auto_collect(false)` sets its threshold to `usize::MAX`, then
+> `reflect/eval` autoloads `reflect`, the **stdlib image** materialises it (ADR-256) and
+> calls `Heap::rt_gc_rebaseline_all_live`, which blindly set the threshold to
+> `max(floor, 2 × live)` — re-arming the collector the test had switched off, with the
+> leaked `floor` of 128. The next safepoint past ~370 closures ran the **single-owner
+> compaction** (not aging), and the count collapsed to the live set. It looked
+> load-dependent because it is **image-dependent**: the 2026-08-29 non-reproduction ran
+> on a box with a stale image (every `std/` edit invalidates it), so the rebaseline never
+> ran. Fix: the rebaseline leaves an opted-out heap (`usize::MAX`) alone — the opt-out is
+> sticky (`gc_runtime.rs`). Guard: `an_opted_out_heap_stays_opted_out_across_a_rebaseline`
+> in `runtime_collector.rs`, sabotage-verified (dropping the early return fails it with
+> its own message). With the fix, the exact command above passes 21/21. The
+> precondition (an env-mutating test sharing a binary) was already removed and is gated
+> by `env_isolation.rs`; this closes the mechanism too.
 
 **Symptom.** Under a loaded box, `cargo test -p brood --test runtime_collector`: 17 pass, 3
 fail — `superseded_global_versions_are_reclaimable`, `evacuation_copies_only_live_code_and_verifies`
@@ -7132,7 +7187,92 @@ nothing did. Recorded because this repo's own rule is that a failure seen once i
 otherwise — and because a single sighting on the one commit that touched the preempt path is
 precisely the coincidence that deserves writing down rather than explaining away.
 
-## KI-89 — a test file's ability impls leak into `std/`'s checker view ✅/⚠️ 2026-08-31: the resurrection race FIXED + guarded; a residual orphan mechanism WATCHING (one binary, since destroyed — see the residual block)
+## KI-89 — a test file's ability impls leak into `std/`'s checker view ✅ FIXED 2026-09-03 (the residual root-caused: the project startup image carried the build session's registrations; two more mechanisms found and closed on the way)
+
+> **Resolution 2026-09-03 — the residual is closed, and it was three things, none of them the
+> straggler race this entry had settled on.** Method: instrument, don't theorise. A per-file
+> orphan probe in the runner (record ids whose constructor is not a global) showed the seven
+> ids `:log/line-backend :multimap/multimap :queue/queue :pq/pq :tempo/iset :tempo/span
+> :tempo/tempo` present **before the first test file ran**, on the runs that failed at all
+> (3 of 6); a second probe bisecting the pre-file phase put their first appearance at
+> `load-sources-cached` — the **project startup image restore** (ADR-218) — and only when
+> the stdlib image was live.
+>
+> **1. The project image carried the build session's load state (the seven-id shape, and the
+> live `tempo` "no impl" sighting).** `write-image` puts every registry global (`*record-ids*`,
+> `*impls*`, `*impl-from*`, `*methods*`, …) into the root section as a WHOLE VALUE. On a
+> source-path boot `nest` loads `debug` → `repl` → … and a chain that reaches `log`, `pq`,
+> `queue`, `multimap`, `tempo`, so the build session's `*record-ids*` held those seven ids and
+> the image stored them. An imaged boot loads lazily and never touches those modules, so
+> restoring the root section registered seven record ids whose constructors did not exist —
+> sticky, because every later file's snapshot contained them. Intermittent only because the
+> stdlib image goes stale on every `std/` edit and a source-path boot has the modules loaded
+> for real. Fix (`std/tool/project.blsp`): `image-prune-foreign-registrations` — before the
+> write, inside an `%isolate`, drop every registration OWNED by a module the image does not
+> carry (not in `*module-files*`), using the stdlib image's own per-owner grouping
+> (`stdimage/registrations-by-module`, `%std-impls-by-module`); root-level and
+> project/dependency-owned registrations stay; the std module re-registers its own when it
+> loads. A registration is data about a module and must arrive with it — the rule the stdlib
+> image already follows by replaying each module's registrations at materialisation.
+> Guard: `tests/startup_image_test.blsp` "write-time pruning drops foreign-owned
+> registrations and keeps root and project ones". **A stale `.brood/image.bin` keeps the old
+> contents until its fingerprint changes** — delete it once after upgrading.
+>
+> **1b. Restored wholesale, the root section also REPLACED the live registries** — erasing what
+> modules loaded before the restore had registered. `nest` boots with `datetime`, `io`,
+> `project` … loaded; the unpruned image happened to carry their impls (the build session had
+> them too), which is the only reason this never showed. With pruning in place the first
+> imaged run lost `Temporal/->iso`'s `:datetime/date` impl (`tempo_test` 7 red, `ui_test`,
+> `test_selection_test`). `project-install-image` now snapshots the live registries, loads
+> the section, and merges the live entries back through `%registry-cas!` (live wins on a
+> conflict; two-level registries union their inner maps). Guard:
+> `crates/nest/tests/project_image_registries.rs` — a scaffold run twice, the imaged second
+> run must still dispatch `->iso` on a datetime and must have no orphan record id.
+>
+> **1c. `%registry-names` omitted every registry the PRELUDE wrote.** The merge in 1b
+> snapshots "the registries" by `%registry-names`, and that set lived in the build heap's
+> `RuntimeCode`, which the freeze discards — so a fresh runtime listed only registries this
+> process had written since boot, and neither `*multi-algebra*` nor `*multi-ret*` (both written
+> by the prelude's `defmulti num/add`). The pruned root section
+> then replaced `*multi-algebra*` with a map lacking `num/add` and nothing merged it back:
+> the next imaged run failed to LOAD every test file carrying a `defmethod num/add`
+> (`record_test.blsp`: "no `(defmulti num/add …)` is in scope"). Fix (`core/heap.rs`): the
+> build's registry-name set rides into `SharedCode` at freeze, like `declared_sigs`, and
+> `Heap::registry_names` unions it. Guard: `crates/lisp/tests/registry_names.rs` on a FRESH
+> `Interp` (under `nest test` the boot writes these registries itself, so an in-language
+> version passed against the bug), sabotage-verified.
+>
+> **2. The scoped runner let 1–18 processes per file run past the restore.** `%isolate` reaps
+> the thunk's descendants by spawn ancestry, and a process whose parent (a unit worker) has
+> exited is not attributed. `drain-files-scoped` now quiesces at every file boundary: kill
+> every process that was not alive when the file started, wait for them to be gone (bounded;
+> a survivor is reported on stderr because it is exactly a writer that may straddle the
+> swap), then restore. `nest test --trace` prints each file's count. Guard:
+> `crates/nest/tests/file_boundary_quiesce.rs`, sabotage-verified.
+>
+> **2b (2026-09-04). The quiesce then caught the runner's OWN processes — the guard read
+> `(nil :ki89-leaker)` one run in three.** `collect-loop` retired a worker at its
+> `:unit-result` and dropped its later `:down`, and `drain-runner` demonitored the driver and
+> flushed its `:down` with `(after 0)` — which only consumes a `:down` that has *already*
+> arrived. A worker's body is `(send me …)` and it exits the instant the send returns, so the
+> window is microseconds, and it was hit anyway. Both now wait for the exit: `pending` counts
+> `:down`s, not results (one more receive per worker), and the driver's `:down` is awaited
+> (bounded 5 s). The guard's exact-count assertion is what found this — keep it exact; a
+> `contains` would have passed over the runner counting itself as a leak. 15/15 + the full
+> suite green after, 271 s wall vs 313 s before (no cost).
+>
+> **3. `stdimage_test.blsp:60` was a violated precondition, not a leak.** The scoped `nest
+> test` boots with `repl` and `editor/lineedit` already loaded (the `debug` chain), so "the
+> names a `require` introduces" cannot be measured in-process there — and the test passed
+> solo, where nothing preloads them. It now measures in a fresh `brood` subprocess.
+>
+> Verified: two consecutive full `nest test` runs 5508/5509 (the one red is the documented
+> 16 GB-cap `wasm_sandbox_limits` exception), orphan probe armed and silent on both; the
+> earlier "delete the stdlib images" lever is explained (it flips boot to the source path,
+> where the modules are really loaded); the seven-id set is explained (exactly the
+> record-bearing std modules `nest`'s source-path boot reaches and its imaged boot does not).
+> The two explicit-file repro pairs in the original entry never touched `%isolate` (resolution
+> 1 above) and stay closed as by-design.
 
 > **Resolution 2026-08-31, two findings.**
 >

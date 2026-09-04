@@ -1094,7 +1094,7 @@ the test rather than hanging the run."
         (fn (t) (any? (test-tags t) (fn (tag) (includes? *test-long-tags* tag))))))))
 
 (defn collect-units (workers acc)
-  "Collect the results of one batch of spawned `workers` (a list of `(pid unit)`), accumulating onto `acc`. Waits for each worker's `:unit-result` (or its monitor `:down`) under a fresh per-batch deadline, hard-killing and failing any straggler that overruns. A `:slow`/`:conformance`-tagged batch runs under the raised `*test-slow-timeout-ms*` budget."
+  "Collect the results of one batch of spawned `workers` (a list of `(pid unit)`), accumulating onto `acc`. Waits for each worker's `:unit-result` AND its monitor `:down` (a batch is done when every worker has EXITED, not merely reported) under a fresh per-batch deadline, hard-killing and failing any straggler that overruns. A `:slow`/`:conformance`-tagged batch runs under the raised `*test-slow-timeout-ms*` budget."
   ;; Fixed wall deadline for this batch — recomputed per collect, so each isolated
   ;; unit / parallel chunk gets its own full budget. A `:slow`-tagged unit raises the
   ;; budget for its batch (see `*test-slow-timeout-ms*`); rebinding the var rather
@@ -1104,6 +1104,15 @@ the test rather than hanging the run."
       (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*)))
     (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*))))
 
+;; `pending` counts workers that have not yet EXITED — a worker's `:down`, not its
+;; `:unit-result`, is what retires it. A worker's body is `(send me …)` and it exits the
+;; instant the send returns, so the `:down` follows the result within microseconds; but
+;; "within microseconds" is not "before the collector returns", and the runner used to
+;; count a unit done at the result and drop the `:down` on the floor. The file-boundary
+;; quiesce (`test-quiesce-file`) then found the runner's OWN worker still alive one run in
+;; three and reported it as a leaked process (`(nil :ki89-leaker)` where one straggler
+;; was expected). Waiting for the exit costs one more receive per worker and makes the
+;; runner's machinery quiescent by construction rather than by luck.
 (defn- collect-loop (pending workers reported acc deadline)
   (if (= pending 0)
     acc
@@ -1113,33 +1122,32 @@ the test rather than hanging the run."
         ;; budget spent — kill + fail the stragglers
         (= msg :%test-timeout) (collect-timeout workers reported acc)
 
-        ;; [:unit-result pid results]
+        ;; [:unit-result pid results] — record the results; the worker is still retiring.
         (= (first msg) :unit-result)
           (let (pid (second msg))
             ;; Ignore a result from a pid that isn't one of THIS batch's workers, or
             ;; one already counted — a late message from a timed-out/killed worker of a
-            ;; prior step must not corrupt this step's `pending` count.
+            ;; prior step must not corrupt this step's bookkeeping.
             (if (or (includes? reported pid) (nil? (unit-of-pid pid workers)))
               (collect-loop pending workers reported acc deadline)
-              (collect-loop (- pending 1)
+              (collect-loop pending
                 workers
                 (cons pid reported)
                 (append (third msg) acc)
                 deadline)))
 
-        ;; [:down mref pid reason]
+        ;; [:down mref pid reason] — the worker is gone: a normal retirement if it
+        ;; reported first, a crash (KI-2) if it did not.
         (= (first msg) :down)
           (let (pid (third msg)
                 unit (unit-of-pid pid workers))
             (cond
-              (includes? reported pid)
-                (collect-loop pending
-                  workers reported acc deadline)
               (nil? unit) (collect-loop pending workers reported acc deadline)
+              (includes? reported pid) (collect-loop (- pending 1) workers reported acc deadline)
               else
                 (collect-loop (- pending 1)
                   workers
-                  reported
+                  (cons pid reported)
                   (append (dead-unit-results unit (nth msg 3)) acc)
                   deadline)))
 
@@ -1225,13 +1233,15 @@ the test rather than hanging the run."
     (receive
       ([:all-results rs]
         ;; The driver exits right after sending its results, which fires a monitor
-        ;; `:down`. Drop the monitor and flush that late `:down` (the call idiom,
-        ;; std/proc/gen.blsp) so it can't pile up in this process's mailbox: a scoped
-        ;; run calls `drain-runner` once PER FILE from one long-lived process, and a
-        ;; leaked `:down` per file made every later `receive` scan past them all — O(n²)
-        ;; over a large suite (100K files went from hours to seconds with this fix).
-        (demonitor mref)
-        (receive ([:down ^mref ^d _] :ok) (after 0 :ok))
+        ;; `:down`. WAIT for it (bounded — the driver has nothing left to do) rather
+        ;; than demonitor-and-flush: (a) a leaked `:down` per file made every later
+        ;; `receive` in this long-lived process scan past them all — O(n²) over a large
+        ;; suite (100K files went from hours to seconds once they were consumed); and
+        ;; (b) `(after 0)` only flushes a `:down` that has ALREADY arrived, so the driver
+        ;; was routinely still alive when this returned and the file-boundary quiesce
+        ;; counted the runner's own process as a leak. Consuming the `:down` here is
+        ;; what makes "the file's drain returned" mean "the runner's machinery is gone".
+        (receive ([:down ^mref ^d _] :ok) (after 5000 :ok))
         rs)
       ([:down ^mref ^d reason] (error (str "test runner crashed: " reason))))))
 
@@ -1292,6 +1302,54 @@ the test rather than hanging the run."
       false
       (if (and (not (= shown "")) (not (nil? line))) (str shown ":" line) ""))))
 
+;; Process quiescence at a file boundary — the precondition `%isolate`'s restore needs
+;; and the scoped runner used to violate (KI-89's residual). `%isolate` reaps the thunk's
+;; descendants by spawn ancestry, and a grandchild whose parent already exited falls
+;; through that filter: it runs on AFTER the restore, against the globals of a file that
+;; is finished, and anything it `def`s or `require`s lands in the next file's table —
+;; a registry id whose constructor was rolled back, a `*lineedit-keymap*` pre-bound
+;; before its module loads, an ability impl map ripped out from under a running dispatch.
+;; Measured 2026-09-03: 1-18 such processes per file across this suite, on every run
+;; (`nest test --trace` prints each file's count). See KI-89 for the whole class.
+;;
+;; The runner owns the whole runtime for the duration of `nest test`, so at a file
+;; boundary every process that was not alive when the file started is a straggler by
+;; definition — its tests have all reported — whatever its ancestry. Kill each one, then
+;; wait (bounded) until they are gone, so the restore that follows sees no concurrent
+;; writer or reader. Killed after their results were collected, so nothing here changes
+;; what a test reports; a process that outlives its own test was a leak either way.
+(defn- test-quiesce-file (before)
+  (let (stragglers (filter (proc/list) (fn (p) (not (includes? before p)))))
+    (when (and *test-trace* (not (empty? stragglers)))
+      (%write-err (str "[test] quiesce: "
+                    (count stragglers)
+                    " process(es) outlived their file and were killed: "
+                    (pr-str (map stragglers (fn (p) (get (or (proc/info p) {}) :name))))
+                    "\n")))
+    (fold stragglers nil (fn (_ p) (exit p :kill)))
+    (let (still (test-await-dead stragglers 40))
+      ;; Unconditional: a straggler that is STILL running when the restore goes ahead is
+      ;; a writer that may straddle the swap — the only way a rolled-back registration can
+      ;; survive with its constructor gone (KI-89's residual shape).
+      (unless (empty? still)
+        (%write-err (str "[test] quiesce: "
+                      (count still)
+                      " killed process(es) still alive after 2 s; restoring anyway: "
+                      (pr-str (map still (fn (p) (get (or (proc/info p) {}) :status))))
+                      "\n"))))))
+(sig test-quiesce-file (seqable -> any))
+
+;; Poll until none of `pids` is alive, or `tries` × 50 ms have passed (a hard kill lands
+;; at the victim's next safepoint, so this is µs in practice — the bound is for a
+;; process wedged in a native call, which is not made worse by proceeding).
+(defn- test-await-dead (pids tries)
+  (let (live (filter pids proc/alive?))
+    (cond
+      (empty? live) nil
+      (= tries 0) live
+      else (do (sleep 50) (test-await-dead live (- tries 1))))))
+(sig test-await-dead (seqable int -> (or list nil)))
+
 (defn- drain-files-scoped (loaders)
   ;; Accumulate each file's result LIST with `cons` (O(1)) into a reverse-order list of
   ;; lists, then flatten once — O(total results). (A naive `(append acc file-results)`
@@ -1315,7 +1373,11 @@ the test rather than hanging the run."
                         failed (second state))
                     (if (and (> *test-max-failures* 0) (>= failed *test-max-failures*))
                       state
-                      (let (file-results (%isolate (fn () (drain-one-file loader))))
+                      (let (file-results (%isolate (fn ()
+                                                     (let (before (proc/list)
+                                                           results (drain-one-file loader))
+                                                       (test-quiesce-file before)
+                                                       results))))
                         (list (cons file-results chunks)
                           (+ failed (count-failed file-results))))))))
         chunks (first final))

@@ -20402,3 +20402,29 @@ declaration channel. The second customer (getting `failure` out of the type unio
 **rejected outright now** rather than deferred: the union in the hover is what makes this
 lint possible, and its own trigger — "`number | failure` in hovers becoming a complaint in
 practice rather than in principle" — has never fired.
+
+## ADR-317 — A registration travels with the module that made it, in every image
+
+**Context.** The project startup image (ADR-218) wrote every registry global (`*record-ids*`,
+`*impls*`, `*impl-from*`, `*methods*`, …) into its root section as a whole value and restored
+it wholesale. A value snapshot carries the build session's load state: registrations by std
+modules that happened to be loaded at build time arrived in processes that never loaded those
+modules (record ids with no constructor), and the wholesale restore erased registrations that
+boot-loaded modules had made before the install (`Temporal/->iso` losing its datetime impls).
+This was KI-89's residual, live since the stdlib image shipped default-on (2026-08-28).
+
+**Decision.** A registration is data about a module and must arrive with that module:
+1. `write-image` prunes, inside an `%isolate`, every registration owned by a module the image
+   does not carry (not in `*module-files*`), using the stdlib image's per-owner grouping
+   (`stdimage/registrations-by-module`, `%std-impls-by-module`). Root-level (unqualified) and
+   project/dependency-owned registrations stay.
+2. `project-install-image` snapshots the live registries before loading the root section and
+   merges them back afterwards (`%registry-cas!`; live wins on a conflict; two-level registries
+   union their inner maps).
+3. `%registry-names` includes the registries the prelude build wrote (`*multi-algebra*`, `*multi-ret*`, …) (`SharedCode.registry_names`,
+   carried at freeze like `declared_sigs`), so "the registries" means all of them.
+
+**Consequences.** An imaged boot's registries equal what the loaded modules registered, no more
+and no less. A stale `.brood/image.bin` keeps its old contents until its fingerprint changes.
+The stdlib image was already right (per-module replay at materialisation); this brings the
+project image to the same rule.

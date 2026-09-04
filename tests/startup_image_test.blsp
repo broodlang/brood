@@ -284,3 +284,23 @@
               (catch e (error-message e))))
       (is (not (= r :no-raise)))
       (is (includes? r "same table")))))
+
+(describe "startup image: a registration travels only with its owner (KI-89)"
+  ;; The registries are written as whole values, so without pruning the image carries the
+  ;; BUILD session's load state: record ids and impls of std modules that were loaded when
+  ;; the image was built but are not loaded in the process that restores it — orphaned ids
+  ;; with no constructor, an impl table disagreeing with the modules present. Sabotage:
+  ;; invert `image-foreign-owner?` in `std/tool/project.blsp` and the tempo assertion fails.
+  :isolated (test "write-time pruning drops foreign-owned registrations and keeps root and project ones"
+    (require-one 'tempo)
+    (is (contains? *record-ids* :tempo/tempo))
+    ;; a root-level registration — unqualified key, no owning module — is kept
+    (%registry-update! '*record-ids* :assoc [:zz-image-root-probe] 'zz-image-root-probe)
+    ;; one owned by a module the image carries (present in `*module-files*`) is kept
+    (%registry-update! '*module-files* :assoc ["zz-imgproj/shapes"] "/nonexistent/shapes.blsp")
+    (%registry-update! '*record-ids* :assoc [:zz-imgproj/shapes/circle] 'zz-imgproj/shapes/circle)
+    (let (n (project/image-prune-foreign-registrations))
+      (is (> n 0))
+      (is (not (contains? *record-ids* :tempo/tempo)))
+      (is (contains? *record-ids* :zz-image-root-probe))
+      (is (contains? *record-ids* :zz-imgproj/shapes/circle)))))

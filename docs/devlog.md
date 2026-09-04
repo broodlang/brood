@@ -10225,3 +10225,73 @@ Both need a bedit commit and then a `BEDIT_REF` bump.
 Trap of the session, again: the first probe of the new `fontify` ran a `target/debug/brood`
 that reported `ec38a54d` — two commits stale — and so "proved" the old contract. The
 version line is printed for exactly this reason; read it before believing a probe.
+
+## 2026-09-03 (stability) — the non-reproducible entries, one by one: two mechanisms were wrong, one was three bugs, one stays dormant
+
+The brief was "reproduce or archive" for every open entry nobody had pinned down. Four
+qualified (KI-86, KI-88, KI-89's residual, KI-99); KI-97 was only a stale header.
+
+**KI-86 — reproduced deterministically; the recorded mechanism was wrong.**
+`BROOD_RT_GC_FLOOR=128 cargo test -p brood --test runtime_collector` fails every time on a quiet
+box, with ZERO `[sched] run` lines: no worker heap was ever involved. The stdlib image's
+materialisation calls `rt_gc_rebaseline_all_live`, which blindly set `max(floor, 2 × live)` over
+a heap that had opted OUT (`usize::MAX`) — re-arming the collector the test switched off. It
+looked load-dependent because it is image-dependent (a stale image → no rebaseline). Fix: the
+opt-out is sticky. Guard + sabotage in `runtime_collector.rs`.
+
+**KI-99 — the recorded mechanism was the harness probe.** `wait_until_listening` is a bare
+connect-and-drop, so B's acceptor prints `failed to fill whole buffer` on EVERY run; it is only
+ever seen on a failure because only the assertion message prints B's stderr. 27/27 solo, 15
+under a 12-thread hog. The plausible full-suite cause is a same-slice port collision (`pid %
+162`, both processes start at offset 0; a `brood` child burns a pid per thread): `free_port`
+now slices by `NEXTEST_TEST_GLOBAL_SLOT`. Guard + sabotage in `distribution.rs`.
+
+**KI-88 — 325 more runs across five timing regimes, still dormant.** Recommendation recorded
+in the entry: archive with the default-on stranded-work watchdog as the tripwire, and decide the
+`BROOD_TW_REENTRY` default on its own protocol.
+
+**KI-89's residual — reproduced 1/1 at HEAD, then instrumented rather than theorised, and it was
+three things:**
+
+1. `stdimage_test.blsp:60` was a violated precondition: the scoped `nest test` boots with
+   `repl`/`editor/lineedit` loaded (the `debug` chain), so "names a require introduces" cannot
+   be measured in-process there. It now runs in a fresh `brood` subprocess.
+2. The scoped runner let **1–18 processes per file** outlive their file — `%isolate` reaps by
+   spawn ancestry, and a grandchild whose worker parent exited is unattributed. The runner now
+   kills and awaits every process that was not alive at file start, before the restore
+   (`nest test --trace` prints the count; a survivor is always reported). Guard:
+   `crates/nest/tests/file_boundary_quiesce.rs`.
+3. The seven orphan ids (`:tempo/tempo`, `:pq/pq`, …) existed **before file 0**, only on runs
+   with a live stdlib image, and first appeared at `load-sources-cached`: the **project
+   startup image**. Its root section writes every registry as a whole value — carrying the
+   build session's load state (a source-path `nest` boot reaches `log`/`pq`/`queue`/
+   `multimap`/`tempo`; an imaged boot does not) — and restores it wholesale, clobbering what
+   boot-loaded modules had registered (`Temporal/->iso` lost its `:datetime/date` impl the
+   moment pruning stopped the image from accidentally carrying it). And `%registry-names`
+   omitted every registry the PRELUDE wrote (`defmulti num/add`), because the build heap's
+   name set died at the freeze — so the merge could not protect `num/add` and every file with
+   a `defmethod num/add` failed to load. Three fixes: `write-image` prunes registrations owned
+   by modules the image does not carry (reusing the stdlib image's per-owner grouping);
+   `project-install-image` snapshots the live registries, loads the section, and merges them
+   back through `%registry-cas!` (live wins); `SharedCode` carries the prelude's registry
+   names. Guards: `startup_image_test.blsp`, `crates/lisp/tests/registry_names.rs` (a fresh
+   `Interp` — under `nest test` the boot writes those registries itself, so the in-language
+   form of that guard was vacuous), `crates/nest/tests/project_image_registries.rs`
+   (a scaffold run twice; the imaged second run must dispatch `->iso` and have no orphan).
+   **A stale `.brood/image.bin` keeps the old contents until its fingerprint changes.**
+
+Method notes worth keeping: the per-file orphan probe found in one run what six sessions of
+theory had not; a python edit against a file `nest format` has reflowed fails silently unless
+the replacement is asserted; `bound?` on a qualified symbol does NOT auto-require (a probe that
+"showed" it did was the checker pre-flight); the explicit-file `nest test` path never installs
+the project image, so an imaged-boot bug reproduces only in a whole-project run.
+
+Also today: `make install` refreshed a week-stale `~/.local/bin/brood` (8162245c), stable moved
+to 1.98.1, cargo-nextest to 0.9.143.
+
+**2026-09-04 follow-up — the quiesce guard was red one run in three, and it was right.** The
+runner's own worker (and driver) were still alive at the file boundary: `collect-loop` retired a
+worker at its result and dropped its `:down`; `drain-runner` demonitored the driver and flushed
+a `:down` that had not arrived yet (`(after 0)`). Now `pending` counts exits and the driver's
+`:down` is awaited, so "the drain returned" means "the runner's machinery is gone" by
+construction. Recorded under KI-89 §2b. Suite 5508/5509 (the wasm-cap exception), 271 s.
