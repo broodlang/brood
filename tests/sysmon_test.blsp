@@ -39,6 +39,16 @@ run out. Returns the final `:all` listing ([] on success)."
     (proc/system-monitor :all)
     (do (sleep 20) (sysmon-wait-empty (- n 1)))))
 
+;; `:quiet` unless a :gc event ABOUT `subject` arrives within `ms`; events about any
+;; other process are consumed and ignored (they are stragglers from an earlier,
+;; broader subscription — see the threshold test).
+(defn- sysmon-quiet-about (subject ms)
+  (let (deadline (+ (os/now) ms))
+    (receive
+      ([:system :gc ^subject _] :got-one)
+      ([:system :gc _ _] (sysmon-quiet-about subject (math/max 0 (- deadline (os/now)))))
+      (after ms :quiet))))
+
 (defn- sysmon-done ()
   "End-of-test hygiene: disarm, then drain any [:system …] backlog out of this
 worker's mailbox so it can't satisfy a later test's receive."
@@ -103,13 +113,24 @@ worker's mailbox so it can't satisfy a later test's receive."
     (sysmon-done))
 
   (test "a gc-min-pause-us threshold suppresses cheap collections"
-    ;; 10-minute threshold: no minor collection takes that long, so nothing
-    ;; may arrive. Wait for the worker to finish, then prove silence.
+    ;; 10-minute threshold: no minor collection takes that long, so nothing about
+    ;; OUR worker may arrive. Wait for the worker to finish, then prove silence.
+    ;;
+    ;; Pinned to `worker` on purpose. The previous test armed an UNTHRESHOLDED :gc
+    ;; subscription, which under a loaded suite reports every collection in the
+    ;; runtime; an event that had already passed the subscriber filter when
+    ;; `sysmon-done` disarmed lands AFTER its zero-wait drain (the emitter snapshots
+    ;; its targets, then delivers — Erlang's system_monitor has the same window), and
+    ;; sat in this unit's shared mailbox until this receive took it as `:got-one`
+    ;; (seen once in a full run, 2026-09-04). Such a straggler is about some other
+    ;; process; `worker` did not exist when the old subscription was live, so an
+    ;; event about it can only have come through THIS subscription — which is the
+    ;; claim under test.
     (proc/system-monitor (self) {:gc true :gc-min-pause-us 600000000})
     (let (worker (spawn (do (sysmon-churn 50000 ()) (dev/gc-collect) :ok))
           wm (monitor worker))
       (receive ([:down ^wm ^worker _] :ok) (after *test-wait-ms* :timeout))
-      (assert= :quiet (receive ([:system :gc _ _] :got-one) (after 200 :quiet))))
+      (assert= :quiet (sysmon-quiet-about worker 200)))
     (sysmon-done))
 
   (test "no self-reporting, and the monitor's death disarms the stream"
