@@ -10863,3 +10863,10 @@ that warns, and `ls -la ~/.cache/brood` at that moment.
 
 Merged `origin/main` (+8, clean). CI's tree-walker job now sets `BROOD_NO_PRELUDE_IMAGE=1` so
 the text-cache boot keeps deliberate coverage, as it already does for the stdlib image.
+
+**Same night — KI-108.** The combined-tree suite, run in foreground halves after the box killed two
+background runs, turned one red: `crash_report_default`'s lazy-arm case with an entirely empty
+stderr — the script's fixed `(sleep 500)` lost to a loaded box while the reporter's nine modules
+loaded. Fixed the way KI-79 was: the harness reads the child's stderr pipe and stops at the
+report, 15 s ceiling — healthy runs ~50 ms instead of 530. Sabotage-verified (no crash → fails at
+the deadline, no hang). Numbered KI-108 because a parallel merge had just taken 107.
