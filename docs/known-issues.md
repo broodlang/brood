@@ -22,9 +22,18 @@ cannot be corrected. `doc_refs::no_two_entries_claim_the_same_number` now fails 
 a collision — if you hit it, **renumber the newer entry**, and check what already cites the
 older one (`grep -rn KI-N`).
 
-**2. Write both halves.** An index row *and* a `## KI-N — <one-line symptom> <status> <date>`
-section. The index row alone is not enough — the file's own header sends the reader to the
-section, and `doc_refs::every_ki_reference_resolves_to_a_known_issue` enforces it.
+**2. Write both halves — and later, UPDATE both halves.** An index row *and* a
+`## KI-N — <one-line symptom> <status> <date>` section. The index row alone is not enough — the
+file's own header sends the reader to the section, and
+`doc_refs::every_ki_reference_resolves_to_a_known_issue` enforces it.
+
+Nothing enforces the *reverse*, and that is the failure mode in practice: when you fix a bug you
+are editing the section, not the index, so the row keeps whatever status it had. KI-79 and KI-80
+were both fixed (2026-09-02 and 2026-08-29) with dated resolutions in their sections while their
+rows still read `⚠️ WATCHING`, and a work-queue item was written on 2026-09-04 to go re-run
+repros for two bugs that no longer existed. **Read the section before trusting the row**, and
+when you resolve one, change the row in the same commit: lead with the new status and keep the
+old text after it as history, the way KI-79, KI-80, KI-86, KI-97 and KI-99 are written.
 
 **3. The section answers five questions, in this order.** They are the questions the next
 person actually has, and every entry that skipped one cost time later:
