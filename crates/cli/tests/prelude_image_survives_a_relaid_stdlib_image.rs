@@ -91,11 +91,10 @@ fn brood(
         .env_remove("BROOD_COVERAGE")
         .env_remove("BROOD_PRELUDE_IMAGE")
         .env_remove("BROOD_NO_PRELUDE_IMAGE");
-    // The image is opt-in (KI-106 blocks the default), so the arm under test asks for it
-    // explicitly. Both spellings are cleared above so an ambient one cannot silently turn
-    // the control arm into a second image arm.
-    if !no_image {
-        cmd.env("BROOD_PRELUDE_IMAGE", "1");
+    // The image is the default (ADR-314); the control arm opts out. Both spellings are
+    // cleared above so an ambient one cannot silently turn either arm into the other.
+    if no_image {
+        cmd.env("BROOD_NO_PRELUDE_IMAGE", "1");
     }
     cmd.arg(program).output().expect("run brood")
 }

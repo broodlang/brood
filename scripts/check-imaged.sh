@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Does the project's own checker gate stay green with the PRELUDE IMAGE on?
 #
-# Why this exists. On 2026-09-04 the prelude image (ADR-314) was made the default, and every
+# Why this exists. On 2026-09-04 the prelude image (ADR-314) was first made the default, and every
 # test written FOR the image passed — the boot differential, the stale-directory guard, all
 # 1377 suite cases. `nest check` over `std/ + tests/ + examples/` went red on the first run:
 # with the image on, a multi-file check lost every DERIVED multimethod mirror (KI-106). The
@@ -29,7 +29,9 @@ echo "check-imaged: using $NEST ($("$NEST" --version 2>/dev/null))"
 WORK="$(mktemp -d)" || exit 2
 trap 'rm -rf "$WORK"' EXIT
 export XDG_CACHE_HOME="$WORK/cache"
-export BROOD_PRELUDE_IMAGE=1
+# The image is the DEFAULT (ADR-314). Clear both spellings so the machine's environment cannot
+# turn this into a source-path run; the boot assertion below still proves which path ran.
+unset BROOD_PRELUDE_IMAGE BROOD_NO_PRELUDE_IMAGE
 export BROOD_NO_CHECK_CACHE=1
 mkdir -p "$XDG_CACHE_HOME"
 

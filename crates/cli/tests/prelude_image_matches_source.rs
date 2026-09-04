@@ -97,14 +97,15 @@ fn run_arm(
         .env_remove("BROOD_NO_JIT")
         .env_remove("BROOD_NO_STDIMAGE")
         .env_remove("BROOD_COVERAGE");
-    // Clear BOTH spellings on BOTH arms before choosing, so an ambient one cannot decide the
-    // answer — an inherited `BROOD_PRELUDE_IMAGE=1` would otherwise make the source arm take
-    // the image path and this test compare the image with itself. (Kept from the 2026-09-04
-    // default-flip attempt, which is reverted; the image is opt-in again, see KI-106.)
+    // The image is the DEFAULT (ADR-314, since 2026-09-04), so the arms are "leave it alone"
+    // and "opt out". Clear BOTH spellings on BOTH arms first, so an ambient one cannot decide
+    // the answer — an inherited opt-out would make the image arm take the text path and this
+    // test compare the text path with itself; the path assertions below would catch that, but
+    // not with a message that names the cause.
     cmd.env_remove("BROOD_PRELUDE_IMAGE")
         .env_remove("BROOD_NO_PRELUDE_IMAGE");
-    if use_image {
-        cmd.env("BROOD_PRELUDE_IMAGE", "1");
+    if !use_image {
+        cmd.env("BROOD_NO_PRELUDE_IMAGE", "1");
     }
     let out = cmd.arg(program).output().expect("run brood");
     (

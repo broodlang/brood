@@ -324,6 +324,9 @@ jobs:
           # non-default configuration (the tree-walker, BROOD_VM=0), so "the other configuration"
           # is its whole purpose. The pairing is engine x load-path, not either alone.
           BROOD_NO_STDIMAGE: 1
+          # Same reason, one artifact over: the PRELUDE image is default-on too (ADR-314, since
+          # 2026-09-04), so this job also keeps the text-cache boot path covered on purpose.
+          BROOD_NO_PRELUDE_IMAGE: 1
         shell: bash
         run: |
           set -o pipefail

@@ -10779,3 +10779,32 @@ Merged `origin/main` (+8, no conflicts) mid-way: upstream has meanwhile **fixed 
 exception properly** — wasmtime was reserving 4 GiB per linear memory (879b0daf) — so both
 wasm files pass capped here (7/7, 15/15), my planned self-skip is moot, and my CLAUDE.md note
 about which binary to judge it with was reverted as targeting deleted text.
+
+## 2026-09-04 (night) — the prelude image is DEFAULT-ON (ADR-314, third attempt), with the project's gates run under it first
+
+The order that made this one stick: `make check-imaged` (clean, imaged boot asserted), the
+default checker gate with no flag and with `BROOD_NO_PRELUDE_IMAGE=1` (0 and 0), both cli image
+guards and upstream's new `stdimage_reporting`, then the full suite under the default.
+
+Upstream's `stdimage_reporting` (55a47b73, merged mid-way) caught a bug in my KI-105 replay
+before the flip shipped: `%std-image-reinstall!` installed the stdlib image UNCONDITIONALLY,
+while the prelude's own top-level form guards on `BROOD_NO_STDIMAGE` and `BROOD_COVERAGE`. So a
+run that asked for the source path with `BROOD_NO_STDIMAGE=1` got the image anyway and its
+summary said `107 sections` — the exact misattribution that test exists to catch. ADR-314's
+rule, applied one notch further: replaying what the evaluation DID includes replaying what it
+DECLINED to do. Fix: one predicate, `%std-image-wanted?`, used by both boot paths so they cannot
+drift. Only visible once the image was the default — the third same-day revert averted by a
+test somebody else wrote that morning.
+
+One unexplained reading, recorded so a second sighting can be matched: the default checker
+gate read **403 warnings** once, seconds after `nest` was rebuilt (new build-id, so its prelude
+image was absent and its boot cold), while a background suite's setup scripts were rewriting
+`~/.cache/brood` for the new std hash. The same command a minute later: 0 on both arms, imaged
+boot confirmed, stdlib image `:live`. Three deterministic cold runs in a private cache (source
+boot + no stdlib image; then imaged + the image nest built itself): 0, 0, 0. So it needed the
+concurrent writers. Temp+rename should make the cache safe against exactly that, so if it
+recurs it is a real bug — keep the log: `BROOD_BOOT_TRACE=1 BROOD_IMAGE_TRACE=1` on the run
+that warns, and `ls -la ~/.cache/brood` at that moment.
+
+Merged `origin/main` (+8, clean). CI's tree-walker job now sets `BROOD_NO_PRELUDE_IMAGE=1` so
+the text-cache boot keeps deliberate coverage, as it already does for the stdlib image.
