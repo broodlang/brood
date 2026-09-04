@@ -10295,3 +10295,13 @@ worker at its result and dropped its `:down`; `drain-runner` demonitored the dri
 a `:down` that had not arrived yet (`(after 0)`). Now `pending` counts exits and the driver's
 `:down` is awaited, so "the drain returned" means "the runner's machinery is gone" by
 construction. Recorded under KI-89 §2b. Suite 5508/5509 (the wasm-cap exception), 271 s.
+
+**Same day, the combined-tree rerun before pushing turned one more red, seen once in three full
+runs:** `sysmon_test` "a gc-min-pause-us threshold suppresses cheap collections" received a
+`:gc` event through a 600 s threshold. Not the threshold: the previous test in that isolated
+unit arms an UNTHRESHOLDED `:gc` subscription (every collection in the runtime, a firehose
+under a loaded suite), and an event already past the subscriber filter when `sysmon-done`
+disarmed lands after its zero-wait drain — the emitter snapshots targets, then delivers, the
+same window Erlang's `system_monitor` has. The test now judges only events about its OWN
+worker, which did not exist under the old subscription, so a straggler cannot satisfy it and
+a real threshold bug still can.
