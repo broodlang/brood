@@ -95,9 +95,9 @@ pub const FLAGS: &[DebugFlag] = &[
         "name each closure that defers to the tree-walker — the tw_defer counter says how many, this says WHO (one defer tree-walks its OWN body; eligible callees route back to the VM)",
     ),
     f(
-        "BROOD_TW_REENTRY",
+        "BROOD_NO_TW_REENTRY",
         OPTOUT,
-        "opt IN (=1) to the tree-walker routing VM-eligible callees back to the engine (60x on the viral defer shape; startup -7%). Off by default until KI-88 (a routed spawn burst can strand one process unscheduled) is fixed",
+        "opt OUT of the tree-walker routing VM-eligible callees back to the engine (default ON since 2026-09-04, ADR-318: 60x on the viral defer shape; startup -7%). The A/B and bisect lever; set it if a routed shape is ever implicated (KI-88's dormant signature has its own watchdog)",
     ),
     f(
         "BROOD_SCHED_DBG",
@@ -107,7 +107,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_ROUTE_DBG",
         ATTRIBUTION,
-        "name each closure the tree-walker routes to the VM (pairs with BROOD_TW_REENTRY)",
+        "name each closure the tree-walker routes to the VM (the router is default ON; BROOD_NO_TW_REENTRY disables it)",
     ),
     f(
         "BROOD_FAULT_QUANTUM_TAIL",

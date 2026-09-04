@@ -10305,3 +10305,29 @@ disarmed lands after its zero-wait drain — the emitter snapshots targets, then
 same window Erlang's `system_monitor` has. The test now judges only events about its OWN
 worker, which did not exist under the old subscription, so a straggler cannot satisfy it and
 a real threshold bug still can.
+
+## 2026-09-04 — the tree-walker→VM router is default-on (ADR-318); KI-88 archived as dormant
+
+The handoff's first open item was "the owner's call on KI-88 / `BROOD_TW_REENTRY`". Taken
+as one decision: the router's default is decided on the router's own gate, and KI-88 — a
+bug nobody could reproduce for five sessions, with a default-on watchdog now reporting its
+exact signature — earns a tripwire, not a veto over a 60× win.
+
+The gate, on the flipped tree: `tw_reentry_test` 6/6; the full suite 5510/5511 (the wasm-cap
+exception) in **217 s**, against 268–316 s for four runs of the same suite earlier today
+with the router off — the deferred entry points every test file pays (autogensym expanders,
+`defn`-in-`let`, the checker) now run at engine speed, which is the §7.3 mechanism showing up
+as a wall-clock number on the whole suite; the breakage suite, all 23 files, exit codes and
+`correct: false` self-checks, green; `chaos2_process_genserver` (KI-88's canonical repro)
+30/30 with the stranded-work watchdog silent; A/B against HEAD at both tiers: default ceiling (`make ab --floor`, best-of-7, 11 rows) every row noise, ten of eleven negative (fib −3.1%, pfib −3.2%, sieve −4.4%, primes −4.5%, json −3.4%; `loop` +1.7% against a 6.4% floor); VM ceiling (`make ab-vm`, best-of-7) `spawn-live` −3.5%, `collatz` −0.3%, `pfib` +1.7% against a 0.8% floor, and **`fib` +2.3%, +2.5% on a solo best-of-9, against a 0.2% floor** — consistent, so it got the probe rather than the "noise" verdict: `perf stat` pinned, three reps each, reads instructions **flat** (43.33 G base vs 43.31 G new — fewer), cycles +2.3%, **L1-icache misses 46 M → 93 M**, and `BROOD_ROUTE_DBG` shows the router firing 35 times on fib, all at boot (`filter`/`fold`/`get`/`into`/`map`/`reverse` from the prelude), never in the loop. That is KI-100's code-layout mechanism (the same signature `ring` showed on 2026-09-02), recorded, and deliberately not pursued.
+
+Mechanically: `tw_reentry_enabled` reads `BROOD_NO_TW_REENTRY` (absent = on), the catalogue
+entry and the CLAUDE.md row follow, and `BROOD_TW_REENTRY=1` is gone rather than aliased — a
+flag the runtime silently ignores is worse than an unknown one.
+
+Trap of the day, for the record: the first breakage pass I ran looked green and proved
+nothing — the files are self-checking programs, not `describe` suites, so `brood --test`
+reports `0 tests` for most of them and the verdict is the exit code plus a grep for
+`correct: false` (the Makefile recipe does exactly that). Read the recipe before
+reproducing a gate by hand.
+

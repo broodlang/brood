@@ -1178,17 +1178,21 @@ pub(crate) fn not_a_function_error(heap: &Heap, v: Value) -> LispError {
 /// mixed-eligibility mutual tail loop stays flat instead of recursing natively.
 pub(crate) const TW_REENTRY_BUDGET: u32 = 32;
 
-/// Is the tree-walker→VM router enabled? **Opt-IN via `BROOD_TW_REENTRY=1`** (the
-/// BROOD_MKCLO pattern) — measured 60× on the viral defer shape and `startup` −6.9%,
-/// but routing exposes a PRE-EXISTING scheduler liveness bug (KI-88: a spawned process
-/// is created, registered and promoted, yet never scheduled — one early spawn of a
-/// 50-burst, deterministic under `breakage/chaos2_process_genserver`'s four warm
-/// sections, reproducible at c4af2feb, GC-stress makes it pass). The router stays
-/// opt-in until that bug is fixed; flip the default WITH its fix, re-running the whole
-/// breakage suite. Read once and cached.
+/// Is the tree-walker→VM router enabled? **Default ON since 2026-09-04; opt OUT via
+/// `BROOD_NO_TW_REENTRY=1`** (ADR-318). Measured 60× on the viral defer shape and
+/// `startup` −6.9% when it landed (2026-08-30), then parked opt-in because routing
+/// exposed KI-88 — a spawned process created, registered and promoted, yet never
+/// scheduled, one early spawn of a 50-burst under `breakage/chaos2_process_genserver`.
+/// KI-88 was never root-caused; it went dormant instead: 358 consecutive clean runs of
+/// that repro with the router live, across five timing regimes and three builds, and a
+/// default-on stranded-work watchdog (`process/scheduler/pool.rs`) that names the pid if
+/// the signature ever recurs. The default flipped on that evidence plus a fresh gate
+/// (full suite, whole breakage suite, the genserver file looped, `make ab --floor` and
+/// `make ab-vm`). The opt-out is the A/B lever, the bisect lever, and the stopgap if a
+/// routed shape is ever implicated again. Read once and cached.
 fn tw_reentry_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_TW_REENTRY").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_TW_REENTRY").is_none())
 }
 
 /// Route a tree-walked closure application onto the VM when the callee has a
