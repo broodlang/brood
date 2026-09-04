@@ -146,7 +146,26 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-04 (latest) — work-queue item 2 is ANSWERED, and the answer is NO: the
+**Addendum 2026-09-04 (latest) — work-queue item 3 needed no repro runs: KI-79 and KI-80 were
+already fixed, and only their INDEX ROWS lagged.** Item 3 asked to try each recorded repro 10x
+and then resolve or fix. Reading them first showed there was nothing to run: **both sections
+already carry dated resolutions** — KI-79 ✅ 2026-09-02 (the liveness check became a *deadline*
+rather than a burst count, generalised from that day's `process_limit_test` flake; the class is
+*assert a condition, not an observation within a window*) and KI-80 ✅ 2026-08-29 (its second
+sighting kept its output and rewrote the entry: 62 F's in runs before the cap, i.e. mass
+failures under load with the timeout hiding the names, from processes dying on
+`editor/serve/serve-manager` after their file's `%isolate` rolled globals back — three defects,
+each fixed). The `⚠️ WATCHING` the item saw was the index row, which the resolving sessions did
+not update; the rows now lead with ✅ and keep the watch text as history, matching KI-86/97/99.
+
+**The transferable bit:** a status lives in two places in `known-issues.md`, and the index is
+the one that goes stale, because it is not where you are working when you fix something. Read
+the section before trusting the row — and when resolving, update both halves (the file's own
+"Filing an entry" note says to write both; it should say to *update* both too).
+**Next: item 4 (move `nest`'s dispatch into Brood) or fix KI-106 (the prelude-image blocker,
+now narrowed to the derived multimethod mirror).**
+
+**Addendum 2026-09-04 (later) — work-queue item 2 is ANSWERED, and the answer is NO: the
 prelude image stays opt-in, now for a reproducible reason (ADR-314, KI-105 fixed, KI-106 open).**
 The item assumed the flip was paperwork. It was not. Working ADR-314's four artifact states
 reproduced its "unreproducible" original failure on the first attempt (5/5 imaged, 0/5 opted
