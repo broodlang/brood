@@ -90,7 +90,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-106 | **with the prelude image on, a multi-file `nest check` loses a record's ability impl** — `nest check <any other file> tests/record_test.blsp` warns `*: no \`num/mul\` method for [:int :record-test/usd]`; the same command with `BROOD_NO_PRELUDE_IMAGE=1`, or with `record_test.blsp` alone, is clean. Two files in one process is the whole repro; order does not matter | ⚠️ **OPEN 2026-09-04** — found by the attempt to make the prelude image (ADR-314) the default, and it is **why that flip was reverted**: CI's zero-warning checker gate is a hard reject. **Not introduced by the KI-105 fix** — it reproduces on the pre-fix binary at `bc8d34d8` under `BROOD_PRELUDE_IMAGE=1`. Invisible to everything else that guards the image: both differentials pass, and all 1377 suite cases pass with the image default-on; only running the project's own gate under the flag found it. Scope is odd and unexplained — `std/**` + `tests/**` together is clean while `tests/**` alone warns, so it is state-dependent on which files share the process, not on a specific companion. Suspect the same family as KI-89 (orphaned `*record-ids*` entries) and KI-84 (an image restoring a registry a source load would have derived): the checker resolves the record id but finds no impl registered under it. `BROOD_REG_TRACE=1` is the tool. **Next step:** minimal repro is two files, so instrument the second one's registration |
+| KI-106 | **with the prelude image on, a multi-file `nest check` loses a record's ability impl** — `nest check <any other file> tests/record_test.blsp` warns `*: no \`num/mul\` method for [:int :record-test/usd]`; the same command with `BROOD_NO_PRELUDE_IMAGE=1`, or with `record_test.blsp` alone, is clean. Two files in one process is the whole repro; order does not matter | ✅ **FIXED 2026-09-04** — not the checker and not the prelude image's restore: `image-prune-foreign-registrations` decides ownership by the QUALIFIER of a registration's key, so `num/mul` was credited to `std/num.blsp` — a real module the project image does not carry — and pruned. The `(defmulti num/mul :commutative)` that registers it lives in the **prelude**, so loading `num` never put it back, and the pruned value was baked into the image. Fixed by never pruning a registration that predates the project's own load; guarded in `tests/startup_image_test.blsp`, sabotage-verified |
 | KI-105 | **a boot from the PRELUDE image consulted a stale stdlib section directory, and a bad offset read garbage instead of failing** — `unbound symbol: io/puts` on a tree where nothing is wrong with `io`. ADR-314 recorded this failure as real, repeatable by hand at the time, and **unreproducible**: three attempts were written and all three passed under a sabotage that removed the fix, so the mechanism stayed a hypothesis and the prelude image stayed opt-in because of it | ✅ **FIXED 2026-09-04** — **reproduced deterministically** (5/5 imaged, 0/5 with `BROOD_NO_PRELUDE_IMAGE=1`) while working the four artifact states for the default flip. Mechanism: `%add-image-source!` **appends**. An imaged boot restores bindings rather than evaluating the prelude, so `*image-sources*` comes back holding a snapshot of whatever stdlib install was live when that prelude image was written; replaying `%std-image-install` over it leaves **two directories for the same file path**, stale one first, and `%image-section-for` scans in install order. The path still exists and reads fine, so the stale offset returns garbage rather than failing cleanly and falling back to source — that readability is the whole bug. The three earlier attempts each broke it (a deleted image fails cleanly; a re-laid layout with no prelude image written under the old one has no snapshot to be stale; an omitted module has no section at all). Fix: `%std-image-reinstall!` (`std/prelude/tools.blsp`) clears the registry to its `def-` values before installing, and the imaged boot calls that. Guarded by `crates/cli/tests/prelude_image_survives_a_relaid_stdlib_image.rs` — **whose first cut passed its own sabotage**: it armed the repro wrongly (brood's prelude image was written on a boot before any stdlib image existed, so the snapshot was empty). It now discards the prelude artifacts and re-cold-boots with the full image live, asserts that arming boot really was a source boot, and fails with the original `unbound symbol: io/puts` when the fix is removed |
 | KI-104 | **`includes?` scanned a set instead of asking its trie — a correct answer given 64x too slowly** — `includes?` is the membership question people reach for first, and it special-cased maps (searching values) but not sets, so `(includes? #{…} x)` fell through to `index-of` and walked the set. The result was always right, so no test could see it | ✅ **FIXED 2026-09-02** — a `(set? coll) (%set-has? coll x)` arm ahead of the map arm in `std/prelude/seq.blsp`; 500 lookups over a 500-element set went 29 ms -> 0.4 ms, matching `contains?`. Guarded by `set_test.blsp` "includes? answers a set the same way contains? does" |
 | KI-103 | **a `:max-mailbox` breach re-trips inside its own handler, killing the remedy** — the process that drains to recover is killed by the *next* enqueue while still draining, so `process_limit_test.blsp:114` ("the handler can drain and clear the bound") timed out; the root cause behind KI-98 | ✅ **fixed 2026-09-02** — the bound is one-shot per arming: taking the breach flag LATCHES it, so no further enqueue re-arms until the bound is set again, which gives the handler the window it never had. One word, three states (`0` clean, `1..` armed with the breaching length, `usize::MAX` latched), armed by `compare_exchange` from clean only. The FIRST fix was wrong and is kept in the entry: a separate `AtomicBool` checked before arming is a check-then-act race, which moved the rate from ~3-in-4 to ~1-in-10 and read as a second bug |
@@ -6354,7 +6354,54 @@ or give the tracing tests real mutual exclusion instead of relying on `:isolated
 Left as a **watch** rather than open: it is one assertion, at a known rate, with a known cause,
 and the two candidate fixes both touch machinery that KI-89's design session is already going
 to have to look at.
-## KI-106 — an imaged prelude loses a record's ability impl across a multi-file check ⚠️ OPEN 2026-09-04
+## KI-106 — an imaged prelude loses a record's ability impl across a multi-file check ✅ FIXED 2026-09-04
+
+> **Resolution 2026-09-04.** The narrowing above was right that this is the checker's view and
+> not the dispatcher's, and right that the loss is the DERIVED mirror. The mechanism is one step
+> further back, and it is not the prelude image restoring anything stale.
+>
+> `image-prune-foreign-registrations` (added for KI-89's residual) removes, at project-image
+> write time, every registration owned by a module the image does not carry — on the sound
+> premise that *a registration is data about a module and must arrive with it*, since the module
+> re-registers its own entries when it loads. Ownership is decided by
+> `stdimage/registrations-by-module`, which groups **by the qualifier of the key**.
+>
+> `num/mul`'s qualifier is `num`. `std/num.blsp` exists and is a real module, and the project
+> image does not carry it — so the entry looked textbook-foreign and was pruned. But the
+> `(defmulti num/mul :commutative)` that registers the algebra lives in the **prelude**, not in
+> `std/num.blsp`. The qualifier named a module that was not the registrar, so nothing ever
+> replayed it: the prune's premise failed silently, the loss was written into the image, and an
+> imaged boot restored a `*multi-algebra*` holding **one** entry (`compare-to`) instead of five.
+>
+> From there the reported symptom follows exactly. `build_multi_info` synthesizes the
+> commutative mirror only `if algebras.contains_key(mname)`, so with the algebra gone every
+> `num/*` mirror went with it — which is why the DECLARED `[usd :int]` on line 135 never warned
+> (the checker reads it from the file's own forms) and only the derived `[:int usd]` on line 137
+> did. It also settles the "unexplained" non-monotonic scope: with `std/**` in the check set,
+> `std/num.blsp`'s `defmulti` forms are in the checked text, so `collect_register_multi` finds
+> the algebra from forms and never needs the registry at all.
+>
+> **The fix needs no name heuristics.** A registration that was already present before this
+> project loaded a single file cannot be owned by anything the load brought in — so nothing will
+> replay it, and pruning it loses it permanently. `write-image` now captures that baseline beside
+> the `before (reflect/global-names)` it already took, at the same moment and for the same
+> reason, and the prune skips it. Everything the load actually introduced is still pruned, which
+> `crates/nest/tests/project_image_registries.rs` (KI-89's guard) confirms.
+>
+> Guarded in `tests/startup_image_test.blsp` by two cases — a synthetic pre-existing
+> registration, and `num/mul` itself — and sabotage-verified: ignoring the baseline fails both.
+>
+> **What this cost, and the reason it stayed hidden.** Nothing else could see it. The prune is
+> rolled back by its own `%isolate`, so the running session keeps every registration it had and
+> looks correct; only the file on disk is short. A defect that is transient in memory and
+> permanent on disk is invisible to every test that checks the live session, which is what the
+> entry observed when it noted that the whole 1377-case suite passes with the image on while the
+> project's own `nest check` fails immediately.
+>
+> **Not flipped.** ADR-314's default stays opt-in. This removes the reason KI-106 gave for that,
+> but ADR-314 records others (module-level names the prelude's evaluation binds coming back
+> unbound), and a default flip is its own change with its own evidence.
+
 
 **Symptom.** With the prelude image on (ADR-314, opt-in via `BROOD_PRELUDE_IMAGE=1`):
 
