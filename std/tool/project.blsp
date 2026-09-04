@@ -2679,7 +2679,7 @@ early, and so on — which is exactly how the editor's declare-sig action corrup
 `std/regex.blsp` when several were accepted against one snapshot (the head of the
 following definition ended up spliced onto the tail of the previous one, and the file
 stopped parsing). Applied bottom-up, no edit can move another's target."
-  (fold (reverse (sort (fn (a b) (< (first a) (first b))) insertions))
+  (fold (reverse (sort insertions (fn (a b) (< (first a) (first b)))))
     lines
     (fn (acc entry) (sig-splice acc (first entry) (second entry)))))
 

@@ -2734,7 +2734,7 @@ In the `math` module: `math/mod`  `math/rem`  `math/quot`  `math/floor`  `math/m
 - `repeat` builds a list of `n` copies of a value; `repeatedly` calls a
   zero-argument function `n` times and collects the results.
 - `sort` orders ascending (or with a strict less-than predicate:
-  `(sort > xs)`); `sort-by` orders by a key function. Both are a **stable**
+  `(sort xs >)`); `sort-by` orders by a key function. Both are a **stable**
   merge sort. All of these are tail-recursive (stack-safe on long inputs).
 - **Lazy, fusing pipelines.** `map`/`filter`/`keep`/`remove` are **eager** — they
   return a concrete list and run their function immediately (so `(map f xs)` for

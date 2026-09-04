@@ -1672,6 +1672,43 @@ the exit code still reflects the run. An unknown formatter name is a clean error
     (test-report-formatted results elapsed)
     (test-report-human results elapsed opts extra)))
 
+;; One line saying whether THIS run used the stdlib image, printed with the timing line.
+;;
+;; It is here because the absence of it cost a full day. The image is default-on and its
+;; fallback is silent by design — with none on disk `require` just reads source, which is
+;; correct — but the source path is also a documented amplifier for the KI-89 isolate race
+;; (deleting the images takes this suite from 5514 passing to 106 failures), and it is ~5x
+;; slower. So "why is the suite red and slow today?" and "did my measurement run imaged?"
+;; both have the same answer, and until now nothing printed it.
+;;
+;; `%std-image-installed` is the honest fact — what this process materialised at boot —
+;; not `(stdimage/status)`'s `:state`, which reads the disk NOW and says `:live` for a run
+;; that loaded everything from source because `nest` rebuilt the image on the way in.
+;; `status` is consulted only on a miss, to say WHICH miss it was; that costs a directory
+;; listing, which is worth paying exactly when something is already wrong.
+(defn- image-summary-line ()
+  (let (n (%std-image-installed))
+    (if n
+      (str "  (stdlib image: " n " sections)")
+      (let (st (get (stdimage/status) :state))
+        (str "  (stdlib image: none — std/ loaded from SOURCE"
+          (cond
+            (= st :stale) " — on-disk image is for a different stdlib; `nest stdimage` rebuilds it"
+            (= st :absent) " — none built yet; `nest stdimage` writes one"
+            (= st :unreadable) " — the image on disk could not be read"
+            (= st :no-cache) " — no cache directory"
+            (= st :disabled) " — this build was configured --without-stdimage"
+            ;; `:live` here means an image is on disk and current, and this process still
+            ;; did not use it. Almost always because `nest` WROTE it on the way into this
+            ;; very command (it is built for the next process, not this one) — the run that
+            ;; pays for a stdlib edit. Otherwise BROOD_NO_STDIMAGE, or BROOD_COVERAGE, which
+            ;; stands the image down so the compiler can instrument what a materialised
+            ;; module never runs.
+            (= st :live)
+              " — one was written during this run; the next run will use it (or BROOD_NO_STDIMAGE / BROOD_COVERAGE is set)"
+            else "")
+          ")")))))
+
 (defn- test-report-human (results elapsed opts extra)
   (let (total (count results)
         failed (count-failed results)
@@ -1704,6 +1741,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
                extra
                ")"))
     (io/puts (str "  (" elapsed " ms wall, peak " (mb-str (dev/mem-peak)) ")"))
+    (io/puts (image-summary-line))
     ;; Echo the seed whenever the order was randomised, so the run can be
     ;; reproduced. Deliberately says "same order", not "replay exactly": the seed
     ;; fixes the order tests are SCHEDULED in, but parallel tests genuinely

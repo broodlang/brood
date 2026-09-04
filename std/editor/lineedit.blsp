@@ -316,6 +316,12 @@ as a substring, or -1. An empty query matches the newest entry."
     (>= i (count history)) -1
     (includes? (nth history i) query) i
     else (lineedit-search-find history query (inc i))))
+;; `number`, not `int`, on the index: `from` in `lineedit-search-step` reaches this
+;; through `(math/max 0 from)`, and `from` originates in `(get s :idx)` — an untyped map
+;; read. Declaring `int` anywhere in that chain only moves the strict warning one call up
+;; until it lands on the `get`, which has nothing to narrow it with. `number` is what the
+;; chain actually supports, and it still rules out the index typos `nth` now rejects.
+(sig lineedit-search-find (seqable string number -> number))
 
 (defn- lineedit-search-step (state query from)
   "Set the search query to `query` and select the nearest match at or after index
@@ -329,6 +335,10 @@ as a substring, or -1. An empty query matches the newest entry."
           :text entry
           :point (string/length entry)
           :search (assoc s :query query :idx found))))))
+;; `any` for the state, deliberately: it IS a map, but every caller builds it with
+;; `assoc` over an untyped value, which types as `vector | map` — so annotating `map`
+;; rejects correct callers. This signature exists to give `from` a type, nothing more.
+(sig lineedit-search-step (any string number -> any))
 
 (defn- lineedit-search-cancel (state)
   "Leave search, restoring the line as it was before C-r."
@@ -944,6 +954,7 @@ once. Stops as soon as the read is `:done`."
     state
     (let (k (term/poll 0))
       (if (nil? k) state (lineedit-drain (lineedit-handle state k))))))
+(sig lineedit-drain (map -> map))
 
 (defn- lineedit-finish (state)
   "End the read: repaint the final line, drop to a new line, and return the result

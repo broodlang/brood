@@ -9,6 +9,15 @@
 
 (defmodule scram-bytes-test (:use test))
 
+;; The `*-decode-bytes` functions return `bytes | failure` (ADR-310), and every case here
+;; feeds an input it controls — so a failure is a decoder REGRESSION, not an expected
+;; channel. `decoded` says exactly that: it turns one into a named test failure instead of
+;; letting it reach `into`, which would raise from inside the assertion. Asserting it up
+;; front is also what lets the checker see a plain `bytes` (ADR-316: a failure is never a
+;; valid materialisation), so these lines type without an opt-out.
+(defn- decoded (v)
+  (if (failure? v) (error "expected a successful decode, got " (pr-str v)) v))
+
 ;; ---- the SCRAM client-key chain, in pure Brood over byte vectors ------------
 ;;
 ;; SaltedPassword = PBKDF2(password, salt, i, 32)
@@ -32,7 +41,7 @@
 (describe "SCRAM-SHA-256 client-key chain over raw bytes"
   (test "base64-decode-bytes recovers the binary salt (not valid UTF-8)"
     (assert= [91 109 153 104 157 18 53 142 236 160 75 20 18 54 250 129]
-      (into [] (encoding/base64-decode-bytes scram-test-salt-b64))))
+      (into [] (decoded (encoding/base64-decode-bytes scram-test-salt-b64)))))
 
   (test "SaltedPassword matches the RFC 7677 reference"
     (assert= "c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d"

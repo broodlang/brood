@@ -2635,6 +2635,68 @@ pub(super) fn list_processes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 ///
 /// It is sound only with no other process mutating globals concurrently, which the
 /// runner ensures by running isolated tests alone.
+/// `(%scope-live-pids)` — the OTHER live processes spawned under the `%isolate` scope this
+/// process is currently running in, as a list of pids.
+///
+/// The mechanism behind "an isolated unit runs alone". `%isolate` is sound only while nothing
+/// else mutates globals concurrently — its own doc says so — and the test runner was
+/// violating that: an `:isolated` unit enters its isolate and rolls the global table back
+/// while the file's parallel workers, and anything they spawned, are still running. A
+/// straggler's `defrecord` in that window lands its `%record-register` (locked, so it survives
+/// the swap) while the constructor `def` beside it does not, which is KI-89's orphaned
+/// record id.
+///
+/// **Scope, not ancestry.** Every process spawned inside a scope carries it, and so does
+/// everything they spawn, however many processes in between have since exited — so this needs
+/// no live parent chain, which is the same durability argument as the reap's `isolate_owner`.
+///
+/// **Scope `0` answers empty, and that is not a shortcut.** Zero is not an ownership group; it
+/// is the default bucket every process spawned outside any isolate shares, root and
+/// infrastructure included. Counting it asks "is the world quiet?", which is never true — an
+/// earlier version did, so the caller's bounded wait timed out every time and cost the suite
+/// 5x its wall clock while fixing nothing.
+///
+/// Policy — how long to wait and what to do when the wait runs out — belongs to the runner, in
+/// Brood, not here.
+pub(super) fn scope_live_pids(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let scope = crate::process::self_isolate_scope();
+    if scope == 0 {
+        return Ok(Value::nil());
+    }
+    let me = crate::process::self_pid();
+    // Exclude our own ANCESTORS, and this is the whole difference between a useful answer
+    // and a guaranteed timeout. The test runner's shape is root → per-file driver → unit
+    // worker, and the driver is parked in `receive` waiting for the very unit that is
+    // asking. Counting it says "someone else is live" forever, so a bounded wait on this
+    // predicate always ran out — which is exactly what an earlier attempt measured, at 5x
+    // the suite's wall clock, and wrongly read as "quiescence is unaffordable".
+    //
+    // An ancestor cannot be the hazard anyway. The processes that can mutate globals under
+    // an isolate are the ones running BESIDE us; the ones we were spawned from are, by
+    // construction, blocked on our result.
+    let mut ancestors = std::collections::HashSet::new();
+    let mut cur = me;
+    // Bounded: a parent pid always predates its child so a cycle is impossible, but the
+    // walk reads a live table, so cap it rather than trust that.
+    for _ in 0..10_000 {
+        match crate::process::parent_of(cur) {
+            Some(p) => {
+                ancestors.insert(p);
+                cur = p;
+            }
+            None => break,
+        }
+    }
+    let items: Vec<Value> = crate::process::list_local_pids()
+        .into_iter()
+        .filter(|p| {
+            *p != me && !ancestors.contains(p) && crate::process::isolate_owner_of(*p) == scope
+        })
+        .map(crate::process::pid_value)
+        .collect();
+    Ok(heap.list(items))
+}
+
 pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let thunk = arg(args, 0);
     // `snapshot_globals`/`restore_globals` now bracket RUNTIME compaction themselves (the
@@ -2654,7 +2716,16 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
     // Pids alive before the run, to tell apart the ones the thunk spawns.
     let before: std::collections::HashSet<u64> =
         crate::process::list_local_pids().into_iter().collect();
+    // Stamp everything the thunk spawns — directly or transitively — with a token unique
+    // to this isolate. `spawn` copies the spawner's current scope into the child's
+    // `isolate_owner` *and* `isolate_scope`, so the whole subtree carries it from birth
+    // and keeps it after any process above it dies. That durability is the entire point:
+    // see the reap below.
+    let scope = crate::process::next_isolate_token();
+    let outer_scope = crate::process::set_self_isolate_scope(scope);
     let result = apply_engine(heap, thunk, &[], env);
+    // Restore before the reap, so nothing spawned by the cleanup itself is stamped ours.
+    crate::process::set_self_isolate_scope(outer_scope);
     // Reap processes the thunk spawned and left running, BEFORE the wholesale
     // global restore below. Otherwise an orphan still running the test's code (a
     // server it spawned but never stopped) looks up a global the test `def`'d,
@@ -2665,46 +2736,28 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
     // and starve any orphan pinned to that same worker. Bounded so a wedged orphan
     // can't hang the run.
     //
-    // **The kill set is what the THUNK spawned, by ancestry — not "alive after minus
-    // alive before".** That set difference is not ownership: any process running
-    // concurrently — a helper the suite spawned before the isolate, a service under
-    // test, a node connection — can spawn during the thunk's run, and the difference
-    // swept those bystanders in and killed them.
+    // **The kill set is what the THUNK spawned, by an ownership STAMP — not "alive after
+    // minus alive before", and no longer by walking the `parent` chain.** The set
+    // difference is not ownership: anything running concurrently — a helper the suite
+    // spawned before the isolate, a service under test, a node connection — can spawn
+    // during the thunk's run, and the difference swept those bystanders in and killed them.
     //
-    // Ownership is decided by walking each newcomer up its `parent_of` chain looking
-    // for US, and then checking the last hop: the direct child of ours that the chain
-    // arrives through must itself be a newcomer. That second half matters — "the chain
-    // reaches me" alone is too coarse, because a child we spawned *before* the isolate
-    // is our descendant too, so everything it spawns during the thunk would read as
-    // ours (exactly the reported bystander: a helper spawned before the isolate,
-    // registering a name 50 ms in). Since `me` runs nothing but the thunk for the whole
-    // window, a direct child of `me` that is new IS the thunk's.
+    // The ancestry walk that replaced it was correct but not total, and its gap is KI-89.
+    // A chain that dead-ends at a process which has already exited (its registry entry, and
+    // with it its own parent link, is gone) could not be proven ours, so an orphaned
+    // GRANDCHILD whose middle process exited during the thunk was left running. That is not
+    // a mere process leak: the orphan keeps executing against the globals we are about to
+    // roll back, and a `require`-driven `defrecord` in it lands its `%record-register`
+    // (locked, so it survives the swap) while the constructor `def` beside it goes to the
+    // table the swap discards — a registered record id with no bound constructor, sticky
+    // from the next snapshot on. It was observed exactly that way: seven ids written in one
+    // burst by a grandchild, between two of the runner's restores.
     //
-    // Known gap, deliberately left: a chain that dead-ends at a process which has
-    // already exited (its registry entry, and with it its own parent link, is gone)
-    // cannot be proven ours, so an orphaned *grandchild* whose middle process exited
-    // during the thunk is not reaped. Erring that way is the right side to err on — a
-    // missed orphan leaks a process, a wrong kill takes down someone else's. Closing it
-    // needs an ownership generation stamped at spawn time, which the scheduler does not
-    // expose today.
+    // `isolate_owner` closes it. It is stamped at spawn from the spawner's current scope
+    // and never mutated, so it survives every death above it and needs no live chain to
+    // read. A bystander carries some other token (or none) and is still left alone, so the
+    // blast radius above is unchanged — it is only the missing half that is added.
     let me = crate::process::self_pid();
-    let owned = |start: u64| {
-        let mut cur = start;
-        // Bounded: a cycle is impossible (a parent pid always predates its child), but
-        // the walk reads a live table, so cap it rather than trust that invariant.
-        for _ in 0..10_000 {
-            match crate::process::parent_of(cur) {
-                // `cur` is the direct child of ours this chain runs through.
-                Some(p) if p == me => return !before.contains(&cur),
-                // `0` is the root's no-parent sentinel and reports as `None`; a `None`
-                // here also covers a parent that died and deregistered, taking the rest
-                // of the chain with it. Either way we can't prove ownership — decline.
-                Some(p) => cur = p,
-                None => return false,
-            }
-        }
-        false
-    };
     let spawned: std::collections::HashSet<u64> = crate::process::list_local_pids()
         .into_iter()
         // Never reap the CALLER: the root's mailbox registers lazily (its first
@@ -2713,7 +2766,9 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
         // running the isolate. That kill was silently ignored for as long as
         // exit signals couldn't reach a natively-nested receive; now that they can
         // (Control::Killed), it would abort the whole run.
-        .filter(|p| !before.contains(p) && *p != me && owned(*p))
+        .filter(|p| {
+            !before.contains(p) && *p != me && crate::process::isolate_owner_of(*p) == scope
+        })
         .collect();
     if !spawned.is_empty() {
         let kill = crate::process::Message::Keyword(crate::core::value::intern(
@@ -2762,6 +2817,39 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
             } else {
                 std::thread::sleep(std::time::Duration::from_micros(500));
             }
+        }
+    }
+    // DIAGNOSTIC (BROOD_SCOPE_DBG): what is still alive as we roll the globals back. Anything
+    // here that is not an ancestor is a process about to see its bindings vanish — KI-89.
+    if std::env::var_os("BROOD_SCOPE_DBG").is_some() {
+        let mut ancestors = std::collections::HashSet::new();
+        let mut cur = me;
+        for _ in 0..10_000 {
+            match crate::process::parent_of(cur) {
+                Some(p) => {
+                    ancestors.insert(p);
+                    cur = p;
+                }
+                None => break,
+            }
+        }
+        let survivors: Vec<String> = crate::process::list_local_pids()
+            .into_iter()
+            .filter(|p| *p != me && !ancestors.contains(p))
+            .map(|p| {
+                format!(
+                    "{p}(scope={},parent={:?})",
+                    crate::process::isolate_owner_of(p),
+                    crate::process::parent_of(p)
+                )
+            })
+            .collect();
+        if !survivors.is_empty() {
+            eprintln!(
+                "[scope] RESTORE by {me} (scope={scope}) with {} live: {}",
+                survivors.len(),
+                survivors.join(" ")
+            );
         }
     }
     heap.restore_globals(saved);

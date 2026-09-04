@@ -611,7 +611,7 @@ pub(super) fn range_reduce_slow(
 /// `(%sort-asc coll)` — stable ascending sort of a numeric collection by `<`.
 /// The fast path behind `(sort coll)` when no custom comparator is given;
 /// the all-Brood `%merge-sort` in `std/prelude.blsp` still handles
-/// `(sort less? coll)`. ~50× faster than the in-Brood mergesort on 10 000
+/// `(sort coll less?)`. ~50× faster than the in-Brood mergesort on 10 000
 /// items because every comparison is a Rust `match` instead of an
 /// `eval::apply` round-trip.
 ///

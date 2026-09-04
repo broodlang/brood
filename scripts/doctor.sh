@@ -18,7 +18,11 @@
 #   3. BOOT-CACHE STATE — the expanded-prelude cache is keyed on the executable's mtime, so
 #      every rebuild colds it. A cold boot is ~1.2 s against ~16 ms warm (KI-38), which is
 #      larger than most benchmark rows.
-#   4. DISK LITTER — `make ab` worktrees and temp dirs (KI-30: 4484 dirs / 168 MB).
+#   4. STDLIB IMAGE — default-on, and its fallback is silent by design. Without it the suite
+#      is ~5x slower (91 s -> 470 s) and the KI-89 isolate race fires wholesale (a green
+#      5514-test run became 106 failures with the images deleted). Asked of the BINARY, since
+#      what a boot actually installed and what is on disk now differ exactly when it matters.
+#   5. DISK LITTER — `make ab` worktrees and temp dirs (KI-30: 4484 dirs / 168 MB).
 #
 # Exit status is 0 unless --strict is passed, which makes any finding exit 1 (for CI).
 set -u
@@ -113,7 +117,55 @@ else
 fi
 
 echo
-echo "4. disk litter"
+echo "4. stdlib image"
+# The image is default-ON and its fallback is SILENT by design — with none on disk `require`
+# just reads source, which is correct. The cost of that silence is what puts this check here:
+# the source path is ~5x slower on the suite (91 s -> 470 s measured) and is a documented
+# amplifier for the KI-89 isolate race (deleting the images took a green 5514-test run to 106
+# failures). A run can therefore be slow and red for a reason that has nothing to do with the
+# change under test, and nothing used to say so.
+#
+# Ask the BINARY, not the directory. `:state` reads what is on disk now; `%std-image-installed`
+# is what that binary's boot actually did, and they disagree exactly when it matters — after a
+# `std/` edit, where `nest` writes an image on the way into a command that itself ran from
+# source. The probe prints "<installed|none> <state>".
+img_probe="$(mktemp -t brood-doctor-img-XXXXXX.blsp)"
+cat >"$img_probe" <<'PROBE'
+(let (n (%std-image-installed)
+      st (check-allow :discarded-catch
+           (try (->string (get (stdimage/status) :state)) (catch _ "unknown"))))
+  (%print (str (if n n "none") " " st)))
+PROBE
+for b in target/release-fast/brood target/release/brood; do
+  [ -x "$b" ] || continue
+  out=$("$b" "$img_probe" 2>/dev/null | tail -1)
+  # No output means the probe did not run — a binary predating `%std-image-installed`, not a
+  # binary running without an image. Say which; claiming the latter would be a wrong finding
+  # in the one section whose job is to stop wrong findings. (The build-drift section above
+  # has already flagged such a binary; this is the same staleness seen from another angle.)
+  if [ -z "$out" ]; then
+    note "$b could not be probed for its image state — older than \`%std-image-installed\`, rebuild it"
+    continue
+  fi
+  inst=${out%% *}
+  state=${out##* }
+  case "$inst" in
+    ""|none)
+      case "$state" in
+        disabled|no-cache)
+          ok "$b: no image by configuration ($state)" ;;
+        *)
+          note "$b boots WITHOUT the stdlib image (on disk: $state) — std/ loads from source"
+          echo "     ~5x slower on a suite, and the KI-89 isolate race fires wholesale; \`nest stdimage\` writes one" ;;
+      esac ;;
+    *)
+      ok "$b boots with the stdlib image ($inst sections)" ;;
+  esac
+done
+rm -f "$img_probe"
+
+echo
+echo "5. disk litter"
 if [ -d target/ab ]; then
   n_wt=$(find target/ab -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
   sz=$(du -sh target/ab 2>/dev/null | cut -f1)

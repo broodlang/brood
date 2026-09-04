@@ -132,11 +132,11 @@
     (assert= (sort nil) nil)
     (assert= (sort (list 1)) (list 1)))
   (test "sort takes a custom strict less-than predicate"
-    (assert= (sort > (list 3 1 2 5 4)) (list 5 4 3 2 1)))
+    (assert= (sort (list 3 1 2 5 4) >) (list 5 4 3 2 1)))
   (test "sort is stable (equal elements keep input order)"
     ;; sort by first component; the second tags the original position.
     (let (pairs (list [1 :a] [0 :b] [1 :c] [0 :d]))
-      (assert= (sort (fn (x y) (< (seq/vector-ref x 0) (seq/vector-ref y 0))) pairs)
+      (assert= (sort pairs (fn (x y) (< (seq/vector-ref x 0) (seq/vector-ref y 0))))
         (list [0 :b] [0 :d] [1 :a] [1 :c]))))
   (test "sort-by orders by a key function"
     (assert= (sort-by (list "ccc" "a" "bb") (fn (s) (string/length s))) (list "a" "bb" "ccc"))

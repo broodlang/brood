@@ -37,15 +37,21 @@ PROFILE="${1:-debug}"
 NEST="$TARGET/$PROFILE/nest"
 
 if [ ! -x "$NEST" ]; then
-    echo "build-std-image: no $PROFILE nest binary yet — nothing to build (suite runs source)"
+    echo "build-std-image: no $PROFILE nest binary at $NEST — nothing to build (suite runs source)"
     exit 0
 fi
 
 # `nest stdimage` is idempotent-ish: it reports `:present` when a current image already exists
 # rather than rebuilding, so this costs ~30 ms on a warm tree and ~1 s after a commit (the id
 # carries the git sha and a content hash of every baked-in .blsp, so any change invalidates it).
+# Name the binary. The image is keyed on the stdlib id of the nest that WRITES it, and the
+# profile argument defaults to `debug` — so a bare `scripts/build-std-image.sh` run while you
+# are testing `target/release/brood` writes a perfectly good image for the *other* binary and
+# reports success. That is a five-minute confusion every time, and the id in the message is
+# not enough to spot it: you have to know which binary it belongs to.
 if out="$("$NEST" stdimage 2>&1)"; then
     printf 'build-std-image: %s\n' "$(printf '%s' "$out" | tail -1)"
+    printf 'build-std-image: written by %s (profile %s) — it serves binaries built from the SAME tree\n' "$NEST" "$PROFILE"
 else
     echo "build-std-image: nest stdimage failed, continuing on the source path"
 fi

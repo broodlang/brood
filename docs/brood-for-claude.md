@@ -1176,7 +1176,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **`sort` on heterogeneous / non-numeric items uses *structural* order.**
   `(sort coll)` is `<` for numbers, lexicographic for vectors/lists, text order
   for strings/symbols/keywords (so `(sort [[1 0] [2 1]])` works, no comparator
-  needed). For custom orderings use `(sort less? coll)` or `(sort-by key-fn coll)`.
+  needed). For custom orderings use `(sort coll less?)` or `(sort-by coll key-fn)`.
 - **`index-of` works on strings *and* on lists/vectors.** Strings → substring
   search; lists/vectors → linear element search (structural `=`). Returns `-1`
   if absent. The general "is `x` in `coll`?" predicate is `(includes? coll x)`

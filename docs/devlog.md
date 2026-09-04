@@ -10449,3 +10449,297 @@ the lib and does **not** relink the binary, so a fix appeared not to work for on
 the documented "judge `wasm_sandbox_limits_test` uncapped, 7/7" check into 4 failures that read
 exactly like a sandbox regression. Uncapped means uncapped *with a binary that has the feature
 under test*.
+### 2026-09-03 — typing the gen framework: the answer was `nth`, not a pid refinement
+
+The question was how to type `gen` (the `defserver` framework). The plan was a `pid<server>`
+refinement carried in the lattice, so `gen/call` could report a server's declared reply type.
+Built it — a `pid_of` slot on `Term`, evidence-based, union widening to `None` on two
+different servers, an unrefined `pid` *not* a subtype of a refined one — with a lattice test
+that caught a real hole on its first run (without the subtype rule, `pid<counter> ∪ pid`
+absorbed to `pid<counter>`, so a value that might be any process carried a protocol).
+
+Then measured its reach and **reverted the whole thing**. The idiom in `std` is a wrapper
+`defn` taking the pid as an opaque parameter — `(gen/call sup [:start-child spec])` — so
+there is no start site to attach evidence to, and the refinement would fire almost nowhere.
+131 lines of speculative machinery with no consumer, which is what ADR-011 says to defer.
+
+What *does* reach is the mechanism underneath. A `call` clause expands to
+`(nth res 0)` / `(nth res 1)`, and **`nth` carried no signature at all** — so
+`(nth 7 0)` type-checked in silence, and so did a `call` clause whose body is not
+`[reply next-state]`. Declaring the domain catches the gen bug with no gen-specific code:
+
+    (defserver bad (n) (call :value (+ n 1)))
+      → warning: nth: argument 1 expects seqable, got number
+
+`seqable` deliberately over-approximates what `%nth-seq-or-fail` actually accepts (vector /
+bytes / list / record): a RECORD is a `map` to the type system and records ARE indexable, so
+excluding `map` would false-flag every `(nth some-record i)`. Soundness over completeness.
+`last` had the same gap. `first`/`rest` turned out already covered — a sabotage run showed
+the curated entries added for them were redundant, so they came back out; `second`/`third`
+already carried exactly this signature, so the *derived* accessors were typed and the
+primitives beneath them were not.
+
+**The index type is `number`, not `int`, and that is a measured choice, not a guess.** `int`
+produced 35 strict warnings across 9 std files (json, diff, url, regex, lineedit, …) on
+correct code: every `(nth s (+ i 1))` whose `i` is an undeclared parameter reads as `number`.
+Those chains bottom out at an untyped map read (`(get s :idx)`), so declaring `int` anywhere
+in one only walks the warning up to the `get`, which has nothing to narrow it with. `number`
+still rejects the index typos — `(nth v :k)`, `(nth v "1")`, `(nth v nil)` — and leaves the
+float-index case to the runtime. Two signatures in `std/editor/lineedit.blsp` were needed to
+reach zero (`lineedit-search-find`, `lineedit-search-step`); the second annotates its state
+as `any` on purpose, since every caller builds it with `assoc` over an untyped value and so
+types as `vector | map`.
+
+Result inference is untouched — a declared `-> any` does not shadow the element-type rule in
+`infer.rs`, verified directly: `(last [1 2 3])` still infers the literal `3`. The signatures
+also flow *backwards*, so `(defn t (v) (nth v 1 "0"))` now infers `(seqable -> any)` where it
+used to infer `any`.
+
+Found on the way: a module importing `gen` **only** for `defserver` was told the import was
+unused. The lint scans the expanded forms, where a macro head no longer exists — so its
+advice was to delete an import the file cannot expand without. It now scans both trees; a
+name that expansion later discards can only *suppress* a warning, the safe direction for a
+lint whose bad advice is "remove a load-bearing import".
+
+Still open: the `int` index constraint is ready the moment those ~9 files declare their index
+parameters — worth doing, and worth doing as its own change rather than riding along here.
+
+### 2026-09-04 — finishing the `sort` flip, and the two gates that were watching it fail
+
+The type-system sweep of 2026-09-03 gave `sort` its first signature, and the signature
+immediately said something the code did not: the comparator came FIRST. `(sort > [3 1 2])`
+had survived the entire ADR-308 data-first wave because `audit/data-first?` judges by
+declared types and then by parameter names, and `sort` had neither — no signature, and
+parameters spelled `a`/`more`. It was vacuously fine on both axes. The flip was started and
+the session died mid-sweep; this finishes it.
+
+**The half that was left.** `defn sort`, `infer.rs`'s element-type rule, the bench body and
+`std/resolver.blsp` were converted; five sites were not. One was live —
+`std/tool/project.blsp`'s `sig-apply-all`, which sorts insertions bottom-up so that
+`--fix-renames` cannot corrupt a file, and which would have raised on its next use. One was
+the stability case in `tests/sequence_test.blsp`, red since the flip. Three were prose:
+`seq.blsp`'s header comment, the bench's doc comment, and `docs/brood-for-claude.md` — the
+last of which ships inside the binary and is dropped into every scaffolded project, so a
+stale line there teaches the old order to every new user. `sort` is now in
+`codemod/data-first-table` too; it was missing, so a downstream project running the
+migration would have been left with exactly the calls this entry spent an hour finding.
+
+**The gate could not have caught it, and still could not after the signature.** Declaring
+`(seqable &optional fn -> any)` looks like it fixes the blindness. It does not:
+`audit/arrow-type?` is `(includes? t "->")`, and a bare `fn` contains no arrow — so the
+collection would be found by type and the comparator by nothing, which is the same vacuous
+pass in a new spelling. Declaring the comparator as `(any any -> bool)` is what makes the
+check real.
+
+That exposed a second hole underneath. Even with the arrow, a deliberately reversed
+signature still passed, because `sig-params` renders an optional parameter as
+`"&optional seqable"` and `collection-type?` compares for equality against `"seqable"` — so
+**every function whose collection or callback is optional was invisible to the type half of
+the judgement** and silently fell back to parameter names. With the marker stripped,
+`audit/reversed-args` names `sort` the moment its declared order is wrong. Both facts are
+pinned by `tests/audit_test.blsp`, and both were verified by sabotage: reverting to `fn`
+reds the arrow assertion, and declaring the comparator first reds `reversed-args`.
+
+**`seqable` was the wrong domain, and the checker said so.** `sort` cannot take a string, a
+map or bytes — `%sort-asc`/`%sort-cmp` both materialise through `Heap::seq_items`, which
+handles nil/pair/vector/set and nothing else. Those two prims had been borrowing the shared
+`seq` alias, which is wrong in *both* directions: it admits `bytes` (which they reject at
+runtime) and omits `set` (which they accept). Nothing noticed while `sort` typed its
+argument as `any`. They now carry `seq_items_ty`, `sort` declares `(or list vector set)`,
+and `stats/median`/`percentile`/`quantile` — the three stats functions that sort — narrow
+from `seqable` to match. The fold-only stats functions keep the wider declaration; they
+never sort.
+
+Two expectations moved rather than broke, both from the previous day's `conj` signature
+flowing backwards into callers: a pattern-clause `defn` whose bodies hand `acc` to `conj`
+now infers `(or list map set vector)` for that parameter instead of `any`, in
+`tests/introspection_test.blsp` and its Rust twin. That is the narrowing the signature work
+was for, so it is pinned, not relaxed.
+
+Suite: 5511 in-language tests, 388 checker/sig Rust tests, both checker gates at zero
+warnings, `nest format --check` clean. The two suite failures are both known and neither is
+this change — `wasm_sandbox_limits_test` is the documented 16 GB address-space exception
+(7/7 uncapped), and the orphaned-record-id race fired 3 of 3 runs. That one finally has a
+preserved binary and a `BROOD_REG_TRACE` log; see `docs/known-issues.md` — the seven ids
+turn out to be one burst by one spawned grandchild writing between two of the runner's
+restores.
+
+### 2026-09-04 — `BROOD_CONTRACTS=1` could not boot, and the sig that broke it was invisible
+
+Running the workspace suite over the day's work turned `crates/cli/tests/contracts_mode.rs`
+red: on a cold boot cache, `BROOD_CONTRACTS=1` died in **`prelude expand: recursion too deep
+— used 12583008 bytes of stack, over the 12582912-byte budget`**. The error names no `sig`,
+no function and no file. A control build of `HEAD` booted fine, so the previous day's
+signature work caused it; the panic gave no way to tell which of the fourteen new prelude
+signatures was responsible, and disabling *half* of them — either half — still failed.
+
+Enabling them one at a time named exactly two: **`reverse` and `append`**. The declared type
+turns out not to matter (`(sig reverse (any -> any))` fails identically), so this is
+structural, not a checking bug. `sig!` rebinds its name to a wrapper; for an ordinary
+function that costs a few frames per call, but the **macro expander calls `reverse` and
+`append` at every level of its recursive descent**, so the wrapper's frames are paid per
+level of expansion depth. One wrapped function took the cold contracts boot from under 6 MB
+of stack to over 12 MB — the same multiplier, not an accumulation, which is why bisecting by
+halves said nothing.
+
+Raising the budget is not available: the boot thread's stack is `WORKER_STACK_BYTES` (16 MB)
+and the budget is that minus a 4 MB margin, so a bigger budget just trades a clean diagnostic
+for a real `fatal runtime error: stack overflow` — verified at 24 MB.
+
+The fix is a two-name exemption in the `sig` macro: `reverse` and `append` register their
+declaration for the checker under contracts mode but do **not** get a runtime contract
+installed. The static value is untouched — `(reverse "ab")` is still caught, which is why
+they were declared — and `reflect/type-signature` reports the same string in both modes. The
+exemption is written with nested `if` and `%`-prims rather than `cond`/`and`, because this
+macro body is expanded where it is defined and those macros come later in the file.
+
+Fixed on the way, and separately worth having: both variadic shims built their call as
+`(apply orig (append (list fixed…) rest))`, so the shim for `append` expanded to a call to
+`append`. `apply` already splices a trailing list, so they now say `(apply orig fixed… rest)`
+— one fewer allocation per checked call, and the shim no longer calls a function a `sig` can
+wrap.
+
+The lesson is the mode's own: contracts-mode faults are **cold-cache-only**, because a warm
+boot replays an already-expanded prelude and never runs the macro bodies. `contracts_mode.rs`
+cold-caches deliberately (KI-81), and it is the only reason this was found before it shipped.
+
+### 2026-09-04 — the wasm "known exception" was a real bug, and half of KI-89 is closed
+
+**The address-space exception was hiding a sandbox bug, not tolerating one.** CLAUDE.md
+listed `tests/wasm_sandbox_limits_test.blsp` as a test that fails under the 16 GB cap and
+must be judged uncapped, with `wasm_test.blsp` intermittently beside it — a standing
+exception, and therefore a place a genuine sandbox regression could have hidden
+indefinitely. The cause was wasmtime's default of **reserving 4 GiB of address space per
+linear memory**: a component with eight small memories asked the kernel for 32 GiB, the
+`mmap` failed, and the sandbox reported that as *denying a module it is documented to
+allow*. `memory_reservation(MAX_GUEST_BYTES)` is the honest bound — `GuestBudget` denies
+any growth past 256 MiB summed over every memory, so a larger reservation can never be
+used — and both files now pass **capped** (7/7 and 15/15). The exception is deleted; a
+capped run that reds a wasm file is a real failure again.
+
+**KI-89: the reaper's documented gap is closed, and the actual suite failure is not.**
+`%isolate` decided ownership by walking each newcomer's `parent` chain, and that chain is
+not durable — a grandchild whose middle process has exited has no link left to walk. The
+code named the fix in a comment ("an ownership generation stamped at spawn time, which the
+scheduler does not expose today"); it does now. `Mailbox::isolate_owner` is copied at spawn
+from the spawner's current isolate scope and never mutated, so it survives every death
+above it, and `%isolate` reaps by stamp. Sabotage-verified: put the ancestry walk back and
+`tests/registry_isolate_race_test.blsp`'s new case fails with the grandchild still alive.
+Beside it, the test runner now accounts a worker as done when its `[:down …]` arrives
+rather than when its results do — the DOWN was already being delivered and discarded, and
+"sent its results" is not "has exited".
+
+Neither closes the suite failure, and the trace says why: the writer is not an orphan at
+all. `BROOD_REG_TRACE` now prints the writer's `owner=` stamp beside its ancestry chain,
+and the offender carries a scope from an isolate that is not the one restoring — a
+legitimate concurrent global mutator, a load-everything module sweep running as an ordinary
+parallel unit while another unit sits inside `%isolate`. That is the soundness condition
+`%isolate` documents, violated by the runner's own scheduling.
+
+Two attempted fixes were measured and rejected rather than shipped: waiting for scope
+quiescence before each isolated unit is correct in principle and costs **91 s → 470 s** at a
+500 ms bound while still failing (at 20 ms it costs and buys nothing); marking the two
+visible sweeps `:isolated` changes nothing and breaks the explicit-file-args mode. Both are
+recorded in `docs/known-issues.md` so the next attempt starts past them.
+
+One measurement worth keeping, and one over-claim worth not repeating. Forced in both
+directions on one binary: with the stdlib image deleted a full `nest test` is **106 failures
+in 469 s**; with it rebuilt, 5514/5514 in ~91 s. That is a real amplifier and it explains why
+the class looks catastrophic in some sessions. What it does *not* explain is the ordinary
+flake — with a live image the suite was seen red 4 runs running and green 7 runs running a
+few edits apart, so the image widens the window rather than owning it. I wrote the stronger
+version of that claim twice today before the data said otherwise; the rule that survives is
+to read `(stdimage/status)` before quoting any frequency, and to say which state it came
+from.
+
+### 2026-09-04 — the stdlib image now says what it did, because guessing cost a day
+
+The image is default-on and its fallback is silent by design: with none on disk `require`
+reads source, which is correct and needs no announcement. What that silence hid is that the
+source path is not merely slower — it is ~5x slower on the suite (91 s → 470 s) and a
+documented amplifier for the KI-89 isolate race, where deleting the images turned a green
+5514-test run into **106 failures**. So "why is the suite slow and red today?" and "did my
+measurement run imaged?" have the same answer, and nothing printed it. Answering it by
+experiment took a day.
+
+Four signals, none of them a new mechanism:
+
+- **The suite summary** prints one line beside the timing: `(stdlib image: 107 sections)`, or
+  `none — std/ loaded from SOURCE` with the reason (`stale`, `none built yet`, `written during
+  this run`, `--without-stdimage`). Guarded end-to-end by
+  `crates/cli/tests/stdimage_reporting.rs`, which drives a real `brood --test` through all
+  three states — no image, image, and image-present-but-declined — because a line that only
+  ever says one of them is worse than no line.
+- **`make doctor` §4** asks each binary directly rather than reading the cache directory, and
+  distinguishes "boots without an image" from "too old to be probed".
+- **`nest`** prints one line when it *rebuilds* the image. It already did the rebuild; what
+  was missing is that the image is written for the NEXT process, so the command that triggers
+  it is itself the slow one.
+- **`(stdimage/status)` gained `:installed`** — how many sections THIS process materialised at
+  boot — beside `:state`, which reads the disk now. They disagree exactly when it matters:
+  after a `std/` edit, and under `BROOD_NO_STDIMAGE=1` where a current image sits unused.
+
+The enabling change is small: `%std-image-install` returned its section count to a boot form
+that discarded it, and the transient `*std-image-sections*` stash beside it is cleared on the
+first materialise, so the fact was genuinely unrecoverable. It is now recorded in
+`*std-image-installed*`.
+
+**Two traps hit while building it, both the thing being fixed.** `scripts/build-std-image.sh`
+defaults to the **debug** profile, so a bare invocation while testing `target/release/brood`
+writes a perfectly good image for the other binary and reports success — twice diagnosed as
+"the image isn't working" before the ids were compared. It now names the binary and profile it
+wrote for. And the first sabotage run of the new `:installed` guard **passed**, because the
+rebuilt `brood` was paired with a stale `nest`, so the image was `:stale` and the branch under
+sabotage never ran; the guard is only verified with both binaries rebuilt.
+
+ADR-280's differential earned its keep on the first run: `def` rebinding a `def-` global drops
+the privacy mark, so an imaged module disagreed with its own source about
+`*std-image-installed*`'s visibility. Every write to a private global has to say `def-`, not
+just the first one.
+
+### 2026-09-04 — KI-89: the trigger was `nest` building the stdlib image in its own process
+
+The orphaned-record-id class had been open for weeks as "a per-file scope restore races
+processes that are still running — a design question, do not patch it piecemeal". It is
+fixed, and the thing at the bottom of it is not a race.
+
+`BROOD_SCOPE_DBG` (new, in `%isolate`) names every process still alive when the globals are
+rolled back. It made the shape readable in one run: `RESTORE by 1629 (scope=172) with 4 live:
+1626(scope=163) 1627(scope=163) 1628(scope=163) 1631(scope=163)` — a worker rolling the shared
+table back while three siblings execute. From there the ancestry stamps and spawn order named
+everything.
+
+**The trigger.** `nest`'s `ensure_stdimage` called `stdimage/build` **in the process that then
+ran the suite**, and `build` works by loading every module and snapshotting what each one
+binds. So the first `nest test` after any `std/` edit began with all ~107 std modules in the
+runner's global table, and the suite's per-file and per-test `%isolate` rollbacks then tore
+that state down underneath running code. It also silently falsified any test whose premise is
+"this module is not loaded yet" — `stdimage_test.blsp:60` failed **6 runs of 6** with the image
+absent and passed with it present, which read as a flaky race for a day and was nothing of the
+kind. `nest` now builds the image in a child process. Sabotage-verified in both directions:
+in-process → red 2/2, child → green 5/5, and green on every run since.
+
+**Three real gaps closed beside it**, each worth having on its own:
+
+- `%isolate` decided ownership by walking the `parent` chain, which dies with any intermediate
+  process. `Mailbox::isolate_owner` is now a scope token copied at spawn and never mutated, so
+  an orphaned grandchild is provably owned however many processes above it have exited — the
+  fix the code named in a comment as needing "an ownership generation stamped at spawn time,
+  which the scheduler does not expose today".
+- The runner counted a worker done when it SENT its results. Its `[:down …]` was already being
+  delivered and thrown away; `collect-loop` waits for it now, at no cost.
+- **Eight tests called `%isolate` while the runner had parallel workers in flight**, rolling
+  the shared table back under their siblings — the exact condition `%isolate` documents itself
+  as unsound in. Marked `:isolated`, with `crates/lisp/tests/isolate_tests_run_alone.rs` as a
+  static gate so it cannot come back.
+
+**What is not proven.** The orphan symptom has not reproduced in ~20 full-suite runs since,
+including the amplifier — but it also did not reproduce with the last three fixes *reverted*,
+so no single lever was shown to kill it. Fix 1 removed the trigger; 2–4 closed gaps that made
+the damage worse. That is the claim, and not a proof that the class is gone.
+
+Two rules learned by getting them wrong first. Reading `(stdimage/status)` before quoting a
+failure rate is not optional — the image state changes the suite's behaviour, and I wrote down
+a frequency claim twice and had the next batch of runs contradict it both times. And
+`BROOD_NO_STDIMAGE=1` is **not** the same experiment as deleting the images: deleting them
+makes `nest` rebuild, and the rebuild was the trigger.

@@ -186,6 +186,21 @@ pub(super) struct Mailbox {
     /// the mailbox is published to the registry and never mutated after, so `Relaxed` is
     /// enough — the registry insert is the release that publishes it.
     pub(super) parent: AtomicU64,
+    /// The `%isolate` scope this process was **spawned under** (`0` = none). Written once
+    /// before publication, like `parent`, and never mutated after.
+    ///
+    /// This is the ownership stamp `%isolate` reaps by, and it exists because the
+    /// `parent` chain is not durable: a grandchild's link to the isolate dies with its
+    /// intermediate parent, so an orphan whose middle process exited could not be proven
+    /// owned and was left running against globals that were about to be rolled back
+    /// (KI-89 — registered record ids whose constructors the restore took away). A stamp
+    /// copied at spawn survives every death above it.
+    pub(super) isolate_owner: AtomicU64,
+    /// The scope this process stamps on the children it spawns. Equal to `isolate_owner`
+    /// except while this process is *inside* `%isolate`, which swaps in a fresh token for
+    /// the duration and puts the old one back. Kept apart from `isolate_owner` so running
+    /// an isolate does not erase the stamp our own parent's isolate reaps us by.
+    pub(super) isolate_scope: AtomicU64,
 }
 
 /// A queued message plus, under `dev-tools`, the debugger causal context (ADR-174
@@ -475,11 +490,16 @@ impl Mailbox {
         self.runtime_tag.load(Ordering::Relaxed)
     }
 
-    pub(super) fn new_with_parent(parent: u64) -> Arc<Mailbox> {
+    pub(super) fn new_with_parent(parent: u64, isolate_scope: u64) -> Arc<Mailbox> {
         let mb = Mailbox::new();
         // Safe: the mailbox is not published to the registry until after this returns, so
-        // no other thread can observe the write.
+        // no other thread can observe the writes.
         mb.parent.store(parent, Ordering::Relaxed);
+        // Both from the spawner's *scope*, not its owner: a process running an isolate
+        // stamps its children with that isolate's token, and a child passes the same one
+        // on to its own children, so a whole subtree is stamped at birth.
+        mb.isolate_owner.store(isolate_scope, Ordering::Relaxed);
+        mb.isolate_scope.store(isolate_scope, Ordering::Relaxed);
         mb
     }
 
@@ -511,6 +531,8 @@ impl Mailbox {
             overflow_hit: AtomicUsize::new(0),
             timer_gen: AtomicU64::new(0),
             parent: AtomicU64::new(0),
+            isolate_owner: AtomicU64::new(0),
+            isolate_scope: AtomicU64::new(0),
         })
     }
 

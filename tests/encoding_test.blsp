@@ -2,6 +2,15 @@
 
 (defmodule encoding-test (:use test))
 
+;; The `*-decode-bytes` functions return `bytes | failure` (ADR-310), and every case here
+;; feeds an input it controls — so a failure is a decoder REGRESSION, not an expected
+;; channel. `decoded` says exactly that: it turns one into a named test failure instead of
+;; letting it reach `into`, which would raise from inside the assertion. Asserting it up
+;; front is also what lets the checker see a plain `bytes` (ADR-316: a failure is never a
+;; valid materialisation), so these lines type without an opt-out.
+(defn- decoded (v)
+  (if (failure? v) (error "expected a successful decode, got " (pr-str v)) v))
+
 ;; ---- string/char->int / string/int->char / utf8 primitives --------------------------------
 
 (describe "string/char->int / string/int->char"
@@ -134,17 +143,18 @@
   (test "uppercase variant"
     (assert= "DEADBEEF" (encoding/hex-encode-bytes-upper [222 173 190 239])))
   (test "decode to a bytes value"
-    (assert= [222 173 190 239] (into [] (encoding/hex-decode-bytes "deadbeef"))))
+    (assert= [222 173 190 239] (into [] (decoded (encoding/hex-decode-bytes "deadbeef")))))
   (test "decode-bytes returns a bytes value, not a string"
     (is (bytes? (encoding/hex-decode-bytes "00ff"))))
   (test "round-trips a high byte the string path would mangle"
     ;; 0xFF alone is not valid UTF-8; the string hex-decode can't carry it
-    (assert= [255] (into [] (encoding/hex-decode-bytes (encoding/hex-encode-bytes [255])))))
+    (assert= [255]
+      (into [] (decoded (encoding/hex-decode-bytes (encoding/hex-encode-bytes [255]))))))
   (test "full 0x00-0xFF round-trip"
     (let (all (into [] (range 256)))
-      (assert= all (into [] (encoding/hex-decode-bytes (encoding/hex-encode-bytes all))))))
+      (assert= all (into [] (decoded (encoding/hex-decode-bytes (encoding/hex-encode-bytes all)))))))
   (test "empty input decodes to an empty bytes value (not nil)"
-    (assert= [] (into [] (encoding/hex-decode-bytes ""))))
+    (assert= [] (into [] (decoded (encoding/hex-decode-bytes "")))))
   (test "odd length returns a failure"
     (is (failure? (encoding/hex-decode-bytes "abc"))))
   (test "invalid chars return nil"
@@ -160,21 +170,22 @@
     ;; byte 0xFB → "+w==" using the '+' of the standard alphabet
     (assert= "+w==" (encoding/base64-encode-bytes [251])))
   (test "decode to a bytes value"
-    (assert= [102 111 111] (into [] (encoding/base64-decode-bytes "Zm9v"))))
+    (assert= [102 111 111] (into [] (decoded (encoding/base64-decode-bytes "Zm9v")))))
   (test "decode-bytes returns a bytes value, not a string"
     (is (bytes? (encoding/base64-decode-bytes "Zm9v"))))
   (test "empty input decodes to an empty bytes value (not nil)"
-    (assert= [] (into [] (encoding/base64-decode-bytes ""))))
+    (assert= [] (into [] (decoded (encoding/base64-decode-bytes "")))))
   (test "invalid input returns nil"
     (is (failure? (encoding/base64-decode-bytes "Zg=!"))))
   (test "full 0x00-0xFF round-trip"
     (let (all (into [] (range 256)))
-      (assert= all (into [] (encoding/base64-decode-bytes (encoding/base64-encode-bytes all))))))
+      (assert= all
+        (into [] (decoded (encoding/base64-decode-bytes (encoding/base64-encode-bytes all)))))))
   (test "url-safe byte round-trip"
     (let (bs [0 255 128 63 62])
       (assert= bs
         (into []
-          (encoding/base64-url-decode-bytes (encoding/base64-url-encode-bytes bs))))))
+          (decoded (encoding/base64-url-decode-bytes (encoding/base64-url-encode-bytes bs)))))))
   (test "url-safe avoids + and /"
     (let (s (encoding/base64-url-encode-bytes [251 255]))
       (refute (includes? s "+"))

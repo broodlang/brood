@@ -306,9 +306,15 @@
 
   ;; A pattern-dispatched multi-clause defn used to read as an arity-0 `(-> any)`; its
   ;; clauses say what each position admits.
+  ;;
+  ;; The accumulator narrowed from `any` to `(or list map set vector)` when `conj` was
+  ;; finally given a signature: the clause bodies pass `acc` straight to it, so the
+  ;; declared domain now flows BACKWARDS into the parameter. That is the signature work
+  ;; paying off in the direction it was meant to, not a widening — pinned here so the
+  ;; next change to `conj`'s domain has to come past this line deliberately.
   (test "a pattern-clause definition has a real signature"
     (let (hit (first (reflect/source-signatures "(defn ixs-tok (((x y & acc) \"+\") (conj acc (+ y x))) ((acc val) (conj acc (string/->number val))))")))
-      (assert= (:sig hit) "(any string -> any)")
+      (assert= (:sig hit) "((or list map set vector) string -> any)")
       (assert= (:informative? hit) true)))
 
   ;; A named reducer whose own signature says nothing about its result gets re-typed under

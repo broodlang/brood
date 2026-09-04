@@ -122,6 +122,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const list_ty: Ty = Ty::LIST;
     // `bytes` is seqable too: `first`/`rest`/`nth` iterate its octets at runtime.
     const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Bytes]);
+    // What `Heap::seq_items` actually materialises — the domain of the two sort prims,
+    // and NOT `seq`: it takes a **set** (which `seq` omits) and rejects **bytes** (which
+    // `seq` admits), so borrowing `seq` here was wrong in both directions. Nothing
+    // noticed while `sort` carried no signature at all and its argument typed as `any`;
+    // declaring one made `(sort coll)` warn inside its own body. A range needs no tag —
+    // it materialises as a pair.
+    const seq_items_ty: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Set]);
     // `first`/`rest` additionally walk a **set** (as its elements) and a **map** (as
     // its `[k v]` pairs), matching `seq`/`map`/`fold`/`last`. Kept separate from
     // `seq` so widening the head/tail pair doesn't silently widen every other
@@ -541,14 +548,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // (ascending by `<`, no custom comparator). Avoids per-comparison Brood
     // eval overhead — the old in-Brood mergesort was ~1.5 s on 10 000 items
     // because every compare went through `eval::apply`. `sort-by` /
-    // `(sort cmp coll)` still routes through the Brood merge sort for
+    // `(sort coll cmp)` still routes through the Brood merge sort for
     // arbitrary comparators. Items must be all-`int` or all-`float`; mixed
     // numerics work by promotion (matches `<`'s semantics).
     def(
         heap,
         "%sort-asc",
         Arity::exact(1),
-        Sig::new(vec![seq], list_ty),
+        Sig::new(vec![seq_items_ty], list_ty),
         &[],
         "",
         sort_asc,
@@ -562,7 +569,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "%sort-cmp",
         Arity::exact(1),
-        Sig::new(vec![seq], list_ty),
+        Sig::new(vec![seq_items_ty], list_ty),
         &[],
         "",
         sort_cmp,
@@ -3360,6 +3367,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         &[],
         "",
         isolate,
+    );
+    // The quiescence mechanism `%isolate`'s own soundness note asks for: an isolate is sound
+    // only while nothing else mutates globals concurrently, and this is how a runner checks
+    // before entering one. See `system::scope_live_pids`.
+    def(
+        heap,
+        "%scope-live-pids",
+        Arity::exact(0),
+        Sig::new(vec![], list_ty),
+        &[],
+        "",
+        scope_live_pids,
     );
 
     // dynamic variables (the `defdyn`/`binding` surface is Brood — see prelude)
