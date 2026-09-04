@@ -164,7 +164,9 @@ fn an_imaged_boot_and_a_source_boot_agree_on_every_global() {
         );
         // Count from the header on: the REGISTRIES line precedes it.
         assert_eq!(
-            out.lines().skip_while(|l| !l.starts_with("GLOBALS ")).count(),
+            out.lines()
+                .skip_while(|l| !l.starts_with("GLOBALS "))
+                .count(),
             n + 1,
             "the {label} arm's line count does not match its own header — the dump stopped early"
         );
@@ -173,7 +175,9 @@ fn an_imaged_boot_and_a_source_boot_agree_on_every_global() {
         // `*multi-algebra*` and `*multi-ret*` from the set `%registry-update!` maintains —
         // a fact recorded beside the bindings, invisible to a per-global diff.
         assert!(
-            out.lines().next().is_some_and(|l| l.starts_with("REGISTRIES") && l.contains('(')),
+            out.lines()
+                .next()
+                .is_some_and(|l| l.starts_with("REGISTRIES") && l.contains('(')),
             "the {label} arm printed no REGISTRIES line"
         );
     }

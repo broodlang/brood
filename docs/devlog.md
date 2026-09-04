@@ -10743,3 +10743,39 @@ failure rate is not optional — the image state changes the suite's behaviour, 
 a frequency claim twice and had the next batch of runs contradict it both times. And
 `BROOD_NO_STDIMAGE=1` is **not** the same experiment as deleting the images: deleting them
 makes `nest` rebuild, and the rebuild was the trigger.
+
+## 2026-09-04 (evening) — KI-106 fixed the same day: the prelude image now carries the registry-name set; the gate that found it is a gate
+
+The narrowing earlier today said "the derived multimethod mirror, checker-side, only under
+the image"; the last step was one probe: `(%registry-names)` reads **12** on a source boot
+and **10** on an imaged one, missing exactly `*multi-algebra*` and `*multi-ret*` — the two
+registries only the prelude's own evaluation writes. `freeze_as_shared_code` captures the
+builder heap's live set into `SharedCode::registry_names`; a materialised prelude runs no
+`%registry-update!`, so nothing marked them, and `project-registry-snapshot` — which uses that
+set to decide what a section load merges rather than overwrites — stopped protecting them
+inside the checker's cross-file `%isolate`. KI-89's mechanism one layer over, and the fourth
+"recorded, not bound" omission after the defdyn marks, def sites and meta.
+
+Fix: write the set, re-mark it on load (`Heap::mark_registry_names`). 12/12 both arms; the
+two-file check 0/0/0 across three imaged nest boots; the whole checker gate 0 under the flag.
+Sabotage reddens the differential (which now compares the registry set as its first line) and
+the two-file check 3/3.
+
+Two traps inside the verification, both about *which process booted from what*: a plain
+`brood` probe read 12 even under sabotage, because a live stdlib image's lazy `%std-regs` merge
+re-marks the names at runtime — the earlier 10-vs-12 had been measured against a stale one. And
+the first sabotage run of the two-file `nest check` read **0**, because I had warmed `brood`'s
+prelude image and not `nest`'s — images are per-binary, and a cold nest takes the source path
+where the bug does not exist. Both are the same lesson as this morning's: assert the path the
+process actually took.
+
+`make check-imaged` (`scripts/check-imaged.sh`) is that lesson made permanent: `nest check`
+over the tree with the image on, nest's own image warmed first, the imaged boot asserted via
+`BROOD_BOOT_TRACE` — and the assertion fired for real on its first run, because the warm-up
+used `nest complete --`, a completion engine that silences stderr. In `green-all` and CI's
+examples job. Also a `doc_refs` test that a KI's index-row status agrees with its section.
+
+Merged `origin/main` (+8, no conflicts) mid-way: upstream has meanwhile **fixed the wasm cap
+exception properly** — wasmtime was reserving 4 GiB per linear memory (879b0daf) — so both
+wasm files pass capped here (7/7, 15/15), my planned self-skip is moot, and my CLAUDE.md note
+about which binary to judge it with was reverted as targeting deleted text.

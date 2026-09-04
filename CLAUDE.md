@@ -289,7 +289,7 @@ cargo run -p nest -- test         # discover + run the project's test suite
 cargo run -p nest -- new foo      # scaffold a new project
 make ab BASE=<ref>                # A/B the working tree vs a git ref on the benchmark rows
 make green                        # IS THE TREE GREEN? completed CI runs + the gates `make check` skips
-make green-all                    # …plus clippy on CI's flags, and the examples/stress gates
+make green-all                    # …plus clippy on CI's flags, the examples/stress gates, and `check-imaged`
 ```
 
 **`make green` is the answer to "is the tree green?" — do not hand-read the run list.** It
