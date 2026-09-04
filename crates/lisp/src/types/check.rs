@@ -1880,7 +1880,18 @@ pub fn check_file_mode(
             });
             let use_modules = extract_use_module_names(heap, &forms);
             if !use_modules.is_empty() && !unresolved_bare {
-                let all_refs = collect_all_syms(heap, &expanded);
+                // Both trees. A MACRO head — `defserver` from `gen`, `describe` from
+                // `test` — is gone from the expanded forms by definition, so a module
+                // imported only for its macros read as contributing nothing. (The
+                // comment below once claimed a "macro-only module is silent"; that
+                // holds only for a module exporting *nothing but* macros, which leaves
+                // it out of the import table entirely. `gen` exports functions too, so
+                // it is in the table, and a file using just `defserver` was told to
+                // delete the import it needs.) Counting a name that expansion later
+                // discards can only SUPPRESS a warning, which is the safe direction for
+                // a lint whose bad advice is "remove a load-bearing import".
+                let mut all_refs = collect_all_syms(heap, &expanded);
+                all_refs.extend(collect_all_syms(heap, &forms));
                 let imported = heap.imported_pairs();
                 // Group each module's contributed names by source module. We record BOTH
                 // the qualified name AND the local (unqualified) alias the file actually

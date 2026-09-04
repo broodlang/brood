@@ -228,6 +228,7 @@ and a set its elements, as everywhere else `seq` applies.
     (vec {:a 1})     → [[:a 1]]
     (vec nil)        → []"
   (into [] coll))
+(sig vec (seqable -> vector))
 
 (defn- %append-two (a b) "Concatenate two lists (`a` before `b`)." (fold (reverse a) b %flip-cons))
 
@@ -245,6 +246,7 @@ and a set its elements, as everywhere else `seq` applies.
   ;; stays stack-safe on many/long lists. The previous left fold of `%append-two`
   ;; re-reversed the growing accumulator each step, making it O(lists²).
   (reverse (fold lists nil %append-onto)))
+(sig append (& seqable -> any))
 
 (defn- %count-acc (coll n) (if (empty? coll) n (%count-acc (rest coll) (%add n 1))))
 (defn count (coll)
@@ -344,5 +346,14 @@ and a set its elements, as everywhere else `seq` applies.
                             (%byte-at coll i)
                             (first default))
                         else (%nth-seq-or-fail coll i (first default)))))
+;; `seqable` rather than nth's exact domain, which `%nth-seq-or-fail` above closes at
+;; vector / bytes / list / record: `seqable` additionally admits a set and a plain map,
+;; both of which error at runtime. That over-approximation is deliberate — a RECORD is a
+;; map to the type system, and records ARE indexable (through their Seqable view), so a
+;; domain that excluded `map` would false-flag every `(nth some-record i)`. What it does
+;; catch is the whole scalar class — `(nth 7 0)`, `(nth "ab" 0)` (a string is genuinely
+;; not indexable; bridge with `string/->list`) — which until now the checker passed in
+;; silence because `nth` carried no signature at all.
+(sig nth (seqable number &optional any -> any))
 
 ;; ---- numeric helpers ----

@@ -525,8 +525,8 @@ number` flow through. Uncertain callback / element → flat fallback (sound;
 `append`, and `concat` — the structural combinators that reshape a sequence without
 transforming its elements. `(reverse vector<int>) : nil | list<int>`, `(take 2
 list<string>) : nil | list<string>`, `(cons 1 list<int>) : list<int>` and so on.
-`sort`/`sort-by` treat the sequence as the last argument (both 1-arg `(sort xs)` and
-2-arg `(sort f xs)` forms). `cons` requires both the head type *and* the tail element
+`sort`/`sort-by` treat the sequence as the FIRST argument (both 1-arg `(sort xs)` and
+2-arg `(sort xs f)` forms — ADR-308). `cons` requires both the head type *and* the tail element
 type to be known (either unknown → unrefined `pair`). `append`/`concat` union the
 element types of all arguments; any argument with an unknown element type → flat
 fallback. Zero new false positives across `std/` + `tests/`.

@@ -529,6 +529,9 @@ running this twice is a no-op. Returns the files changed."
     ["take-while" [1 0] :callback]
     ["drop-while" [1 0] :callback]
     ["sort-by" [1 0] :callback]
+    ;; `sort` joined the wave late — its comparator is OPTIONAL, so only the
+    ;; 2-argument arm moves and the bare `(sort coll)` never matches the arity.
+    ["sort" [1 0] :callback]
     ["seq/remove" [1 0] :callback]
     ["seq/keep" [1 0] :callback]
     ["seq/filterv" [1 0] :callback]
