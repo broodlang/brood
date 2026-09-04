@@ -14,6 +14,13 @@
 //! because the runtime one would have to fire on the very interleaving it is trying to
 //! prevent.
 //!
+//! **String literals do not count, and that is not a loophole.** A test may *write* the text
+//! `%isolate` into a program it hands to a child process — `stdimage_test`'s attribution case
+//! does exactly that, because "the names a require introduces" is only measurable in a runtime
+//! where the module is not loaded yet. That isolate runs in another process and cannot touch
+//! this runner's globals, so counting it would force an `:isolated` marker that buys nothing
+//! and serialises the suite for no reason.
+//!
 //! **Known limit, deliberate.** It is textual, so a test that reaches `%isolate` through a
 //! helper defined in another file is not caught. Every in-tree call is written inline today,
 //! and a check that catches the ordinary case beats one that is never written; the ADR-006
@@ -25,6 +32,31 @@ use std::path::Path;
 /// The `tests/` directory of the repo, from this crate's manifest.
 fn tests_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests")
+}
+
+/// `line` with every double-quoted string literal removed, so text *about* `%isolate` — or a
+/// program built as a string for a child process — is not read as a call. Escapes are honoured
+/// so an embedded `\"` does not end the literal early.
+fn strip_string_literals(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// True when `line` opens a test block, and whether it carries `:isolated`.
@@ -81,7 +113,7 @@ fn every_test_that_calls_isolate_is_marked_isolated() {
                 flush(current.take(), &mut offenders);
             }
             if let Some((_, body, _)) = current.as_mut() {
-                body.push_str(line);
+                body.push_str(&strip_string_literals(line));
                 body.push('\n');
             }
         }
