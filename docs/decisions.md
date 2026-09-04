@@ -20002,11 +20002,10 @@ path only, leaving the default path — the one everybody runs — paying the fu
 
 ## ADR-314 — The prelude image: materialise the prelude's bindings, don't re-evaluate its forms
 
-**Status:** **OPT-IN** (`BROOD_PRELUDE_IMAGE=1`). Since 2026-09-04 that is for a **known,
-reproducible defect** — KI-106, a multi-file `nest check` losing a record's ability impl —
-rather than for the unproven history that kept it off before. The 2026-09-04 attempt to flip
-the default reproduced and fixed the original blocker (KI-105) and then found this one; see
-the amendment at the end of this ADR. Implemented in
+**Status:** **DEFAULT ON** (2026-09-04, evening); `BROOD_NO_PRELUDE_IMAGE=1` opts out. Third
+attempt. The first (2026-09-02) and second (2026-09-04, morning) each shipped and were reverted
+the same day, on KI-105 and KI-106 respectively — both now reproduced, fixed and gated. See the
+two amendments at the end of this ADR. Implemented in
 `crates/lisp/src/builtins/startup_image.rs` (`write_prelude_image` / `load_prelude_image`)
 and `crates/lisp/src/lib.rs` (`boot_from_prelude_image`, tried ahead of the text cache).
 
@@ -20229,6 +20228,32 @@ conditions it needs and vary them one at a time — the condition none of the th
 preserved was the cheapest one to state. And the corollary the second bug supplies: **run the
 project's own gates under the flag, not just the feature's tests.** KI-106 was invisible to
 both differentials and to all 1377 suite cases; `nest check` over the tree found it at once.
+
+**Amendment 2026-09-04 (evening) — KI-106 fixed; the default is ON; and the gate that found it
+is a gate.** The bug was the **registry-name set**: `freeze_as_shared_code` captures the builder
+heap's live set — the globals `%registry-update!` has written — into `SharedCode::registry_names`,
+and `project-registry-snapshot` uses that set to decide what a section load merges rather than
+overwrites. A source boot marks `*multi-algebra*` and `*multi-ret*` by evaluating the prelude's
+`defmulti` forms; a materialised boot runs no `%registry-update!` at all, so its set was 10 names
+to the source boot's 12, and inside the checker's cross-file `%isolate` the two unmarked
+registries were not protected. The fifth thing the evaluation records rather than binds, after
+`defdyn` marks, `*out*`'s kind of binding, def sites and `meta` — every one found late, every
+one by a broad wave of unrelated failures. The image writes the set and re-marks it on load.
+
+What changes for the next person is not the fix but where the evidence comes from. Every test
+written FOR the image passed while KI-105 and KI-106 were both live: the boot differential
+(which compared per-global attributes and could not see a set recorded beside them), the
+stale-directory guard, all 1377 suite cases. `nest check` over `std/ + tests/ + examples/` with
+the image on found KI-106 on its first run. So: the differential now compares
+`(%registry-names)` as its first line, and **`make check-imaged`** runs the project's own
+checker gate with the image on — nest's per-binary image warmed first, the imaged boot
+asserted through `BROOD_BOOT_TRACE` — in `green-all` and in CI's examples job. CI's tree-walker
+job sets `BROOD_NO_PRELUDE_IMAGE=1` so the text-cache path keeps deliberate coverage, exactly
+as it does for the stdlib image (ADR-281).
+
+The rule, stated once for both amendments: **a default is decided by running the project's
+gates under the flag, not the feature's tests.** The feature's tests are shaped by what its
+authors thought could break.
 
 ## ADR-315 — Stopping on a failure is a mechanism you reach for, not something primitives do
 

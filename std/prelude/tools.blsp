@@ -981,6 +981,21 @@ case `require` keeps loading stdlib modules from source exactly as before."
             (def- *std-image-installed* n)
             n))))))
 
+(defn- %std-image-wanted? ()
+  "Should THIS run install the stdlib image at all? The one predicate behind both boot paths —
+the prelude's own top-level install form (a source or text-cache boot) and
+`%std-image-reinstall!` (an imaged boot) — so the two can never disagree. `BROOD_NO_STDIMAGE=1`
+opts out (the A/B lever, and how CI keeps the source path covered); `BROOD_COVERAGE` stands
+aside because a materialised module is never compiled and so never instrumented (ADR-148).
+
+The imaged replay used to skip this guard and install unconditionally, so a run that asked for
+the source path with `BROOD_NO_STDIMAGE=1` got the image anyway and its summary reported
+`107 sections` — the exact misattribution `stdimage_reporting.rs` exists to catch, and what it
+caught the evening the prelude image became the default (2026-09-04). Replaying what the
+evaluation DID includes replaying what it declined to do."
+  (and (nil? (%getenv "BROOD_NO_STDIMAGE"))
+    (nil? (%getenv "BROOD_COVERAGE"))))
+
 (defn- %std-image-reinstall! ()
   "Install the stdlib image from a PRISTINE registry. The entry point for a boot from the
 PRELUDE image (ADR-314), which restores bindings rather than evaluating the prelude, and so
@@ -1007,7 +1022,7 @@ image and before any `require`."
   (def *std-require-edges* nil)
   (def *std-impls* nil)
   (def *std-regs* nil)
-  (%std-image-install))
+  (when (%std-image-wanted?) (%std-image-install)))
 
 (defn- %require-record-edge! (key)
   ;; `reflect/current-ns` first: it is the module whose FILE is being loaded, which is the accurate
@@ -2780,16 +2795,13 @@ it has an impl, else hand it back untouched for the printer's own rendering.
 ;; The traced arm times the install. It is here because an earlier version of it cost 6.8 ms
 ;; of a 20 ms boot and made `startup` 20% WORSE while making module loads faster — a
 ;; regression that only a measurement at this exact point can see.
-(when (and (nil? (%getenv "BROOD_NO_STDIMAGE"))
-        ;; Line coverage instruments the COMPILER (ADR-148): it prefixes each positioned
-        ;; node with a `RecordLine` as the module is evaluated. A materialised module is
-        ;; never evaluated — that is the entire point — so with an image installed no std
-        ;; module can ever appear in a coverage readout, and `nest test --cover-lines`
-        ;; silently reports nothing for the standard library. Stand aside, the same way
-        ;; `--cover-lines` already sets `BROOD_NO_JIT=1`, and for the same reason: a
-        ;; measurement of what ran cannot be taken from code that was restored rather
-        ;; than run.
-        (nil? (%getenv "BROOD_COVERAGE")))
+;; The guard is `%std-image-wanted?` (defined beside `%std-image-reinstall!`): BROOD_NO_STDIMAGE
+;; opts out, and line coverage stands aside because it instruments the COMPILER (ADR-148) — a
+;; materialised module is never evaluated, so with an image installed no std module could appear
+;; in a coverage readout and `nest test --cover-lines` would silently report nothing for the
+;; standard library. ONE predicate for both boot paths, so an imaged boot cannot install what
+;; a source boot would have declined (it did, once — see the predicate's docstring).
+(when (%std-image-wanted?)
   (if (%getenv "BROOD_IMAGE_TRACE")
     (let (t0 (%now-ns) n (%std-image-install) t1 (%now-ns))
       ;; nanoseconds, not microseconds: this runs during PRELUDE evaluation, where a

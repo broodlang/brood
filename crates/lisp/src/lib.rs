@@ -123,16 +123,16 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
         // read + eval the text cache still pays. Tried first; any miss falls through to
         // the text cache, and that to the source boot, so a bad artifact costs a slower
         // boot and never a wrong one.
-        // STILL OPT-IN (`BROOD_PRELUDE_IMAGE=1`), and as of 2026-09-04 for a *known,
-        // reproducible* reason rather than the unproven history that kept it off before.
-        // KI-105 — the stale section directory — was reproduced and fixed (see
-        // `%std-image-reinstall!` below). KI-106 was found by the same flip attempt and is
-        // NOT fixed: with the image on, `nest check <any file> tests/record_test.blsp`
-        // loses a record's ability impl (`no num/mul method for [:int :record-test/usd]`)
-        // where the same command with the image off is clean. Two files in one process is
-        // the whole repro, and it reddens CI's zero-warning checker gate. Flip the default
-        // when that is fixed, not before.
-        if std::env::var_os("BROOD_PRELUDE_IMAGE").is_some() {
+        // DEFAULT ON since 2026-09-04 (ADR-314); `BROOD_NO_PRELUDE_IMAGE=1` opts out to the
+        // text cache. Two earlier attempts to make it the default failed on the same day they
+        // shipped, each on a fact the evaluation RECORDS rather than binds: KI-105 (a stale
+        // stdlib section directory restored from the image — `%std-image-reinstall!` clears it
+        // before installing) and KI-106 (the registry-name set was not carried, so a multi-file
+        // `nest check` lost every derived multimethod mirror — the image writes and re-marks
+        // it now). Both are fixed with sabotage-verified guards, the boot differential compares
+        // the registry set, and `make check-imaged` runs the project's own checker gate with
+        // the image on. Measured: `startup` -11%, no regression on 30 rows.
+        if std::env::var_os("BROOD_NO_PRELUDE_IMAGE").is_none() {
             if let Some(bundle) = boot_from_prelude_image() {
                 return bundle;
             }

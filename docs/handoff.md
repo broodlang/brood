@@ -146,7 +146,16 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-04 (latest) — KI-106 FIXED the same day; `make check-imaged` is the new gate;
+**Addendum 2026-09-04 (latest) — the prelude image is DEFAULT-ON (ADR-314, third attempt).**
+`BROOD_NO_PRELUDE_IMAGE=1` opts out; the opt-in spelling is gone. Gate before flipping, in this
+order: `make check-imaged`, the checker gate with no flag AND opted out (0/0), the three cli
+image tests, the full suite under the default. Upstream's `stdimage_reporting` caught one more
+replay bug first (the imaged replay ignored `BROOD_NO_STDIMAGE`; fixed with a shared predicate
+`%std-image-wanted?`). CI's tree-walker job keeps the text-cache path covered. One unexplained
+403-warning reading under concurrent cache writers is recorded in the devlog with its recipe;
+0/0/0 deterministically. **Next: KI-100.**
+
+**Addendum 2026-09-04 (later) — KI-106 FIXED the same day; `make check-imaged` is the new gate;
 merged +8 from origin.** The prelude image did not carry the registry-name set
 (`SharedCode::registry_names`, captured by the freeze from `%registry-update!` marks the source
 boot makes and a materialised one never does): 10 names vs 12, missing `*multi-algebra*` and
