@@ -5,18 +5,21 @@
 //! table, which is not shipped in the binary. This makes the answer available from the
 //! binary itself (`docs/backend-seams.md` §5).
 //!
-//! **A curated subset, on purpose.** These are the flags for *performance triage and
-//! A/B* — attribution, the JIT, the GC, the optimizer opt-out levers, the scheduler
-//! knobs. Editor/GUI/audio/TUI flags are omitted, as are the ones whose only use is
-//! inside a specific test. `CLAUDE.md`'s table remains the long form: it carries the
-//! measurement history behind each default, which is the part you want when deciding
-//! whether to flip one, and is far too long to print.
+//! **The complete list, in triage order.** It began as a curated performance subset, on
+//! the reasoning that a GUI or REPL flag does not belong in a list you consult while
+//! chasing a regression. What that produced instead was a gap of 43 flags out of 101 —
+//! including the worker count, the reduction budget and every GC tuning knob, none of
+//! which is anything but performance. A flag nothing documents is a flag nobody reaches
+//! for, so the answer is ordering, not omission: the triage groups print first
+//! ([`GROUP_ORDER`]) and the environment ones last. `CLAUDE.md`'s table remains the long
+//! form — it carries the measurement history behind each default, which is what you want
+//! when deciding whether to flip one, and is far too long to print.
 //!
-//! [`FLAGS`] is checked against the source tree by a test below, so a flag that gets
-//! renamed or deleted cannot leave a stale line here. The reverse direction — a new flag
-//! that never gets added — is deliberately *not* asserted: this is a subset, so "missing"
-//! is not an error, and a test that forced every new flag in here would push editor and
-//! test-only flags into a performance list.
+//! Both directions are gated by the tests below. A catalogued flag must still appear in
+//! the source, so a rename cannot leave a line telling a reader to set something the
+//! runtime ignores; and every `BROOD_*` the runtime reads must appear here, so the gap
+//! cannot re-open one flag at a time. The build-time names are exempted explicitly
+//! ([`NON_FLAGS`]) rather than by being forgotten.
 
 /// One catalogued flag: name, the group it belongs to, and what it does in one line.
 pub struct DebugFlag {
@@ -51,10 +54,18 @@ const fn external(name: &'static str, group: &'static str, effect: &'static str)
 
 const ATTRIBUTION: &str = "Attribution — where does the work go";
 const JIT: &str = "JIT — did it lower, and what did it emit";
-const OPTOUT: &str = "Optimizer opt-outs — the A/B and bisect levers (all default ON)";
+const OPTOUT: &str =
+    "Optimizer levers — the A/B and bisect switches (every `NO_` one is default ON)";
 const GC: &str = "GC and memory";
 const SCHED: &str = "Scheduler and messaging";
 const ENGINE: &str = "Engine selection";
+const DIAG: &str = "Diagnostics, checking and reloading";
+const HOST: &str = "Host environment — GUI, audio, distribution, REPL";
+
+/// Print order. A group absent here would never print, so a test asserts every flag's
+/// group appears — the entries themselves may then sit anywhere in [`FLAGS`], which is
+/// what lets a new one be added beside its siblings without reordering the array.
+const GROUP_ORDER: &[&str] = &[ATTRIBUTION, JIT, OPTOUT, GC, SCHED, ENGINE, DIAG, HOST];
 
 /// The catalogue, in print order.
 pub const FLAGS: &[DebugFlag] = &[
@@ -219,7 +230,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_IMAGE_TRACE",
         ENGINE,
-        "name each module materialised from an image, and time the boot install — the only way          to tell a module that came from the image from one that loaded from source anyway",
+        "name each module materialised from an image, and time the boot install — the only way to tell a module that came from the image from one that loaded from source anyway",
     ),
     f(
         "BROOD_NO_XCALL",
@@ -347,28 +358,251 @@ pub const FLAGS: &[DebugFlag] = &[
         ENGINE,
         "skip the implicit advisory type-check before a run (raw eval, e.g. when timing)",
     ),
+    // ---- attribution (added when the catalogue was completed) ----
+    f(
+        "BROOD_STALL_MS",
+        ATTRIBUTION,
+        "`=<ms>`: report any GC pause, scheduler quantum or GUI paint at or over this — the lag tracer",
+    ),
+    f(
+        "BROOD_COMPILE_TRACE",
+        ATTRIBUTION,
+        "time each JIT lowering (`[compile] <dur> arm=… inlined=…`); needs `make perf-brood`",
+    ),
+    f(
+        "BROOD_EVAL_TRACE",
+        ATTRIBUTION,
+        "trace each form entering the TREE-WALKING evaluator (debug builds) — who left the VM",
+    ),
+    f(
+        "BROOD_VM_TRACE",
+        ATTRIBUTION,
+        "trace each bytecode instruction as it executes (debug builds)",
+    ),
+    // ---- JIT (added when the catalogue was completed) ----
+    f(
+        "BROOD_JIT_CB_TRACE",
+        JIT,
+        "trace each `brood_rt_*` callback from native code back into Rust (debug builds)",
+    ),
+    f(
+        "BROOD_DBG_CONST",
+        JIT,
+        "trace JIT constant-pool decisions — for diagnosing a wrong-constant miscompile",
+    ),
+    f(
+        "BROOD_MKCLO",
+        JIT,
+        "opt IN to admitting `MakeClosure` to the JIT subset; default OFF (`docs/compute-frontier.md`)",
+    ),
+    f(
+        "BROOD_MAPGET",
+        JIT,
+        "opt IN to lowering `(get m k)` to a native map probe; default OFF — a miss-heavy loop can deopt to BAILED",
+    ),
+    // ---- optimizer opt-outs (added when the catalogue was completed) ----
+    f(
+        "BROOD_NO_HOF_JIT",
+        OPTOUT,
+        "opt out of the higher-order call's native fast-frame (narrower than BROOD_NO_HOF)",
+    ),
+    f(
+        "BROOD_NO_JIT_ICALL",
+        OPTOUT,
+        "opt out of the in-IR call-site fast-link; every call takes `brood_rt_call_slow` (fib ~20%)",
+    ),
+    f(
+        "BROOD_NO_DEOPT_RESUME",
+        OPTOUT,
+        "chicken switch: drop deopt checkpoints and re-run a deopted arm from ip 0 instead",
+    ),
+    f(
+        "BROOD_INLINE_DEPTH",
+        OPTOUT,
+        "`=<n>`: recursion levels the self-inliner splices (default 2) — the A/B knob",
+    ),
+    f(
+        "BROOD_INLINE_MAXBODY",
+        OPTOUT,
+        "`=<n>`: body-size ceiling for self-inline expansion past the first pass",
+    ),
+    // ---- GC / memory (added when the catalogue was completed) ----
+    f(
+        "BROOD_GC_MAJOR",
+        GC,
+        "`=<count>`: live-object floor before a MAJOR collection (default 256K; K/M suffixes ok)",
+    ),
+    f(
+        "BROOD_GC_TENURE",
+        GC,
+        "`=<count>`: nursery pressure at which a minor TENURES survivors rather than flipping (default 16K)",
+    ),
+    f(
+        "BROOD_GC_GROWTH",
+        GC,
+        "`=<factor>`: minor-threshold growth per collection, 1.05–8.0 (default 2.0)",
+    ),
+    f(
+        "BROOD_MAJOR_GROWTH",
+        GC,
+        "`=<factor>`: old-gen growth allowed before the next major, >=2 (default 4)",
+    ),
+    f(
+        "BROOD_GC_TENURE_RESERVE",
+        GC,
+        "restore the peak-sized nursery reservation after a tenure — the A/B lever for that RSS fix",
+    ),
+    f(
+        "BROOD_STACK_BUDGET",
+        GC,
+        "`=<bytes>`: the non-tail-recursion stack guard's budget",
+    ),
+    f(
+        "BROOD_TRACE_GCBLOCK",
+        GC,
+        "trace GC-block depth (debug builds)",
+    ),
+    // ---- scheduler / messaging / distribution (added when the catalogue was completed) ----
+    f(
+        "BROOD_J",
+        SCHED,
+        "`=<n>`: worker threads in the scheduler pool (default = available parallelism)",
+    ),
+    f(
+        "BROOD_REDUCTIONS",
+        SCHED,
+        "`=<n>`: eval iterations a process runs before it must yield (default 2000; huge ≈ no preemption)",
+    ),
+    f(
+        "BROOD_STEAL_GRACE_NS",
+        SCHED,
+        "`=<ns>`: a spawner's first refusal on its own child before a peer may steal it (default 5000; 0 off)",
+    ),
+    f(
+        "BROOD_NO_STEAL_WAKE",
+        SCHED,
+        "opt out of the spawn-time peer wake; idle workers wait for their own steal re-probe",
+    ),
+    f(
+        "BROOD_NO_SHARE_FN_MSG",
+        SCHED,
+        "opt out of handing a shared closure by handle on the SERIALISED send (BROOD_NO_SHARE_FN's sibling)",
+    ),
+    f(
+        "BROOD_NO_MESH",
+        SCHED,
+        "point-to-point node links only — no automatic mesh to every node a peer already knows",
+    ),
+    // ---- diagnostics and checking ----
+    f(
+        "BROOD_COVERAGE",
+        DIAG,
+        "arm line-coverage instrumentation. Set it before the first Interp — the prelude compiles then — and note it stands the prelude/std images aside, since a materialised binding is never compiled",
+    ),
+    f(
+        "BROOD_CONTRACTS",
+        DIAG,
+        "turn every `sig` into a runtime checking shim — the static checker's runtime counterpart",
+    ),
+    f(
+        "BROOD_CHECK_STRICT",
+        DIAG,
+        "run the advisory checker in --strict mode; the check cache keys its manifest on this",
+    ),
+    f(
+        "BROOD_NO_CHECK_CACHE",
+        DIAG,
+        "bypass `nest check`'s incremental result cache — recheck everything from scratch",
+    ),
+    f(
+        "BROOD_CHECK_CACHE_MAX",
+        DIAG,
+        "`=<n>`: project file count above which the check cache stands aside (default 50000)",
+    ),
+    f(
+        "BROOD_NO_RELOAD_DIAG",
+        DIAG,
+        "silence the hot-reload `def` diagnostics (arity changed / macro redefined)",
+    ),
+    f(
+        "BROOD_NO_SHADOW_WARN",
+        DIAG,
+        "silence the warning that a `(:use …)` import shadows a prelude/root global",
+    ),
+    f(
+        "BROOD_TEST_NO_SCOPE",
+        DIAG,
+        "revert `nest test` to load-all-then-run-all instead of the per-file `%isolate` scope",
+    ),
+    // ---- host environment ----
+    f(
+        "BROOD_GUI_HEADLESS",
+        HOST,
+        "run the GUI/display layer with no real window, and no audio — for a headless CI box",
+    ),
+    f(
+        "BROOD_GUI_GPU",
+        HOST,
+        "select the experimental OpenGL render backend at runtime (build with --with-gui-gpu)",
+    ),
+    f(
+        "BROOD_GUI_DAMAGE",
+        HOST,
+        "`=0`: blit the whole buffer each frame instead of the damage region (the safe fallback)",
+    ),
+    f(
+        "BROOD_AUDIO",
+        HOST,
+        "`=0`: disable `audio-beep` (also off with no device present, or under BROOD_GUI_HEADLESS)",
+    ),
+    f(
+        "BROOD_COOKIE",
+        HOST,
+        "the distribution auth cookie, ahead of `~/.brood_cookie` — configuration, not a diagnostic",
+    ),
+    f(
+        "BROOD_HISTORY",
+        HOST,
+        "`=<path>`: where the REPL stores its history",
+    ),
+    f(
+        "BROOD_RC",
+        HOST,
+        "`=<path>`: the REPL's user startup file (default `$HOME/.broodrc.blsp`)",
+    ),
 ];
+
+/// `BROOD_*` names that are **not** runtime environment flags, so the completeness test
+/// below must not demand a catalogue line for them. All three are BUILD-time: the first two
+/// are stamped by `crates/lisp/build.rs` and read back with `env!`, and the third is read by
+/// `crates/nest/build.rs` to pick the `brood` binary a `nest` embeds (ADR-038). Setting any
+/// of them for a *run* does nothing.
+#[cfg(test)]
+const NON_FLAGS: &[&str] = &["BROOD_GIT_SHA", "BROOD_STDLIB_HASH", "BROOD_EMBED_RUNTIME"];
 
 /// Print the catalogue, grouped, for `brood --debug-flags`.
 pub fn print_catalogue() {
-    println!("BROOD_* diagnostic flags — the performance-triage subset.");
+    println!(
+        "BROOD_* environment flags — all {} the runtime reads, triage groups first.",
+        FLAGS.iter().filter(|f| f.ours).count()
+    );
     println!("Set any to 1 unless a value is described. CLAUDE.md's table is the long form:");
     println!("it carries the measurement history behind each default.");
     let width = FLAGS.iter().map(|f| f.name.len()).max().unwrap_or(0);
-    let mut group = "";
-    for flag in FLAGS {
-        if flag.group != group {
-            group = flag.group;
-            println!("\n{group}");
+    // Drive the grouping from GROUP_ORDER rather than from adjacency in the array: an entry
+    // added next to its siblings used to split its group in two and print the heading twice.
+    for group in GROUP_ORDER {
+        println!("\n{group}");
+        for flag in FLAGS.iter().filter(|f| f.group == *group) {
+            // Mark a dependency's flag so a reader does not go looking for it in our source.
+            let tag = if flag.ours { "" } else { " [not brood's]" };
+            println!(
+                "  {:<width$}  {}{tag}",
+                flag.name,
+                flag.effect,
+                width = width
+            );
         }
-        // Mark a dependency's flag so a reader does not go looking for it in brood's source.
-        let tag = if flag.ours { "" } else { " [not brood's]" };
-        println!(
-            "  {:<width$}  {}{tag}",
-            flag.name,
-            flag.effect,
-            width = width
-        );
     }
     println!("\nStart here:");
     println!("  make perf-brood                      # counters compiled in");
@@ -448,6 +682,110 @@ mod tests {
         assert!(
             missing.is_empty(),
             "catalogued in debug_flags.rs but absent from the source (renamed or deleted?): {missing:?}"
+        );
+    }
+
+    /// Every flag's group must be in `GROUP_ORDER`, because the printer iterates that list:
+    /// a group missing from it makes its flags vanish from `--debug-flags` silently.
+    #[test]
+    fn every_group_is_in_the_print_order() {
+        let mut orphans: Vec<&str> = FLAGS
+            .iter()
+            .map(|f| f.group)
+            .filter(|g| !super::GROUP_ORDER.contains(g))
+            .collect();
+        orphans.sort_unstable();
+        orphans.dedup();
+        assert!(
+            orphans.is_empty(),
+            "group(s) not in GROUP_ORDER, so their flags never print: {orphans:?}"
+        );
+    }
+
+    /// The other direction: every `BROOD_*` the RUNTIME reads must be catalogued here.
+    ///
+    /// The catalogue was a curated performance subset for its first months, and the gap
+    /// grew to 43 of 101 flags — among them the worker count, the reduction budget and
+    /// every GC tuning knob. A flag nothing documents is a flag nobody reaches for, so
+    /// `--debug-flags` is now the complete list and this test keeps it that way.
+    ///
+    /// Scope is deliberately `crates/*/src` + `std/` — what the runtime itself reads.
+    /// Test fixtures name env vars that are not flags (`BROOD_SURELY_MISSING_VAR_XYZ`),
+    /// and cataloguing those would describe the suite rather than the runtime.
+    #[test]
+    fn every_runtime_flag_is_catalogued() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .to_path_buf();
+        let mut found: Vec<(String, String)> = Vec::new();
+        let mut scanned = 0usize;
+        let mut stack = vec![root.join("crates"), root.join("std")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if path.is_dir() {
+                    // Build output, and the test/bench trees whose fixtures are not flags.
+                    if matches!(name.as_str(), "target" | "tests" | "benches" | "examples") {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                if name == "debug_flags.rs"
+                    || !path.extension().is_some_and(|e| e == "rs" || e == "blsp")
+                {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                scanned += text.len();
+                // A quoted literal, not a bare mention: a doc comment that recalls a
+                // DELETED flag ("replaces the old BROOD_JIT_INLINE") must not be demanded.
+                for (i, _) in text.match_indices("\"BROOD_") {
+                    let rest = &text[i + 1..];
+                    let Some(end) = rest.find('"') else { continue };
+                    let flag = &rest[..end];
+                    if flag
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        found.push((flag.to_string(), name.clone()));
+                    }
+                }
+            }
+        }
+        // A scan that found nothing proves nothing — see the sibling test.
+        if scanned < 100_000 {
+            eprintln!(
+                "skipping: only {scanned} bytes scanned under {} — not a full checkout",
+                root.display()
+            );
+            return;
+        }
+        let mut missing: Vec<String> = found
+            .iter()
+            .filter(|(flag, _)| {
+                !super::NON_FLAGS.contains(&flag.as_str()) && !FLAGS.iter().any(|f| f.name == flag)
+            })
+            .map(|(flag, file)| format!("{flag} (read in {file})"))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "read by the runtime but absent from the catalogue in debug_flags.rs \
+             (add an `f(NAME, GROUP, \"…\")` entry, or NON_FLAGS if it is not an env flag): {missing:#?}"
         );
     }
 
