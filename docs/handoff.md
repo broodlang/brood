@@ -5,7 +5,14 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**Addendum 2026-09-04 (latest) — the file-boundary quiesce guard was red one run in three,
+**Addendum 2026-09-04 (later, latest) — the tree-walker→VM router is default-ON (ADR-318),
+KI-88 archived as dormant with the watchdog as its tripwire.** `BROOD_NO_TW_REENTRY=1` is the
+opt-out; `BROOD_TW_REENTRY=1` no longer exists. Gate: suite 5510/5511 in 217 s (vs 268–316 s
+with the router off the same day), breakage 23/23 with the genserver repro 30/30, A/B at both
+tiers recorded in the devlog. **Next:** ADR-314's default (the prelude image, worth 39% of
+startup) — deliberately, with a benchmark refresh, as described below; or the §7.8 perf list.
+
+**Addendum 2026-09-04 (earlier) — the file-boundary quiesce guard was red one run in three,
 and it was right: the runner's own worker/driver were still retiring at the boundary.**
 `collect-loop` retired a worker at its result and dropped its `:down`; `drain-runner` flushed the
 driver's `:down` with `(after 0)`, which only consumes one already there. Both now await the

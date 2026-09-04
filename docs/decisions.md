@@ -20428,3 +20428,39 @@ This was KI-89's residual, live since the stdlib image shipped default-on (2026-
 and no less. A stale `.brood/image.bin` keeps its old contents until its fingerprint changes.
 The stdlib image was already right (per-module replay at materialisation); this brings the
 project image to the same rule.
+
+## ADR-318 — The tree-walker→VM router is on by default; a dormant bug with a tripwire does not hold a default hostage
+
+**Context.** The router (2026-08-30) lets a VM-eligible closure invoked from tree-walked code
+run on the engine instead of inheriting its caller's ~10× defer — before it, `apply_closure`
+never re-entered the VM, so ONE deferred call tree-walked everything beneath it (§7.3's
+macro-expansion constant). Measured 60× on that shape and `startup` −6.9%. It shipped
+**opt-in** (`BROOD_TW_REENTRY=1`, the BROOD_MKCLO pattern) because the first breakage run with
+it live surfaced KI-88: one spawn of a warm 50-burst created, promoted and registered, yet
+never scheduled. KI-88 was shown to be pre-existing (it reproduced at c4af2feb, before the
+router), one candidate mechanism was found and closed (`run_one`'s unprotected post-quantum
+tail), and then it went dormant: 358 consecutive clean runs of its canonical repro with the
+router live, across five timing regimes and three builds, against a bug last seen on one
+destroyed incremental build. Nobody found the cause. Meanwhile a default-on stranded-work
+watchdog (`process/scheduler/pool.rs`, 2026-09-03) reports the exact signature — work queued,
+no worker finding anything for 3 s — with every queued pid and worker state.
+
+**Decision.** Flip the default: the router is ON, `BROOD_NO_TW_REENTRY=1` opts out. KI-88 is
+archived as dormant with the watchdog as its tripwire, not closed. The rule this records:
+**a default is decided on its own gate, and a dormant bug earns a tripwire, not a veto.** The
+router's gate, re-run for the flip on 2026-09-04: `tests/tw_reentry_test.blsp` 6/6; the full
+suite 5510/5511 (the documented wasm-cap exception) — and **217 s wall against 268–316 s** for
+the same suite that morning, the deferred entry points every test file pays now running at
+engine speed; the whole breakage suite (23 files, exit codes and the `correct: false`
+self-checks) green with `chaos2_process_genserver` looped 30× and the watchdog silent; and the
+A/B against HEAD at both tiers: default ceiling (`make ab --floor`, best-of-7, 11 rows) every row noise, ten of eleven negative (fib −3.1%, pfib −3.2%, sieve −4.4%, primes −4.5%, json −3.4%; `loop` +1.7% against a 6.4% floor); VM ceiling (`make ab-vm`, best-of-7) `spawn-live` −3.5%, `collatz` −0.3%, `pfib` +1.7% against a 0.8% floor, and **`fib` +2.3%, +2.5% on a solo best-of-9, against a 0.2% floor** — consistent, so it got the probe rather than the "noise" verdict: `perf stat` pinned, three reps each, reads instructions **flat** (43.33 G base vs 43.31 G new — fewer), cycles +2.3%, **L1-icache misses 46 M → 93 M**, and `BROOD_ROUTE_DBG` shows the router firing 35 times on fib, all at boot (`filter`/`fold`/`get`/`into`/`map`/`reverse` from the prelude), never in the loop. That is KI-100's code-layout mechanism (the same signature `ring` showed on 2026-09-02), recorded, and deliberately not pursued.
+
+**Consequences.** Every deferred entry point — autogensym expanders, checker passes, a `defn`
+inside a `let`, any future vocabulary gap — now pays the tree-walk for its OWN body only. A
+routing change that makes more code reach an engine is a test of every latent assumption in
+that engine (the router found `reset_frame_keep_captures` on its first day), so the opt-out is
+kept as the bisect lever and the stopgap: if a routed shape is ever implicated, set it, and
+file the shape. If the watchdog line ever prints, KI-88 reopens with the pid named — keep the
+binary and the log. `BROOD_TW_REENTRY=1` is gone (no alias: it would be a flag the runtime
+ignores).
+
