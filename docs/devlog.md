@@ -10372,3 +10372,80 @@ and `wasm/instantiate` denies everything. Under `target/debug/brood` (default fe
 include `wasm`) the same file is 7/7. So "judge it uncapped" means uncapped *with a binary
 that has the feature under test* — three of the four failures were plain `:denied` assertion
 diffs that read exactly like a real sandbox regression.
+
+## 2026-09-04 (later still) — the prelude-image flip: one bug reproduced and fixed, a second found, default reverted (ADR-314, KI-105, KI-106)
+
+Handoff work-queue item 2. The task as written was "a deliberate flip with a benchmark
+refresh" — the fix was believed in, the differential was clean, all that was missing was the
+decision. Working ADR-314's own four artifact states instead of re-reading its argument
+turned that around: **state four reproduced the original failure on the first attempt.**
+
+`unbound symbol: io/puts`, 5 runs of 5 with the image live, 0 of 5 with
+`BROOD_NO_PRELUDE_IMAGE=1`. This is the failure ADR-314 recorded as real, repeatable by hand
+in the moment, and then **unreproducible**: three reproductions were written for it and all
+three passed under a sabotage that removed the fix, so the ADR left the mechanism a
+hypothesis and kept a measured 39% startup win switched off on that basis.
+
+The hypothesis was right. `%add-image-source!` appends; an imaged boot restores
+`*image-sources*` holding a snapshot of whatever install was live when the prelude image was
+written; replaying `%std-image-install` appends beside it, leaving two directories for the
+same file path with the stale one first, and `%image-section-for` scans in install order.
+`(count *image-sources*)` reads 2 on the imaged arm and 1 on the source arm — the whole
+diagnosis in one number.
+
+What hid it from three attempts is one condition none of them preserved: **the stale entry's
+path still exists and reads fine.** A deleted image fails cleanly; an offset past the end
+fails cleanly; a module with no section loads from source. Same path, different layout, still
+readable — the read succeeds and hands back garbage. So the replay was a partial fix all
+along: it corrected the directory it appended and left the stale one in front of it.
+
+Fix: `%std-image-reinstall!` clears the registry to its `def-` values before installing
+(Brood, not Rust — the kernel only evaluates the form).
+
+**The regression test passed its own sabotage on the first cut**, and that is the more useful
+lesson. It built a full stdlib image and then booted — but the build's own run cold-booted
+first and wrote the prelude image *before any stdlib image existed*, so the snapshot was
+empty and there was nothing stale to append to. Performing the steps is not the same as
+arming the state. It now discards the prelude artifacts, re-cold-boots with the full image
+live, and asserts that arming boot was genuinely a source boot — an arming step that silently
+stops arming is a test that silently stops testing.
+
+Two more gaps closed on the way. The imaged boot replayed the install from Rust and so never
+emitted the Brood-level `BROOD_IMAGE_TRACE` line — the documented way to tell an imaged run
+from one that quietly fell back to source, about to go quiet on the path everyone now takes.
+And `prelude_image_matches_source.rs` set only the opt-in spelling; with the default flipped
+its arms had to swap, and it now clears both spellings on both arms so an ambient
+`BROOD_PRELUDE_IMAGE=1` cannot make it compare the image path with itself (sabotage-verified:
+both arms imaged, and it refuses).
+
+**Then the flip was reverted, because the gate caught a second bug (KI-106).** With the image
+on, `nest check <any other file> tests/record_test.blsp` warns `no num/mul method for [:int
+:record-test/usd]`; with the image off it is clean. Two files in one process is the whole
+repro. It reddens CI's zero-warning checker gate, which is a hard reject, so the default went
+back to opt-in — and it reproduces on the **pre-fix binary at HEAD** under
+`BROOD_PRELUDE_IMAGE=1`, so it is old, not something today introduced.
+
+The part worth carrying forward is *what saw it*. Not the prelude-image differential, which
+passes. Not the new KI-105 gate, which passes. Not the suite — **all 1377 cases pass with the
+image default-on**. The project's own `nest check` over `std/ + tests/ + examples/` found it on
+the first run. When you evaluate a flag, run the project's gates under the flag; the tests
+written for the feature are the ones already shaped by what its authors thought could break.
+
+So the day's net on ADR-314 is not the flip. It is that "off because three wrong conclusions
+were drawn about it and it costs nothing to leave alone" has become two named bugs — one fixed
+with a sabotage-verified gate, one with a one-line repro and a place to start (`BROOD_REG_TRACE`,
+the KI-89 family). And the win is now measured rather than asserted: `make ab --floor` over 30
+rows reads `startup` −11.1% (0.0% floor), `pipeline` −13.5%, `sieve` −7.3%, `errors-deep` −6.7%,
+`strings` −6.8%, `reduce` −7.1%, **no regressions** — the three positive rows all sit under
+their own floors. Release boot 21.6 → 13.5 ms.
+
+Kept from the attempt, since none of it depends on the default: the KI-105 fix and its gate, the
+`BROOD_IMAGE_TRACE` line on the replay path, and both image tests clearing *both* flag spellings
+on *both* arms so an ambient one cannot make a differential compare a path with itself.
+
+Two traps re-hit and worth the line, both already in CLAUDE.md: `cargo build -p brood` builds
+the lib and does **not** relink the binary, so a fix appeared not to work for one round; and
+`make release` builds `brood` with `--no-default-features`, i.e. **without wasm**, which turns
+the documented "judge `wasm_sandbox_limits_test` uncapped, 7/7" check into 4 failures that read
+exactly like a sandbox regression. Uncapped means uncapped *with a binary that has the feature
+under test*.

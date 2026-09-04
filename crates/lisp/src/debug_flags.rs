@@ -351,7 +351,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_PRELUDE_IMAGE",
         ENGINE,
-        "opt IN to the prelude image (ADR-314) — boot 9.4ms -> 5.3ms, but OFF by default: an imaged boot does not carry the module-level names the prelude evaluation binds",
+        "opt IN to the prelude image (ADR-314) — a warm boot materialises the prelude's bindings instead of evaluating 544 forms (startup -11%), but OFF by default: with it on, a multi-file `nest check` loses a record's ability impl (KI-106)",
     ),
     f(
         "BROOD_NO_CHECK",
