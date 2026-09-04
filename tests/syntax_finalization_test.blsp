@@ -177,6 +177,23 @@
     ;; docstrings until this check existed.
     (is (includes? (err-of "(defmodule sf-m3 (:doc \"hi\"))") "unrecognised header form")))
 
+  ;; The error is raised while EXPANDING the offending `defmodule`, and an expansion error
+  ;; carries no source location of its own — the reporter attributes it to whichever
+  ;; `require-one` is on top of the stack, i.e. the file that IMPORTED this one. So the
+  ;; message has to name the module itself, or the reader is sent to an innocent file.
+  (test "the message names the module, not just `defmodule`"
+    (is (includes? (err-of "(defmodule sf-m4 (:requires json))") "defmodule sf-m4:")))
+
+  ;; The shape this actually shows up as in the wild: an unescaped `\"` inside a module
+  ;; docstring ends the string early, so the reader sees a good string, then a bare symbol,
+  ;; then another string — all of them valid, none of them a clause. Nothing before this
+  ;; point can detect it, so this message is the only place the cause can be named.
+  (test "a bare symbol or string is diagnosed as a docstring that ended early"
+    (let (symbol-case (err-of "(defmodule sf-m5 \"a doc with a \" quote \" in it\")"))
+      (is (includes? symbol-case "docstring above it ENDED EARLY"))
+      (is (includes? symbol-case "unescaped")))
+    (is (includes? (err-of "(defmodule sf-m6 \"doc\" \"stray\")") "docstring above it ENDED EARLY")))
+
   (test "a module docstring is the second form, and it registers"
     ;; naming an `encoding` export auto-loads the module, whose load is what
     ;; registers the docstring we then introspect
