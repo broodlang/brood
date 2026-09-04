@@ -53,8 +53,13 @@ pub fn free_port() -> u16 {
     const SLICE: u16 = 128;
     static NEXT: AtomicU16 = AtomicU16::new(0);
 
-    let slices = SPAN / SLICE;
-    let slice = (std::process::id() % slices as u32) as u16;
+    let slice = port_slice(
+        std::env::var("NEXTEST_TEST_GLOBAL_SLOT")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        std::process::id(),
+        SPAN / SLICE,
+    );
     for probe in 0..SPAN {
         let off = NEXT.fetch_add(1, Ordering::Relaxed) % SLICE;
         // Stay in our own slice for the first pass; widen only if it is somehow exhausted.
@@ -64,6 +69,24 @@ pub fn free_port() -> u16 {
         }
     }
     panic!("no free port in {BASE}..{}", BASE + SPAN);
+}
+
+/// Which of the `slices` port slices this test process draws from.
+///
+/// Under nextest every test runs in its own process, so two *concurrently running* tests
+/// must never share a slice: both start at offset 0 of theirs (`NEXT` is per process), so a
+/// shared slice hands both the SAME first port, and the loser's node fails to bind or — worse
+/// — the winner's node answers the loser's dial with a cookie mismatch. Slicing by pid
+/// almost always separates them, but not always: every `brood` child a test spawns burns
+/// a pid per THREAD (~16 each), so under a full suite the pid counter advances by hundreds a
+/// second and two live test processes can sit exactly `slices` apart (KI-99 is one sighting
+/// of this class; KI-27 and KI-38 are its relatives). nextest publishes a slot number that is
+/// unique among the tests running at any instant — `NEXTEST_TEST_GLOBAL_SLOT`, `0..threads`
+/// — so that is the slice when present. The pid is the fallback for plain `cargo test`,
+/// where one process runs every test and needs only one slice.
+pub fn port_slice(nextest_slot: Option<u32>, pid: u32, slices: u16) -> u16 {
+    let key = nextest_slot.unwrap_or(pid);
+    (key % slices as u32) as u16
 }
 
 /// A `brood` child process that cannot outlive the test which spawned it (KI-29).

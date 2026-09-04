@@ -123,14 +123,15 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
         // read + eval the text cache still pays. Tried first; any miss falls through to
         // the text cache, and that to the source boot, so a bad artifact costs a slower
         // boot and never a wrong one.
-        // OPT-IN, not default (2026-09-02). Shipped default-on and found broken the same
-        // day: the imaged boot restored a STALE `*image-sources*` (fixed below by replaying
-        // the install) and, separately, does not carry the module-level names the prelude's
-        // own evaluation binds — `file/list-files` and friends come back unbound, and
-        // `crash-report/take-over` stays the autoload stub. The differential in
-        // `crates/cli/tests/prelude_image_matches_source.rs` passed while BOTH were true,
-        // because it excluded the very globals that were wrong. Default stays OFF until it
-        // is clean with no exclusions. `BROOD_PRELUDE_IMAGE=1` opts in for that work.
+        // STILL OPT-IN (`BROOD_PRELUDE_IMAGE=1`), and as of 2026-09-04 for a *known,
+        // reproducible* reason rather than the unproven history that kept it off before.
+        // KI-105 — the stale section directory — was reproduced and fixed (see
+        // `%std-image-reinstall!` below). KI-106 was found by the same flip attempt and is
+        // NOT fixed: with the image on, `nest check <any file> tests/record_test.blsp`
+        // loses a record's ability impl (`no num/mul method for [:int :record-test/usd]`)
+        // where the same command with the image off is clean. Two files in one process is
+        // the whole repro, and it reddens CI's zero-warning checker gate. Flip the default
+        // when that is fixed, not before.
         if std::env::var_os("BROOD_PRELUDE_IMAGE").is_some() {
             if let Some(bundle) = boot_from_prelude_image() {
                 return bundle;
@@ -288,9 +289,27 @@ fn boot_from_prelude_image() -> Option<SharedBundle> {
     //
     // Re-running the install is the faithful replay: it is what the source and text paths do
     // at this point, and it overwrites the stale directory with the current one.
-    let install = syntax::reader::read_all(&mut heap, "(%std-image-install)").ok()?;
+    //
+    // The trace line is emitted HERE rather than left to the prelude's own `when` form: that
+    // form is Brood, this replay is Rust, and with the image default-on the Brood one never
+    // runs. `BROOD_IMAGE_TRACE` is documented as the thing to reach for before believing any
+    // image measurement, so a default boot that silently stops printing its install line
+    // would take the diagnostic down on exactly the path everyone now uses.
+    let trace = std::env::var_os("BROOD_IMAGE_TRACE").is_some();
+    let t_install = web_time::Instant::now();
+    let install = syntax::reader::read_all(&mut heap, "(%std-image-reinstall!)").ok()?;
+    let mut sections = Value::Nil;
     for form in install {
-        let _ = eval::eval(&mut heap, form, root);
+        if let Ok(v) = eval::eval(&mut heap, form, root) {
+            sections = v;
+        }
+    }
+    if trace {
+        eprintln!(
+            "[image] install: {} sections, {} ns (replayed under the prelude image)",
+            crate::syntax::printer::display(&heap, sections),
+            t_install.elapsed().as_nanos()
+        );
     }
     let t_load = t_start.elapsed();
     // The image carries no gensym counter of its own: the names baked into its closures

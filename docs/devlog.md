@@ -10226,6 +10226,229 @@ Trap of the session, again: the first probe of the new `fontify` ran a `target/d
 that reported `ec38a54d` — two commits stale — and so "proved" the old contract. The
 version line is printed for exactly this reason; read it before believing a probe.
 
+## 2026-09-03 (stability) — the non-reproducible entries, one by one: two mechanisms were wrong, one was three bugs, one stays dormant
+
+The brief was "reproduce or archive" for every open entry nobody had pinned down. Four
+qualified (KI-86, KI-88, KI-89's residual, KI-99); KI-97 was only a stale header.
+
+**KI-86 — reproduced deterministically; the recorded mechanism was wrong.**
+`BROOD_RT_GC_FLOOR=128 cargo test -p brood --test runtime_collector` fails every time on a quiet
+box, with ZERO `[sched] run` lines: no worker heap was ever involved. The stdlib image's
+materialisation calls `rt_gc_rebaseline_all_live`, which blindly set `max(floor, 2 × live)` over
+a heap that had opted OUT (`usize::MAX`) — re-arming the collector the test switched off. It
+looked load-dependent because it is image-dependent (a stale image → no rebaseline). Fix: the
+opt-out is sticky. Guard + sabotage in `runtime_collector.rs`.
+
+**KI-99 — the recorded mechanism was the harness probe.** `wait_until_listening` is a bare
+connect-and-drop, so B's acceptor prints `failed to fill whole buffer` on EVERY run; it is only
+ever seen on a failure because only the assertion message prints B's stderr. 27/27 solo, 15
+under a 12-thread hog. The plausible full-suite cause is a same-slice port collision (`pid %
+162`, both processes start at offset 0; a `brood` child burns a pid per thread): `free_port`
+now slices by `NEXTEST_TEST_GLOBAL_SLOT`. Guard + sabotage in `distribution.rs`.
+
+**KI-88 — 325 more runs across five timing regimes, still dormant.** Recommendation recorded
+in the entry: archive with the default-on stranded-work watchdog as the tripwire, and decide the
+`BROOD_TW_REENTRY` default on its own protocol.
+
+**KI-89's residual — reproduced 1/1 at HEAD, then instrumented rather than theorised, and it was
+three things:**
+
+1. `stdimage_test.blsp:60` was a violated precondition: the scoped `nest test` boots with
+   `repl`/`editor/lineedit` loaded (the `debug` chain), so "names a require introduces" cannot
+   be measured in-process there. It now runs in a fresh `brood` subprocess.
+2. The scoped runner let **1–18 processes per file** outlive their file — `%isolate` reaps by
+   spawn ancestry, and a grandchild whose worker parent exited is unattributed. The runner now
+   kills and awaits every process that was not alive at file start, before the restore
+   (`nest test --trace` prints the count; a survivor is always reported). Guard:
+   `crates/nest/tests/file_boundary_quiesce.rs`.
+3. The seven orphan ids (`:tempo/tempo`, `:pq/pq`, …) existed **before file 0**, only on runs
+   with a live stdlib image, and first appeared at `load-sources-cached`: the **project
+   startup image**. Its root section writes every registry as a whole value — carrying the
+   build session's load state (a source-path `nest` boot reaches `log`/`pq`/`queue`/
+   `multimap`/`tempo`; an imaged boot does not) — and restores it wholesale, clobbering what
+   boot-loaded modules had registered (`Temporal/->iso` lost its `:datetime/date` impl the
+   moment pruning stopped the image from accidentally carrying it). And `%registry-names`
+   omitted every registry the PRELUDE wrote (`defmulti num/add`), because the build heap's
+   name set died at the freeze — so the merge could not protect `num/add` and every file with
+   a `defmethod num/add` failed to load. Three fixes: `write-image` prunes registrations owned
+   by modules the image does not carry (reusing the stdlib image's per-owner grouping);
+   `project-install-image` snapshots the live registries, loads the section, and merges them
+   back through `%registry-cas!` (live wins); `SharedCode` carries the prelude's registry
+   names. Guards: `startup_image_test.blsp`, `crates/lisp/tests/registry_names.rs` (a fresh
+   `Interp` — under `nest test` the boot writes those registries itself, so the in-language
+   form of that guard was vacuous), `crates/nest/tests/project_image_registries.rs`
+   (a scaffold run twice; the imaged second run must dispatch `->iso` and have no orphan).
+   **A stale `.brood/image.bin` keeps the old contents until its fingerprint changes.**
+
+Method notes worth keeping: the per-file orphan probe found in one run what six sessions of
+theory had not; a python edit against a file `nest format` has reflowed fails silently unless
+the replacement is asserted; `bound?` on a qualified symbol does NOT auto-require (a probe that
+"showed" it did was the checker pre-flight); the explicit-file `nest test` path never installs
+the project image, so an imaged-boot bug reproduces only in a whole-project run.
+
+Also today: `make install` refreshed a week-stale `~/.local/bin/brood` (8162245c), stable moved
+to 1.98.1, cargo-nextest to 0.9.143.
+
+**2026-09-04 follow-up — the quiesce guard was red one run in three, and it was right.** The
+runner's own worker (and driver) were still alive at the file boundary: `collect-loop` retired a
+worker at its result and dropped its `:down`; `drain-runner` demonitored the driver and flushed
+a `:down` that had not arrived yet (`(after 0)`). Now `pending` counts exits and the driver's
+`:down` is awaited, so "the drain returned" means "the runner's machinery is gone" by
+construction. Recorded under KI-89 §2b. Suite 5508/5509 (the wasm-cap exception), 271 s.
+
+**Same day, the combined-tree rerun before pushing turned one more red, seen once in three full
+runs:** `sysmon_test` "a gc-min-pause-us threshold suppresses cheap collections" received a
+`:gc` event through a 600 s threshold. Not the threshold: the previous test in that isolated
+unit arms an UNTHRESHOLDED `:gc` subscription (every collection in the runtime, a firehose
+under a loaded suite), and an event already past the subscriber filter when `sysmon-done`
+disarmed lands after its zero-wait drain — the emitter snapshots targets, then delivers, the
+same window Erlang's `system_monitor` has. The test now judges only events about its OWN
+worker, which did not exist under the old subscription, so a straggler cannot satisfy it and
+a real threshold bug still can.
+
+## 2026-09-04 — the tree-walker→VM router is default-on (ADR-318); KI-88 archived as dormant
+
+The handoff's first open item was "the owner's call on KI-88 / `BROOD_TW_REENTRY`". Taken
+as one decision: the router's default is decided on the router's own gate, and KI-88 — a
+bug nobody could reproduce for five sessions, with a default-on watchdog now reporting its
+exact signature — earns a tripwire, not a veto over a 60× win.
+
+The gate, on the flipped tree: `tw_reentry_test` 6/6; the full suite 5510/5511 (the wasm-cap
+exception) in **217 s**, against 268–316 s for four runs of the same suite earlier today
+with the router off — the deferred entry points every test file pays (autogensym expanders,
+`defn`-in-`let`, the checker) now run at engine speed, which is the §7.3 mechanism showing up
+as a wall-clock number on the whole suite; the breakage suite, all 23 files, exit codes and
+`correct: false` self-checks, green; `chaos2_process_genserver` (KI-88's canonical repro)
+30/30 with the stranded-work watchdog silent; A/B against HEAD at both tiers: default ceiling (`make ab --floor`, best-of-7, 11 rows) every row noise, ten of eleven negative (fib −3.1%, pfib −3.2%, sieve −4.4%, primes −4.5%, json −3.4%; `loop` +1.7% against a 6.4% floor); VM ceiling (`make ab-vm`, best-of-7) `spawn-live` −3.5%, `collatz` −0.3%, `pfib` +1.7% against a 0.8% floor, and **`fib` +2.3%, +2.5% on a solo best-of-9, against a 0.2% floor** — consistent, so it got the probe rather than the "noise" verdict: `perf stat` pinned, three reps each, reads instructions **flat** (43.33 G base vs 43.31 G new — fewer), cycles +2.3%, **L1-icache misses 46 M → 93 M**, and `BROOD_ROUTE_DBG` shows the router firing 35 times on fib, all at boot (`filter`/`fold`/`get`/`into`/`map`/`reverse` from the prelude), never in the loop. That is KI-100's code-layout mechanism (the same signature `ring` showed on 2026-09-02), recorded, and deliberately not pursued.
+
+Mechanically: `tw_reentry_enabled` reads `BROOD_NO_TW_REENTRY` (absent = on), the catalogue
+entry and the CLAUDE.md row follow, and `BROOD_TW_REENTRY=1` is gone rather than aliased — a
+flag the runtime silently ignores is worse than an unknown one.
+
+Trap of the day, for the record: the first breakage pass I ran looked green and proved
+nothing — the files are self-checking programs, not `describe` suites, so `brood --test`
+reports `0 tests` for most of them and the verdict is the exit code plus a grep for
+`correct: false` (the Makefile recipe does exactly that). Read the recipe before
+reproducing a gate by hand.
+
+
+## 2026-09-04 (later) — the flag catalogue is complete, and gated in both directions (ADR-319)
+
+Handoff work-queue item 1. The runtime read 101 `BROOD_*` names; `debug_flags.rs` catalogued
+58. The 43-name gap was not the editor/GUI residue the file's own rationale predicted — it was
+the worker count, the reduction budget, the steal grace, every GC tuning knob and four JIT
+levers. So the curation was reversed in the only direction that matters: the list is complete,
+the triage groups print first, and the two new groups (diagnostics-and-checking, host
+environment) print last.
+
+The load-bearing part is the new test, not the 43 entries: `every_runtime_flag_is_catalogued`
+scans `crates/*/src` + `std/` for quoted `"BROOD_…"` literals and fails naming the file it
+found. **It caught one on its first run** — `BROOD_EMBED_RUNTIME`, which my own grep of
+`crates/*/src` had missed because it is read in `crates/nest/build.rs`. That is the whole
+argument for the test in one instance: the hand method that produced the list also produced
+the omission.
+
+Sabotage, per the rule: a fake `BROOD_TOTALLY_UNCATALOGUED` read added to `coverage.rs` fails
+the test naming the file, and dropping `HOST` from `GROUP_ORDER` fails
+`every_group_is_in_the_print_order` — the case that matters, since a group missing from the
+print order would drop seven flags from the output in silence.
+
+Also fixed, found while auditing: `crates/lisp/tests/jit.rs` told the reader to run
+`BROOD_JIT_INLINE=1` to exercise the self-inliner. The self-inliner has been **default-ON**
+since the two-stage tiering work (2026-06-17) and the runtime stopped reading that name when
+the default flipped — so the note instructed you to arm nothing, and read the default
+backwards while doing it. Exactly the class `every_catalogued_flag_exists_in_the_source`
+exists to prevent, living in a test file rather than in the catalogue.
+
+Nothing was deleted: no read turned out to be a dead lever, and no name in CLAUDE.md's table
+is absent from the source (checked both ways).
+
+**Trap of the day, worth the line:** judging the documented 16 GB-cap exception
+(`tests/wasm_sandbox_limits_test.blsp`, expected 7/7 uncapped) read **3 passed, 4 failed**
+— and the top failure named the reason if you looked past the assertion diffs: `unbound
+symbol: %wasm-load`. `make release` builds `brood` with `--no-default-features` plus
+gui/treesit/jit/stdimage/dev-tools, so **the release binary has no `wasm` feature at all**
+and `wasm/instantiate` denies everything. Under `target/debug/brood` (default features, which
+include `wasm`) the same file is 7/7. So "judge it uncapped" means uncapped *with a binary
+that has the feature under test* — three of the four failures were plain `:denied` assertion
+diffs that read exactly like a real sandbox regression.
+
+## 2026-09-04 (later still) — the prelude-image flip: one bug reproduced and fixed, a second found, default reverted (ADR-314, KI-105, KI-106)
+
+Handoff work-queue item 2. The task as written was "a deliberate flip with a benchmark
+refresh" — the fix was believed in, the differential was clean, all that was missing was the
+decision. Working ADR-314's own four artifact states instead of re-reading its argument
+turned that around: **state four reproduced the original failure on the first attempt.**
+
+`unbound symbol: io/puts`, 5 runs of 5 with the image live, 0 of 5 with
+`BROOD_NO_PRELUDE_IMAGE=1`. This is the failure ADR-314 recorded as real, repeatable by hand
+in the moment, and then **unreproducible**: three reproductions were written for it and all
+three passed under a sabotage that removed the fix, so the ADR left the mechanism a
+hypothesis and kept a measured 39% startup win switched off on that basis.
+
+The hypothesis was right. `%add-image-source!` appends; an imaged boot restores
+`*image-sources*` holding a snapshot of whatever install was live when the prelude image was
+written; replaying `%std-image-install` appends beside it, leaving two directories for the
+same file path with the stale one first, and `%image-section-for` scans in install order.
+`(count *image-sources*)` reads 2 on the imaged arm and 1 on the source arm — the whole
+diagnosis in one number.
+
+What hid it from three attempts is one condition none of them preserved: **the stale entry's
+path still exists and reads fine.** A deleted image fails cleanly; an offset past the end
+fails cleanly; a module with no section loads from source. Same path, different layout, still
+readable — the read succeeds and hands back garbage. So the replay was a partial fix all
+along: it corrected the directory it appended and left the stale one in front of it.
+
+Fix: `%std-image-reinstall!` clears the registry to its `def-` values before installing
+(Brood, not Rust — the kernel only evaluates the form).
+
+**The regression test passed its own sabotage on the first cut**, and that is the more useful
+lesson. It built a full stdlib image and then booted — but the build's own run cold-booted
+first and wrote the prelude image *before any stdlib image existed*, so the snapshot was
+empty and there was nothing stale to append to. Performing the steps is not the same as
+arming the state. It now discards the prelude artifacts, re-cold-boots with the full image
+live, and asserts that arming boot was genuinely a source boot — an arming step that silently
+stops arming is a test that silently stops testing.
+
+Two more gaps closed on the way. The imaged boot replayed the install from Rust and so never
+emitted the Brood-level `BROOD_IMAGE_TRACE` line — the documented way to tell an imaged run
+from one that quietly fell back to source, about to go quiet on the path everyone now takes.
+And `prelude_image_matches_source.rs` set only the opt-in spelling; with the default flipped
+its arms had to swap, and it now clears both spellings on both arms so an ambient
+`BROOD_PRELUDE_IMAGE=1` cannot make it compare the image path with itself (sabotage-verified:
+both arms imaged, and it refuses).
+
+**Then the flip was reverted, because the gate caught a second bug (KI-106).** With the image
+on, `nest check <any other file> tests/record_test.blsp` warns `no num/mul method for [:int
+:record-test/usd]`; with the image off it is clean. Two files in one process is the whole
+repro. It reddens CI's zero-warning checker gate, which is a hard reject, so the default went
+back to opt-in — and it reproduces on the **pre-fix binary at HEAD** under
+`BROOD_PRELUDE_IMAGE=1`, so it is old, not something today introduced.
+
+The part worth carrying forward is *what saw it*. Not the prelude-image differential, which
+passes. Not the new KI-105 gate, which passes. Not the suite — **all 1377 cases pass with the
+image default-on**. The project's own `nest check` over `std/ + tests/ + examples/` found it on
+the first run. When you evaluate a flag, run the project's gates under the flag; the tests
+written for the feature are the ones already shaped by what its authors thought could break.
+
+So the day's net on ADR-314 is not the flip. It is that "off because three wrong conclusions
+were drawn about it and it costs nothing to leave alone" has become two named bugs — one fixed
+with a sabotage-verified gate, one with a one-line repro and a place to start (`BROOD_REG_TRACE`,
+the KI-89 family). And the win is now measured rather than asserted: `make ab --floor` over 30
+rows reads `startup` −11.1% (0.0% floor), `pipeline` −13.5%, `sieve` −7.3%, `errors-deep` −6.7%,
+`strings` −6.8%, `reduce` −7.1%, **no regressions** — the three positive rows all sit under
+their own floors. Release boot 21.6 → 13.5 ms.
+
+Kept from the attempt, since none of it depends on the default: the KI-105 fix and its gate, the
+`BROOD_IMAGE_TRACE` line on the replay path, and both image tests clearing *both* flag spellings
+on *both* arms so an ambient one cannot make a differential compare a path with itself.
+
+Two traps re-hit and worth the line, both already in CLAUDE.md: `cargo build -p brood` builds
+the lib and does **not** relink the binary, so a fix appeared not to work for one round; and
+`make release` builds `brood` with `--no-default-features`, i.e. **without wasm**, which turns
+the documented "judge `wasm_sandbox_limits_test` uncapped, 7/7" check into 4 failures that read
+exactly like a sandbox regression. Uncapped means uncapped *with a binary that has the feature
+under test*.
 ### 2026-09-03 — typing the gen framework: the answer was `nth`, not a pid refinement
 
 The question was how to type `gen` (the `defserver` framework). The plan was a `pid<server>`
