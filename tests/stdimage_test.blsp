@@ -61,6 +61,25 @@
       (is (contains? via '*lineedit-keymap*))
       (is (< (count own) (count via)))))
 
+  ;; `:installed` and `:state` are different questions, and the whole point of adding the
+  ;; first was that only `:state` existed. `:state` reads the DISK NOW; `:installed` is what
+  ;; this process materialised at boot. They disagree routinely — `nest` writes an image on
+  ;; the way into a command that itself ran from source, and `BROOD_NO_STDIMAGE=1` leaves a
+  ;; perfectly current image on disk unused — so a reader who has only `:state` concludes
+  ;; the wrong thing about the run in front of them.
+  ;;
+  ;; Asserted with `contains?`, not `(get … )`: a stored nil and a missing key both read as
+  ;; nil, and "the key was dropped" is exactly the regression this guards. A source-path run
+  ;; has `:installed` nil legitimately, so a truthiness check would pass vacuously there.
+  (test "status reports what THIS process installed, not only what is on disk"
+    (let (s (status))
+      (is (contains? s :installed))
+      (assert= (get s :installed) (%std-image-installed))
+      ;; When this process did install, it installed the whole directory — a partial count
+      ;; would mean sections were dropped between indexing and installing.
+      (when (get s :installed)
+        (assert= (get s :installed) (get s :sections)))))
+
   ;; The require-edges section is keyed on a ROOT name for the same reason in reverse: as
   ;; `stdimage/*std-edges*` it made `stdimage` look already-loaded the moment that section
   ;; was restored, so its source never loaded and `(:use stdimage)` referred nothing.
