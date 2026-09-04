@@ -146,7 +146,16 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-04 (latest) — the prelude image is DEFAULT-ON (ADR-314, third attempt).**
+**Addendum 2026-09-04 (latest) — KI-100 RESOLVED AS FILED; residual is KI-109; KI-108 filed.**
+Re-baselined against `8a2aaa01` (images live both arms): startup −18.2%, sort −7.6%, fib −4.2%,
+bintree −2.9%, collatz flat, nbody inside floor; `mandelbrot` +3.0% (0.2% floor) is the only
+residual and `perf stat` confirms icache footprint (+52% misses, instructions +1.8%) → KI-109.
+KI-108: the lazy-arm crash-report test's fixed 500 ms window lost once under load; now a
+15 s deadline on the harness side (~50 ms healthy). CI green on `9f6c9bee`, all nine jobs.
+**Open now: KI-109 (perf, one row), KI-107 (🔍 watch, theirs). Next: KI-109 via
+`docs/compute-frontier.md`'s root-handling code size, or handoff item 4.**
+
+**Addendum 2026-09-04 (later) — the prelude image is DEFAULT-ON (ADR-314, third attempt).**
 `BROOD_NO_PRELUDE_IMAGE=1` opts out; the opt-in spelling is gone. Gate before flipping, in this
 order: `make check-imaged`, the checker gate with no flag AND opted out (0/0), the three cli
 image tests, the full suite under the default. Upstream's `stdimage_reporting` caught one more
