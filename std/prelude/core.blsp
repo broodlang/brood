@@ -596,8 +596,24 @@ for variadic tails."
   ;; authoritative signature everywhere — intra-module and cross-module — not just
   ;; in a bare file's per-file ctx. Then keep the existing semantics: a runtime
   ;; no-op, or a `sig!` runtime contract under BROOD_CONTRACTS=1.
+  ;; ---- the expander's own functions are declaration-only, even under contracts ----
+  ;; `sig!` rebinds `name` to a wrapper. For most functions that costs a few frames per
+  ;; call. For a function the MACRO EXPANDER itself calls at every level of its recursive
+  ;; descent it costs those frames per level of expansion depth, and prelude expansion is
+  ;; already deep: wrapping `reverse` alone took the cold contracts boot from under 6 MB of
+  ;; stack to over the 12 MB budget, and it died in `prelude expand` naming no `sig` at all.
+  ;; `append` is the same shape. Raising the budget is not the fix — the thread's stack is
+  ;; 16 MB, so a bigger budget just trades a clean error for a real overflow.
+  ;;
+  ;; Declaration-only here means the CHECKER still gets the signature (`(reverse "ab")` is
+  ;; still caught statically, which is why these were declared); only the runtime contract
+  ;; stands down, in the one mode where installing it makes the language unable to boot.
+  ;; Nested `if` and `%`-prims rather than `and`/`or`/`cond` on purpose: this macro body is
+  ;; expanded where it is defined, and those macros are defined further down the file.
   `(do
-     ~(if (= (%getenv "BROOD_CONTRACTS") "1") nil `(%register-sig '~name '~type))
+     ~(if (= (%getenv "BROOD_CONTRACTS") "1")
+        (if (%le 0 (%sig-pos '(reverse append) name 0)) `(%register-sig '~name '~type) nil)
+        `(%register-sig '~name '~type))
      ~(if (= (%getenv "BROOD_CONTRACTS") "1")
         ;; Contracts mode turns this *declaration* into an *action*: `sig!` rebinds
         ;; `name` to a checking wrapper, so the definition must already exist. A
@@ -619,9 +635,11 @@ for variadic tails."
         ;; frame here makes that shim capture a local env, which the prelude
         ;; freeze hard-rejects (KI-81's other half). The defer branch calls
         ;; `%register-sig` a second time instead: cold, idempotent.
-        `(if (bound? (%register-sig '~name '~type))
-           (sig! ~name ~type)
-           (%contract-defer! (%register-sig '~name '~type) '~type))
+        (if (%le 0 (%sig-pos '(reverse append) name 0))
+          nil
+          `(if (bound? (%register-sig '~name '~type))
+             (sig! ~name ~type)
+             (%contract-defer! (%register-sig '~name '~type) '~type)))
         nil)))
 
 ;; ---- checker suppression: `(check-allow :category form…)` -------------------
@@ -884,7 +902,14 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                        (fn (~@fixed-params & ~more)
                          (%contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
                          (%contract-check-args '~name '~opt-ptypes ~more ~(%add opt-pos 1))
-                         (let (~r (apply ~orig (append (list ~@fixed-params) ~more)))
+                         ;; `apply` splices its trailing list, so the leading arguments go
+                         ;; through as themselves. It USED to build the argument list with
+                         ;; `(append (list …) ~more)` — which broke the whole mode the day
+                         ;; `append` was itself given a signature: the shim `append` expands
+                         ;; to calls `append`, so arming contracts over the prelude recursed
+                         ;; until the stack guard fired, during EXPANSION, with no clue which
+                         ;; `sig` did it. The shim must not call a function a `sig` can wrap.
+                         (let (~r (apply ~orig ~@fixed-params ~more))
                            (unless (type-matches? '~rtype ~r)
                              (throw (str '~name
                                       ": result expected "
@@ -937,7 +962,8 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                        (fn (~@fixed-params & ~rest-param)
                          (%contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
                          (%contract-check-rest '~name '~rest-ptype ~rest-param)
-                         (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
+                         ;; No `append` here either — see the `&optional` arm above.
+                         (let (~r (apply ~orig ~@fixed-params ~rest-param))
                            (unless (type-matches? '~rtype ~r)
                              (throw (str '~name
                                       ": result expected "
@@ -1038,3 +1064,14 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
 
     (macroexpand '(when true 1))   → (if true (do 1) nil)"
   (%macroexpand-loop form %macroexpand-max-rounds))
+
+;; ---- signatures for the core functions defined ABOVE `sig` itself ----------
+;; These cannot sit next to their `defn`s: `sig` is defined partway down this file
+;; (the `defmacro sig` below the arithmetic), and a `sig` form before that point is
+;; an unbound symbol that panics the prelude boot. Domains are the ones the runtime
+;; actually enforces, established by probing every value kind rather than read off
+;; the implementation: both reject a string (`(reverse "ab")` raises — reverse its
+;; `string/->list`) and every scalar, and both accept a record, which is a `map` to
+;; the type system and IS indexable through its Seqable view.
+(sig reverse (seqable -> any))
+(sig but-last (seqable -> any))
