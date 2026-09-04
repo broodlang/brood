@@ -10870,3 +10870,14 @@ stderr — the script's fixed `(sleep 500)` lost to a loaded box while the repor
 loaded. Fixed the way KI-79 was: the harness reads the child's stderr pipe and stops at the
 report, 15 s ceiling — healthy runs ~50 ms instead of 530. Sabotage-verified (no crash → fails at
 the deadline, no hang). Numbered KI-108 because a parallel merge had just taken 107.
+
+**Same night — KI-100 re-baselined and resolved as filed; the residual is KI-109.** Against
+`8a2aaa01` itself (the 0.19.1-column commit), `make ab --floor`, images live on both arms after the
+harness refused two asymmetric pairs (a stale image on one side twice — once because `ab`
+relinked `brood` at HEAD while the `nest` that wrote the image was one commit older, and the id
+carries the sha): `startup` −18.2%, `sort` −7.6%, `fib` −4.2%, `bintree` −2.9%, `collatz` flat,
+`nbody` inside its floor. "Every compute row 4–10% slower" is gone. `mandelbrot` +3.0% against a
+0.2% floor is the one residual, and `perf stat` says it is KI-100's mechanism: instructions
++1.8%, cycles +2.6%, icache misses +52%, iTLB −18%. Tracked as KI-109 — a 3% footprint cost on one
+row, not a suite regression. `json` cannot be A/B'd against the old binary (ADR-307's argument
+order); the harness called the baseline program broken rather than slow, which is right.
