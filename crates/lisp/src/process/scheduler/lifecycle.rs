@@ -341,7 +341,11 @@ fn spawn_impl_timed(
     // fan-out of many churny processes doesn't each climb to the single-process
     // GC ceiling. Balanced by the `live_process_dec` in `deregister`.
     crate::core::heap::live_process_inc();
-    let mailbox = Mailbox::new_with_parent(parent);
+    // Stamp the child with the isolate scope we are currently running under, so an
+    // `%isolate` can reap what it spawned without walking a `parent` chain that dies with
+    // any intermediate process (KI-89). Read from OUR scope, which `%isolate` swaps for
+    // the duration of its thunk; `0` when no isolate is active.
+    let mailbox = Mailbox::new_with_parent(parent, super::self_isolate_scope());
     // So `send` can tell this process shares our runtime without touching its heap.
     mailbox.set_runtime_tag(heap.runtime_tag());
     REGISTRY.insert(pid, Arc::clone(&mailbox));

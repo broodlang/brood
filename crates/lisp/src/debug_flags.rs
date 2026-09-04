@@ -82,7 +82,12 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_REG_TRACE",
         ATTRIBUTION,
-        "trace *record-ids* registry writes (with the writer's ancestry chain) and every globals restore — the KI-89 orphan-attribution tool; trace LEAN, heavy tracing suppresses the race",
+        "trace *record-ids* registry writes (with the writer's ancestry chain AND the isolate scope it was spawned under) and every globals restore — the KI-89 orphan-attribution tool; trace LEAN, heavy tracing suppresses the race",
+    ),
+    f(
+        "BROOD_SCOPE_DBG",
+        ATTRIBUTION,
+        "name every process still live when %isolate rolls the globals back — an isolate is sound only while nothing else mutates globals, and this is what says when that is violated",
     ),
     f(
         "BROOD_L1_STATS",

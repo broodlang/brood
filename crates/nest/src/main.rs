@@ -689,7 +689,50 @@ fn ensure_stdimage(interp: &mut Interp, cmd: &Cmd) {
     ) {
         return;
     }
-    let _ = interp.eval_str("(require-one 'stdimage) (stdimage/ensure-built)");
+    // Is there already a current image? A pure-PRELUDE probe on purpose — `%std-image-path`
+    // and `%image-index` load no modules at all, where asking `stdimage` would pull that
+    // module and its dependency tree into the process before the command has started.
+    let current = interp.eval_str(
+        "(let (p (%std-image-path)) (if p (not (nil? (%image-index p (system/stdlib-id)))) true))",
+    );
+    if let Ok(brood::core::value::Value::Bool(true)) = current {
+        return;
+    }
+
+    // Build it in a CHILD process, not here.
+    //
+    // `stdimage/build` works by loading every module and snapshotting what each one binds, so
+    // building in-process leaves the caller holding all ~107 std modules before its own work
+    // begins. For `nest test` that silently rewrites the world the suite then measures: any
+    // test whose premise is "this module is not loaded yet" is false on the first run after a
+    // `std/` edit and true on every run after, which is a test that fails for a reason with no
+    // relation to the change under test. `tests/stdimage_test.blsp`'s attribution case failed
+    // exactly that way, 6 runs out of 6, and read as a concurrency bug for a day.
+    //
+    // A child pays the same ~1 s and hands back a file. Best-effort throughout: a failure to
+    // build is not a reason to fail the user's command — `require` keeps reading source,
+    // exactly as it did before images existed.
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let ok = std::process::Command::new(exe)
+        .arg("stdimage")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false);
+    // Announce the rebuild, and only a rebuild. The image is written for the NEXT process, so
+    // the command that triggers the write is itself running from source — and on this suite
+    // that is the difference between ~91 s and ~110 s, and it is what makes the source path
+    // (a documented KI-89 amplifier) the one this run took. Nothing said so, which is how a
+    // slow run gets attributed to the change you just made instead of to a one-off cache miss.
+    if ok {
+        eprintln!(
+            "nest: rebuilt the stdlib image (std/ or the commit changed) — THIS command \
+             loaded std/ from source; later ones will not."
+        );
+    }
 }
 
 fn main() {
