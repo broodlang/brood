@@ -20,8 +20,11 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/scripts/lib/gate-binary.sh"
-NEST="${NEST:-$(gate_pick nest)}"
+# `make` exports its own NEST (`cargo run -q -p nest`, for recipes that invoke it), which is
+# not a path. Honour NEST only when it names an executable; otherwise pick like the other gates.
+if [ -n "${NEST:-}" ] && [ -x "$NEST" ]; then :; else NEST="$(gate_pick nest)"; fi
 [ -x "$NEST" ] || { echo "check-imaged: no nest at $NEST — run \`make release\`"; exit 2; }
+echo "check-imaged: using $NEST ($("$NEST" --version 2>/dev/null))"
 
 WORK="$(mktemp -d)" || exit 2
 trap 'rm -rf "$WORK"' EXIT
@@ -33,9 +36,12 @@ mkdir -p "$XDG_CACHE_HOME"
 # The stdlib image, so `require` takes the imaged path too (the configuration users get).
 "$NEST" stdimage >/dev/null 2>&1 || true
 # Boot nest once under the flag: the cold source boot that WRITES nest's prelude image.
-"$NEST" complete -- >/dev/null 2>&1 || true
+# `nest check <file>` rather than `nest complete --`: both boot, but a completion engine
+# silences stderr, so only the former can PROVE which path the next boot takes.
+echo '(def check-imaged-warm 1)' > "$WORK/warm.blsp"
+"$NEST" check "$WORK/warm.blsp" >/dev/null 2>&1 || true
 # Prove the next boot is the imaged one.
-trace="$(BROOD_BOOT_TRACE=1 "$NEST" complete -- 2>&1 >/dev/null | grep '^\[boot\]' || true)"
+trace="$(BROOD_BOOT_TRACE=1 "$NEST" check "$WORK/warm.blsp" 2>&1 >/dev/null | grep '^\[boot\]' || true)"
 case "$trace" in
   *"(prelude image)"*) ;;
   *) echo "check-imaged: nest did NOT boot from the prelude image, so this gate would test the source path. Boot trace:"; echo "$trace" | sed 's/^/  /'; exit 2 ;;

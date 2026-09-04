@@ -146,7 +146,17 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-04 (latest) — work-queue item 3 needed no repro runs: KI-79 and KI-80 were
+**Addendum 2026-09-04 (latest) — KI-106 FIXED the same day; `make check-imaged` is the new gate;
+merged +8 from origin.** The prelude image did not carry the registry-name set
+(`SharedCode::registry_names`, captured by the freeze from `%registry-update!` marks the source
+boot makes and a materialised one never does): 10 names vs 12, missing `*multi-algebra*` and
+`*multi-ret*`. Written + re-marked on load; differential compares the set; sabotage-verified both
+ways. **The default flip (item 2) is now unblocked** — re-run the four artifact states AND
+`make check-imaged` AND the full suite under the flag before flipping. Upstream fixed the wasm
+cap exception for real (879b0daf), so a capped run that reds a wasm file is a real failure again.
+**Next: flip ADR-314's default with the full gate, then KI-100.**
+
+**Addendum 2026-09-04 (later) — work-queue item 3 needed no repro runs: KI-79 and KI-80 were
 already fixed, and only their INDEX ROWS lagged.** Item 3 asked to try each recorded repro 10x
 and then resolve or fix. Reading them first showed there was nothing to run: **both sections
 already carry dated resolutions** — KI-79 ✅ 2026-09-02 (the liveness check became a *deadline*

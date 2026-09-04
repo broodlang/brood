@@ -293,14 +293,21 @@ fn ki_index_row_status_agrees_with_its_section() {
             }
         }
     }
-    assert!(rows.len() > 20 && sections.len() > 20, "parsed {} rows / {} sections — format changed?", rows.len(), sections.len());
+    assert!(
+        rows.len() > 20 && sections.len() > 20,
+        "parsed {} rows / {} sections — format changed?",
+        rows.len(),
+        sections.len()
+    );
     let mut disagree = Vec::new();
     for (n, sg) in &sections {
         let Some(rg) = rows.get(n) else { continue };
         let s_closed = CLOSED.contains(sg);
         let r_closed = CLOSED.contains(rg);
         if s_closed != r_closed {
-            disagree.push(format!("KI-{n}: section says {sg}, index row leads with {rg}"));
+            disagree.push(format!(
+                "KI-{n}: section says {sg}, index row leads with {rg}"
+            ));
         }
     }
     assert!(

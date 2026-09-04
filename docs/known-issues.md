@@ -90,7 +90,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 
 | # | What | Status |
 |---|---|---|
-| KI-106 | **with the prelude image on, a multi-file `nest check` loses a record's ability impl** — `nest check <any other file> tests/record_test.blsp` warns `*: no \`num/mul\` method for [:int :record-test/usd]`; the same command with `BROOD_NO_PRELUDE_IMAGE=1`, or with `record_test.blsp` alone, is clean. Two files in one process is the whole repro; order does not matter | ⚠️ **OPEN 2026-09-04** — found by the attempt to make the prelude image (ADR-314) the default, and it is **why that flip was reverted**: CI's zero-warning checker gate is a hard reject. **Not introduced by the KI-105 fix** — it reproduces on the pre-fix binary at `bc8d34d8` under `BROOD_PRELUDE_IMAGE=1`. Invisible to everything else that guards the image: both differentials pass, and all 1377 suite cases pass with the image default-on; only running the project's own gate under the flag found it. Scope is odd and unexplained — `std/**` + `tests/**` together is clean while `tests/**` alone warns, so it is state-dependent on which files share the process, not on a specific companion. Suspect the same family as KI-89 (orphaned `*record-ids*` entries) and KI-84 (an image restoring a registry a source load would have derived): the checker resolves the record id but finds no impl registered under it. `BROOD_REG_TRACE=1` is the tool. **Next step:** minimal repro is two files, so instrument the second one's registration |
+| KI-106 | **with the prelude image on, a multi-file `nest check` loses a record's ability impl** — `nest check <any other file> tests/record_test.blsp` warns `*: no \`num/mul\` method for [:int :record-test/usd]`; the same command with `BROOD_NO_PRELUDE_IMAGE=1`, or with `record_test.blsp` alone, is clean. Two files in one process is the whole repro; order does not matter | ✅ **FIXED 2026-09-04 (same day)** — the prelude image did not carry the **registry-name set**. `freeze_as_shared_code` reads the builder heap's live set into `SharedCode::registry_names`, which `project-registry-snapshot` uses to decide what a section load must MERGE rather than overwrite; a source boot marks `*multi-algebra*`/`*multi-ret*` by evaluating the prelude's `defmulti` forms, a materialised one runs no `%registry-update!` at all — **10 names to the source boot's 12**, missing exactly the two only the prelude writes. KI-89's mechanism one layer over; the fourth "recorded, not bound" omission (after defdyn marks, def sites, meta). Fix: the image writes `heap.registry_names()` and the loader re-marks them (`Heap::mark_registry_names`). Verified 12/12 both arms, two-file check 0/0/0 across imaged nest boots, the whole std/+tests/+examples/ gate 0 under the flag; sabotage (read, never marked) reddens the differential on its new REGISTRIES line and the two-file check 3/3. **And the gate that found it is a gate now**: `make check-imaged` / `scripts/check-imaged.sh` runs `nest check` over the tree with the image on, in `green-all` and CI's examples job, warming nest's per-binary image first and ASSERTING the imaged boot. ⚠️ **OPEN 2026-09-04** — found by the attempt to make the prelude image (ADR-314) the default, and it is **why that flip was reverted**: CI's zero-warning checker gate is a hard reject. **Not introduced by the KI-105 fix** — it reproduces on the pre-fix binary at `bc8d34d8` under `BROOD_PRELUDE_IMAGE=1`. Invisible to everything else that guards the image: both differentials pass, and all 1377 suite cases pass with the image default-on; only running the project's own gate under the flag found it. Scope is odd and unexplained — `std/**` + `tests/**` together is clean while `tests/**` alone warns, so it is state-dependent on which files share the process, not on a specific companion. Suspect the same family as KI-89 (orphaned `*record-ids*` entries) and KI-84 (an image restoring a registry a source load would have derived): the checker resolves the record id but finds no impl registered under it. `BROOD_REG_TRACE=1` is the tool. **Next step:** minimal repro is two files, so instrument the second one's registration |
 | KI-105 | **a boot from the PRELUDE image consulted a stale stdlib section directory, and a bad offset read garbage instead of failing** — `unbound symbol: io/puts` on a tree where nothing is wrong with `io`. ADR-314 recorded this failure as real, repeatable by hand at the time, and **unreproducible**: three attempts were written and all three passed under a sabotage that removed the fix, so the mechanism stayed a hypothesis and the prelude image stayed opt-in because of it | ✅ **FIXED 2026-09-04** — **reproduced deterministically** (5/5 imaged, 0/5 with `BROOD_NO_PRELUDE_IMAGE=1`) while working the four artifact states for the default flip. Mechanism: `%add-image-source!` **appends**. An imaged boot restores bindings rather than evaluating the prelude, so `*image-sources*` comes back holding a snapshot of whatever stdlib install was live when that prelude image was written; replaying `%std-image-install` over it leaves **two directories for the same file path**, stale one first, and `%image-section-for` scans in install order. The path still exists and reads fine, so the stale offset returns garbage rather than failing cleanly and falling back to source — that readability is the whole bug. The three earlier attempts each broke it (a deleted image fails cleanly; a re-laid layout with no prelude image written under the old one has no snapshot to be stale; an omitted module has no section at all). Fix: `%std-image-reinstall!` (`std/prelude/tools.blsp`) clears the registry to its `def-` values before installing, and the imaged boot calls that. Guarded by `crates/cli/tests/prelude_image_survives_a_relaid_stdlib_image.rs` — **whose first cut passed its own sabotage**: it armed the repro wrongly (brood's prelude image was written on a boot before any stdlib image existed, so the snapshot was empty). It now discards the prelude artifacts and re-cold-boots with the full image live, asserts that arming boot really was a source boot, and fails with the original `unbound symbol: io/puts` when the fix is removed |
 | KI-104 | **`includes?` scanned a set instead of asking its trie — a correct answer given 64x too slowly** — `includes?` is the membership question people reach for first, and it special-cased maps (searching values) but not sets, so `(includes? #{…} x)` fell through to `index-of` and walked the set. The result was always right, so no test could see it | ✅ **FIXED 2026-09-02** — a `(set? coll) (%set-has? coll x)` arm ahead of the map arm in `std/prelude/seq.blsp`; 500 lookups over a 500-element set went 29 ms -> 0.4 ms, matching `contains?`. Guarded by `set_test.blsp` "includes? answers a set the same way contains? does" |
 | KI-103 | **a `:max-mailbox` breach re-trips inside its own handler, killing the remedy** — the process that drains to recover is killed by the *next* enqueue while still draining, so `process_limit_test.blsp:114` ("the handler can drain and clear the bound") timed out; the root cause behind KI-98 | ✅ **fixed 2026-09-02** — the bound is one-shot per arming: taking the breach flag LATCHES it, so no further enqueue re-arms until the bound is set again, which gives the handler the window it never had. One word, three states (`0` clean, `1..` armed with the breaching length, `usize::MAX` latched), armed by `compare_exchange` from clean only. The FIRST fix was wrong and is kept in the entry: a separate `AtomicBool` checked before arming is a check-then-act race, which moved the rate from ~3-in-4 to ~1-in-10 and read as a second bug |
@@ -6354,7 +6354,7 @@ or give the tracing tests real mutual exclusion instead of relying on `:isolated
 Left as a **watch** rather than open: it is one assertion, at a known rate, with a known cause,
 and the two candidate fixes both touch machinery that KI-89's design session is already going
 to have to look at.
-## KI-106 — an imaged prelude loses a record's ability impl across a multi-file check ⚠️ OPEN 2026-09-04
+## KI-106 — an imaged prelude loses a record's ability impl across a multi-file check ✅ FIXED 2026-09-04
 
 **Symptom.** With the prelude image on (ADR-314, opt-in via `BROOD_PRELUDE_IMAGE=1`):
 
@@ -6423,8 +6423,40 @@ snapshot is built by materialisation rather than evaluation, so a registry that 
 *evaluation* would have seeded can differ. The minimal repro is two files, so instrument the
 second file's registration and diff the two arms.
 
-**Related.** ADR-314 (why the default is still off), KI-105 (the other bug the same flip
-attempt found, fixed), KI-89, KI-84, KI-72.
+**Root cause (found the same day, after the narrowing above).** The registry-NAME set.
+`Heap::registry_names()` = the runtime's live set ∪ `SharedCode::registry_names`, and the
+latter is captured by `freeze_as_shared_code` from the builder heap's live set at boot. On a
+source boot the prelude's `(defmulti num/add :commutative)` etc. call `%registry-update!`,
+which marks `*multi-algebra*` and `*multi-ret*`. Materialising runs no `%registry-update!`,
+so an imaged boot's set was **10 names to the source boot's 12** — missing exactly the two
+only the prelude itself writes. `project-registry-snapshot` consults that set to decide which
+globals a section load merges rather than overwrites, so inside the checker's cross-file
+`%isolate` the two unmarked registries were not protected and the derived mirror was lost.
+KI-89's mechanism, one layer over. Why the plain-program probe read 12 on both arms: with a
+LIVE stdlib image, `%std-image-tables!`'s lazy `%std-regs` merge re-marks the names at
+runtime; the probe was accidentally measuring that, and the earlier 10-vs-12 reading only
+appeared once the stdlib image happened to be stale. The checker's isolate is where the gap
+actually bites, which is why the differential — not the probe — is the guard.
+
+**Fix.** `write_prelude_image` writes `heap.registry_names()` after the def sites; the loader
+re-marks them via `Heap::mark_registry_names` before the freeze, so `SharedCode` ends up
+identical to a source boot's. The fourth thing the evaluation *records* rather than binds,
+after the `defdyn` marks, the def sites and `meta` — and, like those three, found late.
+
+**Guards.** `prelude_image_matches_source.rs` now prints and compares `(%registry-names)` as
+its first line — this bug agreed on every per-global attribute and differed only there.
+Sabotage (names read, never marked): the differential reddens on the REGISTRIES line, and the
+two-file `nest check` warns 3/3 from an imaged `nest` boot.
+
+**Gate.** `make check-imaged` (`scripts/check-imaged.sh`), in `make green-all` and as a step
+of CI's examples job: runs `nest check` over `std/ + tests/ + examples/` WITH the prelude
+image on, in a private cache. It warms nest's own per-binary image first — a first sabotage
+run read 0 warnings because nest had never booted under the flag — and asserts the boot took
+the image path (`BROOD_BOOT_TRACE` says `(prelude image)`); its tripwire fired for real once,
+when the warm-up used `nest complete --`, which silences stderr.
+
+**Related.** ADR-314 (the default), KI-105 (the other bug the same flip attempt found,
+fixed), KI-89, KI-84, KI-72.
 
 ## KI-105 — an imaged boot read a stale stdlib section directory ✅ FIXED 2026-09-04
 

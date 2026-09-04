@@ -461,7 +461,7 @@ jobs:
       - name: Check under the prelude image (nest check, imaged boot asserted)
         if: always()
         shell: bash
-        run: NEST=./target/release/nest make check-imaged
+        run: make check-imaged NEST=./target/release/nest
 
       # Same gate, one directory over: `stress/` and `scripts/fuzz/stress/` are outside
       # `make test`, `nest check`, the breakage suite and `check-examples`, so two rename
