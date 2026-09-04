@@ -590,17 +590,37 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; whole test suite stopped loading.
 (def- %defmodule-clause-heads [:use :use-internals :alias :implements])
 
-(defn- %defmodule-check-clause (clause)
+;; A header clause that is a bare string or symbol is almost never a typo'd clause — it is
+;; the tail of a DOCSTRING that ended early, because someone wrote an unescaped `"` inside
+;; it. The reader cannot see that: `"a doc with a "quote" in it"` is a perfectly good
+;; string, then a symbol, then another string, so the fault only surfaces here, as clauses
+;; that make no sense. Say so, because the alternative is unguessable.
+(defn- %defmodule-clause-hint (clause)
+  (if (or (string? clause) (symbol? clause))
+    (str " A bare "
+      (if (string? clause) "string" "symbol")
+      " in the header usually means the module docstring above it ENDED EARLY —"
+      " look for an unescaped `\"` inside it.")
+    ""))
+
+;; `mod` is in the message because the error is raised while EXPANDING this module's
+;; `defmodule`, and an expansion error carries no source location of its own: the reporter
+;; attributes it to whichever `require-one` is on top of the stack, which is the file that
+;; imported this one, not this one. Naming the module is what tells you which file to open.
+(defn- %defmodule-check-clause (mod clause)
   (if (and (pair? clause)
         (keyword? (first clause))
         (includes? %defmodule-clause-heads (first clause)))
     clause
-    (error "defmodule: unrecognised header form "
+    (error "defmodule "
+      (->string mod)
+      ": unrecognised header form "
       (pr-str clause)
       " — a `defmodule` header takes only (:use mod [:only [names]]),"
       " (:use-internals mod), (:alias mod [:as short]), and (:implements Protocol)."
       " Check the spelling;"
-      " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers).")))
+      " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers)."
+      (%defmodule-clause-hint clause))))
 
 (defmacro defmodule (mod & more)
   "Declare module/namespace `mod` and compile the rest of the file into it —
@@ -609,7 +629,7 @@ definitions become `mod/name`; bare references resolve there, then through
 feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
   (let (doc (if (string? (first more)) (first more) nil)
         clauses (if (string? (first more)) (rest more) more)
-        _checked (map clauses %defmodule-check-clause))
+        _checked (map clauses (fn (clause) (%defmodule-check-clause mod clause))))
     ;; The feature/doc key is the module's ROOTED name (ADR-070): inside a dependency
     ;; `foo`, `(defmodule b)` provides `foo/b` and `(%in-ns 'b)` roots compile-ns to
     ;; `foo/b`, so an outside `foo/b/…` reference finds it and the file's defs become
