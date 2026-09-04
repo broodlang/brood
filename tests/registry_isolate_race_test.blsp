@@ -62,3 +62,54 @@
       ;; is vacuous (it once died silently on a renamed builtin and "passed").
       (is (> (or (table/get stop :n) 0) 100))
       (assert= resurrected 0))))
+
+;; ---- the OTHER half of KI-89: the orphaned grandchild the reaper could not prove -----
+;;
+;; `%isolate` kills what its thunk spawned before rolling the globals back, so nothing is
+;; left executing against bindings that are about to vanish. Ownership used to be decided
+;; by walking each newcomer's `parent` chain looking for the isolate runner — and that
+;; chain is not durable. A grandchild whose middle process has already exited has no link
+;; left to walk, could not be proven owned, and was left running. It then kept loading
+;; modules against the doomed table: its `%record-register` takes `registry_lock` and
+;; survives the swap, while the `defrecord` constructor beside it does not, which is the
+;; orphaned-record-id shape the scoped suite kept sighting from `ability_test:471` and
+;; `stdimage_test:60`.
+;;
+;; The stamp (`Mailbox::isolate_owner`, copied at spawn from the spawner's scope) needs no
+;; live chain, so the grandchild is provably ours however many processes above it died.
+;;
+;; **Verified by sabotage:** reap on the `parent` walk instead of the stamp and this case
+;; fails — the grandchild is still alive after the isolate returns.
+
+(defn- ki89-orphan-loop (stop)
+  (if (table/get stop :stop) nil (do (sleep 5) (ki89-orphan-loop stop))))
+
+;; Spawns the grandchild, publishes its pid, and EXITS — breaking the chain on purpose.
+(defn- ki89-orphan-middle (stop out)
+  (table/put out :grandchild (spawn (ki89-orphan-loop stop))))
+
+;; Wait (bounded, tail-recursive) until the grandchild exists and its parent is gone, so
+;; the case tests the broken-chain shape rather than winning a race by accident.
+(defn- ki89-orphan-ready (out mid n)
+  (cond
+    (>= n 200) nil
+    (and (table/get out :grandchild) (not (proc/alive? mid))) true
+    else (do (sleep 5) (ki89-orphan-ready out mid (+ n 1)))))
+
+(describe "isolate reaps what it spawned, by stamp not by ancestry (KI-89)"
+  :isolated (test "a grandchild whose parent already exited is still reaped"
+    (let (stop (table/new)
+          out (table/new)
+          ready (%isolate (fn ()
+                            (let (mid (spawn (ki89-orphan-middle stop out)))
+                              (ki89-orphan-ready out mid 0))))
+          gc (table/get out :grandchild))
+      ;; Liveness: without these the case passes vacuously on a build where the middle
+      ;; never ran, or where it outlived the wait and the chain was never broken.
+      (is ready)
+      (is (not (nil? gc)))
+      ;; The actual claim. `%isolate` returned, so the reap has completed and joined.
+      (is (not (proc/alive? gc)))
+      ;; Belt and braces: stop the loop if it somehow survived, so nothing leaks into
+      ;; the next file.
+      (table/put stop :stop true))))

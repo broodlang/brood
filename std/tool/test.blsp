@@ -1101,11 +1101,23 @@ the test rather than hanging the run."
   ;; than threading a number keeps the timeout *message* accurate too.
   (if (collect-slow-batch? workers)
     (binding (*test-timeout-ms* (math/max *test-timeout-ms* *test-slow-timeout-ms*))
-      (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*)))
-    (collect-loop (count workers) workers nil acc (+ (os/now) *test-timeout-ms*))))
+      (collect-loop (count workers) (count workers) workers nil acc (+ (os/now) *test-timeout-ms*)))
+    (collect-loop (count workers) (count workers) workers nil acc (+ (os/now) *test-timeout-ms*))))
 
-(defn- collect-loop (pending workers reported acc deadline)
-  (if (= pending 0)
+;; `unexited` is the second condition, and it is the KI-89 fix. A worker's `[:down …]`
+;; was already being delivered — the monitor is armed for the crash case — and was
+;; DISCARDED for a worker that had reported, on the reasoning that its results were already
+;; counted. But "sent its results" is not "has exited": the runner would return, the driver
+;; would move on to an `:isolated` unit, and `%isolate` would roll the global table back
+;; while that worker (and anything it spawned) was still finishing. A straggler loading a
+;; module in that window lands its `%record-register` — locked, so it survives the swap —
+;; while the constructor `def` beside it does not, which is the orphaned record id.
+;;
+;; Waiting for the DOWN costs nothing: the message is already in flight, and a healthy
+;; worker exits immediately after sending. It replaces a poll-and-hope with the scheduler's
+;; own answer.
+(defn- collect-loop (pending unexited workers reported acc deadline)
+  (if (and (= pending 0) (= unexited 0))
     acc
     ;; `(m m)` takes the next message; `(after …)` fires when the budget is spent.
     (let (msg (receive (m m) (after (math/max 0 (- deadline (os/now))) :%test-timeout)))
@@ -1120,32 +1132,35 @@ the test rather than hanging the run."
             ;; one already counted — a late message from a timed-out/killed worker of a
             ;; prior step must not corrupt this step's `pending` count.
             (if (or (includes? reported pid) (nil? (unit-of-pid pid workers)))
-              (collect-loop pending workers reported acc deadline)
+              (collect-loop pending unexited workers reported acc deadline)
               (collect-loop (- pending 1)
+                unexited
                 workers
                 (cons pid reported)
                 (append (third msg) acc)
                 deadline)))
 
-        ;; [:down mref pid reason]
+        ;; [:down mref pid reason] — the worker has actually exited. Always decrements
+        ;; `unexited`; it additionally accounts the unit when the worker died without
+        ;; reporting.
         (= (first msg) :down)
           (let (pid (third msg)
                 unit (unit-of-pid pid workers))
             (cond
+              (nil? unit) (collect-loop pending unexited workers reported acc deadline)
               (includes? reported pid)
-                (collect-loop pending
-                  workers reported acc deadline)
-              (nil? unit) (collect-loop pending workers reported acc deadline)
+                (collect-loop pending (- unexited 1) workers reported acc deadline)
               else
                 (collect-loop (- pending 1)
+                  (- unexited 1)
                   workers
                   reported
                   (append (dead-unit-results unit (nth msg 3)) acc)
                   deadline)))
 
         ;; Anything else in the runner's mailbox isn't ours — skip it.
-        else (collect-loop pending workers reported acc deadline)))))
-(sig collect-loop (int any any any int -> any))
+        else (collect-loop pending unexited workers reported acc deadline)))))
+(sig collect-loop (int int any any any int -> any))
 
 ;; Run a whole unit with each test under `%isolate` (global-def rollback). This
 ;; is what an isolated unit's *own* worker process evaluates.
@@ -1610,6 +1625,43 @@ the exit code still reflects the run. An unknown formatter name is a clean error
     (test-report-formatted results elapsed)
     (test-report-human results elapsed opts extra)))
 
+;; One line saying whether THIS run used the stdlib image, printed with the timing line.
+;;
+;; It is here because the absence of it cost a full day. The image is default-on and its
+;; fallback is silent by design — with none on disk `require` just reads source, which is
+;; correct — but the source path is also a documented amplifier for the KI-89 isolate race
+;; (deleting the images takes this suite from 5514 passing to 106 failures), and it is ~5x
+;; slower. So "why is the suite red and slow today?" and "did my measurement run imaged?"
+;; both have the same answer, and until now nothing printed it.
+;;
+;; `%std-image-installed` is the honest fact — what this process materialised at boot —
+;; not `(stdimage/status)`'s `:state`, which reads the disk NOW and says `:live` for a run
+;; that loaded everything from source because `nest` rebuilt the image on the way in.
+;; `status` is consulted only on a miss, to say WHICH miss it was; that costs a directory
+;; listing, which is worth paying exactly when something is already wrong.
+(defn- image-summary-line ()
+  (let (n (%std-image-installed))
+    (if n
+      (str "  (stdlib image: " n " sections)")
+      (let (st (get (stdimage/status) :state))
+        (str "  (stdlib image: none — std/ loaded from SOURCE"
+          (cond
+            (= st :stale) " — on-disk image is for a different stdlib; `nest stdimage` rebuilds it"
+            (= st :absent) " — none built yet; `nest stdimage` writes one"
+            (= st :unreadable) " — the image on disk could not be read"
+            (= st :no-cache) " — no cache directory"
+            (= st :disabled) " — this build was configured --without-stdimage"
+            ;; `:live` here means an image is on disk and current, and this process still
+            ;; did not use it. Almost always because `nest` WROTE it on the way into this
+            ;; very command (it is built for the next process, not this one) — the run that
+            ;; pays for a stdlib edit. Otherwise BROOD_NO_STDIMAGE, or BROOD_COVERAGE, which
+            ;; stands the image down so the compiler can instrument what a materialised
+            ;; module never runs.
+            (= st :live)
+              " — one was written during this run; the next run will use it (or BROOD_NO_STDIMAGE / BROOD_COVERAGE is set)"
+            else "")
+          ")")))))
+
 (defn- test-report-human (results elapsed opts extra)
   (let (total (count results)
         failed (count-failed results)
@@ -1642,6 +1694,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
                extra
                ")"))
     (io/puts (str "  (" elapsed " ms wall, peak " (mb-str (dev/mem-peak)) ")"))
+    (io/puts (image-summary-line))
     ;; Echo the seed whenever the order was randomised, so the run can be
     ;; reproduced. Deliberately says "same order", not "replay exactly": the seed
     ;; fixes the order tests are SCHEDULED in, but parallel tests genuinely

@@ -3361,6 +3361,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "",
         isolate,
     );
+    // The quiescence mechanism `%isolate`'s own soundness note asks for: an isolate is sound
+    // only while nothing else mutates globals concurrently, and this is how a runner checks
+    // before entering one. See `system::scope_live_pids`.
+    def(
+        heap,
+        "%scope-live-pids",
+        Arity::exact(0),
+        Sig::new(vec![], list_ty),
+        &[],
+        "",
+        scope_live_pids,
+    );
 
     // dynamic variables (the `defdyn`/`binding` surface is Brood — see prelude)
     def(

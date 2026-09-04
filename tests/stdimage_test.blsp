@@ -45,7 +45,7 @@
   ;; module pulled their definer in FIRST, so `*lineedit-keymap*` landed in `repl`'s section
   ;; and restoring `editor/lineedit` gave the module without it. Attribution now probes each
   ;; module in isolation and takes the SMALLEST introduced set containing the name.
-  (test "a root global is attributed to the module that defines it, not to a dependent"
+  :isolated (test "a root global is attributed to the module that defines it, not to a dependent"
     (let (own (%isolate (fn ()
                           (let (before (into #{} (reflect/global-names))
                                 _ (require-one 'editor/lineedit))

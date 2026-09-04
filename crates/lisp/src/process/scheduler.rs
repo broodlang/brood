@@ -575,6 +575,39 @@ pub fn parent_of(pid: u64) -> Option<u64> {
         .map(|mb| mb.parent.load(Ordering::Relaxed))
         .filter(|&p| p != 0)
 }
+
+/// Hands out `%isolate` scope tokens. Starts at 1 so `0` stays "no isolate", and only ever
+/// increments, so a token is never reused and a stale stamp can never match a live isolate.
+static NEXT_ISOLATE_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh `%isolate` scope token.
+pub fn next_isolate_token() -> u64 {
+    NEXT_ISOLATE_TOKEN.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The scope this process stamps on children it spawns (`0` = not inside any isolate).
+pub fn self_isolate_scope() -> u64 {
+    ensure_ctx().mailbox.isolate_scope.load(Ordering::Relaxed)
+}
+
+/// Set the scope stamped on this process's future children, returning the previous one.
+/// `%isolate` brackets its thunk with this; nothing else should call it.
+pub fn set_self_isolate_scope(scope: u64) -> u64 {
+    ensure_ctx()
+        .mailbox
+        .isolate_scope
+        .swap(scope, Ordering::Relaxed)
+}
+
+/// The `%isolate` scope `pid` was spawned under, or `0` (also for a pid that has since
+/// exited — an unknown process is not owned by anyone).
+pub fn isolate_owner_of(pid: u64) -> u64 {
+    REGISTRY
+        .get(pid)
+        .map(|mb| mb.isolate_owner.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
 static RUNNING: AtomicUsize = AtomicUsize::new(0); // processes inside `resume` right now
 static PEAK_RUNNING: AtomicUsize = AtomicUsize::new(0);
 static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0); // 0 = default (≈ nproc)
