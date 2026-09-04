@@ -29,6 +29,14 @@
 //! different routes are not `=`, and the class of defect this guards has never been a wrong
 //! value — it has been a missing name, a lost attribute, or a wrong kind.
 
+//! **Run this against a genuinely empty cache when you change what it compares.** With a
+//! current image on disk `Interp::new()` installs at boot, so the SOURCE arm materialises too
+//! and the two arms can agree by accident — and nextest's own setup script builds an image
+//! before the test starts, so no invocation through nextest can reproduce the cold state. Run
+//! the test binary directly with an empty `XDG_CACHE_HOME` to see what CI sees; that is how
+//! `*std-image-installed*` was found missing from `INSTALL_BOOKKEEPING` (2026-09-04), green
+//! locally on every run and red on the first cold one.
+
 use brood::Interp;
 
 /// The install's **own** bookkeeping, which legitimately differs between the arms: the

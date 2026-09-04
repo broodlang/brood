@@ -10743,3 +10743,59 @@ failure rate is not optional — the image state changes the suite's behaviour, 
 a frequency claim twice and had the next batch of runs contradict it both times. And
 `BROOD_NO_STDIMAGE=1` is **not** the same experiment as deleting the images: deleting them
 makes `nest` rebuild, and the rebuild was the trigger.
+
+### 2026-09-04 — KI-106: the prune knew who owned a registration, and it was wrong
+
+`nest check <any file> tests/record_test.blsp` under the prelude image warned `*: no
+`num/mul` method for [:int :record-test/usd]`, and the same command with the image off was
+clean. The entry had already narrowed it well — the runtime dispatches correctly on both
+arms, only the DERIVED commutative mirror is lost, and that is exactly the entry the checker
+cannot read from the file — so the question was why the runtime `*methods*`/`*multi-algebra*`
+registries look different to a checker in an imaged process.
+
+They do not, at boot. Probing `*multi-algebra*` at four points showed it correct (5 entries)
+in both arms after boot, and correct in a plain program in both arms. Inside `nest check` on
+an imaged boot it held **one**. A backtrace on the shrinking write named
+`startup_image::image_load_section` — so nothing was losing the registrations at run time;
+the project image on disk was already short, and the imaged boot was faithfully restoring
+what had been written.
+
+**The writer is `image-prune-foreign-registrations`**, added for KI-89's residual. It removes,
+at write time, every registration owned by a module the image does not carry, on the sound
+premise that a registration is data about a module and the module re-registers it on load.
+Ownership comes from `registrations-by-module`, which groups **by the qualifier of the key**.
+`num/mul`'s qualifier is `num`; `std/num.blsp` is a real module and the project image does not
+carry it, so the entry looked textbook-foreign. But the `(defmulti num/mul :commutative)` that
+registers it is in the **prelude**. The qualifier named a module that was not the registrar,
+so the premise failed silently and nothing ever put the entry back.
+
+Everything else follows. `build_multi_info` synthesizes the commutative mirror only
+`if algebras.contains_key(mname)`, so losing the algebra loses every mirror — which is why the
+declared `[usd :int]` never warned (read from the file's own forms) and only the derived
+`[:int usd]` did. It also settles the non-monotonic scope the entry filed as unexplained: with
+`std/**` in the check set, `num`'s `defmulti` forms are *in the checked text*, so the algebra
+comes from forms and the registry is never consulted.
+
+**The fix needs no name heuristics.** A registration present before this project loaded a
+single file cannot be owned by anything the load brought in, so nothing will replay it and
+pruning it loses it for good. `write-image` captures that baseline beside the
+`before (reflect/global-names)` it already took — same moment, same reason — and the prune
+skips it. What the load actually introduced is still pruned, which KI-89's own guard
+(`project_image_registries.rs`) confirms.
+
+**Why nothing caught it, which is the part worth keeping.** The prune runs inside an
+`%isolate`, so the running session keeps every registration it had; only the file on disk is
+short. A defect that is transient in memory and permanent on disk is invisible to every test
+that inspects the live session — the entry had already noticed the whole 1377-case suite
+passes with the image on while the project's own `nest check` fails at once, and that is the
+shape of the reason.
+
+Two traps paid for on the way, both already written down and both hit anyway. Every rebuild
+changes the build id, which invalidates the prelude image, so the **first** run after any
+build is a source boot: three separate "it's fixed" readings were really cold boots, and the
+warm run still warned. And a `grep -c 'warning:'` pipeline reports *grep's* exit code, so an
+empty match reads as a failure — the reverse of the KI-89-era rule about asserting a summary
+line is present rather than that failures are absent.
+
+ADR-314's default stays opt-in. This removes the reason KI-106 gave for it; the other reasons
+the ADR records are unaffected, and a default flip is its own change with its own evidence.

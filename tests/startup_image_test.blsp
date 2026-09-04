@@ -292,15 +292,33 @@
   ;; with no constructor, an impl table disagreeing with the modules present. Sabotage:
   ;; invert `image-foreign-owner?` in `std/tool/project.blsp` and the tempo assertion fails.
   :isolated (test "write-time pruning drops foreign-owned registrations and keeps root and project ones"
-    (require-one 'tempo)
-    (is (contains? *record-ids* :tempo/tempo))
-    ;; a root-level registration — unqualified key, no owning module — is kept
-    (%registry-update! '*record-ids* :assoc [:zz-image-root-probe] 'zz-image-root-probe)
-    ;; one owned by a module the image carries (present in `*module-files*`) is kept
-    (%registry-update! '*module-files* :assoc ["zz-imgproj/shapes"] "/nonexistent/shapes.blsp")
-    (%registry-update! '*record-ids* :assoc [:zz-imgproj/shapes/circle] 'zz-imgproj/shapes/circle)
-    (let (n (project/image-prune-foreign-registrations))
-      (is (> n 0))
-      (is (not (contains? *record-ids* :tempo/tempo)))
-      (is (contains? *record-ids* :zz-image-root-probe))
-      (is (contains? *record-ids* :zz-imgproj/shapes/circle)))))
+    ;; A registration made BEFORE the baseline is captured stands in for everything the
+    ;; prelude registered: its qualifier names no module the image carries, and yet nothing
+    ;; would ever replay it (KI-106). It must survive the prune on that ground alone.
+    (%registry-update! '*record-ids* :assoc [:zz-preexisting/thing] 'zz-preexisting/thing)
+    (let (before-regs (stdimage/registrations-by-module))
+      (require-one 'tempo)
+      (is (contains? *record-ids* :tempo/tempo))
+      ;; a root-level registration — unqualified key, no owning module — is kept
+      (%registry-update! '*record-ids* :assoc [:zz-image-root-probe] 'zz-image-root-probe)
+      ;; one owned by a module the image carries (present in `*module-files*`) is kept
+      (%registry-update! '*module-files* :assoc ["zz-imgproj/shapes"] "/nonexistent/shapes.blsp")
+      (%registry-update! '*record-ids* :assoc [:zz-imgproj/shapes/circle] 'zz-imgproj/shapes/circle)
+      (let (n (project/image-prune-foreign-registrations before-regs))
+        (is (> n 0))
+        (is (not (contains? *record-ids* :tempo/tempo)))
+        (is (contains? *record-ids* :zz-image-root-probe))
+        (is (contains? *record-ids* :zz-imgproj/shapes/circle))
+        (is (contains? *record-ids* :zz-preexisting/thing)))))
+
+  ;; KI-106, the real shape rather than a stand-in: `num/mul`'s qualifier is `num`, and
+  ;; `std/num.blsp` IS a module the project image does not carry — but the `defmulti` that
+  ;; registers the algebra lives in the PRELUDE, so loading `num` never puts it back. The
+  ;; prune used to remove it and bake the loss into the image; an imaged boot then restored
+  ;; a `*multi-algebra*` short by every `num/*` entry, and the checker lost every commutative
+  ;; mirror derived from them.
+  :isolated (test "a prelude-registered entry whose qualifier names a module is kept"
+    (let (before-regs (stdimage/registrations-by-module))
+      (is (contains? *multi-algebra* 'num/mul))
+      (project/image-prune-foreign-registrations before-regs)
+      (is (contains? *multi-algebra* 'num/mul)))))
