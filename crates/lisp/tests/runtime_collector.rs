@@ -1137,3 +1137,37 @@ fn a_def_of_an_old_gen_value_is_rehomed_off_the_freed_generation() {
         "g was re-homed into the live generation"
     );
 }
+
+/// KI-86's actual mechanism, pinned. A heap that switched the runtime collector OFF must
+/// stay off across a bulk-promote re-baseline (`rt_gc_rebaseline_all_live`, which the stdlib
+/// image install calls after materialising a module): before the fix that call replaced the
+/// `usize::MAX` opt-out with `max(floor, 2 * live)`, so a process-wide `BROOD_RT_GC_FLOOR=128`
+/// made `superseded_global_versions_are_reclaimable` compact mid-count (`total=213`,
+/// deterministically, with zero scheduler activity). Sabotage: drop the `usize::MAX` early
+/// return in `rt_gc_rebaseline_all_live` and this fails.
+#[test]
+fn an_opted_out_heap_stays_opted_out_across_a_rebaseline() {
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+    assert_eq!(
+        interp.heap.rt_gc_threshold(),
+        usize::MAX,
+        "opt-out sets the sentinel"
+    );
+    interp
+        .eval_str("(defn a (x) x) (defn b (x) (a x)) (defn c (x) (b x))")
+        .expect("a few promotions");
+    interp.heap.rt_gc_rebaseline_all_live();
+    assert_eq!(
+        interp.heap.rt_gc_threshold(),
+        usize::MAX,
+        "a re-baseline must not re-arm a collector the caller switched off (KI-86)"
+    );
+    // The complement: an ARMED heap is re-baselined (the ADR-218 behaviour is intact).
+    interp.heap.set_rt_auto_collect(true);
+    interp.heap.rt_gc_rebaseline_all_live();
+    assert!(
+        interp.heap.rt_gc_threshold() < usize::MAX,
+        "an armed heap takes the finite max(floor, 2 * live) threshold"
+    );
+}

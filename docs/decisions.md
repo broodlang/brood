@@ -20002,8 +20002,11 @@ path only, leaving the default path — the one everybody runs — paying the fu
 
 ## ADR-314 — The prelude image: materialise the prelude's bindings, don't re-evaluate its forms
 
-**Status:** **OPT-IN, not default** (2026-09-02) — shipped default-on and reverted to
-opt-in the same day; `BROOD_PRELUDE_IMAGE=1` enables it. Implemented in
+**Status:** **OPT-IN** (`BROOD_PRELUDE_IMAGE=1`). Since 2026-09-04 that is for a **known,
+reproducible defect** — KI-106, a multi-file `nest check` losing a record's ability impl —
+rather than for the unproven history that kept it off before. The 2026-09-04 attempt to flip
+the default reproduced and fixed the original blocker (KI-105) and then found this one; see
+the amendment at the end of this ADR. Implemented in
 `crates/lisp/src/builtins/startup_image.rs` (`write_prelude_image` / `load_prelude_image`)
 and `crates/lisp/src/lib.rs` (`boot_from_prelude_image`, tried ahead of the text cache).
 
@@ -20056,8 +20059,10 @@ sabotage**, i.e. none of them reproduces it:
    left out of the build there is no section at all, and `require` loads from source.
 
 So the mechanism recorded above — "a stale `*image-sources*` makes section reads land on
-garbage" — is **not confirmed**, and the two earlier accounts of this bug in this ADR's
-history were wrong too. What is known: the failure was real and repeatable by hand at the
+garbage" — was **not confirmed at the time of writing**, and the two earlier accounts of this
+bug in this ADR's history were wrong too. **It was confirmed on 2026-09-04** — the hypothesis
+was right and the three reproductions were each wrong in the same way; see the amendment at
+the end of this ADR. What is known: the failure was real and repeatable by hand at the
 time (a `crash-report` section of 227 bytes against a healthy 20552), it involved a stdlib
 image written by a *lean* `nest` and read by a *full* `brood`, and it stopped happening after
 the replay landed. Whether the replay is the fix or merely perturbed the state is unproven.
@@ -20068,12 +20073,13 @@ did, which is this ADR's own stated rule. But **it is not evidence the image is 
 that — not any known defect — is why the default stays off. A `⚠️ watching`-shaped situation,
 in ADR clothing.
 
-**Why the default is still off.** Not for a known defect — there is no reproducing failure
-left. It is off because this feature interacts with two other on-disk caches in
-state-dependent ways, three separate wrong conclusions were drawn about it in one session
-(two of them from measuring against stale artifacts), and the default costs nothing to leave
-alone: it is exactly v0.23.1's behaviour. Flipping it on is a deliberate decision to take,
-not one to drift into.
+**Why the default was off (2026-09-02 — 2026-09-04).** Not for a known defect — there was no
+reproducing failure. It was off because this feature interacts with two other on-disk caches
+in state-dependent ways, three separate wrong conclusions were drawn about it in one session
+(two of them from measuring against stale artifacts), and the default cost nothing to leave
+alone: it was exactly v0.23.1's behaviour. Flipping it on is a deliberate decision to take,
+not one to drift into. **That decision was taken on 2026-09-04, and the "no reproducing
+failure" premise turned out to be the thing to attack rather than to rely on** — see below.
 
 **Context — this supersedes ADR-138's rejected alternative, on numbers ADR-138 did not
 have.** That ADR cached the *expanded prelude as text*, which removed the ~27 ms macro
@@ -20132,8 +20138,8 @@ here has been a missing name or a lost attribute. **Sabotage-verified three ways
 dropping def sites, dropping the `defdyn` marks, and restoring the wrong (value-is-native)
 filter each turn it red.
 
-**The differential excludes the stdlib image's install bookkeeping** — the same six names
-`image_matches_source.rs` excludes (`*image-sources*`, `*std-image-file*`,
+**Historical (superseded): the differential USED TO exclude the stdlib image's install
+bookkeeping** — the same six names `image_matches_source.rs` excludes (`*image-sources*`, `*std-image-file*`,
 `*std-image-sections*`, `*std-impls*`, `*std-regs*`, `*std-require-edges*`), and for the
 same reason: their values track how far *that* install has got (`%std-image-tables!` clears
 `*std-image-sections*` once any module materialises), so they differ by module load order
@@ -20153,6 +20159,77 @@ a deliberate sabotage. It now asserts the dump's `GLOBALS n` header is **present
 the line count matches it, before comparing anything. That is
 `never-assert-the-absence-of-failures` applied to a differential, and it is the reason this
 gate can be trusted.
+**Amendment 2026-09-04 — the flip was attempted, found two bugs, fixed one, and was reverted.
+The default stays off, now for a reason you can reproduce in one command.** Deciding this
+default meant working the four artifact states this ADR names, rather than re-reading the
+argument. The fourth — *the stdlib image re-laid by
+a different writer* — reproduced the original `unbound symbol: io/puts` on the first attempt
+and 5 times out of 5, against 0 of 5 with `BROOD_NO_PRELUDE_IMAGE=1`.
+
+`%add-image-source!` **appends**. An imaged boot restores `*image-sources*` holding a snapshot
+of whatever install was live when the prelude image was written; replaying `%std-image-install`
+appends the current directory beside it, leaving **two entries for the same file path** with
+the stale one first, and `%image-section-for` scans in install order. `(count *image-sources*)`
+reads **2** on the imaged arm against **1** on the source arm.
+
+The detail that hid it for three attempts: **the stale entry's path still exists and reads
+fine.** A missing file, or an offset past the end, fails cleanly and `require` falls back to
+source. Same path, different layout, still readable — the read succeeds and returns garbage.
+Each of the three earlier reproductions broke exactly that condition, which is why all three
+were green under sabotage. So the replay was a *partial* fix: it corrected the directory it
+appended and left the stale one in front of it.
+
+Fix: `%std-image-reinstall!` (`std/prelude/tools.blsp`) clears the registry to its `def-`
+values before installing, and the imaged boot calls that instead. Guarded by
+`crates/cli/tests/prelude_image_survives_a_relaid_stdlib_image.rs`, sabotage-verified —
+**after its first cut passed its own sabotage** by arming the repro in the wrong order (the
+prelude image was written before any stdlib image existed, so its snapshot was empty). It now
+discards the prelude artifacts, re-cold-boots with the full image live, and asserts that
+arming boot was genuinely a source boot.
+
+Two further gaps closed while flipping:
+- the imaged boot replayed the install from **Rust**, bypassing the Brood-level
+  `BROOD_IMAGE_TRACE` line. `BROOD_IMAGE_TRACE` is the documented way to tell an imaged run
+  from one that quietly fell back to source, so with the image default-on it would have gone
+  quiet on the path everyone now takes. It is emitted from the replay too.
+- `prelude_image_matches_source.rs` set only the opt-in spelling. With the default flipped the
+  arms had to swap, and it now clears **both** spellings on both arms, so an ambient
+  `BROOD_PRELUDE_IMAGE=1` cannot make the source arm take the image path and the differential
+  compare the image with itself. Sabotage-verified: with both arms imaged, the test refuses.
+
+**Then the gate caught a SECOND, unrelated defect, and the flip was reverted (KI-106).** With
+the image on, `nest check <any other file> tests/record_test.blsp` warns `*: no num/mul method
+for [:int :record-test/usd]`; with `BROOD_NO_PRELUDE_IMAGE=1` the same command is clean. Two
+files in one process is the entire repro — one file alone is clean, order does not matter, and
+it reproduces on the **pre-fix binary at HEAD** under `BROOD_PRELUDE_IMAGE=1`, so it is not
+something the KI-105 fix introduced. It reddens CI's zero-warning checker gate, which is a
+hard reject (ADR-123/124/125/126), so the default cannot go on. Reverted to opt-in; everything
+else from the attempt is kept, because none of it depends on the default.
+
+**What this ADR should now say about its own history.** The old justification — "off because
+three wrong conclusions were drawn about it and the default costs nothing to leave alone" — was
+an argument from unease. It has been replaced by two named bugs, one fixed with a
+sabotage-verified gate and one with a one-line repro. That is the difference between a feature
+you are nervous about and a feature you know the state of, and it is what the next attempt
+should build on: fix KI-106, re-run the four artifact states, re-run `nest check` over
+`std/ + tests/ + examples/` **with the image on** (the gate that caught it), then flip.
+
+The measurements from the attempt, for whoever picks it up: `make ab BASE=HEAD --floor`,
+best-of-7 over 30 rows, image on versus off — `startup` **−11.1% (best-of-11, 0.0% floor)** and
+**−15.2%** in the 30-row sweep, `errors-deep` −6.7%, `pipeline` −13.5%, `reduce` −7.1%,
+`sieve` −7.3%, `strings` −6.8%, every other row inside its floor and **no regressions** (the
+three positives — `ackermann` +2.8%, `spawn-live` +7.7%, `spawn` +1.5% — are all under their
+own measured floors of 5.3%, 13.7% and 3.1%). Release-build boot 21.6 → 13.5 ms. The win is
+real and it is concentrated exactly where predicted: short-lived runs.
+
+The rule this records: **"we could not reproduce it" is a description of the attempts, not of
+the bug.** This ADR kept the win switched off on the strength of three failed reproductions
+that were each wrong the same way. When a real failure resists reproduction, enumerate the
+conditions it needs and vary them one at a time — the condition none of the three attempts
+preserved was the cheapest one to state. And the corollary the second bug supplies: **run the
+project's own gates under the flag, not just the feature's tests.** KI-106 was invisible to
+both differentials and to all 1377 suite cases; `nest check` over the tree found it at once.
+
 ## ADR-315 — Stopping on a failure is a mechanism you reach for, not something primitives do
 
 **Date:** 2026-09-01
@@ -20402,3 +20479,112 @@ declaration channel. The second customer (getting `failure` out of the type unio
 **rejected outright now** rather than deferred: the union in the hover is what makes this
 lint possible, and its own trigger — "`number | failure` in hovers becoming a complaint in
 practice rather than in principle" — has never fired.
+
+## ADR-317 — A registration travels with the module that made it, in every image
+
+**Context.** The project startup image (ADR-218) wrote every registry global (`*record-ids*`,
+`*impls*`, `*impl-from*`, `*methods*`, …) into its root section as a whole value and restored
+it wholesale. A value snapshot carries the build session's load state: registrations by std
+modules that happened to be loaded at build time arrived in processes that never loaded those
+modules (record ids with no constructor), and the wholesale restore erased registrations that
+boot-loaded modules had made before the install (`Temporal/->iso` losing its datetime impls).
+This was KI-89's residual, live since the stdlib image shipped default-on (2026-08-28).
+
+**Decision.** A registration is data about a module and must arrive with that module:
+1. `write-image` prunes, inside an `%isolate`, every registration owned by a module the image
+   does not carry (not in `*module-files*`), using the stdlib image's per-owner grouping
+   (`stdimage/registrations-by-module`, `%std-impls-by-module`). Root-level (unqualified) and
+   project/dependency-owned registrations stay.
+2. `project-install-image` snapshots the live registries before loading the root section and
+   merges them back afterwards (`%registry-cas!`; live wins on a conflict; two-level registries
+   union their inner maps).
+3. `%registry-names` includes the registries the prelude build wrote (`*multi-algebra*`, `*multi-ret*`, …) (`SharedCode.registry_names`,
+   carried at freeze like `declared_sigs`), so "the registries" means all of them.
+
+**Consequences.** An imaged boot's registries equal what the loaded modules registered, no more
+and no less. A stale `.brood/image.bin` keeps its old contents until its fingerprint changes.
+The stdlib image was already right (per-module replay at materialisation); this brings the
+project image to the same rule.
+
+## ADR-318 — The tree-walker→VM router is on by default; a dormant bug with a tripwire does not hold a default hostage
+
+**Context.** The router (2026-08-30) lets a VM-eligible closure invoked from tree-walked code
+run on the engine instead of inheriting its caller's ~10× defer — before it, `apply_closure`
+never re-entered the VM, so ONE deferred call tree-walked everything beneath it (§7.3's
+macro-expansion constant). Measured 60× on that shape and `startup` −6.9%. It shipped
+**opt-in** (`BROOD_TW_REENTRY=1`, the BROOD_MKCLO pattern) because the first breakage run with
+it live surfaced KI-88: one spawn of a warm 50-burst created, promoted and registered, yet
+never scheduled. KI-88 was shown to be pre-existing (it reproduced at c4af2feb, before the
+router), one candidate mechanism was found and closed (`run_one`'s unprotected post-quantum
+tail), and then it went dormant: 358 consecutive clean runs of its canonical repro with the
+router live, across five timing regimes and three builds, against a bug last seen on one
+destroyed incremental build. Nobody found the cause. Meanwhile a default-on stranded-work
+watchdog (`process/scheduler/pool.rs`, 2026-09-03) reports the exact signature — work queued,
+no worker finding anything for 3 s — with every queued pid and worker state.
+
+**Decision.** Flip the default: the router is ON, `BROOD_NO_TW_REENTRY=1` opts out. KI-88 is
+archived as dormant with the watchdog as its tripwire, not closed. The rule this records:
+**a default is decided on its own gate, and a dormant bug earns a tripwire, not a veto.** The
+router's gate, re-run for the flip on 2026-09-04: `tests/tw_reentry_test.blsp` 6/6; the full
+suite 5510/5511 (the documented wasm-cap exception) — and **217 s wall against 268–316 s** for
+the same suite that morning, the deferred entry points every test file pays now running at
+engine speed; the whole breakage suite (23 files, exit codes and the `correct: false`
+self-checks) green with `chaos2_process_genserver` looped 30× and the watchdog silent; and the
+A/B against HEAD at both tiers: default ceiling (`make ab --floor`, best-of-7, 11 rows) every row noise, ten of eleven negative (fib −3.1%, pfib −3.2%, sieve −4.4%, primes −4.5%, json −3.4%; `loop` +1.7% against a 6.4% floor); VM ceiling (`make ab-vm`, best-of-7) `spawn-live` −3.5%, `collatz` −0.3%, `pfib` +1.7% against a 0.8% floor, and **`fib` +2.3%, +2.5% on a solo best-of-9, against a 0.2% floor** — consistent, so it got the probe rather than the "noise" verdict: `perf stat` pinned, three reps each, reads instructions **flat** (43.33 G base vs 43.31 G new — fewer), cycles +2.3%, **L1-icache misses 46 M → 93 M**, and `BROOD_ROUTE_DBG` shows the router firing 35 times on fib, all at boot (`filter`/`fold`/`get`/`into`/`map`/`reverse` from the prelude), never in the loop. That is KI-100's code-layout mechanism (the same signature `ring` showed on 2026-09-02), recorded, and deliberately not pursued.
+
+**Consequences.** Every deferred entry point — autogensym expanders, checker passes, a `defn`
+inside a `let`, any future vocabulary gap — now pays the tree-walk for its OWN body only. A
+routing change that makes more code reach an engine is a test of every latent assumption in
+that engine (the router found `reset_frame_keep_captures` on its first day), so the opt-out is
+kept as the bisect lever and the stopgap: if a routed shape is ever implicated, set it, and
+file the shape. If the watchdog line ever prints, KI-88 reopens with the pid named — keep the
+binary and the log. `BROOD_TW_REENTRY=1` is gone (no alias: it would be a flag the runtime
+ignores).
+
+
+## ADR-319 — `--debug-flags` lists every flag the runtime reads, and both directions are gated
+
+**Context.** `debug_flags.rs` (ADR-less until now) shipped as a deliberately *curated* subset:
+"the flags for performance triage and A/B", with editor/GUI/audio and test-only flags omitted,
+and with only one direction asserted — a catalogued name must still exist in the source, so a
+rename cannot leave a line telling a reader to set something the runtime ignores. The reverse
+was left unasserted on the stated reasoning that "a test that forced every new flag in here
+would push editor and test-only flags into a performance list."
+
+What that produced, measured 2026-09-04: the runtime reads **101** distinct `BROOD_*` names
+under `crates/*/src` and `std/`, and **58** were catalogued. The 43 in the gap were not the
+editor flags the rationale imagined. They included `BROOD_J` (the worker count),
+`BROOD_REDUCTIONS` (the quantum), `BROOD_STEAL_GRACE_NS`, `BROOD_NO_STEAL_WAKE`, every GC
+tuning knob (`BROOD_GC_MAJOR`, `BROOD_GC_TENURE`, `BROOD_GC_GROWTH`, `BROOD_MAJOR_GROWTH`),
+four JIT levers (`BROOD_NO_HOF_JIT`, `BROOD_NO_JIT_ICALL`, `BROOD_NO_DEOPT_RESUME`,
+`BROOD_MKCLO`) and the two self-inliner knobs. Every one of them is a performance flag. The
+curation had not been keeping non-performance flags out; it had been failing to keep
+performance flags in, because nothing made adding one a step you could not skip.
+
+**Decision.** The catalogue is **complete** — every `BROOD_*` the runtime reads has an entry —
+and the triage question is answered by **ordering**, not omission: `GROUP_ORDER` puts
+attribution / JIT / optimizer levers / GC / scheduler / engine first and the two new groups
+(diagnostics-and-checking, host environment) last. Printing is driven by `GROUP_ORDER` rather
+than by adjacency in the array, so an entry added beside its siblings no longer splits its
+group and prints the heading twice.
+
+Three tests hold it, each sabotage-verified:
+- `every_catalogued_flag_exists_in_the_source` (as before) — no stale line.
+- `every_runtime_flag_is_catalogued` — scans `crates/*/src` + `std/` for *quoted* `"BROOD_…"`
+  literals and fails naming the file. It found `BROOD_EMBED_RUNTIME` on its first run, which
+  a hand grep of `crates/*/src` had missed because it is read in `crates/nest/build.rs`.
+- `every_group_is_in_the_print_order` — a group missing from `GROUP_ORDER` would make its
+  flags vanish from the output *silently*, which is the same failure the catalogue exists to
+  prevent.
+
+Scope is deliberately the runtime's own reads: `crates/*/tests` is excluded, because its
+fixtures name env vars that are not flags (`BROOD_SURELY_MISSING_VAR_XYZ`). Build-time names
+(`BROOD_GIT_SHA`, `BROOD_STDLIB_HASH`, `BROOD_EMBED_RUNTIME`) are exempted by an explicit
+`NON_FLAGS` allow-list — exempted, rather than forgotten.
+
+**Consequences.** `brood --debug-flags` is now the answer to "which knob do I reach for",
+including for the scheduler and the GC, where it previously answered nothing. `CLAUDE.md`'s
+table keeps its distinct job: it is the *annotated* form, carrying the measurement history
+behind each default, and is not required to grow a row per flag. Adding a flag now costs one
+catalogue line, enforced — which is the point: the gap did not open through carelessness, it
+opened because closing it was optional.

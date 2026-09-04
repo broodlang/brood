@@ -2438,3 +2438,29 @@ fn a_dropped_send_to_an_unregistered_name_warns_once() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// KI-99's mechanism class, pinned: two test processes running at the same instant must
+/// never draw from the same port slice, because both start at offset 0 of theirs and would
+/// be handed the SAME first port. Under nextest the slot number is unique among concurrent
+/// tests; the pid is only the fallback for plain `cargo test`. Sabotage: make `port_slice`
+/// ignore the slot (use the pid) and the first assertion fails.
+#[test]
+fn concurrent_nextest_slots_never_share_a_port_slice() {
+    let slices = 162u16; // SPAN / SLICE in `free_port`
+                         // Two pids exactly `slices` apart collide on the pid fallback — the KI-99 shape…
+    assert_eq!(
+        support::port_slice(None, 1000, slices),
+        support::port_slice(None, 1000 + slices as u32, slices),
+        "the pid fallback CAN collide (that is the point of the slot)"
+    );
+    // …and the slot separates them regardless of pid.
+    assert_ne!(
+        support::port_slice(Some(0), 1000, slices),
+        support::port_slice(Some(1), 1000 + slices as u32, slices)
+    );
+    // Every slot below the slice count is its own slice.
+    let mut seen = std::collections::HashSet::new();
+    for slot in 0..slices as u32 {
+        assert!(seen.insert(support::port_slice(Some(slot), 4242, slices)));
+    }
+}

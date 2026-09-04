@@ -1132,6 +1132,15 @@ pub struct SharedCode {
     /// `(sig %path-last-slash (string int -> int))` was invisible to every caller and the
     /// checker fell back to the body's inferred `ordered` — weaker advice, silently.
     declared_sigs: SymbolMap<Value>,
+    /// The registries the PRELUDE build wrote (`%registry-update!` during the build —
+    /// `defmulti num/add` alone touches `*multi-algebra*` and `*multi-ret*`). The build heap's name set lived in its `RuntimeCode`, which the
+    /// freeze discards, so a fresh runtime's [`Heap::registry_names`] listed only what THIS
+    /// process had written since boot and omitted every prelude-declared registry. A
+    /// startup-image install that snapshots "the registries" by that list to merge them back
+    /// after loading the root section could therefore not protect `num/add`'s declaration,
+    /// and an imaged `nest test` failed to load any file with a `defmethod num/add` (KI-89).
+    /// Carried here and unioned in, like `declared_sigs`.
+    registry_names: Vec<Symbol>,
 }
 
 /// A snapshot of the LOCAL heap's sizes, taken at a top-level boundary. Passing
@@ -3741,6 +3750,15 @@ impl Heap {
             .iter()
             .map(|(k, v)| (*k, *v))
             .collect();
+        // Same fate, same fix: the build's registry-name set is in its runtime too.
+        let registry_names: Vec<Symbol> = self
+            .runtime
+            .registry_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect();
         {
             let mut fwd: HashMap<(u8, u32, u8), Value> = HashMap::new();
             let vars: Vec<(Symbol, Value)> = self.local.envs[root.index()].vars.to_vec();
@@ -3982,6 +4000,7 @@ impl Heap {
                 slabs,
                 def_sites,
                 declared_sigs,
+                registry_names,
             },
             bindings,
         )
@@ -6435,7 +6454,11 @@ impl Heap {
             .iter()
             .copied()
             .collect();
+        // …plus the ones the prelude build wrote, which no process re-writes (see the
+        // field's note on `SharedCode`).
+        names.extend(self.prelude.registry_names.iter().copied());
         names.sort_by_cached_key(|&s| crate::core::value::symbol_name(s));
+        names.dedup();
         names
     }
 

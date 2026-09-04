@@ -134,6 +134,15 @@ multimethod names by their own qualifier — each key names its owner, so none o
         one)
       two)))
 
+(defn registrations-by-module ()
+  "Every live non-impl registration, grouped by the module that OWNS it: module name →
+vector of `[registry-symbol key-path value]` triples (the grouping the stdlib image is
+built from, see `%std-regs-by-module`). Public so the PROJECT image can ask the same
+question at write time: a registration whose owner is a module the project image does not
+carry must not travel in it (KI-89)."
+  (%std-regs-by-module))
+(sig registrations-by-module (-> map))
+
 (defn- prune (dir keep)
   "Delete all but the `max-keep` most recently modified `std-image-*.bin` under `dir`,
 never touching `keep`. Returns how many were removed.

@@ -31,7 +31,20 @@ impl Heap {
     /// `max(floor, live * 2)` — so this skips only the *discovery*, never the policy.
     /// Raising the threshold can only delay a compaction, and the collector is an
     /// optimisation, so this cannot affect correctness.
+    ///
+    /// A heap that has **opted out** of automatic runtime collection
+    /// ([`set_rt_auto_collect`](Self::set_rt_auto_collect) `false`, threshold `usize::MAX`)
+    /// stays opted out: for that heap a finite `max(floor, live * 2)` is not a *raise* but
+    /// the re-arm of a collector the caller switched off. That is KI-86's actual mechanism —
+    /// a test disabled the collector, loaded a module that the stdlib image restored (which
+    /// lands here), and the process-wide `BROOD_RT_GC_FLOOR` another test had leaked
+    /// re-armed it, so a later safepoint compacted the region the test was counting. The
+    /// entry blamed a worker heap; no process ever ran. It only reproduced on a box with a
+    /// LIVE stdlib image, which is why it looked load-dependent.
     pub fn rt_gc_rebaseline_all_live(&mut self) {
+        if self.rt_gc_threshold == usize::MAX {
+            return;
+        }
         let count = self.runtime.cur_code().closures.count();
         self.rt_gc_threshold = self.floor().max(count.saturating_mul(2));
     }
