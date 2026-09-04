@@ -115,6 +115,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-83 | **The monomorphization differential compared TIMING CHATTER as if it were an answer.** Under full-suite load, `cli::mono_differential` failed with "monomorphization changed an ANSWER" while both arms reported `92 tests, 92 passed, 0 failed` — the diff was one line: the framework's per-test slow annotation (`concurrent impl registration (KI-22) › … 13.9s`), printed only when a test crosses `*test-slow-ms*` (1 s), which under 4-way nextest parallelism one arm's nested run did and the other's did not. `without_timings` stripped only `ms wall`/`Slow tests` lines | ✅ **FIXED 2026-08-29** — the filter now also drops any line whose last token is a duration (`13.9s`, `2ms`); a real divergence in such a line is theoretically maskable, but a *failing* test already fails the `*_ok` asserts before the comparison runs. Sabotage-verified offline on the exact captured outputs: the old comparison fails on them, the new one passes, and a `92 passed`→`91 passed` mutation still diverges. Same species as [KI-80](#ki-80): a nested suite run under load emitting load-dependent output that an outer gate treats as signal |
 | KI-82 | **The hosted playground cannot run its own front-page example.** `https://brood.fly.dev` — the pipeline snippet returned `recursion too deep: used 14021552 bytes of stack, over the 12582912-byte budget` three frames deep, trace `{:fn %require-force-in} {:fn %require-force}` — wasm-only (native answers `165`) | ✅ **FIXED 2026-08-29** (`b6706120`) — not `require` and not ADR-290/291: `WORKER_STACK_BYTES` was a hard-coded 16 MiB (a native worker's stack) while wasm runs on a ~1 MiB shadow stack, so a bogus 13.4 MiB reading landed in the gap between the budget (raised) and the stale-base backstop (never fired). Both are now target-aware; reproduced deterministically via the page's own `completions()`-then-`run()` sequence, verified red-then-green on native, lean-native and wasm32+node. **Residual:** the deployed site answers wrong until hive redeploys with `BROOD_REF` ≥ `b6706120` — a deploy step, not a runtime bug |
 | KI-81 | **`BROOD_CONTRACTS=1` was unusable on a cold boot cache** — one run panicked in prelude expansion — `prelude expand: unbound error: unbound symbol: take` (`lib.rs:359`), on a file using `defability`/`impl`/`sig`. the cause is prelude LOAD ORDER, not a rename: `sig!` lives in `core.blsp` and `take` is defined in `seq.blsp`, which is concatenated later | ✅ **FIXED 2026-08-29** (ADR-293) — **never a flake**: `touch target/release/brood` reproduces it 100%, because the boot cache is keyed on the executable's mtime, so the first run after any rebuild is cold and every run after replays the cache without executing the macro bodies. The twelve clean runs were twelve warm ones, and the image hypothesis was wrong. THREE independent cold-only defects: `sig!`'s expansion-time `take`/`nth`/`map`/`range`/`count` (not yet defined that early — `core.blsp` expands before `seq.blsp` is concatenated); the shim closing over a **let-bound local**, which the prelude's freeze step rejects; and `defrecord` emitting its constructor `sig` **above** the `defn` it rebinds, making every record fatal in that mode. Root cause of all three: the mode had **no end-to-end test**, so `crates/cli/tests/contracts_mode.rs` now cold-caches deliberately via `XDG_CACHE_HOME` — without that it passes on a broken build |
+| KI-107 | **`tests/eval_server_test.blsp:189` — "`:all` traces, and cannot exceed the spy cap" fails ~1 run in 20**, on its liveness half: `(is (> (count (get r :spy)) 0))` sees an EMPTY spy list. Measured 2026-09-04: 1/20 standalone runs, and one retry-recovered flake in a full `cargo nextest` workspace run | 🔍 **WATCH** — the file's own comment already predicts it: `untrace-all` clears a registry `%isolate` does NOT roll back (isolation copies global *bindings*), so a neighbouring traced test can pull this one's wrapper mid-recursion and "the entry count lands anywhere below the cap". The comment uses that to justify the `<=` upper bound — but `anywhere below the cap` includes **zero**, which is exactly what the `> 0` assertion beside it forbids. So the two halves of the test disagree, and the flake is the liveness one being stated more strongly than the shared registry can support. Fixing it means giving the trace registry the same rollback the bindings get, or a real mutual exclusion between tracing tests — not weakening the assertion, which is the only thing keeping the case from passing vacuously |
 | KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ✅ **FIXED 2026-08-29** — closed by its own third pass, and the index row simply lagged the section (corrected 2026-09-04). A second sighting the same day KEPT its output, which rewrote the entry: the try-1 stdout holds **62 F's in runs before the timeout**, so the "timeout under load" was mass test failures with the 300 s cap hiding the names, and stderr named the class — spawned processes dying `unbound symbol: editor/serve/serve-manager` after their file's `%isolate` rolled the globals back. Three defects, each fixed. The lasting lesson is the one the entry was filed for: the original sighting was undiagnosable because the run was piped through `tail -5`, discarding the one thing worth having. ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
 | KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict. **Addendum 2026-08-29:** the same defect verbatim in `check-examples`/`check-stress`/`check-corpora` (fixed inline in `green.sh` only), which on a lean `make release` brood additionally reported an absent DEV_MODULE (`reload/on-change`) as *rename rot* — the exact class the gate exists to find. All three now share `scripts/lib/gate-binary.sh`, which resolves by sha and separates "this build lacks the module" from "this name is gone" |
 | KI-79 | **`live_migration::deep_receive_continuations_resume_correctly_across_workers` failed once in CI, on the commit that moved the JIT preempt handler.** The test runs up to 400 bursts and fails unless `migrate_count() > 0` — it asserts a scheduler event was **observed**, not that results are right. In the failing run the per-burst correctness assertion passed **400/400**; only the "was a migration seen" assertion fired, which is the case the test's own message anticipates ("if this is the only failure and the machine was loaded, suspect scheduler starvation"). Suspicious anyway, because `12b31fc2` outlined `jit_run_fast_link`'s cold arms — including the **preempt** outcome that live migration depends on | ✅ **FIXED 2026-09-02** — closed by that day's flake sweep, and the index row simply lagged the section (corrected 2026-09-04). The liveness check is a **deadline** now, not a burst count: the budget had already gone 40 → 400 and still went red once, because a loaded machine needs more *time*, not more attempts — a count spends the same number of slower bursts before giving up. The loop still exits on the first burst that migrates (0.2 s healthy) and keeps trying for 45 s, well under nextest's 120 s cap so a genuine scheduler failure still reports as this assertion rather than a timeout. Generalised from a `process_limit_test` flake the same day — same defect class, different language: *assert a condition, not an observation within a window*. ⚠️ **WATCHING 2026-08-28** — not reproduced in 18 local runs (10 unpinned + 8 pinned to 2 cores, matching CI's core count). The change is provably a **verbatim** move: a line-by-line diff of the 117 moved lines against the original shows zero semantic differences, and the only new code is `if outcome == 0 { … return }` ahead of the delegation. It also cannot change *when* a preempt happens — the native arm's tick poll decides that, and only the handling moved. **25 further pinned (2-core) runs on 2026-08-29: 0 failures.** Mitigated rather than closed: `live_migration` now carries `retries = 1`, the gap the `distribution` override already documents. **If it recurs, get whether the correctness assertion also failed** — that is the line between starvation and a real capture-machinery bug |
@@ -6321,6 +6322,38 @@ template plus three behavioural probes that define `get`/`reverse`/`bound?` and 
 value comes back. It pins `receive` as the known exception, so a *new* offender fails the build.
 Sabotage-verified: removing `defrecord`'s escape fails both the scan and the probe.
 
+## KI-107 — `eval_server_test`'s spy-cap case asserts a liveness its shared registry cannot promise 🔍 WATCH 2026-09-04
+
+**Symptom.** `tests/eval_server_test.blsp:189` — "`:all` traces, and cannot exceed the spy
+cap" — fails about **1 run in 20**, always on the same half:
+
+```
+assert: (is (> (count (get r :spy)) 0))
+actual: false
+```
+
+Measured 2026-09-04: 1 of 20 standalone `brood --test` runs, plus one retry-recovered flake in
+a full `cargo nextest` workspace run.
+
+**Cause (already written down, one line above the failing assertion).** The file's own comment
+says `untrace-all` clears a registry that `%isolate` does **not** roll back — isolation copies
+global *bindings*, and the trace registry is not one — so "a neighbouring traced test can pull
+this one's wrapper mid-recursion and the entry count lands anywhere below the cap".
+
+That reasoning is used to justify the `<=` upper bound beside it. But *anywhere below the cap*
+includes **zero**, which is exactly what the `> 0` assertion forbids. The two halves of the
+test disagree with each other, and the flake is the liveness half being stated more strongly
+than the shared registry can support.
+
+**Why it is not simply weakened.** `> 0` is the only thing keeping the case from passing
+vacuously: without it, a build where `:all` traced nothing at all would be green. So the fix is
+to make the claim true rather than to drop it — either give the trace registry the same
+rollback the bindings get (the general form of this is the `%isolate` gap KI-89 also lives in),
+or give the tracing tests real mutual exclusion instead of relying on `:isolated` scheduling.
+
+Left as a **watch** rather than open: it is one assertion, at a known rate, with a known cause,
+and the two candidate fixes both touch machinery that KI-89's design session is already going
+to have to look at.
 ## KI-106 — an imaged prelude loses a record's ability impl across a multi-file check ⚠️ OPEN 2026-09-04
 
 **Symptom.** With the prelude image on (ADR-314, opt-in via `BROOD_PRELUDE_IMAGE=1`):
@@ -7517,6 +7550,154 @@ precisely the coincidence that deserves writing down rather than explaining away
 > 94/94 solo immediately after, on the same binary. No new information beyond confirming
 > the class is still live on the current tree; the binary was not preserved because the
 > delete-the-images lever supersedes it.
+>
+> **Sighting 2026-09-04 — BINARY PRESERVED, and the writer is now named.** Fired on a
+> plain capped `nest test` at `4477cedd` + the uncommitted ADR-308 `sort` sweep, with the
+> stdlib image **live**: orphan-shaped 3 of 3 runs (`stdimage_test:60` once —
+> `*lineedit-keymap*` pre-bound — then `ability_test:471` twice), each passing solo. The
+> artifact this entry has twice lost is kept at
+> `~/brood-orphan-repro-2026-09-04/` (both binaries, the two untraced runs, and a full
+> `BROOD_REG_TRACE=1` suite log). **The lean trace does NOT suppress the race** — it
+> reproduced under it, which is what made the read below possible.
+>
+> The seven orphaned ids are not seven independent losses. They are **one contiguous
+> burst by one writer**, sandwiched between two of pid 1's restores:
+>
+> ```
+> [reg] pid=Some(1) RESTORE
+> [reg] *record-ids* Assoc :log/line-backend    chain=13224<-13217<-1<-
+> [reg] *record-ids* Assoc :multimap/multimap   chain=13224<-13217<-1<-
+> [reg] *record-ids* Assoc :pq/pq               chain=13224<-13217<-1<-
+> [reg] *record-ids* Assoc :queue/queue         chain=13224<-13217<-1<-
+> [reg] *record-ids* Assoc :tempo/iset          chain=13224<-13217<-1<-
+> [reg] *record-ids* Assoc :tempo/span          chain=13224<-13217<-1<-
+> [reg] *record-ids* Assoc :tempo/tempo         chain=13224<-13217<-1<-
+> [reg] pid=Some(1) RESTORE
+> ```
+>
+> So the straggler is a **grandchild** of the runner (pid 13224, child of 13217, child of
+> 1) doing a `require`-driven registration of five modules' record types *inside* the
+> window between two file-scope restores. That is the interleaving the registry lock
+> deliberately permits, observed directly rather than inferred: the `%record-register`
+> writes land under the lock and survive, while the constructor `def`s they pair with go
+> to the globals table pid 1 then swaps away — id kept, constructor gone, sticky from the
+> next snapshot on. It does not change the verdict (still a design question about process
+> quiescence at file boundaries, not a patch), but it removes the remaining doubt about
+> *which* interleaving: it is spawn-descendant liveness across a scope boundary, not a
+> lost update inside the registry.
+>
+> **Same day, after working the fix: one half is CLOSED, the other is measured and still
+> open.** Two things landed, both verified by sabotage:
+>
+> 1. **`%isolate` now reaps by an ownership STAMP, not by ancestry.** `Mailbox::isolate_owner`
+>    is copied at spawn from the spawner's current isolate scope and never mutated, so it
+>    survives every death above it. That closes the gap the code itself documented as
+>    "needs an ownership generation stamped at spawn time, which the scheduler does not
+>    expose today" — an orphaned grandchild whose middle process exited is now provably
+>    owned. Guard: `tests/registry_isolate_race_test.blsp`, "a grandchild whose parent
+>    already exited is still reaped"; sabotage-verified by putting the ancestry walk back
+>    (the grandchild is then alive after the isolate returns).
+> 2. **The test runner accounts a worker as done only when its `[:down …]` arrives**, not
+>    when its results do. The DOWN was already being delivered and thrown away; "sent its
+>    results" is not "has exited", and the runner was entering the next `%isolate` while a
+>    worker was still finishing.
+>
+> **Neither fixes the suite failure, and that is the honest result.** The writer is not an
+> orphan whose chain broke — the trace's `owner=` (added the same day) shows it carrying a
+> scope from an isolate that is *not* the one restoring, i.e. it is a legitimate concurrent
+> global mutator: a load-everything module sweep running as an ordinary parallel unit while
+> some other unit is inside `%isolate`. That is the documented soundness condition being
+> violated by design, not a bug in the reaper.
+>
+> **What was tried and rejected, with numbers**, so it is not tried again blind:
+> - *Wait for scope quiescence before each isolated unit.* Correct in principle; the bound
+>   is either useless or ruinous. At 500 ms it took the suite from **91 s to 470–506 s**
+>   (5x) and still failed; at 20 ms it cost nothing and bought nothing. The blocker is a
+>   real straggler that takes hundreds of ms, and there are hundreds of isolated units.
+> - *Mark the two visible load-everything sweeps `:isolated`* (`doc_examples_test`,
+>   `docs_test`). No effect on the failure, and it breaks the explicit-file-args run mode.
+>   Reverted.
+>
+> **The stdlib IMAGE is a severe amplifier — forced in both directions.** Measured
+> 2026-09-04 on one binary: delete `~/.cache/brood/std-image-*.bin` and a full `nest test`
+> goes to **106 failures in 469 s**, including the `ui_test` records/vtables shape this entry
+> already names as the same class; rebuild with `scripts/build-std-image.sh` and it is back
+> to 5514/5514 in ~91 s. So the "delete-the-images lever" is not merely *a* repro — it is the
+> difference between one flaky assertion and a wholesale collapse.
+>
+> **It is NOT the whole story, and the tempting version of that claim is wrong.** With a live
+> image the suite was seen red 4 runs running and green 7 runs running on builds a few edits
+> apart, so it stays genuinely intermittent there: the image widens the window, it does not
+> own it. Two things checked while chasing that, both worth not re-deriving: `nest` builds
+> the image itself for every command except `stdimage`/`completions`/`complete`, and builds
+> the FULL 107-section one, so the absent-image state normally lasts exactly one command
+> after a `std/` edit; and `BROOD_IMAGE_TRACE=1` shows the image serving modules for the
+> whole scoped run (43 materialised across a five-file run), not just the first file.
+>
+> Practical rule for the next sighting: **read `(stdimage/status)` before quoting any
+> frequency**, and say which state the number came from.
+>
+> So the design session still owes an answer, and the question it should answer is now
+> sharper: **an `:isolated` unit and a module-loading parallel unit cannot both be running,
+> and the runner has no mechanism that says so.**
+>
+> ---
+>
+> ### 2026-09-04 — the trigger was not a race, and it is fixed
+>
+> **Read this beside the 2026-09-03 resolution above, not instead of it.** That one names the
+> PROJECT startup image (ADR-317) as the residual's mechanism; this one names a second,
+> independent trigger in the same family — `nest` building the STDLIB image in the process
+> that then ran the suite. Both were real and both are fixed; neither subsumes the other.
+>
+>
+> Chased to the bottom with `BROOD_SCOPE_DBG` (added to `%isolate`: it names every process
+> still live when the globals are rolled back). Four things came out, and they are not equally
+> well established — which of them is which is the most useful thing in this entry.
+>
+> **1. `nest` built the stdlib image INSIDE the process that then ran the suite. Fixed,
+> attributed, sabotage-verified both ways.** `stdimage/build` works by loading every module
+> and snapshotting what each binds, so `ensure_stdimage` left the runner holding all ~107 std
+> modules before the suite started — and the per-file and per-test `%isolate` rollbacks then
+> tore that state down underneath running code. It also silently falsified any test whose
+> premise is "this module is not loaded yet": `stdimage_test.blsp:60` failed **6 runs of 6**
+> with the image absent and passed with it present, which read as a flaky race for a day and
+> is nothing of the kind. `nest` now builds the image in a **child process**. Measured: image
+> deleted, in-process build → `stdimage_test:60` red 2/2; child build → 5515/5515 green **5
+> runs of 5**, and green again on every later run.
+>
+> **2. `%isolate` reaped by walking the `parent` chain, which dies with any intermediate.**
+> Fixed by `Mailbox::isolate_owner`, a scope token copied at spawn and never mutated, so an
+> orphaned grandchild is provably owned however many processes above it have exited. This is
+> the fix the code itself named in a comment as "needs an ownership generation stamped at
+> spawn time, which the scheduler does not expose today". Guard:
+> `tests/registry_isolate_race_test.blsp`, sabotage-verified (put the walk back and the
+> grandchild is alive after the isolate returns).
+>
+> **3. The runner treated a worker as finished when it SENT its results, not when it exited.**
+> The `[:down …]` was already being delivered and discarded. `collect-loop` now waits for it.
+> Free — the message was already in flight.
+>
+> **4. Eight tests called `%isolate` while the runner had parallel workers in flight**, in
+> `stdimage_test.blsp` and `system_robustness_test.blsp`, rolling the shared global table back
+> under their siblings — precisely the condition `%isolate` documents itself as unsound in.
+> They are `:isolated` now, and `crates/lisp/tests/isolate_tests_run_alone.rs` is a static gate
+> so it cannot regress (sabotage-verified).
+>
+> **What is NOT proven, and should not be claimed.** The orphaned-record-id symptom
+> (`ability_test:471`, `ui_test:284`) has not reproduced in ~20 full-suite runs since, including
+> the amplifier — but it also did not reproduce with fixes 2, 3 and 4 **reverted**, so no single
+> lever was shown to kill it. The honest reading is that fix 1 removed the trigger and 2–4
+> closed real soundness gaps that made the damage worse; it is not a proof that the class is
+> gone. If it is seen again, the tools now exist: `BROOD_SCOPE_DBG` names the survivors of a
+> restore, and `BROOD_REG_TRACE=1` prints each registry write's `owner=` stamp beside its
+> ancestry chain.
+>
+> **Two measurement rules this cost a day to learn.** The stdlib image state changes the
+> suite's behaviour, so `(stdimage/status)`'s `:installed` must be read before quoting any
+> failure rate — and `BROOD_NO_STDIMAGE=1` is **not** the same experiment as deleting the
+> images, because deleting them makes `nest` rebuild, which was the trigger. Twice on the same
+> day a frequency claim was written down and then contradicted by the next batch of runs.
 
 **Symptom.** In a scoped `nest test` run, `std_check_test` ("the standard library carries no
 checker warnings") fails with ~15 warnings about a record defined in **another test file**:

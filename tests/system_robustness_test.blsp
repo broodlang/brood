@@ -83,7 +83,7 @@ the write never comes, which is what these cases actually test."
 
 (describe "%isolate: the orphan reap is scoped to the thunk's own descendants"
 
-  (test "a bystander spawned by an unrelated process survives the isolate"
+  :isolated (test "a bystander spawned by an unrelated process survives the isolate"
     ;; `helper` exists BEFORE the isolate and stays alive across it. While the thunk
     ;; runs, it spawns a bystander, which must outlive the reap and record that it
     ;; did. Under the old "every new pid" reap the bystander was killed at the
@@ -110,7 +110,7 @@ the write never comes, which is what these cases actually test."
       (%isolate (fn () (send helper [:go me]) (receive (:spawned nil)) :done))
       (is (= true (wait-for-key t :bystander-ran 5000)))))
 
-  (test "a process the thunk spawned directly IS reaped"
+  :isolated (test "a process the thunk spawned directly IS reaped"
     ;; The reap has to keep working: an orphan still running the thunk's code
     ;; would look up a global the thunk `def`'d and die with a bogus
     ;; `unbound symbol` once the bindings are rolled back.
@@ -119,7 +119,7 @@ the write never comes, which is what these cases actually test."
       (sleep 600)
       (is (nil? (table/get t :orphan-ran)))))
 
-  (test "a grandchild of the thunk IS reaped while its parent is still alive"
+  :isolated (test "a grandchild of the thunk IS reaped while its parent is still alive"
     (let (t (table/new))
       (%isolate (fn ()
                   (spawn (fn ()
@@ -130,7 +130,7 @@ the write never comes, which is what these cases actually test."
       (sleep 600)
       (is (nil? (table/get t :grand-ran)))))
 
-  (test "the isolate still rolls its own global bindings back"
+  :isolated (test "the isolate still rolls its own global bindings back"
     (%isolate (fn () (reflect/eval '(def isolate-scratch-global 41))))
     (is (not (bound? 'isolate-scratch-global)))))
 
@@ -204,20 +204,20 @@ the write never comes, which is what these cases actually test."
     (is (not (reflect/dynamic? '*isolate-leak-probe*)))
     (is (not (bound? '*isolate-leak-probe*))))
 
-  (test "the mark is rolled back on the throwing path too"
+  :isolated (test "the mark is rolled back on the throwing path too"
     (is (= :caught
           (try
             (%isolate (fn () (reflect/eval-string "(defdyn *isolate-leak-throw* 1)") (throw :x)))
             (catch e :caught))))
     (is (not (reflect/dynamic? '*isolate-leak-throw*))))
 
-  (test "a dynamic mark made OUTSIDE an isolate survives it"
+  :isolated (test "a dynamic mark made OUTSIDE an isolate survives it"
     ;; The restore replaces the set wholesale, so it must not drop pre-existing marks.
     (reflect/eval-string "(defdyn *isolate-keep-probe* 1)")
     (is (reflect/dynamic? '*isolate-keep-probe*))
     (%isolate (fn () 1))
     (is (reflect/dynamic? '*isolate-keep-probe*)))
 
-  (test "a defn- inside an isolate does not leak its private mark"
+  :isolated (test "a defn- inside an isolate does not leak its private mark"
     (%isolate (fn () (reflect/eval-string "(defn- isolate-priv-probe () 1)")))
     (is (not (bound? 'isolate-priv-probe)))))

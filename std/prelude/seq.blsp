@@ -165,7 +165,7 @@ Always true for `n` <= 0.
     (reverse acc)))
 
 ;; (sort coll) ascending via `<` (numbers) or structural order (anything else);
-;; (sort less? coll) with a strict less-than predicate. (sort-by key-fn coll)
+;; (sort coll less?) with a strict less-than predicate. (sort-by coll key-fn)
 ;; sorts by `(< (key-fn x) (key-fn y))`. A stable, O(n log n) merge sort: the
 ;; merge prefers the left run on ties (stable) and is tail-recursive; recursion
 ;; depth is O(log n), so it's stack-safe.
@@ -176,22 +176,39 @@ Always true for `n` <= 0.
 ;; `%sort-cmp` for the heterogeneous / structural case (vectors, strings,
 ;; keywords, …). Dispatch checks the first item — non-empty fast since
 ;; `(number? (first a))` is one tag-of compare. Empty coll → empty list.
-;; Custom-comparator `(sort less? coll)` stays on the Brood-side `%merge-sort`.
-(defn sort (a & more)
-  "Sort a collection (stable). `(sort coll)` is ascending by `<` for numbers, or by structural order (lexicographic on vectors/lists, text order on strings/symbols/keywords) for anything else. `(sort less? coll)` uses a strict less-than predicate.
+;; Custom-comparator `(sort coll less?)` stays on the Brood-side `%merge-sort`.
+(defn sort (coll & more)
+  "Sort a collection (stable). `(sort coll)` is ascending by `<` for numbers, or by structural order (lexicographic on vectors/lists, text order on strings/symbols/keywords) for anything else. `(sort coll less?)` uses a strict less-than predicate.
 
     (sort [3 1 2])              → (1 2 3)
     (sort [\"b\" \"a\"])            → (\"a\" \"b\")
-    (sort > [3 1 2])            → (3 2 1)"
+    (sort [3 1 2] >)            → (3 2 1)"
   (cond
-    (not (empty? more)) (%merge-sort a (first more))
-    (empty? a) nil
-    (number? (first a)) (%sort-asc a)
+    (not (empty? more)) (%merge-sort (first more) coll)
+    (empty? coll) nil
+    (number? (first coll)) (%sort-asc coll)
     ;; a record element sorts by its `compare-to` method (STRICT — no structural default,
     ;; ADR-179: sorting records without a method is a %no-method error), so a type can
     ;; define its own order; every built-in keeps the native `%sort-cmp` path.
-    (record? (first a)) (%merge-sort (fn (x y) (< (%ord-compare x y) 0)) a)
-    else (%sort-cmp a)))
+    (record? (first coll)) (%merge-sort (fn (x y) (< (%ord-compare x y) 0)) coll)
+    else (%sort-cmp coll)))
+;; The comparator goes LAST (ADR-308), like every other combinator. It used to come
+;; first — `(sort > [3 1 2])` — and nothing caught it: `audit/data-first?` judges by
+;; declared types then by parameter names, and `sort` had no signature and named its
+;; parameters `a`/`more`, so it was "vacuously fine" on both axes.
+;;
+;; The comparator is declared as an ARROW rather than a bare `fn` for exactly that
+;; reason: `audit/arrow-type?` is `(includes? t "->")`, so `fn` would have left the gate
+;; blind a second time — the collection would be found by type and the subject by
+;; neither type nor name (`more` is not in `subject-params`), which is the same
+;; vacuous pass in a new spelling. With the arrow, flipping the order back puts the
+;; subject at index 0 and `audit/reversed-args` names it.
+;; `(or list vector set)`, not `seqable`: `seqable` additionally admits a string, a map
+;; and bytes, and `sort` RAISES on all three (`%sort-asc`/`%sort-cmp` both materialise
+;; through `Heap::seq_items`, which takes nil/pair/vector/set and nothing else). A range
+;; needs no mention — it materialises as a pair. Declaring the wider `seqable` warned
+;; inside sort's own body, which was the checker being right.
+(sig sort ((or list vector set) &optional (any any -> bool) -> any))
 ;; Split `coll` into its first `n` items and the rest in ONE pass — what `%merge-sort`
 ;; needs instead of a separate `take` + `drop` (two walks). Private: the published
 ;; spelling is `seq/split-at`, a wrapper over this in std/seq.blsp.
@@ -266,6 +283,7 @@ Always true for `n` <= 0.
     ;; returned a list even when `to` was a vector.
     (vector? to) (apply vector (append to from))
     else (append to from)))
+(sig into (seqable seqable -> any))
 
 ;; conj's per-element step: each collection kind has a natural insertion point.
 (defn- %conj-one (coll x)
@@ -308,6 +326,7 @@ a map. Returns a fresh collection; `coll` is untouched.
 `disj` is the inverse and lives beside it — both stay core rather than in `std/set`
 so a set works with the collection protocol without an import."
   (fold xs coll %conj-one))
+(sig conj ((or list vector set map) & any -> any))
 
 (defn disj (s & xs)
   "A fresh set like `s` with each of `xs` removed (removing an absent element is a
@@ -793,6 +812,7 @@ indexed access or a vector literal shape (`(into [] (map coll f))`, named).
     (partition [1 2 3] 2)      → ((1 2))          ; the odd 3 is dropped
     (partition [1 2] 5)        → nil"
   (%partition-acc n coll nil))
+(sig partition (seqable number -> any))
 
 (defn sort-by (coll key-fn)
   "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the

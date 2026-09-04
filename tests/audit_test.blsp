@@ -26,7 +26,18 @@
     (is (data-first? 'fold))
     (is (data-first? 'seq/transduce))
     ;; a function with no recognisable collection/subject pair is vacuously fine
-    (is (data-first? 'count))))
+    (is (data-first? 'count)))
+
+  (test "sort is judged on its declared types, not vacuously"
+    ;; `sort` is the one this gate missed. It names its parameters `coll`/`more`, and
+    ;; `more` is in NEITHER vocabulary — so a name-only judgement finds no subject and
+    ;; passes whatever the order is, which is how `(sort > [3 1 2])` survived the whole
+    ;; ADR-308 wave. Only the signature makes the check real, and only if the comparator
+    ;; is declared as an ARROW: `arrow-type?` is `(includes? t "->")`, so a bare `fn`
+    ;; would be the same vacuous pass in a new spelling. Assert the arrow explicitly —
+    ;; `(data-first? 'sort)` alone is true either way and cannot tell them apart.
+    (is (data-first? 'sort))
+    (is (any? (sig-params 'sort) (fn (t) (includes? t "->"))))))
 
 (describe "surface audit: docs and examples"
   (test "the audit sees a real surface, so an empty result would not pass vacuously"

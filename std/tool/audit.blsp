@@ -214,10 +214,24 @@ no signature. Split at top level, so a callback's own `(any, any) -> any` stays 
             (if (= (string/trim inner) "") nil (split-top inner 0 0 "" nil))))))))
 (sig sig-params (any -> any))
 
-(defn- arrow-type? (t) (includes? t "->"))
+;; `&optional seqable` IS a `seqable` for the purpose of finding the collection, and
+;; without stripping the marker it matched nothing — so every function whose collection
+;; or callback is optional was invisible to the TYPE half of the judgement and fell back
+;; to parameter names. That is not academic: a `sort` whose signature declared the
+;; comparator first still passed, because `coll` sat at index 0 by name while the
+;; comparator sat at index 0 by type, and `(= coll-at subject-at)` read the outright
+;; contradiction as one parameter answering both tests.
+(defn- bare-type (t)
+  (let (t (string/trim t))
+    (cond
+      (string/starts-with? t "&optional ") (string/trim (string/substring t 10 (string/length t)))
+      (string/starts-with? t "&rest ") (string/trim (string/substring t 6 (string/length t)))
+      else t)))
+
+(defn- arrow-type? (t) (includes? (bare-type t) "->"))
 (defn- collection-type? (t)
   (any? ["seqable" "countable" "list" "vector" "map" "string" "bytes"]
-    (fn (k) (= t k))))
+    (fn (k) (= (bare-type t) k))))
 
 ;; ---- 4: does the declared signature match the function? ---------------------
 

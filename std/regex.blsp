@@ -808,9 +808,20 @@ until something matches, after which a later start could only be worse."
     (when (and a b) {:start a :end b :text (string/substring s a b)})))
 
 (defn- regex-cap-match (obj s caps)
-  "Shape the winning slots into the match map `find` returns."
-  (assoc (regex-cap-group s caps 0)
-    :groups (into [] (map (range 1 (inc (get obj :ngroups))) (fn (k) (regex-cap-group s caps k))))))
+  "Shape the winning slots into the match map `find` returns.
+
+Slot 0 is the whole match, so a WINNING `caps` always sets it — `regex-cap-group` can
+only answer nil for a group that never participated, which group 0 cannot be. That
+invariant lives in the caller (`regex-find-at` calls this only `(when caps …)`), so it
+is stated here rather than assumed: without it the impossible case reached `assoc` with
+a nil and raised `%map-assoc: expected map, got nil`, naming neither the regex nor the
+group."
+  (let (whole (regex-cap-group s caps 0))
+    (if (nil? whole)
+      (error "regex: a winning match has no group 0 — capture slots: " (pr-str caps))
+      (assoc whole
+        :groups
+          (into [] (map (range 1 (inc (get obj :ngroups))) (fn (k) (regex-cap-group s caps k))))))))
 
 (defn- regex-find-at (obj s codes n from)
   "The leftmost match at or after `from`, or nil. Positions stay absolute, so `^`

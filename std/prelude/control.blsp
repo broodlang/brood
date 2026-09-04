@@ -305,6 +305,7 @@ Bindings are ONE flat list, exactly like `let`'s — not a list per pair. `(with
     (last [1 2 3])   → 3
     (last nil)       → nil"
   (first (reverse xs)))
+(sig last (seqable -> any))
 
 (defn error (& parts)
   "Raise an error whose message is the concatenated display forms of `parts`.

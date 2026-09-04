@@ -6364,12 +6364,19 @@ impl Heap {
                     None => break,
                 }
             }
+            // The `%isolate` ownership stamp beside the chain. The chain alone could not
+            // settle KI-89: a walk that reaches the runner does not say whether the hop it
+            // arrives through was spawned INSIDE the isolate that is restoring, which is
+            // the whole question. `owner` is that answer directly.
             eprintln!(
-                "[reg] {} {:?} {} chain={}",
+                "[reg] {} {:?} {} chain={} owner={}",
                 crate::core::value::symbol_name(sym),
                 op,
                 crate::syntax::printer::print(self, k1),
                 chain,
+                crate::process::current_pid()
+                    .map(crate::process::isolate_owner_of)
+                    .unwrap_or(0),
             );
         }
         true
@@ -6900,7 +6907,11 @@ impl Heap {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if reg_trace_enabled() {
-            eprintln!("[reg] pid={:?} RESTORE", crate::process::current_pid());
+            eprintln!(
+                "[reg] pid={:?} RESTORE scope={}",
+                crate::process::current_pid(),
+                crate::process::self_isolate_scope(),
+            );
         }
         *self.runtime.globals_write() = snapshot.saved;
         // Wholesale table swap — invalidate every stamped global inline cache. This one

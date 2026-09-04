@@ -150,6 +150,7 @@ A multi-key result prints in the map's internal order, not the order given."
   ;; `& kvs` rest-list + the multi-pair loop, going straight to the kernel op.
   ((coll k v) (if (vector? coll) (%vector-assoc coll k v) (%map-assoc coll k v)))
   ((coll & kvs) (if (vector? coll) (%assoc-vec-pairs coll kvs) (%assoc-map-pairs coll kvs))))
+(sig assoc ((or vector map) & any -> any))
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks)
@@ -177,6 +178,7 @@ stable one."
   ;; so the impl check sits up front rather than behind a miss.
   (let (ks (%keys-via-lookup m))
     (if (nil? ks) (map (seq m) first) ks)))
+(sig keys ((or nil map) -> any))
 
 (defn- %keys-via-lookup (m)
   "This map's own `lookup-keys`, or nil when it has no `Lookup` impl. Raw prims and a `bound?`
@@ -198,6 +200,7 @@ with bare `get`."
 
 Order matches [[keys]] — the map's internal order, not insertion order."
   (map (seq m) second))
+(sig vals ((or nil map) -> any))
 (defn contains? (m k)
   "True if map `m` has key `k` (distinguishes a stored `nil`/`false` from
 absence). O(1) via the CHAMP hash path (`%map-get`), not an O(n) key scan: probe
@@ -234,6 +237,7 @@ can.)
     (merge {:a 1} nil)           → {:a 1}    ; nil maps are skipped
     (merge)                      → {}"
   (reduce maps {} (fn (acc m) (if (nil? m) acc (into acc m)))))
+(sig merge (& (or nil map) -> any))
 
 (defn update (coll k f & args)
   "A collection like `coll` with the value at key/index `k` replaced by

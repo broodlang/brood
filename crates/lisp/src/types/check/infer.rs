@@ -1477,10 +1477,13 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
         return list_result_over(coll_ty.as_ref(), a);
     }
-    // `(sort coll)` / `(sort less? coll)` — variadic in its comparator, so the
-    // sequence stays LAST in both arms; element type is preserved unchanged.
+    // `(sort coll)` / `(sort coll less?)` — data-first (ADR-308), sequence FIRST in
+    // both arms; element type is preserved unchanged. It read `items.last()` while the
+    // comparator came first, which was correct then and silently wrong the moment the
+    // argument order flipped: a stale position here does not error, it infers the
+    // COMPARATOR's type as the element type and degrades to `any`.
     if value::symbol_is(head, "sort") {
-        let coll = *items.last()?;
+        let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
         let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
         return list_result_over(coll_ty.as_ref(), a);
