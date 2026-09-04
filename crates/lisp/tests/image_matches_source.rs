@@ -36,9 +36,15 @@ use brood::Interp;
 /// name rather than by dropping every root global, because a module's root globals are
 /// exactly what broke once before — `*lineedit-keymap*` was credited to `repl`'s section
 /// and `(require 'editor/lineedit)` restored the module without it.
-const INSTALL_BOOKKEEPING: [&str; 6] = [
+const INSTALL_BOOKKEEPING: [&str; 7] = [
     "*image-sources*",
     "*std-image-file*",
+    // How many sections THIS process installed. It is a fact about the process, not about
+    // any module, and differing between the arms is its entire purpose — but only when the
+    // cache is empty. With a current image on disk `Interp::new()` installs at boot, so the
+    // SOURCE arm reads an int too and the arms agree by accident; CI's cache is cold, which
+    // is why this was green locally and red there.
+    "*std-image-installed*",
     "*std-image-sections*",
     "*std-impls*",
     "*std-regs*",
