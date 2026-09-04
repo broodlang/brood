@@ -184,6 +184,21 @@ fn engine() -> &'static Engine {
     E.get_or_init(|| {
         let mut cfg = Config::new();
         cfg.consume_fuel(true);
+        // Never RESERVE more address space for one linear memory than the whole store is
+        // ever allowed to use. wasmtime's default is a 4 GiB reservation per memory (so
+        // a bounds check is a guard-page fault rather than a branch), which is free on a
+        // machine with unlimited address space and fatal on one without: a component with
+        // eight small memories asked for 32 GiB of `mmap` and was DENIED — reported to
+        // Brood as the sandbox refusing a module it is documented to allow. That is how
+        // `tests/wasm_sandbox_limits_test.blsp` came to be listed in CLAUDE.md as a test
+        // that "fails under the address-space cap", i.e. a standing exception that would
+        // have hidden a real sandbox regression.
+        //
+        // `MAX_GUEST_BYTES` is the honest bound: `GuestBudget` denies any growth past it,
+        // summed over every memory, so a reservation larger than that can never be used.
+        // Memories stay movable (the wasmtime default), so a guest that grows within the
+        // budget is reallocated rather than trapped.
+        cfg.memory_reservation(MAX_GUEST_BYTES as u64);
         Engine::new(&cfg).expect("wasm engine")
     })
 }
