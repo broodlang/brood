@@ -795,6 +795,21 @@ pub(crate) fn write_prelude_image(
         put_u32(&mut body, loc.pos.col);
     }
 
+    // Registry names — the fourth thing the evaluation RECORDS rather than binds. Every
+    // `%registry-update!` the prelude runs (each `defmulti`, each ability declaration) adds
+    // its global to the runtime's registry-name set, and `freeze_as_shared_code` carries
+    // that set into `SharedCode::registry_names`, where `project-registry-snapshot` reads it
+    // to decide which globals a section load must merge rather than overwrite. Materialising
+    // runs no `%registry-update!`, so an imaged boot's set held only what the live process
+    // wrote after boot: 10 names to the source boot's 12, missing exactly `*multi-algebra*`
+    // and `*multi-ret*`. A multi-file `nest check` then lost every derived multimethod
+    // mirror (KI-106). Same class as the `defdyn` marks above; found the same way — late.
+    let regs = heap.registry_names();
+    put_u32(&mut body, regs.len() as u32);
+    for sym in &regs {
+        put_str(&mut body, &value::symbol_name(*sym));
+    }
+
     let mut out = Vec::with_capacity(body.len() + 64);
     out.extend_from_slice(PRELUDE_MAGIC);
     put_str(&mut out, fingerprint);
@@ -881,5 +896,14 @@ pub(crate) fn load_prelude_image(
             },
         );
     }
+    // Registry names (see the writer): re-mark them so the freeze that follows sees the same
+    // set a source boot would. A truncated file fails `get_u32` here and the whole load
+    // returns None — the text cache takes over, never a half-restored registry set.
+    let reg_count = get_u32(&mut r)?;
+    let mut regs = Vec::with_capacity(reg_count as usize);
+    for _ in 0..reg_count {
+        regs.push(value::intern(&get_str(&mut r)?));
+    }
+    heap.mark_registry_names(&regs);
     Some(done)
 }

@@ -455,6 +455,14 @@ jobs:
         shell: bash
         run: make check-examples 2>&1 | tee examples.log
 
+      # The project's own checker gate, run WITH the prelude image on (KI-106). Every test
+      # written for the image passed while a multi-file `nest check` lost every derived
+      # multimethod mirror; the gate found it on its first run. Asserts the imaged boot.
+      - name: Check under the prelude image (nest check, imaged boot asserted)
+        if: always()
+        shell: bash
+        run: NEST=./target/release/nest make check-imaged
+
       # Same gate, one directory over: `stress/` and `scripts/fuzz/stress/` are outside
       # `make test`, `nest check`, the breakage suite and `check-examples`, so two rename
       # waves rotted eight of their files with nothing to notice (2026-08-20). ~25 s for all
