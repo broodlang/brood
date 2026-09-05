@@ -147,6 +147,36 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     boot_from_source()
 });
 
+/// **The install's own bookkeeping** — globals that record which artifacts *this process*
+/// loaded, rather than anything a module or the prelude defines.
+///
+/// They differ between an imaged and a source boot **by design**: that is the whole content
+/// of these names, and item 2 of this area's cleanup made one of them (`%boot-source`) more
+/// visible rather than less. A boot differential must therefore skip them, and the reason it
+/// skips them matters: *because of what they are*, not because the arms disagree about them.
+/// Excluding a global because two arms disagree is excluding the evidence — that is how
+/// ADR-314's prelude differential passed with the bug in its own exclusion list, and how
+/// `*std-image-installed*` sat in this set for a day while being exactly what it hid.
+///
+/// The facts these carry are asserted elsewhere, positively: `%boot-source` and the suite
+/// summary line say which artifacts a run used, and `stdimage_reporting.rs` drives all three
+/// states end to end. So they are covered, just not by equality.
+///
+/// One definition, in the runtime, because the tests that need it live in three different
+/// crates and a per-crate copy is the "fixed in one file, left in two" failure this repo
+/// already keeps a shared harness to avoid.
+pub const INSTALL_BOOKKEEPING: &[&str] = &[
+    "*image-sources*",
+    "*image-path*",
+    "*image-sections*",
+    "*std-image-file*",
+    "*std-image-sections*",
+    "*std-image-installed*",
+    "*std-impls*",
+    "*std-regs*",
+    "*std-require-edges*",
+];
+
 /// Which of the three boot paths actually ran, as an atomic so it can be read after the
 /// fact from anywhere without threading it through the bundle.
 ///

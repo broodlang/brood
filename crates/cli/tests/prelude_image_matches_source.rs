@@ -30,40 +30,13 @@
 //! different routes are not `=`, and every defect this guards has been a missing name or a
 //! lost attribute, never a wrong value.
 
+mod support;
+
 use std::io::Write;
 use std::process::Command;
 
-/// Prints one canonical line per global. Sorted, so the diff is positional.
-const DUMP: &str = r#"
-(defn- dyn? (n)
-  "Is `n` a dynamic variable? Asked behaviourally, through the primitive `binding` uses,
-so this needs no new introspection surface."
-  (try (do (%binding (list (symbol n)) [nil] (fn () nil)) true)
-    (catch _ (check-allow :discarded-catch false))))
-
-(defn- loc-of (n)
-  "A def site as `[basename line col]`. The FULL path is deliberately dropped: each arm runs
-under its own XDG_CACHE_HOME, so the materialised `prelude.blsp` lives at a different
-absolute path in each, and comparing those compares the harness rather than the boot. The
-basename plus line:col still fails on a missing, wrong or shifted def site — which is the
-thing worth catching (an imaged boot that records none takes stdlib `M-.` down)."
-  (let (l (reflect/source-location n))
-    (if (nil? l)
-      "nil"
-      (let (parts (string/split (->string (first l)) "/"))
-        (->string [(nth parts (- (count parts) 1)) (nth l 1) (nth l 2)])))))
-
-(io/puts "REGISTRIES " (->string (%registry-names)))
-(let (names (sort (reflect/global-names)))
-  (io/puts "GLOBALS " (count names))
-  (doseq (n names)
-    (io/puts n
-             " kind=" (->string (type-of (reflect/eval (symbol n))))
-             " private=" (->string (reflect/private? (symbol n)))
-             " sig=" (->string (reflect/type-signature n))
-             " loc=" (loc-of n)
-             " dyn=" (->string (dyn? n)))))
-"#;
+/// The canonical fingerprint, shared with the artifact matrix — see `support::STATE_DUMP`.
+use support::STATE_DUMP as DUMP;
 
 /// One arm's private cache directory. Each arm gets its own, because the three artifacts
 /// that live in `~/.cache/brood` — the prelude image, the expanded-prelude text cache and

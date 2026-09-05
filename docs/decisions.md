@@ -20613,3 +20613,164 @@ table keeps its distinct job: it is the *annotated* form, carrying the measureme
 behind each default, and is not required to grow a row per flag. Adding a flag now costs one
 catalogue line, enforced — which is the point: the gap did not open through carelessness, it
 opened because closing it was optional.
+
+## ADR-320 — Side facts travel by journal, not by checklist
+
+**Status:** **Proposed** (2026-09-05) — **no step implemented**. Motivated by KI-72, KI-84,
+KI-89's residual, KI-105 and KI-106, and by ADR-314's own three amendments. The matrix
+differential (ADR-321) landed first, deliberately: it protects against this class from the
+outside today, and it is the gate this refactor should land behind rather than ahead of.
+
+### The rule, and why stating it was not enough
+
+Every startup image in this repo rests on one sentence, which ADR-280 and ADR-314 both quote:
+
+> **Materialising defines bindings and evaluates nothing** — so anything the evaluation *did*
+> must be replayed, and anything it *recorded on the side* must be written.
+
+The rule is correct. It is also unenforceable as prose, because "anything it recorded on the
+side" is an open set that grows whenever someone adds a new kind of fact about a name. Today
+`write_prelude_image` carries five such facts, in five hand-written blocks:
+
+| fact | where it lives | added because |
+|---|---|---|
+| `meta` (ADR-283 stability) | `heap.name_meta_snapshot()` | a module re-runs `%register-meta`; the prelude is inserted, so nothing re-runs it |
+| `defdyn` marks | `value::DYNAMICS`, a process-global set | dynamic vars came back non-dynamic |
+| privacy (ADR-146) | the `private` set | an imaged module disagreed with its source about visibility |
+| def sites | `heap.def_sites_snapshot()` | stdlib `M-.` went down |
+| registry names (ADR-218) | `heap.registry_names()` | **KI-106**: a multi-file `nest check` lost every derived multimethod mirror |
+
+Each was added *after* a bug. The source comments say so themselves — the registry-name block
+records that it is "Same class as the `defdyn` marks above; found the same way — **late**."
+ADR-314 records three of these being missed in a row while building one feature.
+
+The failure mode is the problem: omitting a fact is **silent**, and its symptom lands far from
+the omission — a checker warning about a record in another file, an `unbound symbol` for a
+module that is fine, a stdlib jump-to-definition that does nothing. Nothing fails at the point
+of the mistake, so the cost is a debugging session per omission, and we have paid five.
+
+### The principle is already in the tree, applied once
+
+`registry_lock` guards a value rather than `()`, and its comment explains why:
+
+> Naming them by hand went stale three times, silently; this set is **derived from the writes
+> themselves**, so a registry added later is carried without anyone remembering to.
+
+That is exactly the right answer, implemented for exactly one fact kind — and then the thing
+holding it was itself forgotten by the image writer, which is KI-106. Generalise it.
+
+### Decision
+
+**One journal. Every side fact is recorded through it, and the image carries the journal
+generically rather than carrying a list of facts someone maintains.**
+
+- A `FactKind` enumeration names the kinds. Every path that records a fact about a name goes
+  through one `Heap` entry point instead of writing to its own private set.
+- Image write serialises **every kind present**, by iterating the enumeration. Image load
+  replays every kind it finds.
+- Adding a sixth kind therefore cannot be forgotten at the *carry* step: it is carried by
+  construction. The only thing left to write is its encoding, and that is a non-exhaustive
+  `match` — **a compile error, not a silent runtime omission.**
+
+That conversion — from a silent omission whose symptom appears in another subsystem, to a
+compile error at the point of the change — is the whole value of this ADR. Everything else is
+mechanism.
+
+### Migration, in three steps
+
+1. **Introduce the enumeration and the journal**, and make the five existing facts register
+   through it while keeping their current storage as the read path. No behaviour change; the
+   existing differentials must stay green.
+2. **Drive image write/read off the journal** and delete the five hand-written blocks.
+3. **Compare the journal in the differential**, so a missing kind fails as a missing fact at
+   the boundary rather than as a distant symptom.
+
+Steps 2 and 3 change behaviour and are deliberately separate: step 1 is provably inert and can
+land on its own, which is how a refactor of the boot path should arrive.
+
+### Alternatives considered
+
+- **Discipline plus review.** Rejected on evidence: five omissions, by people who had read the
+  rule and in two cases had just written it down.
+- **A completeness test that enumerates the fact kinds.** Better than nothing, and cheaper —
+  but it moves the hand-maintained list to a second place rather than removing it, so the
+  failure becomes "someone added a kind and updated neither list".
+- **Drop the prelude image (ADR-314) entirely.** The honest option, and it deserves saying out
+  loud: the whole apparatus buys ~5 ms of boot (13.5 → 8.3 ms on an empty run). For a
+  short-lived CLI — `nest check` in a loop, a scripted run — that is paid on every invocation
+  and is worth having; for a long-lived process it is noise. We keep it, but as a *budgeted*
+  decision rather than an accreted one: it has now been reverted twice and shipped three
+  times, and a fourth revert is the signal to withdraw the feature rather than to patch it
+  again.
+
+### Consequences
+
+- One place to look for "what does materialising have to reproduce?", instead of five.
+- A new fact kind is carried automatically and fails to compile if unencoded.
+- The `SharedCode` freeze boundary stays where it is; this changes what crosses it, not when.
+- Steps 2 and 3 touch `core/heap.rs` and `builtins/startup_image.rs`, the two files the image
+  bugs already cluster in — so they land behind the matrix differential (ADR-321), not before it.
+
+## ADR-321 — Boot differentials compare the artifact PRODUCT, not one artifact each
+
+**Status:** Accepted, implemented 2026-09-05 (`crates/cli/tests/artifact_matrix.rs`).
+
+### The gap
+
+Two differentials guarded the startup images, and each compared one artifact against source:
+`image_matches_source` (a materialised stdlib module) and `prelude_image_matches_source` (an
+imaged boot). Both are sound. Neither could see the bugs this repo actually gets, because
+**none of them lived inside a single artifact**:
+
+- **KI-105** — prelude image x stdlib image. An imaged boot restored a snapshot of a previous
+  stdlib install, so section reads landed at stale offsets in a file that still existed and
+  still parsed. Reported as `unbound symbol: io/puts` on a tree where `io` was fine.
+- **KI-106** — project image x prelude image. The registry-name set was not carried, so a
+  multi-file `nest check` lost every derived multimethod mirror.
+- **KI-72** — stdlib image x autoload stubs. A section replaced a stub before the module's own
+  privates were bound, and a racing process died on a name that exists.
+
+Three bugs, three seams, zero coverage — while every per-artifact differential stayed green.
+
+### Decision
+
+One differential over the **product** of artifact states: three prelude paths (source,
+expanded-text cache, image) x two stdlib-image states, each compared against the cell with
+nothing cached. The compared fingerprint is the shared `support::STATE_DUMP` — per global:
+name, kind, privacy, declared signature, def site, dynamic-ness, plus the registry-name set,
+which is exactly the set of side facts ADR-320 enumerates.
+
+Two properties are load-bearing:
+
+**Each cell proves it is the cell it claims.** The recurring way a test here passes for the
+wrong reason is by silently falling back: an image that misses leaves the arm on the source
+path wearing the image's name, and the differential then compares source with source and
+agrees. Each cell asserts `%boot-source` reports the path it intended, so a cell that failed
+to reach its state fails as a *setup* error naming the cause, rather than passing vacuously.
+
+**The one exclusion is justified by what the names are, not by disagreement.** Install
+bookkeeping (`brood::INSTALL_BOOKKEEPING`) records which artifacts *this process* loaded, so
+it differs between cells by design. Those facts are asserted positively elsewhere — by
+`%boot-source`, the suite summary line, and `stdimage_reporting.rs` — rather than by equality.
+The distinction matters because excluding a global *because the arms disagree* is how ADR-314's
+prelude differential passed with the bug sitting in its own exclusion list.
+
+### Verification
+
+Sabotage-verified against the real bug rather than a synthetic one: removing the registry-name
+set from `write_prelude_image` — i.e. reintroducing KI-106 — fails the matrix with
+
+```
+baseline: REGISTRIES (… *multi-algebra* *multi-ret* …)
+cell    : REGISTRIES (… )
+```
+
+naming the two lost registries at the boundary, where KI-106 in the field presented as a
+checker warning about a record in an unrelated file.
+
+### Cost and scope
+
+~23 s, six cells, each booting twice to reach a steady state. The **project image is
+deliberately out of scope**: exercising it needs a scaffolded project per cell and it already
+has `project_image_registries.rs`; the seam it shares with the prelude image (KI-106) is
+covered here through the registry set, which is the fact that was lost.

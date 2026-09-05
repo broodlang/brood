@@ -41,25 +41,10 @@
 
 use brood::Interp;
 
-/// The install's **own** bookkeeping, which legitimately differs between the arms: the
-/// image arm populates these by installing, the source arm never touches them. Excluded by
-/// name rather than by dropping every root global, because a module's root globals are
-/// exactly what broke once before — `*lineedit-keymap*` was credited to `repl`'s section
-/// and `(require 'editor/lineedit)` restored the module without it.
-const INSTALL_BOOKKEEPING: [&str; 7] = [
-    "*image-sources*",
-    "*std-image-file*",
-    // How many sections THIS process installed. It is a fact about the process, not about
-    // any module, and differing between the arms is its entire purpose — but only when the
-    // cache is empty. With a current image on disk `Interp::new()` installs at boot, so the
-    // SOURCE arm reads an int too and the arms agree by accident; CI's cache is cold, which
-    // is why this was green locally and red there.
-    "*std-image-installed*",
-    "*std-image-sections*",
-    "*std-impls*",
-    "*std-regs*",
-    "*std-require-edges*",
-];
+/// The install's own bookkeeping, defined once in the runtime — see
+/// [`brood::INSTALL_BOOKKEEPING`] for why these are skipped and where they are asserted
+/// instead.
+use brood::INSTALL_BOOKKEEPING;
 
 /// Every global, with the attributes materialisation has historically dropped. Sorted, so
 /// the two arms are comparable line by line and a diff names the offender.
