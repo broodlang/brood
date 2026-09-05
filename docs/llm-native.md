@@ -55,7 +55,7 @@ MCP server is mostly a thin JSON-RPC wrapper around APIs that exist.
 - A system-prompt fragment with the do's and don'ts:
   > When writing Brood, prefer `match` over nested `if`; use `_` for
   > wildcard and `_x` for "I'm binding but won't use it"; reach for
-  > `defserver` over raw `receive` loops; use fused `->>`/`lmap` pipelines instead of
+  > `defserver` over raw `receive` loops; use fused `->`/`lmap` pipelines instead of
   > chained `map`/`filter`; remember bare symbols in patterns *bind*…
 
 `nest new` could optionally drop this skill into the new project so any
@@ -200,7 +200,7 @@ examples/by-task/
   actor-pool/              ;; fan out work to N workers, gather results
   concurrent-aggregator/   ;; state owned by a process, queried by call
   state-machine/           ;; tagged-data + multi-clause fn dispatch
-  parse-and-transform/     ;; fused l*/->> pipeline over input
+  parse-and-transform/     ;; fused l*/-> pipeline over input
   cli-tool/                ;; nest run with args, exit codes
   long-running-server/     ;; hatch + supervision + reconnect
   ring-of-processes/       ;; the Erlang ring benchmark
@@ -355,7 +355,7 @@ When writing Brood code:
 - Prefer match over nested if for tagged-data dispatch
 - Use _x (not _) when you're binding but won't use the value
 - Reach for defserver + hatch over raw receive loops
-- Use fused `->>`/`lmap`/`lfilter` instead of chained eager map/filter over large data
+- Use fused `->`/`lmap`/`lfilter` instead of chained eager map/filter over large data
 - Remember: bare symbols in patterns BIND; use 'sym to match literal
 - Closures don't cross process boundaries via send; data does
 - For benchmarks, prefer (bench expr) over hand-rolled (now) diffs

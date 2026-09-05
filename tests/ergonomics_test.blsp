@@ -32,7 +32,7 @@
     (assert= 3 (if-let ([a b] [1 2]) (+ a b) :none))
     (assert= :none (if-let ([a b] nil) (+ a b) :none))))
 
-(describe "cond-> / cond->>"
+(describe "cond->"
   (test "cond-> applies a step only when its guard is truthy"
     (assert= {:a 1} (cond-> {} true (assoc :a 1) false (assoc :b 2)))
     (assert= {:a 1 :b 2} (cond-> {} true (assoc :a 1) true (assoc :b 2))))
