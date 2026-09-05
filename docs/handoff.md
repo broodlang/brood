@@ -146,6 +146,15 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
+**Addendum 2026-09-05 (latest) — item 4 STARTED: five `nest` subcommands are Brood
+(ADR-322).** `std/tool/nest.blsp` + `BLSP_SUBCOMMANDS` in `main.rs`. To move the next one:
+add a table entry + `run-*` in `nest.blsp`, add the name to the const, delete the `Cmd`
+variant + arm + `cmd_*`, extend `crates/nest/tests/blsp_dispatch.rs`, run
+`cargo nextest run -p nest -j1`. Next candidates: `test`/`check`/`run` (their option plists are
+already Brood-shaped — see `TestOpts::to_plist`). Also today: KI-109 closed (`->float`
+promotion; mandelbrot +0.2% vs 0.19.1). **Then: the stress pass (item 1 of the 2026-09-05
+list): `make test-both`, GC stress over the process/mailbox tests, `scripts/fuzz/run.sh`.**
+
 **Addendum 2026-09-04 (latest) — KI-100 RESOLVED AS FILED; residual is KI-109; KI-108 filed.**
 Re-baselined against `8a2aaa01` (images live both arms): startup −18.2%, sort −7.6%, fib −4.2%,
 bintree −2.9%, collatz flat, nbody inside floor; `mandelbrot` +3.0% (0.2% floor) is the only

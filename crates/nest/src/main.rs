@@ -46,6 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): doc, docs, doctest, grammar, format — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -75,21 +76,6 @@ enum CompletionShell {
     Bash,
     Zsh,
     Fish,
-}
-
-/// Which editor grammar `nest grammar` emits (ADR-092). A `ValueEnum` so clap
-/// lists the choices in `--help`, rejects an unknown one with a formatted error,
-/// and offers shell completion — instead of a hand-rolled match + `exit(2)`.
-#[derive(ValueEnum, Clone, Copy, Debug)]
-enum GrammarTarget {
-    /// A VS Code TextMate grammar (JSON).
-    #[value(alias = "vscode", alias = "textmate")]
-    Tmlanguage,
-    /// The `brood-special-forms` defconst for Emacs.
-    Emacs,
-    /// The `tree-sitter-brood` `queries/highlights.scm`.
-    #[value(alias = "treesitter", alias = "highlights")]
-    TreeSitter,
 }
 
 #[derive(Subcommand, Debug)]
@@ -509,63 +495,6 @@ enum Cmd {
     /// project's modules are immediately callable.
     Repl,
 
-    /// Reformat every `.blsp` under `src/` and `tests/` in place.
-    Format {
-        /// Don't write; exit non-zero if any file would change (CI mode).
-        #[arg(long, short = 'c')]
-        check: bool,
-        /// Only format `.blsp` files git reports as changed (modified, staged,
-        /// or untracked) — a fast, git-aware narrower scope. Falls back to the
-        /// whole project when not in a git repository. Ignored with `--check`.
-        #[arg(long)]
-        changed: bool,
-    },
-
-    /// Emit Markdown documentation — the whole project, or one named module.
-    Doc {
-        /// Module name to document (a baked-in std module or one on the
-        /// load-path). Omit to document the whole project.
-        module: Option<String>,
-
-        /// Document every public global in a fresh image (the builtins +
-        /// prelude) — the complete primitive reference. Read this instead of
-        /// probing names one at a time. Ignores MODULE.
-        #[arg(long = "all")]
-        all: bool,
-    },
-
-    /// Generate a browsable HTML documentation site from docstrings — the whole
-    /// project, written to `doc/` by default (an `index.html` plus a `model.json`).
-    Docs {
-        /// Output directory for the generated site. Defaults to `doc`.
-        #[arg(short = 'o', long = "out")]
-        out: Option<String>,
-
-        /// Document the whole builtin + prelude reference (the language reference)
-        /// in a fresh image instead of the current project.
-        #[arg(long = "all")]
-        all: bool,
-    },
-
-    /// Check every `expr ;=> result` example in the project's docstrings still holds —
-    /// so a documented example can't silently drift from the code. Exits non-zero on a
-    /// mismatch.
-    Doctest,
-
-    /// Generate an editor syntax grammar from the language's own `(reflect/special-forms)`
-    /// — one source of truth, no hand-maintained keyword lists (ADR-092). Prints to
-    /// stdout; redirect to the editor's grammar file.
-    ///
-    /// TARGET is `tmlanguage` (default — a VS Code TextMate grammar, JSON), `emacs`
-    /// (the `brood-special-forms` + `brood-doc-forms` defconsts), or `tree-sitter` (the
-    /// `tree-sitter-brood` `queries/highlights.scm`). E.g.
-    /// `nest grammar > brood-vscode/syntaxes/brood.tmLanguage.json`.
-    Grammar {
-        /// What to emit (default `tmlanguage`).
-        #[arg(value_enum, default_value_t = GrammarTarget::Tmlanguage)]
-        target: GrammarTarget,
-    },
-
     /// Serve the project over Model Context Protocol on stdio so an agent
     /// (Claude Code etc.) can eval / lookup / format / expand / run tests /
     /// read docs against this project's live image (ADR-036, docs/mcp.md).
@@ -689,6 +618,12 @@ fn ensure_stdimage(interp: &mut Interp, cmd: &Cmd) {
     ) {
         return;
     }
+    ensure_stdimage_now(interp);
+}
+
+/// The unconditional half of [`ensure_stdimage`], for the Brood-routed subcommands (which
+/// have no `Cmd`).
+fn ensure_stdimage_now(interp: &mut Interp) {
     // Is there already a current image? A pure-PRELUDE probe on purpose — `%std-image-path`
     // and `%image-index` load no modules at all, where asking `stdimage` would pull that
     // module and its dependency tree into the process before the command has started.
@@ -744,6 +679,18 @@ fn main() {
     }
     // Capture any panic (use-after-GC tripwire, heap index, …) to .brood_crash_dump.
     brood::cli_support::install_crash_dump();
+    // A subcommand implemented in Brood (`std/tool/nest.blsp`, ADR-322) is routed there
+    // BEFORE clap sees argv: clap would reject its flags, which it no longer knows. The list
+    // is the routing table AND the completion table's Rust half, so it cannot go stale
+    // against the `Cmd` enum — a name is in exactly one of the two.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv
+        .get(1)
+        .is_some_and(|c| BLSP_SUBCOMMANDS.contains(&c.as_str()))
+    {
+        run_on_main_stack("nest-main", move || run_blsp(argv));
+        return;
+    }
     let cli = Cli::parse();
     // Arm the coverage flags BEFORE anything constructs an `Interp` — the kernel
     // caches them on first read, which happens during the prelude build.
@@ -791,6 +738,24 @@ fn arm_coverage_env(cli: &Cli) {
     if *cover || *cover_lines || *cover_branches || cover_min.is_some() {
         // SAFETY: as above.
         unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
+    }
+}
+
+/// Subcommands implemented in `std/tool/nest.blsp` (ADR-322). Routed there from `main`
+/// before clap runs; listed by `nest complete` beside clap's own; absent from `Cmd`.
+const BLSP_SUBCOMMANDS: &[&str] = &["doc", "docs", "doctest", "grammar", "format"];
+
+/// Run a Brood-implemented subcommand: `(nest/main argv)` returns the exit code.
+fn run_blsp(argv: Vec<String>) {
+    brood::core::alloc::init_limits_from_env();
+    brood::cli_support::warn_nondefault_gc_env();
+    let mut interp = Interp::new();
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_none() {
+        ensure_stdimage_now(&mut interp);
+    }
+    let code = format!("(nest/main {})", blsp_string_list(&argv[1..]));
+    if let brood::core::value::Value::Int(code) = run_for_value(&mut interp, &code) {
+        std::process::exit(code as i32);
     }
 }
 
@@ -970,10 +935,6 @@ fn run_main(cli: Cli) {
         // Handled above, before the interpreter is built.
         Cmd::Completions { .. } | Cmd::Complete { .. } => unreachable!(),
         Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
-        Cmd::Format { check, changed } => {
-            require_project("format", None);
-            cmd_format(&mut interp, check, changed)
-        }
         Cmd::Run {
             file,
             watch,
@@ -1023,26 +984,6 @@ fn run_main(cli: Cli) {
                 &args,
             )
         }
-        Cmd::Doc { module, all } => {
-            if module.is_none() && !all {
-                require_project(
-                    "doc",
-                    Some("For the builtin reference: nest doc --all; for one module: nest doc <module>"),
-                );
-            }
-            cmd_doc(&mut interp, module.as_deref(), all)
-        }
-        Cmd::Docs { out, all } => {
-            if !all {
-                require_project("docs", Some("For the language reference: nest docs --all"));
-            }
-            cmd_docs(&mut interp, out.as_deref(), all)
-        }
-        Cmd::Doctest => {
-            require_project("doctest", None);
-            cmd_doctest(&mut interp)
-        }
-        Cmd::Grammar { target } => cmd_grammar(&mut interp, target),
         Cmd::Fetch => {
             require_project("fetch", None);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/fetch)"))
@@ -1503,21 +1444,6 @@ fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
     );
 }
 
-/// `nest format [--check]` — reformat in place, or dry-run on `--check`.
-fn cmd_format(interp: &mut Interp, check: bool, changed: bool) {
-    let entry = if check {
-        // --check is CI's clean-tree gate: it must see the whole project, so
-        // --changed doesn't narrow it (a stale committed file would slip by).
-        "(format/project-check)"
-    } else if changed {
-        "(format/project-changed)"
-    } else {
-        "(format/project)"
-    };
-    let code = format!("(project/load-config) (require-one 'format) {}", entry);
-    run(interp, &code);
-}
-
 /// `nest run [FILE] [--watch PATH]... [args...]` — the entry point.
 ///
 /// If no FILE is given but exactly one `--watch` path is a regular file,
@@ -1896,67 +1822,6 @@ fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>, enhances: O
     }
     call.push(')');
     run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
-}
-
-/// `nest doc [module] [--all]` — Markdown docs to stdout. `--all` documents
-/// every public global in a fresh image (the complete builtin + prelude
-/// reference) and ignores MODULE.
-fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
-    let code = if all {
-        "(io/puts (docs/document-all))".to_string()
-    } else {
-        match module {
-            Some(name) => format!(
-                "(require-one 'docs) {}",
-                brood::introspect::call_form("docs/generate", &[name])
-            ),
-            None => "(docs/generate)".to_string(),
-        }
-    };
-    run(interp, &code);
-}
-
-/// `nest docs [--all] [-o DIR]` — generate an HTML documentation site (default `doc/`).
-/// Without `--all` documents the current project; with it, the whole builtin + prelude
-/// reference (the language reference) in a fresh image.
-fn cmd_docs(interp: &mut Interp, out: Option<&str>, all: bool) {
-    let entry = if all {
-        "docs/generate-site-all"
-    } else {
-        "docs/generate-site"
-    };
-    let call = match out {
-        Some(dir) => brood::introspect::call_form(entry, &[dir]),
-        None => format!("({entry})"),
-    };
-    run(interp, &format!("(require-one 'docs) {call}"));
-}
-
-/// `nest doctest` — evaluate the project's `expr ;=> result` docstring examples and exit
-/// non-zero on any mismatch, so a CI run catches docs drifting from the code. `run-doctests`
-/// prints the per-example report and returns the failure count.
-fn cmd_doctest(interp: &mut Interp) {
-    match run_for_value(interp, "(docs/run-doctests)") {
-        brood::core::value::Value::Int(0) => {}
-        brood::core::value::Value::Int(_) => std::process::exit(1),
-        _ => {}
-    }
-}
-
-/// `nest grammar [TARGET]` — emit an editor syntax grammar generated from the
-/// language's own `(reflect/special-forms)` + `(reflect/doc-forms)` (ADR-092), to stdout. `tmlanguage`
-/// (default) is a VS Code TextMate grammar (JSON); `emacs` the font-lock defconsts.
-/// Pure Brood — `std/tool/grammar.blsp` — so adding a special form updates every
-/// editor's highlighting from one place.
-fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
-    // Exhaustive — clap already rejected any unknown value (with a listed-choices
-    // error) before we get here, so there's no fallback/exit(2) arm.
-    let call = match target {
-        GrammarTarget::Tmlanguage => "(grammar/tmlanguage)",
-        GrammarTarget::Emacs => "(grammar/emacs)",
-        GrammarTarget::TreeSitter => "(grammar/tree-sitter-highlights)",
-    };
-    run(interp, &format!("(require-one 'grammar) (io/puts {call})"));
 }
 
 /// `nest repl` — project-aware REPL. Inside a project, pre-load every source
@@ -2472,7 +2337,22 @@ fn subcommand_names() -> Vec<String> {
         .get_subcommands()
         .filter(|s| !s.is_hide_set())
         .map(|s| s.get_name().to_string())
+        .chain(BLSP_SUBCOMMANDS.iter().map(|s| s.to_string()))
         .collect()
+}
+
+/// Completion for a Brood-implemented subcommand: its flags and positional values live in
+/// `std/tool/nest.blsp`'s table, the one source of truth for what it accepts, so ask it.
+/// Costs an interpreter boot, as the project-dependent values already did.
+fn print_blsp_completion(subcommand: &str, prior: &[String], current: &str) {
+    let mut interp = Interp::new();
+    let code = format!(
+        "(nest/complete {} {} {})",
+        blsp_string(subcommand),
+        blsp_string_list(prior),
+        blsp_string(current)
+    );
+    let _ = interp.eval_str(&code);
 }
 
 /// The `--long` flags of one subcommand, plus the global ones.
@@ -2608,6 +2488,15 @@ fn cmd_complete(words: &[String]) {
     let statics: Vec<String> = match &subcommand {
         // Still choosing a subcommand.
         None => subcommand_names(),
+        Some(sub) if BLSP_SUBCOMMANDS.contains(&sub.as_str()) => {
+            let after: Vec<String> = prior
+                .iter()
+                .skip_while(|w| w != &sub)
+                .skip(1)
+                .cloned()
+                .collect();
+            return print_blsp_completion(sub, &after, &current);
+        }
         Some(sub) => {
             if current.starts_with('-') {
                 flag_names(sub)

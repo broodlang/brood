@@ -11045,3 +11045,13 @@ identical (92 bails, 0 latched, both sides). The wall swing was the box's platea
 the shape of the cost, not its cause. Trap on the way: the new cache prune had evicted the
 0.19.1 baseline's std image between runs, and `ab-bench` refused the asymmetric pair until the
 worktree's own `nest` rebuilt it — five 0.25.2 images and no 0.19.1 one was the tell.
+
+## 2026-09-05 (midday) — `nest` dispatch starts moving into Brood: five subcommands (ADR-322)
+
+`std/tool/nest.blsp` owns `doc`, `docs`, `doctest`, `grammar` and `format`: a command table,
+an argv parser with clap-shaped errors, the project guard, `(nest/main argv)` → exit code.
+`main.rs` routes those names there before clap runs and lost 108 lines; completion asks the
+Brood table. Gates: a new `blsp_dispatch.rs` on the real binary, the `nest` crate 149/149.
+Two traps, recorded in the ADR: a new std module needs `embedded_module!` in
+`builtins/system.rs` (the `read_dir` in `build.rs` only tracks files it has seen), and
+`index-of` returns −1 on a miss — three "broken" commands were one `substring 0 -1`.

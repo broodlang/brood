@@ -20774,3 +20774,41 @@ checker warning about a record in an unrelated file.
 deliberately out of scope**: exercising it needs a scaffolded project per cell and it already
 has `project_image_registries.rs`; the seam it shares with the prelude image (KI-106) is
 covered here through the registry set, which is the fact that was lost.
+
+## ADR-322 — `nest`'s dispatch moves into Brood, one subcommand per commit
+
+**Context.** `brood` bootstraps into `(repl/run)` (ADR-048); `nest` did not. Its
+`crates/nest/src/main.rs` was 2,771 lines of Rust — a clap `Cmd` enum plus one `cmd_*`
+function per subcommand, each of which formatted a Brood form *as a string* and evaluated it.
+Policy written in the host language, one `format!` away from the language it drives: the
+largest remaining "write the language in the language" gap (CLAUDE.md's first principle), and
+the handoff's item 4.
+
+**Decision.** `std/tool/nest.blsp` owns the command line: a table of subcommands (help, flags
+with the value each takes, an optional positional with its allowed values, and the function
+that runs it), an argv parser that produces clap-shaped usage errors and exit code 2, the
+shared project guard, and `(nest/main argv)` → exit code. `main.rs` checks `argv[1]` against
+`BLSP_SUBCOMMANDS` **before** `Cli::parse()` — clap would reject flags it no longer knows —
+boots the interpreter, runs `(nest/main …)`, and exits with the int it returns. Each move adds
+a table entry and deletes a `Cmd` variant with its `cmd_*`; the const is the routing table, so
+a name is in exactly one of the two and cannot go stale against the enum.
+
+The first five are the pure ones: `doc`, `docs`, `doctest`, `grammar`, `format` — 108 lines of
+Rust gone, 258 of Brood added, `main.rs` at 2,663. Completion of a moved subcommand asks the
+Brood table (`nest/complete`), so a flag added there is completable the same day — the property
+the Rust side got from clap's own model, kept by making the table the model. `nest --help`
+lists the Brood-implemented commands in `after_help`; `nest <cmd> --help` prints the table's
+usage.
+
+**What stays in Rust, and why.** Building the interpreter, `run_on_main_stack`, the crash dump,
+the exit code, the stdlib-image bootstrap (`ensure_stdimage_now`) and the `--brood-*` reserved
+namespace (ADR-257) — mechanism. `test`/`check`/`run` next (their option plists are already
+Brood-shaped), the package manager last; `mcp`'s transport is Rust and may stay.
+
+**Gates.** `crates/nest/tests/blsp_dispatch.rs` drives the real binary through the seam for each
+moved command (output PRESENT, exit codes, clap-shaped errors, completion); the whole `nest`
+crate 149/149 including the 20 completion cases and `scaffold_quality`'s `format --check`. Two
+things this move surfaced, both cheap and both now recorded here: a new std module must be
+registered with `embedded_module!` in `builtins/system.rs` (a `read_dir` in `build.rs` tracks
+existing files; it does not discover a new one until the script re-runs), and `index-of` answers
+**−1** on a miss, not `nil`.
