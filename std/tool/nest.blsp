@@ -1,0 +1,265 @@
+;; std/tool/nest.blsp — the `nest` command line, in Brood (ADR-322).
+;;
+;; `nest` is a thin shell over the project tooling, the way `brood` bootstraps into
+;; `(repl/run)` (ADR-048). Until now that shell was 2,700 lines of Rust: clap parsing plus one
+;; `cmd_*` function per subcommand that formatted a Brood form as a STRING and evaluated it.
+;; Policy written in the host language, one printf away from the language it drives — the
+;; largest remaining "write the language in the language" gap (CLAUDE.md).
+;;
+;; This module takes the subcommands over one at a time. `main.rs` routes a subcommand whose
+;; name is in its `BLSP_SUBCOMMANDS` here BEFORE clap sees it, so each move deletes a Rust
+;; arm and adds an entry to `*commands*`. What stays in Rust is what needs Rust: building the
+;; interpreter, the exit code, the crash dump, the stdlib-image bootstrap, and — for now —
+;; the subcommands not yet moved.
+;;
+;; `(nest/main argv)` returns the process exit code as an int; it never exits itself, so it
+;; can be called from a test in-image. Errors it does not expect propagate: the Rust side
+;; reports them and exits 1, exactly as the old `run` helper did.
+
+(defmodule nest
+  "The `nest` command line: argv parsing and dispatch for the subcommands implemented in
+Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
+
+;; ── the command table ────────────────────────────────────────────────────────────────
+;;
+;; One entry per subcommand: its one-line help, its flags (spelling → `:bool` or the name
+;; of the value it takes), an optional positional (name → allowed values, or nil for free
+;; text), and the `run` function. Completion (`nest complete`) reads the same table, so a
+;; flag added here is completable the same day — the property the Rust side got from clap's
+;; own model, kept by making the table the model.
+
+(def- *commands*
+  {"doc" {:about "Emit Markdown documentation — the whole project, or one named module."
+          :flags {"--all" :bool}
+          :positional ["module" nil]
+          :run (fn (o) (run-doc o))}
+   "docs" {:about "Generate a browsable HTML documentation site from docstrings (default `doc/`)."
+           :flags {"--all" :bool "--out" "DIR" "-o" "DIR"}
+           :run (fn (o) (run-docs o))}
+   "doctest" {:about "Check every `expr ;=> result` docstring example still holds; exit non-zero on a mismatch."
+              :flags {}
+              :run (fn (o) (run-doctest o))}
+   "grammar" {:about "Emit an editor syntax grammar generated from `(reflect/special-forms)` (ADR-092), to stdout."
+              :flags {}
+              :positional ["target" ["tmlanguage" "emacs" "tree-sitter"]]
+              :run (fn (o) (run-grammar o))}
+   "format" {:about "Format every `.blsp` in the project (`--check`: CI mode, `--changed`: git-narrowed)."
+             :flags {"--check" :bool "-c" :bool "--changed" :bool}
+             :run (fn (o) (run-format o))}})
+
+;; Short flags are aliases; canonicalise on parse so handlers read one spelling.
+(def- *short-aliases* {"-c" "--check" "-o" "--out"})
+
+(defn subcommands ()
+  "The subcommands this module implements, sorted."
+  (sort (keys *commands*)))
+
+(defn flags-of (cmd)
+  "The flag spellings of `cmd`, sorted — `()` for a command this module does not own."
+  (let (spec (get *commands* cmd))
+    (if spec (sort (keys (get spec :flags))) (list))))
+
+(defn positional-values (cmd)
+  "The allowed values of `cmd`'s positional, or `()` when it is free text or absent."
+  (let (spec (get *commands* cmd))
+    (or (and spec (get spec :positional) (nth (get spec :positional) 1)) (list))))
+
+;; ── argv → options ───────────────────────────────────────────────────────────────────
+
+(defn- flag-kind (spec word)
+  (get (get spec :flags) (or (get *short-aliases* word) word)))
+
+(defn- split-eq (word)
+  "`--out=DIR` → `[\"--out\" \"DIR\"]`; anything else → `[word nil]`."
+  ;; `index-of` answers -1 for a miss, not nil.
+  (let (i (index-of word "="))
+    (if (and (>= i 0) (string/starts-with? word "--"))
+      [(string/substring word 0 i) (string/substring word (+ i 1))]
+      [word nil])))
+
+(defn- parse-words (spec words acc)
+  "Fold `words` into `{:flags {} :positionals () :error nil}`. Unknown flag → `:error`."
+  (if (empty? words)
+    acc
+    (let ([word inline] (split-eq (first words))
+          rest-words (rest words))
+      (cond
+        (= word "--") (assoc acc :positionals (append (get acc :positionals) rest-words))
+        (string/starts-with? word "-")
+          (let (kind (flag-kind spec word)
+                canon (or (get *short-aliases* word) word))
+            (cond
+              (nil? kind) (assoc acc :error (str "unexpected argument '" word "'"))
+              (= kind :bool)
+                (parse-words spec rest-words (assoc acc :flags (assoc (get acc :flags) canon true)))
+              inline
+                (parse-words spec
+                  rest-words
+                  (assoc acc :flags (assoc (get acc :flags) canon inline)))
+              (empty? rest-words)
+                (assoc acc
+                  :error (str "a value is required for '" word " <" kind ">' but none was supplied"))
+              else
+                (parse-words spec
+                  (rest rest-words)
+                  (assoc acc :flags (assoc (get acc :flags) canon (first rest-words))))))
+        else
+          (parse-words spec
+            rest-words
+            (assoc acc :positionals (append (get acc :positionals) (list word))))))))
+
+(defn- check-positional (spec parsed)
+  "Reject a second positional, or a first one outside the allowed set."
+  (let (pos (get spec :positional) ps (get parsed :positionals))
+    (cond
+      (get parsed :error) parsed
+      (and (nil? pos) (not (empty? ps)))
+        (assoc parsed :error (str "unexpected argument '" (first ps) "'"))
+      (> (count ps) 1) (assoc parsed :error (str "unexpected argument '" (nth ps 1) "'"))
+      (and pos (nth pos 1) (not (empty? ps)) (not (contains? (into #{} (nth pos 1)) (first ps))))
+        (assoc parsed
+          :error
+            (str "invalid value '"
+              (first ps)
+              "' for <"
+              (string/upper (nth pos 0))
+              ">\n  [possible values: "
+              (string/join (nth pos 1) ", ")
+              "]"))
+      else parsed)))
+
+(defn parse (cmd words)
+  "Parse `words` (argv after the subcommand) against `cmd`'s table entry:
+`{:flags {\"--all\" true …} :positionals (…) :error nil-or-message}`."
+  (let (spec (get *commands* cmd))
+    (check-positional spec (parse-words spec words {:flags {} :positionals (list) :error nil}))))
+
+;; ── the plumbing the Rust arms had ───────────────────────────────────────────────────
+
+(defn- eputs (& parts)
+  (%eprint (str (apply str parts) "\n")))
+
+(defn- usage (cmd)
+  (let (spec (get *commands* cmd) pos (get spec :positional))
+    (io/puts (get spec :about))
+    (io/puts "")
+    (io/puts (str "Usage: nest "
+               cmd
+               (if (empty? (get spec :flags)) "" " [OPTIONS]")
+               (if pos (str " [" (string/upper (nth pos 0)) "]") "")))
+    (when pos
+      (when (nth pos 1)
+        (io/puts (str "  " (string/upper (nth pos 0)) ": one of " (string/join (nth pos 1) ", ")))))
+    (when (not (empty? (get spec :flags)))
+      (io/puts "Options:")
+      (doseq (f (sort (keys (get spec :flags))))
+        (let (kind (get (get spec :flags) f))
+          (io/puts (str "  " f (if (= kind :bool) "" (str " <" kind ">")))))))
+    0))
+
+(defn- require-project (cmd hint)
+  "The project guard the Rust arms shared: outside a project, say so on stderr and return
+false (the caller exits 2 — clap's usage-error code)."
+  (if (project/find-root (file/cwd))
+    true
+    (do
+      (eputs "nest " cmd ": no project.blsp in " (file/cwd) " or any parent directory.")
+      (eputs "  Create one with `nest new <name>`, or cd into an existing project.")
+      (when hint (eputs "  " hint))
+      false)))
+
+;; ── the subcommands ──────────────────────────────────────────────────────────────────
+
+(defn- run-doc (o)
+  (let (all (get (get o :flags) "--all") module (first (get o :positionals)))
+    (cond
+      all (do (io/puts (docs/document-all)) 0)
+      module (do (io/puts (docs/generate module)) 0)
+      (require-project "doc"
+        "For the builtin reference: nest doc --all; for one module: nest doc <module>")
+        (do (io/puts (docs/generate)) 0)
+      else 2)))
+
+(defn- run-docs (o)
+  (let (all (get (get o :flags) "--all") out (get (get o :flags) "--out"))
+    (if (or all (require-project "docs" "For the language reference: nest docs --all"))
+      (do
+        (if all
+          (if out (docs/generate-site-all out) (docs/generate-site-all))
+          (if out (docs/generate-site out) (docs/generate-site)))
+        0)
+      2)))
+
+(defn- run-doctest (o)
+  (if (require-project "doctest" nil)
+    (let (failures (docs/run-doctests))
+      (if (and (int? failures) (> failures 0)) 1 0))
+    2))
+
+(defn- run-grammar (o)
+  (let (target (or (first (get o :positionals)) "tmlanguage"))
+    (io/puts (cond
+               (= target "emacs") (grammar/emacs)
+               (= target "tree-sitter") (grammar/tree-sitter-highlights)
+               else (grammar/tmlanguage)))
+    0))
+
+(defn- run-format (o)
+  (if (require-project "format" nil)
+    (do
+      (project/load-config)
+      (let (flags (get o :flags))
+        (cond
+          ;; --check is CI's clean-tree gate: it must see the whole project, so --changed
+          ;; does not narrow it (a stale committed file would slip by).
+          (get flags "--check") (format/project-check)
+          (get flags "--changed") (format/project-changed)
+          else (format/project)))
+      0)
+    2))
+
+;; ── entry points ─────────────────────────────────────────────────────────────────────
+
+(defn main (argv)
+  "Run `argv` — the subcommand and its words, as a vector of strings — and return the exit
+code. `--help`/`-h` anywhere prints the command's usage."
+  (let (cmd (first argv) words (rest argv) spec (get *commands* cmd))
+    (cond
+      (nil? spec) (do (eputs "nest: '" cmd "' is not implemented in std/tool/nest.blsp") 2)
+      (or (contains? (into #{} words) "--help") (contains? (into #{} words) "-h")) (usage cmd)
+      else
+        (let (o (parse cmd words))
+          (if (get o :error)
+            (do
+              (eputs "error: " (get o :error))
+              (eputs "")
+              (eputs "Usage: nest "
+                cmd
+                (if (empty? (get spec :flags)) "" " [OPTIONS]")
+                (if (get spec :positional)
+                  (str " [" (string/upper (nth (get spec :positional) 0)) "]")
+                  ""))
+              (eputs "")
+              (eputs "For more information, try '--help'.")
+              2)
+            ((get spec :run) o))))))
+(sig main (vector -> int))
+
+(defn complete (cmd prior current)
+  "Print the completion candidates for `cmd` given the words typed so far — flags when
+`current` starts with `-`, else the positional's allowed values or, for `doc`, the module
+names `complete/print-candidates` knows. Never raises; prints nothing when it cannot tell."
+  (try
+    (let (spec (get *commands* cmd))
+      (when spec
+        (cond
+          (string/starts-with? current "-")
+            (doseq (f (flags-of cmd))
+              (when (string/starts-with? f current) (io/puts f)))
+          (not (empty? (positional-values cmd)))
+            (doseq (v (positional-values cmd))
+              (when (string/starts-with? v current) (io/puts v)))
+          (= cmd "doc") (complete/print-candidates "module" current)
+          else nil)))
+    (catch _ (check-allow :discarded-catch nil)))
+  nil)
