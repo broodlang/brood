@@ -543,7 +543,7 @@ the test rather than hanging the run."
 ;; Build a filter spec from the raw strings a CLI hands over. Parsing lives here
 ;; rather than in `nest`, so the selector grammar has one definition and the Rust
 ;; side only forwards argv. `nil`/empty arguments mean "no constraint".
-(defn- test-make-filter (only exclude include lines names seed shards shard)
+(defn test-make-filter (only exclude include lines names seed shards shard)
   "Assemble a `nest test` filter spec from raw CLI values: `only`/`exclude`/`include` are selector strings (`tag`, `test:substr`, `describe:substr`), `lines` a list of `[file line]`, `names` exact full labels, `seed` a shuffle seed, and `shards`/`shard` a CI split."
   {:only (map (or only (list)) test-parse-selector)
    :exclude (map (or exclude (list)) test-parse-selector)

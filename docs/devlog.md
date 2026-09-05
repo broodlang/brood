@@ -11118,7 +11118,40 @@ The general lesson is the one this repo keeps relearning from a new angle: an ex
 can silently decline its subject reports the null result, and a null result is exactly what
 you were hoping to rule out. Every lever wants a line that says it fired.
 
-## 2026-09-05 (later still) — the prelude surface audited name by name: the answer was already written down, and three gates were passing on nothing
+## 2026-09-05 (midday) — `nest` dispatch starts moving into Brood: five subcommands (ADR-322)
+
+`std/tool/nest.blsp` owns `doc`, `docs`, `doctest`, `grammar` and `format`: a command table,
+an argv parser with clap-shaped errors, the project guard, `(nest/main argv)` → exit code.
+`main.rs` routes those names there before clap runs and lost 108 lines; completion asks the
+Brood table. Gates: a new `blsp_dispatch.rs` on the real binary, the `nest` crate 149/149.
+Two traps, recorded in the ADR: a new std module needs `embedded_module!` in
+`builtins/system.rs` (the `read_dir` in `build.rs` only tracks files it has seen), and
+`index-of` returns −1 on a miss — three "broken" commands were one `substring 0 -1`.
+
+## 2026-09-05 (afternoon) — `nest check` is Brood (ADR-322, sixth subcommand)
+
+The first moved command with clap constraints and a variadic FILE list; both are table data
+in `std/tool/nest.blsp` now (`:requires`, `:conflicts`, `:no-positional-with`, `:many`),
+reported in clap's words. Rust gave up two pieces of mechanism it had been keeping by
+accident: `%check-strict!` (strict mode was settable only from the Rust arm) and the global
+`-j` option, which the router now parses before `Interp::new()` because it sizes the pool.
+`main.rs` 2,663 → 2,547. Trap: `keep` is not a bare prelude function — only `seq/lkeep`
+exists — so a filter-then-first is `(first (filter coll pred))`.
+
+## 2026-09-05 (evening) — `nest test` is Brood: typed flags, seven subcommands (ADR-322)
+
+Nineteen options, the first typed ones — a flag spec is now `:bool`, a value name, or
+`{:value :int :repeat :complete}` — with `FILE:LINE`, the shard guard, the option-list
+assembly and the silent-exit-1 failure signal all in `std/tool/nest.blsp`. Rust keeps one
+seam, `arm_test_env`: the coverage env flags and the test memory ceiling must be set before
+`Interp::new()` (sabotage: without it 4/6 `coverage_lines` cases fail). `main.rs`
+2,547 → 2,113. Trap: `(and (map? k) (get k :int))` is `false` for a non-map — a `nil?`
+guard let it reach `nth` and broke every `--strict`/`--formatter` until the map question
+came first. Also noticed, not fixed: a scaffolded project's `(:use log)` prints a
+"shadows the prelude `error`" warning on every `nest test`.
+
+
+## 2026-09-05 (night) — the prelude surface audited name by name: the answer was already written down, and three gates were passing on nothing
 
 **The question.** Which of the language core's ~370 definitions could move to `std/`, and
 which should not be public at all? Asked from the doc catalogue's *Modules and reflection*

@@ -343,6 +343,16 @@ pub(super) fn check_strict(_args: &[Value], _env: EnvId, _heap: &mut Heap) -> Li
     Ok(Value::Bool(crate::types::strict_checking()))
 }
 
+/// `(%check-strict! on?)` — set strict checking for this process (ADR-322). The setter the
+/// Brood-implemented `nest check --strict` needs: the mode is a process-wide kernel flag read
+/// by `check_file_mode`, not an argument, so the command line has to be able to flip it
+/// before the first file is checked. Returns the new value.
+pub(super) fn check_strict_set(args: &[Value], _env: EnvId, _heap: &mut Heap) -> LispResult {
+    let on = crate::eval::truthy(arg(args, 0));
+    crate::types::set_strict_checking(on);
+    Ok(Value::Bool(on))
+}
+
 /// `(check-file-structured path)` — the data-shaped counterpart of
 /// `check-file`. Returns a list of `{:file :line :col :message}` maps (or
 /// `{:file :message}` for warnings without a position — the advisory
