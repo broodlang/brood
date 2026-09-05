@@ -46,7 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
-    after_help = "Also (implemented in Brood, std/tool/nest.blsp): doc, docs, doctest, grammar, format — `nest <command> --help`.",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): check, doc, docs, doctest, grammar, format — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -290,53 +290,6 @@ enum Cmd {
         /// stricter number.
         #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u64).range(0..=100))]
         cover_min: Option<u64>,
-    },
-
-    /// Advisory type-check the project, or specific files.
-    ///
-    /// With no FILES: walk every `.blsp` under `src/` + `tests/` and exit
-    /// non-zero on any warning (CI-friendly).
-    /// With FILES: check only those files.
-    Check {
-        /// Specific files to check. Omit for project-wide checking.
-        #[arg(value_name = "FILE")]
-        files: Vec<String>,
-
-        /// Recover from a stdlib rename wave: for each bare name reported
-        /// unbound, rewrite this project's *references* to the single public
-        /// `mod/name` that now defines it. Declines — and says why — a name
-        /// this project itself defines, a name defined in several namespaces,
-        /// and a name that moved behind `%`. Exits non-zero if any are left.
-        #[arg(long = "fix-renames", conflicts_with = "files")]
-        fix_renames: bool,
-
-        /// With `--fix-renames`, print the plan and change nothing.
-        #[arg(long = "dry-run", requires = "fix_renames")]
-        dry_run: bool,
-
-        /// Print the `(sig …)` declaration the checker would write for every
-        /// function that lacks one, grouped by file, and change nothing. The
-        /// bulk counterpart of the editor's declare-sig action: an inferred
-        /// domain over-approximates the real one, so adopting one is sound —
-        /// but it is documentation, so it is advice rather than a patch.
-        #[arg(long = "suggest-sigs", conflicts_with = "fix_renames")]
-        suggest_sigs: bool,
-
-        /// Write those `(sig …)` declarations into the files, above the definitions
-        /// they describe. The safe bulk form of the editor's declare-sig action: that
-        /// action is correct for one signature, but several accepted against a single
-        /// snapshot drift, because each insertion moves every line below it. This
-        /// applies them last-first and re-parses each file before writing, so a file
-        /// is either correct or untouched. `--suggest-sigs` is the dry run.
-        #[arg(long = "fix-sigs", conflicts_with_all = ["fix_renames", "suggest_sigs"])]
-        fix_sigs: bool,
-
-        /// Strict mode: a call result or inferred global with a PRECISE type is checked
-        /// by inclusion, not overlap — `number` handed to an `int` parameter warns. Off
-        /// by default because the overlap rule is what keeps a check quiet across a
-        /// hot reload; also on with BROOD_CHECK_STRICT=1.
-        #[arg(long)]
-        strict: bool,
     },
 
     /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
@@ -684,11 +637,8 @@ fn main() {
     // is the routing table AND the completion table's Rust half, so it cannot go stale
     // against the `Cmd` enum — a name is in exactly one of the two.
     let argv: Vec<String> = std::env::args().collect();
-    if argv
-        .get(1)
-        .is_some_and(|c| BLSP_SUBCOMMANDS.contains(&c.as_str()))
-    {
-        run_on_main_stack("nest-main", move || run_blsp(argv));
+    if let Some((max_parallel, rest)) = blsp_routed(&argv[1..]) {
+        run_on_main_stack("nest-main", move || run_blsp(max_parallel, rest));
         return;
     }
     let cli = Cli::parse();
@@ -743,17 +693,49 @@ fn arm_coverage_env(cli: &Cli) {
 
 /// Subcommands implemented in `std/tool/nest.blsp` (ADR-322). Routed there from `main`
 /// before clap runs; listed by `nest complete` beside clap's own; absent from `Cmd`.
-const BLSP_SUBCOMMANDS: &[&str] = &["doc", "docs", "doctest", "grammar", "format"];
+const BLSP_SUBCOMMANDS: &[&str] = &["doc", "docs", "doctest", "grammar", "format", "check"];
+
+/// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
+/// of the one GLOBAL option clap owns — `-j`/`--max-parallel`/`--jobs N`, which clap
+/// accepts before the subcommand — and the words from the subcommand on. The global option
+/// is honoured here rather than in Brood because it sizes the scheduler pool, which is
+/// built once, before any Brood runs.
+fn blsp_routed(args: &[String]) -> Option<(Option<usize>, Vec<String>)> {
+    let mut max_parallel = None;
+    let mut i = 0;
+    while let Some(word) = args.get(i) {
+        let value = match word.as_str() {
+            "-j" | "--max-parallel" | "--jobs" => {
+                i += 1;
+                args.get(i)?.clone()
+            }
+            w if w.starts_with("--max-parallel=") || w.starts_with("--jobs=") => {
+                w.split_once('=')?.1.to_string()
+            }
+            w if w.starts_with("-j") && w.len() > 2 => w[2..].to_string(),
+            c if BLSP_SUBCOMMANDS.contains(&c) => {
+                return Some((max_parallel, args[i..].to_vec()));
+            }
+            _ => return None,
+        };
+        max_parallel = Some(value.parse().ok()?);
+        i += 1;
+    }
+    None
+}
 
 /// Run a Brood-implemented subcommand: `(nest/main argv)` returns the exit code.
-fn run_blsp(argv: Vec<String>) {
+fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
+    if let Some(n) = max_parallel {
+        brood::process::set_max_parallel(n);
+    }
     brood::core::alloc::init_limits_from_env();
     brood::cli_support::warn_nondefault_gc_env();
     let mut interp = Interp::new();
     if std::env::var_os("BROOD_NO_STDIMAGE").is_none() {
         ensure_stdimage_now(&mut interp);
     }
-    let code = format!("(nest/main {})", blsp_string_list(&argv[1..]));
+    let code = format!("(nest/main {})", blsp_string_list(&argv));
     if let brood::core::value::Value::Int(code) = run_for_value(&mut interp, &code) {
         std::process::exit(code as i32);
     }
@@ -869,68 +851,6 @@ fn run_main(cli: Cli) {
                 lines,
             };
             cmd_test(&mut interp, &paths, &opts);
-        }
-        Cmd::Check {
-            files,
-            fix_renames,
-            dry_run,
-            suggest_sigs,
-            fix_sigs,
-            strict,
-        } => {
-            brood::types::set_strict_checking(
-                strict || std::env::var_os("BROOD_CHECK_STRICT").is_some_and(|v| v == "1"),
-            );
-            if files.is_empty() && !suggest_sigs && !fix_sigs {
-                require_project(
-                    "check",
-                    Some("To check one file outside a project: nest check <file>.blsp"),
-                );
-            }
-            if suggest_sigs {
-                let list = files
-                    .iter()
-                    .map(|f| format!("{f:?}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let code = format!(
-                    "(project/load-config) (require-one 'test) (project/suggest-sigs (list {list}))"
-                );
-                match run_for_value(&mut interp, &code) {
-                    brood::core::value::Value::Int(0) => {}
-                    _ => std::process::exit(1),
-                }
-                return;
-            }
-            if fix_sigs {
-                let list = files
-                    .iter()
-                    .map(|f| format!("{f:?}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let code = format!(
-                    "(project/load-config) (require-one 'test) (project/fix-sigs (list {list}) true)"
-                );
-                match run_for_value(&mut interp, &code) {
-                    brood::core::value::Value::Int(0) => {}
-                    _ => std::process::exit(1),
-                }
-                return;
-            }
-            if fix_renames {
-                // Whole-project by construction — the rewrite is project-wide, so
-                // scoping it to a file list would fix one caller and leave the rest.
-                let code = format!(
-                    "(project/load-config) (require-one 'test) (project/fix-renames {})",
-                    if dry_run { "false" } else { "true" }
-                );
-                match run_for_value(&mut interp, &code) {
-                    brood::core::value::Value::Int(0) => {}
-                    _ => std::process::exit(1),
-                }
-                return;
-            }
-            cmd_check(&mut interp, &files)
         }
         // Handled above, before the interpreter is built.
         Cmd::Completions { .. } | Cmd::Complete { .. } => unreachable!(),
@@ -1396,39 +1316,6 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
             &format!("(test/run-tests {plist})"),
             TEST_FAILURE_SIGNALS,
         );
-    }
-}
-
-/// `nest check [FILES...]` — project-wide if no files, otherwise file-by-file.
-fn cmd_check(interp: &mut Interp, files: &[String]) {
-    require_readable_files("check", files);
-    // One checker, one path. Whole-project and file-list checks both go through
-    // `std/tool/project.blsp`, which loads the project image *first* so cross-module /
-    // namespace imports resolve through the heap's globals. The single-file path
-    // used to be a separate Rust loop that skipped that setup — so every `:use`d
-    // or qualified name in a namespaced file false-flagged as unbound (the
-    // breakage the `.brood-skip-blsp-check` migration hatch was added for). Both
-    // forms now return a warning count; non-zero → exit 1.
-    let code = if files.is_empty() {
-        "(project/load-config) (require-one 'test) (project/check)".to_string()
-    } else {
-        let list = files
-            .iter()
-            .map(|f| format!("\"{}\"", brood::introspect::escape_brood_string(f)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("(require-one 'test) (project/check-files (list {list}))")
-    };
-    match run_for_value(interp, &code) {
-        brood::core::value::Value::Int(0) => {}
-        brood::core::value::Value::Int(_) => std::process::exit(1),
-        other => {
-            eprintln!(
-                "nest check: checker returned a non-integer ({})",
-                interp.print(other)
-            );
-            std::process::exit(1);
-        }
     }
 }
 
@@ -2302,7 +2189,7 @@ fn value_kind(subcommand: &str, arg_name: &str) -> Option<&'static str> {
     match (subcommand, arg_name) {
         (_, "only" | "exclude" | "include") => Some("selector"),
         ("test", "files") => Some("test-file"),
-        ("check", "files") | ("run", "file") => Some("blsp-file"),
+        ("run", "file") => Some("blsp-file"),
         ("doc", "module") => Some("module"),
         // `--main` names a module (optionally `module/fn`), so offer this project's
         // own modules — not std's, which can't be an entry point.

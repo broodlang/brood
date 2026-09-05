@@ -23,15 +23,18 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 ;; ── the command table ────────────────────────────────────────────────────────────────
 ;;
 ;; One entry per subcommand: its one-line help, its flags (spelling → `:bool` or the name
-;; of the value it takes), an optional positional (name → allowed values, or nil for free
-;; text), and the `run` function. Completion (`nest complete`) reads the same table, so a
+;; of the value it takes), an optional positional (name → its allowed values as a list, the
+;; name of a `complete/print-candidates` kind for free text with completion, or nil), and
+;; the `run` function. `:many true` admits any number of positionals. The clap constraints a
+;; command had are data too: `:requires {flag needed-flag}`, `:conflicts [[a b] …]` and
+;; `:no-positional-with [flag …]`. Completion (`nest complete`) reads the same table, so a
 ;; flag added here is completable the same day — the property the Rust side got from clap's
 ;; own model, kept by making the table the model.
 
 (def- *commands*
   {"doc" {:about "Emit Markdown documentation — the whole project, or one named module."
           :flags {"--all" :bool}
-          :positional ["module" nil]
+          :positional ["module" "module"]
           :run (fn (o) (run-doc o))}
    "docs" {:about "Generate a browsable HTML documentation site from docstrings (default `doc/`)."
            :flags {"--all" :bool "--out" "DIR" "-o" "DIR"}
@@ -45,7 +48,23 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
               :run (fn (o) (run-grammar o))}
    "format" {:about "Format every `.blsp` in the project (`--check`: CI mode, `--changed`: git-narrowed)."
              :flags {"--check" :bool "-c" :bool "--changed" :bool}
-             :run (fn (o) (run-format o))}})
+             :run (fn (o) (run-format o))}
+   "check" {:about "Advisory type-check the project (every `.blsp` under `src/` + `tests/`), or specific files; exit non-zero on any warning."
+            :flags {"--fix-renames" :bool
+                    "--dry-run" :bool
+                    "--suggest-sigs" :bool
+                    "--fix-sigs" :bool
+                    "--strict" :bool}
+            :positional ["file" "blsp-file"]
+            :many true
+            :requires {"--dry-run" "--fix-renames"}
+            :conflicts [["--suggest-sigs" "--fix-renames"]
+                         ["--fix-sigs" "--fix-renames"]
+                         ["--fix-sigs" "--suggest-sigs"]]
+            ;; The rewrite is project-wide, so scoping it to a file list would fix one
+            ;; caller and leave the rest.
+            :no-positional-with ["--fix-renames"]
+            :run (fn (o) (run-check o))}})
 
 ;; Short flags are aliases; canonicalise on parse so handlers read one spelling.
 (def- *short-aliases* {"-c" "--check" "-o" "--out"})
@@ -59,10 +78,19 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
   (let (spec (get *commands* cmd))
     (if spec (sort (keys (get spec :flags))) (list))))
 
+(defn- positional-values-of (spec)
+  "The allowed values of `spec`'s positional — `()` when it is free text or absent."
+  (let (values (and spec (get spec :positional) (nth (get spec :positional) 1)))
+    (if (or (list? values) (vector? values)) values (list))))
+
+(defn- positional-kind (spec)
+  "The `complete/print-candidates` kind of `spec`'s free-text positional, or nil."
+  (let (values (and spec (get spec :positional) (nth (get spec :positional) 1)))
+    (if (string? values) values nil)))
+
 (defn positional-values (cmd)
   "The allowed values of `cmd`'s positional, or `()` when it is free text or absent."
-  (let (spec (get *commands* cmd))
-    (or (and spec (get spec :positional) (nth (get spec :positional) 1)) (list))))
+  (positional-values-of (get *commands* cmd)))
 
 ;; ── argv → options ───────────────────────────────────────────────────────────────────
 
@@ -109,14 +137,15 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
             (assoc acc :positionals (append (get acc :positionals) (list word))))))))
 
 (defn- check-positional (spec parsed)
-  "Reject a second positional, or a first one outside the allowed set."
-  (let (pos (get spec :positional) ps (get parsed :positionals))
+  "Reject a second positional (unless `:many`), or a first one outside the allowed set."
+  (let (pos (get spec :positional) ps (get parsed :positionals) allowed (positional-values-of spec))
     (cond
       (get parsed :error) parsed
       (and (nil? pos) (not (empty? ps)))
         (assoc parsed :error (str "unexpected argument '" (first ps) "'"))
-      (> (count ps) 1) (assoc parsed :error (str "unexpected argument '" (nth ps 1) "'"))
-      (and pos (nth pos 1) (not (empty? ps)) (not (contains? (into #{} (nth pos 1)) (first ps))))
+      (and (> (count ps) 1) (not (get spec :many)))
+        (assoc parsed :error (str "unexpected argument '" (nth ps 1) "'"))
+      (and (not (empty? allowed)) (not (empty? ps)) (not (contains? (into #{} allowed) (first ps))))
         (assoc parsed
           :error
             (str "invalid value '"
@@ -124,32 +153,66 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
               "' for <"
               (string/upper (nth pos 0))
               ">\n  [possible values: "
-              (string/join (nth pos 1) ", ")
+              (string/join allowed ", ")
               "]"))
+      else parsed)))
+
+(defn- check-constraints (spec parsed)
+  "The cross-flag rules clap enforced declaratively: `:requires`, `:conflicts`,
+`:no-positional-with`. First violation wins, in clap's words."
+  (let (flags (get parsed :flags)
+        on? (fn (f) (get flags f))
+        conflict (first (filter (get spec :conflicts)
+                          (fn (pair) (and (on? (nth pair 0)) (on? (nth pair 1))))))
+        missing (first (filter (seq (get spec :requires))
+                         (fn (kv) (and (on? (first kv)) (not (on? (second kv)))))))
+        lonely (first (filter (get spec :no-positional-with)
+                        (fn (f) (and (on? f) (not (empty? (get parsed :positionals))))))))
+    (cond
+      (get parsed :error) parsed
+      conflict
+        (assoc parsed
+          :error
+            (str "the argument '" (nth conflict 0) "' cannot be used with '" (nth conflict 1) "'"))
+      missing
+        (assoc parsed
+          :error (str "the following required arguments were not provided:\n  " (second missing)))
+      lonely
+        (assoc parsed
+          :error
+            (str "the argument '"
+              lonely
+              "' cannot be used with '["
+              (string/upper (nth (get spec :positional) 0))
+              "]...'"))
       else parsed)))
 
 (defn parse (cmd words)
   "Parse `words` (argv after the subcommand) against `cmd`'s table entry:
 `{:flags {\"--all\" true …} :positionals (…) :error nil-or-message}`."
   (let (spec (get *commands* cmd))
-    (check-positional spec (parse-words spec words {:flags {} :positionals (list) :error nil}))))
+    (check-constraints spec
+      (check-positional spec (parse-words spec words {:flags {} :positionals (list) :error nil})))))
 
 ;; ── the plumbing the Rust arms had ───────────────────────────────────────────────────
 
 (defn- eputs (& parts)
   (%eprint (str (apply str parts) "\n")))
 
-(defn- usage (cmd)
+(defn- usage-line (cmd)
   (let (spec (get *commands* cmd) pos (get spec :positional))
+    (str "Usage: nest "
+      cmd
+      (if (empty? (get spec :flags)) "" " [OPTIONS]")
+      (if pos (str " [" (string/upper (nth pos 0)) "]" (if (get spec :many) "..." "")) ""))))
+
+(defn- usage (cmd)
+  (let (spec (get *commands* cmd) pos (get spec :positional) allowed (positional-values-of spec))
     (io/puts (get spec :about))
     (io/puts "")
-    (io/puts (str "Usage: nest "
-               cmd
-               (if (empty? (get spec :flags)) "" " [OPTIONS]")
-               (if pos (str " [" (string/upper (nth pos 0)) "]") "")))
-    (when pos
-      (when (nth pos 1)
-        (io/puts (str "  " (string/upper (nth pos 0)) ": one of " (string/join (nth pos 1) ", ")))))
+    (io/puts (usage-line cmd))
+    (when (not (empty? allowed))
+      (io/puts (str "  " (string/upper (nth pos 0)) ": one of " (string/join allowed ", "))))
     (when (not (empty? (get spec :flags)))
       (io/puts "Options:")
       (doseq (f (sort (keys (get spec :flags))))
@@ -167,6 +230,20 @@ false (the caller exits 2 — clap's usage-error code)."
       (eputs "  Create one with `nest new <name>`, or cd into an existing project.")
       (when hint (eputs "  " hint))
       false)))
+
+(defn- readable-files? (cmd files)
+  "The boundary guard for a FILE list: every path must exist and not be a directory. Says
+so at the CLI boundary and returns false (exit 2) — before this, a mistyped filename
+surfaced as `check-file-deps: cannot read …` with a four-frame Brood trace."
+  (let (bad (first (filter files (fn (p) (not (file/regular? p))))))
+    (cond
+      (nil? bad) true
+      (file/dir? bad)
+        (do
+          (eputs "nest " cmd ": " bad " is a directory, not a .blsp file.")
+          (eputs "  Name the files, or omit them to cover the whole project.")
+          false)
+      else (do (eputs "nest " cmd ": cannot read " bad ": No such file or directory") false))))
 
 ;; ── the subcommands ──────────────────────────────────────────────────────────────────
 
@@ -218,6 +295,45 @@ false (the caller exits 2 — clap's usage-error code)."
       0)
     2))
 
+(defn- checker-exit-code (result)
+  "`project/check` and friends return a warning (or unresolved-name) count: 0 is clean."
+  (cond
+    (= result 0) 0
+    (int? result) 1
+    else (do (eputs "nest check: checker returned a non-integer (" (str result) ")") 1)))
+
+(defn- run-check (o)
+  (let (flags (get o :flags) files (get o :positionals))
+    ;; Strict is a process-wide checker mode, not an argument, so it is set before the
+    ;; first file is read; the env spelling is the one CI uses.
+    (%check-strict! (or (get flags "--strict") (= (os/env "BROOD_CHECK_STRICT") "1")))
+    (cond
+      (get flags "--suggest-sigs")
+        (do
+          (project/load-config)
+          (require-one 'test)
+          (checker-exit-code (project/suggest-sigs files)))
+      (get flags "--fix-sigs")
+        (do
+          (project/load-config)
+          (require-one 'test)
+          (checker-exit-code (project/fix-sigs files true)))
+      (get flags "--fix-renames")
+        (do
+          (project/load-config)
+          (require-one 'test)
+          (checker-exit-code (project/fix-renames (not (get flags "--dry-run")))))
+      (and (empty? files)
+        (not (require-project "check" "To check one file outside a project: nest check <file>.blsp")))
+        2
+      (not (readable-files? "check" files)) 2
+      ;; One checker, one path: both forms go through `project.blsp`, which loads the
+      ;; project image first so cross-module names resolve (the single-file path once
+      ;; skipped that and false-flagged every `:use`d name as unbound).
+      (empty? files)
+        (do (project/load-config) (require-one 'test) (checker-exit-code (project/check)))
+      else (do (require-one 'test) (checker-exit-code (project/check-files files))))))
+
 ;; ── entry points ─────────────────────────────────────────────────────────────────────
 
 (defn main (argv)
@@ -233,12 +349,7 @@ code. `--help`/`-h` anywhere prints the command's usage."
             (do
               (eputs "error: " (get o :error))
               (eputs "")
-              (eputs "Usage: nest "
-                cmd
-                (if (empty? (get spec :flags)) "" " [OPTIONS]")
-                (if (get spec :positional)
-                  (str " [" (string/upper (nth (get spec :positional) 0)) "]")
-                  ""))
+              (eputs (usage-line cmd))
               (eputs "")
               (eputs "For more information, try '--help'.")
               2)
@@ -247,8 +358,9 @@ code. `--help`/`-h` anywhere prints the command's usage."
 
 (defn complete (cmd prior current)
   "Print the completion candidates for `cmd` given the words typed so far — flags when
-`current` starts with `-`, else the positional's allowed values or, for `doc`, the module
-names `complete/print-candidates` knows. Never raises; prints nothing when it cannot tell."
+`current` starts with `-`, else the positional's allowed values, or the candidates of its
+`complete/print-candidates` kind (`doc`'s module names, `check`'s `.blsp` files). Never
+raises; prints nothing when it cannot tell."
   (try
     (let (spec (get *commands* cmd))
       (when spec
@@ -259,7 +371,7 @@ names `complete/print-candidates` knows. Never raises; prints nothing when it ca
           (not (empty? (positional-values cmd)))
             (doseq (v (positional-values cmd))
               (when (string/starts-with? v current) (io/puts v)))
-          (= cmd "doc") (complete/print-candidates "module" current)
+          (positional-kind spec) (complete/print-candidates (positional-kind spec) current)
           else nil)))
     (catch _ (check-allow :discarded-catch nil)))
   nil)

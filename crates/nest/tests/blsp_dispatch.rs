@@ -136,3 +136,100 @@ fn completion_knows_the_brood_implemented_subcommands() {
     let (_, out, _) = nest_in(&dir, &["complete", "--", "grammar", "tr"]);
     assert_eq!(out.lines().collect::<Vec<_>>(), vec!["tree-sitter"]);
 }
+
+// ── `check` (moved 2026-09-05) ─────────────────────────────────────────────────────────
+//
+// `missing_file.rs` and `cli_failure_reporting.rs` already drive the boundary guards
+// (missing file, directory) and `complete.rs` the `.blsp` positional; `check_cache_mode.rs`
+// the strict/plain cache split. What is pinned here is the rest of the surface the Rust arm
+// had: the clap constraints, the project guard, the exit codes and the global `-j`.
+
+#[test]
+fn check_needs_a_project_or_files_and_says_which() {
+    let dir = scratch("check-guard");
+    let (code, _, err) = nest_in(&dir, &["check"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("nest check: no project.blsp in") && err.contains("nest check <file>.blsp"),
+        "{err}"
+    );
+    let (code, out, _) = nest_in(&dir, &["check", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Usage: nest check [OPTIONS] [FILE]...") && out.contains("--fix-renames"),
+        "{out}"
+    );
+}
+
+#[test]
+fn check_constraints_are_clap_shaped_usage_errors() {
+    let dir = scratch("check-constraints");
+    let (code, _, err) = nest_in(&dir, &["check", "--dry-run"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("required arguments were not provided") && err.contains("--fix-renames"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["check", "--suggest-sigs", "--fix-renames"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("'--suggest-sigs' cannot be used with '--fix-renames'"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["check", "--fix-renames", "a.blsp"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("'--fix-renames' cannot be used with '[FILE]...'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn check_exit_code_is_the_warning_verdict_for_both_forms() {
+    let dir = scratch("check-proj");
+    let (code, _, err) = nest_in(&dir, &["new", "demo"]);
+    assert_eq!(code, 0, "scaffold:\n{err}");
+    let proj = dir.join("demo");
+    let (code, out, err) = nest_in(&proj, &["check"]);
+    assert_eq!(code, 0, "a fresh scaffold is clean:\n{out}\n{err}");
+    let (code, _, err) = nest_in(&proj, &["check", "--strict", "src/main.blsp"]);
+    assert_eq!(code, 0, "strict, one file:\n{err}");
+    std::fs::write(
+        proj.join("src").join("bad.blsp"),
+        "(defmodule demo/bad)\n(defn f ()\n  (no-such-function 1))\n",
+    )
+    .expect("write bad");
+    let (code, _, err) = nest_in(&proj, &["check"]);
+    assert_eq!(code, 1, "an unbound symbol is a warning, exit 1:\n{err}");
+    assert!(
+        err.contains("warning:") && err.contains("no-such-function"),
+        "the warning names the symbol:\n{err}"
+    );
+    // A FILE list is variadic, and the verdict covers every file named.
+    let (code, _, err) = nest_in(&proj, &["check", "src/main.blsp", "src/bad.blsp"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("no-such-function"), "{err}");
+    let (code, _, err) = nest_in(&proj, &["check", "src/main.blsp"]);
+    assert_eq!(code, 0, "the clean file alone is clean:\n{err}");
+}
+
+#[test]
+fn the_global_jobs_option_still_reaches_a_brood_subcommand() {
+    let dir = scratch("check-jobs");
+    for args in [
+        &["-j", "2", "check", "--help"][..],
+        &["--max-parallel", "2", "check", "--help"][..],
+        &["--jobs=2", "check", "--help"][..],
+        &["-j2", "check", "--help"][..],
+    ] {
+        let (code, out, err) = nest_in(&dir, args);
+        assert_eq!(code, 0, "{args:?}:\n{err}");
+        assert!(out.contains("Usage: nest check"), "{args:?}:\n{out}");
+    }
+    let (_, out, _) = nest_in(&dir, &["complete", "--", "check", "--fix"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines.contains(&"--fix-renames") && lines.contains(&"--fix-sigs"),
+        "{lines:?}"
+    );
+}
