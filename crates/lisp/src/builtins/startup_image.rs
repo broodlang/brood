@@ -403,6 +403,18 @@ fn read_at(path: &str, off: u64, len: usize) -> Option<Vec<u8>> {
 ///
 /// Reads the header and the directory only — never the payload — so opening a 143 MB image
 /// costs a few kilobytes of I/O.
+/// `(%boot-source)` — how this process's prelude arrived, as a keyword.
+///
+/// A keyword rather than a string because it is a closed set the caller matches on, and
+/// because every other "which state is this artifact in" answer in this area
+/// (`stdimage/status`'s `:live`/`:stale`/`:absent`) already reads that way.
+pub(super) fn boot_source(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let _ = heap;
+    Ok(Value::Keyword(crate::core::value::intern(
+        crate::boot_source(),
+    )))
+}
+
 pub(super) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = need_str(heap, arg(args, 0), "%image-index")?;
     let want = need_str(heap, arg(args, 1), "%image-index")?;

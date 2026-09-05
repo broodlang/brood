@@ -134,15 +134,82 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
         // the image on. Measured: `startup` -11%, no regression on 30 rows.
         if std::env::var_os("BROOD_NO_PRELUDE_IMAGE").is_none() {
             if let Some(bundle) = boot_from_prelude_image() {
+                set_boot_source(BOOT_PRELUDE_IMAGE);
                 return bundle;
             }
         }
         if let Some(bundle) = boot_from_cache() {
+            set_boot_source(BOOT_TEXT_CACHE);
             return bundle;
         }
     }
+    set_boot_source(BOOT_SOURCE);
     boot_from_source()
 });
+
+/// **The install's own bookkeeping** — globals that record which artifacts *this process*
+/// loaded, rather than anything a module or the prelude defines.
+///
+/// They differ between an imaged and a source boot **by design**: that is the whole content
+/// of these names, and item 2 of this area's cleanup made one of them (`%boot-source`) more
+/// visible rather than less. A boot differential must therefore skip them, and the reason it
+/// skips them matters: *because of what they are*, not because the arms disagree about them.
+/// Excluding a global because two arms disagree is excluding the evidence — that is how
+/// ADR-314's prelude differential passed with the bug in its own exclusion list, and how
+/// `*std-image-installed*` sat in this set for a day while being exactly what it hid.
+///
+/// The facts these carry are asserted elsewhere, positively: `%boot-source` and the suite
+/// summary line say which artifacts a run used, and `stdimage_reporting.rs` drives all three
+/// states end to end. So they are covered, just not by equality.
+///
+/// One definition, in the runtime, because the tests that need it live in three different
+/// crates and a per-crate copy is the "fixed in one file, left in two" failure this repo
+/// already keeps a shared harness to avoid.
+pub const INSTALL_BOOKKEEPING: &[&str] = &[
+    "*image-sources*",
+    "*image-path*",
+    "*image-sections*",
+    "*std-image-file*",
+    "*std-image-sections*",
+    "*std-image-installed*",
+    "*std-impls*",
+    "*std-regs*",
+    "*std-require-edges*",
+];
+
+/// Which of the three boot paths actually ran, as an atomic so it can be read after the
+/// fact from anywhere without threading it through the bundle.
+///
+/// **This exists because "was that run imaged?" had no answer, and guessing it wrong is the
+/// single most expensive habit in this area.** Every rebuild changes `build-id`, so the
+/// FIRST run after any build is a source boot and every run after it is not — which means a
+/// developer verifying an image fix sees the un-imaged path exactly when they are least
+/// expecting it. That has now corrupted the diagnosis of an image bug repeatedly: ADR-314
+/// records it happening to a session already caught by it twice, and three separate "it is
+/// fixed" readings during KI-106 were cold boots. `BROOD_BOOT_TRACE=1` could always show it,
+/// but only to someone who armed it BEFORE the run and already suspected the answer. A fact
+/// you must predict in order to observe is not a diagnostic.
+// 0 is "not yet decided" — the shared prelude is built lazily, so a reader that beats it
+// gets `unknown` rather than a plausible-looking lie.
+static BOOT_SOURCE_KIND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const BOOT_PRELUDE_IMAGE: u8 = 1;
+const BOOT_TEXT_CACHE: u8 = 2;
+const BOOT_SOURCE: u8 = 3;
+
+fn set_boot_source(kind: u8) {
+    BOOT_SOURCE_KIND.store(kind, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How this process's prelude arrived: `"prelude-image"`, `"boot-cache"`, `"source"`, or
+/// `"unknown"` before the shared prelude has been built. Read by `%boot-source`.
+pub fn boot_source() -> &'static str {
+    match BOOT_SOURCE_KIND.load(std::sync::atomic::Ordering::Relaxed) {
+        BOOT_PRELUDE_IMAGE => "prelude-image",
+        BOOT_TEXT_CACHE => "boot-cache",
+        BOOT_SOURCE => "source",
+        _ => "unknown",
+    }
+}
 
 /// The expanded-prelude cache file for THIS binary:
 /// `~/.cache/brood/prelude-expanded-<hash-of-build-id>.blsp`. Per-binary
@@ -169,8 +236,19 @@ fn boot_cache_path() -> Option<std::path::PathBuf> {
 }
 
 /// Best-effort prune of OTHER builds' expanded-prelude caches: keep the
-/// `MAX_KEEP` most recently modified `prelude-expanded-*.blsp` (plus `keep`)
-/// and delete the rest, and separately drop anything older than `MAX_AGE`.
+/// `MAX_KEEP` most recently modified BUILDS (plus `keep`'s) and delete the rest,
+/// and separately drop anything older than `MAX_AGE`.
+///
+/// **A build, not a file — because a build now has two artifacts.** ADR-314 added
+/// `prelude-expanded-<hash>.img` beside the `.blsp`, keyed identically
+/// (`prelude_image_path` is the text cache's path `.with_extension("img")`). This
+/// function matched on `.blsp` alone, so it pruned the text caches and left every
+/// image behind, and the failure the count cap was written to fix came straight
+/// back in the new artifact: **1057 `.img` files / 450 MB** measured on this repo's
+/// dev machine on 2026-09-05, against 18 `.blsp` correctly held at the cap. Grouping
+/// by file STEM fixes it for this pair and for the next one: a build is the unit,
+/// every file sharing a stem lives or dies with it, and an artifact added later is
+/// carried as soon as it is written beside its siblings.
 ///
 /// **Bounded by COUNT, not only by age, because age does not bound anything.**
 /// The cache name hashes `system/build-id`, which embeds the binary's mtime, so
@@ -191,23 +269,36 @@ fn boot_cache_prune(dir: &std::path::Path, keep: &std::path::Path) {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
     /// Enough for the binaries plausibly in play at once (`brood`, `nest`,
     /// `brood-lsp`, a couple of test binaries, an `ab` worktree or two) — at
-    /// ~190 KB each this bounds the prelude cache at ~3 MB rather than at
-    /// whatever a week of rebuilding produces.
+    /// ~190 KB of text plus ~400 KB of image each, this bounds the prelude cache
+    /// at ~9 MB rather than at whatever a week of rebuilding produces.
     const MAX_KEEP: usize = 16;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    // (mtime, path) for every candidate but `keep`, which is this binary's own
-    // freshly-written file and is never a candidate.
-    let mut found: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    // Skip `keep`'s whole BUILD, not just the one file: `keep` is this binary's own
+    // freshly-written text cache, and its `.img` sibling shares the stem and is just
+    // as live. Deleting the image out from under the binary that wrote it costs a
+    // source boot for no reason.
+    let keep_stem = keep.file_stem().map(|s| s.to_os_string());
+    // stem -> (newest mtime among its files, all its files)
+    let mut found: std::collections::HashMap<
+        std::ffi::OsString,
+        (std::time::SystemTime, Vec<std::path::PathBuf>),
+    > = std::collections::HashMap::new();
     for e in entries.flatten() {
         let p = e.path();
-        if p == keep {
-            continue;
-        }
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if !(name.starts_with("prelude-expanded-") && name.ends_with(".blsp")) {
+        if !name.starts_with("prelude-expanded-") {
+            continue;
+        }
+        if !(name.ends_with(".blsp") || name.ends_with(".img")) {
+            continue;
+        }
+        let Some(stem) = p.file_stem().map(|s| s.to_os_string()) else {
+            continue;
+        };
+        if keep_stem.as_ref() == Some(&stem) {
             continue;
         }
         let Ok(modified) = e.metadata().and_then(|m| m.modified()) else {
@@ -216,14 +307,26 @@ fn boot_cache_prune(dir: &std::path::Path, keep: &std::path::Path) {
             let _ = std::fs::remove_file(&p);
             continue;
         };
-        found.push((modified, p));
+        let slot = found
+            .entry(stem)
+            .or_insert((modified, Vec::with_capacity(2)));
+        // A build is as fresh as its freshest artifact: the image is written after the
+        // text cache, so taking the older of the pair would age every build by the gap.
+        if modified > slot.0 {
+            slot.0 = modified;
+        }
+        slot.1.push(p);
     }
-    // Newest first, then everything past the cap goes, plus anything stale.
-    found.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
-    for (i, (modified, p)) in found.iter().enumerate() {
+    // Newest build first, then every build past the cap goes, plus anything stale.
+    let mut builds: Vec<(std::time::SystemTime, Vec<std::path::PathBuf>)> =
+        found.into_values().collect();
+    builds.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
+    for (i, (modified, paths)) in builds.iter().enumerate() {
         let stale = modified.elapsed().ok().is_some_and(|age| age > MAX_AGE);
         if i >= MAX_KEEP || stale {
-            let _ = std::fs::remove_file(p);
+            for p in paths {
+                let _ = std::fs::remove_file(p);
+            }
         }
     }
 }
@@ -1330,12 +1433,21 @@ mod boot_cache_prune_tests {
             let p = dir.join(format!("prelude-expanded-{i:016x}.blsp"));
             let mut f = std::fs::File::create(&p).unwrap();
             f.write_all(b"x").unwrap();
+            // Every build writes BOTH artifacts (ADR-314), so the fixture must too —
+            // seeding only the text cache is what let the image leak go unnoticed.
+            let img = p.with_extension("img");
+            std::fs::File::create(&img)
+                .unwrap()
+                .write_all(b"i")
+                .unwrap();
+            set_mtime(&img, std::time::SystemTime::now());
             // Stamp mtimes explicitly rather than relying on creation order: the
             // filesystem's timestamp granularity is coarse enough that files written in
             // one loop can share an mtime, which would make the ordering assertion
             // below pass or fail by luck.
             let t = std::time::SystemTime::now() - std::time::Duration::from_secs((n - i) as u64);
             set_mtime(&p, t);
+            set_mtime(&img, t);
             out.push(p);
         }
         out
@@ -1351,13 +1463,20 @@ mod boot_cache_prune_tests {
     }
 
     fn remaining(dir: &std::path::Path) -> usize {
+        count_ext(dir, ".blsp")
+    }
+
+    /// Files with `ext` left in `dir`. Counting `.img` separately is the point: the
+    /// prune matched `.blsp` alone for as long as the image existed, so the text caches
+    /// were bounded and the images grew without limit — 1057 files / 450 MB when found.
+    fn count_ext(dir: &std::path::Path, ext: &str) -> usize {
         std::fs::read_dir(dir)
             .unwrap()
             .flatten()
             .filter(|e| {
                 let n = e.file_name();
                 let n = n.to_string_lossy();
-                n.starts_with("prelude-expanded-") && n.ends_with(".blsp")
+                n.starts_with("prelude-expanded-") && n.ends_with(ext)
             })
             .count()
     }
@@ -1378,6 +1497,8 @@ mod boot_cache_prune_tests {
         let files = seed(&dir, 40);
         let keep = dir.join("prelude-expanded-keep.blsp");
         std::fs::write(&keep, b"k").unwrap();
+        let keep_img = keep.with_extension("img");
+        std::fs::write(&keep_img, b"k").unwrap();
 
         boot_cache_prune(&dir, &keep);
 
@@ -1389,6 +1510,24 @@ mod boot_cache_prune_tests {
         // every binary in use, which is the cost it exists to avoid.
         assert!(!files[0].exists(), "kept the oldest file");
         assert!(files[files.len() - 1].exists(), "deleted the newest file");
+        // The image half is bounded by the same cap. Before the stem grouping this read
+        // 41: every image survived because the prune only ever matched `.blsp`.
+        assert_eq!(
+            count_ext(&dir, ".img"),
+            17,
+            "the prelude IMAGES were not bounded — the artifact the count cap forgot"
+        );
+        // A dropped build takes BOTH its files, never one: an orphaned image is dead
+        // weight no boot will ever read, since its text-cache sibling is gone.
+        assert!(
+            !files[0].with_extension("img").exists(),
+            "dropped a build's text cache but kept its image"
+        );
+        // …and the caller's own build keeps both halves.
+        assert!(
+            keep_img.exists(),
+            "deleted the image belonging to the caller's own fresh cache"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1403,8 +1542,11 @@ mod boot_cache_prune_tests {
         let old = dir.join("prelude-expanded-0000000000000002.blsp");
         std::fs::write(&fresh, b"f").unwrap();
         std::fs::write(&old, b"o").unwrap();
+        std::fs::write(fresh.with_extension("img"), b"f").unwrap();
+        std::fs::write(old.with_extension("img"), b"o").unwrap();
         let ancient = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
         set_mtime(&old, ancient);
+        set_mtime(&old.with_extension("img"), ancient);
         let keep = dir.join("prelude-expanded-keep.blsp");
         std::fs::write(&keep, b"k").unwrap();
 
@@ -1412,6 +1554,10 @@ mod boot_cache_prune_tests {
 
         assert!(fresh.exists(), "a fresh file under the cap was deleted");
         assert!(!old.exists(), "a month-old build survived the age floor");
+        assert!(
+            !old.with_extension("img").exists(),
+            "the stale build's image outlived its text cache"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
