@@ -46,7 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
-    after_help = "Also (implemented in Brood, std/tool/nest.blsp): run, test, check, doc, docs, doctest, grammar, format — `nest <command> --help`.",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -107,20 +107,6 @@ enum Cmd {
         words: Vec<String>,
     },
 
-    /// Scaffold a new project (project.blsp + src/ + tests/ + starter files).
-    New {
-        /// The project's name. Becomes the directory + `:name` in project.blsp.
-        name: String,
-
-        /// Starter template: `default` (a main+hello pair), `tui-loop` (a
-        /// tail-recursive animation loop, pairs with `nest run --for`), `gen`
-        /// (a stateful gen_server-style process), `editor`/`gui` (ui-run apps),
-        /// `hatch` (a full Postgres-backed Hatch web app), or `web-api` (a
-        /// minimal Hatch JSON API). An unknown name lists the full set.
-        #[arg(long = "template", short = 't', value_name = "NAME")]
-        template: Option<String>,
-    },
-
     /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
     ///
     /// For `:path` deps this verifies each sibling project exists and records its
@@ -139,68 +125,23 @@ enum Cmd {
         names: Vec<String>,
     },
 
-    /// Refresh the AI-assistant tooling from this `brood` build.
-    ///
-    /// Rewrites the two files `nest new` drops into a project — the language
-    /// reference `docs/brood-for-claude.md` and the `.claude/skills/writing-brood`
-    /// skill — from the installed `brood` binary (they are baked in, so they drift
-    /// as the language evolves). Run it after upgrading Brood. Your code, manifest,
-    /// and `CLAUDE.md` are left untouched.
-    UpdateTooling,
-
     /// Print the project's resolved dependency tree (root → direct → transitive).
     Tree,
 
-    /// Build this binary's standard-library startup image (ADR-218).
+    /// Build this binary's standard-library startup image (ADR-218), once.
     ///
-    /// A std module is embedded SOURCE, so `require` re-evaluates it every run —
-    /// `format` alone costs ~77 ms, almost all of it materialising closures. This
-    /// snapshots every baked-in module's bindings into
-    /// `~/.cache/brood/std-image-<build-id>.bin`, and `require` restores from it instead:
-    /// a program pulling http+json+format+datetime goes ~124 ms -> ~31 ms, and even a
-    /// trivial script gains ~8 ms because boot's own `string`/`seq` come from it.
+    /// Keyed on `system/stdlib-id` — a content hash of every baked-in `.blsp` — so `brood`,
+    /// `nest` and `brood-lsp` from one tree all read the SAME file. Every ordinary `nest`
+    /// command writes the image when one is missing (`ensure_stdimage`); this is the explicit
+    /// form, for a machine where the first run should not be the one that pays.
     ///
-    /// Costs ~2 s and ~2 MB, once per binary. The image is keyed on `system/build-id` (which
-    /// includes the executable's mtime), so a rebuilt or reinstalled binary simply misses
-    /// and falls back to source until this is run again — it can never go stale.
+    /// Deliberately NOT one of the Brood-routed subcommands (ADR-322, KI-112): the build
+    /// attributes a module's ROOT globals by loading it and diffing, so it is sound only in
+    /// a process where nothing but the prelude is loaded — and `std/tool/nest.blsp`, the
+    /// dispatcher, is a std module whose own load pulls the toolchain in. Routed, it wrote
+    /// an image with none of `project`'s root globals. This arm builds before any std module
+    /// loads, and the child process `ensure_stdimage` spawns is exactly this arm.
     Stdimage,
-
-    /// Add a dependency to project.blsp and re-lock (ADR-037).
-    ///
-    /// Context-aware rename across the project's .blsp sources.
-    ///
-    /// `nest rename OLD NEW` parses each file into its lossless CST and rewrites only
-    /// *symbol tokens* — so a docstring or `;` comment mentioning the name, and symbols
-    /// inside `(quote …)`/`'…` data, are left byte-for-byte alone. An unmatched file
-    /// comes back byte-identical. Skips `.git` and vendored `_deps`; for an
-    /// ecosystem-wide rename, run it per repo.
-    Rename {
-        /// The identifier to rename.
-        old: String,
-        /// Its replacement.
-        new: String,
-        /// Treat this as a reversed-args rename: rewrite every 2-arg call
-        /// `(OLD a b)` to `(NEW b a)`, reading the args as balanced s-expressions
-        /// (e.g. `member?` → `includes?`). Without it, a plain token rename.
-        #[arg(long)]
-        swap: bool,
-        /// Rename only *references*, leaving the `defn`/`def` head alone — for
-        /// renaming the callers of a function whose own definition stays put.
-        #[arg(long, conflicts_with_all = ["defs_only", "swap"])]
-        refs_only: bool,
-        /// Rename only the definition head, leaving every reference alone.
-        #[arg(long, conflicts_with_all = ["refs_only", "swap"])]
-        defs_only: bool,
-        /// Also rewrite symbols inside `(quote …)` / `'…` data (off by default —
-        /// a quoted symbol is inert data, e.g. a name in a registry table).
-        #[arg(long, conflicts_with = "swap")]
-        in_quote: bool,
-        /// Fall back to the old CONTEXT-BLIND whole-token text replace, which also
-        /// rewrites inside docstrings, comments and quoted data. For a rename that
-        /// genuinely must touch prose; prefer the default everywhere else.
-        #[arg(long, conflicts_with_all = ["refs_only", "defs_only", "in_quote"])]
-        text: bool,
-    },
 
     /// `nest add NAME :path PATH` (`:git` lands in a later slice). NAME is the
     /// local require-name. The manifest is rewritten preserving its comments.
@@ -480,7 +421,8 @@ fn main() {
 /// Subcommands implemented in `std/tool/nest.blsp` (ADR-322). Routed there from `main`
 /// before clap runs; listed by `nest complete` beside clap's own; absent from `Cmd`.
 const BLSP_SUBCOMMANDS: &[&str] = &[
-    "doc", "docs", "doctest", "grammar", "format", "check", "test", "run",
+    "doc", "docs", "doctest", "grammar", "format", "check", "test", "run", "new",
+    "update-tooling", "rename",
 ];
 
 /// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
@@ -630,7 +572,6 @@ fn run_main(cli: Cli) {
     match cli.cmd {
         // Handled above, before the interpreter is built.
         Cmd::Completions { .. } | Cmd::Complete { .. } => unreachable!(),
-        Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
         Cmd::Fetch => {
             require_project("fetch", None);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/fetch)"))
@@ -639,27 +580,8 @@ fn run_main(cli: Cli) {
             require_project("update", None);
             cmd_update(&mut interp, &names)
         }
-        Cmd::UpdateTooling => {
-            require_project("update-tooling", None);
-            run(
-                &mut interp,
-                "(project/load-config) (scaffold/update-tooling)",
-            );
-        }
-        // Build the image, once. It is keyed on `system/stdlib-id` — a content hash of every
-        // baked-in `.blsp` — so `brood`, `nest` and `brood-lsp` from one tree all read the
-        // SAME file and one build serves all three.
-        //
-        // This used to build here and then shell out to the `brood` on PATH to "build its
-        // own", on the premise that the key was `system/build-id` (which embeds each
-        // executable's mtime, so they could not share). That premise is stale: the key moved
-        // to `stdlib-id` precisely so they would share, and the second build was writing the
-        // same bytes to the same path — while silently reporting "skipped" whenever `brood`
-        // was not on PATH, which read as a missing image and was nothing of the kind.
-        //
-        // Rarely needed now: every ordinary `nest` command already writes the image when one
-        // is missing (`ensure_stdimage`). Kept as the explicit form, for a machine where the
-        // first run should not be the one that pays.
+        // Nothing but the prelude is loaded when this runs — see the variant's doc for why
+        // that is the whole point, and why `stdimage/build` refuses otherwise (KI-112).
         Cmd::Stdimage => run(
             &mut interp,
             concat!(
@@ -675,33 +597,6 @@ fn run_main(cli: Cli) {
             require_project("tree", None);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/tree)"))
         }
-        Cmd::Rename {
-            old,
-            new,
-            swap,
-            refs_only,
-            defs_only,
-            in_quote,
-            text,
-        } => run(
-            &mut interp,
-            &if swap {
-                format!("(codemod/swap2 {old:?} {new:?})")
-            } else if text {
-                format!("(codemod/rename (list (list {old:?} {new:?})))")
-            } else {
-                let mode = if refs_only {
-                    ":refs-only"
-                } else if defs_only {
-                    ":defs-only"
-                } else if in_quote {
-                    ":in-quote"
-                } else {
-                    ":all"
-                };
-                format!("(codemod/cst-rename {old:?} {new:?} {mode})")
-            },
-        ),
         Cmd::Add { name, spec } => {
             require_project("add", None);
             cmd_add(&mut interp, &name, &spec)
@@ -816,18 +711,6 @@ fn blsp_string_list(items: &[String]) -> String {
         let quoted: Vec<String> = items.iter().map(|s| blsp_string(s)).collect();
         format!("(list {})", quoted.join(" "))
     }
-}
-
-/// `nest new <name> [--template NAME]` — delegates to `(scaffold/new-project name
-/// template)` in std/tool/scaffold.blsp (config still comes from `project`).
-fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
-    let mut args: Vec<&str> = vec![name];
-    args.extend(template);
-    let call = brood::introspect::call_form("scaffold/new-project", &args);
-    run(
-        interp,
-        &format!("(project/load-config) (require-one 'scaffold) {call}"),
-    );
 }
 
 /// `nest update [NAME...]` — re-resolve refs and re-lock (ADR-037). No NAMES
@@ -1358,7 +1241,6 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 /// `MODULE[/FN]`, so every suggestion was wrong. Name each argument.
 fn value_kind(subcommand: &str, arg_name: &str) -> Option<&'static str> {
     match (subcommand, arg_name) {
-        ("new", "template") => Some("template"),
         ("remove" | "update", "names" | "name") => Some("dep"),
         _ => None,
     }

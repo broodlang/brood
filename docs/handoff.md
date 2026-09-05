@@ -182,12 +182,13 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-05 (latest) — item 4: EIGHT `nest` subcommands are Brood (ADR-322):
-`check`, `test` and `run` joined today.** `main.rs` is at 1,654 (from 2,771). The table
+**Addendum 2026-09-05 (latest) — item 4: ELEVEN `nest` subcommands are Brood (ADR-322);
+`stdimage` deliberately is NOT (KI-112 — read it before routing anything that builds an
+image).** `main.rs` is at 1,536 (from 2,771). The table
 now carries typed flags (`{:value :int :repeat :complete}`), `:many`, `:trailing`, and the
 clap constraints as data; the Rust seam for `test` is `arm_test_env` (pre-boot env flags +
 memory ceiling), the pattern for anything else that must precede `Interp::new()`. Next:
-`new` (small), `stdimage`, `rename`, then the package-manager group (`fetch`/`update`/
+the package-manager group (`fetch`/`update`/
 `tree`/`add`/`remove`/`publish`/`search`/`key`/`ws` — they share `PACKAGE_BOOTSTRAP`), then
 `repl`; `mcp`/`observe`/`attach`/`release`/`gen`/`completions` have Rust mechanism in them
 and go last. Found and fixed on the way: `nest run --name` called an unbound `node-start`. Noticed, not fixed: a scaffolded project's `(:use log)`

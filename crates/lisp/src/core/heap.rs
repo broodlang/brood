@@ -1141,6 +1141,11 @@ pub struct SharedCode {
     /// and an imaged `nest test` failed to load any file with a `defmethod num/add` (KI-89).
     /// Carried here and unioned in, like `declared_sigs`.
     registry_names: Vec<Symbol>,
+    /// Every global the prelude bound at the freeze — its own definitions, the natives
+    /// (registered during the build), the registries it seeds. Fixed per binary, identical
+    /// in every process. Behind `%prelude-global?`, which `stdimage/build` uses to tell a
+    /// root global that is always present from one a std module defines (KI-112).
+    binding_names: HashSet<Symbol>,
 }
 
 /// A snapshot of the LOCAL heap's sizes, taken at a top-level boundary. Passing
@@ -3502,6 +3507,12 @@ impl Heap {
         Arc::clone(&self.prelude)
     }
 
+    /// Is `s` one of the globals the prelude bound at the freeze? See
+    /// [`SharedCode::binding_names`].
+    pub fn is_prelude_global(&self, s: Symbol) -> bool {
+        self.prelude.binding_names.contains(&s)
+    }
+
     /// Clone the Arc to this runtime's shared code region (for spawning a child
     /// that shares this runtime's live globals).
     /// This heap's runtime-instance tag — see [`RuntimeCode::runtime_tag`]. Unconditional
@@ -3995,12 +4006,14 @@ impl Heap {
             })
             .collect();
 
+        let binding_names: HashSet<Symbol> = bindings.iter().map(|(s, _)| *s).collect();
         (
             SharedCode {
                 slabs,
                 def_sites,
                 declared_sigs,
                 registry_names,
+                binding_names,
             },
             bindings,
         )

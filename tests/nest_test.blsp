@@ -120,3 +120,14 @@
           "cannot be used with '--for'"))
     (is (includes? (get (nest/parse "run" ["--check-boot" "a.blsp"]) :error) "'[FILE]...'"))
     (assert= nil (get (nest/parse "run" ["--check-boot" "--main" "scratch"]) :error))))
+
+(describe "nest/parse — fixed-arity positionals (`new`, `rename`)"
+  (test "exactly n, named in the missing-argument error"
+    (assert= (list "a" "b") (get (nest/parse "rename" ["a" "b"]) :positionals))
+    (is (includes? (get (nest/parse "rename" ["a"]) :error) "not provided:\n  <NEW>"))
+    (is (includes? (get (nest/parse "rename" []) :error) "<OLD>\n  <NEW>"))
+    (is (includes? (get (nest/parse "rename" ["a" "b" "c"]) :error) "unexpected argument 'c'"))
+    (is (includes? (get (nest/parse "new" []) :error) "<NAME>")))
+
+  (test "a short alias canonicalises for a valued flag too"
+    (assert= "gen" (get (get (nest/parse "new" ["x" "-t" "gen"]) :flags) "--template"))))

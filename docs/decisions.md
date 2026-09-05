@@ -20886,3 +20886,39 @@ exercise the Brood arm. Sabotage: without `:trailing` one parser case reds. What
 `main.rs`: `new`, `completions`/`complete`, the package manager (`fetch`/`update`/`tree`/`add`/
 `remove`/`publish`/`search`/`key`/`ws`), `stdimage`, `rename`, `repl`, `mcp`, `observe`,
 `attach`, `release`, `gen`, `update-tooling`.
+
+**Amendment 2026-09-05 (late) — `new`, `update-tooling` and `rename` are Brood; `stdimage`
+is NOT, and the reason is a bug the attempt found (KI-112).** Three small moves needed one
+table feature: fixed-arity positionals — `:arity n` with `:names [...]`, so `nest rename OLD
+NEW` demands exactly two and a missing one reads `the following required arguments were not
+provided:\n  <NEW>` in clap's words; `-t` joined the short aliases. `main.rs` 1,654 → 1,536.
+
+`stdimage` was moved too, and the move produced a stdlib image missing every one of
+`project`'s 31 root globals, so every later `nest check` died on an unbound `*ns-package*`.
+`stdimage/build` attributes a module's ROOT globals (`*ns-package*`, `*units*`, …) by loading
+it inside `%isolate` and diffing the global names before and after; for a module the process
+had ALREADY loaded, `require-one` is a no-op, the diff is empty, and the root global is claimed
+by nobody — and an unclaimed root was "the prelude's" and skipped. The Brood dispatcher is a
+std module whose own load pulls the toolchain in, so a routed `nest stdimage` built from a
+process with `project` loaded. Forcing the module's source through the probe does not help:
+the "before" set already holds the names. The build is sound only in a process where nothing
+but the prelude is loaded, and the dispatcher cannot provide one — so `stdimage` stays a Rust
+arm (the variant's doc says why), and `ensure_stdimage`'s child process is exactly that arm.
+
+**The guard, so this class can never write an image again.** `build` now audits the roots: a
+root global that no probe claimed and that the PRELUDE did not bind is a std module's the
+probe missed, and the build REFUSES, naming them, before `%image-write` — a missing image
+costs one source boot, a wrong one cost most of a day. "The prelude bound it" is a new kernel
+question, `%prelude-global?`: the freeze records every name in the prelude's root env
+(`SharedCode::binding_names` — its definitions, the natives, the registries it seeds), fixed
+per binary. Definition sites were tried first and rejected: thirty prelude helpers
+(`%match-*`, `%receive-*`, `assoc-in`, …) carry none, and a clean build refused on them.
+Gates, both sabotage-shaped: `crates/cli/tests/stdimage_refuses_dirty_process.rs` drives the
+real `brood` with a private `XDG_CACHE_HOME` — a build after `(require-one 'project)` is
+refused naming `*ns-package*` and writes nothing; a fresh-process build writes, and a fresh
+process restoring `project` from it has the root bound — and `blsp_dispatch.rs` builds the
+image through `nest stdimage` and runs `nest check` against it. Two traps for the record: the
+parsed positionals are a LIST, so `(let ([old new] …))` does not match — take them by
+position; and a `nest` suite whose image build is refused runs every test from source AND
+pays a failing child build per process, which read as a hang (>10 min) before it read as a
+refusal.
