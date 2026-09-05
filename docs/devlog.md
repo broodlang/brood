@@ -11045,3 +11045,36 @@ identical (92 bails, 0 latched, both sides). The wall swing was the box's platea
 the shape of the cost, not its cause. Trap on the way: the new cache prune had evicted the
 0.19.1 baseline's std image between runs, and `ab-bench` refused the asymmetric pair until the
 worktree's own `nest` rebuilt it — five 0.25.2 images and no 0.19.1 one was the tell.
+
+### 2026-09-05 — KI-109 lead 2: which clause, and a premise that moved under it
+
+KI-109 closed upstream while this was being written — `->float`'s deopt latch was the whole
+wall-time cost, and `mandelbrot` is back at the 0.19.1 column. Its close hands lead 2 on as an
+improvement candidate "for the frontier doc", with the instruction to bring numbers. This is
+everything short of numbers, and it now lives in `compute-frontier.md` §7.9 rather than under
+a closed entry.
+
+What was not recorded anywhere: **which** of `plan_general_lowering`'s four conditions rejects
+`row-sum`. It is the float-slot carve-out, and nothing else. Shown by changing one thing — two
+programs identical but for the accumulator's type, same callees, same non-tail calls, same
+self-tail loop: with `0.0` the arm bails `call-mediated-boxed`, with `0` it lowers. The op list
+ends in `SelfCall`, so `has_self_loop` is true and only `has_float_slot` can satisfy the clause.
+
+The carve-out admits a self-tail loop "UNLESS the profile shows a `Float` slot (… whose floats
+still arrive boxed from calls — no win)". That premise was priced when a float-context arm
+applied to an int deopted, which is exactly what lead 1 fixed. Same program, before and after:
+at `95ecfad3` `->float` reports `deopt-thrash-latched deopts=16` and is interpreted for the
+rest of the process, so every float `row-sum` received did arrive boxed; at `d234b944` it
+lowers with no latch. The condition the clause prices is the one lead 1 removed for this shape.
+
+That is a statement about the GATE, not about `mandelbrot` — any named self-tail defn that
+accumulates a float and calls out is rejected on a premise measured under a runtime where the
+callee could not stay native — which is why it was worth keeping after the row closed.
+
+Two process notes. Benchmarks are not run on this machine, so this is deliberately a
+bail-trace and IR-dump diagnosis with the caveat stated in the text rather than a performance
+claim; §7.1 already shows what removing this gate costs, so the candidate is to narrow it and
+the rows to protect are named (`nbody`'s `newvel`, and the non-float self-tail loops the
+comment preserves). And the reproduction caught the version trap again from the other side:
+the first run used a binary built before the sync, which is how the before/after on `->float`
+came to be measured at all — `--version` said `95ecfad3` while the tree was `d234b944`.

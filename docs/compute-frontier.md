@@ -1603,6 +1603,73 @@ before it ships. Ranked by expected value.
 The same audit's correctness findings are KI-91–97; the mailbox slot-table scan (item of
 the same family as 5) was already fixed with KI-92 (`MsgRoots.free`).
 
+
+### 7.9 `row-sum`'s `call-mediated-boxed` bail — the deciding clause, isolated (2026-09-05, NOT measured)
+
+KI-109 closed without needing this: `mandelbrot` came back to the 0.19.1 column when lead 1
+stopped `->float` deopt-thrashing. That entry hands this on as an improvement candidate and
+says to bring numbers. Here is everything short of numbers.
+
+
+
+**Which clause rejects `row-sum`, by experiment.** `plan_general_lowering` bails a named
+defn when all four hold: `dbg_name.is_some()`, `non_tail_call_count >= 1`, `!has_inline_vec`,
+and `(!has_self_loop || has_float_slot)`. On a mandelbrot-shaped reproduction (the prelude's
+`->float`, a recursive float `esc`, a per-row accumulator), `row-sum`'s own op list ends in
+`SelfCall` — so `has_self_loop` is TRUE and the fourth clause can only be satisfied by
+`has_float_slot`.
+
+Isolated by changing one thing. Two programs identical but for the accumulator's type —
+same callees, same non-tail calls, same self-tail loop:
+
+| accumulator | `row-sum` |
+|---|---|
+| `0.0` (float) | `[jit-bail] arm=row-sum reason=call-mediated-boxed` |
+| `0` (int) | `[jit-ir] arm=row-sum inline-swap-installed` — **lowers** |
+
+So the float-slot carve-out is the whole reason, and nothing else in the gate is implicated.
+
+**Why that carve-out may now be stale.** Its stated premise is a self-tail loop is admitted
+"UNLESS the profile shows a `Float` slot (a recursive `f64` accumulator like `newvel`, whose
+floats still arrive **boxed from calls** — no win)". That was priced when a float-context arm
+applied to an int deopted; lead 1 (`83c984fc`) changed exactly that. On the same
+reproduction, before and after, same program:
+
+- at `95ecfad3`: `[jit-bail] arm=->float reason=deopt-thrash-latched deopts=16` — interpreted
+  forever, so every float `row-sum` received did arrive boxed, from the VM;
+- at `d234b944`: `->float` lowers, no latch.
+
+The condition the carve-out prices — floats arriving boxed from a call — is the condition
+lead 1 removed for this shape. Whether that is enough to make admitting `row-sum` pay is a
+measurement, not an inference; what is established here is only that the premise changed and
+the clause has not been re-priced since.
+
+**The candidate, and how to price it.** Narrow the veto, do not remove it: §7.1 already
+measured removing the whole gate (nqueens +20.2%, spawn +71.8%) and the entry above records
+why feedback cannot learn a cost model. The narrowing to try is to make "floats arrive boxed"
+a *tested* condition rather than an assumed one — veto only when the arm's float-producing
+non-tail callees are themselves not native at tier time.
+
+Price it on **icache misses, not wall time**, as this entry's own instruction says:
+`perf stat -e instructions,cycles,L1-icache-load-misses,iTLB-load-misses`, `taskset -c 2`,
+`BENCH_N=1400`, three reps a side. Then `make ab --floor` interleaved. **The rows that must
+not regress are the ones the carve-out was written for**: `nbody` (`newvel` is the named
+example), and the non-float self-tail loops the comment says it preserves —
+`fold--loop`, hence `reduce` and `pipeline`. `spawn` is the gate's other measured victim and
+is worth a look for the same reason, though it turns on named defns generally rather than on
+this clause.
+
+**Caveat, stated plainly: none of the above is a performance claim.** This session could not
+run benchmarks on its machine, so what is recorded here is a bail-trace and IR-dump
+diagnosis — which clause fires, and that its premise changed — and not evidence that
+admitting `row-sum` is faster. Anyone taking it forward starts by measuring, not by
+implementing.
+**Why this is worth keeping even though KI-109 closed.** The finding is about the GATE, not
+about `mandelbrot`: any named self-tail defn that accumulates a float and calls out is
+rejected on a premise that was measured under a runtime where the callee could not stay
+native. That class is wider than one benchmark row, and nothing else records which clause
+fires or that its premise moved.
+
 ### The measurement discipline (each of these burned someone this week)
 
 Image `:live` on **both** arms, verified per run (`(stdimage/status)` — any commit
