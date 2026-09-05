@@ -62,7 +62,18 @@ fn run_suite_env(
     cmd.arg("--test")
         .arg("suite.blsp")
         .current_dir(&dir.path)
-        .env("XDG_CACHE_HOME", cache);
+        .env("XDG_CACHE_HOME", cache)
+        // Clear every artifact switch, in BOTH spellings, before applying this case's own.
+        // An inherited one decides the answer otherwise, and CI is where that bites: the
+        // tree-walker job sets `BROOD_NO_PRELUDE_IMAGE=1` and `BROOD_NO_STDIMAGE=1` for the
+        // whole run, so a child that inherits them takes the text-cache path and a case
+        // asserting "this run used the image" fails for a reason that has nothing to do
+        // with the code. Owning `XDG_CACHE_HOME` is only half of owning the state; the
+        // other half is the environment, and the prelude differential beside this one
+        // already says so in as many words.
+        .env_remove("BROOD_PRELUDE_IMAGE")
+        .env_remove("BROOD_NO_PRELUDE_IMAGE")
+        .env_remove("BROOD_NO_BOOT_CACHE");
     for (k, v) in extra {
         cmd.env(k, v);
     }
