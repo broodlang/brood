@@ -20988,3 +20988,16 @@ time: `blsp_dispatch.rs` feeds `(+ 1 2)` outside a project and `(+ 40 2)`/`(hell
 one, and asserts the value, the bootstrap message, and that the bare project name resolves.
 `main.rs` 1,233 → 1,192. Left in Rust: `completions`/`complete`, `stdimage` (KI-112), `mcp`,
 `observe`, `attach`, `release`, `gen`.
+
+**Amendment 2026-09-05 (night, IV) — `observe` and `attach` are Brood: twenty-three.** The
+two full-screen frontends shared a boundary guard and a cookie rule, both Brood now:
+`require-terminal` (`os/stdout-tty?`, saying "needs an interactive terminal" with exit 2
+instead of failing deep in the render loop) and `link-cookie` (`--cookie`, then a non-empty
+`$BROOD_COOKIE`, else nil so the connect function falls back to the shared cookie file). The
+router's terminal guard became a choice: `observe`/`attach` need the FULL teardown on a panic
+unwind (`FullTermGuard`, alternate screen + cursor), `repl` and everything else the raw-mode
+restore that emits nothing onto a pipe (`RawTermGuard`). One trap, immediately visible:
+`Option::then_some(FullTermGuard)` builds the guard eagerly and drops the unwanted one on the
+spot, so every `nest check` printed `[?25h…[?1049l` on its way out and the missing-file test's
+`starts_with` broke — `then(|| …)` is the lazy form. `main.rs` 1,192 → 1,054. Left in Rust:
+`completions`/`complete`, `stdimage` (KI-112), `mcp`, `release`, `gen`.

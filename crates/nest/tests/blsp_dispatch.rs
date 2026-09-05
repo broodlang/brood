@@ -615,3 +615,32 @@ fn repl_evaluates_piped_forms_outside_and_inside_a_project() {
         "a bare project name resolves at the prompt:\n{out}"
     );
 }
+
+// ── `observe` / `attach` (moved 2026-09-05). `missing_file.rs` pins the no-tty boundary
+// message for both through the real binary. Pinned here: the arity and the option surface.
+
+#[test]
+fn attach_needs_a_spec_and_both_frontends_refuse_a_pipe_before_touching_the_screen() {
+    let dir = scratch("frontends");
+    let (code, _, err) = nest_in(&dir, &["attach"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not provided:\n  <SPEC>"), "{err}");
+    let (code, _, err) = nest_in(&dir, &["attach", "somenode"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("nest attach: needs an interactive terminal") && !err.contains("ui-run"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["observe", "--connect", "n@h:1", "--cookie", "c"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("nest observe: needs an interactive terminal"),
+        "{err}"
+    );
+    let (code, out, _) = nest_in(&dir, &["observe", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Usage: nest observe [OPTIONS]") && out.contains("--connect <NODE>"),
+        "{out}"
+    );
+}
