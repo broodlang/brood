@@ -11375,3 +11375,11 @@ rebinding the module's own comment had to apologise for because no static readin
 it; it is a public setter now. The router holds `RawTermGuard` around every routed
 evaluation. Piped stdin made the REPL testable end to end. `main.rs` 1,233 → 1,192.
 
+## 2026-09-05 (night, IV) — `observe`/`attach` are Brood; the router picks the terminal guard
+
+`require-terminal` (`os/stdout-tty?`) and the cookie precedence moved; the router chooses
+`FullTermGuard` for the two full-screen frontends and `RawTermGuard` otherwise. Trap: a
+`then_some(Guard)` constructs and immediately drops the unwanted guard, and `FullTermGuard`'s
+drop writes the teardown escapes — every command's output grew a `[?25h…[?1049l` tail until
+it became `then(|| …)`. `main.rs` 1,192 → 1,054.
+

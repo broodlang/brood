@@ -46,7 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
-    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, fetch, update, tree, add, remove, publish, search, key, ws, repl — `nest <command> --help`.",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, fetch, update, tree, add, remove, publish, search, key, ws, repl, observe, attach — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -127,46 +127,6 @@ enum Cmd {
     /// read docs against this project's live image (ADR-036, docs/mcp.md).
     /// Errors if cwd is not inside a Brood project.
     Mcp,
-
-    /// Open a live process observer — a full-screen TUI listing processes and
-    /// their status / mailbox / memory (an Erlang-observer-style view, ADR-046).
-    ///
-    /// With no `--connect`: a standalone demo over a fresh runtime's own (seeded)
-    /// processes. With `--connect name@host:port`: **remote attach** — observe a
-    /// *running* program over the node link (it must have called `node-start` +
-    /// `observe-serve`); the cookie comes from `--cookie` or `$BROOD_COOKIE`
-    /// (ADR-053). Press `q` / Esc / Ctrl-C to quit.
-    Observe {
-        /// Attach to a running peer node `name@host:port` instead of the local
-        /// demo (the target must have called `observe-serve`).
-        #[arg(long = "connect", value_name = "NODE")]
-        connect: Option<String>,
-
-        /// Shared cookie authenticating the link (must match the target's). Falls
-        /// back to `$BROOD_COOKIE`; required when `--connect` is given.
-        #[arg(long = "cookie", value_name = "COOKIE")]
-        cookie: Option<String>,
-    },
-
-    /// Attach this terminal to a `ui-run` app served by a running daemon — the
-    /// `emacsclient` to its `--daemon` (ADR-090). The daemon's app renders here and
-    /// this terminal's keys drive it; the app's model lives on the daemon, so several
-    /// terminals can attach at once.
-    ///
-    /// SPEC is the served node: a bare `name` over the local Unix socket (e.g. a
-    /// `nest run --name ed app.blsp` that called `(serve …)`), or `name@host:port`
-    /// over TCP. The cookie comes from `--cookie` or `$BROOD_COOKIE`, else the shared
-    /// `~/.config/brood/cookie`. Press the app's own quit key to detach.
-    Attach {
-        /// The served node to attach to: `name` (local Unix socket) or `name@host:port`.
-        #[arg(value_name = "SPEC")]
-        spec: String,
-
-        /// Shared cookie authenticating the link (must match the daemon's). Falls
-        /// back to `$BROOD_COOKIE`, then the shared cookie file.
-        #[arg(long = "cookie", value_name = "COOKIE")]
-        cookie: Option<String>,
-    },
 
     /// Bundle the project into a single self-contained executable (ADR-038).
     ///
@@ -323,6 +283,8 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
     "key",
     "ws",
     "repl",
+    "observe",
+    "attach",
 ];
 
 /// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
@@ -419,11 +381,19 @@ fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
         ensure_stdimage_now(&mut interp);
     }
     let code = format!("(nest/main {})", blsp_string_list(&argv));
-    // `nest repl`'s line editor enters raw mode; its own `term-raw-leave` is the normal
-    // teardown, and this guard restores the terminal on a panic unwind. Scoped so it drops
-    // before the exit (`process::exit` skips Drop); a no-op for every other subcommand.
+    // Terminal guards for a panic unwind, scoped so they drop before the exit
+    // (`process::exit` skips Drop) and no-ops for a subcommand that never touches the
+    // terminal. `observe`/`attach` draw full-screen and need the full teardown
+    // (`FullTermGuard`: alternate screen + cursor); `repl`'s line editor only enters raw
+    // mode and must NOT emit those escapes onto a pipe (`RawTermGuard`). The Brood side's
+    // own `term-leave`/`term-raw-leave` is the normal teardown; restore is idempotent.
+    let full_screen = matches!(argv.first().map(String::as_str), Some("observe" | "attach"));
     let result = {
-        let _guard = RawTermGuard;
+        // `then`, not `then_some`: the latter builds its value eagerly and DROPS the
+        // unwanted one on the spot — and a dropped `FullTermGuard` emits the teardown escapes
+        // onto every command's stdout (seen as `[?25h[?1049l` after `nest check`).
+        let _full = full_screen.then(|| FullTermGuard);
+        let _raw = (!full_screen).then(|| RawTermGuard);
         run_for_value(&mut interp, &code)
     };
     if let brood::core::value::Value::Int(code) = result {
@@ -496,14 +466,6 @@ fn run_main(cli: Cli) {
             require_project("mcp", None);
             cmd_mcp(&mut interp)
         }
-        Cmd::Observe { connect, cookie } => {
-            require_terminal("observe");
-            cmd_observe(&mut interp, connect, cookie)
-        }
-        Cmd::Attach { spec, cookie } => {
-            require_terminal("attach");
-            cmd_attach(&mut interp, spec, cookie)
-        }
         Cmd::Release {
             output,
             runtime,
@@ -562,88 +524,6 @@ fn cmd_mcp(interp: &mut Interp) {
     run(interp, bootstrap);
     if let Err(e) = mcp::run(interp) {
         eprintln!("nest mcp: {e}");
-        std::process::exit(1);
-    }
-}
-
-/// `nest observe` — the process observer TUI (ADR-046, the M3 display seam). Runs
-/// the Brood observer loop in the root process (so its blocking key-poll blocks
-/// only this thread, never a scheduler worker running the observed processes).
-fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<String>) {
-    // Pick the bootstrap: a remote attach (`--connect`) or the standalone demo.
-    // For remote, resolve the cookie (--cookie → $BROOD_COOKIE → error) and connect
-    // — `observe-connect` dials the peer *before* taking the terminal, so a bad
-    // host / wrong cookie surfaces as a clean error with the screen never entered.
-    let boot = match connect {
-        Some(spec) => {
-            // Cookie precedence: --cookie → $BROOD_COOKIE → (node-cookie). The
-            // first two are resolved here; when neither is set we omit the arg
-            // and `observe-connect` falls back to the shared cookie file itself
-            // (ADR-068), so a matching local setup needs no flag.
-            let cookie = cookie
-                .or_else(|| std::env::var("BROOD_COOKIE").ok())
-                .filter(|c| !c.is_empty());
-            // `spec`/`cookie` are user input — `call_form` embeds them as escaped
-            // string literals so they can't break out of the call.
-            let args: Vec<&str> = match &cookie {
-                Some(c) => vec![&spec, c],
-                None => vec![&spec],
-            };
-            format!(
-                "(require-one 'observer) {}",
-                brood::introspect::call_form("observer/observe-connect", &args)
-            )
-        }
-        None => {
-            // `--cookie` only authenticates a link, and the local demo makes none.
-            // Say so rather than accepting a flag that does nothing — the same
-            // "warn rather than ignore silently" rule `nest run --main` follows.
-            if cookie.is_some() {
-                eprintln!("nest observe: --cookie is ignored without --connect (the local demo opens no link)");
-            }
-            "(observer/observe-run)".to_string()
-        }
-    };
-    // The guard restores the terminal on a panic unwind; the inner scope drops it
-    // (restoring) before any error is reported and we exit — `process::exit`
-    // skips Drop. On the normal `q` path the Brood `term-leave` already restored;
-    // the guard's second restore is idempotent.
-    let result = {
-        let _guard = FullTermGuard;
-        interp.eval_str(&boot)
-    };
-    if let Err(e) = result {
-        report_error(&e);
-        std::process::exit(1);
-    }
-}
-
-/// `nest attach SPEC` — the thin `emacsclient`-style frontend (ADR-090). Connects to
-/// the daemon serving a `ui-run` app and runs `editor/serve/attach`, which paints the
-/// pushed frames + ships back keys. Same shape as `cmd_observe`: resolve the cookie
-/// (`--cookie` → `$BROOD_COOKIE` → the shared cookie file), connect *before* taking
-/// the terminal (so a bad spec / wrong cookie is a clean error, screen untouched),
-/// and run under a `FullTermGuard` that restores the terminal on a panic unwind.
-fn cmd_attach(interp: &mut Interp, spec: String, cookie: Option<String>) {
-    let cookie = cookie
-        .or_else(|| std::env::var("BROOD_COOKIE").ok())
-        .filter(|c| !c.is_empty());
-    // `spec`/`cookie` are user input — `call_form` embeds them as escaped string
-    // literals so they can't break out of the call.
-    let args: Vec<&str> = match &cookie {
-        Some(c) => vec![&spec, c],
-        None => vec![&spec],
-    };
-    let boot = format!(
-        "(require-one 'editor/serve) {}",
-        brood::introspect::call_form("editor/serve/attach", &args)
-    );
-    let result = {
-        let _guard = FullTermGuard;
-        interp.eval_str(&boot)
-    };
-    if let Err(e) = result {
-        report_error(&e);
         std::process::exit(1);
     }
 }
@@ -1135,24 +1015,6 @@ fn positional_possible_values(subcommand: &str) -> Option<Vec<String>> {
         .map(|v| v.get_name().to_string())
         .collect();
     (!values.is_empty()).then_some(values)
-}
-
-/// Reject a full-screen TUI subcommand when stdout isn't a terminal.
-///
-/// `nest observe` / `nest attach` drive an alternate-screen TUI. Piped or
-/// redirected, the terminal primitives fail deep inside the render loop and the
-/// user got `runtime error: terminal: No such device or address (os error 6)` with
-/// an `at editor/ui/ui-run` frame — technically true, and useless. Say the actual
-/// problem before anything is started.
-fn require_terminal(command: &str) {
-    use std::io::IsTerminal;
-    if std::io::stdout().is_terminal() {
-        return;
-    }
-    eprintln!("nest {command}: needs an interactive terminal — stdout is not a tty.");
-    eprintln!("  It draws a full-screen view, so it can't be piped or redirected.");
-    eprintln!("  To capture output for a test, run it under a pty: script -qec 'nest {command}' /dev/null");
-    std::process::exit(2);
 }
 
 /// Guard a project-scoped subcommand at the `nest` boundary.

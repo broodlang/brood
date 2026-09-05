@@ -99,13 +99,14 @@ Concretely:
   should ultimately be Brood**, with Rust only hosting the thinnest necessary
   substrate. (The REPL already moved into Brood — `std/tool/repl.blsp`, ADR-048;
   the binaries just bootstrap into `(repl-run)`. The `nest` CLI dispatch is moving the
-  same way — `std/tool/nest.blsp` owns twenty-one subcommands (ADR-322): `doc`, `docs`,
+  same way — `std/tool/nest.blsp` owns twenty-three subcommands (ADR-322): `doc`, `docs`,
   `doctest`, `grammar`, `format`, `check`, `test`, `run`, `new`, `update-tooling`, `rename`
   and the package manager (`fetch`, `update`, `tree`, `add`, `remove`, `publish`, `search`,
-  `key`, `ws`) and `repl`; `main.rs` routes a name in its `BLSP_SUBCOMMANDS` there before
-  clap runs and deletes the Rust arm. Still Rust: `completions`/`complete`, `mcp`,
-  `observe`, `attach`, `release`, `gen` — and `stdimage`, which must build from a process
-  where nothing but the prelude is loaded, and the dispatcher is a std module (KI-112).)
+  `key`, `ws`), `repl`, `observe` and `attach`; `main.rs` routes a name in its
+  `BLSP_SUBCOMMANDS` there before clap runs and deletes the Rust arm. Still Rust:
+  `completions`/`complete`, `mcp`, `release`, `gen` — and `stdimage`, which must build from
+  a process where nothing but the prelude is loaded, and the dispatcher is a std module
+  (KI-112).)
 - A Rust builtin is an admission that the language can't yet express something.
   Treat each one as a candidate to later replace with Brood once the language
   is capable enough.

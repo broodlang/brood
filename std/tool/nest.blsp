@@ -182,7 +182,15 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
          :run (fn (o) (run-ws o))}
    "repl" {:about "Start a REPL. Inside a project every source file is pre-loaded and the prompt starts in the project's main namespace, so its functions are callable bare; outside one, the plain language REPL (`brood` would do the same). Ctrl-D exits."
            :flags {}
-           :run (fn (o) (run-repl o))}})
+           :run (fn (o) (run-repl o))}
+   "observe" {:about "Open a live process observer — a full-screen TUI of processes, status, mailbox and memory (Erlang-observer style, ADR-046). With no `--connect`, a standalone demo over a fresh runtime's own processes; with `--connect name@host:port`, attach to a RUNNING program over the node link (it must have called `node-start` + `observe-serve`). `q`/Esc/Ctrl-C quits."
+              :flags {"--connect" "NODE" "--cookie" "COOKIE"}
+              :run (fn (o) (run-observe o))}
+   "attach" {:about "Attach this terminal to a `ui-run` app served by a running daemon — the `emacsclient` to its `--daemon` (ADR-090). SPEC is the served node: a bare `name` over the local Unix socket, or `name@host:port` over TCP. The cookie comes from `--cookie`, `$BROOD_COOKIE`, else the shared `~/.config/brood/cookie`. The app's own quit key detaches."
+             :flags {"--cookie" "COOKIE"}
+             :positional ["spec" nil]
+             :arity 1
+             :run (fn (o) (run-attach o))}})
 
 ;; Short flags are aliases; canonicalise on parse so handlers read one spelling.
 (def- *short-aliases* {"-c" "--check" "-o" "--out" "-t" "--template"})
@@ -919,6 +927,55 @@ had configured."
       (eputs "nest repl — no project.blsp here; plain REPL (`brood` would do the same)"))
     (repl/run)
     0))
+
+;; `nest observe` / `nest attach` — the full-screen frontends -------------------------
+
+(defn- require-terminal (cmd)
+  "A full-screen TUI cannot be piped or redirected: say so at the boundary (exit 2) instead
+of failing deep in the render loop with `terminal: No such device or address (os error 6)`
+and an `editor/ui/ui-run` frame — technically true, and useless."
+  (if (os/stdout-tty?)
+    true
+    (do
+      (eputs "nest " cmd ": needs an interactive terminal — stdout is not a tty.")
+      (eputs "  It draws a full-screen view, so it can't be piped or redirected.")
+      (eputs "  To capture output for a test, run it under a pty: script -qec 'nest "
+        cmd "' /dev/null")
+      false)))
+
+(defn- link-cookie (flag)
+  "Cookie precedence for a node link: `--cookie`, then a non-empty `$BROOD_COOKIE`, else nil —
+and nil means the connect function falls back to the shared cookie file itself (ADR-068),
+so a matching local setup needs no flag."
+  (let (env (os/env "BROOD_COOKIE"))
+    (or flag (if (and env (not (= env ""))) env nil))))
+
+(defn- run-observe (o)
+  (let (flags (get o :flags)
+        connect (get flags "--connect")
+        cookie (link-cookie (get flags "--cookie")))
+    (cond
+      (not (require-terminal "observe")) 2
+      ;; Remote attach: `observe-connect` dials the peer BEFORE taking the terminal, so a bad
+      ;; host or wrong cookie is a clean error with the screen never entered.
+      connect
+        (do
+          (if cookie (observer/observe-connect connect cookie) (observer/observe-connect connect))
+          0)
+      else
+        (do
+          ;; `--cookie` only authenticates a link, and the local demo makes none — say so
+          ;; rather than accept a flag that does nothing.
+          (when (get flags "--cookie")
+            (eputs "nest observe: --cookie is ignored without --connect (the local demo opens no link)"))
+          (observer/observe-run)
+          0))))
+
+(defn- run-attach (o)
+  (let (spec (first (get o :positionals)) cookie (link-cookie (get (get o :flags) "--cookie")))
+    (if (require-terminal "attach")
+      (do (if cookie (editor/serve/attach spec cookie) (editor/serve/attach spec)) 0)
+      2)))
 
 ;; ── entry points ─────────────────────────────────────────────────────────────────────
 
