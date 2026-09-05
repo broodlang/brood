@@ -6441,6 +6441,19 @@ uses ADR-307's argument order and fails on the 0.19.1 binary.
 
 **Related.** KI-100 (resolved as filed; this is its residual), ADR-313, ADR-314.
 
+
+> **Correction to lever 3 above (2026-09-05).** "`BROOD_XADMIT=1` … noise" was not a
+> measurement of admitting `row-sum`: hot admission declines that arm for having an inline
+> variant, and independently on the frame cap (8 against its nslots=14), so both sides of the
+> A/B ran identical code. `BROOD_JIT_BAIL_TRACE=1` now reports what admission did with a
+> refused arm, so a lever that skips the case under test says so instead of reading as "no
+> effect". Nothing about this entry's closure changes — lead 1 closed it.
+>
+> **Lead 2's deciding clause is isolated** — `docs/compute-frontier.md` §7.9. It is the
+> float-slot carve-out and nothing else in the gate, shown by changing one thing (the same
+> arm lowers with an int accumulator), and the carve-out's premise moved when lead 1
+> landed. No numbers: benchmarks were not available to that session.
+
 ## KI-108 — the lazy-arm crash-report test slept a fixed 500 ms and lost once under load ✅ FIXED 2026-09-04
 
 **Symptom.** One run of the cli crate under a full-suite load (`-j1`, 2026-09-04 night):

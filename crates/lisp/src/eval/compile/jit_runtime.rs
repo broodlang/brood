@@ -396,12 +396,21 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                         // BAILED path installs it. `inline_queued` is the once latch;
                         // `dtx_bg` (not `JIT_COMPILER.deferred`) because this thread
                         // starts inside that LazyLock's initializer.
+                        // Say whether hot admission fired, and if not, which condition
+                        // refused. Without this the lever is unfalsifiable: an arm it
+                        // silently declines makes both sides of an A/B run identical code
+                        // and the result reads as "no effect" — which is how KI-109 came to
+                        // record lever 3 as *measured noise* for `row-sum`, an arm whose
+                        // frame (nslots=14) the cap (8) had always excluded.
+                        if xadmit_enabled() {
+                            xadmit_trace(arm, inlined);
+                        }
                         if !inlined
                             && xadmit_enabled()
                             && arm.inline_name.is_none()
                             && arm.leaf.is_none()
                             && arm.dbg_name.is_some()
-                            && arm.nslots <= XCALL_RELOWER_MAX_NSLOTS
+                            && arm.nslots <= xadmit_max_nslots()
                             && crate::eval::compile::jit_plan::codegen::plan_general_lowering(
                                 arm, slot_tags,
                             )
@@ -910,6 +919,66 @@ const XCALL_RELOWER_MAX_NSLOTS: usize = 8;
 fn xadmit_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BROOD_XADMIT").is_some_and(|v| v == "1"))
+}
+
+/// Name what hot admission did with this arm, under `BROOD_JIT_BAIL_TRACE=1`.
+///
+/// The complement of `trace_bail`: that says an arm was refused the general lowering, this
+/// says whether the §7.1 experiment then picked it up. Reported per refused condition rather
+/// than as one boolean, because "declined" and "admitted and still no faster" are opposite
+/// findings that an A/B cannot tell apart from the outside.
+#[cfg(feature = "jit")]
+fn xadmit_trace(arm: &std::sync::Arc<CompiledArm>, inlined: bool) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
+        return;
+    }
+    let name = arm
+        .dbg_name
+        .map(crate::core::value::symbol_name_ref)
+        .unwrap_or("<closure>");
+    let why = if inlined {
+        "declined: inlined body"
+    } else if arm.inline_name.is_some() {
+        "declined: has an inline variant"
+    } else if arm.leaf.is_some() {
+        "declined: leaf-spliced"
+    } else if arm.dbg_name.is_none() {
+        "declined: closure (not a named defn)"
+    } else if arm.nslots > xadmit_max_nslots() {
+        "declined: frame over BROOD_XADMIT_MAX_NSLOTS"
+    } else {
+        "admitted"
+    };
+    eprintln!(
+        "[jit-xadmit] arm={name} nslots={} cap={} {why}",
+        arm.nslots,
+        xadmit_max_nslots()
+    );
+}
+
+/// The frame cap hot admission applies, overridable by `BROOD_XADMIT_MAX_NSLOTS`.
+///
+/// **Why this is a knob and not a constant.** `BROOD_XADMIT=1` exists to answer "is admitting
+/// a gate-refused named defn worth it?", and KI-109 records the answer for `mandelbrot`'s
+/// `row-sum` as *noise*. That measurement could not have been about `row-sum`: its frame is
+/// **nslots=14** and this cap is 8, so the arm was never admitted and both arms of the A/B ran
+/// identical code. A lever that silently declines the case under test reports "no difference"
+/// for the one reason that cannot be distinguished from "no effect" — the same shape as a gate
+/// that passes because it scanned nothing.
+///
+/// The default is unchanged, so no ordinary run is affected; raising it is how the experiment
+/// is actually run. It stays capped by the caller's other conditions, and an unparseable value
+/// keeps the default rather than uncapping (`BROOD_L1_BUDGET`'s rule, for its reason).
+#[cfg(feature = "jit")]
+fn xadmit_max_nslots() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("BROOD_XADMIT_MAX_NSLOTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(XCALL_RELOWER_MAX_NSLOTS)
+    })
 }
 
 /// The suspend-host latch resolution for a fast link whose callee dirty-blocked its

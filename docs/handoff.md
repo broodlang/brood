@@ -11,6 +11,42 @@ State when written: `main` = `5f2c89e6`, pushed, CI green on the previous tip; n
 `known-issues.md`; the tree-walker→VM router is default-ON (ADR-318). Pick items **in order**.
 One item per session is fine. Each item says what to do, how to verify, and what "done" means.
 
+> ## Status 2026-09-05 — items 1–3 are DONE; read this before picking from the queue above
+>
+> `main` = `5430d071`, pushed, CI green on the previous tip. **No open bug in
+> `known-issues.md`**: KI-106 fixed, KI-109 closed, KI-100 resolved as filed. Three watch items
+> remain (KI-80, KI-88 archived-dormant, KI-107).
+>
+> - **Item 1 — DONE (ADR-319).** The catalogue is now gated in BOTH directions;
+>   `debug_flags::tests::every_runtime_flag_is_catalogued` fails if the runtime reads a flag the
+>   table omits. It caught a new knob this session, so it is live, not decorative.
+> - **Item 2 — DONE.** ADR-314's prelude image is **default ON** (`01be4cba`, third attempt),
+>   opt out with `BROOD_NO_PRELUDE_IMAGE=1`. The two reverts before it were KI-105 and KI-106,
+>   both fixed and gated.
+> - **Item 3 — DONE.** KI-79 and KI-80 were resolved; only their index rows had lagged
+>   (`96477c4e`). Neither carries ⚠️.
+>
+> **Open threads, in the order I would take them:**
+>
+> 1. **ADR-320 — side facts by journal, not by checklist. PROPOSED, nothing implemented.** The
+>    real fix for the class that produced KI-72, KI-84, KI-89's residual, KI-105 and KI-106:
+>    five facts an image must carry live in five hand-written blocks, each added after a bug,
+>    one annotated "found the same way — late". Derive them from a journal so an unencoded kind
+>    is a *compile error* rather than a silent omission surfacing in another subsystem. Its gate
+>    (ADR-321) now exists, so it can land behind it. Step 1 alone adds an abstraction nothing
+>    uses — decide whether to do 1–3 together.
+> 2. **KI-107 — the `eval_server_test` `:all` flake, ~5-8% standalone.** TWO candidate fixes
+>    were measured and refuted (2/25 → 3/60 quiescing isolated steps; 4/80 with a per-test
+>    session baseline); both reverted. Evidence points at a concurrent `debug/untrace-all`
+>    stripping a wrapper mid-run. The next candidate is a per-process trace registry, which
+>    `eval-server` relies on being shared — a design change, not a patch.
+> 3. **`compute-frontier.md` §7.9 — lead 2, unmeasured but now measurable.** Needs a machine
+>    where `make ab --floor` and `perf stat` are fair game; benchmarks are not run on the dev
+>    box this was written from.
+>
+> **One housekeeping note:** `360eae0c` is unsigned (the 1Password agent locked mid-session);
+> everything around it is signed.
+
 ### Rules that apply to every item (they are all in CLAUDE.md; these are the ones that bite)
 
 1. **Green first.** Before starting: `make green --local` must print `green`. If it says the
@@ -40,7 +76,7 @@ One item per session is fine. Each item says what to do, how to verify, and what
    this was written); a KI row in `docs/known-issues.md` for a bug (the number after the
    highest existing row — 101 when this was written); update this file's top addendum.
 
-### Item 1 — Retire and catalogue the environment flags (cheap, reduces surface)
+### Item 1 — Retire and catalogue the environment flags ✅ DONE 2026-09-04 (ADR-319)
 
 **Why.** The runtime reads 96 `BROOD_*` variables; the catalogue in
 `crates/lisp/src/debug_flags.rs` lists 60. Twenty are `BROOD_NO_*` opt-outs of defaults that
@@ -63,7 +99,7 @@ have held for weeks.
 `make green --local`, then clippy: `cargo clippy --all-targets --all-features -- -D warnings`.
 **Done when** the two counts match and the new test is in.
 
-### Item 2 — Decide ADR-314's default: the prelude image (39% of startup)
+### Item 2 — Decide ADR-314's default: the prelude image ✅ DONE 2026-09-04 — default ON (`01be4cba`)
 
 **Why.** `BROOD_PRELUDE_IMAGE=1` cuts an empty `brood file` run from 13.5 to 8.3 ms. It shipped
 default-on once and was reverted the same day; the fix is in, the differential
@@ -88,7 +124,7 @@ makes the run silently take the source path. Check `(stdimage/status)` reports `
 believing any measurement. **Done when** the suite, the differential, bedit and the A/B are
 green with the flag defaulted on.
 
-### Item 3 — Re-read the two remaining watch rows: KI-79 and KI-80
+### Item 3 — Re-read the two remaining watch rows: KI-79 and KI-80 ✅ DONE 2026-09-04 (`96477c4e`)
 
 **Do.** In `docs/known-issues.md`, find the index rows for KI-79 and KI-80 (still marked ⚠️)
 and their sections. For each: try the recorded repro 10× on the current binary. Either (a) it
@@ -1718,7 +1754,35 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
 
 ## 6. Traps — every one of these cost real time
 
+**Experiments that decline their own subject** (2026-09-05, and this is the sharpest one here)
+
+- **A lever with no signal reports the null result you were trying to rule out.** KI-109 and
+  KI-100 both priced `BROOD_XADMIT=1` on `mandelbrot`'s `row-sum` and recorded *noise*. Hot
+  admission cannot reach that arm: it is declined for having an inline variant, and
+  independently by a frame cap of 8 against its `nslots=14`. Both sides of the A/B ran
+  identical code, so "no difference" meant "the experiment did not run" — indistinguishable
+  from "no effect", and recorded as evidence for a year of decisions. `BROOD_JIT_BAIL_TRACE=1`
+  now prints `[jit-xadmit] arm=… declined: <condition>` for exactly this reason. **Before
+  believing any A/B of an opt-in lever, confirm the lever FIRED on the case you care about.**
+  Same family as the gate that passes because it scanned nothing, and as
+  `stdimage_reporting`'s rule that a line which can only print one value is worse than none.
+- **A fix needs its own denominator.** Two KI-107 candidates each passed the suite on the first
+  run after being built, and each was refuted by measurement (2/25 baseline → 3/60, then 4/80).
+  At a 5-8% flake rate one green run is not evidence in either direction — for the bug OR for
+  the fix.
+- **A probe that raises inside a `try` reads as a 100% failure rate.** `os/getenv` does not
+  exist (it is `%getenv`); the resulting unbound-symbol error was swallowed by
+  `eval-capturing`'s own catch, and two "reproduced on run 1" readings were the probe, not the
+  bug. Related: `eval-capturing` wraps its run in `%capture-begin`, so a probe *inside* the run
+  lands in the result's `:output` and never reaches the terminal — the first version printed
+  nothing and the silence read as "this code never runs".
+
 **Proving green**
+
+- **`nest format --check` is the `.blsp` formatter and says nothing about Rust.** `cargo fmt
+  --all --check` is its own CI job. A hand-assembled gate list missed it on 2026-09-05 and CI
+  caught it; `make green` runs both, which is why CLAUDE.md says to use `make green` rather
+  than assembling the list yourself.
 
 - **A red under `BROOD_GC_STRESS` is not automatically a bug — check *which* assertion fired.**
   Collecting at every safepoint changes scheduling, not just speed, so a *liveness* assertion can
