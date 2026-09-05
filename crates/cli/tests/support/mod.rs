@@ -440,6 +440,28 @@ thing worth catching (an imaged boot that records none takes stdlib `M-.` down).
         (->string [(nth parts (- (count parts) 1)) (nth l 1) (nth l 2)])))))
 
 (io/puts "REGISTRIES " (->string (%registry-names)))
+;; The SIDE-FACT JOURNAL (ADR-320) — every fact the evaluation recorded ABOUT a name rather
+;; than bound to it, rendered one per line by the kernel. Printed wholesale rather than
+;; field-by-field on purpose: the per-global lines below are a hand-listed set of attributes,
+;; which is the same shape of hand-maintained list the journal removed from the image writer,
+;; and it had already gone stale — `meta` (ADR-283) has been carried since ADR-314 and
+;; compared by nothing. A new fact kind now enters this comparison with no change here.
+;;
+;; Restricted to facts about a name this boot actually BOUND, and the reason is a real
+;; divergence rather than a convenience. A stdlib image re-marks **every** `defdyn` in the
+;; whole image at index-install time, before any section loads — deliberately, because a
+;; section may be materialised at any moment and the mark has to precede it
+;; (`startup_image.rs`, the v5 directory footer). So an imaged boot carries dynamic marks for
+;; ~49 names in modules it never loaded (`*project-name*`, `*repl-prompt*`, `*test-filter*`),
+;; and a boot with no artifacts does not. That difference is intended, documented and
+;; monotonic, and it is invisible to the per-global lines below because those iterate bound
+;; names only. Comparing UNBOUND facts would therefore fail the matrix on a design decision
+;; instead of on a defect. What must still match exactly — and does — is every fact about a
+;; name the boot bound, which is the whole of the state a program can observe.
+(let (facts (filter (%side-facts)
+              (fn (f) (bound? (symbol (nth (string/split f " ") 1))))))
+  (io/puts "FACTS " (count facts))
+  (doseq (f facts) (io/puts f)))
 (let (names (sort (reflect/global-names)))
   (io/puts "GLOBALS " (count names))
   (doseq (n names)
