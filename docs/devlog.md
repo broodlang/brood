@@ -10882,6 +10882,22 @@ carries the sha): `startup` −18.2%, `sort` −7.6%, `fib` −4.2%, `bintree` �
 row, not a suite regression. `json` cannot be A/B'd against the old binary (ADR-307's argument
 order); the harness called the baseline program broken rather than slow, which is right.
 
+## 2026-09-05 — KI-109 measured: where the 3% lives, three levers priced, two leads
+
+Symbolized and `perf-stats` builds of both the 0.19.1-column binary and HEAD, same session.
+The tree-walker's 7.8% share of icache misses is ~0.6% of cycles — cold code evicted and
+re-fetched, i.e. layout, as KI-100 said. The one new piece of real work is `Heap::push_root`
+at 2.5% of cycles (the baseline's `Vec::push` inlined by being generic). `#[inline]` on the
+wrappers was NEGATIVE (misses 80 → 130 M, cycles flat: more code at every call site).
+`codegen-units = 1` on `release-fast` is real — cycles back to the baseline's 9.75 G, wall
+−2.0% on a −0.2% floor — but under the 5% bar and worth ~3 min on every incremental release
+build, so not adopted. `BROOD_XADMIT` is noise, as KI-100 found. Two leads recorded in KI-109:
+`->float` (`(* 1.0 x)`) deopt-thrashes to BAILED on an int argument in every program that
+converts, and `row-sum`'s `call-mediated-boxed` bail makes the row a VM↔native round trip per
+pixel. One correction to my own method along the way: a "HEAD vs base" `perf stat` pair must be
+built by the same recipe — I nearly compared a `make release` binary with a `make release-brood`
+one before checking the sizes matched (they did, 42 512 352 bytes both; the lean/full split is
+`nest`'s, not `brood`'s).
 ### 2026-09-05 — the image bugs are all at seams, so stop testing artifacts one at a time
 
 Six known-issue entries and seven ADRs into the startup-image lineage, the pattern is not
