@@ -10972,6 +10972,52 @@ having; for a long-lived process it is noise. ADR-320 records the budget explici
 prelude image has now been reverted twice and shipped three times, and a fourth revert is the
 signal to withdraw the feature rather than patch it again.
 
+### 2026-09-05 — KI-107: two fixes measured, two fixes wrong, and the entry is worth more than either
+
+Picked up the `eval_server_test` `:all` flake I filed yesterday. It reproduces on the current
+tree at a stable ~5-8% standalone — 2/25, then 3/60, then 4/80 — so it is neither rare nor
+load-dependent, and the repo's own rule makes it the work.
+
+Two candidate fixes were built, measured against that baseline, and **reverted**:
+
+1. **Quiesce before every `:isolated` step.** An isolated unit's promise is that it runs
+   alone, and `run-step` awaits its worker but not the processes that worker spawned — and
+   every eval-server child runs `debug/untrace-all` on teardown. Extending upstream's
+   file-boundary reaper to each `:iso` step is a two-line change with a sound argument.
+   3/60 against 2/25: unchanged.
+2. **A per-test session baseline.** `*baseline-globals*` is a `table` — the one structure
+   `%isolate` cannot roll back — and `baseline-globals` is idempotent, so the three `:all`
+   tests share one baseline captured before the first of them. Added a `reset-baseline!`,
+   had each test start its own session. 4/80: unchanged.
+
+Neither is shipped. The second is a genuine API gap (an embedder running several sessions in
+one image cannot express a session boundary) and it would have been easy to land it wearing
+a fix's clothes; it fixes nothing here, so it stays out.
+
+What the instrumentation does show is sharper than the original filing. One request resolved
+`:all` to **seven functions belonging to four different tests**, all traced at once — so the
+coupling is the shared global table, not only the trace registry. In a failing run `trace-fn`
+is refused for a dozen `evsrv-t-*` names from the *other* describe block, each `unbound
+symbol`: present in `reflect/global-names` with no binding, which is the KI-89 shape. And
+there is no refusal for the failing test's own function — its wrapper is installed and then
+lost, which points at a concurrent `debug/untrace-all` stripping it mid-recursion.
+
+The next candidate is a per-process trace registry. It is not a patch: `eval-server`
+deliberately relies on the registry being shared, so that a parent killing a timed-out child
+can untrace on its behalf ("the trace registry is shared globals, so the parent can"). That
+is a change to the tracing model and wants a human.
+
+Two probe traps, both of which cost real time and both of which generalise. `os/getenv` does
+not exist — it is `%getenv` — and a probe that raises inside `eval-capturing` is swallowed by
+that function's own `try`, so a broken probe presents as a **100% failure rate** rather than
+as an error: two "captured on run 1" readings were my own breakage, not the bug. And
+`eval-capturing` wraps its run in `%capture-begin`, so a probe placed inside the run is
+captured into the result's `:output` and never reaches the terminal — the first version
+printed nothing and the absence read as "this code never runs".
+
+The lesson I would keep: with a 5-8% flake, one green run proves nothing and I knew that, but
+a *fix* also needs its own denominator. Both refuted attempts passed the suite on the first
+run after building them.
 ## 2026-09-05 (later) — a float-context arm applied to an int stays native (KI-109, lead 1)
 
 `->float` is `(* 1.0 x)`. The `1.0` puts the arm in float context, so `x` was read through
