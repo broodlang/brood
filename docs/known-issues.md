@@ -6375,6 +6375,42 @@ root handling — RootsBuf's inlined root-stack manipulation (`115faead`) is the
 and §7.5's fatter arms the multiplier. `docs/compute-frontier.md`. Iterate on icache misses, not
 wall time: on this box the counter is stable to <1% where wall needs min-of-N interleaved.
 
+**Measured 2026-09-05 — where the 3% lives, and three levers priced.** Symbolized builds of
+both binaries (`CARGO_PROFILE_RELEASE_FAST_STRIP=false`, separate target dirs) and `perf-stats`
+builds of both, same session, pinned:
+
+- **Both binaries tier `mandelbrot` identically**: `esc` lowers (general lowering, not the
+  scalar worker); `row-sum` **bails** (`call-mediated-boxed`) and runs on the VM; `->float`
+  lowers, deopts 16× and latches BAILED. Per pixel: one native `esc`, two VM calls
+  (`row-sum`→`->float`, `row-sum`→`esc`), ~2.3–2.6 `env_get` with ~3.6 `env_hops`
+  (`n`'s late-bound global reads through the chain), ~0.4 `alloc`. `tw_defer` is ~1.4 k total —
+  boot-shaped, so the tree-walker's 7.8% share of icache *misses* against ~0.6% of *cycles* is
+  cold code being evicted and re-fetched, not extra tree-walking: layout, as this entry says.
+- **The one new piece of real work is `Heap::push_root` at 2.5% of cycles** — absent as a hot
+  symbol on the baseline, whose `Vec<Value>::push` inlined by being generic. HEAD→base counter
+  diff per pixel: `env_get` +0.34, `env_hops` +0.5, `alloc` +0.08, `global_ic_miss` 233 → 1 085.
+- **Lever 1, `#[inline]` on the four `Heap` root wrappers: NEGATIVE.** Cycles flat, icache
+  misses 80 M → ~130 M — more code at each of ~14 VM call sites, which is the footprint
+  mechanism itself. Reverted.
+- **Lever 2, `codegen-units = 1` on `release-fast`: real but under the bar.** perf: cycles
+  10.2 → 9.75 G (the baseline's number), instructions −1.5%. Wall, interleaved pinned
+  best-of-9 with a control-vs-control floor: `mandelbrot` **−2.0% (floor −0.2%)**, `bintree`
+  −1.7%, `nqueens` −0.6%, `startup` +1.2%; `fib` unreadable (its own control swung −12.7%, the
+  turbo-plateau bimodality `brood-benchmarks/CLAUDE.md` describes). Below `max(5%, 2×floor)`,
+  and every incremental `make release` would take ~4 min instead of ~50 s. Not adopted.
+- **Lever 3, `BROOD_XADMIT=1` (admit `row-sum` at the hot stage): noise** — 583/601 and
+  580/565 ms interleaved. Consistent with KI-100's negative measurement of the same switch.
+
+**Two leads worth more than the three levers above, both general:**
+1. **`->float` is `(* 1.0 x)` and deopt-thrashes to BAILED on an int argument** — 16 deopts
+   then interpreted forever, one VM call per pixel here and in every program that converts.
+   A `Prim2 Mul` lowering (or arm specialisation) that handles int×float promotion inline
+   would keep it native. Gate: `BROOD_JIT_BAIL_TRACE=1` shows no `deopt-thrash-latched` for
+   `->float`, and `jit_deopt` reads 0 in `perf-stats`.
+2. **`row-sum` bails `call-mediated-boxed`** on both binaries, so the row's hot loop is a
+   VM↔native round trip per pixel; the profitability gate exists for a measured reason
+   (§7.5, `BROOD_XADMIT`), so the lever is the call convention it prices, not the gate.
+
 **Gate.** `make ab BASE=8a2aaa01 ARGS=--floor ROWS=mandelbrot` closes it at ≤ the floor; the
 `perf stat` table above is the diagnostic. Keep `json` out of that A/B — its benchmark program
 uses ADR-307's argument order and fails on the 0.19.1 binary.
