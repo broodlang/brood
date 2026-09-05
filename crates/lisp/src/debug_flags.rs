@@ -144,7 +144,7 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_JIT_BAIL_TRACE",
         JIT,
-        "name each arm the profitability gate refuses, and why — the complement of DUMP_IR",
+        "name each arm the profitability gate refuses, and why — the complement of DUMP_IR. Also reports what HOT ADMISSION (BROOD_XADMIT=1) then did with a refused arm (`[jit-xadmit] … admitted` / `declined: …`), which is the difference between a lever that ran and one that silently skipped the case under test",
     ),
     f(
         "BROOD_DEOPT_TRACE",
@@ -251,6 +251,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "BROOD_XADMIT",
         JIT,
         "=1: admit profitability-gate-refused named defns at the HOT stage (deferred compile, inline call blob, frame cap). Measured NEGATIVE 2026-08-31 — nqueens +7.6% cycles, pipeline +7.6%: a call-dominated boxed arm is better interpreted even on the cheapest native call path we have. Kept as the one-env-var re-test for when the call convention changes (§7.5 increment 4)",
+    ),
+    f(
+        "BROOD_XADMIT_MAX_NSLOTS",
+        JIT,
+        "=N: the frame cap hot admission (BROOD_XADMIT=1) applies, default 8. Raise it to reach an arm the experiment would otherwise decline silently — mandelbrot's `row-sum` is nslots=14, so every A/B of the lever on that row compared identical code. Not the only condition: `row-sum` is ALSO declined for having an inline variant, which `BROOD_JIT_BAIL_TRACE=1` now says out loud",
     ),
     f(
         "BROOD_MONO",

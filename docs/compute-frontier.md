@@ -1664,6 +1664,39 @@ run benchmarks on its machine, so what is recorded here is a bail-trace and IR-d
 diagnosis — which clause fires, and that its premise changed — and not evidence that
 admitting `row-sum` is faster. Anyone taking it forward starts by measuring, not by
 implementing.
+**Lever 3 never tested this arm — the record is wrong, and now it says so.** KI-109 prices
+"`BROOD_XADMIT=1` (admit `row-sum` at the hot stage): **noise** — 583/601 and 580/565 ms
+interleaved", and KI-100 recorded the same. Hot admission cannot reach `row-sum` at all. Asked
+directly (`BROOD_XADMIT=1 BROOD_JIT_BAIL_TRACE=1`, this session):
+
+```
+[jit-xadmit] arm=row-sum nslots=14 cap=8  declined: has an inline variant
+[jit-xadmit] arm=row-sum nslots=14 cap=16 declined: has an inline variant
+```
+
+Two independent conditions exclude it — `arm.inline_name.is_some()`, and the frame cap, which
+is **8** against this arm's **nslots=14**. Both arms of that A/B ran identical code, so the
+measurement is a control-vs-control: "no difference" for the one reason indistinguishable from
+"no effect". The same shape as a gate that passes because it scanned nothing.
+
+**What was added so this cannot recur.** A lever with no signal is unfalsifiable, and that is
+the actual defect here — bigger than the clause it was hiding:
+
+- `BROOD_JIT_BAIL_TRACE=1` now also reports what hot admission did with a refused arm
+  (`[jit-xadmit] arm=… nslots=… cap=… admitted` / `declined: <which condition>`). One line
+  answers what cost this session an hour of inference.
+- `BROOD_XADMIT_MAX_NSLOTS=N` overrides the frame cap (default 8, unchanged), so the
+  experiment can reach a wider arm once the inline-variant condition is dealt with.
+
+Default behaviour is untouched: with neither variable set the run lowers the same 106 arms and
+prints nothing. Gates green — 28 JIT Rust cases, `jit_effect_once_test`, `tw_reentry_test`, the
+float-promotion guard, and both flag-catalogue directions.
+
+**So the state of lead 2 is: still unmeasured, but now measurable.** Anyone taking it forward
+starts by deciding whether an arm with an inline variant should be admissible at all — that
+condition, not the float-slot clause, is what stops `row-sum` today — and prices it on icache
+misses with `nbody`'s `newvel` and the non-float self-tail loops as the rows to protect.
+
 **Why this is worth keeping even though KI-109 closed.** The finding is about the GATE, not
 about `mandelbrot`: any named self-tail defn that accumulates a float and calls out is
 rejected on a premise that was measured under a runtime where the callee could not stay
