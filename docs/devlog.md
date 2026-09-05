@@ -11039,3 +11039,9 @@ Perf, `make ab BASE=322425b2 --floor`, best-of-7: `mandelbrot` −2.7% (0.5% flo
 `perf stat` then cleared: instructions +0.1%, cycles +0.5%, icache misses **−10%**, tiering
 identical (92 bails, 0 latched, both sides). The wall swing was the box's plateau, not work.
 `mandelbrot` by counter: instructions −1.2%, cycles −0.6%.
+
+**Same morning — KI-109 CLOSED.** The closing gate against `8a2aaa01`, both images live, best-of-9:
+`mandelbrot` 578 → 579 ms, +0.2%. The `->float` promotion was the lever; the icache story was
+the shape of the cost, not its cause. Trap on the way: the new cache prune had evicted the
+0.19.1 baseline's std image between runs, and `ab-bench` refused the asymmetric pair until the
+worktree's own `nest` rebuilt it — five 0.25.2 images and no 0.19.1 one was the tell.
