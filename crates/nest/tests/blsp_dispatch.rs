@@ -417,7 +417,10 @@ fn fixed_arity_positionals_are_required_and_bounded() {
     assert!(err.contains("unexpected argument 'c'"), "{err}");
     let (code, out, _) = nest_in(&dir, &["rename", "--help"]);
     assert_eq!(code, 0);
-    assert!(out.contains("Usage: nest rename [OPTIONS] <OLD> <NEW>"), "{out}");
+    assert!(
+        out.contains("Usage: nest rename [OPTIONS] <OLD> <NEW>"),
+        "{out}"
+    );
     let (code, _, err) = nest_in(&dir, &["rename", "--swap", "--refs-only", "a", "b"]);
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("cannot be used with"), "{err}");
@@ -442,7 +445,10 @@ fn rename_rewrites_references_and_definition_in_a_project() {
     let demo = std::fs::read_to_string(proj.join("src").join("demo.blsp")).expect("demo");
     let main = std::fs::read_to_string(proj.join("src").join("main.blsp")).expect("main");
     assert!(demo.contains("(defn greet"), "the definition:\n{demo}");
-    assert!(!main.contains("(hello") && main.contains("(greet"), "the reference:\n{main}");
+    assert!(
+        !main.contains("(hello") && main.contains("(greet"),
+        "the reference:\n{main}"
+    );
     let (code, out, err) = nest_in(&proj, &["test"]);
     assert_eq!(code, 0, "the renamed project still passes:\n{out}\n{err}");
 }
@@ -480,7 +486,10 @@ fn an_image_built_through_the_dispatcher_restores_every_root_global() {
     // `check` loads `project` FROM THE IMAGE and reaches `record-ns-packages`, which reads
     // the root dynamic `*ns-package*` — unbound, before the fix.
     let (code, out, err) = with_cache(&dir.join("demo"), &["check"]);
-    assert_eq!(code, 0, "check against the dispatcher-built image:\n{out}\n{err}");
+    assert_eq!(
+        code, 0,
+        "check against the dispatcher-built image:\n{out}\n{err}"
+    );
     assert!(
         !err.contains("unbound symbol"),
         "a root global was dropped from the image:\n{err}"

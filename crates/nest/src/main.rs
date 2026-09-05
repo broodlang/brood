@@ -421,8 +421,17 @@ fn main() {
 /// Subcommands implemented in `std/tool/nest.blsp` (ADR-322). Routed there from `main`
 /// before clap runs; listed by `nest complete` beside clap's own; absent from `Cmd`.
 const BLSP_SUBCOMMANDS: &[&str] = &[
-    "doc", "docs", "doctest", "grammar", "format", "check", "test", "run", "new",
-    "update-tooling", "rename",
+    "doc",
+    "docs",
+    "doctest",
+    "grammar",
+    "format",
+    "check",
+    "test",
+    "run",
+    "new",
+    "update-tooling",
+    "rename",
 ];
 
 /// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value

@@ -412,7 +412,12 @@ pub(super) fn bound_p(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
 pub(super) fn prelude_global_p(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Sym(s) => Ok(Value::boolean(heap.is_prelude_global(s))),
-        other => Err(LispError::wrong_type(heap, "%prelude-global?", "symbol", other)),
+        other => Err(LispError::wrong_type(
+            heap,
+            "%prelude-global?",
+            "symbol",
+            other,
+        )),
     }
 }
 
