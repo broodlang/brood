@@ -29,13 +29,15 @@
 //! different routes are not `=`, and the class of defect this guards has never been a wrong
 //! value — it has been a missing name, a lost attribute, or a wrong kind.
 
-//! **Run this against a genuinely empty cache when you change what it compares.** With a
-//! current image on disk `Interp::new()` installs at boot, so the SOURCE arm materialises too
-//! and the two arms can agree by accident — and nextest's own setup script builds an image
-//! before the test starts, so no invocation through nextest can reproduce the cold state. Run
-//! the test binary directly with an empty `XDG_CACHE_HOME` to see what CI sees; that is how
-//! `*std-image-installed*` was found missing from `INSTALL_BOOKKEEPING` (2026-09-04), green
-//! locally on every run and red on the first cold one.
+//! **This test owns its cache, and that is load-bearing.** With a current image on disk
+//! `Interp::new()` installs at boot, so the SOURCE arm materialises too and the two arms
+//! agree *by accident*; nextest's own setup script builds an image before the test starts, so
+//! for as long as this test read the machine's cache it was green locally on every run and
+//! red on the first genuinely cold one — which is how `*std-image-installed*` was found
+//! missing from `INSTALL_BOOKKEEPING` (2026-09-04), by CI rather than by anything here.
+//! Pointing `XDG_CACHE_HOME` at a fresh directory makes both arms well-defined whatever the
+//! machine happens to be holding: the source arm has no image to install, and the image arm
+//! builds its own. A test whose verdict depends on the developer's cache is not a gate.
 
 use brood::Interp;
 
@@ -105,8 +107,21 @@ fn snapshot(install_image: bool) -> String {
     }
 }
 
+/// A private cache directory for this test process, removed and recreated so a previous
+/// run's artifacts cannot decide this one's verdict.
+fn own_the_cache() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("brood-image-differential-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create a private cache dir");
+    // Safe here: nextest runs every test in its own process, and this binary holds one test,
+    // so nothing else is reading the environment concurrently.
+    unsafe { std::env::set_var("XDG_CACHE_HOME", &dir) };
+    dir
+}
+
 #[test]
 fn an_imaged_module_binds_what_its_source_binds() {
+    let cache = own_the_cache();
     let from_source = snapshot(false);
     let from_image = snapshot(true);
     // Name the offenders rather than the byte offset: a diff of ~3000 lines is unreadable,
@@ -126,6 +141,7 @@ fn an_imaged_module_binds_what_its_source_binds() {
             .collect()
     };
     if src == img {
+        let _ = std::fs::remove_dir_all(&cache);
         return;
     }
     let missing = only_in(&src, &img);

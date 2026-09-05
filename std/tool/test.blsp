@@ -1686,6 +1686,20 @@ the exit code still reflects the run. An unknown formatter name is a clean error
 ;; that loaded everything from source because `nest` rebuilt the image on the way in.
 ;; `status` is consulted only on a miss, to say WHICH miss it was; that costs a directory
 ;; listing, which is worth paying exactly when something is already wrong.
+(defn- boot-summary-line ()
+  "How this run's PRELUDE arrived, beside the stdlib-image line and for the same reason: a
+run that cannot say which artifacts it used cannot be compared with another one. The cache
+id embeds the build id, so the first run after any rebuild is a source boot — which is
+exactly when someone is checking whether an image change worked, and exactly when they will
+read the un-imaged path as evidence about the imaged one."
+  (str "  (prelude: "
+    (cond
+      (= (%boot-source) :prelude-image) "image"
+      (= (%boot-source) :boot-cache) "expanded-text cache"
+      (= (%boot-source) :source) "SOURCE — cold boot; this run wrote the artifacts"
+      else "unknown")
+    ")"))
+
 (defn- image-summary-line ()
   (let (n (%std-image-installed))
     (if n
@@ -1742,6 +1756,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
                ")"))
     (io/puts (str "  (" elapsed " ms wall, peak " (mb-str (dev/mem-peak)) ")"))
     (io/puts (image-summary-line))
+    (io/puts (boot-summary-line))
     ;; Echo the seed whenever the order was randomised, so the run can be
     ;; reproduced. Deliberately says "same order", not "replay exactly": the seed
     ;; fixes the order tests are SCHEDULED in, but parallel tests genuinely

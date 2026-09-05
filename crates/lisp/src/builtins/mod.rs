@@ -2767,6 +2767,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         image_write);
     def(
         heap,
+        "%boot-source",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        &[],
+        "How THIS process's prelude arrived, as a keyword: `:prelude-image` (ADR-314), `:boot-cache` (ADR-138's expanded text), or `:source` (a cold boot, which also WRITES the two artifacts). The question every image measurement depends on and none could ask: the cache id embeds the binary's build id, so the first run after any rebuild is a source boot and every later one is not — a developer checking an image fix meets the un-imaged path exactly when they least expect it. Three \"it is fixed\" readings during KI-106 were cold boots, and ADR-314 records the same trap corrupting a diagnosis in a session already caught by it twice.",
+        boot_source);
+    def(
+        heap,
         "%image-index",
         Arity::exact(2),
         Sig::new(vec![any, any], any),
