@@ -181,12 +181,7 @@ fn the_suite_summary_says_how_the_prelude_arrived() {
     // 3. The image declined, so the boot falls back to the expanded-text cache the cold
     //    run also wrote. Distinguishing these two is the point: both are "warm", and only
     //    one of them is exercising ADR-314.
-    let text = run_suite_env(
-        &dir,
-        &cache.path,
-        false,
-        &[("BROOD_NO_PRELUDE_IMAGE", "1")],
-    );
+    let text = run_suite_env(&dir, &cache.path, false, &[("BROOD_NO_PRELUDE_IMAGE", "1")]);
     assert!(
         text.contains("(prelude: expanded-text cache)"),
         "with the prelude image off the boot must name the text cache, not the image:\n{text}"

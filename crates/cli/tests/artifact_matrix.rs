@@ -132,7 +132,10 @@ fn build_stdlib_image(cache: &Path, cell: &Cell, dir: &Path) {
     let mut cmd = base_command(cache, cell);
     // The builder must be able to WRITE the image whatever the cell's read policy is.
     cmd.env_remove("BROOD_NO_STDIMAGE");
-    let out = cmd.arg(&prog).output().expect("run the stdlib image builder");
+    let out = cmd
+        .arg(&prog)
+        .output()
+        .expect("run the stdlib image builder");
     assert!(
         out.status.success(),
         "building the stdlib image failed for {}:\n{}{}",
