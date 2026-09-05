@@ -60,3 +60,31 @@
     (assert= ["tmlanguage" "emacs" "tree-sitter"] (nest/positional-values "grammar"))
     (assert= (list) (nest/positional-values "check"))
     (assert= (list) (nest/positional-values "doc"))))
+
+(describe "nest/parse — typed and repeatable flags (the `test` table)"
+  (test "an :int flag arrives as an int, in range"
+    (let (o (nest/parse "test" ["--seed" "7" "--cover-min" "0" "--partitions=3"]))
+      (assert= nil (get o :error))
+      (assert= 7 (get (get o :flags) "--seed"))
+      (assert= 0 (get (get o :flags) "--cover-min"))
+      (assert= 3 (get (get o :flags) "--partitions"))))
+
+  (test "out of range or not a number is a usage error in clap's words"
+    (is (includes? (get (nest/parse "test" ["--max-failures" "0"]) :error)
+          "invalid value '0' for '--max-failures <N>': 0 is not in 1..="))
+    (is (includes? (get (nest/parse "test" ["--cover-min" "101"]) :error) "101 is not in 0..=100"))
+    (is (includes? (get (nest/parse "test" ["--seed" "x"]) :error)
+          "invalid value 'x' for '--seed <N>': invalid digit found in string")))
+
+  (test "a :repeat flag collects every occurrence, in order"
+    (let (o (nest/parse "test"
+              ["--only" "db" "--only" "test:adds" "--exclude" "slow" "a_test.blsp"]))
+      (assert= nil (get o :error))
+      (assert= (list "db" "test:adds") (get (get o :flags) "--only"))
+      (assert= (list "slow") (get (get o :flags) "--exclude"))
+      (assert= (list "a_test.blsp") (get o :positionals))))
+
+  (test "a plain valued flag keeps the last value"
+    (assert= "json"
+      (get (get (nest/parse "test" ["--formatter" "tap" "--formatter" "json"]) :flags)
+        "--formatter"))))

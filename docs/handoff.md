@@ -182,11 +182,15 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-05 (latest) — item 4: SIX `nest` subcommands are Brood (ADR-322);
-`check` joined with the clap constraints as table data.** Next candidates are still
-`test` and `run` — `test` needs the coverage env flags armed BEFORE `Interp::new()` (see
-`arm_coverage_env`), so the router will have to pre-scan argv for `--cover*` the way it now
-does for `-j`. Earlier today: `std/tool/nest.blsp` + `BLSP_SUBCOMMANDS` in `main.rs`. To move the next one:
+**Addendum 2026-09-05 (latest) — item 4: SEVEN `nest` subcommands are Brood (ADR-322):
+`check` and `test` joined today.** `main.rs` is at 2,113 (from 2,771). The flag spec is
+typed now (`{:value :int :repeat :complete}`), so `run`'s options should slot straight in;
+the Rust seam for `test` is `arm_test_env` (pre-boot env flags + memory ceiling), the
+pattern for anything else that must precede `Interp::new()`. Next: `run` (the largest arm
+left, ~270 lines: `--watch`, `--for`, `--main`, `--check-boot`, the pre-flight check), then
+`new`, then the package manager. Noticed, not fixed: a scaffolded project's `(:use log)`
+warns "shadows the prelude `error`" on every `nest test` — the template in
+`std/tool/scaffold.blsp` should `:exclude [error]` or drop the `:use`. Earlier today: `std/tool/nest.blsp` + `BLSP_SUBCOMMANDS` in `main.rs`. To move the next one:
 add a table entry + `run-*` in `nest.blsp`, add the name to the const, delete the `Cmd`
 variant + arm + `cmd_*`, extend `crates/nest/tests/blsp_dispatch.rs`, run
 `cargo nextest run -p nest -j1`. Next candidates: `test`/`check`/`run` (their option plists are
