@@ -49,7 +49,6 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
             | kw::AND
             | kw::OR
             | kw::THREAD_FIRST
-            | kw::THREAD_LAST
             | kw::MATCH
             | kw::CASE
             | kw::COMMENT

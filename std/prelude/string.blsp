@@ -3,6 +3,10 @@
 ;; The symbol → string direction is the polymorphic `->string` (Display) op, or the
 ;; kernel `name`/`str`; only the strict string → symbol wrapper below is a named
 ;; conversion (it errors on the wrong input shape). Thin Brood wrapper, no new kernel.
+;;
+;; It is `string/`-qualified but defined HERE rather than in `std/string.blsp`, and that is
+;; deliberate: ADR-291 is the precedent the `seq/l*` combinators were decided by — a
+;; qualified name defined in the prelude, not a definition relocated into the module file.
 
 (defn string/->symbol (s)
   "The symbol whose spelling is the string `s`. Errors if `s` isn't a string."

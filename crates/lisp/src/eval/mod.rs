@@ -1652,8 +1652,8 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         "lazy-seq" | "lazy-cat" => {
             "Brood has no `lazy-seq` thunk. `map`/`filter` are EAGER; for a fusing, \
              single-pass pipeline use the lazy seq-view combinators `seq/lmap`/`seq/lfilter`/\
-             `seq/lkeep`/`seq/lremove` with `->>` (ADR-111), and `(range n)` is already a \
-             lazy O(1) value. For an unbounded/streaming source, a process that \
+             `seq/lkeep`/`seq/lremove` threaded with `->` (ADR-111), and `(range n)` is \
+             already a lazy O(1) value. For an unbounded/streaming source, a process that \
              `send`s values."
         }
         // `case` now exists (literal dispatch, flat `test result` pairs); only

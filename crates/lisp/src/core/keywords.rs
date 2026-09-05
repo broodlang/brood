@@ -108,7 +108,6 @@ pub const DOSEQ: &str = "doseq";
 pub const DOTIMES: &str = "dotimes";
 pub const FOR: &str = "for";
 pub const THREAD_FIRST: &str = "->";
-pub const THREAD_LAST: &str = "->>";
 
 // Heads that aren't special forms but are recognised by syntax-aware passes —
 // chiefly the advisory checker's `is_syntactic_keyword` list, so they read

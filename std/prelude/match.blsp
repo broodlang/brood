@@ -439,8 +439,6 @@ NON-LINEAR patterns (the same name twice) work.
 ;; map, else the clause fails. Mirrors Clojure's associative destructuring, minus
 ;; the power forms — general `{:key subpattern}` nesting and `:as` are deferred
 ;; (ADR-011: ship the simple shape, add the rest on a concrete need).
-(defn- %match-map-pattern? (p) (map? p))
-
 ;; A map pattern understands exactly two keys: `:keys` and `:or`. Any other key
 ;; is REJECTED rather than ignored (ADR-152). Ignoring it was the worst kind of
 ;; wrong: `{:a v}` degenerated to "is the target a map?", so the clause matched

@@ -532,9 +532,9 @@ this clause was an expansion error."
 ;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
 ;; running them for side effects (`(map require-one mods)`, `(map run ts)`)
 ;; works as it always has. Fusion is **opt-in**, via `seq/lmap`/`seq/lfilter`/`seq/lkeep`/
-;; `seq/lremove` composed with `->>`. Each returns a lazy seq-view (`%seqview`): a
+;; `seq/lremove` composed with `->`. Each returns a lazy seq-view (`%seqview`): a
 ;; non-materialising value carrying a transducer over a source. Chaining
-;; composes the transducers onto one view, so a `->>` pipeline folds/reduces in
+;; composes the transducers onto one view, so a `->` pipeline folds/reduces in
 ;; a **single pass with no intermediate lists**:
 ;;
 ;;   (-> xs (seq/lmap sq) (seq/lfilter even?) (reduce 0 +))    ; one pass, no temp lists
@@ -592,6 +592,14 @@ for a higher-order op that wants a fixed answer.
 ;; The four built-in stages. Internal: the `l*` combinators below build on them and
 ;; the prelude cannot `require` a module. Published as `seq/xmap` … (ADR-251) — the
 ;; stage constructors belong with `seq/transduce`, the only thing that runs them.
+;;
+;; DON'T RELOCATE THIS BLOCK INTO `std/seq.blsp`. It reads as a pure move — nothing in
+;; the prelude calls an `l*` combinator, and the four `seq/x*` names there are one-line
+;; wrappers over these — and ADR-291 considered exactly that and DECIDED AGAINST it: the
+;; `l*` names stay defined in the PRELUDE under their qualified spelling, because the
+;; prelude is the boot image and relocating a definition changes boot order for no
+;; established gain. Audited again 2026-09-05 and left alone. If you reopen it, reopen the
+;; ADR: the premise to re-test is "no gain", which predates the prelude image (ADR-314).
 (defn %xmap (f)
   "The `map` stage as a transducer — internal; published as `seq/xmap`."
   (fn (rf) (fn (acc x) (rf acc (f x)))))
@@ -629,7 +637,7 @@ view, compose `xf` onto its transducer (same source) so the stages fuse."
 
 (defn seq/lmap (coll f)
   "Lazy, fusing `map`: a seq-view of `(f x)` for each `x` in `coll`. Composes with
-adjacent `l*` stages (thread them with `->>`) and folds/reduces in one pass with
+adjacent `l*` stages (thread them with `->`) and folds/reduces in one pass with
 no intermediate lists. Realise with `seq`/`into`, or just consume it
 (`fold`/`reduce`/`count`/…). Use eager `map` when you want a concrete list or are
 iterating for side effects.

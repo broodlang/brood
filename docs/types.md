@@ -367,11 +367,11 @@ never a false positive.
   iterates over the project's files via `(check-project)` (the standard
   policy-in-Brood pattern, ADR-006).
 - ✅ **Macro-expansion before walking.** `check_file` now macroexpands each
-  top-level form before walking it, so threading macros (`->`/`->>`), pattern
+  top-level form before walking it, so the threading macro (`->`), pattern
   syntax (`match`), test framework wrappers (`test`/`describe`/`error-of`/
   `assert-error`), and any user macro that rearranges code are checked
   against their *expanded* shape — eliminating false positives like
-  `(map inc)` inside `(->> xs (map inc))` getting flagged as 1-arg. The
+  `(map inc)` inside `(-> xs (map inc))` getting flagged as 1-arg. The
   file-globals accumulator likewise walks the expanded tree recursively, so
   a `(defn foo …)` nested inside `test`/`describe`/etc. still shields a later
   `(foo …)` from the unbound check. Positions survive expansion where the

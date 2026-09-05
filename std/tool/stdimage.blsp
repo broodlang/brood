@@ -87,8 +87,8 @@ registration made at the root/REPL gets, since nothing materialises it back."
 performed it — `[registry-symbol key-path value]` triples.
 
 The list is the enumerable set of registries reached through `%registry-update!` during a
-load, minus the ones that are runtime state rather than registration (`*features-loading*`,
-`*deprecation-seen*`) and minus `*module-files*`, which maps a PACKAGE's modules to disk
+load, minus the ones that are runtime state rather than registration (`*features-loading*`)
+and minus `*module-files*`, which maps a PACKAGE's modules to disk
 paths and so never describes baked-in std. Ability declarations are attributed through
 `*ability-owner*`, multimethods through `*method-from*`, and record ids / op names /
 multimethod names by their own qualifier — each key names its owner, so none of this guesses."

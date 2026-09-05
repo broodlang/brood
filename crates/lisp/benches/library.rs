@@ -33,7 +33,7 @@ mod sequence {
     fn pipeline(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(reduce (filter (map (range {n}) (fn (x) (* x x))) even?) 0 +)"),
+            format!("(reduce (filter (map (range {n}) (fn (x) (* x x))) math/even?) 0 +)"),
         );
     }
 
@@ -57,7 +57,7 @@ mod sequence {
     }
 
     /// Same workload as `pipeline`, expressed as the lazy fusing surface —
-    /// `lmap` and `lfilter` threaded with `->>` fuse into one seq-view whose
+    /// `seq/lmap` and `seq/lfilter` threaded with `->` fuse into one seq-view whose
     /// transducer folds straight over `range`, with no intermediate lists.
     /// Paired with the eager `pipeline` to show the fusion win.
     #[divan::bench(args = [1_000, 10_000])]
@@ -65,7 +65,7 @@ mod sequence {
         bench_prog(
             bencher,
             format!(
-                "(->> (range {n}) (seq/lmap (fn (x) (* x x))) (seq/lfilter even?) (reduce + 0))"
+                "(-> (range {n}) (seq/lmap (fn (x) (* x x))) (seq/lfilter math/even?) (reduce 0 +))"
             ),
         );
     }
