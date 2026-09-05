@@ -11046,6 +11046,78 @@ the shape of the cost, not its cause. Trap on the way: the new cache prune had e
 0.19.1 baseline's std image between runs, and `ab-bench` refused the asymmetric pair until the
 worktree's own `nest` rebuilt it — five 0.25.2 images and no 0.19.1 one was the tell.
 
+### 2026-09-05 — KI-109 lead 2: which clause, and a premise that moved under it
+
+KI-109 closed upstream while this was being written — `->float`'s deopt latch was the whole
+wall-time cost, and `mandelbrot` is back at the 0.19.1 column. Its close hands lead 2 on as an
+improvement candidate "for the frontier doc", with the instruction to bring numbers. This is
+everything short of numbers, and it now lives in `compute-frontier.md` §7.9 rather than under
+a closed entry.
+
+What was not recorded anywhere: **which** of `plan_general_lowering`'s four conditions rejects
+`row-sum`. It is the float-slot carve-out, and nothing else. Shown by changing one thing — two
+programs identical but for the accumulator's type, same callees, same non-tail calls, same
+self-tail loop: with `0.0` the arm bails `call-mediated-boxed`, with `0` it lowers. The op list
+ends in `SelfCall`, so `has_self_loop` is true and only `has_float_slot` can satisfy the clause.
+
+The carve-out admits a self-tail loop "UNLESS the profile shows a `Float` slot (… whose floats
+still arrive boxed from calls — no win)". That premise was priced when a float-context arm
+applied to an int deopted, which is exactly what lead 1 fixed. Same program, before and after:
+at `95ecfad3` `->float` reports `deopt-thrash-latched deopts=16` and is interpreted for the
+rest of the process, so every float `row-sum` received did arrive boxed; at `d234b944` it
+lowers with no latch. The condition the clause prices is the one lead 1 removed for this shape.
+
+That is a statement about the GATE, not about `mandelbrot` — any named self-tail defn that
+accumulates a float and calls out is rejected on a premise measured under a runtime where the
+callee could not stay native — which is why it was worth keeping after the row closed.
+
+Two process notes. Benchmarks are not run on this machine, so this is deliberately a
+bail-trace and IR-dump diagnosis with the caveat stated in the text rather than a performance
+claim; §7.1 already shows what removing this gate costs, so the candidate is to narrow it and
+the rows to protect are named (`nbody`'s `newvel`, and the non-float self-tail loops the
+comment preserves). And the reproduction caught the version trap again from the other side:
+the first run used a binary built before the sync, which is how the before/after on `->float`
+came to be measured at all — `--version` said `95ecfad3` while the tree was `d234b944`.
+
+### 2026-09-05 — a lever with no signal: `BROOD_XADMIT` never reached the arm it was measured on
+
+Set out to implement lead 2 — admit `row-sum`, whose `call-mediated-boxed` bail I had isolated
+to the float-slot carve-out that morning. Checked what already existed first, which is the
+rule, and it changed the job entirely.
+
+`BROOD_XADMIT=1` already admits gate-refused named defns at the hot stage, and KI-109 prices
+it on this exact row: "noise — 583/601 and 580/565 ms interleaved", with KI-100 recording the
+same. That is a measurement against admitting `row-sum` — except hot admission cannot reach
+`row-sum`. Two independent conditions exclude it: `arm.inline_name.is_some()`, and a frame cap
+of 8 against this arm's nslots=14. Both sides of that A/B ran identical code, so the result was
+control-vs-control. "No difference" for the one reason that cannot be told apart from "no
+effect" — the shape of a gate that passes because it scanned nothing.
+
+Finding that took an hour of raising caps and disabling inliners to watch a count that never
+moved, because **nothing said what admission did with an arm**. `BROOD_JIT_DUMP_IR` shows what
+lowered and `BROOD_JIT_BAIL_TRACE` shows what the gate refused, but the experiment layered on
+top of the refusal had no voice at all. So the fix is the signal, not the clause:
+
+    [jit-xadmit] arm=row-sum nslots=14 cap=8 declined: has an inline variant
+
+One line, under the flag that already exists, naming which condition refused — and
+`BROOD_XADMIT_MAX_NSLOTS` to override the cap (default 8, unchanged) so the experiment can
+reach a wider arm once the inline-variant condition is settled. Default behaviour is
+untouched: same 106 lowered arms, no output. 28 JIT Rust cases, the `.blsp` JIT guards, the
+float-promotion guard and both flag-catalogue directions green — the catalogue gate would have
+failed had I not listed the new knob, which is the second time this week that test earned its
+place.
+
+What I did **not** do is change the gate. KI-109 closed on lead 1, `mandelbrot` is at parity
+(+0.2%, floor 4.3%), and there is no measured problem to solve; benchmarks do not run on this
+machine, and §7.1 already shows what removing this gate costs when someone reasons instead of
+measures. Lead 2 is still unmeasured — but it is now *measurable*, and the next person starts
+from a corrected record rather than from a number that was never about the thing it named.
+
+The general lesson is the one this repo keeps relearning from a new angle: an experiment that
+can silently decline its subject reports the null result, and a null result is exactly what
+you were hoping to rule out. Every lever wants a line that says it fired.
+
 ## 2026-09-05 (midday) — `nest` dispatch starts moving into Brood: five subcommands (ADR-322)
 
 `std/tool/nest.blsp` owns `doc`, `docs`, `doctest`, `grammar` and `format`: a command table,
