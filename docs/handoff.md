@@ -182,6 +182,22 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
+**Addendum 2026-09-05 (latest) — ADR-320 is IMPLEMENTED; KI-111 filed and fixed.** Side facts
+travel by journal now (`core/heap/facts.rs`): a sixth `FactKind` fails to compile in six places,
+and `%side-facts` puts the journal into `STATE_DUMP`, so the artifact matrix and both boot
+differentials compare the recorded facts instead of a hand-listed set of per-global attributes.
+`meta` (ADR-283) had been carried since ADR-314 and compared by nothing; it is compared now.
+**Two traps this turned up, both worth knowing before touching the image again:** a snapshot
+reader must match the writer's authority (`def_sites_snapshot` is the runtime map — correct on
+the builder heap, empty in every live process, and a fingerprint built on it agreed in both arms
+while reporting nothing), and a fact about an *unbound* name is not part of the boot state (a
+stdlib image pre-marks every `defdyn` in the image at index-install, ~49 names in modules never
+loaded — deliberate). **And one revert to remember:** `def-`/`defn-` must keep expanding to
+`(do (def …) (%mark-private …))`, because `types/check.rs::top_level_defs` identifies a private
+definition by that shape; collapsing it took `nest check --strict std/` from clean to ten
+warnings in untouched files. Next from the open-threads list: KI-107 (the `eval_server_test`
+flake), then `nest run` (ADR-322's next subcommand).
+
 **Addendum 2026-09-05 (latest) — item 4: SEVEN `nest` subcommands are Brood (ADR-322):
 `check` and `test` joined today.** `main.rs` is at 2,113 (from 2,771). The flag spec is
 typed now (`{:value :int :repeat :complete}`), so `run`'s options should slot straight in;

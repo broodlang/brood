@@ -1769,7 +1769,7 @@ pub struct RuntimeCode {
 /// Where a global was defined: the file, and the start position of its
 /// `def`/`defn`/`defmacro` form. Captured pre-macroexpansion so `defn`/`defmacro`
 /// definitions are located accurately (ADR-031).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SourceLoc {
     pub file: String,
     pub pos: crate::error::Pos,
@@ -3154,6 +3154,9 @@ mod env_root_layout_tests {
 // ===== Construction and shared-region management ================================
 
 mod equality;
+/// Side facts — what a definition RECORDS about a name rather than binds to it (ADR-320).
+mod facts;
+pub use facts::{Fact, FactKind};
 mod gc;
 mod gc_runtime;
 mod map_ops;
@@ -6426,7 +6429,23 @@ impl Heap {
         if !self.equal(cur, old) {
             return false;
         }
+        // Save and restore privacy across `env_define`, exactly as `registry_update` does and
+        // for the same reason: `env_define` calls `unmark_private`, which is right for a real
+        // `def` (editing `def-` → `def` and reloading must publish the name) and wrong for an
+        // in-place registry UPDATE, where no def form changed and nothing re-marks afterwards.
+        //
+        // `registry_update` grew this guard and its sibling here did not — the two funnels are
+        // documented as a pair four lines up, and the fix went into one of them. So a `def-`'d
+        // registry reached through `%swap-registry!` rather than `%registry-update!` still
+        // turned public on its first write: `*require-edges*` read `reflect/private? = true` at
+        // boot and false after the first `require` recorded an edge, which is every program.
+        // Found by ADR-320's journal differential, because the name is absent from
+        // `(reflect/global-names)` and no per-global gate could see it.
+        let was_private = self.runtime.is_private_recorded(sym);
         self.env_define(root, sym, new);
+        if was_private {
+            self.runtime.mark_private(sym);
+        }
         guard.insert(sym);
         true
     }

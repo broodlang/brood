@@ -3101,7 +3101,61 @@ pub(super) fn register_sig(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// created (and the `def` runs first, so that global already exists). Privacy is now
 /// a fact the def form declares here, not one derived from the name's spelling.
 /// Returns the qualified name so it composes inside the macro's `do`.
+/// `(%side-facts)` — every side fact this runtime has recorded, one string per fact,
+/// sorted: `"<kind> <name> <payload>"`.
+///
+/// Exists for the boot differential (ADR-320 step 3). The differential used to compare a
+/// hand-listed set of per-name attributes, which is the same shape of hand-maintained list
+/// the journal removed from the image writer — so a fact kind could be carried correctly by
+/// construction and still round-trip WRONG without the differential noticing. `meta`
+/// (ADR-283) was exactly that: carried since ADR-314, compared by nothing.
+///
+/// Rendering to strings rather than to structured data is deliberate. The consumer is a
+/// differential that compares two process outputs textually, and a string per fact means a
+/// **new kind shows up in the comparison automatically** — no Brood-side change, no second
+/// list to update, which is the property this whole ADR is about.
+pub(super) fn side_facts(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crate::core::heap::Fact;
+    let mut lines: Vec<String> = heap
+        .side_facts()
+        .iter()
+        .map(|f| {
+            let name = value::symbol_name(f.subject());
+            match f {
+                Fact::Private(_) => format!("private {name}"),
+                Fact::Meta(_, m) => format!(
+                    "meta {name} since={:?} deprecated={:?} beta={:?} use={:?}",
+                    m.since,
+                    m.deprecated,
+                    m.beta,
+                    m.use_instead.map(value::symbol_name)
+                ),
+                // The def-site FILE is deliberately reduced to its basename: each
+                // differential arm runs under its own `XDG_CACHE_HOME`, so the
+                // materialised `prelude.blsp` sits at a different absolute path in each
+                // and comparing those would compare the harness. Basename + line:col
+                // still fails on a missing, wrong or shifted site.
+                Fact::DefSite(_, loc) => {
+                    let base = loc.file.rsplit('/').next().unwrap_or(&loc.file);
+                    format!("def-site {name} {base}:{}:{}", loc.pos.line, loc.pos.col)
+                }
+                Fact::RegistryName(_) => format!("registry-name {name}"),
+                Fact::Dynamic(_) => format!("dynamic {name}"),
+            }
+        })
+        .collect();
+    lines.sort();
+    let vals: Vec<Value> = lines.iter().map(|l| heap.alloc_string(l)).collect();
+    Ok(heap.list(vals))
+}
+
 pub(super) fn mark_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // Resolves the quoted name against the namespace being compiled now, which is what makes
+    // `(defn- helper …)` inside a module mark `mod/helper`. Note the standing mismatch
+    // recorded with `def-` in `std/prelude/core.blsp`: `def` resolves its head at COMPILE
+    // time, this resolves at CALL time, and the two disagree for a prelude function that
+    // assigns a root private while some module is loading. No live path takes that shape;
+    // closing it means restating `qualify_name`'s rules in Brood at expansion time.
     let name = expect_symbol(heap, "%mark-private", arg(args, 0))?;
     let qualified = crate::eval::macros::resolve_reference(heap, name);
     heap.mark_private(qualified);

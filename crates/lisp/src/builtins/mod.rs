@@ -773,6 +773,19 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "Every global a registry update (%registry-update! / %registry-cas!) has written in this runtime, sorted by spelling. The derived answer to \"which globals does LOADING mutate rather than create?\" — the ones a startup image has to carry deliberately, because the (reflect/global-names) diff it is built from cannot see them (ADR-218). Naming them by hand went stale three times, silently; std/tool/project.blsp filters this instead.",
         registry_names);
 
+    // The side-fact journal (ADR-320), for the boot differential. `%registry-names` above
+    // is one of the kinds this reports; it stays as its own primitive because
+    // `std/tool/project.blsp` consumes it as symbols, while this is a rendered, sorted
+    // fingerprint whose whole job is to be compared as text between two boots.
+    def(
+        heap,
+        "%side-facts",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        &[],
+        "Every SIDE FACT this runtime has recorded — what evaluating a definition recorded ABOUT a name rather than bound to it: privacy, stability meta, def site, registry-name marks, defdyn marks. One sorted string per fact, `\"<kind> <name> <payload>\"`. The boot differential compares these between an imaged and a source boot, so a fact kind that stops round-tripping fails at the boundary instead of surfacing as a distant symptom in another subsystem (ADR-320).",
+        side_facts);
+
     // set (the `#{…}` kernel type; the `set` library is Brood over these)
     def(
         heap,
