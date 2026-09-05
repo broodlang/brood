@@ -182,8 +182,11 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-05 (latest) — item 4 STARTED: five `nest` subcommands are Brood
-(ADR-322).** `std/tool/nest.blsp` + `BLSP_SUBCOMMANDS` in `main.rs`. To move the next one:
+**Addendum 2026-09-05 (latest) — item 4: SIX `nest` subcommands are Brood (ADR-322);
+`check` joined with the clap constraints as table data.** Next candidates are still
+`test` and `run` — `test` needs the coverage env flags armed BEFORE `Interp::new()` (see
+`arm_coverage_env`), so the router will have to pre-scan argv for `--cover*` the way it now
+does for `-j`. Earlier today: `std/tool/nest.blsp` + `BLSP_SUBCOMMANDS` in `main.rs`. To move the next one:
 add a table entry + `run-*` in `nest.blsp`, add the name to the const, delete the `Cmd`
 variant + arm + `cmd_*`, extend `crates/nest/tests/blsp_dispatch.rs`, run
 `cargo nextest run -p nest -j1`. Next candidates: `test`/`check`/`run` (their option plists are

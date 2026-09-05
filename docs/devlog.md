@@ -11127,3 +11127,13 @@ Brood table. Gates: a new `blsp_dispatch.rs` on the real binary, the `nest` crat
 Two traps, recorded in the ADR: a new std module needs `embedded_module!` in
 `builtins/system.rs` (the `read_dir` in `build.rs` only tracks files it has seen), and
 `index-of` returns −1 on a miss — three "broken" commands were one `substring 0 -1`.
+
+## 2026-09-05 (afternoon) — `nest check` is Brood (ADR-322, sixth subcommand)
+
+The first moved command with clap constraints and a variadic FILE list; both are table data
+in `std/tool/nest.blsp` now (`:requires`, `:conflicts`, `:no-positional-with`, `:many`),
+reported in clap's words. Rust gave up two pieces of mechanism it had been keeping by
+accident: `%check-strict!` (strict mode was settable only from the Rust arm) and the global
+`-j` option, which the router now parses before `Interp::new()` because it sizes the pool.
+`main.rs` 2,663 → 2,547. Trap: `keep` is not a bare prelude function — only `seq/lkeep`
+exists — so a filter-then-first is `(first (filter coll pred))`.

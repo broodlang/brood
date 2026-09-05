@@ -20812,3 +20812,20 @@ things this move surfaced, both cheap and both now recorded here: a new std modu
 registered with `embedded_module!` in `builtins/system.rs` (a `read_dir` in `build.rs` tracks
 existing files; it does not discover a new one until the script re-runs), and `index-of` answers
 **−1** on a miss, not `nil`.
+
+**Amendment 2026-09-05 (later) — `check` is the sixth.** The first non-pure command, and the
+first with clap *constraints*: `--dry-run` requires `--fix-renames`; `--suggest-sigs`,
+`--fix-sigs` and `--fix-renames` are mutually exclusive; `--fix-renames` takes no FILE list.
+Those are table data now — `:requires {flag needed}`, `:conflicts [[a b] …]`,
+`:no-positional-with [flag …]` — reported in clap's own words with exit 2, and a FILE list is a
+`:many true` positional whose `"blsp-file"` kind is what completion offers (`doc`'s positional
+is the `"module"` kind the same way; the `doc` special case in `nest/complete` is gone). Two
+things the move needed from Rust, both mechanism: **`%check-strict!`**, because strict mode is a
+process-wide checker flag, not an argument, and until now only the Rust arm could set it; and
+the global **`-j`/`--max-parallel`/`--jobs`**, which clap accepted *before* the subcommand, so
+the router (`blsp_routed`) now skips it, parses it, and sizes the pool before `Interp::new()` —
+that option must land before the scheduler pool exists, which is before any Brood runs.
+`main.rs` 2,663 → 2,547. Gates: `blsp_dispatch.rs` grew four cases (project guard, the three
+constraints, both exit-code forms, the global option in all four spellings), and the boundary
+guards the Rust arm had — a missing FILE, a directory — are still pinned by `missing_file.rs`
+and `cli_failure_reporting.rs`, which now exercise the Brood path.
