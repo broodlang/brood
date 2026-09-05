@@ -999,6 +999,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("renames", "std/tool/renames.blsp"),
     embedded_module!("coverage", "std/tool/coverage.blsp"),
     embedded_module!("complete", "std/tool/complete.blsp"),
+    embedded_module!("nest", "std/tool/nest.blsp"),
     // `nest new` scaffolding (templates + new-project), split out of `project` so
     // the analysis half stays lean. `(:use project)` for *config-git-init*. Opt-in.
     embedded_module!("scaffold", "std/tool/scaffold.blsp"),

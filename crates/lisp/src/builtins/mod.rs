@@ -3132,6 +3132,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%check-strict!",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        &["on?"],
+        "Set STRICT checking for this process and return the new value. The setter behind the Brood-implemented `nest check --strict` (ADR-322): the mode is a process-wide flag the checker reads, so the command line flips it before the first file is checked.",
+        check_strict_set,
+    );
+    def(
+        heap,
         "%check-deps-fp",
         Arity::exact(1),
         Sig::new(vec![any], string),

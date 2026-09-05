@@ -20774,3 +20774,89 @@ checker warning about a record in an unrelated file.
 deliberately out of scope**: exercising it needs a scaffolded project per cell and it already
 has `project_image_registries.rs`; the seam it shares with the prelude image (KI-106) is
 covered here through the registry set, which is the fact that was lost.
+
+## ADR-322 — `nest`'s dispatch moves into Brood, one subcommand per commit
+
+**Context.** `brood` bootstraps into `(repl/run)` (ADR-048); `nest` did not. Its
+`crates/nest/src/main.rs` was 2,771 lines of Rust — a clap `Cmd` enum plus one `cmd_*`
+function per subcommand, each of which formatted a Brood form *as a string* and evaluated it.
+Policy written in the host language, one `format!` away from the language it drives: the
+largest remaining "write the language in the language" gap (CLAUDE.md's first principle), and
+the handoff's item 4.
+
+**Decision.** `std/tool/nest.blsp` owns the command line: a table of subcommands (help, flags
+with the value each takes, an optional positional with its allowed values, and the function
+that runs it), an argv parser that produces clap-shaped usage errors and exit code 2, the
+shared project guard, and `(nest/main argv)` → exit code. `main.rs` checks `argv[1]` against
+`BLSP_SUBCOMMANDS` **before** `Cli::parse()` — clap would reject flags it no longer knows —
+boots the interpreter, runs `(nest/main …)`, and exits with the int it returns. Each move adds
+a table entry and deletes a `Cmd` variant with its `cmd_*`; the const is the routing table, so
+a name is in exactly one of the two and cannot go stale against the enum.
+
+The first five are the pure ones: `doc`, `docs`, `doctest`, `grammar`, `format` — 108 lines of
+Rust gone, 258 of Brood added, `main.rs` at 2,663. Completion of a moved subcommand asks the
+Brood table (`nest/complete`), so a flag added there is completable the same day — the property
+the Rust side got from clap's own model, kept by making the table the model. `nest --help`
+lists the Brood-implemented commands in `after_help`; `nest <cmd> --help` prints the table's
+usage.
+
+**What stays in Rust, and why.** Building the interpreter, `run_on_main_stack`, the crash dump,
+the exit code, the stdlib-image bootstrap (`ensure_stdimage_now`) and the `--brood-*` reserved
+namespace (ADR-257) — mechanism. `test`/`check`/`run` next (their option plists are already
+Brood-shaped), the package manager last; `mcp`'s transport is Rust and may stay.
+
+**Gates.** `crates/nest/tests/blsp_dispatch.rs` drives the real binary through the seam for each
+moved command (output PRESENT, exit codes, clap-shaped errors, completion); the whole `nest`
+crate 149/149 including the 20 completion cases and `scaffold_quality`'s `format --check`. Two
+things this move surfaced, both cheap and both now recorded here: a new std module must be
+registered with `embedded_module!` in `builtins/system.rs` (a `read_dir` in `build.rs` tracks
+existing files; it does not discover a new one until the script re-runs), and `index-of` answers
+**−1** on a miss, not `nil`.
+
+**Amendment 2026-09-05 (later) — `check` is the sixth.** The first non-pure command, and the
+first with clap *constraints*: `--dry-run` requires `--fix-renames`; `--suggest-sigs`,
+`--fix-sigs` and `--fix-renames` are mutually exclusive; `--fix-renames` takes no FILE list.
+Those are table data now — `:requires {flag needed}`, `:conflicts [[a b] …]`,
+`:no-positional-with [flag …]` — reported in clap's own words with exit 2, and a FILE list is a
+`:many true` positional whose `"blsp-file"` kind is what completion offers (`doc`'s positional
+is the `"module"` kind the same way; the `doc` special case in `nest/complete` is gone). Two
+things the move needed from Rust, both mechanism: **`%check-strict!`**, because strict mode is a
+process-wide checker flag, not an argument, and until now only the Rust arm could set it; and
+the global **`-j`/`--max-parallel`/`--jobs`**, which clap accepted *before* the subcommand, so
+the router (`blsp_routed`) now skips it, parses it, and sizes the pool before `Interp::new()` —
+that option must land before the scheduler pool exists, which is before any Brood runs.
+`main.rs` 2,663 → 2,547. Gates: `blsp_dispatch.rs` grew four cases (project guard, the three
+constraints, both exit-code forms, the global option in all four spellings), and the boundary
+guards the Rust arm had — a missing FILE, a directory — are still pinned by `missing_file.rs`
+and `cli_failure_reporting.rs`, which now exercise the Brood path.
+
+**Amendment 2026-09-05 (evening) — `test` is the seventh, and the flag spec grew up.** The
+biggest arm so far (nineteen options) and the first whose options are TYPED: a flag's spec is
+now `:bool`, a value name, or `{:value "N" :int [lo hi] :repeat true :complete "kind"}` — an
+integer parsed and range-checked in clap's words (`invalid value '0' for '--max-failures <N>':
+0 is not in 1..=`), a repeatable flag collected into a list, a value completed by a
+`complete/print-candidates` kind (`--only <TAB>` offers selectors from the table, not from a
+Rust `value_kind` match). `FILE:LINE` splitting, the shard guard (`--shard` without
+`--partitions` exits 0 having run nothing, which CI reads as green — refused with exit 2),
+the option-list assembly (`:filter` only when something narrows the run, so the plain case
+keeps the runner's fast path) and the failure-signal convention (`N test(s) failed` /
+`coverage below minimum` raised by the runner become a SILENT exit 1, everything else is
+rethrown for the normal report) are all Brood. `test/test-make-filter` went public: it was
+`defn-`, reachable only because the Rust arm evaluated a string.
+
+**What stayed in Rust, and why — the one real seam.** `arm_test_env` runs BEFORE
+`Interp::new()`, keyed on the subcommand: `BROOD_COVERAGE`/`BROOD_NO_JIT` for
+`--cover-lines`/`--cover-branches` and `BROOD_NO_RELOAD_DIAG` for any `--cover*`, because the
+kernel caches those flags on first read during the prelude build — set from Brood they are
+simply absent, with no error to notice — plus the ADR-043 default memory ceiling and the
+stale-stdlib warning. The router also accepts the global `-j` AFTER the subcommand now (clap
+did), stripping it before Brood sees the words. Sabotage-verified: with the arming removed,
+4 of `coverage_lines.rs`'s 6 cases fail. `main.rs` 2,547 → 2,113; `nest.blsp` 595 lines.
+Gates: `blsp_dispatch.rs` +3 (the scaffolded suite, a named file with the global `-j`, a
+`FILE:LINE` selector, TAP; a failing suite exits 1 with no runner internals in the report;
+six typed-flag/shard usage errors); `tests/nest_test.blsp` +4 (int, range, repeat,
+last-wins); the `nest` crate 156/156 with `stale.rs`, `coverage_lines.rs`,
+`file_boundary_quiesce.rs`, `missing_file.rs` and `complete.rs` now exercising the Brood arm.
+One trap for the record: `(and (map? kind) (get kind :int))` answers **false**, not nil, for a
+non-map spec, and a `nil?` guard let that `false` through to `nth` — every `--strict` and
+every `--formatter` failed until the map question was asked first.

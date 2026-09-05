@@ -98,8 +98,11 @@ Concretely:
 - This applies to upcoming pieces too. The **editor commands, keymaps, and UI
   should ultimately be Brood**, with Rust only hosting the thinnest necessary
   substrate. (The REPL already moved into Brood — `std/tool/repl.blsp`, ADR-048;
-  the binaries just bootstrap into `(repl-run)`. The `nest`/`brood` CLI dispatch
-  is still Rust — see `ROADMAP.md`.)
+  the binaries just bootstrap into `(repl-run)`. The `nest` CLI dispatch is moving the
+  same way — `std/tool/nest.blsp` owns `doc`, `docs`, `doctest`, `grammar`, `format`,
+  `check` and `test` (ADR-322); `main.rs` routes a name in its `BLSP_SUBCOMMANDS` there
+  before clap runs and deletes the Rust arm. The rest is still Rust, one subcommand per
+  commit.)
 - A Rust builtin is an admission that the language can't yet express something.
   Treat each one as a candidate to later replace with Brood once the language
   is capable enough.
@@ -233,7 +236,7 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          call is `gen/spawn-server`, `http/get`, `test/run` — never a
                          double slash (test, project, package, complete, coverage, debug,
                          docs, eval-server, explain, grammar, mcp, observer, proctree,
-                         repl, scaffold, sexp, reload). `std/editor/*` is the one
+                         nest, repl, scaffold, sexp, reload). `std/editor/*` is the one
                          exception — it keeps the `editor/` prefix (a cohesive framework
                          whose names, `buffer`/`ui`/`pane`/`ansi`, are deliberately generic
                          and would collide/land-grab bare; `ansi` already exists top-level). The

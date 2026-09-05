@@ -46,6 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): test, check, doc, docs, doctest, grammar, format — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -75,21 +76,6 @@ enum CompletionShell {
     Bash,
     Zsh,
     Fish,
-}
-
-/// Which editor grammar `nest grammar` emits (ADR-092). A `ValueEnum` so clap
-/// lists the choices in `--help`, rejects an unknown one with a formatted error,
-/// and offers shell completion — instead of a hand-rolled match + `exit(2)`.
-#[derive(ValueEnum, Clone, Copy, Debug)]
-enum GrammarTarget {
-    /// A VS Code TextMate grammar (JSON).
-    #[value(alias = "vscode", alias = "textmate")]
-    Tmlanguage,
-    /// The `brood-special-forms` defconst for Emacs.
-    Emacs,
-    /// The `tree-sitter-brood` `queries/highlights.scm`.
-    #[value(alias = "treesitter", alias = "highlights")]
-    TreeSitter,
 }
 
 #[derive(Subcommand, Debug)]
@@ -194,163 +180,6 @@ enum Cmd {
         /// Trailing arguments passed to the entry function as strings.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-    },
-
-    /// Run the project's tests, or specific test files.
-    ///
-    /// With no FILES: discover and run every `tests/**/*_test.blsp`.
-    /// With FILES: load each (registering its cases) and run the suite once —
-    /// inside a project, project sources are pre-loaded so cross-module names
-    /// resolve.
-    Test {
-        /// Specific test files to run, optionally `FILE:LINE` to run just the
-        /// test at that line. Omit for project-wide discovery.
-        #[arg(value_name = "FILE")]
-        files: Vec<String>,
-
-        /// Run only tests matching a selector, repeatable: a tag (`db`), a test
-        /// name substring (`test:adds`), or a group substring (`describe:math`).
-        #[arg(long, value_name = "SELECTOR")]
-        only: Vec<String>,
-
-        /// Skip tests matching a selector (same forms as `--only`), repeatable.
-        #[arg(long, value_name = "SELECTOR")]
-        exclude: Vec<String>,
-
-        /// Re-admit tests that `--exclude` dropped, repeatable. `--include` wins.
-        #[arg(long, value_name = "SELECTOR")]
-        include: Vec<String>,
-
-        /// Run only the tests that failed on the previous run in this project.
-        #[arg(long)]
-        failed: bool,
-
-        /// Stop the run once this many tests have failed.
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
-        max_failures: Option<u64>,
-
-        /// Run the suite up to N times, stopping at the first failure — for
-        /// shaking out a flaky test.
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
-        repeat_until_failure: Option<u64>,
-
-        /// Randomise test order using this seed. Any value shuffles (including 0);
-        /// omit the flag for declaration order. The seed is echoed in the summary
-        /// so a failure can be replayed exactly.
-        #[arg(long, value_name = "N")]
-        seed: Option<u64>,
-
-        /// Hard per-test timeout in milliseconds (default 120000). A test over it
-        /// is killed and reported as a failure.
-        #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
-        timeout: Option<u64>,
-
-        /// List the N slowest tests after the summary.
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
-        slowest: Option<u64>,
-
-        /// Split the suite into N shards and run only one (see `--shard`) — for
-        /// fanning a suite across CI machines. Assignment is a stable hash of each
-        /// test's name, so shards never overlap or drop a test.
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
-        partitions: Option<u64>,
-
-        /// Which shard to run, 0-based. Requires `--partitions`.
-        #[arg(long, value_name = "K", default_value_t = 0)]
-        shard: u64,
-
-        /// Print `▶ group › name` as each test starts, instead of the default
-        /// one-character-per-test progress. Useful for spotting which test is slow
-        /// or hung; noisier for everything else.
-        #[arg(long)]
-        trace: bool,
-
-        /// Emit machine-readable output instead of the human report: `tap` (TAP
-        /// version 13, for a CI that speaks it) or `json` (one object with the full
-        /// structured results). Suppresses the live progress dots and summary.
-        #[arg(long, value_name = "NAME")]
-        formatter: Option<String>,
-
-        /// Only run test files whose sources changed since they last ran — a test
-        /// file re-runs when it, or a source file it transitively requires, has a
-        /// newer mtime than the last recorded run. Whole-project runs only.
-        #[arg(long)]
-        stale: bool,
-
-        /// Report FUNCTION-level coverage after the run: which of the project's
-        /// functions the suite never called. Instrumenting rebinds every project
-        /// function through a counting shim, so a `--cover` run is not a timing
-        /// run. Not line coverage — see docs/coverage.md.
-        #[arg(long)]
-        cover: bool,
-
-        /// Report LINE coverage: which executable source lines actually ran.
-        /// Stricter than `--cover`, which only asks whether a function was entered.
-        /// Instruments the bytecode and disables the JIT, so a `--cover-lines` run is
-        /// a diagnostic run and never a timing one.
-        #[arg(long)]
-        cover_lines: bool,
-
-        /// Report BRANCH coverage: whether BOTH edges of each if/cond/match decision
-        /// were taken. The strictest measure — a line runs once and reads as covered
-        /// even if its else-branch never fires. Shares the `--cover-lines` machinery
-        /// (instruments the bytecode, disables the JIT).
-        #[arg(long)]
-        cover_branches: bool,
-
-        /// Fail the run (exit non-zero) if coverage is below this percentage.
-        /// Implies `--cover`; gates on the LINE percentage under `--cover-lines`
-        /// (or the BRANCH percentage under `--cover-branches`), that being the
-        /// stricter number.
-        #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u64).range(0..=100))]
-        cover_min: Option<u64>,
-    },
-
-    /// Advisory type-check the project, or specific files.
-    ///
-    /// With no FILES: walk every `.blsp` under `src/` + `tests/` and exit
-    /// non-zero on any warning (CI-friendly).
-    /// With FILES: check only those files.
-    Check {
-        /// Specific files to check. Omit for project-wide checking.
-        #[arg(value_name = "FILE")]
-        files: Vec<String>,
-
-        /// Recover from a stdlib rename wave: for each bare name reported
-        /// unbound, rewrite this project's *references* to the single public
-        /// `mod/name` that now defines it. Declines — and says why — a name
-        /// this project itself defines, a name defined in several namespaces,
-        /// and a name that moved behind `%`. Exits non-zero if any are left.
-        #[arg(long = "fix-renames", conflicts_with = "files")]
-        fix_renames: bool,
-
-        /// With `--fix-renames`, print the plan and change nothing.
-        #[arg(long = "dry-run", requires = "fix_renames")]
-        dry_run: bool,
-
-        /// Print the `(sig …)` declaration the checker would write for every
-        /// function that lacks one, grouped by file, and change nothing. The
-        /// bulk counterpart of the editor's declare-sig action: an inferred
-        /// domain over-approximates the real one, so adopting one is sound —
-        /// but it is documentation, so it is advice rather than a patch.
-        #[arg(long = "suggest-sigs", conflicts_with = "fix_renames")]
-        suggest_sigs: bool,
-
-        /// Write those `(sig …)` declarations into the files, above the definitions
-        /// they describe. The safe bulk form of the editor's declare-sig action: that
-        /// action is correct for one signature, but several accepted against a single
-        /// snapshot drift, because each insertion moves every line below it. This
-        /// applies them last-first and re-parses each file before writing, so a file
-        /// is either correct or untouched. `--suggest-sigs` is the dry run.
-        #[arg(long = "fix-sigs", conflicts_with_all = ["fix_renames", "suggest_sigs"])]
-        fix_sigs: bool,
-
-        /// Strict mode: a call result or inferred global with a PRECISE type is checked
-        /// by inclusion, not overlap — `number` handed to an `int` parameter warns. Off
-        /// by default because the overlap rule is what keeps a check quiet across a
-        /// hot reload; also on with BROOD_CHECK_STRICT=1.
-        #[arg(long)]
-        strict: bool,
     },
 
     /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
@@ -509,63 +338,6 @@ enum Cmd {
     /// project's modules are immediately callable.
     Repl,
 
-    /// Reformat every `.blsp` under `src/` and `tests/` in place.
-    Format {
-        /// Don't write; exit non-zero if any file would change (CI mode).
-        #[arg(long, short = 'c')]
-        check: bool,
-        /// Only format `.blsp` files git reports as changed (modified, staged,
-        /// or untracked) — a fast, git-aware narrower scope. Falls back to the
-        /// whole project when not in a git repository. Ignored with `--check`.
-        #[arg(long)]
-        changed: bool,
-    },
-
-    /// Emit Markdown documentation — the whole project, or one named module.
-    Doc {
-        /// Module name to document (a baked-in std module or one on the
-        /// load-path). Omit to document the whole project.
-        module: Option<String>,
-
-        /// Document every public global in a fresh image (the builtins +
-        /// prelude) — the complete primitive reference. Read this instead of
-        /// probing names one at a time. Ignores MODULE.
-        #[arg(long = "all")]
-        all: bool,
-    },
-
-    /// Generate a browsable HTML documentation site from docstrings — the whole
-    /// project, written to `doc/` by default (an `index.html` plus a `model.json`).
-    Docs {
-        /// Output directory for the generated site. Defaults to `doc`.
-        #[arg(short = 'o', long = "out")]
-        out: Option<String>,
-
-        /// Document the whole builtin + prelude reference (the language reference)
-        /// in a fresh image instead of the current project.
-        #[arg(long = "all")]
-        all: bool,
-    },
-
-    /// Check every `expr ;=> result` example in the project's docstrings still holds —
-    /// so a documented example can't silently drift from the code. Exits non-zero on a
-    /// mismatch.
-    Doctest,
-
-    /// Generate an editor syntax grammar from the language's own `(reflect/special-forms)`
-    /// — one source of truth, no hand-maintained keyword lists (ADR-092). Prints to
-    /// stdout; redirect to the editor's grammar file.
-    ///
-    /// TARGET is `tmlanguage` (default — a VS Code TextMate grammar, JSON), `emacs`
-    /// (the `brood-special-forms` + `brood-doc-forms` defconsts), or `tree-sitter` (the
-    /// `tree-sitter-brood` `queries/highlights.scm`). E.g.
-    /// `nest grammar > brood-vscode/syntaxes/brood.tmLanguage.json`.
-    Grammar {
-        /// What to emit (default `tmlanguage`).
-        #[arg(value_enum, default_value_t = GrammarTarget::Tmlanguage)]
-        target: GrammarTarget,
-    },
-
     /// Serve the project over Model Context Protocol on stdio so an agent
     /// (Claude Code etc.) can eval / lookup / format / expand / run tests /
     /// read docs against this project's live image (ADR-036, docs/mcp.md).
@@ -689,6 +461,12 @@ fn ensure_stdimage(interp: &mut Interp, cmd: &Cmd) {
     ) {
         return;
     }
+    ensure_stdimage_now(interp);
+}
+
+/// The unconditional half of [`ensure_stdimage`], for the Brood-routed subcommands (which
+/// have no `Cmd`).
+fn ensure_stdimage_now(interp: &mut Interp) {
     // Is there already a current image? A pure-PRELUDE probe on purpose — `%std-image-path`
     // and `%image-index` load no modules at all, where asking `stdimage` would pull that
     // module and its dependency tree into the process before the command has started.
@@ -744,53 +522,124 @@ fn main() {
     }
     // Capture any panic (use-after-GC tripwire, heap index, …) to .brood_crash_dump.
     brood::cli_support::install_crash_dump();
+    // A subcommand implemented in Brood (`std/tool/nest.blsp`, ADR-322) is routed there
+    // BEFORE clap sees argv: clap would reject its flags, which it no longer knows. The list
+    // is the routing table AND the completion table's Rust half, so it cannot go stale
+    // against the `Cmd` enum — a name is in exactly one of the two.
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some((max_parallel, rest)) = blsp_routed(&argv[1..]) {
+        run_on_main_stack("nest-main", move || run_blsp(max_parallel, rest));
+        return;
+    }
     let cli = Cli::parse();
-    // Arm the coverage flags BEFORE anything constructs an `Interp` — the kernel
-    // caches them on first read, which happens during the prelude build.
-    arm_coverage_env(&cli);
     // Run on an explicitly-sized large stack so the stack-budget guard (ADR-043)
     // is uniform across the root thread and spawned coroutines (see
     // `cli_support::run_on_main_stack`).
     run_on_main_stack("nest-main", move || run_main(cli));
 }
 
-/// Arm the coverage env flags before any interpreter exists.
-///
-/// The timing is load-bearing for BOTH flags, and getting it wrong fails silently:
+/// Subcommands implemented in `std/tool/nest.blsp` (ADR-322). Routed there from `main`
+/// before clap runs; listed by `nest complete` beside clap's own; absent from `Cmd`.
+const BLSP_SUBCOMMANDS: &[&str] = &[
+    "doc", "docs", "doctest", "grammar", "format", "check", "test",
+];
+
+/// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
+/// of the one GLOBAL option clap owns — `-j`/`--max-parallel`/`--jobs N`, accepted before
+/// or after the subcommand — and the remaining words from the subcommand on, with that
+/// option removed. It is honoured here rather than in Brood because it sizes the
+/// scheduler pool, which is built once, before any Brood runs.
+fn blsp_routed(args: &[String]) -> Option<(Option<usize>, Vec<String>)> {
+    let mut max_parallel = None;
+    let mut rest: Vec<String> = Vec::new();
+    let mut i = 0;
+    while let Some(word) = args.get(i) {
+        let value = match word.as_str() {
+            "-j" | "--max-parallel" | "--jobs" => {
+                i += 1;
+                args.get(i)?.clone()
+            }
+            w if w.starts_with("--max-parallel=") || w.starts_with("--jobs=") => {
+                w.split_once('=')?.1.to_string()
+            }
+            w if w.starts_with("-j") && w.len() > 2 && !w.starts_with("-jo") => w[2..].to_string(),
+            c if rest.is_empty() && !BLSP_SUBCOMMANDS.contains(&c) => return None,
+            _ => {
+                rest.push(word.clone());
+                i += 1;
+                continue;
+            }
+        };
+        max_parallel = Some(value.parse().ok()?);
+        i += 1;
+    }
+    (!rest.is_empty()).then_some((max_parallel, rest))
+}
+
+/// The process-wide knobs `nest test` needs set BEFORE the interpreter exists — the Rust
+/// half of the moved `test` arm, keyed on the subcommand because the timing is
+/// load-bearing and fails silently when wrong:
 ///
 ///   * `BROOD_COVERAGE` decides whether the compiler emits `RecordLine`. Chunks are
 ///     compiled while `Interp::new()` builds the prelude, and the kernel caches the
-///     flag on first read — set it from the subcommand and the instrumentation is
-///     simply absent, with no error to notice.
+///     flag on first read — set it later and the instrumentation is simply absent.
 ///   * `BROOD_NO_RELOAD_DIAG` silences the hot-reload chatter that function-tier
-///     instrumentation legitimately provokes (it rebinds every project function to a
-///     variadic shim, changing every arity).
-///
-/// `--cover-lines` also disables the JIT: an instrumented arm bails lowering anyway,
-/// but turning it off outright keeps the measurement honest rather than
-/// shape-dependent.
-fn arm_coverage_env(cli: &Cli) {
-    let Cmd::Test {
-        cover,
-        cover_lines,
-        cover_branches,
-        cover_min,
-        ..
-    } = &cli.cmd
-    else {
+///     instrumentation legitimately provokes (it rebinds every project function).
+///   * `--cover-lines`/`--cover-branches` also disable the JIT: an instrumented arm bails
+///     lowering anyway, but turning it off outright keeps the measurement honest.
+///   * The default memory ceiling (ADR-043), so a runaway test can't OOM the host; an
+///     explicit `BROOD_MEM_LIMIT` still wins.
+fn arm_test_env(argv: &[String]) {
+    if argv.first().map(String::as_str) != Some("test") {
         return;
+    }
+    let has = |names: &[&str]| {
+        argv.iter().any(|w| {
+            names
+                .iter()
+                .any(|n| w == n || w.starts_with(&format!("{n}=")))
+        })
     };
-    // Line and branch coverage share the same bytecode instrumentation + JIT-off seam.
-    if *cover_lines || *cover_branches {
-        // SAFETY: called from `main` before any thread or interpreter is created.
+    if has(&["--cover-lines", "--cover-branches"]) {
+        // SAFETY: called before any thread or interpreter is created.
         unsafe {
             std::env::set_var("BROOD_COVERAGE", "1");
             std::env::set_var("BROOD_NO_JIT", "1");
         }
     }
-    if *cover || *cover_lines || *cover_branches || cover_min.is_some() {
+    if has(&[
+        "--cover",
+        "--cover-lines",
+        "--cover-branches",
+        "--cover-min",
+    ]) {
         // SAFETY: as above.
         unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
+    }
+    // See `brood --test`: a green suite from a binary older than the `std/` under test is a
+    // gate that lies, and this is where the reading gets believed.
+    brood::cli_support::warn_if_stdlib_is_stale();
+    brood::core::alloc::init_limits_with_default(
+        brood::core::alloc::TEST_DEFAULT_HARD,
+        brood::core::alloc::TEST_DEFAULT_SOFT,
+    );
+}
+
+/// Run a Brood-implemented subcommand: `(nest/main argv)` returns the exit code.
+fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
+    if let Some(n) = max_parallel {
+        brood::process::set_max_parallel(n);
+    }
+    brood::core::alloc::init_limits_from_env();
+    brood::cli_support::warn_nondefault_gc_env();
+    arm_test_env(&argv);
+    let mut interp = Interp::new();
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_none() {
+        ensure_stdimage_now(&mut interp);
+    }
+    let code = format!("(nest/main {})", blsp_string_list(&argv));
+    if let brood::core::value::Value::Int(code) = run_for_value(&mut interp, &code) {
+        std::process::exit(code as i32);
     }
 }
 
@@ -798,8 +647,8 @@ fn run_main(cli: Cli) {
     if let Some(n) = cli.max_parallel {
         brood::process::set_max_parallel(n);
     }
-    // Honour BROOD_MEM_LIMIT for every command; `nest test` defaults a ceiling
-    // on (in cmd_test) so a runaway test can't OOM the host. `nest run`/`mcp`
+    // Honour BROOD_MEM_LIMIT for every command; `nest test` (Brood-routed, see
+    // `arm_test_env`) defaults a ceiling on so a runaway test can't OOM the host. `nest run`/`mcp`
     // stay unlimited unless the user opts in — the live image edits all day
     // (ADR-043).
     brood::core::alloc::init_limits_from_env();
@@ -840,140 +689,9 @@ fn run_main(cli: Cli) {
     }
 
     match cli.cmd {
-        Cmd::Test {
-            files,
-            only,
-            exclude,
-            include,
-            failed,
-            max_failures,
-            repeat_until_failure,
-            seed,
-            timeout,
-            slowest,
-            partitions,
-            shard,
-            trace,
-            formatter,
-            stale,
-            cover,
-            cover_lines,
-            cover_branches,
-            cover_min,
-        } => {
-            // Named FILES run standalone outside a project; project-wide
-            // discovery needs a manifest to discover from.
-            if files.is_empty() {
-                require_project(
-                    "test",
-                    Some("To run one file outside a project: nest test <file>_test.blsp"),
-                );
-            }
-            // A positional may be `FILE` or `FILE:LINE`; the line suffix becomes a
-            // selector while the bare path is what actually gets loaded.
-            let mut paths: Vec<String> = Vec::new();
-            let mut lines: Vec<(String, u64)> = Vec::new();
-            for arg in &files {
-                let (path, line) = split_file_line(arg);
-                if let Some(n) = line {
-                    lines.push((path.clone(), n));
-                }
-                if !paths.contains(&path) {
-                    paths.push(path);
-                }
-            }
-            let opts = TestOpts {
-                only,
-                exclude,
-                include,
-                failed,
-                max_failures,
-                repeat_until_failure,
-                seed,
-                timeout,
-                slowest,
-                partitions,
-                shard,
-                trace,
-                formatter,
-                stale,
-                cover,
-                cover_lines,
-                cover_branches,
-                cover_min,
-                lines,
-            };
-            cmd_test(&mut interp, &paths, &opts);
-        }
-        Cmd::Check {
-            files,
-            fix_renames,
-            dry_run,
-            suggest_sigs,
-            fix_sigs,
-            strict,
-        } => {
-            brood::types::set_strict_checking(
-                strict || std::env::var_os("BROOD_CHECK_STRICT").is_some_and(|v| v == "1"),
-            );
-            if files.is_empty() && !suggest_sigs && !fix_sigs {
-                require_project(
-                    "check",
-                    Some("To check one file outside a project: nest check <file>.blsp"),
-                );
-            }
-            if suggest_sigs {
-                let list = files
-                    .iter()
-                    .map(|f| format!("{f:?}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let code = format!(
-                    "(project/load-config) (require-one 'test) (project/suggest-sigs (list {list}))"
-                );
-                match run_for_value(&mut interp, &code) {
-                    brood::core::value::Value::Int(0) => {}
-                    _ => std::process::exit(1),
-                }
-                return;
-            }
-            if fix_sigs {
-                let list = files
-                    .iter()
-                    .map(|f| format!("{f:?}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let code = format!(
-                    "(project/load-config) (require-one 'test) (project/fix-sigs (list {list}) true)"
-                );
-                match run_for_value(&mut interp, &code) {
-                    brood::core::value::Value::Int(0) => {}
-                    _ => std::process::exit(1),
-                }
-                return;
-            }
-            if fix_renames {
-                // Whole-project by construction — the rewrite is project-wide, so
-                // scoping it to a file list would fix one caller and leave the rest.
-                let code = format!(
-                    "(project/load-config) (require-one 'test) (project/fix-renames {})",
-                    if dry_run { "false" } else { "true" }
-                );
-                match run_for_value(&mut interp, &code) {
-                    brood::core::value::Value::Int(0) => {}
-                    _ => std::process::exit(1),
-                }
-                return;
-            }
-            cmd_check(&mut interp, &files)
-        }
         // Handled above, before the interpreter is built.
         Cmd::Completions { .. } | Cmd::Complete { .. } => unreachable!(),
         Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
-        Cmd::Format { check, changed } => {
-            require_project("format", None);
-            cmd_format(&mut interp, check, changed)
-        }
         Cmd::Run {
             file,
             watch,
@@ -1023,26 +741,6 @@ fn run_main(cli: Cli) {
                 &args,
             )
         }
-        Cmd::Doc { module, all } => {
-            if module.is_none() && !all {
-                require_project(
-                    "doc",
-                    Some("For the builtin reference: nest doc --all; for one module: nest doc <module>"),
-                );
-            }
-            cmd_doc(&mut interp, module.as_deref(), all)
-        }
-        Cmd::Docs { out, all } => {
-            if !all {
-                require_project("docs", Some("For the language reference: nest docs --all"));
-            }
-            cmd_docs(&mut interp, out.as_deref(), all)
-        }
-        Cmd::Doctest => {
-            require_project("doctest", None);
-            cmd_doctest(&mut interp)
-        }
-        Cmd::Grammar { target } => cmd_grammar(&mut interp, target),
         Cmd::Fetch => {
             require_project("fetch", None);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/fetch)"))
@@ -1216,31 +914,6 @@ fn run_main(cli: Cli) {
 /// plist that `run-tests` and friends already accept. Selector *parsing* stays in
 /// Brood (`test-make-filter`) so the grammar has one definition; this only
 /// forwards argv.
-#[derive(Default)]
-struct TestOpts {
-    only: Vec<String>,
-    exclude: Vec<String>,
-    include: Vec<String>,
-    failed: bool,
-    max_failures: Option<u64>,
-    repeat_until_failure: Option<u64>,
-    seed: Option<u64>,
-    timeout: Option<u64>,
-    slowest: Option<u64>,
-    partitions: Option<u64>,
-    shard: u64,
-    trace: bool,
-    formatter: Option<String>,
-    stale: bool,
-    cover: bool,
-    cover_lines: bool,
-    cover_branches: bool,
-    cover_min: Option<u64>,
-    /// `FILE:LINE` selectors peeled off the positional FILE list.
-    lines: Vec<(String, u64)>,
-}
-
-/// Quote a Rust string as a Brood string literal.
 fn blsp_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -1255,242 +928,6 @@ fn blsp_string_list(items: &[String]) -> String {
     }
 }
 
-fn blsp_opt_int(value: Option<u64>) -> String {
-    value.map_or_else(|| "nil".to_string(), |n| n.to_string())
-}
-
-impl TestOpts {
-    /// True when nothing narrows or reorders the run — lets the common case pass
-    /// no filter at all, so `run-tests` takes its original fast path.
-    fn is_plain_selection(&self) -> bool {
-        self.only.is_empty()
-            && self.exclude.is_empty()
-            && self.include.is_empty()
-            && self.lines.is_empty()
-            && self.seed.is_none()
-            && self.partitions.is_none()
-    }
-
-    fn filter_expr(&self) -> String {
-        if self.is_plain_selection() {
-            return "nil".to_string();
-        }
-        let lines = if self.lines.is_empty() {
-            "nil".to_string()
-        } else {
-            let entries: Vec<String> = self
-                .lines
-                .iter()
-                .map(|(file, line)| format!("[{} {}]", blsp_string(file), line))
-                .collect();
-            format!("(list {})", entries.join(" "))
-        };
-        format!(
-            "(test/test-make-filter {} {} {} {} nil {} {} {})",
-            blsp_string_list(&self.only),
-            blsp_string_list(&self.exclude),
-            blsp_string_list(&self.include),
-            lines,
-            blsp_opt_int(self.seed),
-            blsp_opt_int(self.partitions),
-            self.shard,
-        )
-    }
-
-    /// The Brood option plist — spliced straight into the `run-*` call.
-    fn to_plist(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        // Tracing is OPT-IN. The default is the runner's one-character-per-test
-        // progress (a green dot per pass, a red `F` per failure), which is what you
-        // want for a normal run; `▶ group › name` per test is for finding a slow or
-        // hung case, and it suppresses the dots because the two together are noise.
-        if self.trace {
-            parts.push(":trace".to_string());
-        }
-        if let Some(name) = &self.formatter {
-            parts.push(format!(":formatter {}", blsp_string(name)));
-        }
-        if self.stale {
-            parts.push(":stale".to_string());
-        }
-        if self.failed {
-            parts.push(":failed".to_string());
-        }
-        // `--cover-min` implies `--cover`: asking for a floor without asking for
-        // measurement is never what someone means. A line/branch run reports its own
-        // (stricter) number, so the plain `:cover` shim isn't added for those.
-        if self.cover || (self.cover_min.is_some() && !self.cover_lines && !self.cover_branches) {
-            parts.push(":cover".to_string());
-        }
-        if self.cover_lines {
-            parts.push(":cover-lines".to_string());
-        }
-        if self.cover_branches {
-            parts.push(":cover-branches".to_string());
-        }
-        if let Some(n) = self.cover_min {
-            parts.push(format!(":cover-min {n}"));
-        }
-        if let Some(n) = self.max_failures {
-            parts.push(format!(":max-failures {n}"));
-        }
-        if let Some(n) = self.repeat_until_failure {
-            parts.push(format!(":repeat {n}"));
-        }
-        if let Some(n) = self.timeout {
-            parts.push(format!(":timeout {n}"));
-        }
-        if let Some(n) = self.slowest {
-            parts.push(format!(":slowest {n}"));
-        }
-        let filter = self.filter_expr();
-        if filter != "nil" {
-            parts.push(format!(":filter {filter}"));
-        }
-        parts.join(" ")
-    }
-}
-
-/// Split a positional test argument into its path and optional `:LINE` suffix.
-/// A trailing `:N` is a line selector; anything else is a plain path (so a file
-/// whose name genuinely contains a colon still loads).
-fn split_file_line(arg: &str) -> (String, Option<u64>) {
-    if let Some((path, suffix)) = arg.rsplit_once(':') {
-        if let Ok(line) = suffix.parse::<u64>() {
-            if !path.is_empty() {
-                return (path.to_string(), Some(line));
-            }
-        }
-    }
-    (arg.to_string(), None)
-}
-
-/// Reject a shard selection that would silently run nothing. `--partitions 2
-/// --shard 5` matches no test, and `--shard` without `--partitions` is ignored
-/// outright — both exit 0 having run zero tests, which in CI is indistinguishable
-/// from a green build. Fail loudly instead.
-/// Cross-field check that clap can't express: `--shard` is only meaningful with
-/// `--partitions`, and must be in range. The single-field ranges (`--partitions`
-/// ≥ 1, `--cover-min` 0–100, …) are enforced declaratively by `value_parser`, so
-/// an out-of-range value never reaches this code — `saturating_sub` below is
-/// defence in depth, not the guard: `--partitions 0` once reached `total - 1`
-/// here and panicked on the u64 underflow, handing the user a Rust backtrace and
-/// a crash dump for what is only a bad flag.
-fn validate_shard(opts: &TestOpts) {
-    match (opts.partitions, opts.shard) {
-        (None, shard) if shard != 0 => {
-            eprintln!("nest test: --shard {shard} needs --partitions N (it is ignored without it)");
-            std::process::exit(2);
-        }
-        (Some(total), shard) if shard >= total => {
-            eprintln!(
-                "nest test: --shard {shard} is out of range for --partitions {total} \
-                 (shards are 0-based, so use 0..{})",
-                total.saturating_sub(1)
-            );
-            std::process::exit(2);
-        }
-        _ => {}
-    }
-}
-
-fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
-    validate_shard(opts);
-    // See `brood --test`: a green suite from a binary older than the `std/` under test is a
-    // gate that lies, and this is where the reading gets believed.
-    brood::cli_support::warn_if_stdlib_is_stale();
-    // Default a memory ceiling on for test runs (ADR-043); an explicit
-    // BROOD_MEM_LIMIT still wins (init ran first in main()).
-    brood::core::alloc::init_limits_with_default(
-        brood::core::alloc::TEST_DEFAULT_HARD,
-        brood::core::alloc::TEST_DEFAULT_SOFT,
-    );
-    let plist = opts.to_plist();
-    if files.is_empty() {
-        // Whole-project discovery via std/tool/project.blsp. Raises on failure,
-        // so a non-zero exit falls out of the eval error.
-        // `test` is required up front, not left to `run-tests`: the option
-        // plist can contain a `(test/test-make-filter …)` call, and arguments are
-        // evaluated before the callee runs its own `require`.
-        run_expecting_failure_signal(
-            interp,
-            &format!(
-                "(require-one 'test) (project/load-config) \
-                 (project/run-tests {plist})"
-            ),
-            TEST_FAILURE_SIGNALS,
-        );
-        return;
-    }
-    // Single-file path: mirror brood --test, but pre-load project image when
-    // we're inside a project so cross-module names resolve.
-    let bootstrap = if in_project() {
-        "(project/load-config) (let (root (project/find-root (file/cwd))) \
-            (when root (project/setup root) (project/load-sources root))) \
-            (require-one 'test)"
-    } else {
-        "(require-one 'test)"
-    };
-    let inside_project = in_project();
-    run(interp, bootstrap);
-    for path in files {
-        let src = brood::cli_support::read_source_or_exit("nest test", std::path::Path::new(path));
-        if let Err(e) = brood::cli_support::eval_file(interp, path, &src) {
-            report_error(&e.or_file(path.clone()));
-            std::process::exit(1);
-        }
-    }
-    // Inside a project, go through `run-loaded-tests` so `--failed` resolves
-    // against (and updates) the project's record exactly as on a whole-project
-    // run; outside one there is no record to keep, so run the registry directly.
-    if inside_project {
-        run_expecting_failure_signal(
-            interp,
-            &format!("(project/run-loaded-tests {plist})"),
-            TEST_FAILURE_SIGNALS,
-        );
-    } else {
-        run_expecting_failure_signal(
-            interp,
-            &format!("(test/run-tests {plist})"),
-            TEST_FAILURE_SIGNALS,
-        );
-    }
-}
-
-/// `nest check [FILES...]` — project-wide if no files, otherwise file-by-file.
-fn cmd_check(interp: &mut Interp, files: &[String]) {
-    require_readable_files("check", files);
-    // One checker, one path. Whole-project and file-list checks both go through
-    // `std/tool/project.blsp`, which loads the project image *first* so cross-module /
-    // namespace imports resolve through the heap's globals. The single-file path
-    // used to be a separate Rust loop that skipped that setup — so every `:use`d
-    // or qualified name in a namespaced file false-flagged as unbound (the
-    // breakage the `.brood-skip-blsp-check` migration hatch was added for). Both
-    // forms now return a warning count; non-zero → exit 1.
-    let code = if files.is_empty() {
-        "(project/load-config) (require-one 'test) (project/check)".to_string()
-    } else {
-        let list = files
-            .iter()
-            .map(|f| format!("\"{}\"", brood::introspect::escape_brood_string(f)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("(require-one 'test) (project/check-files (list {list}))")
-    };
-    match run_for_value(interp, &code) {
-        brood::core::value::Value::Int(0) => {}
-        brood::core::value::Value::Int(_) => std::process::exit(1),
-        other => {
-            eprintln!(
-                "nest check: checker returned a non-integer ({})",
-                interp.print(other)
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
 /// `nest new <name> [--template NAME]` — delegates to `(scaffold/new-project name
 /// template)` in std/tool/scaffold.blsp (config still comes from `project`).
 fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
@@ -1501,21 +938,6 @@ fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
         interp,
         &format!("(project/load-config) (require-one 'scaffold) {call}"),
     );
-}
-
-/// `nest format [--check]` — reformat in place, or dry-run on `--check`.
-fn cmd_format(interp: &mut Interp, check: bool, changed: bool) {
-    let entry = if check {
-        // --check is CI's clean-tree gate: it must see the whole project, so
-        // --changed doesn't narrow it (a stale committed file would slip by).
-        "(format/project-check)"
-    } else if changed {
-        "(format/project-changed)"
-    } else {
-        "(format/project)"
-    };
-    let code = format!("(project/load-config) (require-one 'format) {}", entry);
-    run(interp, &code);
 }
 
 /// `nest run [FILE] [--watch PATH]... [args...]` — the entry point.
@@ -1896,67 +1318,6 @@ fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>, enhances: O
     }
     call.push(')');
     run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
-}
-
-/// `nest doc [module] [--all]` — Markdown docs to stdout. `--all` documents
-/// every public global in a fresh image (the complete builtin + prelude
-/// reference) and ignores MODULE.
-fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
-    let code = if all {
-        "(io/puts (docs/document-all))".to_string()
-    } else {
-        match module {
-            Some(name) => format!(
-                "(require-one 'docs) {}",
-                brood::introspect::call_form("docs/generate", &[name])
-            ),
-            None => "(docs/generate)".to_string(),
-        }
-    };
-    run(interp, &code);
-}
-
-/// `nest docs [--all] [-o DIR]` — generate an HTML documentation site (default `doc/`).
-/// Without `--all` documents the current project; with it, the whole builtin + prelude
-/// reference (the language reference) in a fresh image.
-fn cmd_docs(interp: &mut Interp, out: Option<&str>, all: bool) {
-    let entry = if all {
-        "docs/generate-site-all"
-    } else {
-        "docs/generate-site"
-    };
-    let call = match out {
-        Some(dir) => brood::introspect::call_form(entry, &[dir]),
-        None => format!("({entry})"),
-    };
-    run(interp, &format!("(require-one 'docs) {call}"));
-}
-
-/// `nest doctest` — evaluate the project's `expr ;=> result` docstring examples and exit
-/// non-zero on any mismatch, so a CI run catches docs drifting from the code. `run-doctests`
-/// prints the per-example report and returns the failure count.
-fn cmd_doctest(interp: &mut Interp) {
-    match run_for_value(interp, "(docs/run-doctests)") {
-        brood::core::value::Value::Int(0) => {}
-        brood::core::value::Value::Int(_) => std::process::exit(1),
-        _ => {}
-    }
-}
-
-/// `nest grammar [TARGET]` — emit an editor syntax grammar generated from the
-/// language's own `(reflect/special-forms)` + `(reflect/doc-forms)` (ADR-092), to stdout. `tmlanguage`
-/// (default) is a VS Code TextMate grammar (JSON); `emacs` the font-lock defconsts.
-/// Pure Brood — `std/tool/grammar.blsp` — so adding a special form updates every
-/// editor's highlighting from one place.
-fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
-    // Exhaustive — clap already rejected any unknown value (with a listed-choices
-    // error) before we get here, so there's no fallback/exit(2) arm.
-    let call = match target {
-        GrammarTarget::Tmlanguage => "(grammar/tmlanguage)",
-        GrammarTarget::Emacs => "(grammar/emacs)",
-        GrammarTarget::TreeSitter => "(grammar/tree-sitter-highlights)",
-    };
-    run(interp, &format!("(require-one 'grammar) (io/puts {call})"));
 }
 
 /// `nest repl` — project-aware REPL. Inside a project, pre-load every source
@@ -2347,37 +1708,6 @@ fn is_plain_filename(s: &str) -> bool {
 
 // ---------- helpers ----------
 
-/// Evaluate a bootstrap snippet, reporting any error in GNU form and exiting
-/// non-zero on failure.
-/// The raises `nest test` treats as an already-reported verdict rather than an error:
-/// the suite's own failure count, and a `--cover-min` shortfall (both print their
-/// detail first, then raise only so the exit code is non-zero).
-const TEST_FAILURE_SIGNALS: &[&str] = &["test(s) failed", "coverage below minimum"];
-
-/// Like `run`, but for a command whose Brood side signals "the work failed" by
-/// RAISING — `run-tests` raises `N test(s) failed` so that `cargo test` and
-/// `brood --test` see a non-zero exit.
-///
-/// For `nest test` that raise is not an error to report: the failures have already
-/// been printed, in detail, by the runner. Reporting it again appended
-/// `1337:13: error: 2 test(s) failed` plus `at project/run-tests` and a
-/// version banner to the end of an otherwise clean report — three lines of internals
-/// after the part the user actually reads. Exit non-zero silently instead, and only
-/// fall back to the normal error report for a genuine failure (a broken manifest, an
-/// unloadable test file).
-fn run_expecting_failure_signal(interp: &mut Interp, code: &str, signals: &[&str]) {
-    let result = interp.eval_str(code);
-    brood::builtins::restore_terminal_on_exit();
-    if let Err(e) = result {
-        let text = e.to_string();
-        if signals.iter().any(|signal| text.contains(signal)) {
-            std::process::exit(1);
-        }
-        report_error(&e);
-        std::process::exit(1);
-    }
-}
-
 fn run(interp: &mut Interp, code: &str) {
     let result = interp.eval_str(code);
     // Restore the terminal on the way out — whether the program returned
@@ -2435,9 +1765,7 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 /// `MODULE[/FN]`, so every suggestion was wrong. Name each argument.
 fn value_kind(subcommand: &str, arg_name: &str) -> Option<&'static str> {
     match (subcommand, arg_name) {
-        (_, "only" | "exclude" | "include") => Some("selector"),
-        ("test", "files") => Some("test-file"),
-        ("check", "files") | ("run", "file") => Some("blsp-file"),
+        ("run", "file") => Some("blsp-file"),
         ("doc", "module") => Some("module"),
         // `--main` names a module (optionally `module/fn`), so offer this project's
         // own modules — not std's, which can't be an entry point.
@@ -2472,7 +1800,22 @@ fn subcommand_names() -> Vec<String> {
         .get_subcommands()
         .filter(|s| !s.is_hide_set())
         .map(|s| s.get_name().to_string())
+        .chain(BLSP_SUBCOMMANDS.iter().map(|s| s.to_string()))
         .collect()
+}
+
+/// Completion for a Brood-implemented subcommand: its flags and positional values live in
+/// `std/tool/nest.blsp`'s table, the one source of truth for what it accepts, so ask it.
+/// Costs an interpreter boot, as the project-dependent values already did.
+fn print_blsp_completion(subcommand: &str, prior: &[String], current: &str) {
+    let mut interp = Interp::new();
+    let code = format!(
+        "(nest/complete {} {} {})",
+        blsp_string(subcommand),
+        blsp_string_list(prior),
+        blsp_string(current)
+    );
+    let _ = interp.eval_str(&code);
 }
 
 /// The `--long` flags of one subcommand, plus the global ones.
@@ -2608,6 +1951,15 @@ fn cmd_complete(words: &[String]) {
     let statics: Vec<String> = match &subcommand {
         // Still choosing a subcommand.
         None => subcommand_names(),
+        Some(sub) if BLSP_SUBCOMMANDS.contains(&sub.as_str()) => {
+            let after: Vec<String> = prior
+                .iter()
+                .skip_while(|w| w != &sub)
+                .skip(1)
+                .cloned()
+                .collect();
+            return print_blsp_completion(sub, &after, &current);
+        }
         Some(sub) => {
             if current.starts_with('-') {
                 flag_names(sub)

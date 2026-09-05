@@ -1,0 +1,90 @@
+;; The `nest` command line's argv parser (std/tool/nest.blsp, ADR-322).
+;;
+;; The subcommands themselves are driven end-to-end through the real binary in
+;; `crates/nest/tests/blsp_dispatch.rs`; what is pinned here is the pure half — the table
+;; → options parse, its clap-shaped errors, and the constraint rules — in-image, where a
+;; case costs microseconds rather than a process.
+
+(defmodule nest-test (:use test))
+
+(describe "nest/parse — flags and positionals"
+  (test "a variadic FILE list and a bool flag"
+    (let (o (nest/parse "check" ["--strict" "a.blsp" "b.blsp"]))
+      (assert= nil (get o :error))
+      (assert= true (get (get o :flags) "--strict"))
+      (assert= (list "a.blsp" "b.blsp") (get o :positionals))))
+
+  (test "a valued flag, inline or separate, and a short alias canonicalised"
+    (assert= "x" (get (get (nest/parse "docs" ["--out=x"]) :flags) "--out"))
+    (assert= "x" (get (get (nest/parse "docs" ["--out" "x"]) :flags) "--out"))
+    (assert= "x" (get (get (nest/parse "docs" ["-o" "x"]) :flags) "--out")))
+
+  (test "a valued flag with no value is a usage error"
+    (is (includes? (get (nest/parse "docs" ["--out"]) :error) "a value is required")))
+
+  (test "an unknown flag is a usage error"
+    (is (includes? (get (nest/parse "grammar" ["--nope"]) :error) "unexpected argument '--nope'")))
+
+  (test "a positional outside the allowed set, or one too many"
+    (is (includes? (get (nest/parse "grammar" ["bogus"]) :error) "invalid value 'bogus'"))
+    (is (includes? (get (nest/parse "grammar" ["emacs" "extra"]) :error)
+          "unexpected argument 'extra'"))
+    (assert= nil (get (nest/parse "grammar" ["emacs"]) :error)))
+
+  (test "a command with no positional rejects one"
+    (is (includes? (get (nest/parse "format" ["a.blsp"]) :error) "unexpected argument 'a.blsp'"))))
+
+(describe "nest/parse — the clap constraints, as table data"
+  (test ":requires — --dry-run needs --fix-renames"
+    (is (includes? (get (nest/parse "check" ["--dry-run"]) :error)
+          "required arguments were not provided"))
+    (assert= nil (get (nest/parse "check" ["--fix-renames" "--dry-run"]) :error)))
+
+  (test ":conflicts — the sig and rename aids are mutually exclusive"
+    (is (includes? (get (nest/parse "check" ["--suggest-sigs" "--fix-renames"]) :error)
+          "'--suggest-sigs' cannot be used with '--fix-renames'"))
+    (is (includes? (get (nest/parse "check" ["--fix-sigs" "--suggest-sigs"]) :error)
+          "cannot be used with")))
+
+  (test ":no-positional-with — the project-wide rewrite takes no FILE list"
+    (is (includes? (get (nest/parse "check" ["--fix-renames" "a.blsp"]) :error) "'[FILE]...'"))))
+
+(describe "the table as completion's model"
+  (test "the commands and their flags"
+    (is (contains? (into #{} (nest/subcommands)) "check"))
+    (assert= (list "--dry-run" "--fix-renames" "--fix-sigs" "--strict" "--suggest-sigs")
+      (nest/flags-of "check"))
+    (assert= (list) (nest/flags-of "not-a-command")))
+
+  (test "a fixed positional lists its values; a free-text one lists none"
+    (assert= ["tmlanguage" "emacs" "tree-sitter"] (nest/positional-values "grammar"))
+    (assert= (list) (nest/positional-values "check"))
+    (assert= (list) (nest/positional-values "doc"))))
+
+(describe "nest/parse — typed and repeatable flags (the `test` table)"
+  (test "an :int flag arrives as an int, in range"
+    (let (o (nest/parse "test" ["--seed" "7" "--cover-min" "0" "--partitions=3"]))
+      (assert= nil (get o :error))
+      (assert= 7 (get (get o :flags) "--seed"))
+      (assert= 0 (get (get o :flags) "--cover-min"))
+      (assert= 3 (get (get o :flags) "--partitions"))))
+
+  (test "out of range or not a number is a usage error in clap's words"
+    (is (includes? (get (nest/parse "test" ["--max-failures" "0"]) :error)
+          "invalid value '0' for '--max-failures <N>': 0 is not in 1..="))
+    (is (includes? (get (nest/parse "test" ["--cover-min" "101"]) :error) "101 is not in 0..=100"))
+    (is (includes? (get (nest/parse "test" ["--seed" "x"]) :error)
+          "invalid value 'x' for '--seed <N>': invalid digit found in string")))
+
+  (test "a :repeat flag collects every occurrence, in order"
+    (let (o (nest/parse "test"
+              ["--only" "db" "--only" "test:adds" "--exclude" "slow" "a_test.blsp"]))
+      (assert= nil (get o :error))
+      (assert= (list "db" "test:adds") (get (get o :flags) "--only"))
+      (assert= (list "slow") (get (get o :flags) "--exclude"))
+      (assert= (list "a_test.blsp") (get o :positionals))))
+
+  (test "a plain valued flag keeps the last value"
+    (assert= "json"
+      (get (get (nest/parse "test" ["--formatter" "tap" "--formatter" "json"]) :flags)
+        "--formatter"))))
