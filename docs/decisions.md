@@ -20829,3 +20829,34 @@ that option must land before the scheduler pool exists, which is before any Broo
 constraints, both exit-code forms, the global option in all four spellings), and the boundary
 guards the Rust arm had — a missing FILE, a directory — are still pinned by `missing_file.rs`
 and `cli_failure_reporting.rs`, which now exercise the Brood path.
+
+**Amendment 2026-09-05 (evening) — `test` is the seventh, and the flag spec grew up.** The
+biggest arm so far (nineteen options) and the first whose options are TYPED: a flag's spec is
+now `:bool`, a value name, or `{:value "N" :int [lo hi] :repeat true :complete "kind"}` — an
+integer parsed and range-checked in clap's words (`invalid value '0' for '--max-failures <N>':
+0 is not in 1..=`), a repeatable flag collected into a list, a value completed by a
+`complete/print-candidates` kind (`--only <TAB>` offers selectors from the table, not from a
+Rust `value_kind` match). `FILE:LINE` splitting, the shard guard (`--shard` without
+`--partitions` exits 0 having run nothing, which CI reads as green — refused with exit 2),
+the option-list assembly (`:filter` only when something narrows the run, so the plain case
+keeps the runner's fast path) and the failure-signal convention (`N test(s) failed` /
+`coverage below minimum` raised by the runner become a SILENT exit 1, everything else is
+rethrown for the normal report) are all Brood. `test/test-make-filter` went public: it was
+`defn-`, reachable only because the Rust arm evaluated a string.
+
+**What stayed in Rust, and why — the one real seam.** `arm_test_env` runs BEFORE
+`Interp::new()`, keyed on the subcommand: `BROOD_COVERAGE`/`BROOD_NO_JIT` for
+`--cover-lines`/`--cover-branches` and `BROOD_NO_RELOAD_DIAG` for any `--cover*`, because the
+kernel caches those flags on first read during the prelude build — set from Brood they are
+simply absent, with no error to notice — plus the ADR-043 default memory ceiling and the
+stale-stdlib warning. The router also accepts the global `-j` AFTER the subcommand now (clap
+did), stripping it before Brood sees the words. Sabotage-verified: with the arming removed,
+4 of `coverage_lines.rs`'s 6 cases fail. `main.rs` 2,547 → 2,113; `nest.blsp` 595 lines.
+Gates: `blsp_dispatch.rs` +3 (the scaffolded suite, a named file with the global `-j`, a
+`FILE:LINE` selector, TAP; a failing suite exits 1 with no runner internals in the report;
+six typed-flag/shard usage errors); `tests/nest_test.blsp` +4 (int, range, repeat,
+last-wins); the `nest` crate 156/156 with `stale.rs`, `coverage_lines.rs`,
+`file_boundary_quiesce.rs`, `missing_file.rs` and `complete.rs` now exercising the Brood arm.
+One trap for the record: `(and (map? kind) (get kind :int))` answers **false**, not nil, for a
+non-map spec, and a `nil?` guard let that `false` through to `nth` — every `--strict` and
+every `--formatter` failed until the map question was asked first.

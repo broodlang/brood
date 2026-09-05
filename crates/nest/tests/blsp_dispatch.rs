@@ -233,3 +233,100 @@ fn the_global_jobs_option_still_reaches_a_brood_subcommand() {
         "{lines:?}"
     );
 }
+
+// ── `test` (moved 2026-09-05) ──────────────────────────────────────────────────────────
+//
+// The suite-level behaviour (`--stale`, `--cover-lines`, `--trace`, the missing-file
+// boundary, completion of selectors and test files) is pinned by `stale.rs`,
+// `coverage_lines.rs`, `file_boundary_quiesce.rs`, `missing_file.rs` and `complete.rs`,
+// which now run through the Brood arm. Pinned here: the typed flags, the shard guard, the
+// FILE:LINE selector, the silent exit 1 on a failing suite, and the global `-j`.
+
+fn scaffolded(tag: &str) -> std::path::PathBuf {
+    let dir = scratch(tag);
+    let (code, _, err) = nest_in(&dir, &["new", "demo"]);
+    assert_eq!(code, 0, "scaffold:\n{err}");
+    dir.join("demo")
+}
+
+#[test]
+fn test_runs_the_scaffolded_suite_and_a_named_file_with_a_line_selector() {
+    let proj = scaffolded("test-proj");
+    let (code, out, err) = nest_in(&proj, &["test"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains("tests, ") && out.contains(" passed"),
+        "a summary line:\n{out}"
+    );
+    let (code, out, err) = nest_in(&proj, &["-j", "2", "test", "tests/main_test.blsp"]);
+    assert_eq!(code, 0, "named file (with the global -j):\n{out}\n{err}");
+    assert!(out.contains(" passed"), "{out}");
+    // A `FILE:LINE` selector narrows to the test at that line; a line with no test
+    // selects nothing, which the runner reports as zero tests rather than an error.
+    let (code, out, err) = nest_in(&proj, &["test", "tests/main_test.blsp:1"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("0 tests"), "line 1 holds no test:\n{out}");
+    let (code, out, _) = nest_in(&proj, &["test", "--formatter", "tap"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("TAP version 13"), "{out}");
+}
+
+#[test]
+fn a_failing_suite_exits_1_without_reporting_the_runner_internals() {
+    let proj = scaffolded("test-fail");
+    std::fs::write(
+        proj.join("tests").join("bad_test.blsp"),
+        "(defmodule demo/bad-test (:use test))\n(describe \"bad\"\n  (test \"lies\" (assert= 1 2)))\n",
+    )
+    .expect("write bad test");
+    let (code, out, err) = nest_in(&proj, &["test"]);
+    assert_eq!(code, 1, "{out}\n{err}");
+    assert!(
+        out.contains("1 failed") || err.contains("1 failed"),
+        "{out}\n{err}"
+    );
+    let all = format!("{out}{err}");
+    assert!(
+        !all.contains("at project/run-tests") && !all.contains("test(s) failed\n    at "),
+        "the failure signal must not be reported as an error:\n{all}"
+    );
+}
+
+#[test]
+fn test_typed_flags_and_the_shard_guard_are_usage_errors() {
+    let proj = scaffolded("test-flags");
+    for (args, needle) in [
+        (
+            &["test", "--max-failures", "0"][..],
+            "invalid value '0' for '--max-failures <N>'",
+        ),
+        (
+            &["test", "--seed", "abc"][..],
+            "invalid value 'abc' for '--seed <N>'",
+        ),
+        (&["test", "--cover-min", "101"][..], "101 is not in 0..=100"),
+        (
+            &["test", "--shard", "1"][..],
+            "--shard 1 needs --partitions N",
+        ),
+        (
+            &["test", "--partitions", "2", "--shard", "5"][..],
+            "out of range for --partitions 2",
+        ),
+        (&["test", "--nope"][..], "unexpected argument '--nope'"),
+    ] {
+        let (code, out, err) = nest_in(&proj, args);
+        assert_eq!(code, 2, "{args:?}:\n{out}\n{err}");
+        assert!(
+            err.contains(needle),
+            "{args:?}: expected {needle:?} in:\n{err}"
+        );
+        assert!(!out.contains("tests,"), "{args:?} must run nothing:\n{out}");
+    }
+    let (code, out, _) = nest_in(&proj, &["test", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Usage: nest test [OPTIONS] [FILE]...") && out.contains("--only <SELECTOR>"),
+        "{out}"
+    );
+}

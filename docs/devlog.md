@@ -11137,3 +11137,16 @@ accident: `%check-strict!` (strict mode was settable only from the Rust arm) and
 `-j` option, which the router now parses before `Interp::new()` because it sizes the pool.
 `main.rs` 2,663 → 2,547. Trap: `keep` is not a bare prelude function — only `seq/lkeep`
 exists — so a filter-then-first is `(first (filter coll pred))`.
+
+## 2026-09-05 (evening) — `nest test` is Brood: typed flags, seven subcommands (ADR-322)
+
+Nineteen options, the first typed ones — a flag spec is now `:bool`, a value name, or
+`{:value :int :repeat :complete}` — with `FILE:LINE`, the shard guard, the option-list
+assembly and the silent-exit-1 failure signal all in `std/tool/nest.blsp`. Rust keeps one
+seam, `arm_test_env`: the coverage env flags and the test memory ceiling must be set before
+`Interp::new()` (sabotage: without it 4/6 `coverage_lines` cases fail). `main.rs`
+2,547 → 2,113. Trap: `(and (map? k) (get k :int))` is `false` for a non-map — a `nil?`
+guard let it reach `nth` and broke every `--strict`/`--formatter` until the map question
+came first. Also noticed, not fixed: a scaffolded project's `(:use log)` prints a
+"shadows the prelude `error`" warning on every `nest test`.
+
