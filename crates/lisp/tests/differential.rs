@@ -48,10 +48,47 @@ fn eval_on(src: &str, ceiling: Tier) -> Result<String, String> {
 /// harness, add it here and accept the wall-clock cost deliberately rather than by iteration.
 const DIFFERENTIAL_TIERS: &[Tier] = &[Tier::TreeWalk, Tier::Native];
 
+/// The corpus entries whose ERROR is the thing being compared — both engines must fail the
+/// same way. Listed by content so `agree` can tell a deliberate error from a rotted entry;
+/// everything else in `CORPUS` must evaluate.
+const EXPECTED_TO_ERROR: &[&str] = &[
+    "(defn pf ((0) :zero)) (pf 9)",
+    "(first 5)",
+    "(nope-undefined-fn 1)",
+    "(/ 1 0)",
+    "(+ 1 \"x\")",
+    "(1 2 3)",
+    "(defn boom (x) (first x)) (boom 5)",
+    "(defn dz (a b) (/ a b)) (dz 1 0)",
+    "(defn add1 (x) (+ x 1)) (def + (fn (a b) (* a b))) (add1 5)",
+];
+
 /// Every compared ceiling must agree with the reference (tier 0 — the floor, and total).
 fn agree(src: &str) {
     const REFERENCE: Tier = Tier::TreeWalk;
     let expected = eval_on(src, REFERENCE);
+    // Whether an entry EVALUATES is itself asserted, in both directions, because an entry
+    // that errors agrees with its own error on every tier — it passes while testing
+    // nothing. Three had rotted that way and were green throughout: `->>` and `reduce`'s
+    // argument order (deleted/reversed by ADR-308), a bare `even?` (namespaced to
+    // `math/even?`), and a `drive` entry calling a `make-adder` defined in a DIFFERENT
+    // entry — each corpus program gets a fresh `Interp`, so it was never bound. The
+    // deliberate error-parity entries are listed by content in `EXPECTED_TO_ERROR`, so a
+    // new one has to be declared rather than merely tolerated, and an entry that starts
+    // working (a fixed error, a name that came back) fails just as loudly.
+    let must_error = EXPECTED_TO_ERROR.contains(&src);
+    assert_eq!(
+        expected.is_err(),
+        must_error,
+        "{}:\n  {src}\n  {expected:?}",
+        if must_error {
+            "this entry is listed in EXPECTED_TO_ERROR but evaluated — drop it from the list"
+        } else {
+            "corpus entry does not evaluate on the reference tier — it would pass by \
+             agreeing with its own error on every tier; fix it, or add it to \
+             EXPECTED_TO_ERROR if the error IS the thing being compared"
+        }
+    );
     for &ceiling in DIFFERENTIAL_TIERS {
         if ceiling == REFERENCE {
             continue;
@@ -129,13 +166,18 @@ const CORPUS: &[&str] = &[
     // local-capturing closures (Stage 2c)
     "(defn make-adder (n) (fn (x) (+ x n))) ((make-adder 5) 37)",
     "(defn adder3 (a) (fn (b) (let (s (+ a b)) (fn (c) (+ s c))))) (((adder3 1) 2) 3)",
-    "(defn drive (f acc i n) (if (= i n) acc (drive f (f acc) (+ i 1) n))) (drive (make-adder 1) 0 0 1000)",
+    // `make-adder` is defined INSIDE this entry: each corpus program gets a fresh
+    // `Interp`, so borrowing it from the entry above left this one unbound (and therefore
+    // vacuously green) until the reference-tier guard in `agree` caught it.
+    "(defn make-adder (n) (fn (x) (+ x n))) \
+     (defn drive (f acc i n) (if (= i n) acc (drive f (f acc) (+ i 1) n))) \
+     (drive (make-adder 1) 0 0 1000)",
     // higher-order + threading
     "(map (range 1 6) (fn (x) (* x x)))",
-    "(filter (range 1 11) even?)",
+    "(filter (range 1 11) math/even?)",
     "(reduce (range 1 101) 0 +)",
     "(-> 5 (+ 3) (* 2))",
-    "(->> (range 1 6) (map (fn (x) (* x x))) (reduce + 0))",
+    "(-> (range 1 6) (map (fn (x) (* x x))) (reduce 0 +))",
     // multi-arity
     "(defn g ((x) x) ((x y) (+ x y))) [(g 7) (g 3 4)]",
     // variadic call (and a variadic user fn)
@@ -170,7 +212,7 @@ const CORPUS: &[&str] = &[
     // elements, so they're build-nodes, not folded Consts)
     "(defn qd (x) (list (quote a) x '(n e s t) [:v x] {:k x :q (quote s)})) (qd 7)",
     // a match expression whose clauses include a guard, list-destructure, and wildcard
-    "(defn cl (x) (match x (n :when (< n 0) :neg) (0 :z) ((a b) (+ a b)) (_ :o))) [(cl -3) (cl 0) (cl (list 4 5)) (cl 9)]",
+    "(defn cl (x) (match x (0 :z) ((a b) (+ a b)) (n :when (< n 0) :neg) (_ :o))) [(cl -3) (cl 0) (cl (list 4 5)) (cl 9)]",
     // data structures
     "{:a 1 :b (+ 1 1)}",
     "(get (assoc {:x 1} :y 2) :y)",
