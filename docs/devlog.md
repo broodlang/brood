@@ -10898,3 +10898,25 @@ pixel. One correction to my own method along the way: a "HEAD vs base" `perf sta
 built by the same recipe — I nearly compared a `make release` binary with a `make release-brood`
 one before checking the sizes matched (they did, 42 512 352 bytes both; the lean/full split is
 `nest`'s, not `brood`'s).
+
+## 2026-09-05 (later) — a float-context arm applied to an int stays native (KI-109, lead 1)
+
+`->float` is `(* 1.0 x)`. The `1.0` puts the arm in float context, so `x` was read through
+`emit::as_f64`, whose tag guard accepted `Float` alone — and every program that converts calls
+it with an int. A deopt on every activation, sixteen in a row latched BAILED, interpreted for
+the rest of the process: on `mandelbrot` one VM call per pixel. The guard now takes `Int` too,
+promoting with `fcvt_from_sint` — the VM's own `prim_apply_float` coercion, `i64 as f64` — and
+still deopts on anything else (a `BigInt` is a different tag). Not a type guess; the VM's mixed
+semantics, so a stale profile costs nothing.
+
+Guard on the entry point: `crates/cli/tests/float_context_int_operand.rs` runs real `brood`,
+asserts the JIT's answers equal `BROOD_NO_JIT=1`'s on a mixed loop (2⁵³+1 rounding included)
+and that the bail trace names no `deopt-thrash-latched`; sabotage (int tag made unmatchable)
+fails it with the latch message. Suite 1384/1384 in halves; 46 JIT Rust cases; every
+`tests/jit_*_test.blsp`; numeric conformance and math.
+
+Perf, `make ab BASE=322425b2 --floor`, best-of-7: `mandelbrot` −2.7% (0.5% floor), `pipeline`
+−3.8% (1.6%), `fib`/`nbody`/`startup` flat, `matmul` +5.2% against a 3.6% floor — which
+`perf stat` then cleared: instructions +0.1%, cycles +0.5%, icache misses **−10%**, tiering
+identical (92 bails, 0 latched, both sides). The wall swing was the box's plateau, not work.
+`mandelbrot` by counter: instructions −1.2%, cycles −0.6%.

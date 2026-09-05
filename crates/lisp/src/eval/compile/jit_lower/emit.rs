@@ -698,11 +698,53 @@ pub(super) fn as_block_arg(
 ///    where `(* nx nx)` would otherwise reload and tag-check the just-written slot).
 ///    The cache is valid only for slots written via `store_op` (never via SelfCall/entry),
 ///    and parameter slots are always None — safe against cross-branch pollution.
-/// 3. Unknown: full tag-check + brif to deopt + load + bitcast. NOTE: we do NOT skip the
+/// 3. Unknown: tag-check; `Float` → load + bitcast, `Int` → load + `fcvt_from_sint` (the
+///    VM's own promotion), else deopt ([`float_or_promoted_int`]). NOTE: we do NOT skip the
 ///    tag-check based on `slot_float[k]` alone: that flag is a single-pass approximation
 ///    that can be contaminated by stores in other branches (e.g. a then-branch `store_op`
 ///    setting slot_float[k]=true before an else-branch `as_f64` read — the slot is really
 ///    Int at that point). Skipping the brif deopt there produces wrong results.
+/// A value read *as a float*: `Float` → its bits; **`Int` → promoted with `fcvt_from_sint`**,
+/// the same `i64 as f64` the VM's `prim_apply_float` performs; anything else → deopt with
+/// `reason`. `tag` is the low byte already isolated; `payload` the second word.
+///
+/// The `Int` arm is the fix for a whole class of arms that could never stay native: any
+/// float-context body applied to an int — `->float` is literally `(* 1.0 x)`, and every
+/// program that converts calls it with an int. The old guard accepted `Float` alone, so the
+/// arm deopted on EVERY activation, sixteen in a row latched it BAILED, and it ran
+/// interpreted for the rest of the process (`mandelbrot`: one VM call per pixel, KI-109).
+/// Promoting here is not a guess about types; it is the VM's own semantics for a mixed
+/// operand, so a stale profile costs nothing and a `BigInt` (a different tag) still deopts
+/// to the native that owns it.
+fn float_or_promoted_int(
+    b: &mut FunctionBuilder,
+    tag: cranelift_codegen::ir::Value,
+    payload: cranelift_codegen::ir::Value,
+    f: Frame,
+    reason: i64,
+) -> cranelift_codegen::ir::Value {
+    let is_f = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_FLOAT as i64);
+    let is_i = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_INT as i64);
+    let as_float = b.create_block();
+    let not_float = b.create_block();
+    let as_int = b.create_block();
+    let merge = b.create_block();
+    b.append_block_param(merge, types::F64);
+    b.ins().brif(is_f, as_float, &[], not_float, &[]);
+    b.switch_to_block(as_float);
+    let bits = b.ins().bitcast(types::F64, MemFlagsData::new(), payload);
+    b.ins().jump(merge, &[BlockArg::Value(bits)]);
+    b.switch_to_block(not_float);
+    let __dr = b.ins().iconst(types::I32, reason);
+    b.ins()
+        .brif(is_i, as_int, &[], f.deopt, &[BlockArg::Value(__dr)]);
+    b.switch_to_block(as_int);
+    let promoted = b.ins().fcvt_from_sint(types::F64, payload);
+    b.ins().jump(merge, &[BlockArg::Value(promoted)]);
+    b.switch_to_block(merge);
+    b.block_params(merge)[0]
+}
+
 pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_codegen::ir::Value {
     match op {
         Op::Float(v) => v,
@@ -718,19 +760,13 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
             let o = b.ins().imul_imm_s(i, STRIDE);
             let addr = b.ins().iadd(roots_base, o);
             let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
-            let is_f = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_FLOAT as i64);
-            let cont = b.create_block();
-            let __dr = b.ins().iconst(types::I32, 24);
-            b.ins()
-                .brif(is_f, cont, &[], f.deopt, &[BlockArg::Value(__dr)]);
-            b.switch_to_block(cont);
-            let bits = b.ins().load(
+            let payload = b.ins().load(
                 types::I64,
                 MemFlagsData::trusted(),
                 addr,
                 PAYLOAD_OFFSET as i32,
             );
-            b.ins().bitcast(types::F64, MemFlagsData::new(), bits)
+            float_or_promoted_int(b, tag, payload, f, 24)
         }
         Op::Handle(w0, w1, _) => {
             // A type-erased boxed `Value` (a `nth`/vector read, a call result) used as a
@@ -739,13 +775,7 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
             // words already in registers. This is what lets `(nth v k)`-fed float
             // arithmetic stay native instead of deopting on the int-path `as_int`.
             let tagb = b.ins().band_imm_s(w0, 0xff);
-            let is_f = b.ins().icmp_imm_s(IntCC::Equal, tagb, TAG_FLOAT as i64);
-            let cont = b.create_block();
-            let __dr = b.ins().iconst(types::I32, 25);
-            b.ins()
-                .brif(is_f, cont, &[], f.deopt, &[BlockArg::Value(__dr)]);
-            b.switch_to_block(cont);
-            b.ins().bitcast(types::F64, MemFlagsData::new(), w1)
+            float_or_promoted_int(b, tagb, w1, f, 25)
         }
         Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => {
             let __dr = b.ins().iconst(types::I32, 26);

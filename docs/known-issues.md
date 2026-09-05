@@ -6402,11 +6402,20 @@ builds of both, same session, pinned:
   580/565 ms interleaved. Consistent with KI-100's negative measurement of the same switch.
 
 **Two leads worth more than the three levers above, both general:**
-1. **`->float` is `(* 1.0 x)` and deopt-thrashes to BAILED on an int argument** — 16 deopts
-   then interpreted forever, one VM call per pixel here and in every program that converts.
-   A `Prim2 Mul` lowering (or arm specialisation) that handles int×float promotion inline
-   would keep it native. Gate: `BROOD_JIT_BAIL_TRACE=1` shows no `deopt-thrash-latched` for
-   `->float`, and `jit_deopt` reads 0 in `perf-stats`.
+1. **`->float` is `(* 1.0 x)` and deopt-thrashed to BAILED on an int argument — FIXED
+   2026-09-05.** The `1.0` puts the arm in float context, so `x` was read through
+   `emit::as_f64`, whose tag guard accepted `Float` alone: a deopt on every activation,
+   sixteen in a row latched BAILED, interpreted forever — one VM call per pixel here and in
+   every program that converts. The guard (`float_or_promoted_int`, both the slot and the
+   handle path) now takes `Int` too, promoting with `fcvt_from_sint` — the VM's own
+   `prim_apply_float` coercion, `i64 as f64` — and still deopts on anything else (a `BigInt`
+   is a different tag). Not a type guess: it is the mixed-operand semantics the VM already
+   has, so a stale profile costs nothing. Guard: `crates/cli/tests/float_context_int_operand.rs`
+   runs real `brood` on a mixed int/float loop, asserts the result equals `BROOD_NO_JIT=1`'s
+   (including 2⁵³+1 rounding the same way) and that `BROOD_JIT_BAIL_TRACE=1` names no
+   `deopt-thrash-latched` for the arms; sabotage (int tag made unmatchable) fails it with the
+   latch message. Also green: the 46 JIT Rust cases, every `tests/jit_*_test.blsp`, numeric
+   conformance 19/19, math 87/87. Perf: see the devlog entry for the `make ab` row.
 2. **`row-sum` bails `call-mediated-boxed`** on both binaries, so the row's hot loop is a
    VM↔native round trip per pixel; the profitability gate exists for a measured reason
    (§7.5, `BROOD_XADMIT`), so the lever is the call convention it prices, not the gate.
