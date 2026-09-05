@@ -134,15 +134,52 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
         // the image on. Measured: `startup` -11%, no regression on 30 rows.
         if std::env::var_os("BROOD_NO_PRELUDE_IMAGE").is_none() {
             if let Some(bundle) = boot_from_prelude_image() {
+                set_boot_source(BOOT_PRELUDE_IMAGE);
                 return bundle;
             }
         }
         if let Some(bundle) = boot_from_cache() {
+            set_boot_source(BOOT_TEXT_CACHE);
             return bundle;
         }
     }
+    set_boot_source(BOOT_SOURCE);
     boot_from_source()
 });
+
+/// Which of the three boot paths actually ran, as an atomic so it can be read after the
+/// fact from anywhere without threading it through the bundle.
+///
+/// **This exists because "was that run imaged?" had no answer, and guessing it wrong is the
+/// single most expensive habit in this area.** Every rebuild changes `build-id`, so the
+/// FIRST run after any build is a source boot and every run after it is not — which means a
+/// developer verifying an image fix sees the un-imaged path exactly when they are least
+/// expecting it. That has now corrupted the diagnosis of an image bug repeatedly: ADR-314
+/// records it happening to a session already caught by it twice, and three separate "it is
+/// fixed" readings during KI-106 were cold boots. `BROOD_BOOT_TRACE=1` could always show it,
+/// but only to someone who armed it BEFORE the run and already suspected the answer. A fact
+/// you must predict in order to observe is not a diagnostic.
+// 0 is "not yet decided" — the shared prelude is built lazily, so a reader that beats it
+// gets `unknown` rather than a plausible-looking lie.
+static BOOT_SOURCE_KIND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const BOOT_PRELUDE_IMAGE: u8 = 1;
+const BOOT_TEXT_CACHE: u8 = 2;
+const BOOT_SOURCE: u8 = 3;
+
+fn set_boot_source(kind: u8) {
+    BOOT_SOURCE_KIND.store(kind, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How this process's prelude arrived: `"prelude-image"`, `"boot-cache"`, `"source"`, or
+/// `"unknown"` before the shared prelude has been built. Read by `%boot-source`.
+pub fn boot_source() -> &'static str {
+    match BOOT_SOURCE_KIND.load(std::sync::atomic::Ordering::Relaxed) {
+        BOOT_PRELUDE_IMAGE => "prelude-image",
+        BOOT_TEXT_CACHE => "boot-cache",
+        BOOT_SOURCE => "source",
+        _ => "unknown",
+    }
+}
 
 /// The expanded-prelude cache file for THIS binary:
 /// `~/.cache/brood/prelude-expanded-<hash-of-build-id>.blsp`. Per-binary
