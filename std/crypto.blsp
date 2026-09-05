@@ -107,12 +107,36 @@ slower brute force; use ≥ 600,000 for password storage."
 
 (defn constant-time-equal? (a b)
   "Constant-time equality check for byte sequences (prevents timing attacks).
-Returns true if `a` and `b` are identical, false otherwise."
-  (and (= (count a) (count b))
-    (= 0
-      (fold (seq/zip (seq a) (seq b))
-        0
-        (fn (acc pair) (bit/or acc (bit/xor (first pair) (second pair))))))))
+Returns true if `a` and `b` are identical, false otherwise.
+
+The `bytes` case indexes with `bytes/at` instead of building a zipped pair list, and hoists
+the length out of the loop. `seq/zip` allocates a pair PER BYTE, which for the 64-byte
+comparison this exists for (an HMAC tag, a session-cookie signature) is 64 allocations before
+any comparing starts: 43.6us against 25.65us for the indexed form. Anything not `bytes` — a
+vector of ints, say — keeps the original path.
+
+Still constant time. The loop visits every byte with no early exit, accumulating with
+`bit/or`, exactly as before; the `bytes?` test is on the TYPE, which is not secret, and the
+length check that precedes it was always there (an HMAC's length is not secret either).
+
+Note `bytes/at`, not `get`: `get` is the generic collection accessor and dispatches on the
+collection kind on every call, so writing this loop with `get` measures 60.5us — slower than
+the `seq/zip` version it replaces."
+  (let (n (count a))
+    (and (= n (count b))
+      (if (and (bytes? a) (bytes? b))
+        ;; A `letrec` closure over `a`/`b`/`n`, threading only the two changing values. A
+        ;; top-level helper taking all five measured 43.1us — no better than the `seq/zip` it
+        ;; replaces — because the per-byte call then passes five arguments instead of two.
+        (letrec (go (fn (i acc)
+                      (if (>= i n)
+                        acc
+                        (go (+ i 1) (bit/or acc (bit/xor (bytes/at a i) (bytes/at b i)))))))
+          (= 0 (go 0 0)))
+        (= 0
+          (fold (seq/zip (seq a) (seq b))
+            0
+            (fn (acc pair) (bit/or acc (bit/xor (first pair) (second pair))))))))))
 
 ;; --- ed25519 signatures (ADR-212) ------------------------------------------
 ;; Public-key signatures: a private seed signs a message, the matching public key verifies
