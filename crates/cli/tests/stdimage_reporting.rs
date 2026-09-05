@@ -47,11 +47,36 @@ const SUITE: &str = "(defmodule stdimage-line-test (:use test))\n\
 
 /// Run `brood --test` in `dir` against `cache`, returning stdout+stderr.
 fn run_suite(dir: &TempDir, cache: &std::path::Path, no_image: bool) -> String {
+    run_suite_env(dir, cache, no_image, &[])
+}
+
+/// `run_suite` with extra environment — the prelude-boot cases need to turn the prelude
+/// image off without disturbing the stdlib-image cases beside them.
+fn run_suite_env(
+    dir: &TempDir,
+    cache: &std::path::Path,
+    no_image: bool,
+    extra: &[(&str, &str)],
+) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
     cmd.arg("--test")
         .arg("suite.blsp")
         .current_dir(&dir.path)
-        .env("XDG_CACHE_HOME", cache);
+        .env("XDG_CACHE_HOME", cache)
+        // Clear every artifact switch, in BOTH spellings, before applying this case's own.
+        // An inherited one decides the answer otherwise, and CI is where that bites: the
+        // tree-walker job sets `BROOD_NO_PRELUDE_IMAGE=1` and `BROOD_NO_STDIMAGE=1` for the
+        // whole run, so a child that inherits them takes the text-cache path and a case
+        // asserting "this run used the image" fails for a reason that has nothing to do
+        // with the code. Owning `XDG_CACHE_HOME` is only half of owning the state; the
+        // other half is the environment, and the prelude differential beside this one
+        // already says so in as many words.
+        .env_remove("BROOD_PRELUDE_IMAGE")
+        .env_remove("BROOD_NO_PRELUDE_IMAGE")
+        .env_remove("BROOD_NO_BOOT_CACHE");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
     if no_image {
         cmd.env("BROOD_NO_STDIMAGE", "1");
     } else {
@@ -126,5 +151,50 @@ fn the_suite_summary_says_whether_this_run_used_the_stdlib_image() {
     assert!(
         text.contains("SOURCE"),
         "BROOD_NO_STDIMAGE=1 must report the source path even with a live image on disk:\n{text}"
+    );
+}
+
+/// **A run must also say how its PRELUDE arrived**, which is the other half of "which
+/// artifacts did this run use?" and the half that has cost the most.
+///
+/// The prelude has three boot paths — the image (ADR-314), the expanded-text cache
+/// (ADR-138), and a cold source boot that writes both — and which one runs is decided by
+/// whether artifacts keyed on `build-id` already exist. Since `build-id` embeds the
+/// binary's mtime, **the first run after any rebuild is a source boot and every run after
+/// it is not**. That is precisely the moment someone is checking whether an image change
+/// worked, so the un-imaged path gets read as evidence about the imaged one: three separate
+/// "it is fixed" readings during KI-106 were cold boots, and ADR-314 records the same trap
+/// corrupting a diagnosis in a session that had already been caught by it twice.
+///
+/// All three states are asserted. A line that can only ever print one of them would be
+/// worse than none, because it would read as an answer.
+#[test]
+fn the_suite_summary_says_how_the_prelude_arrived() {
+    let dir = temp_dir("prelude-line");
+    std::fs::write(dir.path.join("suite.blsp"), SUITE).expect("write suite");
+    let cache = temp_dir("prelude-line-cache");
+
+    // 1. Nothing cached for this binary yet, so the prelude is read and evaluated — and
+    //    this run is what WRITES the two artifacts the next one will use.
+    let cold = run_suite(&dir, &cache.path, false);
+    assert!(
+        cold.contains("(prelude: SOURCE"),
+        "a first run against an empty cache is a cold boot and must say so:\n{cold}"
+    );
+
+    // 2. Same binary, same cache, second run: the image written above is now current.
+    let warm = run_suite(&dir, &cache.path, false);
+    assert!(
+        warm.contains("(prelude: image)"),
+        "a second run must report the prelude image it just gained:\n{warm}"
+    );
+
+    // 3. The image declined, so the boot falls back to the expanded-text cache the cold
+    //    run also wrote. Distinguishing these two is the point: both are "warm", and only
+    //    one of them is exercising ADR-314.
+    let text = run_suite_env(&dir, &cache.path, false, &[("BROOD_NO_PRELUDE_IMAGE", "1")]);
+    assert!(
+        text.contains("(prelude: expanded-text cache)"),
+        "with the prelude image off the boot must name the text cache, not the image:\n{text}"
     );
 }
