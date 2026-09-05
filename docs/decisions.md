@@ -20616,10 +20616,9 @@ opened because closing it was optional.
 
 ## ADR-320 — Side facts travel by journal, not by checklist
 
-**Status:** **Proposed** (2026-09-05) — **no step implemented**. Motivated by KI-72, KI-84,
-KI-89's residual, KI-105 and KI-106, and by ADR-314's own three amendments. The matrix
-differential (ADR-321) landed first, deliberately: it protects against this class from the
-outside today, and it is the gate this refactor should land behind rather than ahead of.
+**Status:** **Accepted** (2026-09-05) — **all three steps implemented**, behind the matrix
+differential (ADR-321) as planned. Motivated by KI-72, KI-84, KI-89's residual, KI-105 and
+KI-106, and by ADR-314's own three amendments.
 
 ### The rule, and why stating it was not enough
 
@@ -20710,6 +20709,38 @@ land on its own, which is how a refactor of the boot path should arrive.
 - The `SharedCode` freeze boundary stays where it is; this changes what crosses it, not when.
 - Steps 2 and 3 touch `core/heap.rs` and `builtins/startup_image.rs`, the two files the image
   bugs already cluster in — so they land behind the matrix differential (ADR-321), not before it.
+
+### As implemented (2026-09-05)
+
+`core/heap/facts.rs` declares the kinds through a macro that also generates `FactKind::ALL`, so
+the enumeration and the list cannot disagree; `Heap::side_facts` collects and `Heap::replay_fact`
+applies, both exhaustive. `write_prelude_image`'s five hand-written blocks are one loop over
+`put_fact`, and `PRELUDE_MAGIC` went to v2 for the layout change. Verified by sabotage in both
+directions: adding a sixth variant fails to compile in **six** places, and dropping `Fact::Meta`
+from the image write reddens the boot differential naming the exact fact.
+
+**Two corrections the implementation forced, both of the class this ADR is about.**
+
+- **The reader has to match the writer's authority.** `def_sites_snapshot` reads the runtime
+  map, which is right for the image WRITER (it runs on the builder heap, before the freeze) and
+  empty in every live process, where `freeze_as_shared_code` has moved the sites into
+  `SharedCode`. A fingerprint built on it reported zero def sites — *identically in both arms*,
+  which is how a comparison agrees without checking anything. `side_facts` now reads both, in
+  `Heap::def_site`'s own precedence.
+- **A fact about an unbound name is not part of the state.** A stdlib image re-marks every
+  `defdyn` in the whole image at index-install time, deliberately, because a section may
+  materialise at any moment and the mark must precede it — so an imaged boot carries dynamic
+  marks for ~49 names in modules it never loads. That is intended and documented; the
+  differential compares facts about names the boot actually bound, and says so at the site.
+
+**What it found on its first run: KI-111.** Two paths wrote a binding without a def form having
+changed and left `env_define`'s `unmark_private` standing — `registry_cas` missing the
+save/restore its sibling `registry_update` has, and `define_image_entry`'s deferred pass landing
+after the section's privacy entry. Six `def-` globals were public in ordinary runs. Every one was invisible to the existing
+differentials because four of the names are absent from `(reflect/global-names)` and the other
+two diverged identically in both arms — the same blind spot as KI-106, one level down: that was
+a registry the `global-names` diff could not see, this is a *fact about* a global it cannot see
+either. Which is the argument for comparing the journal rather than a list of attributes.
 
 ## ADR-321 — Boot differentials compare the artifact PRODUCT, not one artifact each
 

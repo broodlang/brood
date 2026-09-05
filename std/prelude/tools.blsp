@@ -253,16 +253,27 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 (defn- %set-image-source! (path sections)
   "Install `path`'s section directory `sections` (feature name → `[offset len]`) as a source
 of features, so `require` materialises an imaged module instead of loading its source.
-Returns the directory. Pass `{}` to stop consulting an image."
-  (def *image-path* path)
-  (def *image-sections* sections)
+Returns the directory. Pass `{}` to stop consulting an image.
+
+`def-`, not `def`, and that is load-bearing wherever this file REASSIGNS a `def-` global.
+A plain `def` CLEARS the private mark — `env_define` does it on every global definition, so
+that editing `defn-` to `defn` and hot-reloading actually publishes the name (ADR-146). The
+consequence here is that installing a stdlib image quietly made `*std-impls*`, `*std-regs*`,
+`*std-require-edges*` and `*std-image-sections*` PUBLIC, at 17 assignment sites. Nothing
+failed; `reflect/private?` simply started answering false, so `apropos`, `doc-search` and
+completion began offering kernel bookkeeping, and the cross-module private-reference warning
+stopped firing for them. Invisible to every gate for the same reason KI-106 was — the names
+are not in `(reflect/global-names)`, so the boot differential's per-global lines never saw
+them — until ADR-320's journal compared the recorded facts themselves."
+  (def- *image-path* path)
+  (def- *image-sections* sections)
   *image-sections*)
 
 (defn- %add-image-source! (path sections)
   "Append `path`'s section directory as an ADDITIONAL feature source, consulted after the
 primary one. Use this for a second, independently-produced image — the stdlib image beside
 a project's — rather than `%set-image-source!`, which replaces."
-  (def *image-sources* (append *image-sources* (list [path sections])))
+  (def- *image-sources* (append *image-sources* (list [path sections])))
   *image-sources*)
 
 (defn- %image-section-for (key)
@@ -735,7 +746,7 @@ a `def` there would be namespaced `stdimage/*std-edges*`, and the boot install l
 section BEFORE anything requires `stdimage` — which left the module looking already-present,
 so its source never loaded and `(:use stdimage)` referred nothing. A root name belongs to no
 module, so restoring it cannot half-load one."
-  (def *std-require-edges* edges)
+  (def- *std-require-edges* edges)
   *std-require-edges*)
 
 (def- *std-image-file* nil)
@@ -799,7 +810,7 @@ will never consult."
       (doseq (k ["%std-edges" "%std-impls" "%std-regs"])
         (let (sec (get *std-image-sections* k))
           (when sec (%image-load-section path (first sec) (second sec)))))
-      (def *std-image-sections* nil))))
+      (def- *std-image-sections* nil))))
 
 (defn- %std-edges-for (key)
   "Module `key`'s recorded require-edges: the live registry\'s if a source load already put
@@ -833,7 +844,7 @@ snapshotted value does not round-trip\". Measured 2026-08-27, it does — a `{[A
 defining module's namespace re-established to resolve their bodies\' bare names; values need
 nothing, and replaying them through `%register-impl` reproduces tiering and provenance
 exactly rather than approximating it."
-  (def *std-impls* by-module)
+  (def- *std-impls* by-module)
   *std-impls*)
 
 (defn- %replay-std-impls! (key)
@@ -864,7 +875,7 @@ watching what a probe load happened to introduce.
 Impls travel separately (`*std-impls*`): they alone have a PRECEDENCE tier, so they are
 replayed through `%register-impl` rather than assoc\'d back, and an app-tier impl a program
 registered before the module materialised still holds its slot."
-  (def *std-regs* by-module)
+  (def- *std-regs* by-module)
   *std-regs*)
 
 (defn- %replay-std-regs! (key)
@@ -962,14 +973,14 @@ case `require` keeps loading stdlib modules from source exactly as before."
           ;; program that requires two modules has no use for. They load on the first
           ;; materialise instead (`%std-image-tables!`), and a run that materialises nothing
           ;; never pays at all.
-          (def *std-image-sections*
+          (def- *std-image-sections*
             {"path" path
              "%std-edges" (get idx "%std-edges")
              "%std-impls" (get idx "%std-impls")
              "%std-regs" (get idx "%std-regs")})
           ;; Remember WHICH file is the stdlib image, so a section read back can be told
           ;; from a project's own (see `%std-image-serves?`).
-          (def *std-image-file* path)
+          (def- *std-image-file* path)
           (%add-image-source! path
             (dissoc (dissoc (dissoc idx "%std-edges") "%std-impls") "%std-regs"))
           ;; Record the count durably as well as returning it: the caller is the boot form,
@@ -1019,14 +1030,14 @@ same-path-still-readable condition that makes the garbage read possible.
 So clear the registry to the values `def-` gives it on a source boot, then install. Sound
 because nothing else can have installed yet: this runs during boot, before any project
 image and before any `require`."
-  (def *image-sources* (list))
-  (def *image-path* nil)
-  (def *image-sections* {})
-  (def *std-image-sections* nil)
-  (def *std-image-file* nil)
-  (def *std-require-edges* nil)
-  (def *std-impls* nil)
-  (def *std-regs* nil)
+  (def- *image-sources* (list))
+  (def- *image-path* nil)
+  (def- *image-sections* {})
+  (def- *std-image-sections* nil)
+  (def- *std-image-file* nil)
+  (def- *std-require-edges* nil)
+  (def- *std-impls* nil)
+  (def- *std-regs* nil)
   (when (%std-image-wanted?) (%std-image-install)))
 
 (defn- %require-record-edge! (key)
