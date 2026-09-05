@@ -11150,3 +11150,14 @@ guard let it reach `nth` and broke every `--strict`/`--formatter` until the map 
 came first. Also noticed, not fixed: a scaffolded project's `(:use log)` prints a
 "shadows the prelude `error`" warning on every `nest test`.
 
+## 2026-09-05 (night) — `nest run` is Brood; eight subcommands, `main.rs` 1,654 (ADR-322)
+
+The 287-line Rust arm — a Brood program assembled from `format!` fragments — is
+`run-program`/`run-wrapped` in `std/tool/nest.blsp` now, plus `duration-ms` in place of
+`parse_duration_ms`. One table feature: `:trailing true` (clap's `trailing_var_arg` +
+`allow_hyphen_values`). Found on the way: `--name` had been calling an unbound `node-start`
+(the name is `node/start`) — a string the checker never saw; it is source now. Gates: the
+`nest` crate 156/156, the in-image parser file 20/20, both checker gates zero, sabotage
+verified. Test-authoring traps: a scaffold's entry module is `(defmodule main)`, rooted under
+the package by `setup`, not `demo/main`; and an empty `& args` prints as `nil`, not `()`.
+

@@ -330,3 +330,61 @@ fn test_typed_flags_and_the_shard_guard_are_usage_errors() {
         "{out}"
     );
 }
+
+// ── `run` (moved 2026-09-05) ───────────────────────────────────────────────────────────
+//
+// `run_main.rs` (`--main`, the entry override), `cli_failure_reporting.rs` (`--for` with a
+// crashing/finishing/spinning program and the exit codes), `boot_check_and_renames.rs`
+// (`--check-boot`, the ADR-304 launch gate, `--no-check`), `missing_file.rs` (the
+// boundary guards and the document argument) and `complete.rs` (`--main` offers modules)
+// now all run through the Brood arm. Pinned here: the trailing arguments, a document
+// argument leading them, the clap constraints, and a bad `--for`.
+
+#[test]
+fn run_hands_trailing_words_to_the_entry_point_hyphens_included() {
+    let proj = scaffolded("run-args");
+    std::fs::write(
+        proj.join("src").join("main.blsp"),
+        "(defmodule main)\n(defn main (& args) (io/puts (str \"ARGS \" args)))\n",
+    )
+    .expect("write main");
+    let (code, out, err) = nest_in(&proj, &["run", "notes.txt", "--verbose", "-x", "7"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    // The document leads; everything after the first positional is the program's.
+    assert!(
+        out.contains("ARGS (notes.txt --verbose -x 7)"),
+        "trailing words:\n{out}"
+    );
+    let (code, out, err) = nest_in(&proj, &["run"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains("ARGS nil"),
+        "no trailing words: the empty list prints as nil:\n{out}"
+    );
+}
+
+#[test]
+fn run_constraints_and_a_bad_duration_are_usage_errors() {
+    let proj = scaffolded("run-constraints");
+    let (code, _, err) = nest_in(&proj, &["run", "--check-boot", "--no-check"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("'--check-boot' cannot be used with '--no-check'"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&proj, &["run", "--check-boot", "src/main.blsp"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("'--check-boot' cannot be used with '[FILE]...'"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&proj, &["run", "--for", "2x", "src/main.blsp"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("invalid --for duration '2x'"), "{err}");
+    let (code, out, _) = nest_in(&proj, &["run", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Usage: nest run [OPTIONS] [FILE]...") && out.contains("--for <DURATION>"),
+        "{out}"
+    );
+}

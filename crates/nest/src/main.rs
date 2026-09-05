@@ -46,7 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
-    after_help = "Also (implemented in Brood, std/tool/nest.blsp): test, check, doc, docs, doctest, grammar, format — `nest <command> --help`.",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): run, test, check, doc, docs, doctest, grammar, format — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -119,67 +119,6 @@ enum Cmd {
         /// minimal Hatch JSON API). An unknown name lists the full set.
         #[arg(long = "template", short = 't', value_name = "NAME")]
         template: Option<String>,
-    },
-
-    /// Run the project's entry point, or a specific .blsp file.
-    ///
-    /// Inside a project: with no FILE, runs `:main` (defaults to `main/main`);
-    /// with a `.blsp` FILE, runs that file with the project's sources pre-loaded
-    /// so it can reach project modules; with a *non-*`.blsp` FILE, runs `:main`
-    /// passing FILE as its argument — so `nest run notes.txt` opens notes.txt in
-    /// the editor (vim/emacs style) rather than parsing it as Brood.
-    /// Outside a project: FILE is required and runs like `brood <file>`.
-    Run {
-        /// A `.blsp` file to run instead of `:main`, or a document to hand `:main`.
-        #[arg(value_name = "FILE")]
-        file: Option<String>,
-
-        /// Watch a file or directory; on every save re-`load`s the affected
-        /// file. Repeatable. Directories are walked recursively for `.blsp`
-        /// files; new files added later are picked up automatically.
-        #[arg(long = "watch", value_name = "PATH")]
-        watch: Vec<String>,
-
-        /// Run for at most this long, then exit cleanly — e.g. `2s`, `500ms`,
-        /// or a bare `1500` (milliseconds). Lets a long-running loop / TUI app
-        /// be exercised end-to-end and in CI without a manual `timeout`.
-        #[arg(long = "for", value_name = "DURATION")]
-        for_duration: Option<String>,
-
-        /// Override the entry point for this run — `module` or `module/fn` —
-        /// without editing the manifest's `:main`. Ignored when a FILE is given.
-        #[arg(long = "main", value_name = "MODULE[/FN]")]
-        main: Option<String>,
-
-        /// Start this runtime as a node named NAME before running — a local
-        /// Unix-socket node (no port), the Emacs `--daemon` model. Peers reach
-        /// it with `(connect "NAME")`; the shared `~/.config/brood/cookie`
-        /// authenticates. The program need not call `node-start` itself.
-        #[arg(long = "name", value_name = "NAME")]
-        name: Option<String>,
-
-        /// Load every source module and resolve `:main`, then run NOTHING —
-        /// exiting non-zero if a module fails to load or the entry point is
-        /// missing. The gate between `nest check` (names resolve) and `nest
-        /// test` (the suite passes): neither of those loads the entry point,
-        /// which is where a stale dependency actually dies.
-        #[arg(
-            long = "check-boot",
-            conflicts_with_all = ["watch", "for_duration", "file", "args"]
-        )]
-        check_boot: bool,
-
-        /// Skip the pre-flight check and launch regardless. By default `nest run`
-        /// checks the entry point's require-closure and refuses to start a program
-        /// that references a name it cannot call (ADR-304) — the failure that
-        /// produces at runtime is the least visible one there is. Other warnings
-        /// only print, never block.
-        #[arg(long = "no-check", conflicts_with = "check_boot")]
-        no_check: bool,
-
-        /// Trailing arguments passed to the entry function as strings.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
     },
 
     /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
@@ -541,7 +480,7 @@ fn main() {
 /// Subcommands implemented in `std/tool/nest.blsp` (ADR-322). Routed there from `main`
 /// before clap runs; listed by `nest complete` beside clap's own; absent from `Cmd`.
 const BLSP_SUBCOMMANDS: &[&str] = &[
-    "doc", "docs", "doctest", "grammar", "format", "check", "test",
+    "doc", "docs", "doctest", "grammar", "format", "check", "test", "run",
 ];
 
 /// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
@@ -692,55 +631,6 @@ fn run_main(cli: Cli) {
         // Handled above, before the interpreter is built.
         Cmd::Completions { .. } | Cmd::Complete { .. } => unreachable!(),
         Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
-        Cmd::Run {
-            file,
-            watch,
-            for_duration,
-            main,
-            name,
-            check_boot,
-            no_check,
-            args,
-        } => {
-            // A FILE runs standalone outside a project (documented); the bare
-            // form needs `:main` from a manifest.
-            if file.is_none() {
-                require_project(
-                    "run",
-                    Some("To run one file outside a project: nest run <file>.blsp"),
-                );
-            }
-            if check_boot {
-                // `--main` still applies: checking that a *specific* entry boots is
-                // the point when a project ships several.
-                let override_form = main
-                    .as_deref()
-                    .map(|spec| {
-                        format!(
-                            "{} ",
-                            brood::introspect::call_form("project/set-project-main", &[spec])
-                        )
-                    })
-                    .unwrap_or_default();
-                run(
-                    &mut interp,
-                    &format!("(project/load-config) {override_form}(project/check-boot)"),
-                );
-                return;
-            }
-            cmd_run(
-                &mut interp,
-                file.as_deref(),
-                &RunOptions {
-                    watch: &watch,
-                    for_duration: for_duration.as_deref(),
-                    main: main.as_deref(),
-                    name: name.as_deref(),
-                    no_check,
-                },
-                &args,
-            )
-        }
         Cmd::Fetch => {
             require_project("fetch", None);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/fetch)"))
@@ -938,303 +828,6 @@ fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
         interp,
         &format!("(project/load-config) (require-one 'scaffold) {call}"),
     );
-}
-
-/// `nest run [FILE] [--watch PATH]... [args...]` — the entry point.
-///
-/// If no FILE is given but exactly one `--watch` path is a regular file,
-/// promote it to the entry — so `nest run --watch src/foo.blsp` reads as
-/// "run foo.blsp and hot-reload it on save", matching the most natural
-/// reading. With a directory or multiple watch paths there's no unambiguous
-/// promotion, so we fall through to running `:main` and watching alongside.
-/// Parse a duration like `2s`, `500ms`, or a bare `1500` (milliseconds) into
-/// milliseconds. `None` if unparseable or negative (the caller turns that into
-/// an exit-2 with a usage hint).
-fn parse_duration_ms(s: &str) -> Option<u64> {
-    let t = s.trim();
-    let ms = if let Some(n) = t.strip_suffix("ms") {
-        n.trim().parse::<f64>().ok()?
-    } else if let Some(n) = t.strip_suffix('s') {
-        n.trim().parse::<f64>().ok()? * 1000.0
-    } else {
-        t.parse::<f64>().ok()? // bare number = milliseconds
-    };
-    (ms.is_finite() && ms >= 0.0).then_some(ms as u64)
-}
-
-/// The `nest run` flags, as parsed — everything but the positional FILE and args.
-struct RunOptions<'a> {
-    watch: &'a [String],
-    for_duration: Option<&'a str>,
-    main: Option<&'a str>,
-    name: Option<&'a str>,
-    no_check: bool,
-}
-
-fn cmd_run(interp: &mut Interp, file: Option<&str>, options: &RunOptions<'_>, args: &[String]) {
-    let RunOptions {
-        watch,
-        for_duration,
-        main,
-        name,
-        no_check,
-    } = *options;
-    // A non-`.blsp` positional FILE inside a project is a *document* for the entry
-    // point (the editor opens it), not a Brood script to run: route it to `:main` as
-    // an argument, so `nest run notes.txt` edits notes.txt (vim/emacs style) instead
-    // of trying to parse it as Brood. A `.blsp` FILE still runs as a script; outside a
-    // project FILE always runs (there's no `:main` to hand it to).
-    let doc_arg: Option<String> = match file {
-        Some(p) if in_project() && !p.ends_with(".blsp") => Some(p.to_string()),
-        _ => None,
-    };
-    let file: Option<&str> = if doc_arg.is_some() { None } else { file };
-
-    // Only the path that will be RUN as Brood source is required to exist. A
-    // `doc_arg` deliberately need not: `nest run notes.txt` hands the path to the
-    // entry point, and opening a not-yet-created file is the normal editor case.
-    if let Some(path) = file {
-        require_readable_files("run", &[path.to_string()]);
-    }
-
-    let promoted: Option<String> = if file.is_none() && doc_arg.is_none() && watch.len() == 1 {
-        let p = &watch[0];
-        match std::fs::metadata(p) {
-            Ok(meta) if !meta.is_dir() => Some(p.clone()),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    // With no explicit FILE but `--watch` paths that *can't* promote to the entry
-    // we run `:main` and watch alongside. That's the intended, unremarkable case for
-    // watching a directory (`nest run --watch src` — the standard hot-reload dev
-    // loop), so stay silent there. Only speak up for the genuinely surprising case:
-    // the user watched *files* (one of which they may have expected to *run*), but
-    // gave more than one, so none was promoted — say so once.
-    let watched_a_file = watch.iter().any(|p| std::path::Path::new(p).is_file());
-    if file.is_none() && doc_arg.is_none() && promoted.is_none() && watched_a_file {
-        eprintln!(
-            "nest run: watching {} files and running :main — none was run directly. \
-             (A single watched *file* is promoted to the entry to run; multiple files can't \
-             be, so :main runs.)",
-            watch.len()
-        );
-    }
-    let file: Option<&str> = file.or(promoted.as_deref());
-
-    // The document arg (if any) leads the trailing args passed to `:main`.
-    let escaped_args = doc_arg
-        .into_iter()
-        .chain(args.iter().cloned())
-        .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(&a)))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    // Inside a project, `--watch` also re-checks on every successful reload —
-    // the live-session trigger for ADR-123's soundness-under-reload design
-    // (docs/type-soundness-reload.md): re-running `check-sources`
-    // reuses ADR-119 Phase 2's incremental cache, so only the changed file and
-    // whatever depended on it actually get re-checked; everything else is a
-    // cheap fingerprint compare. Its own errors are swallowed by
-    // `on-change`'s `on-reload` contract, same as a broken reload. Safe
-    // to call from every watched file's own reload process concurrently — the
-    // dependency recorder is per-`Heap` (`Heap::check_dep_rec`), not a shared
-    // thread-local, so parallel dep-capture across a directory watch's many
-    // reload processes can't clobber it. Outside a project (a bare-file
-    // watch) there's no `project` module loaded, so no callback is passed —
-    // unchanged behavior.
-    let watch_setup = if watch.is_empty() {
-        String::new()
-    } else {
-        let on_reload = if in_project() {
-            "(fn (_p) (project/check-sources))"
-        } else {
-            "nil"
-        };
-        let calls = watch
-            .iter()
-            .map(|p| {
-                format!(
-                    "(reload/on-change \"{}\" {})",
-                    brood::introspect::escape_brood_string(p),
-                    on_reload
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("(require-one 'reload) {}", calls)
-    };
-
-    // With `--watch`, wrap the user's program in a supervised process and
-    // park the root thread on its monitor. The supervisor catches throws so
-    // a save with a typo doesn't kill the session; the root parks on
-    // `(receive [:down …])` so it's there to print the final exit reason
-    // when the supervised process really gives up (Erlang intensity
-    // exceeded). Without `--watch`, run inline — plain script, let-it-crash.
-    //
-    // `__nest-supervised` is the supervised pid we expose so a `--watch`
-    // session can be introspected (`(list-processes)` shows it). The
-    // wrapping is invisible to the user's code: their file still sees the
-    // global env, their `(spawn …)` calls are unsupervised by default.
-    let timed: Option<(u64, String)> = for_duration.map(|s| match parse_duration_ms(s) {
-        Some(ms) => (ms, s.trim().to_string()),
-        None => {
-            eprintln!("nest run: invalid --for duration '{s}' (use e.g. 2s, 500ms, or 1500)");
-            std::process::exit(2);
-        }
-    });
-    let wrap = !watch.is_empty() || timed.is_some();
-    let run_form: String = match file {
-        // No FILE: run the project's :main via std/tool/project.blsp.
-        // `no_check` reaches `run` as its second argument: the launch gate (ADR-304)
-        // is policy in project.blsp; this only carries the flag. The third says whether
-        // this is a `--watch` session — the gate then reports and starts anyway, since
-        // the point of a watch is to fix the program while it runs.
-        None => format!(
-            "(project/run (list {}) {} {})",
-            escaped_args,
-            if no_check { "true" } else { "false" },
-            if watch.is_empty() { "false" } else { "true" }
-        ),
-        // FILE: run that file. Inside a project, set up the project so its
-        // `src/` is on `*load-path*` (the file can `(require-one 'foo)` other
-        // project modules), but *don't* eager-load every source — otherwise a
-        // file under `src/` would run twice (once via the walker, once via the
-        // explicit run). Outside a project, plain `brood <file>`.
-        //
-        // Non-wrap: run the file as its own green process (ADR-135, via
-        // `%run-program-file`) so it matches `brood FILE` — a top-level driver
-        // talking to a spawned worker uses the userspace direct-handoff path and
-        // top-level `receive`s park-and-capture, instead of `load`'s inline
-        // tree-walk (which blocks the thread on a top-level receive). The
-        // `--watch`/`--for` (`wrap`) path embeds `run_form` inside a `(%spawn …)`;
-        // a nested program-process spawn+block would native-nest, so it keeps the
-        // inline `load` there.
-        Some(path) if !wrap => brood::introspect::call_form("%run-program-file", &[path]),
-        Some(path) => brood::introspect::call_form("reflect/load", &[path]),
-    };
-    // `--main module/fn` overrides the manifest's `:main` for this run only.
-    // It applies to the project-entry path (no FILE); with a FILE we run that
-    // file directly, so the override is meaningless — warn rather than ignore
-    // silently (the silent-wrong-result lesson from the Game-of-Life retro).
-    let main_override = match (main, file.is_none()) {
-        (Some(spec), true) => format!(
-            "{} ",
-            brood::introspect::call_form("project/set-project-main", &[spec])
-        ),
-        (Some(_), false) => {
-            eprintln!("nest run: --main is ignored when a FILE is given");
-            String::new()
-        }
-        (None, _) => String::new(),
-    };
-    let project_setup = if file.is_none() {
-        format!("(project/load-config) {}", main_override)
-    } else if in_project() {
-        "(project/load-config) \
-         (let (root (project/find-root (file/cwd))) \
-           (when root (project/setup root))) "
-            .to_string()
-    } else {
-        String::new()
-    };
-    let body = if wrap {
-        // Park the root on a monitor of the spawned process so the script
-        // doesn't return before the user's program does — and the root sees
-        // `[:down …]` if it dies. Erlang let-it-crash: a throw kills the
-        // process and the `--watch` session exits with the reason. (Auto-
-        // retry-with-state was removed alongside the supervisor scaffolding;
-        // edit the file again to spawn a fresh attempt.)
-        //
-        // With `--for DURATION`, add a `(after ms …)` timeout clause: when the
-        // cap elapses the receive returns, the root falls through, and the
-        // binary exits cleanly (the spawned program is dropped on exit). This
-        // is the first-class form of `timeout Ns nest run` — it lets a loop /
-        // TUI app be exercised end-to-end (not just its pure fns) and makes
-        // time-based behaviour reproducible in CI.
-        //
-        // Both clauses YIELD a boolean the Rust side turns into the exit status:
-        // reaching the `--for` cap is success, and so is a `:normal` exit, but a
-        // program that *died* must not exit 0. It used to: the `[:down …]` arm
-        // printed the reason and fell out of `run`'s `Ok`, so `nest run --for 3s
-        // boom.blsp` printed a crash and reported success — in the one mode
-        // documented as the CI-friendly way to exercise a long-running app, where a
-        // green exit is exactly what nobody re-reads. The unwrapped path (a plain
-        // `nest run FILE`) has always propagated the throw and exited 1.
-        let after_clause = match &timed {
-            Some((ms, label)) => format!(
-                "(after {} (io/puts \"[stopped after {}]\") true)",
-                ms,
-                brood::introspect::escape_brood_string(label)
-            ),
-            None => String::new(),
-        };
-        // `%spawn-link` + `proc/trap-exit`, NOT `%spawn` + `monitor`: the two-step form has a
-        // race the kernel already names on `%spawn-link` itself ("no spawn->link :noproc
-        // race", ADR-067). If the program finishes before `(monitor p)` runs, monitoring an
-        // already-dead pid fires a synthetic `:noproc`, `(= :noproc :normal)` is false, and a
-        // program that SUCCEEDED reports exit 1 — in the mode documented as the CI-friendly
-        // way to exercise an app, which is where a spurious red costs the most. Reproduced
-        // under load at ~1 run in 6 (`fine` printed, then `[exit] :noproc`).
-        //
-        // Reading `:noproc` as success would be wrong in the other direction: a program that
-        // *crashed* before the monitor attached is indistinguishable, and the exit-nonzero
-        // contract above is exactly what this wrapper exists to enforce. So make it atomic
-        // instead. The link is established before the child runs, so its real reason always
-        // arrives; `proc/trap-exit` turns that into a trappable `[:EXIT pid reason]` message
-        // rather than killing this driver, which is what `monitor` was chosen for.
-        format!(
-            "(let (_ (proc/trap-exit true) \
-                   p (%spawn-link (fn () {}))) \
-                  (receive ([:EXIT ^p reason] (io/puts \"[exit]\" reason) (= reason :normal)) {}))",
-            run_form, after_clause
-        )
-    } else {
-        run_form
-    };
-    // `--name`: bring up a local Unix-socket node before the program runs, so
-    // the file is pure app logic (the Emacs `--daemon` model). Pass the name as
-    // a keyword built from the escaped string so an odd NAME can't break out.
-    let node_setup = match name {
-        Some(n) => format!(
-            "(node-start (keyword \"{}\")) ",
-            brood::introspect::escape_brood_string(n)
-        ),
-        None => String::new(),
-    };
-    // Advisory pre-flight for an explicit FILE run, so *every* `nest run` path
-    // checks first: `nest run` (:main) already checks via `check-sources`
-    // (in `run`), and `brood <file>` pre-checks too — this closes the gap
-    // for `nest run FILE.blsp`, which loads the file directly. `check-file` returns
-    // GNU `path:line:col: warning:` strings; print to stderr and run regardless
-    // (advisory, never gates). `BROOD_NO_CHECK=1` opts out — the flag the rest of
-    // the toolchain honors. Runs after `project_setup` (so the file's load-path is
-    // set) and before the body. Like `brood <file>`, this is a *single-file* check:
-    // a qualified reference to an unloaded sibling module may warn — use `nest check`
-    // (whole-project) or `BROOD_NO_CHECK=1` for that case.
-    let check_setup = match file {
-        Some(path) => format!(
-            "(unless (= (%getenv \"BROOD_NO_CHECK\") \"1\") \
-               (doseq (w (%check-file \"{}\")) (io/puts w :to *err*))) ",
-            brood::introspect::escape_brood_string(path)
-        ),
-        None => String::new(),
-    };
-    let code = format!(
-        "{}{}{}{} {}",
-        project_setup, check_setup, node_setup, watch_setup, body
-    );
-    if !wrap {
-        run(interp, &code);
-        return;
-    }
-    // The wrapped form's value is the monitor verdict built above: `false` means the
-    // supervised program died. Its failure was already printed (`[exit] <reason>`), so
-    // exit non-zero silently rather than reporting a second time.
-    if let brood::core::value::Value::Bool(false) = run_for_value(interp, &code) {
-        std::process::exit(1);
-    }
 }
 
 /// `nest update [NAME...]` — re-resolve refs and re-lock (ADR-037). No NAMES
@@ -1765,11 +1358,6 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 /// `MODULE[/FN]`, so every suggestion was wrong. Name each argument.
 fn value_kind(subcommand: &str, arg_name: &str) -> Option<&'static str> {
     match (subcommand, arg_name) {
-        ("run", "file") => Some("blsp-file"),
-        ("doc", "module") => Some("module"),
-        // `--main` names a module (optionally `module/fn`), so offer this project's
-        // own modules — not std's, which can't be an entry point.
-        ("run", "main") => Some("project-module"),
         ("new", "template") => Some("template"),
         ("remove" | "update", "names" | "name") => Some("dep"),
         _ => None,
@@ -2011,37 +1599,6 @@ fn positional_possible_values(subcommand: &str) -> Option<Vec<String>> {
     (!values.is_empty()).then_some(values)
 }
 
-/// Reject a named file that isn't readable, at the `nest` boundary.
-///
-/// `nest test FILE` already did this (`read_source_or_exit`) and reported
-/// `nest test: cannot read x.blsp: No such file or directory`. `check` and `run`
-/// did not — they handed the path to Brood, which surfaced the failure from
-/// whichever internal function happened to read it first
-/// (`check-file-deps: cannot read …`, plus a trace through `project-pfold-files`).
-/// Same mistake, same message, wherever it is made.
-///
-/// A DIRECTORY is rejected here too, for the same reason: `nest check src` passed
-/// the `metadata` probe (a directory has metadata), handed `src` to Brood, and came
-/// back with `check-file-deps: cannot read src: Is a directory (os error 21)` plus a
-/// four-frame trace through `project-pfold-files` — the exact internals-leak this
-/// guard exists to prevent.
-fn require_readable_files(command: &str, files: &[String]) {
-    for path in files {
-        match std::fs::metadata(path) {
-            Err(e) => {
-                eprintln!("nest {command}: cannot read {path}: {e}");
-                std::process::exit(2);
-            }
-            Ok(meta) if meta.is_dir() => {
-                eprintln!("nest {command}: {path} is a directory, not a .blsp file.");
-                eprintln!("  Name the files, or omit them to cover the whole project.");
-                std::process::exit(2);
-            }
-            Ok(_) => {}
-        }
-    }
-}
-
 /// Reject a full-screen TUI subcommand when stdout isn't a terminal.
 ///
 /// `nest observe` / `nest attach` drive an alternate-screen TUI. Piped or
@@ -2094,30 +1651,4 @@ fn in_project() -> bool {
         here = dir.parent().map(|p| p.to_path_buf());
     }
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_duration_ms;
-
-    #[test]
-    fn parse_duration_ms_handles_units_and_bare_millis() {
-        assert_eq!(parse_duration_ms("1500"), Some(1500)); // bare = ms
-        assert_eq!(parse_duration_ms("500ms"), Some(500));
-        assert_eq!(parse_duration_ms("2s"), Some(2000));
-        assert_eq!(parse_duration_ms("1.5s"), Some(1500)); // fractional seconds
-        assert_eq!(parse_duration_ms("  250ms  "), Some(250)); // trimmed
-        assert_eq!(parse_duration_ms("0"), Some(0));
-    }
-
-    #[test]
-    fn parse_duration_ms_rejects_garbage_and_negatives() {
-        assert_eq!(parse_duration_ms("2x"), None);
-        assert_eq!(parse_duration_ms("abc"), None);
-        assert_eq!(parse_duration_ms(""), None);
-        assert_eq!(parse_duration_ms("-5s"), None);
-    }
-
-    // The release-mechanism tests (target_suffix / is_windows_triple /
-    // runtime_cache_path) moved alongside their helpers into `release.rs`.
 }
