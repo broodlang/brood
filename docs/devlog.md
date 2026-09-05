@@ -11360,3 +11360,11 @@ binding names — def sites were tried and thirty prelude helpers have none). Gu
 the real binaries with a private cache. Traps: parsed positionals are a list (no `[a b]`
 destructuring); a refused image build makes a `nest` suite crawl, not fail.
 
+## 2026-09-05 (night, II) — the package manager is Brood; twenty `nest` subcommands, `main.rs` 1,233
+
+Nine arms in one commit (they shared one bootstrap), one table feature (arity ranges), and
+the Rust completion plumbing's last dynamic value kind went with them — `value_kind` is gone.
+Left in Rust: `completions`/`complete`, `stdimage` (KI-112), `repl`, `mcp`, `observe`,
+`attach`, `release`, `gen`. Gates: nest crate 163/163, parser file 24/24, checker gates
+zero, clippy clean (it caught the empty `match` the move left behind).
+

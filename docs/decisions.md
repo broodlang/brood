@@ -20953,3 +20953,24 @@ parsed positionals are a LIST, so `(let ([old new] …))` does not match — tak
 position; and a `nest` suite whose image build is refused runs every test from source AND
 pays a failing child build per process, which read as a hang (>10 min) before it read as a
 refusal.
+
+**Amendment 2026-09-05 (night, II) — the package manager is Brood: twenty subcommands,
+`main.rs` 1,233.** `fetch`, `update`, `tree`, `add`, `remove`, `publish`, `search`, `key` and
+`ws` moved in one commit — they shared one Rust bootstrap (`PACKAGE_BOOTSTRAP`: `load-config`
+so the user's `:registry` applies, then `require package`), which is `with-package` now, and
+one table feature: arity RANGES, `:arity [lo hi]` (`hi` nil for unbounded), so `search` is
+`<QUERY> [INDEX]`, `ws` is `<ACTION> [MESSAGE]`, `add` is `<NAME> [SPEC]...` with `:trailing`,
+`publish` is `[INDEX]`. `nest key gen` — clap's one nested subcommand — is a positional with a
+fixed value set, which is what it was. The plist options (`:index`, `:source-url`,
+`:enhances`, `:force true`) are built as lists and `apply`ed, where the Rust arms had to
+hand-format them because `call_form` quotes every argument as a string. With these gone the
+Rust side of completion lost its last dynamic value kind: `value_kind`,
+`print_dynamic_values` and `positional_name` are deleted, and a value position of a clap-side
+subcommand now prints nothing (filename fallback) — every subcommand with a project-dependent
+value completes through `nest/complete`. What remains in Rust: `completions`/`complete`
+(the shell scripts and the split router), `stdimage` (KI-112), `repl`, `mcp`, `observe`,
+`attach`, `release`, `gen` — each with Rust mechanism in it (a terminal guard, an MCP
+transport, a release pipeline). Gates: `blsp_dispatch.rs` +3 (the project guard on all seven
+project commands, the arity ranges in clap's words, `tree` on a scaffold);
+`tests/nest_test.blsp` +2; `manifest_race.rs` and `scaffold_quality.rs` drive `add`/`remove`/
+`tree` against real siblings and now run through the Brood arm; the `nest` crate 163/163.

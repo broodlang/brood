@@ -46,7 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
-    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling — `nest <command> --help`.",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, fetch, update, tree, add, remove, publish, search, key, ws — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -107,27 +107,6 @@ enum Cmd {
         words: Vec<String>,
     },
 
-    /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
-    ///
-    /// For `:path` deps this verifies each sibling project exists and records its
-    /// content hash; `:git` deps land in a later slice. Errors if cwd is not
-    /// inside a Brood project.
-    Fetch,
-
-    /// Re-resolve dependency refs and re-lock, advancing moving refs (ADR-037).
-    ///
-    /// With no NAMES: re-resolves every dependency (ignoring the locked commits,
-    /// so a branch or floating tag moves forward). With NAMES: only those deps
-    /// re-resolve; the rest keep their locked pins.
-    Update {
-        /// The require-names of the dependencies to update. Omit to update all.
-        #[arg(value_name = "NAME")]
-        names: Vec<String>,
-    },
-
-    /// Print the project's resolved dependency tree (root → direct → transitive).
-    Tree,
-
     /// Build this binary's standard-library startup image (ADR-218), once.
     ///
     /// Keyed on `system/stdlib-id` — a content hash of every baked-in `.blsp` — so `brood`,
@@ -142,77 +121,6 @@ enum Cmd {
     /// an image with none of `project`'s root globals. This arm builds before any std module
     /// loads, and the child process `ensure_stdimage` spawns is exactly this arm.
     Stdimage,
-
-    /// `nest add NAME :path PATH` (`:git` lands in a later slice). NAME is the
-    /// local require-name. The manifest is rewritten preserving its comments.
-    Add {
-        /// The local require-name for the dependency.
-        name: String,
-
-        /// The source spec: `:path PATH` (or, later, `:git URL :ref REF`).
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        spec: Vec<String>,
-    },
-
-    /// Remove a dependency from project.blsp and re-lock.
-    Remove {
-        /// The require-name of the dependency to remove.
-        name: String,
-    },
-
-    /// Publish this project's release to the hosted package registry.
-    ///
-    /// Builds a source tarball and POSTs it (with its sha256) to the registry's
-    /// HTTP API, authenticated with a Bearer token ($HIVE_TOKEN or the
-    /// :registry-token config). Releases are immutable — a version already
-    /// published is refused by the server.
-    ///
-    /// With `--source-url`, publishes an EXTERNAL release instead: the client
-    /// fetches that URL to hash its bytes into the checksum, then POSTs metadata
-    /// only — the registry records the URL and every downloader verifies the bytes
-    /// it fetches from there (the registry never holds them).
-    Publish {
-        /// The registry base URL. Omit to use the configured `:registry`.
-        index: Option<String>,
-
-        /// Publish an external release pointing at this tarball URL (a GitHub/S3/CDN
-        /// asset) instead of uploading the bytes. The URL is fetched once to compute
-        /// its checksum; downloaders re-verify it.
-        #[arg(long)]
-        source_url: Option<String>,
-
-        /// Bump the project's own :version by this level ("patch"/"minor"/"major"),
-        /// commit the bump, then publish. Only the project's version moves, never a
-        /// dependency pin.
-        #[arg(long)]
-        bump: Option<String>,
-    },
-
-    /// Drive every sibling Brood repo in the workspace at once.
-    ///
-    /// `nest ws <action>`: list | status | check | commit "MESSAGE" | push. Discovers the
-    /// sibling repos of the current directory (a `.git` + `project.blsp`, plus `brood`).
-    Ws {
-        /// list | status | check | commit | push.
-        action: String,
-        /// The commit message (for `nest ws commit`).
-        message: Option<String>,
-    },
-
-    /// Search the package registry for a term (name or description).
-    Search {
-        /// The term to match against each package's name and latest description.
-        query: String,
-
-        /// The registry base URL to search. Omit to use the configured `:registry`.
-        index: Option<String>,
-
-        /// Only packages that plug into this application — matched against each
-        /// package's published `:enhances` names (e.g. `--enhances bedit`). The name
-        /// is opaque here: it is whatever package authors declared.
-        #[arg(long)]
-        enhances: Option<String>,
-    },
 
     /// Start a REPL. Inside a project, every source file is pre-loaded so the
     /// project's modules are immediately callable.
@@ -302,29 +210,6 @@ enum Cmd {
         /// silent. Use this only when you cannot run the artifact at all.
         #[arg(long = "no-smoke")]
         no_smoke: bool,
-    },
-
-    /// Manage the package signing key (ADR-212).
-    ///
-    /// Signing is optional and advisory: a signed release lets installers verify its
-    /// authorship (TOFU — the key is pinned on first install), but nothing is gated.
-    Key {
-        #[command(subcommand)]
-        action: KeyCmd,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum KeyCmd {
-    /// Generate an ed25519 signing key and print its public key.
-    ///
-    /// The private key is written 0600 under the config dir
-    /// (`~/.config/brood/signing-key.blsp`); share the printed public key so others
-    /// can pin it. `nest publish` signs a release's checksum with it automatically.
-    Gen {
-        /// Replace an existing key (this invalidates signatures made with the old one).
-        #[arg(long)]
-        force: bool,
     },
 }
 
@@ -432,6 +317,15 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
     "new",
     "update-tooling",
     "rename",
+    "fetch",
+    "update",
+    "tree",
+    "add",
+    "remove",
+    "publish",
+    "search",
+    "key",
+    "ws",
 ];
 
 /// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
@@ -581,14 +475,6 @@ fn run_main(cli: Cli) {
     match cli.cmd {
         // Handled above, before the interpreter is built.
         Cmd::Completions { .. } | Cmd::Complete { .. } => unreachable!(),
-        Cmd::Fetch => {
-            require_project("fetch", None);
-            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/fetch)"))
-        }
-        Cmd::Update { names } => {
-            require_project("update", None);
-            cmd_update(&mut interp, &names)
-        }
         // Nothing but the prelude is loaded when this runs — see the variant's doc for why
         // that is the whole point, and why `stdimage/build` refuses otherwise (KI-112).
         Cmd::Stdimage => run(
@@ -602,70 +488,6 @@ fn run_main(cli: Cli) {
                 "      \" (shared by brood, nest and brood-lsp from this tree)\")))",
             ),
         ),
-        Cmd::Tree => {
-            require_project("tree", None);
-            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/tree)"))
-        }
-        Cmd::Add { name, spec } => {
-            require_project("add", None);
-            cmd_add(&mut interp, &name, &spec)
-        }
-        Cmd::Remove { name } => {
-            require_project("remove", None);
-            let call = brood::introspect::call_form("package/remove-dep", &[&name]);
-            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
-        }
-        Cmd::Publish {
-            index,
-            source_url,
-            bump,
-        } => {
-            require_project("publish", None);
-            cmd_publish(
-                &mut interp,
-                index.as_deref(),
-                source_url.as_deref(),
-                bump.as_deref(),
-            )
-        }
-        // A workspace command, not a project one — it drives the SIBLING repos, so no
-        // `require_project`. The action/message reach the Brood `workspace/run`.
-        Cmd::Ws { action, message } => {
-            let msg = match message {
-                Some(m) => format!("\"{}\"", brood::introspect::escape_brood_string(&m)),
-                None => "nil".to_string(),
-            };
-            run(
-                &mut interp,
-                &format!(
-                    "(workspace/run \"{}\" {msg})",
-                    brood::introspect::escape_brood_string(&action)
-                ),
-            )
-        }
-        // `nest key gen` is a user-level operation (a signing key in the config dir), not a
-        // project one — no `require_project`.
-        Cmd::Key {
-            action: KeyCmd::Gen { force },
-        } => {
-            let call = if force {
-                "(package/key-gen :force true)"
-            } else {
-                "(package/key-gen)"
-            };
-            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
-        }
-        Cmd::Search {
-            query,
-            index,
-            enhances,
-        } => {
-            // `package/search` resolves the registry through the project's config,
-            // so it needs a project today. Guard it for a clean message rather than
-            // the internal `package--in-project` trace.
-            require_project("search", None);
-            cmd_search(&mut interp, &query, index.as_deref(), enhances.as_deref())
-        }
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => {
             require_project("mcp", None);
@@ -720,89 +542,6 @@ fn blsp_string_list(items: &[String]) -> String {
         let quoted: Vec<String> = items.iter().map(|s| blsp_string(s)).collect();
         format!("(list {})", quoted.join(" "))
     }
-}
-
-/// `nest update [NAME...]` — re-resolve refs and re-lock (ADR-037). No NAMES
-/// updates every dep; NAMES updates only those.
-fn cmd_update(interp: &mut Interp, names: &[String]) {
-    let args: Vec<&str> = names.iter().map(String::as_str).collect();
-    let call = format!(
-        "{PACKAGE_BOOTSTRAP} {}",
-        brood::introspect::call_form("package/update", &args)
-    );
-    run(interp, &call);
-}
-
-/// `nest add NAME :path PATH` — dispatch into the package module's `add` verb,
-/// passing NAME and each spec token as escaped string arguments.
-fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
-    let mut args: Vec<&str> = vec![name];
-    args.extend(spec.iter().map(String::as_str));
-    let call = format!(
-        "{PACKAGE_BOOTSTRAP} {}",
-        brood::introspect::call_form("package/add", &args)
-    );
-    run(interp, &call);
-}
-
-/// The bootstrap every package command shares. `load-config` is the load-bearing
-/// part: the user config supplies `:registry`, and a `:version` dependency cannot be
-/// resolved without it. `fetch`/`tree`/`add`/`remove`/`update` were skipping it, so
-/// they used the hardcoded default index no matter what the user had configured —
-/// `nest add pkg :version 1.0.0` failed against a perfectly good local registry.
-const PACKAGE_BOOTSTRAP: &str = "(project/load-config) (require-one 'package)";
-
-/// `nest publish [BASE-URL] [--source-url URL]` — publish this project's release to
-/// the hosted registry over HTTP. Loads the user config first so a `:registry` override
-/// applies.
-fn cmd_publish(
-    interp: &mut Interp,
-    index: Option<&str>,
-    source_url: Option<&str>,
-    bump: Option<&str>,
-) {
-    // `package/publish` takes a PLIST (`:index` / `:source-url`), so the call is built
-    // here rather than with `call_form` (which quotes every argument as a string and so
-    // cannot emit a keyword) — the same shape as `cmd_search`. `--bump` routes through
-    // `package/release`, which bumps the project's own version + commits it, then publishes.
-    let mut call = match bump {
-        Some(level) => format!(
-            "(package/release \"{}\"",
-            brood::introspect::escape_brood_string(level)
-        ),
-        None => String::from("(package/publish"),
-    };
-    for (key, value) in [(":index", index), (":source-url", source_url)] {
-        if let Some(v) = value {
-            call.push_str(&format!(
-                " {key} \"{}\"",
-                brood::introspect::escape_brood_string(v)
-            ));
-        }
-    }
-    call.push(')');
-    run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
-}
-
-/// `nest search QUERY [BASE-URL]` — search the hosted registry over HTTP.
-fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>, enhances: Option<&str>) {
-    // `package/search` takes a term plus a PLIST (`:index` / `:enhances`), so the call is
-    // built here rather than with `call_form` (which quotes every argument as a string and
-    // so cannot emit a keyword).
-    let mut call = format!(
-        "(package/search \"{}\"",
-        brood::introspect::escape_brood_string(query)
-    );
-    for (key, value) in [(":index", index), (":enhances", enhances)] {
-        if let Some(v) = value {
-            call.push_str(&format!(
-                " {key} \"{}\"",
-                brood::introspect::escape_brood_string(v)
-            ));
-        }
-    }
-    call.push(')');
-    run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
 }
 
 /// `nest repl` — project-aware REPL. Inside a project, pre-load every source
@@ -1234,44 +973,13 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 //     (`Cli::command()`), never a hand-kept list. That is the whole point: a flag
 //     added to the `Cmd` enum is completable the same day, and a flag renamed
 //     can't leave a stale completion behind.
-//   * Project-dependent VALUES (tags, dep names, modules, test files) come from
-//     `std/tool/complete.blsp`, and only when the cursor is actually at a value
-//     position — so completing a subcommand or a flag never pays interpreter boot.
+//   * A Brood-routed subcommand (`BLSP_SUBCOMMANDS`) is handed to `nest/complete`, which
+//     reads the same table the parser does — flags, fixed positionals, and the
+//     project-dependent VALUES (tags, dep names, modules, test files) via
+//     `std/tool/complete.blsp` — and only then pays interpreter boot.
 //
 // Everything here must be silent and total: completion runs on a keypress, so it
 // prints candidates or nothing, exits 0, and never reports an error.
-
-/// What kind of value an argument takes, i.e. what to suggest after it. `None`
-/// means "no idea" — the shell falls back to filename completion, which is a
-/// better answer than a wrong list.
-/// Every arm matches on the argument's NAME as well as the subcommand. An earlier
-/// version had a subcommand-wide arm (`("check" | "run" | "format", _)`), which also
-/// caught `nest run --main` and offered it file paths — but `--main` takes
-/// `MODULE[/FN]`, so every suggestion was wrong. Name each argument.
-fn value_kind(subcommand: &str, arg_name: &str) -> Option<&'static str> {
-    match (subcommand, arg_name) {
-        ("remove" | "update", "names" | "name") => Some("dep"),
-        _ => None,
-    }
-}
-
-/// Ask `std/tool/complete.blsp` to PRINT the candidates for `kind` that start with
-/// `prefix`. Brood prints straight to stdout (which is where the shell reads them
-/// from) and does the prefix filtering, so no list has to be marshalled back
-/// across the boundary.
-///
-/// Failures are swallowed deliberately: a broken manifest or an unreadable
-/// directory must cost a suggestion, not spray an error across a half-typed
-/// prompt. This is also the only path that pays interpreter boot, and it is
-/// reached only when the cursor is genuinely at a project-dependent value.
-fn print_dynamic_values(kind: &str, prefix: &str) {
-    let mut interp = Interp::new();
-    let code = format!(
-        "(require-one 'complete) {}",
-        brood::introspect::call_form("complete/print-candidates", &[kind, prefix])
-    );
-    let _ = interp.eval_str(&code);
-}
 
 /// Every subcommand name clap knows about, hidden ones excluded.
 fn subcommand_names() -> Vec<String> {
@@ -1337,16 +1045,6 @@ fn pending_value_flag(subcommand: &str, words: &[String]) -> Option<String> {
         return None;
     }
     takes_value(subcommand, long).then(|| long.to_string())
-}
-
-/// The positional argument's clap id for a subcommand, if it has one.
-fn positional_name(subcommand: &str) -> Option<String> {
-    Cli::command()
-        .get_subcommands()
-        .find(|s| s.get_name() == subcommand)?
-        .get_positionals()
-        .next()
-        .map(|a| a.get_id().to_string())
 }
 
 /// `nest completions <shell>` — emit a shell integration script.
@@ -1442,28 +1140,18 @@ fn cmd_complete(words: &[String]) {
         Some(sub) => {
             if current.starts_with('-') {
                 flag_names(sub)
-            } else if let Some(flag) = pending_value_flag(sub, &prior) {
-                match value_kind(sub, &flag) {
-                    Some(kind) => {
-                        print_dynamic_values(kind, &current);
-                        return;
-                    }
-                    // No known value kind: print nothing so the shell falls back
-                    // to filenames, which beats a confidently wrong list.
-                    None => return,
-                }
+            } else if pending_value_flag(sub, &prior).is_some() {
+                // A value position of a clap-side subcommand. None of these has a
+                // project-dependent kind any more — every subcommand with one is
+                // Brood-routed and completes through `nest/complete` — so print nothing and
+                // let the shell fall back to filenames, which beats a confidently wrong list.
+                return;
             } else if let Some(values) = positional_possible_values(sub) {
-                // A `ValueEnum` positional (`nest grammar <TARGET>`) — choices
-                // come from the enum definition, not a restated list.
+                // A `ValueEnum` positional (`nest completions <SHELL>`) — choices come from
+                // the enum definition, not a restated list.
                 values
             } else {
-                match positional_name(sub).and_then(|name| value_kind(sub, &name)) {
-                    Some(kind) => {
-                        print_dynamic_values(kind, &current);
-                        return;
-                    }
-                    None => return,
-                }
+                return;
             }
         }
     };
