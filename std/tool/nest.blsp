@@ -29,7 +29,8 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 ;; (either bound nil for open), repeatable (collected into a list), completed by a
 ;; `complete/print-candidates` kind. A positional is `[name values]`: its allowed values as a
 ;; list, the name of a completion kind for free text, or nil. `:many true` admits any number
-;; of positionals. The clap constraints a command had are data too: `:requires {flag
+;; of positionals; `:trailing true` hands every word after the first positional through
+;; unparsed, hyphens included. The clap constraints a command had are data too: `:requires {flag
 ;; needed-flag}`, `:conflicts [[a b] …]` and `:no-positional-with [flag …]`. Completion
 ;; (`nest complete`) reads the same table, so a flag added here is completable the same day —
 ;; the property the Rust side got from clap's own model, kept by making the table the model.
@@ -89,7 +90,24 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                    "--cover-min" {:value "PCT" :int [0 100]}}
            :positional ["file" "test-file"]
            :many true
-           :run (fn (o) (run-test o))}})
+           :run (fn (o) (run-test o))}
+   "run" {:about "Run the project's entry point (`:main`, default `main/main`), or a `.blsp` FILE with the project's sources reachable; a non-`.blsp` FILE is handed to `:main` as a document. Outside a project FILE is required and runs like `brood FILE`. Trailing words go to the entry function as strings."
+          :flags {"--watch" {:value "PATH" :repeat true}
+                  "--for" "DURATION"
+                  "--main" {:value "MODULE[/FN]" :complete "project-module"}
+                  "--name" "NAME"
+                  "--check-boot" :bool
+                  "--no-check" :bool}
+          :positional ["file" "blsp-file"]
+          :many true
+          ;; After FILE every word is the program's, hyphens included (clap's
+          ;; `trailing_var_arg` + `allow_hyphen_values`).
+          :trailing true
+          :conflicts [["--check-boot" "--watch"]
+                       ["--check-boot" "--for"]
+                       ["--check-boot" "--no-check"]]
+          :no-positional-with ["--check-boot"]
+          :run (fn (o) (run-run o))}})
 
 ;; Short flags are aliases; canonicalise on parse so handlers read one spelling.
 (def- *short-aliases* {"-c" "--check" "-o" "--out"})
@@ -174,6 +192,8 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                       ">' but none was supplied"))
               else
                 (parse-words spec (rest rest-words) (store-flag acc canon kind (first rest-words)))))
+        (get spec :trailing)
+          (assoc acc :positionals (append (get acc :positionals) (cons word rest-words)))
         else
           (parse-words spec
             rest-words
@@ -541,6 +561,132 @@ file) is rethrown for the normal error report."
                        (if root
                          (apply project/run-loaded-tests (test-opts flags lines))
                          (apply test/run-tests (test-opts flags lines)))))))))
+
+;; `nest run` -------------------------------------------------------------------------
+
+(defn duration-ms (s)
+  "`--for`'s DURATION as milliseconds: `2s`, `500ms`, `1.5s`, or a bare count of
+milliseconds; nil for anything else (garbage, a negative)."
+  (let (t (string/trim s)
+        [num scale] (cond
+                      (string/ends-with? t "ms") [(string/substring t 0 (- (string/length t) 2)) 1]
+                      (string/ends-with? t "s")
+                        [(string/substring t 0 (- (string/length t) 1)) 1000]
+                      else [t 1])
+        n (string/->number (string/trim num)))
+    ;; `failure?` first and alone: the checker narrows `n` on that test, not through an `or`.
+    (if (failure? n) nil (if (or (not (number? n)) (< n 0)) nil (math/floor (* n scale))))))
+
+(defn- run-wrapped (thunk timed-ms label)
+  "`--watch`/`--for`: run the program as a linked process and park here on its exit. The link
+is made before the child runs (`%spawn-link`, not spawn-then-`monitor`, whose `:noproc` race
+read a finished program as a failure ~1 run in 6), and `proc/trap-exit` turns the exit into a
+message. A `:normal` exit and the `--for` cap are success; a program that DIED is exit 1 — its
+reason was already printed, so the caller exits silently."
+  (proc/trap-exit true)
+  (let (p (%spawn-link thunk))
+    (if timed-ms
+      (receive
+        ([:EXIT ^p reason] (io/puts "[exit]" reason) (if (= reason :normal) 0 1))
+        (after timed-ms (io/puts (str "[stopped after " label "]")) 0))
+      (receive
+        ([:EXIT ^p reason] (io/puts "[exit]" reason) (if (= reason :normal) 0 1))))))
+
+(defn- run-program (file args watch for-spec main nm no-check)
+  (let (in-project (not (nil? (project/find-root (file/cwd))))
+        ;; A non-`.blsp` FILE inside a project is a DOCUMENT for the entry point (the editor
+        ;; opens it), not a script: `nest run notes.txt` edits notes.txt. It need not exist —
+        ;; creating a file is the ordinary editor case — so only a script path is checked.
+        doc-arg (if (and file in-project (not (string/ends-with? file ".blsp"))) file nil)
+        file (if doc-arg nil file)
+        timed-ms (and for-spec (duration-ms for-spec)))
+    (cond
+      (and file (not (readable-files? "run" (list file)))) 2
+      (and for-spec (nil? timed-ms))
+        (do
+          (eputs "nest run: invalid --for duration '" for-spec "' (use e.g. 2s, 500ms, or 1500)")
+          2)
+      else
+        (let (
+              ;; With no FILE, a single watched *file* is promoted to the entry to run.
+              ;; Several can't be, so `:main` runs — say so once, since the user may have
+              ;; expected one of them to run; a watched directory is the ordinary dev loop.
+              promoted (if (and (nil? file)
+                             (nil? doc-arg)
+                             (= (count watch) 1)
+                             (file/regular? (first watch)))
+                         (first watch)
+                         nil)
+              watched-a-file (not (empty? (filter watch file/regular?))))
+          (when (and (nil? file) (nil? doc-arg) (nil? promoted) watched-a-file)
+            (eputs "nest run: watching "
+              (count watch)
+              " files and running :main — none was run directly. (A single watched *file* is "
+              "promoted to the entry to run; multiple files can't be, so :main runs.)"))
+          (let (file (or file promoted)
+                all-args (if doc-arg (cons doc-arg args) args)
+                wrap (or (not (empty? watch)) (not (nil? timed-ms))))
+            ;; Project setup. With no FILE `:main` runs, and `--main` overrides the manifest for
+            ;; this run only; with a FILE the override is meaningless — warn rather than ignore
+            ;; silently. Inside a project a FILE gets `src/` on the load path but no eager load
+            ;; (a file under `src/` would otherwise run twice).
+            (cond
+              (nil? file) (do (project/load-config) (when main (project/set-project-main main)))
+              in-project
+                (do
+                  (project/load-config)
+                  (let (root (project/find-root (file/cwd))) (when root (project/setup root))))
+              else nil)
+            (when (and main file) (eputs "nest run: --main is ignored when a FILE is given"))
+            ;; Advisory single-file pre-flight for an explicit FILE (`:main` runs check via
+            ;; `project/run`); `BROOD_NO_CHECK=1` opts out, as everywhere.
+            (when (and file (not (= (os/env "BROOD_NO_CHECK") "1")))
+              (doseq (w (%check-file file)) (io/puts w :to *err*)))
+            ;; `--name`: a local Unix-socket node before the program runs (the Emacs
+            ;; `--daemon` model), so the file is pure app logic.
+            (when nm (node/start (keyword nm)))
+            ;; `--watch`: re-`load` on save; inside a project also re-check the sources (the
+            ;; live trigger for ADR-123's soundness-under-reload).
+            (when (not (empty? watch))
+              (require-one 'reload)
+              (let (on-reload (if in-project (fn (_p) (project/check-sources)) nil))
+                (doseq (w watch) (reload/on-change w on-reload))))
+            (let (thunk (cond
+                          (nil? file) (fn () (project/run all-args no-check (not (empty? watch))))
+                          ;; Unwrapped, a FILE runs as its own green process (ADR-135) so it
+                          ;; matches `brood FILE`; wrapped it is already inside a spawn, and a
+                          ;; nested program-process spawn+block would native-nest.
+                          (not wrap) (fn () (%run-program-file file))
+                          else (fn () (reflect/load file))))
+              (if wrap
+                (run-wrapped thunk timed-ms (and for-spec (string/trim for-spec)))
+                (do (thunk) 0))))))))
+
+(defn- run-run (o)
+  (let (flags (get o :flags)
+        positionals (get o :positionals)
+        file (first positionals)
+        main (get flags "--main"))
+    (cond
+      (and (nil? file)
+        (not (require-project "run" "To run one file outside a project: nest run <file>.blsp")))
+        2
+      ;; Load every module and resolve `:main`, run NOTHING (KI-66). `--main` still applies:
+      ;; checking that a *specific* entry boots is the point when a project ships several.
+      (get flags "--check-boot")
+        (do
+          (project/load-config)
+          (when main (project/set-project-main main))
+          (project/check-boot)
+          0)
+      else
+        (run-program file
+          (rest positionals)
+          (or (get flags "--watch") (list))
+          (get flags "--for")
+          main
+          (get flags "--name")
+          (get flags "--no-check")))))
 
 ;; ── entry points ─────────────────────────────────────────────────────────────────────
 

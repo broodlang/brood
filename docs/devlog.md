@@ -11266,7 +11266,28 @@ recorded only in `decisions.md` is invisible to someone reading `std/prelude/seq
 rule that generalises: when an ADR's decision is *not to change* something, the note belongs at
 the thing it declined to change.
 
-## 2026-09-05 (late) — side facts travel by journal (ADR-320), and its first run found KI-111
+## 2026-09-05 (night) — `nest run` is Brood; eight subcommands, `main.rs` 1,654 (ADR-322)
+
+The 287-line Rust arm — a Brood program assembled from `format!` fragments — is
+`run-program`/`run-wrapped` in `std/tool/nest.blsp` now, plus `duration-ms` in place of
+`parse_duration_ms`. One table feature: `:trailing true` (clap's `trailing_var_arg` +
+`allow_hyphen_values`). Found on the way: `--name` had been calling an unbound `node-start`
+(the name is `node/start`) — a string the checker never saw; it is source now. Gates: the
+`nest` crate 156/156, the in-image parser file 20/20, both checker gates zero, sabotage
+verified. Test-authoring traps: a scaffold's entry module is `(defmodule main)`, rooted under
+the package by `setup`, not `demo/main`; and an empty `& args` prints as `nil`, not `()`.
+
+## 2026-09-05 (night, later) — KI-110: a `:noproc` flake in `exit_test`, closed by `spawn-monitor`
+
+`brood_suite_passes` failed once on the merged tree and passed on nextest's retry:
+`tests/exit_test.blsp:179` read `:noproc` where `:badness` was expected. Three ADR-311 cases
+spawned a body that ends on its own and then called `monitor` — KI-59's race, the one ADR-309's
+`spawn-monitor` closes by registering the monitor before the child runs. Fixed by using it;
+the parked bodies keep the two-step form because they never finish. 0/30 standalone before and
+after, so the argument is from construction, not from a loop.
+
+
+## 2026-09-05 (last) — side facts travel by journal (ADR-320), and its first run found KI-111
 
 **ADR-320 implemented, all three steps.** Every startup image rests on one sentence —
 *materialising defines bindings and evaluates nothing, so anything the evaluation recorded on

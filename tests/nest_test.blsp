@@ -88,3 +88,35 @@
     (assert= "json"
       (get (get (nest/parse "test" ["--formatter" "tap" "--formatter" "json"]) :flags)
         "--formatter"))))
+
+(describe "nest/duration-ms — `--for`'s grammar"
+  (test "units and a bare millisecond count"
+    (assert= 1500 (nest/duration-ms "1500"))
+    (assert= 500 (nest/duration-ms "500ms"))
+    (assert= 2000 (nest/duration-ms "2s"))
+    (assert= 1500 (nest/duration-ms "1.5s"))
+    (assert= 250 (nest/duration-ms "  250ms  "))
+    (assert= 0 (nest/duration-ms "0")))
+
+  (test "garbage and negatives are nil"
+    (assert= nil (nest/duration-ms "2x"))
+    (assert= nil (nest/duration-ms "abc"))
+    (assert= nil (nest/duration-ms ""))
+    (assert= nil (nest/duration-ms "-5s"))))
+
+(describe "nest/parse — trailing positionals (the `run` table)"
+  (test "after the first positional every word is the program's, hyphens included"
+    (let (o (nest/parse "run" ["--for" "2s" "app.blsp" "--verbose" "-x" "7"]))
+      (assert= nil (get o :error))
+      (assert= "2s" (get (get o :flags) "--for"))
+      (assert= (list "app.blsp" "--verbose" "-x" "7") (get o :positionals))))
+
+  (test "a flag before the first positional is still a flag, and an unknown one an error"
+    (is (includes? (get (nest/parse "run" ["--verbose" "app.blsp"]) :error)
+          "unexpected argument '--verbose'")))
+
+  (test "--check-boot stands alone"
+    (is (includes? (get (nest/parse "run" ["--check-boot" "--for" "2s"]) :error)
+          "cannot be used with '--for'"))
+    (is (includes? (get (nest/parse "run" ["--check-boot" "a.blsp"]) :error) "'[FILE]...'"))
+    (assert= nil (get (nest/parse "run" ["--check-boot" "--main" "scratch"]) :error))))
