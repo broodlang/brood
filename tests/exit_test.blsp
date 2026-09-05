@@ -169,13 +169,21 @@
 ;; that ends before reaching one used to retire `:normal`, DISCARDING the reason: a
 ;; process that deliberately terminated itself reported a clean exit, so links did not
 ;; cascade and monitors read `:normal`. The signal outlives the body.
+;;
+;; These bodies END on their own, so `spawn` then `monitor` is a race: under the suite's
+;; full load the child can finish before the monitor attaches, and monitoring a dead pid
+;; fires a synthetic `:noproc` — read here as a wrong REASON, not a hang (seen once in
+;; 5570, 2026-09-05; 0/30 standalone). `spawn-monitor` (ADR-309) registers the monitor
+;; before the child runs, the same pre-enqueue window `spawn-link` uses, so `:noproc` is
+;; impossible by construction. The parked bodies above never finish, so they may keep the
+;; two-step form.
 (describe "an exit signal outlives a body that never reaches another receive"
   (test "a process that signals itself and then ends reports its own reason"
-    (let (p (spawn (ex-self-exit)) m (monitor p))
+    (let ([p m] (spawn-monitor (ex-self-exit)))
       (assert= (ex-down-reason p m) :badness)))
 
   (test "the reason survives work done after the signal"
-    (let (p (spawn (ex-self-exit-then-work)) m (monitor p))
+    (let ([p m] (spawn-monitor (ex-self-exit-then-work)))
       (assert= (ex-down-reason p m) :badness)))
 
   (test "a linked trapping parent sees the reason, so the death still cascades"
@@ -189,5 +197,5 @@
 
   (test "a body with no signal pending still exits :normal"
     ; the fallback must stay put — this is the case the old code got right
-    (let (p (spawn :done) m (monitor p))
+    (let ([p m] (spawn-monitor :done))
       (assert= (ex-down-reason p m) :normal))))
