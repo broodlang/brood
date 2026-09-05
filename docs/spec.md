@@ -352,7 +352,7 @@ and the `receive`/`try`/`match` surfaces are **not** primitives — they are Bro
 written over the kernel above.
 
 **Derived (Brood, in the prelude):**
-the macros `defn`, `when`/`unless`/`cond`/`and`/`or`, `->`/`->>`, `match`/`match*`,
+the macros `defn`, `when`/`unless`/`cond`/`and`/`or`, `->`, `match`/`match*`,
 `receive`, and `try`/`catch`; `error`; the full arithmetic/comparison family
 (`+ - * / < <= > >= = inc dec mod abs max min sum product` — plus ~~`not=`~~,
 deprecated since 0.19.1 in favour of `(not (= a b))` — plus the float
@@ -385,7 +385,7 @@ tries), **modules / namespaces** (`defmodule`), a **per-process tracing GC**
 (ADR-035 and its successors), **rest-parameter notation in `(sig …)`** (`&` /
 `&optional`, ADR-127), **records** (`defrecord` — pure sugar over closed maps,
 ADR-130), **fusing lazy seq-views** (`seq/lmap`/`seq/lfilter`/`seq/lkeep`/`seq/lremove` threaded
-with `->>`, ADR-111), a **first-class set** kind with the `#{…}` literal
+with `->`, ADR-111), a **first-class set** kind with the `#{…}` literal
 (ADR-060 — `type-of` reports `:set` and a set is never `=` to a map),
 **callable keywords** (ADR-165/167) and **abilities** — open generic functions
 with nominal dispatch (ADR-168) — are all part of the language today and

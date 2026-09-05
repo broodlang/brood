@@ -123,12 +123,16 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ;; Core forms whose heads must NOT be treated as function calls (their arguments
 ;; are not plain eager operands). After a full macroexpand only these survive; the
 ;; macro entries are belt-and-suspenders in case one reaches a node unexpanded.
+;;
+;; Because they are belt-and-suspenders, a head that stops existing goes unnoticed here —
+;; nothing fails, the entry simply never matches. Three had: `->>` (deleted by ADR-308) and
+;; `remote-spawn`/`remote-spawn-sync` (now `node/spawn`/`node/spawn-sync`, whose bare
+;; spelling under `(:use node)` is `spawn-sync`, not the old name). Dropped 2026-09-05.
 (def- %spy-special-forms
   #{'if
     'do 'def 'fn 'let 'letrec 'quote 'quasiquote 'defmacro 'defn 'defdyn 'defrecord 'defmodule 'when
     'unless 'cond 'and 'or 'match 'match* 'case 'comment 'try 'catch 'throw 'receive 'binding
-    'dolist 'doseq 'dotimes 'for '-> '->> 'spawn 'spawn-link 'remote-spawn 'remote-spawn-sync 'error
-    'with-out-str 'with-err-str 'bench})
+    'dolist 'doseq 'dotimes 'for '-> 'spawn 'spawn-link 'error 'with-out-str 'with-err-str 'bench})
 
 (defn- %spy-walk-seq (forms depth) (map forms (fn (form) (%spy-walk form depth))))
 (defn- %spy-walk-binds (binds depth)
@@ -463,18 +467,19 @@ one call site is inside `defmodule`'s template — see the note there."
 (defdyn *reload-diagnostics* true)
 
 ;; ---- deprecation ------------------------------------------------------------
-;; A deprecated construct keeps working but says so. `%deprecation-warning` is the
-;; primitive: print a message to stderr ONCE per key (so a re-required module or a
-;; hot loop doesn't spam), then stay silent. A macro calls it from its expansion
-;; when it lowers a deprecated form.
-(def- *deprecation-seen* nil)
-(defn %deprecation-warning (key message)
-  "Print `message` to stderr once per `key` (deduplicated); returns nil. The
-deprecation primitive — emit it from a macro's expansion to flag a deprecated use."
-  (unless (includes? *deprecation-seen* key)
-    (%registry-update! '*deprecation-seen* :cons-new nil key)
-    (%write-err (str "deprecation: " message "\n")))
-  nil)
+;; Deprecating a function is `(meta name :deprecated "0.14.0" :use 'replacement)` — ADR-283.
+;; The warning lands at the CALL SITE, at `nest check` time, in the file that has to change,
+;; and it is advisory: a deprecation that fails the build is a removal with extra steps. The
+;; prelude uses it on itself (`not=`), and `(check-allow :deprecated …)` silences a
+;; deliberate call, such as a shim calling the name it replaces.
+;;
+;; A `%deprecation-warning` primitive lived here until 2026-09-05: print to stderr once per
+;; key, to be emitted from a macro's expansion. It never had a caller in any repo, and it was
+;; not merely unused — it is the RUNTIME approach ADR-283 weighed and rejected, in its own
+;; words, because it "would fire in a hot loop, on a machine that cannot act on it, long after
+;; the edit that caused it". Two mechanisms for one job, where the second was already decided
+;; against, is a trap for whoever finds it first. If a deprecated *form shape* (as opposed to
+;; a name) ever needs saying, it wants a checker diagnostic beside `:deprecated`, not a print.
 
 ;; The `(require …)`+`(%refer …)` forms for one `(:use mod [:only|:exclude [a b]])`
 ;; clause: load the module, then import its names. `:only [a b]` imports just those;
@@ -1237,6 +1242,12 @@ image and before any `require`."
 ;; into this binary (`(reflect/builtin-modules)`). Enforced in THREE layers: at `nest new`
 ;; (scaffold) and `nest publish` (package.blsp), and here at LOAD time so a `:path`/`:git`
 ;; dependency that never went through the registry is refused all the same (ADR-166 kin).
+;;
+;; It stays BARE, and not only because the load path needs it before any module can load:
+;; `crates/lisp/tests/autoload_race.rs` calls it *because* it is bare-named and its body
+;; reaches an autoload stub (`seq/distinct`) — the KI-72 guard. Qualifying it, or hiding it
+;; behind a `%` name with a `package/` face, leaves that test passing while it no longer
+;; tests the thing it names. ADR-291 rule 4; re-audited 2026-09-05.
 (defn reserved-package-name? (nm)
   "True if package name `nm` (a symbol or string) is reserved by the standard library —
 its first segment names a module baked into this binary, so a package taking it would
@@ -1438,6 +1449,12 @@ is exactly what OTP 24 reply aliases exist for."
 ;; waits for that load to complete rather than trusting a top-of-file provide
 ;; (the old partial-load race). A circular require inside one file's own load
 ;; still returns immediately (the loader pid matches).
+;; `require-one` is the loader's PUBLIC entry point and stays bare — mechanism, not tooling
+;; (ADR-291). It is not merely convention: six Rust sites resolve it BY NAME —
+;; `eval/derive.rs` (twice), `types/check.rs` (three) and `process/message.rs`, which builds
+;; `(require-one 'mod)` to make a shipped closure's module load on the receiving node. There
+;; is no bound `require`; this is the function underneath a qualified reference's inferred
+;; load, and the one a program calls to load a module by a name computed at runtime.
 (defn require-one (mod)
   "Load a single feature `mod` once (a no-op if already loaded); returns its name.
 Safe under concurrency: never returns while another process is mid-load of `mod` —
@@ -2365,8 +2382,10 @@ at run time from a value the checker never read. Returns `value` so it can wrap 
 
 (defn multi-return-type (mname)
   "The declared `:-> RET` type form of multimethod `mname`, or nil when it declares none.
-  The multimethod counterpart of an ability's `op-return-type`; the checker reads it to type
-  a call site, and `check-method-returns` reads it to verify each method body against it."
+  The multimethod counterpart of `%op-declared-ret`, which reads an ability op's declared
+  return out of its `defability` specs. The Rust checker does not call this — it reads the
+  `*multi-ret*` registry from the heap directly (`types/check/protocol.rs`) — so this is the
+  in-language accessor: introspection, and the way a test asserts what a `:->` recorded."
   (get *multi-ret* mname))
 
 (defn %multi-resolve (mname key)

@@ -23,10 +23,6 @@
 ;; scope. Only the screen printers consult it; `str`/`pr-str`/`fmt` stay native.
 (%declare-dynamic '*show*)
 (def *show* nil)
-(defn- %show-args (xs)
-  ;; Each print argument, run through the installed `*show*` transform — or the
-  ;; arguments untouched when none is installed (the default fast path).
-  (if *show* (map xs *show*) xs))
 ; The printing functions live in `std/io.blsp` as `io/write` / `io/puts` / `io/inspect`,
 ; beside the `Port` ability they write through. `*out*`/`*err*` stay here: they are the dynamic
 ; vars a port is installed into, and the kernel's own diagnostics reach them without

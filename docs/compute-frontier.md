@@ -546,8 +546,9 @@ lazy *by default* breaks Brood's entrenched "iterate for side effects" idiom —
 loader (`(map require-one …)`) and the test runner (`(map run-test …)`) rely on eager
 evaluation, and a lazy view silently drops those effects (immutability covers *data*, not
 *I/O*). So the eager combinators are unchanged and the fusing views are explicit:
-`lmap`/`lfilter`/`lkeep`/`lremove`, threaded with `->>` (the transducer plumbing that backs
-them is internal — `%x*` — not public surface). Measured `pipeline` (n = 1e6): eager
+`lmap`/`lfilter`/`lkeep`/`lremove`, threaded with `->` (ADR-308 later deleted `->>`, so the
+measured snippets in this section and the next are written in the spelling of their date;
+the `%x*` stages were published as `seq/xmap` … by ADR-161). Measured `pipeline` (n = 1e6): eager
 `(->> … (filter …) (map …) (reduce +))` ≈ 2.0 s / 173 MB → fused
 `(->> (range n) (lfilter …) (lmap …) (reduce + 0))` ≈ 0.63 s / 13 MB
 (~3.3× faster, ~13× less memory).

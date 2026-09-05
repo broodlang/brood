@@ -19,7 +19,9 @@
       (is (includes? kw "when"))
       (is (includes? kw "match*"))
       (is (includes? kw "->"))
-      (is (includes? kw "->>"))
+      ;; `->>` was here until ADR-308 deleted it — the grammar went on colouring a macro
+      ;; the language does not have. There is no thread-last form to assert now.
+      (is (not (includes? kw "->>")))
       ;; the count matches: the canonical list with def-heads filtered out
       (assert= (count kw)
         (count (filter (reflect/special-forms) (fn (k) (not (string/starts-with? k "def"))))))))
@@ -39,7 +41,8 @@
       (is (includes? m "match\\*"))
       ;; the word forms and the operator forms both made it in
       (is (includes? m "when"))
-      (is (includes? m "->>"))
+      (is (includes? m "->"))
+      (is (not (includes? m "->>")))
       ;; def-heads are NOT in the keyword alternation (they're the :definition rule)
       (is (not (includes? m "defn")))
       (is (map? (get (get g :repository) :definition)))))
@@ -79,7 +82,8 @@
       (is (includes? q "\"when\""))
       ; the `*` is a plain literal here
       (is (includes? q "\"match*\""))
-      (is (includes? q "\"->>\""))
+      (is (includes? q "\"->\""))
+      (is (not (includes? q "\"->>\"")))
       ;; static node→capture rules + the separate def-head rule
       (is (includes? q "@punctuation.bracket"))
       (is (includes? q "(#match? @keyword \"^def\"))"))
@@ -97,7 +101,8 @@
     (let (e (emacs-special-forms))
       (is (includes? e "(defconst brood-special-forms"))
       (is (includes? e "\"when\""))
-      (is (includes? e "\"->>\""))
+      (is (includes? e "\"->\""))
+      (is (not (includes? e "\"->>\"")))
       ;; same source of truth — no def-heads
       (is (not (includes? e "\"defn\"")))))
 

@@ -29,7 +29,7 @@
     ["vector of vectors"
       "(def rows [[\"alpha\" 1 :one] [\"beta\" 2 :two] [\"gamma\" 3 :three] [\"delta\" 4 :four]])"]
     ["threading macro"
-      "(->> (range 0 1000) (filter (fn (n) (= 0 (rem n 3)))) (map (fn (n) (* n n))) (reduce + 0))"]
+      "(-> (range 0 1000) (filter (fn (n) (= 0 (math/rem n 3)))) (map (fn (n) (* n n))) (reduce 0 +))"]
     ["defn with docstring and body"
       "(defn tally (items) \"Count each distinct item, returning a map of item to count.\" (fold (fn (acc x) (map-assoc acc x (inc (map-get acc x 0)))) {} items))"]
     ["receive with clauses"

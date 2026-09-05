@@ -316,7 +316,6 @@
    "file/rm" :filesystem
    "demonitor" :processes
    "math/denominator" :math
-   "%deprecation-warning" :meta
    "file/dir?" :filesystem
    "disj" :collections
    "string/display-width" :strings
@@ -517,7 +516,6 @@
    "seqview?" :predicates
    "reflect/set-load-path" :meta
    "set?" :predicates
-   "%show-args" :io
    "%show-print-hook" :meta
    "meta" :meta
    "sig" :meta
