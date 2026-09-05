@@ -46,7 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
-    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, fetch, update, tree, add, remove, publish, search, key, ws — `nest <command> --help`.",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, fetch, update, tree, add, remove, publish, search, key, ws, repl — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -121,10 +121,6 @@ enum Cmd {
     /// an image with none of `project`'s root globals. This arm builds before any std module
     /// loads, and the child process `ensure_stdimage` spawns is exactly this arm.
     Stdimage,
-
-    /// Start a REPL. Inside a project, every source file is pre-loaded so the
-    /// project's modules are immediately callable.
-    Repl,
 
     /// Serve the project over Model Context Protocol on stdio so an agent
     /// (Claude Code etc.) can eval / lookup / format / expand / run tests /
@@ -326,6 +322,7 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
     "search",
     "key",
     "ws",
+    "repl",
 ];
 
 /// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
@@ -422,7 +419,14 @@ fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
         ensure_stdimage_now(&mut interp);
     }
     let code = format!("(nest/main {})", blsp_string_list(&argv));
-    if let brood::core::value::Value::Int(code) = run_for_value(&mut interp, &code) {
+    // `nest repl`'s line editor enters raw mode; its own `term-raw-leave` is the normal
+    // teardown, and this guard restores the terminal on a panic unwind. Scoped so it drops
+    // before the exit (`process::exit` skips Drop); a no-op for every other subcommand.
+    let result = {
+        let _guard = RawTermGuard;
+        run_for_value(&mut interp, &code)
+    };
+    if let brood::core::value::Value::Int(code) = result {
         std::process::exit(code as i32);
     }
 }
@@ -488,7 +492,6 @@ fn run_main(cli: Cli) {
                 "      \" (shared by brood, nest and brood-lsp from this tree)\")))",
             ),
         ),
-        Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => {
             require_project("mcp", None);
             cmd_mcp(&mut interp)
@@ -541,50 +544,6 @@ fn blsp_string_list(items: &[String]) -> String {
     } else {
         let quoted: Vec<String> = items.iter().map(|s| blsp_string(s)).collect();
         format!("(list {})", quoted.join(" "))
-    }
-}
-
-/// `nest repl` — project-aware REPL. Inside a project, pre-load every source
-/// file so the project's modules are immediately callable from the prompt.
-/// Outside a project, fall through to the plain language REPL (same UX as
-/// `brood`). The REPL itself is Brood (`std/tool/repl.blsp`, ADR-048) — one
-/// implementation both binaries bootstrap into via `(repl/run)`.
-fn cmd_repl(interp: &mut Interp) {
-    if in_project() {
-        // After loading the project's sources, tell the REPL to start in the project's
-        // `:main` module namespace so a BARE project fn (`go`) resolves at the prompt
-        // without qualifying it `myproj/main/go` — the interactive half of package
-        // rooting (ADR-070). `*repl-start-ns*` is a plain `def` (not a `binding`) so it
-        // reaches the spawned loop process, which roots + enters it through the ambient
-        // package context `project-setup` just established. Other project modules still
-        // need their `mod/fn` (or a `(defmodule …)`/`%in-ns` switch), exactly as in a file.
-        run(
-            interp,
-            "(project/load-config) \
-             (let (root (project/find-root (file/cwd))) \
-               (when root \
-                 (project/setup root) \
-                 (project/load-sources root) \
-                 (def repl/*repl-start-ns* (first *project-main*))))",
-        );
-        eprintln!(
-            "nest repl — project sources loaded, in the project's main namespace; Ctrl-D to exit"
-        );
-    } else {
-        eprintln!("nest repl — no project.blsp here; plain REPL (`brood` would do the same)");
-    }
-    // The REPL is Brood now (`std/tool/repl.blsp`), same as `brood` with no args. The
-    // interactive editor enters raw mode (std/editor/lineedit.blsp), so guard the
-    // terminal: the Brood `term-raw-leave` is the normal teardown, but this
-    // restores it on a panic unwind too. Scope it like `cmd_observe` so it drops
-    // (restoring) before any error report + exit (`process::exit` skips Drop).
-    let result = {
-        let _guard = RawTermGuard;
-        interp.eval_str("(repl/run)")
-    };
-    if let Err(e) = result {
-        report_error(&e);
-        std::process::exit(1);
     }
 }
 

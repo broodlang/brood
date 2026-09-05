@@ -182,17 +182,18 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-05 (latest) — item 4: TWENTY `nest` subcommands are Brood (ADR-322);
+**Addendum 2026-09-05 (latest) — item 4: TWENTY-ONE `nest` subcommands are Brood (ADR-322);
 `stdimage` deliberately is NOT (KI-112 — read it before routing anything that builds an
-image).** `main.rs` is at 1,233 (from 2,771). Left: `completions`/`complete` (shell scripts
-+ the router), `repl`, `mcp`, `observe`, `attach`, `release`, `gen` — all with Rust
-mechanism in them; `repl` is the next natural one (it is `(repl/run)` behind a project
-bootstrap). The table
+image).** `main.rs` is at 1,192 (from 2,771). Left: `completions`/`complete` (shell scripts
++ the router), `mcp`, `observe`, `attach`, `release`, `gen` — each with Rust mechanism in it
+(a terminal guard, the MCP transport, the release pipeline). `observe`/`attach` would need
+`require_terminal` (an `IsTerminal` check) as a primitive or a Brood `os/stdout-tty?` guard
+— `os/stdout-tty?` exists, so they are the next natural pair. The table
 now carries typed flags (`{:value :int :repeat :complete}`), `:many`, `:trailing`, and the
 clap constraints as data; the Rust seam for `test` is `arm_test_env` (pre-boot env flags +
 memory ceiling), the pattern for anything else that must precede `Interp::new()`. Next:
-`repl`; `mcp`/`observe`/`attach`/`release`/`gen`/`completions` have Rust mechanism in them
-and go last. Found and fixed on the way: `nest run --name` called an unbound `node-start`. Noticed, not fixed: a scaffolded project's `(:use log)`
+`observe`/`attach`; `mcp`/`release`/`gen`/`completions` have Rust mechanism in them and go
+last. Found and fixed on the way: `nest run --name` called an unbound `node-start`. Noticed, not fixed: a scaffolded project's `(:use log)`
 
 **Addendum 2026-09-05 (also today) — ADR-320 is IMPLEMENTED; KI-111 filed and fixed.** Side facts
 travel by journal now (`core/heap/facts.rs`): a sixth `FactKind` fails to compile in six places,

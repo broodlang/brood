@@ -20974,3 +20974,17 @@ transport, a release pipeline). Gates: `blsp_dispatch.rs` +3 (the project guard 
 project commands, the arity ranges in clap's words, `tree` on a scaffold);
 `tests/nest_test.blsp` +2; `manifest_race.rs` and `scaffold_quality.rs` drive `add`/`remove`/
 `tree` against real siblings and now run through the Brood arm; the `nest` crate 163/163.
+
+**Amendment 2026-09-05 (night, III) — `repl` is the twenty-first.** `nest repl` was the one
+arm whose body was already Brood in spirit: a project bootstrap and `(repl/run)`. Two things
+moved with it. The start namespace used to be set FROM RUST as `(def repl/*repl-start-ns* …)`
+— a rebinding no static reading of `repl.blsp` could see, which its own comment apologised for
+— and is `repl/start-in!` now, a public setter beside the variable. And the terminal guard:
+the line editor enters raw mode, its own `term-raw-leave` is the normal teardown, and
+`RawTermGuard` restores on a panic unwind; the router (`run_blsp`) now holds that guard around
+every Brood-routed evaluation, a no-op for a subcommand that never touches the terminal.
+Piped stdin keeps the REPL's `read-line` path, so it is testable end to end for the first
+time: `blsp_dispatch.rs` feeds `(+ 1 2)` outside a project and `(+ 40 2)`/`(hello)` inside
+one, and asserts the value, the bootstrap message, and that the bare project name resolves.
+`main.rs` 1,233 → 1,192. Left in Rust: `completions`/`complete`, `stdimage` (KI-112), `mcp`,
+`observe`, `attach`, `release`, `gen`.

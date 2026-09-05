@@ -11368,3 +11368,10 @@ Left in Rust: `completions`/`complete`, `stdimage` (KI-112), `repl`, `mcp`, `obs
 `attach`, `release`, `gen`. Gates: nest crate 163/163, parser file 24/24, checker gates
 zero, clippy clean (it caught the empty `match` the move left behind).
 
+## 2026-09-05 (night, III) — `nest repl` is Brood; `repl/start-in!` replaces a def-from-Rust
+
+The start namespace was a `(def repl/*repl-start-ns* …)` evaluated from a Rust string — a
+rebinding the module's own comment had to apologise for because no static reading could see
+it; it is a public setter now. The router holds `RawTermGuard` around every routed
+evaluation. Piped stdin made the REPL testable end to end. `main.rs` 1,233 → 1,192.
+
