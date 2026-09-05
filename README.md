@@ -232,8 +232,8 @@ variables** (`defdyn`/
 checker** flags type/arity/unbound-symbol mistakes without ever gating the live
 image (see [The type system](#the-type-system) below); and a per-process tracing
 **GC** keeps long-running loops flat.
-`defn`, the operators (`+`, `<`, …), the sequence library, and the `->`/`->>`
-threading macros are all defined in Brood itself (`std/prelude.blsp`) on top of a
+`defn`, the operators (`+`, `<`, …), the sequence library, and the `->`
+threading macro are all defined in Brood itself (`std/prelude.blsp`) on top of a
 small Rust kernel.
 
 Beyond that: first-class **sets** (`#{…}`), exact **decimals** (`1.50M`) for money,
@@ -359,7 +359,7 @@ mistake once produced a phantom "JIT regression"; see the devlog).
 ### Relationship to other Lisps — it is *not* a Clojure clone
 
 The surface borrows a few good ideas from Clojure — immutable data, `{ }` map
-and `[ ]` vector literals, `:keywords`, `->`/`->>` threading, and `~`/`~@`
+and `[ ]` vector literals, `:keywords`, `->` threading, and `~`/`~@`
 quasiquote — so a Clojure reader will recognise the shapes. But the semantics
 diverge, and the differences are deliberate:
 

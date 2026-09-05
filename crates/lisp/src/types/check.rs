@@ -1154,10 +1154,10 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
 /// <file>` / `nest check`.
 ///
 /// Each form is **macro-expanded first** (like the `(check 'form)` builtin),
-/// so threading macros (`->`/`->>`), pattern syntax (`match`), test framework
+/// so the threading macro (`->`), pattern syntax (`match`), test framework
 /// wrappers (`test`/`describe`/…), and any user macro that rearranges code
 /// are checked against their *expanded* shape — not the surface syntax that
-/// would otherwise mistake `(map inc)` inside `(->> xs (map inc))` for a
+/// would otherwise mistake `(map inc)` inside `(-> xs (map inc))` for a
 /// 1-arg call. Source positions survive expansion where the macro rebuilds
 /// through `rebuild_list` (the common case); positions on macro-introduced
 /// new code are absent.

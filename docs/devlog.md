@@ -11117,3 +11117,118 @@ from a corrected record rather than from a number that was never about the thing
 The general lesson is the one this repo keeps relearning from a new angle: an experiment that
 can silently decline its subject reports the null result, and a null result is exactly what
 you were hoping to rule out. Every lever wants a line that says it fired.
+
+## 2026-09-05 (later still) — the prelude surface audited name by name: the answer was already written down, and three gates were passing on nothing
+
+**The question.** Which of the language core's ~370 definitions could move to `std/`, and
+which should not be public at all? Asked from the doc catalogue's *Modules and reflection*
+(`:meta`) category, with `reserved-package-name?` and `require-one` as the named suspects.
+
+**The answer, for every public name: none of them, and it was already decided.** The audit
+enumerated all 222 public prelude names, counted every reference (prelude / `std/` / `tests/` /
+Rust / `examples/`), and each one landed on a rule that already exists:
+
+- **ADR-291's five rules** cover most of the surface — a module header that reserves the name
+  (`std/reflect.blsp` on `apropos`/`doc-search`/`macroexpand`, `std/proc.blsp` on `offload`),
+  half of an inverse pair (`pr-str`/`pr-str-bounded`), an earmuffed global (`is_earmuffed` is
+  a spelling rule, so `io/*print-length*` would silently stop reading as ambient), a name a
+  test depends on being bare, and a name in `(special-forms)` (`for`, `doseq`, `dolist`,
+  `dotimes`, `with-out-str`, `with-err-str`).
+- **`reserved-package-name?` is rule 4 exactly.** `crates/lisp/tests/autoload_race.rs` calls
+  it *because* it is bare-named and its body reaches an autoload stub (`seq/distinct`) — the
+  KI-72 guard. Qualifying it leaves that test passing while it no longer tests what it names.
+- **`require-one` is mechanism, and public non-negotiably.** Six Rust sites resolve it by
+  name: `eval/derive.rs` ×2, `types/check.rs` ×3, and `process/message.rs`, which builds
+  `(require-one 'mod)` so a shipped closure's module loads on the receiving node.
+- **ADR-236** covers the library-type predicates (`queue?`/`pq?`/`datetime?` …) and **ADR-251**
+  the type predicates generally.
+
+**What I got wrong, and the fix that follows from it.** I moved the lazy seq-view block
+(`seq/lmap`/`lfilter`/`lkeep`/`lremove` + the four `%x*` stages + `%seqview-wrap`) and
+`string/->symbol` into their module files first, and the whole suite went green — 5427 cases,
+both checker gates, `check-imaged`, the prelude-image differential. It reads as a clean move:
+nothing in the prelude calls an `l*` combinator, and `std/seq.blsp`'s `seq/xmap` … are one-line
+wrappers over prelude internals. **ADR-291 had considered precisely that and decided against
+it**, and nothing at either site said so, which is why I re-derived it. Reverted, and the
+decision is now recorded where the next reader stands: at the `%x*` block, at
+`string/->symbol`, at `reserved-package-name?` and at `require-one`. An ADR that a future pass
+cannot find is an ADR that gets re-litigated by whoever touches the file.
+
+**Three things that were passing on nothing.**
+
+1. **`crates/lisp/tests/differential.rs` had three dead corpus entries** — the engine
+   differential, the tree's central correctness gate. An entry that *errors* agrees with its
+   own error on every tier, so it is green while testing nothing: `(->> (range 1 6) (map …)
+   (reduce + 0))` predated ADR-308 deleting `->>` and reversing `reduce`; `(filter (range 1 11)
+   even?)` predated `even?` becoming `math/even?`; and a `drive` entry called a `make-adder`
+   defined in a *different* entry, which is a different `Interp`. `agree` now asserts whether
+   an entry evaluates, **in both directions**, against an explicit `EXPECTED_TO_ERROR` list —
+   so a deliberate error-parity case must be declared, and an entry that starts working fails
+   too. Sabotage-verified both ways. A fourth entry (`cl`, "guard + list-destructure +
+   wildcard") turned out to have an irrefutable first clause, so the two features it named were
+   unreachable; clauses reordered.
+2. **`crates/lisp/benches/library.rs`** — `pipeline` and `pipeline_fused` both evaluate with
+   `.unwrap()`, and both programs were unbound (`even?`, `->>`, the old `reduce` order). The
+   fusion benchmark the lazy views exist to justify has not run in some time.
+3. **The `lazy-seq` hint in `eval/mod.rs`** told the user to thread with `->>`, which ADR-308
+   deleted — an error message whose advice is itself an unbound symbol.
+
+**Dead code removed:** `%show-args` (`control.blsp` — printing moved to `std/io.blsp`; the
+comment right below it already said so) and `%match-map-pattern?` (`match.blsp` — a one-line
+alias for `map?` with no callers), plus the stale `%show-args` row in the doc catalogue, which
+is how the deletion was caught: `tests/docs_test.blsp` asserts every catalogue entry resolves.
+`multi-return-type`'s docstring pointed at an `op-return-type` that does not exist; corrected
+to `%op-declared-ret` and to the fact that the Rust checker reads the `*multi-ret*` registry
+from the heap rather than calling it.
+
+**`->>` is gone from the tooling too.** ADR-308 deleted the macro; the *keyword set* kept it,
+so the highlighter, `nest grammar` (VS Code/Emacs/tree-sitter), the LSP's semantic tokens and
+`brood.el` all went on colouring a form the language does not have — and `tests/grammar_test.blsp`
+asserted it was there, which is why nothing noticed. Removed from `kw::THREAD_LAST`,
+`SPECIAL_FORMS`, `is_syntactic_keyword` and `%spy-special-forms`; the four grammar assertions
+now assert its **absence**, so the tooling and the language cannot drift apart again in that
+direction. Two more dead heads went with it from `%spy-special-forms` — `remote-spawn` and
+`remote-spawn-sync`, which are `node/spawn`/`node/spawn-sync` now (bare spelling under
+`(:use node)` is `spawn-sync`, not the old name). That list is belt-and-suspenders, consulted
+only after a full `macroexpand`, so a head that stops existing never fails — it just stops
+matching. The note saying so is now in the file. The remaining `->>` prose was stale in
+fourteen live places, including `docs/llm-native.md`, which *instructs an assistant* to write
+fused `->>` pipelines; the historical record (devlog, decisions, CHANGELOG, the KI-82 repro,
+`compute-frontier`'s dated measurements) is left as written, with a dated note where it could
+be read as current.
+
+**`%deprecation-warning` deleted — the feature exists, and this was the rejected half of it.**
+The audit flagged it as a documented seam with zero callers, and the question it raised was
+whether deprecation is something we'd want later. It is — for end-users, once the language is
+stable, wanting to deprecate a function. **That mechanism already shipped as ADR-283:**
+
+    (meta old-parse :deprecated "0.14.0" :use 'parse-text)
+
+warns at the **call site**, at `nest check` time, in the file that has to change, names the
+replacement, and is advisory rather than gating — because "a deprecation that fails the build
+is a removal with extra steps". `nest doc` strikes the heading through; the LSP publishes it
+as an editor warning; `(check-allow :deprecated …)` silences a deliberate call. The prelude
+already deprecates `not=` this way, and a cross-module check confirms it end to end.
+
+So `%deprecation-warning` was not merely unused — it is the RUNTIME approach ADR-283 weighed
+and rejected in writing, because a runtime print "would fire in a hot loop, on a machine that
+cannot act on it, long after the edit that caused it". Two mechanisms for one job, one of them
+already decided against, is a trap for whoever finds it first — which is exactly what happened
+in this session: it read as "the deprecation primitive" and cost a round trip to learn it was
+the discarded design. Deleted, with a pointer to `meta :deprecated` in its place, and
+`*deprecation-seen*` with it (both image exclusion-lists that named it are updated).
+
+**The one gap left in that story, unbuilt:** the LSP publishes a deprecation as an ordinary
+warning, but does not tag it `DiagnosticTag::Deprecated` and does not mark the completion
+item — so an editor neither strikes the name through nor discourages completing it. Small,
+additive, and gated on a real consumer (ADR-011).
+
+**Also left standing:** `std/doc-catalog.blsp` carries `%`-prefixed and module-private names
+that `nest docs` filters out anyway.
+
+**The lesson.** The audit's real output was not a move — it was finding that every answer
+already existed and none of them were reachable from the code they governed. ADR-291 exists to
+"stop the next pass re-deriving them", and the next pass re-derived them, because a decision
+recorded only in `decisions.md` is invisible to someone reading `std/prelude/seq.blsp`. The
+rule that generalises: when an ADR's decision is *not to change* something, the note belongs at
+the thing it declined to change.

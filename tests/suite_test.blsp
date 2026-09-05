@@ -184,12 +184,12 @@
     (assert= (as-> [1 2 3] xs (map xs inc) (fold xs 0 +)) 9))
   (test "as-> with no forms is the value" (assert= (as-> 10 n n) 10)))
 
-;; The `$` placeholder (ADR-303). Brood carries two argument conventions —
-;; subject-first (`string/split`) and collection-last (`map`) — so a pipeline
-;; crossing the boundary is threaded correctly by NEITHER `->` nor `->>`. `$` puts
-;; the value where it actually goes, and survives the move to one convention:
-;; the subject is genuinely not first in `(- 100 $)` or `(cons $ xs)`.
-(describe "the $ placeholder in -> / ->>"
+;; The `$` placeholder (ADR-303). Brood USED to carry two argument conventions —
+;; subject-first (`string/split`) and collection-last (`map`) — so a pipeline crossing
+;; the boundary was threaded correctly by neither pipe. ADR-308 settled on one
+;; convention and deleted the thread-last pipe; `$` survived the move, because the
+;; subject is genuinely not first in `(- 100 $)` or `(cons $ xs)`.
+(describe "the $ placeholder in ->"
   (test "a step with no $ threads exactly as before"
     (assert= (-> 5 (- 1) (* 2)) 8)
     (assert= (-> 1 inc inc) 3)
@@ -198,9 +198,10 @@
     (assert= (-> 1 (- 10 $)) 9)
     (assert= (-> 10 (- $ 1)) 9))
   (test "$ threads a pipeline that crosses the two conventions"
-    ;; `string/split` is subject-first, `map` is collection-last: `->` alone gets
-    ;; `map` wrong and `->>` alone gets `string/split` wrong (it splits the
-    ;; SEPARATOR, silently yielding nil rather than raising).
+    ;; Written when `string/split` was subject-first and `map` collection-last: `->`
+    ;; alone got `map` wrong and the deleted thread-last pipe got `string/split` wrong
+    ;; (it split the SEPARATOR, silently yielding nil rather than raising). Both are
+    ;; collection-first now; `$` still states the position rather than assuming it.
     (assert= (-> "1 2 3" (string/split " ") (map $ string/->number) first) 1)
     (assert= (-> "4 5 6" (string/split " ") (map $ string/->number) (fold $ 0 +)) 15))
   (test "$ is found at any depth, and inside vector and map literals"

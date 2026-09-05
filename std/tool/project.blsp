@@ -645,9 +645,6 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     ;; In-flight loads, keyed to the loader's pid — empty by the time an image is written,
     ;; and a pid is meaningless in the next process anyway.
     '*features-loading*
-    ;; A once-per-run "already warned about this" filter. An imaged start does no loading,
-    ;; so it has nothing to suppress; carrying the filter would only silence a later warning.
-    '*deprecation-seen*
     ;; ADR-070's dependency-module maps. The image already carries a dep's bindings, and
     ;; restoring these would only send `require` down the source-load branch for modules the
     ;; image can serve directly.

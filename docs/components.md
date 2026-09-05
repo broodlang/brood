@@ -233,8 +233,8 @@ before working in any Rust component:
 ### `std/prelude/*.blsp` — the core library · ~7,000 LOC across nine files
 - **Owns:** `defn`; logic; folding (`reduce`/`map`/`filter`); variadic
   arithmetic & comparison over the 2-arg primitives; control-flow macros
-  (`when`/`unless`/`and`/`or`/`cond`); sequence ops; threading macros
-  (`->`/`->>`); error handling (`error`, `try`/`catch` over `%try`); the
+  (`when`/`unless`/`and`/`or`/`cond`); sequence ops; the threading macro
+  (`->`); error handling (`error`, `try`/`catch` over `%try`); the
   **pattern-match compiler** (`match*`/`match`, reused by `let`/`fn`); string &
   path helpers; and the **module system** (`provide`/`require`/`*load-path*`).
 - **Baked into the binary** via `include_str!` in `lib.rs`; frozen into PRELUDE.

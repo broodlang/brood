@@ -326,7 +326,6 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::DOTIMES,
     kw::FOR,
     kw::THREAD_FIRST,
-    kw::THREAD_LAST,
     // Core macros (std/prelude.blsp) that read as keywords — highlight-only, not
     // evaluator special forms (ADR-092). Promoted here so every editor (VS Code via
     // `nest grammar`, Emacs, the REPL highlighter) + the LSP colour them from one
