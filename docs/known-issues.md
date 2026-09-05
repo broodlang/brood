@@ -115,6 +115,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-83 | **The monomorphization differential compared TIMING CHATTER as if it were an answer.** Under full-suite load, `cli::mono_differential` failed with "monomorphization changed an ANSWER" while both arms reported `92 tests, 92 passed, 0 failed` — the diff was one line: the framework's per-test slow annotation (`concurrent impl registration (KI-22) › … 13.9s`), printed only when a test crosses `*test-slow-ms*` (1 s), which under 4-way nextest parallelism one arm's nested run did and the other's did not. `without_timings` stripped only `ms wall`/`Slow tests` lines | ✅ **FIXED 2026-08-29** — the filter now also drops any line whose last token is a duration (`13.9s`, `2ms`); a real divergence in such a line is theoretically maskable, but a *failing* test already fails the `*_ok` asserts before the comparison runs. Sabotage-verified offline on the exact captured outputs: the old comparison fails on them, the new one passes, and a `92 passed`→`91 passed` mutation still diverges. Same species as [KI-80](#ki-80): a nested suite run under load emitting load-dependent output that an outer gate treats as signal |
 | KI-82 | **The hosted playground cannot run its own front-page example.** `https://brood.fly.dev` — the pipeline snippet returned `recursion too deep: used 14021552 bytes of stack, over the 12582912-byte budget` three frames deep, trace `{:fn %require-force-in} {:fn %require-force}` — wasm-only (native answers `165`) | ✅ **FIXED 2026-08-29** (`b6706120`) — not `require` and not ADR-290/291: `WORKER_STACK_BYTES` was a hard-coded 16 MiB (a native worker's stack) while wasm runs on a ~1 MiB shadow stack, so a bogus 13.4 MiB reading landed in the gap between the budget (raised) and the stale-base backstop (never fired). Both are now target-aware; reproduced deterministically via the page's own `completions()`-then-`run()` sequence, verified red-then-green on native, lean-native and wasm32+node. **Residual:** the deployed site answers wrong until hive redeploys with `BROOD_REF` ≥ `b6706120` — a deploy step, not a runtime bug |
 | KI-81 | **`BROOD_CONTRACTS=1` was unusable on a cold boot cache** — one run panicked in prelude expansion — `prelude expand: unbound error: unbound symbol: take` (`lib.rs:359`), on a file using `defability`/`impl`/`sig`. the cause is prelude LOAD ORDER, not a rename: `sig!` lives in `core.blsp` and `take` is defined in `seq.blsp`, which is concatenated later | ✅ **FIXED 2026-08-29** (ADR-293) — **never a flake**: `touch target/release/brood` reproduces it 100%, because the boot cache is keyed on the executable's mtime, so the first run after any rebuild is cold and every run after replays the cache without executing the macro bodies. The twelve clean runs were twelve warm ones, and the image hypothesis was wrong. THREE independent cold-only defects: `sig!`'s expansion-time `take`/`nth`/`map`/`range`/`count` (not yet defined that early — `core.blsp` expands before `seq.blsp` is concatenated); the shim closing over a **let-bound local**, which the prelude's freeze step rejects; and `defrecord` emitting its constructor `sig` **above** the `defn` it rebinds, making every record fatal in that mode. Root cause of all three: the mode had **no end-to-end test**, so `crates/cli/tests/contracts_mode.rs` now cold-caches deliberately via `XDG_CACHE_HOME` — without that it passes on a broken build |
+| KI-111 | **a `def-` global silently became PUBLIC on any write that was not a redefinition** — `(reflect/private? '*std-impls*)` answers `true` at boot and `false` the moment a stdlib image installs; `*require-edges*` answers `false` after the first `require` in any program. Nothing errors: the names simply re-enter `apropos`, `doc-search` and completion, and the cross-module private-reference warning stops firing for them | ✅ **FIXED 2026-09-05 — one rule, two broken paths, found by ADR-320's journal differential on its first run.** `env_define` clears the private mark, correctly, so that editing `defn-` → `defn` and hot-reloading publishes the name; every path that writes a binding WITHOUT a def form having changed therefore has to put it back, and two did not. **(1) `registry_cas` lacked the save/restore its sibling `registry_update` has** — the two are documented as a pair four lines apart and the guard went into one of them — so a `def-`'d registry reached through `%swap-registry!` turned public on its first write. **(2) `define_image_entry`'s DEFERRED pass** re-defined a name after the section's `KIND_PRIVATE` entry had marked it (privacy entries are written last, and a value entry whose global already exists is deferred), undoing the mark. A third suspect — `%mark-private` resolving its name at call time where `def` resolved at compile time — is a real mismatch with **no live path**, and closing it is recorded as a deliberate non-fix: the attempt broke the `(do (def …) (%mark-private …))` shape the checker identifies a private definition by, and `nest check --strict std/` went from clean to ten warnings in untouched files. **Why it survived:** the four worst-affected names are absent from `(reflect/global-names)`, so every per-global gate — the boot differentials included — was structurally unable to see them. Guarded by the side-fact comparison in `STATE_DUMP`; sabotage-verified |
 | KI-109 | **`mandelbrot` runs ~3% slower than the 0.19.1 column at steady state — instruction-fetch pressure on one row** — `make ab --floor` vs `8a2aaa01`, best-of-7, images live: +3.0% against a 0.2% floor at the default size; KI-100's re-baseline table had it at 1.033–1.034 at N=1400 and N=3000, so it scales with work. `perf stat` (pinned, 3 reps a side): instructions +1.8%, cycles +2.6%, **L1-icache misses +52%**, iTLB −18% | ✅ **CLOSED 2026-09-05** — the closing gate reads **`mandelbrot` +0.2% vs `8a2aaa01`** (578 → 579 ms, best-of-9, floor 4.3%, stdlib image live both arms) after the `->float` fix: a float-context arm applied to an int now promotes it (`fcvt_from_sint`, the VM's own `i64 as f64`) instead of deopting sixteen times and running interpreted — one VM call per pixel here, and in every program that converts. The footprint mechanism KI-100 identified is still what the counters show (icache misses +16% with the arm native), but it no longer costs wall time; the row is back at the 0.19.1 column. Two levers measured and refused on the way: `#[inline]` on the root wrappers (icache 80 → 130 M, negative) and `codegen-units = 1` (−2% under the 5% bar, +3 min per incremental release build). One trap for the next `make ab` against an old ref: upstream's new cache prune bounds the number of std images kept, so an old baseline's image is EVICTED between runs and the harness (rightly) refuses the asymmetric pair — rebuild it with the worktree's own `nest` (`cd target/ab/<sha> && scripts/build-std-image.sh`). ⚠️ **OPEN 2026-09-04** — the sole residual of KI-100, split out so it is tracked as what it is. Mechanism confirmed, not hypothesised: same work, more fetch stalls; every other compute row is flat or faster. The fix direction KI-100 priced: **not huge pages** (the iTLB is already *down*); **reduce the machine code the JIT emits per arm for root handling** (RootsBuf's inlined root-stack manipulation, `115faead`) — `docs/compute-frontier.md`. Measure with `perf stat -e instructions,cycles,L1-icache-load-misses` on `mandelbrot` at `BENCH_N=1400`: icache misses are the signal, wall time on this box is not |
 | KI-110 | **`tests/exit_test.blsp` "the reason survives work done after the signal" flaked once under full-suite load — `:noproc` where `:badness` was expected** — three ADR-311 cases spawned a body that ENDS on its own and then called `monitor`; under load the child finished first and monitoring a dead pid fired a synthetic `:noproc`. 1 in 5570 on 2026-09-05; 0/30 standalone | ✅ **fixed 2026-09-05** — the three self-ending cases use `spawn-monitor` (ADR-309), which registers the monitor before the child runs, so `:noproc` is impossible by construction (the primitive's own doc measured the two-step form: adjacent 0/300 lost the reason, one 5 ms yield between them 40/40). Same mechanism as KI-59 and the reason ADR-309 exists; the parked bodies in the file never finish and keep the two-step form |
 | KI-112 | **`stdimage/build` wrote an image missing every root global of a module the building process had already loaded — `project`'s 31, so every later `nest check` died on an unbound `*ns-package*`.** Surfaced when `nest stdimage` was routed through `std/tool/nest.blsp` (ADR-322), whose load pulls the toolchain in before the build; the probe that attributes root globals diffs names before/after `require-one`, which is a no-op for a loaded module, and an unclaimed root was silently skipped as "the prelude's" | ✅ **fixed 2026-09-05** (never pushed) — `stdimage` stays a Rust arm, built before any std module loads; and `build` now REFUSES to write when a root global is neither owned by a probe nor bound by the prelude (`%prelude-global?`, a new kernel query over the freeze's binding names), naming the orphans. Sabotage-shaped gates in `crates/cli/tests/stdimage_refuses_dirty_process.rs` and `blsp_dispatch.rs` |
@@ -6349,6 +6350,68 @@ escape total there is nothing left to warn about; the gate asserts **zero** offe
 template plus three behavioural probes that define `get`/`reverse`/`bound?` and assert the real
 value comes back. It pins `receive` as the known exception, so a *new* offender fails the build.
 Sabotage-verified: removing `defrecord`'s escape fails both the scan and the probe.
+
+## KI-111 — a `def-` global went PUBLIC on any write that was not a redefinition ✅ FIXED 2026-09-05
+
+**Symptom.** `(reflect/private? '*std-impls*)` answers `true` at boot and `false` the moment a
+stdlib image installs. `(reflect/private? '*require-edges*)` answers `false` after the first
+`require` — which is every program. Four more went the same way: `*std-regs*`,
+`*std-require-edges*`, `*std-image-sections*`. Nothing raises and nothing fails; the names just
+stop being private, so `apropos`, `doc-search` and completion begin offering kernel bookkeeping
+and the cross-module private-reference warning stops firing for them.
+
+**Cause.** One rule, three sites that break it. `env_define` calls `unmark_private` on every
+global definition, and that is **correct**: privacy is declared by the def FORM (ADR-146), so an
+author editing `defn-` to `defn` and hot-reloading must stop being private. The corollary is
+that any path writing a binding *without* a def form having changed must put the mark back.
+
+1. **`registry_cas` had no save/restore, while its sibling `registry_update` did.** The two are
+   documented as a pair four lines apart in `core/heap.rs`; the guard went into one of them. So
+   a `def-`'d registry updated through `%swap-registry!` rather than `%registry-update!` turned
+   public on its first write — `*require-edges*`, on every `require`.
+2. **`define_image_entry`'s deferred pass.** A section's `KIND_PRIVATE` entries are written
+   *last*, and a value entry whose global already exists is deferred to a second pass — so for
+   an already-bound private the mark landed first and the define undid it. Private at
+   image-build time, private for one pass of the load, public by the end of it.
+
+A third path *looks* like a cause and is not, which is worth recording because it cost the most
+time here. **`%mark-private` resolves its quoted name at CALL time** — against the namespace
+loading right then — while `def` resolved its head at COMPILE time. They disagree for a prelude
+function assigning a root private while a module loads: it binds `*x*` and marks `mod/*x*`. Real,
+but no live path takes that shape, and the two symptoms it was blamed for were (1) and (2).
+
+**Why it survived.** The four worst-affected names are **not in `(reflect/global-names)`** — a
+global bound to `nil` is not listed — so every per-global gate in the tree, the two boot
+differentials included, was structurally unable to see them. That is KI-106's blind spot
+exactly, one level down: KI-106 was a registry the `global-names` diff could not see, and this
+is a *fact about* a global the same diff cannot see. The two affected names that ARE listed
+diverged identically in both arms of every differential, so a comparison of two boots agreed
+while both were wrong.
+
+**Fix.** `registry_cas` saves and restores privacy around `env_define`, like `registry_update`.
+`define_image_entry` does the same, so the order of a section's value and privacy entries stops
+mattering. The 17 prelude assignments to a `def-` global were switched from `def` to `def-`,
+stating the intent at the site.
+
+**Deliberate non-fix, with its reason.** Closing the `%mark-private` resolution mismatch by
+having `def-`/`defn-` pass the symbol `def` returned — `(%mark-private (def …))` — was
+implemented and reverted. `types/check.rs::top_level_defs` identifies a private definition by the
+exact shape `(do (def name …) (%mark-private …))` and unwraps it so the definition is inferred
+and its call sites checked; most definitions in a real module are private (40 of
+`std/json.blsp`'s 42). Nesting the `def` anywhere else makes the checker silently stop seeing
+them: `nest check --strict std/` went from clean to **ten warnings in files the change never
+touched** (`tempo`, `stats`, `datetime`, `version`, `fuzzy`, `seq`). The shape is now documented
+as load-bearing at the macro. Fixing the mismatch properly means qualifying at expansion time,
+which needs `qualify_name`'s ambient/already-qualified rules restated in Brood — a second copy of
+a kernel rule, for a hazard with no symptom.
+
+**Guard.** `%side-facts` (ADR-320) reports the recorded facts themselves, and `STATE_DUMP` — run
+by `prelude_image_matches_source`, `image_matches_source` and the `artifact_matrix` — compares
+them between boots. Sabotage-verified twice: dropping `Fact::Meta` from the image write reddens
+`an_imaged_boot_and_a_source_boot_agree_on_every_global` with
+`source: meta not= since=None deprecated=Some("0.19.1") …` named in the diff; and before the
+fixes, the matrix failed with `baseline: FACTS 807 / cell: FACTS 804` naming the three lost
+`private` facts. Adding a sixth `FactKind` fails to compile in six places.
 
 ## KI-109 — `mandelbrot` is ~3% slower than 0.19.1 at steady state: icache footprint on one row ✅ CLOSED 2026-09-05
 

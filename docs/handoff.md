@@ -192,6 +192,30 @@ the package-manager group (`fetch`/`update`/
 `tree`/`add`/`remove`/`publish`/`search`/`key`/`ws` — they share `PACKAGE_BOOTSTRAP`), then
 `repl`; `mcp`/`observe`/`attach`/`release`/`gen`/`completions` have Rust mechanism in them
 and go last. Found and fixed on the way: `nest run --name` called an unbound `node-start`. Noticed, not fixed: a scaffolded project's `(:use log)`
+
+**Addendum 2026-09-05 (also today) — ADR-320 is IMPLEMENTED; KI-111 filed and fixed.** Side facts
+travel by journal now (`core/heap/facts.rs`): a sixth `FactKind` fails to compile in six places,
+and `%side-facts` puts the journal into `STATE_DUMP`, so the artifact matrix and both boot
+differentials compare the recorded facts instead of a hand-listed set of per-global attributes.
+`meta` (ADR-283) had been carried since ADR-314 and compared by nothing; it is compared now.
+**Two traps this turned up, both worth knowing before touching the image again:** a snapshot
+reader must match the writer's authority (`def_sites_snapshot` is the runtime map — correct on
+the builder heap, empty in every live process, and a fingerprint built on it agreed in both arms
+while reporting nothing), and a fact about an *unbound* name is not part of the boot state (a
+stdlib image pre-marks every `defdyn` in the image at index-install, ~49 names in modules never
+loaded — deliberate). **And one revert to remember:** `def-`/`defn-` must keep expanding to
+`(do (def …) (%mark-private …))`, because `types/check.rs::top_level_defs` identifies a private
+definition by that shape; collapsing it took `nest check --strict std/` from clean to ten
+warnings in untouched files. Next from the open-threads list: KI-107 (the `eval_server_test`
+flake), then `nest run` (ADR-322's next subcommand).
+
+**Addendum 2026-09-05 (latest) — item 4: SEVEN `nest` subcommands are Brood (ADR-322):
+`check` and `test` joined today.** `main.rs` is at 2,113 (from 2,771). The flag spec is
+typed now (`{:value :int :repeat :complete}`), so `run`'s options should slot straight in;
+the Rust seam for `test` is `arm_test_env` (pre-boot env flags + memory ceiling), the
+pattern for anything else that must precede `Interp::new()`. Next: `run` (the largest arm
+left, ~270 lines: `--watch`, `--for`, `--main`, `--check-boot`, the pre-flight check), then
+`new`, then the package manager. Noticed, not fixed: a scaffolded project's `(:use log)`
 warns "shadows the prelude `error`" on every `nest test` — the template in
 `std/tool/scaffold.blsp` should `:exclude [error]` or drop the `:use`. Earlier today: `std/tool/nest.blsp` + `BLSP_SUBCOMMANDS` in `main.rs`. To move the next one:
 add a table entry + `run-*` in `nest.blsp`, add the name to the const, delete the `Cmd`

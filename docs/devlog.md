@@ -11286,6 +11286,67 @@ spawned a body that ends on its own and then called `monitor` — KI-59's race, 
 the parked bodies keep the two-step form because they never finish. 0/30 standalone before and
 after, so the argument is from construction, not from a loop.
 
+
+## 2026-09-05 (last) — side facts travel by journal (ADR-320), and its first run found KI-111
+
+**ADR-320 implemented, all three steps.** Every startup image rests on one sentence —
+*materialising defines bindings and evaluates nothing, so anything the evaluation recorded on
+the side must be written* — and that sentence was unenforceable as prose, because "anything it
+recorded on the side" is an open set. `write_prelude_image` carried five such facts in five
+hand-written blocks, **every one added after a bug** (KI-72, KI-84, KI-89's residual, KI-105,
+KI-106), the last of which says so in its own comment: "found the same way — late."
+
+`core/heap/facts.rs` now declares the kinds through a macro that also generates `FactKind::ALL`,
+so the enumeration and the list cannot disagree; `Heap::side_facts` collects and
+`Heap::replay_fact` applies, both exhaustive. The image writer is one loop over `put_fact`;
+`PRELUDE_MAGIC` went to v2. Sabotage-verified in both directions, which is the whole claim:
+
+- adding a sixth `FactKind` **fails to compile in six places** (collect, classify, replay,
+  encode, decode, render) — the conversion ADR-320 exists for, from a silent omission whose
+  symptom appears in another subsystem to a compile error at the point of the change;
+- dropping `Fact::Meta` from the image write reddens the boot differential naming the fact:
+  `source: meta not= since=None deprecated=Some("0.19.1") beta=None use=Some("not")`. Before
+  this, `meta` had been carried since ADR-314 and compared by **nothing**.
+
+**Step 3 is where the value showed up.** `%side-facts` renders the journal as sorted strings and
+`STATE_DUMP` prints it, so the artifact matrix and both boot differentials compare the recorded
+facts rather than a hand-listed set of per-global attributes — the same shape of list the journal
+just removed from the writer. Two things had to be got right first, and both are the ADR's own
+failure mode wearing a different hat:
+
+1. **The reader must match the writer's authority.** `def_sites_snapshot` reads the runtime map,
+   which is right for the writer (builder heap, pre-freeze) and *empty in every live process*,
+   where the sites have moved into `SharedCode`. The first fingerprint reported zero def sites —
+   identically in both arms, which is how a comparison agrees without checking anything.
+2. **A fact about an unbound name is not part of the state.** A stdlib image re-marks every
+   `defdyn` in the image at index-install time, deliberately, because a section may materialise
+   at any moment; so an imaged boot carries marks for ~49 names in modules it never loads. That
+   is intended and documented, and the fingerprint compares facts about names the boot bound.
+
+**KI-111, found on the first green run of the new comparison.** `env_define` clears the private
+mark — correctly, so `defn-` → `defn` plus a reload publishes the name — so every path that
+writes a binding *without a def form having changed* must put it back. Two did not:
+`registry_cas` (its sibling `registry_update` has the guard; the two are documented as a pair
+four lines apart), and `define_image_entry`'s deferred pass, which re-defines after the section's
+`KIND_PRIVATE` entry has already marked. Six `def-` globals were public in ordinary runs —
+`*require-edges*` after the first `require` of any program. Invisible to every existing gate
+because four of the names are **not in `(reflect/global-names)`** (a nil-valued global is not
+listed), so no per-global comparison could reach them, and the other two diverged identically in
+both arms. That is KI-106's blind spot one level down: KI-106 was a registry the `global-names`
+diff could not see; this is a *fact about* a global it cannot see either.
+
+**And one fix reverted, which is the more useful half.** A third suspect — `%mark-private`
+resolving its name at call time where `def` resolved at compile time — is a real mismatch with no
+live path. Closing it by passing the symbol `def` returned, `(%mark-private (def …))`, broke
+something invisible: `types/check.rs::top_level_defs` identifies a private definition **by the
+shape** `(do (def name …) (%mark-private …))` and unwraps it so the definition is inferred and
+its call sites checked. Most definitions in a real module are private (40 of `std/json.blsp`'s
+42), so nesting the `def` elsewhere makes the checker stop seeing them: `nest check --strict
+std/` went from clean to **ten warnings in files the change never touched**. Reverted, and the
+shape is documented as load-bearing at the macro — a tidier expansion is a checker regression.
+The lesson rhymes with the ADR's: a rule that lives in one file's pattern-match is a rule the
+next reader of *another* file cannot see.
+
 ## 2026-09-05 (late) — `new`/`update-tooling`/`rename` are Brood; `stdimage` is not, and KI-112 says why
 
 Three more `nest` arms moved (fixed-arity positionals joined the table: `:arity`/`:names`);

@@ -91,6 +91,24 @@
 ;; recorded via `%mark-private` — not a marker in the name, so the name stays clean
 ;; at the definition and at every call site. The `def` runs first so the global
 ;; exists when `%mark-private` qualifies it.
+;;
+;; **The `(do (def …) (%mark-private …))` SHAPE is load-bearing and must not be tidied.**
+;; `types/check.rs::top_level_defs` identifies a private definition by exactly this shape —
+;; a `do` carrying a `%mark-private` call — and unwraps it so the definition inside is
+;; inferred and its call sites checked. Most definitions in a real module are private (40 of
+;; `std/json.blsp`'s 42), so a rewrite that nests the `def` anywhere else silently stops the
+;; checker seeing them: collapsing this to `(%mark-private (def …))` on 2026-09-05 turned
+;; `nest check --strict std/` from clean to ten warnings, in files the change never touched.
+;;
+;; A known hazard, deliberately left: `%mark-private` re-resolves the quoted name against the
+;; namespace loading at CALL time, while `def` resolved its head at COMPILE time. The two
+;; disagree for a prelude function that assigns a root private while a module is loading —
+;; it binds `*x*` and marks `mod/*x*`. Harmless today because nothing takes that path (the
+;; stdlib-image setters are called from the image BUILDER, whose marks are then re-derived
+;; from the built image), and the two real cases it looked like were KI-111's other halves,
+;; in `registry_cas` and `define_image_entry`. Fixing it properly means qualifying at
+;; expansion time, which needs `qualify_name`'s ambient/already-qualified rules restated in
+;; Brood — a second copy of a kernel rule, for a case with no live symptom.
 (defmacro defn- (name & clauses)
   "Define a MODULE-PRIVATE function `name` (ADR-146) — like `defn`, but the name is not exported and a cross-module reference to it is a compile error."
   (%defn-check-name 'defn- name)

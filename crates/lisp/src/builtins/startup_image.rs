@@ -517,6 +517,31 @@ fn define_image_entry(
     v: Value,
     reserve: bool,
 ) -> Result<(), LispError> {
+    // `env_define` clears the private mark — right for a real `def` (editing `def-` → `def`
+    // and reloading must publish the name), wrong for materialising, which is not a
+    // redefinition at all. It bit through the DEFERRED pass: a section's privacy entries are
+    // written last, so for a name whose global already exists the value entry is deferred to
+    // the second pass and lands AFTER the `KIND_PRIVATE` entry marked it — undoing the mark.
+    // That is how installing a stdlib image left `*std-impls*`, `*std-regs*` and
+    // `*std-require-edges*` public: private at image-build time, private for one pass of the
+    // load, public by the end of it. Save and restore around the define, exactly as
+    // `registry_update`/`registry_cas` do, so the order of the two entries stops mattering.
+    let was_private = heap.is_private(sym);
+    let out = define_image_entry_inner(heap, global, kind, sym, v, reserve);
+    if was_private {
+        heap.mark_private(sym);
+    }
+    out
+}
+
+fn define_image_entry_inner(
+    heap: &mut Heap,
+    global: EnvId,
+    kind: u8,
+    sym: value::Symbol,
+    v: Value,
+    reserve: bool,
+) -> Result<(), LispError> {
     match kind {
         KIND_SIG => heap.set_declared_sig(sym, v),
         KIND_MACRO => {
@@ -739,6 +764,81 @@ fn get_meta(r: &mut Cursor<Vec<u8>>) -> Option<crate::core::heap::NameMeta> {
     })
 }
 
+/// Tags for the side-fact journal (ADR-320). Distinct from the `KIND_*` section tags: a
+/// section entry is a BINDING, a fact is something recorded *about* a name. The numbers are
+/// format, so append rather than renumber — `PRELUDE_MAGIC` guards a layout change, not a
+/// tag reshuffle within one.
+const FACT_PRIVATE: u8 = 0;
+const FACT_META: u8 = 1;
+const FACT_DEF_SITE: u8 = 2;
+const FACT_REGISTRY_NAME: u8 = 3;
+const FACT_DYNAMIC: u8 = 4;
+
+/// Encode one side fact. **Exhaustive on purpose**: this is the second half of ADR-320's
+/// guarantee — `Heap::side_facts` makes a new kind impossible to leave out of the *carry*,
+/// and this match makes it impossible to leave out of the *encoding*. Add a `Fact` variant
+/// and this stops compiling.
+fn put_fact(out: &mut Vec<u8>, fact: &crate::core::heap::Fact) {
+    use crate::core::heap::Fact;
+    match fact {
+        Fact::Private(sym) => {
+            out.push(FACT_PRIVATE);
+            put_str(out, &value::symbol_name(*sym));
+        }
+        Fact::Meta(sym, meta) => {
+            out.push(FACT_META);
+            put_str(out, &value::symbol_name(*sym));
+            put_meta(out, meta);
+        }
+        Fact::DefSite(sym, loc) => {
+            out.push(FACT_DEF_SITE);
+            put_str(out, &value::symbol_name(*sym));
+            // The file is written per entry rather than hoisted: prelude def sites all name
+            // the same materialised copy today, but nothing in the format should assume it.
+            put_str(out, &loc.file);
+            put_u32(out, loc.pos.line);
+            put_u32(out, loc.pos.col);
+        }
+        Fact::RegistryName(sym) => {
+            out.push(FACT_REGISTRY_NAME);
+            put_str(out, &value::symbol_name(*sym));
+        }
+        Fact::Dynamic(sym) => {
+            out.push(FACT_DYNAMIC);
+            put_str(out, &value::symbol_name(*sym));
+        }
+    }
+}
+
+/// Decode one side fact, or `None` for a truncated or unknown-tag file — which fails the
+/// whole load, so the text cache takes over rather than a partial fact set being installed.
+fn get_fact(r: &mut Cursor<Vec<u8>>) -> Option<crate::core::heap::Fact> {
+    use crate::core::heap::Fact;
+    let p = r.position() as usize;
+    let tag = *r.get_ref().get(p)?;
+    r.set_position((p + 1) as u64);
+    let sym = value::intern(&get_str(r)?);
+    Some(match tag {
+        FACT_PRIVATE => Fact::Private(sym),
+        FACT_META => Fact::Meta(sym, get_meta(r)?),
+        FACT_DEF_SITE => {
+            let file = get_str(r)?;
+            let line = get_u32(r)?;
+            let col = get_u32(r)?;
+            Fact::DefSite(
+                sym,
+                crate::core::heap::SourceLoc {
+                    file,
+                    pos: crate::error::Pos { line, col },
+                },
+            )
+        }
+        FACT_REGISTRY_NAME => Fact::RegistryName(sym),
+        FACT_DYNAMIC => Fact::Dynamic(sym),
+        _ => return None,
+    })
+}
+
 /// Write the prelude image for `fingerprint` to `path`: every non-native binding in `root`,
 /// plus declared sigs, privacy and `meta`. Best-effort — an error simply means the next boot
 /// takes the text-cache path, exactly as a missing file does.
@@ -774,52 +874,19 @@ pub(crate) fn write_prelude_image(
         &mut std::collections::HashMap::new(),
     )?;
 
-    // `meta` is not part of a module section's vocabulary (a module re-runs
-    // `%register-meta` when it loads); the prelude is *inserted*, so nothing re-runs it.
-    let meta = heap.name_meta_snapshot();
-    put_u32(&mut body, meta.len() as u32);
-    for (sym, m) in &meta {
-        put_str(&mut body, &value::symbol_name(*sym));
-        put_meta(&mut body, m);
-    }
-
-    // `defdyn`-ness lives in a process-global set (`value::DYNAMICS`), not in the binding,
-    // so restoring the VALUE of `*require-parent*` without its mark leaves `binding` — and
-    // therefore every `require` — rejecting it. `value::dynamic_names`'s own doc-comment
-    // anticipates exactly this for the module image; the prelude needs it for the same
-    // reason and more urgently, since the prelude is where the dynamics are declared.
-    let dyns = value::dynamic_names();
-    put_u32(&mut body, dyns.len() as u32);
-    for n in &dyns {
-        put_str(&mut body, n);
-    }
-
-    // Def sites, so stdlib `M-.` works on an imaged boot exactly as it does on the text
-    // cache's (ADR-138 kept a whole positioned read alive for this; here it is 30 bytes a
-    // name). The file is written per entry rather than hoisted: prelude def sites all name
-    // the same materialised copy today, but nothing in the format should assume that.
-    let sites = heap.def_sites_snapshot();
-    put_u32(&mut body, sites.len() as u32);
-    for (sym, loc) in &sites {
-        put_str(&mut body, &value::symbol_name(*sym));
-        put_str(&mut body, &loc.file);
-        put_u32(&mut body, loc.pos.line);
-        put_u32(&mut body, loc.pos.col);
-    }
-
-    // Registry names — the fourth thing the evaluation RECORDS rather than binds. Every
-    // `%registry-update!` the prelude runs (each `defmulti`, each ability declaration) adds
-    // its global to the runtime's registry-name set, and `freeze_as_shared_code` carries
-    // that set into `SharedCode::registry_names`, where `project-registry-snapshot` reads it
-    // to decide which globals a section load must merge rather than overwrite. Materialising
-    // runs no `%registry-update!`, so an imaged boot's set held only what the live process
-    // wrote after boot: 10 names to the source boot's 12, missing exactly `*multi-algebra*`
-    // and `*multi-ret*`. A multi-file `nest check` then lost every derived multimethod
-    // mirror (KI-106). Same class as the `defdyn` marks above; found the same way — late.
-    let regs = heap.registry_names();
-    put_u32(&mut body, regs.len() as u32);
-    for sym in &regs {
-        put_str(&mut body, &value::symbol_name(*sym));
+    // The SIDE FACTS — everything the prelude's evaluation RECORDED about a name rather
+    // than bound to it: privacy, `meta`, def sites, registry names, `defdyn` marks. These
+    // used to be five hand-written blocks here, one added after each of KI-72, KI-84,
+    // KI-89, KI-105 and KI-106, because "materialising evaluates nothing" is a rule prose
+    // cannot enforce over an open set of fact kinds. `Heap::side_facts` now enumerates
+    // them through an exhaustive match, so a sixth kind is carried by construction and its
+    // ENCODING is the only thing left to write — `put_fact` below, also exhaustive, which
+    // makes forgetting it a compile error rather than a silent omission surfacing in
+    // another subsystem three weeks later (ADR-320).
+    let facts = heap.side_facts();
+    put_u32(&mut body, facts.len() as u32);
+    for fact in &facts {
+        put_fact(&mut body, fact);
     }
 
     let mut out = Vec::with_capacity(body.len() + 64);
@@ -839,7 +906,11 @@ pub(crate) fn write_prelude_image(
     Ok(())
 }
 
-const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v1\n";
+/// Bumped to v2 when the five per-fact blocks became one side-fact journal (ADR-320). The
+/// fingerprint below already invalidates on any binary or `std/` change, so this is belt and
+/// braces — but a magic that tracks the LAYOUT is what makes a hand-copied or half-written
+/// file fail as "not my format" instead of decoding into nonsense.
+const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v2\n";
 
 /// Restore a prelude image into `root`. `None` for any miss — absent, stale, truncated,
 /// or a value that will not decode — and the caller falls back to the text cache. Returns
@@ -883,39 +954,14 @@ pub(crate) fn load_prelude_image(
         define_image_entry(heap, root, kind, sym, v, false).ok()?;
         done += 1;
     }
-    let meta_count = get_u32(&mut r)?;
-    for _ in 0..meta_count {
-        let name = get_str(&mut r)?;
-        let m = get_meta(&mut r)?;
-        heap.set_name_meta(value::intern(&name), m);
+    // The side facts, replayed through the same entry points ordinary evaluation uses, so a
+    // restored fact is indistinguishable from a recorded one (see the writer, and ADR-320).
+    // A truncated file fails `get_u32`/`get_fact` here and the WHOLE load returns None — the
+    // text cache takes over, and a half-restored fact set is never observable.
+    let fact_count = get_u32(&mut r)?;
+    for _ in 0..fact_count {
+        let fact = get_fact(&mut r)?;
+        heap.replay_fact(&fact);
     }
-    let dyn_count = get_u32(&mut r)?;
-    for _ in 0..dyn_count {
-        let name = get_str(&mut r)?;
-        value::mark_dynamic(value::intern(&name));
-    }
-    let site_count = get_u32(&mut r)?;
-    for _ in 0..site_count {
-        let name = get_str(&mut r)?;
-        let file = get_str(&mut r)?;
-        let line = get_u32(&mut r)?;
-        let col = get_u32(&mut r)?;
-        heap.set_def_site(
-            value::intern(&name),
-            crate::core::heap::SourceLoc {
-                file,
-                pos: crate::error::Pos { line, col },
-            },
-        );
-    }
-    // Registry names (see the writer): re-mark them so the freeze that follows sees the same
-    // set a source boot would. A truncated file fails `get_u32` here and the whole load
-    // returns None — the text cache takes over, never a half-restored registry set.
-    let reg_count = get_u32(&mut r)?;
-    let mut regs = Vec::with_capacity(reg_count as usize);
-    for _ in 0..reg_count {
-        regs.push(value::intern(&get_str(&mut r)?));
-    }
-    heap.mark_registry_names(&regs);
     Some(done)
 }
