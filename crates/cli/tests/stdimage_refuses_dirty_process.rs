@@ -14,7 +14,8 @@
 use std::process::Command;
 
 fn scratch(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("brood-stdimage-dirty-{}-{tag}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("brood-stdimage-dirty-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
