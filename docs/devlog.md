@@ -11277,3 +11277,12 @@ The 287-line Rust arm — a Brood program assembled from `format!` fragments —
 verified. Test-authoring traps: a scaffold's entry module is `(defmodule main)`, rooted under
 the package by `setup`, not `demo/main`; and an empty `& args` prints as `nil`, not `()`.
 
+## 2026-09-05 (night, later) — KI-110: a `:noproc` flake in `exit_test`, closed by `spawn-monitor`
+
+`brood_suite_passes` failed once on the merged tree and passed on nextest's retry:
+`tests/exit_test.blsp:179` read `:noproc` where `:badness` was expected. Three ADR-311 cases
+spawned a body that ends on its own and then called `monitor` — KI-59's race, the one ADR-309's
+`spawn-monitor` closes by registering the monitor before the child runs. Fixed by using it;
+the parked bodies keep the two-step form because they never finish. 0/30 standalone before and
+after, so the argument is from construction, not from a loop.
+
