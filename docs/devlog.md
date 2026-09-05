@@ -11078,3 +11078,42 @@ the rows to protect are named (`nbody`'s `newvel`, and the non-float self-tail l
 comment preserves). And the reproduction caught the version trap again from the other side:
 the first run used a binary built before the sync, which is how the before/after on `->float`
 came to be measured at all — `--version` said `95ecfad3` while the tree was `d234b944`.
+
+### 2026-09-05 — a lever with no signal: `BROOD_XADMIT` never reached the arm it was measured on
+
+Set out to implement lead 2 — admit `row-sum`, whose `call-mediated-boxed` bail I had isolated
+to the float-slot carve-out that morning. Checked what already existed first, which is the
+rule, and it changed the job entirely.
+
+`BROOD_XADMIT=1` already admits gate-refused named defns at the hot stage, and KI-109 prices
+it on this exact row: "noise — 583/601 and 580/565 ms interleaved", with KI-100 recording the
+same. That is a measurement against admitting `row-sum` — except hot admission cannot reach
+`row-sum`. Two independent conditions exclude it: `arm.inline_name.is_some()`, and a frame cap
+of 8 against this arm's nslots=14. Both sides of that A/B ran identical code, so the result was
+control-vs-control. "No difference" for the one reason that cannot be told apart from "no
+effect" — the shape of a gate that passes because it scanned nothing.
+
+Finding that took an hour of raising caps and disabling inliners to watch a count that never
+moved, because **nothing said what admission did with an arm**. `BROOD_JIT_DUMP_IR` shows what
+lowered and `BROOD_JIT_BAIL_TRACE` shows what the gate refused, but the experiment layered on
+top of the refusal had no voice at all. So the fix is the signal, not the clause:
+
+    [jit-xadmit] arm=row-sum nslots=14 cap=8 declined: has an inline variant
+
+One line, under the flag that already exists, naming which condition refused — and
+`BROOD_XADMIT_MAX_NSLOTS` to override the cap (default 8, unchanged) so the experiment can
+reach a wider arm once the inline-variant condition is settled. Default behaviour is
+untouched: same 106 lowered arms, no output. 28 JIT Rust cases, the `.blsp` JIT guards, the
+float-promotion guard and both flag-catalogue directions green — the catalogue gate would have
+failed had I not listed the new knob, which is the second time this week that test earned its
+place.
+
+What I did **not** do is change the gate. KI-109 closed on lead 1, `mandelbrot` is at parity
+(+0.2%, floor 4.3%), and there is no measured problem to solve; benchmarks do not run on this
+machine, and §7.1 already shows what removing this gate costs when someone reasons instead of
+measures. Lead 2 is still unmeasured — but it is now *measurable*, and the next person starts
+from a corrected record rather than from a number that was never about the thing it named.
+
+The general lesson is the one this repo keeps relearning from a new angle: an experiment that
+can silently decline its subject reports the null result, and a null result is exactly what
+you were hoping to rule out. Every lever wants a line that says it fired.
