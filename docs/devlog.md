@@ -10881,3 +10881,77 @@ carries the sha): `startup` −18.2%, `sort` −7.6%, `fib` −4.2%, `bintree` �
 +1.8%, cycles +2.6%, icache misses +52%, iTLB −18%. Tracked as KI-109 — a 3% footprint cost on one
 row, not a suite regression. `json` cannot be A/B'd against the old binary (ADR-307's argument
 order); the harness called the baseline program broken rather than slow, which is right.
+
+### 2026-09-05 — the image bugs are all at seams, so stop testing artifacts one at a time
+
+Six known-issue entries and seven ADRs into the startup-image lineage, the pattern is not
+subtle: **not one of those bugs was inside an image.** KI-105 was prelude-image x
+stdlib-image, KI-106 project-image x prelude-image, KI-72 stdlib-image x autoload stubs,
+KI-84 project-image x derived state. Every per-artifact differential was green throughout.
+
+They are all instances of one invariant that ADR-280 and ADR-314 both state and neither can
+enforce: *materialising defines bindings and evaluates nothing, so anything the evaluation
+did must be replayed and anything it recorded must be written.* `write_prelude_image` carries
+five such facts — `meta`, `defdyn` marks, privacy, def sites, registry names — in five
+hand-written blocks, each added after a bug. The source says so itself: the registry-name
+block is annotated "Same class as the `defdyn` marks above; found the same way — **late**."
+
+Four changes, in the order they were worth doing.
+
+**1. The prelude cache prune bounds BUILDS.** The count cap exists because the cache name
+hashes `build-id`, so an age-only rule deletes nothing — 4192 files / 732 MB when that was
+found. ADR-314 then added `prelude-expanded-<hash>.img` beside the `.blsp`, keyed identically,
+and the prune matched `.blsp` alone. The same failure came straight back in the new artifact:
+**1057 images / 450 MB** on this machine against 18 text caches correctly capped. Pruning by
+file *stem* makes a build the unit, so an artifact added later is carried as soon as it is
+written beside its siblings. One boot took the live cache to 17 images / 53 MB.
+
+**2. A run says how its prelude arrived.** Three boot paths — image, expanded-text cache,
+source — chosen by whether artifacts keyed on `build-id` exist. Since `build-id` embeds the
+binary's mtime, **the first run after any rebuild is a source boot and every run after is
+not**, which is exactly when someone is checking an image fix. Three "it is fixed" readings
+during KI-106 were cold boots; ADR-314 records the same trap corrupting a diagnosis in a
+session already caught by it twice. `BROOD_BOOT_TRACE=1` could always show it — to someone
+who armed it beforehand and already suspected the answer. A fact you must predict in order to
+observe is not a diagnostic. It is now `(%boot-source)`, printed in the suite summary beside
+the stdlib-image line, and it earned itself immediately: the first suite run reported SOURCE
+for *both* artifacts, a state that had been invisible.
+
+In the same change, `image_matches_source` stopped reading the machine's cache. With a
+current image on disk `Interp::new()` installs at boot, so its SOURCE arm materialised too and
+the arms agreed by accident — which is why it was green locally on every run and red on the
+first genuinely cold one, and why CI rather than the test found `*std-image-installed*`
+missing from its exclusion list. A test whose verdict depends on the developer's cache is not
+a gate.
+
+**3. ADR-320, proposed and not implemented.** The long-term fix is to stop maintaining the
+"what must be replayed" set by hand and derive it — one journal every side fact is recorded
+through, carried generically, so a sixth kind cannot be forgotten at the carry step and an
+unencoded one is a *compile error* rather than a silent omission whose symptom lands in
+another subsystem. The principle is already in the tree, applied once: `registry_lock`'s name
+set is "derived from the writes themselves, so a registry added later is carried without
+anyone remembering to" — and the thing holding it was then forgotten by the image writer,
+which is KI-106. Written up rather than built, because it touches `heap.rs` and
+`startup_image.rs` and should land behind the gate below, not ahead of it.
+
+**4. ADR-321, built: the differential compares the artifact PRODUCT.** Three prelude paths x
+two stdlib-image states, each compared against the cell with nothing cached, over the
+fingerprint the prelude differential already used (now shared, since a third copy was exactly
+the "fixed in one file, left in two" failure `support/` exists to prevent). Two properties do
+the work. Each cell asserts `%boot-source` reports the path it intended, so a cell that fell
+back fails as a setup error instead of comparing source with source and agreeing — the
+vacuous pass this area keeps producing. And the single exclusion, install bookkeeping, is
+justified by *what those names are* rather than by the arms disagreeing about them: excluding
+a global because two arms disagree is how ADR-314's own differential passed with the bug
+sitting in its exclusion list. That set now has one definition, in the runtime.
+
+Sabotage-verified against the real bug, not a synthetic one: deleting the registry-name set
+from `write_prelude_image` — reintroducing KI-106 — fails the matrix naming `*multi-algebra*`
+and `*multi-ret*` at the boundary, where the same bug in the field presented as a checker
+warning about a record in an unrelated file.
+
+**And the question worth keeping open.** All of this apparatus buys ~5 ms of boot (13.5 → 8.3
+ms empty). For a short-lived `nest check` that is paid on every invocation and is worth
+having; for a long-lived process it is noise. ADR-320 records the budget explicitly: the
+prelude image has now been reverted twice and shipped three times, and a fourth revert is the
+signal to withdraw the feature rather than patch it again.

@@ -407,3 +407,46 @@ fn process_cpu_ms(pid: u32) -> u64 {
 pub fn stall_report(_what: &str) -> String {
     String::new()
 }
+
+/// **The canonical boot-state fingerprint**: one line per global — name, kind, privacy,
+/// declared signature, def site and dynamic-ness — preceded by the registry-name set.
+///
+/// It lives here because two differentials compare it and a third would have copied it. That
+/// is the failure this module was created for ("fixed in one file and left in two"), and it
+/// bites harder here than for a port helper: the whole point of a boot differential is that
+/// the fingerprint covers every fact materialisation has to reproduce, so a fingerprint that
+/// gains a field in one copy and not the other silently narrows the gate it belongs to.
+///
+/// The fields are exactly the side facts ADR-320 enumerates — the ones an image must carry
+/// because the evaluation RECORDS them rather than binding them, each of which has been
+/// omitted at least once and found late.
+pub const STATE_DUMP: &str = r#"
+(defn- dyn? (n)
+  "Is `n` a dynamic variable? Asked behaviourally, through the primitive `binding` uses,
+so this needs no new introspection surface."
+  (try (do (%binding (list (symbol n)) [nil] (fn () nil)) true)
+    (catch _ (check-allow :discarded-catch false))))
+
+(defn- loc-of (n)
+  "A def site as `[basename line col]`. The FULL path is deliberately dropped: each arm runs
+under its own XDG_CACHE_HOME, so the materialised `prelude.blsp` lives at a different
+absolute path in each, and comparing those compares the harness rather than the boot. The
+basename plus line:col still fails on a missing, wrong or shifted def site — which is the
+thing worth catching (an imaged boot that records none takes stdlib `M-.` down)."
+  (let (l (reflect/source-location n))
+    (if (nil? l)
+      "nil"
+      (let (parts (string/split (->string (first l)) "/"))
+        (->string [(nth parts (- (count parts) 1)) (nth l 1) (nth l 2)])))))
+
+(io/puts "REGISTRIES " (->string (%registry-names)))
+(let (names (sort (reflect/global-names)))
+  (io/puts "GLOBALS " (count names))
+  (doseq (n names)
+    (io/puts n
+             " kind=" (->string (type-of (reflect/eval (symbol n))))
+             " private=" (->string (reflect/private? (symbol n)))
+             " sig=" (->string (reflect/type-signature n))
+             " loc=" (loc-of n)
+             " dyn=" (->string (dyn? n)))))
+"#;
