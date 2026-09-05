@@ -131,3 +131,20 @@
 
   (test "a short alias canonicalises for a valued flag too"
     (assert= "gen" (get (get (nest/parse "new" ["x" "-t" "gen"]) :flags) "--template"))))
+
+(describe "nest/parse — arity ranges (the package manager)"
+  (test "between lo and hi, unbounded above with :trailing"
+    (assert= (list "q") (get (nest/parse "search" ["q"]) :positionals))
+    (assert= (list "q" "i") (get (nest/parse "search" ["q" "i"]) :positionals))
+    (is (includes? (get (nest/parse "search" []) :error) "not provided:\n  <QUERY>"))
+    (is (includes? (get (nest/parse "search" ["q" "i" "x"]) :error) "unexpected argument 'x'"))
+    (assert= nil (get (nest/parse "publish" []) :error))
+    (is (includes? (get (nest/parse "publish" ["a" "b"]) :error) "unexpected argument 'b'"))
+    (assert= (list "n" ":path" "../n" "-x")
+      (get (nest/parse "add" ["n" ":path" "../n" "-x"]) :positionals))
+    (is (includes? (get (nest/parse "add" []) :error) "<NAME>")))
+
+  (test "a fixed positional set for the first word only"
+    (assert= (list "commit" "msg") (get (nest/parse "ws" ["commit" "msg"]) :positionals))
+    (is (includes? (get (nest/parse "ws" ["bogus"]) :error) "invalid value 'bogus'"))
+    (assert= true (get (get (nest/parse "key" ["gen" "--force"]) :flags) "--force"))))

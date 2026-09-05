@@ -495,3 +495,75 @@ fn an_image_built_through_the_dispatcher_restores_every_root_global() {
         "a root global was dropped from the image:\n{err}"
     );
 }
+
+// ── the package manager: `fetch`/`update`/`tree`/`add`/`remove`/`publish`/`search`/`key`/`ws`
+// (moved 2026-09-05). `manifest_race.rs` and `scaffold_quality.rs` drive `add`/`remove`/`tree`
+// against real sibling projects and `complete.rs` the dependency-name completion. Pinned
+// here: the project guard on every project command, the arity ranges, and `tree`.
+
+#[test]
+fn every_package_command_needs_a_project_and_says_so() {
+    let dir = scratch("pkg-guard");
+    for args in [
+        &["fetch"][..],
+        &["update"][..],
+        &["tree"][..],
+        &["add", "x", ":path", "../x"][..],
+        &["remove", "x"][..],
+        &["publish"][..],
+        &["search", "json"][..],
+    ] {
+        let (code, _, err) = nest_in(&dir, args);
+        assert_eq!(code, 2, "{args:?}:\n{err}");
+        assert!(
+            err.contains(&format!("nest {}: no project.blsp in", args[0])),
+            "{args:?}:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn package_arity_ranges_are_clap_shaped() {
+    let dir = scratch("pkg-arity");
+    let (code, _, err) = nest_in(&dir, &["search"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not provided:\n  <QUERY>\n"), "{err}");
+    let (code, _, err) = nest_in(&dir, &["search", "a", "b", "c"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("unexpected argument 'c'"), "{err}");
+    let (code, out, _) = nest_in(&dir, &["search", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Usage: nest search [OPTIONS] <QUERY> [INDEX]"),
+        "{out}"
+    );
+    let (code, out, _) = nest_in(&dir, &["add", "--help"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Usage: nest add <NAME> [SPEC]..."), "{out}");
+    let (code, _, err) = nest_in(&dir, &["key", "bogus"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("invalid value 'bogus' for <ACTION>") && err.contains("gen"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["ws"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("<ACTION>"), "{err}");
+    let (code, _, err) = nest_in(&dir, &["publish", "--bump"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("a value is required for '--bump <LEVEL>'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn tree_prints_the_scaffolded_project() {
+    let proj = scaffolded("pkg-tree");
+    let (code, out, err) = nest_in(&proj, &["tree"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("demo"), "{out}");
+    let (_, out, _) = nest_in(&proj, &["complete", "--", "remove", ""]);
+    // No declared dependencies, so nothing is offered — and nothing fails.
+    assert!(out.trim().is_empty(), "{out}");
+}
