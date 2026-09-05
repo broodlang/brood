@@ -567,3 +567,51 @@ fn tree_prints_the_scaffolded_project() {
     // No declared dependencies, so nothing is offered — and nothing fails.
     assert!(out.trim().is_empty(), "{out}");
 }
+
+// ── `repl` (moved 2026-09-05). Piped stdin keeps the plain `read-line` path, so the loop is
+// testable end to end: a form in, its value out, and the project bootstrap message on stderr.
+
+fn nest_repl(dir: &std::path::Path, input: &str) -> (i32, String, String) {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nest"))
+        .current_dir(dir)
+        .env("BROOD_NO_STDIMAGE", "1")
+        .arg("repl")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nest repl");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn repl_evaluates_piped_forms_outside_and_inside_a_project() {
+    let dir = scratch("repl");
+    let (code, out, err) = nest_repl(&dir, "(+ 1 2)\n");
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains('3'), "the value:\n{out}");
+    assert!(err.contains("plain REPL"), "{err}");
+    let proj = scaffolded("repl-proj");
+    // Inside the project the prompt starts in `main`, so its `:use`d `demo/hello` is
+    // reachable bare through the module's own imports.
+    let (code, out, err) = nest_repl(&proj, "(+ 40 2)\n(hello)\n");
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("42"), "{out}");
+    assert!(err.contains("project sources loaded"), "{err}");
+    assert!(
+        !out.contains("unbound"),
+        "a bare project name resolves at the prompt:\n{out}"
+    );
+}

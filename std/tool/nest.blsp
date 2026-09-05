@@ -179,7 +179,10 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
          :positional ["action" ["list" "status" "check" "commit" "push"]]
          :names ["action" "message"]
          :arity [1 2]
-         :run (fn (o) (run-ws o))}})
+         :run (fn (o) (run-ws o))}
+   "repl" {:about "Start a REPL. Inside a project every source file is pre-loaded and the prompt starts in the project's main namespace, so its functions are callable bare; outside one, the plain language REPL (`brood` would do the same). Ctrl-D exits."
+           :flags {}
+           :run (fn (o) (run-repl o))}})
 
 ;; Short flags are aliases; canonicalise on parse so handlers read one spelling.
 (def- *short-aliases* {"-c" "--check" "-o" "--out" "-t" "--template"})
@@ -895,6 +898,27 @@ had configured."
   ;; A workspace command, not a project one — it drives the SIBLING repos.
   (workspace/run (first (get o :positionals)) (second (get o :positionals)))
   0)
+
+;; `nest repl` ------------------------------------------------------------------------
+
+(defn- run-repl (o)
+  ;; The REPL is Brood (`std/tool/repl.blsp`, ADR-048), the same loop `brood` bootstraps
+  ;; into. Inside a project, load its sources and start the prompt in the `:main` module so
+  ;; a bare project fn resolves without qualification (the interactive half of package
+  ;; rooting, ADR-070); other project modules still need their `mod/fn`. The raw-mode line
+  ;; editor's normal teardown is its own `term-raw-leave`; the Rust router also holds a
+  ;; terminal guard for a panic unwind.
+  (let (root (project/find-root (file/cwd)))
+    (if root
+      (do
+        (project/load-config)
+        (project/setup root)
+        (project/load-sources root)
+        (repl/start-in! (first *project-main*))
+        (eputs "nest repl — project sources loaded, in the project's main namespace; Ctrl-D to exit"))
+      (eputs "nest repl — no project.blsp here; plain REPL (`brood` would do the same)"))
+    (repl/run)
+    0))
 
 ;; ── entry points ─────────────────────────────────────────────────────────────────────
 
