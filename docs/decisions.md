@@ -20860,3 +20860,29 @@ last-wins); the `nest` crate 156/156 with `stale.rs`, `coverage_lines.rs`,
 One trap for the record: `(and (map? kind) (get kind :int))` answers **false**, not nil, for a
 non-map spec, and a `nil?` guard let that `false` through to `nth` — every `--strict` and
 every `--formatter` failed until the map question was asked first.
+
+**Amendment 2026-09-05 (night) — `run` is the eighth; `main.rs` is under 1,700.** The largest
+arm left (287 lines of Rust, most of it a Brood program assembled from `format!` fragments) is
+now `run-program`/`run-wrapped` in `nest.blsp`, which read as the program they always were:
+the document-argument rule (a non-`.blsp` FILE inside a project goes to `:main`, and need not
+exist), single-watched-file promotion, the `--main`-with-FILE warning, the single-file advisory
+pre-flight, `--name`, `--watch` with the in-project re-check, and the `--watch`/`--for` wrapper
+— `%spawn-link` + `proc/trap-exit`, a `:normal` exit or the cap is 0, a death is a silent 1.
+`duration-ms` (`2s`/`500ms`/`1.5s`/bare) replaced `parse_duration_ms` and its two Rust unit
+tests with in-image cases. One table feature was needed: **`:trailing true`** — after the first
+positional every word is the program's, hyphens included, which is clap's `trailing_var_arg` +
+`allow_hyphen_values` — so `nest run notes.txt --verbose -x 7` hands all four to `:main`.
+
+**A bug the move found:** the Rust arm's `--name` evaluated `(node-start (keyword …))`, and
+`node-start` is not a bound name — only `node/start` is — so `nest run --name NAME` had been
+failing with an unbound symbol for as long as the rename stood, unnoticed because nothing ran
+it. A string is not checked; Brood source is: the checker gate over `std/` would have caught it
+the day it broke. It is `node/start` now. `main.rs` 2,113 → 1,654; `nest.blsp` 741 lines.
+Gates: `blsp_dispatch.rs` +2 (trailing words with a leading document argument; the
+constraints, a bad `--for`, `--help`), `tests/nest_test.blsp` +5 (the duration grammar ported
+from the Rust tests, trailing parse, `--check-boot` alone); `run_main.rs`,
+`cli_failure_reporting.rs`, `boot_check_and_renames.rs`, `missing_file.rs` and `complete.rs`
+exercise the Brood arm. Sabotage: without `:trailing` one parser case reds. What remains in
+`main.rs`: `new`, `completions`/`complete`, the package manager (`fetch`/`update`/`tree`/`add`/
+`remove`/`publish`/`search`/`key`/`ws`), `stdimage`, `rename`, `repl`, `mcp`, `observe`,
+`attach`, `release`, `gen`, `update-tooling`.
