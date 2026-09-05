@@ -11286,3 +11286,16 @@ spawned a body that ends on its own and then called `monitor` — KI-59's race, 
 the parked bodies keep the two-step form because they never finish. 0/30 standalone before and
 after, so the argument is from construction, not from a loop.
 
+## 2026-09-05 (late) — `new`/`update-tooling`/`rename` are Brood; `stdimage` is not, and KI-112 says why
+
+Three more `nest` arms moved (fixed-arity positionals joined the table: `:arity`/`:names`);
+`main.rs` 1,654 → 1,536. The fourth, `stdimage`, came straight back: routed through the
+dispatcher — a std module whose load pulls the toolchain in — `stdimage/build` wrote an image
+with none of `project`'s 31 root globals, because its probe diffs global names around a
+`require-one` that is a no-op for a loaded module, and skipped the unclaimed roots as "the
+prelude's". Fixed structurally (Rust arm, clean process) and guarded: `build` refuses when a
+root is neither probe-owned nor prelude-bound (`%prelude-global?`, new, over the freeze's
+binding names — def sites were tried and thirty prelude helpers have none). Guard tests drive
+the real binaries with a private cache. Traps: parsed positionals are a list (no `[a b]`
+destructuring); a refused image build makes a `nest` suite crawl, not fail.
+

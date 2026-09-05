@@ -403,6 +403,19 @@ pub(super) fn bound_p(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
     }
 }
 
+/// `(%prelude-global? 'name)` — is `name` one of the globals the PRELUDE bound: its own
+/// definitions, every native builtin (registered during the prelude build and frozen with
+/// it), and the registries it seeds. The set is fixed at the freeze and identical in every
+/// process of a binary. `stdimage/build` uses it to audit that every root global a std
+/// module defines reached an owning section (KI-112): a root that is neither the prelude's
+/// nor owned is one the probe missed.
+pub(super) fn prelude_global_p(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Sym(s) => Ok(Value::boolean(heap.is_prelude_global(s))),
+        other => Err(LispError::wrong_type(heap, "%prelude-global?", "symbol", other)),
+    }
+}
+
 /// `(%global-generation 'name)` — the rebinding generation of a global: a number that
 /// grows with every `def` of that name in this runtime, 0 for a name never `def`'d here.
 /// For code that rebinds a global TEMPORARILY and must restore it without clobbering a

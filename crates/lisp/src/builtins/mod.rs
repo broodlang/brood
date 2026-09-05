@@ -3281,6 +3281,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%prelude-global?",
+        Arity::exact(1),
+        Sig::new(vec![sym], bool_ty),
+        &["name"],
+        "Is `name` a global the PRELUDE bound — its own definitions, every native builtin, the registries it seeds? Fixed at the freeze, identical in every process of a binary. `stdimage/build` audits with it that every root global a std module defines reached an owning section (KI-112).",
+        prelude_global_p,
+    );
+    def(
+        heap,
         "%global-generation",
         Arity::exact(1),
         Sig::new(vec![sym], int),

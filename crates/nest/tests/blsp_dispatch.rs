@@ -388,3 +388,101 @@ fn run_constraints_and_a_bad_duration_are_usage_errors() {
         "{out}"
     );
 }
+
+// ── `new`, `update-tooling`, `stdimage`, `rename` (moved 2026-09-05) ───────────────────
+//
+// `scaffold_quality.rs` exercises `new` (every template), `update_tooling.rs` the tooling
+// refresh in and outside a project, `complete.rs` the template completion. Pinned here: the
+// fixed-arity positionals in clap's words, `stdimage`'s report, and `rename` end to end.
+
+#[test]
+fn fixed_arity_positionals_are_required_and_bounded() {
+    let dir = scratch("arity");
+    let (code, _, err) = nest_in(&dir, &["new"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("required arguments were not provided") && err.contains("<NAME>"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["rename", "only-old"]);
+    assert_eq!(code, 2, "{err}");
+    // The missing list names only NEW; OLD appears in the usage line beneath, so check the
+    // list's own lines.
+    assert!(
+        err.contains("not provided:\n  <NEW>\n") && !err.contains("  <OLD>\n"),
+        "only the missing one:\n{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["rename", "a", "b", "c"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("unexpected argument 'c'"), "{err}");
+    let (code, out, _) = nest_in(&dir, &["rename", "--help"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Usage: nest rename [OPTIONS] <OLD> <NEW>"), "{out}");
+    let (code, _, err) = nest_in(&dir, &["rename", "--swap", "--refs-only", "a", "b"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("cannot be used with"), "{err}");
+}
+
+#[test]
+fn stdimage_reports_what_it_built() {
+    let dir = scratch("stdimage");
+    let (code, out, err) = nest_in(&dir, &["stdimage"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains("bindings ->") || out.contains("no cache directory"),
+        "{out}"
+    );
+}
+
+#[test]
+fn rename_rewrites_references_and_definition_in_a_project() {
+    let proj = scaffolded("rename");
+    let (code, out, err) = nest_in(&proj, &["rename", "hello", "greet"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let demo = std::fs::read_to_string(proj.join("src").join("demo.blsp")).expect("demo");
+    let main = std::fs::read_to_string(proj.join("src").join("main.blsp")).expect("main");
+    assert!(demo.contains("(defn greet"), "the definition:\n{demo}");
+    assert!(!main.contains("(hello") && main.contains("(greet"), "the reference:\n{main}");
+    let (code, out, err) = nest_in(&proj, &["test"]);
+    assert_eq!(code, 0, "the renamed project still passes:\n{out}\n{err}");
+}
+
+/// KI-112. `nest stdimage` is dispatched from `std/tool/nest.blsp`, whose load pulls the
+/// toolchain in before the build runs. The build attributed a module's ROOT globals by
+/// loading it and diffing, and `require-one` is a no-op for a module already loaded — so
+/// `project`'s 31 root globals went unclaimed and the image restored `project` without
+/// `*ns-package*`. This drives the real entry point with a private cache directory: build
+/// the image through the dispatcher, then run the command that first showed the hole.
+#[test]
+fn an_image_built_through_the_dispatcher_restores_every_root_global() {
+    let dir = scratch("stdimage-cache");
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&cache).expect("cache dir");
+    let with_cache = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_nest"))
+            .current_dir(cwd)
+            .env_remove("BROOD_NO_STDIMAGE")
+            .env("XDG_CACHE_HOME", &cache)
+            .args(args)
+            .output()
+            .expect("run nest");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (code, out, err) = with_cache(&dir, &["stdimage"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("bindings ->"), "{out}");
+    let (code, _, err) = nest_in(&dir, &["new", "demo"]);
+    assert_eq!(code, 0, "scaffold:\n{err}");
+    // `check` loads `project` FROM THE IMAGE and reaches `record-ns-packages`, which reads
+    // the root dynamic `*ns-package*` — unbound, before the fix.
+    let (code, out, err) = with_cache(&dir.join("demo"), &["check"]);
+    assert_eq!(code, 0, "check against the dispatcher-built image:\n{out}\n{err}");
+    assert!(
+        !err.contains("unbound symbol"),
+        "a root global was dropped from the image:\n{err}"
+    );
+}

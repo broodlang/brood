@@ -30,7 +30,8 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 ;; `complete/print-candidates` kind. A positional is `[name values]`: its allowed values as a
 ;; list, the name of a completion kind for free text, or nil. `:many true` admits any number
 ;; of positionals; `:trailing true` hands every word after the first positional through
-;; unparsed, hyphens included. The clap constraints a command had are data too: `:requires {flag
+;; unparsed, hyphens included; `:arity n` demands exactly n (named by `:names` in usage and
+;; in the missing-argument error). The clap constraints a command had are data too: `:requires {flag
 ;; needed-flag}`, `:conflicts [[a b] …]` and `:no-positional-with [flag …]`. Completion
 ;; (`nest complete`) reads the same table, so a flag added here is completable the same day —
 ;; the property the Rust side got from clap's own model, kept by making the table the model.
@@ -107,10 +108,36 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                        ["--check-boot" "--for"]
                        ["--check-boot" "--no-check"]]
           :no-positional-with ["--check-boot"]
-          :run (fn (o) (run-run o))}})
+          :run (fn (o) (run-run o))}
+   "new" {:about "Scaffold a new project: NAME becomes the directory and the manifest's `:name` (`.` scaffolds into the current directory). `--template` picks the starter code; an unknown name lists the set."
+          :flags {"--template" {:value "NAME" :complete "template"}
+                  "-t" {:value "NAME" :complete "template"}}
+          :positional ["name" nil]
+          :arity 1
+          :run (fn (o) (run-new o))}
+   "update-tooling" {:about "Refresh the AI-assistant tooling `nest new` drops into a project — `docs/brood-for-claude.md` and the `.claude/skills/writing-brood` skill — from THIS binary. Run it after upgrading Brood; code, manifest and `CLAUDE.md` are left untouched."
+                     :flags {}
+                     :run (fn (o) (run-update-tooling o))}
+   "rename" {:about "Context-aware rename of an identifier across the project's `.blsp` sources: OLD → NEW, leaving docstrings, comments and quoted data alone unless asked."
+             :flags {"--swap" :bool
+                     "--refs-only" :bool
+                     "--defs-only" :bool
+                     "--in-quote" :bool
+                     "--text" :bool}
+             :positional ["old" nil]
+             :names ["old" "new"]
+             :arity 2
+             :conflicts [["--refs-only" "--defs-only"]
+                          ["--refs-only" "--swap"]
+                          ["--defs-only" "--swap"]
+                          ["--in-quote" "--swap"]
+                          ["--text" "--refs-only"]
+                          ["--text" "--defs-only"]
+                          ["--text" "--in-quote"]]
+             :run (fn (o) (run-rename o))}})
 
 ;; Short flags are aliases; canonicalise on parse so handlers read one spelling.
-(def- *short-aliases* {"-c" "--check" "-o" "--out"})
+(def- *short-aliases* {"-c" "--check" "-o" "--out" "-t" "--template"})
 
 (defn subcommands ()
   "The subcommands this module implements, sorted."
@@ -134,6 +161,10 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 (defn positional-values (cmd)
   "The allowed values of `cmd`'s positional, or `()` when it is free text or absent."
   (positional-values-of (get *commands* cmd)))
+
+(defn- positional-names (spec)
+  "The positional names, in order: `:names` for an `:arity` command, else the one positional."
+  (or (get spec :names) (if (get spec :positional) (list (nth (get spec :positional) 0)) (list))))
 
 ;; ── argv → options ───────────────────────────────────────────────────────────────────
 
@@ -206,8 +237,17 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
       (get parsed :error) parsed
       (and (nil? pos) (not (empty? ps)))
         (assoc parsed :error (str "unexpected argument '" (first ps) "'"))
-      (and (> (count ps) 1) (not (get spec :many)))
+      (and (> (count ps) 1) (not (get spec :many)) (nil? (get spec :arity)))
         (assoc parsed :error (str "unexpected argument '" (nth ps 1) "'"))
+      (and (get spec :arity) (> (count ps) (get spec :arity)))
+        (assoc parsed :error (str "unexpected argument '" (nth ps (get spec :arity)) "'"))
+      (and (get spec :arity) (< (count ps) (get spec :arity)))
+        (assoc parsed
+          :error
+            (str "the following required arguments were not provided:\n  "
+              (string/join (map (drop (positional-names spec) (count ps))
+                             (fn (n) (str "<" (string/upper n) ">")))
+                "\n  ")))
       (and (not (empty? allowed)) (not (empty? ps)) (not (contains? (into #{} allowed) (first ps))))
         (assoc parsed
           :error
@@ -304,7 +344,11 @@ arrives as an int; a `:repeat` flag's as a list."
     (str "Usage: nest "
       cmd
       (if (empty? (get spec :flags)) "" " [OPTIONS]")
-      (if pos (str " [" (string/upper (nth pos 0)) "]" (if (get spec :many) "..." "")) ""))))
+      (cond
+        (get spec :arity)
+          (apply str (map (positional-names spec) (fn (n) (str " <" (string/upper n) ">"))))
+        pos (str " [" (string/upper (nth pos 0)) "]" (if (get spec :many) "..." ""))
+        else ""))))
 
 (defn- usage (cmd)
   (let (spec (get *commands* cmd) pos (get spec :positional) allowed (positional-values-of spec))
@@ -687,6 +731,41 @@ reason was already printed, so the caller exits silently."
           main
           (get flags "--name")
           (get flags "--no-check")))))
+
+;; `nest new`, `update-tooling`, `rename` ---------------------------------------------------
+
+(defn- run-new (o)
+  ;; `load-config` first: the user config decides e.g. whether the scaffold runs `git init`.
+  (let (nm (first (get o :positionals)) template (get (get o :flags) "--template"))
+    (project/load-config)
+    (require-one 'scaffold)
+    (if template (scaffold/new-project nm template) (scaffold/new-project nm))
+    0))
+
+(defn- run-update-tooling (o)
+  (if (require-project "update-tooling" nil)
+    (do (project/load-config) (scaffold/update-tooling) 0)
+    2))
+
+(defn- run-rename (o)
+  ;; The positionals are a LIST, so `[old new]` would not match — take them by position.
+  (let (flags (get o :flags)
+        old (first (get o :positionals))
+        new (second (get o :positionals)))
+    (cond
+      ;; A reversed-args rename: every 2-arg call `(OLD a b)` → `(NEW b a)`.
+      (get flags "--swap") (codemod/swap2 old new)
+      ;; The context-blind whole-token replace, for a rename that must touch prose.
+      (get flags "--text") (codemod/rename (list (list old new)))
+      else
+        (codemod/cst-rename old
+          new
+          (cond
+            (get flags "--refs-only") :refs-only
+            (get flags "--defs-only") :defs-only
+            (get flags "--in-quote") :in-quote
+            else :all)))
+    0))
 
 ;; ── entry points ─────────────────────────────────────────────────────────────────────
 
