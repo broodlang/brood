@@ -11347,6 +11347,43 @@ shape is documented as load-bearing at the macro — a tidier expansion is a che
 The lesson rhymes with the ADR's: a rule that lives in one file's pattern-match is a rule the
 next reader of *another* file cannot see.
 
+## 2026-09-05 (late) — `new`/`update-tooling`/`rename` are Brood; `stdimage` is not, and KI-112 says why
+
+Three more `nest` arms moved (fixed-arity positionals joined the table: `:arity`/`:names`);
+`main.rs` 1,654 → 1,536. The fourth, `stdimage`, came straight back: routed through the
+dispatcher — a std module whose load pulls the toolchain in — `stdimage/build` wrote an image
+with none of `project`'s 31 root globals, because its probe diffs global names around a
+`require-one` that is a no-op for a loaded module, and skipped the unclaimed roots as "the
+prelude's". Fixed structurally (Rust arm, clean process) and guarded: `build` refuses when a
+root is neither probe-owned nor prelude-bound (`%prelude-global?`, new, over the freeze's
+binding names — def sites were tried and thirty prelude helpers have none). Guard tests drive
+the real binaries with a private cache. Traps: parsed positionals are a list (no `[a b]`
+destructuring); a refused image build makes a `nest` suite crawl, not fail.
+
+## 2026-09-05 (night, II) — the package manager is Brood; twenty `nest` subcommands, `main.rs` 1,233
+
+Nine arms in one commit (they shared one bootstrap), one table feature (arity ranges), and
+the Rust completion plumbing's last dynamic value kind went with them — `value_kind` is gone.
+Left in Rust: `completions`/`complete`, `stdimage` (KI-112), `repl`, `mcp`, `observe`,
+`attach`, `release`, `gen`. Gates: nest crate 163/163, parser file 24/24, checker gates
+zero, clippy clean (it caught the empty `match` the move left behind).
+
+## 2026-09-05 (night, III) — `nest repl` is Brood; `repl/start-in!` replaces a def-from-Rust
+
+The start namespace was a `(def repl/*repl-start-ns* …)` evaluated from a Rust string — a
+rebinding the module's own comment had to apologise for because no static reading could see
+it; it is a public setter now. The router holds `RawTermGuard` around every routed
+evaluation. Piped stdin made the REPL testable end to end. `main.rs` 1,233 → 1,192.
+
+## 2026-09-05 (night, IV) — `observe`/`attach` are Brood; the router picks the terminal guard
+
+`require-terminal` (`os/stdout-tty?`) and the cookie precedence moved; the router chooses
+`FullTermGuard` for the two full-screen frontends and `RawTermGuard` otherwise. Trap: a
+`then_some(Guard)` constructs and immediately drops the unwanted guard, and `FullTermGuard`'s
+drop writes the teardown escapes — every command's output grew a `[?25h…[?1049l` tail until
+it became `then(|| …)`. `main.rs` 1,192 → 1,054.
+
+
 ## 2026-09-06 — the two loose ends: a deprecation the editor could not show, and a scaffold that warned on its first command
 
 Both were "noticed, not fixed" notes; both are one-line symptoms with a gate-shaped cause.

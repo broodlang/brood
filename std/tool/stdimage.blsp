@@ -255,6 +255,34 @@ since the prelude is always present."
                                             [m (count probe)]
                                             winner)))))
                            (if best (%map-assoc acc g (->string (first best))) acc))))
+            ;; KI-112. A root global no probe claimed is dropped from the image, and the
+            ;; probe claims nothing for a module this process had ALREADY loaded when it ran
+            ;; (`require-one` is a no-op then, and the diff sees no introductions). That is
+            ;; how `nest stdimage`, dispatched from `std/tool/nest.blsp` — whose load pulls the
+            ;; toolchain in — wrote an image with none of `project`'s 31 root globals, and
+            ;; every later `nest check` died on an unbound `*ns-package*`. A root the PRELUDE
+            ;; binds (its own definitions, the kernel's natives, the registries it seeds) is
+            ;; always present and needs no section; any other unowned root is a std module's
+            ;; that the probe missed. Refuse — a missing image costs one source boot, a wrong
+            ;; one costs a day.
+            ;; Only the FULL build can judge: with an explicit `modules` subset, a root may
+            ;; belong to a module outside it and has no section by design; and only names
+            ;; with no prefix at all — `roots` also holds the prefixed globals of modules
+            ;; outside `names`, which were always the prelude's business here.
+            orphans (if modules
+                      (list)
+                      (filter roots
+                        (fn (g)
+                          (and (not (includes? (->string g) "/"))
+                            (nil? (%map-get owner-of g nil))
+                            (not (%prelude-global? g))))))
+            _ (when (not (empty? orphans))
+                (error "stdimage/build: "
+                  (count orphans)
+                  " root global(s) belong to no module — a std module was already loaded "
+                  "when the probe ran, so its root globals cannot be attributed: "
+                  (string/join (sort (map orphans ->string)) " ")
+                  ". Build from a fresh process (`nest stdimage`); nothing was written."))
             sections (append [["%std-edges" ['*std-require-edges*]]
                                ["%std-impls" ['*std-impls*]]
                                ["%std-regs" ['*std-regs*]]]

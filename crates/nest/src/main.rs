@@ -46,7 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
-    after_help = "Also (implemented in Brood, std/tool/nest.blsp): run, test, check, doc, docs, doctest, grammar, format — `nest <command> --help`.",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, fetch, update, tree, add, remove, publish, search, key, ws, repl, observe, attach — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -107,221 +107,26 @@ enum Cmd {
         words: Vec<String>,
     },
 
-    /// Scaffold a new project (project.blsp + src/ + tests/ + starter files).
-    New {
-        /// The project's name. Becomes the directory + `:name` in project.blsp.
-        name: String,
-
-        /// Starter template: `default` (a main+hello pair), `tui-loop` (a
-        /// tail-recursive animation loop, pairs with `nest run --for`), `gen`
-        /// (a stateful gen_server-style process), `editor`/`gui` (ui-run apps),
-        /// `hatch` (a full Postgres-backed Hatch web app), or `web-api` (a
-        /// minimal Hatch JSON API). An unknown name lists the full set.
-        #[arg(long = "template", short = 't', value_name = "NAME")]
-        template: Option<String>,
-    },
-
-    /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
+    /// Build this binary's standard-library startup image (ADR-218), once.
     ///
-    /// For `:path` deps this verifies each sibling project exists and records its
-    /// content hash; `:git` deps land in a later slice. Errors if cwd is not
-    /// inside a Brood project.
-    Fetch,
-
-    /// Re-resolve dependency refs and re-lock, advancing moving refs (ADR-037).
+    /// Keyed on `system/stdlib-id` — a content hash of every baked-in `.blsp` — so `brood`,
+    /// `nest` and `brood-lsp` from one tree all read the SAME file. Every ordinary `nest`
+    /// command writes the image when one is missing (`ensure_stdimage`); this is the explicit
+    /// form, for a machine where the first run should not be the one that pays.
     ///
-    /// With no NAMES: re-resolves every dependency (ignoring the locked commits,
-    /// so a branch or floating tag moves forward). With NAMES: only those deps
-    /// re-resolve; the rest keep their locked pins.
-    Update {
-        /// The require-names of the dependencies to update. Omit to update all.
-        #[arg(value_name = "NAME")]
-        names: Vec<String>,
-    },
-
-    /// Refresh the AI-assistant tooling from this `brood` build.
-    ///
-    /// Rewrites the two files `nest new` drops into a project — the language
-    /// reference `docs/brood-for-claude.md` and the `.claude/skills/writing-brood`
-    /// skill — from the installed `brood` binary (they are baked in, so they drift
-    /// as the language evolves). Run it after upgrading Brood. Your code, manifest,
-    /// and `CLAUDE.md` are left untouched.
-    UpdateTooling,
-
-    /// Print the project's resolved dependency tree (root → direct → transitive).
-    Tree,
-
-    /// Build this binary's standard-library startup image (ADR-218).
-    ///
-    /// A std module is embedded SOURCE, so `require` re-evaluates it every run —
-    /// `format` alone costs ~77 ms, almost all of it materialising closures. This
-    /// snapshots every baked-in module's bindings into
-    /// `~/.cache/brood/std-image-<build-id>.bin`, and `require` restores from it instead:
-    /// a program pulling http+json+format+datetime goes ~124 ms -> ~31 ms, and even a
-    /// trivial script gains ~8 ms because boot's own `string`/`seq` come from it.
-    ///
-    /// Costs ~2 s and ~2 MB, once per binary. The image is keyed on `system/build-id` (which
-    /// includes the executable's mtime), so a rebuilt or reinstalled binary simply misses
-    /// and falls back to source until this is run again — it can never go stale.
+    /// Deliberately NOT one of the Brood-routed subcommands (ADR-322, KI-112): the build
+    /// attributes a module's ROOT globals by loading it and diffing, so it is sound only in
+    /// a process where nothing but the prelude is loaded — and `std/tool/nest.blsp`, the
+    /// dispatcher, is a std module whose own load pulls the toolchain in. Routed, it wrote
+    /// an image with none of `project`'s root globals. This arm builds before any std module
+    /// loads, and the child process `ensure_stdimage` spawns is exactly this arm.
     Stdimage,
-
-    /// Add a dependency to project.blsp and re-lock (ADR-037).
-    ///
-    /// Context-aware rename across the project's .blsp sources.
-    ///
-    /// `nest rename OLD NEW` parses each file into its lossless CST and rewrites only
-    /// *symbol tokens* — so a docstring or `;` comment mentioning the name, and symbols
-    /// inside `(quote …)`/`'…` data, are left byte-for-byte alone. An unmatched file
-    /// comes back byte-identical. Skips `.git` and vendored `_deps`; for an
-    /// ecosystem-wide rename, run it per repo.
-    Rename {
-        /// The identifier to rename.
-        old: String,
-        /// Its replacement.
-        new: String,
-        /// Treat this as a reversed-args rename: rewrite every 2-arg call
-        /// `(OLD a b)` to `(NEW b a)`, reading the args as balanced s-expressions
-        /// (e.g. `member?` → `includes?`). Without it, a plain token rename.
-        #[arg(long)]
-        swap: bool,
-        /// Rename only *references*, leaving the `defn`/`def` head alone — for
-        /// renaming the callers of a function whose own definition stays put.
-        #[arg(long, conflicts_with_all = ["defs_only", "swap"])]
-        refs_only: bool,
-        /// Rename only the definition head, leaving every reference alone.
-        #[arg(long, conflicts_with_all = ["refs_only", "swap"])]
-        defs_only: bool,
-        /// Also rewrite symbols inside `(quote …)` / `'…` data (off by default —
-        /// a quoted symbol is inert data, e.g. a name in a registry table).
-        #[arg(long, conflicts_with = "swap")]
-        in_quote: bool,
-        /// Fall back to the old CONTEXT-BLIND whole-token text replace, which also
-        /// rewrites inside docstrings, comments and quoted data. For a rename that
-        /// genuinely must touch prose; prefer the default everywhere else.
-        #[arg(long, conflicts_with_all = ["refs_only", "defs_only", "in_quote"])]
-        text: bool,
-    },
-
-    /// `nest add NAME :path PATH` (`:git` lands in a later slice). NAME is the
-    /// local require-name. The manifest is rewritten preserving its comments.
-    Add {
-        /// The local require-name for the dependency.
-        name: String,
-
-        /// The source spec: `:path PATH` (or, later, `:git URL :ref REF`).
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        spec: Vec<String>,
-    },
-
-    /// Remove a dependency from project.blsp and re-lock.
-    Remove {
-        /// The require-name of the dependency to remove.
-        name: String,
-    },
-
-    /// Publish this project's release to the hosted package registry.
-    ///
-    /// Builds a source tarball and POSTs it (with its sha256) to the registry's
-    /// HTTP API, authenticated with a Bearer token ($HIVE_TOKEN or the
-    /// :registry-token config). Releases are immutable — a version already
-    /// published is refused by the server.
-    ///
-    /// With `--source-url`, publishes an EXTERNAL release instead: the client
-    /// fetches that URL to hash its bytes into the checksum, then POSTs metadata
-    /// only — the registry records the URL and every downloader verifies the bytes
-    /// it fetches from there (the registry never holds them).
-    Publish {
-        /// The registry base URL. Omit to use the configured `:registry`.
-        index: Option<String>,
-
-        /// Publish an external release pointing at this tarball URL (a GitHub/S3/CDN
-        /// asset) instead of uploading the bytes. The URL is fetched once to compute
-        /// its checksum; downloaders re-verify it.
-        #[arg(long)]
-        source_url: Option<String>,
-
-        /// Bump the project's own :version by this level ("patch"/"minor"/"major"),
-        /// commit the bump, then publish. Only the project's version moves, never a
-        /// dependency pin.
-        #[arg(long)]
-        bump: Option<String>,
-    },
-
-    /// Drive every sibling Brood repo in the workspace at once.
-    ///
-    /// `nest ws <action>`: list | status | check | commit "MESSAGE" | push. Discovers the
-    /// sibling repos of the current directory (a `.git` + `project.blsp`, plus `brood`).
-    Ws {
-        /// list | status | check | commit | push.
-        action: String,
-        /// The commit message (for `nest ws commit`).
-        message: Option<String>,
-    },
-
-    /// Search the package registry for a term (name or description).
-    Search {
-        /// The term to match against each package's name and latest description.
-        query: String,
-
-        /// The registry base URL to search. Omit to use the configured `:registry`.
-        index: Option<String>,
-
-        /// Only packages that plug into this application — matched against each
-        /// package's published `:enhances` names (e.g. `--enhances bedit`). The name
-        /// is opaque here: it is whatever package authors declared.
-        #[arg(long)]
-        enhances: Option<String>,
-    },
-
-    /// Start a REPL. Inside a project, every source file is pre-loaded so the
-    /// project's modules are immediately callable.
-    Repl,
 
     /// Serve the project over Model Context Protocol on stdio so an agent
     /// (Claude Code etc.) can eval / lookup / format / expand / run tests /
     /// read docs against this project's live image (ADR-036, docs/mcp.md).
     /// Errors if cwd is not inside a Brood project.
     Mcp,
-
-    /// Open a live process observer — a full-screen TUI listing processes and
-    /// their status / mailbox / memory (an Erlang-observer-style view, ADR-046).
-    ///
-    /// With no `--connect`: a standalone demo over a fresh runtime's own (seeded)
-    /// processes. With `--connect name@host:port`: **remote attach** — observe a
-    /// *running* program over the node link (it must have called `node-start` +
-    /// `observe-serve`); the cookie comes from `--cookie` or `$BROOD_COOKIE`
-    /// (ADR-053). Press `q` / Esc / Ctrl-C to quit.
-    Observe {
-        /// Attach to a running peer node `name@host:port` instead of the local
-        /// demo (the target must have called `observe-serve`).
-        #[arg(long = "connect", value_name = "NODE")]
-        connect: Option<String>,
-
-        /// Shared cookie authenticating the link (must match the target's). Falls
-        /// back to `$BROOD_COOKIE`; required when `--connect` is given.
-        #[arg(long = "cookie", value_name = "COOKIE")]
-        cookie: Option<String>,
-    },
-
-    /// Attach this terminal to a `ui-run` app served by a running daemon — the
-    /// `emacsclient` to its `--daemon` (ADR-090). The daemon's app renders here and
-    /// this terminal's keys drive it; the app's model lives on the daemon, so several
-    /// terminals can attach at once.
-    ///
-    /// SPEC is the served node: a bare `name` over the local Unix socket (e.g. a
-    /// `nest run --name ed app.blsp` that called `(serve …)`), or `name@host:port`
-    /// over TCP. The cookie comes from `--cookie` or `$BROOD_COOKIE`, else the shared
-    /// `~/.config/brood/cookie`. Press the app's own quit key to detach.
-    Attach {
-        /// The served node to attach to: `name` (local Unix socket) or `name@host:port`.
-        #[arg(value_name = "SPEC")]
-        spec: String,
-
-        /// Shared cookie authenticating the link (must match the daemon's). Falls
-        /// back to `$BROOD_COOKIE`, then the shared cookie file.
-        #[arg(long = "cookie", value_name = "COOKIE")]
-        cookie: Option<String>,
-    },
 
     /// Bundle the project into a single self-contained executable (ADR-038).
     ///
@@ -361,29 +166,6 @@ enum Cmd {
         /// silent. Use this only when you cannot run the artifact at all.
         #[arg(long = "no-smoke")]
         no_smoke: bool,
-    },
-
-    /// Manage the package signing key (ADR-212).
-    ///
-    /// Signing is optional and advisory: a signed release lets installers verify its
-    /// authorship (TOFU — the key is pinned on first install), but nothing is gated.
-    Key {
-        #[command(subcommand)]
-        action: KeyCmd,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum KeyCmd {
-    /// Generate an ed25519 signing key and print its public key.
-    ///
-    /// The private key is written 0600 under the config dir
-    /// (`~/.config/brood/signing-key.blsp`); share the printed public key so others
-    /// can pin it. `nest publish` signs a release's checksum with it automatically.
-    Gen {
-        /// Replace an existing key (this invalidates signatures made with the old one).
-        #[arg(long)]
-        force: bool,
     },
 }
 
@@ -480,7 +262,29 @@ fn main() {
 /// Subcommands implemented in `std/tool/nest.blsp` (ADR-322). Routed there from `main`
 /// before clap runs; listed by `nest complete` beside clap's own; absent from `Cmd`.
 const BLSP_SUBCOMMANDS: &[&str] = &[
-    "doc", "docs", "doctest", "grammar", "format", "check", "test", "run",
+    "doc",
+    "docs",
+    "doctest",
+    "grammar",
+    "format",
+    "check",
+    "test",
+    "run",
+    "new",
+    "update-tooling",
+    "rename",
+    "fetch",
+    "update",
+    "tree",
+    "add",
+    "remove",
+    "publish",
+    "search",
+    "key",
+    "ws",
+    "repl",
+    "observe",
+    "attach",
 ];
 
 /// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
@@ -577,7 +381,22 @@ fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
         ensure_stdimage_now(&mut interp);
     }
     let code = format!("(nest/main {})", blsp_string_list(&argv));
-    if let brood::core::value::Value::Int(code) = run_for_value(&mut interp, &code) {
+    // Terminal guards for a panic unwind, scoped so they drop before the exit
+    // (`process::exit` skips Drop) and no-ops for a subcommand that never touches the
+    // terminal. `observe`/`attach` draw full-screen and need the full teardown
+    // (`FullTermGuard`: alternate screen + cursor); `repl`'s line editor only enters raw
+    // mode and must NOT emit those escapes onto a pipe (`RawTermGuard`). The Brood side's
+    // own `term-leave`/`term-raw-leave` is the normal teardown; restore is idempotent.
+    let full_screen = matches!(argv.first().map(String::as_str), Some("observe" | "attach"));
+    let result = {
+        // `then`, not `then_some`: the latter builds its value eagerly and DROPS the
+        // unwanted one on the spot — and a dropped `FullTermGuard` emits the teardown escapes
+        // onto every command's stdout (seen as `[?25h[?1049l` after `nest check`).
+        let _full = full_screen.then(|| FullTermGuard);
+        let _raw = (!full_screen).then(|| RawTermGuard);
+        run_for_value(&mut interp, &code)
+    };
+    if let brood::core::value::Value::Int(code) = result {
         std::process::exit(code as i32);
     }
 }
@@ -630,36 +449,8 @@ fn run_main(cli: Cli) {
     match cli.cmd {
         // Handled above, before the interpreter is built.
         Cmd::Completions { .. } | Cmd::Complete { .. } => unreachable!(),
-        Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
-        Cmd::Fetch => {
-            require_project("fetch", None);
-            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/fetch)"))
-        }
-        Cmd::Update { names } => {
-            require_project("update", None);
-            cmd_update(&mut interp, &names)
-        }
-        Cmd::UpdateTooling => {
-            require_project("update-tooling", None);
-            run(
-                &mut interp,
-                "(project/load-config) (scaffold/update-tooling)",
-            );
-        }
-        // Build the image, once. It is keyed on `system/stdlib-id` — a content hash of every
-        // baked-in `.blsp` — so `brood`, `nest` and `brood-lsp` from one tree all read the
-        // SAME file and one build serves all three.
-        //
-        // This used to build here and then shell out to the `brood` on PATH to "build its
-        // own", on the premise that the key was `system/build-id` (which embeds each
-        // executable's mtime, so they could not share). That premise is stale: the key moved
-        // to `stdlib-id` precisely so they would share, and the second build was writing the
-        // same bytes to the same path — while silently reporting "skipped" whenever `brood`
-        // was not on PATH, which read as a missing image and was nothing of the kind.
-        //
-        // Rarely needed now: every ordinary `nest` command already writes the image when one
-        // is missing (`ensure_stdimage`). Kept as the explicit form, for a machine where the
-        // first run should not be the one that pays.
+        // Nothing but the prelude is loaded when this runs — see the variant's doc for why
+        // that is the whole point, and why `stdimage/build` refuses otherwise (KI-112).
         Cmd::Stdimage => run(
             &mut interp,
             concat!(
@@ -671,109 +462,9 @@ fn run_main(cli: Cli) {
                 "      \" (shared by brood, nest and brood-lsp from this tree)\")))",
             ),
         ),
-        Cmd::Tree => {
-            require_project("tree", None);
-            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/tree)"))
-        }
-        Cmd::Rename {
-            old,
-            new,
-            swap,
-            refs_only,
-            defs_only,
-            in_quote,
-            text,
-        } => run(
-            &mut interp,
-            &if swap {
-                format!("(codemod/swap2 {old:?} {new:?})")
-            } else if text {
-                format!("(codemod/rename (list (list {old:?} {new:?})))")
-            } else {
-                let mode = if refs_only {
-                    ":refs-only"
-                } else if defs_only {
-                    ":defs-only"
-                } else if in_quote {
-                    ":in-quote"
-                } else {
-                    ":all"
-                };
-                format!("(codemod/cst-rename {old:?} {new:?} {mode})")
-            },
-        ),
-        Cmd::Add { name, spec } => {
-            require_project("add", None);
-            cmd_add(&mut interp, &name, &spec)
-        }
-        Cmd::Remove { name } => {
-            require_project("remove", None);
-            let call = brood::introspect::call_form("package/remove-dep", &[&name]);
-            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
-        }
-        Cmd::Publish {
-            index,
-            source_url,
-            bump,
-        } => {
-            require_project("publish", None);
-            cmd_publish(
-                &mut interp,
-                index.as_deref(),
-                source_url.as_deref(),
-                bump.as_deref(),
-            )
-        }
-        // A workspace command, not a project one — it drives the SIBLING repos, so no
-        // `require_project`. The action/message reach the Brood `workspace/run`.
-        Cmd::Ws { action, message } => {
-            let msg = match message {
-                Some(m) => format!("\"{}\"", brood::introspect::escape_brood_string(&m)),
-                None => "nil".to_string(),
-            };
-            run(
-                &mut interp,
-                &format!(
-                    "(workspace/run \"{}\" {msg})",
-                    brood::introspect::escape_brood_string(&action)
-                ),
-            )
-        }
-        // `nest key gen` is a user-level operation (a signing key in the config dir), not a
-        // project one — no `require_project`.
-        Cmd::Key {
-            action: KeyCmd::Gen { force },
-        } => {
-            let call = if force {
-                "(package/key-gen :force true)"
-            } else {
-                "(package/key-gen)"
-            };
-            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
-        }
-        Cmd::Search {
-            query,
-            index,
-            enhances,
-        } => {
-            // `package/search` resolves the registry through the project's config,
-            // so it needs a project today. Guard it for a clean message rather than
-            // the internal `package--in-project` trace.
-            require_project("search", None);
-            cmd_search(&mut interp, &query, index.as_deref(), enhances.as_deref())
-        }
-        Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => {
             require_project("mcp", None);
             cmd_mcp(&mut interp)
-        }
-        Cmd::Observe { connect, cookie } => {
-            require_terminal("observe");
-            cmd_observe(&mut interp, connect, cookie)
-        }
-        Cmd::Attach { spec, cookie } => {
-            require_terminal("attach");
-            cmd_attach(&mut interp, spec, cookie)
         }
         Cmd::Release {
             output,
@@ -818,145 +509,6 @@ fn blsp_string_list(items: &[String]) -> String {
     }
 }
 
-/// `nest new <name> [--template NAME]` — delegates to `(scaffold/new-project name
-/// template)` in std/tool/scaffold.blsp (config still comes from `project`).
-fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
-    let mut args: Vec<&str> = vec![name];
-    args.extend(template);
-    let call = brood::introspect::call_form("scaffold/new-project", &args);
-    run(
-        interp,
-        &format!("(project/load-config) (require-one 'scaffold) {call}"),
-    );
-}
-
-/// `nest update [NAME...]` — re-resolve refs and re-lock (ADR-037). No NAMES
-/// updates every dep; NAMES updates only those.
-fn cmd_update(interp: &mut Interp, names: &[String]) {
-    let args: Vec<&str> = names.iter().map(String::as_str).collect();
-    let call = format!(
-        "{PACKAGE_BOOTSTRAP} {}",
-        brood::introspect::call_form("package/update", &args)
-    );
-    run(interp, &call);
-}
-
-/// `nest add NAME :path PATH` — dispatch into the package module's `add` verb,
-/// passing NAME and each spec token as escaped string arguments.
-fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
-    let mut args: Vec<&str> = vec![name];
-    args.extend(spec.iter().map(String::as_str));
-    let call = format!(
-        "{PACKAGE_BOOTSTRAP} {}",
-        brood::introspect::call_form("package/add", &args)
-    );
-    run(interp, &call);
-}
-
-/// The bootstrap every package command shares. `load-config` is the load-bearing
-/// part: the user config supplies `:registry`, and a `:version` dependency cannot be
-/// resolved without it. `fetch`/`tree`/`add`/`remove`/`update` were skipping it, so
-/// they used the hardcoded default index no matter what the user had configured —
-/// `nest add pkg :version 1.0.0` failed against a perfectly good local registry.
-const PACKAGE_BOOTSTRAP: &str = "(project/load-config) (require-one 'package)";
-
-/// `nest publish [BASE-URL] [--source-url URL]` — publish this project's release to
-/// the hosted registry over HTTP. Loads the user config first so a `:registry` override
-/// applies.
-fn cmd_publish(
-    interp: &mut Interp,
-    index: Option<&str>,
-    source_url: Option<&str>,
-    bump: Option<&str>,
-) {
-    // `package/publish` takes a PLIST (`:index` / `:source-url`), so the call is built
-    // here rather than with `call_form` (which quotes every argument as a string and so
-    // cannot emit a keyword) — the same shape as `cmd_search`. `--bump` routes through
-    // `package/release`, which bumps the project's own version + commits it, then publishes.
-    let mut call = match bump {
-        Some(level) => format!(
-            "(package/release \"{}\"",
-            brood::introspect::escape_brood_string(level)
-        ),
-        None => String::from("(package/publish"),
-    };
-    for (key, value) in [(":index", index), (":source-url", source_url)] {
-        if let Some(v) = value {
-            call.push_str(&format!(
-                " {key} \"{}\"",
-                brood::introspect::escape_brood_string(v)
-            ));
-        }
-    }
-    call.push(')');
-    run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
-}
-
-/// `nest search QUERY [BASE-URL]` — search the hosted registry over HTTP.
-fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>, enhances: Option<&str>) {
-    // `package/search` takes a term plus a PLIST (`:index` / `:enhances`), so the call is
-    // built here rather than with `call_form` (which quotes every argument as a string and
-    // so cannot emit a keyword).
-    let mut call = format!(
-        "(package/search \"{}\"",
-        brood::introspect::escape_brood_string(query)
-    );
-    for (key, value) in [(":index", index), (":enhances", enhances)] {
-        if let Some(v) = value {
-            call.push_str(&format!(
-                " {key} \"{}\"",
-                brood::introspect::escape_brood_string(v)
-            ));
-        }
-    }
-    call.push(')');
-    run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
-}
-
-/// `nest repl` — project-aware REPL. Inside a project, pre-load every source
-/// file so the project's modules are immediately callable from the prompt.
-/// Outside a project, fall through to the plain language REPL (same UX as
-/// `brood`). The REPL itself is Brood (`std/tool/repl.blsp`, ADR-048) — one
-/// implementation both binaries bootstrap into via `(repl/run)`.
-fn cmd_repl(interp: &mut Interp) {
-    if in_project() {
-        // After loading the project's sources, tell the REPL to start in the project's
-        // `:main` module namespace so a BARE project fn (`go`) resolves at the prompt
-        // without qualifying it `myproj/main/go` — the interactive half of package
-        // rooting (ADR-070). `*repl-start-ns*` is a plain `def` (not a `binding`) so it
-        // reaches the spawned loop process, which roots + enters it through the ambient
-        // package context `project-setup` just established. Other project modules still
-        // need their `mod/fn` (or a `(defmodule …)`/`%in-ns` switch), exactly as in a file.
-        run(
-            interp,
-            "(project/load-config) \
-             (let (root (project/find-root (file/cwd))) \
-               (when root \
-                 (project/setup root) \
-                 (project/load-sources root) \
-                 (def repl/*repl-start-ns* (first *project-main*))))",
-        );
-        eprintln!(
-            "nest repl — project sources loaded, in the project's main namespace; Ctrl-D to exit"
-        );
-    } else {
-        eprintln!("nest repl — no project.blsp here; plain REPL (`brood` would do the same)");
-    }
-    // The REPL is Brood now (`std/tool/repl.blsp`), same as `brood` with no args. The
-    // interactive editor enters raw mode (std/editor/lineedit.blsp), so guard the
-    // terminal: the Brood `term-raw-leave` is the normal teardown, but this
-    // restores it on a panic unwind too. Scope it like `cmd_observe` so it drops
-    // (restoring) before any error report + exit (`process::exit` skips Drop).
-    let result = {
-        let _guard = RawTermGuard;
-        interp.eval_str("(repl/run)")
-    };
-    if let Err(e) = result {
-        report_error(&e);
-        std::process::exit(1);
-    }
-}
-
 /// `nest mcp` — see docs/mcp.md (ADR-036). Strictly per-project.
 fn cmd_mcp(interp: &mut Interp) {
     // `setup-tooling-image` (std/tool/project.blsp) is the shared tooling bootstrap
@@ -972,88 +524,6 @@ fn cmd_mcp(interp: &mut Interp) {
     run(interp, bootstrap);
     if let Err(e) = mcp::run(interp) {
         eprintln!("nest mcp: {e}");
-        std::process::exit(1);
-    }
-}
-
-/// `nest observe` — the process observer TUI (ADR-046, the M3 display seam). Runs
-/// the Brood observer loop in the root process (so its blocking key-poll blocks
-/// only this thread, never a scheduler worker running the observed processes).
-fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<String>) {
-    // Pick the bootstrap: a remote attach (`--connect`) or the standalone demo.
-    // For remote, resolve the cookie (--cookie → $BROOD_COOKIE → error) and connect
-    // — `observe-connect` dials the peer *before* taking the terminal, so a bad
-    // host / wrong cookie surfaces as a clean error with the screen never entered.
-    let boot = match connect {
-        Some(spec) => {
-            // Cookie precedence: --cookie → $BROOD_COOKIE → (node-cookie). The
-            // first two are resolved here; when neither is set we omit the arg
-            // and `observe-connect` falls back to the shared cookie file itself
-            // (ADR-068), so a matching local setup needs no flag.
-            let cookie = cookie
-                .or_else(|| std::env::var("BROOD_COOKIE").ok())
-                .filter(|c| !c.is_empty());
-            // `spec`/`cookie` are user input — `call_form` embeds them as escaped
-            // string literals so they can't break out of the call.
-            let args: Vec<&str> = match &cookie {
-                Some(c) => vec![&spec, c],
-                None => vec![&spec],
-            };
-            format!(
-                "(require-one 'observer) {}",
-                brood::introspect::call_form("observer/observe-connect", &args)
-            )
-        }
-        None => {
-            // `--cookie` only authenticates a link, and the local demo makes none.
-            // Say so rather than accepting a flag that does nothing — the same
-            // "warn rather than ignore silently" rule `nest run --main` follows.
-            if cookie.is_some() {
-                eprintln!("nest observe: --cookie is ignored without --connect (the local demo opens no link)");
-            }
-            "(observer/observe-run)".to_string()
-        }
-    };
-    // The guard restores the terminal on a panic unwind; the inner scope drops it
-    // (restoring) before any error is reported and we exit — `process::exit`
-    // skips Drop. On the normal `q` path the Brood `term-leave` already restored;
-    // the guard's second restore is idempotent.
-    let result = {
-        let _guard = FullTermGuard;
-        interp.eval_str(&boot)
-    };
-    if let Err(e) = result {
-        report_error(&e);
-        std::process::exit(1);
-    }
-}
-
-/// `nest attach SPEC` — the thin `emacsclient`-style frontend (ADR-090). Connects to
-/// the daemon serving a `ui-run` app and runs `editor/serve/attach`, which paints the
-/// pushed frames + ships back keys. Same shape as `cmd_observe`: resolve the cookie
-/// (`--cookie` → `$BROOD_COOKIE` → the shared cookie file), connect *before* taking
-/// the terminal (so a bad spec / wrong cookie is a clean error, screen untouched),
-/// and run under a `FullTermGuard` that restores the terminal on a panic unwind.
-fn cmd_attach(interp: &mut Interp, spec: String, cookie: Option<String>) {
-    let cookie = cookie
-        .or_else(|| std::env::var("BROOD_COOKIE").ok())
-        .filter(|c| !c.is_empty());
-    // `spec`/`cookie` are user input — `call_form` embeds them as escaped string
-    // literals so they can't break out of the call.
-    let args: Vec<&str> = match &cookie {
-        Some(c) => vec![&spec, c],
-        None => vec![&spec],
-    };
-    let boot = format!(
-        "(require-one 'editor/serve) {}",
-        brood::introspect::call_form("editor/serve/attach", &args)
-    );
-    let result = {
-        let _guard = FullTermGuard;
-        interp.eval_str(&boot)
-    };
-    if let Err(e) = result {
-        report_error(&e);
         std::process::exit(1);
     }
 }
@@ -1342,45 +812,13 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 //     (`Cli::command()`), never a hand-kept list. That is the whole point: a flag
 //     added to the `Cmd` enum is completable the same day, and a flag renamed
 //     can't leave a stale completion behind.
-//   * Project-dependent VALUES (tags, dep names, modules, test files) come from
-//     `std/tool/complete.blsp`, and only when the cursor is actually at a value
-//     position — so completing a subcommand or a flag never pays interpreter boot.
+//   * A Brood-routed subcommand (`BLSP_SUBCOMMANDS`) is handed to `nest/complete`, which
+//     reads the same table the parser does — flags, fixed positionals, and the
+//     project-dependent VALUES (tags, dep names, modules, test files) via
+//     `std/tool/complete.blsp` — and only then pays interpreter boot.
 //
 // Everything here must be silent and total: completion runs on a keypress, so it
 // prints candidates or nothing, exits 0, and never reports an error.
-
-/// What kind of value an argument takes, i.e. what to suggest after it. `None`
-/// means "no idea" — the shell falls back to filename completion, which is a
-/// better answer than a wrong list.
-/// Every arm matches on the argument's NAME as well as the subcommand. An earlier
-/// version had a subcommand-wide arm (`("check" | "run" | "format", _)`), which also
-/// caught `nest run --main` and offered it file paths — but `--main` takes
-/// `MODULE[/FN]`, so every suggestion was wrong. Name each argument.
-fn value_kind(subcommand: &str, arg_name: &str) -> Option<&'static str> {
-    match (subcommand, arg_name) {
-        ("new", "template") => Some("template"),
-        ("remove" | "update", "names" | "name") => Some("dep"),
-        _ => None,
-    }
-}
-
-/// Ask `std/tool/complete.blsp` to PRINT the candidates for `kind` that start with
-/// `prefix`. Brood prints straight to stdout (which is where the shell reads them
-/// from) and does the prefix filtering, so no list has to be marshalled back
-/// across the boundary.
-///
-/// Failures are swallowed deliberately: a broken manifest or an unreadable
-/// directory must cost a suggestion, not spray an error across a half-typed
-/// prompt. This is also the only path that pays interpreter boot, and it is
-/// reached only when the cursor is genuinely at a project-dependent value.
-fn print_dynamic_values(kind: &str, prefix: &str) {
-    let mut interp = Interp::new();
-    let code = format!(
-        "(require-one 'complete) {}",
-        brood::introspect::call_form("complete/print-candidates", &[kind, prefix])
-    );
-    let _ = interp.eval_str(&code);
-}
 
 /// Every subcommand name clap knows about, hidden ones excluded.
 fn subcommand_names() -> Vec<String> {
@@ -1446,16 +884,6 @@ fn pending_value_flag(subcommand: &str, words: &[String]) -> Option<String> {
         return None;
     }
     takes_value(subcommand, long).then(|| long.to_string())
-}
-
-/// The positional argument's clap id for a subcommand, if it has one.
-fn positional_name(subcommand: &str) -> Option<String> {
-    Cli::command()
-        .get_subcommands()
-        .find(|s| s.get_name() == subcommand)?
-        .get_positionals()
-        .next()
-        .map(|a| a.get_id().to_string())
 }
 
 /// `nest completions <shell>` — emit a shell integration script.
@@ -1551,28 +979,18 @@ fn cmd_complete(words: &[String]) {
         Some(sub) => {
             if current.starts_with('-') {
                 flag_names(sub)
-            } else if let Some(flag) = pending_value_flag(sub, &prior) {
-                match value_kind(sub, &flag) {
-                    Some(kind) => {
-                        print_dynamic_values(kind, &current);
-                        return;
-                    }
-                    // No known value kind: print nothing so the shell falls back
-                    // to filenames, which beats a confidently wrong list.
-                    None => return,
-                }
+            } else if pending_value_flag(sub, &prior).is_some() {
+                // A value position of a clap-side subcommand. None of these has a
+                // project-dependent kind any more — every subcommand with one is
+                // Brood-routed and completes through `nest/complete` — so print nothing and
+                // let the shell fall back to filenames, which beats a confidently wrong list.
+                return;
             } else if let Some(values) = positional_possible_values(sub) {
-                // A `ValueEnum` positional (`nest grammar <TARGET>`) — choices
-                // come from the enum definition, not a restated list.
+                // A `ValueEnum` positional (`nest completions <SHELL>`) — choices come from
+                // the enum definition, not a restated list.
                 values
             } else {
-                match positional_name(sub).and_then(|name| value_kind(sub, &name)) {
-                    Some(kind) => {
-                        print_dynamic_values(kind, &current);
-                        return;
-                    }
-                    None => return,
-                }
+                return;
             }
         }
     };
@@ -1597,24 +1015,6 @@ fn positional_possible_values(subcommand: &str) -> Option<Vec<String>> {
         .map(|v| v.get_name().to_string())
         .collect();
     (!values.is_empty()).then_some(values)
-}
-
-/// Reject a full-screen TUI subcommand when stdout isn't a terminal.
-///
-/// `nest observe` / `nest attach` drive an alternate-screen TUI. Piped or
-/// redirected, the terminal primitives fail deep inside the render loop and the
-/// user got `runtime error: terminal: No such device or address (os error 6)` with
-/// an `at editor/ui/ui-run` frame — technically true, and useless. Say the actual
-/// problem before anything is started.
-fn require_terminal(command: &str) {
-    use std::io::IsTerminal;
-    if std::io::stdout().is_terminal() {
-        return;
-    }
-    eprintln!("nest {command}: needs an interactive terminal — stdout is not a tty.");
-    eprintln!("  It draws a full-screen view, so it can't be piped or redirected.");
-    eprintln!("  To capture output for a test, run it under a pty: script -qec 'nest {command}' /dev/null");
-    std::process::exit(2);
 }
 
 /// Guard a project-scoped subcommand at the `nest` boundary.

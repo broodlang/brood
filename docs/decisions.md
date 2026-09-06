@@ -20917,3 +20917,87 @@ exercise the Brood arm. Sabotage: without `:trailing` one parser case reds. What
 `main.rs`: `new`, `completions`/`complete`, the package manager (`fetch`/`update`/`tree`/`add`/
 `remove`/`publish`/`search`/`key`/`ws`), `stdimage`, `rename`, `repl`, `mcp`, `observe`,
 `attach`, `release`, `gen`, `update-tooling`.
+
+**Amendment 2026-09-05 (late) — `new`, `update-tooling` and `rename` are Brood; `stdimage`
+is NOT, and the reason is a bug the attempt found (KI-112).** Three small moves needed one
+table feature: fixed-arity positionals — `:arity n` with `:names [...]`, so `nest rename OLD
+NEW` demands exactly two and a missing one reads `the following required arguments were not
+provided:\n  <NEW>` in clap's words; `-t` joined the short aliases. `main.rs` 1,654 → 1,536.
+
+`stdimage` was moved too, and the move produced a stdlib image missing every one of
+`project`'s 31 root globals, so every later `nest check` died on an unbound `*ns-package*`.
+`stdimage/build` attributes a module's ROOT globals (`*ns-package*`, `*units*`, …) by loading
+it inside `%isolate` and diffing the global names before and after; for a module the process
+had ALREADY loaded, `require-one` is a no-op, the diff is empty, and the root global is claimed
+by nobody — and an unclaimed root was "the prelude's" and skipped. The Brood dispatcher is a
+std module whose own load pulls the toolchain in, so a routed `nest stdimage` built from a
+process with `project` loaded. Forcing the module's source through the probe does not help:
+the "before" set already holds the names. The build is sound only in a process where nothing
+but the prelude is loaded, and the dispatcher cannot provide one — so `stdimage` stays a Rust
+arm (the variant's doc says why), and `ensure_stdimage`'s child process is exactly that arm.
+
+**The guard, so this class can never write an image again.** `build` now audits the roots: a
+root global that no probe claimed and that the PRELUDE did not bind is a std module's the
+probe missed, and the build REFUSES, naming them, before `%image-write` — a missing image
+costs one source boot, a wrong one cost most of a day. "The prelude bound it" is a new kernel
+question, `%prelude-global?`: the freeze records every name in the prelude's root env
+(`SharedCode::binding_names` — its definitions, the natives, the registries it seeds), fixed
+per binary. Definition sites were tried first and rejected: thirty prelude helpers
+(`%match-*`, `%receive-*`, `assoc-in`, …) carry none, and a clean build refused on them.
+Gates, both sabotage-shaped: `crates/cli/tests/stdimage_refuses_dirty_process.rs` drives the
+real `brood` with a private `XDG_CACHE_HOME` — a build after `(require-one 'project)` is
+refused naming `*ns-package*` and writes nothing; a fresh-process build writes, and a fresh
+process restoring `project` from it has the root bound — and `blsp_dispatch.rs` builds the
+image through `nest stdimage` and runs `nest check` against it. Two traps for the record: the
+parsed positionals are a LIST, so `(let ([old new] …))` does not match — take them by
+position; and a `nest` suite whose image build is refused runs every test from source AND
+pays a failing child build per process, which read as a hang (>10 min) before it read as a
+refusal.
+
+**Amendment 2026-09-05 (night, II) — the package manager is Brood: twenty subcommands,
+`main.rs` 1,233.** `fetch`, `update`, `tree`, `add`, `remove`, `publish`, `search`, `key` and
+`ws` moved in one commit — they shared one Rust bootstrap (`PACKAGE_BOOTSTRAP`: `load-config`
+so the user's `:registry` applies, then `require package`), which is `with-package` now, and
+one table feature: arity RANGES, `:arity [lo hi]` (`hi` nil for unbounded), so `search` is
+`<QUERY> [INDEX]`, `ws` is `<ACTION> [MESSAGE]`, `add` is `<NAME> [SPEC]...` with `:trailing`,
+`publish` is `[INDEX]`. `nest key gen` — clap's one nested subcommand — is a positional with a
+fixed value set, which is what it was. The plist options (`:index`, `:source-url`,
+`:enhances`, `:force true`) are built as lists and `apply`ed, where the Rust arms had to
+hand-format them because `call_form` quotes every argument as a string. With these gone the
+Rust side of completion lost its last dynamic value kind: `value_kind`,
+`print_dynamic_values` and `positional_name` are deleted, and a value position of a clap-side
+subcommand now prints nothing (filename fallback) — every subcommand with a project-dependent
+value completes through `nest/complete`. What remains in Rust: `completions`/`complete`
+(the shell scripts and the split router), `stdimage` (KI-112), `repl`, `mcp`, `observe`,
+`attach`, `release`, `gen` — each with Rust mechanism in it (a terminal guard, an MCP
+transport, a release pipeline). Gates: `blsp_dispatch.rs` +3 (the project guard on all seven
+project commands, the arity ranges in clap's words, `tree` on a scaffold);
+`tests/nest_test.blsp` +2; `manifest_race.rs` and `scaffold_quality.rs` drive `add`/`remove`/
+`tree` against real siblings and now run through the Brood arm; the `nest` crate 163/163.
+
+**Amendment 2026-09-05 (night, III) — `repl` is the twenty-first.** `nest repl` was the one
+arm whose body was already Brood in spirit: a project bootstrap and `(repl/run)`. Two things
+moved with it. The start namespace used to be set FROM RUST as `(def repl/*repl-start-ns* …)`
+— a rebinding no static reading of `repl.blsp` could see, which its own comment apologised for
+— and is `repl/start-in!` now, a public setter beside the variable. And the terminal guard:
+the line editor enters raw mode, its own `term-raw-leave` is the normal teardown, and
+`RawTermGuard` restores on a panic unwind; the router (`run_blsp`) now holds that guard around
+every Brood-routed evaluation, a no-op for a subcommand that never touches the terminal.
+Piped stdin keeps the REPL's `read-line` path, so it is testable end to end for the first
+time: `blsp_dispatch.rs` feeds `(+ 1 2)` outside a project and `(+ 40 2)`/`(hello)` inside
+one, and asserts the value, the bootstrap message, and that the bare project name resolves.
+`main.rs` 1,233 → 1,192. Left in Rust: `completions`/`complete`, `stdimage` (KI-112), `mcp`,
+`observe`, `attach`, `release`, `gen`.
+
+**Amendment 2026-09-05 (night, IV) — `observe` and `attach` are Brood: twenty-three.** The
+two full-screen frontends shared a boundary guard and a cookie rule, both Brood now:
+`require-terminal` (`os/stdout-tty?`, saying "needs an interactive terminal" with exit 2
+instead of failing deep in the render loop) and `link-cookie` (`--cookie`, then a non-empty
+`$BROOD_COOKIE`, else nil so the connect function falls back to the shared cookie file). The
+router's terminal guard became a choice: `observe`/`attach` need the FULL teardown on a panic
+unwind (`FullTermGuard`, alternate screen + cursor), `repl` and everything else the raw-mode
+restore that emits nothing onto a pipe (`RawTermGuard`). One trap, immediately visible:
+`Option::then_some(FullTermGuard)` builds the guard eagerly and drops the unwanted one on the
+spot, so every `nest check` printed `[?25h…[?1049l` on its way out and the missing-file test's
+`starts_with` broke — `then(|| …)` is the lazy form. `main.rs` 1,192 → 1,054. Left in Rust:
+`completions`/`complete`, `stdimage` (KI-112), `mcp`, `release`, `gen`.

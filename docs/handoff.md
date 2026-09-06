@@ -195,13 +195,17 @@ a design change, not a patch.
 
 **Addendum 2026-09-05 (latest) — item 4: EIGHT `nest` subcommands are Brood (ADR-322):
 `check`, `test` and `run` joined today.** `main.rs` is at 1,654 (from 2,771). The table
+
+**Addendum 2026-09-05 (latest) — item 4: TWENTY-THREE `nest` subcommands are Brood
+(ADR-322); `stdimage` deliberately is NOT (KI-112 — read it before routing anything that
+builds an image).** `main.rs` is at 1,054 (from 2,771). Left: `completions`/`complete`
+(shell scripts + the router), `mcp` (Rust transport in `mcp.rs`), `release` (the bundle
+pipeline), `gen` — each with Rust mechanism in it. Item 4's "done when" was `main.rs` under
+~300 lines; what is left is mostly `release` and the completion scripts. The table
 now carries typed flags (`{:value :int :repeat :complete}`), `:many`, `:trailing`, and the
 clap constraints as data; the Rust seam for `test` is `arm_test_env` (pre-boot env flags +
 memory ceiling), the pattern for anything else that must precede `Interp::new()`. Next:
-`new` (small), `stdimage`, `rename`, then the package-manager group (`fetch`/`update`/
-`tree`/`add`/`remove`/`publish`/`search`/`key`/`ws` — they share `PACKAGE_BOOTSTRAP`), then
-`repl`; `mcp`/`observe`/`attach`/`release`/`gen`/`completions` have Rust mechanism in them
-and go last. Found and fixed on the way: `nest run --name` called an unbound `node-start`. Noticed, not fixed: a scaffolded project's `(:use log)`
+`gen` (small), then decide how much of `release`/`mcp`/`completions` is policy. Found and fixed on the way: `nest run --name` called an unbound `node-start`. Noticed, not fixed: a scaffolded project's `(:use log)`
 
 **Addendum 2026-09-05 (also today) — ADR-320 is IMPLEMENTED; KI-111 filed and fixed.** Side facts
 travel by journal now (`core/heap/facts.rs`): a sixth `FactKind` fails to compile in six places,

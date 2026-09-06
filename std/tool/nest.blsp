@@ -30,7 +30,8 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 ;; `complete/print-candidates` kind. A positional is `[name values]`: its allowed values as a
 ;; list, the name of a completion kind for free text, or nil. `:many true` admits any number
 ;; of positionals; `:trailing true` hands every word after the first positional through
-;; unparsed, hyphens included. The clap constraints a command had are data too: `:requires {flag
+;; unparsed, hyphens included; `:arity n` demands exactly n and `:arity [lo hi]` between lo
+;; and hi (hi nil for no bound), named by `:names` in usage and in the missing-argument error. The clap constraints a command had are data too: `:requires {flag
 ;; needed-flag}`, `:conflicts [[a b] …]` and `:no-positional-with [flag …]`. Completion
 ;; (`nest complete`) reads the same table, so a flag added here is completable the same day —
 ;; the property the Rust side got from clap's own model, kept by making the table the model.
@@ -107,10 +108,92 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
                        ["--check-boot" "--for"]
                        ["--check-boot" "--no-check"]]
           :no-positional-with ["--check-boot"]
-          :run (fn (o) (run-run o))}})
+          :run (fn (o) (run-run o))}
+   "new" {:about "Scaffold a new project: NAME becomes the directory and the manifest's `:name` (`.` scaffolds into the current directory). `--template` picks the starter code; an unknown name lists the set."
+          :flags {"--template" {:value "NAME" :complete "template"}
+                  "-t" {:value "NAME" :complete "template"}}
+          :positional ["name" nil]
+          :arity 1
+          :run (fn (o) (run-new o))}
+   "update-tooling" {:about "Refresh the AI-assistant tooling `nest new` drops into a project — `docs/brood-for-claude.md` and the `.claude/skills/writing-brood` skill — from THIS binary. Run it after upgrading Brood; code, manifest and `CLAUDE.md` are left untouched."
+                     :flags {}
+                     :run (fn (o) (run-update-tooling o))}
+   "rename" {:about "Context-aware rename of an identifier across the project's `.blsp` sources: OLD → NEW, leaving docstrings, comments and quoted data alone unless asked."
+             :flags {"--swap" :bool
+                     "--refs-only" :bool
+                     "--defs-only" :bool
+                     "--in-quote" :bool
+                     "--text" :bool}
+             :positional ["old" nil]
+             :names ["old" "new"]
+             :arity 2
+             :conflicts [["--refs-only" "--defs-only"]
+                          ["--refs-only" "--swap"]
+                          ["--defs-only" "--swap"]
+                          ["--in-quote" "--swap"]
+                          ["--text" "--refs-only"]
+                          ["--text" "--defs-only"]
+                          ["--text" "--in-quote"]]
+             :run (fn (o) (run-rename o))}
+   "fetch" {:about "Resolve the project's dependencies and write project.lock.blsp (ADR-037): a `:path` dep must exist and records its content hash."
+            :flags {}
+            :run (fn (o) (run-fetch o))}
+   "update" {:about "Re-resolve dependency refs and re-lock, advancing moving refs. With no NAMES every dependency; with NAMES only those, the rest keep their pins."
+             :flags {}
+             :positional ["name" "dep"]
+             :many true
+             :run (fn (o) (run-update o))}
+   "tree" {:about "Print the project's resolved dependency tree (root → direct → transitive)."
+           :flags {}
+           :run (fn (o) (run-tree o))}
+   "add" {:about "Add a dependency to project.blsp and re-lock: `nest add NAME :path PATH` (NAME is the local require-name; the manifest is rewritten preserving its comments)."
+          :flags {}
+          :positional ["name" nil]
+          :names ["name" "spec"]
+          :arity [1 nil]
+          :trailing true
+          :run (fn (o) (run-add o))}
+   "remove" {:about "Remove a dependency from project.blsp and re-lock."
+             :flags {}
+             :positional ["name" "dep"]
+             :arity 1
+             :run (fn (o) (run-remove o))}
+   "publish" {:about "Publish this project's release to the hosted package registry (a source tarball + sha256, Bearer-authenticated; releases are immutable). `--source-url` publishes an EXTERNAL release — metadata only, the URL fetched once for its checksum. `--bump LEVEL` bumps the project's own :version (patch/minor/major), commits, then publishes."
+              :flags {"--source-url" "URL" "--bump" "LEVEL"}
+              :positional ["index" nil]
+              :arity [0 1]
+              :run (fn (o) (run-publish o))}
+   "search" {:about "Search the package registry for a term (name or description). INDEX overrides the configured `:registry`; `--enhances APP` keeps only packages that declare they plug into that application."
+             :flags {"--enhances" "APP"}
+             :positional ["query" nil]
+             :names ["query" "index"]
+             :arity [1 2]
+             :run (fn (o) (run-search o))}
+   "key" {:about "Manage the ed25519 signing key `nest publish` uses (ADR-212): `nest key gen` writes it 0600 under the config dir and prints the public key to share; `--force` replaces an existing one."
+          :flags {"--force" :bool}
+          :positional ["action" ["gen"]]
+          :arity 1
+          :run (fn (o) (run-key o))}
+   "ws" {:about "Drive every sibling Brood repo in the workspace at once: list | status | check | commit \"MESSAGE\" | push. Discovers the siblings of the current directory (a `.git` + `project.blsp`, plus `brood`)."
+         :flags {}
+         :positional ["action" ["list" "status" "check" "commit" "push"]]
+         :names ["action" "message"]
+         :arity [1 2]
+         :run (fn (o) (run-ws o))}
+   "repl" {:about "Start a REPL. Inside a project every source file is pre-loaded and the prompt starts in the project's main namespace, so its functions are callable bare; outside one, the plain language REPL (`brood` would do the same). Ctrl-D exits."
+           :flags {}
+           :run (fn (o) (run-repl o))}
+   "observe" {:about "Open a live process observer — a full-screen TUI of processes, status, mailbox and memory (Erlang-observer style, ADR-046). With no `--connect`, a standalone demo over a fresh runtime's own processes; with `--connect name@host:port`, attach to a RUNNING program over the node link (it must have called `node-start` + `observe-serve`). `q`/Esc/Ctrl-C quits."
+              :flags {"--connect" "NODE" "--cookie" "COOKIE"}
+              :run (fn (o) (run-observe o))}
+   "attach" {:about "Attach this terminal to a `ui-run` app served by a running daemon — the `emacsclient` to its `--daemon` (ADR-090). SPEC is the served node: a bare `name` over the local Unix socket, or `name@host:port` over TCP. The cookie comes from `--cookie`, `$BROOD_COOKIE`, else the shared `~/.config/brood/cookie`. The app's own quit key detaches."
+             :flags {"--cookie" "COOKIE"}
+             :positional ["spec" nil]
+             :arity 1
+             :run (fn (o) (run-attach o))}})
 
 ;; Short flags are aliases; canonicalise on parse so handlers read one spelling.
-(def- *short-aliases* {"-c" "--check" "-o" "--out"})
+(def- *short-aliases* {"-c" "--check" "-o" "--out" "-t" "--template"})
 
 (defn subcommands ()
   "The subcommands this module implements, sorted."
@@ -134,6 +217,10 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
 (defn positional-values (cmd)
   "The allowed values of `cmd`'s positional, or `()` when it is free text or absent."
   (positional-values-of (get *commands* cmd)))
+
+(defn- positional-names (spec)
+  "The positional names, in order: `:names` for an `:arity` command, else the one positional."
+  (or (get spec :names) (if (get spec :positional) (list (nth (get spec :positional) 0)) (list))))
 
 ;; ── argv → options ───────────────────────────────────────────────────────────────────
 
@@ -199,15 +286,35 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
             rest-words
             (assoc acc :positionals (append (get acc :positionals) (list word))))))))
 
+(defn- arity-bounds (spec)
+  "`:arity` as `[lo hi]` — `n` is `[n n]`, `[lo nil]` is unbounded above; nil when unset."
+  (let (a (get spec :arity))
+    (cond (nil? a) nil (int? a) [a a] else [(nth a 0) (nth a 1)])))
+
 (defn- check-positional (spec parsed)
-  "Reject a second positional (unless `:many`), or a first one outside the allowed set."
-  (let (pos (get spec :positional) ps (get parsed :positionals) allowed (positional-values-of spec))
+  "Reject a second positional (unless `:many`/`:arity`), one outside the allowed set, more
+than `:arity` admits, or fewer than it demands."
+  (let (pos (get spec :positional)
+        ps (get parsed :positionals)
+        allowed (positional-values-of spec)
+        bounds (arity-bounds spec)
+        lo (if bounds (nth bounds 0) 0)
+        hi (if bounds (nth bounds 1) nil))
     (cond
       (get parsed :error) parsed
       (and (nil? pos) (not (empty? ps)))
         (assoc parsed :error (str "unexpected argument '" (first ps) "'"))
-      (and (> (count ps) 1) (not (get spec :many)))
+      (and (> (count ps) 1) (not (get spec :many)) (nil? bounds))
         (assoc parsed :error (str "unexpected argument '" (nth ps 1) "'"))
+      (and bounds hi (> (count ps) hi))
+        (assoc parsed :error (str "unexpected argument '" (nth ps hi) "'"))
+      (and bounds (< (count ps) lo))
+        (assoc parsed
+          :error
+            (str "the following required arguments were not provided:\n  "
+              (string/join (map (take (drop (positional-names spec) (count ps)) (- lo (count ps)))
+                             (fn (n) (str "<" (string/upper n) ">")))
+                "\n  ")))
       (and (not (empty? allowed)) (not (empty? ps)) (not (contains? (into #{} allowed) (first ps))))
         (assoc parsed
           :error
@@ -299,12 +406,27 @@ arrives as an int; a `:repeat` flag's as a list."
 (defn- eputs (& parts)
   (%eprint (str (apply str parts) "\n")))
 
+(defn- positional-usage (spec)
+  "`<REQUIRED>` up to `lo`, `[OPTIONAL]` up to `hi`, `[LAST]...` when unbounded."
+  (let ([lo hi] (arity-bounds spec)
+        names (positional-names spec)
+        required (map (take names lo) (fn (n) (str " <" (string/upper n) ">")))
+        optional (if hi
+                   (map (drop (take names hi) lo) (fn (n) (str " [" (string/upper n) "]")))
+                   (list (str " ["
+                           (string/upper (if (> (count names) lo) (nth names lo) (last names)))
+                           "]..."))))
+    (apply str (append required optional))))
+
 (defn- usage-line (cmd)
   (let (spec (get *commands* cmd) pos (get spec :positional))
     (str "Usage: nest "
       cmd
       (if (empty? (get spec :flags)) "" " [OPTIONS]")
-      (if pos (str " [" (string/upper (nth pos 0)) "]" (if (get spec :many) "..." "")) ""))))
+      (cond
+        (get spec :arity) (positional-usage spec)
+        pos (str " [" (string/upper (nth pos 0)) "]" (if (get spec :many) "..." ""))
+        else ""))))
 
 (defn- usage (cmd)
   (let (spec (get *commands* cmd) pos (get spec :positional) allowed (positional-values-of spec))
@@ -687,6 +809,173 @@ reason was already printed, so the caller exits silently."
           main
           (get flags "--name")
           (get flags "--no-check")))))
+
+;; `nest new`, `update-tooling`, `rename` ---------------------------------------------------
+
+(defn- run-new (o)
+  ;; `load-config` first: the user config decides e.g. whether the scaffold runs `git init`.
+  (let (nm (first (get o :positionals)) template (get (get o :flags) "--template"))
+    (project/load-config)
+    (require-one 'scaffold)
+    (if template (scaffold/new-project nm template) (scaffold/new-project nm))
+    0))
+
+(defn- run-update-tooling (o)
+  (if (require-project "update-tooling" nil)
+    (do (project/load-config) (scaffold/update-tooling) 0)
+    2))
+
+(defn- run-rename (o)
+  ;; The positionals are a LIST, so `[old new]` would not match — take them by position.
+  (let (flags (get o :flags)
+        old (first (get o :positionals))
+        new (second (get o :positionals)))
+    (cond
+      ;; A reversed-args rename: every 2-arg call `(OLD a b)` → `(NEW b a)`.
+      (get flags "--swap") (codemod/swap2 old new)
+      ;; The context-blind whole-token replace, for a rename that must touch prose.
+      (get flags "--text") (codemod/rename (list (list old new)))
+      else
+        (codemod/cst-rename old
+          new
+          (cond
+            (get flags "--refs-only") :refs-only
+            (get flags "--defs-only") :defs-only
+            (get flags "--in-quote") :in-quote
+            else :all)))
+    0))
+
+;; The package manager (ADR-037) ------------------------------------------------------
+
+(defn- with-package (cmd f)
+  "The bootstrap every package command shares, then `f`. `load-config` is load-bearing: the
+user config supplies `:registry`, and a `:version` dependency cannot resolve without it —
+these commands once skipped it and used the hardcoded default index no matter what the user
+had configured."
+  (if (require-project cmd nil)
+    (do (project/load-config) (require-one 'package) (f) 0)
+    2))
+
+(defn- run-fetch (o)
+  (with-package "fetch" (fn () (package/fetch))))
+
+(defn- run-update (o)
+  (with-package "update" (fn () (apply package/update (get o :positionals)))))
+
+(defn- run-tree (o)
+  (with-package "tree" (fn () (package/tree))))
+
+(defn- run-add (o)
+  ;; `(add NAME & SPEC)` — the positionals are already in that shape.
+  (with-package "add" (fn () (apply package/add (get o :positionals)))))
+
+(defn- run-remove (o)
+  (with-package "remove" (fn () (package/remove-dep (first (get o :positionals))))))
+
+(defn- plist-when (key value)
+  (if value (list key value) (list)))
+
+(defn- run-publish (o)
+  (with-package "publish"
+    (fn ()
+      (let (flags (get o :flags)
+            opts (append (plist-when :index (first (get o :positionals)))
+                   (plist-when :source-url (get flags "--source-url"))))
+        (if (get flags "--bump")
+          (apply package/release (get flags "--bump") opts)
+          (apply package/publish opts))))))
+
+(defn- run-search (o)
+  ;; `package/search` resolves the registry through the project's config, so it needs a
+  ;; project today — guard it for a clean message rather than an internal trace.
+  (with-package "search"
+    (fn ()
+      (let (query (first (get o :positionals))
+            opts (append (plist-when :index (second (get o :positionals)))
+                   (plist-when :enhances (get (get o :flags) "--enhances"))))
+        (apply package/search query opts)))))
+
+(defn- run-key (o)
+  ;; A user-level operation (a signing key in the config dir), not a project one.
+  (project/load-config)
+  (require-one 'package)
+  (if (get (get o :flags) "--force") (package/key-gen :force true) (package/key-gen))
+  0)
+
+(defn- run-ws (o)
+  ;; A workspace command, not a project one — it drives the SIBLING repos.
+  (workspace/run (first (get o :positionals)) (second (get o :positionals)))
+  0)
+
+;; `nest repl` ------------------------------------------------------------------------
+
+(defn- run-repl (o)
+  ;; The REPL is Brood (`std/tool/repl.blsp`, ADR-048), the same loop `brood` bootstraps
+  ;; into. Inside a project, load its sources and start the prompt in the `:main` module so
+  ;; a bare project fn resolves without qualification (the interactive half of package
+  ;; rooting, ADR-070); other project modules still need their `mod/fn`. The raw-mode line
+  ;; editor's normal teardown is its own `term-raw-leave`; the Rust router also holds a
+  ;; terminal guard for a panic unwind.
+  (let (root (project/find-root (file/cwd)))
+    (if root
+      (do
+        (project/load-config)
+        (project/setup root)
+        (project/load-sources root)
+        (repl/start-in! (first *project-main*))
+        (eputs "nest repl — project sources loaded, in the project's main namespace; Ctrl-D to exit"))
+      (eputs "nest repl — no project.blsp here; plain REPL (`brood` would do the same)"))
+    (repl/run)
+    0))
+
+;; `nest observe` / `nest attach` — the full-screen frontends -------------------------
+
+(defn- require-terminal (cmd)
+  "A full-screen TUI cannot be piped or redirected: say so at the boundary (exit 2) instead
+of failing deep in the render loop with `terminal: No such device or address (os error 6)`
+and an `editor/ui/ui-run` frame — technically true, and useless."
+  (if (os/stdout-tty?)
+    true
+    (do
+      (eputs "nest " cmd ": needs an interactive terminal — stdout is not a tty.")
+      (eputs "  It draws a full-screen view, so it can't be piped or redirected.")
+      (eputs "  To capture output for a test, run it under a pty: script -qec 'nest "
+        cmd "' /dev/null")
+      false)))
+
+(defn- link-cookie (flag)
+  "Cookie precedence for a node link: `--cookie`, then a non-empty `$BROOD_COOKIE`, else nil —
+and nil means the connect function falls back to the shared cookie file itself (ADR-068),
+so a matching local setup needs no flag."
+  (let (env (os/env "BROOD_COOKIE"))
+    (or flag (if (and env (not (= env ""))) env nil))))
+
+(defn- run-observe (o)
+  (let (flags (get o :flags)
+        connect (get flags "--connect")
+        cookie (link-cookie (get flags "--cookie")))
+    (cond
+      (not (require-terminal "observe")) 2
+      ;; Remote attach: `observe-connect` dials the peer BEFORE taking the terminal, so a bad
+      ;; host or wrong cookie is a clean error with the screen never entered.
+      connect
+        (do
+          (if cookie (observer/observe-connect connect cookie) (observer/observe-connect connect))
+          0)
+      else
+        (do
+          ;; `--cookie` only authenticates a link, and the local demo makes none — say so
+          ;; rather than accept a flag that does nothing.
+          (when (get flags "--cookie")
+            (eputs "nest observe: --cookie is ignored without --connect (the local demo opens no link)"))
+          (observer/observe-run)
+          0))))
+
+(defn- run-attach (o)
+  (let (spec (first (get o :positionals)) cookie (link-cookie (get (get o :flags) "--cookie")))
+    (if (require-terminal "attach")
+      (do (if cookie (editor/serve/attach spec cookie) (editor/serve/attach spec)) 0)
+      2)))
 
 ;; ── entry points ─────────────────────────────────────────────────────────────────────
 

@@ -388,3 +388,259 @@ fn run_constraints_and_a_bad_duration_are_usage_errors() {
         "{out}"
     );
 }
+
+// ── `new`, `update-tooling`, `stdimage`, `rename` (moved 2026-09-05) ───────────────────
+//
+// `scaffold_quality.rs` exercises `new` (every template), `update_tooling.rs` the tooling
+// refresh in and outside a project, `complete.rs` the template completion. Pinned here: the
+// fixed-arity positionals in clap's words, `stdimage`'s report, and `rename` end to end.
+
+#[test]
+fn fixed_arity_positionals_are_required_and_bounded() {
+    let dir = scratch("arity");
+    let (code, _, err) = nest_in(&dir, &["new"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("required arguments were not provided") && err.contains("<NAME>"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["rename", "only-old"]);
+    assert_eq!(code, 2, "{err}");
+    // The missing list names only NEW; OLD appears in the usage line beneath, so check the
+    // list's own lines.
+    assert!(
+        err.contains("not provided:\n  <NEW>\n") && !err.contains("  <OLD>\n"),
+        "only the missing one:\n{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["rename", "a", "b", "c"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("unexpected argument 'c'"), "{err}");
+    let (code, out, _) = nest_in(&dir, &["rename", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Usage: nest rename [OPTIONS] <OLD> <NEW>"),
+        "{out}"
+    );
+    let (code, _, err) = nest_in(&dir, &["rename", "--swap", "--refs-only", "a", "b"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("cannot be used with"), "{err}");
+}
+
+#[test]
+fn stdimage_reports_what_it_built() {
+    let dir = scratch("stdimage");
+    let (code, out, err) = nest_in(&dir, &["stdimage"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains("bindings ->") || out.contains("no cache directory"),
+        "{out}"
+    );
+}
+
+#[test]
+fn rename_rewrites_references_and_definition_in_a_project() {
+    let proj = scaffolded("rename");
+    let (code, out, err) = nest_in(&proj, &["rename", "hello", "greet"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let demo = std::fs::read_to_string(proj.join("src").join("demo.blsp")).expect("demo");
+    let main = std::fs::read_to_string(proj.join("src").join("main.blsp")).expect("main");
+    assert!(demo.contains("(defn greet"), "the definition:\n{demo}");
+    assert!(
+        !main.contains("(hello") && main.contains("(greet"),
+        "the reference:\n{main}"
+    );
+    let (code, out, err) = nest_in(&proj, &["test"]);
+    assert_eq!(code, 0, "the renamed project still passes:\n{out}\n{err}");
+}
+
+/// KI-112. `nest stdimage` is dispatched from `std/tool/nest.blsp`, whose load pulls the
+/// toolchain in before the build runs. The build attributed a module's ROOT globals by
+/// loading it and diffing, and `require-one` is a no-op for a module already loaded — so
+/// `project`'s 31 root globals went unclaimed and the image restored `project` without
+/// `*ns-package*`. This drives the real entry point with a private cache directory: build
+/// the image through the dispatcher, then run the command that first showed the hole.
+#[test]
+fn an_image_built_through_the_dispatcher_restores_every_root_global() {
+    let dir = scratch("stdimage-cache");
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&cache).expect("cache dir");
+    let with_cache = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_nest"))
+            .current_dir(cwd)
+            .env_remove("BROOD_NO_STDIMAGE")
+            .env("XDG_CACHE_HOME", &cache)
+            .args(args)
+            .output()
+            .expect("run nest");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (code, out, err) = with_cache(&dir, &["stdimage"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("bindings ->"), "{out}");
+    let (code, _, err) = nest_in(&dir, &["new", "demo"]);
+    assert_eq!(code, 0, "scaffold:\n{err}");
+    // `check` loads `project` FROM THE IMAGE and reaches `record-ns-packages`, which reads
+    // the root dynamic `*ns-package*` — unbound, before the fix.
+    let (code, out, err) = with_cache(&dir.join("demo"), &["check"]);
+    assert_eq!(
+        code, 0,
+        "check against the dispatcher-built image:\n{out}\n{err}"
+    );
+    assert!(
+        !err.contains("unbound symbol"),
+        "a root global was dropped from the image:\n{err}"
+    );
+}
+
+// ── the package manager: `fetch`/`update`/`tree`/`add`/`remove`/`publish`/`search`/`key`/`ws`
+// (moved 2026-09-05). `manifest_race.rs` and `scaffold_quality.rs` drive `add`/`remove`/`tree`
+// against real sibling projects and `complete.rs` the dependency-name completion. Pinned
+// here: the project guard on every project command, the arity ranges, and `tree`.
+
+#[test]
+fn every_package_command_needs_a_project_and_says_so() {
+    let dir = scratch("pkg-guard");
+    for args in [
+        &["fetch"][..],
+        &["update"][..],
+        &["tree"][..],
+        &["add", "x", ":path", "../x"][..],
+        &["remove", "x"][..],
+        &["publish"][..],
+        &["search", "json"][..],
+    ] {
+        let (code, _, err) = nest_in(&dir, args);
+        assert_eq!(code, 2, "{args:?}:\n{err}");
+        assert!(
+            err.contains(&format!("nest {}: no project.blsp in", args[0])),
+            "{args:?}:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn package_arity_ranges_are_clap_shaped() {
+    let dir = scratch("pkg-arity");
+    let (code, _, err) = nest_in(&dir, &["search"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not provided:\n  <QUERY>\n"), "{err}");
+    let (code, _, err) = nest_in(&dir, &["search", "a", "b", "c"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("unexpected argument 'c'"), "{err}");
+    let (code, out, _) = nest_in(&dir, &["search", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Usage: nest search [OPTIONS] <QUERY> [INDEX]"),
+        "{out}"
+    );
+    let (code, out, _) = nest_in(&dir, &["add", "--help"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Usage: nest add <NAME> [SPEC]..."), "{out}");
+    let (code, _, err) = nest_in(&dir, &["key", "bogus"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("invalid value 'bogus' for <ACTION>") && err.contains("gen"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["ws"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("<ACTION>"), "{err}");
+    let (code, _, err) = nest_in(&dir, &["publish", "--bump"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("a value is required for '--bump <LEVEL>'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn tree_prints_the_scaffolded_project() {
+    let proj = scaffolded("pkg-tree");
+    let (code, out, err) = nest_in(&proj, &["tree"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("demo"), "{out}");
+    let (_, out, _) = nest_in(&proj, &["complete", "--", "remove", ""]);
+    // No declared dependencies, so nothing is offered — and nothing fails.
+    assert!(out.trim().is_empty(), "{out}");
+}
+
+// ── `repl` (moved 2026-09-05). Piped stdin keeps the plain `read-line` path, so the loop is
+// testable end to end: a form in, its value out, and the project bootstrap message on stderr.
+
+fn nest_repl(dir: &std::path::Path, input: &str) -> (i32, String, String) {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nest"))
+        .current_dir(dir)
+        .env("BROOD_NO_STDIMAGE", "1")
+        .arg("repl")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nest repl");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn repl_evaluates_piped_forms_outside_and_inside_a_project() {
+    let dir = scratch("repl");
+    let (code, out, err) = nest_repl(&dir, "(+ 1 2)\n");
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains('3'), "the value:\n{out}");
+    assert!(err.contains("plain REPL"), "{err}");
+    let proj = scaffolded("repl-proj");
+    // Inside the project the prompt starts in `main`, so its `:use`d `demo/hello` is
+    // reachable bare through the module's own imports.
+    let (code, out, err) = nest_repl(&proj, "(+ 40 2)\n(hello)\n");
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("42"), "{out}");
+    assert!(err.contains("project sources loaded"), "{err}");
+    assert!(
+        !out.contains("unbound"),
+        "a bare project name resolves at the prompt:\n{out}"
+    );
+}
+
+// ── `observe` / `attach` (moved 2026-09-05). `missing_file.rs` pins the no-tty boundary
+// message for both through the real binary. Pinned here: the arity and the option surface.
+
+#[test]
+fn attach_needs_a_spec_and_both_frontends_refuse_a_pipe_before_touching_the_screen() {
+    let dir = scratch("frontends");
+    let (code, _, err) = nest_in(&dir, &["attach"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not provided:\n  <SPEC>"), "{err}");
+    let (code, _, err) = nest_in(&dir, &["attach", "somenode"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("nest attach: needs an interactive terminal") && !err.contains("ui-run"),
+        "{err}"
+    );
+    let (code, _, err) = nest_in(&dir, &["observe", "--connect", "n@h:1", "--cookie", "c"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("nest observe: needs an interactive terminal"),
+        "{err}"
+    );
+    let (code, out, _) = nest_in(&dir, &["observe", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Usage: nest observe [OPTIONS]") && out.contains("--connect <NODE>"),
+        "{out}"
+    );
+}
