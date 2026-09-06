@@ -25,7 +25,9 @@
   ;; `put`, and `every_inlinable_head_still_reaches_its_primitive`, which is what caught this.
   ((t k) (%table-get t k))
   ((t k default) (%table-get t k default)))
-(sig get (table any -> any))
+;; `&optional any`: the primitive takes a default (`(table/get t k default)`), and a fixed
+;; two-parameter contract failed every three-argument call under BROOD_CONTRACTS=1 (KI-113).
+(sig get (table any &optional any -> any))
 
 (defn has? (t k)
   "True if table t has an entry for key k.

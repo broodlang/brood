@@ -705,6 +705,12 @@ names accept anything, so a contract never throws on a type it can't interpret.
     (pair? t)
       (let (h (first t))
         (cond
+          ;; An ARROW type — `(map -> int)`, `(-> any)` — describes a callable, and it is
+          ;; checked BEFORE the head dispatch below: its head is whatever its first parameter
+          ;; type is, so `(map -> int)` used to fall into the `map` branch and fail every
+          ;; callback argument under BROOD_CONTRACTS=1 (KI-113). Callability is all a
+          ;; contract can check of a function value.
+          (%le 0 (%sig-pos t '-> 0)) (fn? v)
           ;; `(is T)` — a type guard's result (ADR-301): the VALUE is a bool; what it
           ;; proves about the argument is the checker's business, not the contract's.
           (%eq h 'is) (bool? v)
@@ -836,6 +842,22 @@ materialised modules never evaluate their sigs)."
     (pair? xs) (if (%eq (first xs) x) n (%sig-pos (rest xs) x (%add n 1)))
     else -1))
 
+(defn- %sig-doc-forms (qualified)
+  "The docstring of the function bound to `qualified` as a one-element list to splice into a
+shim's body, or nil when there is no binding or no docstring. Expansion-time helper for
+`sig!`; `qualified` is the symbol `%register-sig` returns."
+  (if (/bound? qualified)
+    ;; `type-of`, not `string?`: this runs while the PRELUDE's own sigs expand, before
+    ;; `predicates.blsp` has defined `string?` (core → predicates → …).
+    (let (d (/doc (reflect/eval qualified))) (if (%eq (/type-of d) :string) (/list d) nil))
+    nil))
+
+(defn- %sig-private-forms (qualified name)
+  "`((%mark-private 'name))` when the function bound to `qualified` is module-private, else
+nil — the re-mark a contract shim's `def` needs, spliced after it. Expansion-time helper for
+`sig!`."
+  (if (reflect/private? qualified) (/list (/list '%mark-private (/list 'quote name))) nil))
+
 (defn- %sig-rev (xs acc)
   "`xs` reversed onto `acc`. Expansion-time helper — see `%sig-take`."
   (if (nil? xs) acc (%sig-rev (rest xs) (cons (first xs) acc))))
@@ -893,6 +915,10 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
   ;; module-qualified global name) — same as `(sig …)` — then install the runtime
   ;; contract. The `(do …)` keeps both effects at top level.
   ;;
+  ;; The held original is `def-` (private): it is a gensym global the module never wrote, and
+  ;; public it showed up in `reflect/global-names` for every contracted function — apropos,
+  ;; completion and the doc catalogue's "nothing falls through to :other" all saw them.
+  ;;
   ;; Every prelude FUNCTION the shim calls is root-scoped (`/list`, `/str`, …): the shim is
   ;; expanded INSIDE the module being contracted, where a bare name resolves to that module's
   ;; own definition first — so in `(defmodule proc)` the argument list `(list ~@params)` called
@@ -907,7 +933,19 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
           (let (ptypes (%sig-take i type)
                 rtype (%sig-nth type (%add i 1))
                 amp-pos (%sig-pos ptypes '& 0)
-                opt-pos (%sig-pos ptypes '&optional 0))
+                opt-pos (%sig-pos ptypes '&optional 0)
+                ;; The original's docstring, read NOW (the binding exists — a `sig` below its
+                ;; definition, or the deferred install at `provide`) and spliced into the shim,
+                ;; so `doc`/`apropos` keep answering under contracts. A docstring lives on the
+                ;; closure, and a fresh `(fn …)` had none: every contracted function went
+                ;; undocumented in the one mode meant for careful reading (KI-113). Asked by the
+                ;; QUALIFIED name `%register-sig` returns, not the bare one (see `sig`).
+                docf (%sig-doc-forms (%register-sig name type))
+                ;; A `defn-` stays private: the shim's `def` is a plain global definition, and
+                ;; `env_define` CLEARS the private mark on every one (ADR-146) — so every signed
+                ;; private helper went public under contracts, into apropos and the doc
+                ;; catalogue (KI-113). Re-mark right after, the way `def-` itself does.
+                privf (%sig-private-forms (%register-sig name type) name))
             (cond
               ;; `(fixed… &optional o… -> ret)`. Checked before the two below because an
               ;; `&optional` list has neither an `&` nor a fixed count: read as fixed it
@@ -928,9 +966,10 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                       orig (gensym "orig")
                       r (gensym "ret"))
                   `(do
-                     (def ~orig ~name)
+                     (def- ~orig ~name)
                      (def ~name
                        (fn (~@fixed-params & ~more)
+                         ~@docf
                          (%contract-check-args '~name '~fixed-ptypes (/list ~@fixed-params) 1)
                          (%contract-check-args '~name '~opt-ptypes ~more ~(%add opt-pos 1))
                          ;; `apply` splices its trailing list, so the leading arguments go
@@ -950,7 +989,8 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                                       " ("
                                       (/pr-str ~r)
                                       ")")))
-                           ~r)))))
+                           ~r)))
+                     ~@privf))
               (%lt amp-pos 0)
               ;; fixed arity
                 (let (params (%sig-gensyms i)
@@ -963,9 +1003,10 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                   ;; before this could check anything. The name is a gensym, so nothing can
                   ;; reach or rebind it, and the shim now captures only globals (KI-81).
                   `(do
-                     (def ~orig ~name)
+                     (def- ~orig ~name)
                      (def ~name
                        (fn (~@params)
+                         ~@docf
                          (%contract-check-args '~name '~ptypes (/list ~@params) 1)
                          (let (~r (~orig ~@params))
                            (unless (/type-matches? '~rtype ~r)
@@ -977,7 +1018,8 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                                       " ("
                                       (/pr-str ~r)
                                       ")")))
-                           ~r)))))
+                           ~r)))
+                     ~@privf))
               ;; variadic: (fixed… & rest-type -> ret)
               else
                 (let (fixed-ptypes (%sig-take amp-pos ptypes)
@@ -988,9 +1030,10 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                       r (gensym "ret"))
                   ;; Same global-capture reasoning as the fixed-arity shim above.
                   `(do
-                     (def ~orig ~name)
+                     (def- ~orig ~name)
                      (def ~name
                        (fn (~@fixed-params & ~rest-param)
+                         ~@docf
                          (%contract-check-args '~name '~fixed-ptypes (/list ~@fixed-params) 1)
                          (%contract-check-rest '~name '~rest-ptype ~rest-param)
                          ;; No `append` here either — see the `&optional` arm above.
@@ -1004,7 +1047,8 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                                       " ("
                                       (/pr-str ~r)
                                       ")")))
-                           ~r)))))))))))
+                           ~r)))
+                     ~@privf))))))))
 
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
 ;; each subexpression evaluated at most once (a gensym holds it across the test).

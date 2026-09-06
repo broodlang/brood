@@ -233,7 +233,9 @@ vector comes FIRST here, unlike the rest of this module — see the note above.
 
     (seq/subvec [1 2 3 4] 1 3)   → [2 3]"
   (if (empty? more) (%subvec v start) (%subvec v start (first more))))
-(sig subvec (vector int -> vector))
+;; `& int`, not a fixed second int: `end` is optional (`& more`), and the fixed-arity form
+;; armed a 2-parameter contract over a 2-3 argument function under BROOD_CONTRACTS=1.
+(sig subvec (vector int & int -> vector))
 
 (defn vector-ref (v i)
   "The element at index i of vector v."

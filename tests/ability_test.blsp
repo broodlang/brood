@@ -139,16 +139,18 @@
     (refute (= (circle 3) (rect 3 3)))))
 
 ;; ---- slice 4: sealed abilities record their closed member set (checker uses it) ----
+;; The impls return what the op DECLARES (`:-> float`): under BROOD_CONTRACTS=1 the declared
+;; return is enforced at runtime, and an int from a float-declared op is a contract failure.
 (defability Shape :sealed [circle rect] (area [self] :-> float))
-(impl Shape ability-test/circle (area [c] (* 3 (get c :r) (get c :r))))
-(impl Shape ability-test/rect (area [r] (* (get r :w) (get r :h))))
+(impl Shape ability-test/circle (area [c] (* 3.0 (get c :r) (get c :r))))
+(impl Shape ability-test/rect (area [r] (* 1.0 (get r :w) (get r :h))))
 
 (describe "sealed abilities"
   (test "the closed member set is recorded (bare names qualified to this ns)"
     (assert= (%sealed-members 'Shape) (list :ability-test/circle :ability-test/rect)))
   (test "sealing does not change dispatch"
-    (assert= (area (circle 2)) 12)
-    (assert= (area (rect 3 4)) 12)))
+    (assert= (area (circle 2)) 12.0)
+    (assert= (area (rect 3 4)) 12.0)))
 
 ;; ---- KI-15: a bare impl id qualifies to the record's ns, like :sealed ----
 (defability Kilo (kilo [self] :-> int))

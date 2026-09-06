@@ -980,8 +980,9 @@ so a matching local setup needs no flag."
 ;; ── entry points ─────────────────────────────────────────────────────────────────────
 
 (defn main (argv)
-  "Run `argv` — the subcommand and its words, as a vector of strings — and return the exit
-code. `--help`/`-h` anywhere prints the command's usage."
+  "Run `argv` — the subcommand and its words, as a list of strings (what `main.rs` builds
+with `blsp_string_list`) — and return the exit code. `--help`/`-h` anywhere prints the
+command's usage."
   (let (cmd (first argv) words (rest argv) spec (get *commands* cmd))
     (cond
       (nil? spec) (do (eputs "nest: '" cmd "' is not implemented in std/tool/nest.blsp") 2)
@@ -997,7 +998,9 @@ code. `--help`/`-h` anywhere prints the command's usage."
               (eputs "For more information, try '--help'.")
               2)
             ((get spec :run) o))))))
-(sig main (vector -> int))
+;; `list`, not `vector`: the router passes `(list "check" …)`, and a `vector` contract refused
+;; every Brood-routed subcommand under BROOD_CONTRACTS=1 (found by KI-113's sweep).
+(sig main (list -> int))
 
 (defn complete (cmd prior current)
   "Print the completion candidates for `cmd` given the words typed so far: the value of a

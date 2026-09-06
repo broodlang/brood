@@ -26,4 +26,6 @@ crypto/syscalls are Rust.")
 (defn self-signed (host)
   "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns `[cert-pem key-pem]` — pass them to `tls/listen`. Not for production (clients reject a self-signed cert unless told to trust it)."
   (%tls-self-signed host))
-(sig self-signed (string -> list))
+;; A VECTOR, as the docstring says (`[cert-pem key-pem]`): declared `list`, the return
+;; contract failed every `tls/self-signed` call under BROOD_CONTRACTS=1 (KI-113).
+(sig self-signed (string -> vector))

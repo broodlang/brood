@@ -1425,7 +1425,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "%tls-self-signed",
         Arity::exact(1),
-        Sig::new(vec![string], list_ty),
+        // A VECTOR (`alloc_vector`): declared `list`, the Brood `tls/self-signed` contract failed
+        // every call under BROOD_CONTRACTS=1 and the checker warned on the corrected sig (KI-113).
+        Sig::new(vec![string], vec_ty),
         &["host"],
         "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it).",
         tls_self_signed);

@@ -8444,6 +8444,49 @@ a bare name resolves to that module's own definition first, so in `(defmodule pr
 `type-of`, `type-matches?`) is root-scoped now (`/list`, …), the idiom `control.blsp`'s
 capture macro already used for `/str`.
 
+**What a sweep of every test file under contracts from source then turned up (same day).**
+With the modules loading, 39 of 235 files failed. The conformance files need `nest test`'s
+load path for their corpus helper and fail identically without contracts — a sweep artefact.
+The rest were four more shapes, all fixed:
+
+- **Arrow-typed callback parameters never matched.** `type-matches?` dispatched on a list
+  type's HEAD, and an arrow's head is its first parameter type — so `(map -> int)` fell into
+  the `map` branch and rejected every function argument (`coverage-sum`, and every HOF with a
+  declared callback). An arrow is checked first now and matches any callable, which is all a
+  contract can say about a function value.
+- **Contracted functions lost their docstrings.** A docstring lives on the closure, and the
+  shim was a fresh `(fn …)`: `doc`, `apropos`, `doc-search` and the surface audit went blank
+  for every signed function in the one mode meant for careful reading. `sig!` now reads the
+  original's docstring at expansion time (by the qualified name `%register-sig` returns) and
+  splices it into the shim. `%sig-doc-forms` tests with `type-of`, not `string?`, because the
+  prelude's own sigs expand before `predicates.blsp` exists.
+- **The held originals were public gensym globals.** `(def orig123 name)` per contracted
+  function showed up in `reflect/global-names`, apropos, completion and the doc catalogue's
+  "nothing falls through to `:other`". They are `def-` now.
+- **Signed private helpers went public.** The shim's `def` is a plain global definition,
+  and `env_define` clears the private mark on every one (ADR-146), so `path/path-last-dot`,
+  `seq/shuffle-at`, `string/trimr-to` and the like appeared in the doc catalogue. `sig!`
+  re-marks a private original private after the rebind, the way `def-` does.
+- **Four signatures that were simply wrong**, and only a runtime contract could tell:
+  `seq/subvec` declared two fixed parameters over a `& more` end (`(vector int & int ->
+  vector)` now); `table/get` declared two over a three-argument primitive (`&optional any`);
+  `tls/self-signed` declared `list` over a primitive that allocates a vector — the Rust `Sig`
+  said `list` too, so the checker agreed with the wrong answer; both say `vector` now; and
+  `nest/main` declared `vector` over the LIST the router builds, which refused every
+  Brood-routed `nest` subcommand under contracts.
+
+**Expected residue, deliberately not chased.** With everything above in, a contracts-mode
+run of the whole test tree from source still reds a handful of files, all for reasons that
+are the mode itself rather than a bug: `audit_test`, `doc_examples_test`, `prng_test` and
+`resolver_test` exceed the 120 s per-test budget (every std call is wrapped; the doctest
+runner evaluates thousands of examples); `maps_test` asserts the KERNEL's `nth` message
+(`integer index`), which the shim's argument check now pre-empts with its own; the three
+`jit_*` tests assert lowering decisions on shapes the shims change; and `record_test`,
+`sig_adoption_test`, `ability_test`, `std_check_test` are CHECKER tests whose warnings differ
+against a live image in which every std signature is a shim (`(sig ghost …)` itself expands to
+a deferred contract, not a declaration). Contracts mode is a dev switch, not a suite
+configuration; what it must do — boot, load every module, enforce — is gated.
+
 **Gate.** `contracts_mode.rs::every_baked_in_module_loads_under_contracts_from_source`:
 a fresh `XDG_CACHE_HOME`, `BROOD_NO_STDIMAGE=1`, `BROOD_CONTRACTS=1`, a program that
 `require-one`s every `(reflect/builtin-modules)` entry and prints each failure by name.

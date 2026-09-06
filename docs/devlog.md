@@ -11551,5 +11551,9 @@ symbol, failing every module that loads `project`/`test`/`lineedit`; and a sig i
 `check-allow` above its `defn-` in `editor/pane` deferred its contract past the loader's
 reserved-name exemption — the placement gate matched column-0 sigs only. Fixed both, widened the
 gate, and `contracts_mode.rs` now requires every baked-in module from source under contracts.
-Also today: `nest check --strict std/` was red on the dns module's undeclared offsets — declared.
+A sweep of all 235 test files under contracts from source then found four more shapes, fixed
+the same day: arrow-typed callbacks never matched (`(map -> int)` dispatched on `map`), shims
+dropped docstrings, the held originals were public gensyms, and three sigs were plainly wrong
+(`seq/subvec`, `table/get`, `tls/self-signed` — the last wrong in the Rust `Sig` too). Also today:
+`nest check --strict std/` was red on the dns module's undeclared offsets — declared.
 
