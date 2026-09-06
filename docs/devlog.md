@@ -11557,3 +11557,10 @@ dropped docstrings, the held originals were public gensyms, and three sigs were 
 (`seq/subvec`, `table/get`, `tls/self-signed` — the last wrong in the Rust `Sig` too). Also today:
 `nest check --strict std/` was red on the dns module's undeclared offsets — declared.
 
+## 2026-09-06 (later) — heap.rs split, first move: positions + definition sites
+
+Handoff item 5 begins: the `// ===== Source positions and compilation context` and `// =====
+Definition sites` sections — 50 methods, 734 lines — are `heap/positions.rs`, a `use super::*`
+child like the others; the two runtime-GC-floor knobs that sat at the top of that section stay
+in `heap.rs` under their own header. No behaviour change; `heap.rs` 7,536 → 6,802.
+

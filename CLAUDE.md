@@ -145,8 +145,10 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                heap.rs (per-process heap + shared regions + env chain: construction,
                source-positions, definition-sites, alloc, accessors, env-chain, globals)
                with child modules heap/{gc.rs (roots/collection/RUNTIME-compaction/stats),
-               map_ops.rs (CHAMP ops), equality.rs (equality/compare/hash),
-               vm_cache.rs (VM body cache + inline caches)} — children of `heap`, so they
+               gc_runtime.rs, map_ops.rs (CHAMP ops), equality.rs (equality/compare/hash),
+               vm_cache.rs (VM body cache + inline caches), facts.rs (side facts, ADR-320),
+               positions.rs (form positions, compile context, def sites + name facts),
+               roots_buf.rs} — children of `heap`, so they
                reach Heap's private items via `use super::*`, alloc.rs,
                blob.rs (cross-process zero-copy blob heap), map_champ.rs (CHAMP
                map trie), table.rs (shared mutable table — Brood's ETS, ADR-107), sync.rs

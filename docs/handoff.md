@@ -153,7 +153,7 @@ should be the same thin shell.
 **Verify per step.** `cargo nextest run -p nest -j1` (capped) — these tests run the real binary;
 `make green --local`; `make smoke-bedit`. **Done when** `main.rs` is under ~300 lines.
 
-### Item 5 — Split `crates/lisp/src/core/heap.rs` (7,500 lines)
+### Item 5 — Split `crates/lisp/src/core/heap.rs` (7,500 lines) — STARTED 2026-09-06: positions + def sites moved (`heap/positions.rs`, 734 lines; `heap.rs` 7,536 → 6,802). Next groups: the env chain + globals (`// ===== Environment chain` through the Phase-2 dependency recorder), then the freeze/`SharedCode` construction
 
 **Do.** The GC, CHAMP, equality and VM-cache pieces are already child modules under `heap/`
 (`use super::*` reaches private items). Move the next cohesive groups the same way, one per
