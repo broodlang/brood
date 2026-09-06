@@ -120,7 +120,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-110 | **`tests/exit_test.blsp` "the reason survives work done after the signal" flaked once under full-suite load — `:noproc` where `:badness` was expected** — three ADR-311 cases spawned a body that ENDS on its own and then called `monitor`; under load the child finished first and monitoring a dead pid fired a synthetic `:noproc`. 1 in 5570 on 2026-09-05; 0/30 standalone | ✅ **fixed 2026-09-05** — the three self-ending cases use `spawn-monitor` (ADR-309), which registers the monitor before the child runs, so `:noproc` is impossible by construction (the primitive's own doc measured the two-step form: adjacent 0/300 lost the reason, one 5 ms yield between them 40/40). Same mechanism as KI-59 and the reason ADR-309 exists; the parked bodies in the file never finish and keep the two-step form |
 | KI-112 | **`stdimage/build` wrote an image missing every root global of a module the building process had already loaded — `project`'s 31, so every later `nest check` died on an unbound `*ns-package*`.** Surfaced when `nest stdimage` was routed through `std/tool/nest.blsp` (ADR-322), whose load pulls the toolchain in before the build; the probe that attributes root globals diffs names before/after `require-one`, which is a no-op for a loaded module, and an unclaimed root was silently skipped as "the prelude's" | ✅ **fixed 2026-09-05** (never pushed) — `stdimage` stays a Rust arm, built before any std module loads; and `build` now REFUSES to write when a root global is neither owned by a probe nor bound by the prelude (`%prelude-global?`, a new kernel query over the freeze's binding names), naming the orphans. Sabotage-shaped gates in `crates/cli/tests/stdimage_refuses_dirty_process.rs` and `blsp_dispatch.rs` |
 | KI-108 | **`crash_report_default::an_unsupervised_crash_is_reported_through_the_lazy_arm` flaked once under a full-suite load — stderr entirely empty** — the script slept a fixed 500 ms after spawning a crashing process and the harness read stderr after exit; the lazy arm loads the reporter's nine modules before printing, and one loaded run took longer than the window. 5/5 green in isolation at 0.53 s | ✅ **FIXED 2026-09-04** — KI-79's class (a wall clock standing in for synchronisation) and KI-79's fix: a **deadline, not a window**. Nothing in-language can observe "report printed" (the prelude shim holds the `:crash-reporter` name from arm time), so the HARNESS watches the child's stderr pipe and stops it the moment `[crash]` + the reason are there, with a 15 s ceiling. Healthy runs now take **~50 ms** (the old window was 10× the normal path and still lost once). Sabotage-verified: with no crash in the script the test fails at the deadline with `no crash report`, not a hang |
-| KI-107 | **`tests/eval_server_test.blsp:189` — "`:all` traces, and cannot exceed the spy cap" fails ~1 run in 20**, on its liveness half: `(is (> (count (get r :spy)) 0))` sees an EMPTY spy list. Measured 2026-09-04: 1/20 standalone runs, and one retry-recovered flake in a full `cargo nextest` workspace run | ✅ **FIXED 2026-09-06** — the three `:all` tests were never isolated: `:isolated` written BEFORE a `(test …)` form in a describe body was a bare keyword the body evaluated and dropped, so they ran in the parallel phase beside every other traced request's `untrace-all`. `describe` now splices a body-position `:isolated`/`:skip`/`:tags` into the test form it precedes and rejects any other stray keyword at expansion; 31 tests in 10 files were running concurrently under that marker. Reproduced on the day's tree at 3/160 before, **0 of 120** after (60 source path, 60 image path; gate: `tests/describe_modifiers_test.blsp`) |
+| KI-107 | **`tests/eval_server_test.blsp` — "`:all` traces, and cannot exceed the spy cap" fails with an EMPTY `:spy`**, about 1 run in 17 standalone; two refuted fixes on 2026-09-05 | ✅ **CLOSED 2026-09-06 — two mechanisms, both fixed.** (1) `eval-capturing`'s teardown called `debug/untrace-all` and restored every wrapper in the shared registry, a concurrent request's included — teardown now restores only what the request installed (measured 9/150 → 10/550, 6.0% → 1.8%, guarded deterministically). (2) The residual: the three `:all` tests were NEVER isolated — `:isolated` written before a `(test …)` form in a describe body was a bare keyword the body evaluated and dropped, so they ran in the parallel phase, a concurrent `:all` request wrapped this test's function itself and restored it on its own teardown. `describe` now honours that spelling and rejects any other stray keyword (ADR-323); 31 tests in 10 files were running concurrently under the marker. 3/160 → **0/120** on the day's tree (gate: `tests/describe_modifiers_test.blsp`) |
 | KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ✅ **FIXED 2026-08-29** — closed by its own third pass, and the index row simply lagged the section (corrected 2026-09-04). A second sighting the same day KEPT its output, which rewrote the entry: the try-1 stdout holds **62 F's in runs before the timeout**, so the "timeout under load" was mass test failures with the 300 s cap hiding the names, and stderr named the class — spawned processes dying `unbound symbol: editor/serve/serve-manager` after their file's `%isolate` rolled the globals back. Three defects, each fixed. The lasting lesson is the one the entry was filed for: the original sighting was undiagnosable because the run was piped through `tail -5`, discarding the one thing worth having. ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
 | KI-76 | **`make green` ran the `.blsp` gates against a binary no documented command refreshes, and reported two failures that did not exist.** It gated on `target/release/nest` while its own advice said to run `make release`, which builds `RELEASE_DIR=target/release-fast` — a *different* binary. The one it read was **9 commits behind** (`464b6c57`), so it carried a pre-rename `std/` baked in and reported `defserver` (renamed from `defprocess` since) and `third` as `unbound symbol` — 8 warnings, all phantom. Both names exist; the current binary returns **zero warnings**. The staleness guard could not have caught it either: it fired only when `std/` or `crates/` had *uncommitted* changes, i.e. never on the clean tree you have right before a push, which is exactly when this gate is consulted | ✅ **FIXED 2026-08-28** — `green.sh` now picks whichever of release-fast/release reports **HEAD's sha** (the `--version` mechanism `make doctor` already used), and a binary that is stale *or* older than any `std/`/`crates/` source is a **failure**, not a note: a stale binary's verdict is meaningless in both directions, so it must not be possible to read a green — or a red — off the wrong `std/`. Sabotage-verified: with uncommitted `std/` edits it prints "the .blsp gates DID NOT RUN" in place of a verdict. **Addendum 2026-08-29:** the same defect verbatim in `check-examples`/`check-stress`/`check-corpora` (fixed inline in `green.sh` only), which on a lean `make release` brood additionally reported an absent DEV_MODULE (`reload/on-change`) as *rename rot* — the exact class the gate exists to find. All three now share `scripts/lib/gate-binary.sh`, which resolves by sha and separates "this build lacks the module" from "this name is gone" |
 | KI-79 | **`live_migration::deep_receive_continuations_resume_correctly_across_workers` failed once in CI, on the commit that moved the JIT preempt handler.** The test runs up to 400 bursts and fails unless `migrate_count() > 0` — it asserts a scheduler event was **observed**, not that results are right. In the failing run the per-burst correctness assertion passed **400/400**; only the "was a migration seen" assertion fired, which is the case the test's own message anticipates ("if this is the only failure and the machine was loaded, suspect scheduler starvation"). Suspicious anyway, because `12b31fc2` outlined `jit_run_fast_link`'s cold arms — including the **preempt** outcome that live migration depends on | ✅ **FIXED 2026-09-02** — closed by that day's flake sweep, and the index row simply lagged the section (corrected 2026-09-04). The liveness check is a **deadline** now, not a burst count: the budget had already gone 40 → 400 and still went red once, because a loaded machine needs more *time*, not more attempts — a count spends the same number of slower bursts before giving up. The loop still exits on the first burst that migrates (0.2 s healthy) and keeps trying for 45 s, well under nextest's 120 s cap so a genuine scheduler failure still reports as this assertion rather than a timeout. Generalised from a `process_limit_test` flake the same day — same defect class, different language: *assert a condition, not an observation within a window*. ⚠️ **WATCHING 2026-08-28** — not reproduced in 18 local runs (10 unpinned + 8 pinned to 2 cores, matching CI's core count). The change is provably a **verbatim** move: a line-by-line diff of the 117 moved lines against the original shows zero semantic differences, and the only new code is `if outcome == 0 { … return }` ahead of the delegation. It also cannot change *when* a preempt happens — the native arm's tick poll decides that, and only the handling moved. **25 further pinned (2-core) runs on 2026-08-29: 0 failures.** Mitigated rather than closed: `live_migration` now carries `retries = 1`, the gap the `distribution` override already documents. **If it recurs, get whether the correctness assertion also failed** — that is the line between starvation and a real capture-machinery bug |
@@ -6554,17 +6554,22 @@ caught it before anything was written. Read the section numbers, not the index.
 
 **Related.** KI-79 (the same fix for `live_migration`), KI-80, ADR-313 (the lazy arm).
 
-## KI-107 — `eval_server_test`'s `:all` cases are coupled through shared trace state ✅ FIXED 2026-09-06
+## KI-107 — `eval_server_test`'s `:all` cases are coupled through shared trace state ✅ CLOSED 2026-09-06 (two mechanisms)
 
-> **Resolution 2026-09-06.** The tests were never isolated. Every `:isolated` in that
+> **Resolution 2026-09-06 (the closing half).** Lands on top of the scoped-teardown fix
+> recorded further down, which took the rate from 6.0% to 1.8% and explains what it could not:
+> the tests were never isolated. Every `:isolated` in that
 > describe body is written BEFORE its test form — `:isolated (test "…" …)` — and the `test`
 > macro reads its modifiers AFTER the name, `(test "…" :isolated …)`. Inside a `describe`
 > body the bare keyword was an ordinary form: it evaluated to itself, did nothing, and the
 > `(test …)` after it registered as a PARALLEL test. So the three `:trace :all` cases ran in
 > the parallel phase beside each other and beside every other traced request, each of whose
 > `eval-capturing` teardown runs `untrace-all` over the shared registry — which is precisely
-> the coupling the file's own comments describe and the marker was meant to prevent. That is
-> also why both refuted fixes below changed nothing: quiescing between isolated steps and a
+> the coupling the file's own comments describe and the marker was meant to prevent. With the
+> teardown scoped, the residual was a CONCURRENT `:all` request resolving to THIS test's
+> function, wrapping it itself ("newly installed" from its own view) and restoring it on its
+> own teardown — which is why the per-test baseline was refuted twice: it never addressed the
+> concurrency. That is also why the two refuted fixes of 2026-09-05 changed nothing: quiescing between isolated steps and a
 > per-test baseline both act on the isolated phase, and these tests were not in it. And why
 > the evidence showed `:all` resolving to seven functions of four tests and `evsrv-t-*`
 > names present: the tests really were concurrent.
@@ -6602,6 +6607,50 @@ caught it before anything was written. Read the section numbers, not the index.
 > `macroexpand-1` of a bare `describe` inside a test WORKER returns the form unchanged (the
 > worker's compile context has no module imports), where `reflect/eval` of the qualified
 > `test/describe` raises — a gate that asserts on expansion must qualify the name.
+
+> **Earlier the same day — the scoped teardown (the 6.0% → 1.8% half).**
+>
+> **2026-09-06 — one mechanism identified, fixed and measured; a residual remains.**
+>
+> **The mechanism.** `eval-capturing`'s teardown called `debug/untrace-all`, which restores
+> **every** entry in a registry that is shared globals — so one request's teardown stripped a
+> wrapper a *concurrent* request had just installed, that request's trace stopped mid-recursion,
+> and its reply came back with an empty `:spy` and no error anywhere. That matches the evidence
+> recorded below exactly: the wrapper installed and then lost, and **no refusal for the failing
+> test's own name**.
+>
+> **Fix.** `eval-server-try-traces` records the names this request NEWLY wrapped (those
+> `debug/traced-current?` said were not already wrapped) and teardown restores exactly those.
+> A name someone else had already traced is deliberately not recorded: `trace-fn` is idempotent
+> and left their wrapper alone, so this request has nothing to put back for it. The parent-side
+> `untrace-all` on the `:down` and timeout paths stays — a killed child never reached its own
+> teardown, and cleaning the image is the point there.
+>
+> **Measured, with a real baseline.** 150 runs of the unfixed tree and 550 of the fixed one,
+> `brood --test tests/eval_server_test.blsp`, counting the `:all` spy-cap failure specifically:
+>
+> | | failures | rate |
+> |---|---|---|
+> | before | 9 / 150 | **6.0 %** |
+> | after | 10 / 550 | **1.8 %** |
+>
+> χ² = 7.59, p ≈ 0.006. The first reading was 3/40 against 1/100 and looked like a clean kill;
+> it was not — a 40-run baseline cannot distinguish 7.5 % from 2 %, and a later 150-run block of
+> the *same* fixed build read 5/150. The honest comparison needed a same-N baseline, and the
+> effect survived it at about a **3.3× reduction**.
+>
+> **Guarded deterministically**, which a 6 % flake otherwise cannot be: `teardown restores only
+> what the request traced (KI-107)` installs a trace OUTSIDE a request, runs a traced request,
+> and requires the outside trace to survive. Sabotage-verified — with `untrace-all` back in
+> `eval-capturing` it fails on **every** run, not one in fifteen.
+>
+> **Still open at 1.8 %, and one theory refuted a second time.** The per-test session baseline
+> was re-tried, on the reasoning that scoping teardown had changed its premise: `reset-baseline!`
+> plus a boundary in each `:all` test read **3/150**, indistinguishable from the fix alone, so the
+> "`:all` spans tests" theory is now refuted twice and was not shipped. Remaining candidates, in
+> order: the parent-side `untrace-all` (still image-wide, on a path the tests should not reach —
+> worth confirming they do not); and **refcounting the registry**, so a wrapper shared by two
+> requests is restored only by its last user, which is the general form of the fix above.
 
 ## KI-107 — `eval_server_test`'s `:all` cases are coupled through shared trace state (original record) — superseded by the resolution above
 

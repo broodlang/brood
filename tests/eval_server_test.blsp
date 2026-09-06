@@ -191,6 +191,30 @@
       (is (> (count (get r :spy)) 0)) ; it really traced
       (is (<= (count (get r :spy)) eval-server/*spy-entry-cap*)))))
 
+(describe "teardown restores only what the request traced (KI-107)"
+  ;; The flake this closes was one request's teardown stripping ANOTHER's wrapper: it called
+  ;; `debug/untrace-all`, which restores every entry in a registry that is shared globals, so
+  ;; the victim's trace stopped mid-recursion and its reply came back with an empty `:spy` —
+  ;; about 1 run in 15, with no error anywhere. `:isolated` never prevented it, because a test
+  ;; step awaits its worker and not the processes that worker spawned.
+  ;;
+  ;; Asserted DETERMINISTICALLY rather than by re-running the race: install a trace outside a
+  ;; request, run a traced request, and require the outside trace to survive its teardown.
+  ;; With `untrace-all` back in `eval-capturing` this fails every single run — which is what a
+  ;; guard for a 7% flake has to do to be worth anything.
+  :isolated (test "a request's teardown leaves alone a trace it did not install"
+    (reflect/eval (list 'defn 'evsrv-ki107-outsider '(x) '(* 2 x)))
+    (debug/trace-fn 'evsrv-ki107-outsider)
+    (is (debug/traced-current? 'evsrv-ki107-outsider))
+    (let (r (eval-capturing "(defn evsrv-ki107-inner (x) (+ x 1))\n(evsrv-ki107-inner 1)"
+              ["evsrv-ki107-inner"]))
+      (assert= (get r :ok) true)
+      (is (> (count (get r :spy)) 0)))
+    (is (debug/traced-current? 'evsrv-ki107-outsider))
+    ;; …and the request DID restore its own: the inner name is no longer wrapped.
+    (refute (debug/traced-current? 'evsrv-ki107-inner))
+    (debug/untrace-fn 'evsrv-ki107-outsider)))
+
 (describe "boundary tracing (:trace)"
   ;; :isolated — tracing rebinds globals and `untrace-all` clears a SHARED registry,
   ;; so these must not run beside each other (concurrently they flipped each other's
