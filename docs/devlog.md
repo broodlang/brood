@@ -11429,3 +11429,52 @@ had quietly come apart. `ships_passing_tests` now also asserts the run prints no
 which costs nothing because it already had the output in hand — the per-case cost note in that
 file is about scaffolding a project per gate, and this adds no scaffold. Sabotage-verified:
 restoring the bare `(:use log)` reddens `template_default::ships_passing_tests`.
+
+## 2026-09-06 (later) — KI-107: the teardown that restored everything, and a baseline that was too small to say so
+
+**The mechanism, at last.** `eval-capturing`'s teardown called `debug/untrace-all`, which
+restores **every** entry in a registry that is deliberately shared globals. So one request's
+teardown stripped a wrapper a *concurrent* request had just installed; the victim's trace
+stopped mid-recursion and its reply came back with an empty `:spy` and no error anywhere. That
+is exactly what the 2026-09-05 investigation had already written down without naming — "its
+wrapper was installed and then lost, which points at a concurrent `debug/untrace-all`" — and it
+explains why `:isolated` never helped: a test step awaits its worker, not the processes that
+worker spawned, so the *previous* unit's evaluator is still alive and tearing down.
+
+Teardown now restores only the names the request itself wrapped. `eval-server-try-traces` asks
+`debug/traced-current?` before each install and records the ones that were not already wrapped —
+a name someone else had traced is deliberately not recorded, because `trace-fn` is idempotent
+and left their wrapper alone, so this request has nothing to put back for it. The parent-side
+`untrace-all` on the `:down` and timeout paths stays: a killed child never reached its own
+teardown, and cleaning the image is the whole point there.
+
+**The measurement is the part worth reading.** The first comparison was **3/40 before** against
+**1/100 after** and looked like a clean kill. It was not. A 40-run baseline cannot distinguish
+7.5 % from 2 %, and a later 150-run block of the *same fixed build* read 5/150 — which is how I
+noticed. Re-measured properly, same N on both sides, counting the `:all` spy-cap failure
+specifically:
+
+| | failures | rate |
+|---|---|---|
+| before | 9 / 150 | **6.0 %** |
+| after | 10 / 550 | **1.8 %** |
+
+χ² = 7.59, p ≈ 0.006 — a real ~3.3× reduction that survives a baseline big enough to test it.
+The lesson is the repo's own rule about A/B floors, in a domain where it is easier to forget:
+**a flake rate is a measurement, and a measurement needs a control of comparable size.** Three
+failures is not a baseline; it is three failures.
+
+**Guarded deterministically**, which a 6 % flake otherwise cannot be. The new case installs a
+trace OUTSIDE a request, runs a traced request, and requires the outside trace to survive the
+teardown — and asserts the request *did* restore its own. Sabotage-verified: with `untrace-all`
+put back it fails on **every** run rather than one in fifteen, which is what a guard for a rare
+race has to do to be worth anything.
+
+**Not closed, and one theory refuted a second time.** 1.8 % remains. The per-test session
+baseline was re-tried on the reasoning that scoping teardown had changed its premise —
+`reset-baseline!` plus a boundary in each `:all` test — and read **3/150**, indistinguishable
+from the fix alone. So the "`:all` spans tests" theory is refuted twice now, and neither the API
+nor the test change shipped: the previous session's rule about not shipping on a false narrative
+applies to a second attempt as much as a first. Remaining candidates are recorded in KI-107, the
+strongest being to refcount the registry so a wrapper shared by two requests is restored only by
+its last user — the general form of the fix that landed.

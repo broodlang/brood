@@ -182,6 +182,18 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
+**Addendum 2026-09-06 (later) — KI-107's mechanism is found and fixed; it is NOT closed.**
+`eval-capturing`'s teardown called `debug/untrace-all` and so restored every wrapper in a shared
+registry, stripping a concurrent request's. Teardown now restores only what the request itself
+installed. Measured against a same-N baseline: **9/150 → 10/550** (6.0 % → 1.8 %, χ² 7.59,
+p ≈ 0.006), guarded deterministically (the guard fails on every run with `untrace-all` back, not
+one in fifteen). **The measuring lesson, which cost the first conclusion:** the initial 3/40 vs
+1/100 read like a clean kill and was noise — a 40-run baseline cannot tell 7.5 % from 2 %, and a
+later 150-run block of the same fixed build read 5/150. A flake rate needs a control of
+comparable size. Residual 1.8 %; the per-test session baseline was re-tried and refuted a second
+time (3/150), so the next candidates are the parent-side `untrace-all` and refcounting the trace
+registry. KI-107 stays a WATCH item.
+
 **Addendum 2026-09-06 — the two small ones are done; next is KI-107.** The LSP tags a
 deprecation now (`DiagnosticTag::DEPRECATED` + `CompletionItemTag::DEPRECATED`), so ADR-283's
 fourth surface works; the diagnostic side recognises it by the checker's wording, which is pinned
