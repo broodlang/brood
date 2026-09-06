@@ -175,12 +175,14 @@
   ;; The cap is the safety net for `:all` more than for a name list: a session can define
   ;; a lot, and tracing all of it must still bound what comes back.
   ;;
-  ;; Bounded, not exact. `untrace-all` clears a registry that `%isolate` does not roll back
-  ;; (isolation copies global BINDINGS), so a neighbouring traced test can pull this one's
-  ;; wrapper mid-recursion and the entry count lands anywhere below the cap — the same
-  ;; shared-registry hazard the `:isolated` note at the top of the section describes. The
-  ;; claim that matters here is that `:all` cannot flood a reply, and `<=` is that claim;
-  ;; asserting a specific number would be asserting the scheduler.
+  ;; The trace registry is a plain global, so `%isolate` DOES roll it back along with every
+  ;; other binding — what it cannot do is stop a CONCURRENT test's `untrace-all` (every
+  ;; traced request's teardown) from stripping this wrapper mid-recursion, which is why the
+  ;; three `:all` cases are `:isolated`: alone, the count is the cap exactly. They carried
+  ;; the marker for months without being isolated (KI-107 — a bare `:isolated` before a
+  ;; test form was a no-op until `describe` learned to read it), and this assertion failed
+  ;; at 3-8% for as long as the other `:all` tests could reach it. `<=` stays the claim
+  ;; that matters (`:all` cannot flood a reply); `> 0` keeps it from passing vacuously.
   :isolated (test ":all traces, and cannot exceed the spy cap"
     (baseline-globals)
     (let (r (eval-capturing "(defn evsrv-all-chat ((0) 1) ((n) (* n (evsrv-all-chat (- n 1)))))\n(evsrv-all-chat 200)"

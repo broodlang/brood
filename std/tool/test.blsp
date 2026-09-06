@@ -259,8 +259,58 @@ docs/testing.md for the full guide.")
 (defn- describe-body-has-tests? (body)
   (any? body form-contains-test?))
 
+;; A modifier written BEFORE a test form in a describe body — `:isolated (test "…" …)` — is
+;; spliced into that form, after its name, so it means what `(test "…" :isolated …)` means.
+;; Until 2026-09-06 a bare keyword in a describe body was an ordinary form: it evaluated to
+;; itself and did nothing, and the test it stood before registered as a PARALLEL test. The
+;; spelling is the natural one (109 files use it; at the head of a body it is the group-level
+;; modifier, so it reads as the same thing per test) and it was believed everywhere it was
+;; written — 31 tests in 10 files had been running concurrently under a marker saying they
+;; must not, and `eval_server_test`'s three `:trace :all` cases flaked at 5-8% for exactly
+;; that reason (KI-107, two candidate fixes refuted before the marker was checked). Any OTHER
+;; bare keyword in a body is an expansion-time error, so the mistake cannot go quiet again.
+(defn- test-describe-form? (f)
+  (and (pair? f) (includes? (list 'test 'deftest) (first f))))
+
+(defn- test-splice-mods (form mods)
+  ;; `(test name body…)` → `(test name mod… body…)`; `test`'s own `test-split-mods` reads
+  ;; the modifiers right after the name, so an already-modified form takes more.
+  (cons (first form) (cons (second form) (append mods (rest (rest form))))))
+
+(defn- test-lift-prefix-mods (forms acc)
+  (cond
+    (empty? forms) (reverse acc)
+    (includes? (list :isolated :skip) (first forms))
+      (if (test-describe-form? (second forms))
+        (test-lift-prefix-mods (rest (rest forms))
+          (cons (test-splice-mods (second forms) (list (first forms))) acc))
+        (error "describe: "
+          (first forms)
+          " must stand directly before a (test …) form, or be "
+          "the group's own modifier right after its name — found it before "
+          (pr-str-bounded (second forms))))
+    (= (first forms) :tags)
+      (if (test-describe-form? (third forms))
+        (test-lift-prefix-mods (rest (rest (rest forms)))
+          (cons (test-splice-mods (third forms) (list :tags (second forms))) acc))
+        (error "describe: :tags "
+          (pr-str (second forms))
+          " must stand directly before a "
+          "(test …) form, or be the group's own modifier right after its name"))
+    (= (first forms) :serial)
+      (error "describe: :serial is a GROUP mode and has no per-test meaning — put it right "
+        "after the group name, or mark the one test :isolated")
+    (keyword? (first forms))
+      (error "describe: stray keyword "
+        (first forms)
+        " in the body — a bare keyword here does "
+        "nothing; did you mean (test \"…\" "
+        (first forms)
+        " …)?")
+    else (test-lift-prefix-mods (rest forms) (cons (first forms) acc))))
+
 (defmacro describe (group & forms)
-  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. Warns (advisory) if the group contains no tests."
+  "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on. Inside the body, `:isolated`, `:skip` or `:tags [kw …]` written directly before a `(test …)` form applies to that test alone (the same as writing it inside the form after its name); any other bare keyword in the body is an error. Warns (advisory) if the group contains no tests."
   (if (keyword? group)
     (error "describe: group name must be a string, not keyword "
       (pr-str group)
@@ -270,7 +320,7 @@ docs/testing.md for the full guide.")
     (let (parts (test-split-mods forms :parallel nil)
           mode (first parts)
           tags (second parts)
-          body (third parts)
+          body (test-lift-prefix-mods (third parts) nil)
           skip (nth parts 3))
       `(do
          (def *collecting* true)

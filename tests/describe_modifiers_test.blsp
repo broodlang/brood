@@ -1,0 +1,72 @@
+;; A modifier written BEFORE a test form in a describe body (KI-107).
+;;
+;; `(describe "g" (test "a" …) :isolated (test "b" …))` used to register `b` as a PARALLEL
+;; test: the bare keyword was an ordinary body form that evaluated to itself. The spelling
+;; is what people reach for — at the head of a body it IS the group modifier — and 31 tests
+;; in 10 files were running concurrently under a marker that said they must not, three of
+;; them the coupled `:trace :all` cases that flaked at 5-8% for a day of investigation.
+;;
+;; These cases read the EXPANSION, not the registry: registering a fixture would put it in
+;; `*units*`, i.e. into the very suite that is running (the same reason
+;; `test_selection_test.blsp` builds synthetic units).
+
+(defmodule describe-modifiers-test (:use test))
+
+(defn- expansion-text (form)
+  (pr-str (macroexpand-1 form)))
+
+(defn- expansion-error (form)
+  ;; `reflect/eval`, not `macroexpand-1`: in a test worker the latter hands a form whose
+  ;; expansion RAISED back unchanged, so the error is invisible to it. Evaluating raises at
+  ;; expansion time — before `describe` registers anything — so a green run leaves `*units*`
+  ;; untouched, and a regressed one fails the assertion rather than passing quietly.
+  (try (do (reflect/eval form) nil) (catch e (error-message e))))
+
+(describe "a modifier before a test form applies to that test"
+  (test ":isolated is spliced in after the name, and only into the form it precedes"
+    (let (text (expansion-text '(test/describe "g" (test "a" 1) :isolated (test "b" 2) (test "c" 3))))
+      (is (includes? text "(test \"b\" :isolated 2)"))
+      (is (includes? text "(test \"a\" 1)"))
+      (is (includes? text "(test \"c\" 3)"))
+      ;; the group mode stays :parallel — the marker was per test
+      (is (includes? text "emit-describe :parallel"))))
+
+  (test ":skip and :tags splice the same way, and stack with the form's own modifiers"
+    ;; `(test "z" 0)` first: a modifier at the HEAD of the body is the group's own (below).
+    (let (text (expansion-text '(test/describe "g"
+                                  (test "z" 0)
+                                  :skip (test "a" 1)
+                                  :tags [:db]
+                                  (test "b" :isolated 2))))
+      (is (includes? text "(test \"a\" :skip 1)"))
+      (is (includes? text "(test \"b\" :tags [:db] :isolated 2)"))))
+
+  (test "a modifier at the HEAD of the body is still the group's own"
+    (let (text (expansion-text '(test/describe "g" :isolated (test "a" 1) (test "b" 2))))
+      (is (includes? text "emit-describe :isolated"))
+      (is (includes? text "(test \"a\" 1)"))))
+
+  (test "deftest takes the modifier too"
+    (is (includes? (expansion-text '(test/describe "g"
+                                      :isolated (deftest a 1)
+                                      :isolated (deftest b 2)))
+          "(deftest b :isolated 2)"))))
+
+(describe "a stray keyword in a describe body is an error, not a silent no-op"
+  (test "an unknown keyword"
+    (is (includes? (expansion-error '(test/describe "g" (test "a" 1) :bogus (test "b" 2)))
+          "stray keyword :bogus")))
+
+  (test ":isolated before something that is not a test form"
+    (is (includes? (expansion-error '(test/describe "g"
+                                       (test "a" 1)
+                                       :isolated (let (x 1) (test "b" x))))
+          "must stand directly before a (test …) form")))
+
+  (test ":isolated as the LAST body form has nothing to apply to"
+    (is (includes? (expansion-error '(test/describe "g" (test "a" 1) :isolated))
+          "must stand directly before")))
+
+  (test ":serial has no per-test meaning"
+    (is (includes? (expansion-error '(test/describe "g" (test "a" 1) :serial (test "b" 2)))
+          "GROUP mode"))))

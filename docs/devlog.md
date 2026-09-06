@@ -11429,3 +11429,20 @@ had quietly come apart. `ships_passing_tests` now also asserts the run prints no
 which costs nothing because it already had the output in hand — the per-case cost note in that
 file is about scaffolding a project per gate, and this adds no scaffold. Sabotage-verified:
 restoring the bare `(:use log)` reddens `template_default::ships_passing_tests`.
+
+## 2026-09-06 — KI-107 was never a tracing bug: the `:isolated` marker was a no-op (ADR-323)
+
+`eval_server_test`'s three `:trace :all` cases write `:isolated (test …)`; the `test` macro
+wants `(test "…" :isolated …)`, and a bare keyword in a describe body did nothing. The tests
+ran in the parallel phase beside every other traced request's `untrace-all` — exactly the
+coupling the file's comments describe, and why yesterday's two candidate fixes (both acting
+on the isolated phase) changed nothing. The summary line said `3 isolated` for six markers.
+Tree-wide: 31 tests in 10 files were concurrent under a marker saying they must not be.
+`describe` now lifts a body-position `:isolated`/`:skip`/`:tags` into the test after it and
+rejects any other stray keyword at expansion. Reproduced 3/160 before; 0/120 after (60 on each std path). One
+test the isolation exposed (`project_test` build-info comparing against a leaked global) is
+fixed. Traps: `macroexpand-1` of a bare macro name inside a test worker returns the form
+unchanged — qualify it or `reflect/eval`; and the registry IS rolled back by `%isolate`
+(`%registry-cas!` → `env_define`), contrary to the comments — concurrency, not rollback, was
+the hazard.
+

@@ -912,10 +912,18 @@
   ;; The suite runs inside the brood repo, so the unbundled path finds a real manifest and
   ;; a real git HEAD. That is the whole point of the fallback: an app run from source can
   ;; state its version too, instead of only once shipped.
+  ;; Compared against the manifest READ HERE, not against `*project-version*`: that global
+  ;; is set by `project/setup`, which this test never calls — it passed for as long as a
+  ;; neighbouring parallel test's `setup` happened to leak the value into the shared table,
+  ;; and failed the day those neighbours became genuinely `:isolated` (KI-107's fix).
   (test "an unbundled binary in a checkout reads its app from project.blsp and dates it by git"
-    (let (info (project/build-info))
+    (let (info (project/build-info)
+          root (project/find-root (file/cwd))
+          manifest (reflect/read-first (file/slurp (path/join root "project.blsp")))
+          version (project/plist-get (rest manifest) :version))
+      (is (string? version))
       (assert= (get info :app) "brood")
-      (assert= (get info :app-version) *project-version*)
+      (assert= (get info :app-version) version)
       (is (int? (get info :built-at)))
       (is (not (nil? (get info :commit))))
       ;; `built-at` is the newer of HEAD's commit and the newest source mtime, so it is

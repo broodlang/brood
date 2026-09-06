@@ -21001,3 +21001,38 @@ restore that emits nothing onto a pipe (`RawTermGuard`). One trap, immediately v
 spot, so every `nest check` printed `[?25h…[?1049l` on its way out and the missing-file test's
 `starts_with` broke — `then(|| …)` is the lazy form. `main.rs` 1,192 → 1,054. Left in Rust:
 `completions`/`complete`, `stdimage` (KI-112), `mcp`, `release`, `gen`.
+
+## ADR-323 — A modifier before a test form in a `describe` body applies to that test
+
+**Context.** `test` takes its modifiers after the name: `(test "…" :isolated …)`. `describe`
+takes its own right after the group name: `(describe "…" :isolated …)`. Between those two
+positions — a bare `:isolated` written in a describe body, directly before a `(test …)` form —
+was an ordinary body form: it evaluated to a keyword, did nothing, and the test after it
+registered as parallel. The spelling is the one people reach for (it is how the group-level
+modifier reads, applied per test); 109 test files use it, 31 tests in 10 files mid-body, where
+it was silently dropped, including the three `:trace :all` cases of `eval_server_test` that
+flaked at 3-8% for a day of investigation and two refuted fixes (KI-107). The runner had fixed
+the *other* half of this trap a month earlier (a per-test `:isolated` inside a describe used to
+be dropped by `register-test`), and its summary line reported the true count all along — `3
+isolated` for six markers — which nobody read as a discrepancy.
+
+**Decision.** `describe` lifts a body-position `:isolated`, `:skip`, or `:tags [kw …]` into
+the `(test …)`/`(deftest …)` form directly after it, splicing it in after the name, so the two
+spellings mean the same thing. A modifier at the HEAD of the body stays the group's own
+(unchanged: `test-split-mods` consumes it first), so `(describe "g" :isolated (test a) (test
+b))` still isolates both — a superset of the per-test reading, and the only backward-compatible
+one. Any other bare keyword in a body is an expansion-time error: an unknown keyword ("stray
+keyword …; did you mean `(test "…" :kw …)`"), a modifier before something that is not a test
+form, a modifier with nothing after it, and `:serial` (a group mode with no per-test meaning).
+The rule that makes this safe to accept rather than reject: a bare keyword in a describe body
+can never be intentional, so recognising three of them and refusing the rest loses nothing.
+
+**Consequences.** 31 tests that were parallel are isolated now — they run first, alone, under
+`%isolate`. One of them exposed a test passing on a leaked global (`project_test`'s
+build-info case), fixed to read what it compares against. Suite wall time moves by the cost of
+those units running serially. Gate: `tests/describe_modifiers_test.blsp`, on the EXPANSION —
+a registered fixture would land in the running suite's `*units*` — with the macro named
+qualified (`test/describe`), because `macroexpand-1` of a bare name inside a test worker
+returns the form unchanged rather than expanding it, which is how a first draft of the gate
+passed its error cases vacuously.
+

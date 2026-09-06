@@ -506,7 +506,10 @@ mod tests {
         // below the replacement. Without it the editor was the one surface that showed a
         // deprecation exactly like every other name.
         let mut interp = Interp::new();
-        let r = resolve(&mut interp, item("not=".into(), CompletionItemKind::FUNCTION));
+        let r = resolve(
+            &mut interp,
+            item("not=".into(), CompletionItemKind::FUNCTION),
+        );
         assert_eq!(
             r.tags.as_deref(),
             Some(&[CompletionItemTag::DEPRECATED][..]),
@@ -527,7 +530,10 @@ mod tests {
     fn resolve_leaves_a_live_name_untagged() {
         // The negative half: the tag comes from the recorded fact, not from resolving.
         let mut interp = Interp::new();
-        let r = resolve(&mut interp, item("not".into(), CompletionItemKind::FUNCTION));
+        let r = resolve(
+            &mut interp,
+            item("not".into(), CompletionItemKind::FUNCTION),
+        );
         assert_eq!(r.tags, None, "a live name carries no tag: {r:?}");
     }
 

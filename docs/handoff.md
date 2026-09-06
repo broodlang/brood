@@ -35,11 +35,11 @@ One item per session is fine. Each item says what to do, how to verify, and what
 >    is a *compile error* rather than a silent omission surfacing in another subsystem. Its gate
 >    (ADR-321) now exists, so it can land behind it. Step 1 alone adds an abstraction nothing
 >    uses — decide whether to do 1–3 together.
-> 2. **KI-107 — the `eval_server_test` `:all` flake, ~5-8% standalone.** TWO candidate fixes
->    were measured and refuted (2/25 → 3/60 quiescing isolated steps; 4/80 with a per-test
->    session baseline); both reverted. Evidence points at a concurrent `debug/untrace-all`
->    stripping a wrapper mid-run. The next candidate is a per-process trace registry, which
->    `eval-server` relies on being shared — a design change, not a patch.
+> 2. **KI-107 — FIXED 2026-09-06 (ADR-323).** Not a tracing bug: `:isolated` written before
+>    a test form in a describe body was a silent no-op, so the three `:all` tests were never
+>    isolated. `describe` now honours that spelling and rejects stray keywords. 31 tests in
+>    10 files became genuinely isolated; watch the suite for any other test that was passing
+>    on a neighbour's leaked global (one found and fixed in `project_test`).
 > 3. **`compute-frontier.md` §7.9 — lead 2, unmeasured but now measurable.** Needs a machine
 >    where `make ab --floor` and `perf stat` are fair game; benchmarks are not run on the dev
 >    box this was written from.
