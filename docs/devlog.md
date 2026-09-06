@@ -11478,3 +11478,46 @@ nor the test change shipped: the previous session's rule about not shipping on a
 applies to a second attempt as much as a first. Remaining candidates are recorded in KI-107, the
 strongest being to refcount the registry so a wrapper shared by two requests is restored only by
 its last user — the general form of the fix that landed.
+
+## 2026-09-06 (later still) — KI-107 refcounted: the second user of a shared trace is countable now
+
+Scoping teardown to "the names I installed" (earlier today) left a hole, and the hole is the
+interesting part. Request A installs a wrapper; request B calls `trace-fn` on the same name and
+gets a **documented no-op**, because a second wrapper would trace every call twice; B therefore
+records nothing to restore — and when A finishes first it takes the wrapper away while B is
+still running. The registry is shared globals, so B was *uncountable*.
+
+`debug/trace-hold` / `debug/trace-release` make it countable. A hold ensures the wrapper exists
+and adds one holder; a release removes one and restores only at the last. The detail that makes
+it compose with the REPL: **a fresh install is its own first holder**, so an interactive
+`trace-fn` counts as one, and a request that holds and releases the same name leaves that trace
+exactly as it found it. `trace-fn`/`untrace-fn` keep their toggle meaning — refcounting *them*
+would make `untrace-fn` fail to untrace after two `trace-fn`s, which is the documented contract
+— and `untrace-fn` drops holds, so a late release is a no-op rather than a second restore.
+
+**The parent-side `untrace-all` was the same bug one level up**, and this file proves it live:
+the `answer` tests time out on purpose, and the timeout path restored the *whole image*, taking
+wrappers from requests still running. Holds are now recorded under the evaluator's pid, so the
+parent releases exactly that child's (`release-holds-of`). Neither path is image-wide any more.
+
+| | failures | rate | |
+|---|---|---|---|
+| before | 9 / 150 | 6.00 % | |
+| scoped teardown | 10 / 550 | 1.82 % | p ≈ 0.006 vs before |
+| **refcounted** | **3 / 450** | **0.67 %** | **p ≈ 0.00006 vs before** |
+
+**What the numbers do not say, stated because it would be easy to imply otherwise.** Refcounted
+against the earlier scoped teardown is p ≈ 0.11 — not established at this N. The refcount ships
+because it closes a mechanism the scoped version provably leaves open, demonstrated by a
+deterministic guard rather than by the rate; the parent-side scoping likewise. Neither is
+claimed to have moved the flake rate on its own.
+
+**Three guards, each sabotage-verified to fail on every run**, which is what a guard for a 6 %
+race has to do. One methodological note worth keeping: the third sabotage *passed* at first, and
+the guard was fine — my patch matched a ten-space pattern that also occurs inside the
+thirty-six-space `:down` branch, so it broke a different arm than the one it meant to. A
+sabotage that does not redden is two hypotheses, not one: the guard may be weak, or the sabotage
+may have missed. Check which before believing either.
+
+**Still open at 0.67 %** — three failures in 450, same assertion, no mechanism currently named.
+Two are named, fixed and guarded; KI-107 stays a WATCH item for the third.

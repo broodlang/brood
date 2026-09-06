@@ -315,6 +315,11 @@ self-restore re-stamps the generation, so it is not mistaken for a redefinition.
         (debug-rebind sym orig))
       (%swap-registry! debug/*traced-fns* (fn (m) (dissoc m sym)))
       (%swap-registry! debug/*trace-generations* (fn (m) (dissoc m sym)))
+      ;; …and any holds, so a later `trace-release` for this name is a no-op rather than a
+      ;; second restore. `untrace-fn`/`untrace-all` are the blunt path — an interactive undo,
+      ;; or a parent cleaning up after an evaluator it killed — and they end the trace for
+      ;; everyone by design; leaving a stale count would only make the next release lie.
+      (%swap-registry! debug/*trace-holds* (fn (m) (dissoc m sym)))
       sym)))
 
 (defn untrace-all ()
@@ -332,6 +337,65 @@ was attempted."
 (defn traced-fns ()
   "The symbols currently instrumented by `trace-fn`/`break-fn`."
   (keys *traced-fns*))
+
+;; ---- shared traces: hold / release ------------------------------------------
+;; The registry above is SHARED GLOBALS, deliberately — that is what lets a parent clean up
+;; after an evaluator it killed. The consequence is that two independent users of the same
+;; traced name are invisible to each other: the second `trace-fn` is a documented no-op
+;; (a second wrapper would trace every call twice), so when the FIRST one finishes and calls
+;; `untrace-fn`, it silently pulls the wrapper out from under the second. That is KI-107 —
+;; an eval-server request whose trace stopped mid-recursion and whose reply came back with an
+;; empty `:spy`, no error anywhere, about one run in seventeen.
+;;
+;; So a user that brackets a trace holds it. `trace-hold` ensures the wrapper exists and adds
+;; one holder; `trace-release` removes one and restores only at the last. A name traced
+;; INTERACTIVELY is the holder of its own install, so a request that holds and releases the
+;; same name leaves the REPL's trace exactly as it found it.
+;;
+;; `trace-fn`/`untrace-fn` keep their documented meaning — install and restore, a toggle —
+;; because that is the interactive contract and refcounting it would make `untrace-fn` fail
+;; to untrace after two `trace-fn`s. The pair here is for a caller with a scope.
+(defonce *trace-holds* {}) ; sym -> how many holders; absent means "not held"
+(defn trace-hold (sym)
+  "Trace `sym` if it is not already traced, and register one HOLDER either way; returns `sym`.
+Pair with [[trace-release]], which restores the original only when the last holder lets go.
+
+For a caller whose tracing has a scope — an eval-server request, a debugger session — running
+beside other such callers on one image. `trace-fn` alone cannot express that: it is idempotent,
+so the second caller cannot tell it did not install, and the first caller's `untrace-fn` then
+takes the wrapper away while the second is still using it (KI-107)."
+  (if (traced-current? sym)
+    (do
+      (%swap-registry! debug/*trace-holds*
+        (fn (m) (assoc m sym (inc (or (get m sym) 1)))))
+      sym)
+    ;; A fresh install is its own first holder, so an interactive `trace-fn` counts as one too
+    ;; and a request that holds and releases it cannot end up restoring someone else's trace.
+    (do
+      (trace-fn sym)
+      (%swap-registry! debug/*trace-holds* (fn (m) (assoc m sym (or (get m sym) 1))))
+      sym)))
+
+(defn trace-release (sym)
+  "Drop one holder registered by [[trace-hold]]; `untrace-fn` when it was the last. Returns the
+number of holders left, or nil if `sym` was not held.
+
+A name nobody holds is left alone — an untraced name, or one already restored by
+`untrace-all` — so a release is always safe to run on teardown."
+  (let (n (get *trace-holds* sym))
+    (when n
+      (if (<= n 1)
+        (do
+          (%swap-registry! debug/*trace-holds* (fn (m) (dissoc m sym)))
+          (untrace-fn sym)
+          0)
+        (do
+          (%swap-registry! debug/*trace-holds* (fn (m) (assoc m sym (dec n))))
+          (dec n))))))
+
+(defn trace-holds ()
+  "Every held trace as `sym -> holder count` — the holds [[trace-hold]] has registered."
+  *trace-holds*)
 
 ;; ---- causal spans: correlate work across the share-nothing boundary ---------
 (defn span (label thunk)
