@@ -183,9 +183,49 @@ retries = 1
 # `crates/lisp/tests/completion_load_cost.rs` fail immediately if `complete` starts loading
 # `project` or `scaffold` again, naming the offending global. Fix a red budget by reading that
 # test, not by raising this number.
+# Raised 180s -> 360s on 2026-09-06, and the instruction above was followed rather than
+# skipped: `completion_load_cost.rs` was read FIRST, and it holds — `(require-one 'complete)`
+# is 5 ms and pulls in 27 globals, all of them `complete`'s own. So this is not the dependency
+# coming back, and the budget is not hiding it.
+#
+# What it is: the same engine mismatch every other raise in this file has turned out to be.
+# The CI `differential (tree-walker)` job runs this case under `BROOD_VM=0` and timed out at
+# **180.005s** on five consecutive commits. Measured here, same commit, case alone on a
+# 12-core idle box: **22.4s under the VM, 46.9s under the tree-walker**. A 2-core runner
+# sharing the box with the workspace build runs this case several times slower again (the
+# measured contention factor for this very case was >4.7x), so 180s was under water and 360s
+# is ~7.7x the measured tree-walker figure.
+#
+# Recorded because it should not be lost, and stated as measurements rather than a diagnosis:
+# the 10.5s figure above was taken 2026-08-18 and this case now runs **22.4s** on the VM. The
+# growth is NOT in the thing that produced KI-39 and is not user-visible — a single completion
+# is **7ms** on the release binary, in every position the matrix exercises (static, `doc <TAB>`,
+# `test --only <TAB>`), and `(require-one 'complete)` is 5ms pulling in 27 globals, all its own.
+# What is left is 96 spawns of a `[profile.test]` binary with debug-assertions armed. Whether
+# the doubling is that profile, the runner, or something since, I did not bisect; the next
+# person to care should measure a single spawn first, because that number is the one a user
+# feels and it is fine.
 [[profile.default.overrides]]
 filter = 'binary(complete) and test(completion_never_fails_however_it_is_called)'
-slow-timeout = { period = "60s", terminate-after = 3 }
+slow-timeout = { period = "60s", terminate-after = 6 }
+
+# `every_baked_in_module_loads_under_contracts_from_source` (cli/tests/contracts_mode.rs, KI-113)
+# loads EVERY baked-in std module with `BROOD_CONTRACTS=1` from SOURCE — the configuration that
+# skips both images by construction, so it is the heaviest module-loading case in the workspace
+# by design, exactly as `image_matches_source` is for the image path.
+#
+# It landed 2026-09-06 with no override and so took the 120s default, which was never sized for
+# the tree-walker: the CI `differential (tree-walker)` job runs it under `BROOD_VM=0` and it
+# TIMED OUT at 120.008s. Measured here, case alone on a 12-core idle box: **15.5s under the VM,
+# 80.7s under the tree-walker** — a 5.2x engine ratio, and the 2-core shared runner multiplies
+# it again. 60s x 8 = 480s is ~6x the measured tree-walker figure.
+#
+# The budget hides no regression class, for the same reason `image_matches_source`'s does not:
+# what this test catches is a module that will not load under contracts, and that fails in
+# seconds, not slowly. If it goes red again, check the engine ratio before the number.
+[[profile.default.overrides]]
+filter = 'binary(contracts_mode) and test(every_baked_in_module_loads_under_contracts_from_source)'
+slow-timeout = { period = "60s", terminate-after = 8 }
 
 # `image_matches_source` (ADR-280) loads EVERY std module twice — once from source, once
 # from the freshly built image — and diffs the resulting bindings, so it is the heaviest
