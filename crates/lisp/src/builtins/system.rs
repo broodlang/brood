@@ -1040,6 +1040,13 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // link alive with exponential-backoff `(connect …)` retries; subscribers get
     // [:nodeup]/[:nodedown]. Pure Brood over connect/monitor-node/nodes. Opt-in.
     embedded_module!("reconnect", "std/net/reconnect.blsp"),
+    // A DNS client over TCP: resolve a name to its A/AAAA records. Enumerating the
+    // addresses behind a name is how a cluster finds its own members — Fly gives one
+    // AAAA per machine at `<app>.internal`, a headless Kubernetes service one A per
+    // pod — and Erlang has `:inet_res` for exactly this. TCP because the kernel has
+    // no UDP and DNS over TCP is a required transport (RFC 7766), so it needs no new
+    // Rust. Pure Brood over tcp. Opt-in.
+    embedded_module!("dns", "std/net/dns.blsp"),
     // Server-Sent Events (text/event-stream): a client reader process that streams
     // events to a subscriber's mailbox (pairs with ui's `with-events`) + server-side
     // framing. Pure frame parsing + a thin IO loop over tcp; reuses http's URL/header

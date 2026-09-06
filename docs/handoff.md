@@ -190,10 +190,24 @@ restored this test's own function. The summary's `3 isolated` for six markers sa
 `describe` now lifts a body-position `:isolated`/`:skip`/`:tags` into the test after it and rejects
 any other stray keyword at expansion; 31 tests in 10 files became genuinely isolated (one,
 `project_test`'s build-info case, had been passing on a neighbour's leaked global — fixed).
-3/160 → 0/120 on the day's tree, on top of the scoped teardown below. Gate:
+3/160 → 0/120 on the day's tree, on top of the scoped teardown and the refcount below — whose
+0.67% residual "with no mechanism named" was this: the tests it measured were never in the isolated phase. Gate:
 `tests/describe_modifiers_test.blsp`, sabotage-verified. Two record corrections: `%isolate` DOES
 roll the trace registry back (`%registry-cas!` → `env_define`); and `macroexpand-1` of a bare
 macro name inside a test WORKER returns the form unchanged — qualify it.
+
+**Addendum 2026-09-06 (last) — KI-107 is REFCOUNTED: 6.0 % → 0.67 %, still not closed.** Two
+mechanisms, both now fixed and guarded. The trace registry is shared globals, so a second user
+of a traced name was uncountable — `trace-fn` no-ops for them — and the first user's teardown
+took the wrapper away. `debug/trace-hold`/`trace-release` count holders, with a fresh install
+counting as its own first holder so an interactive trace cannot be stolen. The parent-side
+`untrace-all` was the same bug one level up and is live in that file (the `answer` tests time out
+on purpose); holds are recorded per evaluator pid and the parent releases only its own child's.
+**Read the numbers carefully:** 9/150 → 3/450 against the baseline is p ≈ 0.00006, but refcount
+vs the earlier scoped teardown is p ≈ 0.11 and is NOT established — both ship on a deterministic
+guard, not on the rate. Residual 0.67 % with no mechanism named. **A trap worth carrying:** a
+sabotage that does not redden is two hypotheses — weak guard, or missed patch. Mine matched a
+ten-space pattern inside a thirty-six-space line and broke the wrong branch.
 
 **Addendum 2026-09-06 (later) — KI-107's mechanism is found and fixed; it is NOT closed.**
 `eval-capturing`'s teardown called `debug/untrace-all` and so restored every wrapper in a shared

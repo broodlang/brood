@@ -202,6 +202,46 @@
   ;; request, run a traced request, and require the outside trace to survive its teardown.
   ;; With `untrace-all` back in `eval-capturing` this fails every single run — which is what a
   ;; guard for a 7% flake has to do to be worth anything.
+  ;; The parent's cleanup after a KILLED evaluator, which is the residual that survived
+  ;; scoping the ordinary teardown: it used to call `debug/untrace-all` and so restored the
+  ;; whole image, taking wrappers from requests that were still running. This file times out
+  ;; on purpose elsewhere, so that path really does fire beside the tracing tests.
+  :isolated (test "a timed-out evaluator's cleanup leaves another holder's trace alone"
+    (reflect/eval (list 'defn 'evsrv-ki107-bystander '(x) '(+ x 7)))
+    (debug/trace-hold 'evsrv-ki107-bystander)
+    (let (r (answer {:id 501 :src "(letrec (go (fn () (go))) (go))" :timeout-ms 60}))
+      (assert= (get r :timeout) true))
+    (is (debug/traced-current? 'evsrv-ki107-bystander))
+    (debug/trace-release 'evsrv-ki107-bystander)
+    (refute (debug/traced-current? 'evsrv-ki107-bystander)))
+
+  ;; The refcount itself, stated directly rather than through a request: two holders, and the
+  ;; wrapper survives the first release. This is the half a request-level test cannot show,
+  ;; because a request holds each name exactly once — and it is the half that closes the
+  ;; residual, where request A installs, B finds it already traced, and A tears down first.
+  :isolated (test "a held trace survives another holder letting go"
+    (reflect/eval (list 'defn 'evsrv-ki107-shared '(x) '(+ x 1)))
+    (debug/trace-hold 'evsrv-ki107-shared)
+    (debug/trace-hold 'evsrv-ki107-shared)
+    (is (debug/traced-current? 'evsrv-ki107-shared))
+    (assert= (debug/trace-release 'evsrv-ki107-shared) 1)
+    (is (debug/traced-current? 'evsrv-ki107-shared)) ; ← the second holder still has it
+    (assert= (debug/trace-release 'evsrv-ki107-shared) 0)
+    (refute (debug/traced-current? 'evsrv-ki107-shared)))
+
+  ;; An INTERACTIVE trace is the holder of its own install, so a request cannot release it out
+  ;; from under the REPL: `trace-fn` counts as one holder, a hold makes two.
+  :isolated (test "a plain trace-fn counts as a holder, so a scope cannot steal it"
+    (reflect/eval (list 'defn 'evsrv-ki107-manual '(x) '(* 3 x)))
+    (debug/trace-fn 'evsrv-ki107-manual)
+    (debug/trace-hold 'evsrv-ki107-manual)
+    (debug/trace-release 'evsrv-ki107-manual)
+    (is (debug/traced-current? 'evsrv-ki107-manual))
+    (debug/untrace-fn 'evsrv-ki107-manual)
+    (refute (debug/traced-current? 'evsrv-ki107-manual))
+    ;; …and `untrace-fn` dropped the hold, so a late release is a no-op rather than a lie
+    (assert= (debug/trace-release 'evsrv-ki107-manual) nil))
+
   :isolated (test "a request's teardown leaves alone a trace it did not install"
     (reflect/eval (list 'defn 'evsrv-ki107-outsider '(x) '(* 2 x)))
     (debug/trace-fn 'evsrv-ki107-outsider)

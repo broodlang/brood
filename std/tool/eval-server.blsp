@@ -185,43 +185,96 @@ definitions, with the language's and any later-required module's excluded. What
   ;; its own source text for call heads — and so never saw a helper the source doesn't name.
   (if (= trace :all) (session-globals) (or trace [])))
 
+;; ---- holds a killed evaluator can no longer release --------------------------
+;; A traced request holds its wrappers and releases them at teardown — but an evaluator the
+;; parent KILLS never reaches its teardown, and its held set died with it. The parent used to
+;; answer that with `debug/untrace-all`, "the trace registry is shared globals, so the parent
+;; can", and that is the KI-107 mechanism restated one level up: a timeout in one request
+;; wiped every wrapper in the image, including those a CONCURRENT request was still using.
+;; The `answer` tests include a deliberate timeout, so this is not hypothetical — it is the
+;; residual that survived scoping the ordinary teardown.
+;;
+;; So the held set lives where the parent can reach it: a registry keyed by the evaluator's
+;; pid. The child records as it holds; it clears its own entry on a normal teardown; the
+;; parent releases exactly that pid's holds when it kills or buries the child. Nothing
+;; image-wide, and a leaked entry is bounded by the child's lifetime rather than forever.
+(def- *trace-holders* {}) ; evaluator pid -> {name true} it currently holds
+(defn- eval-server-note-hold (pid name)
+  (%swap-registry! eval-server/*trace-holders*
+    (fn (m) (assoc m pid (assoc (or (get m pid) {}) name true))))
+  nil)
+
+(defn- eval-server-forget-holds (pid)
+  (%swap-registry! eval-server/*trace-holders* (fn (m) (dissoc m pid)))
+  nil)
+
+(defn release-holds-of (pid)
+  "Release every trace hold recorded for evaluator `pid` and forget it; returns how many.
+
+The parent's cleanup after a child that could not run its own teardown — a kill on deadline,
+or an abnormal death. Replaces `debug/untrace-all` on those paths, which restored the whole
+image and so took wrappers away from requests that were still running (KI-107)."
+  (let (names (keys (or (get *trace-holders* pid) {})))
+    ;; check-allow :discarded-catch — best-effort release; a name redefined since is reported by `untrace-fn`
+    (doseq (n names)
+      (check-allow :discarded-catch (try (debug/trace-release (symbol n)) (catch _ nil))))
+    (eval-server-forget-holds pid)
+    (count names)))
+
 (defn- eval-server-try-traces (names acc)
   ;; Install a boundary trace on every requested name that is a function right now;
   ;; a name that isn't (yet) defined is skipped.
   ;;
-  ;; Records in `acc` under `:installed` the names THIS request actually wrapped — the ones
-  ;; `traced-current?` said were not already wrapped — so teardown can restore exactly those
-  ;; instead of every entry in a registry that is shared globals. A name someone else had
-  ;; already traced is deliberately not recorded: `trace-fn` is idempotent and left their
-  ;; wrapper alone, so this request has nothing to put back for it (KI-107).
+  ;; Takes a HOLD on each name (`debug/trace-hold`) rather than a bare `trace-fn`, and records
+  ;; the held set in `acc` so teardown can release exactly those. The registry is shared
+  ;; globals, so two requests tracing the same name are otherwise invisible to each other —
+  ;; the second `trace-fn` is a documented no-op, and the first request`s teardown then pulls
+  ;; the wrapper out from under it. That is KI-107. A hold makes the second user countable,
+  ;; and the wrapper survives until the last one lets go.
+  ;;
+  ;; Two different periods, and conflating them broke a test the first time round. The HOLD is
+  ;; once per name per REQUEST — teardown releases each held name once, so a per-form hold
+  ;; would leak holders the single release cannot match. The INSTALL stays per form, because
+  ;; that is what re-wraps a name the previous form redefined (and wraps one that did not
+  ;; exist yet); skipping it for an already-held name left a mid-request redefinition
+  ;; untraced, which `tracing must never resurrect a stale definition` catches by name.
   (doseq (s (eval-server-trace-names names))
     ;; check-allow :discarded-catch — a line that is not the expected map, or a not-yet-defined trace target, is skipped
     (check-allow :discarded-catch
       (try
-        (let (sym (symbol s)
-              mine (not (debug/traced-current? sym)))
-          (debug/trace-fn sym)
-          (when (and acc mine)
-            (table/put acc :installed (assoc (or (table/get acc :installed) {}) s true))))
+        (let (held (or (table/get acc :held) {}))
+          (if (contains? held s)
+            ;; already ours — re-wrap if the name was redefined since (`trace-fn` is
+            ;; generation-aware, and a no-op when the wrapper is still current)
+            (debug/trace-fn (symbol s))
+            (do
+              (debug/trace-hold (symbol s))
+              (table/put acc :held (assoc held s true))
+              ;; …and where the PARENT can see it, in case this process is killed before
+              ;; it can release (see `release-holds-of`).
+              (eval-server-note-hold (self) s))))
         (catch _ nil)))))
 
-(defn- eval-server-untrace-installed (acc)
-  ;; Teardown: restore exactly the names this request wrapped.
+(defn- eval-server-release-traces (acc)
+  ;; Teardown: let go of exactly the names this request held. The wrapper is restored only if
+  ;; no one else is still holding it.
   ;;
   ;; This used to be `debug/untrace-all`, and that is KI-107. The trace registry is shared
   ;; GLOBALS — deliberately, so a parent can clean up after a child it killed — so a request
   ;; tearing down restored every wrapper in the image, including one a CONCURRENT request had
   ;; just installed. The victim's own trace then stopped mid-recursion and its reply came back
-  ;; with an empty `:spy`, about 1 run in 15, with no error anywhere: the evidence showed the
+  ;; with an empty `:spy`, about 1 run in 17, with no error anywhere: the evidence showed the
   ;; wrapper installed and then lost, and no refusal for the name that lost it.
   ;;
   ;; `:isolated` does not prevent it. A test step awaits its worker, not the processes that
   ;; worker spawned, so the PREVIOUS unit's evaluator can still be alive and tearing down
   ;; while this one installs — which is why quiescing before each isolated step was measured
   ;; and did not move the rate.
-  (doseq (s (keys (or (table/get acc :installed) {})))
-    ;; check-allow :discarded-catch — best-effort restore; a name redefined since is reported by `untrace-fn` itself
-    (check-allow :discarded-catch (try (debug/untrace-fn (symbol s)) (catch _ nil))))
+  (doseq (s (keys (or (table/get acc :held) {})))
+    ;; check-allow :discarded-catch — best-effort release; a name redefined since is reported by `untrace-fn` itself
+    (check-allow :discarded-catch (try (debug/trace-release (symbol s)) (catch _ nil))))
+  ;; released by us, so the parent has nothing left to clean up for this process
+  (eval-server-forget-holds (self))
   nil)
 
 (defn- eval-server-eval-traced (src names acc)
@@ -305,7 +358,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
              :procs (eval-server-process-report pids-before)))
     (if acc
       (do
-        (eval-server-untrace-installed acc)
+        (eval-server-release-traces acc)
         (assoc r2 :spy (reverse (or (table/get acc :entries) '()))))
       r2)))
 
@@ -372,7 +425,7 @@ process died without answering."
           (%restore-compile-context ctx)
           (assoc r :id id)))
       ([:down ^ref ^child reason] (do
-                                    (debug/untrace-all)
+                                    (release-holds-of child)
                                     {:id id
                                      :ok false
                                      :error (str "evaluator died: " (pr-str reason))
@@ -381,9 +434,12 @@ process died without answering."
         (do
           (exit child :kill)
           (demonitor ref)
-          ;; a killed traced evaluator never reached its own untrace — restore
-          ;; here (the trace registry is shared globals, so the parent can)
-          (debug/untrace-all)
+          ;; A killed traced evaluator never reached its own release, so the parent does it
+          ;; — but only for THAT child. This was `debug/untrace-all`, which restored the whole
+          ;; image and so pulled wrappers out from under requests that were still running: the
+          ;; KI-107 mechanism one level up, and the residual that survived scoping the ordinary
+          ;; teardown (the `answer` tests time out on purpose, so it fires in this very file).
+          (release-holds-of child)
           {:id id :ok false :timeout true :ms timeout})))))
 
 ;; ---- the server loop ----------------------------------------------------------

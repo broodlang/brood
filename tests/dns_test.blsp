@@ -1,0 +1,35 @@
+;; A DNS client over TCP. The queries below hit a real resolver, so they are tolerant by
+;; design: this asserts the SHAPE of what comes back and the failure behaviour, never that a
+;; particular name resolves to a particular address. A test that pins someone else's DNS
+;; records fails on their schedule, not ours.
+(defmodule dns-test
+  (:use test)
+  (:alias dns))
+
+(describe "dns/lookup"
+  (test "a name that cannot resolve is an empty list, not an error"
+    (assert= [] (into [] (dns/lookup "no-such-host.invalid"))))
+
+  ;; The contract every caller depends on: enumerating peers polls repeatedly, and a peer
+  ;; being down must not raise on every tick.
+  (test "an unreachable resolver is an empty list, not an error"
+    (assert= [] (into [] (dns/lookup "example.com" dns/*a* "127.0.0.1" 300))))
+
+  (test "a malformed name is an empty list, not an error"
+    (assert= [] (into [] (dns/lookup "" dns/*a* nil 300))))
+
+  (test "localhost resolves to a loopback address"
+    (let (addrs (into [] (dns/lookup "localhost")))
+      ;; a machine with no resolver at all is not a failure of this code
+      (when (not (empty? addrs))
+        (is (includes? addrs "127.0.0.1")))))
+
+  (test "the record types are the IANA numbers"
+    (assert= 1 dns/*a*)
+    (assert= 28 dns/*aaaa*)))
+
+(describe "dns/nameserver"
+  (test "answers something usable even with no resolv.conf"
+    (let (ns (dns/nameserver))
+      (is (string? ns))
+      (is (> (string/length ns) 0)))))
