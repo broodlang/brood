@@ -214,18 +214,27 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 # skips both images by construction, so it is the heaviest module-loading case in the workspace
 # by design, exactly as `image_matches_source` is for the image path.
 #
-# It landed 2026-09-06 with no override and so took the 120s default, which was never sized for
-# the tree-walker: the CI `differential (tree-walker)` job runs it under `BROOD_VM=0` and it
-# TIMED OUT at 120.008s. Measured here, case alone on a 12-core idle box: **15.5s under the VM,
-# 80.7s under the tree-walker** — a 5.2x engine ratio, and the 2-core shared runner multiplies
-# it again. 60s x 8 = 480s is ~6x the measured tree-walker figure.
+# It landed 2026-09-06 with no override and TIMED OUT at the 120s default in the CI
+# `differential (tree-walker)` job — then again at 480s, when the first fix here was to size
+# the budget for the tree-walker (15.5s VM / 80.7s tree-walker measured on an idle 12-core
+# box; the 2-core shared runner was still over 480s). Raising a number twice is the signal
+# this file keeps recording, so the second fix was not a third raise.
 #
-# The budget hides no regression class, for the same reason `image_matches_source`'s does not:
-# what this test catches is a module that will not load under contracts, and that fails in
-# seconds, not slowly. If it goes red again, check the engine ratio before the number.
+# **The test now pins its child to `BROOD_TIER=2`.** It already pins that child's cache, its
+# image and its contract mode; the question it asks — does every module load under contracts
+# from source? — is engine-independent, and both causes it exists for (KI-81) are `sig!`'s
+# expansion-time calls and the prelude freeze rejecting a closure over a let-bound local.
+# Inheriting the job's `BROOD_VM=0` only re-asked an engine-independent question at ~5x cost.
+# Contract shims keep their tree-walker coverage in that job through `brood_suite_passes`,
+# which runs `tests/contract_test.blsp`'s 74 cases under whatever engine is ambient.
+#
+# With the pin it runs **14.6s under the tree-walker job's own environment** (from 80.7s), so
+# this budget is sized for a VM-speed case on a loaded 2-core runner: 60s x 4 = 240s, ~16x the
+# idle figure and ~3.5x a plausible loaded one. Deliberately NOT left at 480s, which would
+# have hidden a 30x regression in a case whose whole cost is module loading.
 [[profile.default.overrides]]
 filter = 'binary(contracts_mode) and test(every_baked_in_module_loads_under_contracts_from_source)'
-slow-timeout = { period = "60s", terminate-after = 8 }
+slow-timeout = { period = "60s", terminate-after = 4 }
 
 # `image_matches_source` (ADR-280) loads EVERY std module twice — once from source, once
 # from the freshly built image — and diffs the resulting bindings, so it is the heaviest
