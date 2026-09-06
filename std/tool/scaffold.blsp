@@ -95,8 +95,16 @@ test discovery, lints, release, config)."
     ;; comment inside a list is re-emitted on its own line by the formatter, which
     ;; would hoist it above the whole `defmodule` and leave `nest new` output
     ;; failing `nest format --check` on the very first run.
-    "  ;; `log` is the async, safe logger (std/log)\n"
-    "  (:use log))\n"
+    ;;
+    ;; `:exclude [error]` because `log/error` shadows the prelude's `error`, and a plain
+    ;; `(:use log)` made a freshly scaffolded project print a shadowing warning on its very
+    ;; first `nest test` — the first thing a new user sees, about code they did not write.
+    ;; Excluding it is also the honest default: `error` RAISES and `log/error` records a
+    ;; line, so the two are not interchangeable and the prelude's is the one a body reaches
+    ;; for. The scaffold thus doubles as the worked example of the escape hatch.
+    "  ;; `log` is the async, safe logger (std/log). `error` is excluded because\n"
+    "  ;; `log/error` would shadow the prelude's raising `error`; reach it as `log/error`.\n"
+    "  (:use log :exclude [error]))\n"
     "\n"
     "(defn main ()\n"
     "  \"Entry point: start the logger and print the project's greeting.\"\n"

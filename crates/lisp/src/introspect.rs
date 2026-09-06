@@ -83,6 +83,32 @@ pub fn protocol_ops(interp: &Interp, proto: &str) -> Vec<(String, usize)> {
     out
 }
 
+/// `name`'s deprecation note (ADR-283), rendered for a human: `"deprecated since 0.14.0 —
+/// use `parse-text` instead"`, or `None` if the name carries no `:deprecated` meta.
+///
+/// For the editor surfaces. `nest check` warns at the call site and `nest doc` strikes the
+/// heading through, but an editor knew nothing: the LSP published a deprecation as an
+/// ordinary yellow warning and completion went on offering the name with no marking. Both
+/// want the FACT, not the checker's sentence, because LSP carries it as a tag
+/// (`DiagnosticTag::DEPRECATED`, `CompletionItemTag::DEPRECATED`) that the client renders
+/// itself — a strikethrough, and a de-ranked completion.
+///
+/// Reads the recorded metadata directly; no eval, and `intern_existing` for the same reason
+/// [`signature`] uses it — the LSP routes half-typed names through here on every keystroke
+/// and the interner never frees.
+pub fn deprecation(interp: &Interp, name: &str) -> Option<String> {
+    let sym = value::intern_existing(name)?;
+    let meta = interp.heap.name_meta(sym)?;
+    let version = meta.deprecated?;
+    Some(match meta.use_instead {
+        Some(u) => format!(
+            "deprecated since {version} — use `{}` instead",
+            value::symbol_name(u)
+        ),
+        None => format!("deprecated since {version}"),
+    })
+}
+
 /// The `(signature, docstring)` of a global `name`, via `(list (arglist NAME)
 /// (doc NAME))`. `name` is a CST symbol token, so it can't contain a delimiter,
 /// comment, or quote char (see [`is_delimiter`]) — interpolating it can't escape

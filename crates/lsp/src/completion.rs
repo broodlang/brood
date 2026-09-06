@@ -20,7 +20,8 @@ use brood::syntax::scope::{BindingKind, ScopeTree};
 use brood::types::check;
 use brood::Interp;
 use lsp_types::{
-    CompletionItem, CompletionItemKind, Documentation, InsertTextFormat, MarkupContent, MarkupKind,
+    CompletionItem, CompletionItemKind, CompletionItemTag, Documentation, InsertTextFormat,
+    MarkupContent, MarkupKind,
 };
 
 use brood::introspect;
@@ -165,6 +166,19 @@ pub fn resolve(interp: &mut Interp, mut item: CompletionItem) -> CompletionItem 
             kind: MarkupKind::Markdown,
             value: doc,
         }));
+    }
+    // A deprecated name is still offered — it still exists and still works, and ADR-283 is
+    // explicit that a deprecation must not gate — but it is offered as deprecated: the TAG
+    // is what makes a client strike it through and rank it below the replacement, which is
+    // the whole point of warning in the editor rather than at build time. The note goes in
+    // `detail` too, because that is the line the client shows without expanding the item,
+    // and `:use` names the replacement, which is what makes the message actionable.
+    if let Some(note) = introspect::deprecation(interp, &lookup) {
+        item.tags = Some(vec![CompletionItemTag::DEPRECATED]);
+        item.detail = Some(match item.detail.take() {
+            Some(d) => format!("{d}  — {note}"),
+            None => note,
+        });
     }
     item
 }
@@ -482,6 +496,39 @@ mod tests {
             1,
             "shadowing local should be de-duped: {labels:?}"
         );
+    }
+
+    #[test]
+    fn resolve_tags_a_deprecated_name_and_names_its_replacement() {
+        // The prelude deprecates `not=` in favour of `not` (ADR-283). Completion still
+        // OFFERS it — a deprecation is advisory, the name still works — but it must arrive
+        // tagged, because the tag is what a client renders as a strikethrough and ranks
+        // below the replacement. Without it the editor was the one surface that showed a
+        // deprecation exactly like every other name.
+        let mut interp = Interp::new();
+        let r = resolve(&mut interp, item("not=".into(), CompletionItemKind::FUNCTION));
+        assert_eq!(
+            r.tags.as_deref(),
+            Some(&[CompletionItemTag::DEPRECATED][..]),
+            "a deprecated global must be tagged: {r:?}"
+        );
+        let detail = r.detail.unwrap_or_default();
+        assert!(
+            detail.contains("deprecated since"),
+            "the note belongs in `detail`, the line shown without expanding: {detail}"
+        );
+        assert!(
+            detail.contains("`not`"),
+            "`:use` names the replacement, which is what makes it actionable: {detail}"
+        );
+    }
+
+    #[test]
+    fn resolve_leaves_a_live_name_untagged() {
+        // The negative half: the tag comes from the recorded fact, not from resolving.
+        let mut interp = Interp::new();
+        let r = resolve(&mut interp, item("not".into(), CompletionItemKind::FUNCTION));
+        assert_eq!(r.tags, None, "a live name carries no tag: {r:?}");
     }
 
     #[test]

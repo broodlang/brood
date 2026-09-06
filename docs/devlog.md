@@ -11346,3 +11346,49 @@ std/` went from clean to **ten warnings in files the change never touched**. Rev
 shape is documented as load-bearing at the macro — a tidier expansion is a checker regression.
 The lesson rhymes with the ADR's: a rule that lives in one file's pattern-match is a rule the
 next reader of *another* file cannot see.
+
+## 2026-09-06 — the two loose ends: a deprecation the editor could not show, and a scaffold that warned on its first command
+
+Both were "noticed, not fixed" notes; both are one-line symptoms with a gate-shaped cause.
+
+**1. The LSP showed a deprecation exactly like every other warning.** ADR-283 gave the language
+a real deprecation — `(meta old :deprecated "0.14.0" :use 'new)` warns at the CALL SITE at check
+time, names the replacement, and stays advisory — and three of its four surfaces worked: `nest
+check` prints it, `nest doc` strikes the heading through, `(check-allow :deprecated …)` silences
+a deliberate call. The fourth did not. The LSP published it as an ordinary yellow squiggle and
+completion went on offering the name unmarked, so the one place a deprecation is *actionable* —
+the editor, while you are typing the call — was the one place it did not look different.
+
+LSP carries this as a tag the client renders itself: `DiagnosticTag::DEPRECATED` (a
+strikethrough on the name) and `CompletionItemTag::DEPRECATED` (struck through and ranked below
+the replacement). Both now set, plus the note in the completion item's `detail`, which is the
+line a client shows without expanding. `introspect::deprecation` reads the recorded fact — no
+eval, `intern_existing` so a half-typed name on every keystroke does not leak an interner entry.
+
+The diagnostic side recognises a deprecation by the checker's own wording, because `check_file`
+returns `(Option<Pos>, String)` and has no category channel. That coupling is deliberate and
+**pinned**: `a_deprecated_call_is_tagged_deprecated_not_only_warned` fails if either side is
+reworded, and it was sabotage-verified both ways — dropping the tag reddens it, and so does
+rewording `stability_msg` to "was retired in". A negative case asserts an ordinary arity warning
+carries no tag, so the tag comes from the fact rather than from every diagnostic.
+
+**2. `nest new` warned on the first command its own epilogue tells you to run.** A scaffolded
+project's `main.blsp` had `(:use log)`, and `log/error` shadows the prelude's raising `error`, so
+`nest test` printed
+
+    warning: (:use log) refers `error`, which shadows the prelude/root `error` …
+
+before the tests it then passed. The first thing a new user sees, about code they did not write.
+Now `(:use log :exclude [error])`, with the reason in the generated comment — which also makes
+the scaffold the worked example of the escape hatch. It is the honest default independently of
+the warning: `error` RAISES and `log/error` records a line, so they are not interchangeable and
+the prelude's is the one a body reaches for.
+
+**The gate is the more interesting half.** Three scaffold gates already existed —
+`scaffolds_format_clean`, `scaffolds_check_clean`, `ships_passing_tests` — and all three were
+green through this. `nest check` alone did not warn (the shadow is reported while `nest test`
+BUILDS the project), and `nest test` exited 0 with the warning on stdout, so "green" and "clean"
+had quietly come apart. `ships_passing_tests` now also asserts the run prints no `warning:`,
+which costs nothing because it already had the output in hand — the per-case cost note in that
+file is about scaffolding a project per gate, and this adds no scaffold. Sabotage-verified:
+restoring the bare `(:use log)` reddens `template_default::ships_passing_tests`.

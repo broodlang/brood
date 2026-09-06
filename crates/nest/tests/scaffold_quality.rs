@@ -107,6 +107,22 @@ fn assert_ships_passing_tests(template: &str) {
         "{template}: expected a test summary, got:\n{}",
         tested.out
     );
+    // …and it must run CLEAN, not merely green. `nest test` builds the project first and
+    // prints the checker's warnings while doing it, then exits 0 — so a scaffold that warns
+    // passes every assertion above while showing a new user a complaint about code they did
+    // not write, on the very first command the `nest new` epilogue tells them to run. The
+    // `default` template did exactly that: `(:use log)` refers `error`, which shadows the
+    // prelude's raising `error`.
+    //
+    // Asserted here rather than in a sixth case per template because each of these scaffolds
+    // a project and runs a `nest` command against one 120 s deadline (see the note below);
+    // this reuses output already in hand and costs nothing.
+    assert!(
+        !tested.out.contains("warning:"),
+        "`nest new --template {template}` warns on its first `nest test` — a new user's first \
+         command must be clean:\n{}",
+        tested.out
+    );
 }
 
 /// ONE CASE PER (template, gate) PAIR — deliberately not one case looping over

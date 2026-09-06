@@ -182,6 +182,17 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
+**Addendum 2026-09-06 — the two small ones are done; next is KI-107.** The LSP tags a
+deprecation now (`DiagnosticTag::DEPRECATED` + `CompletionItemTag::DEPRECATED`), so ADR-283's
+fourth surface works; the diagnostic side recognises it by the checker's wording, which is pinned
+by a test that fails if either side is reworded. `nest new` no longer warns on its first
+`nest test` — `(:use log :exclude [error])`. **The gate lesson worth carrying:** three scaffold
+gates were green through that warning, because `nest check` does not report it and `nest test`
+exits 0 while printing it — "green" and "clean" had come apart, and `ships_passing_tests` now
+asserts no `warning:` in the output. Remaining from the open-threads list: **KI-107**, the
+`eval_server_test` `:all` flake (~5-8%), whose next candidate is a per-process trace registry —
+a design change, not a patch.
+
 **Addendum 2026-09-05 (latest) — item 4: EIGHT `nest` subcommands are Brood (ADR-322):
 `check`, `test` and `run` joined today.** `main.rs` is at 1,654 (from 2,771). The table
 now carries typed flags (`{:value :int :repeat :complete}`), `:many`, `:trailing`, and the

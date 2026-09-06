@@ -42,7 +42,8 @@ use lsp_types::request::{
 };
 use lsp_types::{
     CodeActionParams, CodeActionProviderCapability, CompletionItem, CompletionOptions,
-    CompletionParams, Diagnostic, DiagnosticSeverity, DocumentChanges, DocumentFormattingParams,
+    CompletionParams, Diagnostic, DiagnosticSeverity, DiagnosticTag, DocumentChanges,
+    DocumentFormattingParams,
     DocumentHighlightParams, DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams,
     FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams, HoverParams,
     HoverProviderCapability, InlayHintParams, OneOf, OptionalVersionedTextDocumentIdentifier,
@@ -1150,9 +1151,23 @@ fn typecheck_diagnostics(
                             index.position(text, index.next_char(text, off)),
                         )
                     });
+                // A deprecation is carried as a TAG as well as a warning, so the client
+                // strikes the name through instead of only colouring it yellow — which is
+                // the difference between a diagnostic you read and one you see. ADR-283
+                // keeps deprecations advisory, so the severity stays WARNING.
+                //
+                // Recognised by the checker's own wording (`types/check/walk.rs`
+                // `stability_msg`). That coupling is deliberate — `check_file` returns
+                // `(Option<Pos>, String)` and has no category channel — and it is pinned by
+                // `a_deprecated_call_is_tagged_deprecated_not_only_warned`, which fails if
+                // either side is reworded.
+                let deprecated = msg.contains(" is deprecated since ");
                 let mut diag = Diagnostic::new_simple(range, msg);
                 diag.severity = Some(DiagnosticSeverity::WARNING);
                 diag.source = Some("brood".to_string());
+                if deprecated {
+                    diag.tags = Some(vec![DiagnosticTag::DEPRECATED]);
+                }
                 out.push(diag);
             }
         }
