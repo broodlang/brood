@@ -1,0 +1,179 @@
+;; std/net/dns.blsp — a DNS client, in Brood, over TCP.
+;;
+;; Why TCP: the kernel has no UDP, and DNS over TCP is not a fallback but a required transport
+;; (RFC 7766 — "DNS over TCP MUST be supported"). Same wire format, with a two-byte length
+;; prefix in front of each message. So a resolver is reachable with the primitives that already
+;; exist, and no new Rust.
+;;
+;; Why it exists: enumerating the addresses behind a name is how a cluster finds its own
+;; members. On Fly, `<app>.internal` has one AAAA per machine; on Kubernetes a headless service
+;; has one A per pod. Erlang has `:inet_res` for exactly this and Elixir's libcluster builds its
+;; DNSPoll strategy on it — without something equivalent, a Brood node can dial a peer it was
+;; told about but cannot discover one.
+(defmodule dns
+  "Resolve a hostname to its A/AAAA records, over TCP.
+
+  `(dns/lookup \"example.com\")` → a list of IPv4 address strings;
+  `(dns/lookup \"example.com\" dns/*aaaa*)` → IPv6.
+
+  Enough DNS to enumerate a name, deliberately: one question per query, answers only, A and
+  AAAA only. Not a resolver — no recursion of its own, no cache, no DNSSEC. It asks the
+  resolver the system already uses and reads back what it says."
+  (:alias tcp))
+
+(def *a* 1)
+(def *aaaa* 28)
+
+;; ---- the resolver to ask -----------------------------------------------------
+
+(defn nameserver ()
+  "The first `nameserver` in /etc/resolv.conf, or `127.0.0.1` when there is no readable one.
+
+  A container without resolv.conf is not an error worth raising here — the connect that
+  follows will fail with something a caller can act on."
+  (let (text (check-allow :discarded-catch
+               (try (file/slurp "/etc/resolv.conf") (catch _e ""))))
+    (or (first (filter (map (string/split (or text "") "\n")
+                         (fn (line)
+                           (let (t (string/trim line))
+                             (if (string/starts-with? t "nameserver")
+                               (string/trim (string/substring t 10 (string/length t)))
+                               nil))))
+                 (fn (v) (and v (not (= v ""))))))
+      "127.0.0.1")))
+
+;; ---- building a query --------------------------------------------------------
+
+(defn- label-bytes (label)
+  "One DNS label: a length byte, then the label's bytes."
+  (bytes/concat (bytes (string/length label)) (string/->bytes label)))
+
+(defn- encode-name (host)
+  "A hostname as length-prefixed labels terminated by a zero byte — `QNAME`."
+  (bytes/concat (apply bytes/concat (map (string/split host ".") label-bytes))
+    (bytes 0)))
+
+(defn- u16 (n)
+  "A 16-bit big-endian field."
+  (bytes (bit/and (bit/shift-right n 8) 255) (bit/and n 255)))
+
+(defn- query-message (host qtype)
+  "A complete DNS query: header, one question, nothing else.
+
+  Flags `0x0100` is RD (recursion desired) — we are asking a resolver to do the walking, which
+  is the whole point of asking it rather than the root."
+  (bytes/concat (u16 22136)
+    (u16 256)
+    (u16 1)
+    (u16 0)
+    (u16 0)
+    (u16 0)
+    (encode-name host)
+    (u16 qtype)
+    (u16 1)))
+
+;; ---- reading the answer ------------------------------------------------------
+
+(defn- skip-name (msg off)
+  "The offset just past the name at `off`.
+
+  A name ends at a zero length byte, or at a two-byte COMPRESSION POINTER (top bits set) that
+  points back into the message — the pointer is the end of the name here, since we only need to
+  step over it. Without handling pointers this walks off into the middle of a record: every
+  answer after the first uses one."
+  (let (b (bytes/at msg off))
+    (cond
+      (= b 0) (+ off 1)
+      (>= b 192) (+ off 2)
+      else (skip-name msg (+ off 1 b)))))
+
+(defn- ipv4 (msg off)
+  (string/join (map (range 0 4) (fn (i) (->string (bytes/at msg (+ off i))))) "."))
+
+(defn- hex4 (n)
+  "One IPv6 group, lowercase hex, no leading zeros — the form every tool prints."
+  (let (digits "0123456789abcdef"
+        nib (fn (shift)
+              (string/char-at digits (bit/and (bit/shift-right n shift) 15)))
+        s (str (nib 12) (nib 8) (nib 4) (nib 0))
+        trimmed (letrec (drop (fn (i)
+                                (if (and (< i 3) (= (string/char-at s i) "0"))
+                                  (drop (+ i 1))
+                                  i)))
+                  (drop 0)))
+    (string/substring s trimmed 4)))
+
+(defn- ipv6 (msg off)
+  "The full eight-group form. Not the `::`-compressed one: this is fed to a connect string,
+  where being unambiguous matters more than being short."
+  (string/join (map (range 0 8) (fn (i) (hex4 (bytes/uint msg (+ off (* i 2)) 2)))) ":"))
+
+(defn- read-answers (msg off n qtype acc)
+  "Walk `n` answer records from `off`, collecting the ones matching `qtype`.
+
+  Every record is stepped over by its own RDLENGTH whether or not we want it — a response
+  carries CNAMEs and other types alongside the answer, and skipping only the ones we recognise
+  would desynchronise the walk."
+  (if (<= n 0)
+    (reverse acc)
+    (let (after-name (skip-name msg off)
+          rtype (bytes/uint msg after-name 2)
+          rdlen (bytes/uint msg (+ after-name 8) 2)
+          rdata (+ after-name 10)
+          next (+ rdata rdlen)
+          value (cond
+                  (and (= rtype *a*) (= qtype *a*)) (ipv4 msg rdata)
+                  (and (= rtype *aaaa*) (= qtype *aaaa*)) (ipv6 msg rdata)
+                  else nil))
+      (read-answers msg next (- n 1) qtype (if value (cons value acc) acc)))))
+
+;; ---- the query ---------------------------------------------------------------
+
+(defn- read-body (sock len surplus timeout-ms)
+  "`len` bytes of body, using whatever `read-n` already handed back before asking for more."
+  (let (have (bytes/length surplus))
+    (cond
+      (>= have len) (bytes/slice surplus 0 len)
+      else
+        (let ([more _] (tcp/read-n sock (- len have) {:timeout-ms timeout-ms}))
+          (bytes/concat surplus more)))))
+
+(defn lookup (host &optional (qtype *a*) (server nil) (timeout-ms 5000))
+  "The addresses `host` resolves to, as strings — `[]` when the name does not resolve, when
+  the resolver is unreachable, or when the response is malformed.
+
+  Never raises: a name that does not resolve is an ordinary answer to an ordinary question, and
+  a caller enumerating cluster peers wants an empty list rather than an exception on every poll
+  while a peer is down.
+
+  (dns/lookup \"localhost\") ;=> (\"127.0.0.1\")"
+  (or
+    (check-allow :discarded-catch
+      (try
+        (let (sock (tcp/connect (or server (nameserver)) 53)
+              ;; BEFORE the send, so the reply is decoded as bytes. Text mode is the default
+              ;; and would UTF-8-decode a binary DNS response — every byte over 0x7F becomes
+              ;; U+FFFD and the record offsets stop meaning anything (the runtime's own
+              ;; KI-102). Nothing about the failure says "wrong mode": the bytes simply
+              ;; arrive wrong.
+              _ (tcp/set-binary sock true)
+              msg (query-message host qtype)
+              _ (tcp/send sock (bytes/concat (u16 (bytes/length msg)) msg))
+              ;; TCP framing: two bytes of length, then exactly that many bytes. `read-n`
+              ;; answers `[data surplus]` — the surplus is already-arrived body, and dropping
+              ;; it would deadlock waiting for bytes we have.
+              [len-bytes surplus] (tcp/read-n sock 2 {:timeout-ms timeout-ms})
+              len (bytes/uint len-bytes 0 2)
+              body (read-body sock len surplus timeout-ms)
+              _ (tcp/close sock)
+              ancount (bytes/uint body 6 2)
+              ;; the question is echoed back before the answers; step over it
+              after-q (+ (skip-name body 12) 4))
+          (read-answers body after-q ancount qtype (list)))
+        (catch _e nil)))
+    (list)))
+
+(defn lookup-all (host &optional (server nil))
+  "Every address for `host`, IPv6 first — the order a dual-stack caller should try them in, and
+  on a v6-only network (Fly's private network, for one) the only ones that exist."
+  (append (lookup host *aaaa* server) (lookup host *a* server)))
