@@ -6652,7 +6652,7 @@ caught it before anything was written. Read the section numbers, not the index.
 > worth confirming they do not); and **refcounting the registry**, so a wrapper shared by two
 > requests is restored only by its last user, which is the general form of the fix above.
 
-## KI-107 — `eval_server_test`'s `:all` cases are coupled through shared trace state (original record) — superseded by the resolution above
+> **Original record (2026-09-04, investigated 2026-09-05) — superseded by the resolution above; kept for the evidence and the two refuted fixes.**
 
 > **Investigated 2026-09-05 — reproduced, mechanism sharpened, and TWO candidate fixes
 > measured and REFUTED. Read this before attempting a third.**
