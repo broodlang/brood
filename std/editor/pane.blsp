@@ -188,7 +188,6 @@ returned unchanged — you can't delete the only one."
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
-  (sig pane-layout-go (any list (vector int) -> map))
   (defn- pane-layout-go (node path rect)
     "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`."
     (if (pane-leaf? node)
@@ -213,6 +212,12 @@ returned unchanged — you can't delete the only one."
         {:panes (append (get la :panes) (get lb :panes))
          :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect}
                      (append (get la :dividers) (get lb :dividers)))}))))
+
+;; BELOW its definition, outside the wrapper. Indented above it, this sig was invisible to
+;; `sig_placement.rs` and, under BROOD_CONTRACTS=1 from source, its deferred contract landed
+;; at `provide` — after the loader's reserved-name exemption — and was refused, failing the
+;; module (2026-09-06). The gate now reads indented sigs too.
+(sig pane-layout-go (any list (vector int) -> map))
 
 (defn pane-layout (tree rect)
   "Lay `tree` out in `rect` (`[x y w h]` cells): a map `{:panes :dividers}` where

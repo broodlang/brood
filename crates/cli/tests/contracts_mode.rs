@@ -163,3 +163,54 @@ fn without_the_flag_nothing_is_enforced() {
         "with contracts off, a declaration is advisory and nothing raises:\n{text}"
     );
 }
+
+/// Every baked-in module must LOAD under `BROOD_CONTRACTS=1` — from SOURCE.
+///
+/// The case above boots a small program and enforces two kinds of contract, and it passed
+/// while eleven std modules could not load at all in that mode: with the stdlib image
+/// present a materialised module never evaluates its `(sig …)` forms, so the only runs that
+/// reached them were ones with no current image, which nothing in CI is. Two shapes were
+/// hiding there (2026-09-06): a `(sig *name* int)` on a VALUE — a bare type, not an arrow —
+/// which `sig!`'s position helper answered by calling `first` on the symbol; and a `sig`
+/// indented inside a `(check-allow …)` above its own `defn-`, whose deferred contract lands
+/// at `provide`, after the loader's reserved-name exemption ends, and is refused. A fresh
+/// `XDG_CACHE_HOME` plus `BROOD_NO_STDIMAGE=1` is the configuration in which both are
+/// reachable; the program requires every module the binary bakes and names each that fails.
+#[test]
+fn every_baked_in_module_loads_under_contracts_from_source() {
+    let dir = temp_dir("contracts-all-modules");
+    let program = dir.path.join("all.blsp");
+    std::fs::write(
+        &program,
+        "(doseq (m (reflect/builtin-modules))\n\
+           (let (r (try (do (require-one (symbol m)) nil) (catch e (error-message e))))\n\
+             (when r (io/puts \"FAIL \" m \" :: \" r))))\n\
+         (io/puts \"ALL-MODULES-DONE\")\n",
+    )
+    .expect("write program");
+    let cache = dir.path.join("cache");
+    std::fs::create_dir_all(&cache).expect("create cache dir");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+    cmd.arg("all.blsp")
+        .current_dir(&dir.path)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("BROOD_NO_STDIMAGE", "1")
+        .env("BROOD_CONTRACTS", "1");
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run brood");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("ALL-MODULES-DONE"),
+        "the walk must run to completion:\n{text}"
+    );
+    let failed: Vec<&str> = text.lines().filter(|l| l.starts_with("FAIL ")).collect();
+    assert!(
+        failed.is_empty(),
+        "modules that do not load under BROOD_CONTRACTS=1 from source:\n{}",
+        failed.join("\n")
+    );
+}

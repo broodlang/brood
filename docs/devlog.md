@@ -11542,3 +11542,14 @@ unchanged — qualify it or `reflect/eval`; and the registry IS rolled back by `
 (`%registry-cas!` → `env_define`), contrary to the comments — concurrency, not rollback, was
 the hazard.
 
+## 2026-09-06 (later) — KI-113: contracts mode could not load eleven std modules from source
+
+Checking the new dns module under `BROOD_CONTRACTS=1` with a private cache failed at boot for
+any file. Two shapes, both invisible whenever a stdlib image is present (a materialised module
+never evaluates its sigs): `(sig *name* int)` on a value made `%sig-pos` call `first` on a
+symbol, failing every module that loads `project`/`test`/`lineedit`; and a sig indented inside
+`check-allow` above its `defn-` in `editor/pane` deferred its contract past the loader's
+reserved-name exemption — the placement gate matched column-0 sigs only. Fixed both, widened the
+gate, and `contracts_mode.rs` now requires every baked-in module from source under contracts.
+Also today: `nest check --strict std/` was red on the dns module's undeclared offsets — declared.
+

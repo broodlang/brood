@@ -182,7 +182,14 @@ the freeze/`SharedCode` construction. Each move: `cargo build`, `cargo clippy --
   `docs/decisions-archive.md`. The `doc_refs` gate in `scripts/green.sh` checks references
   and duplicate numbers — run `make green --local` after each move.
 
-**Addendum 2026-09-06 (latest) — KI-107 is CLOSED (ADR-323): the residual 1.8% was the tests
+**Addendum 2026-09-06 (latest) — KI-113: `BROOD_CONTRACTS=1` could not load eleven std modules
+from SOURCE, fixed.** A value sig (`(sig *x* int)`) broke `sig!`'s position helper, and an
+indented above-defn sig in `editor/pane` deferred its contract past the loader's reserved-name
+exemption; both hidden by the stdlib image, which never evaluates a materialised module's sigs.
+`contracts_mode.rs` now walks every baked-in module from source under contracts. **Rule for any
+contracts-mode claim: take it with a private `XDG_CACHE_HOME` or `BROOD_NO_STDIMAGE=1`.**
+
+**Addendum 2026-09-06 (earlier) — KI-107 is CLOSED (ADR-323): the residual 1.8% was the tests
 not being isolated at all.** `:isolated` written BEFORE a `(test …)` form in a describe body was a
 bare keyword the body evaluated and dropped — the `test` macro reads modifiers AFTER the name — so
 the three `:all` cases ran in the parallel phase and a concurrent `:all` request wrapped and then

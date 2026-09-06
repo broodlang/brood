@@ -49,7 +49,15 @@ fn blsp_files(root: &Path) -> Vec<PathBuf> {
 
 /// The name a `(sig NAME …)` line declares, if the line is one.
 fn sig_name(line: &str) -> Option<&str> {
-    line.strip_prefix("(sig ")?.split_whitespace().next()
+    // Indentation-blind, like `def_name`: a `(sig …)` nested in a `(check-allow …)` wrapper
+    // used to be invisible here, which is how `std/editor/pane.blsp`'s `pane-layout-go` sat
+    // above its `defn-` and failed the module under BROOD_CONTRACTS=1 whenever it loaded from
+    // source — the deferred contract is applied at `provide`, AFTER the loader's reserved-name
+    // exemption ends, so the rebind is refused.
+    line.trim_start()
+        .strip_prefix("(sig ")?
+        .split_whitespace()
+        .next()
 }
 
 /// The name a definition form binds, if this line opens one. Matched anywhere in the line,

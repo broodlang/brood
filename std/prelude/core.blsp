@@ -822,12 +822,19 @@ arity itself is the static checker's job."
     (%contract-check-rest name rtype (rest args))))
 
 (defn- %sig-pos (xs x n)
-  "Position of `x` in the list `xs` (from index `n`), or -1. Expansion-time helper
-for `sig!` that predates `index-of` in the prelude's own load order."
+  "Position of `x` in the list `xs` (from index `n`), or -1 — also -1 when `xs` is not a
+list at all. Expansion-time helper for `sig!` that predates `index-of` in the prelude's own
+load order.
+
+The non-list answer is load-bearing: a `(sig *name* int)` declares a VALUE's type, so `sig!`
+asks where its `->` is and must hear \"nowhere\" — it used to call `first` on the symbol and
+fail the module, which under BROOD_CONTRACTS=1 took down every module loading `project`,
+`test` or `editor/lineedit` from source (2026-09-06; invisible with a stdlib image, whose
+materialised modules never evaluate their sigs)."
   (cond
     (nil? xs) -1
-    (%eq (first xs) x) n
-    else (%sig-pos (rest xs) x (%add n 1))))
+    (pair? xs) (if (%eq (first xs) x) n (%sig-pos (rest xs) x (%add n 1)))
+    else -1))
 
 (defn- %sig-rev (xs acc)
   "`xs` reversed onto `acc`. Expansion-time helper — see `%sig-take`."
@@ -885,6 +892,12 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
   ;; Register the declaration on the heap for the checker (keyed by the
   ;; module-qualified global name) — same as `(sig …)` — then install the runtime
   ;; contract. The `(do …)` keeps both effects at top level.
+  ;;
+  ;; Every prelude FUNCTION the shim calls is root-scoped (`/list`, `/str`, …): the shim is
+  ;; expanded INSIDE the module being contracted, where a bare name resolves to that module's
+  ;; own definition first — so in `(defmodule proc)` the argument list `(list ~@params)` called
+  ;; `proc/list` and every contracted `proc/*` call died with `expected 0 arguments, got 1`
+  ;; (KI-113). Special forms and `unless` are safe; no module can shadow them.
   `(do
      (%register-sig '~name '~type)
      ~(let (i (%sig-pos type '-> 0))
@@ -918,24 +931,24 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                      (def ~orig ~name)
                      (def ~name
                        (fn (~@fixed-params & ~more)
-                         (%contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
+                         (%contract-check-args '~name '~fixed-ptypes (/list ~@fixed-params) 1)
                          (%contract-check-args '~name '~opt-ptypes ~more ~(%add opt-pos 1))
                          ;; `apply` splices its trailing list, so the leading arguments go
                          ;; through as themselves. It USED to build the argument list with
-                         ;; `(append (list …) ~more)` — which broke the whole mode the day
+                         ;; `(append (/list …) ~more)` — which broke the whole mode the day
                          ;; `append` was itself given a signature: the shim `append` expands
                          ;; to calls `append`, so arming contracts over the prelude recursed
                          ;; until the stack guard fired, during EXPANSION, with no clue which
                          ;; `sig` did it. The shim must not call a function a `sig` can wrap.
-                         (let (~r (apply ~orig ~@fixed-params ~more))
-                           (unless (type-matches? '~rtype ~r)
-                             (throw (str '~name
+                         (let (~r (/apply ~orig ~@fixed-params ~more))
+                           (unless (/type-matches? '~rtype ~r)
+                             (throw (/str '~name
                                       ": result expected "
                                       '~rtype
                                       ", got "
-                                      (type-of ~r)
+                                      (/type-of ~r)
                                       " ("
-                                      (pr-str ~r)
+                                      (/pr-str ~r)
                                       ")")))
                            ~r)))))
               (%lt amp-pos 0)
@@ -953,16 +966,16 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                      (def ~orig ~name)
                      (def ~name
                        (fn (~@params)
-                         (%contract-check-args '~name '~ptypes (list ~@params) 1)
+                         (%contract-check-args '~name '~ptypes (/list ~@params) 1)
                          (let (~r (~orig ~@params))
-                           (unless (type-matches? '~rtype ~r)
-                             (throw (str '~name
+                           (unless (/type-matches? '~rtype ~r)
+                             (throw (/str '~name
                                       ": result expected "
                                       '~rtype
                                       ", got "
-                                      (type-of ~r)
+                                      (/type-of ~r)
                                       " ("
-                                      (pr-str ~r)
+                                      (/pr-str ~r)
                                       ")")))
                            ~r)))))
               ;; variadic: (fixed… & rest-type -> ret)
@@ -978,18 +991,18 @@ one shim IS variadic, so `arity-of` reports `2+` where the function reads `2-3`.
                      (def ~orig ~name)
                      (def ~name
                        (fn (~@fixed-params & ~rest-param)
-                         (%contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
+                         (%contract-check-args '~name '~fixed-ptypes (/list ~@fixed-params) 1)
                          (%contract-check-rest '~name '~rest-ptype ~rest-param)
                          ;; No `append` here either — see the `&optional` arm above.
-                         (let (~r (apply ~orig ~@fixed-params ~rest-param))
-                           (unless (type-matches? '~rtype ~r)
-                             (throw (str '~name
+                         (let (~r (/apply ~orig ~@fixed-params ~rest-param))
+                           (unless (/type-matches? '~rtype ~r)
+                             (throw (/str '~name
                                       ": result expected "
                                       '~rtype
                                       ", got "
-                                      (type-of ~r)
+                                      (/type-of ~r)
                                       " ("
-                                      (pr-str ~r)
+                                      (/pr-str ~r)
                                       ")")))
                            ~r)))))))))))
 
