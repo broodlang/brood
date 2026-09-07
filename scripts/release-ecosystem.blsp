@@ -60,6 +60,20 @@
   "Run `command` in `directory` through a shell; returns its exit code."
   (os/run-process "sh" ["-c" (str "cd " directory " && " command)]))
 
+(defn- sh-capture (directory command)
+  "Run `command` in `directory`; answer `[exit-code output-text]`.
+
+  The publish step needs the server's WORDS, not just its exit code. A 409 saying the version
+  is already published means there is nothing to do — the package is current — but it exits
+  non-zero, so a code-only reading calls it a failure and stops the train on the first package
+  that was already up to date. That is what happened on 2026-09-07: `store 0.4.3 is already
+  published` halted the run before any of the fourteen behind it were even looked at."
+  (let (out "/tmp/brood-release-step.log"
+        code (os/run-process "sh"
+               ["-c" (str "cd " directory " && " command " > " out " 2>&1")])
+        text (check-allow :discarded-catch (try (file/slurp out) (catch _e ""))))
+    [code (or text "")]))
+
 (defn- step (directory label command)
   "Run one step, printing a heading first. Returns true when it succeeded."
   (io/puts (str "  → " label))
@@ -84,9 +98,15 @@ dirty one ships bytes that are in no commit — untraceable afterwards to anythi
           (not (step directory "nest check" "nest check")) {:repo name :status :check-failed}
           (not (step directory "nest test" "nest test")) {:repo name :status :test-failed}
           (and publish? (get entry :publish?))
-            (if (step directory "nest publish" "nest publish")
-              {:repo name :status :published}
-              {:repo name :status :publish-failed})
+            (do
+              (io/puts "  → nest publish")
+              (let ([code text] (sh-capture directory "nest publish"))
+                (cond
+                  (= code 0) {:repo name :status :published}
+                  ;; immutable releases: this version is already up there, so the package is
+                  ;; current and the train should carry on rather than stop at it
+                  (>= (index-of text "already published") 0) {:repo name :status :already-published}
+                  else (do (io/puts text) {:repo name :status :publish-failed}))))
           else {:repo name :status :verified}))))
 
 ;; Listed explicitly rather than matched on the name containing "failed", which quietly let
