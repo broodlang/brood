@@ -11580,3 +11580,31 @@ method is invisible to the parent and to its siblings, and `heap.rs` calls it on
 No behaviour change; `heap.rs` 6,802 → 5,731. One thing the move exposed rather than caused:
 `global_defined` carries no doc comment, and the paragraph written for it is stranded above
 `global_generation`'s own — fixed separately so this move stays a pure cut.
+
+## 2026-09-07 (later) — heap.rs split, moves (b) and (c): the freeze, and promotion
+
+Handoff item 1's remaining group turned out to be two, because the item had grouped
+`PromoteForward` with the freeze on the strength of its position in the file. Its only users
+are the ten `promote*` methods, so it went with them instead:
+
+- **`heap/freeze.rs`** (465 lines) — `freeze_as_shared_code` and `localize_for_freeze`: the
+  once-per-runtime operation that consumes the builder heap, re-tags every handle
+  local→prelude, and returns the frozen region plus the bindings that seed each runtime's
+  global table. The copy step exists because the re-tag is only sound for LOCAL handles (KI-12).
+- **`heap/promote.rs`** (483 lines) — the promote family plus `PromoteForward`, `HandleHasher`
+  and the `HandleMap` alias, which no other module referenced.
+
+Neither move needed a visibility change: everything the parent still calls was already
+`pub`/`pub(crate)`, unlike move (a) where `env_frame` had to become `pub(super)`.
+
+`heap.rs` 5,731 → 4,782, of which 508 lines are its seven `#[cfg(test)]` modules, so ~4,275
+lines of code. The ~3,000 bar in the handoff item is therefore about 1,300 lines away, and the
+remaining bulk is not methods at all — it is the type substrate above the first `impl Heap`
+(the LOCAL string representation, the slab machinery, and the GC tuning knobs). The item now
+names those three with anchors.
+
+One thing found rather than caused, and fixed separately: `freeze_as_shared_code` has no doc
+comment of its own, and the paragraph written for it sits above `localize_for_freeze`. That is
+the second instance of this exact defect today (`global_defined` was the first), which suggests
+reading the doc *above* a moved section is worth doing on every future move — a stranded
+paragraph is invisible until the boundary moves.
