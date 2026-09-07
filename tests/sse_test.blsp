@@ -66,7 +66,7 @@
       (assert= (get h "Cache-Control") "no-cache")))
   (test "frame is the inverse of parse-event (round-trip)"
     (let ([blocks _] (sse/frames (sse/frame "a\nb" "tick"))
-          ev (sse/parse-event (first blocks)))
+          ev (sse/parse-event (or (first blocks) (error "sse-test: no blocks parsed"))))
       (assert= (get ev :event) "tick")
       (assert= (get ev :data) "a\nb"))))
 

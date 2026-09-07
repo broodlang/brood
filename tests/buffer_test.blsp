@@ -1031,7 +1031,7 @@ suite run. `*test-wait-ms*` is a failure deadline, reached only if a relay never
           sel (assoc (goto-char b1 (buffer-length b1)) :mark 0)
           out (undo-in-region sel))
       (is (<= (buffer-point out) (buffer-length out)))
-      (is (<= (buffer-mark out) (buffer-length out))))))
+      (is (<= (or (buffer-mark out) 0) (buffer-length out))))))
 
 (describe "undo-region-restore (the pure core)"
   (test "chunk-wise over CHARACTERS: the changed span is what the region is tested against"

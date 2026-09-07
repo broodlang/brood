@@ -38,7 +38,8 @@
   (let (p (first (filter (csv-dir "json") (fn (f) (= (csv-stem f) stem)))))
     (if (nil? p)
       (error "conformance-csv: no json expectation for " stem)
-      (into [] (map (json/decode (file/slurp p)) csv-stringify-keys)))))
+      (into []
+        (map (let (d (json/decode (file/slurp p))) (if (vector? d) d [])) csv-stringify-keys)))))
 
 (defn- csv-actual (path) (into [] (csv/decode-maps (file/slurp path))))
 

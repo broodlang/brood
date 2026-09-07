@@ -939,7 +939,7 @@
   (test "the runtime dates itself from its own binary, in a unit datetime can format"
     (let (ms (get (project/build-info) :brood-built-at))
       (is (int? ms))
-      (assert= (datetime/format (datetime/epoch-ms-> ms) "%Y")
+      (assert= (datetime/format (datetime/epoch-ms-> (or ms 0)) "%Y")
         (datetime/format (datetime/epoch-ms-> (os/now)) "%Y"))))
   (test "the printed report names every field and returns 0"
     (let (out (with-out-str (assert= (project/build-info-report) 0)))
