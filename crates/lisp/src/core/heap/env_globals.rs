@@ -236,11 +236,6 @@ impl Heap {
         &self.runtime.code_epoch as *const AtomicU64 as *const u64
     }
 
-    /// Is `sym` bound in the global table (prelude + user `def`s)? An authoritative,
-    /// non-racy read of `runtime.globals` (which is seeded with the prelude). Used by
-    /// the unbound-symbol diagnostic to tell a *spuriously*-unbound known global (the
-    /// fan-out race) apart from a genuinely-undefined name (a typo) — so the
-    /// scheduler-race hint only fires for the former.
     /// The rebinding generation of global `sym`: strictly increasing across `def`s of
     /// that name, 0 for a name never `def`'d in this runtime (a prelude binding, or an
     /// unbound one). See `RuntimeCode::global_generations`.
@@ -254,6 +249,11 @@ impl Heap {
             .unwrap_or(0)
     }
 
+    /// Is `sym` bound in the global table (prelude + user `def`s)? An authoritative,
+    /// non-racy read of `runtime.globals` (which is seeded with the prelude). Used by
+    /// the unbound-symbol diagnostic to tell a *spuriously*-unbound known global (the
+    /// fan-out race) apart from a genuinely-undefined name (a typo) — so the
+    /// scheduler-race hint only fires for the former.
     pub fn global_defined(&self, sym: Symbol) -> bool {
         self.runtime.globals_read().get(&sym).is_some()
     }
