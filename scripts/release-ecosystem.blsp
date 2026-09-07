@@ -95,7 +95,10 @@ dirty one ships bytes that are in no commit — untraceable afterwards to anythi
 ;; publish bytes that exist in no commit.
 (def- *fatal* [:missing :dirty :fetch-failed :check-failed :test-failed :publish-failed])
 
-(defn- failure? (result) (>= (index-of *fatal* (get result :status)) 0))
+;; `fatal?`, not `failure?`: `failure?` is a reserved name — it ships with the binary as the
+;; predicate for failure VALUES — so defining one here is a load error, not a shadow, and the
+;; script does not run at all. It read fine until failure values landed.
+(defn- fatal? (result) (>= (index-of *fatal* (get result :status)) 0))
 
 ;; Walk the list in order, stopping at the first failure — see the header: continuing past
 ;; a red repo is how a train ends up half-published.
@@ -103,7 +106,7 @@ dirty one ships bytes that are in no commit — untraceable afterwards to anythi
   (if (empty? remaining)
     (reverse acc)
     (let (result (process-repo root (first remaining) publish?))
-      (if (failure? result)
+      (if (fatal? result)
         (reverse (cons result acc))
         (run-all root publish? (rest remaining) (cons result acc))))))
 
@@ -117,7 +120,7 @@ dirty one ships bytes that are in no commit — untraceable afterwards to anythi
              root
              "\n"))
   (let (results (run-all root publish? *repos* nil)
-        failed (filter results failure?))
+        failed (filter results fatal?))
     (io/puts "\n=== summary")
     (doseq (r results) (io/puts (str "  " (get r :repo) ": " (->string (get r :status)))))
     (let (skipped (- (count *repos*) (count results)))
