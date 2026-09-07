@@ -239,7 +239,7 @@
     ;; subcommand, exit 2.) A regression test for KI-72 that never executes is worse than no
     ;; test, so resolve the real binary: beside the runner (`brood --test`, `nest test`) or
     ;; one level up (`target/release/deps/` → `target/release/`), and skip if absent.
-    (let (dir (path/dirname (os/exe-path))
+    (let (dir (path/dirname (or (os/exe-path) (error "stdimage-test: no exe path")))
           exe (first (filter [(path/join dir "brood") (path/join dir ".." "brood")] file/exists?))
           prog (path/temp "stdimage-race-")
           _ (file/spit prog

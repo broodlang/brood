@@ -65,14 +65,14 @@
     (assert= (decode "\"a\\nb\"") "a\nb")
     (assert= (decode "\"a\\tb\"") "a\tb"))
   (test "\\b and \\f decode to single control chars (no codepoint primitive needed)"
-    (assert= (string/length (decode "\"\\b\"")) 1)
-    (assert= (string/length (decode "\"\\f\"")) 1))
+    (assert= (string/length (str (decode "\"\\b\""))) 1)
+    (assert= (string/length (str (decode "\"\\f\""))) 1))
   (test "\\uXXXX BMP escapes (via the reader's \\u{} mechanism)"
     (assert= (decode "\"\\u0041\"") "A")
     (assert= (decode "\"caf\\u00e9\"") "café"))
   (test "a surrogate pair combines into one astral code point"
     (assert= (decode "\"\\ud83d\\ude00\"") "😀")
-    (assert= (string/length (decode "\"\\ud83d\\ude00\"")) 1)))
+    (assert= (string/length (str (decode "\"\\ud83d\\ude00\""))) 1)))
 
 (describe "decode — arrays + objects"
   (test "arrays: empty, flat, mixed, nested"

@@ -9,6 +9,11 @@
   (:use tcp :exclude [send listen])
   (:use-internals http))
 
+(defn- served (r)
+  "`r` as the `[port …]` vector it should be, or a failed test — the loopback helpers answer
+  `:timeout | vector`, and a `:timeout` means the exchange never happened."
+  (if (vector? r) r (error "http-test: expected a vector, got " r)))
+
 (describe "http: request parsing"
   (test "method, path, version, and lower-cased headers"
     (let (r (parse-request "GET /hi HTTP/1.1\r\nHost: example\r\nContent-Length: 0\r\n\r\n"))
@@ -367,8 +372,8 @@
                  (send me [:ready (tcp/local-port ls) (first ck)])
                  (serve-loop ls (router {"/" (fn (req) (ok "<h1>secure brood</h1>"))})))))
       (let (pc (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout)))
-        (let (resp (fetch (str "https://localhost:" (first pc) "/")
-                     {:ca (second pc)}))
+        (let (resp (fetch (str "https://localhost:" (first (served pc)) "/")
+                     {:ca (second (served pc))}))
           (assert= (get resp :status) 200)
           (is (includes? (body-text resp) "secure brood"))))))
   (test "a binary body is byte-faithful over https too"
@@ -383,8 +388,8 @@
                        {"Content-Type" "application/octet-stream"}
                        (bytes 255 128 0 7)))))))
       (let (pc (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout)))
-        (let (resp (fetch (str "https://localhost:" (first pc) "/blob")
-                     {:ca (second pc)}))
+        (let (resp (fetch (str "https://localhost:" (first (served pc)) "/blob")
+                     {:ca (second (served pc))}))
           (assert= (get resp :status) 200)
           (assert= (get resp :body) (bytes 255 128 0 7)))))))
 

@@ -396,16 +396,19 @@ produces is UTC.
 
     (datetime/seconds 2)   → 2000"
   (* n 1000))
+(sig seconds (int -> int))
 (defn minutes (n)
   "Milliseconds in `n` minutes.
 
     (datetime/minutes 1)   → 60000"
   (* n 60000))
+(sig minutes (int -> int))
 (defn hours (n)
   "Milliseconds in `n` hours.
 
     (datetime/hours 1)     → 3600000"
   (* n 3600000))
+(sig hours (int -> int))
 (defn days (n)
   "Milliseconds in `n` days.
 
@@ -414,6 +417,7 @@ produces is UTC.
 
 ;; ---- arithmetic -------------------------------------------------------------
 
+(sig days (int -> int))
 (defn add (dt ms)
   "Add `ms` milliseconds to `dt`, returning a new datetime.
 

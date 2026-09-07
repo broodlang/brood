@@ -32,7 +32,9 @@ conformance port. The oracle is upstream's own expected output in
 (def- chudnovsky-a 13591409)
 (def- chudnovsky-b 545140134)
 (def- chudnovsky-c 640320)
-(def- chudnovsky-c^3 (pow 640320 3))
+;; `pow` answers `number`; this is an exact integer and every `math/quot` below needs it
+;; to say so.
+(def- chudnovsky-c^3 (math/floor (pow 640320 3)))
 (def- chudnovsky-d 12)
 
 ;; floor(sqrt(n)) for an exact non-negative integer `n`, by Newton's method. The loop
@@ -70,6 +72,7 @@ conformance port. The oracle is upstream's own expected output in
           (+ (* q1 p2) (* q2 g1))]))))
 
 (sig chudnovsky-isqrt (int -> int))
+(sig chudnovsky-split (int int -> vector))
 (defn pi-digits (digits)
   "The first `digits` digits of π, as an exact integer (upstream's `pi`)."
   (let (num-terms (math/floor (+ 2 (/ digits 14.181647462)))
