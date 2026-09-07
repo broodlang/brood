@@ -14,9 +14,9 @@ use std::sync::OnceLock;
 use brood::Interp;
 use wasm_bindgen::prelude::*;
 
-/// Evaluate Brood `source` and return its output as text: captured stdout (from
-/// `print`/`println`) followed by the printed value of the last form, or an error
-/// report if a form raised or failed to parse.
+/// Evaluate Brood `source` and return its output as text: captured stdout (from `io/puts`
+/// and friends) followed by the printed value of the last form, or an error report if a form
+/// raised or failed to parse.
 #[wasm_bindgen]
 pub fn run(source: &str) -> String {
     let mut interp = Interp::new();
@@ -40,14 +40,16 @@ pub fn run(source: &str) -> String {
             } else if printed.is_empty() {
                 captured
             } else {
-                format!("{captured}\n{printed}")
+                // `captured` already ends in the newline `io/puts` wrote, so joining with
+                // another one put a blank line between the output and the value.
+                format!("{}\n{printed}", captured.trim_end_matches('\n'))
             }
         }
         Err(error) => {
             if captured.is_empty() {
                 format!("error: {error}")
             } else {
-                format!("{captured}\nerror: {error}")
+                format!("{}\nerror: {error}", captured.trim_end_matches('\n'))
             }
         }
     }

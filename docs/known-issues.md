@@ -121,7 +121,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-112 | **`stdimage/build` wrote an image missing every root global of a module the building process had already loaded — `project`'s 31, so every later `nest check` died on an unbound `*ns-package*`.** Surfaced when `nest stdimage` was routed through `std/tool/nest.blsp` (ADR-322), whose load pulls the toolchain in before the build; the probe that attributes root globals diffs names before/after `require-one`, which is a no-op for a loaded module, and an unclaimed root was silently skipped as "the prelude's" | ✅ **fixed 2026-09-05** (never pushed) — `stdimage` stays a Rust arm, built before any std module loads; and `build` now REFUSES to write when a root global is neither owned by a probe nor bound by the prelude (`%prelude-global?`, a new kernel query over the freeze's binding names), naming the orphans. Sabotage-shaped gates in `crates/cli/tests/stdimage_refuses_dirty_process.rs` and `blsp_dispatch.rs` |
 | KI-113 | **`BROOD_CONTRACTS=1` could not load eleven std modules from SOURCE, and its shim called the contracted module's own `list`** — every module reaching `project`, `test` or `editor/lineedit` failed with `first: expected list … got symbol (int)`, and `editor/pane` with a reserved-name refusal. Invisible in every normal run and in CI: a stdlib image is always present there, and a materialised module never evaluates its `(sig …)` forms. Found 2026-09-06 by running the dns tests under contracts with a private cache | ✅ **fixed 2026-09-06** — two shapes. (1) `(sig *name* int)` on a VALUE: `sig!`'s `%sig-pos` called `first` on the bare type; it answers -1 for a non-list now, so a value sig is a pure declaration under contracts as it always was without. (2) A `sig` indented inside `(check-allow …)` above its own `defn-`: the deferred contract lands at `provide`, after the loader's reserved-name exemption ends, and the rebind is refused; moved below, and `sig_placement.rs` now reads indented sigs. (3) The `sig!` shim template emitted bare prelude names into the module it was expanded in — `(list …)` in `proc` was `proc/list`; root-scoped now. Gate: `contracts_mode.rs` requires every baked-in module under contracts from source on a cold cache and names each failure |
 | KI-114 | **the native JIT miscompiles a numeric shape: an int-producing `math/round` result reaches `math/rem` as a FLOAT** — `pong` fails 22 of 101 tests on v0.26.0 with `rem: expected int, got float (-16.0)` / `(9.0)` / `(175.0)`, raised from `math/mod` under `pong/pong/spawn-burst-acc`. The same tree passes 101/101 on v0.25.2 (d0af81f7) and on v0.26.0 with the JIT off. Found 2026-09-07 by the ecosystem verification pass, after tagging v0.26.0 | ⚠️ **OPEN — bisected to the native tier, not the VM, router or inliner.** `BROOD_NO_JIT=1` and `BROOD_VM=0` are both green; `BROOD_NO_TW_REENTRY=1` (ADR-318's router) and `BROOD_NO_INLINE=1` both still fail, so it is neither. `BROOD_JIT_BAIL_TRACE=1` shows `math/round` and `math/mod` BAIL (`lowering-returned-none`, `call-mediated-boxed`), so the corruption is in a JIT'd CALLER, not in the math arms. No minimal repro yet: the shape alone (`(mod (+ int (round (* 120 (- c 0.5)))) 360)` in a hot loop, PRNG-threaded) does NOT reproduce in isolation |
-| KI-115 | **`io/puts` output does not reach the in-browser playground — only the last form's value is shown.** `(io/puts "hello, brood")` then `(+ 1 2 3)` displays `6` on brood.fly.dev/docs and `(1 4 9 16 25)` on /playground, with the printed line missing. Reported 2026-09-07 against the deployed v0.26.0 wasm | ⚠️ **OPEN — wasm-only; the host path is correct and now tested.** KI's ancestor `f8f647b4` fixed this for `run_program`, and `root_program_capture.rs` guards it — but the playground calls **`run_program_repr`**, which was `#[cfg(target_arch = "wasm32")]` along with the whole `last_repr`/`set_result`/`take_result` chain behind it, so no host test could reach the shipped entry point. Those are now ungated (measured: no cost — 0.58s vs 0.60s on 200 large top-level forms) and a third test asserts `run_program_repr` captures `hello, brood\n` and returns `6`. It PASSES on host, so the defect is specific to the wasm build — most likely the cooperative single-thread scheduler driving `exit.wait()`. Not reproduced off-wasm; needs a wasm build to debug |
+| KI-115 | **`io/puts` output does not reach the in-browser playground — only the last form's value is shown.** `(io/puts "hello, brood")` then `(+ 1 2 3)` displayed `6`. Reported 2026-09-07 against the deployed v0.26.0 wasm | ✅ **FIXED 2026-09-07 — `save_ctx` CLEARED the thread's `CURRENT` instead of restoring what it displaced.** On a worker thread those are identical (the thread has no context of its own), which is why it stayed invisible while processes only ran on workers. On wasm there are no workers: `wait` drives the run queue on the CALLING thread, so the snippet's own quantum ran on top of the caller's context and destroyed it — and `begin_stdout_capture` had put the capture buffer in exactly that context, so `take_capture` found nothing and every `io/puts` went to a stdout that in a browser is nowhere. `install_ctx` now stashes the displaced ctx on a `DISPLACED` stack and `save_ctx` restores it; on a worker the displaced value is `None`, so nothing changes there. **Why it survived:** the previous fix (`f8f647b4`) was correct and guarded, but `root_program_capture.rs` asserts `run_program` while the playground calls `run_program_repr`, which was `#[cfg(wasm32)]` along with the whole `last_repr`/`set_result`/`take_result` chain — no host test could name the shipped function. Worse, `test_drive_quanta`'s own docs told callers to drive "from a **fresh** thread … so the per-quantum ctx install doesn't clobber the caller's ctx": the bug was written down as standing advice, and a fresh thread is not an option on wasm. Guard: `same_thread_capture.rs` reproduces the wasm shape on the host (workers disabled, quanta driven on the spawner's thread); sabotage-verified — reverting gives `left: None, right: Some("hello, brood\n")`. Verified end to end against a locally built wasm in node: `"6"` → `"hello, brood\n6"` |
 | KI-108 | **`crash_report_default::an_unsupervised_crash_is_reported_through_the_lazy_arm` flaked once under a full-suite load — stderr entirely empty** — the script slept a fixed 500 ms after spawning a crashing process and the harness read stderr after exit; the lazy arm loads the reporter's nine modules before printing, and one loaded run took longer than the window. 5/5 green in isolation at 0.53 s | ✅ **FIXED 2026-09-04** — KI-79's class (a wall clock standing in for synchronisation) and KI-79's fix: a **deadline, not a window**. Nothing in-language can observe "report printed" (the prelude shim holds the `:crash-reporter` name from arm time), so the HARNESS watches the child's stderr pipe and stops it the moment `[crash]` + the reason are there, with a 15 s ceiling. Healthy runs now take **~50 ms** (the old window was 10× the normal path and still lost once). Sabotage-verified: with no crash in the script the test fails at the deadline with `no crash report`, not a hang |
 | KI-107 | **`tests/eval_server_test.blsp` — "`:all` traces, and cannot exceed the spy cap" fails with an EMPTY `:spy`**, about 1 run in 17 standalone; two refuted fixes on 2026-09-05 | ✅ **CLOSED 2026-09-06 — three mechanisms, all fixed.** (1) `eval-capturing`'s teardown called `debug/untrace-all` and restored every wrapper in the shared registry, a concurrent request's included — teardown now restores only what the request installed (measured 9/150 → 10/550, 6.0% → 1.8%), then `debug/trace-hold`/`trace-release` refcount a shared trace so a second user is countable (→ 3/450, 0.67%), both guarded deterministically. (3) The residual: the three `:all` tests were NEVER isolated — `:isolated` written before a `(test …)` form in a describe body was a bare keyword the body evaluated and dropped, so they ran in the parallel phase, a concurrent `:all` request wrapped this test's function itself and restored it on its own teardown. `describe` now honours that spelling and rejects any other stray keyword (ADR-323); 31 tests in 10 files were running concurrently under the marker. 3/160 → **0/120** on the day's tree (gate: `tests/describe_modifiers_test.blsp`) |
 | KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ✅ **FIXED 2026-08-29** — closed by its own third pass, and the index row simply lagged the section (corrected 2026-09-04). A second sighting the same day KEPT its output, which rewrote the entry: the try-1 stdout holds **62 F's in runs before the timeout**, so the "timeout under load" was mass test failures with the 300 s cap hiding the names, and stderr named the class — spawned processes dying `unbound symbol: editor/serve/serve-manager` after their file's `%isolate` rolled the globals back. Three defects, each fixed. The lasting lesson is the one the entry was filed for: the original sighting was undiagnosable because the run was piped through `tail -5`, discarding the one thing worth having. ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
@@ -8407,40 +8407,55 @@ every test from source and pays a failing child build in every process, which re
 (the `nest` crate went past ten minutes) before it reads as anything else. If a `nest` run is
 inexplicably slow, run `nest stdimage` by hand first.
 
-## KI-115 — `io/puts` output never reaches the playground page ⚠️ OPEN 2026-09-07
+## KI-115 — `io/puts` output never reaches the playground page ✅ fixed 2026-09-07
 
-**Symptom.** On the deployed playground and the `/docs` runnable examples, printed output is
-missing and only the last form's value appears:
+**Symptom.** On the deployed playground and the `/docs` runnable examples, printed output was
+missing and only the last form's value appeared:
 
     (io/puts "hello, brood")
     (+ 1 2 3)
-    => 6                      ; expected: hello, brood \n 6
+    => 6                      ; expected: hello, brood, then 6
 
-The page header reads `brood 0.26.0`, which comes from the wasm's own `version()`, so the
-build is current — not a stale artifact.
+**Cause.** `Process::save_ctx` ended a quantum with `CURRENT = None` rather than restoring the
+context the quantum displaced. On a worker thread that is the same thing — the thread runs
+processes and owns no context — so it was correct for as long as processes only ran on
+workers. On wasm there are no worker threads: `ProgramExit::wait` calls
+`pump_until_quiescent`, driving the run queue on the CALLING thread, so a quantum runs on top
+of the caller's own context. `playground::run` calls `begin_stdout_capture()`, which creates
+that context and puts the capture buffer in it; the snippet's quantum then cleared it, and
+`take_capture()` returned `None`. Output went to real stdout, which in a browser is nowhere.
 
-**Cause.** Not yet identified, but narrowed to the wasm build. `playground::run` calls
-`begin_stdout_capture()`, then on wasm `interp.run_program_repr(source)`, then
-`take_captured_stdout()`. The captured text comes back empty.
+**Why it survived.** Three layers, each reasonable alone:
 
-**Why it survived.** This exact bug was fixed once already — `f8f647b4` (2026-09-03), "a root
-program never inherited the caller's stdout capture" — and guarded by
-`tests/root_program_capture.rs`. That guard asserts `run_program`. The playground calls
-`run_program_repr`, which was `#[cfg(target_arch = "wasm32")]`, as were `ProgramExit::result`,
-`set_result`, `take_result` and `ProgramState::last_repr`. The entire result path existed only
-on wasm, so **no host test could name the function that ships**, and the guard could only
-assert its neighbour. A fix written specifically for this bug therefore could not be verified
-on the path the bug is on.
+1. This bug was already fixed once — `f8f647b4`, "a root program never inherited the caller's
+   stdout capture" — and guarded by `root_program_capture.rs`. That guard asserts
+   `run_program`. The playground calls `run_program_repr`.
+2. `run_program_repr` was `#[cfg(target_arch = "wasm32")]`, as were `ProgramExit::result`,
+   `set_result`, `take_result` and `ProgramState::last_repr`. The whole result path existed
+   only on wasm, so **no host test could name the function that ships** — a fix written for
+   this exact bug could only be verified against its neighbour.
+3. `test_drive_quanta`'s doc comment instructed callers to drive "from a **fresh** thread (not
+   the spawner's), so `run_one`'s per-quantum ctx install doesn't clobber the caller's process
+   ctx". The defect was recorded as standing advice rather than filed, and the workaround it
+   recommends is unavailable on the one platform that needs it.
 
-**Fix.** None for the wasm behaviour. What changed: those five items are no longer
-`#[cfg]`-gated, so `run_program_repr` is callable and testable off-wasm. Measured before
-keeping it — 200 top-level forms each a 20k-element vector run in 0.58s ungated vs 0.60s on
-the gated build, i.e. rendering every top-level value is not a cost worth gating for.
+**Fix.** `install_ctx` pushes the displaced `CURRENT` onto a thread-local `DISPLACED` stack;
+`save_ctx` pops and restores it. A stack rather than a slot because a pump re-entered from
+inside a quantum would otherwise lose a frame silently. The five `#[cfg(wasm32)]` items above
+are ungated so the shipped path is testable off-wasm (measured first: 200 top-level forms each
+a 20k-element vector run 0.58s ungated vs 0.60s gated). `test_drive_quanta`'s doc now records
+that driving on the caller's thread is safe, and why. Two cosmetics went with it: the joiner
+added a newline to a `captured` that already ended in one (a blank line between output and
+value), and `playground::run`'s doc still credited capture to `print`/`println`, names that
+have never been bound.
 
-**Guard.** `root_program_capture.rs::the_repr_path_the_playground_actually_calls_captures_too`
-asserts the real entry point captures `hello, brood\n` and returns `6`. It passes today —
-which is the point: it pins the host behaviour so a future change cannot regress it silently,
-and it makes the wasm/host divergence the only remaining explanation.
+**Guard.** `crates/lisp/tests/same_thread_capture.rs` — workers disabled, a root program
+spawned and its quanta driven on the spawner's own thread, asserting the caller's capture
+survives and holds `hello, brood\n`. Its own test binary, since `set_test_no_workers` is
+process-global. Sabotage-verified: restoring the `CURRENT = None` line fails it with
+`left: None, right: Some("hello, brood\n")` — the production symptom exactly. Also verified
+end to end against a locally built wasm in node, before and after:
+`"6"` → `"hello, brood\n6"`.
 
 ## KI-114 — the native JIT turns an int into a float across a call ⚠️ OPEN 2026-09-07
 

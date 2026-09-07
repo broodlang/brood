@@ -809,6 +809,17 @@ impl Interp {
         Ok(exit.take_result().unwrap_or_default())
     }
 
+    /// Test-only: spawn a top-level program as a green process and return immediately,
+    /// WITHOUT waiting for it. Lets a test drive the quanta itself on the calling thread —
+    /// the shape wasm runs in, where `wait` pumps the run queue on the caller rather than
+    /// parking it. `run_program_repr` would deadlock here, since with workers disabled
+    /// nothing would ever publish the exit.
+    #[doc(hidden)]
+    pub fn spawn_program_for_test(&mut self, src: &str) -> Result<(), LispError> {
+        process::spawn_root_program(&self.heap, src, None, None)?;
+        Ok(())
+    }
+
     /// Read every form in `src`, evaluate each against the global environment,
     /// and return the value of the last.
     pub fn eval_str(&mut self, src: &str) -> Result<Value, LispError> {

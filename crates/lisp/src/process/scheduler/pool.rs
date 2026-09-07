@@ -443,9 +443,13 @@ pub fn set_test_no_workers(on: bool) {
 /// including the preempt → re-enqueue-at-the-back path). Returns the number of quanta
 /// actually run; stops early once the queue drains. This bounds a liveness test by
 /// **work units, not wall-clock**, so it is fully deterministic. Pair with
-/// [`set_test_no_workers`]`(true)` so no OS worker races the driving, and call it from a
-/// **fresh** thread (not the spawner's), so `run_one`'s per-quantum ctx install doesn't
-/// clobber the caller's process ctx / scheduling TLS.
+/// [`set_test_no_workers`]`(true)` so no OS worker races the driving.
+///
+/// It is now safe to call from the spawner's own thread: a quantum RESTORES the context it
+/// displaced rather than clearing it (see `save_ctx`), which is what lets wasm drive the run
+/// queue on the caller at all. It used to clobber the caller's ctx, and the standing advice
+/// was to drive from a fresh thread to dodge that — see KI-115 for what it cost on wasm,
+/// where a fresh thread is not an option.
 #[doc(hidden)]
 pub fn test_drive_quanta(max: usize) -> usize {
     let mut ran = 0;

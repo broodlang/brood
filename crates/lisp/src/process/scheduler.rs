@@ -148,6 +148,25 @@ thread_local! {
     pub(super) static CURRENT: RefCell<Option<Ctx>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// The `CURRENT` a quantum displaced, so `save_ctx` can put it back rather than
+    /// clearing it.
+    ///
+    /// On a worker thread there is nothing to put back — the thread runs processes and
+    /// nothing else — which is why clearing was indistinguishable from restoring for as long
+    /// as processes only ever ran on workers. On wasm there are no worker threads: `wait`
+    /// drives the run queue on the CALLING thread, so a quantum runs on top of the caller's
+    /// own context. The playground calls `begin_stdout_capture` (which creates that context
+    /// and puts the capture buffer in it), runs the snippet, then reads the buffer back —
+    /// and the snippet's own quantum was clearing the context holding it, so `take_capture`
+    /// found nothing and every `io/puts` vanished from the page (KI-115).
+    ///
+    /// A stack, not a slot: nothing nests today, but a pump re-entered from inside a
+    /// quantum would silently lose a frame, and that is not a failure worth discovering
+    /// twice.
+    static DISPLACED: RefCell<Vec<Option<Ctx>>> = const { RefCell::new(Vec::new()) };
+}
+
 // ----- reduction-counted preemption ------------------------------------------
 
 thread_local! {
@@ -1058,21 +1077,28 @@ impl Process {
             mailbox: Arc::clone(&self.mailbox),
             capture: self.capture.clone(),
         };
+        let displaced = CURRENT.with(|c| c.borrow_mut().take());
+        DISPLACED.with(|d| d.borrow_mut().push(displaced));
         CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         gc_block_set(0);
         stack_base_set(0);
         macro_block_set(0);
     }
 
-    /// Read the (possibly mutated) capture stack back out of `CURRENT` into the process
-    /// and clear `CURRENT`, so `begin_capture`/`take_capture` done this quantum persist
-    /// across the next `receive` suspend, and the worker's TLS doesn't leak this
-    /// process's ctx into the next one it runs.
+    /// Read the (possibly mutated) capture stack back out of `CURRENT` into the process,
+    /// then put back whatever `install_ctx` displaced — so `begin_capture`/`take_capture`
+    /// done this quantum persist across the next `receive` suspend, and the thread's TLS
+    /// doesn't leak this process's ctx into whatever runs next.
+    ///
+    /// RESTORES rather than clears. On a worker thread the displaced value is `None` and the
+    /// two are the same thing; on wasm the quantum runs on the caller's thread, and clearing
+    /// threw away the caller's own context — see `DISPLACED` (KI-115).
     fn save_ctx(&mut self) {
         if let Some(cap) = CURRENT.with(|c| c.borrow().as_ref().map(|ctx| ctx.capture.clone())) {
             self.capture = cap;
         }
-        CURRENT.with(|c| *c.borrow_mut() = None);
+        let displaced = DISPLACED.with(|d| d.borrow_mut().pop()).flatten();
+        CURRENT.with(|c| *c.borrow_mut() = displaced);
     }
 }
 
