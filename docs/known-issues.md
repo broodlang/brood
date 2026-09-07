@@ -120,6 +120,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-110 | **`tests/exit_test.blsp` "the reason survives work done after the signal" flaked once under full-suite load — `:noproc` where `:badness` was expected** — three ADR-311 cases spawned a body that ENDS on its own and then called `monitor`; under load the child finished first and monitoring a dead pid fired a synthetic `:noproc`. 1 in 5570 on 2026-09-05; 0/30 standalone | ✅ **fixed 2026-09-05** — the three self-ending cases use `spawn-monitor` (ADR-309), which registers the monitor before the child runs, so `:noproc` is impossible by construction (the primitive's own doc measured the two-step form: adjacent 0/300 lost the reason, one 5 ms yield between them 40/40). Same mechanism as KI-59 and the reason ADR-309 exists; the parked bodies in the file never finish and keep the two-step form |
 | KI-112 | **`stdimage/build` wrote an image missing every root global of a module the building process had already loaded — `project`'s 31, so every later `nest check` died on an unbound `*ns-package*`.** Surfaced when `nest stdimage` was routed through `std/tool/nest.blsp` (ADR-322), whose load pulls the toolchain in before the build; the probe that attributes root globals diffs names before/after `require-one`, which is a no-op for a loaded module, and an unclaimed root was silently skipped as "the prelude's" | ✅ **fixed 2026-09-05** (never pushed) — `stdimage` stays a Rust arm, built before any std module loads; and `build` now REFUSES to write when a root global is neither owned by a probe nor bound by the prelude (`%prelude-global?`, a new kernel query over the freeze's binding names), naming the orphans. Sabotage-shaped gates in `crates/cli/tests/stdimage_refuses_dirty_process.rs` and `blsp_dispatch.rs` |
 | KI-113 | **`BROOD_CONTRACTS=1` could not load eleven std modules from SOURCE, and its shim called the contracted module's own `list`** — every module reaching `project`, `test` or `editor/lineedit` failed with `first: expected list … got symbol (int)`, and `editor/pane` with a reserved-name refusal. Invisible in every normal run and in CI: a stdlib image is always present there, and a materialised module never evaluates its `(sig …)` forms. Found 2026-09-06 by running the dns tests under contracts with a private cache | ✅ **fixed 2026-09-06** — two shapes. (1) `(sig *name* int)` on a VALUE: `sig!`'s `%sig-pos` called `first` on the bare type; it answers -1 for a non-list now, so a value sig is a pure declaration under contracts as it always was without. (2) A `sig` indented inside `(check-allow …)` above its own `defn-`: the deferred contract lands at `provide`, after the loader's reserved-name exemption ends, and the rebind is refused; moved below, and `sig_placement.rs` now reads indented sigs. (3) The `sig!` shim template emitted bare prelude names into the module it was expanded in — `(list …)` in `proc` was `proc/list`; root-scoped now. Gate: `contracts_mode.rs` requires every baked-in module under contracts from source on a cold cache and names each failure |
+| KI-114 | **the native JIT miscompiles a numeric shape: an int-producing `math/round` result reaches `math/rem` as a FLOAT** — `pong` fails 22 of 101 tests on v0.26.0 with `rem: expected int, got float (-16.0)` / `(9.0)` / `(175.0)`, raised from `math/mod` under `pong/pong/spawn-burst-acc`. The same tree passes 101/101 on v0.25.2 (d0af81f7) and on v0.26.0 with the JIT off. Found 2026-09-07 by the ecosystem verification pass, after tagging v0.26.0 | ⚠️ **OPEN — bisected to the native tier, not the VM, router or inliner.** `BROOD_NO_JIT=1` and `BROOD_VM=0` are both green; `BROOD_NO_TW_REENTRY=1` (ADR-318's router) and `BROOD_NO_INLINE=1` both still fail, so it is neither. `BROOD_JIT_BAIL_TRACE=1` shows `math/round` and `math/mod` BAIL (`lowering-returned-none`, `call-mediated-boxed`), so the corruption is in a JIT'd CALLER, not in the math arms. No minimal repro yet: the shape alone (`(mod (+ int (round (* 120 (- c 0.5)))) 360)` in a hot loop, PRNG-threaded) does NOT reproduce in isolation |
 | KI-108 | **`crash_report_default::an_unsupervised_crash_is_reported_through_the_lazy_arm` flaked once under a full-suite load — stderr entirely empty** — the script slept a fixed 500 ms after spawning a crashing process and the harness read stderr after exit; the lazy arm loads the reporter's nine modules before printing, and one loaded run took longer than the window. 5/5 green in isolation at 0.53 s | ✅ **FIXED 2026-09-04** — KI-79's class (a wall clock standing in for synchronisation) and KI-79's fix: a **deadline, not a window**. Nothing in-language can observe "report printed" (the prelude shim holds the `:crash-reporter` name from arm time), so the HARNESS watches the child's stderr pipe and stops it the moment `[crash]` + the reason are there, with a 15 s ceiling. Healthy runs now take **~50 ms** (the old window was 10× the normal path and still lost once). Sabotage-verified: with no crash in the script the test fails at the deadline with `no crash report`, not a hang |
 | KI-107 | **`tests/eval_server_test.blsp` — "`:all` traces, and cannot exceed the spy cap" fails with an EMPTY `:spy`**, about 1 run in 17 standalone; two refuted fixes on 2026-09-05 | ✅ **CLOSED 2026-09-06 — three mechanisms, all fixed.** (1) `eval-capturing`'s teardown called `debug/untrace-all` and restored every wrapper in the shared registry, a concurrent request's included — teardown now restores only what the request installed (measured 9/150 → 10/550, 6.0% → 1.8%), then `debug/trace-hold`/`trace-release` refcount a shared trace so a second user is countable (→ 3/450, 0.67%), both guarded deterministically. (3) The residual: the three `:all` tests were NEVER isolated — `:isolated` written before a `(test …)` form in a describe body was a bare keyword the body evaluated and dropped, so they ran in the parallel phase, a concurrent `:all` request wrapped this test's function itself and restored it on its own teardown. `describe` now honours that spelling and rejects any other stray keyword (ADR-323); 31 tests in 10 files were running concurrently under the marker. 3/160 → **0/120** on the day's tree (gate: `tests/describe_modifiers_test.blsp`) |
 | KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ✅ **FIXED 2026-08-29** — closed by its own third pass, and the index row simply lagged the section (corrected 2026-09-04). A second sighting the same day KEPT its output, which rewrote the entry: the try-1 stdout holds **62 F's in runs before the timeout**, so the "timeout under load" was mass test failures with the 300 s cap hiding the names, and stderr named the class — spawned processes dying `unbound symbol: editor/serve/serve-manager` after their file's `%isolate` rolled the globals back. Three defects, each fixed. The lasting lesson is the one the entry was filed for: the original sighting was undiagnosable because the run was piped through `tail -5`, discarding the one thing worth having. ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
@@ -8404,6 +8405,53 @@ from that image has the root bound. `blsp_dispatch.rs` builds through `nest stdi
 every test from source and pays a failing child build in every process, which reads as a hang
 (the `nest` crate went past ten minutes) before it reads as anything else. If a `nest` run is
 inexplicably slow, run `nest stdimage` by hand first.
+
+## KI-114 — the native JIT turns an int into a float across a call ⚠️ OPEN 2026-09-07
+
+**Symptom.** On brood v0.26.0, `pong` fails 22 of its 101 tests, all with the same shape:
+
+    rem: expected int, got float (-16.0)     :code E0030
+      at math/mod                 (std/math.blsp:611)
+      at pong/pong/spawn-burst-acc (src/pong.blsp:618)
+
+The wrong values are always whole-numbered floats — `-16.0`, `9.0`, `104.0`, `175.0`,
+`194.0`, `299.0`. The expression is `(mod (+ hue (round (* 120 (- c 0.5)))) 360)` where
+`hue` is an int literal (25 at the `crowd-crash` call site) and `round` is `math/round`
+under `(:use math)`, which returns an int.
+
+**Cause.** Not yet identified. Bisected to the native JIT tier:
+
+| lever | result |
+|---|---|
+| default (v0.26.0) | 79/101 — **fails** |
+| `BROOD_NO_JIT=1` | 101/101 — passes |
+| `BROOD_VM=0` | 101/101 — passes |
+| `BROOD_NO_TW_REENTRY=1` (ADR-318 router) | 79/101 — still fails |
+| `BROOD_NO_INLINE=1` | 79/101 — still fails |
+| v0.25.2 (d0af81f7), default | 101/101 — passes |
+
+So it is the native tier specifically, and neither the ADR-318 router nor the self-inliner.
+`BROOD_JIT_BAIL_TRACE=1` reports both math arms REFUSED:
+
+    [jit-bail] arm=math/round reason=call-mediated-boxed
+    [jit-bail] arm=math/round reason=lowering-returned-none
+    [jit-bail] arm=math/mod   reason=call-mediated-boxed
+
+— so neither `round` nor `mod` is JIT'd, and the corruption is in a JIT'd **caller**
+(`spawn-burst-acc`) mishandling the value returned across the call boundary. That matches
+the observed symptom exactly: an int result arriving as a float.
+
+**Why it survived.** brood's own 5597-test suite is green, and so is every other package in
+the ecosystem — pong is the only one whose hot path threads a PRNG float through
+`round` into `mod` often enough to be admitted. It also cannot be seen from a single call:
+the same function called once, or 3000 times with an unthreaded seed, is correct under both
+engines. It needs the JIT to admit the arm AND a value that exercises the miscompiled path.
+
+**Fix.** None yet. `BROOD_NO_JIT=1` is a correct workaround at a performance cost.
+
+**Guard.** None yet — `pong`'s suite is the current reproducer, which is a dependency on
+another repo and not acceptable as the permanent guard. A brood-side test needs the shape
+isolated first; the naive isolation does not reproduce (see Cause).
 
 ## KI-113 — `BROOD_CONTRACTS=1` could not load eleven std modules from source ✅ fixed 2026-09-06
 
