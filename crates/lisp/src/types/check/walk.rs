@@ -2541,6 +2541,26 @@ fn check_one_impl_return(
             .and_then(Option::as_ref)
         {
             Some(ty) => scope = scope.bind_sig_param(p, ty.clone()),
+            // The FIRST param of an impl is the dispatch value, and this impl is registered
+            // for one concrete id — so `self` is that record, which the op spec cannot say
+            // (it is written once for every implementor, before any of them exist). The
+            // record's shape is its constructor's declared return, and the id names the
+            // constructor.
+            //
+            // Without this every `(get self :field)` reads `any`, so `(* (get r :w) (get r :h))`
+            // widens to `number` and an op declared `:-> int` can never be satisfied by
+            // arithmetic — which is what `ability_test` was reporting.
+            None if i == 0 => {
+                let seeded = id
+                    .as_deref()
+                    .and_then(|n| ctx.declared_sig(value::intern(n)))
+                    .map(|sig| sig.ret.clone())
+                    .filter(|t| t.record_fields().is_some());
+                scope = match seeded {
+                    Some(t) => scope.bind_sig_param(p, t),
+                    None => scope.bind(p, None),
+                };
+            }
             None => scope = scope.bind(p, None),
         }
     }
