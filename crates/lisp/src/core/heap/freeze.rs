@@ -12,16 +12,6 @@
 use super::*;
 
 impl Heap {
-    /// Consume this (builder) heap: move everything it allocated into a frozen
-    /// [`SharedCode`] (PRELUDE) region — re-tagging every handle local→prelude —
-    /// and return that region plus the global env's bindings
-    /// (`symbol -> prelude value`) used to seed each runtime's global table.
-    ///
-    /// Env frames are dropped: shared (top-level) closures capture the global
-    /// env symbolically (`env == None`), so nothing references a frame.
-    /// GC is disabled in a builder heap (`Heap::new` sets `gc_enabled = false`),
-    /// so the slabs have no holes here — indices are dense and stable across
-    /// the local→prelude re-tag.
     /// Deep-copy `v` into the builder's **LOCAL** slabs if any part of it lives in
     /// another region, returning an all-LOCAL value; already-LOCAL values (and
     /// atoms, symbols, natives) are returned unchanged.
@@ -207,6 +197,16 @@ impl Heap {
         out
     }
 
+    /// Consume this (builder) heap: move everything it allocated into a frozen
+    /// [`SharedCode`] (PRELUDE) region — re-tagging every handle local→prelude —
+    /// and return that region plus the global env's bindings
+    /// (`symbol -> prelude value`) used to seed each runtime's global table.
+    ///
+    /// Env frames are dropped: shared (top-level) closures capture the global
+    /// env symbolically (`env == None`), so nothing references a frame.
+    /// GC is disabled in a builder heap (`Heap::new` sets `gc_enabled = false`),
+    /// so the slabs have no holes here — indices are dense and stable across
+    /// the local→prelude re-tag.
     pub fn freeze_as_shared_code(mut self, root: EnvId) -> (SharedCode, Vec<(Symbol, Value)>) {
         // Pull anything a global reaches into the LOCAL slabs first, so the
         // re-tag below is valid for every handle it touches (KI-12).

@@ -13,30 +13,56 @@ Last full suite 1415/1415 on `326e4cdb`. The tree is clean. Pick items **in orde
 session is fine. Each says what to do, how to verify, and what "done" means. The 2026-09-04
 queue below is superseded except where these items point back into it.
 
-### 1 — Finish the `heap.rs` split (old item 5; two moves done)
+### 1 — Finish the `heap.rs` split (old item 5; four moves done, the type substrate left)
 
-**State.** `heap/positions.rs` holds form positions, compile context and def sites (734 lines,
-`326e4cdb`); `heap/env_globals.rs` holds the env chain and the global table (1,041 lines,
-2026-09-07 — move (a), suite 1417/1417). `heap.rs` is 5,731 lines. One cohesive group remains:
-(b) the freeze / `SharedCode` construction (`freeze_as_shared_code` at `heap.rs:3756`,
-`localize_for_freeze` at `3586`, `struct PromoteForward` at `5188`) → `heap/freeze.rs`. Note
-the three are NOT contiguous — unlike (a), this one is a gather, not a slice, and
-`PromoteForward` is a top-level struct rather than an `impl Heap` method.
+**State.** `heap.rs` is **4,782 lines**, of which **508** are its seven `#[cfg(test)]` modules —
+so ~4,275 lines of code. Four children are out (all 2026-09-07 except the first):
+`positions.rs` (734), `env_globals.rs` (1,041, move a), `freeze.rs` (465, move b),
+`promote.rs` (483, move c). Suite 1417/1417 after each round.
 
-**What move (a) cost, so (b) can expect it.** A child's private method is invisible to the
-parent AND to its siblings, so anything `heap.rs` or another child still calls needs
-`pub(super)` — one method (`env_frame`) here, and the build names each site. Four
-`jit_shared_*`/`jit_inline_*` accessors sitting in the moved section went to
-`heap/vm_cache.rs` instead, where their siblings already were.
+**The remaining bulk is NOT methods.** Everything named in the old item text is moved. What is
+left above the first `impl Heap` is the **type substrate**, and that is where the next ~1,300
+lines are. Three cohesive groups, easiest first:
+
+- (d) **the LOCAL string representation** → `heap/local_string.rs`: `LocalString` (86),
+  `StrAux` (103), `CharIndex` (135), `StrData` (174), the `CHAR_INDEX_STRIDE`/`_MIN_CHARS`
+  consts, and `mod char_index_tests` (119 lines) which tests exactly this and should travel
+  with it. ~420 lines.
+- (e) **the slab substrate** → `heap/slabs.rs`: `VecStore` (796) and its `Deref`/`DerefMut`,
+  `Slabs` (922), the `slab_live_count`/`slab_capacity_bytes`/`park_trim_probe`/`shrink_slabs`/
+  `slab_bytes` helpers, `CodeSlabs` (1188) and `SlabRef` (1238). The biggest group, ~800 lines,
+  and the one to read carefully — `SlabRef` is the borrow shim every accessor returns.
+- (f) **the GC tuning knobs** → append to the existing `heap/gc.rs`: `gc_floor`, `rt_gc_floor`,
+  `major_growth`, `major_floor`, `min_tenure`, `gc_trace_default`, `gc_count_env`, and the
+  `*_STRIDE`/`NURSERY_MAX`/`WALKER_*` consts. ~200 lines of policy that belongs beside the
+  collector.
+
+Line numbers are as of `72fd14c2` and will drift; anchor on the item name.
 
 **Do, per move.** Cut the section verbatim into a `use super::*;` child with an `impl Heap {…}`
-wrapper and a `//!` header saying what it holds; add `mod name;` beside the others (alphabetical);
-leave anything that is not the section's own concern in `heap.rs` under a small header (the GC
-floor pair was that shape in move 1). `cargo fmt --all`; `cargo build -p brood`; `cargo clippy
---all-targets --all-features -- -D warnings`; then the suite — build the test binaries in the
-FOREGROUND with `--build-jobs 6` and run `cargo nextest run --no-fail-fast -j1` in the background
-under the 16 GB cap. Update the layout table in CLAUDE.md and this item. One commit per move.
-**Done when** `heap.rs` is under ~3,000 lines.
+wrapper and a `//!` header saying what it holds; add `mod name;` beside the others
+(alphabetical — and check the order, `freeze` between `facts` and `gc`, not next to
+`env_globals`); leave anything that is not the section's own concern in `heap.rs` under a small
+header. `cargo fmt --all`; `cargo build -p brood`; `cargo clippy --all-targets --all-features
+-- -D warnings`; then the suite — build the test binaries in the FOREGROUND with
+`--build-jobs 6` and run `cargo nextest run --no-fail-fast -j1` in the background under the
+16 GB cap. Update the layout table in CLAUDE.md and this item. **Done when** `heap.rs` is under
+~3,000 lines; (d)+(e)+(f) get there with room to spare.
+
+**Three things the first three moves cost, so the next ones need not.**
+1. **Visibility.** A child's private method is invisible to the parent AND to its siblings, so
+   anything still called from outside needs `pub(super)` — `env_frame` in move (a); the build
+   names every site. Moves (b) and (c) needed none.
+2. **Read the doc comment ABOVE the section you are cutting.** Two functions turned out to
+   carry a paragraph written for a *neighbour* — `global_defined`'s sat on `global_generation`,
+   and `freeze_as_shared_code`'s sat on `localize_for_freeze`, leaving both undocumented. The
+   defect is invisible until a boundary moves, and both were fixed as separate comment-only
+   commits so the cut stayed pure.
+3. **Check the item's own grouping against the code.** This item grouped `PromoteForward` with
+   the freeze; its only users are the `promote*` methods, so it went with those instead. The
+   same applies to the test modules: `promote_sharing_tests` (130 lines) still sits in
+   `heap.rs` testing code that now lives in `promote.rs`, and `rt_position_tests` (88) tests
+   what is now `positions.rs` — worth carrying across when convenient.
 
 ### 2 — The last `nest` arms (old item 4; 23 of 28 moved)
 
