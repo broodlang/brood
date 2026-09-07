@@ -488,7 +488,7 @@
     (let (w (spawn (receive (_ :done))))
       (sleep 10)
       (let (info (proc/info w))
-        (is (contains? info :pid))
+        (is (contains? (or info {}) :pid))
         (is (pid? (get info :pid)))
         ;; the pid round-trips: it equals the value spawn returned
         (assert= (get info :pid) w))))

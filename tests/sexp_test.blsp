@@ -122,9 +122,11 @@
       "(map g (h x))"))
   (def n (string/length many))
   (test "narrowed motion matches the whole-buffer walk at many points (incl. deep + boundaries)"
-    (doseq (p [0 1 25 (- n 13) (- n 12) (- n 7) (- n 6) (- n 1)])
-      (assert= (point-forward many p) (bf-forward many p))
-      (assert= (point-backward many p) (bf-backward many p))))
+    (doseq (p-raw [0 1 25 (- n 13) (- n 12) (- n 7) (- n 6) (- n 1)])
+      ;; the literal's elements widen to `number` through the vector; these are offsets
+      (let (p (math/floor p-raw))
+        (assert= (point-forward many p) (bf-forward many p))
+        (assert= (point-backward many p) (bf-backward many p)))))
   (test "narrow genuinely slices (base ≤ point, slice shorter than the whole text)"
     (let ([base sub] (narrow many (- n 6)))
       (is (<= base (- n 6)))

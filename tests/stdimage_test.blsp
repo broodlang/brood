@@ -182,7 +182,7 @@
     ;; them: measured 2026-08-27, 35 images / 74 MB, all from that day, and the prelude boot
     ;; cache beside it had reached 4192 files / 732 MB the same way. `build` prunes to the
     ;; newest few before writing.
-    (let (dir (path/dirname (image-path)))
+    (let (dir (path/dirname (or (image-path) (error "stdimage-test: no image path"))))
       (when (file/dir? dir)
         (let (n (count (filter (file/ls dir)
                          (fn (e)

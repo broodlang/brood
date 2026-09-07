@@ -18,8 +18,12 @@
   (:use version))
 
 (defn lcg (s) (math/rem (+ (* s 1103515245) 12345) 2147483648))
+;; Integers throughout — an LCG over machine ints — but `(* s …)` widens to `number`
+;; and `math/rem` wants an int.
+(sig lcg (int -> int))
 (defn pick (s lo hi) (+ lo (math/rem s (+ 1 (- hi lo))))) ; s → int in [lo, hi]
 ;; --- the independent reference (int tuples only, no strings) -------------------------
+(sig pick (int int int -> int))
 (defn ref-cmp (x y)
   ;; element-wise compare [a b c] vs [d e f] → -1 / 0 / 1
   (cond

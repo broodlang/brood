@@ -30,7 +30,7 @@
 
 ;; This file quotes the two markers below as string literals, so scanning it would find
 ;; them in its own source and report a phantom prefix. Skip it by name.
-(def self-name (path/basename (reflect/current-file)))
+(def self-name (path/basename (or (reflect/current-file) "")))
 
 (defn- test-files ()
   (filter (file/ls tests-dir)

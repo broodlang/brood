@@ -171,7 +171,7 @@
                              ([:line s] [:line s])
                              (after *test-wait-ms* :timeout)))
         (stop-logger)
-        (is (not (= (first first-message) (first second-message))))))))
+        (is (not (= (first (captured first-message)) (first (captured second-message)))))))))
 
 (describe "log: the stock backend is a record"
   (test "backend builds a line-backend with the documented defaults"

@@ -215,7 +215,7 @@
             ex (tel-recv))
         (stop)
         (assert= threw "boom")
-        (assert= (first ex) [:job :exception])
+        (assert= (first (evt ex)) [:job :exception])
         (assert= (get (nth ex 2) :error) "boom")
         (assert= (+ 1 1) 2)))))
 ;; ---- not started / after stop ----------------------------------------------

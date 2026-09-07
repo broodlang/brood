@@ -48,7 +48,8 @@
     (is (= (/ 10M 4M) 2.5M))
     (is (= (/ 1M 8M) 0.125M)))
   (test "division by zero errors (not a panic)"
-    (is (= (first (try (/ 1M 0M) (catch _ [:error]))) :error))))
+    (is (= (first (let (r (try (/ 1M 0M) (catch _ [:error]))) (if (vector? r) r [:not-an-error])))
+          :error))))
 
 (describe "decimal: numeric tower contagion"
   (test "mixed int + decimal -> decimal (exact)"
@@ -77,7 +78,9 @@
   (test "(decimal/of d) on a decimal is identity"
     (is (= (decimal/of 1.5M) 1.5M)))
   (test "a malformed decimal string errors"
-    (is (= (first (try (decimal/of "not-a-number") (catch _ [:error]))) :error))))
+    (is (= (first (let (r (try (decimal/of "not-a-number") (catch _ [:error])))
+                    (if (vector? r) r [:not-an-error])))
+          :error))))
 
 (describe "decimal: normalized equality + hashing"
   (test "1.5M == 1.50M (numerically equal regardless of scale)"

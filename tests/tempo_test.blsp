@@ -363,8 +363,10 @@
           covered (tempo/set-of ps))
       (assert= 1 (count (tempo/spans covered)))
       (assert= (tempo/width t) (tempo/total-width covered))
-      (assert= (tempo/from-ms t) (tempo/from-ms (nth ps 0)))
-      (assert= (tempo/to-ms t) (tempo/to-ms (nth ps 27))))))
+      (assert= (tempo/from-ms t)
+        (tempo/from-ms (or (nth ps 0) (error "tempo-test: no part at index 0"))))
+      (assert= (tempo/to-ms t)
+        (tempo/to-ms (or (nth ps 27) (error "tempo-test: no part at index 27")))))))
 
 ;; ---- shifting ---------------------------------------------------------------
 
