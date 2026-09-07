@@ -6,6 +6,49 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.26.0 — the toolchain is Brood, and three spellings change
+
+**`nest` is written in Brood.** ADR-322 moved the CLI out of Rust a subcommand at a
+time — `run`, `test`, `check`, `new`/`update-tooling`/`rename`, `repl`, `observe`/`attach`,
+the doc and grammar commands, and finally the twenty-subcommand package manager. `main.rs`
+is 1,233 lines of dispatch; the behaviour lives in `std/tool/`. `stdimage` stays Rust
+(KI-112). The practical effect is that the tool you extend and the language you extend it
+in are the same one.
+
+**Three breaking changes.** `->>` is deleted from the keyword set — it was a second spelling
+of a thing `->` already did. `sort`'s comparator argument moves LAST (ADR-308), so
+`(sort coll less?)`; the old `(sort less? coll)` now type-errors deep inside `%merge-sort`,
+naming neither `sort` nor the caller, so audit call sites rather than waiting for a
+red test. Image side facts travel by journal (ADR-320).
+
+**`std/net/dns`** resolves a name to its A/AAAA records over TCP, in Brood, with no new
+Rust — DNS over TCP is a required transport (RFC 7766), not a fallback. It exists so a
+cluster can enumerate its own members: on Fly `<app>.internal` carries one AAAA per
+machine, on Kubernetes a headless service one A per pod. Erlang has `:inet_res` for this
+and libcluster's DNSPoll builds on it; without an equivalent a Brood node can dial a peer
+it was told about but cannot discover one.
+
+**The regex engine grew what the roadmap was waiting on**: character ranges, `{m,n}`,
+lazy quantifiers and capture groups.
+
+**Two performance defaults flipped on**, each gated by the project's own checks: the
+tree-walker→VM router (ADR-318) and the prelude image (ADR-314, third attempt).
+
+**`io/read-line` parks the process rather than the worker** (ADR-059 Phase 2), closing
+KI-97 — a blocking read no longer costs a scheduler thread.
+
+Also: `os/spawn-pty` runs a child in a terminal instead of on a pipe, and `os/cmd` takes a
+working directory. `nest check --fix-sigs` applies signature declarations in bulk. The
+LSP tags deprecations. `BROOD_CONTRACTS=1` can load every std module from source again
+(KI-113) — eleven could not.
+
+**The assistant documentation is now checked against the language.** `docs/brood-for-claude.md`
+and the `writing-brood` skill are baked into the binary and copied into every project, and
+nothing verified them: both taught `print`, `rand-int`, `string->list` and `private?`, none
+of which has ever been bound at any pin. Corrected, and `tests/skill_doc_test.blsp` now
+holds each document to the live image in both directions — names it calls available must
+resolve, names it calls retired must not.
+
 ## v0.25.2 — declarations that said nothing, and the guard idiom that forced them
 
 **33 standard-library signatures stop saying `any`.** A hover reporting `(string -> any)`
