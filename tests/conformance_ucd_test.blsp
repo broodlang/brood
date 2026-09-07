@@ -84,7 +84,9 @@
               (inc ran)
               (if (= got want) bad (cons [(pr-str input) want got] bad))))))))
 
-(def- gb-lines (corpus-lines (ucd-file "GraphemeBreakTest.txt")))
+(def- gb-lines
+  (corpus-lines (or (ucd-file "GraphemeBreakTest.txt")
+                  (error "ucd-test: corpus file not found: " "GraphemeBreakTest.txt"))))
 
 ;; ---- NormalizationTest -------------------------------------------------------
 
@@ -159,7 +161,9 @@
 ;; Read and split the ~20,000-line file ONCE at load, not once per part. Six re-reads cost
 ;; ~40 s of a debug build's suite budget for nothing — the parts differ in which lines they
 ;; test, not in the lines they read.
-(def- nt-lines (corpus-lines (ucd-file "NormalizationTest.txt")))
+(def- nt-lines
+  (corpus-lines (or (ucd-file "NormalizationTest.txt")
+                  (error "ucd-test: corpus file not found: " "NormalizationTest.txt"))))
 
 (defn- nt-part-scan (want) (nt-scan-part want nt-lines nil 0 nil))
 

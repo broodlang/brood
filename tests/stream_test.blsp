@@ -7,8 +7,8 @@
 `budget-ms` run out. Polling rather than sleeping: a leaked message never drains, so the
 full budget still yields the failing value, while a merely slow one is forgiven."
   (cond
-    (<= (proc/mailbox-size (self)) target) (proc/mailbox-size (self))
-    (<= budget-ms 0) (proc/mailbox-size (self))
+    (<= (or (proc/mailbox-size (self)) 0) target) (or (proc/mailbox-size (self)) 0)
+    (<= budget-ms 0) (or (proc/mailbox-size (self)) 0)
     else (do (sleep 20) (drained-to target (- budget-ms 20)))))
 
 ;; ---- sources ----------------------------------------------------------------
@@ -244,7 +244,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
   :isolated (test "loopback: write chunks to a socket, read them back as a stream"
     (let (_me (self)
           ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (or (tcp/local-port ls) (error "stream-test: the listener reported no local port")))
       ;; Writer spawns, connects, sends two chunks, closes.
       (spawn (let (c (tcp/connect "127.0.0.1" port))
                (tcp/send c "hello ")
@@ -327,7 +327,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
     ;;
     ;; The verdict is unchanged, because a LEAKED down never drains: the poll then runs
     ;; its full budget and the assertion still fails. Only the slow case is forgiven.
-    (let (before (proc/mailbox-size (self))
+    (let (before (or (proc/mailbox-size (self)) 0)
           s (stream/singleton 1))
       (stream/next s)
       (stream/next s)

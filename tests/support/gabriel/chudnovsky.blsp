@@ -84,3 +84,5 @@ conformance port. The oracle is upstream's own expected output in
     (if (< m n)
       nil
       (cons (pi-digits n) (pies (+ n s) m s)))))
+;; Integers throughout — this is exact big-integer arithmetic, which is the point.
+(sig pi-digits (int -> any))
