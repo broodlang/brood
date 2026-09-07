@@ -216,7 +216,7 @@
         (stop)
         (assert= threw "boom")
         (assert= (first (evt ex)) [:job :exception])
-        (assert= (get (nth ex 2) :error) "boom")
+        (assert= (get (or (nth (evt ex) 2) {}) :error) "boom")
         (assert= (+ 1 1) 2)))))
 ;; ---- not started / after stop ----------------------------------------------
 (describe "telemetry: not started / after stop"

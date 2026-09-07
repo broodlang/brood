@@ -64,7 +64,8 @@
     (is (not (includes? (fn-doc-heads) "defmodule"))))
 
   (test "the definition rule is a block that colours a docstring as documentation"
-    (let (repo (get (decode (tmlanguage)) :repository)
+    (let (decoded (decode (tmlanguage))
+          repo (get (if (map? decoded) decoded {}) :repository)
           d (get repo :definition))
       ;; a block, not a match — a docstring is a position, so the rule needs state
       (is (includes? (get d :begin) "defmodule"))

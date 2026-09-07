@@ -12,6 +12,7 @@
 
 (defn mk (s) [(math/rem (+ (* s 1103515245) 12345) 2147483648) :tag])
 
+(sig mk (int -> vector))
 (defn spin (t s n i)
   (if (= n 0)
     nil

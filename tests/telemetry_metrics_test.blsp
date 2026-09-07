@@ -178,7 +178,7 @@
     (sync)
     (let (snap (metrics-snapshot))
       (stop)
-      (assert= (into [] (sort (keys snap))) [:a :b])
+      (assert= (into [] (sort (keys (if (map? snap) snap {})))) [:a :b])
       (assert= (get (get snap :a) :count) 2)
       (assert= (get (get snap :b) :mean) 10)))
 

@@ -90,6 +90,7 @@
 (defn- cy-hmac-mac (algo key msg tlen)
   (string/substring (encoding/hex-encode-bytes (%hmac algo key msg)) 0 (* 2 tlen)))
 
+(sig cy-hmac-mac (any any any int -> string))
 (defn- cy-hmac-scan (lines algo tlen key msg ran skipped bad)
   (if (nil? lines)
     [ran skipped (reverse bad)]

@@ -28,6 +28,7 @@
 (defn burn (i acc)
   (if (>= i 20000) acc (burn (+ i 1) (bit/and (+ (* acc 1103515245) 12345) 2147483647))))
 
+(sig burn (int int -> int))
 (defn fan (me i)
   (if (>= i fan-size) nil (do (spawn (send me [:done (burn 0 i)])) (fan me (+ i 1)))))
 

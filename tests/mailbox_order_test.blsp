@@ -37,7 +37,7 @@
 ;; ref — so sleeping after minting `r` would disarm the very mark this case is about, and
 ;; the pinned receive would scan from the front and pass for the wrong reason.
 (defn- await-queued (n tries)
-  (if (or (>= (proc/mailbox-size (self)) n) (<= tries 0))
+  (if (or (>= (or (proc/mailbox-size (self)) 0) n) (<= tries 0))
     (proc/mailbox-size (self))
     (await-queued n (- tries 1))))
 
