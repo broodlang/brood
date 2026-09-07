@@ -8498,6 +8498,40 @@ the ecosystem — pong is the only one whose hot path threads a PRNG float throu
 the same function called once, or 3000 times with an unthreaded seed, is correct under both
 engines. It needs the JIT to admit the arm AND a value that exercises the miscompiled path.
 
+**Located, 2026-09-07 — `math/round` returns a FLOAT.** Instrumenting pong at the failure
+point names the operand exactly:
+
+    BAD  hue=149 int?=true   rr=-33.0 int?=false   c=0.224...
+
+`hue` is a clean int; `rr` is `(round (* 120 (- c 0.5)))`. Inlining `round`'s body
+(`(if (< x 0) (- (math/floor (+ (- x) 0.5))) (math/floor (+ x 0.5)))`) narrows it one step
+further:
+
+    y=-33.118 float?=true   fl=33 int?=true   rr=-33.0 int?=false
+
+`math/floor` correctly answers the **int** 33 — it is Brood's one Float->Int primitive — and
+then `(- fl)` answers **-33.0**. Unary negate of an int is publishing a float. Only the
+NEGATIVE branch of `round` is affected, which is why every bad value observed is negative.
+
+**Mechanism.** `-` is `((x) (%sub 0 x))` in `std/prelude/core.blsp`, so the zero is an int and
+the expression is int-typed. But `-`'s arm is profiled FLOAT (pong runs a great deal of float
+arithmetic through it), so the lowering takes the float path, and since
+`62cbe29f perf(jit): a float-context arm applied to an int promotes it instead of deopting
+(KI-109)` an int operand read through `as_f64` is promoted with `fcvt_from_sint` rather than
+deopting. Promotion is sound for a genuinely mixed operation — `(+ 1.5 2)` IS 3.5 — but not
+when the operand's own type decides the result's, which is exactly `(%sub 0 x)`. Before that
+commit the int deopted to the VM and the result stayed an int. `62cbe29f` is dated
+2026-09-05, inside the v0.25.2..v0.26.0 range, which matches when this appeared.
+
+**A fix that did NOT work, recorded so it is not retried.** Restricting the promotion to
+`Op::Slot` and restoring Float-only-or-deopt for `Op::Handle` (call results) leaves pong at
+79/101. The value reaches the subtraction as a plain slot, not a handle — `set_slot_flags`
+maps `Op::Handle` to not-float, so the call result is stored unflagged and read back as
+`Op::Slot`. Slot promotion is the same path KI-109 needs, so the two cases are
+indistinguishable at that level and the fix has to be higher up: either the float path must
+not be chosen when the other operand is an int constant, or an arm whose result type follows
+its operand must not promote.
+
 **Not a repro (checked, so the next person need not).** A VERBATIM copy of
 `spawn-burst-acc` — same body, same `*part-life-min*`/`*part-life-max*` constants, same four
 `rand/float` calls, driven 4000 rounds with the seed threaded through — runs clean under both
