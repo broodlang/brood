@@ -10,6 +10,14 @@
 
 (defmodule tcp-test (:use test) (:use tcp :exclude [send]))
 
+(defn- listen-port (ls)
+  "The listener's OS-assigned port, or a failed test.
+
+  `tcp/local-port` answers `nil | int` — a closed or unbound socket has no port — and every
+  use below feeds it to `tcp/connect`, which wants an int. Asking here means a listener that
+  never bound fails saying so, instead of `tcp/connect` complaining about its argument."
+  (or (tcp/local-port ls) (error "tcp-test: the listener reported no local port")))
+
 (describe "tcp: predicate + handles"
   :isolated (test "socket? distinguishes sockets from other values"
     (let (ls (tcp/listen "127.0.0.1" 0))
@@ -19,13 +27,13 @@
       (tcp/close ls)))
   (test "tcp/local-port reports the OS-assigned port"
     (let (ls (tcp/listen "127.0.0.1" 0))
-      (is (> (tcp/local-port ls) 0))
+      (is (> (listen-port ls) 0))
       (tcp/close ls))))
 
 (describe "tcp: loopback echo via mailbox delivery"
   :isolated (test "accept, client send, server echo — all in one process"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             ;; the accept notification carries the server-side socket
             s (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
@@ -46,7 +54,7 @@
 (describe "tcp: EOF surfaces as [:tcp-closed …]"
   :isolated (test "closing one end delivers [:tcp-closed sock] to the other"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
         (tcp/close s)
@@ -58,7 +66,7 @@
 (describe "tcp: drain collects a request/response"
   :isolated (test "drain concatenates chunks until the peer closes; returns bytes"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
         ;; server writes a reply in two chunks then closes
@@ -76,7 +84,7 @@
     ;; Neither side speaks; the client's armed idle bound reaps it. (The reap is
     ;; detected on the reactor's ~1s housekeep tick, so allow slack.)
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
         (tcp/set-idle-timeout c 500)
@@ -89,7 +97,7 @@
     ;; after longer than the bound, wrongly counted the pre-claim wait and reaped
     ;; the connection the instant it was established. It must start alive.
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
         ; arm while still unclaimed/passive
@@ -115,7 +123,7 @@
     ;; deadline standing in for an event. Here the deadline is the *subject*, so it cannot be
     ;; replaced by waiting on an event; the fix is margin on both sides instead.
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
         (tcp/controlling-process s (self))
@@ -133,7 +141,7 @@
 (describe "tcp: binary mode is inbound-only (ADR-141)"
   :isolated (test "binary inbound is bytes; string leaves always go out as UTF-8"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after *test-wait-ms* :timeout)))
         (tcp/controlling-process s (self))
@@ -151,7 +159,7 @@
 (describe "tcp: framed reads — read-until / read-n"
   :isolated (test "read-until returns the frame up to+including the delimiter, plus the remainder"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -165,7 +173,7 @@
           (assert= (string/bytes-> (nth r 1)) "body bytes here")))))
   (test "read-until spans chunk boundaries (delimiter split across sends)"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -184,7 +192,7 @@
   ;; and the read hangs to EOF instead of framing.
   (test "read-until finds a delimiter delivered one byte per chunk"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -208,7 +216,7 @@
   ;; straddle window carries "\r\n\r" forward, so a following "x" has to reject.
   (test "read-until does not match a partial delimiter carried across chunks"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -229,7 +237,7 @@
   ;; correctly after many chunks have gone by.
   (test "read-until cuts at the right offset after many chunks"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -244,7 +252,7 @@
           (assert= (string/bytes-> (nth r 1)) "rest")))))
   (test "read-until returns [:closed acc] when the delimiter never arrives"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -258,7 +266,7 @@
           (assert= (string/bytes-> (nth r 1)) "no delimiter here")))))
   (test "read-n returns exactly n bytes and the surplus"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -272,7 +280,7 @@
           (assert= (string/bytes-> (nth r 1)) "EXTRA")))))
   (test "read-n accumulates across chunks"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -287,7 +295,7 @@
           (assert= (string/bytes-> (nth r 1)) "bb")))))
   (test "read-n returns [:closed acc] on early EOF"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -308,7 +316,7 @@
 (describe "tcp: framed-read limits — :timeout-ms / :max-bytes"
   :isolated (test "read-until returns [:timeout acc] when the peer goes silent"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -323,7 +331,7 @@
           (assert= (string/bytes-> (nth r 1)) "GET / HTTP/1.1\r\n")))))
   (test "read-until returns [:too-large acc] when the delimiter never arrives"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -336,7 +344,7 @@
           (assert= (first r) :too-large)))))
   (test "a frame landing exactly on :max-bytes is delivered, not rejected"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -350,7 +358,7 @@
           (assert= (string/bytes-> (nth r 0)) "abcdef\r\n\r\n")))))
   (test "read-until with limits set still returns a normal frame"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -364,7 +372,7 @@
           (assert= (string/bytes-> (nth r 1)) "BODY")))))
   (test "read-n refuses an over-cap declared length before reading anything"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -378,7 +386,7 @@
           (assert= (first r) :too-large)))))
   (test "read-n returns [:timeout acc] when the body stalls mid-stream"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -392,7 +400,7 @@
           (assert= (string/bytes-> (nth r 1)) "abc")))))
   (test "read-n with limits set still returns a normal body"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -422,7 +430,7 @@
 (describe "tcp: framed-read limits — :deadline-ms (total budget)"
   :isolated (test "a drip that keeps re-arming the idle timeout is still cut off by the deadline"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -447,7 +455,7 @@
           (assert= (> (bytes/length (nth r 1)) 1) true)))))
   (test "a frame that arrives inside the deadline is delivered normally"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -461,7 +469,7 @@
           (assert= (string/bytes-> (nth r 1)) "BODY")))))
   (test "an already-expired deadline fires at once rather than waiting"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -480,7 +488,7 @@
           (assert= (< elapsed 3000) true)))))
   (test "read-n is bounded by the deadline too"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -504,7 +512,7 @@
 (describe "tcp: framed reads — :seed (bytes already in hand)"
   :isolated (test "a seed containing the whole frame returns without reading the socket"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -520,7 +528,7 @@
           (assert= (string/bytes-> (nth r 1)) "EXTRA")))))
   (test "a delimiter straddling the seed and the first chunk is still found"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -538,7 +546,7 @@
           (assert= (string/bytes-> (nth r 1)) "BODY")))))
   (test "a seed short of the delimiter continues into the socket"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -554,7 +562,7 @@
           (assert= (string/bytes-> (nth r 1)) "REST")))))
   (test "the seed counts toward :max-bytes"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -570,7 +578,7 @@
           (assert= (first r) :too-large)))))
   (test "an empty seed behaves exactly like no seed"
     (let (ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (listen-port ls))
       (let (c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -599,7 +607,7 @@
     (let (payload (apply bytes (range 256))
           ls (tcp/listen "127.0.0.1" 0))
       (tcp/set-binary ls true)
-      (let (port (tcp/local-port ls)
+      (let (port (listen-port ls)
             c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))
@@ -617,7 +625,7 @@
   ;; a listener left alone still accepts text-mode sockets.
   (test "a listener that was not set binary still accepts text-mode sockets"
     (let (ls (tcp/listen "127.0.0.1" 0))
-      (let (port (tcp/local-port ls)
+      (let (port (listen-port ls)
             c (tcp/connect "127.0.0.1" port)
             s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
         (tcp/controlling-process s (self))

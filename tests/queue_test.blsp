@@ -1,5 +1,14 @@
 (defmodule queue-test (:use test) (:use math))
 
+(defn- popped (r)
+  "`pop`'s `[value rest]`, or a failed test.
+
+  `queue/pop` and `pq/pop` answer `:empty` for an empty queue, so their result types as
+  `:empty | vector` and `first`/`second` on it are unchecked. Every use below has just
+  pushed, so `:empty` here means the queue lost an element — which is worth failing on
+  loudly rather than reading `nil` out of a keyword."
+  (if (vector? r) r (error "queue-test: expected a [value rest] pair, got " r)))
+
 (describe "FIFO queue"
   (test "new queue is empty"
     (is (empty? (queue/empty))))
@@ -17,12 +26,12 @@
               (queue/push 2)
               (queue/push 3)))
       (let (r1 (queue/pop q)
-            r2 (queue/pop (second r1))
-            r3 (queue/pop (second r2)))
-        (assert= 1 (first r1))
-        (assert= 2 (first r2))
-        (assert= 3 (first r3))
-        (is (empty? (second r3))))))
+            r2 (queue/pop (second (popped r1)))
+            r3 (queue/pop (second (popped r2))))
+        (assert= 1 (first (popped r1)))
+        (assert= 2 (first (popped r2)))
+        (assert= 3 (first (popped r3)))
+        (is (empty? (second (popped r3)))))))
   (test "peek does not remove"
     (let (q (queue/push (queue/empty) :x))
       (assert= :x (queue/peek q))
@@ -53,12 +62,12 @@
           q1 (queue/push q0 :a)
           q2 (queue/push q1 :b)
           r1 (queue/pop q2)
-          q3 (queue/push (second r1) :c)
+          q3 (queue/push (second (popped r1)) :c)
           r2 (queue/pop q3)
-          r3 (queue/pop (second r2)))
-      (assert= :a (first r1))
-      (assert= :b (first r2))
-      (assert= :c (first r3)))))
+          r3 (queue/pop (second (popped r2))))
+      (assert= :a (first (popped r1)))
+      (assert= :b (first (popped r2)))
+      (assert= :c (first (popped r3))))))
 
 (describe "min-priority queue"
   (test "new pq is empty"
@@ -76,12 +85,12 @@
                (pq/insert 2 :med)))
       (assert= :high (pq/peek pq))
       (let (r1 (pq/pop pq)
-            r2 (pq/pop (second r1))
-            r3 (pq/pop (second r2)))
-        (assert= :high (first r1))
-        (assert= :med (first r2))
-        (assert= :low (first r3))
-        (is (empty? (second r3))))))
+            r2 (pq/pop (second (popped r1)))
+            r3 (pq/pop (second (popped r2))))
+        (assert= :high (first (popped r1)))
+        (assert= :med (first (popped r2)))
+        (assert= :low (first (popped r3)))
+        (is (empty? (second (popped r3)))))))
   (test "seq in priority order"
     (let (pq (-> (pq/empty)
                (pq/insert 5 :e)

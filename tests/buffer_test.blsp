@@ -947,6 +947,9 @@ suite run. `*test-wait-ms*` is a failure deadline, reached only if a relay never
 ;; keep the hunks that touch the region and drop the rest.
 
 (defn uir-sel (b lo hi) (assoc (goto-char b lo) :mark hi))
+;; `assoc` on a record answers `vector | map` — the record type does not survive an update —
+;; so the result has to be re-declared or every caller reports it.
+(sig uir-sel (buffer int int -> buffer))
 (defn uir-line-start (b line) (text/line->char (buffer-rope b) line))
 
 (describe "undo-in-region"
