@@ -5,7 +5,86 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-## Work queue — written 2026-09-04 for the next session (read this first, then the addenda)
+## Work queue — written 2026-09-07 for the next session (read this first)
+
+State when written: `main` = `5e238340`, pushed; **no open bug in `known-issues.md`** — every
+row is ✅/☑️/📦 (KI-107 closed 2026-09-06 with ADR-323, KI-112/KI-113 fixed the same weekend).
+Last full suite 1415/1415 on `326e4cdb`. The tree is clean. Pick items **in order**; one per
+session is fine. Each says what to do, how to verify, and what "done" means. The 2026-09-04
+queue below is superseded except where these items point back into it.
+
+### 1 — Finish the `heap.rs` split (old item 5; one move done)
+
+**State.** `heap/positions.rs` holds form positions, compile context and def sites (734 lines,
+`326e4cdb`). `heap.rs` is 6,802 lines. Two cohesive groups remain, in this order:
+(a) `// ===== Environment chain` through the end of `// ── Phase-2 incremental-check dependency
+recorder` (~870 lines) → `heap/env_globals.rs`; (b) the freeze / `SharedCode` construction
+(`freeze_as_shared_code`, `localize_for_freeze`, `PromoteForward`) → `heap/freeze.rs`.
+
+**Do, per move.** Cut the section verbatim into a `use super::*;` child with an `impl Heap {…}`
+wrapper and a `//!` header saying what it holds; add `mod name;` beside the others (alphabetical);
+leave anything that is not the section's own concern in `heap.rs` under a small header (the GC
+floor pair was that shape in move 1). `cargo fmt --all`; `cargo build -p brood`; `cargo clippy
+--all-targets --all-features -- -D warnings`; then the suite — build the test binaries in the
+FOREGROUND with `--build-jobs 6` and run `cargo nextest run --no-fail-fast -j1` in the background
+under the 16 GB cap. Update the layout table in CLAUDE.md and this item. One commit per move.
+**Done when** `heap.rs` is under ~3,000 lines.
+
+### 2 — The last `nest` arms (old item 4; 23 of 28 moved)
+
+**State.** Still Rust in `crates/nest/src/main.rs` (1,054 lines): `completions`/`complete`,
+`mcp`, `release`, `gen`, and `stdimage` — which **stays** (KI-112: the image build needs a
+process where nothing but the prelude is loaded, and the dispatcher is a std module).
+
+**Do.** `gen` first (small; read its arm, add a table entry in `std/tool/nest.blsp`, delete the
+variant + arm, extend `crates/nest/tests/blsp_dispatch.rs`). Then decide `release`: the bundle
+byte assembly and the boot-check smoke are mechanism (`brood::bundle`, `smoke_test`), the
+collection and reporting are policy — split along that seam rather than port the whole arm.
+`mcp`'s transport is `mcp.rs` and may stay; `completions` emits shell scripts and can stay.
+Per move: `cargo nextest run -p nest -j1` capped, the checker gates, `make smoke-bedit`.
+**Done when** every routed name is in `BLSP_SUBCOMMANDS` and `main.rs` holds only mechanism.
+
+### 3 — Two small gates this weekend's bugs asked for
+
+- **Stray keywords in a describe body, tree-wide.** ADR-323 makes `describe` reject them at
+  expansion, so the tree is clean by construction; a static scan like `sig_placement.rs` over
+  `tests/**` would catch a THIRD spelling before it reaches a runner. Optional; small.
+- **Contracts-mode residue.** KI-113 records four files that exceed the 120 s budget under
+  wrapping and several checker/JIT tests that assume an un-instrumented image. If the mode
+  should run the whole tree: raise the budget when `BROOD_CONTRACTS` is set, and have those
+  tests `:skip` under it. Otherwise leave it — what the mode must do (boot, load every module
+  from source, enforce) is gated in `contracts_mode.rs`.
+
+### 4 — ADR-320 follow-through (open thread 1 of the 2026-09-05 status)
+
+The side-facts journal landed (`heap/facts.rs`, 2026-09-06). The 2026-09-05 status left open
+whether steps 1–3 ship together; re-read ADR-320/321 and the journal as it now is, then either
+close the thread in `decisions.md` or write the next step down here.
+
+### 5 — Documentation debt (old item 7; do a slice when a session has time)
+
+Docstring examples at ~29% (each is an executed test via `doc_examples_test.blsp`); the archive
+split of `decisions.md`/`known-issues.md`/`devlog.md`. `make green --local` after any move —
+the `doc_refs` gate checks references and duplicate numbers, and it caught a duplicated KI-107
+header this weekend.
+
+### Not on this box
+
+Compute frontier §7.9 lead 2 is measurable now (`BROOD_XADMIT` reports what it declines) but
+needs a machine where `make ab --floor` and `perf stat` are fair game.
+
+### Rules that bit this weekend (all in CLAUDE.md; the short list)
+
+1. **Build test binaries in the foreground, run the suite in the background.** A background
+   `nextest --no-run` was killed for memory; `--build-jobs 6` in the foreground takes ~3 min.
+2. **Do not edit `std/` or `tests/` while a suite runs** — two tests read them from disk.
+3. **`cargo fmt --all` before every commit** — the pre-push hook checks it, after the suite.
+4. **Any contracts-mode reading needs a private `XDG_CACHE_HOME` or `BROOD_NO_STDIMAGE=1`.**
+5. **A test marked `:isolated` before its form is isolated only since ADR-323** — check the
+   summary's `N isolated` count against the markers when a file's concurrency is in question.
+6. **A stale binary agrees with anything.** Rebuild before believing a `.blsp` change.
+
+## Work queue — written 2026-09-04 (superseded by the 2026-09-07 queue above; kept for its item text)
 
 State when written: `main` = `5f2c89e6`, pushed, CI green on the previous tip; no open bug in
 `known-issues.md`; the tree-walker→VM router is default-ON (ADR-318). Pick items **in order**.
