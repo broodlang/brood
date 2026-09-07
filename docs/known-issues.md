@@ -120,7 +120,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-110 | **`tests/exit_test.blsp` "the reason survives work done after the signal" flaked once under full-suite load — `:noproc` where `:badness` was expected** — three ADR-311 cases spawned a body that ENDS on its own and then called `monitor`; under load the child finished first and monitoring a dead pid fired a synthetic `:noproc`. 1 in 5570 on 2026-09-05; 0/30 standalone | ✅ **fixed 2026-09-05** — the three self-ending cases use `spawn-monitor` (ADR-309), which registers the monitor before the child runs, so `:noproc` is impossible by construction (the primitive's own doc measured the two-step form: adjacent 0/300 lost the reason, one 5 ms yield between them 40/40). Same mechanism as KI-59 and the reason ADR-309 exists; the parked bodies in the file never finish and keep the two-step form |
 | KI-112 | **`stdimage/build` wrote an image missing every root global of a module the building process had already loaded — `project`'s 31, so every later `nest check` died on an unbound `*ns-package*`.** Surfaced when `nest stdimage` was routed through `std/tool/nest.blsp` (ADR-322), whose load pulls the toolchain in before the build; the probe that attributes root globals diffs names before/after `require-one`, which is a no-op for a loaded module, and an unclaimed root was silently skipped as "the prelude's" | ✅ **fixed 2026-09-05** (never pushed) — `stdimage` stays a Rust arm, built before any std module loads; and `build` now REFUSES to write when a root global is neither owned by a probe nor bound by the prelude (`%prelude-global?`, a new kernel query over the freeze's binding names), naming the orphans. Sabotage-shaped gates in `crates/cli/tests/stdimage_refuses_dirty_process.rs` and `blsp_dispatch.rs` |
 | KI-113 | **`BROOD_CONTRACTS=1` could not load eleven std modules from SOURCE, and its shim called the contracted module's own `list`** — every module reaching `project`, `test` or `editor/lineedit` failed with `first: expected list … got symbol (int)`, and `editor/pane` with a reserved-name refusal. Invisible in every normal run and in CI: a stdlib image is always present there, and a materialised module never evaluates its `(sig …)` forms. Found 2026-09-06 by running the dns tests under contracts with a private cache | ✅ **fixed 2026-09-06** — two shapes. (1) `(sig *name* int)` on a VALUE: `sig!`'s `%sig-pos` called `first` on the bare type; it answers -1 for a non-list now, so a value sig is a pure declaration under contracts as it always was without. (2) A `sig` indented inside `(check-allow …)` above its own `defn-`: the deferred contract lands at `provide`, after the loader's reserved-name exemption ends, and the rebind is refused; moved below, and `sig_placement.rs` now reads indented sigs. (3) The `sig!` shim template emitted bare prelude names into the module it was expanded in — `(list …)` in `proc` was `proc/list`; root-scoped now. Gate: `contracts_mode.rs` requires every baked-in module under contracts from source on a cold cache and names each failure |
-| KI-114 | **the native JIT miscompiles a numeric shape: an int-producing `math/round` result reaches `math/rem` as a FLOAT** — `pong` fails 22 of 101 tests on v0.26.0 with `rem: expected int, got float (-16.0)` / `(9.0)` / `(175.0)`, raised from `math/mod` under `pong/pong/spawn-burst-acc`. The same tree passes 101/101 on v0.25.2 (d0af81f7) and on v0.26.0 with the JIT off. Found 2026-09-07 by the ecosystem verification pass, after tagging v0.26.0 | ⚠️ **OPEN — bisected to the native tier, not the VM, router or inliner.** `BROOD_NO_JIT=1` and `BROOD_VM=0` are both green; `BROOD_NO_TW_REENTRY=1` (ADR-318's router) and `BROOD_NO_INLINE=1` both still fail, so it is neither. `BROOD_JIT_BAIL_TRACE=1` shows `math/round` and `math/mod` BAIL (`lowering-returned-none`, `call-mediated-boxed`), so the corruption is in a JIT'd CALLER, not in the math arms. No minimal repro yet: the shape alone (`(mod (+ int (round (* 120 (- c 0.5)))) 360)` in a hot loop, PRNG-threaded) does NOT reproduce in isolation |
+| KI-114 | **the native JIT miscompiles a numeric shape: an int-producing `math/round` result reaches `math/rem` as a FLOAT** — `pong` fails 22 of 101 tests on v0.26.0 with `rem: expected int, got float (-16.0)` / `(9.0)` / `(175.0)`, raised from `math/mod` under `pong/pong/spawn-burst-acc`. The same tree passes 101/101 on v0.25.2 (d0af81f7) and on v0.26.0 with the JIT off. Found 2026-09-07 by the ecosystem verification pass, after tagging v0.26.0 | ✅ **fixed 2026-09-07 — `as_f64_pair`.** Unary `-` is `(%sub 0 x)`; `-`'s shared arm is float-PROFILED by pong's float arithmetic, so `(- <int>)` took the float lowering, and since KI-109 an int operand there is PROMOTED rather than deopted. Promotion is the VM's rule for MIXED arithmetic only — an op is float arithmetic iff some operand is a float — so it is now licensed per-operand by the OTHER operand being proven float, restoring `op_is_float`'s contract that a wrong guess costs a deopt, not an answer. pong 101/101; minimal repro is `(- 33)` after a hot float loop |
 | KI-115 | **`io/puts` output does not reach the in-browser playground — only the last form's value is shown.** `(io/puts "hello, brood")` then `(+ 1 2 3)` displayed `6`. Reported 2026-09-07 against the deployed v0.26.0 wasm | ✅ **FIXED 2026-09-07 — `save_ctx` CLEARED the thread's `CURRENT` instead of restoring what it displaced.** On a worker thread those are identical (the thread has no context of its own), which is why it stayed invisible while processes only ran on workers. On wasm there are no workers: `wait` drives the run queue on the CALLING thread, so the snippet's own quantum ran on top of the caller's context and destroyed it — and `begin_stdout_capture` had put the capture buffer in exactly that context, so `take_capture` found nothing and every `io/puts` went to a stdout that in a browser is nowhere. `install_ctx` now stashes the displaced ctx on a `DISPLACED` stack and `save_ctx` restores it; on a worker the displaced value is `None`, so nothing changes there. **Why it survived:** the previous fix (`f8f647b4`) was correct and guarded, but `root_program_capture.rs` asserts `run_program` while the playground calls `run_program_repr`, which was `#[cfg(wasm32)]` along with the whole `last_repr`/`set_result`/`take_result` chain — no host test could name the shipped function. Worse, `test_drive_quanta`'s own docs told callers to drive "from a **fresh** thread … so the per-quantum ctx install doesn't clobber the caller's ctx": the bug was written down as standing advice, and a fresh thread is not an option on wasm. Guard: `same_thread_capture.rs` reproduces the wasm shape on the host (workers disabled, quanta driven on the spawner's thread); sabotage-verified — reverting gives `left: None, right: Some("hello, brood\n")`. Verified end to end against a locally built wasm in node: `"6"` → `"hello, brood\n6"` |
 | KI-108 | **`crash_report_default::an_unsupervised_crash_is_reported_through_the_lazy_arm` flaked once under a full-suite load — stderr entirely empty** — the script slept a fixed 500 ms after spawning a crashing process and the harness read stderr after exit; the lazy arm loads the reporter's nine modules before printing, and one loaded run took longer than the window. 5/5 green in isolation at 0.53 s | ✅ **FIXED 2026-09-04** — KI-79's class (a wall clock standing in for synchronisation) and KI-79's fix: a **deadline, not a window**. Nothing in-language can observe "report printed" (the prelude shim holds the `:crash-reporter` name from arm time), so the HARNESS watches the child's stderr pipe and stops it the moment `[crash]` + the reason are there, with a 15 s ceiling. Healthy runs now take **~50 ms** (the old window was 10× the normal path and still lost once). Sabotage-verified: with no crash in the script the test fails at the deadline with `no crash report`, not a hang |
 | KI-107 | **`tests/eval_server_test.blsp` — "`:all` traces, and cannot exceed the spy cap" fails with an EMPTY `:spy`**, about 1 run in 17 standalone; two refuted fixes on 2026-09-05 | ✅ **CLOSED 2026-09-06 — three mechanisms, all fixed.** (1) `eval-capturing`'s teardown called `debug/untrace-all` and restored every wrapper in the shared registry, a concurrent request's included — teardown now restores only what the request installed (measured 9/150 → 10/550, 6.0% → 1.8%), then `debug/trace-hold`/`trace-release` refcount a shared trace so a second user is countable (→ 3/450, 0.67%), both guarded deterministically. (3) The residual: the three `:all` tests were NEVER isolated — `:isolated` written before a `(test …)` form in a describe body was a bare keyword the body evaluated and dropped, so they ran in the parallel phase, a concurrent `:all` request wrapped this test's function itself and restored it on its own teardown. `describe` now honours that spelling and rejects any other stray keyword (ADR-323); 31 tests in 10 files were running concurrently under the marker. 3/160 → **0/120** on the day's tree (gate: `tests/describe_modifiers_test.blsp`) |
@@ -8457,7 +8457,7 @@ process-global. Sabotage-verified: restoring the `CURRENT = None` line fails it 
 end to end against a locally built wasm in node, before and after:
 `"6"` → `"hello, brood\n6"`.
 
-## KI-114 — the native JIT turns an int into a float across a call ⚠️ OPEN 2026-09-07
+## KI-114 — the native JIT turns an int into a float across a call ✅ fixed 2026-09-07
 
 **Symptom.** On brood v0.26.0, `pong` fails 22 of its 101 tests, all with the same shape:
 
@@ -8532,20 +8532,47 @@ indistinguishable at that level and the fix has to be higher up: either the floa
 not be chosen when the other operand is an int constant, or an arm whose result type follows
 its operand must not promote.
 
-**Not a repro (checked, so the next person need not).** A VERBATIM copy of
-`spawn-burst-acc` — same body, same `*part-life-min*`/`*part-life-max*` constants, same four
-`rand/float` calls, driven 4000 rounds with the seed threaded through — runs clean under both
-engines. So the trigger is not the expression shape alone: it needs something about the
-surrounding program (admission thresholds, the real call chain, or frame size) that a
-standalone module does not reproduce. `BROOD_JIT_VERIFY=1` reports no stale handle, and
-`BROOD_JIT_VERIFY_FN` / `BROOD_JIT_DUMP_IR` are silent on a plain release build — they need
-`make perf-brood`, which is the next step.
+**The minimal repro the earlier attempts missed — fourteen lines, no PRNG.** The copy of
+`spawn-burst-acc` did not reproduce because the *shape* is irrelevant. What matters is that
+the shared `-` arm is float-profiled BEFORE an int reaches it, which a standalone module
+that only ever calls it one way never arranges:
 
-**Fix.** None yet. `BROOD_NO_JIT=1` is a correct workaround at a performance cost.
+    (defn burn (n acc)
+      (if (= n 0) acc (burn (- n 1) (+ acc (- 1.5)))))   ; float-profiles `-`
+    (burn 400000 0.0)
+    (defn probe (x) (- x))
+    (probe 33)   ; => -33.0 with the JIT, -33 with BROOD_NO_JIT=1
 
-**Guard.** None yet — `pong`'s suite is the current reproducer, which is a dependency on
-another repo and not acceptable as the permanent guard. A brood-side test needs the shape
-isolated first; the naive isolation does not reproduce (see Cause).
+Two lessons for the next miscompile of this class. **The arm to reproduce is the one that
+was profiled, not the one that computes wrongly** — every earlier attempt rebuilt
+`spawn-burst-acc`, whose only role is to run enough float arithmetic to mislabel a *prelude*
+slot. And **the tools were not silent for the reason recorded**: `BROOD_JIT_DUMP_IR` and
+`BROOD_JIT_BAIL_TRACE` work on a plain release build (the JIT is a default feature); the
+earlier reading of "silent" came from a stale `target/release/nest` — `cargo build --release
+--bin brood` does not relink `nest`, which is what `nest test` runs.
+
+**Fix — `emit::as_f64_pair` (`jit_lower/emit.rs`), used by all three float-arith lowerings
+in `prim.rs`.** The rule is the VM's own: an operation is float arithmetic **iff at least one
+operand is a float**, and only then is the other coerced. So promotion is licensed
+per-operand by the *other* operand being proven float — which is why the pair is now read
+together rather than by two independent `as_f64` calls: neither operand can decide alone. A
+`Prim2SlotInt` whose literal is an int therefore needs its slot to be a float outright; two
+tagged operands take a fused test that keeps the both-float path at its original two
+branches, so the guard is not paid for in the hot float loops it does not concern.
+
+This restores `op_is_float`'s documented contract — *a wrong guess is safe: a deopt, not a
+miscompile* — which KI-109 had quietly voided while fixing a genuine stall. KI-109's own
+case (`->float` is `(* 1.0 x)`) still promotes: the `1.0` is an `Op::Float`, i.e. proven.
+
+**Guard.** `crates/cli/tests/float_profile_int_stays_int.rs` — runs the real binary and
+requires the JIT to agree with `BROOD_NO_JIT=1`, pins `(- 33)` and `(math/round -16.4)` as
+ints, and pins the KI-109 direction (a float+int op still promotes, and `mix` does not
+`deopt-thrash-latched`). Sabotage-verified: restoring the unconditional promotion at
+`Prim2SlotInt` reddens it, and an over-strict gate reddens `float_context_int_operand.rs`.
+The file states in its own header what it does NOT cover — no program written for it reached
+the `Prim2SlotSlot` or `Prim2`-handle lowerings with a wrong guess (those arms either never
+tier or thrash-latch on the int path first), so those two carry the same rule on the argument
+that the unsoundness is identical, not on a test.
 
 ## KI-113 — `BROOD_CONTRACTS=1` could not load eleven std modules from source ✅ fixed 2026-09-06
 

@@ -6,7 +6,8 @@
 //! the whole arm to the VM.
 #![cfg(feature = "jit")]
 use super::emit::{
-    as_f64, as_int, call_handle, emit_arith, emit_float_arith, eq_dispatch, inline_vec_ref,
+    as_f64_guarded, as_int, call_handle, emit_arith, emit_float_arith, eq_dispatch,
+    as_f64_pair, inline_vec_ref,
     load_slot_int, op_is_float, read_words, table_prim, vector_ref, Frame, Funcs,
 };
 use super::Op;
@@ -764,12 +765,15 @@ pub(super) fn emit_prim2(
     {
         // Float arith/compare (an operand is a float, or — in a float-context arm — a
         // type-erased `Op::Handle` optimistically treated as float, e.g. `(- (nth bi 0)
-        // (nth bj 0))`). `as_f64` tag-checks each `Handle` is `Float` and deopts
+        // (nth bj 0))`). `as_f64_guarded` tag-checks each `Handle` is `Float` and deopts
         // otherwise, so a wrong guess is safe (a deopt, not a miscompile); a right guess
         // yields `Op::Float`, which `store_op` marks float so the rest of the chain stays
         // unboxed. `pick` selects f64 values the same as i64.
-        let aa = as_f64(b, aa_op, frame);
-        let bb = as_f64(b, bb_op, frame);
+        //
+        // An `Int` operand may only be PROMOTED to f64 once the OTHER operand is proven
+        // float, which is the VM's own rule for when an op is float arithmetic at all —
+        // hence one paired read rather than two independent ones. See KI-114.
+        let (aa, bb) = as_f64_pair(b, aa_op, bb_op, frame);
         let x = pick(aa, bb, map[0]);
         let y = pick(aa, bb, map[1]);
         stack.push(emit_float_arith(b, *op, x, y, deopt)?);
@@ -878,9 +882,11 @@ pub(super) fn emit_prim2_slot_slot(
         let wb = read_words(b, Op::Slot(slot_b), frame);
         stack.push(Op::Int(eq_dispatch(b, wa, wb, frame)));
     } else if op_is_float(Op::Slot(slot_a), frame) || op_is_float(Op::Slot(slot_b), frame) {
-        // Float arith/compare on two slots (e.g. `(+ xx yy)`, `(* x y)`).
-        let sa = as_f64(b, Op::Slot(slot_a), frame);
-        let sb = as_f64(b, Op::Slot(slot_b), frame);
+        // Float arith/compare on two slots (e.g. `(+ xx yy)`, `(* x y)`). Both operands
+        // are slots, so the float context rests entirely on `slot_float`'s guess: read them
+        // as a pair, so one being a float is what licenses promoting the other and two ints
+        // deopt to the integer operation they are (KI-114).
+        let (sa, sb) = as_f64_pair(b, Op::Slot(slot_a), Op::Slot(slot_b), frame);
         let x = pick(sa, sb, map[0]);
         let y = pick(sa, sb, map[1]);
         stack.push(emit_float_arith(b, *op, x, y, deopt)?);
@@ -967,7 +973,13 @@ pub(super) fn emit_prim2_slot_int(
     } else if op_is_float(Op::Slot(slot_a), frame) {
         // `(op floatslot int-literal)` — Brood coerces the int to f64 (`(+ 1.5 1)` =
         // 2.5). Promote the literal and do float arith.
-        let sa = as_f64(b, Op::Slot(slot_a), frame);
+        //
+        // Only the SLOT decides that, and only at runtime: the literal is an int, so if
+        // the slot holds an int too this is an integer operation and the VM answers an
+        // int. `slot_float` is a guess, so pass `promote = false` and let an int slot
+        // deopt. This is KI-114 — unary `-` lowers here as `(%sub 0 x)`, and a float
+        // profile made `(- 33)` publish `-33.0`.
+        let sa = as_f64_guarded(b, Op::Slot(slot_a), frame, false);
         let sb = b.ins().f64const(int_b as f64);
         let x = pick(sa, sb, map[0]);
         let y = pick(sa, sb, map[1]);

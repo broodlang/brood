@@ -11564,3 +11564,31 @@ Definition sites` sections — 50 methods, 734 lines — are `heap/positions.rs`
 child like the others; the two runtime-GC-floor knobs that sat at the top of that section stay
 in `heap.rs` under their own header. No behaviour change; `heap.rs` 7,536 → 6,802.
 
+
+## 2026-09-07 — KI-114: a float-profiled arm applied to an int published a float
+
+`pong` failed 22 of 101 tests on v0.26.0 with `rem: expected int, got float (-16.0)`, green
+with `BROOD_NO_JIT=1`. The value came from `math/round`'s negative branch, whose last step is
+`(- (math/floor …))` — unary `-` on an int. `-` is `((x) (%sub 0 x))`, one shared prelude arm,
+and pong's float arithmetic float-profiles it; `op_is_float` then chose the float lowering for
+`(- <int>)`, where since KI-109 an int operand is promoted with `fcvt_from_sint` instead of
+deopting. So `(- 33)` answered `-33.0` for the rest of the process.
+
+Fixed by `emit::as_f64_pair`: promotion is licensed per-operand by the OTHER operand being
+proven float, which is the VM's own rule for when an op is float arithmetic at all. The pair
+is read together because neither operand can decide alone. The fused two-tagged case keeps
+the both-float path at its original two branches, so hot float loops pay nothing for it.
+KI-109's `(* 1.0 x)` still promotes — its `1.0` is proven, not guessed. pong 101/101.
+
+Two things worth carrying forward. **The arm to reproduce is the one that was PROFILED, not
+the one that computes wrongly**: three earlier attempts rebuilt `spawn-burst-acc` verbatim
+and came out clean, because its only role is to mislabel a slot in an arm somewhere else. The
+repro is fourteen lines — hot-loop `-` on floats, then call it on an int. And **`cargo build
+--release --bin brood` does not relink `nest`**, which is what `nest test` runs; the KI's note
+that `BROOD_JIT_DUMP_IR` is "silent on a plain release build" was a stale binary, not a
+missing feature.
+
+Guard: `crates/cli/tests/float_profile_int_stays_int.rs`, sabotage-verified both ways. It
+records in its header that the other two float-arith lowerings carry the same rule without a
+test, because no program reached them with a wrong guess. Perf is unmeasured here by
+standing policy — the A/B belongs on the benchmark box.
