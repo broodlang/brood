@@ -13,13 +13,21 @@ Last full suite 1415/1415 on `326e4cdb`. The tree is clean. Pick items **in orde
 session is fine. Each says what to do, how to verify, and what "done" means. The 2026-09-04
 queue below is superseded except where these items point back into it.
 
-### 1 — Finish the `heap.rs` split (old item 5; one move done)
+### 1 — Finish the `heap.rs` split (old item 5; two moves done)
 
 **State.** `heap/positions.rs` holds form positions, compile context and def sites (734 lines,
-`326e4cdb`). `heap.rs` is 6,802 lines. Two cohesive groups remain, in this order:
-(a) `// ===== Environment chain` through the end of `// ── Phase-2 incremental-check dependency
-recorder` (~870 lines) → `heap/env_globals.rs`; (b) the freeze / `SharedCode` construction
-(`freeze_as_shared_code`, `localize_for_freeze`, `PromoteForward`) → `heap/freeze.rs`.
+`326e4cdb`); `heap/env_globals.rs` holds the env chain and the global table (1,041 lines,
+2026-09-07 — move (a), suite 1417/1417). `heap.rs` is 5,731 lines. One cohesive group remains:
+(b) the freeze / `SharedCode` construction (`freeze_as_shared_code` at `heap.rs:3756`,
+`localize_for_freeze` at `3586`, `struct PromoteForward` at `5188`) → `heap/freeze.rs`. Note
+the three are NOT contiguous — unlike (a), this one is a gather, not a slice, and
+`PromoteForward` is a top-level struct rather than an `impl Heap` method.
+
+**What move (a) cost, so (b) can expect it.** A child's private method is invisible to the
+parent AND to its siblings, so anything `heap.rs` or another child still calls needs
+`pub(super)` — one method (`env_frame`) here, and the build names each site. Four
+`jit_shared_*`/`jit_inline_*` accessors sitting in the moved section went to
+`heap/vm_cache.rs` instead, where their siblings already were.
 
 **Do, per move.** Cut the section verbatim into a `use super::*;` child with an `impl Heap {…}`
 wrapper and a `//!` header saying what it holds; add `mod name;` beside the others (alphabetical);

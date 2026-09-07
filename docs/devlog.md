@@ -11564,3 +11564,19 @@ Definition sites` sections — 50 methods, 734 lines — are `heap/positions.rs`
 child like the others; the two runtime-GC-floor knobs that sat at the top of that section stay
 in `heap.rs` under their own header. No behaviour change; `heap.rs` 7,536 → 6,802.
 
+## 2026-09-07 — heap.rs split, second move: the env chain and the global table
+
+Handoff item 1 continues: `// ===== Environment chain` through the ADR-119 dependency recorder —
+46 methods, 1,026 lines — is `heap/env_globals.rs`, the two halves of name resolution in the
+order a lookup walks them (the LOCAL frame chain, then the shared global table with `def`,
+generations, the registry ops, dynamics, sigs and snapshot/restore). Two departures from a
+straight cut. The four `jit_shared_*`/`jit_inline_*` accessors sat in the globals section
+because they key off the global epoch, but they are the shared JIT code cache and their
+siblings `shared_closure_lookup`/`_publish` already live in `heap/vm_cache.rs`, so they went
+there instead. And `env_frame` is `pub(super)` now rather than private: a child's private
+method is invisible to the parent and to its siblings, and `heap.rs` calls it once,
+`heap/gc_runtime.rs` twice — the only visibility this move needed to widen.
+
+No behaviour change; `heap.rs` 6,802 → 5,731. One thing the move exposed rather than caused:
+`global_defined` carries no doc comment, and the paragraph written for it is stranded above
+`global_generation`'s own — fixed separately so this move stays a pure cut.

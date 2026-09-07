@@ -142,12 +142,15 @@ paths — but until then, prefer learning over shortcuts.
 ```
 crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   core/        substrate: value.rs (Value, Tag, symbol interner, Closure/Arity),
-               heap.rs (per-process heap + shared regions + env chain: construction,
-               source-positions, definition-sites, alloc, accessors, env-chain, globals)
+               heap.rs (per-process heap + shared regions: construction, alloc,
+               accessors, promotion/freeze)
                with child modules heap/{gc.rs (roots/collection/RUNTIME-compaction/stats),
                gc_runtime.rs, map_ops.rs (CHAMP ops), equality.rs (equality/compare/hash),
-               vm_cache.rs (VM body cache + inline caches), facts.rs (side facts, ADR-320),
+               vm_cache.rs (VM body cache + inline caches + the shared JIT code cache),
+               facts.rs (side facts, ADR-320),
                positions.rs (form positions, compile context, def sites + name facts),
+               env_globals.rs (the env chain + the global table: def/generation, the
+               registry ops, dynamics, sigs, snapshot/restore, the ADR-119 dep recorder),
                roots_buf.rs} — children of `heap`, so they
                reach Heap's private items via `use super::*`, alloc.rs,
                blob.rs (cross-process zero-copy blob heap), map_champ.rs (CHAMP

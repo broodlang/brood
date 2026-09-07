@@ -974,4 +974,50 @@ impl Heap {
     pub fn live_arm_len(&self) -> usize {
         self.live_vm_arms.len()
     }
+
+    /// Shared-JIT cache lookup (ADR-101, the spawn lever): the native code published
+    /// for a RUNTIME/PRELUDE arm's `(closure_id, argc)` `share_key`, as
+    /// `(code_ptr, compile_epoch)`. The caller ([`crate::eval::compile::jit_tier`])
+    /// checks `compile_epoch == global_epoch()` before installing — a `def` or RUNTIME
+    /// compaction bumps `version`, so a stale entry is never used. See
+    /// `RuntimeCode::jit_code_cache`.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_shared_lookup(&self, key: (u64, u16)) -> Option<(*mut u8, u64)> {
+        let cache = self.runtime.jit_code_cache.read().ok()?;
+        cache.get(&key).map(|&(ptr, epoch)| (ptr as *mut u8, epoch))
+    }
+
+    /// Publish a RUNTIME/PRELUDE arm's freshly-installed native code to the shared
+    /// cache so the runtime's other processes can install it directly instead of
+    /// recompiling. Idempotent overwrite (last writer wins — all writers store the
+    /// same code for the same epoch; a newer epoch's recompile correctly replaces an
+    /// older entry). See `RuntimeCode::jit_code_cache`.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_shared_publish(&self, key: (u64, u16), code: *mut u8, epoch: u64) {
+        if let Ok(mut cache) = self.runtime.jit_code_cache.write() {
+            cache.insert(key, (code as usize, epoch));
+        }
+    }
+
+    /// Shared-JIT lookup for the **inlined** upgrade — the [`Self::jit_shared_lookup`]
+    /// counterpart over `jit_inline_cache`. Lets a process install another process's
+    /// already-compiled inlined native for the same `(closure_id, argc)` instead of
+    /// waiting on its own deferred compile; the caller checks `compile_epoch ==
+    /// global_epoch()` before installing, so a `def`/compaction invalidates it.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_inline_lookup(&self, key: (u64, u16)) -> Option<(*mut u8, u64)> {
+        let cache = self.runtime.jit_inline_cache.read().ok()?;
+        cache.get(&key).map(|&(ptr, epoch)| (ptr as *mut u8, epoch))
+    }
+
+    /// Publish a freshly-installed **inlined** native to the shared inline cache — the
+    /// [`Self::jit_shared_publish`] counterpart over `jit_inline_cache`. Idempotent
+    /// overwrite (last writer wins; all writers store equivalent code for the same
+    /// epoch). See `RuntimeCode::jit_inline_cache`.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_inline_publish(&self, key: (u64, u16), code: *mut u8, epoch: u64) {
+        if let Ok(mut cache) = self.runtime.jit_inline_cache.write() {
+            cache.insert(key, (code as usize, epoch));
+        }
+    }
 }
