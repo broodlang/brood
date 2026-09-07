@@ -1,0 +1,122 @@
+;; The `writing-brood` skill is prose baked into the binary (`%builtin-doc 'writing-brood-skill`)
+;; and copied into every project by `nest new` / `nest update-tooling`. Nothing else checks it,
+;; so when the std API moves the skill keeps confidently teaching the old spelling — and it is
+;; the first thing an assistant reads before writing any Brood.
+;;
+;; That is not hypothetical. The skill taught `print`, `rand-int`, `shuffle` and
+;; `string->list` for as long as it existed; NONE of those four names has ever been bound.
+;; Every project on this machine shipped that advice.
+;;
+;; So: the names the skill presents as AVAILABLE must resolve, and the names it presents as
+;; RETIRED must not. Both directions matter — the retired list is what stops a reader reaching
+;; for `car` or `loop`, and it is only worth reading while it is still true.
+(defmodule skill-doc-test
+  (:use test))
+
+;; Presented as "Brood has this". Qualified exactly as the skill spells them, because the
+;; spelling IS the claim: `string->list` and `string/->list` differ by one character and only
+;; one of them exists.
+;; One `list` per GROUP, appended — not one flat list. The formatter fills a list to the
+;; column limit, so a flat one silently reflows a group's names onto the line under a
+;; different group's comment (`seq/shuffle` ended up under `;; RNG`). A group per form is a
+;; boundary the formatter cannot cross, so each comment keeps describing what follows it.
+(def *available*
+  (append
+    ;; output — the whole `print` family is absent, these are the replacements
+    (list 'io/puts 'io/write 'io/inspect)
+    ;; the string/sequence bridge (a string is not seqable)
+    (list 'string/->list 'string/->graphemes 'string/->codepoints)
+    ;; RNG: pure, seeded, `[value next-seed]`
+    (list 'rand/seed 'rand/rng 'rand/int 'rand/float 'rand/token)
+    ;; the sequence ops built on that RNG
+    (list 'seq/shuffle 'seq/sample 'seq/frequencies)
+    ;; the combinators the skill tells you to reach for instead of a hand-written fn
+    (list 'comp 'partial 'complement 'constantly)
+    ;; the replacements named in the retired-names trap
+    (list 'first 'rest 'append 'count 'any? 'mapcat)
+    ;; collection protocol claimed to work with no import
+    (list 'contains? 'conj 'disj 'get 'empty? 'into 'vec 'seq 'sort 'sort-by 'index-of 'includes?)
+    ;; introspection the skill tells you to use instead of guessing
+    (list 'bound? 'reflect/private?)))
+
+;; Presented as "this does not exist" — each with a named replacement above.
+;; NOT listed: `not=`. The skill says it is DEPRECATED (it warns) rather than gone, so it is
+;; bound and belongs in neither list — asserting it absent would fail today, asserting it
+;; available would outlive its eventual removal.
+(def *retired*
+  (append
+    ;; output — the `print` family the skill taught for as long as it existed
+    (list 'print 'println 'puts 'flush)
+    ;; RNG under its pre-`rand`-module spellings
+    (list 'rand-int 'rand-float 'shuffle)
+    ;; Lisp/Clojure names a reader arrives with
+    (list 'car 'cdr 'concat 'length 'some? 'entries 'flat-map 'lambda)
+    ;; mutation, which the language does not have at all (ADR-026)
+    (list 'set! 'setq 'swap! 'set-car! 'vector-set!)
+    ;; iteration constructs — recursion and processes are the answer
+    (list 'loop 'recur 'while)))
+
+;; `bound?` takes a QUOTED symbol, so it never triggers the load-by-inference that a real
+;; qualified reference does (ADR-229): `(seq/shuffle …)` in source loads `seq`, but
+;; `(bound? 'seq/shuffle)` just asks the table and gets false. So the module a qualified name
+;; belongs to has to be loaded FIRST, or this asks a question about load order instead of
+;; about the skill.
+;;
+;; It really did: in a cold image `seq/shuffle`, `seq/sample`, `seq/frequencies` and all five
+;; `rand/*` are unbound, while `io/puts` and `string/->list` are bound anyway because the
+;; prelude carries autoload stubs for them and `reflect/private?` is a kernel primitive. The
+;; assertion therefore passed or failed on whether some OTHER test in the same image had
+;; happened to load `seq` — and `rand`, which nothing else loads, failed every time.
+;;
+;; Derived from the name rather than listed, so a qualified name added to `*available*` later
+;; is covered without anyone remembering to extend a second list.
+(defn- owning-module (name)
+  "The module a qualified name belongs to (`seq/shuffle` → `seq`), or nil for a bare one."
+  (let (s (->string name)
+        i (index-of s "/"))
+    (when (> i 0) (symbol (string/substring s 0 i)))))
+
+(defn- load-owners! (names)
+  "Load every module the qualified names in `names` belong to; returns nil. A name whose
+module will not load is left alone — the `bound?` assertion below is what reports it, and
+with the name attached, which a raise here would not have."
+  (doseq (m (seq/distinct (seq/keep names owning-module)))
+    ;; check-allow :discarded-catch — a qualifier with no module of its own (a kernel-registered
+    ;; namespace) is not an error here; the assertion below is the report.
+    (check-allow :discarded-catch (try (require-one m) (catch _ nil))))
+  nil)
+
+(describe "the writing-brood skill's claims hold against this image"
+  ;; Each assertion collects the OFFENDING names and compares against `[]`, so a failure
+  ;; prints exactly which name broke rather than a bare `false` that sends the reader back
+  ;; to diffing a 200-line markdown table against the std tree.
+  (test "every name it presents as available is bound"
+    (load-owners! *available*)
+    (assert= [] (into [] (filter *available* (fn (name) (not (bound? name)))))))
+
+  ;; Deliberately AFTER the loads above are possible: a retired bare name must stay unbound
+  ;; even once `io`, `seq`, `rand` and `string` are in the image, which is the state a real
+  ;; program is in. `io/puts` exists and bare `puts` must not — that is the whole claim.
+  (test "every name it presents as retired is absent"
+    (load-owners! *available*)
+    (assert= [] (into [] (filter *retired* bound?))))
+
+  ;; Guards the shipped TEXT of BOTH documents, not just the names. `nest new` and
+  ;; `nest update-tooling` write these two files into every project from this binary, so a
+  ;; wrong spelling here is a wrong spelling in every checkout on the machine — which is
+  ;; exactly how `print` survived: four names, two documents, never once resolvable.
+  ;;
+  ;; `index-of` answers -1 for a miss, NOT nil, so a membership test written as
+  ;; `(not (nil? (index-of …)))` is true for every input and asserts nothing. The checker
+  ;; says so out loud — "this can never be true" — and it was right.
+  (test "neither shipped document teaches an absent spelling"
+    (dolist (doc (list 'writing-brood-skill 'brood-for-claude))
+      (let (text (%builtin-doc doc))
+        (assert= []
+          (into []
+            ;; Spellings with no legitimate reason to appear. `rand-int` is deliberately
+            ;; NOT here: the "don't guess the standard library" section names it as an
+            ;; example of a plausible-but-wrong guess, which is exactly right. The
+            ;; *retired* list above is what holds that name to account.
+            (filter (list "`(print " "`string->list`" "`string->graphemes`" "`(private? ")
+              (fn (bad) (>= (index-of text bad) 0)))))))))

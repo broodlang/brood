@@ -61,7 +61,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    `conj`/`disj`/`get`/`contains?` on a set are prelude (no `(:use set)` — that
    module is only `set`/`union`/`intersection`/`difference`/`subset?`). Two
    deliberate exceptions: `contains?` is map/set only, and a **string is not
-   seqable** — bridge with `string->list`/`string->graphemes`. `(sort coll)` uses
+   seqable** — bridge with `string/->list` (codepoints) or `string/->graphemes` (what a human calls a character). `(sort coll)` uses
    structural lexicographic order for vectors/lists — `(sort [[1 0] [2 1]])` needs
    no comparator. `index-of` / `includes?` work on lists, vectors, and strings
    (substring).
@@ -120,7 +120,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
   nothing (the few in-tree `!` names mean unrelated things: `sig!` = enforced,
   `set-load-path!` = a root setter, `(! pid msg)` = a `gen` cast).
 - **Private = `defn-` / `def-`**, not a marker in the name (ADR-146). The name
-  stays clean at the def and every call site; `(private? 'mod/name)` asks the
+  stays clean at the def and every call site; `(reflect/private? 'mod/name)` asks the
   image. The retired `--`-in-name convention still appears in old code — ignore it.
 - Tail-recursive helpers: public shell delegates to a `defn-` private
   `name-acc`/`-loop` worker that carries the accumulator.
@@ -146,7 +146,7 @@ to write actually works. Its tools:
 
 - **`eval`** — evaluate a Brood expression in the running image. Use it to test a
   function before committing it to a file, or to reproduce a bug. *Prefer
-  returning data as the result value; `(print …)` is safe too — the dispatcher
+  returning data as the result value; `(io/puts …)` is safe too — the dispatcher
   captures stdout process-scoped and returns it as a separate block.*
 - **`load`** — load a file into the image (re-`def`s its globals, hot-reload).
   The image is a separate world from disk: after editing a file, `eval` sees the
@@ -185,9 +185,10 @@ round-trips. Two faster moves:
   | `conj` onto a vector | `cons` (lists); `into` / `(apply vector …)` (vectors) |
   | `set!` / `swap!` / atoms | nothing — state is a process or a Rust handle (trap #1) |
   | `while`, `for`-loop | tail recursion (or a local `letrec`), or `fold`/`map`/`filter`/`reduce` (trap #2) |
-  | a `flush` after `print` | nothing — `print` flushes stdout every call |
-  | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` (a bare `editor/ansi/…` reference loads it but leaves names qualified) → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — call them: `(print (ansi-clear))`, never `(print ansi-clear)` (prints `#<fn …>`). A render loop wants `std/display`. |
-  | a built-in RNG (`rand`) | `rng`/`rand-int`/`rand-float`/`shuffle`/`sample` — pure & seedable, return `[value next-seed]`; thread the seed through your state |
+  | `print` / `puts` / `println` | **none of those exist** — output is `io/`-qualified and needs no `(:use io)`: `(io/puts x)` writes a line, `(io/write x)` writes without a newline, `(io/inspect x)` writes the re-readable form (`"a\nb"` rather than two lines). A trailing `:to <port>` redirects one call: `(io/puts "boom" :to *err*)` |
+  | a `flush` after printing | nothing — every `io/` writer flushes on each call, pipe or terminal |
+  | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` (a bare `editor/ansi/…` reference loads it but leaves names qualified) → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — call them: `(io/write (ansi-clear))`, never `(io/write ansi-clear)` (writes `#<fn …>`). A render loop wants `std/display`. |
+  | a built-in RNG (`rand`) | `rand/rng`, `rand/int`, `rand/float`, `rand/token`, plus `seq/shuffle`/`seq/sample` for collections — pure & seedable: each takes a seed and returns `[value next-seed]`, so start with `(rand/seed n)` and thread the seed through your state. The unqualified spellings do not exist |
   | a set / `#{}` | First-class kernel value (ADR-060): `#{1 2 3}` literal, `(set? s)` true, `(map? s)` **false**, prints `#{…}`, never `=` to a map. Collection protocol works with no import — `(contains? s x)`, `(conj s x)`/`(disj s x)`, `(get s x)` (element or nil), `count`/`first`/`map`/`fold`/`into`/`vec`/`seq` (as elements). `(:use set)` adds only `(set coll)` (dedup) + `union`/`intersection`/`difference`/`subset?`. |
 
 ## When to reach for a process (vs staying pure)

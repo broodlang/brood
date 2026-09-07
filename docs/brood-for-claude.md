@@ -499,8 +499,8 @@ Prefer the higher-order combinators:
 `[:a 1]`. `conj`/`into` insert at each kind's natural point and *preserve the kind*;
 `(conj #{1} 2)` and `(disj s x)` are prelude, no `(:use set)` needed. Two ops stay
 deliberately strict: `contains?` is map/set only (a vector would have to answer by
-*index*), and a **string** is not seqable — bridge with `string->list` or
-`string->graphemes`.
+*index*), and a **string** is not seqable — bridge with `string/->list` (codepoints) or
+`string/->graphemes` (what a human calls a character).
 
 **`case` for constant dispatch, `match` for shapes.** `case` is flat `test result`
 pairs with a lone trailing default, and its tests must be *literals* — a bare symbol
@@ -1040,10 +1040,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **bitwise**: `bit/and` `bit/or` `bit/xor` `bit/not` `bit/shift-left`
   `bit/shift-right` (64-bit, arithmetic right shift; shift amount in `[0,64)`).
 - **randomness** (pure & seedable — there is *no* global RNG; thread the seed):
-  every step takes a seed and returns `[value next-seed]`. `rng` (→ a 32-bit
-  int), `rand-int` `(seed n)` → `[i next]` in `[0,n)`, `rand-float` `(seed)` →
-  `[f next]` in `[0,1)`, `shuffle` `(seed coll)`, `sample` `(seed coll)`; seed a
-  stream from any int (e.g. `(now)`) with `rand-seed`. Carry `next-seed` in your
+  every step takes a seed and returns `[value next-seed]`, and every name is
+  qualified; the unqualified spellings do not exist. `rand/rng` (→ a 32-bit
+  int), `rand/int` `(seed n)` → `[i next]` in `[0,n)`, `rand/float` `(seed)` →
+  `[f next]` in `[0,1)`, `rand/token` `(n)`; for collections, `seq/shuffle`
+  `(seed coll)` and `seq/sample` `(seed coll)`; seed a stream from any int
+  (e.g. `(now)`) with `rand/seed`. Carry `next-seed` in your
   loop/process state like any other value.
 - **meta / eval**: `apply` (call a fn with a list of args — the only way to
   splat) `reflect/eval` `reflect/read-string` `reflect/eval-string` `gensym` (fresh symbol, for macros)
@@ -1235,7 +1237,7 @@ generator (over the PRNG) and asserts `pred` on each — deterministic, and on a
 counterexample it fails with the value + seed:
 
 ```clojure
-(check-property 100 (fn (s) (rand-int s 1000)) (fn (x) (and (>= x 0) (< x 1000))))
+(check-property 100 (fn (s) (rand/int s 1000)) (fn (x) (and (>= x 0) (< x 1000))))
 ```
 
 `nest test` runs each test in its own green process. `nest run` invokes the
