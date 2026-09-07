@@ -11,6 +11,8 @@
 
 (defn lcg (s) (math/rem (+ (* s 1103515245) 12345) 2147483648))
 
+;; Integers throughout; `(* s …)` widens to `number` and `math/rem` wants an int.
+(sig lcg (int -> int))
 (defn build-vec (s n acc)
   (if (= n 0) acc (build-vec (lcg s) (- n 1) (conj acc (- (math/rem s 200) 100)))))
 (defn rand-vec (s n) (build-vec s n []))

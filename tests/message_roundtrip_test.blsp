@@ -42,6 +42,7 @@
             {(math/rem s 10) (rand-val (lcg s) (- depth 1))
              :k (rand-val (lcg (lcg s)) (- depth 1))})))))
 
+(sig lcg (int -> int))
 (defn check-rt (s n)
   (if (= n 0)
     true
