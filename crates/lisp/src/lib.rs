@@ -799,7 +799,10 @@ impl Interp {
     /// exit); this captures the last form's rendered form across that boundary so the
     /// in-browser playground can display it. On wasm `exit.wait()` drives the cooperative
     /// single-thread scheduler, so `spawn`/`send`/`receive` run with no OS threads.
-    #[cfg(target_arch = "wasm32")]
+    ///
+    /// NOT `#[cfg(wasm32)]`, though only wasm calls it: gated, it was invisible to every host
+    /// test, so the capture guard beside it could only assert `run_program` — the neighbour —
+    /// while the playground's actual entry point went unchecked.
     pub fn run_program_repr(&mut self, src: &str) -> Result<String, LispError> {
         let exit = process::spawn_root_program(&self.heap, src, None, None)?;
         exit.wait()?;

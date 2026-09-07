@@ -37,3 +37,19 @@ fn the_direct_eval_path_captures_the_same_text() {
     assert!(value.is_ok(), "{value:?}");
     assert_eq!(captured, "hello, brood\n");
 }
+
+/// The playground calls `run_program_repr`, not `run_program`. The two tests above assert the
+/// NEIGHBOUR of the shipped path; this one asserts the path itself.
+#[test]
+fn the_repr_path_the_playground_actually_calls_captures_too() {
+    let mut interp = Interp::new();
+    brood::builtins::begin_stdout_capture();
+    let ran = interp.run_program_repr("(io/puts \"hello, brood\")\n(+ 1 2 3)");
+    let captured = brood::builtins::take_captured_stdout().unwrap_or_default();
+    assert!(ran.is_ok(), "the program should run: {ran:?}");
+    assert_eq!(ran.unwrap(), "6", "the last form's printed value");
+    assert_eq!(
+        captured, "hello, brood\n",
+        "run_program_repr is what `playground::run` calls on wasm"
+    );
+}
