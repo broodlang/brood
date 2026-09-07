@@ -117,6 +117,13 @@ what incremental search rides on (formerly the separate `index-of`).
 
 ;; `includes?` follows it for the same reason — the membership question over any
 ;; collection, string included, not a string op that happens to accept a vector.
+;; Only the RETURN is declared: an index or -1, never anything else. The arguments stay
+;; open because `index-of` is polymorphic over strings, lists and vectors and the `from`
+;; offset may arrive as nil. Without this the inferred return is `number`, and that width
+;; travels into every caller's arithmetic — `string/substring` and `bytes/at` want an int,
+;; so hatch's request parser, its BML scanner and hive's changelog renderer all reported
+;; positions that were only ever integers.
+(sig index-of (any any &optional any -> int))
 (defn includes? (coll x)
   "True if `coll` contains `x`. Works on lists, vectors, strings (string/substring), sets, and maps (membership among values — use `contains?` for keys).
 
