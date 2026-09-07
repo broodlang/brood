@@ -61,10 +61,10 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    `conj`/`disj`/`get`/`contains?` on a set are prelude (no `(:use set)` — that
    module is only `set`/`union`/`intersection`/`difference`/`subset?`). Two
    deliberate exceptions: `contains?` is map/set only, and a **string is not
-   seqable** — bridge with `string/->list` (codepoints) or `string/->graphemes` (what a human calls a character). `(sort coll)` uses
-   structural lexicographic order for vectors/lists — `(sort [[1 0] [2 1]])` needs
-   no comparator. `index-of` / `includes?` work on lists, vectors, and strings
-   (substring).
+   seqable** — bridge with `string/->list` (codepoints) or `string/->graphemes`
+   (what a human calls a character). `(sort coll)` uses structural lexicographic
+   order for vectors/lists — `(sort [[1 0] [2 1]])` needs no comparator.
+   `index-of` / `includes?` work on lists, vectors, and strings (substring).
 
 9. **`case` for constants, `match` for shapes.** `(case k :a 1 :b 2 default)` —
    flat `test result` pairs, lone trailing form is the default, tests must be
