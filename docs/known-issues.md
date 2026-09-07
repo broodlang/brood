@@ -8483,6 +8483,15 @@ the ecosystem — pong is the only one whose hot path threads a PRNG float throu
 the same function called once, or 3000 times with an unthreaded seed, is correct under both
 engines. It needs the JIT to admit the arm AND a value that exercises the miscompiled path.
 
+**Not a repro (checked, so the next person need not).** A VERBATIM copy of
+`spawn-burst-acc` — same body, same `*part-life-min*`/`*part-life-max*` constants, same four
+`rand/float` calls, driven 4000 rounds with the seed threaded through — runs clean under both
+engines. So the trigger is not the expression shape alone: it needs something about the
+surrounding program (admission thresholds, the real call chain, or frame size) that a
+standalone module does not reproduce. `BROOD_JIT_VERIFY=1` reports no stale handle, and
+`BROOD_JIT_VERIFY_FN` / `BROOD_JIT_DUMP_IR` are silent on a plain release build — they need
+`make perf-brood`, which is the next step.
+
 **Fix.** None yet. `BROOD_NO_JIT=1` is a correct workaround at a performance cost.
 
 **Guard.** None yet — `pong`'s suite is the current reproducer, which is a dependency on
