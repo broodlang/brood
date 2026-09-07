@@ -44,6 +44,10 @@ conformance port. The oracle is upstream's own expected output in
     (chudnovsky-isqrt-descend n y (math/quot (+ y (math/quot n y)) 2))
     x))
 
+;; All three are integers by construction — the whole point of this routine is that no
+;; float appears in the derivation — but untyped parameters widen to `number` and
+;; `math/quot` wants ints.
+(sig chudnovsky-isqrt-descend (int int int -> int))
 (defn- chudnovsky-isqrt (n)
   (if (< n 2)
     n
@@ -65,6 +69,7 @@ conformance port. The oracle is upstream's own expected output in
           (* p1 p2)
           (+ (* q1 p2) (* q2 g1))]))))
 
+(sig chudnovsky-isqrt (int -> int))
 (defn pi-digits (digits)
   "The first `digits` digits of π, as an exact integer (upstream's `pi`)."
   (let (num-terms (math/floor (+ 2 (/ digits 14.181647462)))

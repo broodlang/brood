@@ -955,6 +955,7 @@ ranges."
 ;; then). Gravity is left: an insert exactly AT a marker leaves it put, so text typed at one
 ;; cursor lands after another user's cursor sitting at the same spot.
 
+(sig set-read-only-spans (buffer any -> buffer))
 (defn- buffer-markers-insert (markers p n)
   "Shift `markers` for an insert of `n` chars at `p`: a marker strictly after `p` moves
 right by `n` (left-gravity — a marker exactly at `p` stays put)."
@@ -1073,6 +1074,7 @@ remote participants' cursors on a shared buffer."
   (assoc buf
     :markers (assoc (or (get buf :markers) {}) id (buffer-clamp 0 (buffer-length buf) pos))))
 
+(sig buffer-marker-set (buffer any int -> buffer))
 (defn buffer-marker (buf id)
   "The char position of marker `id` (clamped to the current length), or nil if unset."
   (let (p (get (or (get buf :markers) {}) id))
@@ -1110,6 +1112,7 @@ count it describes. Read it back with `annotation`."
        :rope (buffer-rope buf)
        :lines (buffer-line-count buf)}))
 
+(sig annotate (buffer any any -> buffer))
 (defn annotation (buf key)
   "The annotation stored under `key` as `{:value :current? :stale?}`, or nil when
 there is none. `:current?` — the line count still matches, so line-keyed data is

@@ -27,7 +27,9 @@
         (count (filter (reflect/special-forms) (fn (k) (not (string/starts-with? k "def"))))))))
 
   (test "(tmlanguage) is valid JSON of the TextMate shape"
-    (let (g (decode (tmlanguage)))
+    ;; narrowed once: `decode` answers any shape, and every `get` below assumes a map
+    (let (decoded (decode (tmlanguage))
+          g (if (map? decoded) decoded {}))
       (assert= (get g :scopeName) "source.brood")
       (assert= (get g :name) "Brood")
       (is (map? (get g :repository)))
