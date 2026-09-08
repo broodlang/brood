@@ -11677,7 +11677,7 @@ above its test module. Two more stranded doc paragraphs surfaced (`StrData`'s ab
 own comment-only commit. The item is closed; `RuntimeCode` → its own child is the one seam left,
 noted in the handoff as optional.
 
-## 2026-09-08 (later) — KI-118: the stdlib image reader read sections from whatever file was at the path
+## 2026-09-08 (later) — KI-119: the stdlib image reader read sections from whatever file was at the path
 
 Resuming after a crashed session: the heap-split commits were in, the final suite run they
 were waiting on had been killed at 10 s. Rerunning it produced two things that were not the

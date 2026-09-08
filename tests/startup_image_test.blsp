@@ -81,7 +81,7 @@
         (%image-load-section p (first sec) (second sec))
         (assert= 1 si-later))))
 
-  ;; KI-118: a section is read from the file that was INDEXED, not from whatever sits at the
+  ;; KI-119: a section is read from the file that was INDEXED, not from whatever sits at the
   ;; path by the time the module materialises. The directory is read at `%image-index`; a
   ;; section is read on the module's first `require`, arbitrarily later — and in between a
   ;; rebuild replaces the file (two builds of one tree are not byte-identical, so every offset

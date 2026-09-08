@@ -18,7 +18,7 @@ row is ✅/☑️/📦 (KI-107 closed 2026-09-06 with ADR-323, KI-112/KI-113 fix
 no `:trace` (found as a one-in-N flake of `try_catch_test.blsp`, made deterministic, fixed with a
 per-arm error-exit callback; guard `tests/jit_trace_test.blsp`). One residue is
 recorded in the entry: native frames carry name + file but no call-site position.
-**2026-09-08 (later): KI-118 found and FIXED** — the stdlib image reader re-opened the image
+**2026-09-08 (later): KI-119 found and FIXED** — the stdlib image reader re-opened the image
 BY PATH per section against a directory read at boot, and rebuilds (not byte-identical, so
 every offset moves) landed in between; a module then materialised another module's bytes and
 its names were unbound in every process at once. This was KI-80's "unbound after `%isolate`

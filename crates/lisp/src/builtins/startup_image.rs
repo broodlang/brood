@@ -369,7 +369,7 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     // builds of one unchanged tree on 2026-09-08 gave three different files of the same
     // size, differing from byte 103 on — so a rename moves every section offset, and a
     // process that indexed the previous file must keep reading THAT file: `OPEN_IMAGES`
-    // holds the handle open for exactly this reason (KI-118).
+    // holds the handle open for exactly this reason (KI-119).
     let tmp = format!("{path}.{}.tmp", std::process::id());
     std::fs::write(&tmp, &body)
         .map_err(|e| LispError::runtime(format!("%image-write: {tmp}: {e}")))?;
@@ -394,7 +394,7 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// The image files this process has indexed, **held open** for as long as it runs — one
 /// handle per path, replaced whenever the same path is indexed again.
 ///
-/// This is what makes a section read agree with the directory it came from (KI-118). A
+/// This is what makes a section read agree with the directory it came from (KI-119). A
 /// directory is read once, at `%image-index`; the sections it names are read LATER, on
 /// each module's first `require`, seconds or minutes after — and in between the file at
 /// that path can be replaced: `nest` rebuilds the stdlib image on any command that finds
@@ -663,7 +663,7 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
     };
     let reserve = crate::eval::truthy(arg(args, 3));
     // From the handle `%image-index` opened for this path — never a fresh open by path, which
-    // would read whatever a concurrent rebuild has since put there (KI-118, `OPEN_IMAGES`).
+    // would read whatever a concurrent rebuild has since put there (KI-119, `OPEN_IMAGES`).
     let Some(file) = image_file(&path) else {
         return Ok(Value::Nil);
     };
