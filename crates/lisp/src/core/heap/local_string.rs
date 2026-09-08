@@ -11,15 +11,6 @@
 
 use super::*;
 
-/// A LOCAL (and transitively PRELUDE-builder) string slab entry. Small strings
-/// stay inline; strings of [`SHARED_BLOB_THRESHOLD`] bytes or more route through
-/// an `Arc<SharedBlob>` so cross-process sends bump a refcount instead of
-/// deep-copying the bytes (see `core/blob.rs`).
-///
-/// PRELUDE itself contains no `Shared` entries — `freeze_as_shared_code`
-/// inline-extracts any builder-time Shared blobs into `Inline(String)` before
-/// freezing, keeping the cross-runtime PRELUDE region independent of any
-/// runtime-scoped `Arc<SharedBlob>`.
 /// A stored string plus its cached **char** length.
 ///
 /// Brood indexes strings by Unicode scalar, but they are stored as UTF-8, so every
@@ -130,6 +121,15 @@ impl CharIndex {
     }
 }
 
+/// A LOCAL (and transitively PRELUDE-builder) string slab entry. Small strings
+/// stay inline; strings of [`SHARED_BLOB_THRESHOLD`] bytes or more route through
+/// an `Arc<SharedBlob>` so cross-process sends bump a refcount instead of
+/// deep-copying the bytes (see `core/blob.rs`).
+///
+/// PRELUDE itself contains no `Shared` entries — `freeze_as_shared_code`
+/// inline-extracts any builder-time Shared blobs into `Inline(String)` before
+/// freezing, keeping the cross-runtime PRELUDE region independent of any
+/// runtime-scoped `Arc<SharedBlob>`.
 #[derive(Clone)]
 pub(super) enum StrData {
     Inline(String),
