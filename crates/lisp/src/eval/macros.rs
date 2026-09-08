@@ -1143,7 +1143,8 @@ fn scan_def_form(
     if matches!(
         hn,
         kw::DEF | kw::DEF_PRIVATE | kw::DEFN | kw::DEFN_PRIVATE | kw::DEFMACRO | kw::DEFDYN
-    ) {
+    ) || defines_by_convention(hn)
+    {
         if let Some(ValueRef::Sym(name)) = items.get(1).map(|v| v.unpack()) {
             // An AMBIENT name is never namespaced, so it must not be pre-recorded as
             // a namespace-local name — that would qualify every reference in the file
@@ -1165,6 +1166,37 @@ fn scan_def_form(
     for &it in &items[1..] {
         scan_def_form(heap, it, names, ambient);
     }
+}
+
+/// Does a top-level form headed by `hn` **define** its second element as a name in the
+/// current namespace? True for the literal `def…` special forms (handled by the caller)
+/// and, by CONVENTION, for any other head spelled `def…` — which is every definition
+/// macro in the tree: `defonce`, `defrecord`, `defmulti`, `defmethod`, `defability`,
+/// `defbehaviour`, `defevent`, and third-party ones like hatch's `defhtml`/`deflive`.
+///
+/// The pre-scan reads UNEXPANDED forms, so it cannot ask a macro what it binds: at scan
+/// time the file's own `(:use …)` has not run and the macro may not even be loaded yet.
+/// Expanding here to find out would be both order-dependent and a second run of every
+/// macro. The spelling is the one signal available before expansion, and it is a signal
+/// the language already leans on everywhere else (`?` predicate, `-` private, earmuffs).
+///
+/// Without this, a name a macro defines is absent from the region's known-name set, so a
+/// bare reference to it from a function written ABOVE the definition does not qualify to
+/// `ns/name` — it falls through to root and is **unbound at runtime**, past a clean
+/// `nest check`, a clean `--strict` and a green suite (brood KI-118). Below the
+/// definition it happened to work, because by then `ns/name` is bound.
+///
+/// A false positive costs a bare reference to a ROOT binding of the same name being
+/// qualified to `ns/name` inside this module — which is what a real definition would
+/// have done anyway, and the head has to be spelled `def…` for it to arise.
+fn defines_by_convention(hn: &str) -> bool {
+    // `(defmodule M …)` names a MODULE, not a module-level binding; `scan_regions`
+    // consumes it before this is reached, but the recursive descent can still see one.
+    if hn == kw::DEFMODULE {
+        return false;
+    }
+    // A qualified call — `(web/page/defhtml card …)` — is the same form as the bare one.
+    hn.rsplit('/').next().is_some_and(|last| last.starts_with("def"))
 }
 
 /// Resolve `form` against `heap.compile_ns`. Identity when at root.
@@ -2986,6 +3018,13 @@ mod resolve_tests {
         v
     }
 
+    fn regions_of(
+        interp: &Interp,
+        forms: &[Value],
+    ) -> HashMap<value::Symbol, HashSet<value::Symbol>> {
+        scan_regions(&interp.heap, forms)
+    }
+
     #[test]
     fn scan_regions_partitions_defs_by_module_boundary() {
         // ADR-223: two modules in one file — each def head belongs to its own region.
@@ -3016,6 +3055,55 @@ mod resolve_tests {
         let flat = scan_def_names(&interp.heap, &forms);
         assert!(flat.contains(&value::intern("x")));
         assert!(!flat.contains(&value::intern("pre")));
+    }
+
+    #[test]
+    fn scan_regions_collects_names_a_definition_macro_binds() {
+        // KI-118. The pre-scan reads UNEXPANDED forms, so a name bound by a MACRO —
+        // std's own `defonce`/`defrecord`/`defmulti`, or hatch's `defhtml` — used to be
+        // absent from the region's known names. A reference to it from a function
+        // written ABOVE the definition then failed to qualify to `ns/name`, fell through
+        // to root, and was UNBOUND at runtime, past a clean check and a green suite.
+        let mut interp = Interp::new();
+        let forms = reader::read_all(
+            &mut interp.heap,
+            "(defmodule a) (defonce cache 1) (defhtml card (p) p) (web/page/defhtml two (p) p)",
+        )
+        .expect("parse");
+        assert_eq!(region(&regions_of(&interp, &forms), "a"), vec!["cache", "card", "two"]);
+    }
+
+    #[test]
+    fn scan_regions_ignores_a_non_def_head_and_a_nested_defmodule() {
+        // The rule is the `def…` spelling, not "second element is a symbol": an ordinary
+        // call must not donate its argument to the namespace, and a `defmodule` names a
+        // MODULE, never a module-level binding.
+        let mut interp = Interp::new();
+        let forms = reader::read_all(
+            &mut interp.heap,
+            "(defmodule a) (register thing) (do (defmodule b)) (defn x () 1)",
+        )
+        .expect("parse");
+        assert_eq!(region(&regions_of(&interp, &forms), "a"), vec!["x"]);
+    }
+
+    #[test]
+    fn a_macro_defined_name_resolves_from_above_its_definition() {
+        // The end-to-end shape of KI-118: `read-it` is written above the `defthing` that
+        // binds `thing`. Before the fix this was `unbound symbol: thing` at CALL time.
+        let mut interp = Interp::new();
+        interp
+            .eval_str(
+                "(defmodule ki118)\n\
+                 (defmacro defthing (name val) (list 'def name val))\n\
+                 (defn read-it () (* thing 2))\n\
+                 (defthing thing 21)",
+            )
+            .expect("load");
+        assert_eq!(
+            interp.eval_str("(ki118/read-it)").expect("call").as_int(),
+            Some(42)
+        );
     }
 
     #[test]
