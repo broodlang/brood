@@ -16,9 +16,19 @@ State when written: `main` = `5e238340`, pushed; **no open bug in `known-issues.
 row is ✅/☑️/📦 (KI-107 closed 2026-09-06 with ADR-323, KI-112/KI-113 fixed the same weekend).
 **2026-09-08: KI-117 found and FIXED the same day** — an error raised inside JIT'd code carried
 no `:trace` (found as a one-in-N flake of `try_catch_test.blsp`, made deterministic, fixed with a
-per-arm error-exit callback; guard `tests/jit_trace_test.blsp`). No open bug again. One residue is
+per-arm error-exit callback; guard `tests/jit_trace_test.blsp`). One residue is
 recorded in the entry: native frames carry name + file but no call-site position.
-Last full suite 1415/1415 on `326e4cdb`. The tree is clean. Pick items **in order**; one per
+**2026-09-08 (later): KI-118 found and FIXED** — the stdlib image reader re-opened the image
+BY PATH per section against a directory read at boot, and rebuilds (not byte-identical, so
+every offset moves) landed in between; a module then materialised another module's bytes and
+its names were unbound in every process at once. This was KI-80's "unbound after `%isolate`
+rollback" shape — that attribution was wrong (`BROOD_SCOPE_DBG` printed nothing on the failing
+run) — and a fresh `nest run` dying on `file/regular?`. Reader holds the indexed handle now;
+guard in `tests/startup_image_test.blsp`, sabotage-verified. No open bug again.
+**Also that day: twelve orphaned load spinners from a 2026-09-03 flake hunt had pinned 9–12
+cores for 4 d 18 h** — every timing taken here since was ~2.5x inflated (`complete` 22.4 → 5.7 s,
+`artifact_matrix` 66 → 26 s). Rule 7 below.
+The tree is clean. Pick items **in order**; one per
 session is fine. Each says what to do, how to verify, and what "done" means. The 2026-09-04
 queue below is superseded except where these items point back into it.
 
@@ -108,6 +118,13 @@ needs a machine where `make ab --floor` and `perf stat` are fair game.
 5. **A test marked `:isolated` before its form is isolated only since ADR-323** — check the
    summary's `N isolated` count against the markers when a file's concurrency is in question.
 6. **A stale binary agrees with anything.** Rebuild before believing a `.blsp` change.
+7. **Before believing a timing or a timeout, check the box is idle**: `cat /proc/loadavg` and
+   `pgrep -af 'while :;'`. Load-generator spinners started as `( timeout N sh -c '…' & )` outlive
+   the session that started them (a killed `timeout` leaves its child), and twelve of them sat
+   here for five days. Start hogs self-terminating — `bash -c 'end=$((SECONDS+N)); while
+   [ $SECONDS -lt $end ]; do :; done'` (dash has no `SECONDS`) — and kill them in a trap.
+8. **Do not edit `docs/` while a suite runs either** — `doc_refs` reads `known-issues.md` from
+   disk, and a source comment citing a KI whose section is not written yet reds it.
 
 ## Work queue — written 2026-09-04 (superseded by the 2026-09-07 queue above; kept for its item text)
 

@@ -11676,3 +11676,36 @@ above its test module. Two more stranded doc paragraphs surfaced (`StrData`'s ab
 `LocalString`, `RuntimeCode`'s above `SymbolHasher`) — five for the weekend, each fixed as its
 own comment-only commit. The item is closed; `RuntimeCode` → its own child is the one seam left,
 noted in the handoff as optional.
+
+## 2026-09-08 (later) — KI-118: the stdlib image reader read sections from whatever file was at the path
+
+Resuming after a crashed session: the heap-split commits were in, the final suite run they
+were waiting on had been killed at 10 s. Rerunning it produced two things that were not the
+split. First `artifact_matrix` TIMED OUT at 120 s — because twelve orphaned `while :; do :; done`
+load spinners from a 2026-09-03 KI-88 hunt had been pinning nine to twelve cores of this box for
+4 d 18 h (a SIGKILLed `timeout` does not take its child). Every figure taken here since then was
+~2.5x inflated: `artifact_matrix` 66 s → 26.4 s clean, `complete` 22.4 s → 5.7 s. The test gets a
+240 s budget in `.config/nextest.toml` with the measurements, and the spinner check is now in
+the handoff's rules.
+
+Second, on the clean box, `brood_suite_passes` went **TMT at 900 s** on try 1 with the KI-80
+shape in its stderr — spawned children dying `unbound symbol: editor/serve/serve-manager`,
+`ui-run`, `def-face`. KI-80's third pass had attributed that to `%isolate` rolling globals back.
+Looping the wrapper with `BROOD_SCOPE_DBG=1` beside a `cargo nextest run -p cli -p nest` loop
+reproduced it on the first run (`unbound symbol: set`, then a hang on a receive with no
+`after`) with **zero** `[scope]` lines, and the load loop itself failed once: a fresh `nest run`
+died `unbound symbol: file/regular?`. That single-process shape was the handle: looped alone it
+failed 1/40 and 1/40 (`format/vec->list`), and `BROOD_IMAGE_TRACE` showed `format` materialised
+with **20 entries** where the section holds **172** — another module's bytes under `format`'s
+name.
+
+Mechanism: `%image-index` reads the directory at boot; `%image-load-section` re-opened the
+file **by path** on each module's first `require`, and a rebuild in between (nextest's setup
+script on every invocation, `nest` on a stale image) replaces the file — atomically, so never
+torn, but two builds of one unchanged tree differ from byte 103 on (three builds, three hashes,
+one size), so every offset moves. Fix: the reader holds the handle it indexed (`OPEN_IMAGES`);
+an open descriptor pins the old inode across the rename. Guard in
+`tests/startup_image_test.blsp` writes a shorter image over an indexed one and loads the
+indexed section; sabotaged to open-per-read it goes 21/22, fixed 22/22. Full write-up, the
+three sightings and what it retroactively explains (KI-80's fourth/fifth, its kinship with
+KI-72 and KI-105) in `known-issues.md`.
