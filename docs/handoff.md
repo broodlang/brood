@@ -24,7 +24,19 @@ every offset moves) landed in between; a module then materialised another module
 its names were unbound in every process at once. This was KI-80's "unbound after `%isolate`
 rollback" shape — that attribution was wrong (`BROOD_SCOPE_DBG` printed nothing on the failing
 run) — and a fresh `nest run` dying on `file/regular?`. Reader holds the indexed handle now;
-guard in `tests/startup_image_test.blsp`, sabotage-verified. No open bug again.
+guard in `tests/startup_image_test.blsp`, sabotage-verified. **But one bug is OPEN: KI-120** —
+the wrapper's `def-face`/`editor/serve/*` unbound wave recurred on the fixed tree with the image
+rebuilt only once, two of three full runs. Item 0 below. Until it is closed, `brood_suite_passes`
+reports it as FLAKY (retry absorbs one hit); a FLAKY row on that binary is this bug, not noise.
+
+### 0 — KI-120 (open): the wrapper's unbound wave that KI-119 did not explain
+
+**Do.** `BROOD_SCOPE_DBG=1 BROOD_IMAGE_TRACE=1 cargo nextest run --no-fail-fast --features
+brood/treesit-grammars > suite.log 2>&1` under the cap, alone on the box (a concurrent release
+build got both killed for memory). ~50% hit rate per 17-min run. On a hit, read the wrapper's
+try-1 stderr: `[scope] RESTORE by … with N live:` lines against the `process N died:
+unbound symbol` lines. The entry lists what each outcome means and the next tool. Keep the
+whole log; never pipe it through a filter.
 **Also that day: twelve orphaned load spinners from a 2026-09-03 flake hunt had pinned 9–12
 cores for 4 d 18 h** — every timing taken here since was ~2.5x inflated (`complete` 22.4 → 5.7 s,
 `artifact_matrix` 66 → 26 s). Rule 7 below.

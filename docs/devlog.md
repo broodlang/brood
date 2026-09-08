@@ -11709,3 +11709,9 @@ an open descriptor pins the old inode across the rename. Guard in
 indexed section; sabotaged to open-per-read it goes 21/22, fixed 22/22. Full write-up, the
 three sightings and what it retroactively explains (KI-80's fourth/fifth, its kinship with
 KI-72 and KI-105) in `known-issues.md`.
+
+**Not closed.** On the merged tree, with the stdlib image rebuilt exactly once at the run's
+start, `brood_suite_passes` went TMT at 900 s again — 200 children dead on bare `def-face`, the
+`editor/serve/*` names, `ui-run`: KI-80's shape, not KI-119's. That is **KI-120, open**; the
+KI-119 entry and KI-80's pointer say so. Next is the full fan-out with `BROOD_SCOPE_DBG=1`
+exported to every test process.
