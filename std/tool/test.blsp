@@ -1610,7 +1610,11 @@ the test rather than hanging the run."
 (defn- test-apply-opts (opts)
   (def *test-timeout-ms* (opt-val :timeout opts *test-timeout-ms*))
   (def *test-slow-ms* (opt-val :slow-over opts *test-slow-ms*))
-  (def *test-trace* (opt? :trace opts))
+  ;; `BROOD_TEST_TRACE` arms `--trace` from the environment, for a runner nobody passes
+  ;; flags to: the nextest wrapper (`crates/lisp/tests/suite.rs`) prints only progress marks,
+  ;; so a run killed at its cap has never named the tests that failed (KI-120). Under trace
+  ;; each result is a line as it lands, which survives the kill.
+  (def *test-trace* (or (opt? :trace opts) (not (nil? (os/env "BROOD_TEST_TRACE")))))
   (def *test-formatter* (opt-val :formatter opts nil))
   (def *test-filter* (opt-val :filter opts nil))
   (def *test-max-failures* (opt-val :max-failures opts 0)))

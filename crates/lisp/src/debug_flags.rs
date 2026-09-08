@@ -544,6 +544,11 @@ pub const FLAGS: &[DebugFlag] = &[
         DIAG,
         "revert `nest test` to load-all-then-run-all instead of the per-file `%isolate` scope",
     ),
+    f(
+        "BROOD_TEST_TRACE",
+        DIAG,
+        "arm the test runner's --trace from the environment (one line per result as it lands) — for the nextest wrapper, whose progress dots name nothing when the run is killed at its cap (KI-120)",
+    ),
     // ---- host environment ----
     f(
         "BROOD_GUI_HEADLESS",

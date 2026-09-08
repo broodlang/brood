@@ -24,7 +24,9 @@ mod selfhost_macros;
 mod sequences;
 pub(crate) mod startup_image;
 mod syntax_scan;
-mod system;
+// `pub(crate)` for `eval::unbound_error`'s KI-120 diagnostic, which asks whether a missing
+// qualified name belongs to a baked-in module that `*features*` records as loaded.
+pub(crate) mod system;
 #[cfg(not(target_arch = "wasm32"))]
 mod terminal;
 #[cfg(target_arch = "wasm32")]
