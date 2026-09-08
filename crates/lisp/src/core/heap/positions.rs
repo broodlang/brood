@@ -745,3 +745,92 @@ impl Heap {
         self.runtime.restore_private(names);
     }
 }
+
+#[cfg(test)]
+mod rt_position_tests {
+    use super::*;
+    use crate::error::Pos;
+
+    /// The `(code_gen, index)` of a RUNTIME pair value — the identity
+    /// [`RuntimeCode::positions`] is keyed by.
+    fn rt_pair(v: Value) -> (usize, usize) {
+        match v.unpack() {
+            ValueRef::Pair(id) => {
+                assert_eq!(id.region(), RUNTIME, "expected a promoted RUNTIME pair");
+                (id.code_gen(), id.index())
+            }
+            _ => panic!("expected a pair"),
+        }
+    }
+
+    /// Regression: the shared RUNTIME source-position table must be keyed by
+    /// **`(code_gen, slab index)`**, not by the bare index.
+    ///
+    /// The two RUNTIME generations share one index space and a fresh generation starts
+    /// its slabs at 0, so once aging is active a `def` into the new generation lands on
+    /// the same index as a live form in the retained one. Keyed by index alone, the
+    /// second write silently clobbered the first, and `(form-pos …)` — plus every error
+    /// message and test-framework line lookup that goes through it — reported a
+    /// stranger's position for still-live old-generation code.
+    // The synthetic mark (ADR-297) rides the position record, so `promote` carries it: it
+    // once lived in a side set beside the LOCAL table, and a promoted form silently lost
+    // it — the checker then warned "unused let binding" on destructured names in every
+    // loaded file while the LOCAL-heap unit test stayed green.
+    #[test]
+    fn the_synthetic_mark_survives_promotion() {
+        let mut h = Heap::new();
+        let pos = Pos { line: 3, col: 7 };
+        let generated = h.alloc_pair(Value::int(1), Value::nil());
+        h.set_form_pos(generated, pos);
+        h.mark_synthetic(generated);
+        let written = h.alloc_pair(Value::int(2), Value::nil());
+        h.set_form_pos(written, pos);
+        assert!(h.is_synthetic(generated));
+        assert!(!h.is_synthetic(written));
+        let (rg, rw) = (h.promote(generated), h.promote(written));
+        assert_eq!(h.form_pos_only(rg), Some(pos), "the position still travels");
+        assert!(h.is_synthetic(rg), "…and so does the mark");
+        assert!(
+            !h.is_synthetic(rw),
+            "a form the user wrote stays not-synthetic"
+        );
+    }
+
+    #[test]
+    fn runtime_form_positions_are_keyed_by_generation() {
+        let mut h = Heap::new();
+        let pos_a = Pos { line: 11, col: 2 };
+        let pos_b = Pos { line: 22, col: 4 };
+
+        // A positioned form promoted into the current generation.
+        let a = h.alloc_pair(Value::int(1), Value::nil());
+        h.set_form_pos(a, pos_a);
+        let ra = h.promote(a);
+        assert_eq!(h.form_pos_only(ra), Some(pos_a));
+
+        // Age: subsequent promotes land in the other generation, whose slab indices
+        // restart at 0 and therefore collide with the retained generation's.
+        assert!(h.age_runtime(), "the other generation slot should be empty");
+        let b = h.alloc_pair(Value::int(2), Value::nil());
+        h.set_form_pos(b, pos_b);
+        let rb = h.promote(b);
+
+        let ((gen_a, idx_a), (gen_b, idx_b)) = (rt_pair(ra), rt_pair(rb));
+        assert_ne!(
+            gen_a, gen_b,
+            "the two forms must be in different generations"
+        );
+        assert_eq!(
+            idx_a, idx_b,
+            "the test only proves anything if the slab indices actually collide",
+        );
+
+        assert_eq!(h.form_pos_only(rb), Some(pos_b), "new-generation position");
+        assert_eq!(
+            h.form_pos_only(ra),
+            Some(pos_a),
+            "a promote into the fresh generation overwrote a LIVE old-generation form's \
+             recorded position — the RUNTIME position table is keyed by bare slab index",
+        );
+    }
+}

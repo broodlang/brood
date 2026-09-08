@@ -501,3 +501,140 @@ impl std::hash::Hasher for HandleHasher {
     }
 }
 type HandleMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<HandleHasher>>;
+
+/// KI-95: `promote` must copy shared (DAG) substructure ONCE, the way the GC's
+/// flush path does (`flush_pair`/`flush_vector`/`flush_map` in `gc.rs`) — not once
+/// per referrer. Immutable path-copying code produces shared substructure
+/// routinely, and the RUNTIME region is append-only, so per-referrer copies are a
+/// leak that compounds exponentially with nesting. The counts are asserted
+/// directly against the RUNTIME slabs, per the KI-95 fix-shape note.
+#[cfg(test)]
+mod promote_sharing_tests {
+    use super::*;
+
+    /// Level 0 is `(1)`; level k is a pair whose car AND cdr are level k-1:
+    /// n+1 distinct cells, but 2^(n+1)-1 if re-copied once per referrer.
+    #[test]
+    fn a_self_sharing_pair_dag_promotes_linearly() {
+        let mut h = Heap::new();
+        let n = 16;
+        let mut v = h.alloc_pair(Value::int(1), Value::nil());
+        for _ in 0..n {
+            v = h.alloc_pair(v, v);
+        }
+        let before = h.runtime.cur_code().pairs.count();
+        let promoted = h.promote(v);
+        let grown = h.runtime.cur_code().pairs.count() - before;
+        assert_eq!(
+            grown,
+            n + 1,
+            "each distinct cell must be promoted exactly once"
+        );
+        // The promoted graph still reads correctly: car^n reaches the `(1)` leaf.
+        let mut cur = promoted;
+        for _ in 0..n {
+            let ValueRef::Pair(id) = cur.unpack() else {
+                panic!("expected a pair");
+            };
+            cur = h.pair(id).0;
+        }
+        let ValueRef::Pair(id) = cur.unpack() else {
+            panic!("expected the leaf pair");
+        };
+        assert!(matches!(h.pair(id).0.unpack(), ValueRef::Int(1)));
+    }
+
+    /// A shared list *tail* rides the same table: two lists converging on one
+    /// spine must promote the shared cells once.
+    #[test]
+    fn a_shared_list_tail_promotes_once() {
+        let mut h = Heap::new();
+        let mut tail = Value::nil();
+        for i in 0..8 {
+            tail = h.alloc_pair(Value::int(i), tail);
+        }
+        let a = h.alloc_pair(Value::int(100), tail);
+        let b = h.alloc_pair(Value::int(200), tail);
+        let both = h.alloc_pair(a, b);
+        let before = h.runtime.cur_code().pairs.count();
+        h.promote(both);
+        let grown = h.runtime.cur_code().pairs.count() - before;
+        assert_eq!(
+            grown,
+            8 + 3,
+            "the 8 shared tail cells + a + b + the outer pair"
+        );
+    }
+
+    /// Past `SPINE_REG_FULL` a spine registers only every `SPINE_REG_STRIDE`-th
+    /// cell, so a walk re-entering it (the shared tail here) may re-copy up to
+    /// stride−1 cells per referrer before hitting a registered one — bounded,
+    /// still O(n), never the pre-KI-95 once-per-referrer full re-copy.
+    #[test]
+    fn a_long_shared_tail_stays_linear_past_the_stride_threshold() {
+        let mut h = Heap::new();
+        let n = 1000;
+        let mut tail = Value::nil();
+        for i in 0..n {
+            tail = h.alloc_pair(Value::int(i), tail);
+        }
+        let a = h.alloc_pair(Value::int(-1), tail);
+        let b = h.alloc_pair(Value::int(-2), tail);
+        let both = h.alloc_pair(a, b);
+        let before = h.runtime.cur_code().pairs.count();
+        h.promote(both);
+        let grown = h.runtime.cur_code().pairs.count() - before;
+        assert!(
+            grown <= n as usize + 3 + 8,
+            "grown={grown} for a {n}-cell tail shared twice — a re-entering walk \
+             must join the registered copy within one stride window"
+        );
+    }
+
+    #[test]
+    fn a_self_sharing_vector_dag_promotes_linearly() {
+        let mut h = Heap::new();
+        let n = 12;
+        let mut v = h.alloc_vector(vec![Value::int(1)]);
+        for _ in 0..n {
+            v = h.alloc_vector(vec![v, v]);
+        }
+        let before = h.runtime.cur_code().vectors.count();
+        h.promote(v);
+        let grown = h.runtime.cur_code().vectors.count() - before;
+        assert_eq!(
+            grown,
+            n + 1,
+            "each distinct vector must be promoted exactly once"
+        );
+    }
+
+    /// A map referenced twice must land as one RUNTIME trie, not two. The trie's
+    /// per-copy node count is measured by a single-reference promote of the same
+    /// map, so the assertion doesn't hardcode CHAMP layout.
+    #[test]
+    fn a_shared_map_promotes_once() {
+        let mut h = Heap::new();
+        let s = h.alloc_string("shared-once");
+        let m = h.map_from_pairs(vec![(Value::int(1), s), (Value::int(2), s)]);
+        let unit = {
+            let before = h.runtime.cur_code().maps.count();
+            h.promote(m);
+            h.runtime.cur_code().maps.count() - before
+        };
+        let twice = h.alloc_vector(vec![m, m]);
+        let before_maps = h.runtime.cur_code().maps.count();
+        let before_strs = h.runtime.cur_code().strings.count();
+        h.promote(twice);
+        assert_eq!(
+            h.runtime.cur_code().maps.count() - before_maps,
+            unit,
+            "the map is one value referenced twice — one trie copy"
+        );
+        assert_eq!(
+            h.runtime.cur_code().strings.count() - before_strs,
+            1,
+            "the string is referenced twice inside the map — one copy"
+        );
+    }
+}
