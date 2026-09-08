@@ -62,8 +62,11 @@
         (dm-scan-test-body where
           (rest forms)
           true
-          (cons (str where ": " (first forms) " stands after the body started, where nothing"
-                   " reads it — a test's modifiers are read directly after its name")
+          (cons (str where
+                  ": "
+                  (first forms)
+                  " stands after the body started, where nothing"
+                  " reads it — a test's modifiers are read directly after its name")
             acc))
         ;; A leading modifier. `:tags` carries its vector with it.
         (dm-scan-test-body where
@@ -81,32 +84,36 @@
     (dm-modifier? (first forms))
       (cond
         (not in-body)
-        (dm-scan-describe-body where
-          (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
-          false
-          acc)
+          (dm-scan-describe-body where
+            (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
+            false
+            acc)
 
         (= (first forms) :serial)
-        (dm-scan-describe-body where
-          (rest forms)
-          true
-          (cons (str where ": :serial is a group mode and has no per-test meaning — put it"
-                   " right after the group name, or mark the one test :isolated")
-            acc))
+          (dm-scan-describe-body where
+            (rest forms)
+            true
+            (cons (str where
+                    ": :serial is a group mode and has no per-test meaning — put it"
+                    " right after the group name, or mark the one test :isolated")
+              acc))
 
         (dm-test-form? (if (= (first forms) :tags) (third forms) (second forms)))
-        (dm-scan-describe-body where
-          (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
-          true
-          acc)
+          (dm-scan-describe-body where
+            (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
+            true
+            acc)
 
         :else
-        (dm-scan-describe-body where
-          (rest forms)
-          true
-          (cons (str where ": " (first forms) " does not stand before a (test …) form, so"
-                   " nothing reads it")
-            acc)))
+          (dm-scan-describe-body where
+            (rest forms)
+            true
+            (cons (str where
+                    ": "
+                    (first forms)
+                    " does not stand before a (test …) form, so"
+                    " nothing reads it")
+              acc)))
     else (dm-scan-describe-body where (rest forms) true acc)))
 
 (defn- dm-walk-kids (where form acc)

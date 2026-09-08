@@ -3735,28 +3735,29 @@ output path; with several, each binary gets a per-target suffix.
   (cond
     ;; `--runtime` names ONE base binary, so it cannot serve a matrix.
     (and pinned-runtime? (> (count targets) 1))
-    (list "error" "--runtime names one base binary; use it with at most one --target" "2")
+      (list "error" "--runtime names one base binary; use it with at most one --target" "2")
 
     (and (nil? output) (not (release-plain-filename? name)))
-    (list "error"
-      (str "the manifest's :name (\"" name "\") is not a plain filename, so it cannot"
-        " name the output binary.\n  Give the path explicitly: nest release -o <path>")
-      "2")
+      (list "error"
+        (str "the manifest's :name (\""
+          name "\") is not a plain filename, so it cannot"
+          " name the output binary.\n  Give the path explicitly: nest release -o <path>")
+        "2")
 
     :else
-    (let (stem (or output name))
-      (cons "ok"
-        (if (empty? targets)
-          (list "" stem)
-          (mapcat targets
-            (fn (t)
-              (list t
-                (if (and output (= (count targets) 1))
-                  stem
-                  (str stem
-                    "-"
-                    (release-target-suffix t)
-                    (if (release-windows-triple? t) ".exe" "")))))))))))
+      (let (stem (or output name))
+        (cons "ok"
+          (if (empty? targets)
+            (list "" stem)
+            (mapcat targets
+              (fn (t)
+                (list t
+                  (if (and output (= (count targets) 1))
+                    stem
+                    (str stem
+                      "-"
+                      (release-target-suffix t)
+                      (if (release-windows-triple? t) ".exe" "")))))))))))
 
 (defn release-report (out module-count size triple)
   "The line `nest release` prints for one artifact it wrote: the path, how many
