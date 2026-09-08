@@ -478,3 +478,84 @@ impl Heap {
         )
     }
 }
+
+// ===== Helpers of the freeze — the handle identity it collapses on, and the re-tag =====
+
+/// Re-tag a value's handle from the local region to the immutable **prelude**
+/// region (same slab index, region bits set). Atoms are unchanged.
+/// A movable handle's identity — `(kind, index, region)`. `None` for an atom, which
+/// has no heap identity and never needs copying. Used by
+/// [`Heap::localize_for_freeze`] to collapse shared structure and to tell "already
+/// LOCAL, unchanged" from "copied".
+fn handle_key(v: Value) -> Option<(u8, u32, u8)> {
+    let (kind, idx, reg) = match v.unpack() {
+        ValueRef::Pair(id) => (0u8, id.index() as u32, id.region()),
+        ValueRef::Vector(id) => (1, id.index() as u32, id.region()),
+        ValueRef::Range(id) => (2, id.index() as u32, id.region()),
+        ValueRef::SeqView(id) => (3, id.index() as u32, id.region()),
+        ValueRef::Map(id) => (4, id.index() as u32, id.region()),
+        ValueRef::Set(id) => (5, id.index() as u32, id.region()),
+        ValueRef::Failure(id) => (24, id.index() as u32, id.region()),
+        ValueRef::Str(id) => (6, id.index() as u32, id.region()),
+        ValueRef::BigInt(id) => (7, id.index() as u32, id.region()),
+        ValueRef::Decimal(id) => (8, id.index() as u32, id.region()),
+        ValueRef::Ratio(id) => (13, id.index() as u32, id.region()),
+        ValueRef::Bytes(id) => (9, id.index() as u32, id.region()),
+        ValueRef::Fn(id) => (10, id.index() as u32, id.region()),
+        ValueRef::Macro(id) => (11, id.index() as u32, id.region()),
+        ValueRef::Rope(id) => (12, id.index() as u32, id.region()),
+        _ => return None,
+    };
+    Some((kind, idx, reg))
+}
+
+/// Re-tag a **LOCAL** handle as PRELUDE, preserving its slab index.
+///
+/// Only LOCAL: a re-tag is an index-preserving bit flip, which is valid exactly
+/// because the builder's slabs *become* the prelude region. Applying it to a
+/// RUNTIME (or already-PRELUDE) handle would keep the index and change the region,
+/// pointing at an unrelated object in a different slab — that was KI-12. The VM
+/// promotes its constant-pool literals into RUNTIME, so a prelude global built by
+/// compiled code (`(def *load-path* (list "."))`) held a LOCAL pair whose car was a
+/// RUNTIME string; re-tagging it yielded PRELUDE `Str@60`, some unrelated
+/// docstring. Non-LOCAL values are copied into the builder's slabs *before* this
+/// runs — see [`Heap::localize_for_freeze`].
+fn to_prelude(v: Value) -> Value {
+    // **LOCAL only.** Reachable structure is copied LOCAL beforehand
+    // ([`Heap::localize_for_freeze`]), so a non-LOCAL handle reaching here belongs to
+    // unreachable boot garbage — the slab sweep visits every cell, dead ones
+    // included. Leave those alone: nothing can read them, and flipping them is
+    // precisely what corrupted a live global (KI-12).
+    if !matches!(handle_key(v), None | Some((_, _, LOCAL))) {
+        return v;
+    }
+    match v.unpack() {
+        ValueRef::Pair(id) => Value::pair(PairId::prelude(id.index())),
+        ValueRef::Vector(id) => Value::vector(VecId::prelude(id.index())),
+        ValueRef::Range(id) => Value::range(VecId::prelude(id.index())),
+        ValueRef::SeqView(id) => Value::seqview(VecId::prelude(id.index())),
+        ValueRef::Map(id) => Value::map(MapId::prelude(id.index())),
+        ValueRef::Set(id) => Value::set(MapId::prelude(id.index())),
+        ValueRef::Failure(id) => Value::failure(MapId::prelude(id.index())),
+        ValueRef::Str(id) => Value::str_(StrId::prelude(id.index())),
+        ValueRef::BigInt(id) => Value::bigint(BigIntId::prelude(id.index())),
+        ValueRef::Decimal(id) => Value::decimal(DecimalId::prelude(id.index())),
+        ValueRef::Ratio(id) => Value::ratio(RatioId::prelude(id.index())),
+        // A `bytes` handle used to fall through the `other` arm below, keeping its
+        // LOCAL tag — so a `#b"…"` literal reaching a prelude global would resolve
+        // in the wiped builder heap after the freeze. No prelude form produces one
+        // today (the bit-syntax matcher only mentions them in comments), so this is
+        // latent, but silence was the wrong default for a region re-tag: every kind
+        // is either flipped or explicitly guarded (see `Rope`). Noticed while
+        // investigating KI-12.
+        ValueRef::Bytes(id) => Value::bytes(BytesId::prelude(id.index())),
+        ValueRef::Fn(id) => Value::func(ClosureId::prelude(id.index())),
+        ValueRef::Macro(id) => Value::macro_(ClosureId::prelude(id.index())),
+        ValueRef::Native(id) => Value::native(NativeId::prelude(id.index())),
+        // The prelude is pure Brood (no rope literals), so a rope can never
+        // exist at freeze time. Guard the invariant rather than silently
+        // re-tagging a LOCAL handle into PRELUDE.
+        ValueRef::Rope(_) => unreachable!("a Rope cannot appear in the prelude region"),
+        other => other,
+    }
+}
