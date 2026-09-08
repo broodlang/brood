@@ -481,8 +481,6 @@ impl Heap {
 
 // ===== Helpers of the freeze — the handle identity it collapses on, and the re-tag =====
 
-/// Re-tag a value's handle from the local region to the immutable **prelude**
-/// region (same slab index, region bits set). Atoms are unchanged.
 /// A movable handle's identity — `(kind, index, region)`. `None` for an atom, which
 /// has no heap identity and never needs copying. Used by
 /// [`Heap::localize_for_freeze`] to collapse shared structure and to tell "already
