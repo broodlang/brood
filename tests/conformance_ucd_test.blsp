@@ -215,7 +215,7 @@
         ;; `idx` advances over test lines only, so the slices stay balanced.
         (not (= (math/rem idx n) k)) (nt-scan-chunk want k n (rest lines) here (inc idx) ran bad)
         else
-          (let (w (nt-wrong (nt-case line)))
+          (let (w (nt-wrong (or (nt-case line) [])))
             (nt-scan-chunk want
               k
               n
@@ -255,7 +255,7 @@
   (if (nil? lines)
     [ran (reverse bad)]
     (if (= (math/rem idx n) k)
-      (let (w (nt-wrong (nt-case (first lines))))
+      (let (w (nt-wrong (or (nt-case (first lines)) [])))
         (nt-slice-scan (rest lines) k n (inc idx) (inc ran) (if w (cons w bad) bad)))
       (nt-slice-scan (rest lines) k n (inc idx) ran bad))))
 

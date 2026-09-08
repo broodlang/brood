@@ -2457,9 +2457,47 @@ fn check_one_method_return(
     let Some(&params_form) = fn_items.get(1) else {
         return;
     };
+    // Seed each param from the DISPATCH KEY. A `defmulti` declares only its return, but a
+    // method is registered for one concrete key — `[:int :string]` says, positionally, what
+    // this method's arguments are, and the runtime will not call it with anything else.
+    // Without this every param bound unknown, so `(+ n (string/length s))` widened to
+    // `number` and a `:-> int` multimethod could not be satisfied by arithmetic — the same
+    // gap an ability impl's `self` had, one level up from rules that were already right.
+    //
+    // Only names the type lattice knows (`:int`, `:string`, …) seed; a record id or an
+    // unrecognised keyword binds unknown, which is the sound under-approximation.
+    let key_tys: Vec<Option<Ty>> = items
+        .get(2)
+        .copied()
+        .and_then(|v| {
+            let v = list_items(heap, v)
+                .filter(|it| {
+                    it.len() == 2
+                        && matches!(it.first(), Some(&Value::Sym(h)) if value::symbol_is(h, kw::QUOTE))
+                })
+                .and_then(|it| it.get(1).copied())
+                .unwrap_or(v);
+            match v {
+                Value::Vector(id) => Some(heap.vector(id).to_vec()),
+                _ => None,
+            }
+        })
+        .map(|items| {
+            items
+                .iter()
+                .map(|&e| match e {
+                    Value::Keyword(k) => super::annot::base_ty(&value::symbol_name(k)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut scope = ctx.clone();
-    for p in fn_params(heap, params_form) {
-        scope = scope.bind(p, None);
+    for (i, p) in fn_params(heap, params_form).into_iter().enumerate() {
+        match key_tys.get(i).and_then(Option::as_ref) {
+            Some(ty) => scope = scope.bind_sig_param(p, ty.clone()),
+            None => scope = scope.bind(p, None),
+        }
     }
     let body_start = match (fn_items.get(2), fn_items.get(3)) {
         (Some(Value::Str(_)), Some(_)) => 3,

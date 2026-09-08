@@ -122,7 +122,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-113 | **`BROOD_CONTRACTS=1` could not load eleven std modules from SOURCE, and its shim called the contracted module's own `list`** — every module reaching `project`, `test` or `editor/lineedit` failed with `first: expected list … got symbol (int)`, and `editor/pane` with a reserved-name refusal. Invisible in every normal run and in CI: a stdlib image is always present there, and a materialised module never evaluates its `(sig …)` forms. Found 2026-09-06 by running the dns tests under contracts with a private cache | ✅ **fixed 2026-09-06** — two shapes. (1) `(sig *name* int)` on a VALUE: `sig!`'s `%sig-pos` called `first` on the bare type; it answers -1 for a non-list now, so a value sig is a pure declaration under contracts as it always was without. (2) A `sig` indented inside `(check-allow …)` above its own `defn-`: the deferred contract lands at `provide`, after the loader's reserved-name exemption ends, and the rebind is refused; moved below, and `sig_placement.rs` now reads indented sigs. (3) The `sig!` shim template emitted bare prelude names into the module it was expanded in — `(list …)` in `proc` was `proc/list`; root-scoped now. Gate: `contracts_mode.rs` requires every baked-in module under contracts from source on a cold cache and names each failure |
 | KI-114 | **the native JIT miscompiles a numeric shape: an int-producing `math/round` result reaches `math/rem` as a FLOAT** — `pong` fails 22 of 101 tests on v0.26.0 with `rem: expected int, got float (-16.0)` / `(9.0)` / `(175.0)`, raised from `math/mod` under `pong/pong/spawn-burst-acc`. The same tree passes 101/101 on v0.25.2 (d0af81f7) and on v0.26.0 with the JIT off. Found 2026-09-07 by the ecosystem verification pass, after tagging v0.26.0 | ✅ **fixed 2026-09-07 — `as_f64_pair`.** Unary `-` is `(%sub 0 x)`; `-`'s shared arm is float-PROFILED by pong's float arithmetic, so `(- <int>)` took the float lowering, and since KI-109 an int operand there is PROMOTED rather than deopted. Promotion is the VM's rule for MIXED arithmetic only — an op is float arithmetic iff some operand is a float — so it is now licensed per-operand by the OTHER operand being proven float, restoring `op_is_float`'s contract that a wrong guess costs a deopt, not an answer. pong 101/101; minimal repro is `(- 33)` after a hot float loop |
 | KI-115 | **`io/puts` output does not reach the in-browser playground — only the last form's value is shown.** `(io/puts "hello, brood")` then `(+ 1 2 3)` displayed `6`. Reported 2026-09-07 against the deployed v0.26.0 wasm | ✅ **FIXED 2026-09-07 — `save_ctx` CLEARED the thread's `CURRENT` instead of restoring what it displaced.** On a worker thread those are identical (the thread has no context of its own), which is why it stayed invisible while processes only ran on workers. On wasm there are no workers: `wait` drives the run queue on the CALLING thread, so the snippet's own quantum ran on top of the caller's context and destroyed it — and `begin_stdout_capture` had put the capture buffer in exactly that context, so `take_capture` found nothing and every `io/puts` went to a stdout that in a browser is nowhere. `install_ctx` now stashes the displaced ctx on a `DISPLACED` stack and `save_ctx` restores it; on a worker the displaced value is `None`, so nothing changes there. **Why it survived:** the previous fix (`f8f647b4`) was correct and guarded, but `root_program_capture.rs` asserts `run_program` while the playground calls `run_program_repr`, which was `#[cfg(wasm32)]` along with the whole `last_repr`/`set_result`/`take_result` chain — no host test could name the shipped function. Worse, `test_drive_quanta`'s own docs told callers to drive "from a **fresh** thread … so the per-quantum ctx install doesn't clobber the caller's ctx": the bug was written down as standing advice, and a fresh thread is not an option on wasm. Guard: `same_thread_capture.rs` reproduces the wasm shape on the host (workers disabled, quanta driven on the spawner's thread); sabotage-verified — reverting gives `left: None, right: Some("hello, brood\n")`. Verified end to end against a locally built wasm in node: `"6"` → `"hello, brood\n6"` |
-| KI-116 | **twenty `nest check --strict` warnings across the test tree are the checker being RIGHT, and cannot be cleared without weakening what the tests assert** — an ability's non-self param is a different implementor, `:or` destructuring genuinely answers `T | nil`, `first` of an empty vector is nil under a `-> string` contract, and `math/pow` answers `number` because a negative exponent gives a ratio | ☑️ **NOT A BUG — recorded 2026-09-07 so the next `--strict` sweep does not re-derive them.** brood went 269 -> 20 in that sweep; these twenty are the residue. Each is a real union the code relies on being one arm, in a test that exists to exercise exactly that. The trap they invite is silencing by coercion: `(count (str (json/decode …)))` type-checks and counts CHARACTERS where the test counts ROWS — it was caught only because two assertions went red, and would have read as green had the numbers coincided. Narrow, never coerce |
+| KI-116 | **nine `nest check --strict` warnings in the test tree are the checker being RIGHT** — an ability's non-`self` param is a different implementor, `:or` destructuring genuinely answers `T \| nil`, `first` of an empty vector is nil under a `-> string` contract, an undeclared map shape, and `math/pow` answering `number` because a negative exponent yields a ratio | ☑️ **NOT A BUG — recorded 2026-09-08.** Corrected from an earlier revision of this entry that claimed TWENTY such warnings: eleven of those were unverified regex patches of mine that had silently failed to match, reported as deliberate without re-checking. The sweep went 269 -> 9. Two of the "limitations" it originally named were also wrong and are now fixed in the checker: an ability impl's `self` is seeded from the record it dispatches on, and a multimethod's params from its dispatch key |
 | KI-108 | **`crash_report_default::an_unsupervised_crash_is_reported_through_the_lazy_arm` flaked once under a full-suite load — stderr entirely empty** — the script slept a fixed 500 ms after spawning a crashing process and the harness read stderr after exit; the lazy arm loads the reporter's nine modules before printing, and one loaded run took longer than the window. 5/5 green in isolation at 0.53 s | ✅ **FIXED 2026-09-04** — KI-79's class (a wall clock standing in for synchronisation) and KI-79's fix: a **deadline, not a window**. Nothing in-language can observe "report printed" (the prelude shim holds the `:crash-reporter` name from arm time), so the HARNESS watches the child's stderr pipe and stops it the moment `[crash]` + the reason are there, with a 15 s ceiling. Healthy runs now take **~50 ms** (the old window was 10× the normal path and still lost once). Sabotage-verified: with no crash in the script the test fails at the deadline with `no crash report`, not a hang |
 | KI-107 | **`tests/eval_server_test.blsp` — "`:all` traces, and cannot exceed the spy cap" fails with an EMPTY `:spy`**, about 1 run in 17 standalone; two refuted fixes on 2026-09-05 | ✅ **CLOSED 2026-09-06 — three mechanisms, all fixed.** (1) `eval-capturing`'s teardown called `debug/untrace-all` and restored every wrapper in the shared registry, a concurrent request's included — teardown now restores only what the request installed (measured 9/150 → 10/550, 6.0% → 1.8%), then `debug/trace-hold`/`trace-release` refcount a shared trace so a second user is countable (→ 3/450, 0.67%), both guarded deterministically. (3) The residual: the three `:all` tests were NEVER isolated — `:isolated` written before a `(test …)` form in a describe body was a bare keyword the body evaluated and dropped, so they ran in the parallel phase, a concurrent `:all` request wrapped this test's function itself and restored it on its own teardown. `describe` now honours that spelling and rejects any other stray keyword (ADR-323); 31 tests in 10 files were running concurrently under the marker. 3/160 → **0/120** on the day's tree (gate: `tests/describe_modifiers_test.blsp`) |
 | KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ✅ **FIXED 2026-08-29** — closed by its own third pass, and the index row simply lagged the section (corrected 2026-09-04). A second sighting the same day KEPT its output, which rewrote the entry: the try-1 stdout holds **62 F's in runs before the timeout**, so the "timeout under load" was mass test failures with the 300 s cap hiding the names, and stderr named the class — spawned processes dying `unbound symbol: editor/serve/serve-manager` after their file's `%isolate` rolled the globals back. Three defects, each fixed. The lasting lesson is the one the entry was filed for: the original sighting was undiagnosable because the run was piped through `tail -5`, discarding the one thing worth having. ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
@@ -8408,35 +8408,45 @@ every test from source and pays a failing child build in every process, which re
 (the `nest` crate went past ten minutes) before it reads as anything else. If a `nest` run is
 inexplicably slow, run `nest stdimage` by hand first.
 
-## KI-116 — the strict warnings that are the checker being right ☑️ not a bug 2026-09-07
+## KI-116 — the strict warnings that are the checker being right ☑️ not a bug 2026-09-08
 
-**Symptom.** `nest check --strict` reports twenty warnings across the test tree that no
-declaration or guard removes without changing what the test asserts.
-
-**Cause.** Four shapes, each a genuine union:
+**Symptom.** After the 269 -> 9 sweep, nine warnings remain that no declaration or guard
+removes without changing what the test asserts.
 
 | shape | why it is right |
 |---|---|
-| `(rcmp [a b] …)` in an ability impl | only `self` dispatches on a concrete id. `b` is any implementor — comparing a circle with a rect is legal — so `(get b :r)` on a rect really is nil |
-| `{:keys [a b] :or {b 40}}` | `b` is `40 \| nil` by the destructuring's own semantics, and the test exists to prove the default fires |
-| `(defn c-first-vec (v) (first v))` under `-> string` | `first` of an empty vector is nil; the contract test is asserting that the declared return is enforced |
-| `math/pow` in chudnovsky | answers `number` because a negative exponent yields a ratio. These sites pass positive integer exponents, which no signature expresses |
+| `(rcmp [a b] …)` ×2 | only `self` dispatches on a concrete id. `b` is any implementor — comparing a circle with a rect is legal — so `(get b :r)` on a rect really is nil |
+| `{:keys [a b] :or {b 40}}` | `b` is `40 \| nil` by the destructuring's own semantics, which is the thing under test |
+| `c-first-vec` under `-> string` | `first` of an empty vector is nil; the contract test asserts the declared return is enforced |
+| `lineedit-kill-line` | the lineedit state is a plain map with no declared shape. Declaring `lineedit-move`'s return `map` merely MOVES the warning into `std/` where the project check cannot see it — traded one visible warning for two hidden ones, and was reverted |
+| `math/pow` ×4 (chudnovsky) | answers `number` because a negative exponent yields a ratio. The exponents here are non-negative literals, but the values flow through top-level `def-`s whose types do not carry the int |
 
-**Why it survived.** It did not — it is not a defect. Recorded because a `--strict` sweep
-re-derives these every time, and because two of them were mis-filed earlier in the same
-sweep as limitations of the checker's arithmetic. They were not: `(* int int)` is `int`
-(the int-closure rule), and `math/max` answers the union of its operands. Both were
-missing declarations one level up — an ability impl's `self` was not seeded with the
-record it dispatches on (fixed, see the commit for `check_one_impl_return`), and a test
-helper's parameters were untyped.
+**Why this entry was wrong before.** Its first revision said TWENTY warnings were of this
+kind. Eleven were not: they were regex substitutions written and never verified, whose
+non-matches were then reported as deliberate. `docs_test`, `gen_test`, `layers_test`, the
+`nt-wrong` pair and the `grow` helpers were all fixed in one pass once actually read.
 
-**Fix.** None wanted. The deliberate non-fix is the entry.
+Two more were named here as limitations of the checker's arithmetic and were not:
 
-**Guard.** None. The warning IS the guard — it says the union is real. What needs guarding
-is the reflex to silence it: satisfying a type error by coercion can change the meaning
-silently. `(count (str (json/decode …)))` type-checks and counts characters where the test
-counts rows; it was caught only because two assertions went red, and would have read as
-green had the counts coincided. Narrow (`(if (vector? x) x [])`), never coerce.
+  - `(* int int)` is `int` — the int-closure rule exists and is right. The gap was that an
+    ability impl's `self` was not seeded with the record it dispatches on.
+  - `math/max` answers the union of its operands — the extremum rule exists and is right.
+    It was not firing because a test helper's parameters were untyped.
+
+A third of the same shape was found and fixed while correcting this entry: a multimethod's
+params bound unknown although its dispatch key (`[:int :string]`) states them positionally.
+
+**Fix.** None wanted for the nine. The deliberate non-fix is the entry.
+
+**Guard.** None — the warning IS the guard, it says the union is real. What needs guarding
+is the reflex to silence it. Two ways that goes wrong, both hit here:
+
+  - **Coercion changes meaning.** `(count (str (json/decode …)))` type-checks and counts
+    CHARACTERS where the test counts ROWS. Caught only because two assertions went red; it
+    would have read as green had the numbers coincided. Narrow (`(if (vector? x) x [])`),
+    never coerce.
+  - **A declared sig is authoritative, so a wrong one is worse than none.**
+    `(sig mk (int -> int))` on a helper answering `[n :tag]` was rejected immediately.
 
 ## KI-115 — `io/puts` output never reaches the playground page ✅ fixed 2026-09-07
 

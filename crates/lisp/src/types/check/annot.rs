@@ -270,7 +270,7 @@ fn record_id_for(name: &str) -> Option<String> {
 /// returns, plus the named unions (`number` = int∪float, `list` = nil∪pair,
 /// `fn` = fn∪native). `None` for an unknown name, so an unrecognised annotation
 /// is dropped rather than guessed (never a false signal).
-fn base_ty(name: &str) -> Option<Ty> {
+pub(super) fn base_ty(name: &str) -> Option<Ty> {
     Some(match name {
         "any" => Ty::ANY,
         "never" => Ty::NEVER,

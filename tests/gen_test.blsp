@@ -204,7 +204,9 @@
   (test "start-named registers the server for proc/whereis"
     (let (p (start-named :echo-srv echo2 nil))
       (assert= (proc/whereis :echo-srv) p)
-      (assert= (call (proc/whereis :echo-srv) [:echo 99]) 99)
+      (assert= (call (or (proc/whereis :echo-srv) (error "gen-test: :echo-srv is not registered"))
+                 [:echo 99])
+        99)
       (stop p)))
 
   (test "start-link links the server but a normal stop won't take us down"

@@ -120,7 +120,7 @@
   (if (= n 0)
     true
     (let (i (math/rem s mb-len)
-          j (+ i (math/rem (lcg s) (- mb-len i))))
+          j (+ i (math/rem (lcg s) (math/floor (- mb-len i)))))
       (if (mb-laws i j) (check-mb (lcg (lcg s)) (- n 1)) false))))
 
 (describe "collection identities hold over random values"
