@@ -811,10 +811,12 @@ Build the text first, then narrow — like [[set-read-only]], construction never
 Pass the regions the user OWNS, not their complement: an empty region `[k k]` means `you may
 type at k`, which has no complement spelling — that is why this takes the editable side."
   (assoc buf :editable (into [] regions)))
+(sig narrow-to (buffer any -> buffer))
 
 (defn widen (buf)
   "Undo any narrowing: the whole of `buf` is editable again."
   (dissoc buf :editable))
+(sig widen (buffer -> buffer))
 
 (defn read-only? (buf)
   "True if `buf` refuses every change — its mutators (`insert`, `delete-char`,
@@ -1103,16 +1105,31 @@ remote participants' cursors on a shared buffer."
 ;; `:stale?` is the content question (the text moved at all, so the value predates
 ;; your edit — dim it, don't hide it, and undoing back un-dims it).
 
-(defn annotate (buf key value)
-  "Stamp derived `value` onto `buf` under `key`, together with the rope and line
-count it describes. Read it back with `annotation`."
-  (assoc buf
-    key
-      {:value value
-       :rope (buffer-rope buf)
-       :lines (buffer-line-count buf)}))
+;; check-allow: the checker is RIGHT and the suppression is the contract, not a shrug.
+;; `key` is `any`, so `(assoc buf key …)` could in principle name one of the buffer's own
+;; fields (`:point`, `:rope`, …) and store a `{:value :rope :lines}` map there — which would
+;; genuinely stop being a `buffer`. That is what "yields map" is reporting. Callers pass an
+;; ANNOTATION name, never a field name, and the return really is a buffer for every such
+;; call; the type system has no way to say "a keyword that is not one of these", so the
+;; alternative would be weakening the declared return to `map` and losing it for the
+;; callers that chain buffer operations onto the result.
+;;
+;; The hazard it names is real but latent. Removing it rather than declaring it would mean
+;; nesting annotations under one reserved key, so a collision becomes impossible — a change
+;; to the stored shape and to `annotation`, deliberately not made here.
+(check-allow :type-mismatch
+  (defn annotate (buf key value)
+    "Stamp derived `value` onto `buf` under `key`, together with the rope and line
+count it describes. Read it back with `annotation`.
 
-(sig annotate (buffer any any -> buffer))
+`key` must not be one of the buffer's own fields — it names an annotation, and a field
+name would overwrite the buffer's own state."
+    (assoc buf
+      key
+        {:value value
+         :rope (buffer-rope buf)
+         :lines (buffer-line-count buf)}))
+  (sig annotate (buffer any any -> buffer)))
 (defn annotation (buf key)
   "The annotation stored under `key` as `{:value :current? :stale?}`, or nil when
 there is none. `:current?` — the line count still matches, so line-keyed data is
