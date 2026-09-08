@@ -1263,7 +1263,10 @@ image and before any `require`."
   "True if package name `nm` (a symbol or string) is reserved by the standard library —
 its first segment names a module baked into this binary, so a package taking it would
 root its own modules onto stdlib namespaces. Backs the `nest new` / `nest publish` /
-load-time (`require`) guards."
+load-time (`require`) guards.
+
+    (reserved-package-name? \"json\") → true
+    (reserved-package-name? \"brood\") → false"
   (let (seg (first (string/split (->string nm) "/"))
         owned (seq/distinct (map (reflect/builtin-modules) (fn (m) (first (string/split m "/"))))))
     (includes? owned seg)))
@@ -1763,18 +1766,25 @@ and that every declared arity still matches its module's actual definition."
   *truthy* `:__id__` — matching `%identity-of`, which treats a nil/false id as a plain
   map and dispatches on `type-of`. (A `defrecord` value always carries a truthy keyword
   id; the guard only matters for a hand-written `{:__id__ nil …}` literal, which must not
-  be seen as a record by `record?`/`record-id`/`fields` while dispatching as `:map`.)"
+  be seen as a record by `record?`/`record-id`/`fields` while dispatching as `:map`.)
+
+    (record? 42) → false
+    (record? {:a 1}) → false"
   (if (and (map? x) (get x :__id__)) true false))
 
 (defn record-id (x)
   "The nominal id (`module/name` keyword) of record `x`, or nil if `x` is not a record.
-  Unlike `%identity-of`, never falls back to `type-of`."
+  Unlike `%identity-of`, never falls back to `type-of`.
+
+    (record-id {:a 1}) → nil"
   (if (record? x) (get x :__id__) nil))
 
 (defn fields (x)
   "The FIELDS of record `x` as a plain map — its identity omitted. The explicit id-free
   view; the default `Seqable` view a record's `seq`/`count`/`keys`/`map`/`fold` already
-  give (so those don't leak `:__id__`). A plain map is returned unchanged."
+  give (so those don't leak `:__id__`). A plain map is returned unchanged.
+
+    (fields {:a 1 :b 2}) → {:a 1 :b 2}"
   (if (record? x) (dissoc x :__id__) x))
 
 ; ---- library type predicates ------------------------------------------------

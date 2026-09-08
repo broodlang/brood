@@ -391,7 +391,9 @@ A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `s
 ;; compile time where the escape resolves. This is the other half of moving `but-last`
 ;; into core.blsp; both were needed (KI-73). Keep it here.
 (defn sleep (ms)
-  "Park the current process for `ms` milliseconds without touching its mailbox — every queued message stays queued. Parks on the scheduler timer; it does not block a worker thread."
+  "Park the current process for `ms` milliseconds without touching its mailbox — every queued message stays queued. Parks on the scheduler timer; it does not block a worker thread.
+
+    (sleep 0) → nil"
   (let (never (ref)) (receive (^never nil) (after ms nil))))
 (sig sleep ((or int nil) -> nil))
 

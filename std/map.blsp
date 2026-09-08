@@ -22,7 +22,9 @@ access, or call qualified (`map/update-vals`).")
 ;; merge-with: on a shared key, combine with `(f existing new)` instead of replacing.
 ;; Read-modify-write per key, so it folds immutable `assoc` (each returns a fresh map).
 (defn merge-with (f & maps)
-  "Like `merge`, but when two maps share a key the combined value is `(f value-so-far next-value)` rather than just the latter. `nil` maps are skipped."
+  "Like `merge`, but when two maps share a key the combined value is `(f value-so-far next-value)` rather than just the latter. `nil` maps are skipped.
+
+    (map/merge-with + {:a 1 :b 2} {:b 3}) → {:a 1 :b 5}"
   (fold maps
     {}
     (fn (acc m)
@@ -31,16 +33,22 @@ access, or call qualified (`map/update-vals`).")
         (map/reduce-kv m acc (fn (a k v) (assoc a k (if (contains? a k) (f (get a k) v) v))))))))
 
 (defn update-vals (m f)
-  "A map like `m` with `f` applied to every value."
+  "A map like `m` with `f` applied to every value.
+
+    (map/update-vals {:a 1 :b 2} inc) → {:a 2 :b 3}"
   (into {} (map (%map-pairs m) (fn (p) [(first p) (f (second p))]))))
 (sig update-vals (map any -> map))
 (defn update-keys (m f)
-  "A map like `m` with `f` applied to every key (later keys win on a collision)."
+  "A map like `m` with `f` applied to every key (later keys win on a collision).
+
+    (map/update-keys {:a 1} ->string) → {\"a\" 1}"
   (into {} (map (%map-pairs m) (fn (p) [(f (first p)) (second p)]))))
 (sig update-keys (map any -> map))
 
 (defn select-keys (m ks)
-  "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped)."
+  "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped).
+
+    (map/select-keys {:a 1 :b 2 :c 3} [:a :c]) → {:a 1 :c 3}"
   ;; One `%map-get` per key — which also yields the value — rather than
   ;; `contains?` (its own probe) plus a separate `get`. A present key returns its
   ;; stored value (used directly); only when that value happens to equal the
@@ -56,7 +64,9 @@ access, or call qualified (`map/update-vals`).")
             [k v]))))))
 
 (defn reduce-kv (m init f)
-  "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
+  "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`.
+
+    (map/reduce-kv {:a 1 :b 2} 0 (fn (acc k v) (+ acc v))) → 3"
   (fold (%map-pairs m) init (fn (acc p) (f acc (first p) (second p)))))
 (sig reduce-kv (map any any -> any))
 
