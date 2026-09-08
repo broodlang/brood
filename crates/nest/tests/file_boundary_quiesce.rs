@@ -59,9 +59,9 @@ fn a_process_leaked_by_one_file_is_dead_before_the_next_file_runs() {
     let dir = std::env::temp_dir().join(format!("brood-quiesce-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     scaffold(&dir);
-    // `--trace` makes the runner print `[test] quiesce: N process(es) …` per file, which is
-    // what proves the leak EXISTED and was killed — without it a run where file B happened
-    // to go first would pass vacuously.
+    // `--trace` makes the runner print `[test] quiesce: killing N straggler(s): …` per file,
+    // which is what proves the leak EXISTED and was killed — without it a run where file B
+    // happened to go first would pass vacuously.
     let out = Command::new(env!("CARGO_BIN_EXE_nest"))
         .args(["test", "--trace"])
         .current_dir(&dir)
@@ -74,10 +74,17 @@ fn a_process_leaked_by_one_file_is_dead_before_the_next_file_runs() {
         out.status.success(),
         "the leaked process outlived its file (KI-89 class)\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
     );
+    // Exactly one straggler, named. KI-120 made quiesce loop until the non-`before` set is
+    // empty, so the report is now per-round `killing N straggler(s): (…names…)`; the one leak
+    // here dies in the first round and no round reports it a second time.
     assert!(
-        stderr.contains("[test] quiesce: 1 process(es) outlived their file and were killed"),
+        stderr.contains("[test] quiesce: killing 1 straggler(s): (:ki89-leaker)"),
         "the runner must report the one straggler it killed at the file boundary — \
          no report means the leak never happened and this test proved nothing\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("still spawning after 20 kill rounds"),
+        "one parked leaker must die in the first kill round, not exhaust the bound\n--- stderr ---\n{stderr}"
     );
     assert!(
         stdout.contains("2 tests, 2 passed"),

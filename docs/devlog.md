@@ -11715,3 +11715,23 @@ start, `brood_suite_passes` went TMT at 900 s again — 200 children dead on bar
 `editor/serve/*` names, `ui-run`: KI-80's shape, not KI-119's. That is **KI-120, open**; the
 KI-119 entry and KI-80's pointer say so. Next is the full fan-out with `BROOD_SCOPE_DBG=1`
 exported to every test process.
+
+## 2026-09-08 (later) — KI-120 FIXED: a straggler supervisor respawns into the isolate-restore window
+
+The instrumented run (`BROOD_SCOPE_DBG=1 BROOD_TEST_TRACE=1` exported to every test process,
+plus three diagnostics added this session) named it on the first hit. `[refer] (:use editor/ui)
+imported NOTHING … *features* lists it: true … pid=Some(1)` — the runner's own base `*features*`
+marks a module loaded over an empty namespace. Cause: the scoped runner quiesced ONCE per file,
+but a supervisor among the stragglers respawns a child in the window between the quiesce pass and
+`%isolate`'s restore; that child loads an editor module and `provide`s it after the restore
+rolled its globals back — KI-89's registry-survives-restore asymmetry, now for `*features*` +
+module globals. KI-80's third pass had blamed the rollback; the rollback was downstream.
+
+Fix: `test-quiesce-file` loops (`test-quiesce-rounds`, bounded 20) — kill non-`before`, await,
+re-scan until empty — so the supervisor is killed and respawns stop. Diagnostics kept default-on
+where safe (`[refer] NOTHING`, `[unbound] recorded-loaded-but-unbound under BROOD_SCOPE_DBG`,
+`BROOD_TEST_TRACE`). Before ~40% of full runs hit it; after, 2 full loaded runs 0/0/0. Guard:
+`file_boundary_quiesce.rs` on the new wording. The two tests that reddened under the tracer
+export (`mono_differential`, old-wording quiesce) pass un-instrumented — instrumentation, not the
+fix. Residual: a bounded loop warns and proceeds if a respawner outlasts 20 rounds; none seen.
+Full write-up in known-issues.md.

@@ -1369,25 +1369,51 @@ the test rather than hanging the run."
 ;; writer or reader. Killed after their results were collected, so nothing here changes
 ;; what a test reports; a process that outlives its own test was a leak either way.
 (defn- test-quiesce-file (before)
-  (let (stragglers (filter (proc/list) (fn (p) (not (includes? before p)))))
-    (when (and *test-trace* (not (empty? stragglers)))
-      (%write-err (str "[test] quiesce: "
-                    (count stragglers)
-                    " process(es) outlived their file and were killed: "
-                    (pr-str (map stragglers (fn (p) (get (or (proc/info p) {}) :name))))
-                    "\n")))
-    (fold stragglers nil (fn (_ p) (exit p :kill)))
-    (let (still (test-await-dead stragglers 40))
-      ;; Unconditional: a straggler that is STILL running when the restore goes ahead is
-      ;; a writer that may straddle the swap — the only way a rolled-back registration can
-      ;; survive with its constructor gone (KI-89's residual shape).
-      (unless (empty? still)
-        (%write-err (str "[test] quiesce: "
-                      (count still)
-                      " killed process(es) still alive after 2 s; restoring anyway: "
-                      (pr-str (map still (fn (p) (get (or (proc/info p) {}) :status))))
-                      "\n"))))))
+  (test-quiesce-rounds before 20))
 (sig test-quiesce-file (seqable -> any))
+
+;; Kill every process the file left behind, and REPEAT until none is left — bounded by
+;; `rounds`. One pass is not enough (KI-120): a supervisor among the stragglers respawns
+;; a child in the window between the pass's `(proc/list)` snapshot and the `%isolate`
+;; restore that follows, and that fresh child — not in `before`, spawned after the kill —
+;; is then alive as the globals roll back. It loads whatever module it needs (an editor
+;; module, say), `env_define`s that module's globals into the live table and `provide`s it;
+;; the restore then wipes the globals but the `provide`, serialized with restore under the
+;; registry lock, can land AFTER it — leaving `*features*` marking the module loaded over an
+;; empty namespace. The next file's `(:use editor/serve)` then imports nothing and every
+;; bare use dies `unbound symbol` in a different process, far away. That is KI-89's
+;; asymmetry (a registry op survives a restore that rolled back the plain globals beside it),
+;; here for `*features*` + a module's own globals rather than `*record-ids*` + a constructor.
+;;
+;; Looping closes the window: each round kills the supervisor too (it is a straggler), so
+;; after it exhausts its restart intensity — or is simply dead — no new child appears and the
+;; set goes empty. Bounded so a genuinely wedged process cannot hang the run; if the bound is
+;; hit we warn and restore anyway, exactly as the single pass did, because proceeding is no
+;; worse than the old behaviour and a hang is worse than both.
+(defn- test-quiesce-rounds (before rounds)
+  (let (stragglers (filter (proc/list) (fn (p) (not (includes? before p)))))
+    (cond
+      (empty? stragglers) nil
+      (= rounds 0)
+        (%write-err (str "[test] quiesce: "
+                      (count stragglers)
+                      " process(es) still spawning after 20 kill rounds; restoring anyway: "
+                      (pr-str (map stragglers (fn (p) (get (or (proc/info p) {}) :name))))
+                      "\n"))
+      else
+        (do
+          (when (and *test-trace* (not (empty? stragglers)))
+            (%write-err (str "[test] quiesce: killing "
+                          (count stragglers)
+                          " straggler(s): "
+                          (pr-str (map stragglers (fn (p) (get (or (proc/info p) {}) :name))))
+                          "\n")))
+          (fold stragglers nil (fn (_ p) (exit p :kill)))
+          (test-await-dead stragglers 40)
+          ;; Re-scan: a supervisor we just killed may have spawned a replacement before it
+          ;; died, and that replacement is a NEW straggler this round did not see.
+          (test-quiesce-rounds before (- rounds 1))))))
+(sig test-quiesce-rounds (seqable int -> any))
 
 ;; Poll until none of `pids` is alive, or `tries` × 50 ms have passed (a hard kill lands
 ;; at the victim's next safepoint, so this is µs in practice — the bound is for a

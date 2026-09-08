@@ -122,7 +122,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-113 | **`BROOD_CONTRACTS=1` could not load eleven std modules from SOURCE, and its shim called the contracted module's own `list`** — every module reaching `project`, `test` or `editor/lineedit` failed with `first: expected list … got symbol (int)`, and `editor/pane` with a reserved-name refusal. Invisible in every normal run and in CI: a stdlib image is always present there, and a materialised module never evaluates its `(sig …)` forms. Found 2026-09-06 by running the dns tests under contracts with a private cache | ✅ **fixed 2026-09-06** — two shapes. (1) `(sig *name* int)` on a VALUE: `sig!`'s `%sig-pos` called `first` on the bare type; it answers -1 for a non-list now, so a value sig is a pure declaration under contracts as it always was without. (2) A `sig` indented inside `(check-allow …)` above its own `defn-`: the deferred contract lands at `provide`, after the loader's reserved-name exemption ends, and the rebind is refused; moved below, and `sig_placement.rs` now reads indented sigs. (3) The `sig!` shim template emitted bare prelude names into the module it was expanded in — `(list …)` in `proc` was `proc/list`; root-scoped now. Gate: `contracts_mode.rs` requires every baked-in module under contracts from source on a cold cache and names each failure |
 | KI-114 | **the native JIT miscompiles a numeric shape: an int-producing `math/round` result reaches `math/rem` as a FLOAT** — `pong` fails 22 of 101 tests on v0.26.0 with `rem: expected int, got float (-16.0)` / `(9.0)` / `(175.0)`, raised from `math/mod` under `pong/pong/spawn-burst-acc`. The same tree passes 101/101 on v0.25.2 (d0af81f7) and on v0.26.0 with the JIT off. Found 2026-09-07 by the ecosystem verification pass, after tagging v0.26.0 | ✅ **fixed 2026-09-07 — `as_f64_pair`.** Unary `-` is `(%sub 0 x)`; `-`'s shared arm is float-PROFILED by pong's float arithmetic, so `(- <int>)` took the float lowering, and since KI-109 an int operand there is PROMOTED rather than deopted. Promotion is the VM's rule for MIXED arithmetic only — an op is float arithmetic iff some operand is a float — so it is now licensed per-operand by the OTHER operand being proven float, restoring `op_is_float`'s contract that a wrong guess costs a deopt, not an answer. pong 101/101; minimal repro is `(- 33)` after a hot float loop |
 | KI-115 | **`io/puts` output does not reach the in-browser playground — only the last form's value is shown.** `(io/puts "hello, brood")` then `(+ 1 2 3)` displayed `6`. Reported 2026-09-07 against the deployed v0.26.0 wasm | ✅ **FIXED 2026-09-07 — `save_ctx` CLEARED the thread's `CURRENT` instead of restoring what it displaced.** On a worker thread those are identical (the thread has no context of its own), which is why it stayed invisible while processes only ran on workers. On wasm there are no workers: `wait` drives the run queue on the CALLING thread, so the snippet's own quantum ran on top of the caller's context and destroyed it — and `begin_stdout_capture` had put the capture buffer in exactly that context, so `take_capture` found nothing and every `io/puts` went to a stdout that in a browser is nowhere. `install_ctx` now stashes the displaced ctx on a `DISPLACED` stack and `save_ctx` restores it; on a worker the displaced value is `None`, so nothing changes there. **Why it survived:** the previous fix (`f8f647b4`) was correct and guarded, but `root_program_capture.rs` asserts `run_program` while the playground calls `run_program_repr`, which was `#[cfg(wasm32)]` along with the whole `last_repr`/`set_result`/`take_result` chain — no host test could name the shipped function. Worse, `test_drive_quanta`'s own docs told callers to drive "from a **fresh** thread … so the per-quantum ctx install doesn't clobber the caller's ctx": the bug was written down as standing advice, and a fresh thread is not an option on wasm. Guard: `same_thread_capture.rs` reproduces the wasm shape on the host (workers disabled, quanta driven on the spawner's thread); sabotage-verified — reverting gives `left: None, right: Some("hello, brood\n")`. Verified end to end against a locally built wasm in node: `"6"` → `"hello, brood\n6"` |
-| KI-120 | **`brood_suite_passes` still goes TMT at 900 s with spawned children dying on bare `def-face`, `ui-run`, `highlight-spans` and qualified `editor/serve/*` — on the KI-119-fixed tree, with the stdlib image rebuilt exactly once at the run's start** (mtime 14:13:33, untouched for the 17 min after). Two of three full runs on 2026-09-08 (F-waves 12/8/22/4/8/3/19/76 in the second); the wrapper alone with `BROOD_SCOPE_DBG=1` never produced this shape (its one hit was KI-119). KI-80's third pass called it the `%isolate` rollback and fixed three things around it; the shape is back | ⚠️ **OPEN 2026-09-08** — next: the full fan-out with `BROOD_SCOPE_DBG=1` exported (NOT `BROOD_IMAGE_TRACE` — its timing lines red 25 output-comparing tests, measured), so the wrapper's try-1 stderr carries the `[scope]` lines; 2 hits in 4 full runs so far, the one instrumented run a miss. Until root-caused, the `retries = 1` on `binary(suite)` absorbs it as FLAKY, never silently |
+| KI-120 | **`brood_suite_passes` still goes TMT at 900 s with spawned children dying on bare `def-face`, `ui-run`, `highlight-spans` and qualified `editor/serve/*` — on the KI-119-fixed tree, with the stdlib image rebuilt exactly once at the run's start** (mtime 14:13:33, untouched for the 17 min after). Two of three full runs on 2026-09-08 (F-waves 12/8/22/4/8/3/19/76 in the second); the wrapper alone with `BROOD_SCOPE_DBG=1` never produced this shape (its one hit was KI-119). KI-80's third pass called it the `%isolate` rollback and fixed three things around it; the shape is back | ✅ **FIXED 2026-09-08** — the instrumented run named it: a supervisor among a file's stragglers respawns a child in the window between the runner's ONE quiesce pass and the `%isolate` restore, and that fresh child loads an editor module and `provide`s it AFTER the restore rolled its globals back — `*features*` then marks it loaded over an empty namespace and the next file's `(:use editor/serve)` imports nothing. `test-quiesce-file` now LOOPS (kill non-`before`, await, re-scan) until the set is empty, killing the supervisor so respawns stop; the `[refer] imported NOTHING` / `[unbound] recorded loaded but not bound` diagnostics are default-on where safe. Before: ~40% of full runs. After: 2 full loaded runs 0 deaths / 0 empty-imports / 0 give-ups |
 | KI-119 | **a module materialised from the stdlib image came back with another module's bytes — `unbound symbol` on a name that exists, under load** — `%image-index` read the section directory once at boot and `%image-load-section` re-opened the file BY PATH per module, arbitrarily later; any rebuild in between (nextest's setup script, `nest` on a stale image, a sibling test) replaced the file, and two builds of ONE tree are not byte-identical, so the old offsets landed on other sections. Seen as a `brood_suite_passes` run dying on bare `set` in a spawned child (then a receive waiting forever, into the 900 s cap) while a sibling loop rebuilt the image, and as a fresh `nest run` dying `unbound symbol: file/regular?` / `format/vec->list` with `[image] format` already in its own trace at **20 entries where the section holds 172** | ✅ **FIXED 2026-09-08** — the reader holds the handle it indexed (`OPEN_IMAGES`): an open descriptor pins the old inode across the writer's atomic rename, so a directory and the bytes it names cannot come from two builds. Guard `tests/startup_image_test.blsp` "a section is read from the file that was indexed" (sabotage-verified: fresh-open-per-read fails it). Fast repro before: 2 of 80 rebuild-then-`nest run` loops; after: **0 of 60**, and one full suite with the wrapper green on try 1 while that loop rebuilt the image beside it — but the wrapper's `def-face`/`editor/serve/*` shape recurred on the fixed tree with NO rebuild in the window, so that one is a second mechanism: **KI-120**, open. KI-80's `%isolate`-rollback attribution was wrong for the `set`/`nest run` runs (`BROOD_SCOPE_DBG` printed nothing) and is undecided for KI-120 |
 | KI-116 | **nine `nest check --strict` warnings in the test tree are the checker being RIGHT** — an ability's non-`self` param is a different implementor, `:or` destructuring genuinely answers `T \| nil`, `first` of an empty vector is nil under a `-> string` contract, an undeclared map shape, and `math/pow` answering `number` because a negative exponent yields a ratio | ☑️ **NOT A BUG — recorded 2026-09-08.** Corrected from an earlier revision of this entry that claimed TWENTY such warnings: eleven of those were unverified regex patches of mine that had silently failed to match, reported as deliberate without re-checking. The sweep went 269 -> 9. Two of the "limitations" it originally named were also wrong and are now fixed in the checker: an ability impl's `self` is seeded from the record it dispatches on, and a multimethod's params from its dispatch key |
 | KI-117 | **an error raised inside JIT'd code carries NO `:trace`** — once an arm is native, an error thrown in or through it reaches `catch` with an empty trace; caught as `tests/try_catch_test.blsp:352` (`trace is capped at 32 frames under deep non-tail recursion`) failing with 8 frames on try 1 of a full suite, passing on retry | ✅ **FIXED 2026-09-08** — each native arm now records itself as an error exits it (`brood_rt_trace_push` from the general lowering's `error` block and the scalar worker's `poisoned` block); the driver attaches callers-only where it would otherwise name that arm twice. Looped repro `{32 3000}`, 5000 runs never flip, a named `a→b→c` chain reads the identical trace hot and cold on both error routes, sabotage fails the guard `tests/jit_trace_test.blsp`. Corrected mechanism in the section: nothing native ever pushed a frame, and the repro's route is a division deopt re-run on the VM with no pending callers. Residue: native frames carry name + file, not the call-site position. Was: ⚠️ OPEN 2026-09-08 — found as a `FLAKY 2/2` of `brood_suite_passes`, made deterministic in one process (`{32 482, 0 2518}`; `BROOD_NO_JIT=1` `{32 3000}`), present on both 0.25.2 binaries so not the merge |
@@ -8551,7 +8551,7 @@ instrumentation "never fired" and the fix "did not work" against a binary that p
 them. CLAUDE.md records this for `--release`; it is identical for debug. `cargo build --bin
 brood`, then check the mtime.
 
-## KI-120 — the wrapper's `def-face`/`editor/serve/*` unbound wave survives the KI-119 fix ⚠️ open 2026-09-08
+## KI-120 — the wrapper's `def-face`/`editor/serve/*` unbound wave: a straggler supervisor respawns into the isolate-restore window ✅ FIXED 2026-09-08
 
 **What was seen.** A full `make test` on the merged tree `b405c49f` (KI-119 fixed):
 `brood_suite_passes` TMT at 900.040 s on try 1, passed try 2 in 112.7 s (`FLAKY 2/2`). The
@@ -8595,6 +8595,67 @@ the leaking test; if none does, the next tool is `BROOD_REG_TRACE=1` on a narrow
 `(:use …)` importing nothing. Also worth doing regardless: `face_test`'s fan-in receives have no
 `after`, so a dead child is a 600 s hang rather than a failure — the reason this reads as a
 timeout instead of a named case.
+
+**Resolution 2026-09-08 — the instrumented run named it, and it was not the rollback KI-80
+guessed.** With `BROOD_SCOPE_DBG=1 BROOD_TEST_TRACE=1` exported to every test process, the
+hit came with the wrapper's per-test trace intact, and three default-on-where-safe diagnostics
+(added this session) told the whole story on stderr:
+
+```
+supervisor: child :flaky failed to start: flaky: cannot start
+[refer] (:use editor/ui) imported NOTHING — no public `editor/ui/` global is bound; *features* lists it: true, mid-load: false, pid=Some(1) scope=270
+[unbound] std module `editor/serve` is recorded as loaded but `editor/serve/serve-manager` is not bound — pid=Some(3773) scope=298
+```
+
+`*features*` lists `editor/ui` as loaded while not one `editor/ui/` global is bound — the
+"recorded loaded, globals missing" state — and it is **pid 1, the runner itself**, hitting it
+while loading a later file's `(:use editor/ui)` header. So the poison was written into the
+runner's own base `*features*` by an earlier file and persisted.
+
+**Mechanism.** The scoped runner quiesces once per file:
+`(%isolate (fn () (let (before (proc/list) results (drain-one-file loader)) (test-quiesce-file before) results)))`.
+`test-quiesce-file` took ONE pass — snapshot `(proc/list)`, kill every non-`before` process,
+await. But the supervisor lines show a supervisor is *among* those stragglers, and killing its
+child makes it respawn. A replacement spawned after the pass's snapshot — or in the window
+between the pass returning and `%isolate`'s `restore_globals` — is not in `before`, was not
+killed, and is alive as the globals roll back. It loads an editor module (`env_define`s
+`editor/ui/*`, then `provide`s it); the restore wipes those globals but the `provide`,
+serialized with restore under the registry lock (KI-89's lock), lands *after* it and re-adds
+`editor/ui` to the restored `*features*`. Sticky from the next snapshot on. This is KI-89's
+exact asymmetry — a registry write surviving a restore that rolled back the plain globals
+beside it — for `*features*` + a module's own globals rather than `*record-ids*` + a
+constructor. KI-80's third pass attributed the earlier sighting to the `%isolate` rollback and
+fixed three real things around it; the rollback was downstream, the un-quiesced respawn was the
+cause.
+
+**Fix** (`std/tool/test.blsp`). `test-quiesce-file` now LOOPS (`test-quiesce-rounds`, bounded at
+20): each round re-scans the non-`before` set, kills all of it — the supervisor included, so it
+stops respawning once its restart intensity is spent or it is simply dead — awaits, and repeats
+until the set is empty. A parked leaker dies in round one; a respawning supervisor takes a few.
+The bound means a pathological respawner warns (`still spawning after 20 kill rounds`) and the
+restore proceeds anyway, which is no worse than the single pass and never a hang.
+
+**Diagnostics kept** (this session, so a recurrence self-reports rather than costing another
+week): `%refer` prints `[refer] (:use mod) imported NOTHING …` on stderr, default-on, since a
+refer-all of nothing has no legitimate shape; `unbound_error` prints `[unbound] std module `m`
+is recorded as loaded but `m/x` is not bound` under `BROOD_SCOPE_DBG` (gated — a typo on a std
+name looks identical); `BROOD_TEST_TRACE=1` arms the runner's `--trace` from the environment so
+the nextest wrapper, which nobody passes flags to, names each result as it lands even when
+killed at its cap. All three are in `docs/known-issues.md`'s catalogue via `debug_flags.rs`.
+
+**Verified.** Before: ~40% of full loaded runs hit the wave (KI-119 proof run clean, but the
+`4027b8ca`, `b405c49f` and one instrumented run all hit it — 3 of ~7). After: two full runs
+under the same `-j 6` concurrent load and tracers, **0 unbound deaths, 0 `[refer] NOTHING`, 0
+give-ups**, wrapper green. The guard `crates/nest/tests/file_boundary_quiesce.rs` follows the
+new per-round wording and asserts the leaker dies in the first round (no give-up). The two
+tests that reddened under the tracer export — `mono_differential` (compares two arms' stdout,
+which the trace timing perturbs) and the old-wording `file_boundary_quiesce` — both pass
+un-instrumented; they were the instrumentation, not the fix.
+
+**Residual.** The fix is a bounded loop, not a hard guarantee: a supervisor that out-respawns 20
+kill rounds would still slip a straggler through and warn. None observed. The deeper guarantee —
+an isolate restore that cannot be raced at all — is the `%isolate`/scheduler design question
+KI-89 and this entry both circle; the loop closes the window this bug used, loudly.
 
 ## KI-119 — a module materialised from the stdlib image came back with another module's bytes ✅ fixed 2026-09-08
 

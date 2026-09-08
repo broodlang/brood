@@ -24,17 +24,15 @@ every offset moves) landed in between; a module then materialised another module
 its names were unbound in every process at once. This was KI-80's "unbound after `%isolate`
 rollback" shape — that attribution was wrong (`BROOD_SCOPE_DBG` printed nothing on the failing
 run) — and a fresh `nest run` dying on `file/regular?`. Reader holds the indexed handle now;
-guard in `tests/startup_image_test.blsp`, sabotage-verified. **But one bug is OPEN: KI-120** —
-the wrapper's `def-face`/`editor/serve/*` unbound wave recurred on the fixed tree with the image
-rebuilt only once, two of three full runs. Item 0 below. Until it is closed, `brood_suite_passes`
-reports it as FLAKY (retry absorbs one hit); a FLAKY row on that binary is this bug, not noise.
-
-### 0 — KI-120 (open): the wrapper's unbound wave that KI-119 did not explain
-
-**Do.** `BROOD_SCOPE_DBG=1 cargo nextest run --no-fail-fast --features brood/treesit-grammars
-> suite.log 2>&1` under the cap, alone on the box (a concurrent release build got both killed
-for memory; build the test binaries first, in the foreground, `--build-jobs 6`). NOT
-`BROOD_IMAGE_TRACE` — it reds 25 output-comparing tests. 2 hits in 4 full runs so far. On a hit, read the wrapper's
+guard in `tests/startup_image_test.blsp`, sabotage-verified. **2026-09-08 (later): KI-120 also
+FIXED** — the wrapper's `def-face`/`editor/serve/*` unbound wave was a supervisor among a file's
+stragglers respawning a child into the window between the runner's ONE quiesce pass and the
+`%isolate` restore; the child loaded an editor module and `provide`d it after the restore rolled
+its globals back, so `*features*` marked it loaded over an empty namespace (KI-89's asymmetry).
+`test-quiesce-file` now loops until the straggler set is empty. **No open bug again.** Three
+diagnostics stay default-on-where-safe (`[refer] NOTHING`, `[unbound]` under `BROOD_SCOPE_DBG`,
+`BROOD_TEST_TRACE`) so a recurrence self-reports. If `brood_suite_passes` ever shows the wave
+again, the `[refer] imported NOTHING` line names the module and the responsible file follows. On a hit, read the wrapper's
 try-1 stderr: `[scope] RESTORE by … with N live:` lines against the `process N died:
 unbound symbol` lines. The entry lists what each outcome means and the next tool. Keep the
 whole log; never pipe it through a filter.
