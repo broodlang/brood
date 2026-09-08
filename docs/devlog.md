@@ -11659,3 +11659,20 @@ itself were "not working" against a stale binary for about an hour; the tell was
 instrumentation that fired nowhere, not even where the cold path provably ran. And **a flake
 that passes on retry is a bug with a race in front of it**: the deterministic repro took two
 minutes to write and turned a one-in-N into `{32 482, 0 2518}`.
+
+## 2026-09-08 (later) — heap.rs split, moves (d)–(g): the type substrate is out
+
+Handoff item 1's remaining bulk was the type substrate above the first `impl Heap`, not
+methods. Four more children — `local_string.rs` (the LOCAL string representation and its six
+readers), `slabs.rs` (VecStore, Slabs, CodeSlabs, SlabRef) — plus the GC tuning knobs into
+`gc.rs` and the freeze's two handle helpers into `freeze.rs`; then the three test modules that
+earlier moves had orphaned went to their subjects. `heap.rs` 4,782 → **3,175**; fourteen
+children. Suite 1418/1418 and clippy clean after each round.
+
+What this batch taught beyond the first three moves: free fns and consts a sibling reaches need
+the parent to re-import them (`use self::gc::{…}`), and rustc counts a sibling's glob use as a
+use; `unsafe fn` and trait-impl methods escape a naive widening; and new items in a child go
+above its test module. Two more stranded doc paragraphs surfaced (`StrData`'s above
+`LocalString`, `RuntimeCode`'s above `SymbolHasher`) — five for the weekend, each fixed as its
+own comment-only commit. The item is closed; `RuntimeCode` → its own child is the one seam left,
+noted in the handoff as optional.

@@ -142,19 +142,20 @@ paths — but until then, prefer learning over shortcuts.
 ```
 crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   core/        substrate: value.rs (Value, Tag, symbol interner, Closure/Arity),
-               heap.rs (per-process heap + shared regions: the type substrate —
-               LOCAL strings, slabs, SlabRef, CodeSlabs — plus construction, alloc
-               and the region-dispatching accessors)
-               with child modules heap/{gc.rs (roots/collection/RUNTIME-compaction/stats),
-               gc_runtime.rs, map_ops.rs (CHAMP ops), equality.rs (equality/compare/hash),
-               vm_cache.rs (VM body cache + inline caches + the shared JIT code cache),
-               facts.rs (side facts, ADR-320),
-               positions.rs (form positions, compile context, def sites + name facts),
-               env_globals.rs (the env chain + the global table: def/generation, the
-               registry ops, dynamics, sigs, snapshot/restore, the ADR-119 dep recorder),
-               freeze.rs (the once-per-runtime prelude freeze: local->prelude re-tag +
-               the KI-12 localize step), promote.rs (LOCAL -> shared RUNTIME copying,
-               `def`/`spawn`'s append-only publish, + PromoteForward),
+               heap.rs (per-process heap + shared regions: the Heap/ColdHeap/RuntimeCode/
+               SharedCode records, construction, alloc, and the region-dispatching accessors)
+               with child modules heap/{gc.rs (roots/collection/RUNTIME-compaction/stats +
+               the tuning knobs), gc_runtime.rs, map_ops.rs (CHAMP ops), equality.rs
+               (equality/compare/hash), vm_cache.rs (VM body cache + inline caches + the
+               shared JIT code cache), facts.rs (side facts, ADR-320), positions.rs (form
+               positions, compile context, def sites + name facts), env_globals.rs (the env
+               chain + the global table: def/generation, the registry ops, dynamics, sigs,
+               snapshot/restore, the ADR-119 dep recorder), freeze.rs (the once-per-runtime
+               prelude freeze: local->prelude re-tag + the KI-12 localize step, and its
+               handle-identity helpers), promote.rs (LOCAL -> shared RUNTIME copying,
+               `def`/`spawn`'s append-only publish, + PromoteForward), local_string.rs
+               (LocalString/StrData/StrAux/CharIndex + the six string readers), slabs.rs
+               (VecStore, Slabs, CodeSlabs, SlabRef — where values physically live),
                roots_buf.rs} — children of `heap`, so they
                reach Heap's private items via `use super::*`, alloc.rs,
                blob.rs (cross-process zero-copy blob heap), map_champ.rs (CHAMP
