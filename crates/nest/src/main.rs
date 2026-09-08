@@ -495,6 +495,31 @@ fn run_main(cli: Cli) {
 /// plist that `run-tests` and friends already accept. Selector *parsing* stays in
 /// Brood (`test-make-filter`) so the grammar has one definition; this only
 /// forwards argv.
+/// Read a Brood list of strings into owned `String`s, or exit naming `what` returned
+/// the bad value. Owned deliberately: the list is not rooted, so a later `eval` could
+/// collect it out from under a borrow.
+fn string_list(interp: &mut Interp, what: &str, list: brood::core::value::Value) -> Vec<String> {
+    use brood::core::value::Value;
+    let items = match interp.heap.seq_items(list) {
+        Ok(v) => v,
+        Err(e) => {
+            report_error(&e);
+            std::process::exit(1);
+        }
+    };
+    items
+        .iter()
+        .map(|v| match v {
+            Value::Str(id) => Ok(interp.heap.string(*id).to_string()),
+            other => Err(interp.print(*other)),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|bad| {
+            eprintln!("nest release: {what} returned a non-string ({bad})");
+            std::process::exit(1);
+        })
+}
+
 fn blsp_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -551,26 +576,7 @@ fn cmd_release(
         "(let (root (project/find-root (file/cwd))) \
          (project/bundle-collect root))",
     );
-    let items = match interp.heap.seq_items(collected) {
-        Ok(v) => v,
-        Err(e) => {
-            report_error(&e);
-            std::process::exit(1);
-        }
-    };
-    // Extract to owned Strings *before* any further eval — the list isn't rooted,
-    // so a later collection could reclaim it.
-    let strings: Vec<String> = items
-        .iter()
-        .map(|v| match v {
-            Value::Str(id) => Ok(interp.heap.string(*id).to_string()),
-            other => Err(interp.print(*other)),
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|bad| {
-            eprintln!("nest release: bundle-collect returned a non-string ({bad})");
-            std::process::exit(1);
-        });
+    let strings = string_list(interp, "bundle-collect", collected);
     let (manifest, rest) = match strings.split_first() {
         Some(pair) => pair,
         None => {
@@ -608,67 +614,60 @@ fn cmd_release(
     // 3. Serialize the archive once — it's target-independent.
     let archive = brood::bundle::serialize(manifest, &modules);
 
-    // 4. One release binary per target (no --target = one, for the host).
-    //    --runtime names a single specific base, so it can't serve a matrix.
-    if runtime.is_some() && targets.len() > 1 {
-        eprintln!(
-            "nest release: --runtime names one base binary; use it with at most one --target"
-        );
-        std::process::exit(2);
-    }
-    // A DEFAULTED output name is manifest data, not an argument: `:name` is read out
-    // of a project.blsp that may not be ours (a cloned repo, a `nest release` run
-    // before anyone read it). `(project :name |../../escaped-app|)` wrote a 30 MB
-    // **executable** two directories above the project root, with no `-o` and no
-    // warning — verified. A defaulted artifact must land in the project directory, so
-    // require a plain filename; an explicit `-o PATH` is the user's own choice and
-    // stays unrestricted (that is what it is for).
-    if output.is_none() && !is_plain_filename(&name) {
-        eprintln!(
-            "nest release: the manifest's :name ({name:?}) is not a plain filename, so it \
-             cannot name the output binary."
-        );
-        eprintln!("  Give the path explicitly: nest release -o <path>");
-        std::process::exit(2);
-    }
-    let stem = output.unwrap_or(&name);
-    let plans: Vec<(Option<&str>, std::path::PathBuf)> = if targets.is_empty() {
-        vec![(None, std::path::PathBuf::from(stem))]
-    } else {
-        targets
-            .iter()
-            .map(|t| {
-                // `-o` with a single target is the exact output path; otherwise
-                // each binary gets a per-target suffix (`app-macos-arm64`, …).
-                let out = if output.is_some() && targets.len() == 1 {
-                    stem.to_string()
-                } else {
-                    let exe = if release::is_windows_triple(t) {
-                        ".exe"
-                    } else {
-                        ""
-                    };
-                    format!("{stem}-{}{exe}", release::target_suffix(t))
-                };
-                (Some(t.as_str()), std::path::PathBuf::from(out))
+    // 4. What are the binaries CALLED, and is any name refused? Policy, so Brood
+    //    answers it (`project/release-plan`): a flat `("ok" triple out …)` list with
+    //    an empty triple meaning the host, or `("error" message exit-code)`.
+    let planned = run_for_value(
+        interp,
+        &format!(
+            "(project/release-plan {} {} {} {})",
+            blsp_string(&name),
+            output.map(blsp_string).unwrap_or_else(|| "nil".to_string()),
+            blsp_string_list(targets),
+            runtime.is_some(),
+        ),
+    );
+    let plan_words = string_list(interp, "release-plan", planned);
+    let plans: Vec<(Option<String>, std::path::PathBuf)> = match plan_words.split_first() {
+        Some((tag, rest)) if tag == "ok" => rest
+            .chunks(2)
+            .map(|c| {
+                let triple = (!c[0].is_empty()).then(|| c[0].clone());
+                (triple, std::path::PathBuf::from(&c[1]))
             })
-            .collect()
+            .collect(),
+        Some((tag, rest)) if tag == "error" && rest.len() == 2 => {
+            eprintln!("nest release: {}", rest[0]);
+            std::process::exit(rest[1].parse().unwrap_or(2));
+        }
+        _ => {
+            eprintln!("nest release: release-plan returned an unrecognised answer");
+            std::process::exit(1);
+        }
     };
     for (triple, out) in plans {
+        let triple = triple.as_deref();
         let base = release::resolve_runtime(runtime, triple);
         if let Err(e) = brood::bundle::write_release(&base, &archive, &out) {
             eprintln!("nest release: cannot write {}: {e}", out.display());
             std::process::exit(1);
         }
         let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
-        println!(
-            "Wrote {} ({} module{}, {}{})",
-            out.display(),
-            modules.len(),
-            if modules.len() == 1 { "" } else { "s" },
-            release::human_size(size),
-            triple.map(|t| format!(", {t}")).unwrap_or_default(),
+        // What the command SAYS it wrote is policy too (`project/release-report`).
+        let line = run_for_value(
+            interp,
+            &format!(
+                "(project/release-report {} {} {} {})",
+                blsp_string(&out.display().to_string()),
+                modules.len(),
+                size,
+                triple.map(blsp_string).unwrap_or_else(|| "nil".to_string()),
+            ),
         );
+        match line {
+            Value::Str(id) => println!("{}", interp.heap.string(id)),
+            other => println!("{}", interp.print(other)),
+        }
         if smoke {
             smoke_test(&out, triple);
         }
@@ -753,20 +752,6 @@ fn discard_unbootable(path: &std::path::Path, out: &std::path::Path) {
             out.display()
         ),
     }
-}
-
-/// Is `s` a single path component that names a file in the current directory —
-/// no separator, no `.`/`..`, not empty? The test a *defaulted* output name has to
-/// pass before it may become a filesystem path (see `cmd_release`). Deliberately
-/// rejects `\` too: a name is data, and a name written for one platform must not
-/// traverse on another.
-fn is_plain_filename(s: &str) -> bool {
-    !s.is_empty()
-        && s != "."
-        && s != ".."
-        && !s.contains('/')
-        && !s.contains('\\')
-        && !s.contains('\0')
 }
 
 // ---------- helpers ----------

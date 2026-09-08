@@ -3650,6 +3650,131 @@ which is what `nest release --smoke` does to the binary it just wrote."
                " modules loaded, nothing run)"))
     0))
 
+;; --- `nest release`: naming the artifacts, and saying what was written -------
+;; `nest` keeps the release MECHANISM, because it is bound to the `nest` binary
+;; itself: which base runtime to append to (its own embedded copy, a cache entry,
+;; `--runtime`), the byte assembly in `brood::bundle`, and running the artifact's
+;; boot check. What the artifacts are CALLED, which names are refused, and what
+;; the command prints are policy — and policy is Brood (ADR-028/322).
+
+(defn release-target-suffix (triple)
+  "Short, human-friendly artifact suffix for a target `triple`. An unrecognized OS
+keeps the whole triple: always unambiguous, just longer. The libc stays visible on
+Linux so a gnu + musl matrix cannot collide.
+
+    (project/release-target-suffix \"aarch64-apple-darwin\") → \"macos-arm64\"
+    (project/release-target-suffix \"x86_64-unknown-linux-gnu\") → \"linux-x86_64\"
+    (project/release-target-suffix \"x86_64-unknown-linux-musl\") → \"linux-musl-x86_64\"
+    (project/release-target-suffix \"wasm32-wasip1\") → \"wasm32-wasip1\""
+  (let (arch (let (a (first (string/split triple "-"))) (if (= a "aarch64") "arm64" a))
+        os (cond
+             (includes? triple "apple-darwin") "macos"
+             (includes? triple "windows") "windows"
+             (includes? triple "linux") (if (string/ends-with? triple "musl") "linux-musl" "linux")
+             (includes? triple "freebsd") "freebsd"
+             :else nil))
+    (if os (str os "-" arch) triple)))
+(sig release-target-suffix (string -> string))
+
+(defn release-windows-triple? (triple)
+  "Is `triple` a Windows target — i.e. does its artifact need a `.exe` suffix?
+
+    (project/release-windows-triple? \"x86_64-pc-windows-msvc\") → true
+    (project/release-windows-triple? \"x86_64-unknown-linux-gnu\") → false"
+  (includes? triple "windows"))
+(sig release-windows-triple? (string -> bool))
+
+(defn release-plain-filename? (s)
+  "Is `s` a bare filename, safe to use as a DEFAULTED output path?
+
+A defaulted name is manifest data, not an argument: `:name` is read out of a
+`project.blsp` that may not be ours. `(project :name |../../escaped-app|)` wrote a
+30 MB executable two directories above the project root, with no `-o` and no
+warning. An explicit `-o PATH` is the user's own choice and stays unrestricted.
+
+    (project/release-plain-filename? \"app\") → true
+    (project/release-plain-filename? \"../escape\") → false
+    (project/release-plain-filename? \"..\") → false
+    (project/release-plain-filename? \"\") → false"
+  (and (not (= s ""))
+    (not (= s "."))
+    (not (= s ".."))
+    (not (includes? s "/"))
+    (not (includes? s "\\"))
+    (not (includes? s (string/codepoints-> [0])))))
+(sig release-plain-filename? (string -> bool))
+
+(defn human-size (bytes)
+  "Human-friendly byte size for a release summary — whole bytes up to 1 KB, one
+decimal above it.
+
+    (project/human-size 512) → \"512 B\"
+    (project/human-size 4404019) → \"4.2 MB\""
+  (letrec (go (fn (n units)
+                (if (and (>= n 1024.0) (not (empty? (rest units))))
+                  (go (/ n 1024.0) (rest units))
+                  (if (= (first units) "B")
+                    (str bytes " B")
+                    (string/format "%.1f %s" n (first units))))))
+    (go (->float bytes) ["B" "KB" "MB" "GB"])))
+(sig human-size (int -> string))
+
+(defn release-plan (name output targets pinned-runtime?)
+  "Decide which binaries a `nest release` writes, as a flat list of strings the
+`nest` side consumes: `(\"ok\" triple0 out0 triple1 out1 …)` with an empty triple
+meaning the host, or `(\"error\" message exit-code)`.
+
+`name` is the manifest's `:name`, `output` the `-o` path (nil if unset), `targets`
+the `--target` triples (empty for a host-only release), and `pinned-runtime?`
+whether `--runtime` named a specific base binary. With one target `-o` is the exact
+output path; with several, each binary gets a per-target suffix.
+
+    (project/release-plan \"app\" nil [] false) → (\"ok\" \"\" \"app\")
+    (project/release-plan \"app\" nil [\"x86_64-pc-windows-msvc\"] false) → (\"ok\" \"x86_64-pc-windows-msvc\" \"app-windows-x86_64.exe\")
+    (project/release-plan \"app\" \"out\" [\"a\" \"b\"] true) → (\"error\" \"--runtime names one base binary; use it with at most one --target\" \"2\")"
+  (cond
+    ;; `--runtime` names ONE base binary, so it cannot serve a matrix.
+    (and pinned-runtime? (> (count targets) 1))
+    (list "error" "--runtime names one base binary; use it with at most one --target" "2")
+
+    (and (nil? output) (not (release-plain-filename? name)))
+    (list "error"
+      (str "the manifest's :name (\"" name "\") is not a plain filename, so it cannot"
+        " name the output binary.\n  Give the path explicitly: nest release -o <path>")
+      "2")
+
+    :else
+    (let (stem (or output name))
+      (cons "ok"
+        (if (empty? targets)
+          (list "" stem)
+          (mapcat targets
+            (fn (t)
+              (list t
+                (if (and output (= (count targets) 1))
+                  stem
+                  (str stem
+                    "-"
+                    (release-target-suffix t)
+                    (if (release-windows-triple? t) ".exe" "")))))))))))
+
+(defn release-report (out module-count size triple)
+  "The line `nest release` prints for one artifact it wrote: the path, how many
+modules it embeds, its size, and the target triple when there was one.
+
+    (project/release-report \"app\" 1 512 nil) → \"Wrote app (1 module, 512 B)\"
+    (project/release-report \"app\" 3 512 \"x86_64-unknown-linux-gnu\") → \"Wrote app (3 modules, 512 B, x86_64-unknown-linux-gnu)\""
+  (str "Wrote "
+    out
+    " ("
+    module-count
+    " module"
+    (if (= module-count 1) "" "s")
+    ", "
+    (human-size size)
+    (if triple (str ", " triple) "")
+    ")"))
+
 ;; --- what is this binary? (the `--brood-build-info` surface) -----------------
 ;; Answering "which brood built this, with which features" meant grepping the binary
 ;; over SSH — and the first attempt used `strings`, which `debian:bookworm-slim` does

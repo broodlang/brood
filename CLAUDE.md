@@ -104,9 +104,12 @@ Concretely:
   and the package manager (`fetch`, `update`, `tree`, `add`, `remove`, `publish`, `search`,
   `key`, `ws`), `repl`, `observe` and `attach`; `main.rs` routes a name in its
   `BLSP_SUBCOMMANDS` there before clap runs and deletes the Rust arm. Still Rust:
-  `completions`/`complete`, `mcp`, `release`, `gen` — and `stdimage`, which must build from
-  a process where nothing but the prelude is loaded, and the dispatcher is a std module
-  (KI-112).)
+  `completions`/`complete`, `mcp` — and `stdimage`, which must build from a process where
+  nothing but the prelude is loaded, and the dispatcher is a std module (KI-112).
+  `release` is the one arm SPLIT rather than moved: what a release binary is called, which
+  names are refused and what the command prints are `project/release-plan` +
+  `project/release-report` in Brood, while the Rust side keeps what only this binary can
+  host — the runtime embedded in `nest` at install time, the byte assembly, the boot check.)
 - A Rust builtin is an admission that the language can't yet express something.
   Treat each one as a candidate to later replace with Brood once the language
   is capable enough.
