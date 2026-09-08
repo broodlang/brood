@@ -1,72 +1,167 @@
-;; A modifier written BEFORE a test form in a describe body (KI-107).
+;; Every `:isolated` / `:serial` / `:skip` / `:tags` in `tests/` sits where a macro
+;; actually reads it — checked STATICALLY, over the source, without running anything.
 ;;
-;; `(describe "g" (test "a" …) :isolated (test "b" …))` used to register `b` as a PARALLEL
-;; test: the bare keyword was an ordinary body form that evaluated to itself. The spelling
-;; is what people reach for — at the head of a body it IS the group modifier — and 31 tests
-;; in 10 files were running concurrently under a marker that said they must not, three of
-;; them the coupled `:trace :all` cases that flaked at 5-8% for a day of investigation.
+;; WHY THIS EXISTS. A test modifier is a keyword, and a keyword evaluates to itself, so a
+;; misplaced one is not an error — it is a body form that does nothing. That is KI-107: 31
+;; tests in 10 files carried `:isolated` written *before* their `(test …)` form, every one
+;; of them believed, none of them isolated, and `eval_server_test`'s three cases flaked at
+;; 5–8% for months because of it. Two candidate fixes were refuted before anyone read the
+;; marker.
 ;;
-;; These cases read the EXPANSION, not the registry: registering a fixture would put it in
-;; `*units*`, i.e. into the very suite that is running (the same reason
-;; `test_selection_test.blsp` builds synthetic units).
+;; ADR-323 closed the spelling that caused it: `describe` now honours a modifier standing
+;; before a test form and REJECTS any other bare keyword in its body. But that check runs
+;; at expansion, which means it only fires for a file the runner actually loads, and it
+;; cannot see inside a `(test …)` form at all. So the third spelling is still silent:
+;;
+;;     (test "name"
+;;       (assert= 1 1)
+;;       :isolated)          ; ← after the body started. Reads as a body form that
+;;                           ;   evaluates to :isolated, asserts nothing, and passes.
+;;
+;; `test-split-mods` reads modifiers directly after the name and nowhere else, so this one
+;; is a no-op by construction — and `describe`'s guard never sees it, because it is not in
+;; the describe body. This gate reads every test file as DATA and walks it, so a file that
+;; is filtered out, skipped, or fails to load for an unrelated reason is checked anyway.
 
 (defmodule describe-modifiers-test (:use test))
 
-(defn- expansion-text (form)
-  (pr-str (macroexpand-1 form)))
+;; Every `.blsp` under `dir`, recursively — `cons` + `%append-two` (not `append`) so the
+;; walk stays linear in the file count. Same shape as `std_check_test`'s.
+(defn- dm-files (dir)
+  (if (file/dir? dir)
+    (fold (file/ls dir)
+      nil
+      (fn (acc entry)
+        (let (p (path/join dir entry))
+          (cond
+            (file/dir? p) (%append-two (dm-files p) acc)
+            (string/ends-with? entry ".blsp") (cons p acc)
+            else acc))))
+    nil))
 
-(defn- expansion-error (form)
-  ;; `reflect/eval`, not `macroexpand-1`: in a test worker the latter hands a form whose
-  ;; expansion RAISED back unchanged, so the error is invisible to it. Evaluating raises at
-  ;; expansion time — before `describe` registers anything — so a green run leaves `*units*`
-  ;; untouched, and a regressed one fails the assertion rather than passing quietly.
-  (try (do (reflect/eval form) nil) (catch e (error-message e))))
+(defn- dm-modifier? (k)
+  (includes? [:isolated :serial :skip :tags] k))
 
-(describe "a modifier before a test form applies to that test"
-  (test ":isolated is spliced in after the name, and only into the form it precedes"
-    (let (text (expansion-text '(test/describe "g" (test "a" 1) :isolated (test "b" 2) (test "c" 3))))
-      (is (includes? text "(test \"b\" :isolated 2)"))
-      (is (includes? text "(test \"a\" 1)"))
-      (is (includes? text "(test \"c\" 3)"))
-      ;; the group mode stays :parallel — the marker was per test
-      (is (includes? text "emit-describe :parallel"))))
+(defn- dm-test-form? (f)
+  (and (pair? f) (includes? ['test 'deftest] (first f))))
 
-  (test ":skip and :tags splice the same way, and stack with the form's own modifiers"
-    ;; `(test "z" 0)` first: a modifier at the HEAD of the body is the group's own (below).
-    (let (text (expansion-text '(test/describe "g"
-                                  (test "z" 0)
-                                  :skip (test "a" 1)
-                                  :tags [:db]
-                                  (test "b" :isolated 2))))
-      (is (includes? text "(test \"a\" :skip 1)"))
-      (is (includes? text "(test \"b\" :tags [:db] :isolated 2)"))))
+(defn- dm-name-of (form)
+  ;; The group/test name as written, for the report — a string literal, or a symbol for
+  ;; `deftest`. Anything else prints as itself.
+  (pr-str-bounded (second form)))
 
-  (test "a modifier at the HEAD of the body is still the group's own"
-    (let (text (expansion-text '(test/describe "g" :isolated (test "a" 1) (test "b" 2))))
-      (is (includes? text "emit-describe :isolated"))
-      (is (includes? text "(test \"a\" 1)"))))
+;; The body forms of a `(test …)`: modifiers are read as a leading run and nowhere else,
+;; so anything after the first real body form is dead.
+(defn- dm-scan-test-body (where forms in-body acc)
+  (cond
+    ;; `(not (pair? …))` rather than `empty?`: this file tree includes reader tests that
+    ;; carry DOTTED forms, whose tail is an atom rather than nil, and `empty?` refuses one.
+    (not (pair? forms)) acc
+    (dm-modifier? (first forms))
+      (if in-body
+        (dm-scan-test-body where
+          (rest forms)
+          true
+          (cons (str where ": " (first forms) " stands after the body started, where nothing"
+                   " reads it — a test's modifiers are read directly after its name")
+            acc))
+        ;; A leading modifier. `:tags` carries its vector with it.
+        (dm-scan-test-body where
+          (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
+          false
+          acc))
+    else (dm-scan-test-body where (rest forms) true acc)))
 
-  (test "deftest takes the modifier too"
-    (is (includes? (expansion-text '(test/describe "g"
-                                      :isolated (deftest a 1)
-                                      :isolated (deftest b 2)))
-          "(deftest b :isolated 2)"))))
+;; The body forms of a `(describe …)`: the same leading run, plus ADR-323's per-test
+;; prefix — `:isolated`/`:skip`/`:tags […]` directly before a `(test …)`. `describe`
+;; rejects the rest at expansion; this says so without loading the file.
+(defn- dm-scan-describe-body (where forms in-body acc)
+  (cond
+    (not (pair? forms)) acc
+    (dm-modifier? (first forms))
+      (cond
+        (not in-body)
+        (dm-scan-describe-body where
+          (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
+          false
+          acc)
 
-(describe "a stray keyword in a describe body is an error, not a silent no-op"
-  (test "an unknown keyword"
-    (is (includes? (expansion-error '(test/describe "g" (test "a" 1) :bogus (test "b" 2)))
-          "stray keyword :bogus")))
+        (= (first forms) :serial)
+        (dm-scan-describe-body where
+          (rest forms)
+          true
+          (cons (str where ": :serial is a group mode and has no per-test meaning — put it"
+                   " right after the group name, or mark the one test :isolated")
+            acc))
 
-  (test ":isolated before something that is not a test form"
-    (is (includes? (expansion-error '(test/describe "g"
-                                       (test "a" 1)
-                                       :isolated (let (x 1) (test "b" x))))
-          "must stand directly before a (test …) form")))
+        (dm-test-form? (if (= (first forms) :tags) (third forms) (second forms)))
+        (dm-scan-describe-body where
+          (if (= (first forms) :tags) (rest (rest forms)) (rest forms))
+          true
+          acc)
 
-  (test ":isolated as the LAST body form has nothing to apply to"
-    (is (includes? (expansion-error '(test/describe "g" (test "a" 1) :isolated))
-          "must stand directly before")))
+        :else
+        (dm-scan-describe-body where
+          (rest forms)
+          true
+          (cons (str where ": " (first forms) " does not stand before a (test …) form, so"
+                   " nothing reads it")
+            acc)))
+    else (dm-scan-describe-body where (rest forms) true acc)))
 
-  (test ":serial has no per-test meaning"
-    (is (includes? (expansion-error '(test/describe "g" (test "a" 1) :serial (test "b" 2)))
-          "GROUP mode"))))
+(defn- dm-walk-kids (where form acc)
+  ;; A form's children, walked by hand rather than with `fold`. `syntax_roundtrip_test`
+  ;; carries DOTTED forms — a reader test would — whose tail is an atom rather than nil,
+  ;; and every sequence combinator refuses one.
+  (if (pair? form)
+    (dm-walk-kids where (rest form) (dm-walk where (first form) acc))
+    acc))
+
+(defn- dm-walk (where form acc)
+  (cond
+    (dm-test-form? form)
+      (let (body (rest (rest form))
+            here (str where " " (dm-name-of form)))
+        (dm-walk-kids here body (dm-scan-test-body here body false acc)))
+    (and (pair? form) (= (first form) 'describe))
+      (let (body (rest (rest form))
+            here (str where " " (dm-name-of form)))
+        (dm-walk-kids here body (dm-scan-describe-body here body false acc)))
+    (pair? form) (dm-walk-kids where form acc)
+    (vector? form) (fold form acc (fn (a f) (dm-walk where f a)))
+    else acc))
+
+(defn- dm-misplaced (path)
+  "Every modifier keyword in `path` that no macro reads — as report strings."
+  (fold (or (reflect/read-all (file/slurp path)) nil)
+    nil
+    (fn (acc form) (dm-walk path form acc))))
+
+(describe "test modifiers sit where a macro reads them"
+  (test "the test tree is discoverable from the suite's working directory"
+    ;; Not ceremony: with a wrong cwd the walk returns nil and the assertion below passes
+    ;; over zero files. Fail loudly rather than report a green gate that read nothing.
+    (is (> (count (dm-files "tests")) 50)))
+
+  (test "no modifier keyword in tests/ is a silent no-op"
+    ;; Assert on the findings themselves, so a failure names the file and the marker
+    ;; rather than only a count.
+    (assert= (fold (sort (dm-files "tests")) nil (fn (acc p) (append acc (dm-misplaced p))))
+      nil))
+
+  (test "a modifier after the body has started is caught"
+    ;; The gate's own sabotage, kept in the file: this is the exact shape KI-107's third
+    ;; spelling takes, and `dm-misplaced` must report it. Written as source text rather
+    ;; than as a real test, so reading it cannot register anything.
+    (let (src "(describe \"g\" (test \"t\" (assert= 1 1) :isolated))"
+          found (fold (or (reflect/read-all src) nil) nil (fn (a f) (dm-walk "src" f a))))
+      (assert= (count found) 1)
+      (is (includes? (first found) ":isolated"))))
+
+  (test "the honoured spellings are not reported"
+    (let (src "(describe \"g\" :serial :tags [:slow]
+                  (test \"a\" :isolated (assert= 1 1))
+                  :isolated (test \"b\" (assert= 1 1))
+                  :tags [:x] (test \"c\" (assert= 1 1)))"
+          found (fold (or (reflect/read-all src) nil) nil (fn (a f) (dm-walk "src" f a))))
+      (assert= found nil))))
