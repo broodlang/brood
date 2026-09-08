@@ -5,6 +5,11 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
+**Perf work does not belong in this queue.** This box does not run benchmarks, so anything
+needing one is queued in [`perf-handoff.md`](perf-handoff.md) instead — currently one
+high-priority item: whether KI-114's `as_f64_pair` holds the closure KI-109 got from the
+promotion it constrained.
+
 ## Work queue — written 2026-09-07 for the next session (read this first)
 
 State when written: `main` = `5e238340`, pushed; **no open bug in `known-issues.md`** — every

@@ -1,0 +1,151 @@
+# Perf handoff — work that must run on a benchmark box
+
+**Why this file exists.** The primary development machine for this repo does not run
+benchmarks: it is a 28-core workstation shared with other work, its thermal and cache state
+drifts across a session (a `pingpong` baseline wandered ~10% across one day's runs), and it
+has repeatedly produced confident, wrong perf verdicts. So perf verification is *deferred*
+rather than skipped, and this file is the queue. Anything here needs a quiet, pinned box.
+
+Read `docs/benchmarking.md` for *how* to measure and the `Commands` section of `CLAUDE.md`
+for the traps. This file is only *what* to measure, *why*, and *what a pass looks like*.
+
+---
+
+## Before anything: three ways the measurement lies
+
+These have each cost a wrong verdict in this repo. They are not general advice.
+
+1. **`make doctor` first.** A stale binary fails by *agreeing with the baseline* — the most
+   convincing possible way to be wrong. `make ab` aborts if the two binaries come out
+   byte-identical, which is what a silently no-op'd build looks like, but it cannot catch a
+   binary that is merely old.
+2. **`make release-brood` before any timing — never time after `make perf-brood`.** They
+   write the *same path* (`target/release-fast/brood`), so the moment you profile anything,
+   the binary you go on to time is the counter-armed one and your change is charged ~10% for
+   atomics it never introduced. This needs no command-line slip: profile, then time, and the
+   bias is there. On 2026-08-27 it showed two behaviourally identical binaries at 958 vs
+   1018 ms.
+3. **Prove the floor before believing a delta.** `make ab --floor` runs the baseline twice
+   and reports that row's own base-vs-base spread; a regression counts only past
+   `max(5%, 2 × floor)`. For a suspicious row, keep the `target/ab/<sha>/…/brood` binary and
+   run base / base / new pinned best-of-15 — a row that read +5.3% "confirmed" solo turned
+   out to be +0.9% against a +0.5% floor once the baseline stopped wandering.
+
+Also: **`make ab` pins compute rows to one core**, which charges the benchmark for background
+JIT compilation. Right for judging generated-code quality, wrong for any change that alters
+*how much* the compiler does. If the change touches tiering, re-run the row unpinned.
+`BROOD_JIT_DUMP_IR=1 … | grep -c '^\[jit-ir\]'` counts the compiles.
+
+---
+
+## Task 1 — does KI-114's fix hold KI-109's closure? (the only open question)
+
+**Priority: high.** This is a *possible silent regression*, not a suspected one.
+
+### The situation
+
+KI-109 was `mandelbrot` ~3% slower than the 0.19.1 column at steady state. It was **closed on
+2026-09-05 by `62cbe29f`**, and not by the layout work the entry spent its length on:
+
+> `->float` is `(* 1.0 x)`. The `1.0` puts the arm in float context, so `x` was read through
+> `as_f64`, whose guard accepted `Float` alone — and every program that converts calls it
+> with an int. The arm deopted on every activation, sixteen in a row latched it BAILED, and
+> it ran interpreted for the rest of the process: on `mandelbrot` that is one VM call per
+> pixel.
+
+`62cbe29f` made an `Int` operand **promote** (`fcvt_from_sint`) instead of deopting. Closing
+gate: `make ab BASE=8a2aaa01 --floor ROWS=mandelbrot`, best-of-9, images live on both arms —
+**578 → 579 ms, +0.2%** against a 4.3% floor.
+
+**KI-114 (2026-09-07) then found that promotion was unconditional, and unsound.** A
+float-*profiled* arm applied to ints promoted them too, so `(- 33)` answered `-33.0` — pong
+failed 22 of 101 tests. The fix (`emit::as_f64_pair`) licenses promotion only when some
+operand is **proven** float, which is the VM's own rule for when an op is float arithmetic
+at all.
+
+### Why this needs measuring rather than reasoning
+
+The argument that KI-109 is unaffected is: `->float`'s `1.0` is an `Op::Float`, i.e. proven,
+so its promotion is still licensed and the arm still stays native. That argument is sound as
+far as it goes, and it is exactly the kind of argument that KI-109 itself shows to be
+insufficient — that entry spent its length on an icache hypothesis that measured true and was
+not the cause. **Bring numbers.**
+
+### Run this
+
+    make doctor
+    make release-brood
+    make ab BASE=8a2aaa01 --floor ROWS=mandelbrot N=9      # the closing gate, repeated
+    make ab --floor                                         # full sweep, all 30 rows
+    ./scripts/ab-bench.sh --list                            # row names if you need them
+
+**Pass:** `mandelbrot` within its floor of the 2026-09-05 number, and no row regressing past
+`max(5%, 2 × floor)`. Watch the float-heavy rows in particular — `mandelbrot`, `nbody`,
+`matmul` — since those are the ones `as_f64_pair` sits in the middle of.
+
+**If `mandelbrot` regressed**, the first question is whether the arm still stays native:
+
+    BROOD_JIT_BAIL_TRACE=1 ./target/release-fast/brood <mandelbrot.blsp> 2>&1 \
+      | grep -E "arm=(->float|esc|row-sum)"
+
+`->float` appearing as `deopt-thrash-latched` means the gate is rejecting a promotion it
+should license — i.e. `as_f64_pair`'s `FOperand::Float` classification is not recognising the
+`Op::Float` operand — and the bug is in
+`crates/lisp/src/eval/compile/jit_lower/emit.rs`. Before KI-114 that arm latched BAILED and
+cost one VM call per pixel, so this is the exact failure to look for.
+
+### Also worth measuring while you are there
+
+`as_f64_pair` is written so the common both-float path keeps the *same two branches* the
+unconditional version had (the first operand's tag test, then the second's inside
+`float_or_promoted_int`). That is an argument from the code shape, not a measurement. The
+sweep above is what would show it wrong.
+
+Measure **short and long** runs, per `CLAUDE.md`: a tiered runtime has two steady states and
+a micro-benchmark reports one of them. Sweep the call count across two orders of magnitude
+and check whether the *gap between the arms* moves, not just whether each arm got faster.
+
+---
+
+## Task 2 — two lowerings the KI-114 fix changed with no test reaching them
+
+**Priority: low. Correctness is argued, not tested; perf is unmeasured.**
+
+`as_f64_pair` guards three sites in `jit_lower/prim.rs`. Only one — `Prim2SlotInt`, where
+unary `-` lowers — is reachable by any program written for it, and that one is
+sabotage-verified by `crates/cli/tests/float_profile_int_stays_int.rs`. The other two are
+`Prim2SlotSlot` and `Prim2`'s type-erased `Op::Handle` path.
+
+The shapes that *should* reach them do not tier: `(defn add2 (a b) (+ a b))` warmed on floats
+is never elected, and the nbody-shaped `(- (nth v 0) (nth v 1))` beside a float slot
+thrash-latches on the **int** path first, so both answer via the VM. Sabotaging those two
+arms leaves the guard test green — checked, not assumed, and said so in the test's header.
+
+On a benchmark box with real float workloads, the thing to look for is **new**
+`deopt-thrash-latched` arms that the pre-KI-114 binary did not have:
+
+    BROOD_JIT_BAIL_TRACE=1 … 2>&1 | grep deopt-thrash-latched | sort -u
+
+A new one on a float-heavy row means the pair gate is refusing a genuinely mixed
+float/int operation somewhere the guard test does not reach.
+
+---
+
+## Task 3 — re-take KI-100's re-baseline if the runtime has moved
+
+**Priority: low.** KI-100 was resolved as filed on 2026-09-04 by re-baselining against
+`8a2aaa01`: `startup` −18.2%, `sort` −7.6%, `fib` −4.2%, `bintree` −2.9%. Those numbers
+predate ADR-318 (the tree-walker→VM router, default-on 2026-09-04), the prelude image
+becoming default, and everything since. Nothing suggests they have moved; nobody has
+checked. This is hygiene, not a suspicion.
+
+---
+
+## Reporting back
+
+Put results in `docs/devlog.md` with the date, the exact `make ab` invocation, N, whether
+rows were pinned, and the **floor for every row you quote**. A delta without its floor is not
+a result — that is the single most common way this repo has been wrong about performance.
+
+If a task here is settled, say so in this file and in the relevant `docs/known-issues.md`
+entry, and delete the task rather than leaving it to be re-derived.
