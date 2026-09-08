@@ -1110,6 +1110,41 @@ pub unsafe extern "C" fn brood_rt_call_slow(
     }
 }
 
+/// Record this native arm in the parked error's `:trace` as the error unwinds through it
+/// (KI-117). Called from each arm's error-exit block — the general lowering's `error`
+/// block and the scalar worker's `poisoned` block when its sentinel reads 3 — so a native
+/// recursion contributes one frame per level, innermost first, exactly as the VM's
+/// `BcFrame`s do through `attach_vm_trace`. Before this, nothing on the native side ever
+/// pushed a frame: a hot function's error reached `catch` with an EMPTY trace (the suite's
+/// 32-frame cap test read 8, then 0, once `deep` tiered up), and the default crash reporter
+/// printed no frames for exactly the code most likely to crash.
+///
+/// Name and defining file only — the call site that entered the frame lives in the
+/// caller's instruction stream, which native code does not keep. A frame with neither is
+/// dropped by `push_trace`, so an anonymous arm in a file-less context adds nothing.
+/// Cold path (an error is already unwinding), one call per native level.
+///
+/// # Safety
+/// `heap` must be the live context pointer; `arm` the `CompiledArm` whose native code is
+/// running — pinned for the process lifetime by `JIT_ARM_KEEPALIVE`, so the pointer the
+/// lowering embedded as a constant cannot dangle.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_trace_push(
+    heap: *mut Heap,
+    arm: *const crate::eval::compile::CompiledArm,
+) {
+    let h = &mut *heap;
+    let Some(e) = h.jit_pending_error.as_mut() else {
+        return;
+    };
+    let arm = &*arm;
+    e.push_trace(crate::error::TraceFrame {
+        name: arm.fn_name.map(crate::core::value::symbol_name_ref),
+        file: arm.src_file.as_deref().map(str::to_string),
+        pos: None,
+    });
+}
+
 /// Record *why* the JIT is about to deopt. Called from the shared deopt block with a
 /// distinct id per guard, so a deopt can name the check that failed instead of only the
 /// checkpoint it resumes at.

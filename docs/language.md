@@ -1683,8 +1683,12 @@ that shows the cycle). Proper tail calls collapse into their caller's frame, so
 a tail chain `outer → middle → boom` shows one frame named for where the chain
 ended — the Erlang behaviour, and a direct picture of the real (O(1)-stack)
 frame structure. Uncaught errors print it as `at fn (file:line:col)` lines under
-the diagnostic; it costs nothing on the non-throwing path. A user `(throw v)`
-carries `v` verbatim (no map, so no `:trace` on the caught value).
+the diagnostic; it costs nothing on the non-throwing path. A frame that was running
+as **JIT-compiled native code** when the error passed through it is recorded too
+(KI-117), with its `:fn` and `:file` but no `:line`/`:col` — the call site lives in
+the caller's instruction stream, which native code does not keep — so a trace
+through hot code has the same frames as through cold code, less those positions.
+A user `(throw v)` carries `v` verbatim (no map, so no `:trace` on the caught value).
 
 Because a caught value has no single shape, **`(error-message e)`** is the
 shape-agnostic accessor: a raised string as-is, the `:message` of an error map,

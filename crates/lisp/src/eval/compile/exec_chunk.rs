@@ -947,6 +947,27 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
         file,
         pos,
     });
+    attach_vm_trace_callers(e, frames);
+}
+
+/// The pending-callers half of [`attach_vm_trace`], without the running arm's own entry.
+/// For an arm that ran NATIVELY at the driver's loop top (`jit_tier_in_frame` outcome 3):
+/// its error block already recorded it through `brood_rt_trace_push` (KI-117), so
+/// attaching `cur_arm` here again would name the same frame twice.
+pub(crate) fn attach_vm_trace_callers(e: &mut LispError, frames: &[BcFrame]) {
+    use crate::error::TraceFrame;
+    if e.is_control() || e.trace_full() {
+        return;
+    }
+    fn call_site(f: &BcFrame) -> (Option<String>, Option<crate::error::Pos>) {
+        let pos = f
+            .arm
+            .chunk
+            .as_ref()
+            .and_then(|c| f.ip.checked_sub(1).and_then(|i| c.code.get(i)))
+            .and_then(|inst| inst.call_pos());
+        (f.arm.src_file.as_deref().map(str::to_string), pos)
+    }
     for k in (0..frames.len()).rev() {
         if e.trace_full() {
             break;

@@ -669,6 +669,14 @@ fn jit_lower_arm_inner(
     let nd_id = m
         .declare_function("brood_rt_note_deopt", Linkage::Import, &nd_sig)
         .ok()?;
+    // brood_rt_trace_push(heap, arm): records this arm in the parked error's `:trace` as
+    // the error exits it (KI-117) — the native counterpart of `attach_vm_trace`'s entry.
+    let mut tp_sig = m.make_signature();
+    tp_sig.params.push(AbiParam::new(ptr_ty));
+    tp_sig.params.push(AbiParam::new(types::I64));
+    let tp_id = m
+        .declare_function("brood_rt_trace_push", Linkage::Import, &tp_sig)
+        .ok()?;
     // brood_rt_tick_n(heap, n) -> u8: the batched back-edge poll (burns n reductions).
     let mut tickn_sig = m.make_signature();
     tickn_sig.params.push(AbiParam::new(ptr_ty));
@@ -1068,6 +1076,7 @@ fn jit_lower_arm_inner(
     let xcold_ref = m.declare_func_in_func(xcold_id, b.func);
     let armfn_sigref = b.import_signature(armfn_sig.clone());
     let nd_ref = m.declare_func_in_func(nd_id, b.func);
+    let tp_ref = m.declare_func_in_func(tp_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let thas_ref = m.declare_func_in_func(thas_id, b.func);
     let tget_ref = m.declare_func_in_func(tget_id, b.func);
@@ -2078,6 +2087,12 @@ fn jit_lower_arm_inner(
     // Error: a JIT'd call / global read raised — return 3. The error is parked in
     // `JIT_PENDING_ERROR`; `vm_run_bc` takes it and propagates (no VM re-run).
     b.switch_to_block(error);
+    // KI-117: this arm is one frame of the unwinding error — say so before handing the
+    // parked error to whoever called us (a native caller's own error block, or the VM
+    // driver, which then attaches only the pending callers). The arm pointer is a constant:
+    // installed code pins its `CompiledArm` for the process lifetime (`JIT_ARM_KEEPALIVE`).
+    let arm_ptr = b.ins().iconst(types::I64, arm as *const CompiledArm as i64);
+    b.ins().call(tp_ref, &[heap, arm_ptr]);
     let three = b.ins().iconst(types::I64, 3);
     b.ins().return_(&[three]);
     // Tail call: the callee + args are staged on `roots` — return 4. `vm_run_bc`

@@ -14,10 +14,10 @@ promotion it constrained.
 
 State when written: `main` = `5e238340`, pushed; **no open bug in `known-issues.md`** — every
 row is ✅/☑️/📦 (KI-107 closed 2026-09-06 with ADR-323, KI-112/KI-113 fixed the same weekend).
-**Superseded 2026-09-08: KI-117 is OPEN** — an error raised inside JIT'd code carries no
-`:trace` (deterministic once the arm is hot; found as a one-in-N flake of `try_catch_test.blsp`).
-By the green-tree rule it goes ahead of every item below; the entry has the repro, the mechanism
-and a two-layer fix, the second layer being CLIF emission on the error path.
+**2026-09-08: KI-117 found and FIXED the same day** — an error raised inside JIT'd code carried
+no `:trace` (found as a one-in-N flake of `try_catch_test.blsp`, made deterministic, fixed with a
+per-arm error-exit callback; guard `tests/jit_trace_test.blsp`). No open bug again. One residue is
+recorded in the entry: native frames carry name + file but no call-site position.
 Last full suite 1415/1415 on `326e4cdb`. The tree is clean. Pick items **in order**; one per
 session is fine. Each says what to do, how to verify, and what "done" means. The 2026-09-04
 queue below is superseded except where these items point back into it.

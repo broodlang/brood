@@ -1,0 +1,19 @@
+;; KI-117 guard: an error raised inside JIT'd code must still carry its :trace.
+;; The suite's single-call test only sees the race (a background compile landing
+;; mid-recursion); this loops until the arm is hot and requires EVERY run to read 32.
+(defmodule jit-trace-test (:use test))
+
+(defn- deep-trace-count ()
+  (check-allow :non-tail-recursion
+    (letrec (deep (fn (n) (if (= n 0) (/ 1 0) (+ 1 (deep (- n 1))))))
+      (count (try (deep 100) (catch e (get e :trace)))))))
+
+(defn- first-short-run (i limit)
+  (cond
+    (>= i limit) nil
+    (not (= 32 (deep-trace-count))) [i (deep-trace-count)]
+    else (first-short-run (+ i 1) limit)))
+
+(describe "errors raised in native code keep their trace (KI-117)"
+  (test "3000 runs of a 100-deep raise all read the 32-frame cap, hot or cold"
+    (assert= nil (first-short-run 0 3000))))

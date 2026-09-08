@@ -11638,3 +11638,24 @@ the KI-114 work is still touching.
 The general lesson is the one CLAUDE.md already states: a flake that passes on retry is a bug
 with a race in front of it, and the race here (a background compile landing mid-recursion) is
 one no amount of solo re-running would have found. The loop that found it took two minutes.
+
+## 2026-09-08 (later) — KI-117 FIXED: native frames record themselves as an error exits them
+
+The mechanism was not what the morning's entry said. Nothing on the native side ever pushed a
+trace frame at all: the VM records `BcFrame`s, the tree-walker its boundary entries, and a
+native activation is neither. In the repro the integer division *deopts* on a zero divisor;
+the caller re-runs that level on the VM in a nested driver with no pending callers, so its
+entry is nameless and positionless and dropped; the error is parked and travels up through
+native levels that record nothing. Fix: a `brood_rt_trace_push` callback from each arm's
+error-exit block (general lowering and the scalar worker), and callers-only attachment at the
+one driver site that would otherwise name the arm twice. The looped repro reads `{32 3000}`;
+a named three-function chain reads the identical trace hot and cold on both error routes;
+sabotage fails the guard; the suite is green. Residue recorded in the entry: native frames
+carry name and file, not the call-site position.
+
+Two lessons, both already in CLAUDE.md and both re-learned the hard way. **`cargo build -p
+brood` does not relink `target/debug/brood`** — three rounds of instrumentation and the fix
+itself were "not working" against a stale binary for about an hour; the tell was
+instrumentation that fired nowhere, not even where the cold path provably ran. And **a flake
+that passes on retry is a bug with a race in front of it**: the deterministic repro took two
+minutes to write and turned a one-in-N into `{32 482, 0 2518}`.

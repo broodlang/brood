@@ -679,6 +679,14 @@ pub(super) fn jit_lower_i64_arm(
     let throw_id = m
         .declare_function("brood_rt_i64_throw", Linkage::Import, &throw_sig)
         .ok()?;
+    // brood_rt_trace_push(heap, arm): one `:trace` frame per worker level an error unwinds
+    // through (KI-117). Declared here, called from the worker's `poisoned` block.
+    let mut tp_sig = m.make_signature();
+    tp_sig.params.push(AbiParam::new(ptr_ty));
+    tp_sig.params.push(AbiParam::new(types::I64));
+    let tp_id = m
+        .declare_function("brood_rt_trace_push", Linkage::Import, &tp_sig)
+        .ok()?;
 
     // ---- Worker ----
     {
@@ -688,6 +696,7 @@ pub(super) fn jit_lower_i64_arm(
         let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         let self_ref = m.declare_func_in_func(worker_id, b.func);
         let throw_ref = m.declare_func_in_func(throw_id, b.func);
+        let tp_ref = m.declare_func_in_func(tp_id, b.func);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
@@ -780,7 +789,24 @@ pub(super) fn jit_lower_i64_arm(
         let result = lower_i64_value(&mut b, &cx, body);
         b.ins().return_(&[result]);
         // The shared unwind block: returns a kind-zero (garbage — the wrapper deopts on the sentinel).
+        // Sentinel 3 is a thrown error unwinding through this worker level: record the level in
+        // the parked error's `:trace` first (KI-117). Every worker activation — the innermost
+        // that threw and each caller its sentinel poisons — passes through here exactly once,
+        // so the recursion reads one frame per level; the wrapper adds none (its activation IS
+        // the outermost worker level). Overflow (1) and depth (2) are deopts, not errors.
         b.switch_to_block(poisoned);
+        let o = b.ins().load(types::I8, MemFlagsData::trusted(), ovf, 0);
+        let is_err = b.ins().icmp_imm_s(IntCC::Equal, o, 3);
+        let record = b.create_block();
+        let unwound = b.create_block();
+        b.ins().brif(is_err, record, &[], unwound, &[]);
+        b.seal_block(record);
+        b.switch_to_block(record);
+        let arm_ptr = b.ins().iconst(types::I64, arm as *const CompiledArm as i64);
+        b.ins().call(tp_ref, &[heap, arm_ptr]);
+        b.ins().jump(unwound, &[]);
+        b.seal_block(unwound);
+        b.switch_to_block(unwound);
         let zero = match kind {
             Scalar::Int => b.ins().iconst(types::I64, 0),
             Scalar::Float => b.ins().f64const(0.0),
