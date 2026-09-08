@@ -124,6 +124,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-115 | **`io/puts` output does not reach the in-browser playground — only the last form's value is shown.** `(io/puts "hello, brood")` then `(+ 1 2 3)` displayed `6`. Reported 2026-09-07 against the deployed v0.26.0 wasm | ✅ **FIXED 2026-09-07 — `save_ctx` CLEARED the thread's `CURRENT` instead of restoring what it displaced.** On a worker thread those are identical (the thread has no context of its own), which is why it stayed invisible while processes only ran on workers. On wasm there are no workers: `wait` drives the run queue on the CALLING thread, so the snippet's own quantum ran on top of the caller's context and destroyed it — and `begin_stdout_capture` had put the capture buffer in exactly that context, so `take_capture` found nothing and every `io/puts` went to a stdout that in a browser is nowhere. `install_ctx` now stashes the displaced ctx on a `DISPLACED` stack and `save_ctx` restores it; on a worker the displaced value is `None`, so nothing changes there. **Why it survived:** the previous fix (`f8f647b4`) was correct and guarded, but `root_program_capture.rs` asserts `run_program` while the playground calls `run_program_repr`, which was `#[cfg(wasm32)]` along with the whole `last_repr`/`set_result`/`take_result` chain — no host test could name the shipped function. Worse, `test_drive_quanta`'s own docs told callers to drive "from a **fresh** thread … so the per-quantum ctx install doesn't clobber the caller's ctx": the bug was written down as standing advice, and a fresh thread is not an option on wasm. Guard: `same_thread_capture.rs` reproduces the wasm shape on the host (workers disabled, quanta driven on the spawner's thread); sabotage-verified — reverting gives `left: None, right: Some("hello, brood\n")`. Verified end to end against a locally built wasm in node: `"6"` → `"hello, brood\n6"` |
 | KI-116 | **nine `nest check --strict` warnings in the test tree are the checker being RIGHT** — an ability's non-`self` param is a different implementor, `:or` destructuring genuinely answers `T \| nil`, `first` of an empty vector is nil under a `-> string` contract, an undeclared map shape, and `math/pow` answering `number` because a negative exponent yields a ratio | ☑️ **NOT A BUG — recorded 2026-09-08.** Corrected from an earlier revision of this entry that claimed TWENTY such warnings: eleven of those were unverified regex patches of mine that had silently failed to match, reported as deliberate without re-checking. The sweep went 269 -> 9. Two of the "limitations" it originally named were also wrong and are now fixed in the checker: an ability impl's `self` is seeded from the record it dispatches on, and a multimethod's params from its dispatch key |
 | KI-117 | **an error raised inside JIT'd code carries NO `:trace`** — once an arm is native, an error thrown in or through it reaches `catch` with an empty trace; caught as `tests/try_catch_test.blsp:352` (`trace is capped at 32 frames under deep non-tail recursion`) failing with 8 frames on try 1 of a full suite, passing on retry | ✅ **FIXED 2026-09-08** — each native arm now records itself as an error exits it (`brood_rt_trace_push` from the general lowering's `error` block and the scalar worker's `poisoned` block); the driver attaches callers-only where it would otherwise name that arm twice. Looped repro `{32 3000}`, 5000 runs never flip, a named `a→b→c` chain reads the identical trace hot and cold on both error routes, sabotage fails the guard `tests/jit_trace_test.blsp`. Corrected mechanism in the section: nothing native ever pushed a frame, and the repro's route is a division deopt re-run on the VM with no pending callers. Residue: native frames carry name + file, not the call-site position. Was: ⚠️ OPEN 2026-09-08 — found as a `FLAKY 2/2` of `brood_suite_passes`, made deterministic in one process (`{32 482, 0 2518}`; `BROOD_NO_JIT=1` `{32 3000}`), present on both 0.25.2 binaries so not the merge |
+| KI-118 | **a name defined by a MACRO was invisible to the module pre-pass, so a bare reference ABOVE the definition was unbound at runtime** — hive's `package-list` referred to a `package-card` defined eight lines below it by hatch's `defhtml`; `nest check` clean, `--strict` clean, 190 tests green, and `/packages` answered 500 on the first request | ✅ **FIXED** — `scan_def_form` now also collects the second element of any top-level form whose head is spelled `def…`, which is every definition macro in the tree (`defonce`, `defrecord`, `defmulti`, `defability`, `defevent`, hatch's `defhtml`/`deflive`). Order no longer matters. Fixed 2026-09-08 |
 | KI-108 | **`crash_report_default::an_unsupervised_crash_is_reported_through_the_lazy_arm` flaked once under a full-suite load — stderr entirely empty** — the script slept a fixed 500 ms after spawning a crashing process and the harness read stderr after exit; the lazy arm loads the reporter's nine modules before printing, and one loaded run took longer than the window. 5/5 green in isolation at 0.53 s | ✅ **FIXED 2026-09-04** — KI-79's class (a wall clock standing in for synchronisation) and KI-79's fix: a **deadline, not a window**. Nothing in-language can observe "report printed" (the prelude shim holds the `:crash-reporter` name from arm time), so the HARNESS watches the child's stderr pipe and stops it the moment `[crash]` + the reason are there, with a 15 s ceiling. Healthy runs now take **~50 ms** (the old window was 10× the normal path and still lost once). Sabotage-verified: with no crash in the script the test fails at the deadline with `no crash report`, not a hang |
 | KI-107 | **`tests/eval_server_test.blsp` — "`:all` traces, and cannot exceed the spy cap" fails with an EMPTY `:spy`**, about 1 run in 17 standalone; two refuted fixes on 2026-09-05 | ✅ **CLOSED 2026-09-06 — three mechanisms, all fixed.** (1) `eval-capturing`'s teardown called `debug/untrace-all` and restored every wrapper in the shared registry, a concurrent request's included — teardown now restores only what the request installed (measured 9/150 → 10/550, 6.0% → 1.8%), then `debug/trace-hold`/`trace-release` refcount a shared trace so a second user is countable (→ 3/450, 0.67%), both guarded deterministically. (3) The residual: the three `:all` tests were NEVER isolated — `:isolated` written before a `(test …)` form in a describe body was a bare keyword the body evaluated and dropped, so they ran in the parallel phase, a concurrent `:all` request wrapped this test's function itself and restored it on its own teardown. `describe` now honours that spelling and rejects any other stray keyword (ADR-323); 31 tests in 10 files were running concurrently under the marker. 3/160 → **0/120** on the day's tree (gate: `tests/describe_modifiers_test.blsp`) |
 | KI-80 | **`brood_suite_passes` flaked once under a loaded `--test-threads 4` run** — failed try 1, passed try 2, on the run that first included a new CPU-heavy type test. Matches the class this binary's `retries = 1` was added for verbatim (the in-language suite holds cases that talk to a local node, and one blown deadline reddens all ~1200 of them) | ✅ **FIXED 2026-08-29** — closed by its own third pass, and the index row simply lagged the section (corrected 2026-09-04). A second sighting the same day KEPT its output, which rewrote the entry: the try-1 stdout holds **62 F's in runs before the timeout**, so the "timeout under load" was mass test failures with the 300 s cap hiding the names, and stderr named the class — spawned processes dying `unbound symbol: editor/serve/serve-manager` after their file's `%isolate` rolled the globals back. Three defects, each fixed. The lasting lesson is the one the entry was filed for: the original sighting was undiagnosable because the run was piped through `tail -5`, discarding the one thing worth having. ⚠️ **WATCHING 2026-08-29** — **not reproduced in 10 runs since** (6 loaded 4-thread, 3 solo, 1 loaded before the fix). No diagnosis is possible because **the failure output was discarded at the terminal, not by the tooling**: nextest names a flaky case and prints its output, and it was piped through `tail`. That is the trap `never-truncate-test-output` already records, and it is the whole finding here. The one contributing factor found and fixed: the new `arrow_subtyping_is_sound` rebuilt a `Ty` and recomputed a denotation 1596 times inside its inner loop, ~2.5M times over — precomputing both took it 3.4s → 2.0s and removed that much contention. **If it recurs, capture the whole run to a file and read the `---- ... stdout ----` block** — which in-language case failed is the entire question, and a summary line cannot answer it |
@@ -8408,6 +8409,55 @@ from that image has the root bound. `blsp_dispatch.rs` builds through `nest stdi
 every test from source and pays a failing child build in every process, which reads as a hang
 (the `nest` crate went past ten minutes) before it reads as anything else. If a `nest` run is
 inexplicably slow, run `nest stdimage` by hand first.
+
+## KI-118 — a name a macro defines was unbound above its definition ✅ FIXED 2026-09-08
+
+**Symptom.** A module referred to a name defined by a definition-macro, from a function
+written ABOVE the macro call:
+
+    (defn package-list (packages) … (map packages package-card) …)   ; line 263
+    (defhtml package-card (pkg) …)                                   ; line 271
+
+At runtime: `unbound symbol: package-card`, as a 500 on the first request that reached it.
+Reordering — the `defhtml` above `package-list` — worked around it completely.
+
+**Why it survived.** Every gate was green:
+
+    nest check              clean
+    nest check --strict     clean
+    nest test               190 passed
+    GET /packages           500
+
+**Cause.** `scan_regions` / `scan_def_form` in `eval/macros.rs` pre-scan the file's
+UNEXPANDED top-level forms to learn which bare names belong to the module's namespace, so a
+reference can be qualified to `ns/name` before the definition has run. The scan matched only
+the literal heads `def`/`def-`/`defn`/`defn-`/`defmacro`/`defdyn`. A macro that expands to a
+`def` was invisible: its name never entered the region's set, so a reference above it stayed
+bare, fell through to root, and was unbound. Below the definition it happened to work,
+because by then `ns/name` was already bound and resolution found it.
+
+This was never `defhtml`-specific. std's own `defonce`, `defrecord`, `defmulti`,
+`defability`, `defbehaviour` and `defevent` all had it, as did hatch's `deflive`.
+
+**Fix.** `scan_def_form` also accepts a head spelled `def…` (last segment, so a qualified
+`(web/page/defhtml card …)` counts), taking its second element as a defined name —
+`defines_by_convention`. `defmodule` is excluded: it names a module, not a binding.
+
+The scan reads unexpanded forms by construction, so it cannot ask a macro what it binds — at
+scan time the file's own `(:use …)` has not run and the macro may not be loaded at all.
+Expanding to find out would be order-dependent AND a second run of every macro. The spelling
+is the one signal available before expansion, and it is a signal the language already leans
+on (`?` predicate, `-` private, earmuffed knob).
+
+A false positive costs a bare reference to a same-named ROOT binding being qualified to
+`ns/name` inside that one module — which is what a real definition would have done anyway,
+and the head must be spelled `def…` for it to arise at all.
+
+**Guard.** Three, in `eval::macros::resolve_tests`:
+`scan_regions_collects_names_a_definition_macro_binds`,
+`scan_regions_ignores_a_non_def_head_and_a_nested_defmodule`, and the end-to-end
+`a_macro_defined_name_resolves_from_above_its_definition`. Sabotaging
+`defines_by_convention` to `return false` reproduces `unbound symbol: thing` exactly.
 
 ## KI-117 — an error raised inside JIT'd code carries no `:trace` ✅ fixed 2026-09-08
 
