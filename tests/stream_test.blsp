@@ -7,11 +7,17 @@
 `budget-ms` run out. Polling rather than sleeping: a leaked message never drains, so the
 full budget still yields the failing value, while a merely slow one is forgiven."
   (cond
-    (<= (proc/mailbox-size (self)) target) (proc/mailbox-size (self))
-    (<= budget-ms 0) (proc/mailbox-size (self))
+    (<= (or (proc/mailbox-size (self)) 0) target) (or (proc/mailbox-size (self)) 0)
+    (<= budget-ms 0) (or (proc/mailbox-size (self)) 0)
     else (do (sleep 20) (drained-to target (- budget-ms 20)))))
 
 ;; ---- sources ----------------------------------------------------------------
+
+(defn- stepped (r)
+  "`stream/next`'s result as the vector it should be, or a failed test. It answers
+  `[:ok v] | :done | vector`, so indexing it directly is unchecked; `:done` here means the
+  stream ended earlier than the test expects."
+  (if (vector? r) r (error "stream-test: expected a step vector, got " r)))
 
 (describe "empty"
   (test "immediately done"
@@ -244,7 +250,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
   :isolated (test "loopback: write chunks to a socket, read them back as a stream"
     (let (_me (self)
           ls (tcp/listen "127.0.0.1" 0)
-          port (tcp/local-port ls))
+          port (or (tcp/local-port ls) (error "stream-test: the listener reported no local port")))
       ;; Writer spawns, connects, sends two chunks, closes.
       (spawn (let (c (tcp/connect "127.0.0.1" port))
                (tcp/send c "hello ")
@@ -308,7 +314,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 
   (test "a producer that crashed surfaces as [:err …], not a hang"
     (let (p (spawn (receive ([:next _] (error "producer boom")))))
-      (assert= :err (first (stream/next p)))))
+      (assert= :err (first (stepped (stream/next p))))))
 
   (test "a producer that already exited answers :done"
     (let (p (spawn :nothing))
@@ -317,7 +323,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
 
   (test "timeout-ms bounds a producer that is alive but never answers"
     (let (p (spawn (receive (:never nil) (after 4000 nil))))
-      (assert= :err (first (stream/next p 40)))))
+      (assert= :err (first (stepped (stream/next p 40))))))
 
   (test "the monitor leaves no [:down] behind in the caller's mailbox"
     ;; WAITS for the mailbox to drain rather than sleeping past the expected moment. A
@@ -327,7 +333,7 @@ full budget still yields the failing value, while a merely slow one is forgiven.
     ;;
     ;; The verdict is unchanged, because a LEAKED down never drains: the poll then runs
     ;; its full budget and the assertion still fails. Only the slow case is forgiven.
-    (let (before (proc/mailbox-size (self))
+    (let (before (or (proc/mailbox-size (self)) 0)
           s (stream/singleton 1))
       (stream/next s)
       (stream/next s)

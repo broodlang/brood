@@ -6,8 +6,13 @@
 (defmodule ability-test (:use test) (:use json) (:use project))
 
 ;; Records carry a nominal identity captured from THIS module (`ability-test`).
-(defrecord circle (r))
-(defrecord rect (w h))
+;; Fields TYPED, not bare. An impl's `self` is now seeded with the record it dispatches on
+;; (see `check_one_impl_return`), so `(get c :r)` answers the FIELD's type — but only if the
+;; field has one. Bare, it is `any`, `(* 3.0 (get c :r) …)` widens to `number`, and an op
+;; declared `:-> float` / `:-> int` cannot be satisfied by arithmetic. The dimensions were
+;; always numbers; saying so is what lets the declared returns mean anything.
+(defrecord circle ((r int)))
+(defrecord rect ((w int) (h int)))
 
 ;; ---- value polymorphism: dispatch across built-in kinds AND record identities ----
 (defability Size (size [self] :-> int))
@@ -671,7 +676,7 @@
 ;; asks the reader to `impl` an ability, and the test that evaluated the worked ANSWER left
 ;; that impl registered, so the exercise's own template then "already passed".)
 (defability Retract (rsize [self] :-> int))
-(defrecord retractable (n))
+(defrecord retractable ((n int)))
 
 (describe "%unimpl — retracting an implementation"
   :serial (test "an impl dispatches, and after %unimpl it is gone again"

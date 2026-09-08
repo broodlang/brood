@@ -159,7 +159,7 @@
 
     (defn ts-bol (text n)
       (let (lines (string/split text "\n"))
-        (fold (range n) 0 (fn (a k) (+ a (string/length (nth lines k)) 1)))))
+        (fold (range n) 0 (fn (a k) (+ a (string/length (or (nth lines k) "")) 1)))))
 
     (defn ts-reindents-itself? (text spec)
       ;; every line, indented from scratch, lands where the source already has it

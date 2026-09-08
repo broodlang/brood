@@ -40,6 +40,12 @@
 ;; The range is *exhausted* at exactly that point, so the tail is empty — which is
 ;; what `range_to_vec` has always done with its `checked_add`.
 ;; ---------------------------------------------------------------------------
+(defn- dec-str (x)
+  "`decimal/->string` of `x`, which must be a decimal. Arithmetic on two decimals types as
+  `number` — the checker's `+`/`-`/`*` rules do not carry the operand type through — while
+  `decimal/->string` accepts a decimal alone."
+  (if (decimal? x) (decimal/->string x) (error "dec-str: not a decimal: " x)))
+
 (describe "rest on a range whose next step leaves i64"
   (test "ascending: the tail of a one-element max-step range is empty"
     (let (r (%range 1 2 I64-MAX))
@@ -151,10 +157,10 @@
   (test "a product whose scale is merely large is still bounded"
     (assert-error (* (decimal/of "1e-999999") (decimal/of "1e-999999"))))
   (test "ordinary decimal arithmetic keeps its significance"
-    (assert= (decimal/->string (* 1.50M 2.0M)) "3.000")
-    (assert= (decimal/->string (+ 1.50M 2.0M)) "3.50")
-    (assert= (decimal/->string (- 1.50M 2.0M)) "-0.50")
-    (assert= (decimal/->string (* 1.00M -1M)) "-1.00")))
+    (assert= (dec-str (* 1.50M 2.0M)) "3.000")
+    (assert= (dec-str (+ 1.50M 2.0M)) "3.50")
+    (assert= (dec-str (- 1.50M 2.0M)) "-0.50")
+    (assert= (dec-str (* 1.00M -1M)) "-1.00")))
 
 ;; ---------------------------------------------------------------------------
 ;; 5. A Range compared against its own list form near i64::MAX

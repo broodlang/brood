@@ -8,6 +8,11 @@
   "True if parsing `s` raises (the malformed-input cases)."
   (try (do (decode s) false) (catch e true)))
 
+(defn- as-map (x)
+  "`x` when it is a map, else an empty one — `decode` answers any JSON shape and the tests
+  below index the result."
+  (if (map? x) x {}))
+
 (describe "decode — scalars"
   (test "integers and floats (incl. sign + exponent)"
     (assert= (decode "42") 42)
@@ -65,14 +70,14 @@
     (assert= (decode "\"a\\nb\"") "a\nb")
     (assert= (decode "\"a\\tb\"") "a\tb"))
   (test "\\b and \\f decode to single control chars (no codepoint primitive needed)"
-    (assert= (string/length (decode "\"\\b\"")) 1)
-    (assert= (string/length (decode "\"\\f\"")) 1))
+    (assert= (string/length (str (decode "\"\\b\""))) 1)
+    (assert= (string/length (str (decode "\"\\f\""))) 1))
   (test "\\uXXXX BMP escapes (via the reader's \\u{} mechanism)"
     (assert= (decode "\"\\u0041\"") "A")
     (assert= (decode "\"caf\\u00e9\"") "café"))
   (test "a surrogate pair combines into one astral code point"
     (assert= (decode "\"\\ud83d\\ude00\"") "😀")
-    (assert= (string/length (decode "\"\\ud83d\\ude00\"")) 1)))
+    (assert= (string/length (str (decode "\"\\ud83d\\ude00\""))) 1)))
 
 (describe "decode — arrays + objects"
   (test "arrays: empty, flat, mixed, nested"
@@ -83,7 +88,7 @@
   (test "objects: empty, flat (KEYWORD keys), nested"
     (assert= (decode "{}") {})
     (assert= (decode "{\"a\":1,\"b\":2}") {:a 1 :b 2})
-    (assert= (get (decode "{\"repo\":\"brood\"}") :repo) "brood")
+    (assert= (get (as-map (decode "{\"repo\":\"brood\"}")) :repo) "brood")
     (assert= (decode "{\"o\":{\"x\":[true]}}") {:o {:x [true]}}))
   (test "whitespace between tokens is ignored"
     (assert= (decode "{ \"a\" : [ 1 , 2 ] }") {:a [1 2]})))

@@ -99,6 +99,7 @@ port. The oracle is upstream's own expected output in
         (cons (nth lst i)
           (mazefun-shuffle-acc (mazefun-list-remove-pos lst i) next))))))
 
+(sig mazefun-next-random (int -> int))
 (defn- mazefun-shuffle (lst)
   (mazefun-shuffle-acc lst mazefun-initial-random))
 

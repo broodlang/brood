@@ -69,15 +69,24 @@
 ;; `plus` is identity and `minus` is multiplication by -1 rather than `(+ 0 a)` /
 ;; `(- 0 a)`: adding a zero re-scales the result to the zero's exponent, which is an
 ;; artefact of how the case is expressed, not of the operation dectest is naming.
+(defn- dt-str (x)
+  "`decimal/->string` of `x`, which must be a decimal.
+
+  Arithmetic on two decimals types as `number` — the checker's `+`/`-`/`*` rules do not
+  carry the operand type through — while `decimal/->string` accepts a decimal alone. So the
+  fact is re-established here, once, and a value that is somehow NOT a decimal fails saying
+  which operation produced it rather than as a type error inside the primitive."
+  (if (decimal? x) (decimal/->string x) (error "dt-str: not a decimal: " x)))
+
 (defn- dt-apply (op a b)
   (cond
-    (= op "add") (decimal/->string (+ a b))
-    (= op "subtract") (decimal/->string (- a b))
-    (= op "multiply") (decimal/->string (* a b))
+    (= op "add") (dt-str (+ a b))
+    (= op "subtract") (dt-str (- a b))
+    (= op "multiply") (dt-str (* a b))
     (= op "compare") (str (cond (< a b) -1 (= a b) 0 else 1))
-    (= op "minus") (decimal/->string (* (decimal/of "-1") a))
-    (= op "plus") (decimal/->string a)
-    (= op "abs") (decimal/->string (abs a))
+    (= op "minus") (dt-str (* (decimal/of "-1") a))
+    (= op "plus") (dt-str a)
+    (= op "abs") (dt-str (abs a))
     else nil))
 
 ;; The expected side, canonicalised the same way the computed side is.
@@ -107,8 +116,8 @@
               (first (seq/remove args dt-numeric?))
               (first (seq/remove args dt-in-range?)))
           nil
-          (let (a (decimal/of (first args))
-                b (if binary (decimal/of (nth args 1)) nil)
+          (let (a (decimal/of (or (first args) ""))
+                b (if binary (decimal/of (or (nth args 1) "")) nil)
                 got (dt-apply op a b)
                 expect (dt-expected op want))
             (if (= got expect) [:ok] [id op args expect got])))))))
@@ -152,19 +161,19 @@
   :tags [:conformance]
 
   (test "multiply adds the operand exponents"
-    (assert= (decimal/->string (* 1.50M 2.25M))
+    (assert= (dt-str (* 1.50M 2.25M))
       "3.3750")
-    (assert= (decimal/->string (* 1.20M 2M))
+    (assert= (dt-str (* 1.20M 2M))
       "2.40")
-    (assert= (decimal/->string (* 0.10M 0.10M))
+    (assert= (dt-str (* 0.10M 0.10M))
       "0.0100"))
 
   (test "add and subtract take the smaller operand exponent"
-    (assert= (decimal/->string (+ 1.25M 1.25M))
+    (assert= (dt-str (+ 1.25M 1.25M))
       "2.50")
-    (assert= (decimal/->string (+ 0.7M 0.3M))
+    (assert= (dt-str (+ 0.7M 0.3M))
       "1.0")
-    (assert= (decimal/->string (+ 1.00M 2M))
+    (assert= (dt-str (+ 1.00M 2M))
       "3.00"))
 
   ;; Regression cases for the two `bigdecimal` short-circuits the corpus caught
@@ -174,23 +183,23 @@
   ;; the standard's ideal exponent, so these hold. Significance is the whole point
   ;; of a decimal: money scaled by `1.00M` has to stay in cents.
   (test "a zero operand still aligns exponents (subtract)"
-    (assert= (decimal/->string (- 1M (decimal/of "0.0")))
+    (assert= (dt-str (- 1M (decimal/of "0.0")))
       "1.0")
-    (assert= (decimal/->string (- 1M (decimal/of "0.00")))
+    (assert= (dt-str (- 1M (decimal/of "0.00")))
       "1.00")
-    (assert= (decimal/->string (- (decimal/of "0.0") 1M))
+    (assert= (dt-str (- (decimal/of "0.0") 1M))
       "-1.0")
-    (assert= (decimal/->string (+ 1M (decimal/of "0.0")))
+    (assert= (dt-str (+ 1M (decimal/of "0.0")))
       "1.0"))
 
   (test "a one-valued operand still contributes its scale (multiply)"
-    (assert= (decimal/->string (* (decimal/of "-1") 1.00M))
+    (assert= (dt-str (* (decimal/of "-1") 1.00M))
       "-1.00")
-    (assert= (decimal/->string (* 1.00M (decimal/of "-1")))
+    (assert= (dt-str (* 1.00M (decimal/of "-1")))
       "-1.00")
-    (assert= (decimal/->string (* (decimal/of "-2") 1.00M))
+    (assert= (dt-str (* (decimal/of "-2") 1.00M))
       "-2.00")
-    (assert= (decimal/->string (* 1M 1.00M))
+    (assert= (dt-str (* 1M 1.00M))
       "1.00"))
 
   ;; The remaining departure from dectest, on the record rather than left as a
@@ -201,18 +210,18 @@
   ;; canonicalises both sides, so dectest's `0.00` normalises to `0` too. Revisit if
   ;; decimals ever grow scale-significant equality.
   (test "a zero result prints scale-less (deviation from dectest)"
-    (assert= (decimal/->string (- 1.50M 1.50M))
+    (assert= (dt-str (- 1.50M 1.50M))
       "0")
-    (assert= (decimal/->string (* 0M 1.50M))
+    (assert= (dt-str (* 0M 1.50M))
       "0")
     (assert= (decimal/->string (decimal/of "0.00")) "0")
     ;; non-zero results keep their scale, which is the property that matters
-    (assert= (decimal/->string (- 1.50M 1.25M))
+    (assert= (dt-str (- 1.50M 1.25M))
       "0.25"))
 
   (test "exponent alignment across a wide gap is exact"
-    (assert= (decimal/->string (+ (decimal/of "1E+3") (decimal/of "1E-3"))) "1000.001")
-    (assert= (decimal/->string (- (decimal/of "1") (decimal/of "1E-20")))
+    (assert= (dt-str (+ (decimal/of "1E+3") (decimal/of "1E-3"))) "1000.001")
+    (assert= (dt-str (- (decimal/of "1") (decimal/of "1E-20")))
       "0.99999999999999999999"))
 
   (test "a decimal is exact where a float is not"

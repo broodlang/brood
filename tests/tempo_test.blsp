@@ -334,9 +334,15 @@
 (describe "parts"
   (test "a year yields its twelve months"
     (assert= 12 (count (tempo/parts (tempo/parse! "2026"))))
-    (assert= "2026-01" (tempo/->iso (nth (tempo/parts (tempo/parse! "2026")) 0)))
-    (assert= "2026-06" (tempo/->iso (nth (tempo/parts (tempo/parse! "2026")) 5)))
-    (assert= "2026-12" (tempo/->iso (nth (tempo/parts (tempo/parse! "2026")) 11))))
+    (assert= "2026-01"
+      (tempo/->iso (or (nth (tempo/parts (tempo/parse! "2026")) 0)
+                     (error "tempo-test: no part at index 0"))))
+    (assert= "2026-06"
+      (tempo/->iso (or (nth (tempo/parts (tempo/parse! "2026")) 5)
+                     (error "tempo-test: no part at index 5"))))
+    (assert= "2026-12"
+      (tempo/->iso (or (nth (tempo/parts (tempo/parse! "2026")) 11)
+                     (error "tempo-test: no part at index 11")))))
   (test "a month yields the days the calendar actually gives it"
     (assert= 28 (count (tempo/parts (tempo/parse! "2026-02"))))
     (assert= 29 (count (tempo/parts (tempo/parse! "2024-02"))))
@@ -357,8 +363,10 @@
           covered (tempo/set-of ps))
       (assert= 1 (count (tempo/spans covered)))
       (assert= (tempo/width t) (tempo/total-width covered))
-      (assert= (tempo/from-ms t) (tempo/from-ms (nth ps 0)))
-      (assert= (tempo/to-ms t) (tempo/to-ms (nth ps 27))))))
+      (assert= (tempo/from-ms t)
+        (tempo/from-ms (or (nth ps 0) (error "tempo-test: no part at index 0"))))
+      (assert= (tempo/to-ms t)
+        (tempo/to-ms (or (nth ps 27) (error "tempo-test: no part at index 27")))))))
 
 ;; ---- shifting ---------------------------------------------------------------
 

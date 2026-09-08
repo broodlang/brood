@@ -47,7 +47,7 @@
     (assert-error (file/slurp (u8-file))))
 
   (test "slurp-bytes reads it byte-for-byte"
-    (let (bs (file/slurp-bytes (u8-file)))
+    (let (bs (file/slurp-bytes (or (u8-file) (error "utf8-test: corpus file not found"))))
       (is (bytes? bs))
       ;; Kuhn's 2015-08-28 revision, as pinned in the corpus README.
       (assert= (count bs) 22781))))

@@ -16,6 +16,9 @@
 
 ;; a wide-range int: -1e6..1e6, occasionally cubed into bignum territory, with
 ;; the type/overflow edges mixed in so promotion boundaries get exercised.
+;; Integers throughout — an LCG over machine ints — but `(* s …)` widens to `number`
+;; and `math/rem` wants an int.
+(sig lcg (int -> int))
 (defn lcg-int (s)
   (let (x (- (math/rem s 2000001) 1000000))
     (cond
@@ -53,6 +56,9 @@
     ;; the division identity: a = (math/quot a b)*b + (math/rem a b), rem has sign of a
     (if (= b 0) true (= (+ (* (math/quot a b) b) (math/rem a b)) a))))
 
+;; The laws under test are the INT laws; untyped parameters leave `math/max` at its
+;; whole domain (`ordered`, since it also orders strings) and `+` then rejects it.
+(sig int-laws (int int int -> bool))
 (defn float-laws (a b)
   (and (= (+ a b) (+ b a))
     ; float + commutes exactly

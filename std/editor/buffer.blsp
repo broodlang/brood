@@ -399,11 +399,16 @@ point already sits at one, the paragraph's start when there is no earlier senten
 (defn set-mark (buf)
   "Set the mark at point (with point, this delimits the region)."
   (assoc buf :mark (get buf :point)))
+;; `assoc` on a record answers `vector | map` — a record's type does not survive an
+;; update — so every buffer transformer has to re-declare what it hands back, or its
+;; callers report the width instead.
+(sig set-mark (buffer -> buffer))
 (defn clear-mark (buf) "Clear the mark." (assoc buf :mark nil))
 
 ;; ---- mark ring (a history of marks; the substrate for C-u C-SPC) ------------
 
 ; like Emacs `mark-ring-max`
+(sig clear-mark (buffer -> buffer))
 (def *mark-ring-max* 16)
 (defn push-mark (buf)
   "Set the mark at point **and** push point onto the buffer's `:mark-ring` (bounded
@@ -482,6 +487,7 @@ editor's command loop calls this to coalesce a typing / deletion run (or a multi
 command) into one undo, the Emacs way — keeping this primitive's default simple."
   (assoc buf :undo-amalgamate true))
 
+(sig amalgamate-undo (buffer -> buffer))
 (defn- buffer-push-undo (buf)
   "Record `buf`'s pre-edit state for undo — called by an editing op before it changes the
 text. Normally conses a fresh snapshot onto `:undo` (each op its own undo step); when
@@ -834,6 +840,7 @@ here\" is how a buffer ends up read-only by one rule and writable by the other."
 ;; so a caller can tell "you may not edit that" from a genuine fault. The editor's turn of
 ;; the refusal into a graceful no-op matches `(= (:kind e) :read-only)` rather than the
 ;; message text, so the wording stays free to change.
+(sig set-read-only (buffer any -> buffer))
 (defn- buffer-read-only-error (message)
   (throw {:kind :read-only :message message}))
 
@@ -948,6 +955,7 @@ ranges."
 ;; then). Gravity is left: an insert exactly AT a marker leaves it put, so text typed at one
 ;; cursor lands after another user's cursor sitting at the same spot.
 
+(sig set-read-only-spans (buffer any -> buffer))
 (defn- buffer-markers-insert (markers p n)
   "Shift `markers` for an insert of `n` chars at `p`: a marker strictly after `p` moves
 right by `n` (left-gravity — a marker exactly at `p` stays put)."
@@ -1066,6 +1074,7 @@ remote participants' cursors on a shared buffer."
   (assoc buf
     :markers (assoc (or (get buf :markers) {}) id (buffer-clamp 0 (buffer-length buf) pos))))
 
+(sig buffer-marker-set (buffer any int -> buffer))
 (defn buffer-marker (buf id)
   "The char position of marker `id` (clamped to the current length), or nil if unset."
   (let (p (get (or (get buf :markers) {}) id))
@@ -1103,6 +1112,7 @@ count it describes. Read it back with `annotation`."
        :rope (buffer-rope buf)
        :lines (buffer-line-count buf)}))
 
+(sig annotate (buffer any any -> buffer))
 (defn annotation (buf key)
   "The annotation stored under `key` as `{:value :current? :stale?}`, or nil when
 there is none. `:current?` — the line count still matches, so line-keyed data is

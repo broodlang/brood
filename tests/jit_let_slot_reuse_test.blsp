@@ -23,6 +23,7 @@
 
 ;; A driver that consumes each result (so f5's arm is JIT'd in a consuming
 ;; context) and accumulates — the value diverged at odd iteration counts.
+(sig f5 (int -> int))
 (defn drive (f i n acc)
   (if (>= i n)
     acc

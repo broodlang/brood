@@ -61,6 +61,12 @@
 ;; `]`, plus a comma between rows — `4n + 1`.
 (defn- fragments (n) (count (step (lazy-rows n) nil)))
 
+(defn- as-vector (x)
+  "`x` when it is a vector, else an empty one. `json/decode` answers any JSON shape, and
+  `count` here means the number of ROWS — wrapping in `str` instead would have counted
+  characters, which is a different assertion that happens to be greppable as green."
+  (if (vector? x) x []))
+
 (describe "block-argument spills stay inside their frame"
   (test "a walker over a lazy sequence of containers is correct once tiered"
     ;; Ten calls: the first few run interpreted, the rest native. Before the fix the
@@ -78,9 +84,9 @@
     ;; own `emit-list` arm is the one that took the bad gate.
     (let (rows (map (range 500) (fn (i) {:n i})))
       (is (= (list 500 500 500 500 500)
-            (map (range 5) (fn (_) (count (json/decode (json/encode rows)))))))))
+            (map (range 5) (fn (_) (count (as-vector (json/decode (json/encode rows))))))))))
 
   (test "a walker whose elements are maps, so the pair emitter recurses too"
     (let (rows (map (range 400) (fn (i) {:a i :b [i i]})))
       (is (= (list 400 400 400 400 400)
-            (map (range 5) (fn (_) (count (json/decode (json/encode rows))))))))))
+            (map (range 5) (fn (_) (count (as-vector (json/decode (json/encode rows)))))))))))

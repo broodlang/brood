@@ -7,6 +7,11 @@ mixed-eligibility mutual TAIL recursion still cannot overflow — past TW_REENTR
 the router stands down and the tree-walker's own 'tail loop absorbs the cycle flat."
   (:use test))
 
+(defn- evt (r)
+  "`r` as the event vector it should be, or a failed test — the receive helper answers
+  `:timeout | vector`, and a `:timeout` means the event never arrived."
+  (if (vector? r) r (error "tw-reentry-test: expected an event vector, got " r)))
+
 (describe "tree-walker→VM routing"
   (test "a routed helper computes what a tree-walked one does"
     ;; driver defers (autogensym template keeps its quasiquote on the runtime path);
@@ -67,7 +72,7 @@ the router stands down and the tree-walker's own 'tail loop absorbs the cycle fl
                    (let (event (receive ([:d d] [:data d]) ([:done] :done) (after 3000 :timeout)))
                      (if (= :done event)
                        (send me [:tw-cap-got acc])
-                       (tw-cap-drain sock (str acc (second event))))))
+                       (tw-cap-drain sock (str acc (second (evt event)))))))
                  (tw-cap-drain :sock ""))))
       (send w [:d "a"])
       (send w [:d "b"])

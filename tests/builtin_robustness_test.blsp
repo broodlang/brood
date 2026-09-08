@@ -180,3 +180,4 @@ that a megabyte of it costs seconds; doubling costs milliseconds."
 
   (test "a negative code raises rather than wrapping"
     (assert= :raised (try (%halt -1) (catch e :raised)))))
+(sig grow (string int -> string))

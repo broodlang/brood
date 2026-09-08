@@ -129,15 +129,24 @@
 (defmethod num/mul [usd :int] (m n) (usd (* (get m :cents) n))) ; scale by a scalar
 (defmethod num/div [usd :int] (m n) (usd (math/quot (get m :cents) n)))
 
+(defn- cents (x)
+  "`x`'s `:cents`, where `x` must be a record.
+
+  Arithmetic dispatched through the `Num` ability answers `number | usd` — the checker
+  cannot see that `(+ (usd 500) (usd 250))` is still a `usd` — and `get` wants something
+  countable. Asking here keeps the assertions readable and fails by name if the dispatch
+  ever stops answering a record."
+  (if (record? x) (get x :cents) (error "record-test: expected a record, got " x)))
+
 (describe "defrecord: custom Num"
   (test "a Num record uses +/-/*// (dispatched from the kernel %add fallback)"
-    (assert= (get (+ (usd 500) (usd 250)) :cents) 750)
-    (assert= (get (- (usd 500) (usd 250)) :cents) 250)
-    (assert= (get (* (usd 500) 3) :cents) 1500)
-    (assert= (get (* 3 (usd 500)) :cents) 1500) ; commutative: the [:int usd] mirror is derived
-    (assert= (get (/ (usd 900) 3) :cents) 300)
+    (assert= (cents (+ (usd 500) (usd 250))) 750)
+    (assert= (cents (- (usd 500) (usd 250))) 250)
+    (assert= (cents (* (usd 500) 3)) 1500)
+    (assert= (cents (* 3 (usd 500))) 1500) ; commutative: the [:int usd] mirror is derived
+    (assert= (cents (/ (usd 900) 3)) 300)
     ;; variadic + folds through the same dispatch
-    (assert= (get (+ (usd 100) (usd 200) (usd 300)) :cents) 600))
+    (assert= (cents (+ (usd 100) (usd 200) (usd 300))) 600))
   (test "a pair with no method is a loud :%no-method error, not a silent coercion"
     ;; `usd` has no `[usd usd]` mul method — mixing errors instead of silently coercing.
     (let (e (try (* (usd 5) (usd 5)) (catch e e)))

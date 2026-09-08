@@ -49,6 +49,7 @@ run out. Returns the final `:all` listing ([] on success)."
       ([:system :gc _ _] (sysmon-quiet-about subject (math/max 0 (- deadline (os/now)))))
       (after ms :quiet))))
 
+(sig sysmon-quiet-about (any int -> any))
 (defn- sysmon-done ()
   "End-of-test hygiene: disarm, then drain any [:system …] backlog out of this
 worker's mailbox so it can't satisfy a later test's receive."

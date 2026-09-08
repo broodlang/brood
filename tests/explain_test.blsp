@@ -42,8 +42,8 @@
       (is (any? m (fn (e) (includes? (get e :idiom) "set!"))))))
   (test "results drop the :keywords search index, keep the content"
     (let (e (first (get (find-pattern "spawn") :matches)))
-      (is (contains? e :idiom))
-      (is (contains? e :example))
-      (refute (contains? e :keywords))))
+      (is (contains? (or e {}) :idiom))
+      (is (contains? (or e {}) :example))
+      (refute (contains? (or e {}) :keywords))))
   (test "no match returns an empty (nil) matches list, not an error"
     (is (nil? (get (find-pattern "zzz-no-such-intent") :matches)))))

@@ -27,7 +27,9 @@
         (count (filter (reflect/special-forms) (fn (k) (not (string/starts-with? k "def"))))))))
 
   (test "(tmlanguage) is valid JSON of the TextMate shape"
-    (let (g (decode (tmlanguage)))
+    ;; narrowed once: `decode` answers any shape, and every `get` below assumes a map
+    (let (decoded (decode (tmlanguage))
+          g (if (map? decoded) decoded {}))
       (assert= (get g :scopeName) "source.brood")
       (assert= (get g :name) "Brood")
       (is (map? (get g :repository)))
@@ -35,8 +37,11 @@
       (is (vector? (get g :patterns)))))
 
   (test "the special-form rule carries the escaped keyword alternation"
-    (let (g (decode (tmlanguage))
-          m (get (get (get g :repository) :special-form) :match))
+    (let (decoded (decode (tmlanguage))
+          g (if (map? decoded) decoded {})
+          repo (let (r (get g :repository)) (if (map? r) r {}))
+          sf (let (x (get repo :special-form)) (if (map? x) x {}))
+          m (get sf :match))
       ;; regex metacharacters in keywords are escaped (`match*` → `match\*`)
       (is (includes? m "match\\*"))
       ;; the word forms and the operator forms both made it in
@@ -45,7 +50,7 @@
       (is (not (includes? m "->>")))
       ;; def-heads are NOT in the keyword alternation (they're the :definition rule)
       (is (not (includes? m "defn")))
-      (is (map? (get (get g :repository) :definition)))))
+      (is (map? (get repo :definition)))))
 
   (test "doc-heads is exactly (reflect/doc-forms)'s heads, and fn-doc-heads its function half"
     (is (includes? (doc-heads) "defn"))
@@ -59,7 +64,8 @@
     (is (not (includes? (fn-doc-heads) "defmodule"))))
 
   (test "the definition rule is a block that colours a docstring as documentation"
-    (let (repo (get (decode (tmlanguage)) :repository)
+    (let (decoded (decode (tmlanguage))
+          repo (get (if (map? decoded) decoded {}) :repository)
           d (get repo :definition))
       ;; a block, not a match — a docstring is a position, so the rule needs state
       (is (includes? (get d :begin) "defmodule"))

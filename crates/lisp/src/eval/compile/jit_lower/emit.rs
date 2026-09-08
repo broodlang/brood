@@ -722,6 +722,7 @@ fn float_or_promoted_int(
     payload: cranelift_codegen::ir::Value,
     f: Frame,
     reason: i64,
+    promote: bool,
 ) -> cranelift_codegen::ir::Value {
     let is_f = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_FLOAT as i64);
     let is_i = b.ins().icmp_imm_s(IntCC::Equal, tag, TAG_INT as i64);
@@ -736,8 +737,20 @@ fn float_or_promoted_int(
     b.ins().jump(merge, &[BlockArg::Value(bits)]);
     b.switch_to_block(not_float);
     let __dr = b.ins().iconst(types::I32, reason);
+    // `promote` decides what an INT operand means here, and it is the whole of KI-114.
+    // Promoting is the VM's semantics for a MIXED operation — `(+ 1.5 2)` really is 3.5 —
+    // but only when some operand is genuinely a float. When the float path was entered on
+    // a GUESS (`op_is_float` reads `slot_float`, a single-pass approximation) and every
+    // operand turns out to be an int, the VM computes in ints and answers an int; a native
+    // that promotes answers a float instead. That is a miscompile, not a slow path.
+    let int_target = if promote { as_int } else { f.deopt };
+    let int_args: &[BlockArg] = if promote {
+        &[]
+    } else {
+        &[BlockArg::Value(__dr)]
+    };
     b.ins()
-        .brif(is_i, as_int, &[], f.deopt, &[BlockArg::Value(__dr)]);
+        .brif(is_i, int_target, int_args, f.deopt, &[BlockArg::Value(__dr)]);
     b.switch_to_block(as_int);
     let promoted = b.ins().fcvt_from_sint(types::F64, payload);
     b.ins().jump(merge, &[BlockArg::Value(promoted)]);
@@ -746,6 +759,168 @@ fn float_or_promoted_int(
 }
 
 pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_codegen::ir::Value {
+    as_f64_guarded(b, op, f, true)
+}
+
+/// One operand of a two-operand float lowering, classified for [`as_f64_pair`].
+enum FOperand {
+    /// A float with no check needed: an `Op::Float`, or a slot already carried/cached as f64.
+    Float(cranelift_codegen::ir::Value),
+    /// A tagged value whose type is only known at runtime.
+    Tagged {
+        tag: cranelift_codegen::ir::Value,
+        payload: cranelift_codegen::ir::Value,
+    },
+    /// Cannot be a float, and `as_f64` has always deopted on it: an unboxed `Op::Int`, a
+    /// bool, a hoisted vector/table.
+    Never,
+}
+
+/// Classify one operand, mirroring `as_f64_guarded`'s own fast paths so a slot it would
+/// answer without a tag check is `Float` here too.
+fn classify_float_operand(b: &mut FunctionBuilder, op: Op, f: Frame) -> FOperand {
+    match op {
+        Op::Float(v) => FOperand::Float(v),
+        Op::Slot(k) => {
+            if let Some((var, true)) = f.carry_vars.get(k).copied().flatten() {
+                return FOperand::Float(b.use_var(var));
+            }
+            if let Some(v) = f.slot_f64_cache.borrow().get(k).copied().flatten() {
+                return FOperand::Float(v);
+            }
+            let roots_base = b.use_var(f.rb_var);
+            let i = b.ins().iadd_imm_s(f.base, k as i64);
+            let o = b.ins().imul_imm_s(i, STRIDE);
+            let addr = b.ins().iadd(roots_base, o);
+            let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
+            let payload = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                addr,
+                PAYLOAD_OFFSET as i32,
+            );
+            FOperand::Tagged { tag, payload }
+        }
+        Op::Handle(w0, w1, _) => FOperand::Tagged {
+            tag: b.ins().band_imm_s(w0, 0xff),
+            payload: w1,
+        },
+        Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => {
+            FOperand::Never
+        }
+    }
+}
+
+/// Read BOTH operands of a float arithmetic/compare as f64 — the sound form of what two
+/// separate [`as_f64`] calls used to do.
+///
+/// The float path is chosen by `op_is_float`, which reads `slot_float` — a single-pass
+/// approximation whose stated contract is that *a wrong guess is safe: a deopt, not a
+/// miscompile*. KI-109 broke that contract while fixing a real stall: it made an `Int`
+/// operand promote via `fcvt_from_sint` rather than deopt, which is right for MIXED
+/// arithmetic (`(+ 1.5 1)` really is 2.5) but was applied unconditionally, so an arm whose
+/// guess was simply wrong computed two ints in floats and published a float where the VM
+/// publishes an int (KI-114).
+///
+/// The rule that makes both cases right is the VM's own: an op is float arithmetic **iff at
+/// least one operand is a float**, and only then is the other coerced. So promotion is
+/// licensed per-operand by the *other* operand having been proven float. Reading the pair
+/// together is what makes that expressible — and it is why this is one function rather than
+/// two calls: neither operand can decide alone.
+///
+/// The common both-float path costs the same two branches the unconditional version did:
+/// the first operand's tag test, then the second's inside [`float_or_promoted_int`].
+pub(super) fn as_f64_pair(
+    b: &mut FunctionBuilder,
+    oa: Op,
+    ob: Op,
+    f: Frame,
+) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value) {
+    let ca = classify_float_operand(b, oa, f);
+    let cb = classify_float_operand(b, ob, f);
+    match (ca, cb) {
+        // An operand that can never be a float deopts, exactly as `as_f64` always did.
+        (FOperand::Never, _) | (_, FOperand::Never) => {
+            let __dr = b.ins().iconst(types::I32, 26);
+            b.ins().jump(f.deopt, &[BlockArg::Value(__dr)]);
+            let dead = b.create_block();
+            b.switch_to_block(dead);
+            let zero = b.ins().f64const(0.0);
+            (zero, zero)
+        }
+        (FOperand::Float(x), FOperand::Float(y)) => (x, y),
+        // One side is certainly a float, so the other may promote (KI-109).
+        (FOperand::Float(x), FOperand::Tagged { tag, payload }) => {
+            (x, float_or_promoted_int(b, tag, payload, f, 25, true))
+        }
+        (FOperand::Tagged { tag, payload }, FOperand::Float(y)) => {
+            (float_or_promoted_int(b, tag, payload, f, 25, true), y)
+        }
+        // Neither is certainly a float: whichever proves to be one licenses the other's
+        // promotion, and two non-floats deopt. Written as one fused test rather than a
+        // gate plus two reads so the both-float path keeps its original branch count.
+        (
+            FOperand::Tagged {
+                tag: ta,
+                payload: pa,
+            },
+            FOperand::Tagged {
+                tag: tb,
+                payload: pb,
+            },
+        ) => {
+            let merge = b.create_block();
+            b.append_block_param(merge, types::F64);
+            b.append_block_param(merge, types::F64);
+            let a_float = b.create_block();
+            let a_notfloat = b.create_block();
+            let a_int = b.create_block();
+
+            let is_fa = b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_FLOAT as i64);
+            b.ins().brif(is_fa, a_float, &[], a_notfloat, &[]);
+
+            // A is a float, so B may be a float or an int-to-promote.
+            b.switch_to_block(a_float);
+            let fa = b.ins().bitcast(types::F64, MemFlagsData::new(), pa);
+            let fb = float_or_promoted_int(b, tb, pb, f, 25, true);
+            b.ins()
+                .jump(merge, &[BlockArg::Value(fa), BlockArg::Value(fb)]);
+
+            b.switch_to_block(a_notfloat);
+            let __dr = b.ins().iconst(types::I32, 27);
+            let is_ia = b.ins().icmp_imm_s(IntCC::Equal, ta, TAG_INT as i64);
+            b.ins()
+                .brif(is_ia, a_int, &[], f.deopt, &[BlockArg::Value(__dr)]);
+
+            // A is an int, so this is float arithmetic only if B is a float. If it is not,
+            // the VM computes in ints and answers an int — deopt and let it.
+            b.switch_to_block(a_int);
+            let fa2 = b.ins().fcvt_from_sint(types::F64, pa);
+            let fb2 = float_or_promoted_int(b, tb, pb, f, 25, false);
+            b.ins()
+                .jump(merge, &[BlockArg::Value(fa2), BlockArg::Value(fb2)]);
+
+            b.switch_to_block(merge);
+            let params = b.block_params(merge);
+            (params[0], params[1])
+        }
+    }
+}
+
+/// [`as_f64`], but the caller says whether an `Int` operand may be **promoted** to f64 or
+/// must **deopt** (KI-114).
+///
+/// Promote only when the float path was entered because some operand is CERTAINLY a float
+/// (an `Op::Float`, so the arm really is doing mixed arithmetic and f64 is the VM's own
+/// answer — KI-109). When it was entered on `op_is_float`'s `slot_float` GUESS, pass
+/// `false`: if every operand then turns out to be an int, the VM computes in ints and
+/// answers an int, so promoting would publish `-33.0` where the VM says `-33`.
+pub(super) fn as_f64_guarded(
+    b: &mut FunctionBuilder,
+    op: Op,
+    f: Frame,
+    promote: bool,
+) -> cranelift_codegen::ir::Value {
     match op {
         Op::Float(v) => v,
         Op::Slot(k) => {
@@ -766,7 +941,7 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
                 addr,
                 PAYLOAD_OFFSET as i32,
             );
-            float_or_promoted_int(b, tag, payload, f, 24)
+            float_or_promoted_int(b, tag, payload, f, 24, promote)
         }
         Op::Handle(w0, w1, _) => {
             // A type-erased boxed `Value` (a `nth`/vector read, a call result) used as a
@@ -775,7 +950,7 @@ pub(super) fn as_f64(b: &mut FunctionBuilder, op: Op, f: Frame) -> cranelift_cod
             // words already in registers. This is what lets `(nth v k)`-fed float
             // arithmetic stay native instead of deopting on the int-path `as_int`.
             let tagb = b.ins().band_imm_s(w0, 0xff);
-            float_or_promoted_int(b, tagb, w1, f, 25)
+            float_or_promoted_int(b, tagb, w1, f, 25, promote)
         }
         Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => {
             let __dr = b.ins().iconst(types::I32, 26);

@@ -182,7 +182,7 @@
     ;; them: measured 2026-08-27, 35 images / 74 MB, all from that day, and the prelude boot
     ;; cache beside it had reached 4192 files / 732 MB the same way. `build` prunes to the
     ;; newest few before writing.
-    (let (dir (path/dirname (image-path)))
+    (let (dir (path/dirname (or (image-path) (error "stdimage-test: no image path"))))
       (when (file/dir? dir)
         (let (n (count (filter (file/ls dir)
                          (fn (e)
@@ -239,7 +239,7 @@
     ;; subcommand, exit 2.) A regression test for KI-72 that never executes is worse than no
     ;; test, so resolve the real binary: beside the runner (`brood --test`, `nest test`) or
     ;; one level up (`target/release/deps/` → `target/release/`), and skip if absent.
-    (let (dir (path/dirname (os/exe-path))
+    (let (dir (path/dirname (or (os/exe-path) (error "stdimage-test: no exe path")))
           exe (first (filter [(path/join dir "brood") (path/join dir ".." "brood")] file/exists?))
           prog (path/temp "stdimage-race-")
           _ (file/spit prog

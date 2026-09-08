@@ -23,6 +23,12 @@
 (defn threw? (thunk) (try (do (thunk) false) (catch e true)))
 
 ;; ---- emit + handlers --------------------------------------------------------
+(defn- evt (r)
+  "`r` as the event vector it should be, or a failed test. The capture helpers answer
+  `:timeout | vector`, so `first`/`second` on the result are unchecked; a `:timeout` means
+  the event never arrived, which is worth failing on by name."
+  (if (vector? r) r (error "telemetry-test: expected an event vector, got " r)))
+
 (describe "telemetry: emit and handlers"
   :isolated (test "emit delivers event + measurements + metadata to a handler"
     (let (me (self))
@@ -196,9 +202,9 @@
             stop-evt (tel-recv))
         (stop)
         (assert= result 3)
-        (assert= (first start-evt) [:job :start])
-        (assert= (first stop-evt) [:job :stop])
-        (is (>= (get (second stop-evt) :duration) 0)))))
+        (assert= (first (evt start-evt)) [:job :start])
+        (assert= (first (evt stop-evt)) [:job :stop])
+        (is (>= (get (second (evt stop-evt)) :duration) 0)))))
 
   (test "span emits :exception and re-raises; the emitter survives the throw"
     (let (me (self))
@@ -209,8 +215,8 @@
             ex (tel-recv))
         (stop)
         (assert= threw "boom")
-        (assert= (first ex) [:job :exception])
-        (assert= (get (nth ex 2) :error) "boom")
+        (assert= (first (evt ex)) [:job :exception])
+        (assert= (get (or (nth (evt ex) 2) {}) :error) "boom")
         (assert= (+ 1 1) 2)))))
 ;; ---- not started / after stop ----------------------------------------------
 (describe "telemetry: not started / after stop"

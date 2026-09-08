@@ -1587,7 +1587,6 @@ Two lessons worth keeping, both of which cost this session real time:
 The change itself stands unaltered — same code, same time-neutrality, same 992/992 on both
 engines. Only the size claim and the bogus caution change.
 
-
 ## 2026-08-18 — Stdlib namespacing, stage 5: the `string` library module (ADR-230)
 
 Moved the whole string surface into a real `std/string.blsp` `(defmodule string)`, one name per op,
@@ -1626,7 +1625,6 @@ Scope: ~915 call sites across `std/`+`tests/`+`examples/`+Rust-embedded Brood, p
 `PRIMITIVE_DOCS`, the `doc-catalog` (public entries renamed, private helpers dropped per ADR-227),
 `docs/language.md`, and every `../*` sibling project. See ADR-230.
 
-
 ## 2026-08-18 — Stdlib namespacing, stage 6: the `file` library module (ADR-231)
 
 Same treatment for the filesystem surface, mirroring stage 5. The 18 kernel fs primitives are
@@ -1659,7 +1657,6 @@ Living-doc references in `tooling.md`/`module-index.md`/`node-connect.md` update
 historical entries in `decisions.md` and `devlog-archive.md` are left as the record of what those
 primitives were called at the time. See ADR-231.
 
-
 ## 2026-08-19 — Bump to 0.4.0: the stdlib-namespacing renames are a compatibility boundary
 
 The `string/*` (ADR-230) and `file/*` (ADR-231) renames removed the old bare/`string-`/`file-`
@@ -1675,7 +1672,6 @@ and the ecosystem's packages now declare `:brood ">= 0.4.0"` — a real gate tha
 clear message instead of a cryptic unbound-symbol cascade. This is the first version bump used to
 *mark* a break rather than just accrue features; the lesson is to bump on the break, not after it
 bites. (Greenfield still means we break freely — 0.4.0 is a signpost, not a stability promise.)
-
 
 ## 2026-08-19 — The dependency resolver is now brood-version aware (ADR-209)
 
@@ -1698,7 +1694,6 @@ unchanged — verified by resolving `store 0.2.2` off the live registry, which s
 Bootstrap note: hive *is* one of the packages, so the first publish of the migrated deps necessarily
 lands on the pre-feature registry (their `:brood` is sent but not stored); the resolver serves it for
 every release published once the upgraded hive is live.
-
 
 ## 2026-08-19 — Release bundles: root a dependency module only when its name collides
 
@@ -2738,7 +2733,6 @@ correct code. A `(bound? 'name)` test in a top-level form now exempts that name 
 "a genuinely unused import still warns" — verified by sabotage: reverting the loader test fails
 the two `file` cases) plus a `feature_loaded` unit test pinning both directions. Both engines
 1025/1025.
-
 
 ## 2026-08-25 — KI-55: a shipped closure now brings its modules with it
 
@@ -5984,7 +5978,6 @@ against the pre-change baseline), 628 Rust lib tests, the zero-warning checker g
 format --check`, `cargo fmt --all --check`, and clippy `--all-targets --all-features` all
 green.
 
-
 ### `math/max`/`math/min` get a two-argument arm — `collatz` −38.2%, and nothing in the kernel changed
 
 The lever the isolation pointed at, taken. `max` and `min` were single-clause `(& xs)` over
@@ -8079,7 +8072,6 @@ are in 52 uncommitted files — so the job is red until those land and `BEDIT_RE
 and 13 cases failed locally, 8 of them the tree-sitter modes the debug build lacks grammars
 for (CI builds them) and 5 in `view_scroll_test`'s completion-popup block, not yet attributed.
 
-
 ## 2026-08-30 — tracing that cannot lose a definition; the table's abort becomes an error; the cap is 16 GB
 
 Follow-through on the morning's playground fault, closing the *class* rather than the instance.
@@ -8148,7 +8140,6 @@ refusal, `--no-check`, ledger-first fixing that then satisfies the gate). `nest 
 the repo: the 263 warnings on the tree tonight are the in-flight data-first migration
 (`any?`/`every?`/`map` argument order) in files this change does not touch; none of them is
 in `std/tool/project.blsp`, `std/tool/renames.blsp` or `tests/renames_test.blsp`.
-
 
 ### 2026-08-30, eleventh — `:discarded-catch`: a `(catch e nil)` cannot have read what it caught
 
@@ -8259,7 +8250,6 @@ kept, so the catch shape is unchanged and the rendering is the original's. Pinne
 `seq.blsp`, so the clause scan walks by hand rather than calling `any?`. Effects in the
 tests are observed through a mailbox — there is no cell to mutate.
 
-
 ## 2026-08-30 (cont.) — data-first argument order (ADR-308): one pipe, `->>` deleted
 
 The `!` and `$` work above came from one nil; this came from the same pipeline. With `$` in
@@ -8316,7 +8306,6 @@ never-matching pattern wakes per delivery and never passes a VM safepoint. Sende
 never blocked, nothing dropped; clear-inside-catch rescues, as with `:max-heap`.
 Five new tests in `process_limit_test.blsp` incl. the busy-spinner (safepoint route)
 and drain-and-recover.
-
 
 ### 2026-08-30, twelfth — CI back to green: the strict gate's 13, and the differential's cap
 
@@ -10331,7 +10320,6 @@ reports `0 tests` for most of them and the verdict is the exit code plus a grep 
 `correct: false` (the Makefile recipe does exactly that). Read the recipe before
 reproducing a gate by hand.
 
-
 ## 2026-09-04 (later) — the flag catalogue is complete, and gated in both directions (ADR-319)
 
 Handoff work-queue item 1. The runtime read 101 `BROOD_*` names; `debug_flags.rs` catalogued
@@ -11150,7 +11138,6 @@ guard let it reach `nth` and broke every `--strict`/`--formatter` until the map 
 came first. Also noticed, not fixed: a scaffolded project's `(:use log)` prints a
 "shadows the prelude `error`" warning on every `nest test`.
 
-
 ## 2026-09-05 (night) — the prelude surface audited name by name: the answer was already written down, and three gates were passing on nothing
 
 **The question.** Which of the language core's ~370 definitions could move to `std/`, and
@@ -11286,7 +11273,6 @@ spawned a body that ends on its own and then called `monitor` — KI-59's race, 
 the parked bodies keep the two-step form because they never finish. 0/30 standalone before and
 after, so the argument is from construction, not from a loop.
 
-
 ## 2026-09-05 (last) — side facts travel by journal (ADR-320), and its first run found KI-111
 
 **ADR-320 implemented, all three steps.** Every startup image rests on one sentence —
@@ -11382,7 +11368,6 @@ evaluation. Piped stdin made the REPL testable end to end. `main.rs` 1,233 → 1
 `then_some(Guard)` constructs and immediately drops the unwanted guard, and `FullTermGuard`'s
 drop writes the teardown escapes — every command's output grew a `[?25h…[?1049l` tail until
 it became `then(|| …)`. `main.rs` 1,192 → 1,054.
-
 
 ## 2026-09-06 — the two loose ends: a deprecation the editor could not show, and a scaffold that warned on its first command
 
@@ -11608,3 +11593,31 @@ comment of its own, and the paragraph written for it sits above `localize_for_fr
 the second instance of this exact defect today (`global_defined` was the first), which suggests
 reading the doc *above* a moved section is worth doing on every future move — a stranded
 paragraph is invisible until the boundary moves.
+
+## 2026-09-07 — KI-114: a float-profiled arm applied to an int published a float
+
+`pong` failed 22 of 101 tests on v0.26.0 with `rem: expected int, got float (-16.0)`, green
+with `BROOD_NO_JIT=1`. The value came from `math/round`'s negative branch, whose last step is
+`(- (math/floor …))` — unary `-` on an int. `-` is `((x) (%sub 0 x))`, one shared prelude arm,
+and pong's float arithmetic float-profiles it; `op_is_float` then chose the float lowering for
+`(- <int>)`, where since KI-109 an int operand is promoted with `fcvt_from_sint` instead of
+deopting. So `(- 33)` answered `-33.0` for the rest of the process.
+
+Fixed by `emit::as_f64_pair`: promotion is licensed per-operand by the OTHER operand being
+proven float, which is the VM's own rule for when an op is float arithmetic at all. The pair
+is read together because neither operand can decide alone. The fused two-tagged case keeps
+the both-float path at its original two branches, so hot float loops pay nothing for it.
+KI-109's `(* 1.0 x)` still promotes — its `1.0` is proven, not guessed. pong 101/101.
+
+Two things worth carrying forward. **The arm to reproduce is the one that was PROFILED, not
+the one that computes wrongly**: three earlier attempts rebuilt `spawn-burst-acc` verbatim
+and came out clean, because its only role is to mislabel a slot in an arm somewhere else. The
+repro is fourteen lines — hot-loop `-` on floats, then call it on an int. And **`cargo build
+--release --bin brood` does not relink `nest`**, which is what `nest test` runs; the KI's note
+that `BROOD_JIT_DUMP_IR` is "silent on a plain release build" was a stale binary, not a
+missing feature.
+
+Guard: `crates/cli/tests/float_profile_int_stays_int.rs`, sabotage-verified both ways. It
+records in its header that the other two float-arith lowerings carry the same rule without a
+test, because no program reached them with a wrong guess. Perf is unmeasured here by
+standing policy — the A/B belongs on the benchmark box.

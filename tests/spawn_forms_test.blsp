@@ -13,7 +13,9 @@
 ;; (a bare global name carries no closure), so it resolves the parent by registered
 ;; name. Reports that it actually ran.
 (defn- spawn-forms-report-bare ()
-  (send (proc/whereis :spawn-forms-bare-parent) :ran-bare))
+  (send (or (proc/whereis :spawn-forms-bare-parent)
+          (error "spawn-forms-test: :spawn-forms-bare-parent is not registered"))
+    :ran-bare))
 
 (describe "spawn: every body shape runs its body (no silent no-op)"
   (test "(spawn fn-name) — a bare function name is CALLED, not yielded-and-discarded"
@@ -39,4 +41,6 @@
 ;; Worker for the named-form test (defined after its first textual use is fine — a
 ;; global resolves at call time).
 (defn- spawn-forms-report-named ()
-  (send (proc/whereis :spawn-forms-named-parent) :ran-named))
+  (send (or (proc/whereis :spawn-forms-named-parent)
+          (error "spawn-forms-test: :spawn-forms-named-parent is not registered"))
+    :ran-named))
