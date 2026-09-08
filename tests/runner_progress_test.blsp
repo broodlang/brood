@@ -36,12 +36,16 @@
   (test "a failing result marks an F"
     (assert= (marks (list (progress-test-fail "t"))) "F"))
   (test "several results mark in order"
-    (assert= (marks (list (progress-test-pass "a") (progress-test-fail "b") (progress-test-pass "c")))
+    (assert= (marks (list (progress-test-pass "a")
+                      (progress-test-fail "b")
+                      (progress-test-pass "c")))
       ".F."))
   (test "a skipped result marks an orange circle, not a dot"
     (assert= (marks (list (progress-test-skip "t"))) "○"))
   (test "the three outcomes mark distinctly, in order"
-    (assert= (marks (list (progress-test-pass "a") (progress-test-skip "b") (progress-test-fail "c")))
+    (assert= (marks (list (progress-test-pass "a")
+                      (progress-test-skip "b")
+                      (progress-test-fail "c")))
       ".○F"))
   (test "no results marks nothing" (assert= (marks nil) ""))
   (test "colour is off when stdout is captured, so output stays parseable"
