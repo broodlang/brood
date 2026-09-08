@@ -566,3 +566,66 @@ impl CodeSlabs {
             && self.envs.count() == 0
     }
 }
+
+#[cfg(all(test, feature = "jit"))]
+mod vecstore_layout_tests {
+    use super::*;
+    use crate::core::value::Value;
+
+    /// Pin the byte layout the JIT hardcodes for its inline small-vector read
+    /// (`jit_lower.rs`): the `Inline` discriminant is 0, and `len`/`items` sit at
+    /// the advertised offsets within a slot. A `#[repr(u8)]` layout drift (e.g.
+    /// bumping `INLINE_VEC_CAP` or reordering fields) fails here rather than
+    /// silently miscompiling every `nth`.
+    #[test]
+    fn vecstore_jit_layout() {
+        let v = VecStore::Inline {
+            len: 2,
+            items: [Value::int(7), Value::int(9)],
+        };
+        let base = &v as *const VecStore as usize;
+        // Discriminant byte at offset 0 (repr(u8), RFC 2195).
+        let tag = unsafe { *(base as *const u8) };
+        assert_eq!(tag as i64, VecStore::JIT_INLINE_TAG, "Inline discriminant");
+        if let VecStore::Inline { len, items } = &v {
+            assert_eq!(
+                len as *const u8 as usize - base,
+                VecStore::JIT_LEN_OFF as usize,
+                "Inline.len offset"
+            );
+            assert_eq!(
+                items.as_ptr() as usize - base,
+                VecStore::JIT_ITEMS_OFF as usize,
+                "Inline.items offset"
+            );
+        }
+        assert_eq!(
+            std::mem::size_of::<VecStore>() as i64,
+            VecStore::JIT_STRIDE,
+            "slab stride"
+        );
+        // The JIT reads a Value element as 3 i64 words; the slab stride between
+        // elements is `size_of::<Value>()`.
+        assert_eq!(std::mem::size_of::<Value>(), 24, "Value stride");
+        // Spill layout: discriminant 1 @0, cached ptr @8, cached len @16 — the
+        // JIT's pointer-read path loads exactly these.
+        let sp = VecStore::spill(vec![Value::int(1), Value::int(2), Value::int(3)]);
+        let sbase = &sp as *const VecStore as usize;
+        let stag = unsafe { *(sbase as *const u8) };
+        assert_eq!(stag as i64, VecStore::JIT_SPILL_TAG, "Spill discriminant");
+        if let VecStore::Spill { ptr, len, vec } = &sp {
+            assert_eq!(
+                ptr as *const *const Value as usize - sbase,
+                VecStore::JIT_SPILL_PTR_OFF as usize,
+                "Spill.ptr offset"
+            );
+            assert_eq!(
+                len as *const u64 as usize - sbase,
+                VecStore::JIT_SPILL_LEN_OFF as usize,
+                "Spill.len offset"
+            );
+            assert_eq!(*ptr, vec.as_ptr(), "cached ptr matches the buffer");
+            assert_eq!(*len as usize, vec.len(), "cached len matches");
+        }
+    }
+}
