@@ -11621,3 +11621,20 @@ Guard: `crates/cli/tests/float_profile_int_stays_int.rs`, sabotage-verified both
 records in its header that the other two float-arith lowerings carry the same rule without a
 test, because no program reached them with a wrong guess. Perf is unmeasured here by
 standing policy — the A/B belongs on the benchmark box.
+
+## 2026-09-08 — KI-117: a JIT'd error has no `:trace`, found as a one-in-N flake
+
+The merged tree's suite read `FLAKY 2/2` on `brood_suite_passes`, and for once the try-1 output
+was kept: `try_catch_test.blsp:352` counted 8 trace frames where the cap is 32. Nine solo runs
+passed. Looping the test's exact `letrec` shape in one process made it deterministic —
+`{32 482, 0 2518}` — 32 until the arm tiers to native, then **zero**, with `BROOD_NO_JIT=1`
+reading 32 all 3000 times. Both 0.25.2 binaries on the box flip the same way, so it is not
+today's merge and not the KI-114 lowering; it has been true since arms could go native. The
+suite only caught it because load stretched one `(deep 100)` across the background compile.
+The mechanism and the two-layer fix are in the entry; the boundary layer is small, the per-level
+layer is CLIF emission on the error path. Filed, not fixed — the emission side is in the files
+the KI-114 work is still touching.
+
+The general lesson is the one CLAUDE.md already states: a flake that passes on retry is a bug
+with a race in front of it, and the race here (a background compile landing mid-recursion) is
+one no amount of solo re-running would have found. The loop that found it took two minutes.
