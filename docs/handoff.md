@@ -31,9 +31,10 @@ reports it as FLAKY (retry absorbs one hit); a FLAKY row on that binary is this 
 
 ### 0 — KI-120 (open): the wrapper's unbound wave that KI-119 did not explain
 
-**Do.** `BROOD_SCOPE_DBG=1 BROOD_IMAGE_TRACE=1 cargo nextest run --no-fail-fast --features
-brood/treesit-grammars > suite.log 2>&1` under the cap, alone on the box (a concurrent release
-build got both killed for memory). ~50% hit rate per 17-min run. On a hit, read the wrapper's
+**Do.** `BROOD_SCOPE_DBG=1 cargo nextest run --no-fail-fast --features brood/treesit-grammars
+> suite.log 2>&1` under the cap, alone on the box (a concurrent release build got both killed
+for memory; build the test binaries first, in the foreground, `--build-jobs 6`). NOT
+`BROOD_IMAGE_TRACE` — it reds 25 output-comparing tests. 2 hits in 4 full runs so far. On a hit, read the wrapper's
 try-1 stderr: `[scope] RESTORE by … with N live:` lines against the `process N died:
 unbound symbol` lines. The entry lists what each outcome means and the next tool. Keep the
 whole log; never pipe it through a filter.
