@@ -133,8 +133,6 @@ struct EnvFrame {
     vars: EnvVars,
     parent: Option<EnvId>,
 }
-/// Re-tag a value's handle from the local region to the immutable **prelude**
-/// region (same slab index, region bits set). Atoms are unchanged.
 /// A movable handle's identity — `(kind, index, region)`. `None` for an atom, which
 /// has no heap identity and never needs copying. Used by
 /// [`Heap::localize_for_freeze`] to collapse shared structure and to tell "already
@@ -291,10 +289,6 @@ pub struct LocalCheckpoint {
     // PRELUDE). If that ever changes, add a field here and truncate it below.
 }
 
-/// A runtime's mutable, shared code region: the code `def`'d at runtime plus the
-/// global bindings table. All of a runtime's inner processes share one of these
-/// (via `Arc::clone`), which is what makes a `def` propagate to them — and what
-/// keeps separate runtimes (nodes) independent (each has its own).
 /// A fast hasher for `Symbol` (`u32`) keys. The globals table is consulted on
 /// every global reference (every operator / prelude call), and the default
 /// SipHash is overkill — and notably slow to finalize — for a single `u32`.
@@ -388,6 +382,10 @@ pub struct NameMeta {
     pub beta: Option<String>,
 }
 
+/// A runtime's mutable, shared code region: the code `def`'d at runtime plus the
+/// global bindings table. All of a runtime's inner processes share one of these
+/// (via `Arc::clone`), which is what makes a `def` propagate to them — and what
+/// keeps separate runtimes (nodes) independent (each has its own).
 pub struct RuntimeCode {
     /// The **two** code generations (ADR-091 Erlang-style 2-generation collector).
     /// New code (`def`/`promote`) lands in `gens[current_gen]`; the *other* slot
