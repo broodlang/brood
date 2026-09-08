@@ -3317,14 +3317,17 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                     }
                 }
             }
-            // KI-120 diagnostic. A refer-all that imports NOTHING leaves every bare use of the
-            // module's names unresolved, and each then dies at runtime as `unbound symbol:
-            // <bare>` — far from here, in whichever process runs it. `(:use mod)` of a module
-            // with no public names is legal but pointless, so the line is cheap to keep; what
-            // it exists to catch is a module `*features*` records as loaded whose globals are
-            // not in the table, which is the state the wrapper's `def-face`/`ui-run` deaths
-            // imply and nothing had ever reported.
-            if referred == 0 {
+            // KI-120 diagnostic. A refer-all of a baked-in std/editor module that imports
+            // NOTHING leaves every bare use of its names unresolved, each dying later as
+            // `unbound symbol: <bare>` in whichever process runs it — the wrapper's
+            // `def-face`/`ui-run` wave. Restricted to EMBEDDED modules on purpose: a std
+            // module always has public API, so importing nothing from one means its globals
+            // are gone under a `*features*` that still says loaded (the bug). A user/test
+            // module legitimately refers nothing — all-private (`priv-vault2`), everything
+            // `:exclude`d (`clpb2`), or `defdyn`-only (`dynprov`, whose names are ambient, not
+            // `mod/` globals) — so those are NOT the signal and must stay silent, or the line
+            // becomes noise the reader learns to skip past.
+            if referred == 0 && is_embedded_module(&mod_name) {
                 eprintln!(
                     "[refer] (:use {mod_name}) imported NOTHING — no public `{mod_name}/` global is bound; \
                      *features* lists it: {}, mid-load: {}, pid={:?} scope={}",
