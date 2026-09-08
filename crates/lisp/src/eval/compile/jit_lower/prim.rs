@@ -6,9 +6,8 @@
 //! the whole arm to the VM.
 #![cfg(feature = "jit")]
 use super::emit::{
-    as_f64_guarded, as_int, call_handle, emit_arith, emit_float_arith, eq_dispatch,
-    as_f64_pair, inline_vec_ref,
-    load_slot_int, op_is_float, read_words, table_prim, vector_ref, Frame, Funcs,
+    as_f64_guarded, as_f64_pair, as_int, call_handle, emit_arith, emit_float_arith, eq_dispatch,
+    inline_vec_ref, load_slot_int, op_is_float, read_words, table_prim, vector_ref, Frame, Funcs,
 };
 use super::Op;
 use crate::core::value::jit_layout::{

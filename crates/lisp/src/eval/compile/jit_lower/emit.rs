@@ -749,8 +749,13 @@ fn float_or_promoted_int(
     } else {
         &[BlockArg::Value(__dr)]
     };
-    b.ins()
-        .brif(is_i, int_target, int_args, f.deopt, &[BlockArg::Value(__dr)]);
+    b.ins().brif(
+        is_i,
+        int_target,
+        int_args,
+        f.deopt,
+        &[BlockArg::Value(__dr)],
+    );
     b.switch_to_block(as_int);
     let promoted = b.ins().fcvt_from_sint(types::F64, payload);
     b.ins().jump(merge, &[BlockArg::Value(promoted)]);

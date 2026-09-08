@@ -1635,18 +1635,31 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             return list_result(Some(v.clone()));
         }
     }
-    // `(dissoc m k …)` → the same record shape without those fields. Exact on a closed
-    // record with literal-keyword keys: the result definitely lacks them.
+    // `(dissoc m k …)` → the same record shape without those fields. Exact with
+    // literal-keyword keys: the result definitely lacks them.
+    //
+    // OPEN records go through here too, on the same reasoning that justifies the closed
+    // case. "Open" means *at least* these fields, so removing a declared one drops it from
+    // the shape and removing an undeclared one leaves the shape alone — either way the
+    // remaining fields are still all present. Handling only closed records meant
+    // `(dissoc buf :editable)` on an open record fell through to `dissoc`'s declared
+    // return and read as a flat `map`, so `editor/buffer/widen` could not be declared to
+    // return a `buffer` even though it does — while its sibling `narrow-to`, an `assoc`,
+    // was precise. `assoc` had already learned open records; this is `dissoc` catching up.
     if value::symbol_is(head, "dissoc") && items.len() >= 3 {
         let map_arg = *items.get(1)?;
         let map_ty = expr_ty(heap, map_arg, ctx);
-        if let Some(shape) = closed_record_fields(map_ty.as_ref()) {
+        if let Some(shape) = record_shape_of(map_ty.as_ref()) {
             if let Some(removed) = literal_keyword_args(&items[2..]) {
-                let mut fields = shape.clone();
+                let mut fields = shape.fields;
                 for name in removed {
                     fields.remove(&name);
                 }
-                return Some(Ty::record_of(fields));
+                return Some(if shape.open {
+                    Ty::record_of_open(fields)
+                } else {
+                    Ty::record_of(fields)
+                });
             }
         }
     }
