@@ -47,10 +47,11 @@ The tree is clean. Pick items **in order**; one per
 session is fine. Each says what to do, how to verify, and what "done" means. The 2026-09-04
 queue below is superseded except where these items point back into it.
 
-### 1 — Finish the `heap.rs` split ✅ DONE 2026-09-08 (one optional move left)
+### 1 — Finish the `heap.rs` split ✅ DONE (the optional move is done too, 2026-09-09)
 
-**State.** `heap.rs` is **3,175 lines** (from 7,536 when the item was written, 6,802 at the
-start of this weekend). Fourteen `use super::*` children under `heap/`; the last session added
+**State.** `heap.rs` is **2,367 lines** (from 7,536 when the item was written, 6,802 at the
+start of this weekend; 3,175 before the `RuntimeCode` move below). Fifteen `use super::*`
+children under `heap/`; the last session added
 `env_globals` (1,041), `freeze` (480), `promote` (503), `local_string` (497) and `slabs` (568),
 moved the GC knobs into `gc.rs` and the freeze helpers into `freeze.rs`, and carried the three
 test modules that had been orphaned to the children that own their subjects. Suite 1418/1418
@@ -58,12 +59,11 @@ and clippy clean after every round. Five stranded doc comments were found by the
 boundaries and fixed as separate comment-only commits.
 
 **What is left in `heap.rs`, deliberately.** The records — `Heap`, `ColdHeap`, `CheckHeap`,
-`SharedCode`, `LocalCheckpoint`, `RuntimeCode` with its `Default` + `impl` (~600 lines) and
-the `SymbolHasher` family — plus construction, the LOCAL allocators and the region-dispatching
-accessors. The one further move with a clean seam is **`RuntimeCode` → `heap/runtime_code.rs`**:
-its 29 fields are all private and addressed as `self.runtime.X` from `heap.rs` and every child,
-so it would need `pub(super)` on each. Do it only if a reason beyond line count appears; the
-~3,000 bar was about the method groups, which are out.
+`SharedCode`, `LocalCheckpoint` — plus construction, the LOCAL allocators and the
+region-dispatching accessors. `RuntimeCode` and the `SymbolHasher` family are **out** as of
+2026-09-09 (`heap/runtime_code.rs`, 833 lines): its 29 private fields, addressed as
+`self.runtime.X` from `heap.rs` and every child, took `pub(super)` on each, exactly as this
+item predicted. That was the last seam worth cutting; nothing further is queued here.
 
 **What the moves cost, for the next one of this kind (any file).**
 1. A child's private item is invisible to the parent AND to its siblings: widen with

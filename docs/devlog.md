@@ -28,6 +28,16 @@ mostly trimmed in `fdce540` once their features shipped). Recover from git if ne
 entry** and drop the verbose text (don't grow the archive). Prune anything that
 won't help future work — the ADRs and topic docs carry the durable rationale.
 
+**The digest is the invariant, and it had quietly stopped being true.** On 2026-09-08 it
+was missing a line for **87 sessions across 16 dates** — every session from 2026-08-31 on,
+and gaps back to 2026-08-13 — because the "condense it once it is older than a day or two"
+half of the rule stopped being applied while the "append a full entry" half carried on.
+"Recent" had grown to 229 sessions over four weeks and *become* the log, so the file's own
+navigation advice ("use the digest to place a change in time") pointed at something
+incomplete. The lines are restored, taken from each session's own header. The verbose text
+is still there and still wants condensing; the thing to protect is the digest, because it
+is what the rest of the file promises.
+
 **Major threads** (grep these across devlog-archive.md to follow an arc end to end):
 - **GC / memory** — `GC`, `safepoint`, `use-after-GC`, `generational`, `promote`,
   `hibernate`, `tracing`, `copying` (ADR-016/035/043/054/055/058/061/072)
@@ -711,10 +721,71 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-11** — the backend seam: a `JitBackend` contract, and the decisions hoisted above it
 - **2026-08-12** — the forward-ref pre-scan was not module-boundary-aware
 - **2026-08-12** — multiple modules per file: the region model (ADR-223 Phase 1)
+- **2026-08-13** — ADR-223 Phase 2 (MVP): cross-file require-by-name for a co-located module
+- **2026-08-13** — closing out: the whole-tree format, and KI-39's local avenue exhausted
+- **2026-08-13** — `nest check` (and `brood`) no longer SIGABRT on a broken pipe
+- **2026-08-13** — the VM's call path was contending on one cache line (ADR-224), and the gates that should have caught it
+- **2026-08-13** — `reduce-while`: the early-terminating fold (roadmap: Elixir-loved ergonomics)
+- **2026-08-13** — require-by-name for a co-located module in a nameless project / bare run (ADR-223 Phase 2b)
+- **2026-08-13** — Function-head guards: `:when` on defn/fn clause heads (ADR-226)
+- **2026-08-13** — `tap` / `then`: the single-function pipe helpers (Elixir Kernel parity)
+- **2026-08-13** — Stdlib namespacing, stage 1: the `enum` sequence-helper module (ADR-227)
+- **2026-08-14** — Stdlib namespacing, stage 2: the `map` transformation-helper module (ADR-227)
+- **2026-08-14** — Stdlib namespacing, stage 3: the `math` library module (ADR-227)
+- **2026-08-14** — Auto-derived imports go live + stdlib namespacing stage 4: `json` (ADR-227 follow-up)
+- **2026-08-14** — The computed-head call pays no allocation: the arm handle is memoized (ADR-228)
+- **2026-08-14** — Remove the user-facing `require` form; loading is inference + an internal `require-one`
+- **2026-08-17** — The stale-bare-name sweep: a curated sig masking the unbound lint, two dead benchmark rows, and one GC walk
+- **2026-08-17** — `nest release` bundle rooting: dev/release parity for package-rooted deps (ADR-070)
+- **2026-08-17** — Close the last two open issues: the `sqrt` call-site inline (KI-44) and the stale `examples/editor` (KI-45)
+- **2026-08-18** — KI-39 was never a flake: a coloured log, an uncovered TIMEOUT, and a keypress that loaded 2967 lines
+- **2026-08-18** — Stdlib namespacing, stage 5: the `string` library module (ADR-230)
+- **2026-08-18** — Stdlib namespacing, stage 6: the `file` library module (ADR-231)
+- **2026-08-19** — Bump to 0.4.0: the stdlib-namespacing renames are a compatibility boundary
+- **2026-08-19** — The dependency resolver is now brood-version aware (ADR-209)
+- **2026-08-19** — Release bundles: root a dependency module only when its name collides
+- **2026-08-19** — KI-36 reproduced and fixed: the deadline analysis was aimed at the wrong branch
+- **2026-08-19** — Stdlib namespacing, stage 7: flat names for `proc/*` and `net/*` (ADR-233)
+- **2026-08-19** — Stdlib placement review: path/file/hash/crypto homes + enum→seq (ADR-234)
+- **2026-08-19** — `(:use …)` clashes resolve lazily; the maintained overlap list is gone (ADR-235)
+- **2026-08-19** — Stdlib prefix cleanup, exemplar: `queue`/`pq` (ADR-236)
+- **2026-08-19** — Prelude split into std/prelude/*.blsp (organizational)
+- **2026-08-19** — Prefix rollout, long tail: io/task/reload/protocol/gen/hash/format/package/telemetry/explain (ADR-236)
+- **2026-08-19** — Forced through the collision keeps: stats, fuzzy, tcp, sse (ADR-236)
+- **2026-08-19** — Going-live namespace policy recorded (ADR-237)
+- **2026-08-19** — Release 0.5.0: the stdlib-naming compatibility boundary
+- **2026-08-19** — Green the tree after the ADR-236 sweep: fixture damage, a prelude-split guard, a pq bench
+- **2026-08-20** — A direct git/path pin overrides a transitive registry dep (ADR-238)
+- **2026-08-20** — The rename-sweep gap, closed: a gate for `stress/` + `scripts/fuzz/stress/`
+- **2026-08-20** — KI-47's memory question, answered: legitimate growth, and the mechanism was wrong
+- **2026-08-20** — The source-position tables are not the memory target: 7.1%, not 18% (a negative result)
+- **2026-08-20** — One conversion-naming convention: arrow `->` everywhere (ADR-239)
+- **2026-08-20** — Kernel primitives stay flat (dash); a `/` is module-member syntax only
+- **2026-08-20** — Refreshing the perf standing: the menu was being ordered off a superseded table
+- **2026-08-20** — The "no default features" CI gate has never worked (and my own break proved it)
 - **2026-08-24** — a primitive's name gets one definition site; CST-backed `nest rename` (ADR-240)
 - **2026-08-24** — a library name may shadow core only when used qualified (ADR-241)
 - **2026-08-24** — the bare core: 613 published names down to 337 (ADR-242)
 - **2026-08-24** — the namespace waves: 337 bare core names down to 291
+- **2026-08-25** — `brood --check` resolved `(:use M)` against the namespace, not the module
+- **2026-08-25** — KI-55: a shipped closure now brings its modules with it
+- **2026-08-25** — ADR-243: a framework's client API is a module, not ten bare names
+- **2026-08-25** — ADR-244: a late reply now dies at the door, not in the mailbox
+- **2026-08-25** — KI-56: bounding the L1 copy, and why counting nodes was not a bound
+- **2026-08-25** — the overflow check that overflowed, and 17 guards CI never ran
+- **2026-08-25** — KI-56's second site: the fix that turned out not to be a trade-off
+- **2026-08-25** — KI-57: the suite was 1061/1061 green with a use-after-GC in it
+- **2026-08-25** — the first cross-language run on 0.11.0, and the inline a rename had retired
+- **2026-08-25** — KI-59: the CI-friendly run mode reported failure for programs that worked
+- **2026-08-25** — the gate KI-58 prompted found a second dead inline on its first run
+- **2026-08-25** — the stdlib had lost stderr, and only a checker test noticed
+- **2026-08-25** — the same one-line fix, arrived at twice
+- **2026-08-25** — the startup image did not work on the build that ships
+- **2026-08-25** — the benchmark "regressions" were mostly measurement, and one of them was real
+- **2026-08-25** — correcting KI-63, and the measurement method that manufactured a threshold
+- **2026-08-25** — KI-63 retracted: three methods, three confident numbers, no effect
+- **2026-08-25** — the stdimage boot-install premise, re-measured rather than inherited
+- **2026-08-25** — why every probe said the image was fine while the suite said 150 failures
 - **2026-08-26** — KI-61 fixed: the prelude autoloads instead of force-loading; boot 22.8 -> 11.6 ms (ADR-246/247)
 - **2026-08-26** — KI-64 fixed: a JIT block-argument spill was landing on the deopt journal (ADR-248)
 - **2026-08-26** — the codecs: `json` parse 1.8x (row -20.8%) and `base64` decode 1.8x (row -9.5%) (ADR-249)
@@ -734,6 +805,33 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-08-30** — `try … finally` (ADR-306), a prelude macro clause over two `%try`s; and `throw` of a caught error map rebuilds the error, so a rethrow (and everything escaping a `finally`) renders as the original, not as a map dump
 - **2026-08-30** — crash reports by default (ADR-305): `proc/system-monitor` becomes one subscription per pid with an `:exit-abnormal` selector; `std/proc/crash-report.blsp` prints each crash site once with the trace; armed by `brood file`/`nest run`/bundle/REPL, never `nest test`; the kernel's `process N died` one-liner yields to it
 - **2026-08-30** — Lisp survey: Brood vs Clojure/CL/Racket and vs OTP; two backlogs recorded in ROADMAP ("Lisp survey + OTP-gap backlog") — seven OTP-gap items (crash reports by default, `defapp`, `finally`, `defstatem`, registry/`pg`, mailbox bounds, soak) and ten Lisp borrowings (regex captures, `iterate` as a seqview, sorted map/set, `reduced`, macro grammars, `next-impl`, `for :into`, small helpers, contract blame); the `terminate/2`-on-kill item reassessed as by-design
+- **2026-08-31** — `gui/font`'s one-arg form never worked (&optional nil-padding)
+- **2026-08-31** — `scan-form-start` tracks bracket depth, not column 0
+- **2026-08-31** — the block cursor gets a rim
+- **2026-08-31** — the stability/perf audit: four silent bugs fixed, the rest filed
+- **2026-08-31** — the attach seed could clobber a first keystroke (collab)
+- **2026-08-31** — `spawn-monitor`, and the two gates that let a release ship unbuildable
+- **2026-08-31** — a bare `(fn)` panicked the recursion analyzer
+- **2026-08-31** — the checker learns the shape of the migration's bugs
+- **2026-08-31** — inline pattern-clause callbacks stop reading as `any`
+- **2026-08-31** — ADR-310: a known failure is a value, not a raise
+- **2026-09-01** — the benchmark refresh found a regression the whole gate stack was blind to
+- **2026-09-01** — a failure is truthy: the migration that cost nothing was the tell
+- **2026-09-02** — the type said `any` because the program was wrong
+- **2026-09-02** — a CI flake that was a real bug: `tcp/set-binary` could not make a server binary
+- **2026-09-03** — (types) the standard library was telling the checker to forget
+- **2026-09-03** — (correction) there was no flake; I read a cancelled run's log
+- **2026-09-03** — (stability) a watchdog for the process that never ran, and a rule for the env var that leaked twice
+- **2026-09-03** — (runtime) `read-line` parks a process, not a worker: ADR-059 Phase 2, and KI-97 closes
+- **2026-09-03** — (CI) the strict gate was red all day, and the downstream smoke told two other stories
+- **2026-09-03** — (stability) the non-reproducible entries, one by one: two mechanisms were wrong, one was three bugs, one stays dormant
+- **2026-09-04** — the tree-walker→VM router is default-on (ADR-318); KI-88 archived as dormant
+- **2026-09-05** — KI-109 measured: where the 3% lives, three levers priced, two leads
+- **2026-09-06** — the two loose ends: a deprecation the editor could not show, and a scaffold that warned on its first command
+- **2026-09-07** — heap.rs split, second move: the env chain and the global table
+- **2026-09-07** — KI-114: a float-profiled arm applied to an int published a float
+- **2026-09-08** — KI-117: a JIT'd error has no `:trace`, found as a one-in-N flake
+- **2026-09-09** — two sessions split `heap.rs` in parallel; reconciling it, and `RuntimeCode` moves out
 
 ---
 
@@ -11735,3 +11833,30 @@ where safe (`[refer] NOTHING`, `[unbound] recorded-loaded-but-unbound under BROO
 export (`mono_differential`, old-wording quiesce) pass un-instrumented — instrumentation, not the
 fix. Residual: a bounded loop warns and proceeds if a respawner outlasts 20 rounds; none seen.
 Full write-up in known-issues.md.
+
+## 2026-09-09 — the same refactor arrived twice, and `RuntimeCode` moves out of heap.rs
+
+Two sessions worked `heap.rs` from the same base and both did moves (d)+(e)+(f): each produced
+its own `local_string.rs`, `slabs.rs` and GC-knob relocation, and one of them pushed. Resolved
+by taking the pushed side's whole `core/heap/` — it is canonical and further along (the orphaned
+test modules had followed their subjects there) — and dropping this side's two heap commits as
+duplicates.
+
+**The trap worth recording is the shape of the failure, not the duplication.** `git merge`
+reported five conflicts, all in files whose *content* differed. `gc.rs` was not among them: both
+sides had ADDED the same tuning knobs to it, in the same place, so git auto-merged them by
+keeping **both copies** — a clean merge that does not build (15 × `E0428 defined multiple
+times`). A conflict list is not the blast radius of a duplicated refactor; two sides moving the
+same code into the same new file conflict, and two sides moving it into an *existing* file
+silently double it. The resolution has to be directory-wide, and the build is the only gate that
+says so.
+
+`RuntimeCode` is the one piece that was not duplicated — item 1 in the handoff had named it "the
+one further move with a clean seam" and left it undone, so it moves now: `heap/runtime_code.rs`
+(833 lines) with `RuntimeCode`, `SymbolMap`/`SymbolHasher`, the registry vocabulary,
+`GlobalsSnapshot` and `GenPin`. `heap.rs` is **2,367 lines**, from 7,536 when the item was
+written. Its 29 private fields took `pub(super)` exactly as the item predicted. Verified on the
+merged tree: `cargo fmt --check`, clippy `--all-targets --all-features -D warnings`, the 84
+heap/GC/promote/freeze/globals Rust tests, and seven `.blsp` files spanning maps, the JIT trace
+guard, the startup image and the concurrency/spawn set (172 tests). Not a full-suite run — this
+box does not get one.

@@ -48,12 +48,43 @@
     (is (exemplified? 'audit/data-first?))
     (is (not (exemplified? 'audit/undocumented))))
 
-  ;; Not asserted to zero: 23 names carry no docstring and 224 no example as of
-  ;; ADR-308 — mostly Rust builtins whose docs come from PRIMITIVE_DOCS. Recorded
-  ;; here as a WATCH so the numbers are visible and cannot silently grow unnoticed.
   (test "report returns the four counts it prints"
     (let (r (with-out-str (report)))
       (is (includes? r "surface audit"))
       (is (includes? r "no docstring"))
       (is (includes? r "no example"))
       (is (includes? r "reversed args")))))
+
+;; The two counts, held. Until 2026-09-08 they were "recorded here as a WATCH so the numbers
+;; are visible and cannot silently grow unnoticed" — and nothing asserted them. The comment
+;; said 23 undocumented and 224 example-less; the real numbers were 0 and 1155, because the
+;; earlier reading predates `load-everything` (before it the audit judged only what happened
+;; to be loaded, which was a fraction of the surface). A watch that asserts nothing does not
+;; watch: it reports the number it was told, forever.
+(describe "surface audit: the documentation debt only shrinks"
+  (test "the audit sees the WHOLE surface, not just what happens to be loaded"
+    ;; `exampleless` below is a ceiling, and a ceiling over a short list passes for the wrong
+    ;; reason. Assert the surface first, so a regression in `load-everything` fails HERE
+    ;; instead of quietly making the ratchet easy.
+    (is (> (load-everything) 50))
+    (is (> (count (public-names)) 1000)))
+
+  (test "every public name carries a docstring"
+    ;; At zero, so it is a hard gate rather than a ratchet: a new public function without a
+    ;; docstring fails here. Asserted as the NAME LIST — a count says a rule was broken, the
+    ;; list says by what.
+    (assert= [] (undocumented)))
+
+  (test "no more public names lack a `form → result` example than yesterday"
+    ;; A RATCHET, not a target. 1138 names carry a docstring with no executed example, and
+    ;; that is real debt — but a hard gate at zero cannot land in one session, and no gate at
+    ;; all is what let the number grow unwatched. So: this number may be LOWERED whenever
+    ;; examples are written, and may never rise. Adding a public function means adding its
+    ;; example, or the ceiling stops you.
+    ;;
+    ;; Each example is an executed test (`doc_examples_test.blsp`), so lowering this is not a
+    ;; documentation chore with no verification behind it — it is coverage.
+    ;; Compared through `math/max` rather than with `<=`, so the failure PRINTS the number
+    ;; that broke it — the ceiling against the count that exceeded it is the whole diagnosis,
+    ;; where a plain false-against-true would send you back to run the audit by hand.
+    (assert= 1138 (math/max 1138 (count (exampleless))))))

@@ -1,9 +1,11 @@
 //! `nest release` mechanism — the runtime-resolution + target-triple plumbing
 //! behind the `cmd_release` orchestration in `main.rs` (ADR-038). Collection of
-//! the project's sources is *policy* (Brood: `project/bundle-collect`) and byte
-//! assembly is in `brood::bundle`; this module is the Rust glue that picks which
-//! base runtime to append to and names per-target artifacts. Split out of
-//! `main.rs` to keep the thin `nest` shell thin (ADR-028).
+//! the project's sources is *policy* (Brood: `project/bundle-collect`), and so is
+//! naming the artifacts (`project/release-plan`); byte assembly is in
+//! `brood::bundle`. What is left here is the Rust glue that can only live in this
+//! binary: picking which base runtime to append to, out of the one embedded in
+//! *this* `nest` at install time, the local cache, or a `--runtime` path. Split out
+//! of `main.rs` to keep the thin `nest` shell thin (ADR-028).
 
 /// The lean+gui `brood` runtime baked into this `nest` at install time, so
 /// `nest release` can append an app to it with **no Rust toolchain** (ADR-038).
@@ -98,44 +100,12 @@ pub(crate) fn runtime_cache_path(triple: &str) -> Option<std::path::PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    let bin = if is_windows_triple(triple) {
+    let bin = if triple.contains("windows") {
         "brood.exe"
     } else {
         "brood"
     };
     Some(base.join("brood/runtimes").join(triple).join(bin))
-}
-
-/// Short, human-friendly artifact suffix for a target triple — `macos-arm64`,
-/// `linux-x86_64`, `linux-musl-x86_64`, `windows-x86_64`. An unrecognized OS
-/// keeps the whole triple (always unambiguous, just longer).
-pub(crate) fn target_suffix(triple: &str) -> String {
-    let arch = match triple.split('-').next().unwrap_or(triple) {
-        "aarch64" => "arm64",
-        a => a,
-    };
-    let os = if triple.contains("apple-darwin") {
-        "macos"
-    } else if triple.contains("windows") {
-        "windows"
-    } else if triple.contains("linux") {
-        // Keep the libc visible so a gnu + musl matrix can't collide.
-        if triple.ends_with("musl") {
-            "linux-musl"
-        } else {
-            "linux"
-        }
-    } else if triple.contains("freebsd") {
-        "freebsd"
-    } else {
-        return triple.to_string();
-    };
-    format!("{os}-{arch}")
-}
-
-/// Whether a target triple is a Windows target (artifact gets `.exe`).
-pub(crate) fn is_windows_triple(triple: &str) -> bool {
-    triple.contains("windows")
 }
 
 /// Build the single lean+gui `brood` runtime from the workspace this `nest` was
@@ -198,49 +168,9 @@ fn workspace_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// Human-friendly byte size for the release summary (e.g. `4.2 MB`).
-pub(crate) fn human_size(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
-    let mut n = bytes as f64;
-    let mut u = 0;
-    while n >= 1024.0 && u < UNITS.len() - 1 {
-        n /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{bytes} {}", UNITS[0])
-    } else {
-        format!("{n:.1} {}", UNITS[u])
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{is_windows_triple, runtime_cache_path, target_suffix};
-
-    #[test]
-    fn target_suffix_maps_common_triples() {
-        assert_eq!(target_suffix("aarch64-apple-darwin"), "macos-arm64");
-        assert_eq!(target_suffix("x86_64-apple-darwin"), "macos-x86_64");
-        assert_eq!(target_suffix("x86_64-unknown-linux-gnu"), "linux-x86_64");
-        assert_eq!(target_suffix("aarch64-unknown-linux-gnu"), "linux-arm64");
-        // musl keeps the libc visible so a gnu + musl matrix can't collide.
-        assert_eq!(
-            target_suffix("x86_64-unknown-linux-musl"),
-            "linux-musl-x86_64"
-        );
-        assert_eq!(target_suffix("x86_64-pc-windows-msvc"), "windows-x86_64");
-        assert_eq!(target_suffix("x86_64-unknown-freebsd"), "freebsd-x86_64");
-        // An unrecognized OS keeps the whole triple — unambiguous, just longer.
-        assert_eq!(target_suffix("wasm32-wasip1"), "wasm32-wasip1");
-    }
-
-    #[test]
-    fn windows_triples_get_exe() {
-        assert!(is_windows_triple("x86_64-pc-windows-msvc"));
-        assert!(is_windows_triple("x86_64-pc-windows-gnu"));
-        assert!(!is_windows_triple("x86_64-unknown-linux-gnu"));
-    }
+    use super::runtime_cache_path;
 
     #[test]
     fn runtime_cache_path_is_per_triple() {

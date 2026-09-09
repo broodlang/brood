@@ -213,5 +213,7 @@ result does not read back, so use `pr-str` when you need the whole value.
 results, `spy`'s trace entries, an editor's echo area. A protocol whose job is to
 show a value to a human has no business flooding the screen (or a pipe, or a log)
 with a megabyte, and one bounded printer is how that stays true everywhere instead
-of each consumer inventing its own cap."
+of each consumer inventing its own cap.
+
+    (pr-str-bounded [1 2]) → \"[1 2]\""
   (%pr-bounded x 0))

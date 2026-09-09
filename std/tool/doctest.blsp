@@ -29,8 +29,21 @@ the sentence.
     (doctest/failures)                    ;; → …across every public name in the image")
 
 (defn- strip-comment (line)
-  ;; `line` up to a trailing `;`, so `→ :x  ; note` compares against `:x`.
-  (let (i (index-of line ";")) (if (and i (>= i 0)) (string/substring line 0 i) line)))
+  ;; `line` up to its first `;` that is OUTSIDE a string literal, so `→ :x  ; note`
+  ;; compares against `:x` while `→ ("a; b")` keeps its semicolon. Cutting at the first
+  ;; `;` unconditionally truncated any documented result containing one, leaving an
+  ;; expectation that no longer read as a value — so it fell through to the text
+  ;; comparison and could only fail, however right the code was.
+  (letrec (go (fn (cs i in-string escaped)
+                (cond
+                  (empty? cs) line
+                  escaped (go (rest cs) (+ i 1) in-string false)
+                  ;; A backslash escapes the next character, but only inside a string.
+                  (= (first cs) "\\") (go (rest cs) (+ i 1) in-string in-string)
+                  (= (first cs) "\"") (go (rest cs) (+ i 1) (not in-string) false)
+                  (and (= (first cs) ";") (not in-string)) (string/substring line 0 i)
+                  :else (go (rest cs) (+ i 1) in-string false))))
+    (go (string/->list line) 0 false false)))
 
 (defn- example-line? (l)
   ;; Indented, and carrying the arrow OUTSIDE any trailing comment. Testing the raw line

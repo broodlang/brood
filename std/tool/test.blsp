@@ -1005,7 +1005,18 @@ the test rather than hanging the run."
 ;; nextest wrapper (`brood_suite_passes`, tests/suite.rs) runs this entire suite as
 ;; ONE case, so its per-case cap in `.config/nextest.toml` is set *above* this (300s)
 ;; — otherwise nextest would kill the wrapper before this inner timeout could fire.
-(defdyn *test-timeout-ms* 120000)
+;; Under `BROOD_CONTRACTS=1` the ceiling is FIVE TIMES that. Contracts rebind every signed
+;; function to a checking shim, so every std call a test makes pays an argument check — and
+;; `audit_test`, `doc_examples_test`, `prng_test` and `resolver_test` all cross 120 s on work
+;; that is not hung, only wrapped. Left alone, those four report as TIMED OUT, which is the
+;; one word that must keep meaning "this test stopped making progress": a mode that turns
+;; four slow tests into four apparent hangs makes its own real hang unreadable. The multiple
+;; is deliberately coarse — it separates "slower because everything is checked" from "not
+;; running", which is the only distinction the ceiling has to draw. It does NOT lift the
+;; nextest wrapper's own 300 s cap, which would still cut a contracts run short; contracts
+;; mode is a dev switch driven directly (`brood --test`, `nest test`), not a suite
+;; configuration, and this raises the ceiling for the way it is actually run.
+(defdyn *test-timeout-ms* (if (= (%getenv "BROOD_CONTRACTS") "1") 600000 120000))
 (sig *test-timeout-ms* int)
 
 ;; The batch budget for a unit tagged `:slow` or `:conformance`. Before this, `:tags [… :slow]` was

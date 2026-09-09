@@ -9066,17 +9066,31 @@ The rest were four more shapes, all fixed:
   `nest/main` declared `vector` over the LIST the router builds, which refused every
   Brood-routed `nest` subcommand under contracts.
 
-**Expected residue, deliberately not chased.** With everything above in, a contracts-mode
-run of the whole test tree from source still reds a handful of files, all for reasons that
-are the mode itself rather than a bug: `audit_test`, `doc_examples_test`, `prng_test` and
-`resolver_test` exceed the 120 s per-test budget (every std call is wrapped; the doctest
-runner evaluates thousands of examples); `maps_test` asserts the KERNEL's `nth` message
+**Residue: the budget half is fixed; the rest stays, deliberately.** With everything above
+in, a contracts-mode run of the whole test tree from source still reds a handful of files,
+all for reasons that are the mode itself rather than a bug.
+
+**Fixed 2026-09-08.** `audit_test`, `doc_examples_test`, `prng_test` and `resolver_test`
+exceeded the 120 s per-test budget (every std call is wrapped; the doctest runner evaluates
+thousands of examples), and were therefore reported as **TIMED OUT** — the one word that has
+to keep meaning "this test stopped making progress". Four slow tests presenting as four
+hangs is what makes a real hang unreadable, so `*test-timeout-ms*` is now `600000` when
+`BROOD_CONTRACTS=1` and `120000` otherwise. Coarse on purpose: the ceiling only has to
+separate "slower because everything is checked" from "not running". It does not lift the
+nextest wrapper's own 300 s cap — contracts mode is driven directly, not under nextest.
+
+**Not chased, and the reason.** `maps_test` asserts the KERNEL's `nth` message
 (`integer index`), which the shim's argument check now pre-empts with its own; the three
 `jit_*` tests assert lowering decisions on shapes the shims change; and `record_test`,
 `sig_adoption_test`, `ability_test`, `std_check_test` are CHECKER tests whose warnings differ
 against a live image in which every std signature is a shim (`(sig ghost …)` itself expands to
-a deferred contract, not a declaration). Contracts mode is a dev switch, not a suite
-configuration; what it must do — boot, load every module, enforce — is gated.
+a deferred contract, not a declaration). Every one of those is the shim being *visible*, which
+is the mode working; marking them `:skip` under contracts would put "does not hold under
+contracts" into seven files that have nothing to do with contracts, to make green a
+configuration nothing runs. Contracts mode is a dev switch, not a suite configuration; what
+it must do — boot, load every module from source, enforce — is gated, and the reading it is
+actually used for (point a signed module at it and see what the contracts say) is unaffected
+by any of the seven.
 
 **Gate.** `contracts_mode.rs::every_baked_in_module_loads_under_contracts_from_source`:
 a fresh `XDG_CACHE_HOME`, `BROOD_NO_STDIMAGE=1`, `BROOD_CONTRACTS=1`, a program that

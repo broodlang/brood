@@ -320,15 +320,29 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
     (math/cos 0)          → 1.0"
   (%cos x))
 (sig cos (number -> float))
-(defn tan (x) "The tangent of `x` (radians). Returns a float." (%tan x))
+(defn tan (x)
+  "The tangent of `x` (radians). Returns a float.
+
+    (math/tan 0) → 0.0"
+  (%tan x))
 (sig tan (number -> float))
-(defn asin (x) "The arcsine of `x` in radians. `x` must be in [-1, 1]; raises otherwise." (%asin x))
+(defn asin (x)
+  "The arcsine of `x` in radians. `x` must be in [-1, 1]; raises otherwise.
+
+    (math/asin 0) → 0.0"
+  (%asin x))
 (sig asin (number -> float))
 (defn acos (x)
-  "The arccosine of `x` in radians. `x` must be in [-1, 1]; raises otherwise."
+  "The arccosine of `x` in radians. `x` must be in [-1, 1]; raises otherwise.
+
+    (math/acos 1) → 0.0"
   (%acos x))
 (sig acos (number -> float))
-(defn atan (x) "The arctangent of `x` in radians (result in [-π/2, π/2])." (%atan x))
+(defn atan (x)
+  "The arctangent of `x` in radians (result in [-π/2, π/2]).
+
+    (math/atan 0) → 0.0"
+  (%atan x))
 (sig atan (number -> float))
 (defn atan2 (y x)
   "The angle in radians of the vector (`x`, `y`) from the positive x-axis, in (-π, π]. Handles x=0.
@@ -348,7 +362,15 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
     (math/ln 1)           → 0.0"
   (%ln x))
 (sig ln (number -> float))
-(defn log2 (x) "The base-2 logarithm of `x`. `x` must be positive; raises otherwise." (%log2 x))
+(defn log2 (x)
+  "The base-2 logarithm of `x`. `x` must be positive; raises otherwise.
+
+    (math/log2 8) → 3.0"
+  (%log2 x))
 (sig log2 (number -> float))
-(defn log10 (x) "The base-10 logarithm of `x`. `x` must be positive; raises otherwise." (%log10 x))
+(defn log10 (x)
+  "The base-10 logarithm of `x`. `x` must be positive; raises otherwise.
+
+    (math/log10 1000) → 3.0"
+  (%log10 x))
 (sig log10 (number -> float))
