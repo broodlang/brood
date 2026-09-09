@@ -1816,8 +1816,10 @@ Runtime housekeeping (both items landed):
   shipping: 0 across `std/`, 6 across `tests/`+`examples/` (written-out literals that
   cannot fail, carrying `check-allow`), **8 in bedit — every one a real bug**, and all one
   shape: a `nil?`/truthiness guard written before ADR-310 made a failure truthy, which a
-  failure walks straight through into arithmetic that raises. ⬜ **bedit's eight are not
-  fixed** — downstream repo, CI pins it. Also fixed on the way: the incremental check cache
+  failure walks straight through into arithmetic that raises. ☑️ **bedit's eight no longer
+  reproduce** (checked 2026-09-09: `nest check` on `../bedit` is clean), so they were fixed
+  downstream at some point and this line had gone stale. What the check DID surface was
+  KI-122 — this diagnostic's sibling crying wolf. Also fixed on the way: the incremental check cache
   was not keyed on the checking MODE, so a plain `nest check` poisoned it for the following
   `nest check --strict` — CI runs the two gates back to back, so the strict gate had
   stopped being able to fail (`crates/nest/tests/check_cache_mode.rs`).

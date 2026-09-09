@@ -3302,6 +3302,11 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             }
             // Refer all public names: enumerate the live globals under `mod/`.
             let mut referred = 0usize;
+            // Public names the module actually EXPOSES, whether or not this `:use` took
+            // them. The diagnostic below asks "are this module's globals gone?", and only
+            // this count can answer that: `referred` is 0 both when the globals are missing
+            // (the bug) and when the caller excluded every one of them (perfectly healthy).
+            let mut public_seen = 0usize;
             for g in heap.global_symbols() {
                 let name = value::symbol_name(g);
                 if let Some(bare) = name.strip_prefix(&prefix) {
@@ -3309,6 +3314,7 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                     // (the recorded fact) is exact — the module is loaded here.
                     if !bare.is_empty() && !bare.contains('/') && !heap.is_private(g) {
                         let bare_sym = value::intern(bare);
+                        public_seen += 1;
                         if excluded.contains(&bare_sym) {
                             continue;
                         }
@@ -3327,7 +3333,17 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             // `:exclude`d (`clpb2`), or `defdyn`-only (`dynprov`, whose names are ambient, not
             // `mod/` globals) — so those are NOT the signal and must stay silent, or the line
             // becomes noise the reader learns to skip past.
-            if referred == 0 && is_embedded_module(&mod_name) {
+            // `public_seen`, not `referred`. Excluding every public name of an embedded
+            // module leaves `referred == 0` with nothing wrong: bedit's completion module
+            // does exactly that — `(:use fuzzy :exclude [filter match])`, `fuzzy`'s only two
+            // publics — and calls `fuzzy/filter` qualified. That warned on every cold
+            // `nest check` of the flagship downstream project (the run has to rebuild
+            // `.brood/image.bin` to show it, which is why it read as a one-off), and the
+            // message was not merely noisy but false: it says no public `fuzzy/` global is
+            // bound, while both were. The shape was already listed here as one that must
+            // stay silent — `clpb2` — but the guard chosen was `is_embedded_module`, which
+            // excuses a USER module that excludes everything and not a std one.
+            if referred == 0 && public_seen == 0 && is_embedded_module(&mod_name) {
                 eprintln!(
                     "[refer] (:use {mod_name}) imported NOTHING — no public `{mod_name}/` global is bound; \
                      *features* lists it: {}, mid-load: {}, pid={:?} scope={}",

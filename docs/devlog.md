@@ -838,6 +838,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-09** — queue items 2/3/4 closed by verification; a doc slice, and why its sabotage lied
 - **2026-09-09** — the wasm cooperative scheduler was compiled on every CI run and executed on none
 - **2026-09-09** — the bare namespace gets a gate: 264 names recorded, a new one fails by name
+- **2026-09-09** — KI-122: the KI-120 tripwire was crying wolf on bedit, on a false claim
 
 ---
 
@@ -12141,3 +12142,44 @@ and adding a real `(defn sneaky-new-bare-name …)` to `std/prelude/core.blsp` �
 way a bare name arrives — reds it by name after a rebuild. That last one is the scenario the
 gate exists for, and it is the only sabotage that proves the gate sees the *world* rather
 than its own ledger.
+
+## 2026-09-09 (later) — KI-122: the tripwire was wrong about the thing it was watching
+
+Went looking for the eight real bugs ADR-316's failure lint found in bedit, which ROADMAP
+still marks ⬜. They do not reproduce — `nest check` on bedit is clean — so that entry is
+stale like the others this weekend. What the run *did* print was a default-ON diagnostic:
+
+    [refer] (:use fuzzy) imported NOTHING — no public `fuzzy/` global is bound;
+            *features* lists it: true, mid-load: false
+
+That is KI-120's tripwire, deliberately left armed so the "recorded loaded, globals missing"
+wave self-reports, and deliberately narrowed to EMBEDDED std modules because those always have
+public API. `fuzzy` is one, so it fired. **The claim was false.** Both of `fuzzy`'s publics
+were bound, the check reported zero warnings, and the qualified call resolved.
+
+The cause is a counting mistake. The check tested `referred` — names *this* `:use` took — and
+an excluded name `continue`s without counting. bedit's completion module opens
+`(:use fuzzy :exclude [filter match])`, which is `fuzzy`'s entire public surface, so
+`referred == 0` with nothing wrong. The comment beside the check already listed that shape as
+one that must stay silent (`clpb2`, "everything `:exclude`d") — the guard chosen for it,
+`is_embedded_module`, excuses a *user* module that excludes everything and not a std one. Now
+it counts `public_seen`, the names the module exposes, so the message means what it says.
+
+**Chasing the repro was most of the work, and the shape is worth knowing.** It fired once in
+ten runs and survived `BROOD_NO_CHECK_CACHE=1`, `BROOD_NO_STDIMAGE=1` and a private
+`XDG_CACHE_HOME` — each of which I expected to force it. The run that shows it is the run that
+rebuilds `.brood/image.bin`, and every later check materialises from that image and is silent;
+so the act of reproducing it also cures it. `rm ../bedit/.brood/image.bin && nest check` is
+deterministic.
+
+I also got the diagnosis backwards once and corrected it mid-flight: the first reading was
+"`:exclude` explains it, false positive", then the message's own wording ("no public global is
+bound") argued it was the genuine KI-120 state, and only reading the code settled it — the
+message is generated from a count that cannot distinguish the two, which is the defect.
+
+Guard: `crates/cli/tests/refer_excluded_all.rs`, with an ordinary refer-all as the control so
+it cannot pass on a build where the diagnostic never fires at all. Sabotage-verified — the old
+guard reds the exclude-all case and leaves the control green.
+
+The commit that narrowed this diagnostic said "a gate that cries wolf is one the reader learns
+to skip". It was crying wolf on the one project CI runs as its downstream smoke.
