@@ -29,7 +29,11 @@ FIXED** — the wrapper's `def-face`/`editor/serve/*` unbound wave was a supervi
 stragglers respawning a child into the window between the runner's ONE quiesce pass and the
 `%isolate` restore; the child loaded an editor module and `provide`d it after the restore rolled
 its globals back, so `*features*` marked it loaded over an empty namespace (KI-89's asymmetry).
-`test-quiesce-file` now loops until the straggler set is empty. **No open bug again.** Three
+`test-quiesce-file` now loops until the straggler set is empty. **No open bug — one WATCH:
+KI-121**, a crash-report test that read a neighbour's crash off the runtime-global
+`proc/system-monitor` under a deliberately heavy `-j8` run. One sighting, retry-absorbed,
+passes 3/3 alone, so it cannot be reproduced on demand; the entry carries the fix direction if
+it recurs. CI green on `4001f3e9`; `make green --local` green on a fresh `make release`. Three
 diagnostics stay default-on-where-safe (`[refer] NOTHING`, `[unbound]` under `BROOD_SCOPE_DBG`,
 `BROOD_TEST_TRACE`) so a recurrence self-reports. If `brood_suite_passes` ever shows the wave
 again, the `[refer] imported NOTHING` line names the module and the responsible file follows. On a hit, read the wrapper's
