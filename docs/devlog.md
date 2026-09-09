@@ -837,6 +837,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-09** — KI-121 fixed without waiting for it to recur: the test, not the reporter, was racy
 - **2026-09-09** — queue items 2/3/4 closed by verification; a doc slice, and why its sabotage lied
 - **2026-09-09** — the wasm cooperative scheduler was compiled on every CI run and executed on none
+- **2026-09-09** — the bare namespace gets a gate: 264 names recorded, a new one fails by name
 
 ---
 
@@ -12107,3 +12108,36 @@ corrected rather than left to mislead, which is this week's recurring theme.
 the very error the roadmap quotes) and it looked like a found bug. It was not: brood imports
 `web_time::Instant`, which is shimmed. The probe used `std::time::Instant`. Checking the
 dependency before believing the toy would have cost one grep.
+
+## 2026-09-09 (later) — the bare namespace is a flow, so it gets a valve
+
+ROADMAP's last open structural item, and it had already explained why counting again would
+not help:
+
+> It went 268 → **264** across a day in which ADR-290/291 removed 18, because roughly
+> fourteen arrived … Reduction work is cancelled by ordinary feature work at about the rate
+> it is done, so the next audit will re-derive this same list unless **adding a bare name
+> has to record a reason**.
+
+Two audits had each removed names and each been undone within a day, because nothing sits
+between a root-level `defn` and the language's shared vocabulary. A third audit would have
+produced a third list. So: `docs/bare-names.md` records all **264** bare public names,
+grouped by the KIND of justification — operators (13) and `*earmuffed*` dynamics (62) are
+bare by convention and need no argument, predicates (40) read as English at a call site, and
+`core` (149) is the group with a real budget and the one to push back on. The groups are
+coarse on purpose: the file carries the kind of reason, not prose per name, and the *reason*
+belongs in the commit that adds one.
+
+`tests/bare_names_test.blsp` fails when a bare public name is not in the ledger, **by name**.
+The reverse direction — a listed name no longer live — runs only when the full surface is
+loaded: a lean build (no `brood/dev-tools`) genuinely has fewer modules, and a gate that
+reds on the feature set is one people learn to skip.
+
+Sabotage-verified three ways, the third being the one that matters: dropping `spawn` from
+the ledger reds it naming `spawn`; pointing the parser at a missing file reds the separate
+"the ledger parses and is not empty" anchor too (a parser matching nothing would otherwise
+make every check pass vacuously — the same shape as a sweep pointed at a missing directory);
+and adding a real `(defn sneaky-new-bare-name …)` to `std/prelude/core.blsp` — the ordinary
+way a bare name arrives — reds it by name after a rebuild. That last one is the scenario the
+gate exists for, and it is the only sabotage that proves the gate sees the *world* rather
+than its own ledger.

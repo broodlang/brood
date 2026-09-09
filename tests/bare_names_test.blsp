@@ -1,0 +1,75 @@
+;; The bare namespace is gated: a new unqualified public name has to be recorded.
+;;
+;; ROADMAP calls this "a FLOW, not a stock". Two audits each removed bare names and each
+;; was undone within a day by ordinary feature work, because nothing sits between a new
+;; root-level `defn` and the language's shared vocabulary. Counting them again would just
+;; re-derive the same list; what changes the flow is a gate, so this is one.
+;;
+;; The ledger is `docs/bare-names.md` — every bare public name, grouped by the KIND of
+;; justification it has. A bare name absent from it fails here, by name.
+;;
+;; The reverse check is deliberately softer. A lean build (no `brood/dev-tools`) genuinely
+;; has fewer modules loaded, so a listed name can be legitimately absent; asserting it
+;; hard would red the suite on the feature set, and a gate that reds for the wrong reason
+;; is one people learn to skip. It runs only when the full surface is present.
+
+(defmodule bare-names-test
+  (:use test))
+
+(def- ledger-path "docs/bare-names.md")
+
+(defn- public? (s)
+  (let (n (->string s))
+    (and (not (string/starts-with? n "%")) (not (reflect/private? s)))))
+
+(defn- bare? (s)
+  ;; A leading `/` is the division operator, not a namespace separator.
+  (let (n (->string s) i (index-of n "/"))
+    (not (and i (> i 0)))))
+
+(defn- live-bare-names ()
+  "Every bare public name the runtime can see, with the whole library loaded."
+  (do
+    (doseq (m (reflect/builtin-modules))
+      (check-allow :discarded-catch (try (require-one m) (catch _ nil))))
+    (sort (map (filter (filter (reflect/global-names) public?) bare?) ->string))))
+
+(defn- ledger-names ()
+  "The names recorded in the ledger: every `- \\`name\\`` bullet."
+  (sort (map (filter (string/split (file/slurp ledger-path) "\n")
+               (fn (l) (string/starts-with? l "- `")))
+          (fn (l)
+            (let (rest (string/substring l 3 (count l))
+                  end (index-of rest "`"))
+              (string/substring rest 0 end))))))
+
+(defn- missing-from (a b)
+  "Every name in `a` that is not in `b`."
+  (filter a (fn (n) (not (includes? b n)))))
+
+;; A lean runtime has no dev-tools modules, so the surface is smaller by design. Any name
+;; from one of those modules is enough to tell the two builds apart.
+(defn- full-surface? ()
+  (and (bound? 'test/run) (bound? 'doctest/failures)))
+
+(describe "the bare namespace is gated, not merely counted"
+
+  (test "the ledger parses and is not empty"
+    ;; A parser that silently matched nothing would make every check below pass vacuously —
+    ;; the same shape as a sweep pointed at a missing directory.
+    (let (recorded (ledger-names))
+      (is (> (count recorded) 200))
+      (is (includes? recorded "spawn"))
+      (is (includes? recorded "*out*"))
+      (is (not (includes? recorded "string/join")))))
+
+  (test "every bare public name is recorded in docs/bare-names.md"
+    (let (unrecorded (missing-from (live-bare-names) (ledger-names)))
+      ;; Fails by NAME: the fix is to add it to the ledger under its group, and to say in
+      ;; the commit why it should not be qualified instead.
+      (assert= [] (apply vector unrecorded))))
+
+  (test "the ledger has not rotted (full builds only)"
+    (if (full-surface?)
+      (assert= [] (apply vector (missing-from (ledger-names) (live-bare-names))))
+      (is true))))

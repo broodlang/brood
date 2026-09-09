@@ -442,13 +442,25 @@ family of per-type functions. ADR-250 through ADR-253 carry the decisions.
         question (`(gen/start f state :link true :name :foo)`), not a rename, and it is a
         breaking change to the gen surface. Deferred deliberately, with the reason recorded
         so it is not re-derived as "five verbs" again.
-- [ ] **The bare namespace is a FLOW, not a stock — nothing gates a new bare name.** It went
+- [x] **The bare namespace is a FLOW, not a stock — GATED 2026-09-09.** `docs/bare-names.md`
+      records all 264 bare public names, grouped by the KIND of justification they have
+      (operator / dynamic / predicate / core vocabulary), and `tests/bare_names_test.blsp`
+      fails when a bare public name is not in it — **by name**, so the fix is to record it
+      and say in the commit why it should not be qualified instead. The reverse check
+      (a listed name no longer live) runs only on a full build, because a lean runtime
+      genuinely has fewer modules and a gate that reds on the feature set is one people
+      learn to skip. Sabotage-verified three ways: dropping `spawn` from the ledger reds it
+      naming `spawn`; pointing the parser at a missing file reds the "ledger parses and is
+      not empty" anchor as well; and a real new root-level `defn` added to the prelude —
+      the ordinary way a bare name arrives — reds it naming `sneaky-new-bare-name`. The
+      superseded text follows, because its measurement is the argument for the gate:
+      ~~It went
       268 → **264** across a day in which ADR-290/291 removed 18, because roughly fourteen
       arrived: of ten sampled, eight (`defbehaviour`, `conj-onto`, `lookup-get`,
       `lookup-keys`, `->seq`, `assoc-in`, `dissoc-in`, `inspect`) did not exist that morning.
       Reduction work is cancelled by ordinary feature work at about the rate it is done, so
       the next audit will re-derive this same list unless adding a bare name has to record a
-      reason. This is the structural item behind all four ADRs
+      reason. This is the structural item behind all four ADRs~~
 
 ### Backend seams — swappable JIT / engine + perf legibility (2026-08-11)
 
