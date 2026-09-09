@@ -83,10 +83,14 @@ jobs:
   # which is the worst place to learn it, since a deploy is where nobody is reading a
   # compiler.
   #
-  # Build only, deliberately: there is no wasm test runner here, and what breaks in this
-  # class is COMPILATION of the cfg'd surface, which a build catches in full.
+  # It used to be build-only, on the reasoning that what breaks in this class is COMPILATION
+  # of the cfg'd surface. That is true of a cfg'd SHIM and false of the cooperative
+  # scheduler, which is a whole alternate implementation whose bugs are behavioural — the
+  # clock-domain hang needed a by-hand repro script to find precisely because it compiles
+  # fine. There is a wasm test runner here now (`wasm-bindgen --target nodejs` + node), and
+  # the behavioural suite runs after the build.
   wasm:
-    name: wasm32 (the playground target)
+    name: wasm32 (the playground target — built AND run)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -99,6 +103,24 @@ jobs:
       # `--profile release-wasm`, matching hive's Dockerfile: CI must compile the wasm the
       # site actually ships, not a differently-optimized one.
       - run: cargo build --profile release-wasm --target wasm32-unknown-unknown -p brood-playground
+
+      # Build-only was the standing state, and the comment above said so: "there is no wasm
+      # test runner here". That left an entire alternate scheduler — the cooperative pump,
+      # the non-blocking park, the frozen logical clock and `fire_next_timer` — compiled on
+      # every run and executed on none. The native suite CANNOT cover it: off wasm there are
+      # OS worker threads and `sched_now()` IS `Instant::now()`, so every gate agrees whether
+      # or not the wasm path works, which is why the clock-domain bug needed a by-hand repro
+      # script to find. `wasm-bindgen --target nodejs` + node is the runner; it needs nothing
+      # a browser would.
+      #
+      # Sabotage-verified when it landed: a park gate on real time HANGS the suite, a pump
+      # that sweeps one queue reds 7 of 10 cases, and a `fire_next_timer` that does not
+      # advance the logical clock hangs. A hang is reported as its own verdict, because that
+      # is this scheduler's signature failure and a bare non-zero exit would hide it.
+      - name: wasm-bindgen CLI (pinned to the crate version in crates/playground)
+        run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - name: wasm32 behavioural suite (the cooperative scheduler actually runs)
+        run: ./scripts/wasm-suite.sh
 
   # Clippy runs ALONE, in parallel with the test job, and that is the point.
   #

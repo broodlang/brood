@@ -836,6 +836,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-09** — a gate for ADR-323's third spelling; the `nest` arms item was already done
 - **2026-09-09** — KI-121 fixed without waiting for it to recur: the test, not the reporter, was racy
 - **2026-09-09** — queue items 2/3/4 closed by verification; a doc slice, and why its sabotage lied
+- **2026-09-09** — the wasm cooperative scheduler was compiled on every CI run and executed on none
 
 ---
 
@@ -12058,3 +12059,51 @@ had — the step-3 comparison lives in `crates/cli/tests/support/`, which a grep
 green (`artifact_matrix` 24.2 s, `prelude_image_matches_source`, `prelude_image_survives_a_
 relaid_stdlib_image`). Item 3's second half was a decision, and the decision is to leave
 contracts mode as it is: `contracts_mode.rs` 3/3 already gates what the mode must do.
+
+## 2026-09-09 (later) — a wasm test runner: the cooperative scheduler now RUNS in CI
+
+The wasm concurrency item read as a five-milestone feature to build. Four of them were
+already built — `ensure_workers` no-ops on wasm, `pump_until_quiescent` sweeps the queues,
+the park path is shared, and `fire_next_timer` advances a frozen logical clock. What was
+missing was not a feature. It was **execution**: CI's wasm job said so in its own comment —
+*"Build only, deliberately: there is no wasm test runner here"* — so an entire alternate
+scheduler compiled on every run and ran on none.
+
+The native suite cannot close this by construction, and the repo already knew: off wasm
+there are OS worker threads and `sched_now()` **is** `Instant::now()`, so every gate agrees
+whether or not the wasm path works. That is why the clock-domain hang (park gate on real
+time, receive re-scan on logical time → suspend/park/re-queue forever, 100% CPU, frozen
+tab) needed a **by-hand** repro script to find, and why its permanent guard was a
+*source-text* test that greps the gate rather than running it.
+
+`scripts/wasm-suite.sh` + `wasm-suite.cjs` closes it: build the playground on the profile
+the site serves, `wasm-bindgen --target nodejs`, then run **10 behavioural cases** under
+node — pump, park/wake, sweeping every queue, a ping-pong, timer firing, deadline ordering,
+message-beats-timeout, would-block termination, and the clock-domain case. `make wasm-test`,
+in `make green-all`, and a CI step in the wasm job. The whole thing is a 45 s build plus
+~1.5 s of node.
+
+**Sabotage found a bug in my own test, which is the part worth recording.** Three
+sabotages: a park gate on real time (hangs), a pump sweeping only queue 0 (reds 7 of 10), a
+`fire_next_timer` that does not advance the logical clock (hangs). The first one **passed**
+at first. The case was under-powered — a 3M-iteration burn against a 200 ms deadline is
+marginal, and the bug only arms when real time clearly outruns logical time. Sized to 20M
+against 50 ms (~26x) it reproduces the documented hang exactly. A case that cannot fail
+reads as coverage, and this one would have shipped as decoration.
+
+A hang is also reported as its own verdict rather than a bare non-zero exit, because a hang
+IS this scheduler's signature failure and "the command failed" would hide which kind.
+
+Two smaller things on the way. The wasm target had accumulated two warnings the native
+build never shows (an `AtomicBool` import the wasm timer does not use; `subprocess::pty`,
+whose only reader is unix-gated) — CI builds wasm without `-D warnings`, so they were
+silent. Both fixed, wasm target now warning-clean. And three documents that described the
+old state — CI's "build only" comment, the repro script's "run by hand", and
+`sched_clock_domain.rs`'s "why a source-text guard rather than a behavioural test" — were
+corrected rather than left to mislead, which is this week's recurring theme.
+
+**A wrong turn, for the record.** The first hypothesis was that `Instant::now()` traps on
+`wasm32-unknown-unknown` — a minimal probe confirmed the trap (`RuntimeError: unreachable`,
+the very error the roadmap quotes) and it looked like a found bug. It was not: brood imports
+`web_time::Instant`, which is shimmed. The probe used `std::time::Instant`. Checking the
+dependency before believing the toy would have cost one grep.

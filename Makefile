@@ -343,9 +343,20 @@ green: ## Answer one question honestly: is this tree green? (completed CI runs +
 	# `--local` skips the CI half, `--remote` skips the local half.
 	@./scripts/green.sh $(ARGS)
 
-green-all: check-examples check-stress check-imaged smoke-bedit ## `make green` plus clippy (CI's flags), the two slow .blsp corpus gates and the bedit smoke
+green-all: check-examples check-stress check-imaged smoke-bedit wasm-test ## `make green` plus clippy (CI's flags), the two slow .blsp corpus gates, the bedit smoke and the wasm behavioural suite
 	@./scripts/green.sh --clippy
-	@echo "green-all: clippy, the .blsp gates and the bedit smoke passed too. Still not run: make test, breakage, tree-walker differential."
+	@echo "green-all: clippy, the .blsp gates, the bedit smoke and the wasm suite passed too. Still not run: make test, breakage, tree-walker differential."
+
+wasm-test: ## Run the wasm32 cooperative scheduler BEHAVIOURALLY (build + wasm-bindgen + node)
+	# CI's wasm job is build-only ("there is no wasm test runner here"), so an entire
+	# alternate scheduler — the cooperative pump, the non-blocking park, the frozen logical
+	# clock and fire_next_timer — was compiled every run and executed none. The native
+	# suite cannot cover it by construction: off wasm there are OS workers and `sched_now()`
+	# IS `Instant::now()`, so every gate agrees whether or not the wasm path works. This
+	# runs the real artifact (the profile the site serves) under node.
+	# Needs: rustup target add wasm32-unknown-unknown; cargo install wasm-bindgen-cli
+	# --version 0.2.100; node.
+	@./scripts/wasm-suite.sh
 
 smoke-bedit: ## Run bedit's gates (nest check, --check-boot, nest test) against THIS tree's nest — the downstream smoke CI's `downstream-bedit` job runs
 	# bedit is where a brood regression surfaces first (the ADR-302 rename wave, 2026-08-30,

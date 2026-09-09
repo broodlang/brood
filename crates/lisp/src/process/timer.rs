@@ -29,7 +29,12 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
+// Only the native timer thread has a start-once flag; wasm has no timer thread at all
+// (`fire_next_timer` is driven by the pump), so this import is unused there and the wasm
+// build warned. CI builds wasm without `-D warnings`, so it warned silently for a while.
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicBool;
 use std::sync::{Condvar, LazyLock, Mutex};
 use web_time::Instant;
 

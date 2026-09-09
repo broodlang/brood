@@ -100,6 +100,11 @@ struct Proc {
     /// exist on `wasm32-unknown-unknown`, and this struct is not itself unix-gated, so
     /// naming the alias here broke the playground's build. `RawFd` IS `i32` on every
     /// unix target; the unix-only code below converts at its own boundary.
+    ///
+    /// Its only reader (`pty_resize`) is unix-gated while this struct is not, so on wasm32
+    /// nothing reads it and that target warned. Allowed rather than cfg'd out: gating the
+    /// field would fork the constructor for one dead word.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pty: Option<i32>,
 }
 

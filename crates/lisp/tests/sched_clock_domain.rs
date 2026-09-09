@@ -2,8 +2,12 @@
 //! clock ([`process::timer::sched_now`]), so every gate that decides "has it elapsed?"
 //! must read that same clock — never `Instant::now()`.
 //!
-//! Why a source-text guard rather than a behavioural test: **on native the two are the
-//! same clock**. `sched_now()` is literally `Instant::now()` off wasm, so a native run
+//! Why a source-text guard rather than a behavioural test *here*: **on native the two are
+//! the same clock**. (Since 2026-09-09 there IS a behavioural guard, it just cannot live in
+//! this suite: `scripts/wasm-suite.sh` runs the real wasm artifact under node — `make
+//! wasm-test`, and a CI step — and its clock-domain case hangs if this gate regresses. This
+//! test stays because it fails at the LINE, in the ordinary `cargo test` run, without a
+//! wasm toolchain.) `sched_now()` is literally `Instant::now()` off wasm, so a native run
 //! cannot tell a correct gate from a broken one, and no `cargo test` on this box would
 //! ever go red for the mismatch. The divergence exists only under
 //! `wasm32-unknown-unknown`, where there is no timer thread and `sched_now()` is a

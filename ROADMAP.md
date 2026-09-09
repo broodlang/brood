@@ -2145,10 +2145,12 @@ Runtime housekeeping (both items landed):
 
 ### WebAssembly — a cooperative single-threaded scheduler (playground concurrency)
 
-> **Goal.** Make green processes — `spawn` / `send` / `receive`, gen-servers, the whole
-> concurrency layer — run in the `wasm32` build (the in-browser playground and the
-> runnable docs on brood.fly.dev), single-threaded. Today they trap: the playground's
-> counter example dies with `RuntimeError: unreachable executed`.
+> **Goal — DELIVERED.** Make green processes — `spawn` / `send` / `receive`, gen-servers,
+> the whole concurrency layer — run in the `wasm32` build (the in-browser playground and
+> the runnable docs on brood.fly.dev), single-threaded. They used to trap
+> (`RuntimeError: unreachable executed`); they now run, and as of 2026-09-09 a behavioural
+> suite proves it on every CI run rather than by hand. The design notes below are kept as
+> the record of how it works.
 
 **Why it traps (diagnosis).** *Not* the processes — the **worker pool**.
 `scheduler::pool::ensure_workers` (`pool.rs:311`) starts the executor pool with
@@ -2197,15 +2199,28 @@ pool untouched; add a single-threaded path behind cfg:
 - **No parallelism.** CPU fan-out examples run *cooperatively*, not faster — expected
   and fine for a playground/teaching context.
 
-**Milestones.**
-1. cfg(wasm32) `ensure_workers` no-op + `pump_ready` driving the run queue (a
-   compute-only spawned process runs, no trap).
-2. Non-blocking park/wake → the counter example (`spawn` + `send` + `receive`) runs to
-   completion under the pump.
-3. Root-process integration in `run_program`/`eval_source`; would-block termination.
-4. Cooperative receive-timeouts (or a documented limitation).
-5. Playground + docs: re-enable the runnable **Processes** example on the site; add a
-   wasm concurrency test (`tests/wasm_test.blsp`).
+**Milestones — ✅ ALL FIVE DONE (5 closed 2026-09-09).**
+1. ✅ cfg(wasm32) `ensure_workers` no-op + the pump driving the run queue.
+2. ✅ Non-blocking park/wake → `spawn` + `send` + `receive` completes under the pump.
+3. ✅ Root-process integration (`vm_run_bc` drives `pump_until_quiescent`); would-block
+   termination.
+4. ✅ Cooperative receive-timeouts — `fire_next_timer` advances a FROZEN logical clock
+   (`timer::sched_now`) to the fired deadline.
+5. ✅ **A wasm test runner, 2026-09-09.** The gap 1–4 left was not a missing feature but a
+   missing *execution*: CI built the target and ran nothing, and the native suite cannot
+   cover this by construction — off wasm there are OS workers and `sched_now()` IS
+   `Instant::now()`, so every gate agrees whether or not the wasm path works. That is why
+   the clock-domain bug needed a by-hand repro script to find.
+   `scripts/wasm-suite.sh` (+ `wasm-suite.cjs`) builds the playground on the profile the
+   site serves, runs `wasm-bindgen --target nodejs`, and executes **10 behavioural cases**
+   under node — pump, park/wake, queue sweep, ping-pong, timer firing, deadline ordering,
+   message-beats-timeout, would-block termination and the clock-domain case. `make
+   wasm-test`, in `make green-all`, and a CI step in the wasm job.
+   Sabotage-verified in three places: a park gate on real time HANGS it, a pump sweeping
+   one queue reds 7 of 10, a `fire_next_timer` that does not advance the clock hangs. The
+   clock-domain case was itself found to be under-powered by that sabotage — it passed with
+   the bug present until the burn was sized to outrun the deadline ~26x, which is recorded
+   at the case.
 
 **Touch points.** `process/scheduler/pool.rs` (ensure_workers, the pump),
 `process/scheduler/lifecycle.rs`, `process/mailbox.rs` (the park path), `eval`/`lib.rs`

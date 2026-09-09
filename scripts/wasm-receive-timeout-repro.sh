@@ -13,9 +13,13 @@
 #   100% CPU, frozen browser tab.
 #
 #   NOTHING IN `make test` CAN CATCH THIS: off wasm, `sched_now()` *is* `Instant::now()`,
-#   so both gates agree and a native run is green either way. The permanent guard is the
-#   source-text test `crates/lisp/tests/sched_clock_domain.rs`; this script is the
-#   behavioural check, run by hand when the scheduler's park/timeout path changes.
+#   so both gates agree and a native run is green either way. The guards are now two:
+#   the source-text test `crates/lisp/tests/sched_clock_domain.rs` (the gate reads the
+#   right clock) and `scripts/wasm-suite.sh` (the behaviour, automated — `make wasm-test`,
+#   and a CI step since 2026-09-09; its clock-domain case is this repro, sized down so the
+#   suite stays fast). THIS script stays as the deep version: a much larger burn and an
+#   explicit short-burn control, for when the park/timeout path itself is being changed
+#   and you want a decisive by-hand answer rather than a fast one.
 #
 # REQUIREMENTS
 #   rustup target add wasm32-unknown-unknown
