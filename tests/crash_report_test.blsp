@@ -9,18 +9,55 @@
   "A sink that forwards each report to the test process."
   (fn (text) (send me [:report text])))
 
-(defn- crash-report-next ()
-  "The next report's text, or :none after a short quiet period."
-  (receive ([:report text] text) (after *test-wait-ms* :none)))
-
 (defn- crash-report-drain ()
   "Drop any report left in this mailbox by an earlier test (an isolated unit's tests
 share one worker process)."
   (receive ([:report _] (crash-report-drain)) (after 0 nil)))
 
-(defn- crash-report-quiet? ()
-  "True if no report arrives within 100 ms."
-  (= :none (receive ([:report text] text) (after 100 :none))))
+;; KI-121. The reporter subscribes to `proc/system-monitor`, which is RUNTIME-global: a
+;; sink armed here receives the abnormal exit of ANY process in the runtime, and a full
+;; `-j8` suite crashes processes constantly. `:isolated` serialises the units, not the
+;; runtime — a straggler or a parallel non-isolated unit elsewhere can still be dying. So
+;; "the next report" was never this test's report, and one run of the suite proved it by
+;; reading a neighbour's crash text. Every assertion below therefore names WHICH crash it
+;; means, and reports that do not match are dropped rather than asserted on.
+;;
+;; The wait is a DEADLINE, not a per-message window: a fresh `after` on each skipped
+;; neighbour would let steady crash traffic extend the wait without bound.
+
+(defn- crash-report-next-where (match? deadline)
+  "The next report satisfying `match?`, or :none once `deadline` (an `os/now` stamp)
+passes. A report that does not match belongs to another test — drop it and keep waiting."
+  (let (remaining (- deadline (os/now)))
+    (if (<= remaining 0)
+      :none (receive
+        ([:report text] (if (match? text) text (crash-report-next-where match? deadline)))
+        (after remaining :none)))))
+
+(defn- crash-report-next-of (pids)
+  "The next report naming one of `pids`."
+  (crash-report-next-where (fn (text) (any? pids (fn (pid) (includes? text (pr-str pid)))))
+    (+ (os/now) *test-wait-ms*)))
+
+(defn- crash-report-next-saying (fragment)
+  "The next report containing `fragment` — for a crash whose pid the test never sees
+(a `spawn-link`ed grandchild)."
+  (crash-report-next-where (fn (text) (includes? text fragment))
+    (+ (os/now) *test-wait-ms*)))
+
+(defn- crash-report-quiet-where? (match? deadline)
+  "True if no report satisfying `match?` arrives before `deadline`."
+  (let (remaining (- deadline (os/now)))
+    (if (<= remaining 0)
+      true
+      (receive
+        ([:report text] (if (match? text) false (crash-report-quiet-where? match? deadline)))
+        (after remaining true)))))
+
+(defn- crash-report-quiet-of? (pids)
+  "True if none of `pids` is reported within 100 ms."
+  (crash-report-quiet-where? (fn (text) (any? pids (fn (pid) (includes? text (pr-str pid)))))
+    (+ (os/now) 100)))
 
 (defn- crash-report-boom (x)
   "A named frame for the trace assertions."
@@ -62,22 +99,23 @@ share one worker process)."
       (crash-report-drain)
       (start {:sink (crash-report-collect me)})
       (is (running?))
-      (spawn :done)
-      ;; non-tail so the `error` frame carries this file's position (a tail call
-      ;; collapses into its caller's frame and records none)
-      (let (crasher (spawn (+ 1 (crash-report-boom 1)))
-            text (crash-report-next))
-        (is (string? text))
-        (is (includes? text (pr-str crasher)))
-        (is (includes? text "boom: 1"))
-        (is (includes? text "kind :user"))
-        ;; Match the FILE NAME and a position, not a path prefix: `nest test` loads a
-        ;; discovered file by ABSOLUTE path and an explicitly-named one relatively, so
-        ;; pinning "tests/…" passed alone and failed under discovery — a property of how
-        ;; the runner was invoked, never of the trace.
-        (is (includes? text "at error ("))
-        (is (includes? text "crash_report_test.blsp:")))
-      (is (crash-report-quiet?))
+      (let (clean (spawn :done))
+        ;; non-tail so the `error` frame carries this file's position (a tail call
+        ;; collapses into its caller's frame and records none)
+        (let (crasher (spawn (+ 1 (crash-report-boom 1)))
+              text (crash-report-next-of [crasher]))
+          (is (string? text))
+          (is (includes? text (pr-str crasher)))
+          (is (includes? text "boom: 1"))
+          (is (includes? text "kind :user"))
+          ;; Match the FILE NAME and a position, not a path prefix: `nest test` loads a
+          ;; discovered file by ABSOLUTE path and an explicitly-named one relatively, so
+          ;; pinning "tests/…" passed alone and failed under discovery — a property of how
+          ;; the runner was invoked, never of the trace.
+          (is (includes? text "at error ("))
+          (is (includes? text "crash_report_test.blsp:"))
+          ;; neither a second report for this site nor anything for the clean exit
+          (is (crash-report-quiet-of? [crasher clean]))))
       (stop)))
 
   :isolated (test "start is idempotent; stop disarms and drops the subscription"
@@ -89,8 +127,8 @@ share one worker process)."
       (sleep 50)
       (is (not (running?)))
       (assert= [] (proc/system-monitor :all))
-      (spawn (error "unreported"))
-      (is (crash-report-quiet?))))
+      (let (after-stop (spawn (error "unreported")))
+        (is (crash-report-quiet-of? [after-stop])))))
 
   :isolated (test "one report per site: a crash loop at one site prints once, a second site prints again"
     (let (me (self))
@@ -100,12 +138,28 @@ share one worker process)."
       ;; time: one report. (`crash-report-boom` tail-calls `error`, so the recorded
       ;; site is the call that entered it — this `dotimes` body.)
       ;; Which iteration's crash is reported first is scheduling order; the site is not.
-      (dotimes (i 3) (spawn (+ 1 (crash-report-boom i))))
-      (is (includes? (crash-report-next) "exited: boom: "))
-      (is (crash-report-quiet?))
-      ;; a different raise site is a different report
-      (spawn (error "elsewhere"))
-      (is (includes? (crash-report-next) "elsewhere"))
+      (let (boomers (map (range 0 3) (fn (i) (spawn (+ 1 (crash-report-boom i))))))
+        (is (includes? (crash-report-next-of boomers) "exited: boom: "))
+        (is (crash-report-quiet-of? boomers))
+        ;; a different raise site is a different report
+        (let (elsewhere (spawn (error "elsewhere")))
+          (is (includes? (crash-report-next-of [elsewhere]) "elsewhere"))))
+      (stop)))
+
+  ;; KI-121, pinned deterministically rather than left to load. The sighting was a
+  ;; neighbouring test's crash text arriving first; simulating that is just a `[:report …]`
+  ;; queued ahead of this test's own, which is exactly what the runtime-global subscription
+  ;; delivers. With the unscoped helper this test reads the neighbour's report and fails.
+  :isolated (test "a neighbouring test's report is skipped, not asserted on (KI-121)"
+    (let (me (self))
+      (crash-report-drain)
+      (send me [:report "[crash] <pid 90001> exited: a neighbouring test's crash"])
+      (start {:sink (crash-report-collect me)})
+      (let (mine (spawn (+ 1 (crash-report-boom :mine))))
+        (is (includes? (crash-report-next-of [mine]) "boom: :mine"))
+        ;; and a foreign report must not break a quiet assertion either
+        (send me [:report "[crash] <pid 90002> exited: another neighbour"])
+        (is (crash-report-quiet-of? [mine])))
       (stop)))
 
   :isolated (test "deliberate exits — :normal, :killed, :shutdown — are never reported"
@@ -116,7 +170,7 @@ share one worker process)."
             polite (spawn (receive (:never nil))))
         (exit victim :kill)
         (exit polite :shutdown)
-        (is (crash-report-quiet?)))
+        (is (crash-report-quiet-of? [victim polite])))
       (stop)))
 
   :isolated (test "the starting process is never reported, and a linked crash still is"
@@ -129,7 +183,7 @@ share one worker process)."
                (proc/trap-exit true)
                (spawn-link (crash-report-boom :linked))
                (receive ([:EXIT _ _] :handled))))
-      (is (includes? (crash-report-next) "boom: :linked"))
+      (is (includes? (crash-report-next-saying "boom: :linked") "boom: :linked"))
       (stop)))
 
   :isolated (test "the reporter coexists with a telemetry watch-runtime subscription"
@@ -140,7 +194,7 @@ share one worker process)."
       (let (watcher (telemetry/watch-runtime {:spawn true}))
         (assert= 2 (count (proc/system-monitor :all)))
         (spawn (crash-report-boom :under-watch))
-        (is (includes? (crash-report-next) "under-watch"))
+        (is (includes? (crash-report-next-saying "under-watch") "under-watch"))
         (telemetry/stop-watch-runtime watcher)
         (sleep 50)
         ;; the watcher leaving does not take the reporter with it

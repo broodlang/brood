@@ -29,11 +29,14 @@ FIXED** — the wrapper's `def-face`/`editor/serve/*` unbound wave was a supervi
 stragglers respawning a child into the window between the runner's ONE quiesce pass and the
 `%isolate` restore; the child loaded an editor module and `provide`d it after the restore rolled
 its globals back, so `*features*` marked it loaded over an empty namespace (KI-89's asymmetry).
-`test-quiesce-file` now loops until the straggler set is empty. **No open bug — one WATCH:
-KI-121**, a crash-report test that read a neighbour's crash off the runtime-global
-`proc/system-monitor` under a deliberately heavy `-j8` run. One sighting, retry-absorbed,
-passes 3/3 alone, so it cannot be reproduced on demand; the entry carries the fix direction if
-it recurs. CI green on `4001f3e9`; `make green --local` green on a fresh `make release`. Three
+`test-quiesce-file` now loops until the straggler set is empty. **No open bug. KI-121 FIXED 2026-09-09** — the crash-report test that read a
+neighbour's crash off the runtime-global `proc/system-monitor` under a heavy `-j8` run. Fixed
+without waiting for a recurrence: the mechanism was understood, and a watch on something not
+reproducible on demand only defers the work to someone else's red run. The reporter is right to
+be runtime-wide; each assertion now names its own crash (by spawned pid, or by content where
+the pid is invisible) and drops the rest, on a deadline rather than a re-arming window. Pinned
+deterministically — a foreign `[:report …]` queued ahead of the test's own is exactly what the
+global subscription delivers — and sabotage-verified. CI green on `4001f3e9`; `make green --local` green on a fresh `make release`. Three
 diagnostics stay default-on-where-safe (`[refer] NOTHING`, `[unbound]` under `BROOD_SCOPE_DBG`,
 `BROOD_TEST_TRACE`) so a recurrence self-reports. If `brood_suite_passes` ever shows the wave
 again, the `[refer] imported NOTHING` line names the module and the responsible file follows. On a hit, read the wrapper's
@@ -106,7 +109,7 @@ mechanism". Both hold: 23 routed names, and every arm above is mechanism by the 
 (could this be written in Brood on top of existing primitives? — no, each needs something only
 the host binary has). Reopen only if a *new* arm lands with policy in it.
 
-### 3 — Two small gates this weekend's bugs asked for
+### 3 — Two small gates this weekend's bugs asked for ✅ BOTH SETTLED 2026-09-09
 
 - ~~**Stray keywords in a describe body, tree-wide.**~~ ✅ DONE 2026-09-09 —
   `tests/test_modifier_placement_test.blsp`. The third spelling turned out to be a modifier in
@@ -120,24 +123,65 @@ the host binary has). Reopen only if a *new* arm lands with policy in it.
   directory reds the "did the sweep sweep" anchor. It also found that an improper list is
   still `list?` — `drop` hands back its bare tail and `mapcat` raises on one — which is now
   its own pinned case.
-- **Contracts-mode residue.** KI-113 records four files that exceed the 120 s budget under
-  wrapping and several checker/JIT tests that assume an un-instrumented image. If the mode
-  should run the whole tree: raise the budget when `BROOD_CONTRACTS` is set, and have those
-  tests `:skip` under it. Otherwise leave it — what the mode must do (boot, load every module
-  from source, enforce) is gated in `contracts_mode.rs`.
+- ~~**Contracts-mode residue.**~~ ✅ DECIDED 2026-09-09 — **leave it**, deliberately, which is
+  the option the item itself offered. Running the whole tree under `BROOD_CONTRACTS` would buy
+  a budget bump plus `:skip` markers on several checker/JIT tests that assume an
+  un-instrumented image — cost paid in every future run, for coverage of a mode nothing ships
+  in. What the mode must actually do is already gated, and verified green 2026-09-09:
+  `contracts_mode.rs` 3/3 — it boots on a cold cache and enforces both kinds, **every baked-in
+  module loads under contracts from source** (27.0 s — the KI-113 hole, since a materialised
+  module never evaluates its sigs), and without the flag nothing is enforced. Reopen only if a
+  contracts-mode defect appears that those three would not have caught.
 
-### 4 — ADR-320 follow-through (open thread 1 of the 2026-09-05 status)
+### 4 — ADR-320 follow-through ✅ CLOSED 2026-09-09 (all three steps are in, and gated)
 
-The side-facts journal landed (`heap/facts.rs`, 2026-09-06). The 2026-09-05 status left open
-whether steps 1–3 ship together; re-read ADR-320/321 and the journal as it now is, then either
-close the thread in `decisions.md` or write the next step down here.
+The thread asked whether steps 1–3 shipped together. They did — verified in the code rather
+than from the ADR's own status line, which is the lesson item 2 taught this weekend:
+
+- **Step 1** — `core/heap/facts.rs` declares the kinds through a macro that also generates
+  `FactKind::ALL`, so the enumeration and the list cannot disagree.
+- **Step 2** — `write_prelude_image`'s five hand-written blocks are one loop over
+  `heap.side_facts()` → `put_fact`; load replays through `replay_fact`.
+- **Step 3** — the journal IS compared: `%side-facts` is emitted per fact as a line by the
+  boot probe in `crates/cli/tests/support/mod.rs`, filtered to facts about names the boot
+  actually bound (an imaged boot carries dynamic marks for ~49 names in modules it never
+  loads — intended, documented, and it would fail the matrix on a design decision).
+
+Run 2026-09-09, all green: `artifact_matrix::every_artifact_combination_boots_to_the_same_state`
+(24.2 s), `prelude_image_matches_source::an_imaged_boot_and_a_source_boot_agree_on_every_global`,
+and `prelude_image_survives_a_relaid_stdlib_image`. Nothing further is queued; ADR-320 stands as
+Accepted with its "As implemented" section accurate.
+
+**One search note for next time.** `%side-facts` looked unused because the differentials live in
+`crates/cli/tests/`, not `crates/lisp/tests/` or `crates/nest/tests/`. A grep over two of the
+three test roots reported an unwired feature that was wired.
 
 ### 5 — Documentation debt (old item 7; do a slice when a session has time)
 
-Docstring examples at ~29% (each is an executed test via `doc_examples_test.blsp`); the archive
-split of `decisions.md`/`known-issues.md`/`devlog.md`. `make green --local` after any move —
-the `doc_refs` gate checks references and duplicate numbers, and it caught a duplicated KI-107
+Docstring examples (each is an executed test via `doc_examples_test.blsp`); the archive split of
+`decisions.md`/`known-issues.md`/`devlog.md`. `make green --local` after any move — the
+`doc_refs` gate checks references and duplicate numbers, and it caught a duplicated KI-107
 header this weekend.
+
+**Measure with the tool, not by hand:** `(audit/report)` — 1,635 public callables, **0 without
+a docstring**, 1,138 without an example (2026-09-09). It also runs the ADR-308 data-first and
+sig-arity checks, both at 0.
+
+**Slice done 2026-09-09:** `first`, `rest`, `bound?`, `math/floor` (Rust `PRIMITIVE_DOCS`) and
+`assoc-in`, `dissoc-in` (`std/prelude/map.blsp`) — the most-used names in the language had none.
+Two behaviours worth documenting fell out of computing the outputs rather than writing them from
+memory: `(rest [1])` is **nil**, not `()`, and `math/floor` rounds toward *negative* infinity, so
+`(math/floor -3.2)` → `-4`.
+
+**The trap, which cost most of the slice.** `std/prelude/*.blsp` and the Rust `PRIMITIVE_DOCS`
+are **baked into the binary**, so editing a prelude docstring changes nothing until
+`cargo build`. A sabotage run against the un-rebuilt binary passes — which reads exactly like
+"the harness does not execute this example" and sent this session looking for a collection bug
+that did not exist. Worse, the boot artifacts hide it a second way: a run that has written a
+prelude image or the ADR-138 text cache serves the OLD docstring even after a rebuild. To verify
+a docstring example: **rebuild, then run under a private `XDG_CACHE_HOME`**, and sabotage-check
+in both directions before believing the pass. Verified that way here — a wrong value reds the
+harness naming the example, for both a Rust docstring and a prelude one.
 
 ### Not on this box
 

@@ -271,7 +271,10 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
 ;; check-allow: deliberately non-tail — depth = (count path) — a few keys, never data scale.
 (check-allow :non-tail-recursion
   (defn assoc-in (m path v)
-    "A nested copy of `m` with `v` stored at the key sequence `path`, creating intermediate maps as needed (a non-map node along the path becomes a fresh map)."
+    "A nested copy of `m` with `v` stored at the key sequence `path`, creating intermediate maps as needed (a non-map node along the path becomes a fresh map).
+
+    (assoc-in {:a {:b 1}} [:a :b] 2)   → {:a {:b 2}}
+    (assoc-in {} [:a :b] 1)            → {:a {:b 1}}"
     (let (m (if (map? m) m {}) k (first path) ks (rest path))
       (if (empty? ks)
         (assoc m k v)
@@ -291,7 +294,9 @@ Works on maps (by key) and vectors (by integer index, which must be in range).
   (defn dissoc-in (m path)
     "A nested copy of `m` with the key sequence `path` REMOVED (the sibling of
   `assoc-in`). A path that doesn't exist is a no-op, and intermediate maps are left in
-  place even when they end up empty — removing a leaf never prunes its branch."
+  place even when they end up empty — removing a leaf never prunes its branch.
+
+    (dissoc-in {:a {:b 1 :c 2}} [:a :b])   → {:a {:c 2}}"
     (let (k (first path) ks (rest path))
       (cond
         (not (map? m)) m

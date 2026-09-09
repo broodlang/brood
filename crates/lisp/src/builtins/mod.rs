@@ -302,7 +302,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![num], int),
         &["x"],
-        "Round x toward negative infinity to an integer. Accepts the whole numeric tower; a ratio floors exactly (not through f64), so it stays correct past 2^53.",
+        "Round x toward negative infinity to an integer. Accepts the whole numeric tower; a ratio floors exactly (not through f64), so it stays correct past 2^53. Toward NEGATIVE infinity, so a negative argument rounds away from zero.\n\n    (math/floor 3.7)    → 3\n    (math/floor -3.2)   → -4",
         floor);
 
     // bitwise — integer bit-twiddling on the i64 two's-complement representation.
@@ -417,7 +417,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![seqable], any),
         &["coll"],
-        "The head of any sequence — a list, vector, bytes, set (an element) or map (a [k v] pair) — or nil if empty.",
+        "The head of any sequence — a list, vector, bytes, set (an element) or map (a [k v] pair) — or nil if empty.\n\n    (first [1 2 3])   → 1\n    (first {:a 1})    → [:a 1]\n    (first [])        → nil",
         first);
     def(
         heap,
@@ -425,7 +425,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![seqable], list_ty),
         &["coll"],
-        "All but the head of any sequence, as a list (a set yields its remaining elements, a map its remaining [k v] pairs).",
+        "All but the head of any sequence, as a list (a set yields its remaining elements, a map its remaining [k v] pairs). A one-element sequence yields nil, not an empty list.\n\n    (rest [1 2 3])   → (2 3)\n    (rest [1])       → nil",
         rest);
     def(
         heap,
@@ -3293,7 +3293,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![sym], bool_ty),
         &["sym"],
-        "Whether sym is bound in scope. Quote it: (bound? 'foo).",
+        "Whether sym is bound in scope. Quote it: (bound? 'foo).\n\n    (bound? 'first)   → true\n    (bound? 'nope)    → false",
         bound_p,
     );
     def(

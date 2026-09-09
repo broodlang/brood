@@ -834,6 +834,8 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-09** — two sessions split `heap.rs` in parallel; reconciling it, and `RuntimeCode` moves out
 - **2026-09-09** — an idle runtime burned 6-8% of a core: every parked worker woke 100x/s forever
 - **2026-09-09** — a gate for ADR-323's third spelling; the `nest` arms item was already done
+- **2026-09-09** — KI-121 fixed without waiting for it to recur: the test, not the reporter, was racy
+- **2026-09-09** — queue items 2/3/4 closed by verification; a doc slice, and why its sabotage lied
 
 ---
 
@@ -11986,3 +11988,73 @@ mechanism question is not deferred as a magnitude one: structural first; trust l
 (measured spread here 5% JIT arm / 12% VM arm); within-process adjacency via the divan engine
 grid below that; count the calls before optimising; and check loadavg, orphan spinners and
 `make doctor` before believing anything.
+
+## 2026-09-09 (later) — KI-121: fix the watch instead of waiting for it
+
+KI-121 was filed as a WATCH: `crash_report_test.blsp` read a neighbouring test's crash text once
+under a deliberately heavy `-j8` run, retry-absorbed, 3/3 alone. A watch is the right status
+when the mechanism is unknown. Here it was written down in the entry the day it was filed — the
+reporter subscribes to `proc/system-monitor`, which is runtime-global, and a full suite crashes
+processes constantly — so the only thing waiting would have bought is the same red run in
+someone else's session. Fixed now.
+
+**The reporter did not change**, and should not: being runtime-wide is what ADR-305 is for. The
+racy part was a *test* asking for "the next report" and assuming it was its own. Each assertion
+now names the crash it means — `crash-report-next-of`/`crash-report-quiet-of?` scoped to the
+pids the test spawned (the headline carries `(pr-str pid)`), and `crash-report-next-saying` for
+the two cases whose crashing pid the test never sees: the `spawn-link`ed grandchild and the
+telemetry-coexistence case. Non-matching reports are dropped and the wait continues.
+
+The wait is a **deadline taken once**, not a fresh `after` per message. Re-arming the window on
+each skipped neighbour would let steady crash traffic extend it without bound — the same shape
+as KI-79 and KI-108, where a wall-clock window stood in for synchronisation.
+
+**Pinned deterministically rather than by load**, which is the part worth copying. Reproducing
+this by running a heavy suite is a coin flip, and a fix verified by "it passed 10 times" is
+verified by nothing. But what the global subscription actually *delivers* is a `[:report …]` in
+the mailbox ahead of the test's own — and that can simply be sent. The new case queues a
+foreign report, crashes its own process, asserts it reads its own, then queues a second foreign
+report against a quiet assertion. Sabotage-verified: forcing the matcher to `true` — the
+pre-fix behaviour — reds that case and only that case. 12/12 in the file, and 10/10 runs green
+with crash-producing suites running concurrently beside it.
+
+## 2026-09-09 (later) — a docstring slice, and a sabotage that passed for a mechanical reason
+
+Six of the most-used names in the language carried no executed example: `first`, `rest`,
+`bound?`, `math/floor` (Rust `PRIMITIVE_DOCS`) and `assoc-in`, `dissoc-in`
+(`std/prelude/map.blsp`). `(audit/report)` puts the surface at 1,635 public callables, **0
+without a docstring** and 1,138 without an example — so the debt is examples, not prose.
+
+Every value was **computed and pasted, not written from memory**, which is the rule
+`doc_examples_test` exists to enforce (two of the first batch ever written were wrong). Doing it
+that way documented two behaviours worth knowing: `(rest [1])` is **nil**, not `()`, and
+`math/floor` rounds toward *negative* infinity, so `(math/floor -3.2)` → `-4`. Both are now in
+the docstrings as executed cases.
+
+**The part worth recording is the sabotage that passed.** Breaking `assoc-in`'s example to a
+wrong value and running the harness reported 3/3 green. That reads as "the harness never
+executes this example", and the next twenty minutes went into `doctest.blsp`'s collection logic
+looking for the bug — including a wrong turn through `doc`, which takes the VALUE
+(`(doc (reflect/eval s))`), not the symbol, so a probe of `(doc 'count)` returning nil looked
+like more evidence.
+
+There was no bug. `std/prelude/*.blsp` is **concatenated into the binary at build time**, so
+editing a prelude docstring changes nothing until `cargo build` — the sabotage never reached the
+runtime. And the boot artifacts hide it a second way: after a rebuild, a run that has already
+written a prelude image or the ADR-138 text cache still serves the OLD docstring. The first
+"source-forced" retry with `BROOD_NO_PRELUDE_IMAGE=1` fell back to the text cache and lied
+identically; the printed line said `(prelude: expanded-text cache)` the whole time.
+
+Verified properly in the end — rebuild, private `XDG_CACHE_HOME`, sabotage each direction — and
+a wrong value then reds the harness naming the exact example, for a Rust docstring
+(`first: … → got 1, documented 7`) and a prelude one alike. The rule for next time is in the
+handoff: **a docstring sabotage that passes is a stale binary until proven otherwise.**
+
+Also this session, and the theme is the same: queue items 2, 3 and 4 were closed by *verifying*
+rather than by working. Item 2 asked for a `gen` arm that does not exist and a `release` split
+ADR-322 had already done; item 4 asked whether ADR-320's three steps shipped together, and they
+had — the step-3 comparison lives in `crates/cli/tests/support/`, which a grep over
+`crates/lisp/tests/` and `crates/nest/tests/` reported as unwired. Three differentials run it
+green (`artifact_matrix` 24.2 s, `prelude_image_matches_source`, `prelude_image_survives_a_
+relaid_stdlib_image`). Item 3's second half was a decision, and the decision is to leave
+contracts mode as it is: `contracts_mode.rs` 3/3 already gates what the mode must do.
