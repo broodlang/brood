@@ -831,6 +831,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-07** — heap.rs split, second move: the env chain and the global table
 - **2026-09-07** — KI-114: a float-profiled arm applied to an int published a float
 - **2026-09-08** — KI-117: a JIT'd error has no `:trace`, found as a one-in-N flake
+- **2026-09-09** — two sessions split `heap.rs` in parallel; reconciling it, and `RuntimeCode` moves out
 
 ---
 
@@ -11832,3 +11833,30 @@ where safe (`[refer] NOTHING`, `[unbound] recorded-loaded-but-unbound under BROO
 export (`mono_differential`, old-wording quiesce) pass un-instrumented — instrumentation, not the
 fix. Residual: a bounded loop warns and proceeds if a respawner outlasts 20 rounds; none seen.
 Full write-up in known-issues.md.
+
+## 2026-09-09 — the same refactor arrived twice, and `RuntimeCode` moves out of heap.rs
+
+Two sessions worked `heap.rs` from the same base and both did moves (d)+(e)+(f): each produced
+its own `local_string.rs`, `slabs.rs` and GC-knob relocation, and one of them pushed. Resolved
+by taking the pushed side's whole `core/heap/` — it is canonical and further along (the orphaned
+test modules had followed their subjects there) — and dropping this side's two heap commits as
+duplicates.
+
+**The trap worth recording is the shape of the failure, not the duplication.** `git merge`
+reported five conflicts, all in files whose *content* differed. `gc.rs` was not among them: both
+sides had ADDED the same tuning knobs to it, in the same place, so git auto-merged them by
+keeping **both copies** — a clean merge that does not build (15 × `E0428 defined multiple
+times`). A conflict list is not the blast radius of a duplicated refactor; two sides moving the
+same code into the same new file conflict, and two sides moving it into an *existing* file
+silently double it. The resolution has to be directory-wide, and the build is the only gate that
+says so.
+
+`RuntimeCode` is the one piece that was not duplicated — item 1 in the handoff had named it "the
+one further move with a clean seam" and left it undone, so it moves now: `heap/runtime_code.rs`
+(833 lines) with `RuntimeCode`, `SymbolMap`/`SymbolHasher`, the registry vocabulary,
+`GlobalsSnapshot` and `GenPin`. `heap.rs` is **2,367 lines**, from 7,536 when the item was
+written. Its 29 private fields took `pub(super)` exactly as the item predicted. Verified on the
+merged tree: `cargo fmt --check`, clippy `--all-targets --all-features -D warnings`, the 84
+heap/GC/promote/freeze/globals Rust tests, and seven `.blsp` files spanning maps, the JIT trace
+guard, the startup image and the concurrency/spawn set (172 tests). Not a full-suite run — this
+box does not get one.

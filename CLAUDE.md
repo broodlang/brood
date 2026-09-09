@@ -145,8 +145,8 @@ paths — but until then, prefer learning over shortcuts.
 ```
 crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   core/        substrate: value.rs (Value, Tag, symbol interner, Closure/Arity),
-               heap.rs (per-process heap + shared regions: the Heap/ColdHeap/RuntimeCode/
-               SharedCode records, construction, alloc, and the region-dispatching accessors)
+               heap.rs (per-process heap + shared regions: the Heap/ColdHeap/SharedCode
+               records, construction, alloc, and the region-dispatching accessors)
                with child modules heap/{gc.rs (roots/collection/RUNTIME-compaction/stats +
                the tuning knobs), gc_runtime.rs, map_ops.rs (CHAMP ops), equality.rs
                (equality/compare/hash), vm_cache.rs (VM body cache + inline caches + the
@@ -159,6 +159,9 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                `def`/`spawn`'s append-only publish, + PromoteForward), local_string.rs
                (LocalString/StrData/StrAux/CharIndex + the six string readers), slabs.rs
                (VecStore, Slabs, CodeSlabs, SlabRef — where values physically live),
+               runtime_code.rs (RuntimeCode — the shared `def`'d code + globals table a
+               runtime's processes hold in common — with SymbolMap, the registry
+               vocabulary, GlobalsSnapshot and GenPin),
                roots_buf.rs} — children of `heap`, so they
                reach Heap's private items via `use super::*`, alloc.rs,
                blob.rs (cross-process zero-copy blob heap), map_champ.rs (CHAMP
