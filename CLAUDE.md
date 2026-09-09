@@ -227,6 +227,10 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                native code has — backend-independent), cranelift.rs (`CraneliftBackend`:
                the Cranelift `JITModule` owner + the impl), mod.rs (sentinels +
                `ActiveBackend`). The lowering itself is `eval/compile/jit_lower*`
+  renames.rs   the rename ledger — where a deliberately renamed public name went (ADR-304),
+               so a downstream `unbound symbol` can name its replacement
+  text_width.rs display-cell width of text, shared by the `string/display-width` builtin and
+               the GUI renderer so the two cannot disagree about a cluster
   coverage.rs  line-coverage instrumentation (ADR-148); perf.rs/profile.rs VM counters;
                debug_flags.rs the `BROOD_*` catalogue behind `brood --debug-flags`
   error.rs     LispError / LispResult / source Pos
@@ -282,7 +286,11 @@ both leave unasked, KI-66), `doc`, `format`, `repl`,
 `attach` (the `emacsclient`-style thin frontend for a daemon serving a `ui-run`
 app — ADR-090), `completions` (emit a shell TAB-completion script; `complete` is the hidden
 candidate engine behind it), `grammar` (emit an editor syntax grammar — VS Code TextMate or
-Emacs — generated from `(special-forms)`, ADR-092), the package-manager commands
+Emacs — generated from `(special-forms)`, ADR-092), `docs` (render the project's API docs) and
+`doctest` (execute the `form → result` examples in its docstrings), `rename` (apply a rename
+wave, recording it in the ADR-304 ledger), `ws` (workspace-wide commands), `stdimage` (build
+this binary's stdlib startup image once — deliberately NOT Brood-routed, KI-112), the
+package-manager commands
 `fetch`/`update`/`tree`/`add`/`remove` (ADR-037) plus `publish`/`search` against a
 **hosted** registry (the `hive` tarball service, ADR-147/211 — *not* a git-backed
 index) and `key` (generate/manage the ed25519 signing keypair `nest publish` uses,
@@ -844,4 +852,9 @@ roadmap/ADR-039). **Native WASM interop** shipped too (ADR-071/145): an embedded
 `wasmtime` host with WIT-typed marshalling + fuel metering (`crates/lisp/src/wasm.rs`,
 `std/wasm.blsp`), plus an in-browser playground built on the wasm32 target
 (`crates/playground`). The editor app itself is a separate downstream project, out of
-scope for this repo and its roadmap. Still ahead here: server-mode socket serving.
+scope for this repo and its roadmap. **M4 is delivered** — this line used to end "still ahead
+here: server-mode socket serving", which was stale: TCP (ADR-062), TLS client/HTTPS,
+`http/serve`/`http/listen`/`tls/listen`, distributed nodes and `std/editor/serve`'s
+daemon/`attach` seam (ADR-090) all shipped. There is no milestone-shaped gap left here; the
+open work is housekeeping and is tracked in `docs/handoff.md`'s queue and ROADMAP's
+"Still open" list, not in this paragraph.
