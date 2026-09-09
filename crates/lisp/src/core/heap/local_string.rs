@@ -1,24 +1,16 @@
-//! The LOCAL string representation — how a Brood string is stored in a slab, and the
-//! side tables that keep indexing it linear.
+//! The LOCAL string representation — child of heap.
 //!
-//! A string slab entry is a [`LocalString`]: the bytes ([`StrData`] — inline, or an
-//! `Arc<SharedBlob>` past [`SHARED_BLOB_THRESHOLD`] so a cross-process send bumps a
-//! refcount) plus the char count cached at construction, plus a lazily-built [`StrAux`]
-//! holding the sparse char→byte [`CharIndex`] and one opaque slot a higher layer can
-//! use for its own table. Everything here is about *representing* a string; allocation
-//! and the region-dispatching accessors stay in the parent.
+//! What a string slab entry IS and how it is read: [`LocalString`] (inline UTF-8 or a
+//! shared blob, plus the cached char count that makes `string-length` O(1) and the pure-ASCII
+//! test free), its lazily-built side tables ([`StrAux`], the sparse char→byte [`CharIndex`]
+//! that keeps a rising-index scan linear on non-ASCII text), and `Heap`'s six string readers
+//! (`str_metrics`, the two index conversions, `str_scan_table`, `with_string_slot`, `string`).
+//! The tests that pin the index geometry and the entry size travel with it. Split out of
+//! `heap.rs` on 2026-09-08 (handoff item 1, move d); a `use super::*` child, so it reaches
+//! `Heap`'s private fields and the `local_gc_check!` macro exactly as before.
 
 use super::*;
 
-/// A LOCAL (and transitively PRELUDE-builder) string slab entry. Small strings
-/// stay inline; strings of [`SHARED_BLOB_THRESHOLD`] bytes or more route through
-/// an `Arc<SharedBlob>` so cross-process sends bump a refcount instead of
-/// deep-copying the bytes (see `core/blob.rs`).
-///
-/// PRELUDE itself contains no `Shared` entries — `freeze_as_shared_code`
-/// inline-extracts any builder-time Shared blobs into `Inline(String)` before
-/// freezing, keeping the cross-runtime PRELUDE region independent of any
-/// runtime-scoped `Arc<SharedBlob>`.
 /// A stored string plus its cached **char** length.
 ///
 /// Brood indexes strings by Unicode scalar, but they are stored as UTF-8, so every
@@ -44,12 +36,12 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct LocalString {
     pub(super) data: StrData,
-    pub(super) chars: usize,
+    chars: usize,
     /// Side tables for this string value, built on first use and never otherwise — see
     /// [`StrAux`]. One cell, because this struct is every string slab entry and its size
     /// is per-string memory in every heap (40 → 56 bytes, pinned by a test); a second
     /// cell for the second table would have cost every string another 16.
-    pub(super) aux: OnceLock<Box<StrAux>>,
+    aux: OnceLock<Box<StrAux>>,
 }
 
 /// Lazily-built, immutable side tables for one string value. Both are pure functions of
@@ -59,29 +51,29 @@ pub(super) struct LocalString {
 /// to be synchronised, and two racing builders produce identical tables of which
 /// `get_or_init` publishes one.
 #[derive(Clone)]
-pub(super) struct StrAux {
+struct StrAux {
     /// The sparse char→byte index (see [`CharIndex`]), built on the first char↔byte
     /// conversion of a long non-ASCII string.
-    pub(super) index: OnceLock<CharIndex>,
+    index: OnceLock<CharIndex>,
     /// A table belonging to some **other layer**, attached to this exact string value.
     /// The heap owns the cell and never interprets the contents: it is `dyn Any` so that
     /// a per-string cache can exist for a higher layer's own type without the core
     /// depending on it (today the Lisp lexical scanners in `builtins/syntax_scan.rs`
     /// keep their form-start safepoint table here). `Arc` so a slot clone — what the GC
     /// does when it tenures a survivor — shares the table instead of rebuilding it.
-    pub(super) scan: OnceLock<Arc<dyn std::any::Any + Send + Sync>>,
+    scan: OnceLock<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// One [`CharIndex`] mark per `STRIDE` chars, so an index costs `4 * chars / STRIDE`
 /// bytes (~1.5% of a 2-bytes-per-char string) and bounds a conversion's walk by `STRIDE`
 /// chars. 32 trades table size against that walk; it is not tuned, and the measured win
 /// is orders of magnitude larger than any nearby power of two would move it.
-pub(super) const CHAR_INDEX_STRIDE: usize = 32;
+const CHAR_INDEX_STRIDE: usize = 32;
 
 /// Below this many chars a conversion just walks: the walk is already bounded by a
 /// small number, and building an index would cost an allocation per string for it.
 /// Above it the quadratic term is what dominates, which is what the index removes.
-pub(super) const CHAR_INDEX_MIN_CHARS: usize = 256;
+const CHAR_INDEX_MIN_CHARS: usize = 256;
 
 /// A sparse char→byte index for one non-ASCII string: `marks[k]` is the byte offset of
 /// char `(k + 1) * CHAR_INDEX_STRIDE`. Char 0 is byte 0 and needs no entry, and the
@@ -91,13 +83,13 @@ pub(super) const CHAR_INDEX_MIN_CHARS: usize = 256;
 /// Byte offsets are `u32`: a string of 4 GiB or more is left on the walking path rather
 /// than given a 64-bit table (see [`LocalString::char_index`]).
 #[derive(Clone)]
-pub(super) struct CharIndex {
-    pub(super) marks: Vec<u32>,
+struct CharIndex {
+    marks: Vec<u32>,
 }
 
 impl CharIndex {
     /// One pass over the bytes, recording every `STRIDE`-th char boundary.
-    fn build(s: &str, chars: usize) -> CharIndex {
+    pub(super) fn build(s: &str, chars: usize) -> CharIndex {
         let mut marks = Vec::with_capacity(chars / CHAR_INDEX_STRIDE);
         for (k, (b, _)) in s.char_indices().enumerate() {
             if k > 0 && k % CHAR_INDEX_STRIDE == 0 {
@@ -108,7 +100,7 @@ impl CharIndex {
     }
 
     /// The nearest indexed point at or before char `ci`: `(char index, byte offset)`.
-    fn floor_char(&self, ci: usize) -> (usize, usize) {
+    pub(super) fn floor_char(&self, ci: usize) -> (usize, usize) {
         let k = (ci / CHAR_INDEX_STRIDE).min(self.marks.len());
         if k == 0 {
             (0, 0)
@@ -119,7 +111,7 @@ impl CharIndex {
 
     /// The nearest indexed point at or before byte offset `b`, found by binary search
     /// over the (sorted) marks: `(char index, byte offset)`.
-    fn floor_byte(&self, b: usize) -> (usize, usize) {
+    pub(super) fn floor_byte(&self, b: usize) -> (usize, usize) {
         let k = self.marks.partition_point(|&m| (m as usize) <= b);
         if k == 0 {
             (0, 0)
@@ -129,6 +121,15 @@ impl CharIndex {
     }
 }
 
+/// A LOCAL (and transitively PRELUDE-builder) string slab entry. Small strings
+/// stay inline; strings of [`SHARED_BLOB_THRESHOLD`] bytes or more route through
+/// an `Arc<SharedBlob>` so cross-process sends bump a refcount instead of
+/// deep-copying the bytes (see `core/blob.rs`).
+///
+/// PRELUDE itself contains no `Shared` entries — `freeze_as_shared_code`
+/// inline-extracts any builder-time Shared blobs into `Inline(String)` before
+/// freezing, keeping the cross-runtime PRELUDE region independent of any
+/// runtime-scoped `Arc<SharedBlob>`.
 #[derive(Clone)]
 pub(super) enum StrData {
     Inline(String),
@@ -177,7 +178,7 @@ impl LocalString {
 
     /// This string's side-table block, allocated on the first table that needs it.
     #[inline]
-    pub(super) fn aux(&self) -> &StrAux {
+    fn aux(&self) -> &StrAux {
         self.aux.get_or_init(|| {
             Box::new(StrAux {
                 index: OnceLock::new(),
@@ -189,7 +190,7 @@ impl LocalString {
     /// This string's sparse char→byte index, built on first use; `None` for a string
     /// that walks instead (ASCII — where conversion is arithmetic — short, or larger
     /// than a `u32` offset can address).
-    pub(super) fn char_index(&self) -> Option<&CharIndex> {
+    fn char_index(&self) -> Option<&CharIndex> {
         if self.chars < CHAR_INDEX_MIN_CHARS {
             return None;
         }
@@ -270,6 +271,107 @@ impl LocalString {
             StrData::Shared(b) => {
                 std::str::from_utf8(b.as_bytes()).expect("shared blob bytes are valid UTF-8")
             }
+        }
+    }
+}
+
+impl Heap {
+    /// Resolve a string handle to a `&str`. Hand-written (not via the
+    /// `region_ref!` macro) because LOCAL slots are `LocalString` enum
+    /// variants that need a match to extract their bytes, while PRELUDE and
+    /// RUNTIME store plain `String` (PRELUDE is inline-extracted at freeze;
+    /// RUNTIME is append-only via `boxcar::Vec<String>` for stable refs).
+    /// The **char** length of string `id`, and whether it is pure ASCII — both O(1),
+    /// read from the count cached at construction (see [`LocalString`]). The pair is
+    /// returned together because every caller that converts a char index to a byte
+    /// offset needs both, and resolving the slot twice would cost more than the work.
+    pub fn str_metrics(&self, id: StrId) -> (usize, bool) {
+        self.with_string_slot(id, |e| (e.char_len(), e.is_ascii()))
+    }
+
+    /// Byte offset of char `ci` in string `id`, clamped to the string's end — the
+    /// conversion every char-indexed string builtin needs before it can touch the UTF-8
+    /// bytes. O(1) for ASCII; for non-ASCII a lookup in the slot's sparse char→byte
+    /// index plus a walk bounded by one stride (which is what keeps a scan carrying a
+    /// rising index linear rather than quadratic — see [`LocalString`]).
+    pub fn str_char_to_byte(&self, id: StrId, ci: usize) -> usize {
+        self.with_string_slot(id, |e| e.char_to_byte(ci))
+    }
+
+    /// Char index of byte offset `b` in string `id` (`b` must be a char boundary) — the
+    /// return direction: a byte-level `find`/`match_indices` result converted back to
+    /// the char index the language speaks. Same complexities as
+    /// [`str_char_to_byte`](Self::str_char_to_byte).
+    pub fn str_byte_to_char(&self, id: StrId, b: usize) -> usize {
+        self.with_string_slot(id, |e| e.byte_to_char(b))
+    }
+
+    /// The higher-layer table cached against string `id`, built by `build` on first use
+    /// and shared thereafter (including with the slot's GC copies). The heap does not
+    /// interpret it — see [`StrAux::scan`]; the caller downcasts to its own type. Callers
+    /// that key a cache by string *value* belong here rather than in a map keyed by
+    /// handle: a handle is only unique within a GC epoch, while this cell travels with
+    /// the bytes it describes.
+    pub fn str_scan_table(
+        &self,
+        id: StrId,
+        build: impl FnOnce(&str) -> Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Arc<dyn std::any::Any + Send + Sync> {
+        self.with_string_slot(id, |e| {
+            Arc::clone(e.aux().scan.get_or_init(|| build(e.as_str())))
+        })
+    }
+
+    /// Resolve a string handle to its slab entry and hand it to `f`. The
+    /// region dispatch the string-metric accessors share; separate from
+    /// [`string`](Self::string) because these need the `LocalString` itself (its cached
+    /// count and char index), not just its bytes.
+    fn with_string_slot<R>(&self, id: StrId, f: impl FnOnce(&LocalString) -> R) -> R {
+        match id.region() {
+            LOCAL if id.is_old() => {
+                local_gc_check!(old, self, id, "string");
+                f(&self.old().strings[id.index()])
+            }
+            LOCAL => {
+                local_gc_check!(nursery, self, id, "string");
+                f(&self.local.strings[id.index()])
+            }
+            PRELUDE => f(&self.prelude.slabs.strings[id.index()]),
+            RUNTIME => {
+                let c = self
+                    .runtime
+                    .gens
+                    .get(id.code_gen())
+                    .expect("runtime string generation")
+                    .load();
+                f(c.strings.get(id.index()).expect("runtime string handle"))
+            }
+            _ => unreachable!("invalid handle region"),
+        }
+    }
+
+    pub fn string(&self, id: StrId) -> SlabRef<'_, str> {
+        match id.region() {
+            LOCAL if id.is_old() => {
+                local_gc_check!(old, self, id, "string");
+                SlabRef::direct(self.old().strings[id.index()].as_str())
+            }
+            LOCAL => {
+                local_gc_check!(nursery, self, id, "string");
+                SlabRef::direct(self.local.strings[id.index()].as_str())
+            }
+            // PRELUDE's `Slabs::strings` is also `Vec<LocalString>` because
+            // it shares the `Slabs` shape, but `freeze_as_shared_code`
+            // inline-extracts any `Shared` entries — every prelude slot is
+            // `Inline`. `as_str` works either way.
+            PRELUDE => SlabRef::direct(self.prelude.slabs.strings[id.index()].as_str()),
+            RUNTIME => self.rt_slab_ref(id.code_gen(), |c| {
+                c.strings
+                    .get(id.index())
+                    .expect("runtime string handle")
+                    .as_str()
+            }),
+            _ => unreachable!("invalid handle region"),
         }
     }
 }

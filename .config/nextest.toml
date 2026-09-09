@@ -248,6 +248,31 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 filter = 'binary(image_matches_source)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
+# `artifact_matrix` (cli/tests/artifact_matrix.rs) is the same class of case as
+# `image_matches_source` above and had no override: six cells, each a cold or warm `brood`
+# child boot or two plus three stdlib-image builds, all in the test profile. Measured
+# 2026-09-08 on a 12-core box: **26.4 s solo, 81.5 s inside a full `make test` fan-out** —
+# 32% under the 120 s default, which is the "one slow scheduling quantum from a false red"
+# margin this file keeps warning about.
+#
+# It went red that day at 120.006 s, and the instruction above — check for a slow case
+# FIRST — was followed: the case was flat (66 s in every full run for a week, 66.7 s solo),
+# so nothing in it had regressed. What had changed was the box: twelve orphaned
+# `sh -c 'while :; do :; done'` load spinners from a 2026-09-03 flake hunt had been pinning
+# nine to twelve cores for five days (their `timeout 400` parents died with that session's
+# shell and did not take them along). Every figure taken on this machine in that window was
+# ~2.5x inflated. Killing them took this case from 66 s to 26 s with no code change — and the
+# 22.4 s `complete` reading the note above calls an unexplained doubling measured **5.7 s**
+# solo on the same box once they were gone: that doubling was the spinners, not the profile.
+#
+# 60 s x 4 = 240 s: ~9x the solo figure, ~3x the loaded one, and the mismatch this test exists
+# to catch fails in seconds, so the budget hides no regression class. NOT 360 s like its
+# sibling — that would let a 10x cost regression in a case whose whole cost is booting sit
+# unnoticed. Before raising this, `cat /proc/loadavg` and `pgrep -af 'while :; do :; done'`.
+[[profile.default.overrides]]
+filter = 'binary(artifact_matrix)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
 # --- KI-38: warm the boot cache once, before ~50 binaries fan out ---
 #
 # The expanded-prelude cache is keyed on `build_id` = version + git sha + the

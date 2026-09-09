@@ -3230,6 +3230,26 @@ fn refer_add(
 /// `%refer` runs. A module still loading here therefore means the current file is
 /// being referred from *inside* `m`'s own load — a `(:use)` cycle, whose refer-all
 /// would silently import only the names defined so far.
+/// Is `mod_name` recorded in `*features*` — has some process `provide`d it? Read-only (no
+/// allocation), so it is usable from an error path holding `&Heap`.
+pub(crate) fn module_is_provided(heap: &Heap, mod_name: &str) -> bool {
+    let map_id = match heap
+        .env_get(value::EnvId::GLOBAL, value::intern("*features*"))
+        .map(|v| v.unpack())
+    {
+        Some(crate::core::value::ValueRef::Map(id)) => id,
+        _ => return false,
+    };
+    heap.map_entries(map_id)
+        .iter()
+        .any(|(k, _)| matches!(*k, Value::Str(s) if heap.string(s) == mod_name))
+}
+
+/// Is `key` one of this binary's baked-in `std/` modules?
+pub(crate) fn is_embedded_module(key: &str) -> bool {
+    embedded_module(key).is_some()
+}
+
 fn module_is_loading(heap: &mut Heap, mod_name: &str) -> bool {
     let map_id = match heap
         .env_get(value::EnvId::GLOBAL, value::intern("*features-loading*"))
@@ -3281,6 +3301,7 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 )));
             }
             // Refer all public names: enumerate the live globals under `mod/`.
+            let mut referred = 0usize;
             for g in heap.global_symbols() {
                 let name = value::symbol_name(g);
                 if let Some(bare) = name.strip_prefix(&prefix) {
@@ -3292,8 +3313,29 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                             continue;
                         }
                         refer_add(heap, bare_sym, g, &mod_name)?;
+                        referred += 1;
                     }
                 }
+            }
+            // KI-120 diagnostic. A refer-all of a baked-in std/editor module that imports
+            // NOTHING leaves every bare use of its names unresolved, each dying later as
+            // `unbound symbol: <bare>` in whichever process runs it — the wrapper's
+            // `def-face`/`ui-run` wave. Restricted to EMBEDDED modules on purpose: a std
+            // module always has public API, so importing nothing from one means its globals
+            // are gone under a `*features*` that still says loaded (the bug). A user/test
+            // module legitimately refers nothing — all-private (`priv-vault2`), everything
+            // `:exclude`d (`clpb2`), or `defdyn`-only (`dynprov`, whose names are ambient, not
+            // `mod/` globals) — so those are NOT the signal and must stay silent, or the line
+            // becomes noise the reader learns to skip past.
+            if referred == 0 && is_embedded_module(&mod_name) {
+                eprintln!(
+                    "[refer] (:use {mod_name}) imported NOTHING — no public `{mod_name}/` global is bound; \
+                     *features* lists it: {}, mid-load: {}, pid={:?} scope={}",
+                    module_is_provided(heap, &mod_name),
+                    module_is_loading(heap, &mod_name),
+                    crate::process::current_pid(),
+                    crate::process::self_isolate_scope(),
+                );
             }
         }
         subset => {

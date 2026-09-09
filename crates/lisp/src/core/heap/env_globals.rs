@@ -643,7 +643,7 @@ impl Heap {
                 // Test probe: assert (from inside the window) that the publish really is
                 // covered by the read guard. `try_write` fails iff a read guard is held —
                 // and this thread holds it, so it must fail. Compiled out entirely
-                // otherwise; see `def_publish_probe` at the foot of this file.
+                // otherwise; see `heap::def_publish_probe`.
                 #[cfg(test)]
                 def_publish_probe::observe(&h.runtime.promote_lock);
                 h.runtime.globals_write().insert(sym, shared).is_some()
@@ -1037,100 +1037,5 @@ impl Heap {
                 None => return cur, // the prelude builder's local root
             }
         }
-    }
-}
-
-/// Test-only probe for the "a global `def` publishes under the promote lock" invariant
-/// (see [`Heap::promote_rehome_publish`]). Armed by the test, checked from inside
-/// [`Heap::env_define`]'s global arm at the instant just before the globals insert, and
-/// compiled out entirely in every non-test build.
-#[cfg(test)]
-mod def_publish_probe {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    use std::sync::RwLock;
-
-    pub(super) const DISARMED: u8 = 0;
-    pub(super) const ARMED: u8 = 1;
-    /// The publish ran with NO read guard held — the TOCTOU window is open.
-    pub(super) const SAW_UNGUARDED: u8 = 2;
-    /// The publish ran inside the guard — aging cannot flip underneath it.
-    pub(super) const SAW_GUARDED: u8 = 3;
-
-    pub(super) static STATE: AtomicU8 = AtomicU8::new(DISARMED);
-
-    /// A `try_write` fails exactly while some reader holds the lock. This thread is the
-    /// only candidate reader (nothing else is running), so failure ⟺ our own guard is
-    /// still held across the publish.
-    pub(super) fn observe(lock: &RwLock<()>) {
-        if STATE.load(Ordering::Relaxed) != ARMED {
-            return;
-        }
-        let guarded = lock.try_write().is_err();
-        STATE.store(
-            if guarded { SAW_GUARDED } else { SAW_UNGUARDED },
-            Ordering::Relaxed,
-        );
-    }
-}
-
-#[cfg(test)]
-mod def_atomicity_tests {
-    use super::*;
-    use std::sync::atomic::Ordering;
-
-    /// Regression: `(def name value)` must promote, re-home **and** install the binding
-    /// under a single `promote_lock` read guard.
-    ///
-    /// The store publishes a shared GC root. If the lock is dropped between the re-home
-    /// (which validates "this handle is in the current generation") and the insert, an
-    /// aging flip + `migrate_live_globals` can complete in the gap — leaving the binding
-    /// pinned to a generation that is already draining and about to be freed (a dangling
-    /// global), or letting migration's reconcile mistake a fresh rebind for the stale
-    /// value it snapshotted and overwrite it (a silently reverted `def`). Both are
-    /// invisible until they aren't, so the invariant is asserted structurally, from
-    /// inside the window itself.
-    #[test]
-    fn global_def_installs_the_binding_under_the_promote_lock() {
-        let mut interp = crate::Interp::new();
-        def_publish_probe::STATE.store(def_publish_probe::ARMED, Ordering::Relaxed);
-        interp.eval_str("(def probe-atomicity 41)").expect("def");
-        let state = def_publish_probe::STATE.swap(def_publish_probe::DISARMED, Ordering::Relaxed);
-        assert_ne!(
-            state,
-            def_publish_probe::ARMED,
-            "the probe never fired — `env_define`'s global arm no longer publishes \
-             through `promote_rehome_publish`",
-        );
-        assert_eq!(
-            state,
-            def_publish_probe::SAW_GUARDED,
-            "a global `def` installed its binding with the promote lock RELEASED: an \
-             aging flip can land between the re-home and the insert (dangling global / \
-             silently reverted def)",
-        );
-    }
-
-    /// The companion for `declared_sigs`, the other shared root published this way.
-    /// Same window, same consequence — a `(sig …)` type-expression stranded on a
-    /// draining generation is read by the checker long after the generation is gone.
-    #[test]
-    fn declared_sig_installs_under_the_promote_lock() {
-        let mut interp = crate::Interp::new();
-        let heap = &interp.heap;
-        let sym = crate::core::value::intern("probe-sig-atomicity");
-        let observed = heap.promote_rehome_publish(Value::int(7), |h, _shared| {
-            h.runtime.promote_lock.try_write().is_err()
-        });
-        assert!(
-            observed,
-            "`promote_rehome_publish` released the promote lock before running its \
-             publish step — the TOCTOU window it exists to close is open",
-        );
-        // And the real caller still stores what it promised to.
-        interp.heap.set_declared_sig(sym, Value::int(7));
-        assert_eq!(
-            interp.heap.declared_sig_value(sym).and_then(|v| v.as_int()),
-            Some(7),
-        );
     }
 }

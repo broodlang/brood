@@ -81,6 +81,29 @@
         (%image-load-section p (first sec) (second sec))
         (assert= 1 si-later))))
 
+  ;; KI-119: a section is read from the file that was INDEXED, not from whatever sits at the
+  ;; path by the time the module materialises. The directory is read at `%image-index`; a
+  ;; section is read on the module's first `require`, arbitrarily later — and in between a
+  ;; rebuild replaces the file (two builds of one tree are not byte-identical, so every offset
+  ;; moves). Reading by path then decoded another module's bytes, or ran off the end, and the
+  ;; module's names never arrived: `unbound symbol: format/vec->list` in a process whose own
+  ;; trace showed `format` materialised. The reader now holds the handle it indexed, and an
+  ;; open descriptor pins the old file across the writer's atomic rename.
+  ;;
+  ;; The replacement here is a valid, stamped image that is SHORTER than the indexed section's
+  ;; end, so a read by path cannot succeed by luck: it runs off the end and answers nil.
+  :isolated (test "a section is read from the file that was indexed, not the one at the path now"
+    (def si-pinned 7)
+    (let (p (img-tmp "pinned"))
+      (%image-write p [["" ['startup-image-test/si-pinned]]] "fp-pin")
+      (let (sec (get (%image-index p "fp-pin") ""))
+        ;; the rebuild lands between index and materialise
+        (%image-write p [] "fp-pin")
+        (def si-pinned :clobbered)
+        ;; nil is what a read off the end of the replacement answers
+        (is (int? (%image-load-section p (first sec) (second sec))))
+        (assert= 7 si-pinned))))
+
   ;; A `defdyn` var written into an image (v5) must open without error and stay a *dynamic* var:
   ;; `binding` on it must work, not raise "not a dynamic variable". The dynamic mark lives in a
   ;; process-wide static that an imaged start would otherwise miss (it skips the module load that

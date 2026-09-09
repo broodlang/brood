@@ -11756,3 +11756,79 @@ itself were "not working" against a stale binary for about an hour; the tell was
 instrumentation that fired nowhere, not even where the cold path provably ran. And **a flake
 that passes on retry is a bug with a race in front of it**: the deterministic repro took two
 minutes to write and turned a one-in-N into `{32 482, 0 2518}`.
+
+## 2026-09-08 (later) — heap.rs split, moves (d)–(g): the type substrate is out
+
+Handoff item 1's remaining bulk was the type substrate above the first `impl Heap`, not
+methods. Four more children — `local_string.rs` (the LOCAL string representation and its six
+readers), `slabs.rs` (VecStore, Slabs, CodeSlabs, SlabRef) — plus the GC tuning knobs into
+`gc.rs` and the freeze's two handle helpers into `freeze.rs`; then the three test modules that
+earlier moves had orphaned went to their subjects. `heap.rs` 4,782 → **3,175**; fourteen
+children. Suite 1418/1418 and clippy clean after each round.
+
+What this batch taught beyond the first three moves: free fns and consts a sibling reaches need
+the parent to re-import them (`use self::gc::{…}`), and rustc counts a sibling's glob use as a
+use; `unsafe fn` and trait-impl methods escape a naive widening; and new items in a child go
+above its test module. Two more stranded doc paragraphs surfaced (`StrData`'s above
+`LocalString`, `RuntimeCode`'s above `SymbolHasher`) — five for the weekend, each fixed as its
+own comment-only commit. The item is closed; `RuntimeCode` → its own child is the one seam left,
+noted in the handoff as optional.
+
+## 2026-09-08 (later) — KI-119: the stdlib image reader read sections from whatever file was at the path
+
+Resuming after a crashed session: the heap-split commits were in, the final suite run they
+were waiting on had been killed at 10 s. Rerunning it produced two things that were not the
+split. First `artifact_matrix` TIMED OUT at 120 s — because twelve orphaned `while :; do :; done`
+load spinners from a 2026-09-03 KI-88 hunt had been pinning nine to twelve cores of this box for
+4 d 18 h (a SIGKILLed `timeout` does not take its child). Every figure taken here since then was
+~2.5x inflated: `artifact_matrix` 66 s → 26.4 s clean, `complete` 22.4 s → 5.7 s. The test gets a
+240 s budget in `.config/nextest.toml` with the measurements, and the spinner check is now in
+the handoff's rules.
+
+Second, on the clean box, `brood_suite_passes` went **TMT at 900 s** on try 1 with the KI-80
+shape in its stderr — spawned children dying `unbound symbol: editor/serve/serve-manager`,
+`ui-run`, `def-face`. KI-80's third pass had attributed that to `%isolate` rolling globals back.
+Looping the wrapper with `BROOD_SCOPE_DBG=1` beside a `cargo nextest run -p cli -p nest` loop
+reproduced it on the first run (`unbound symbol: set`, then a hang on a receive with no
+`after`) with **zero** `[scope]` lines, and the load loop itself failed once: a fresh `nest run`
+died `unbound symbol: file/regular?`. That single-process shape was the handle: looped alone it
+failed 1/40 and 1/40 (`format/vec->list`), and `BROOD_IMAGE_TRACE` showed `format` materialised
+with **20 entries** where the section holds **172** — another module's bytes under `format`'s
+name.
+
+Mechanism: `%image-index` reads the directory at boot; `%image-load-section` re-opened the
+file **by path** on each module's first `require`, and a rebuild in between (nextest's setup
+script on every invocation, `nest` on a stale image) replaces the file — atomically, so never
+torn, but two builds of one unchanged tree differ from byte 103 on (three builds, three hashes,
+one size), so every offset moves. Fix: the reader holds the handle it indexed (`OPEN_IMAGES`);
+an open descriptor pins the old inode across the rename. Guard in
+`tests/startup_image_test.blsp` writes a shorter image over an indexed one and loads the
+indexed section; sabotaged to open-per-read it goes 21/22, fixed 22/22. Full write-up, the
+three sightings and what it retroactively explains (KI-80's fourth/fifth, its kinship with
+KI-72 and KI-105) in `known-issues.md`.
+
+**Not closed.** On the merged tree, with the stdlib image rebuilt exactly once at the run's
+start, `brood_suite_passes` went TMT at 900 s again — 200 children dead on bare `def-face`, the
+`editor/serve/*` names, `ui-run`: KI-80's shape, not KI-119's. That is **KI-120, open**; the
+KI-119 entry and KI-80's pointer say so. Next is the full fan-out with `BROOD_SCOPE_DBG=1`
+exported to every test process.
+
+## 2026-09-08 (later) — KI-120 FIXED: a straggler supervisor respawns into the isolate-restore window
+
+The instrumented run (`BROOD_SCOPE_DBG=1 BROOD_TEST_TRACE=1` exported to every test process,
+plus three diagnostics added this session) named it on the first hit. `[refer] (:use editor/ui)
+imported NOTHING … *features* lists it: true … pid=Some(1)` — the runner's own base `*features*`
+marks a module loaded over an empty namespace. Cause: the scoped runner quiesced ONCE per file,
+but a supervisor among the stragglers respawns a child in the window between the quiesce pass and
+`%isolate`'s restore; that child loads an editor module and `provide`s it after the restore
+rolled its globals back — KI-89's registry-survives-restore asymmetry, now for `*features*` +
+module globals. KI-80's third pass had blamed the rollback; the rollback was downstream.
+
+Fix: `test-quiesce-file` loops (`test-quiesce-rounds`, bounded 20) — kill non-`before`, await,
+re-scan until empty — so the supervisor is killed and respawns stop. Diagnostics kept default-on
+where safe (`[refer] NOTHING`, `[unbound] recorded-loaded-but-unbound under BROOD_SCOPE_DBG`,
+`BROOD_TEST_TRACE`). Before ~40% of full runs hit it; after, 2 full loaded runs 0/0/0. Guard:
+`file_boundary_quiesce.rs` on the new wording. The two tests that reddened under the tracer
+export (`mono_differential`, old-wording quiesce) pass un-instrumented — instrumentation, not the
+fix. Residual: a bounded loop warns and proceeds if a respawner outlasts 20 rounds; none seen.
+Full write-up in known-issues.md.

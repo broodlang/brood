@@ -122,6 +122,9 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-113 | **`BROOD_CONTRACTS=1` could not load eleven std modules from SOURCE, and its shim called the contracted module's own `list`** — every module reaching `project`, `test` or `editor/lineedit` failed with `first: expected list … got symbol (int)`, and `editor/pane` with a reserved-name refusal. Invisible in every normal run and in CI: a stdlib image is always present there, and a materialised module never evaluates its `(sig …)` forms. Found 2026-09-06 by running the dns tests under contracts with a private cache | ✅ **fixed 2026-09-06** — two shapes. (1) `(sig *name* int)` on a VALUE: `sig!`'s `%sig-pos` called `first` on the bare type; it answers -1 for a non-list now, so a value sig is a pure declaration under contracts as it always was without. (2) A `sig` indented inside `(check-allow …)` above its own `defn-`: the deferred contract lands at `provide`, after the loader's reserved-name exemption ends, and the rebind is refused; moved below, and `sig_placement.rs` now reads indented sigs. (3) The `sig!` shim template emitted bare prelude names into the module it was expanded in — `(list …)` in `proc` was `proc/list`; root-scoped now. Gate: `contracts_mode.rs` requires every baked-in module under contracts from source on a cold cache and names each failure |
 | KI-114 | **the native JIT miscompiles a numeric shape: an int-producing `math/round` result reaches `math/rem` as a FLOAT** — `pong` fails 22 of 101 tests on v0.26.0 with `rem: expected int, got float (-16.0)` / `(9.0)` / `(175.0)`, raised from `math/mod` under `pong/pong/spawn-burst-acc`. The same tree passes 101/101 on v0.25.2 (d0af81f7) and on v0.26.0 with the JIT off. Found 2026-09-07 by the ecosystem verification pass, after tagging v0.26.0 | ✅ **fixed 2026-09-07 — `as_f64_pair`.** Unary `-` is `(%sub 0 x)`; `-`'s shared arm is float-PROFILED by pong's float arithmetic, so `(- <int>)` took the float lowering, and since KI-109 an int operand there is PROMOTED rather than deopted. Promotion is the VM's rule for MIXED arithmetic only — an op is float arithmetic iff some operand is a float — so it is now licensed per-operand by the OTHER operand being proven float, restoring `op_is_float`'s contract that a wrong guess costs a deopt, not an answer. pong 101/101; minimal repro is `(- 33)` after a hot float loop |
 | KI-115 | **`io/puts` output does not reach the in-browser playground — only the last form's value is shown.** `(io/puts "hello, brood")` then `(+ 1 2 3)` displayed `6`. Reported 2026-09-07 against the deployed v0.26.0 wasm | ✅ **FIXED 2026-09-07 — `save_ctx` CLEARED the thread's `CURRENT` instead of restoring what it displaced.** On a worker thread those are identical (the thread has no context of its own), which is why it stayed invisible while processes only ran on workers. On wasm there are no workers: `wait` drives the run queue on the CALLING thread, so the snippet's own quantum ran on top of the caller's context and destroyed it — and `begin_stdout_capture` had put the capture buffer in exactly that context, so `take_capture` found nothing and every `io/puts` went to a stdout that in a browser is nowhere. `install_ctx` now stashes the displaced ctx on a `DISPLACED` stack and `save_ctx` restores it; on a worker the displaced value is `None`, so nothing changes there. **Why it survived:** the previous fix (`f8f647b4`) was correct and guarded, but `root_program_capture.rs` asserts `run_program` while the playground calls `run_program_repr`, which was `#[cfg(wasm32)]` along with the whole `last_repr`/`set_result`/`take_result` chain — no host test could name the shipped function. Worse, `test_drive_quanta`'s own docs told callers to drive "from a **fresh** thread … so the per-quantum ctx install doesn't clobber the caller's ctx": the bug was written down as standing advice, and a fresh thread is not an option on wasm. Guard: `same_thread_capture.rs` reproduces the wasm shape on the host (workers disabled, quanta driven on the spawner's thread); sabotage-verified — reverting gives `left: None, right: Some("hello, brood\n")`. Verified end to end against a locally built wasm in node: `"6"` → `"hello, brood\n6"` |
+| KI-121 | **`crash_report_test.blsp` "one report per site" saw another test's crash text under heavy load** — the assertion `(includes? (crash-report-next) "exited: boom: ")` got a different crash's report. The default reporter subscribes to the RUNTIME-GLOBAL `proc/system-monitor`, so a test that arms one can receive an abnormal exit from any process in the runtime, not only its own — and a full `-j8` suite crashes processes constantly | ⚠️ **WATCH 2026-09-08** — one sighting, in a deliberately heavy `-j8` full-suite + wrapper run; retry-absorbed (FLAKY), passes 3/3 alone. Not KI-120 (no module empty, no unbound). Fix if it recurs: scope the test reporter to crashes from its own spawned pids, or drain-by-site; the design question is that a global system-monitor subscription is inherently runtime-wide |
+| KI-120 | **`brood_suite_passes` still goes TMT at 900 s with spawned children dying on bare `def-face`, `ui-run`, `highlight-spans` and qualified `editor/serve/*` — on the KI-119-fixed tree, with the stdlib image rebuilt exactly once at the run's start** (mtime 14:13:33, untouched for the 17 min after). Two of three full runs on 2026-09-08 (F-waves 12/8/22/4/8/3/19/76 in the second); the wrapper alone with `BROOD_SCOPE_DBG=1` never produced this shape (its one hit was KI-119). KI-80's third pass called it the `%isolate` rollback and fixed three things around it; the shape is back | ✅ **FIXED 2026-09-08** — the instrumented run named it: a supervisor among a file's stragglers respawns a child in the window between the runner's ONE quiesce pass and the `%isolate` restore, and that fresh child loads an editor module and `provide`s it AFTER the restore rolled its globals back — `*features*` then marks it loaded over an empty namespace and the next file's `(:use editor/serve)` imports nothing. `test-quiesce-file` now LOOPS (kill non-`before`, await, re-scan) until the set is empty, killing the supervisor so respawns stop; the `[refer] imported NOTHING` / `[unbound] recorded loaded but not bound` diagnostics are default-on where safe. Before: ~40% of full runs. After: 2 full loaded runs 0 deaths / 0 empty-imports / 0 give-ups |
+| KI-119 | **a module materialised from the stdlib image came back with another module's bytes — `unbound symbol` on a name that exists, under load** — `%image-index` read the section directory once at boot and `%image-load-section` re-opened the file BY PATH per module, arbitrarily later; any rebuild in between (nextest's setup script, `nest` on a stale image, a sibling test) replaced the file, and two builds of ONE tree are not byte-identical, so the old offsets landed on other sections. Seen as a `brood_suite_passes` run dying on bare `set` in a spawned child (then a receive waiting forever, into the 900 s cap) while a sibling loop rebuilt the image, and as a fresh `nest run` dying `unbound symbol: file/regular?` / `format/vec->list` with `[image] format` already in its own trace at **20 entries where the section holds 172** | ✅ **FIXED 2026-09-08** — the reader holds the handle it indexed (`OPEN_IMAGES`): an open descriptor pins the old inode across the writer's atomic rename, so a directory and the bytes it names cannot come from two builds. Guard `tests/startup_image_test.blsp` "a section is read from the file that was indexed" (sabotage-verified: fresh-open-per-read fails it). Fast repro before: 2 of 80 rebuild-then-`nest run` loops; after: **0 of 60**, and one full suite with the wrapper green on try 1 while that loop rebuilt the image beside it — but the wrapper's `def-face`/`editor/serve/*` shape recurred on the fixed tree with NO rebuild in the window, so that one is a second mechanism: **KI-120**, open. KI-80's `%isolate`-rollback attribution was wrong for the `set`/`nest run` runs (`BROOD_SCOPE_DBG` printed nothing) and is undecided for KI-120 |
 | KI-116 | **nine `nest check --strict` warnings in the test tree are the checker being RIGHT** — an ability's non-`self` param is a different implementor, `:or` destructuring genuinely answers `T \| nil`, `first` of an empty vector is nil under a `-> string` contract, an undeclared map shape, and `math/pow` answering `number` because a negative exponent yields a ratio | ☑️ **NOT A BUG — recorded 2026-09-08.** Corrected from an earlier revision of this entry that claimed TWENTY such warnings: eleven of those were unverified regex patches of mine that had silently failed to match, reported as deliberate without re-checking. The sweep went 269 -> 9. Two of the "limitations" it originally named were also wrong and are now fixed in the checker: an ability impl's `self` is seeded from the record it dispatches on, and a multimethod's params from its dispatch key |
 | KI-117 | **an error raised inside JIT'd code carries NO `:trace`** — once an arm is native, an error thrown in or through it reaches `catch` with an empty trace; caught as `tests/try_catch_test.blsp:352` (`trace is capped at 32 frames under deep non-tail recursion`) failing with 8 frames on try 1 of a full suite, passing on retry | ✅ **FIXED 2026-09-08** — each native arm now records itself as an error exits it (`brood_rt_trace_push` from the general lowering's `error` block and the scalar worker's `poisoned` block); the driver attaches callers-only where it would otherwise name that arm twice. Looped repro `{32 3000}`, 5000 runs never flip, a named `a→b→c` chain reads the identical trace hot and cold on both error routes, sabotage fails the guard `tests/jit_trace_test.blsp`. Corrected mechanism in the section: nothing native ever pushed a frame, and the repro's route is a division deopt re-run on the VM with no pending callers. Residue: native frames carry name + file, not the call-site position. Was: ⚠️ OPEN 2026-09-08 — found as a `FLAKY 2/2` of `brood_suite_passes`, made deterministic in one process (`{32 482, 0 2518}`; `BROOD_NO_JIT=1` `{32 3000}`), present on both 0.25.2 binaries so not the merge |
 | KI-118 | **a name defined by a MACRO was invisible to the module pre-pass, so a bare reference ABOVE the definition was unbound at runtime** — hive's `package-list` referred to a `package-card` defined eight lines below it by hatch's `defhtml`; `nest check` clean, `--strict` clean, 190 tests green, and `/packages` answered 500 on the first request | ✅ **FIXED** — `scan_def_form` now also collects the second element of any top-level form whose head is spelled `def…`, which is every definition macro in the tree (`defonce`, `defrecord`, `defmulti`, `defability`, `defevent`, hatch's `defhtml`/`deflive`). Order no longer matters. Fixed 2026-09-08 |
@@ -7412,6 +7415,15 @@ with the name lost it cannot be told apart from KI-98's full-suite-context famil
 either. The standing instruction survives another demonstration: **never pipe a suite
 run through a filter — capture the whole run to a file, grep the file.**
 
+**Fifth sighting, 2026-09-08 — split in two. See KI-119 and KI-120.** One wrapper run died
+on bare `set` with `BROOD_SCOPE_DBG=1` printing no restore-with-survivor, and a fresh `nest run`
+(no runner, no isolate) died on `file/regular?` / `format/vec->list`: those were KI-119, the
+stdlib image reader opening the file by path per section against a boot-time directory while
+rebuilds moved every offset — fixed. But this entry's own shape — `editor/serve/serve-manager`,
+`ui-run`, `def-face` dying in spawned children, TMT at 900 s — recurred on the fixed tree with
+no image rebuild in the window, twice in three full runs. That is **KI-120**, open; whether
+the third pass's `%isolate` attribution holds for it is exactly the question there.
+
 ## KI-75 — `compare` called unequal values equal, and `sort` inherited it ✅ FIXED 2026-08-28
 
 **Symptom.** Sorting float data containing a `NaN` silently returned it *unsorted*:
@@ -8539,6 +8551,243 @@ process flips).
 instrumentation "never fired" and the fix "did not work" against a binary that predated all of
 them. CLAUDE.md records this for `--release`; it is identical for debug. `cargo build --bin
 brood`, then check the mtime.
+
+## KI-121 — a crash-report test saw another test's crash under heavy load ⚠️ WATCH 2026-09-08
+
+**What was seen.** In a deliberately heavy run (full suite at `-j8`, the in-language wrapper
+under `BROOD_SCOPE_DBG`), `tests/crash_report_test.blsp` "one report per site" failed once:
+
+    (is (includes? (crash-report-next) "exited: boom: "))
+
+`crash-report-next` returned a report, but not this test's — some other crashing test's text.
+Retry passed (FLAKY); the file passes 3/3 alone.
+
+**Why.** The default crash reporter (`std/proc/crash-report.blsp`) subscribes to
+`proc/system-monitor`, which is RUNTIME-global: a reporter armed by one test receives the
+abnormal exit of ANY process in the runtime. A full suite crashes processes constantly
+(`error: boom` / `worker failed` / `always`), so a test that arms a reporter and then reads
+"the next report" can read a neighbour's. `:isolated` serialises the units but not the whole
+runtime — a straggler or a parallel non-isolated unit elsewhere can still be dying.
+
+**Not KI-120.** No module came back empty, no `[refer] NOTHING`, no `unbound`. This is
+cross-talk on a shared global monitor, not the isolate-restore race.
+
+**If it recurs.** Scope the test's reporter to crashes from its own spawned pids (the sink
+already has `me`; it could filter reports whose pid it did not spawn), or drain-by-site before
+asserting. The deeper point is that a global system-monitor subscription is inherently
+runtime-wide, so any test asserting "exactly my crashes" over it is racing every other test
+that crashes a process. One sighting; watching.
+
+## KI-120 — the wrapper's `def-face`/`editor/serve/*` unbound wave: a straggler supervisor respawns into the isolate-restore window ✅ FIXED 2026-09-08
+
+**What was seen.** A full `make test` on the merged tree `b405c49f` (KI-119 fixed):
+`brood_suite_passes` TMT at 900.040 s on try 1, passed try 2 in 112.7 s (`FLAKY 2/2`). The
+captured try-1 output: F-waves of 12, 8, 22, 4, 8, 3, 19 and 76 in a row; stderr with **200**
+`process N died: unbound error: unbound symbol: def-face`, 7 `editor/serve/serve-manager`, 2
+`ui-run`, 2 `editor/serve/shared-hub`, 2 `editor/serve/serve-shared-manager`, 1
+`highlight-spans`. The same names, in the same proportions, as the first run of the day on
+`4027b8ca` and as KI-80's third-pass sighting of 2026-08-29.
+
+**What rules KI-119 out for this one.** KI-119 needs the stdlib image to be REPLACED between a
+process's boot-time index and a module's first materialisation. Here the image for this tree
+was written once, by nextest's setup script at 14:13:33, and its mtime was unchanged when the
+run finished 17 minutes later. Nothing else was running on the box (the release build and
+clippy had been killed for memory before this run started). And the wrapper looped alone
+under `BROOD_SCOPE_DBG=1` beside a `cargo nextest run -p cli -p nest` loop never produced
+this shape — its one failure was KI-119's bare `set`.
+
+**What the names say.** `def-face` is a root-level name from `std/face.blsp`, referenced bare
+by `tests/face_test.blsp` (13 tests, all `:isolated`, several spawning 8 workers that call
+`face`); 200 deaths is many more processes than that file has tests, so children are dying,
+not only workers. `editor/serve/*` are qualified references from `serve_test`/`sse_test`; `ui-run`
+and `highlight-spans` bare ones from `ui_test`/`highlight_test`. All editor-cluster modules,
+all loaded on demand by the files that use them — inside those files' `%isolate`s.
+
+**What is not known.** Whether an `%isolate` restore ran with a live survivor (the third
+pass's theory) — the two hits had no scope tracer armed, and the wrapper prints only F's until
+a summary it never reaches. Which tests failed. Whether the fan-out's *memory* pressure rather
+than its CPU load is the ingredient (the wrapper carries `TEST_DEFAULT_*` memory limits; the
+loaded solo loops that stayed clean ran with the box's memory free).
+
+**Next.** Run the full suite with `BROOD_SCOPE_DBG=1` exported — every test process inherits
+it, it prints only at a restore that has a live survivor, and nextest prints the wrapper's try-1
+stderr when it fails — then read the `[scope]` lines against the death lines. **Not**
+`BROOD_IMAGE_TRACE`: its per-section timing lines differ between engines and reddened 25
+output-comparing tests (`error_format_parity`, `complete`, the differentials) on the one run that
+tried it, which passed the wrapper and so learned nothing. Tally so far: hits on 2 of 4 full runs
+(`4027b8ca`, `b405c49f`), misses on the KI-119 proof run and the instrumented one. If a restore with
+survivors precedes the wave, the third pass's theory stands and the survivor's ancestry names
+the leaking test; if none does, the next tool is `BROOD_REG_TRACE=1` on a narrowed run, since
+`*features*` saying "loaded" over an unbound module is the state that would explain a
+`(:use …)` importing nothing. Also worth doing regardless: `face_test`'s fan-in receives have no
+`after`, so a dead child is a 600 s hang rather than a failure — the reason this reads as a
+timeout instead of a named case.
+
+**Resolution 2026-09-08 — the instrumented run named it, and it was not the rollback KI-80
+guessed.** With `BROOD_SCOPE_DBG=1 BROOD_TEST_TRACE=1` exported to every test process, the
+hit came with the wrapper's per-test trace intact, and three default-on-where-safe diagnostics
+(added this session) told the whole story on stderr:
+
+```
+supervisor: child :flaky failed to start: flaky: cannot start
+[refer] (:use editor/ui) imported NOTHING — no public `editor/ui/` global is bound; *features* lists it: true, mid-load: false, pid=Some(1) scope=270
+[unbound] std module `editor/serve` is recorded as loaded but `editor/serve/serve-manager` is not bound — pid=Some(3773) scope=298
+```
+
+`*features*` lists `editor/ui` as loaded while not one `editor/ui/` global is bound — the
+"recorded loaded, globals missing" state — and it is **pid 1, the runner itself**, hitting it
+while loading a later file's `(:use editor/ui)` header. So the poison was written into the
+runner's own base `*features*` by an earlier file and persisted.
+
+**Mechanism.** The scoped runner quiesces once per file:
+`(%isolate (fn () (let (before (proc/list) results (drain-one-file loader)) (test-quiesce-file before) results)))`.
+`test-quiesce-file` took ONE pass — snapshot `(proc/list)`, kill every non-`before` process,
+await. But the supervisor lines show a supervisor is *among* those stragglers, and killing its
+child makes it respawn. A replacement spawned after the pass's snapshot — or in the window
+between the pass returning and `%isolate`'s `restore_globals` — is not in `before`, was not
+killed, and is alive as the globals roll back. It loads an editor module (`env_define`s
+`editor/ui/*`, then `provide`s it); the restore wipes those globals but the `provide`,
+serialized with restore under the registry lock (KI-89's lock), lands *after* it and re-adds
+`editor/ui` to the restored `*features*`. Sticky from the next snapshot on. This is KI-89's
+exact asymmetry — a registry write surviving a restore that rolled back the plain globals
+beside it — for `*features*` + a module's own globals rather than `*record-ids*` + a
+constructor. KI-80's third pass attributed the earlier sighting to the `%isolate` rollback and
+fixed three real things around it; the rollback was downstream, the un-quiesced respawn was the
+cause.
+
+**Fix** (`std/tool/test.blsp`). `test-quiesce-file` now LOOPS (`test-quiesce-rounds`, bounded at
+20): each round re-scans the non-`before` set, kills all of it — the supervisor included, so it
+stops respawning once its restart intensity is spent or it is simply dead — awaits, and repeats
+until the set is empty. A parked leaker dies in round one; a respawning supervisor takes a few.
+The bound means a pathological respawner warns (`still spawning after 20 kill rounds`) and the
+restore proceeds anyway, which is no worse than the single pass and never a hang.
+
+**Diagnostics kept** (this session, so a recurrence self-reports rather than costing another
+week): `%refer` prints `[refer] (:use mod) imported NOTHING …` on stderr, default-on, since a
+refer-all of nothing has no legitimate shape; `unbound_error` prints `[unbound] std module `m`
+is recorded as loaded but `m/x` is not bound` under `BROOD_SCOPE_DBG` (gated — a typo on a std
+name looks identical); `BROOD_TEST_TRACE=1` arms the runner's `--trace` from the environment so
+the nextest wrapper, which nobody passes flags to, names each result as it lands even when
+killed at its cap. All three are in `docs/known-issues.md`'s catalogue via `debug_flags.rs`.
+
+**Verified.** Before: ~40% of full loaded runs hit the wave (KI-119 proof run clean, but the
+`4027b8ca`, `b405c49f` and one instrumented run all hit it — 3 of ~7). After: two full runs
+under the same `-j 6` concurrent load and tracers, **0 unbound deaths, 0 `[refer] NOTHING`, 0
+give-ups**, wrapper green. The guard `crates/nest/tests/file_boundary_quiesce.rs` follows the
+new per-round wording and asserts the leaker dies in the first round (no give-up). The two
+tests that reddened under the tracer export — `mono_differential` (compares two arms' stdout,
+which the trace timing perturbs) and the old-wording `file_boundary_quiesce` — both pass
+un-instrumented; they were the instrumentation, not the fix.
+
+**Residual.** The fix is a bounded loop, not a hard guarantee: a supervisor that out-respawns 20
+kill rounds would still slip a straggler through and warn. None observed. The deeper guarantee —
+an isolate restore that cannot be raced at all — is the `%isolate`/scheduler design question
+KI-89 and this entry both circle; the loop closes the window this bug used, loudly.
+
+## KI-119 — a module materialised from the stdlib image came back with another module's bytes ✅ fixed 2026-09-08
+
+**Symptom, three shapes in one afternoon, all under load.**
+
+1. A full `make test` on `4027b8ca`: `brood_suite_passes` **TMT at 900.040 s** on try 1, passed
+   on try 2 (`FLAKY 2/2`). The captured try-1 stdout has F-waves (15, 46, 19, 64 in a row); its
+   stderr names spawned children dying `unbound symbol: editor/serve/serve-manager`, `ui-run`,
+   `def-face`, `highlight-spans` — KI-80's third-pass shape, verbatim.
+2. The wrapper binary looped alone with `BROOD_SCOPE_DBG=1` beside a `cargo nextest run -p cli -p
+   nest` loop: run 1 died `process 3735 died: 156:46: unbound error: unbound symbol: set` — bare
+   `set`, in `tests/set_test.blsp`'s `st-build-echo` child — and then sat until my 700 s timeout:
+   the parent's `(receive)` has no `after`, so a dead child is a hang until the 600 s batch
+   deadline, which plus the rest of the run is more than the 900 s cap. **Zero `[scope]` lines** —
+   no `%isolate` restore ran with a live survivor. The rollback theory KI-80 settled on does not
+   survive that run.
+3. The concurrent load loop's third pass: `nest::startup_image
+   an_imaged_start_follows_transitive_require_edges` — a FRESH `nest run` in a scaffolded project,
+   no test runner, no isolate — died `1000:13: unbound symbol: file/regular?` at
+   `nest/run-program`. Looped alone with `BROOD_IMAGE_TRACE=1`: **1 of 40**, then **1 of 40**
+   again with `BROOD_SCOPE_DBG=1` (still no `[scope]` line), this time
+   `509:29: unbound symbol: format/vec->list` at `package/package-lock-index` — and the same
+   process's own trace shows `[image] format` materialised, with **20 entries**. A healthy
+   `format` section holds **172**.
+
+That last number is the whole diagnosis: the process read a *different module's bytes* under
+`format`'s name. `vec->list` exists, is public, and `format` was "installed"; it was some other
+section.
+
+**Mechanism.** `%image-index` reads the header, footer and directory at boot and hands Brood a
+`{name → [offset len]}` map. `%image-load-section` runs LATER — on each module's first
+`require`, seconds or minutes after — and re-opened the file **by path** (`read_at(path, off,
+len)`), then seeked to an offset from that boot-time directory. In between, the file at that
+path gets replaced: nextest's `build-std-image` setup script writes it on every invocation
+(so every one of my loops did, on every iteration), `nest` rebuilds it on any command that
+finds it stale or missing, and the writer's own comment promised this was harmless because
+"both wrote identical bytes anyway (the content is a pure function of `stdlib-id`)". **It is
+not.** Three builds of one unchanged tree, same binary, same id:
+
+    ce4d6c8a0ff84bfd  3005157 bytes
+    db117e1c4787e15a  3005157 bytes
+    ad6d5a5eb858513c  3005157 bytes    — differing from byte 103 on (right after the header)
+
+Same size, different layout — section order and encoding vary run to run — so every rebuild
+moves every offset. The rename is atomic, so no reader ever saw a torn file; every reader saw
+a *complete, valid, different* file through a directory that described the previous one. A
+section decoded at the wrong offset either defines another module's names (harmless, and the
+requested module's names never arrive — the `format`/20-entries case) or runs off the end and
+answers nil (the source path then loads it — the silent recovery that kept this at one-in-N).
+
+Why it presents as KI-72's "wrong answer as a hang" and KI-80's mass F's: the name is missing
+in *every* process of the runtime at once, so whichever spawned children reach it die together,
+their parents wait on replies that never come, and the wrapper's 600 s batch deadline plus the
+rest of the run exceeds its 900 s cap — a TMT line with the names hidden behind it. It needs
+load only because load is what makes an image rebuild land *between* a boot and a module's
+first use in some other process on the box.
+
+**Fix** (`crates/lisp/src/builtins/startup_image.rs`). `%image-index` opens the file once and
+keeps the handle in `OPEN_IMAGES`, keyed by path; `%image-load-section` reads from that
+handle, never from a fresh open. An open descriptor pins the inode across the writer's rename,
+so a directory and the bytes it indexes cannot come from two builds. Re-indexing a path
+deliberately adopts the file now on disk (that is what `%std-image-reinstall!` is for, KI-105).
+One handle per indexed image, held for the process's life. The lookup takes its hit out from
+under the registry lock before the miss path re-locks it — the sabotage that first tried
+`open_image` inside the `if let` deadlocked, which is worth knowing about `std::sync::Mutex`.
+
+**Guard.** `tests/startup_image_test.blsp` "a section is read from the file that was indexed,
+not the one at the path now": write an image, index it, write a *shorter* valid image with the
+same stamp over the path, load the indexed section — it must still define its global. With the
+reader sabotaged to open per read, the load runs off the end and answers nil: **21/22**; with
+the fix **22/22**. The replacement is deliberately shorter so a path read cannot pass by luck.
+
+**After the fix.** The rebuild-then-`nest run` loop that failed 1/40 and 1/40 ran **0/60**; a
+full `make test` beside it (so the stdlib image was rebuilt some sixty times during the run —
+the adversarial condition) came back 1417/1418 with `brood_suite_passes` green on try 1 in
+201 s, the one red being `doc_refs` reading this file mid-edit (green on rerun). One
+sighting's-worth of evidence, not proof of absence; the fix is argued from construction — an
+open descriptor cannot see a rename.
+
+**What this closes — and what it does not.** It closes the `nest run` sightings (3) and the
+wrapper run whose failure was bare `set` (2): both happened while another process was rebuilding
+the image. It does **not** close the wrapper shape in (1): on the fixed tree, with the image
+rebuilt exactly once at the run's start (mtime 14:13:33, untouched for the 17 minutes after),
+`brood_suite_passes` went TMT at 900 s again with **200** children dead on bare `def-face` and
+the `editor/serve/*` names — see **KI-120**, open. So the wrapper has had at least two
+mechanisms under it, and KI-80's third-pass attribution to the `%isolate` rollback may yet be
+right for that one; what is settled is that it was wrong for the `set` and `nest run` runs,
+where the scope tracer printed nothing. KI-72 (a section replaced a stub before its helpers
+were bound) and KI-105 (a prelude image carrying a stale directory) are two other members of
+this entry's family — a directory and its bytes disagreeing — and this is the one that needed
+neither the prelude image nor a stub.
+
+**Also recorded here, found on the way.**
+- Twelve orphaned `sh -c 'while :; do :; done'` load spinners from a 2026-09-03 KI-88 hunt
+  had been pinning nine to twelve cores of this box for **4 days 18 hours** (their `timeout 400`
+  parents died with that session's shell; a SIGKILLed `timeout` does not take its child).
+  Every figure taken on this machine in that window was ~2.5x inflated — `artifact_matrix` 66 s
+  → 26 s clean, `complete` 22.4 s (the "unexplained doubling" in `.config/nextest.toml`) →
+  **5.7 s** clean — and they turned `artifact_matrix` into a 120 s TIMEOUT once. Before
+  believing a timing or a timeout on a dev box: `cat /proc/loadavg`, `pgrep -af 'while :;'`.
+- `nest test --trace` reds the five `tests/runner_progress_test.blsp` cases: `progress-mark` is
+  suppressed under `*test-trace*`, so `with-out-str` captures "". Cosmetic; not fixed here.
+- `tests/set_test.blsp`'s fan-in `(receive …)` has no `after`, so a dead child is a hang rather
+  than a failure. Left as is: the runner's batch deadline names it, and the test is right to
+  expect the message.
 
 ## KI-116 — the strict warnings that are the checker being right ☑️ not a bug 2026-09-08
 

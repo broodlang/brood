@@ -1,19 +1,15 @@
-//! The slab substrate — where heap objects actually live, and how a reference to one is
-//! handed out.
+//! The slab substrate — child of heap.
 //!
-//! Three storages, one borrow shim:
-//!
-//! * [`VecStore`] — element storage for a single heap vector, inline in the slab slot for
-//!   the common small case and spilled to a `Vec` past [`INLINE_VEC_CAP`].
-//! * [`Slabs`] — the per-kind `Vec`s backing the LOCAL data heap and the PRELUDE region,
-//!   plus the size/liveness probes the collector and the park-time trimmer read.
-//! * [`CodeSlabs`] — the append-only `boxcar::Vec` counterpart for the shared RUNTIME
-//!   region, where lock-free reads must return references that never move.
-//! * [`SlabRef`] — what every region-dispatching accessor returns: a borrow of a slab slot
-//!   that is either direct (LOCAL/PRELUDE) or keeps a RUNTIME generation pinned.
-//!
-//! The accessors themselves, and the GC policy that decides when a slab is collected,
-//! stay in the parent.
+//! Where LOCAL and shared values physically live: [`VecStore`] (a vector's elements, inline in
+//! the slab slot up to [`INLINE_VEC_CAP`] and spilled to a `Vec` past it), [`Slabs`] (one `Vec`
+//! per kind — the LOCAL nursery/old generations and the frozen PRELUDE are all this shape) with
+//! the live-count / capacity / park-trim helpers the collector's sizing reads, [`CodeSlabs`]
+//! (the append-only `boxcar` slabs of one RUNTIME code generation), and [`SlabRef`], the borrow
+//! shim every accessor returns — a direct reference into a LOCAL/PRELUDE slab, or a pinned one
+//! into a RUNTIME generation. Split out of `heap.rs` on 2026-09-08 (handoff item 1, move e).
+//! Fields and constructors are `pub(super)` because `heap.rs`, `gc.rs` and `gc_runtime.rs`
+//! address the slabs directly; `heap.rs` re-exports `VecStore`, `INLINE_VEC_CAP` and `SlabRef`
+//! at their previous visibility so paths outside the module are unchanged.
 
 use super::*;
 
@@ -453,11 +449,11 @@ pub struct SlabRef<'a, T: ?Sized> {
     /// Keeps the RUNTIME generation's `Arc<CodeSlabs>` alive while borrowed; `None`
     /// for a direct borrow. Never read directly — held purely so its `Drop` (the
     /// Arc release) runs no earlier than the pointer's last use.
-    pub(super) _pin: Option<Arc<CodeSlabs>>,
+    _pin: Option<Arc<CodeSlabs>>,
     /// Points into the borrowed slot — a direct `&'a T`, or into the slab the pin
     /// keeps alive. Valid for the wrapper's whole lifetime either way.
-    pub(super) ptr: *const T,
-    pub(super) _life: std::marker::PhantomData<&'a T>,
+    ptr: *const T,
+    _life: std::marker::PhantomData<&'a T>,
 }
 
 // SAFETY: `SlabRef` is a plain shared borrow (a `&T` plus, optionally, the `Arc`
@@ -582,7 +578,7 @@ mod vecstore_layout_tests {
     /// bumping `INLINE_VEC_CAP` or reordering fields) fails here rather than
     /// silently miscompiling every `nth`.
     #[test]
-    pub(super) fn vecstore_jit_layout() {
+    fn vecstore_jit_layout() {
         let v = VecStore::Inline {
             len: 2,
             items: [Value::int(7), Value::int(9)],

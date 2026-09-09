@@ -502,12 +502,6 @@ impl std::hash::Hasher for HandleHasher {
 }
 type HandleMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<HandleHasher>>;
 
-/// KI-95: `promote` must copy shared (DAG) substructure ONCE, the way the GC's
-/// flush path does (`flush_pair`/`flush_vector`/`flush_map` in `gc.rs`) — not once
-/// per referrer. Immutable path-copying code produces shared substructure
-/// routinely, and the RUNTIME region is append-only, so per-referrer copies are a
-/// leak that compounds exponentially with nesting. The counts are asserted
-/// directly against the RUNTIME slabs, per the KI-95 fix-shape note.
 #[cfg(test)]
 mod promote_sharing_tests {
     use super::*;

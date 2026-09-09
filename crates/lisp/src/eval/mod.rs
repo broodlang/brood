@@ -1559,6 +1559,27 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
 /// `-j 1`," not on every unbound being a race. (`docs/error-codes.md`.)
 pub(crate) fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
     let name = value::symbol_name(sym);
+    // KI-120 diagnostic, under `BROOD_SCOPE_DBG` (the tracer for this whole class): a
+    // qualified name whose module is one of this binary's baked-in `std/` modules AND is
+    // recorded in `*features*` as loaded, yet is not bound. That is the "recorded loaded,
+    // globals missing" state the wrapper's `editor/serve/serve-manager` deaths imply —
+    // but it is also what a plain typo on a std name looks like from here, which is why
+    // it is not default-on. Printed at the death site, with the pid and isolate scope,
+    // because the `process N died:` one-liner that follows carries neither.
+    if let Some(slash) = name.rfind('/') {
+        let m = &name[..slash];
+        if std::env::var_os("BROOD_SCOPE_DBG").is_some()
+            && crate::builtins::system::is_embedded_module(m)
+            && crate::builtins::system::module_is_provided(heap, m)
+        {
+            eprintln!(
+                "[unbound] std module `{m}` is recorded as loaded but `{name}` is not bound — \
+                 pid={:?} scope={}",
+                crate::process::current_pid(),
+                crate::process::self_isolate_scope(),
+            );
+        }
+    }
     // A deliberate rename (ADR-304's ledger) is appended to the MESSAGE, not carried as
     // a hint: a `(try … (catch e (error-message e)))` sees the message only, and the
     // caller most in need of the pointer is exactly the one that swallowed the error.

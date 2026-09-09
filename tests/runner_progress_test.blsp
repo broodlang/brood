@@ -22,24 +22,32 @@
   (let (f (test/r-fails r))
     (if (pair? f) f (error "runner-progress-test: expected a failure list, got " f))))
 
+;; The marks `results` print with trace OFF. `progress-mark` is suppressed under `*test-trace*`
+;; (a line per test already says everything), so these cases used to read "" — and fail —
+;; whenever the run around them was traced: `nest test --trace`, or `BROOD_TEST_TRACE=1` on
+;; the nextest wrapper. What they test is the marks, not the run's trace setting.
+(defn- marks (results)
+  (binding (*test-trace* false)
+    (with-out-str (test/progress-mark results))))
+
 (describe "test runner: progress marks"
   (test "a passing result marks a dot"
-    (assert= (with-out-str (test/progress-mark (list (progress-test-pass "t")))) "."))
+    (assert= (marks (list (progress-test-pass "t"))) "."))
   (test "a failing result marks an F"
-    (assert= (with-out-str (test/progress-mark (list (progress-test-fail "t")))) "F"))
+    (assert= (marks (list (progress-test-fail "t"))) "F"))
   (test "several results mark in order"
-    (assert= (with-out-str (test/progress-mark (list (progress-test-pass "a")
-                                                 (progress-test-fail "b")
-                                                 (progress-test-pass "c"))))
+    (assert= (marks (list (progress-test-pass "a")
+                      (progress-test-fail "b")
+                      (progress-test-pass "c")))
       ".F."))
   (test "a skipped result marks an orange circle, not a dot"
-    (assert= (with-out-str (test/progress-mark (list (progress-test-skip "t")))) "○"))
+    (assert= (marks (list (progress-test-skip "t"))) "○"))
   (test "the three outcomes mark distinctly, in order"
-    (assert= (with-out-str (test/progress-mark (list (progress-test-pass "a")
-                                                 (progress-test-skip "b")
-                                                 (progress-test-fail "c"))))
+    (assert= (marks (list (progress-test-pass "a")
+                      (progress-test-skip "b")
+                      (progress-test-fail "c")))
       ".○F"))
-  (test "no results marks nothing" (assert= (with-out-str (test/progress-mark nil)) ""))
+  (test "no results marks nothing" (assert= (marks nil) ""))
   (test "colour is off when stdout is captured, so output stays parseable"
     ;; The gate is what keeps a piped run, a CI log, or an LLM reading the output
     ;; free of escape codes.

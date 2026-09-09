@@ -16,62 +16,65 @@ State when written: `main` = `5e238340`, pushed; **no open bug in `known-issues.
 row is ✅/☑️/📦 (KI-107 closed 2026-09-06 with ADR-323, KI-112/KI-113 fixed the same weekend).
 **2026-09-08: KI-117 found and FIXED the same day** — an error raised inside JIT'd code carried
 no `:trace` (found as a one-in-N flake of `try_catch_test.blsp`, made deterministic, fixed with a
-per-arm error-exit callback; guard `tests/jit_trace_test.blsp`). No open bug again. One residue is
+per-arm error-exit callback; guard `tests/jit_trace_test.blsp`). One residue is
 recorded in the entry: native frames carry name + file but no call-site position.
-Last full suite 1415/1415 on `326e4cdb`. The tree is clean. Pick items **in order**; one per
+**2026-09-08 (later): KI-119 found and FIXED** — the stdlib image reader re-opened the image
+BY PATH per section against a directory read at boot, and rebuilds (not byte-identical, so
+every offset moves) landed in between; a module then materialised another module's bytes and
+its names were unbound in every process at once. This was KI-80's "unbound after `%isolate`
+rollback" shape — that attribution was wrong (`BROOD_SCOPE_DBG` printed nothing on the failing
+run) — and a fresh `nest run` dying on `file/regular?`. Reader holds the indexed handle now;
+guard in `tests/startup_image_test.blsp`, sabotage-verified. **2026-09-08 (later): KI-120 also
+FIXED** — the wrapper's `def-face`/`editor/serve/*` unbound wave was a supervisor among a file's
+stragglers respawning a child into the window between the runner's ONE quiesce pass and the
+`%isolate` restore; the child loaded an editor module and `provide`d it after the restore rolled
+its globals back, so `*features*` marked it loaded over an empty namespace (KI-89's asymmetry).
+`test-quiesce-file` now loops until the straggler set is empty. **No open bug again.** Three
+diagnostics stay default-on-where-safe (`[refer] NOTHING`, `[unbound]` under `BROOD_SCOPE_DBG`,
+`BROOD_TEST_TRACE`) so a recurrence self-reports. If `brood_suite_passes` ever shows the wave
+again, the `[refer] imported NOTHING` line names the module and the responsible file follows. On a hit, read the wrapper's
+try-1 stderr: `[scope] RESTORE by … with N live:` lines against the `process N died:
+unbound symbol` lines. The entry lists what each outcome means and the next tool. Keep the
+whole log; never pipe it through a filter.
+**Also that day: twelve orphaned load spinners from a 2026-09-03 flake hunt had pinned 9–12
+cores for 4 d 18 h** — every timing taken here since was ~2.5x inflated (`complete` 22.4 → 5.7 s,
+`artifact_matrix` 66 → 26 s). Rule 7 below.
+The tree is clean. Pick items **in order**; one per
 session is fine. Each says what to do, how to verify, and what "done" means. The 2026-09-04
 queue below is superseded except where these items point back into it.
 
-### 1 — Finish the `heap.rs` split (old item 5; four moves done, the type substrate left)
+### 1 — Finish the `heap.rs` split ✅ DONE 2026-09-08 (one optional move left)
 
-**State.** `heap.rs` is **4,782 lines**, of which **508** are its seven `#[cfg(test)]` modules —
-so ~4,275 lines of code. Four children are out (all 2026-09-07 except the first):
-`positions.rs` (734), `env_globals.rs` (1,041, move a), `freeze.rs` (465, move b),
-`promote.rs` (483, move c). Suite 1417/1417 after each round.
+**State.** `heap.rs` is **3,175 lines** (from 7,536 when the item was written, 6,802 at the
+start of this weekend). Fourteen `use super::*` children under `heap/`; the last session added
+`env_globals` (1,041), `freeze` (480), `promote` (503), `local_string` (497) and `slabs` (568),
+moved the GC knobs into `gc.rs` and the freeze helpers into `freeze.rs`, and carried the three
+test modules that had been orphaned to the children that own their subjects. Suite 1418/1418
+and clippy clean after every round. Five stranded doc comments were found by the moving
+boundaries and fixed as separate comment-only commits.
 
-**The remaining bulk is NOT methods.** Everything named in the old item text is moved. What is
-left above the first `impl Heap` is the **type substrate**, and that is where the next ~1,300
-lines are. Three cohesive groups, easiest first:
+**What is left in `heap.rs`, deliberately.** The records — `Heap`, `ColdHeap`, `CheckHeap`,
+`SharedCode`, `LocalCheckpoint`, `RuntimeCode` with its `Default` + `impl` (~600 lines) and
+the `SymbolHasher` family — plus construction, the LOCAL allocators and the region-dispatching
+accessors. The one further move with a clean seam is **`RuntimeCode` → `heap/runtime_code.rs`**:
+its 29 fields are all private and addressed as `self.runtime.X` from `heap.rs` and every child,
+so it would need `pub(super)` on each. Do it only if a reason beyond line count appears; the
+~3,000 bar was about the method groups, which are out.
 
-- (d) **the LOCAL string representation** → `heap/local_string.rs`: `LocalString` (86),
-  `StrAux` (103), `CharIndex` (135), `StrData` (174), the `CHAR_INDEX_STRIDE`/`_MIN_CHARS`
-  consts, and `mod char_index_tests` (119 lines) which tests exactly this and should travel
-  with it. ~420 lines.
-- (e) **the slab substrate** → `heap/slabs.rs`: `VecStore` (796) and its `Deref`/`DerefMut`,
-  `Slabs` (922), the `slab_live_count`/`slab_capacity_bytes`/`park_trim_probe`/`shrink_slabs`/
-  `slab_bytes` helpers, `CodeSlabs` (1188) and `SlabRef` (1238). The biggest group, ~800 lines,
-  and the one to read carefully — `SlabRef` is the borrow shim every accessor returns.
-- (f) **the GC tuning knobs** → append to the existing `heap/gc.rs`: `gc_floor`, `rt_gc_floor`,
-  `major_growth`, `major_floor`, `min_tenure`, `gc_trace_default`, `gc_count_env`, and the
-  `*_STRIDE`/`NURSERY_MAX`/`WALKER_*` consts. ~200 lines of policy that belongs beside the
-  collector.
-
-Line numbers are as of `72fd14c2` and will drift; anchor on the item name.
-
-**Do, per move.** Cut the section verbatim into a `use super::*;` child with an `impl Heap {…}`
-wrapper and a `//!` header saying what it holds; add `mod name;` beside the others
-(alphabetical — and check the order, `freeze` between `facts` and `gc`, not next to
-`env_globals`); leave anything that is not the section's own concern in `heap.rs` under a small
-header. `cargo fmt --all`; `cargo build -p brood`; `cargo clippy --all-targets --all-features
--- -D warnings`; then the suite — build the test binaries in the FOREGROUND with
-`--build-jobs 6` and run `cargo nextest run --no-fail-fast -j1` in the background under the
-16 GB cap. Update the layout table in CLAUDE.md and this item. **Done when** `heap.rs` is under
-~3,000 lines; (d)+(e)+(f) get there with room to spare.
-
-**Three things the first three moves cost, so the next ones need not.**
-1. **Visibility.** A child's private method is invisible to the parent AND to its siblings, so
-   anything still called from outside needs `pub(super)` — `env_frame` in move (a); the build
-   names every site. Moves (b) and (c) needed none.
-2. **Read the doc comment ABOVE the section you are cutting.** Two functions turned out to
-   carry a paragraph written for a *neighbour* — `global_defined`'s sat on `global_generation`,
-   and `freeze_as_shared_code`'s sat on `localize_for_freeze`, leaving both undocumented. The
-   defect is invisible until a boundary moves, and both were fixed as separate comment-only
-   commits so the cut stayed pure.
-3. **Check the item's own grouping against the code.** This item grouped `PromoteForward` with
-   the freeze; its only users are the `promote*` methods, so it went with those instead. The
-   same applies to the test modules: `promote_sharing_tests` (130 lines) still sits in
-   `heap.rs` testing code that now lives in `promote.rs`, and `rt_position_tests` (88) tests
-   what is now `positions.rs` — worth carrying across when convenient.
+**What the moves cost, for the next one of this kind (any file).**
+1. A child's private item is invisible to the parent AND to its siblings: widen with
+   `pub(super)` (struct fields too), and for free fns/consts have the parent re-import them —
+   `use self::child::{…}` — so `use super::*` in the siblings still finds them. rustc counts a
+   sibling's glob use as a use, so only names nobody outside the child reaches warn as unused.
+2. `unsafe fn` and trait-impl methods are the two shapes a naive `fn `-prefix widening misses;
+   the compiler names each.
+3. `clippy::items_after_test_module`: new items in a child go ABOVE its `#[cfg(test)]` module.
+4. **Read the doc comment ABOVE the section you cut.** Five times this weekend a paragraph
+   written for one item sat glued above its neighbour's doc (`global_defined`,
+   `freeze_as_shared_code`, `to_prelude`, `StrData`, `RuntimeCode`) — invisible until a
+   boundary moved.
+5. Check the item's grouping against the code: `PromoteForward` was listed with the freeze;
+   its only users are the `promote*` methods.
 
 ### 2 — The last `nest` arms (old item 4; 23 of 28 moved)
 
@@ -126,6 +129,13 @@ needs a machine where `make ab --floor` and `perf stat` are fair game.
 5. **A test marked `:isolated` before its form is isolated only since ADR-323** — check the
    summary's `N isolated` count against the markers when a file's concurrency is in question.
 6. **A stale binary agrees with anything.** Rebuild before believing a `.blsp` change.
+7. **Before believing a timing or a timeout, check the box is idle**: `cat /proc/loadavg` and
+   `pgrep -af 'while :;'`. Load-generator spinners started as `( timeout N sh -c '…' & )` outlive
+   the session that started them (a killed `timeout` leaves its child), and twelve of them sat
+   here for five days. Start hogs self-terminating — `bash -c 'end=$((SECONDS+N)); while
+   [ $SECONDS -lt $end ]; do :; done'` (dash has no `SECONDS`) — and kill them in a trap.
+8. **Do not edit `docs/` while a suite runs either** — `doc_refs` reads `known-issues.md` from
+   disk, and a source comment citing a KI whose section is not written yet reds it.
 
 ## Work queue — written 2026-09-04 (superseded by the 2026-09-07 queue above; kept for its item text)
 

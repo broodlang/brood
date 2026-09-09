@@ -365,8 +365,11 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     // so a reader observes either the old complete image or the new one, never half.
     //
     // The temp name carries the pid so two concurrent builders do not collide with
-    // each other either; last rename wins, and both wrote identical bytes anyway
-    // (the content is a pure function of `stdlib-id`, which is in the file name).
+    // each other either; last rename wins. The two builds are NOT byte-identical — three
+    // builds of one unchanged tree on 2026-09-08 gave three different files of the same
+    // size, differing from byte 103 on — so a rename moves every section offset, and a
+    // process that indexed the previous file must keep reading THAT file: `OPEN_IMAGES`
+    // holds the handle open for exactly this reason (KI-119).
     let tmp = format!("{path}.{}.tmp", std::process::id());
     std::fs::write(&tmp, &body)
         .map_err(|e| LispError::runtime(format!("%image-write: {tmp}: {e}")))?;
@@ -388,9 +391,66 @@ pub(super) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(Value::int(total as i64))
 }
 
-/// Read `len` bytes at `off` from `path` without reading the rest of the file.
-fn read_at(path: &str, off: u64, len: usize) -> Option<Vec<u8>> {
-    let mut f = std::fs::File::open(path).ok()?;
+/// The image files this process has indexed, **held open** for as long as it runs — one
+/// handle per path, replaced whenever the same path is indexed again.
+///
+/// This is what makes a section read agree with the directory it came from (KI-119). A
+/// directory is read once, at `%image-index`; the sections it names are read LATER, on
+/// each module's first `require`, seconds or minutes after — and in between the file at
+/// that path can be replaced: `nest` rebuilds the stdlib image on any command that finds
+/// it missing or stale, a test suite's setup script rebuilds it, and two builds of the
+/// SAME tree are not byte-identical (section order and encoding vary run to run, so every
+/// rebuild moves every offset). Reading by path then applied the old offsets to the new
+/// file — decoding some *other* module's bytes under the requested name, or running off
+/// the end — and the module's names simply never arrived: `unbound symbol: format/vec->list`
+/// in a process whose trace showed `format` "materialised" with 20 entries where the section
+/// holds 172. That is the mechanism behind a week of `brood_suite_passes` flakes and every
+/// "unbound symbol on a name that exists" sighting under load.
+///
+/// An open descriptor pins the inode: the atomic rename the writer does leaves an old
+/// reader on the old, complete file for as long as it holds the handle, so a directory and
+/// the bytes it indexes cannot come from two different builds. Bounded: one handle per
+/// indexed image path, and a process indexes a handful.
+static OPEN_IMAGES: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn open_images() -> std::sync::MutexGuard<
+    'static,
+    std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+> {
+    OPEN_IMAGES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Open `path` and make it THE file this process reads `path`'s sections from, replacing any
+/// earlier handle for the same path — an index deliberately adopts whatever is on disk now.
+fn open_image(path: &str) -> Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>> {
+    let f = std::sync::Arc::new(std::sync::Mutex::new(std::fs::File::open(path).ok()?));
+    open_images().insert(path.to_string(), f.clone());
+    Some(f)
+}
+
+/// The held handle for `path`, opening (and holding) it if this process has not indexed it.
+/// The miss path exists for a caller that got its directory from somewhere other than this
+/// process's own `%image-index` — it is exactly as safe as the old read-by-path was, no more.
+fn image_file(path: &str) -> Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>> {
+    // Take the hit out from under the registry lock BEFORE the miss path re-locks it in
+    // `open_image` — `std::sync::Mutex` is not reentrant, and an `if let` on the guard would
+    // keep it alive across that call.
+    let held = open_images().get(path).cloned();
+    match held {
+        Some(f) => Some(f),
+        None => open_image(path),
+    }
+}
+
+/// Read `len` bytes at `off` from an open image handle without reading the rest of the file.
+/// Seek + read under the handle's lock, so two concurrent section loads cannot interleave
+/// their seeks.
+fn read_at(file: &std::sync::Mutex<std::fs::File>, off: u64, len: usize) -> Option<Vec<u8>> {
+    let mut f = file.lock().unwrap_or_else(|e| e.into_inner());
     f.seek(SeekFrom::Start(off)).ok()?;
     let mut buf = vec![0u8; len];
     f.read_exact(&mut buf).ok()?;
@@ -419,17 +479,28 @@ pub(super) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let path = need_str(heap, arg(args, 0), "%image-index")?;
     let want = need_str(heap, arg(args, 1), "%image-index")?;
 
-    let Ok(meta) = std::fs::metadata(&path) else {
+    // Open ONCE and hold the handle (see `OPEN_IMAGES`): the header, the footer, the
+    // directory and — later, per module — every section are read from this same file, so a
+    // rebuild that replaces the path between now and a section load cannot move the bytes
+    // the directory points at out from under us.
+    let Some(file) = open_image(&path) else {
         return Ok(Value::Nil);
     };
-    let size = meta.len();
+    let Ok(size) = file
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .metadata()
+        .map(|m| m.len())
+    else {
+        return Ok(Value::Nil);
+    };
     if size < (MAGIC.len() + 8) as u64 {
         return Ok(Value::Nil);
     }
     // Header: magic + fingerprint. Read a bounded prefix — the fingerprint is the only
     // variable-length part and the caller built it, so its length is known to be sane.
     let head_len = (MAGIC.len() + 4 + want.len()).min(size as usize);
-    let Some(head) = read_at(&path, 0, head_len) else {
+    let Some(head) = read_at(&file, 0, head_len) else {
         return Ok(Value::Nil);
     };
     if !head.starts_with(MAGIC) {
@@ -444,14 +515,14 @@ pub(super) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         return Ok(Value::Nil);
     }
     // Footer: the directory's offset.
-    let Some(foot) = read_at(&path, size - 8, 8) else {
+    let Some(foot) = read_at(&file, size - 8, 8) else {
         return Ok(Value::Nil);
     };
     let dir_off = u64::from_le_bytes(foot.try_into().ok().unwrap_or([0; 8]));
     if dir_off >= size - 8 {
         return Ok(Value::Nil);
     }
-    let Some(dir_bytes) = read_at(&path, dir_off, (size - 8 - dir_off) as usize) else {
+    let Some(dir_bytes) = read_at(&file, dir_off, (size - 8 - dir_off) as usize) else {
         return Ok(Value::Nil);
     };
     let mut dr = Cursor::new(dir_bytes);
@@ -591,7 +662,12 @@ pub(super) fn image_load_section(args: &[Value], _: EnvId, heap: &mut Heap) -> L
         v => return Err(LispError::wrong_type(heap, "%image-load-section", "int", v)),
     };
     let reserve = crate::eval::truthy(arg(args, 3));
-    let Some(bytes) = read_at(&path, off, len) else {
+    // From the handle `%image-index` opened for this path — never a fresh open by path, which
+    // would read whatever a concurrent rebuild has since put there (KI-119, `OPEN_IMAGES`).
+    let Some(file) = image_file(&path) else {
+        return Ok(Value::Nil);
+    };
+    let Some(bytes) = read_at(&file, off, len) else {
         return Ok(Value::Nil);
     };
     let mut r = Cursor::new(bytes);
