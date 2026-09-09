@@ -1,0 +1,43 @@
+;; Task 4's named open shape: work made runnable by a TIMER (no spawn, so no spawn-time peer
+;; wake) on workers that are deep-idle, so every would-be thief is parked on its grown
+;; backstop. K sleepers are placed on ONE worker (BROOD_SPAWN_SPILL huge = always-local),
+;; the pool then goes deep-idle long enough for the backoff to reach its ceiling, and all K
+;; timers expire together. The owner runs them serially; a thief is what parallelises them,
+;; and a thief is exactly what the backoff delays.
+(def k 8)
+(def idle-ms 1500)
+(def work-ms 150)
+
+(defn spin (deadline)
+  (if (< (os/now) deadline) (spin deadline) :done))
+
+(defn sleeper (parent)
+  (sleep idle-ms)
+  (spin (+ (os/now) work-ms))
+  (send parent [:done (os/now)]))
+
+(defn collect (n first-at last-at)
+  (if (= n 0)
+    [first-at last-at]
+    (receive
+      ([:done t] (collect (- n 1)
+                   (if (nil? first-at) t (math/min first-at t))
+                   (if (nil? last-at) t (math/max last-at t)))))))
+
+(let (me (self) t0 (os/now))
+  (dotimes (_ k) (spawn (sleeper me)))
+  (let ([first-at last-at] (collect k nil nil))
+    (io/puts (str "first-finish "
+               (- first-at t0)
+               " ms"
+               "  last-finish "
+               (- last-at t0)
+               " ms"
+               "  spread "
+               (- last-at first-at)
+               " ms"
+               "  (serial would be ~"
+               (+ idle-ms (* k work-ms))
+               ", parallel ~"
+               (+ idle-ms work-ms)
+               ")"))))

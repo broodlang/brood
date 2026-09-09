@@ -216,6 +216,36 @@ checked. This is hygiene, not a suspicion.
 
 ## Task 4 — the empty-pool park backoff: confirm `latency` and the message rows are flat
 
+> ### ✅ The named open shape is answered on the dev box, 2026-09-09 — the row sweep is what is left
+>
+> The "shape worth probing" below — work made runnable by a **timer** (no spawn, so no
+> spawn-time peer wake) while every would-be thief is parked on its grown backstop — is a
+> *mechanism* question with a hundreds-of-milliseconds effect size, so it does not need a quiet
+> box. Probe (**`stress/idle_backoff_probe.blsp`**, kept there so `make check-corpora` statically
+> checks its names and it cannot rot the way the fuzz generator and scaling probe did): 8 sleepers placed on ONE worker with
+> `BROOD_SPAWN_SPILL=100000` (always-local), a **1500 ms** idle so the backoff is provably at
+> its 500 ms ceiling (the doubling 10+20+40+80+160+320 reaches the cap by 630 ms), then all 8
+> timers expire together and each does 150 ms of CPU work. Serial on one worker would be
+> ~2700 ms; full parallelism ~1650 ms.
+>
+> | arm | last finish | spread |
+> |---|---|---|
+> | backoff ON (default), 3 runs | 1651 / 1652 / 1651 ms | 1 / 0 / 1 ms |
+> | `BROOD_NO_IDLE_BACKOFF=1`, 3 runs | 1652 / 1652 / 1651 ms | 1 / 1 / 0 ms |
+>
+> Indistinguishable, and both at the parallel ideal — the backoff costs this shape nothing.
+>
+> **Sabotage, because a flat result is only worth having if the probe could show a delay.**
+> With `BROOD_NO_STEAL_WAKE=1` the spread grows to 8 ms (backoff ON) and 2-10 ms (OFF): the
+> probe does resolve steal latency, and even with the spawn-time wake gone a thief finds the
+> work on its ordinary 10 ms re-probe, never the 500 ms backstop. So the shape is protected
+> **structurally** — the `enqueue` that makes a timer-woken process runnable wakes a parked
+> worker — not by luck, which is the thing the paragraph below could not tell from reasoning.
+>
+> **Still queued for a quiet box:** the row sweep proper — `latency`, `pingpong`, `ring`,
+> `spawn`, `spawn-live`, `supervisor` with floors, and `latency` p50/p99 as medians over 11
+> runs. This box cannot resolve that row, for the reason recorded below.
+
 **What changed (2026-09-09).** A parked scheduler worker used to re-probe every 10 ms
 forever; it now doubles that backstop to 500 ms **while `STEALABLE == 0`** and resets to
 10 ms the moment it runs anything. Motivation was not throughput: an idle runtime was

@@ -11907,3 +11907,42 @@ first; a bug that reproduces with the change disabled is not the change.
 
 Not measured here: the `latency` benchmark row, which this box does not run. Queued in
 `perf-handoff.md`.
+
+## 2026-09-09 — two queued perf questions answered on the dev box, by making them structural
+
+`perf-handoff.md` existed because this box cannot resolve a few-percent delta. Two of its
+entries turned out not to need one: they were *mechanism* questions wearing a number.
+
+**Task 1 (high, "possible silent regression") — does KI-114's `as_f64_pair` hold KI-109's
+mandelbrot closure?** The feared regression has a named signature: `->float` deopts every
+activation, sixteen latch it `BAILED`, the arm runs interpreted. Binary and load-immune. On
+`9a9f6a3d`, lean `make release-brood`, `make doctor` clean, box idle (loadavg 0.03):
+`BROOD_JIT_DUMP_IR=1` shows `->float` **lowered** and `esc` **lowered**;
+`BROOD_JIT_BAIL_TRACE=1 | grep deopt-thrash-latched | sort -u` is **empty — zero arms
+anywhere**. Native vs `BROOD_NO_JIT=1`: **0.21 s vs ~2.0 s (~9.5x)**, so the native path
+demonstrably carries the work. The closure holds. That also settles Task 2, which asks for
+thrash-latched arms the pre-KI-114 binary lacked: there are none at all. `row-sum`/`grid-sum`
+not lowering is not this change — `row-sum` bails `call-mediated-boxed`, a call-plumbing
+refusal `as_f64_pair` cannot produce, and they are the per-row drivers, not the per-pixel path.
+
+**Task 4 — the empty-pool park backoff's one named open shape.** Work made runnable by a
+*timer* (no spawn, so no spawn-time peer wake) while every would-be thief is parked on its
+grown backstop. Probe now at `stress/idle_backoff_probe.blsp`: 8 sleepers pinned to one worker
+(`BROOD_SPAWN_SPILL=100000`), 1500 ms idle so the backoff is provably at its 500 ms ceiling
+(the doubling reaches the cap by 630 ms), then all 8 timers expire together and each does
+150 ms of CPU work. Serial ~2700 ms, parallel ideal ~1650 ms. Backoff ON: last finish
+1651/1652/1651 ms, spread 1/0/1. `BROOD_NO_IDLE_BACKOFF=1`: 1652/1652/1651, spread 1/1/0.
+Indistinguishable, both at the ideal. **Sabotaged** with `BROOD_NO_STEAL_WAKE=1` to prove the
+probe resolves steal latency at all: spread grows to 8 ms (ON) and 2-10 ms (OFF) — and even
+with the spawn-time wake gone a thief finds the work on its ordinary 10 ms re-probe, never the
+500 ms backstop. So the shape is protected *structurally*: the `enqueue` that makes a
+timer-woken process runnable wakes a parked worker.
+
+**What is still deferred, and it is now one class only:** absolute cross-process deltas of a
+few percent, i.e. `make ab --floor` sweep verdicts — Task 1's 30-row sweep, Task 3's
+re-baseline (smallest rows 2.9%, 4.2%), Task 4's message/scheduler rows with `latency` p50/p99
+over 11 runs. `perf-handoff.md` now opens with a "What this box CAN answer" section so the next
+mechanism question is not deferred as a magnitude one: structural first; trust large ratios
+(measured spread here 5% JIT arm / 12% VM arm); within-process adjacency via the divan engine
+grid below that; count the calls before optimising; and check loadavg, orphan spinners and
+`make doctor` before believing anything.
