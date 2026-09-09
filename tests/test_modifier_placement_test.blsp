@@ -1,0 +1,134 @@
+;; A test modifier must sit where the runner actually reads it.
+;;
+;; ADR-323 fixed the second of three spellings. `test` takes its modifiers after the name
+;; (`(test "n" :isolated …)`); `describe` takes the group's own after the group name; and a
+;; bare `:isolated` in a describe BODY used to be an inert body form that evaluated to a
+;; keyword and did nothing — 31 tests in 10 files ran parallel while reading as isolated,
+;; which is how KI-107 flaked for a day. `describe` now lifts a body-position modifier onto
+;; the test after it and rejects every other bare keyword at expansion time.
+;;
+;; The spelling that expansion still cannot see is a modifier in a `test` BODY —
+;; `(test "n" (is …) :isolated)`. There it is just a trailing value: legal, inert, and
+;; silently dropped, exactly the shape ADR-323 was written about. Expansion cannot reject it
+;; because a trailing keyword value IS meaningful there (`macro_harden_test` ends three
+;; side-effect-only tests with `:ok`), so the rule has to be narrower than "no bare keyword":
+;; only the four MODIFIER keywords are refused, and only outside their legal position.
+;;
+;; A static scan also reaches files the runner never expands — one excluded by a filter, or
+;; a fixture — which is the other half of why this is a scan and not a runtime check.
+;;
+;; The fixtures below are STRINGS parsed by `reflect/read-all`, not literal forms, so this
+;; file cannot trip its own scanner and needs no self-exclusion.
+
+(defmodule test-modifier-placement-test
+  (:use test))
+
+(def- modifier-keywords [:isolated :skip :serial :tags])
+(def- test-heads ['test 'deftest])
+
+(defn- modifier? (x)
+  (and (keyword? x) (includes? modifier-keywords x)))
+
+(defn- test-form? (form)
+  (and (list? form) (includes? test-heads (first form))))
+
+(defn- proper (form acc)
+  "The proper prefix of `form`, as a list. Source can legitimately hold an IMPROPER list —
+   `syntax_roundtrip_test` reads `'(list 1 . 2)` on purpose — and one is still `list?`, so
+   the walk has to normalise before touching it: `drop` hands back that bare tail (`2`), and
+   `mapcat` raises on it outright. Normalising once here is why nothing below needs a guard."
+  (cond
+    (not (list? form)) (reverse acc)
+    (empty? form) (reverse acc)
+    else (proper (rest form) (cons (first form) acc))))
+
+(defn- after-modifiers (items)
+  "Drop the leading modifier run — the legal position for both `test` and `describe`."
+  (cond
+    (empty? items) items
+    (= (first items) :tags) (after-modifiers (drop items 2))
+    (modifier? (first items)) (after-modifiers (drop items 1))
+    else items))
+
+(defn- test-body-problems (form)
+  "A modifier among a test form's body forms is inert."
+  (map (filter (after-modifiers (drop (proper form '()) 2)) modifier?)
+    (fn (kw) (str "(" (first form) " …) body contains " kw))))
+
+(defn- describe-body-problems (body acc)
+  "ADR-323: a body-position modifier is legal only directly before a test form; `:serial`
+   is a group mode with no per-test meaning, so it is never legal here."
+  (cond
+    (empty? body) acc
+    (modifier? (first body))
+      (let (kw (first body)
+            tail (drop body 1)
+            legal (cond
+                    (= kw :serial) false
+                    (= kw :tags) (and (vector? (first tail)) (test-form? (second tail)))
+                    else (test-form? (first tail))))
+        (describe-body-problems tail
+          (if legal acc (cons (str "(describe …) body contains " kw " with no test after it") acc))))
+    else (describe-body-problems (drop body 1) acc)))
+
+(defn- problems-here (form)
+  (cond
+    (test-form? form) (test-body-problems form)
+    (and (list? form) (= (first form) 'describe))
+      (describe-body-problems (after-modifiers (drop (proper form '()) 2)) '())
+    else '()))
+
+(defn- scan-form (form)
+  (if (list? form)
+    (mapcat [(problems-here form) (mapcat (proper form '()) scan-form)] (fn (x) x))
+    '()))
+
+(defn- scan-source (source)
+  (mapcat (reflect/read-all source) scan-form))
+
+(defn- blsp? (path)
+  (string/ends-with? path ".blsp"))
+
+(defn- scan-file (path)
+  (map (scan-source (file/slurp path)) (fn (p) (str path ": " p))))
+
+(describe "test modifiers sit where the runner reads them"
+
+  ;; The scanner must actually detect each spelling — a tree-wide assertion over a clean
+  ;; tree passes just as well when the scanner is broken.
+  (test "a modifier in a test body is reported"
+    (assert= 1 (count (scan-source "(test \"n\" (is 1) :isolated)")))
+    (assert= 1 (count (scan-source "(describe \"g\" (test \"n\" (is 1) :skip))"))))
+
+  (test "a describe-body modifier with no test after it is reported"
+    ;; NOT at the head — a head modifier is the GROUP's own and stays legal (ADR-323).
+    (assert= 1
+      (count (scan-source "(describe \"g\" (io/puts 1) :isolated (io/puts 2) (test \"n\" (is 1)))")))
+    (assert= 1 (count (scan-source "(describe \"g\" (test \"a\" (is 1)) :isolated)"))))
+
+  (test ":serial is never a per-test modifier"
+    (assert= 1
+      (count (scan-source "(describe \"g\" :serial (test \"n\" (is 1)) :serial (test \"m\" (is 2)))"))))
+
+  ;; Found by running the scan over the tree: an improper list is still `list?`, `drop`
+  ;; hands back its bare tail and `mapcat` raises on it. A scanner that reads all of `tests/`
+  ;; must survive everything the reader accepts, not just what a test file usually holds.
+  (test "an improper list in source does not break the scan"
+    (assert= '() (scan-source "(test \"n\" (reflect/eval '(list 1 . 2)))"))
+    (assert= 1 (count (scan-source "(test \"n\" (reflect/eval '(list 1 . 2)) :isolated)"))))
+
+  (test "the legal spellings are accepted"
+    (assert= '() (scan-source "(test \"n\" :isolated (is 1))"))
+    (assert= '() (scan-source "(describe \"g\" :serial (test \"n\" (is 1)))"))
+    (assert= '() (scan-source "(describe \"g\" :isolated (test \"n\" (is 1)))"))
+    (assert= '() (scan-source "(describe \"g\" :tags [:slow] (test \"n\" (is 1)))"))
+    ;; a trailing keyword VALUE is legal — macro_harden_test relies on it
+    (assert= '() (scan-source "(test \"n\" (dolist (x '(1 2)) x) :ok)")))
+
+  (test "every test file in the tree places its modifiers legally"
+    (let (files (filter (file/walk-files "tests") blsp?)
+          problems (mapcat files scan-file))
+      ;; Assert the sweep actually swept. A walk that resolves to nothing — wrong cwd, a
+      ;; renamed directory — reports a clean tree in exactly the same way a clean tree does.
+      (is (> (count files) 100))
+      (assert= '() problems))))

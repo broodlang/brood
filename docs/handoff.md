@@ -80,25 +80,46 @@ item predicted. That was the last seam worth cutting; nothing further is queued 
 5. Check the item's grouping against the code: `PromoteForward` was listed with the freeze;
    its only users are the `promote*` methods.
 
-### 2 — The last `nest` arms (old item 4; 23 of 28 moved)
+### 2 — The last `nest` arms ✅ DONE (verified 2026-09-09; the item text had gone stale)
 
-**State.** Still Rust in `crates/nest/src/main.rs` (1,054 lines): `completions`/`complete`,
-`mcp`, `release`, `gen`, and `stdimage` — which **stays** (KI-112: the image build needs a
-process where nothing but the prelude is loaded, and the dispatcher is a std module).
+**Nothing to port.** The item said "do `gen` first, then decide `release`". There is no `gen`
+arm in `main.rs` — the name does not appear in the file — and `release` was split by ADR-322
+(`96d959ff`): `cmd_release` calls `project/bundle-collect` for the collection and keeps only
+the byte assembly and the boot-check smoke. Both halves of the "Do" were already answered.
 
-**Do.** `gen` first (small; read its arm, add a table entry in `std/tool/nest.blsp`, delete the
-variant + arm, extend `crates/nest/tests/blsp_dispatch.rs`). Then decide `release`: the bundle
-byte assembly and the boot-check smoke are mechanism (`brood::bundle`, `smoke_test`), the
-collection and reporting are policy — split along that seam rather than port the whole arm.
-`mcp`'s transport is `mcp.rs` and may stay; `completions` emits shell scripts and can stay.
-Per move: `cargo nextest run -p nest -j1` capped, the checker gates, `make smoke-bedit`.
-**Done when** every routed name is in `BLSP_SUBCOMMANDS` and `main.rs` holds only mechanism.
+**What is still Rust, and why each stays** (`main.rs`, 1,039 lines — all mechanism):
+
+- `completions` / `complete` — the static candidates ARE clap's command tree (flag names,
+  `ValueEnum` positionals, subcommand names), which only this binary can see. `cmd_complete`
+  is already a router: anything project-dependent is handed to Brood's `nest/complete`, which
+  filters and prints. Porting it would mean restating clap's own definitions in Brood, which
+  is how a completion list goes confidently wrong.
+- `stdimage` — must stay (KI-112), and already delegates its policy: the arm is a two-line
+  `require-one` + `stdimage/build` call. What is Rust is the *property*, not the logic — the
+  build attributes a module's root globals by loading and diffing, so it is sound only in a
+  process where nothing but the prelude is loaded, which a routed std module cannot be.
+- `mcp` — stdio transport (`mcp.rs`).
+- `release` — the runtime embedded at install time, the byte assembly, the boot check.
+
+**Done when** was "every routed name is in `BLSP_SUBCOMMANDS` and `main.rs` holds only
+mechanism". Both hold: 23 routed names, and every arm above is mechanism by the ADR-006 test
+(could this be written in Brood on top of existing primitives? — no, each needs something only
+the host binary has). Reopen only if a *new* arm lands with policy in it.
 
 ### 3 — Two small gates this weekend's bugs asked for
 
-- **Stray keywords in a describe body, tree-wide.** ADR-323 makes `describe` reject them at
-  expansion, so the tree is clean by construction; a static scan like `sig_placement.rs` over
-  `tests/**` would catch a THIRD spelling before it reaches a runner. Optional; small.
+- ~~**Stray keywords in a describe body, tree-wide.**~~ ✅ DONE 2026-09-09 —
+  `tests/test_modifier_placement_test.blsp`. The third spelling turned out to be a modifier in
+  a **`test` body** (`(test "n" (is …) :isolated)`), which expansion cannot reject because a
+  trailing keyword value is meaningful there — `macro_harden_test` ends three side-effect-only
+  tests with `:ok`. So the rule is narrower than "no bare keyword": only the four modifier
+  keywords, only outside their legal position. Written in Brood over `reflect/read-all` +
+  `file/walk-files` rather than as a Rust scan, and its fixtures are strings, so the file
+  cannot trip its own scanner. Tree is clean (0 findings over 374 files). Sabotage-verified
+  both ways: a planted modifier reds it and names the file; pointing the walk at a missing
+  directory reds the "did the sweep sweep" anchor. It also found that an improper list is
+  still `list?` — `drop` hands back its bare tail and `mapcat` raises on one — which is now
+  its own pinned case.
 - **Contracts-mode residue.** KI-113 records four files that exceed the 120 s budget under
   wrapping and several checker/JIT tests that assume an un-instrumented image. If the mode
   should run the whole tree: raise the budget when `BROOD_CONTRACTS` is set, and have those

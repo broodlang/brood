@@ -833,6 +833,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-08** — KI-117: a JIT'd error has no `:trace`, found as a one-in-N flake
 - **2026-09-09** — two sessions split `heap.rs` in parallel; reconciling it, and `RuntimeCode` moves out
 - **2026-09-09** — an idle runtime burned 6-8% of a core: every parked worker woke 100x/s forever
+- **2026-09-09** — a gate for ADR-323's third spelling; the `nest` arms item was already done
 
 ---
 
@@ -11908,7 +11909,46 @@ first; a bug that reproduces with the change disabled is not the change.
 Not measured here: the `latency` benchmark row, which this box does not run. Queued in
 `perf-handoff.md`.
 
-## 2026-09-09 — two queued perf questions answered on the dev box, by making them structural
+## 2026-09-09 (later) — the third spelling of a misplaced test modifier, and a stale queue item
+
+**Item 2 was already done.** The queue said "do `gen` first, then decide `release`". There is
+no `gen` arm in `nest`'s `main.rs` — the name does not occur in the file — and `release` was
+split by ADR-322: `cmd_release` calls `project/bundle-collect` and keeps only the byte assembly
+and the boot check. Both halves of the "Do" had been answered by earlier work. Read each
+remaining Rust arm against ADR-006 (could this be written in Brood over existing primitives?)
+and every one is mechanism: `completions`/`complete` ARE clap's command tree, and already hand
+every project-dependent candidate to Brood's `nest/complete`; `stdimage` must stay (KI-112) and
+already delegates its policy in two lines; `mcp` is transport; `release` is the embedded
+runtime. Item closed with that evidence rather than a port invented to match the text.
+
+**Item 3's first gate, and what it actually had to catch.** ADR-323 fixed a bare modifier in a
+`describe` BODY. The spelling expansion still cannot see is one in a **`test` body** —
+`(test "n" (is …) :isolated)` — where it is a trailing value: legal, inert, silently dropped.
+The obvious rule ("no bare keyword in a test body") false-positives immediately:
+`macro_harden_test` ends three side-effect-only tests with `:ok`, which is deliberate. So the
+gate refuses only the four MODIFIER keywords, and only outside their legal position — narrow
+enough to be true, which is the ADR-011 test.
+
+Written in Brood (`tests/test_modifier_placement_test.blsp`) over `reflect/read-all` and
+`file/walk-files`, not as a Rust scan like `sig_placement.rs`: the language can express it, so
+it should. Its fixtures are *strings* parsed at run time rather than literal forms, so the file
+cannot trip its own scanner and needs no self-exclusion. Tree is clean — 0 findings over 374
+files, which is what ADR-323 promised for the describe half and this now proves for the other.
+
+**Two things the gate taught, both from running it rather than reasoning about it.** A fixture
+I wrote as an error case was not one: a modifier at the HEAD of a describe body is the group's
+own modifier and stays legal (ADR-323 says so explicitly) — the scanner was right and the test
+was wrong. And the sweep crashed on `syntax_roundtrip_test`, which reads `'(list 1 . 2)` on
+purpose: an **improper list is still `list?`**, `drop` hands back its bare tail (the int `2`,
+which `empty?` then rejects) and `mapcat` raises on one outright. A scanner that reads all of
+`tests/` has to survive everything the *reader* accepts, not just what a test file usually
+holds; it normalises to the proper prefix once, and that case is pinned.
+
+Sabotage-verified in both directions, which is the only reason the tree-wide assertion means
+anything: a modifier planted in `spawn_forms_test` reds it with the file and spelling named,
+and pointing the walk at a missing directory reds the separate "did the sweep sweep" anchor —
+a walk that resolves to nothing otherwise reports a clean tree exactly as a clean tree does.
+## 2026-09-09 (later) — two queued perf questions answered on the dev box, by making them structural
 
 `perf-handoff.md` existed because this box cannot resolve a few-percent delta. Two of its
 entries turned out not to need one: they were *mechanism* questions wearing a number.
