@@ -70,12 +70,15 @@ number. The order to try:
 it without asking). The substitutes are the VM's own counters — `make perf-brood` plus
 `(perf/measure thunk)` / `BROOD_PERF_STATS=1` — and the JIT dumps above.
 
-What is genuinely left for a quiet, pinned box: absolute cross-process deltas of a few percent,
-i.e. `make ab --floor` sweep verdicts. Nothing else in this file needs one.
+What is genuinely left for a quiet, pinned box is one class only: absolute cross-process deltas
+of a few percent, i.e. `make ab --floor` sweep verdicts. That is Task 1's remaining half (the
+30-row sweep) and Task 3 (re-taking KI-100's re-baseline, whose smallest rows are 2.9% and
+4.2% — under the floor measured above). Every *mechanism* question here is answerable on the
+dev box; check that first.
 
 ---
 
-## Task 1 — does KI-114's fix hold KI-109's closure? (the only open question)
+## Task 1 — does KI-114's fix hold KI-109's closure?
 
 **Priority: high.** This is a *possible silent regression*, not a suspected one.
 
