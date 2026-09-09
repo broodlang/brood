@@ -38,9 +38,79 @@ JIT compilation. Right for judging generated-code quality, wrong for any change 
 
 ---
 
+## What this box CAN answer (and how) — read before deferring anything here
+
+Deferring a question to a benchmark box is right for a *magnitude* claim and wrong for a
+*mechanism* one. Most entries that landed in this file were mechanism questions wearing a
+number. The order to try:
+
+1. **Turn it into a structural question.** Did the arm lower (`BROOD_JIT_DUMP_IR=1`, count
+   `[jit-ir]`)? Was it refused, and for which reason (`BROOD_JIT_BAIL_TRACE=1`)? Did it lower
+   and then fall back (`BROOD_DEOPT_TRACE=1`, needs `perf-stats`)? These are binary and
+   load-immune, and the counter-armed build's overhead does not matter because nothing is being
+   timed — so the `make perf-brood`/`make release-brood` same-path trap is also irrelevant here.
+   Task 1 above was answered this way after being queued as unanswerable.
+2. **Trust large ratios, never small deltas.** Measured on this box 2026-09-09, mandelbrot,
+   3 runs each: JIT arm spread **5%**, VM arm spread **12%**. So an order-of-magnitude
+   comparison (tier ladder `BROOD_TIER=0|1|2`, a feature's on/off lever, JIT vs VM) is solid;
+   a few percent is noise. Prefer a comparison whose expected effect is large.
+3. **Within-process adjacency** for anything smaller: the `crates/lisp/benches/eval.rs` engine
+   grid runs both arms back-to-back in ONE process, so the ratio survives load even while
+   absolutes wander ±10–20%. Add the workload to that grid rather than timing two invocations.
+4. **Count the calls before optimising** — a `static AtomicUsize` + one `eprintln!` at the call
+   site, one run. Minutes, where a build-then-A/B round trip is hours, and it is the only cheap
+   way to tell a hot path from a plausible one (`compute-frontier.md` §7.8's top item died this
+   way: 21 calls on `fib`).
+5. **Check the box before believing anything**: `cat /proc/loadavg` and
+   `pgrep -af 'while :'` — twelve orphaned load spinners once pinned this box for 4d18h and
+   inflated every number taken in that window ~2.5x. Then `make doctor` for staleness, because
+   a stale binary fails by *agreeing* with the baseline.
+
+**`perf record` is unavailable here** (`/proc/sys/kernel/perf_event_paranoid` is 4; do not change
+it without asking). The substitutes are the VM's own counters — `make perf-brood` plus
+`(perf/measure thunk)` / `BROOD_PERF_STATS=1` — and the JIT dumps above.
+
+What is genuinely left for a quiet, pinned box: absolute cross-process deltas of a few percent,
+i.e. `make ab --floor` sweep verdicts. Nothing else in this file needs one.
+
+---
+
 ## Task 1 — does KI-114's fix hold KI-109's closure? (the only open question)
 
 **Priority: high.** This is a *possible silent regression*, not a suspected one.
+
+> ### ✅ Answered structurally on the dev box, 2026-09-09 — only the magnitude sweep is still queued
+>
+> The feared regression has a **named mechanism**, not just a number: `->float` deopts on every
+> activation, sixteen in a row latch it `BAILED`, and it runs interpreted for the rest of the
+> process. That is a *binary, load-immune* observation, so it does not need a quiet box — and
+> the instrumented build's overhead is irrelevant because nothing is being timed. On
+> `9a9f6a3d`, lean `make release-brood`, `make doctor` clean, box idle (loadavg 0.03):
+>
+> | check | command | result |
+> |---|---|---|
+> | `->float` lowers | `BROOD_JIT_DUMP_IR=1` | **lowered** (1 arm) |
+> | `esc` lowers | `BROOD_JIT_DUMP_IR=1` | **lowered** (1 arm) |
+> | the KI-109 signature | `BROOD_JIT_BAIL_TRACE=1 \| grep deopt-thrash-latched \| sort -u` | **zero arms, anywhere** |
+> | native path carries the work | default vs `BROOD_NO_JIT=1`, 3 runs each | **0.21 s vs ~2.0 s (~9.5x)** |
+>
+> So `as_f64_pair` still licenses `->float`'s promotion, the arm stays native, and nothing
+> thrash-latches. **KI-109's closure holds.** The 9.5x is quoted because a *large ratio* is
+> trustworthy on a noisy box even when a 3% delta is not — the run-to-run spread measured here
+> was 5% (JIT arm) and 12% (VM arm), which is exactly why the sweep below is still deferred.
+>
+> `row-sum` and `grid-sum` do not lower, and that is **not** this change: `row-sum` bails
+> `call-mediated-boxed`, a profitability-gate refusal about call plumbing, not a float-gate
+> refusal — `as_f64_pair` cannot produce that reason. They are also the per-row/per-grid
+> drivers, not the per-pixel path.
+>
+> **Task 2 below is fully answered by the same run**: it asks for `deopt-thrash-latched` arms the
+> pre-KI-114 binary did not have, and the new binary has **none at all**, so there can be no new
+> ones — no second binary needed.
+>
+> **Still queued for a quiet box, and only this:** the ±few-percent claims — `mandelbrot` within
+> its floor of the 2026-09-05 number, and no row regressing past `max(5%, 2 × floor)` across the
+> 30-row sweep. Those are absolute cross-process deltas smaller than this box's noise floor.
 
 ### The situation
 
