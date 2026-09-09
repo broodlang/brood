@@ -832,6 +832,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-07** — KI-114: a float-profiled arm applied to an int published a float
 - **2026-09-08** — KI-117: a JIT'd error has no `:trace`, found as a one-in-N flake
 - **2026-09-09** — two sessions split `heap.rs` in parallel; reconciling it, and `RuntimeCode` moves out
+- **2026-09-09** — an idle runtime burned 6-8% of a core: every parked worker woke 100x/s forever
 
 ---
 
@@ -11860,3 +11861,49 @@ merged tree: `cargo fmt --check`, clippy `--all-targets --all-features -D warnin
 heap/GC/promote/freeze/globals Rust tests, and seven `.blsp` files spanning maps, the JIT trace
 guard, the startup image and the concurrency/spawn set (172 tests). Not a full-suite run — this
 box does not get one.
+
+## 2026-09-09 — an idle runtime burned 6-8% of a core, and nothing was running
+
+Found from the outside in. The box felt loaded; the top consumer after the browser was a
+`nest mcp` server that had been sitting idle for five days and had accumulated **10 hours 3
+minutes of CPU**. Per-thread accounting named the shape immediately: not one hot thread but
+**all 28 scheduler workers, evenly**, ~1095 s each, every one of them in `futex_do_wait`.
+
+`STEAL_BACKOFF` was 10 ms, and it was the park backstop *unconditionally*. A parked worker
+therefore took a futex timeout and a context switch a hundred times a second, forever, to
+execute `try_steal`'s fast path — a single relaxed load of `STEALABLE` — find zero, and park
+again. The old comment on the constant argued this was cheap because "each wake is a single
+`STEALABLE` load when nothing is stealable", which measures the wrong thing: the load is free,
+the **wake** is not. Cost is linear in worker count, ~0.25% of a core each — confirmed by
+sweeping `BROOD_J` (1/4/8/28 → 0%/1%/2%/7%).
+
+Fix: while `STEALABLE == 0` a worker doubles its own backstop, 10 ms → 500 ms
+(`IDLE_BACKOFF_MAX`), and snaps back to 10 ms the instant it runs anything. **With work queued
+anywhere, nothing changes** — and that is the whole safety argument, because it is the regime
+stealing and the stranded-work watchdog both live in. Idle, 28 workers, 20 s: `user=0.43s
+sys=1.01s` → `user=0.01s sys=0.01s`, ~70x. `BROOD_NO_IDLE_BACKOFF=1` restores the old
+behaviour and reproduces the old cost, which is the A/B control.
+
+**Why latency does not move, checked rather than assumed.** The timeout was never how work is
+discovered: `enqueue` notifies the target worker's own condvar, and a spawn wakes an idle peer
+through `wake_a_parked_peer`. Post-idle fan-out of 64 processes after 2 s of deep idle measured
+7-12 ms with the backoff against 7-29 ms without. The adversarial shape — `BROOD_SPAWN_SPILL`
+huge, so placement is always-local and *only* stealing can parallelise — measured 7-8 ms with
+against 8-26 ms without. `BROOD_FAULT_STRANDED=1` still trips the watchdog at 3004 ms, because
+the over-count keeps `STEALABLE > 0` and therefore the 10 ms cadence.
+
+Guarded by `park_backoff_tests` over the two extracted policy fns (`park_wait`/`next_backoff`):
+the loaded cadence is exactly `STEAL_BACKOFF`, growth doubles, saturates and never shrinks, and
+finding work returns to the floor. Sabotage-verified — dropping the `min(IDLE_BACKOFF_MAX)` and
+making `park_wait` ignore `pool_empty` reds 3 of the 4 (the fourth asserts only the empty-pool
+path, which that sabotage leaves correct).
+
+**A test-writing note, since it cost the session an hour.** The first latency harness hung, and
+a hang in a program written to test a *park* change reads as a lost wakeup. It was not: the A/B
+lever hung identically, which located the fault in the harness before any code was suspected.
+`spawn` takes an unevaluated call form — `(spawn (f a b))` runs `(f a b)` in the new process —
+so a helper that *returns* a closure spawns a process that builds one and exits. Run the control
+first; a bug that reproduces with the change disabled is not the change.
+
+Not measured here: the `latency` benchmark row, which this box does not run. Queued in
+`perf-handoff.md`.

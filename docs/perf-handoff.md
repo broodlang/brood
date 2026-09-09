@@ -141,6 +141,40 @@ checked. This is hygiene, not a suspicion.
 
 ---
 
+## Task 4 — the empty-pool park backoff: confirm `latency` and the message rows are flat
+
+**What changed (2026-09-09).** A parked scheduler worker used to re-probe every 10 ms
+forever; it now doubles that backstop to 500 ms **while `STEALABLE == 0`** and resets to
+10 ms the moment it runs anything. Motivation was not throughput: an idle runtime was
+costing 0.25% of a core per worker (6-8% on 28 cores, 10 h of CPU on a five-day-idle `nest
+mcp`). See the devlog entry and `BROOD_NO_IDLE_BACKOFF` in `CLAUDE.md`.
+
+**Why it should be flat, and why that still needs checking.** With work queued anywhere the
+cadence is bit-for-bit the old one, and work is discovered by direct condvar wake
+(`enqueue`) or the spawn-time peer wake (`wake_a_parked_peer`), never by this timeout. The
+dev box measured post-idle fan-out at 7-12 ms with the backoff against 7-29 ms without,
+including with `BROOD_SPAWN_SPILL` huge so that only stealing parallelises. But that box
+cannot resolve the `latency` row: `BROOD_SPAWN_SPILL`'s own tuning notes record that two
+11-run samples of the *same* binaries disagreed by 3× on p99.9.
+
+**Do.** `make ab --floor BASE=<the commit before the change>` over the message/scheduler
+rows — `latency`, `pingpong`, `ring`, `spawn`, `spawn-live`, `supervisor` — and read
+`latency` p50/p99 as medians over 11 runs, the protocol `BROOD_SPAWN_SPILL` was tuned with.
+Then repeat the two interesting rows with `BROOD_NO_IDLE_BACKOFF=1` as the A/B control; the
+flag exists for exactly this.
+
+**Pass.** Every row within `max(5%, 2 × floor)`, and `latency` p50/p99 not worse than the
+control beyond that band. **Fail.** Any message row outside it — report the row, the floor
+and the control numbers; the flag makes a revert a one-line default flip, not a code change.
+
+**A shape worth probing if a row does move.** The one path with a real (if bounded) change
+is work becoming runnable *without* a spawn — a timer or I/O wake enqueued onto a **busy**
+worker while every other worker is deep-idle. The owner still runs it after its current
+quantum; what waits up to 500 ms is a *thief* taking it off that owner instead. Construct it
+with a long-idle process holding one busy worker, then a timer fire onto that same worker.
+
+---
+
 ## Reporting back
 
 Put results in `docs/devlog.md` with the date, the exact `make ab` invocation, N, whether
