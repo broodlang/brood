@@ -686,10 +686,29 @@ static STEALABLE: AtomicUsize = AtomicUsize::new(0);
 /// immediately when a process is enqueued onto *its* queue (a preempt re-enqueue
 /// or a spawn placed here), but it is *not* notified when a **peer's** queue
 /// grows — so it re-checks for stealable work every `STEAL_BACKOFF`. Short
-/// enough that a steal opportunity isn't missed for long; long enough that a
-/// genuinely idle pool wakes rarely (each wake is a single `STEALABLE` load when
-/// nothing is stealable). Tunable.
+/// enough that a steal opportunity isn't missed for long. Tunable.
+///
+/// This is the cadence while work exists *somewhere* (`STEALABLE > 0`). It used to be the
+/// cadence always, and the comment here claimed a genuinely idle pool then "wakes rarely"
+/// because each wake is a single `STEALABLE` load. That measured the wrong thing: the load
+/// is free, the **wake** is not. At 10 ms every parked worker takes a futex timeout and a
+/// context switch 100×/s, so an idle runtime cost 0.25% of a core *per worker* — 6-8% of a
+/// core on a 28-core box, forever, with nothing to run. It showed up as a `nest mcp` server
+/// that had burned 10 hours of CPU sitting idle for five days. See `IDLE_BACKOFF_MAX`.
 const STEAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The park backstop once `STEALABLE == 0` — nothing queued on any worker, so a re-probe
+/// has nothing to find *by definition*, and the only thing the timeout buys is the wake
+/// itself. A worker doubles its own backstop from `STEAL_BACKOFF` up to this bound while it
+/// keeps finding an empty pool, and drops straight back to `STEAL_BACKOFF` the moment it
+/// runs anything or wakes to a non-empty pool.
+///
+/// **Nothing about the loaded scheduler changes**: with `STEALABLE > 0` the cadence is
+/// `STEAL_BACKOFF`, exactly as before, which is the regime stealing and the stranded-work
+/// watchdog both live in. Real work is unaffected either way — a process enqueued onto a
+/// worker's queue notifies *that worker's* condvar directly (see `enqueue`), and a spawn
+/// wakes an idle peer (`wake_a_parked_peer`); neither path is a timeout.
+const IDLE_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How long a newly enqueued process is left for its **owning** worker before a thief may
 /// take it. The owner is exempt — it pops its own queue without consulting this — so the

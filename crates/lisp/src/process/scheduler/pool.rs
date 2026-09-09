@@ -288,6 +288,16 @@ fn steal_wake_disabled() -> bool {
     *OFF.get_or_init(|| std::env::var_os("BROOD_NO_STEAL_WAKE").is_some())
 }
 
+/// `BROOD_NO_IDLE_BACKOFF=1` pins a parked worker's backstop at `STEAL_BACKOFF` even when
+/// the pool is provably empty — the pre-2026-09-09 behaviour, where an idle runtime woke
+/// every worker 100×/s forever and cost 6-8% of a core doing nothing. The A/B lever for
+/// attributing a latency change to the backoff, the bisect switch, and the stopgap if a
+/// long park is ever implicated in a missed wake. Read once.
+fn idle_backoff_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("BROOD_NO_IDLE_BACKOFF").is_some())
+}
+
 /// Steal one queued process from a backed-up peer's queue, re-assigning it to
 /// `thief_wid`. Returns `None` if nothing is stealable. Since a process has no native
 /// stack (state capture, ADR-100 §8.4), **any** process is safe to resume on the thief —
@@ -571,9 +581,38 @@ pub(crate) fn ensure_workers() {
     });
 }
 
+/// How long to park this time. Split out of the worker loop so the policy is testable
+/// without a scheduler: the loop supplies the two facts, this decides.
+///
+/// `pool_empty` is `STEALABLE == 0` with both opt-outs clear — nothing is queued on any
+/// worker, so the re-probe this timeout exists to trigger has nothing to find.
+fn park_wait(pool_empty: bool, idle_backoff: std::time::Duration) -> std::time::Duration {
+    if pool_empty {
+        idle_backoff
+    } else {
+        STEAL_BACKOFF
+    }
+}
+
+/// The backstop for this worker's *next* empty park: doubling while the pool stays empty,
+/// bounded by `IDLE_BACKOFF_MAX`, and snapping back to `STEAL_BACKOFF` the moment it is not.
+/// Growth is per worker, so a pool waking together does not have to agree on anything.
+fn next_backoff(pool_empty: bool, idle_backoff: std::time::Duration) -> std::time::Duration {
+    if pool_empty {
+        (idle_backoff * 2).min(IDLE_BACKOFF_MAX)
+    } else {
+        STEAL_BACKOFF
+    }
+}
+
 fn worker_loop(wid: usize) {
     CURRENT_WORKER.with(|c| c.set(Some(wid)));
     IS_EXECUTOR.with(|e| e.set(true));
+    // This worker's park backstop while the pool is empty. Grows toward `IDLE_BACKOFF_MAX`
+    // for as long as we keep waking to nothing, resets to `STEAL_BACKOFF` the moment there
+    // is anything to do. A plain local: the worker loop is this thread's, so the level needs
+    // no atomic and no sharing.
+    let mut idle_backoff = STEAL_BACKOFF;
     loop {
         // 1. Our own queue first (FIFO).
         //
@@ -585,6 +624,7 @@ fn worker_loop(wid: usize) {
         //    re-enqueue (which re-locks this same queue) would deadlock the worker.
         let own = crate::core::sync::lock(&WORKERS[wid].0).pop_front();
         if let Some(p) = own {
+            idle_backoff = STEAL_BACKOFF;
             run_one(p);
             continue;
         }
@@ -592,6 +632,7 @@ fn worker_loop(wid: usize) {
         //    (every process is migratable — no native stack). See `try_steal`.
         let mut saw_young = false;
         if let Some(p) = try_steal(wid, &mut saw_young) {
+            idle_backoff = STEAL_BACKOFF;
             run_one(p);
             continue;
         }
@@ -607,6 +648,7 @@ fn worker_loop(wid: usize) {
             // that expires rather than sleeping the full backoff: if the owner drains it
             // (the spawn-then-block shape) we find nothing and park normally; if the owner
             // is CPU-bound and still running, we take it a few microseconds after spawn.
+            idle_backoff = STEAL_BACKOFF;
             let _ = cv.wait_timeout(q, std::time::Duration::from_nanos(steal_grace_ns().max(1)));
             continue;
         }
@@ -619,7 +661,16 @@ fn worker_loop(wid: usize) {
             // send the wake. Clearing it after we wake keeps the count honest.
             WORKER_PARKED[wid].store(true, Ordering::Relaxed);
             PARKED_COUNT.fetch_add(1, Ordering::Relaxed);
-            let _ = cv.wait_timeout(q, STEAL_BACKOFF);
+            // Nothing queued anywhere: a re-probe has nothing to find, so the only thing a
+            // short timeout buys is the wake. Back off toward `IDLE_BACKOFF_MAX` while that
+            // stays true. With work queued somewhere — or with the spawn-time peer wake
+            // disabled, which is what leaves discovery to this timeout — hold the original
+            // `STEAL_BACKOFF` cadence, so the loaded scheduler is bit-for-bit unchanged.
+            let pool_empty = STEALABLE.load(Ordering::SeqCst) == 0
+                && !steal_wake_disabled()
+                && !idle_backoff_disabled();
+            let _ = cv.wait_timeout(q, park_wait(pool_empty, idle_backoff));
+            idle_backoff = next_backoff(pool_empty, idle_backoff);
             WORKER_PARKED[wid].store(false, Ordering::Relaxed);
             PARKED_COUNT.fetch_sub(1, Ordering::Relaxed);
         }
@@ -957,5 +1008,68 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
         // history that would have marked it CPU-bound (see `SPAWNS_SINCE_PARK`).
         proc.spawns_since_park = 0;
         st.waiter = Some(proc);
+    }
+}
+
+#[cfg(test)]
+mod park_backoff_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// The property the whole change rests on: with work queued anywhere, the cadence is
+    /// exactly what it was before the empty-pool backoff existed. Stealing and the
+    /// stranded-work watchdog both live in this regime, so it must not move.
+    #[test]
+    fn a_non_empty_pool_keeps_the_original_cadence_and_forgets_any_backoff() {
+        for level in [STEAL_BACKOFF, Duration::from_millis(80), IDLE_BACKOFF_MAX] {
+            assert_eq!(park_wait(false, level), STEAL_BACKOFF);
+            assert_eq!(next_backoff(false, level), STEAL_BACKOFF);
+        }
+    }
+
+    /// An empty pool doubles, and saturates rather than growing without bound — an
+    /// unbounded park would be indistinguishable from a lost wakeup.
+    #[test]
+    fn an_empty_pool_doubles_up_to_the_bound_and_stops_there() {
+        let mut level = STEAL_BACKOFF;
+        let mut seen = vec![level];
+        for _ in 0..20 {
+            level = next_backoff(true, level);
+            seen.push(level);
+        }
+        assert_eq!(seen[1], STEAL_BACKOFF * 2, "first empty park doubles");
+        assert_eq!(level, IDLE_BACKOFF_MAX, "saturates at the bound");
+        assert!(
+            seen.windows(2).all(|w| w[1] >= w[0]),
+            "backoff must never shrink while the pool stays empty: {seen:?}"
+        );
+        assert!(
+            IDLE_BACKOFF_MAX > STEAL_BACKOFF,
+            "the bound must actually back off"
+        );
+    }
+
+    /// The wait is the level itself while empty — the cost saving is exactly this.
+    #[test]
+    fn an_empty_pool_parks_for_its_current_level() {
+        assert_eq!(park_wait(true, IDLE_BACKOFF_MAX), IDLE_BACKOFF_MAX);
+        assert_eq!(park_wait(true, STEAL_BACKOFF), STEAL_BACKOFF);
+    }
+
+    /// One run of real work resets the worker to the floor: the loop assigns
+    /// `STEAL_BACKOFF` on every path that finds something, so a burst after a long idle
+    /// starts at the original cadence rather than inheriting a 500 ms park.
+    #[test]
+    fn finding_work_returns_the_worker_to_the_floor() {
+        let deep = {
+            let mut l = STEAL_BACKOFF;
+            for _ in 0..10 {
+                l = next_backoff(true, l);
+            }
+            l
+        };
+        assert_eq!(deep, IDLE_BACKOFF_MAX);
+        assert_eq!(next_backoff(false, deep), STEAL_BACKOFF);
+        assert_eq!(park_wait(false, deep), STEAL_BACKOFF);
     }
 }

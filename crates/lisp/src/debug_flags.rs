@@ -494,6 +494,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "opt out of the spawn-time peer wake; idle workers wait for their own steal re-probe",
     ),
     f(
+        "BROOD_NO_IDLE_BACKOFF",
+        SCHED,
+        "opt out of the empty-pool park backoff; every parked worker re-probes every 10 ms forever",
+    ),
+    f(
         "BROOD_NO_SHARE_FN_MSG",
         SCHED,
         "opt out of handing a shared closure by handle on the SERIALISED send (BROOD_NO_SHARE_FN's sibling)",
