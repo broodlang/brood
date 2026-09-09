@@ -1196,7 +1196,9 @@ fn defines_by_convention(hn: &str) -> bool {
         return false;
     }
     // A qualified call — `(web/page/defhtml card …)` — is the same form as the bare one.
-    hn.rsplit('/').next().is_some_and(|last| last.starts_with("def"))
+    hn.rsplit('/')
+        .next()
+        .is_some_and(|last| last.starts_with("def"))
 }
 
 /// Resolve `form` against `heap.compile_ns`. Identity when at root.
@@ -3070,7 +3072,10 @@ mod resolve_tests {
             "(defmodule a) (defonce cache 1) (defhtml card (p) p) (web/page/defhtml two (p) p)",
         )
         .expect("parse");
-        assert_eq!(region(&regions_of(&interp, &forms), "a"), vec!["cache", "card", "two"]);
+        assert_eq!(
+            region(&regions_of(&interp, &forms), "a"),
+            vec!["cache", "card", "two"]
+        );
     }
 
     #[test]
