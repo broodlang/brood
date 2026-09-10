@@ -97,6 +97,12 @@
 (defn module-anchor (module-name)
   "The HTML anchor id for `module-name`'s section (`m-<slug>`)."
   (str "m-" (slug module-name)))
+;; An anchor is built from a definition NAME, and a name is whatever the source called it —
+;; Brood symbols admit `&`, `<` and `>`, so an anchor can contain them. Every site that puts
+;; one into an `id="…"` or `href="#…"` runs it through `escape` first: unescaped, an `&`
+;; starts an entity the browser may decode, which is invalid HTML and can silently change the
+;; id. Escaping BOTH the id and the href keeps them equal — the browser decodes entities on
+;; each side alike — so the link still lands.
 (defn def-anchor (module-name definition-name)
   "The HTML anchor id for a definition within a module (`d-<module>-<name>`)."
   (str "d-" (slug module-name) "-" (slug definition-name)))
@@ -120,7 +126,7 @@
         raw-sig (get definition :sig)
         sig (if qualified? (qualify-sig module-name raw-sig) raw-sig))
     (str "<div class=\"def\" id=\""
-      (def-anchor module-name (get definition :name))
+      (escape (def-anchor module-name (get definition :name)))
       "\">"
       "<div class=\"def-head\">"
       "<code class=\"sig\">"
@@ -141,7 +147,7 @@
         qualified? (get module :qualified?)
         defs (get module :defs))
     (str "<section class=\"module\" id=\""
-      (module-anchor module-name)
+      (escape (module-anchor module-name))
       "\">"
       "<h2>"
       (escape module-name)
@@ -175,7 +181,7 @@
 
 (defn- sidebar-def (module-name definition)
   (str "<li><a href=\"#"
-    (def-anchor module-name (get definition :name))
+    (escape (def-anchor module-name (get definition :name)))
     "\">"
     (escape (get definition :name))
     "</a></li>"))
@@ -184,7 +190,7 @@
   (let (module-name (get module :module))
     (str "<div class=\"nav-module\">"
       "<a class=\"nav-module-link\" href=\"#"
-      (module-anchor module-name)
+      (escape (module-anchor module-name))
       "\">"
       (escape module-name)
       "</a>"

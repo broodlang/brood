@@ -194,3 +194,35 @@
                                 :modules [{:module "plain" :defs [{:name "a" :sig "(a)"}]}]}
                  {:wrap? false}))
       (refute (includes? html "doc-section")))))
+
+;; An anchor is built from a definition NAME, and a name is whatever the source called it.
+;; Brood symbols admit `&`, `<` and `>`, so those reach an `id="…"` and an `href="#…"`.
+(describe "anchors survive a name that is not alphanumeric"
+  (defn- rendered (defs)
+    (docsite/render {:name "p" :version "1" :modules [{:module "math" :doc "d" :defs defs}]}
+      {:wrap? false}))
+
+  (test "an ampersand in an id is escaped — unescaped it starts an entity"
+    (let (html (rendered [{:name "a&b" :arglist "()" :doc "d"}]))
+      (is (includes? html "id=\"d-math-a&amp;b\""))
+      (is (not (includes? html "id=\"d-math-a&b\"")))))
+
+  (test "angle brackets are escaped in the attribute, not just in the text"
+    (let (html (rendered [{:name "<x>" :arglist "()" :doc "d"}]))
+      (is (not (includes? html "id=\"d-math-<x>\"")))
+      (is (includes? html "id=\"d-math-&lt;x&gt;\""))))
+
+  ;; The id and the href must stay the SAME string or the link stops landing — the browser
+  ;; decodes entities on both sides, so escaping both is what keeps them equal.
+  (test "the sidebar href matches the id it targets"
+    (let (html (rendered [{:name "a&b" :arglist "()" :doc "d"}]))
+      (is (includes? html "href=\"#d-math-a&amp;b\""))
+      (is (includes? html "id=\"d-math-a&amp;b\""))))
+
+  ;; Operator names are ordinary in Brood, and two of them must not slug to one anchor.
+  (test "operator names keep distinct anchors"
+    (let (html (rendered [{:name "+" :arglist "(a b)" :doc "d"}
+                          {:name "-" :arglist "(a b)" :doc "d"}]))
+      (is (includes? html "id=\"d-math-+\""))
+      (is (includes? html "id=\"d-math--\""))
+      (is (not (= (docsite/def-anchor "math" "+") (docsite/def-anchor "math" "-")))))))
