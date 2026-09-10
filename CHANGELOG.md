@@ -6,6 +6,41 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+## v0.27.0 — the checker learns a trap, and the library describes itself
+
+**A `failure` used as a condition is now a warning.** A failure value is TRUTHY, so
+`(if (string/->number s) …)` takes the then-branch precisely when the parse FAILED. The
+checker already caught the consequence once the value flowed somewhere typed; a test whose
+only job IS the branch sailed through. Measured across four repos, it found four sites and
+two of them were real latent bugs. Positively-known failures only (ADR-310), so an
+unannotated parameter does not warn; `check-allow :type-mismatch` covers code that means it.
+
+**Every standard-library module has a docstring.** Fourteen of sixty-five described
+themselves in a leading comment, which nothing reads — `nest doc bytes` printed no summary
+and the hosted reference showed an empty heading. `docsite/prose` also renders `**bold**`
+now, which docstrings across the tree use and which had been reaching the page as its own
+asterisks.
+
+**Two rendering fixes with a security edge.** `markdown->html` refused a `javascript:` href
+by comparing the URL as written, so `JaVaScRiPt:` passed — and a browser matches a scheme
+case-insensitively. `vbscript:` and `data:` were unchecked. Anything rendering third-party
+Markdown (a package README, a dependency's guide) was letting its author choose that URL.
+Separately, `docsite` now escapes an anchor before it goes into an attribute; that one is
+malformed markup rather than script, since a Brood symbol cannot contain a `"`.
+
+**A name a definition macro binds is visible to the module pre-pass** (KI-118). The scan
+matched only literal `def` heads, so a name bound by a macro — std's own `defonce`,
+`defrecord`, `defmulti` included — was unbound when referenced from above its definition, at
+runtime, past a clean check and a green suite.
+
+**Performance.** `(into [] coll)` no longer builds an intermediate list through `append`:
+ten thousand items, 1190us to 210us. An idle scheduler worker stops waking a hundred times a
+second to find nothing.
+
+**JIT and runtime fixes.** An error raised inside JIT'd code carries a `:trace` again
+(KI-117); a float-profiled arm applied to ints answered a float (KI-114); the image reader
+reads the section from the file it indexed (KI-119).
+
 ## v0.26.0 — the toolchain is Brood, and three spellings change
 
 **`nest` is written in Brood.** ADR-322 moved the CLI out of Rust a subcommand at a
