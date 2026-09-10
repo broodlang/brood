@@ -125,6 +125,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-121 | **`crash_report_test.blsp` "one report per site" saw another test's crash text under heavy load** — the assertion `(includes? (crash-report-next) "exited: boom: ")` got a different crash's report. The default reporter subscribes to the RUNTIME-GLOBAL `proc/system-monitor`, so a test that arms one can receive an abnormal exit from any process in the runtime, not only its own — and a full `-j8` suite crashes processes constantly | ✅ **FIXED 2026-09-09** — fixed without waiting for a recurrence, since the mechanism was already understood and the sighting was not reproducible on demand. The reporter is CORRECT to be runtime-wide; the racy part was the test asserting on "the next report". Every assertion in `crash_report_test.blsp` now names which crash it means — by spawned pid (`crash-report-next-of`/`crash-report-quiet-of?`) or, for a `spawn-link`ed grandchild whose pid the test never sees, by content (`crash-report-next-saying`) — and drops the rest. The wait is a DEADLINE, not a per-message window, so steady neighbour traffic cannot extend it without bound. Pinned deterministically rather than by load: a `[:report …]` queued ahead of the test's own is exactly what the global subscription delivers, and the new case asserts it is skipped. Sabotage-verified (matcher forced to `true` reds that case alone); 10/10 under concurrent crash traffic. Was: ⚠️ WATCH 2026-09-08 — one sighting, in a deliberately heavy `-j8` full-suite + wrapper run; retry-absorbed (FLAKY), passes 3/3 alone. Not KI-120 (no module empty, no unbound) |
 | KI-122 | **the KI-120 `[refer] imported NOTHING` tripwire cried wolf on bedit** — every cold `nest check` of the flagship downstream project printed `(:use fuzzy) imported NOTHING — no public `fuzzy/` global is bound`, and the claim was false: both of `fuzzy`'s publics were bound. `src/completion.blsp` opens `(:use fuzzy :exclude [filter match])` — `fuzzy`'s entire public surface — and calls `fuzzy/filter` qualified | ✅ **FIXED 2026-09-09** — the diagnostic counted `referred` (names this `:use` took), which is 0 both when the globals are missing (the bug it hunts) and when the caller excluded all of them (healthy). It now counts `public_seen` (names the module exposes), so the message means what it says; the KI-120 signal is preserved by construction, the added condition being false only when the globals exist. The exclude-everything shape was already listed in the code as one that must stay silent (`clpb2`), but the guard chosen — `is_embedded_module` — excuses a USER module that excludes everything and not a std one. Deterministic repro: `rm ../bedit/.brood/image.bin && nest check` (the run that shows it is the one that rebuilds the image, which is why it read as a one-off). Guard `crates/cli/tests/refer_excluded_all.rs`, sabotage-verified: the old guard reds the exclude-all case and leaves the refer-all control green |
 | KI-123 | **KI-117's fix cost `errors-deep` 61% — a native frame's trace entry was built, then thrown away** — `brood_rt_trace_push` runs once per native level as an error unwinds, and it constructed the `TraceFrame` (cloning the arm's file name into a fresh `String`) BEFORE calling `push_trace`, which drops the frame once the trace hits its 32-frame cap. A 50-deep unwind paid 50 allocations to keep 32; `errors-deep` throws 50,000 times, so 2.5M frames were built per run where v0.24.0 built none | ✅ **FIXED 2026-09-10.** Two changes, each measured with `make ab BASE=c9876132 --floor` (the commit before KI-117's fix): the callback now returns early on `is_control() || trace_full()`, the guard the VM's own walker `attach_vm_trace_callers` has always had (+61% → +51%); and `TraceFrame.file` is an `Arc<str>` rather than a `String`, since every producer already holds the arm's `src_file` as one — the copy was pure waste (+51% → **+19%**). Found by the 0.27.0 brood-benchmarks column refresh, which read +72% on the row across three interleaved invocations with a 0.6% spread. Residue recorded below |
+| KI-124 | **macOS has not compiled since 2026-09-03, and only a pushed tag could tell you** — `os/spawn-pty` added `libc::ioctl(0, libc::TIOCSCTTY, 0)` in `crates/lisp/src/subprocess.rs`. libc types that constant as `c_uint` in its Apple bindings and `c_ulong` on Linux, while `ioctl` takes `c_ulong` on both, so the call is a hard `E0308` on both mac arms and green on every Linux job in CI | ✅ **FIXED 2026-09-10.** The constant is cast `as _`, which each target infers for itself. The gap that let it live a week was structural, not local: **every** CI job ran `ubuntu-latest`, so nothing compiled this tree for macOS except the Release workflow's build matrix — which runs on a pushed TAG. v0.26.0 and v0.27.0 could not have caught it either; both died at the version-drift gate *before* reaching a build (KI-121's fix is what let v0.27.1 get far enough to fail here) |
 | KI-120 | **`brood_suite_passes` still goes TMT at 900 s with spawned children dying on bare `def-face`, `ui-run`, `highlight-spans` and qualified `editor/serve/*` — on the KI-119-fixed tree, with the stdlib image rebuilt exactly once at the run's start** (mtime 14:13:33, untouched for the 17 min after). Two of three full runs on 2026-09-08 (F-waves 12/8/22/4/8/3/19/76 in the second); the wrapper alone with `BROOD_SCOPE_DBG=1` never produced this shape (its one hit was KI-119). KI-80's third pass called it the `%isolate` rollback and fixed three things around it; the shape is back | ✅ **FIXED 2026-09-08** — the instrumented run named it: a supervisor among a file's stragglers respawns a child in the window between the runner's ONE quiesce pass and the `%isolate` restore, and that fresh child loads an editor module and `provide`s it AFTER the restore rolled its globals back — `*features*` then marks it loaded over an empty namespace and the next file's `(:use editor/serve)` imports nothing. `test-quiesce-file` now LOOPS (kill non-`before`, await, re-scan) until the set is empty, killing the supervisor so respawns stop; the `[refer] imported NOTHING` / `[unbound] recorded loaded but not bound` diagnostics are default-on where safe. Before: ~40% of full runs. After: 2 full loaded runs 0 deaths / 0 empty-imports / 0 give-ups |
 | KI-119 | **a module materialised from the stdlib image came back with another module's bytes — `unbound symbol` on a name that exists, under load** — `%image-index` read the section directory once at boot and `%image-load-section` re-opened the file BY PATH per module, arbitrarily later; any rebuild in between (nextest's setup script, `nest` on a stale image, a sibling test) replaced the file, and two builds of ONE tree are not byte-identical, so the old offsets landed on other sections. Seen as a `brood_suite_passes` run dying on bare `set` in a spawned child (then a receive waiting forever, into the 900 s cap) while a sibling loop rebuilt the image, and as a fresh `nest run` dying `unbound symbol: file/regular?` / `format/vec->list` with `[image] format` already in its own trace at **20 entries where the section holds 172** | ✅ **FIXED 2026-09-08** — the reader holds the handle it indexed (`OPEN_IMAGES`): an open descriptor pins the old inode across the writer's atomic rename, so a directory and the bytes it names cannot come from two builds. Guard `tests/startup_image_test.blsp` "a section is read from the file that was indexed" (sabotage-verified: fresh-open-per-read fails it). Fast repro before: 2 of 80 rebuild-then-`nest run` loops; after: **0 of 60**, and one full suite with the wrapper green on try 1 while that loop rebuilt the image beside it — but the wrapper's `def-face`/`editor/serve/*` shape recurred on the fixed tree with NO rebuild in the window, so that one is a second mechanism: **KI-120**, open. KI-80's `%isolate`-rollback attribution was wrong for the `set`/`nest run` runs (`BROOD_SCOPE_DBG` printed nothing) and is undecided for KI-120 |
 | KI-116 | **nine `nest check --strict` warnings in the test tree are the checker being RIGHT** — an ability's non-`self` param is a different implementor, `:or` destructuring genuinely answers `T \| nil`, `first` of an empty vector is nil under a `-> string` contract, an undeclared map shape, and `math/pow` answering `number` because a negative exponent yields a ratio | ☑️ **NOT A BUG — recorded 2026-09-08.** Corrected from an earlier revision of this entry that claimed TWENTY such warnings: eleven of those were unverified regex patches of mine that had silently failed to match, reported as deliberate without re-checking. The sweep went 269 -> 9. Two of the "limitations" it originally named were also wrong and are now fixed in the checker: an ability impl's `self` is seeded from the record it dispatches on, and a multimethod's params from its dispatch key |
@@ -9221,3 +9222,56 @@ saying "refresh me" since 0.24.0.
 behaviour-preserving — sabotage-verified this session in both directions: making the callback
 return unconditionally reds it (`1 tests, 0 passed`), restoring greens it. Suite 1019 + the
 `.blsp` suite green, clippy `--all-targets --all-features` clean.
+
+## KI-124 — macOS stopped compiling on 2026-09-03 and only a tag could say so ✅ fixed 2026-09-10
+
+**Symptom.** The `Release` workflow for **v0.27.1** built both Linux targets and failed both
+mac ones:
+
+```
+error[E0308]: mismatched types
+   --> crates/lisp/src/subprocess.rs:636:31
+636 |             if libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+    |                -----------    ^^^^^^^^^^^^^^^^ expected `u64`, found `u32`
+note: function defined here
+    --> libc-0.2.189/src/unix/bsd/mod.rs:557:12
+557 |     pub fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+error: could not compile `brood` (lib) due to 1 previous error
+make: *** [release-brood] Error 101
+```
+
+**Cause.** `os/spawn-pty` (f3e524bb, 2026-09-03) makes the pty the child's controlling
+terminal from `pre_exec`. libc declares `TIOCSCTTY` as `c_uint` in its Apple bindings and as
+`c_ulong` on Linux, while `ioctl`'s `request` parameter is `c_ulong` on both — so the literal
+constant is the right type on one platform and the wrong one on the other. Not a logic error:
+it never compiled for macOS at all.
+
+**Why it survived.** This is the whole of it, and it is structural rather than an oversight in
+any one review: **every job in `ci.yml` ran `ubuntu-latest`.** Nothing in the tree was ever
+compiled for macOS outside the `Release` workflow's build matrix, and that workflow is
+triggered by a pushed tag — so the earliest possible detection was *after* a version number
+had been made public. Worse, the two releases in between could not have found it either:
+v0.26.0 and v0.27.0 both failed the tag-matches-the-tree step nine seconds in and never
+reached a compiler (KI-121). Fixing that gate is precisely what let v0.27.1 travel far enough
+to hit this one — a week of macOS breakage surfaced only because an *earlier* blind spot was
+closed first.
+
+**Fix.** `libc::TIOCSCTTY as _` — the cast target is inferred per platform, so it is a no-op
+on Linux and the required widening on Apple. Deliberate non-fix: `TIOCSWINSZ` at line 512 is
+left uncast, because libc declares *that* one `c_ulong` on both platforms; casting it would
+be noise implying a portability problem that is not there.
+
+**Guard.** A new `macos-check` job in `ci.yml` (`runs-on: macos-14`) runs `cargo check` over
+`cli`, `nest` and `brood-lsp` with `make release`'s exact feature set, so a macOS compile
+error now reds an ordinary push instead of a tag.
+
+**On verifying it.** There is no macOS here, so the guard was **not** sabotage-verified the
+usual way — do not read it as if it were. What stands in its place is a recorded red on the
+identical runner, toolchain and target: Release run `34478600630` compiled the unfixed source
+on `macos-14` and emitted the exact `E0308` quoted above, twice (both mac arms). The new job
+differs from that run in one respect — `cargo check` where the release does `cargo build` —
+and a type error is diagnosed in the same pass either way, so the substitution does not weaken
+it. The residual gap is honest and worth naming: nobody has yet watched *this job* go red. The
+first push carrying it can only show that it goes **green**, which proves it runs and that the
+cast is right, not that it can fail. If a cheap way to red it on purpose appears (a throwaway
+branch with the cast reverted), take it and replace this paragraph.

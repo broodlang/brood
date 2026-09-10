@@ -186,6 +186,41 @@ jobs:
       - name: Test (gui renderer — feature-gated, not covered by the nextest run)
         run: cargo test -p brood --features gui,gui-gpu --lib gui
 
+  # Every other job here is ubuntu-latest, so until 2026-09-10 NOTHING compiled this tree
+  # for macOS except the Release workflow's build matrix — which runs on a pushed TAG, after
+  # the version is public. A `libc::ioctl(0, libc::TIOCSCTTY, 0)` added on 2026-09-03 took
+  # `c_uint` on Apple and `c_ulong` on Linux; it compiled green here for a week and reddened
+  # both mac arms of v0.27.1's release (KI-124). The two releases before that died at the
+  # version gate BEFORE reaching a build, so not one of them could have caught it either.
+  #
+  # `check`, not `build`: this job exists to catch a compile error on a target no other job
+  # compiles, not to produce a binary — the Release workflow still does that. Feature set is
+  # `make release`'s (RUN_FEATURES + dev-tools) so it sees exactly what a release sees.
+  # aarch64 only: both mac arms failed identically on the bug that motivated this, and the
+  # Intel binary is cross-compiled from the same SDK on the same runner, so a second full
+  # check buys little for the wall clock it costs.
+  macos-check:
+    name: macOS compiles (the target only a tag used to reach)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: cargo check — brood + cli (release feature set)
+        run: >
+          cargo check -p cli --all-targets --no-default-features
+          --features brood/gui --features brood/audio --features brood/treesit-grammars
+          --features brood/jit --features brood/stdimage --features brood/dev-tools
+      - name: cargo check — nest
+        run: >
+          cargo check -p nest --no-default-features
+          --features brood/gui --features brood/audio --features brood/treesit-grammars
+          --features brood/jit --features brood/stdimage --features brood/dev-tools
+      - name: cargo check — brood-lsp
+        run: cargo check -p brood-lsp
+
   build-test:
     name: test
     runs-on: ubuntu-latest

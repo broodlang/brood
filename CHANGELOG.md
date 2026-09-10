@@ -4,6 +4,22 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
+## v0.27.2 — macOS builds again
+
+**The macOS binaries are back** (KI-124). `os/spawn-pty`, added on 2026-09-03, called
+`libc::ioctl(0, libc::TIOCSCTTY, 0)` to make the pty a child's controlling terminal. libc
+types that constant as `c_uint` on Apple and `c_ulong` on Linux while `ioctl` takes `c_ulong`
+on both, so the line was a hard compile error on macOS and perfectly fine on Linux. v0.27.1's
+release therefore shipped **Linux tarballs only**, and `install.sh` on a Mac — which resolves
+the asset for the latest release — had nothing to download.
+
+**Nothing could have caught it before a tag, and now something can.** Every job in CI ran
+`ubuntu-latest`; the only thing that ever compiled this tree for macOS was the Release
+workflow's build matrix, which runs on a pushed tag. A new `macos-check` job compiles `cli`,
+`nest` and `brood-lsp` for `macos-14` with the release feature set, so this class of break
+reds an ordinary push. (v0.26.0 and v0.27.0 could not have found it either — both died at the
+version gate before reaching a compiler, which is why a week went by.)
+
 ## v0.27.1 — the checker's own advice works, and a deep throw is fast again
 
 **`filter` on a type predicate narrows its elements, so the new failure lint stops crying

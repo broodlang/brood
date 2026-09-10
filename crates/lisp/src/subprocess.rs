@@ -633,7 +633,11 @@ pub fn spawn_pty(
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            if libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+            // `TIOCSCTTY` is `c_uint` in libc's Apple bindings and `c_ulong` on Linux,
+            // while `ioctl` takes `c_ulong` on both — so the constant needs a cast that
+            // each target infers for itself. Only the macOS release job compiles this,
+            // which is why it broke unnoticed for a week (KI-124).
+            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())

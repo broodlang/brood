@@ -12244,3 +12244,33 @@ Also fixed on the way in, both from this morning's release batch: a `nest check 
 warning in `std/docsite.blsp` (`math/quot` given an unannotated `number`) and an unformatted
 `tests/docsite_test.blsp`. The second is the one that cost something — it is the first step of
 the `examples + stress` job, so its failure *skipped* the corpora and examples gates behind it.
+
+## 2026-09-10 (later) — KI-124: macOS had not compiled for a week, and only a tag could say so
+
+v0.27.1 went out with the version-drift gate finally passing (KI-121), which is exactly what
+made this visible: the Release workflow got past the gate, reached the compilers, built both
+Linux targets and failed **both mac arms** on a single `E0308`. `os/spawn-pty` (2026-09-03)
+calls `libc::ioctl(0, libc::TIOCSCTTY, 0)` from `pre_exec`; libc types `TIOCSCTTY` as
+`c_uint` in its Apple bindings and `c_ulong` on Linux, while `ioctl`'s `request` is `c_ulong`
+on both. The cast is now `as _`, inferred per target — a no-op on Linux, the required
+widening on Apple. `TIOCSWINSZ` beside it is deliberately left alone: libc declares that one
+`c_ulong` on both, and casting it would imply a portability problem that is not there.
+
+The interesting half is why it lived a week. **Every job in `ci.yml` ran `ubuntu-latest`.**
+Nothing compiled this tree for macOS except the Release build matrix, which triggers on a
+pushed tag — so the earliest possible detection was after a version number was public. And
+the two releases in between could not have found it either: v0.26.0 and v0.27.0 both died at
+the tag-matches-the-tree step nine seconds in, before any compiler ran. Closing the earlier
+blind spot is what let this one finally surface, which is worth remembering as a shape — a
+gate that fails early can *hide* every gate behind it.
+
+It was not merely theoretical by the time it was found. The v0.27.1 **release object was
+created** by the two Linux jobs that succeeded and marked Latest, carrying Linux tarballs and
+no mac ones, while `scripts/install.sh` resolves `apple-darwin` from the latest release. Any
+Mac following the documented install was getting a 404. v0.27.2 is that fix.
+
+Guard: a new `macos-check` job (`runs-on: macos-14`) runs `cargo check` over `cli`, `nest`
+and `brood-lsp` with `make release`'s feature set. It is **not** sabotage-verified — there is
+no macOS here — and KI-124 says so in place of pretending otherwise; what stands in for it is
+Release run `34478600630`, which is a recorded red from the same runner, toolchain and target
+on the unfixed source.
