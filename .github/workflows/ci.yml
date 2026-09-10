@@ -194,11 +194,19 @@ jobs:
   # version gate BEFORE reaching a build, so not one of them could have caught it either.
   #
   # `check`, not `build`: this job exists to catch a compile error on a target no other job
-  # compiles, not to produce a binary — the Release workflow still does that. Feature set is
-  # `make release`'s (RUN_FEATURES + dev-tools) so it sees exactly what a release sees.
+  # compiles, not to produce a binary — the Release workflow still does that.
   # aarch64 only: both mac arms failed identically on the bug that motivated this, and the
   # Intel binary is cross-compiled from the same SDK on the same runner, so a second full
   # check buys little for the wall clock it costs.
+  #
+  # THE FEATURE SET IS THE RELEASE'S, AND `gui`/`audio` ARE DELIBERATELY ABSENT. The Makefile
+  # defaults `WITH_GUI ?= 0` and `WITH_AUDIO ?= 0`; the `config.mk` that turns them on is
+  # written by ./configure and gitignored, so a developer's local `make release` has the GUI
+  # and CI's release build does NOT. Adding `--features brood/gui` here reds this job on code
+  # macOS never ships: `crates/lisp/src/gui.rs` imports `winit::platform::wayland` and calls
+  # `with_any_thread` with no `cfg` guard, so the gui feature cannot compile on macOS at all
+  # (KI-125). Do not "fix" that by adding the feature back — either port the gui and then add
+  # it, or leave this matching what a release actually builds.
   macos-check:
     name: macOS compiles (the target only a tag used to reach)
     runs-on: macos-14
@@ -208,16 +216,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: cargo check — brood + cli (release feature set)
+      - name: cargo check — brood + cli (the release feature set; see the note above)
         run: >
           cargo check -p cli --all-targets --no-default-features
-          --features brood/gui --features brood/audio --features brood/treesit-grammars
-          --features brood/jit --features brood/stdimage --features brood/dev-tools
+          --features brood/treesit-grammars --features brood/jit --features brood/stdimage
       - name: cargo check — nest
         run: >
           cargo check -p nest --no-default-features
-          --features brood/gui --features brood/audio --features brood/treesit-grammars
-          --features brood/jit --features brood/stdimage --features brood/dev-tools
+          --features brood/treesit-grammars --features brood/jit --features brood/stdimage
+          --features brood/dev-tools
       - name: cargo check — brood-lsp
         run: cargo check -p brood-lsp
 

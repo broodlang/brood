@@ -12286,3 +12286,17 @@ The job itself has **not** been watched going red — it was written after the f
 says so rather than blurring it into the probe's result; standing in for it is Release run
 `34478600630`, a recorded red from the same runner, toolchain and target on the unfixed
 source.
+
+The new `macos-check` job earned its place on its first run, by failing for a reason that had
+nothing to do with the bug it was written for. It initially forced `--features brood/gui`, on
+the assumption that "the release feature set" meant the one this machine builds — and macOS
+came back with `unresolved import winit::platform::wayland` and no `with_any_thread`. That is
+KI-125, and it is not a regression: `WITH_GUI ?= 0` in the Makefile and the `config.mk` that
+flips it on is written by `./configure` and gitignored, so a developer's local `make release`
+has the gui and **CI's release build does not**. The published macOS binaries have never
+contained a GUI. What has never worked is `./configure --with-gui` on a Mac.
+
+So the job now matches what a release actually builds, with a comment naming KI-125 so nobody
+re-adds the feature thinking it was an oversight. Worth extracting the general shape: a new
+gate is only as honest as its fidelity to the thing it claims to guard, and "the flags I use
+locally" is not that — the gitignored config file was the entire difference between the two.
