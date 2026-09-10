@@ -75,6 +75,7 @@
 (defn- count-pairs (part-count)
   "How many complete `**…**` runs `part-count` split parts describe."
   (math/quot (- part-count 1) 2))
+(sig count-pairs (int -> int))
 
 (defn- leading-space-count (line i)
   "The number of leading space/tab characters in `line`, scanning from `i`."

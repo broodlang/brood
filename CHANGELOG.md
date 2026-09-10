@@ -6,6 +6,12 @@ engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
 ## Unreleased
 
+**The version-drift check now runs before the tag, not after it.** v0.26.0 and v0.27.0 were
+both tagged and pushed with `std/system.blsp`'s docstring still showing `0.25.2`, and both
+Release runs died nine seconds in on the workflow's tag-matches-the-tree step — two tags with
+no binaries behind them. The same comparison is now a test (`manifest_version.rs`), so it
+fails on the bump commit.
+
 ## v0.27.0 — the checker learns a trap, and the library describes itself
 
 **A `failure` used as a condition is now a warning.** A failure value is TRUTHY, so

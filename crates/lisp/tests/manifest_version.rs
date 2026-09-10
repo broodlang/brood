@@ -30,3 +30,40 @@ fn version_matches_cargo() {
          bump both when releasing"
     );
 }
+
+/// The `(system/brood-version)` line of `std/system.blsp`'s module docstring.
+///
+/// That docstring is rendered on the hosted reference page (introspected from the
+/// runtime), and its `;; =>` form is NOT the ` -> ` shape `doc_examples_test`
+/// executes — so no test ran it and nothing here compared it.
+fn system_docstring_example() -> String {
+    let source = include_str!("../../../std/system.blsp");
+    source
+        .lines()
+        .find(|line| line.contains("(system/brood-version)"))
+        .expect("std/system.blsp's docstring shows (system/brood-version)")
+        .to_string()
+}
+
+/// The version lives in FOUR places. `.github/workflows/release.yml` compares all of
+/// them, but it runs on a pushed TAG — by which time the release is public and the
+/// only remedies are moving a tag or burning a version. It fired that way twice:
+/// v0.26.0 and v0.27.0 were both tagged and pushed with this line still reading
+/// `0.25.2`, and both Release runs died nine seconds in with no binaries built. The
+/// first went unnoticed for three days — a tag that publishes nothing looks exactly
+/// like a tag from the outside, and the failure is not in the CI run anyone reads.
+///
+/// The check belongs where it fails BEFORE the tag exists, which is here.
+#[test]
+fn system_docstring_shows_the_current_version() {
+    let example = system_docstring_example();
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        example.contains(version),
+        "std/system.blsp's (system/brood-version) example reads\n    {}\nbut the \
+         workspace is at {version}. It is rendered on the hosted reference page, and \
+         `.github/workflows/release.yml` refuses to build a release while the two \
+         disagree — bump it with Cargo.toml and project.blsp, not after tagging.",
+        example.trim()
+    );
+}
