@@ -222,7 +222,7 @@
   ;; Operator names are ordinary in Brood, and two of them must not slug to one anchor.
   (test "operator names keep distinct anchors"
     (let (html (rendered [{:name "+" :arglist "(a b)" :doc "d"}
-                          {:name "-" :arglist "(a b)" :doc "d"}]))
+                           {:name "-" :arglist "(a b)" :doc "d"}]))
       (is (includes? html "id=\"d-math-+\""))
       (is (includes? html "id=\"d-math--\""))
       (is (not (= (docsite/def-anchor "math" "+") (docsite/def-anchor "math" "-")))))))
