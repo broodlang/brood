@@ -779,8 +779,20 @@ previous wave. The scaling probe was worse: it called `bit-and`/`now`/`println`,
 nothing, and its gate reported "no timing" to nobody, because nothing runs it outside a
 manual `make stress`. Both are now covered — the probe is a real `.blsp` the corpus gate
 reads, the generator says `STALE GENERATOR` instead of blaming the checker, and the nightly
-runs the suite — but a generator cannot be static-checked, so **grep the Python too**. The scaffold templates matter most — they emit a *user's* project, and
-nothing in this repo's suite runs the code they generate.
+runs the suite — but a generator cannot be static-checked, so **grep the Python too**. The
+scaffold templates matter most — they emit a *user's* project. They ARE covered (this line used
+to say nothing ran them): `crates/nest/tests/scaffold_quality.rs` scaffolds each self-contained
+template into a temp dir and asserts it is format-clean, check-clean, ships passing tests that
+run without a warning, **boots** (`nest run --check-boot`), and — for the two templates whose
+`main` terminates (`default`, `gen`) — **runs to completion** (`nest run`). The other three
+cannot be run headless for environment reasons, not template ones: `tui-loop` never returns,
+`editor` wants a TTY, `gui` wants a display.
+
+Both new cases were sabotage-verified against a failure the OTHERS survive, which is the only
+thing that earns a gate its place. A manifest `:main` pointing at a missing module leaves
+format, check and test green and reds **boot** alone. A `main` that boots and then throws on its
+first line leaves format, check, test AND boot green and reds **run** alone — `--check-boot`
+resolves `:main` and runs nothing, which is exactly its documented limit.
 
 **The Rust checker encodes argument positions structurally**, and they degrade to `any`
 *silently* rather than erroring — `types/check/sigs.rs` (curated signatures + callback

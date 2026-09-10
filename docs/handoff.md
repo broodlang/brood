@@ -156,6 +156,23 @@ Accepted with its "As implemented" section accurate.
 `crates/cli/tests/`, not `crates/lisp/tests/` or `crates/nest/tests/`. A grep over two of the
 three test roots reported an unwired feature that was wired.
 
+### 4b — The scaffold gate now runs the project, not just checks it (2026-09-09)
+
+`crates/nest/tests/scaffold_quality.rs` had covered format-clean, check-clean and passing
+tests per template. Two cases added, each justified by a sabotage the others survive:
+
+- **`scaffolds_bootable`** (all five templates) — `nest run --check-boot`. KI-66's question.
+  Sabotage: a manifest `:main` pointing at a missing module leaves format/check/test green.
+- **`runs_to_completion`** (`default`, `gen` — the two whose `main` terminates) — `nest run`,
+  the command the `nest new` epilogue actually tells a user to type. Sabotage: a `main` that
+  boots and then throws leaves format/check/test **and boot** green.
+
+The other three are excluded for environment reasons, recorded beside `RUNNABLE`: `tui-loop`
+never returns, `editor` wants a TTY, `gui` wants a display. A drift guard fails if `RUNNABLE`
+and the macro's list disagree, so a new template has to be classified rather than silently
+left un-run. Verified under CI's exact feature set (`--features brood/treesit-grammars`,
+which notably does NOT include gui); binary is 31/31.
+
 ### 5 — Documentation debt (old item 7; do a slice when a session has time)
 
 Docstring examples (each is an executed test via `doc_examples_test.blsp`); the archive split of
@@ -167,15 +184,29 @@ header this weekend.
 a docstring**, 1,138 without an example (2026-09-09). It also runs the ADR-308 data-first and
 sig-arity checks, both at 0.
 
-**Slice done 2026-09-09:** `first`, `rest`, `bound?`, `math/floor` (Rust `PRIMITIVE_DOCS`) and
-`assoc-in`, `dissoc-in` (`std/prelude/map.blsp`) — the most-used names in the language had none.
+**Slices done 2026-09-09 (coverage 29.3% → 33.6%, 564 → 574 examples):** `first`, `rest`,
+`bound?`, `math/floor` (Rust `PRIMITIVE_DOCS`) and `assoc-in`, `dissoc-in`
+(`std/prelude/map.blsp`) — the most-used names in the language had none — then a second slice
+over `multimap` (6), `version` (3), `queue` (2) and `stats` (2).
+
+**Writing them surfaces API surprises, which is half the value.** `multimap/map-vals` calls its
+function as `(f key values-list)`, not `(f value)`; `version/match?` takes the COMPILED
+constraint first and the version string second; `version/compare-cores` takes parsed cores, not
+strings. Each is now pinned by an executed example rather than left to be rediscovered.
+
+**A case must be ONE LINE.** The engine reads the left side with `reflect/read-string`, so a
+case wrapped across two lines fails with "unexpected trailing content after the form" — which
+at least fails loudly rather than silently passing.
 Two behaviours worth documenting fell out of computing the outputs rather than writing them from
 memory: `(rest [1])` is **nil**, not `()`, and `math/floor` rounds toward *negative* infinity, so
 `(math/floor -3.2)` → `-4`.
 
-**The trap, which cost most of the slice.** `std/prelude/*.blsp` and the Rust `PRIMITIVE_DOCS`
-are **baked into the binary**, so editing a prelude docstring changes nothing until
-`cargo build`. A sabotage run against the un-rebuilt binary passes — which reads exactly like
+**The trap, which cost most of the slice — and it is broader than the prelude.** **Every
+embedded `std/*.blsp`** is baked into the binary, not just `std/prelude/*`, along with the Rust
+`PRIMITIVE_DOCS`. Editing `std/version.blsp`'s docstring changed nothing until `cargo build`:
+the runtime kept serving the old text, and a doctest sabotage against it passed. (Confirmed
+2026-09-09 the hard way, a second time, after the first slice recorded this as a prelude-only
+trap. `is_embedded_module` is the same fact from the other side.) A sabotage run against the un-rebuilt binary passes — which reads exactly like
 "the harness does not execute this example" and sent this session looking for a collection bug
 that did not exist. Worse, the boot artifacts hide it a second way: a run that has written a
 prelude image or the ADR-138 text cache serves the OLD docstring even after a rebuild. To verify

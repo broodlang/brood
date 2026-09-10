@@ -37,7 +37,9 @@ a 1-element sequence has population variance 0.0.
 (sig variance (seqable -> float))
 
 (defn sample-variance (xs)
-  "The sample variance (divided by n-1, Bessel's correction) of `xs`. Raises if fewer than 2 elements."
+  "The sample variance (divided by n-1, Bessel's correction) of `xs`. Raises if fewer than 2 elements.
+
+    (stats/sample-variance [2 4 4 4 5 5 7 9])   → 4.571428571428571"
   (let (n (count xs))
     (when (< n 2) (error "stats/sample-variance: need at least 2 elements"))
     (let (m (mean xs))
@@ -52,7 +54,9 @@ a 1-element sequence has population variance 0.0.
 (sig stddev (seqable -> float))
 
 (defn sample-stddev (xs)
-  "The sample standard deviation of `xs` (Bessel's correction)."
+  "The sample standard deviation of `xs` (Bessel's correction).
+
+    (stats/sample-stddev [2 4 4 4 5 5 7 9])   → 2.138089935299395"
   (sqrt (sample-variance xs)))
 (sig sample-stddev (seqable -> float))
 

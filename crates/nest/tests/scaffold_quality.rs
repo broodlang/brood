@@ -7,7 +7,11 @@
 //! starter code modelled non-canonical style to every new user.
 //!
 //! For each template, scaffold into a temp dir and assert the result is
-//! format-clean, check-clean, and its bundled tests pass.
+//! format-clean, check-clean, its bundled tests pass, and it BOOTS (`nest run
+//! --check-boot`). The last is KI-66's question, which `check` and `test` both leave
+//! unasked: a project can satisfy all three of the others while its `:main` does not
+//! resolve, and `nest run` is the first thing the `nest new` epilogue tells a user to
+//! type.
 //!
 //! Deliberately excluded: `hatch` and `web-api`. Those scaffold `:path`
 //! dependencies on sibling checkouts (`../hatch`) that do not exist in a temp dir,
@@ -19,6 +23,13 @@ use std::process::Command;
 
 /// Templates that scaffold a self-contained project (no external path deps).
 const SELF_CONTAINED: &[&str] = &["default", "tui-loop", "gen", "editor", "gui"];
+
+/// Of those, the ones whose `main` TERMINATES, so the gate can run the program instead of
+/// only booting it. The other three cannot run in a test harness for environment reasons,
+/// not template ones: `tui-loop` is an interactive loop that never returns, `editor` needs a
+/// TTY (`terminal: No such device or address`) and `gui` needs a display (it raises in
+/// `gui/open`). Those three keep the boot case, which is all a headless runner can ask.
+const RUNNABLE: &[&str] = &["default", "gen"];
 
 struct TempDir {
     path: std::path::PathBuf,
@@ -125,6 +136,41 @@ fn assert_ships_passing_tests(template: &str) {
     );
 }
 
+fn assert_scaffolds_bootable(template: &str) {
+    let (_tmp, root) = scaffold(template);
+    // `check` and `test` both leave this unasked — that is KI-66's whole argument, and the
+    // reason `--check-boot` exists: load every module, resolve `:main`, run NOTHING, exit
+    // nonzero if that fails. A scaffold can be format-clean, check-clean and ship passing
+    // tests while its entry point does not resolve, and the first thing the `nest new`
+    // epilogue tells a new user to run is `nest run`.
+    //
+    // `--check-boot` rather than a bare `run`: the tui-loop, editor and gui templates start
+    // an interactive loop that would not terminate, so running them would hang the case
+    // rather than answer the question.
+    let booted = nest(&root, &["run", "--check-boot"]);
+    assert!(
+        booted.ok,
+        "`nest new --template {template}` scaffolds a project that does not boot — \
+         `:main` failed to resolve or a module failed to load:\n{}",
+        booted.out
+    );
+}
+
+fn assert_runs_to_completion(template: &str) {
+    let (_tmp, root) = scaffold(template);
+    // Stronger than the boot case, and the reason both exist: `--check-boot` resolves `:main`
+    // and runs NOTHING, so a `main` that boots and then throws on its first line passes it.
+    // `nest run` is what the `nest new` epilogue actually tells a new user to type, so for
+    // the templates that terminate, type it.
+    let ran = nest(&root, &["run"]);
+    assert!(
+        ran.ok,
+        "`nest new --template {template}` scaffolds a project that boots but fails when RUN \
+         — this is what a new user sees on the command the epilogue tells them to run:\n{}",
+        ran.out
+    );
+}
+
 /// ONE CASE PER (template, gate) PAIR — deliberately not one case looping over
 /// `SELF_CONTAINED`, which is how these were written until 2026-08-18.
 ///
@@ -150,12 +196,25 @@ macro_rules! template_gate_cases {
         /// failure than the slow case this split was fixing.
         const GATED_TEMPLATES: &[&str] = &[$($template),*];
 
+        /// A new template must be classified, not silently left un-run: if it terminates it
+        /// belongs in `RUNNABLE` (and gets a `runs_to_completion` case), and if it does not,
+        /// the reason belongs in that list's comment beside the other three.
+        #[test]
+        fn runnable_templates_are_a_subset_of_the_self_contained_ones() {
+            for t in RUNNABLE {
+                assert!(
+                    SELF_CONTAINED.contains(t),
+                    "{t} is in RUNNABLE but not SELF_CONTAINED"
+                );
+            }
+        }
+
         #[test]
         fn every_self_contained_template_has_generated_gate_cases() {
             assert_eq!(
                 GATED_TEMPLATES, SELF_CONTAINED,
                 "the `template_gate_cases!` list has drifted from SELF_CONTAINED — add the \
-                 new template to the macro invocation so it gets format/check/test cases"
+                 new template to the macro invocation so it gets format/check/test/boot cases"
             );
         }
 
@@ -173,9 +232,42 @@ macro_rules! template_gate_cases {
                 fn ships_passing_tests() {
                     super::assert_ships_passing_tests($template);
                 }
+                #[test]
+                fn scaffolds_bootable() {
+                    super::assert_scaffolds_bootable($template);
+                }
             }
         )*
     };
+}
+
+/// The runnable subset gets one more case each — same one-case-per-pair rule as above.
+macro_rules! runnable_gate_cases {
+    ($($module:ident => $template:expr),* $(,)?) => {
+        const RUN_GATED: &[&str] = &[$($template),*];
+
+        #[test]
+        fn every_runnable_template_has_a_run_case() {
+            assert_eq!(
+                RUN_GATED, RUNNABLE,
+                "the `runnable_gate_cases!` list has drifted from RUNNABLE"
+            );
+        }
+
+        $(
+            mod $module {
+                #[test]
+                fn runs_to_completion() {
+                    super::assert_runs_to_completion($template);
+                }
+            }
+        )*
+    };
+}
+
+runnable_gate_cases! {
+    run_default => "default",
+    run_gen => "gen",
 }
 
 template_gate_cases! {

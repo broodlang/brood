@@ -44,13 +44,17 @@ look-alike map, and it prints as `#<multimap …>` (`->map` is the plain-map vie
 (sig empty? (multimap -> bool))
 
 (defn assoc (mm k v)
-  "Return a multimap with value `v` added under key `k`."
+  "Return a multimap with value `v` added under key `k`.
+
+    (multimap/->map (multimap/assoc (multimap/empty) :a 1))   → {:a (1)}"
   (let (entries (/get mm :entries))
     (multimap (/assoc entries k (cons v (/get entries k nil))))))
 (sig assoc (multimap any any -> multimap))
 
 (defn assoc-all (mm k vs)
-  "Return a multimap with all values in list `vs` added under key `k`."
+  "Return a multimap with all values in list `vs` added under key `k`.
+
+    (multimap/->map (multimap/assoc-all (multimap/empty) :a [1 2]))   → {:a (1 2)}"
   (fold vs mm (fn (m v) (assoc m k v))))
 (sig assoc-all (any any seqable -> any))
 
@@ -67,7 +71,9 @@ takes the record-FIELD path and silently answers nil for a key that holds values
 (defn get-all (mm k)
   "All values for key `k` in insertion order (oldest first), or nil if absent.
 
-    (multimap/get-all (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2) :k)   → (1 2)"
+    (multimap/get-all (multimap/assoc (multimap/assoc (multimap/empty) :k 1) :k 2) :k)   → (1 2)
+
+    (multimap/get-all (multimap/assoc-all (multimap/empty) :a [1 2]) :a)   → (1 2)"
   (reverse (get mm k)))
 (sig get-all (multimap any -> (or seqable nil)))
 
@@ -79,13 +85,17 @@ takes the record-FIELD path and silently answers nil for a key that holds values
 (sig contains? (multimap any -> bool))
 
 (defn dissoc (mm k)
-  "Return a multimap with all values for key `k` removed."
+  "Return a multimap with all values for key `k` removed.
+
+    (multimap/->map (multimap/dissoc (multimap/assoc-all (multimap/empty) :a [1 2]) :a))   → {}"
   (multimap (/dissoc (/get mm :entries) k)))
 (sig dissoc (multimap any -> multimap))
 
 (defn remove-value (mm k v)
   "Return a multimap with the first occurrence of `v` removed from key `k`.
-If no values remain under `k`, the key is dropped."
+If no values remain under `k`, the key is dropped.
+
+    (multimap/->map (multimap/remove-value (multimap/assoc-all (multimap/empty) :a [1 2]) :a 1))   → {:a (2)}"
   (let (entries (/get mm :entries)
         vs (/get entries k nil))
     (if (nil? vs)
@@ -148,7 +158,10 @@ If no values remain under `k`, the key is dropped."
       (fn (pair) (map (reverse (second pair)) (fn (v) [(first pair) v]))))))
 
 (defn map-vals (mm f)
-  "Return a multimap where each value list has been transformed by `(f key values-list)`."
+  "Return a multimap where each value list has been transformed by `(f key values-list)`.
+Note the arity: `f` receives the KEY as well as the list, not the list alone.
+
+    (multimap/->map (multimap/map-vals (multimap/assoc-all (multimap/empty) :a [1 2]) (fn (k vs) (reverse vs))))   → {:a (2 1)}"
   (multimap (fold (%map-pairs (/get mm :entries))
               {}
               (fn (m pair) (let (k (first pair) vs (second pair)) (/assoc m k (f k vs)))))))
