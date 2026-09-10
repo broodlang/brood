@@ -27,7 +27,8 @@
 ;; A `.rsp` field line: "Msg = d3" -> "d3". nil for a non-field line.
 (defn- cy-field (line key)
   (if (string/starts-with? line (str key " = "))
-    (string/trim (string/substring line (+ (string/length key) 3)))
+    (let (rest-of (string/substring line (+ (string/length key) 3)))
+      (if (string? rest-of) (string/trim rest-of) nil))
     nil))
 
 ;; `Len = 0` is spelled with a placeholder `Msg = 00`, which is NOT the byte 0x00 — the
@@ -83,7 +84,9 @@
 ;; "[L=20]" -> 20, else nil.
 (defn- cy-section-l (line)
   (if (and (string/starts-with? line "[L=") (string/ends-with? line "]"))
-    (string/->number (string/substring line 3 (dec (string/length line))))
+    (let (digits (string/substring line 3 (dec (string/length line)))
+          n (if (string? digits) (string/->number digits) nil))
+      (if (int? n) n nil))
     nil))
 
 ;; `Tlen` is in BYTES and truncates the MAC; the hex is 2 chars per byte.

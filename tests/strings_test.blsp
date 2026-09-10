@@ -31,9 +31,12 @@
     (is (includes? (error-message (string/->number "3abc")) "not a number: \"3abc\""))
     ;; A failure is TRUTHY and is not nil: neither `or` nor `if` will quietly treat it
     ;; as "no value", which is what stops a bad parse from becoming a silent default.
-    (assert= (or (string/->number "x") 0) (string/->number "x"))
-    (assert= (if (string/->number "x") :truthy :falsy) :truthy)
+    ;;
+    ;; These three DEMONSTRATE that, so they are exactly the shape the truthy-failure
+    ;; warning exists to flag — allowed here, and nowhere that isn't documenting it.
     (check-allow :type-mismatch
+      (assert= (or (string/->number "x") 0) (string/->number "x"))
+      (assert= (if (string/->number "x") :truthy :falsy) :truthy)
       (is (not (nil? (string/->number "x"))))))
   (test "str is string/->number's inverse"
     (assert= (str 42) "42")

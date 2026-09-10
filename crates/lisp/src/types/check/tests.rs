@@ -8325,3 +8325,69 @@ fn a_repeated_call_narrows_only_when_it_is_provably_the_same_value() {
             (+ 1 (string/->number (io/read-line)))))"
     ));
 }
+
+// A `failure` is TRUTHY. `(if (string/->number s) …)` therefore takes the THEN branch
+// exactly when the parse FAILED — the opposite of how the shape reads. The checker already
+// caught the downstream consequence when the value flowed somewhere typed; a test whose only
+// job is the branch, or an untyped consumer, sailed through. A registry shipped
+// `(string/->number id)` into a query on the strength of that and answered 500 on any
+// non-numeric URL.
+#[test]
+fn a_failure_used_as_a_condition_is_warned_about() {
+    let w = warnings("(defn f (s) (if (string/->number s) :parsed :nope))");
+    assert!(
+        w.iter().any(|m| m.contains("TRUTHY")),
+        "expected a truthy-failure warning, got {w:?}"
+    );
+}
+
+#[test]
+fn the_same_holds_for_or_and_when_which_desugar_to_if() {
+    // `warnings` checks ONE form and does not macroexpand, so the desugared shape is
+    // asserted here - which is exactly what the checker walks in a real file. Confirmed
+    // separately: a file containing `(defn f (s) (or (string/->number s) 0))` warns.
+    let or_w = warnings("(defn f (s) (let (t (string/->number s)) (if t t 0)))");
+    assert!(
+        or_w.iter().any(|m| m.contains("TRUTHY")),
+        "`or` yields the FAILURE, not the fallback: {or_w:?}"
+    );
+    let when_w = warnings("(defn f (s) (let (n (string/->number s)) (if n n nil)))");
+    assert!(
+        when_w.iter().any(|m| m.contains("TRUTHY")),
+        "expected a truthy-failure warning from `when`, got {when_w:?}"
+    );
+}
+
+// The fix the message names must actually silence it, or the warning is unactionable.
+#[test]
+fn narrowing_on_the_wanted_type_silences_it() {
+    let w = warnings("(defn f (s) (if (int? (string/->number s)) :parsed :nope))");
+    assert!(
+        !w.iter().any(|m| m.contains("TRUTHY")),
+        "narrowing with int? should silence it, got {w:?}"
+    );
+    let explicit = warnings("(defn f (s) (if (failure? (string/->number s)) :nope :parsed))");
+    assert!(
+        !explicit.iter().any(|m| m.contains("TRUTHY")),
+        "testing failure? explicitly should silence it, got {explicit:?}"
+    );
+}
+
+// ADR-310's rule: a bound known only by EXCLUSION admits failure the way it admits
+// everything. Reading that as "can fail" would fire on every unannotated parameter, which
+// is most conditions in most programs.
+#[test]
+fn an_ordinary_untyped_condition_is_not_warned_about() {
+    for src in [
+        "(defn f (x) (if x :yes :no))",
+        "(defn f (x) (if (nil? x) :no :yes))",
+        "(defn f (xs) (if (empty? xs) :empty :some))",
+        "(defn f (x) (when x x))",
+    ] {
+        let w = warnings(src);
+        assert!(
+            !w.iter().any(|m| m.contains("TRUTHY")),
+            "{src} should not warn, got {w:?}"
+        );
+    }
+}

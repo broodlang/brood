@@ -3166,6 +3166,37 @@ fn check_if(
         }
     }
 
+    // **Truthy-failure lint.** A `failure` is TRUTHY in Brood, so `(if (string/->number s) …)`
+    // takes the THEN branch precisely when the parse failed — the opposite of what the shape
+    // reads as. The checker already catches the downstream consequence when the value flows
+    // into something typed (`(+ n 1)` → "expects number, got number | failure"), but an
+    // untyped consumer, or a test whose only job IS the branch, sails through. This class has
+    // a habit: a registry shipped `(string/->number id)` straight into a query and answered
+    // 500 on any non-numeric URL.
+    //
+    // Positively-known failures only, the ADR-310 rule: a bound known merely by exclusion
+    // (`any`, or a guard's `(not nil)`) admits failure the way it admits everything and says
+    // nothing, and reading that as "can fail" would fire on every unannotated parameter.
+    if !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) {
+        if let Some(ty) = super::infer::expr_ty(heap, test, ctx) {
+            if ty.contains_tag(crate::types::Tag::Failure) && !ty.is_known_only_by_exclusion() {
+                // The test is often a bare symbol or a macro-expanded form with no position
+                // of its own; the enclosing `if` always has one, and a warning without a
+                // line is a warning nobody can act on.
+                let pos = heap
+                    .form_pos_only(test)
+                    .or_else(|| heap.form_pos_only(form));
+                out.push((
+                    pos,
+                    "a failure value is TRUTHY, so this tests as true when the operation \
+                     FAILED — narrow with the type you want (`int?`, `bytes?`, `string?`) \
+                     or test `(failure? …)` explicitly"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
     let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
         Some(g) => {
             let then_ctx = ctx.narrow(g.sym, g.ty.clone());
