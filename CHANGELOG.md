@@ -4,7 +4,17 @@ All notable changes to the Brood toolchain (`brood`, `nest`, `brood-lsp`) are
 recorded here. Versions follow [semver](https://semver.org); the full
 engineering narrative lives in [`docs/devlog.md`](docs/devlog.md).
 
-## Unreleased
+## v0.27.1 — the checker's own advice works, and a deep throw is fast again
+
+**`filter` on a type predicate narrows its elements, so the new failure lint stops crying
+wolf.** v0.27.0 taught the checker that a `failure` used as a condition is a warning, and told
+you to "narrow with the type you want (`int?`, `bytes?`, `string?`)". Narrowing a COLLECTION
+that way did not work: `(filter (map parts string/->number) int?)` kept `failure` in its
+element type, so code that had narrowed exactly as instructed still warned. Found on bedit,
+where it reddened the downstream CI gate on correct code. `filter`'s result is now
+`elem ∩ tested_by(pred)` when the predicate is a bare type-predicate symbol — the same bridge
+occurrence typing uses for an `if` guard. An inline `(fn (x) …)` is left alone: nothing proves
+what it admits.
 
 **The version-drift check now runs before the tag, not after it.** v0.26.0 and v0.27.0 were
 both tagged and pushed with `std/system.blsp`'s docstring still showing `0.25.2`, and both
