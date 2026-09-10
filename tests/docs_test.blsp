@@ -283,3 +283,34 @@
                                (= (doc-catalog/category-of nm) :other))))))
       ;; Names, not a count — a failure should say WHICH name needs a category.
       (assert= (sort (map uncatalogued ->string)) (list)))))
+
+;; A Markdown link's URL becomes an `href`. Anything rendering third-party Markdown — a
+;; package README on a registry, a dependency's guide in a generated site — is letting
+;; whoever wrote it choose that URL, and a scheme that EXECUTES turns a link into script
+;; running with the page's own origin.
+(describe "markdown links cannot carry an executing scheme"
+  (test "javascript: is neutralised"
+    ;; `includes?` on the href, not equality on the whole string: the link parser stops at
+    ;; the first `)`, so `alert(1))` leaves a stray paren in the text. The href is the claim.
+    (is (includes? (docs/markdown->html "[x](javascript:alert(1))") "href=\"#\""))
+    (is (not (includes? (docs/markdown->html "[x](javascript:alert(1))") "javascript"))))
+
+  ;; A browser matches a scheme case-insensitively, so a check on the literal spelling
+  ;; catches only the spelling an attacker would not use.
+  (test "and so is every casing of it"
+    (is (includes? (docs/markdown->html "[x](JaVaScRiPt:alert(1))") "href=\"#\""))
+    (is (not (includes? (docs/markdown->html "[x](JaVaScRiPt:alert(1))") "JaVaScRiPt:")))
+    (is (includes? (docs/markdown->html "[x](JAVASCRIPT:alert(1))") "href=\"#\"")))
+
+  (test "vbscript: and data: too — a data: URL is a document with an origin"
+    (is (includes? (docs/markdown->html "[x](vbscript:msgbox(1))") "href=\"#\""))
+    (is (includes? (docs/markdown->html "[x](data:text/html,hi)") "href=\"#\""))
+    (is (includes? (docs/markdown->html "[x](DATA:text/html,hi)") "href=\"#\"")))
+
+  (test "leading whitespace does not smuggle one past the check"
+    (is (includes? (docs/markdown->html "[x](  javascript:alert(1))") "href=\"#\"")))
+
+  (test "ordinary links are untouched"
+    (is (includes? (docs/markdown->html "[x](https://example.com)") "href=\"https://example.com\""))
+    (is (includes? (docs/markdown->html "[x](/relative)") "href=\"/relative\""))
+    (is (includes? (docs/markdown->html "[x](mailto:a@b.com)") "href=\"mailto:a@b.com\""))))

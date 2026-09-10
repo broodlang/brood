@@ -389,13 +389,27 @@ module's namespace-rooted globals (ADR-070) back to it."
 (defn- md-escape (s)
   (-> (str s) (string/replace "&" "&amp;") (string/replace "<" "&lt;") (string/replace ">" "&gt;")))
 
-;; Escape a URL for an `href="…"` attribute (adds `"` to `md-escape`) and neutralise a
-;; `javascript:` link, so a guide's Markdown can't break out of the attribute or inject
+;; Schemes that execute rather than fetch. A link carrying one runs script the moment it is
+;; clicked, with the page's own origin — which for anything rendering third-party Markdown
+;; (a package README on a registry, a dependency's guide in a generated site) means whoever
+;; wrote that Markdown chose the code.
+(def- *md-unsafe-schemes* ["javascript:" "vbscript:" "data:"])
+
+;; Escape a URL for an `href="…"` attribute (adds `"` to `md-escape`) and neutralise a link
+;; that would execute, so a guide's Markdown can't break out of the attribute or inject
 ;; script into the generated site.
+;;
+;; The scheme is matched LOWER-CASED. It used to be compared as written, which caught
+;; `javascript:` and let `JaVaScRiPt:` through — and a browser matches a scheme
+;; case-insensitively, so the spelling that got through is the one an attacker would use.
+;; `vbscript:` and `data:` are refused for the same reason: `data:text/html,<script>…` is a
+;; document with an origin, not a document that is fetched.
 (defn- md-attr (url)
-  (if (string/starts-with? (string/trim url) "javascript:")
-    "#"
-    (string/replace (md-escape url) "\"" "&quot;")))
+  (let (trimmed (string/trim url)
+        lowered (string/lower trimmed))
+    (if (any? *md-unsafe-schemes* (fn (scheme) (string/starts-with? lowered scheme)))
+      "#"
+      (string/replace (md-escape trimmed) "\"" "&quot;"))))
 
 ;; A non-code text run: turn `[text](url)` into a link, HTML-escape everything else.
 (defn- md-links (text)
