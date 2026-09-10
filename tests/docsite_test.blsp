@@ -226,3 +226,33 @@
       (is (includes? html "id=\"d-math-+\""))
       (is (includes? html "id=\"d-math--\""))
       (is (not (= (docsite/def-anchor "math" "+") (docsite/def-anchor "math" "-")))))))
+
+;; Docstrings across the tree are written with `**bold**` — `**Every value is UTC**`,
+;; `**Timezones.**` — and it reached the page as its own asterisks, on every generated docs
+;; page and in `nest docs` output.
+(describe "prose renders bold"
+  (test "a bold run becomes strong"
+    (assert= "<p><strong>Note</strong> the rest</p>" (docsite/prose "**Note** the rest")))
+
+  (test "several runs in one paragraph"
+    (assert= "<p>a <strong>b</strong> c <strong>d</strong> e</p>"
+      (docsite/prose "a **b** c **d** e")))
+
+  ;; Inside backticks the asterisks are the text, not markup — `**kwargs` is a real thing to
+  ;; write in a docstring.
+  (test "a code span is not scanned for emphasis"
+    (assert= "<p><code>**kwargs</code> stays</p>" (docsite/prose "`**kwargs` stays")))
+
+  ;; Swallowing a lone marker would silently eat text the author typed.
+  (test "an unmatched marker is left as written"
+    (assert= "<p>one ** marker</p>" (docsite/prose "one ** marker"))
+    (assert= "<p>a <strong>b</strong> then ** alone</p>" (docsite/prose "a **b** then ** alone")))
+
+  (test "text is still escaped, and only the emphasis is markup"
+    (let (html (docsite/prose "**bold** and <script>"))
+      (is (includes? html "<strong>bold</strong>"))
+      (is (not (includes? html "<script>")))
+      (is (includes? html "&lt;script&gt;"))))
+
+  (test "prose with no emphasis is unchanged"
+    (assert= "<p>plain words here</p>" (docsite/prose "plain words here"))))
