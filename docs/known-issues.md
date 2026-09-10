@@ -9268,6 +9268,18 @@ would have swapped a macOS break for a musl one. The identity conversion is righ
 them and cannot truncate. The comment at the call site says so, so that a later tidy-up does
 not read it as a redundant conversion and delete it.
 
+**A second platform trap, one layer up.** The correct cross-platform fix does not compile
+under CI's own lint settings. On linux-gnu — the only target clippy ever runs on here —
+`Ioctl` *is* `c_ulong`, so `.into()` is the identity and `clippy::useless_conversion` fires;
+CI runs `-D warnings`, which makes that a hard error, and per the note in `CLAUDE.md` a red
+clippy step **skips every step behind it**, so the tests, doctests and checker gate would not
+have run at all. The lint is right about the target it can see and wrong about the other four.
+The conversion therefore carries a statement-scoped `#[allow(clippy::useless_conversion)]`
+with the reason written beside it, deliberately not a crate- or function-level allow. This one
+*was* sabotage-verified in the ordinary way: without the allow,
+`cargo clippy -p brood --all-targets --all-features -- -D warnings` fails with
+`useless conversion to the same type: u64` at that line; with it, exit 0.
+
 **Guard.** A new `macos-check` job in `ci.yml` (`runs-on: macos-14`) runs `cargo check` over
 `cli`, `nest` and `brood-lsp` with `make release`'s exact feature set, so a macOS compile
 error now reds an ordinary push instead of a tag.

@@ -12273,6 +12273,13 @@ created** by the two Linux jobs that succeeded and marked Latest, carrying Linux
 no mac ones, while `scripts/install.sh` resolves `apple-darwin` from the latest release. Any
 Mac following the documented install was getting a 404. v0.27.2 is that fix.
 
+And a sting in the tail: the correct fix fails CI's clippy. linux-gnu is the only target
+clippy runs on here and `Ioctl` is `c_ulong` there, so `.into()` is the identity and
+`useless_conversion` fires under `-D warnings` — which would have skipped the tests, doctests
+and checker gate behind the clippy job. Statement-scoped `#[allow]` with the reason beside it;
+verified in both directions (red without, exit 0 with). Worth remembering as a shape: a lint
+that runs on one platform cannot judge a conversion that exists for the others.
+
 Guard: a new `macos-check` job (`runs-on: macos-14`) runs `cargo check` over `cli`, `nest`
 and `brood-lsp` with `make release`'s feature set, so this class reds a push instead of a tag.
 The job itself has **not** been watched going red — it was written after the fix — and KI-124

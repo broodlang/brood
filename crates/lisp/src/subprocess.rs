@@ -641,7 +641,14 @@ pub fn spawn_pty(
             // Linux types both as its `Ioctl` alias — c_ulong on gnu, c_int on musl —
             // so `as u64` would trade the macOS break for a musl one; the identity
             // conversion is correct on all of them and cannot truncate.
-            if libc::ioctl(0, libc::TIOCSCTTY.into(), 0) < 0 {
+            // The allow is the other half of the same platform story, not a silencing:
+            // clippy only ever runs here on linux-gnu, where `Ioctl` is `c_ulong` and the
+            // conversion genuinely is the identity, so `useless_conversion` fires and CI's
+            // `-D warnings` turns it into a hard error — which also skips every step behind
+            // the clippy job. It is right about this target and wrong about the other four.
+            #[allow(clippy::useless_conversion)]
+            let request = libc::TIOCSCTTY.into();
+            if libc::ioctl(0, request, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
