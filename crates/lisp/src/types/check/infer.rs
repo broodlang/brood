@@ -1259,6 +1259,21 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let coll = *items.get(1)?;
         let coll_ty = expr_ty(heap, coll, ctx);
         let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        // …NARROWED by the predicate when it is a type predicate: `(filter xs int?)` keeps
+        // only the items `int?` admits, so the result's elements are `elem ∩ int`. This is
+        // the same `Ty::tested_by` bridge occurrence typing uses for an `if` guard, applied
+        // to the elements that survive rather than to a binding.
+        //
+        // Without it the element type passed straight through, and ADR-316's failure lint
+        // fired on code that had narrowed exactly as the lint's own message advises:
+        // `(or (second (filter (map parts string/->number) int?)) 1)` still carried
+        // `failure`, so the remedy the diagnostic recommends did not silence it. Found on
+        // bedit, where it reddened the downstream CI gate.
+        let a = match (a, items.get(2).and_then(|p| predicate_tested_ty(*p))) {
+            (Some(elem), Some(tested)) => Some(elem.intersect(tested)),
+            (None, tested @ Some(_)) => tested,
+            (elem, None) => elem,
+        };
         // `filter` builds a LIST whatever it is handed (a vector in, a list out), so with
         // the element type unknown the result is still `list`, not the curated `seqable` —
         // `(filter pred (file/ls d))` declared `(list string)` is not "seqable ⊄ list".
@@ -1865,6 +1880,19 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
 /// The result type of a list-producing combinator (`map`/`filter`): `nil |
 /// list<elem>` — empty input maps/filters to `nil`. `None` element → `None`, so
 /// the caller falls back to the flat curated `list` (never a too-narrow result).
+/// The type a bare type-predicate argument asserts of the items it keeps — `int?` → `int`.
+///
+/// Only a bare SYMBOL naming a predicate counts. An inline `(fn (x) …)` or a composed
+/// predicate is left alone: nothing here proves what it admits, and guessing would narrow a
+/// type on no evidence, which is worse than the wide answer.
+fn predicate_tested_ty(pred: Value) -> Option<Ty> {
+    let sym = match pred {
+        Value::Sym(s) => s,
+        _ => return None,
+    };
+    Ty::tested_by(&value::symbol_name(sym))
+}
+
 fn list_result(elem: Option<Ty>) -> Option<Ty> {
     elem.map(|e| Ty::list_of(e).union(Ty::of(Tag::Nil)))
 }

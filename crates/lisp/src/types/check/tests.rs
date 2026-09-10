@@ -8373,6 +8373,40 @@ fn narrowing_on_the_wanted_type_silences_it() {
     );
 }
 
+/// The lint's own advice has to WORK on a collection, not only on a scalar.
+///
+/// `(filter xs int?)` keeps exactly the items `int?` admits, so nothing downstream of it can
+/// be a failure — but `filter` used to pass the element type straight through, so the lint
+/// fired on code that had narrowed exactly as its message tells you to ("narrow with the type
+/// you want (`int?` …)"). A diagnostic whose recommended remedy does not silence it is worse
+/// than no diagnostic: it teaches the reader to ignore the message.
+///
+/// Found on bedit, where it reddened CI's downstream gate on correct code:
+/// `(or (second (filter (map parts string/->number) int?)) 1)`.
+#[test]
+fn filtering_a_collection_on_a_type_predicate_narrows_its_elements() {
+    // `file_warnings`, not `warnings`: the bare-fragment harness cannot see through
+    // `map`/`second` here — the element type comes back unknown, no failure is in the type,
+    // and BOTH cases pass vacuously. The control below catches that, and did, twice.
+    let narrowed = file_warnings(
+        "(defn f (parts) (let (nums (filter (map parts string/->number) int?)) \
+         (or (second nums) 1)))",
+    );
+    assert!(
+        !narrowed.iter().any(|m| m.contains("TRUTHY")),
+        "filtering on int? should silence it, got {narrowed:?}"
+    );
+    // The control: WITHOUT the filter a failure genuinely reaches the condition, so the lint
+    // must still fire. Otherwise the case above would pass on a build where the lint is dead.
+    let unfiltered = file_warnings(
+        "(defn f (parts) (let (nums (map parts string/->number)) (or (second nums) 1)))",
+    );
+    assert!(
+        unfiltered.iter().any(|m| m.contains("TRUTHY")),
+        "without the filter the failure is real and must warn, got {unfiltered:?}"
+    );
+}
+
 // ADR-310's rule: a bound known only by EXCLUSION admits failure the way it admits
 // everything. Reading that as "can fail" would fire on every unannotated parameter, which
 // is most conditions in most programs.
