@@ -12183,3 +12183,30 @@ guard reds the exclude-all case and leaves the control green.
 
 The commit that narrowed this diagnostic said "a gate that cries wolf is one the reader learns
 to skip". It was crying wolf on the one project CI runs as its downstream smoke.
+
+## 2026-09-10 — two releases published nothing, and the gate that would have said so ran after the tag
+
+`gh release list` says the latest Brood release is **v0.25.2**. v0.26.0 and v0.27.0 are tags
+with no binaries behind them: both Release runs died in **nine seconds** on the workflow's own
+first step, `tag matches the tree`, because `std/system.blsp`'s module docstring still showed
+`(system/brood-version) ;; => "0.25.2"` while Cargo.toml and `project.blsp` had been bumped
+correctly. v0.26.0 failed that way on 2026-09-07 and went unnoticed for three days, so the
+failure was already three days old when v0.27.0 repeated it this morning.
+
+**The check existed and was right.** `.github/workflows/release.yml` compares all four places
+the version lives, and its comment says exactly why the fourth is the one that gets forgotten:
+the `;; =>` form is not the ` -> ` shape `doc_examples_test` executes, so no test runs it.
+What it got wrong is *when* it runs. A tag-triggered gate can only report that a public tag is
+already wrong, and its remedies — move a published tag, or burn the version — are both worse
+than the mistake. The bump commit itself was green everywhere a human looks.
+
+The fix is placement, not logic: `crates/lisp/tests/manifest_version.rs` already pinned
+`project.blsp` against `CARGO_PKG_VERSION` for the same reason ("cheaper to assert than to
+remember"), so the docstring line goes beside it and fails in `make test` and in CI, on the
+commit that does the bump. Sabotage-verified: with the line back at `0.25.2` the test reds and
+prints the offending line and the expected version. `release.yml` keeps its copy — it also
+checks the tag and the CHANGELOG, which no in-tree test can.
+
+Worth naming the second-order failure too: a red row in a workflow nobody reads on a push that
+publishes nothing looks, from outside, exactly like a release. Nothing in `make green` covers
+the Release workflow, because `make green` deliberately reports the **CI** workflow only.
