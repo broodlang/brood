@@ -12252,9 +12252,13 @@ made this visible: the Release workflow got past the gate, reached the compilers
 Linux targets and failed **both mac arms** on a single `E0308`. `os/spawn-pty` (2026-09-03)
 calls `libc::ioctl(0, libc::TIOCSCTTY, 0)` from `pre_exec`; libc types `TIOCSCTTY` as
 `c_uint` in its Apple bindings and `c_ulong` on Linux, while `ioctl`'s `request` is `c_ulong`
-on both. The cast is now `as _`, inferred per target — a no-op on Linux, the required
-widening on Apple. `TIOCSWINSZ` beside it is deliberately left alone: libc declares that one
-`c_ulong` on both, and casting it would imply a portability problem that is not there.
+on both. The constant now gets `.into()`. Not `as u64`: Linux's `Ioctl` alias is `c_ulong` on
+gnu but `c_int` on musl, so a hardcoded width trades one broken target for another, where the
+identity conversion is right on all of them and cannot truncate. `TIOCSWINSZ` beside it is
+deliberately untouched — libc derives that one from `_IOW` (c_ulong, matching the parameter)
+and `TIOCSCTTY` from `_IO` through `ulong_cast_uint` (c_uint), which is precisely why one
+call compiles and the other does not. Verified with a libc-only probe across all five of the
+apple/gnu/musl triples: it reproduces CI's error verbatim unfixed and passes fixed.
 
 The interesting half is why it lived a week. **Every job in `ci.yml` ran `ubuntu-latest`.**
 Nothing compiled this tree for macOS except the Release build matrix, which triggers on a
@@ -12270,7 +12274,8 @@ no mac ones, while `scripts/install.sh` resolves `apple-darwin` from the latest 
 Mac following the documented install was getting a 404. v0.27.2 is that fix.
 
 Guard: a new `macos-check` job (`runs-on: macos-14`) runs `cargo check` over `cli`, `nest`
-and `brood-lsp` with `make release`'s feature set. It is **not** sabotage-verified — there is
-no macOS here — and KI-124 says so in place of pretending otherwise; what stands in for it is
-Release run `34478600630`, which is a recorded red from the same runner, toolchain and target
-on the unfixed source.
+and `brood-lsp` with `make release`'s feature set, so this class reds a push instead of a tag.
+The job itself has **not** been watched going red — it was written after the fix — and KI-124
+says so rather than blurring it into the probe's result; standing in for it is Release run
+`34478600630`, a recorded red from the same runner, toolchain and target on the unfixed
+source.

@@ -633,11 +633,15 @@ pub fn spawn_pty(
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            // `TIOCSCTTY` is `c_uint` in libc's Apple bindings and `c_ulong` on Linux,
-            // while `ioctl` takes `c_ulong` on both — so the constant needs a cast that
-            // each target infers for itself. Only the macOS release job compiles this,
-            // which is why it broke unnoticed for a week (KI-124).
-            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+            // `.into()` is load-bearing, not decoration: `ioctl`'s request parameter and
+            // `TIOCSCTTY` are typed independently per platform and DISAGREE on Apple —
+            // libc derives `TIOCSWINSZ` from `_IOW` (c_ulong, matching) but `TIOCSCTTY`
+            // from `_IO` through `ulong_cast_uint` (c_uint), so a bare constant is
+            // `expected u64, found u32` and only the macOS release job ever sees it.
+            // Linux types both as its `Ioctl` alias — c_ulong on gnu, c_int on musl —
+            // so `as u64` would trade the macOS break for a musl one; the identity
+            // conversion is correct on all of them and cannot truncate.
+            if libc::ioctl(0, libc::TIOCSCTTY.into(), 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
