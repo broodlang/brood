@@ -303,7 +303,7 @@ pub fn error_reason(e: &crate::error::LispError) -> Message {
                     fm.push((kw("fn"), Message::Str(name.to_string())));
                 }
                 if let Some(file) = &f.file {
-                    fm.push((kw("file"), Message::Str(file.clone())));
+                    fm.push((kw("file"), Message::Str(file.to_string())));
                 }
                 if let Some(pos) = f.pos {
                     fm.push((kw("line"), Message::Int(pos.line as i64)));

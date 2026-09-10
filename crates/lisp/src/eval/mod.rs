@@ -113,7 +113,7 @@ pub(crate) fn is_special_form(s: Symbol) -> bool {
 struct TwFrame {
     name: Option<Symbol>,
     call_pos: Option<crate::error::Pos>,
-    call_file: Option<String>,
+    call_file: Option<std::sync::Arc<str>>,
 }
 
 /// Record that this eval frame entered closure `id` via `call_form`. First entry
@@ -134,7 +134,7 @@ fn record_tw_entry(
         Some(fr) => fr.name = name,
         None => {
             let (call_pos, call_file) = match heap.form_pos(call_form) {
-                Some((p, file)) => (Some(p), file.map(|f| f.to_string())),
+                Some((p, file)) => (Some(p), file),
                 None => (None, None),
             };
             *entered = Some(TwFrame {

@@ -148,7 +148,10 @@ pub enum Control {
 #[derive(Debug, Clone)]
 pub struct TraceFrame {
     pub name: Option<&'static str>,
-    pub file: Option<String>,
+    /// Shared, not owned: every producer already holds the arm's `src_file` as an
+    /// `Arc<str>`, so cloning the handle costs a refcount bump where `to_string()`
+    /// cost an allocation per frame per unwind — 1.6M of them on `errors-deep`.
+    pub file: Option<std::sync::Arc<str>>,
     pub pos: Option<Pos>,
 }
 
@@ -561,7 +564,7 @@ impl LispError {
                     let field = |name: &str| heap.map_get(frame, Value::keyword(intern(name)));
                     Some(TraceFrame {
                         name: string_of(field("fn")).map(|n| symbol_name_ref(intern(&n))),
-                        file: string_of(field("file")),
+                        file: string_of(field("file")).map(std::sync::Arc::from),
                         pos: pos_of(field("line"), field("col")),
                     })
                 })

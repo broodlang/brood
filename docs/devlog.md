@@ -12210,3 +12210,37 @@ checks the tag and the CHANGELOG, which no in-tree test can.
 Worth naming the second-order failure too: a red row in a workflow nobody reads on a push that
 publishes nothing looks, from outside, exactly like a release. Nothing in `make green` covers
 the Release workflow, because `make green` deliberately reports the **CI** workflow only.
+
+## 2026-09-10 (later) — the benchmark column was three versions stale, and it was hiding a 61%
+
+Refreshing the Brood column in `brood-benchmarks` (published at 0.24.0, 1684 commits back)
+turned up one row that was not noise: **`errors-deep` +72%**, three interleaved invocations
+agreeing to 0.6%. Everything else moved the right way — `startup` −18%, `reduce` −18%,
+`http` −16%, `strings` −14%, `matmul` −6%.
+
+It bisected in two A/B runs to `04e0fe36`, KI-117's fix. See KI-123 for the mechanism and the
+numbers; the short version is that the per-native-frame trace callback built a `TraceFrame`,
+allocating a copy of the arm's file name, and then handed it to a `push_trace` that discards
+everything past the 32-frame cap. Fixed to +19% by asking `trace_full()` first (the guard the
+VM's own walker already had) and by making `TraceFrame.file` the `Arc<str>` every producer was
+already holding.
+
+**Two things worth keeping from how this was found.**
+
+*The staleness gate was right and had been saying so for three versions.* `staleness.py`
+measures nothing on purpose — a timing gate on a shared runner cannot tell 7% from a turbo
+plateau — so it just compares the column's commit against the binary and nags at a version
+boundary. It was nagging. The regression was visible to anyone who ran the refresh, and the
+refresh is the step that gets skipped because it takes an hour and usually finds nothing.
+
+*A correctness fix is a perf change.* KI-117 was two days of work to make a `:trace` appear,
+guarded by a test that asserts the trace's contents, reviewed as a correctness fix. Nothing in
+that framing suggests running `make ab`, and the row that would have objected lives in another
+repo. The cheap habit that would have caught it: when a fix adds work to a path that runs *per
+frame*, per element or per message, A/B the row that exercises that path before committing —
+`ab-bench --list` names them, and one row is ninety seconds.
+
+Also fixed on the way in, both from this morning's release batch: a `nest check --strict`
+warning in `std/docsite.blsp` (`math/quot` given an unannotated `number`) and an unformatted
+`tests/docsite_test.blsp`. The second is the one that cost something — it is the first step of
+the `examples + stress` job, so its failure *skipped* the corpora and examples gates behind it.

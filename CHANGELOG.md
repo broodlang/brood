@@ -12,6 +12,12 @@ Release runs died nine seconds in on the workflow's tag-matches-the-tree step �
 no binaries behind them. The same comparison is now a test (`manifest_version.rs`), so it
 fails on the bump commit.
 
+**A deep `throw` is fast again** (KI-123). The fix that gave JIT'd code a stack trace
+(KI-117, v0.27.0) built a trace frame — allocating a copy of the file name — at every native
+level an error unwound, then threw away everything past the 32-frame cap. Throwing 50 frames
+deep cost 61% more than before that fix; it now costs 19%, and the frames past the cap are not
+built at all.
+
 ## v0.27.0 — the checker learns a trap, and the library describes itself
 
 **A `failure` used as a condition is now a warning.** A failure value is TRUTHY, so

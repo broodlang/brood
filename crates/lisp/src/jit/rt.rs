@@ -1137,10 +1137,18 @@ pub unsafe extern "C" fn brood_rt_trace_push(
     let Some(e) = h.jit_pending_error.as_mut() else {
         return;
     };
+    // `push_trace` drops the frame once the trace is capped or the error is a control
+    // signal — but only AFTER we have built one, and building one clones the arm's file
+    // name. A 50-frame unwind therefore paid 50 allocations to keep 32. The VM's own
+    // walker (`attach_vm_trace_callers`) consults `trace_full()` for exactly this reason;
+    // this callback, added for KI-117, did not, which cost `errors-deep` 61%.
+    if e.is_control() || e.trace_full() {
+        return;
+    }
     let arm = &*arm;
     e.push_trace(crate::error::TraceFrame {
         name: arm.fn_name.map(crate::core::value::symbol_name_ref),
-        file: arm.src_file.as_deref().map(str::to_string),
+        file: arm.src_file.clone(),
         pos: None,
     });
 }

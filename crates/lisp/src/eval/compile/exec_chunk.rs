@@ -928,14 +928,14 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
     if e.is_control() || e.trace_full() {
         return;
     }
-    fn call_site(f: &BcFrame) -> (Option<String>, Option<crate::error::Pos>) {
+    fn call_site(f: &BcFrame) -> (Option<std::sync::Arc<str>>, Option<crate::error::Pos>) {
         let pos = f
             .arm
             .chunk
             .as_ref()
             .and_then(|c| f.ip.checked_sub(1).and_then(|i| c.code.get(i)))
             .and_then(|inst| inst.call_pos());
-        (f.arm.src_file.as_deref().map(str::to_string), pos)
+        (f.arm.src_file.clone(), pos)
     }
     // The running arm's entry, called from the innermost pending caller; then the
     // pending callers themselves — frame k was called from frame k-1, and the
@@ -959,14 +959,14 @@ pub(crate) fn attach_vm_trace_callers(e: &mut LispError, frames: &[BcFrame]) {
     if e.is_control() || e.trace_full() {
         return;
     }
-    fn call_site(f: &BcFrame) -> (Option<String>, Option<crate::error::Pos>) {
+    fn call_site(f: &BcFrame) -> (Option<std::sync::Arc<str>>, Option<crate::error::Pos>) {
         let pos = f
             .arm
             .chunk
             .as_ref()
             .and_then(|c| f.ip.checked_sub(1).and_then(|i| c.code.get(i)))
             .and_then(|inst| inst.call_pos());
-        (f.arm.src_file.as_deref().map(str::to_string), pos)
+        (f.arm.src_file.clone(), pos)
     }
     for k in (0..frames.len()).rev() {
         if e.trace_full() {
