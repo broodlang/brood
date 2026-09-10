@@ -199,6 +199,13 @@ jobs:
   # Intel binary is cross-compiled from the same SDK on the same runner, so a second full
   # check buys little for the wall clock it costs.
   #
+  # NO `--all-targets`, EITHER. A release builds binaries, not tests, and
+  # `crates/cli/tests/support/mod.rs` reaps child processes with `libc::prctl(PR_SET_PDEATHSIG)`
+  # — Linux-only, and correct there: it is what keeps a test's `brood` child from outliving a
+  # killed runner (KI-29). Checking test targets here reds the job on code no macOS ever runs.
+  # Both this and the feature note below are the same mistake made twice while writing this
+  # job: every bit of extra breadth added something the release does not compile.
+  #
   # THE FEATURE SET IS THE RELEASE'S, AND `gui`/`audio` ARE DELIBERATELY ABSENT. The Makefile
   # defaults `WITH_GUI ?= 0` and `WITH_AUDIO ?= 0`; the `config.mk` that turns them on is
   # written by ./configure and gitignored, so a developer's local `make release` has the GUI
@@ -218,7 +225,7 @@ jobs:
           cache-on-failure: true
       - name: cargo check — brood + cli (the release feature set; see the note above)
         run: >
-          cargo check -p cli --all-targets --no-default-features
+          cargo check -p cli --no-default-features
           --features brood/treesit-grammars --features brood/jit --features brood/stdimage
       - name: cargo check — nest
         run: >

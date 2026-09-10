@@ -9282,8 +9282,21 @@ with the reason written beside it, deliberately not a crate- or function-level a
 `useless conversion to the same type: u64` at that line; with it, exit 0.
 
 **Guard.** A new `macos-check` job in `ci.yml` (`runs-on: macos-14`) runs `cargo check` over
-`cli`, `nest` and `brood-lsp` with `make release`'s exact feature set, so a macOS compile
-error now reds an ordinary push instead of a tag.
+`cli`, `nest` and `brood-lsp` with the feature set CI's release build actually uses, so a
+macOS compile error now reds an ordinary push instead of a tag.
+
+**Getting the guard's scope right took three tries, and the pattern is worth keeping.** Both
+failures were the same mistake — the job checked *more* than the release builds, and each
+extra thing it checked was broken on macOS for reasons no release cares about:
+
+| the extra breadth | what macOS said | why the release never sees it |
+|---|---|---|
+| `--features brood/gui` | `unresolved import winit::platform::wayland`, no `with_any_thread` | `WITH_GUI ?= 0`; the `config.mk` enabling it is gitignored (KI-125) |
+| `--all-targets` | `cannot find function prctl` / `PR_SET_PDEATHSIG` in `crates/cli/tests/support/mod.rs` | a release builds binaries, not tests; that helper is the Linux child-reaper from KI-29 |
+
+The lesson is not "be careful" — it is that a gate's value comes from *fidelity* to the thing
+it guards, and any breadth beyond that is a false positive waiting to block a release. Both
+exclusions are commented in the job so neither reads as an omission.
 
 **On verifying it.** The *fix* is verified on the real targets, not by reasoning about them.
 A full cross-compile to Apple is not possible from this machine — the C build scripts (`psm`,
