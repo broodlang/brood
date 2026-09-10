@@ -12,7 +12,8 @@
 ;; touches. `link`/`unlink` and `monitor`/`demonitor` stayed bare TOGETHER — splitting an
 ;; inverse pair across namespaces is the seam ADR-252 fixed for `register`, not one to
 ;; reintroduce.
-(defmodule proc)
+(defmodule proc
+  "The non-mainstream process surface: green-process introspection and control, plus OS subprocesses. The mainstream actor model (spawn/send/receive/self/link) stays in the bare core.")
 
 (defn info (pid)
   "A snapshot map of a live local process:

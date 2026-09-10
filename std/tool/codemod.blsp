@@ -5,6 +5,9 @@
 ;; identifiers, using the Brood identifier character set for the word boundary, so those are
 ;; never touched. Pure Brood over `file/slurp` / `file/spit` / `file/walk-files`.
 (defmodule codemod
+  "Identifier-aware whole-token rewrites over a project's Brood sources — what `nest rename`
+  drives. A plain text replace corrupts substrings (`map/get` sits inside `multimap/get`);
+  this rewrites only whole Brood identifiers."
   (:use file))
 
 ;; The Brood identifier boundary set — letters, digits, and the symbol chars a name may

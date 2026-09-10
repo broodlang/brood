@@ -28,7 +28,8 @@
 ;; `'reflect/current-ns` — so a consuming module that happens to `(:alias reflect …)`
 ;; something else cannot capture the reference. The prelude's `defability`/`defrecord`
 ;; expansions do exactly this.
-(defmodule reflect)
+(defmodule reflect
+  "Reading Brood source as DATA: the advisory checker, the reader's lossless CST, the string- and comment-aware scanners, and where a definition lives.")
 
 (defn reflect/read-string (s)
   "Parse the source string `s` into a single form (the first one). Errors on malformed

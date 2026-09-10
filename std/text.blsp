@@ -1,7 +1,8 @@
 ;; std/text.blsp — the rope text-engine seam. Thin policy over the %rope-* primitives, so
 ;; editor code reaches the rope (efficient large-text editing: O(log n) insert/delete/slice,
 ;; cheap line access) as text/insert, text/slice, … rather than the bare language core.
-(defmodule text)
+(defmodule text
+  "The rope text engine: O(log n) insert, delete and slice with cheap line access, for editing large text.")
 
 (defn insert (r idx s)
   "A fresh rope with string s inserted at character index idx.

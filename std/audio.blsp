@@ -1,6 +1,7 @@
 ;; std/audio.blsp — sound output. Policy over the `%audio-beep` primitive, so it lives under
 ;; audio/* rather than the bare core.
-(defmodule audio)
+(defmodule audio
+  "Sound output.")
 
 ;; `& more`, not `&optional vol`: the primitive branches on how many args it RECEIVED
 ;; (`args.len() >= 3`), so forwarding an absent `vol` as an explicit nil makes it try to

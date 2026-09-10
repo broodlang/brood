@@ -23,6 +23,8 @@
 ;; mechanism; what to snapshot, where it lives and when it is rebuilt is here.
 
 (defmodule stdimage
+  "A startup image for the standard library: std modules are pre-evaluated and promoted once
+  at build time rather than re-read and re-evaluated on every run."
   (:use seq)
   (:use file))
 

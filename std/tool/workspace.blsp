@@ -6,6 +6,9 @@
 ;; repos of the current directory: any sibling with a `.git` dir AND a `project.blsp`, plus
 ;; `brood` itself. Nothing here force-pushes, resets, stashes, or checks out.
 (defmodule workspace
+  "Drive every Brood repo in the workspace with one command — what `nest ws` runs. Discovers
+  the sibling repos of the current directory and fans a check, commit or push out across
+  them."
   (:use file))
 
 (defn- brood-repos ()

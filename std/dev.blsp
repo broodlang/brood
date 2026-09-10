@@ -11,7 +11,8 @@
 ;; that `telemetry/watch-runtime` re-emits, which is production observability rather than a
 ;; developer counter. It was bare until 2026-08-28 and is now a `proc/` primitive (ADR-290)
 ;; — a process-level facility, not a diagnostic counter.
-(defmodule dev)
+(defmodule dev
+  "Runtime diagnostics: memory, GC, the scheduler, the sampling profiler and the VM's work-attribution counters.")
 
 (defn mem-bytes ()
   "Bytes currently allocated process-wide.

@@ -4,7 +4,8 @@
 ;; control, input polling, and the two paint frontends (full-screen `draw`, inline
 ;; `emit`). Kept in the `term` namespace rather than the bare language core — an editor
 ;; or REPL reaches these as `term/enter`, `term/poll`, `term/draw`, …
-(defmodule term)
+(defmodule term
+  "The terminal seam: raw mode, the alternate screen, cursor control and key decoding, over the `%term-*` primitives.")
 
 (defn enter ()
   "Enter raw mode + the alternate screen, hide the cursor, and enable mouse capture,

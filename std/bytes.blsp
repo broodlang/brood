@@ -1,5 +1,6 @@
 ;; std/bytes.blsp
-(defmodule bytes)
+(defmodule bytes
+  "Immutable byte strings: construct, index, slice, concatenate, and read fixed-width big- or little-endian integers out of a buffer.")
 
 (defn at (b i)
   "The byte at index i of b as an int 0–255; errors if i is out of range.

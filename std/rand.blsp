@@ -4,7 +4,8 @@
 ;; Kept in the `rand` namespace rather than the bare language core (`rand/int`, `rand/float`).
 ;; (`sample`/`shuffle` — random *collection* ops — stay in the prelude with the sequence
 ;; functions, on the same `%rand-*` mechanism.)
-(defmodule rand)
+(defmodule rand
+  "A seeded PRNG (xorshift32). Deterministic and purely functional: every draw returns `[value next-seed]`, so randomness threads through code without hidden state.")
 
 (defn seed (n)
   "Normalize integer `n` into a valid nonzero 32-bit PRNG seed (xorshift32 cannot start from 0)."
