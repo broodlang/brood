@@ -332,6 +332,19 @@ const NOT_COMPILED: &str = "gui backend not compiled in — this `brood` was bui
 mod disabled {
     use super::Op;
     use super::NOT_COMPILED;
+
+    /// No GUI is compiled in, so nothing will ever want the process main thread: this is
+    /// the plain `join` it stands in for. The signature matches the real backend's so
+    /// `cli_support::run_on_main_stack` needs no `cfg` of its own.
+    pub fn host_main_thread<T: Send + 'static>(
+        handle: std::thread::JoinHandle<T>,
+        name: &str,
+    ) -> T {
+        handle
+            .join()
+            .unwrap_or_else(|_| panic!("{name} thread panicked"))
+    }
+
     pub fn open(_subscriber: u64, _spec: super::WindowSpec) -> Result<u64, String> {
         Err(NOT_COMPILED.into())
     }
@@ -396,14 +409,14 @@ mod disabled {
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key, icon, inset,
-    maximize, minimize, open, register_family, size, title,
+    bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
+    host_main_thread, icon, inset, maximize, minimize, open, register_family, size, title,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key, icon, inset,
-    maximize, minimize, open, register_family, size, title,
+    bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key,
+    host_main_thread, icon, inset, maximize, minimize, open, register_family, size, title,
 };
 
 #[cfg(feature = "gui")]
@@ -415,9 +428,10 @@ pub(crate) mod backend {
     use std::collections::HashMap;
     use std::num::NonZeroU32;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc::{self, Sender};
     use std::sync::{Arc, Mutex, OnceLock};
+    use std::thread::JoinHandle;
     use std::time::Duration;
     use web_time::Instant;
 
@@ -449,6 +463,15 @@ pub(crate) mod backend {
     };
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{Key as WKey, ModifiersState, NamedKey, PhysicalKey};
+    // Wayland/X11 only: this is the extension trait providing `with_any_thread`, which
+    // has NO macOS (or Windows) equivalent — see `DEDICATED_THREAD_OK` below.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, Icon, Window, WindowId};
 
@@ -666,13 +689,157 @@ pub(crate) mod backend {
         (((w / 8.0) as u16).max(1), ((h / 16.0) as u16).max(1))
     }
 
+    /// Can the event loop live on a thread we choose, or must it own the **process main
+    /// thread**?
+    ///
+    /// Wayland/X11 let a loop run anywhere, which is why the GUI has always been a
+    /// dedicated `brood-gui` thread. macOS does not: AppKit's run loop is main-thread-only
+    /// and winit exposes no `with_any_thread` there — so the gui feature simply did not
+    /// compile for macOS until 2026-09-11 (KI-125). Windows is the same shape. Anything not
+    /// on the permissive list therefore hosts the loop on the main thread.
+    const DEDICATED_THREAD_OK: bool = cfg!(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ));
+
+    /// `BROOD_GUI_MAIN_THREAD=1` forces the main-thread path on a platform that does not
+    /// need it. It exists for one reason and it is not configuration: the main-thread path
+    /// is the ONLY path macOS can take, and there is no macOS in this project's CI beyond a
+    /// compile check — so without a lever it would ship having never once been run. With it
+    /// the identical code is exercised on Linux, where the GUI is actually tested.
+    fn main_thread_hosting_required() -> bool {
+        static R: OnceLock<bool> = OnceLock::new();
+        *R.get_or_init(|| {
+            hosting_required_from(
+                DEDICATED_THREAD_OK,
+                std::env::var("BROOD_GUI_MAIN_THREAD").ok().as_deref(),
+            )
+        })
+    }
+
+    /// The decision itself, kept free of `cfg!`, the environment and the cache above so it
+    /// can be tested for every platform from whichever one the tests happen to run on —
+    /// which matters here more than usual, since the case that motivated this code
+    /// (`dedicated_ok == false`) is a platform CI only ever *compiles*.
+    fn hosting_required_from(dedicated_ok: bool, lever: Option<&str>) -> bool {
+        if !dedicated_ok {
+            // Not a preference. macOS/Windows have nowhere else to put the loop, so the
+            // lever cannot switch this off — `BROOD_GUI_MAIN_THREAD=0` there would only
+            // turn a working GUI into one that fails to start.
+            return true;
+        }
+        matches!(lever, Some(v) if v != "0" && !v.is_empty())
+    }
+
+    /// What the process main thread can be asked to do while the runtime runs elsewhere.
+    enum MainMsg {
+        /// Build and run the one event loop *here*, replying with its proxy. Never returns:
+        /// winit's `run_app` owns the thread from then on.
+        HostGui(Sender<Result<EventLoopProxy<UserEvent>, String>>),
+        /// The runtime thread finished without ever wanting a window; return normally.
+        RuntimeDone,
+    }
+
+    /// The channel `host_main_thread` is listening on, published so `start_thread` can
+    /// reach it. `None` until a binary reserves its main thread — a library embedding the
+    /// runtime need not, and gets a clear error rather than a deadlock.
+    fn main_slot() -> &'static Mutex<Option<Sender<MainMsg>>> {
+        static S: OnceLock<Mutex<Option<Sender<MainMsg>>>> = OnceLock::new();
+        S.get_or_init(|| Mutex::new(None))
+    }
+
+    /// Set once the main thread has been handed to winit, so the joiner below knows a
+    /// returning runtime can no longer be reported back through it.
+    static GUI_OWNS_MAIN: AtomicBool = AtomicBool::new(false);
+
+    const MAIN_THREAD_UNRESERVED: &str =
+        "gui: this platform requires the event loop on the process main thread, and this \
+         binary did not reserve it. A host embedding the brood runtime must run its work \
+         through `cli_support::run_on_main_stack`, which parks the main thread for exactly \
+         this.";
+
+    /// Run the runtime to completion while keeping the **process main thread** available
+    /// for a GUI event loop, and return whatever the runtime returned.
+    ///
+    /// `handle` is the already-spawned runtime thread (`cli_support::run_on_main_stack`
+    /// sized it; that is the whole reason the runtime is not on the main thread in the
+    /// first place). On a platform where a dedicated GUI thread is fine this is exactly the
+    /// `join()` it replaces. Where it is not, this parks here instead: a small joiner
+    /// thread waits on the runtime, and the main thread blocks until either the runtime
+    /// finishes (return normally) or a `gui-open` asks for the loop — in which case winit
+    /// takes this thread for the life of the process.
+    ///
+    /// The process then ends the way it always did, through the `std::process::exit` the
+    /// runtime's own exit path calls. The one case needing help is a runtime that *returns*
+    /// while winit owns this thread: nothing would notice, so the joiner exits the process
+    /// as a returning `main` would have.
+    pub fn host_main_thread<T: Send + 'static>(handle: JoinHandle<T>, name: &str) -> T {
+        if !main_thread_hosting_required() {
+            return handle
+                .join()
+                .unwrap_or_else(|_| panic!("{name} thread panicked"));
+        }
+        let (tx, rx) = mpsc::channel::<MainMsg>();
+        *main_slot().lock().unwrap() = Some(tx.clone());
+
+        let result: Arc<Mutex<Option<std::thread::Result<T>>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&result);
+        let joined = std::thread::Builder::new()
+            .name("brood-main-join".into())
+            .spawn(move || {
+                let r = handle.join();
+                *sink.lock().unwrap() = Some(r);
+                if GUI_OWNS_MAIN.load(Ordering::SeqCst) {
+                    // winit is never giving this thread back, so a returning runtime has to
+                    // end the process itself. Exit 0 is what a `main` that returned would
+                    // have produced; every non-zero path already went through
+                    // `std::process::exit` before reaching here.
+                    std::process::exit(0);
+                }
+                let _ = tx.send(MainMsg::RuntimeDone);
+            });
+        if let Err(e) = joined {
+            panic!("spawn brood-main-join thread: {e}");
+        }
+
+        loop {
+            match rx.recv() {
+                Ok(MainMsg::HostGui(ready)) => run_gui(ready),
+                Ok(MainMsg::RuntimeDone) | Err(_) => break,
+            }
+        }
+        let outcome = result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("runtime finished without recording a result");
+        outcome.unwrap_or_else(|_| panic!("{name} thread panicked"))
+    }
+
     /// Spawn the GUI thread + build the (single) event loop; return a proxy to it.
     fn start_thread() -> Result<EventLoopProxy<UserEvent>, String> {
         let (ready_tx, ready_rx) = mpsc::channel::<Result<EventLoopProxy<UserEvent>, String>>();
-        std::thread::Builder::new()
-            .name("brood-gui".into())
-            .spawn(move || run_gui(ready_tx))
-            .map_err(|e| e.to_string())?;
+        if main_thread_hosting_required() {
+            // Hand the loop to the parked main thread rather than spawning one. Safe to set
+            // the flag after the send succeeds and before awaiting the proxy: the caller is
+            // blocked in `recv` below, so the runtime cannot finish in the window between.
+            let tx = main_slot()
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| MAIN_THREAD_UNRESERVED.to_string())?;
+            tx.send(MainMsg::HostGui(ready_tx))
+                .map_err(|_| "gui: the process main thread is gone".to_string())?;
+            GUI_OWNS_MAIN.store(true, Ordering::SeqCst);
+        } else {
+            std::thread::Builder::new()
+                .name("brood-gui".into())
+                .spawn(move || run_gui(ready_tx))
+                .map_err(|e| e.to_string())?;
+        }
         ready_rx
             .recv()
             .map_err(|_| "gui thread exited during init".to_string())?
@@ -1993,9 +2160,23 @@ pub(crate) mod backend {
     /// windows from a registry as `UserEvent`s arrive. It never exits (winit can't
     /// restart an event loop), so it idles harmlessly when no windows are open.
     fn run_gui(ready: Sender<Result<EventLoopProxy<UserEvent>, String>>) {
-        // winit normally requires the main thread; on Linux we explicitly allow
-        // the dedicated GUI thread to own the loop.
+        // Two hosting modes, decided by `main_thread_hosting_required()`:
+        //
+        //   * Wayland/X11 — this runs on the dedicated `brood-gui` thread, and
+        //     `with_any_thread(true)` is what permits a loop off the main thread.
+        //   * everywhere else (macOS, Windows) — this runs ON the process main thread,
+        //     because AppKit's run loop may live nowhere else and winit offers no escape
+        //     hatch. `with_any_thread` does not exist on those platforms at all, which is
+        //     why the call is gated rather than merely unnecessary (KI-125).
+        #[allow(unused_mut)]
         let mut builder = EventLoop::<UserEvent>::with_user_event();
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
         builder.with_any_thread(true);
         let event_loop = match builder.build() {
             Ok(el) => el,
@@ -3545,6 +3726,42 @@ pub(crate) mod backend {
     /// These run the REAL renderer, which `BROOD_GUI_HEADLESS=1` cannot: headless makes
     /// every draw op a silent no-op, so an in-language headless GUI test proves exactly
     /// nothing about this code. Hence a Rust test that calls `render_ops` directly.
+    #[cfg(test)]
+    mod main_thread_hosting {
+        use super::hosting_required_from;
+
+        /// macOS/Windows: the loop has one legal home and the lever must not be able to
+        /// move it. A `=0` that *was* honoured would not read as a config mistake — the GUI
+        /// would simply fail to start, on the platform with no second path to fall back to.
+        #[test]
+        fn a_platform_with_nowhere_else_always_hosts_on_main() {
+            for lever in [None, Some("0"), Some(""), Some("1")] {
+                assert!(
+                    hosting_required_from(false, lever),
+                    "lever {lever:?} must not move the loop off the main thread"
+                );
+            }
+        }
+
+        /// Wayland/X11 keep the dedicated `brood-gui` thread by default — this is the path
+        /// that has always worked and the one every existing GUI app runs on.
+        #[test]
+        fn wayland_and_x11_keep_the_dedicated_thread_by_default() {
+            assert!(!hosting_required_from(true, None));
+            assert!(!hosting_required_from(true, Some("0")));
+            assert!(!hosting_required_from(true, Some("")));
+        }
+
+        /// ...but can opt in, which is the only reason the main-thread path is runnable
+        /// anywhere this project actually tests. Without this, the macOS code would ship
+        /// having been compiled and never executed.
+        #[test]
+        fn the_lever_opts_a_permissive_platform_into_the_main_thread_path() {
+            assert!(hosting_required_from(true, Some("1")));
+            assert!(hosting_required_from(true, Some("yes")));
+        }
+    }
+
     #[cfg(test)]
     mod render_robustness {
         use super::*;

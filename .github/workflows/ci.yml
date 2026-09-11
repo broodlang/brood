@@ -214,17 +214,19 @@ jobs:
   # dev-dependencies on a macOS runner buys coverage of code no gate ever runs off Linux.
   # Turn it on if that changes; it should pass.
   #
-  # The feature note below is the other half of the same mistake made twice while writing
-  # this job: every bit of extra breadth added something the release does not compile.
+  # The feature note below began as the other half of the same mistake — every bit of extra
+  # breadth this job was given turned up something that does not compile for macOS — and it
+  # is worth recording that BOTH halves ended up resolved the same way: by fixing the code
+  # the breadth exposed, not by narrowing the job further. The gui is now checked here.
   #
-  # THE FEATURE SET IS THE RELEASE'S, AND `gui`/`audio` ARE DELIBERATELY ABSENT. The Makefile
-  # defaults `WITH_GUI ?= 0` and `WITH_AUDIO ?= 0`; the `config.mk` that turns them on is
-  # written by ./configure and gitignored, so a developer's local `make release` has the GUI
-  # and CI's release build does NOT. Adding `--features brood/gui` here reds this job on code
-  # macOS never ships: `crates/lisp/src/gui.rs` imports `winit::platform::wayland` and calls
-  # `with_any_thread` with no `cfg` guard, so the gui feature cannot compile on macOS at all
-  # (KI-125). Do not "fix" that by adding the feature back — either port the gui and then add
-  # it, or leave this matching what a release actually builds.
+  # The feature set is the release's, PLUS `gui` — which is deliberate and worth explaining,
+  # because it is broader than what a release builds. The Makefile defaults `WITH_GUI ?= 0`
+  # and the `config.mk` that turns it on is written by ./configure and gitignored, so a
+  # developer's local `make release` has the GUI and CI's release build does not. That
+  # asymmetry is exactly how `brood/gui` came to contain Wayland-only winit calls that had
+  # never once been compiled for macOS (KI-125). So the gui is checked here on purpose: it
+  # is the configuration a developer on a Mac actually builds, and the one with no other
+  # coverage anywhere. `audio` stays out — it is not implicated and costs build time.
   macos-check:
     name: macOS compiles (the target only a tag used to reach)
     runs-on: macos-14
@@ -238,6 +240,12 @@ jobs:
         run: >
           cargo check -p cli --no-default-features
           --features brood/treesit-grammars --features brood/jit --features brood/stdimage
+      # Separate step so a gui-only break is named as one in the step list rather than
+      # hiding inside the release check above.
+      - name: cargo check — the gui backend (KI-125; no other job compiles it for macOS)
+        run: >
+          cargo check -p cli --no-default-features
+          --features brood/gui --features brood/jit --features brood/stdimage
       - name: cargo check — nest
         run: >
           cargo check -p nest --no-default-features

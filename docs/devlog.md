@@ -12300,3 +12300,43 @@ So the job now matches what a release actually builds, with a comment naming KI-
 re-adds the feature thinking it was an oversight. Worth extracting the general shape: a new
 gate is only as honest as its fidelity to the thing it claims to guard, and "the flags I use
 locally" is not that — the gitignored config file was the entire difference between the two.
+
+## 2026-09-11 — KI-125: the GUI runs on macOS, and the main thread was free all along
+
+The blocker looked structural and turned out to be two lines of `cfg` plus a channel.
+`brood/gui` reached for `winit::platform::wayland::EventLoopBuilderExtWayland` and
+`with_any_thread(true)` unguarded, so it had never compiled for Apple. Gating them is the
+easy half and on its own would have been a trap: `with_any_thread` is not decoration, it is
+the *only* reason the event loop could live on a thread of our choosing. winit wants the
+loop on the process main thread; Wayland/X11 let you opt out and **macOS does not**. Gate
+without porting and you get a binary that compiles and then dies at the first `gui-open`.
+
+The port is small because the runtime is already off the main thread. `run_on_main_stack`
+has moved the work to a spawned, explicitly-sized thread since the ADR-043 stack-budget guard
+needed the root thread to match the workers — which means the OS main thread has spent this
+project's whole life blocked in a `join()`. It was free; it just had no way of being asked
+for. It now parks on a channel while a `brood-main-join` thread does the joining, and
+`start_thread` either spawns `brood-gui` as before or hands the loop to the main thread. One
+case needed care: a runtime that *returns* while winit owns main would hang, since nothing
+comes back to notice — the joiner exits the process there, exactly as a returning `main`
+would have. Non-zero exits were already `std::process::exit` on the runtime thread.
+
+**The part worth generalising is how this got verified.** There is no macOS here and
+`macos-check` only compiles, so a port could easily have shipped having been *executed
+nowhere*. `BROOD_GUI_MAIN_THREAD=1` exists for that and nothing else: it selects the
+main-thread path on Linux, where the GUI is actually exercised. Running the same binary both
+ways, the window opens, paints and closes identically and the exit codes match (3 for a
+`halt 3`; 0 and 5 with the lever set and no window opened, the `RuntimeDone` path). The
+evidence that matters is the thread table — default shows a `brood-gui` thread, and with the
+lever there is **no `brood-gui` thread at all** and a `brood-main-join` beside a loop running
+on tid == pid. That is the macOS topology, observed on Linux.
+
+What remains unproven is stated in KI-125 rather than glossed: nobody has opened a window on
+an actual Mac. The topology, the handoff, the exit paths and the compile are all verified;
+"a window appears" is not.
+
+A note for the next platform break, since this is the second in two days: the gui was
+checkable on macOS this whole time and nothing checked it, because `WITH_GUI ?= 0` and the
+`config.mk` that flips it on is gitignored. The feature was on for every developer who could
+have noticed and off in every place that could have reported it. `macos-check` now compiles
+the gui in its own step.

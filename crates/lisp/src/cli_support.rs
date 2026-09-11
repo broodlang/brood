@@ -341,9 +341,14 @@ where
         .stack_size(crate::process::WORKER_STACK_BYTES)
         .spawn(f)
         .unwrap_or_else(|e| panic!("spawn {name} thread: {e}"));
-    handle
-        .join()
-        .unwrap_or_else(|_| panic!("{name} thread panicked"))
+    // Not a plain `join`, because the thread we are standing on is a resource: macOS will
+    // only run an AppKit event loop on the process MAIN thread, and winit has no escape
+    // hatch there the way Wayland/X11 do (KI-125). Since the runtime already lives on the
+    // thread spawned above, the main thread is free — so hand it to the GUI backend, which
+    // joins on our behalf and, on a platform that needs it, hosts the event loop right here
+    // if a window is ever opened. Where a dedicated GUI thread is fine this is exactly the
+    // `join` it replaces, and the no-gui build's stub is literally that.
+    crate::gui::host_main_thread(handle, name)
 }
 
 /// Warn once if this binary's baked-in standard library is **older than the tree it is
