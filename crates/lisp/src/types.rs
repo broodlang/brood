@@ -1783,9 +1783,13 @@ impl Ty {
     /// refinement is the unknown too (`vector` IS `vector<any>`), except where a sibling
     /// slot already describes the same members (a tuple term's elements, a record's
     /// keys and values) — filling in `never` beside it would answer for members it does
-    /// not own. A shape's `rest` is left alone: open-versus-closed is a positive fact
-    /// about the undeclared keys, not an unknown. The top level is not filled either —
-    /// that is `GradualTy`'s `dynamic` bit, decided by the caller.
+    /// not own. A map's SHAPE is a component like any other: a bare `map` (no shape, no
+    /// key/value types — what `(assoc x :k v)` on an unknown `x` answers) has unknown
+    /// fields, and an OPEN record's undeclared keys are unknown, so both fill to `never`
+    /// there — an unknown shape proves nothing about which keys are absent, exactly as
+    /// unknown elements prove nothing about what they are. A `map<K, V>` with positively
+    /// known `K`/`V` is not touched: it says its keys need not be present. The top level
+    /// is not filled either — that is `GradualTy`'s `dynamic` bit, decided by the caller.
     fn unknowns_as_never(&self) -> Ty {
         fn fill(ty: &Ty) -> Ty {
             if ty.is_known_only_by_exclusion() {
@@ -1813,10 +1817,17 @@ impl Ty {
                             .collect();
                         out.fields = Some(Arc::new(RecordShape {
                             fields,
-                            rest: shape.rest.clone(),
+                            rest: fill(&shape.rest),
                         }));
                     }
-                    (None, None) => out.map_kv = Some(Arc::new((Ty::NEVER, Ty::NEVER))),
+                    // No shape at all: every key unknown. `rest: never` is the filling —
+                    // a shape whose every reading is `never` sits below any record shape.
+                    (None, None) => {
+                        out.fields = Some(Arc::new(RecordShape {
+                            fields: BTreeMap::new(),
+                            rest: Ty::NEVER,
+                        }));
+                    }
                 }
             }
             out

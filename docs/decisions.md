@@ -21201,13 +21201,26 @@ is a positive fact (open versus closed), not an unknown.
 exhaustiveness check and union absorption need its exact answer; only the "can this value
 be used here" question is gradual, and that question already had its own entry point.
 
+A map's *shape* is a component like any other. A bare `map` — no shape, no key/value
+types, which is what `(assoc x :k v)` on an unknown `x` answers — has unknown fields, and
+an open record's undeclared keys are unknown; both fill to `never` and so fit any record
+shape. An earlier draft of this decision drew the line the other way ("no filling of a
+missing shape proves the required keys are present"), and the first large program typed
+under it showed why that is the lattice's line and not the gradual one: declaring an
+editor's `model` shape made every `(assoc (step m) :k v)` over an unsigged `step` a
+finding at the next typed parameter, six hundred at once, and the only way out was to
+declare the entire program in one move — which is exactly what gradual typing exists to
+make unnecessary. An unknown shape proves nothing about which keys are absent, as
+unknown elements prove nothing about what they are. What still does not fit: a closed
+record lacking a required key (its shape is positively known), and a `map<K, V>` with
+positively known `K`/`V` (it says its keys need not be present).
+
 **Consequences.** Strict mode says the same thing about an unknown at every depth, which is
 what makes "the answer to a strict warning is a `sig` on the enclosing function" true: the
 warning now points at the parameter whose type is missing, never at a field that inherited
-its unknown-ness. std stays at zero in both modes. A bare `map` handed where a record is
-expected still warns — the shape is absent, and no filling of a missing shape proves the
-required keys are present — which is the right side of the line: that IS a positive fact
-the caller has not established.
+its unknown-ness — and a program can be declared one function at a time, each new sig
+checked against what its neighbours positively established and nothing else. std stays at
+zero in both modes.
 
 ## ADR-327 — `deftype` names a structural type for the checker
 
