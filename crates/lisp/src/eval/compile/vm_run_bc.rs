@@ -71,15 +71,36 @@ pub struct ProgramExit {
     /// Not `#[cfg(wasm32)]`: gated, the whole result path was invisible to host tests, so
     /// the playground's shipped entry point could not be asserted at all.
     result: std::sync::Mutex<Option<String>>,
+    /// Whether anyone will ever READ `result`. Only `run_program_repr` does; `run_program`
+    /// discards it. Set once at construction, so there is no race with the program starting.
+    ///
+    /// This exists because ungating the result path (7a72135b) made `finish_form` render
+    /// EVERY top-level form's value to a string on the native path, where nothing reads it.
+    /// That is proportional to the value's size, and a program whose top level binds one
+    /// huge structure pays it in full: the `sort` benchmark (`(def data (sort …))` over a
+    /// 375k-element list) went 132ms -> 146ms, **+10.6%**, measured interleaved against a
+    /// 0.7% control. The ungating was measured at the time, but over 200 forms holding
+    /// small vectors — many small values, never one large one, which is the shape that
+    /// bites. Keep the path ungated (that is what makes it testable on the host); just
+    /// don't do the work when the answer is thrown away.
+    want_result: bool,
 }
 
 impl ProgramExit {
-    pub fn new() -> Arc<Self> {
+    /// `want_result` is whether the caller will read [`take_result`](Self::take_result);
+    /// when false the driver skips rendering each form's value entirely.
+    pub fn new(want_result: bool) -> Arc<Self> {
         Arc::new(ProgramExit {
             slot: std::sync::Mutex::new(None),
             cv: std::sync::Condvar::new(),
             result: std::sync::Mutex::new(None),
+            want_result,
         })
+    }
+
+    /// Whether the printed result is wanted — see [`want_result`](Self::want_result).
+    pub fn wants_result(&self) -> bool {
+        self.want_result
     }
 
     fn publish(&self, r: Result<(), LispError>) {
@@ -301,9 +322,15 @@ impl ProgramState {
     /// `name` to `v` now (reusing the full `def` semantics — naming, promote-to-shared,
     /// reload diagnostics); either way advance to the next form.
     fn finish_form(&mut self, heap: &mut Heap, v: Value) -> Result<(), LispError> {
-        // Render the form's value while its heap is alive (wasm). Overwritten each form, so
-        // after the last one it holds the program's result for the playground to print.
-        self.last_repr = Some(crate::syntax::printer::print(heap, v));
+        // Render the form's value while its heap is alive, but ONLY when someone will read
+        // it (`run_program_repr`, i.e. the playground). `print` is proportional to the
+        // value's size and `run_program` discards the result, so doing it unconditionally
+        // charges every native program for rendering a string nothing consumes — see
+        // `ProgramExit::want_result`. Overwritten each form, so after the last one it holds
+        // the program's result.
+        if self.exit.wants_result() {
+            self.last_repr = Some(crate::syntax::printer::print(heap, v));
+        }
         if let Some(name) = self.def_name.take() {
             bind_def(heap, name, v)?;
         }

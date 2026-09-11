@@ -696,7 +696,10 @@ pub(super) fn run_program_file(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         LispError::runtime(format!("%run-program-file: cannot read {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    let exit = crate::process::spawn_root_program(heap, &src, Some(path.clone()), None)
+    // `false`: this path returns nil/raises, never the printed value — see
+    // `ProgramExit::want_result`. `nest run FILE` comes through here, so a run script with a
+    // large top-level binding would otherwise render it to a string and drop it.
+    let exit = crate::process::spawn_root_program(heap, &src, Some(path.clone()), None, false)
         .map_err(|e| e.or_file(path.clone()))?;
     match exit.wait() {
         Ok(()) => Ok(Value::nil()),

@@ -53,3 +53,48 @@ fn the_repr_path_the_playground_actually_calls_captures_too() {
         "run_program_repr is what `playground::run` calls on wasm"
     );
 }
+
+/// `run_program` must NOT render each top-level form's value — and this asserts the
+/// observable consequence rather than the flag, so a regression that sets `want_result`
+/// without honouring it still fails.
+///
+/// The cost is invisible until a program's top level binds something big: ungating the
+/// result path (7a72135b) rendered EVERY form's value to a string on the native path,
+/// where `run_program` throws it away, and the `sort` benchmark — `(def data (sort …))`
+/// over a 375k-element list — paid **+10.6%** for it (132ms -> 146ms, interleaved against
+/// a 0.7% control). A `Some` here means that work is back.
+#[test]
+fn run_program_does_not_render_a_result_nobody_reads() {
+    let interp = Interp::new();
+    let exit = brood::process::spawn_root_program(
+        &interp.heap,
+        "(def data (list 1 2 3))\n(+ 1 2 3)",
+        None,
+        None,
+        false,
+    )
+    .expect("spawn");
+    exit.wait().expect("the program should run");
+    assert_eq!(
+        exit.take_result(),
+        None,
+        "run_program discards the value, so the driver must not have rendered one"
+    );
+}
+
+/// The other side of the same rule: when the caller DOES want the result, it is there.
+/// Without this, the test above passes trivially if rendering were removed altogether.
+#[test]
+fn run_program_repr_still_renders_the_result() {
+    let interp = Interp::new();
+    let exit = brood::process::spawn_root_program(
+        &interp.heap,
+        "(def data (list 1 2 3))\n(+ 1 2 3)",
+        None,
+        None,
+        true,
+    )
+    .expect("spawn");
+    exit.wait().expect("the program should run");
+    assert_eq!(exit.take_result().as_deref(), Some("6"));
+}
