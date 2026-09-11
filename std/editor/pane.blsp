@@ -229,7 +229,6 @@ returned unchanged — you can't delete the only one."
 ;; module (2026-09-06). The gate now reads indented sigs too.
 (sig pane-layout-go (any list rect -> layout))
 
-(sig pane-layout (any rect -> layout))
 (defn pane-layout (tree rect)
   "Lay `tree` out in `rect` (`[x y w h]` cells): a map `{:panes :dividers}` where
 each pane is `{:path :payload :selected :rect}` and each divider is `{:path :dir
@@ -237,14 +236,15 @@ each pane is `{:path :payload :selected :rect}` and each divider is `{:path :dir
 that split feeds `pane-ratio-for`). Pure — the frontend paints each pane's payload
 into its rect and the dividers between them."
   (pane-layout-go tree () rect))
+(sig pane-layout (any rect -> layout))
 
 ;; ---- hit-testing + resize (drag-to-resize over :drag mouse events) ----------
 
-(sig pane-in-rect? (rect (tuple int int) -> bool))
 (defn- pane-in-rect? (rect point)
   "Whether `point` (`[row col]`) falls inside `rect` (`[x y w h]`)."
   (let ([x y w h] rect [row col] point)
     (and (>= col x) (< col (+ x w)) (>= row y) (< row (+ y h)))))
+(sig pane-in-rect? (rect (tuple int int) -> bool))
 
 (defn- pane-find (items point)
   "The first `{:rect …}` in `items` whose rect contains `point`, or nil."
@@ -253,16 +253,16 @@ into its rect and the dividers between them."
     (pane-in-rect? (get (first items) :rect) point) (first items)
     else (pane-find (rest items) point)))
 
-(sig pane-at (layout (tuple int int) -> (or nil pane)))
 (defn pane-at (layout point)
   "The pane (`{:path :payload :selected :rect}`) under `point`, or nil."
   (pane-find (get layout :panes) point))
+(sig pane-at (layout (tuple int int) -> (or nil pane)))
 
-(sig divider-at (layout (tuple int int) -> (or nil divider)))
 (defn divider-at (layout point)
   "The divider (`{:path :dir :rect :split-rect}`) under `point`, or nil — what a
 frontend stashes on a left-press to begin a drag-resize."
   (pane-find (get layout :dividers) point))
+(sig divider-at (layout (tuple int int) -> (or nil divider)))
 
 (defn pane-select-at (tree layout point)
   "Move selection to the pane under `point` (a click selects it); unchanged if the
@@ -270,7 +270,6 @@ point is off every pane."
   (let (pane (pane-at layout point))
     (if (nil? pane) tree (pane-select-path tree (get pane :path)))))
 
-(sig pane-ratio-for (divider (tuple int int) -> number))
 (defn pane-ratio-for (divider point)
   "The ratio that places `divider` at `point`, within the divider's `:split-rect` —
 i.e. dragging the divider to the pointer. Feed the result to `pane-set-ratio`."
@@ -278,6 +277,7 @@ i.e. dragging the divider to the pointer. Feed the result to `pane-set-ratio`."
     (if (= (get divider :dir) :col)
       (/ (- col x) (math/max 1 (- w 1)))
       (/ (- row y) (math/max 1 (- h 1))))))
+(sig pane-ratio-for (divider (tuple int int) -> number))
 
 (defn pane-set-ratio (tree path ratio)
   "Set the `:ratio` of the split at `path` (clamped to `[0.1 0.9]` so neither pane

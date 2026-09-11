@@ -779,11 +779,11 @@ matched pair reversed, or a lone unmatched bracket in the error face."
 
 ;; ---- layout + rendering (IO) ------------------------------------------------
 
-(sig lineedit-cols (-> int))
 (defn- lineedit-cols ()
   "The terminal width in columns, with a sane fallback when the terminal reports no
 size (e.g. a pty with no winsize), so layout never collapses to a 1-column window."
   (let ([c r] (term/size)) (if (< c 1) 80 c)))
+(sig lineedit-cols (-> int))
 
 (defn lineedit-display-prompt (state)
   "The prompt to show for `state`: the `(reverse-i-search)\`query':` prompt while
@@ -798,7 +798,6 @@ terminal multiplexer), which is the same reason `lineedit-init` is public."
       (get state :prompt)
       (str "(reverse-i-search)`" (get s :query) "': "))))
 
-(sig lineedit-reflow (state -> state))
 (defn- lineedit-reflow (state)
   "Recompute the horizontal-scroll window so point is visible, and cache the width,
 available text columns, and prompt width for rendering."
@@ -812,6 +811,7 @@ available text columns, and prompt width for rendering."
               (>= point (+ hs avail)) (inc (- point avail))
               else hs))
     (assoc state :hscroll hs2 :width width :avail avail :promptw promptw)))
+(sig lineedit-reflow (state -> state))
 
 (defn- lineedit-chunk-ops (chunks)
   "Turn `[substring face]` highlight chunks into `[:print str face]` ops."
