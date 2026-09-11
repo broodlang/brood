@@ -9345,8 +9345,9 @@ gui on is written by `./configure` and is gitignored, so a developer's local `ma
 compiles the gui and CI's never does. The feature was on for everyone who would notice and
 off everywhere it would be checked.
 
-**Fix.** The gate, plus main-thread hosting — which turned out to be far smaller than
-feared, because the runtime *already* runs on a spawned thread. `cli_support::run_on_main_stack`
+**Fix** (rationale and the constraints it creates: **ADR-324**). The gate, plus main-thread
+hosting — which turned out to be far smaller than feared, because the runtime *already* runs
+on a spawned thread. `cli_support::run_on_main_stack`
 has always moved the work off the main thread (to size the stack for the ADR-043 budget
 guard), leaving the main thread doing nothing but `join()`. So there was a free main thread
 the whole time; it simply had no way to be asked for.

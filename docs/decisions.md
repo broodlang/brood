@@ -21036,3 +21036,58 @@ qualified (`test/describe`), because `macroexpand-1` of a bare name inside a tes
 returns the form unchanged rather than expanding it, which is how a first draft of the gate
 passed its error cases vacuously.
 
+
+## ADR-324 — The GUI event loop may own the process main thread; the runtime never does
+
+**Context.** winit requires its event loop on the process main thread. Wayland and X11 offer
+an opt-out (`EventLoopBuilderExtWayland::with_any_thread`) and the GUI was built on it: a
+dedicated `brood-gui` thread owned the loop, lazily started on the first `gui-open`, and the
+Brood side reached it through an `EventLoopProxy`. macOS has no such opt-out — AppKit's run
+loop is main-thread-only — and Windows is the same shape. The consequence was not a
+degradation but a compile error, and because every CI job ran `ubuntu-latest` and the release
+build has `WITH_GUI ?= 0`, `brood/gui` sat un-compiled for Apple indefinitely (KI-125).
+
+The obvious reading is that supporting macOS means restructuring the runtime around a GUI
+toolkit's demand for `main`. It does not, because of a decision already taken for an
+unrelated reason: `cli_support::run_on_main_stack` moves all work to a spawned thread sized
+to `WORKER_STACK_BYTES`, so the ADR-043 stack-budget guard behaves identically on the root
+thread and inside spawned processes. The runtime has therefore never run on the OS main
+thread, which has only ever blocked in `join()`.
+
+**Decision.** The process main thread is a **reservable resource**, and the GUI is the only
+thing that may claim it. `run_on_main_stack` no longer joins directly: it hands its
+`JoinHandle` to `gui::host_main_thread`, which parks the main thread on a channel while a
+`brood-main-join` thread performs the join. `start_thread` then either spawns `brood-gui` as
+before, or sends the loop to the parked main thread — decided by
+`main_thread_hosting_required()`, which is forced true wherever a dedicated loop is illegal
+and cannot be switched off there.
+
+Three consequences worth stating, because each is a constraint rather than a detail:
+
+1. **A host embedding the runtime must run its work through `run_on_main_stack`** if it wants
+   a GUI. One that does not gets a named error at `gui-open` — not a deadlock, and not a
+   crash inside AppKit.
+2. **A runtime that returns while winit owns the main thread ends the process from the
+   joiner.** Nothing would otherwise notice: `run_app` never comes back. Exit 0, matching
+   what a returning `main` produced before; every non-zero path already went through
+   `std::process::exit` on the runtime thread and is untouched.
+3. **The loop is still lazy and still never restarts.** Reserving the main thread costs a
+   parked thread and a channel, nothing more, and a run that never opens a window behaves
+   exactly as it did.
+
+**Alternatives rejected.** *Make the main-thread path universal* — uniform, and it would have
+deleted the `with_any_thread` branch entirely; rejected because it changes the thread topology
+of every Linux GUI app that works today to buy consistency rather than capability, and this
+project has no way to run macOS to justify the trade. *Keep macOS on a dedicated thread via
+`objc2`/GCD* — winit does not support a loop off the main thread there at all, so this is not
+an implementation difficulty but an unsupported configuration. *Gate the Wayland calls and
+stop* — compiles, then fails at the first `gui-open`; worse than not compiling, because the
+failure moves from build time to a user's machine.
+
+**The lever is testability, not configuration.** `BROOD_GUI_MAIN_THREAD=1` selects the
+main-thread path on a platform that does not need it. This project has no macOS beyond a
+compile check, so without it the entire main-thread path would ship having been compiled and
+never executed. With it, the identical code runs on Linux where the GUI is exercised, and the
+topology is directly observable: no `brood-gui` thread, a `brood-main-join`, and the loop on
+tid == pid. A gate that can only compile is worth less than one that can run, and the cheapest
+way to get the second is to make the foreign path selectable at home.
