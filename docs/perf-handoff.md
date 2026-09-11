@@ -279,7 +279,29 @@ checked. This is hygiene, not a suspicion.
 
 ---
 
-## Task 4 — the empty-pool park backoff: confirm `latency` and the message rows are flat
+## Task 4 — the empty-pool park backoff: confirm `latency` and the message rows are flat ◐ MOSTLY ANSWERED 2026-09-11
+
+> **Five of six rows are clean; `latency` is not resolvable here and is NOT counted as a pass.**
+> `ab-bench --floor` against `99d61222` (= `c7afd4ec^`, the commit before the change), both arms
+> imaged, box settled to 0.69:
+>
+> | row | base | new | delta | floor | verdict |
+> |---|---|---|---|---|---|
+> | `pingpong` | 208 ms | 204 ms | −1.9% | 1.4% | pass |
+> | `ring` | 808 ms | 775 ms | −4.1% | 0.1% | pass |
+> | `spawn` | 75 ms | 78 ms | +4.0% | 4.0% | pass |
+> | `spawn-live` | 1503 ms | 1494 ms | −0.6% | 1.4% | pass |
+> | `supervisor` | 927 ms | 909 ms | −1.9% | 1.2% | pass |
+> | `latency` | 4311 ms | 4956 ms | +15.0% | **11.9%** | **inconclusive** |
+>
+> `latency`'s delta is inside `max(5%, 2 x floor)` = 23.8% and that is *not* a pass — an 11.9%
+> floor means the instrument cannot see a 15% effect on that row, which is what this file
+> already predicted. Letting a wide floor launder a number is the failure mode, not the result.
+>
+> **Still owed for this task:** `latency` p50/p99 as medians over 11 runs (the protocol
+> `BROOD_SPAWN_SPILL` was tuned with), and the `BROOD_NO_IDLE_BACKOFF=1` control on the two
+> interesting rows. Both were specified below and neither was run.
+
 
 > ### ✅ The named open shape is answered on the dev box, 2026-09-09 — the row sweep is what is left
 >
