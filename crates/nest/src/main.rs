@@ -35,7 +35,7 @@
 
 use brood::cli_support::{report_error, run_on_main_stack, FullTermGuard, RawTermGuard};
 use brood::Interp;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 mod mcp;
 mod release;
@@ -46,7 +46,7 @@ mod release;
     // The build sha, not just the semver — see `cli_support::VERSION_LINE`.
     version = brood::cli_support::VERSION_LINE,
     about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
-    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, fetch, update, tree, add, remove, publish, search, key, ws, repl, observe, attach — `nest <command> --help`.",
+    after_help = "Also (implemented in Brood, std/tool/nest.blsp): new, run, test, check, format, doc, docs, doctest, grammar, rename, update-tooling, fetch, update, tree, add, remove, publish, search, key, ws, repl, observe, attach, completions — `nest <command> --help`.",
     propagate_version = true,
     subcommand_required = true,
     arg_required_else_help = true
@@ -67,46 +67,8 @@ struct Cli {
     cmd: Cmd,
 }
 
-/// Which shell `nest completions` emits an integration script for. A `ValueEnum`,
-/// so the choices are listed in `--help`, an unknown one is rejected with a
-/// formatted error, and `nest completions <TAB>` completes them from this
-/// definition rather than a restated list.
-#[derive(ValueEnum, Clone, Copy, Debug)]
-enum CompletionShell {
-    Bash,
-    Zsh,
-    Fish,
-}
-
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Print a shell integration script enabling TAB completion for `nest`.
-    ///
-    /// Completes subcommands, flags, and project-aware values — test files, tags
-    /// for `--only`/`--exclude`/`--include`, dependency names, module names.
-    ///
-    /// Install by sourcing it from your shell's startup file:
-    ///   bash:  eval "$(nest completions bash)"
-    ///   zsh:   eval "$(nest completions zsh)"
-    ///   fish:  nest completions fish | source
-    Completions {
-        /// Which shell to emit for.
-        #[arg(value_name = "SHELL")]
-        shell: CompletionShell,
-    },
-
-    /// Print completion candidates for a partial command line (used by the shell
-    /// scripts from `nest completions`; not usually run by hand).
-    ///
-    /// Takes the words after `nest`, the word being typed last, and prints one
-    /// candidate per line. Always exits 0 — a completion must never fail.
-    #[command(hide = true)]
-    Complete {
-        /// The words after `nest`, with the partial word last.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        words: Vec<String>,
-    },
-
     /// Build this binary's standard-library startup image (ADR-218), once.
     ///
     /// Keyed on `system/stdlib-id` — a content hash of every baked-in `.blsp` — so `brood`,
@@ -176,10 +138,7 @@ enum Cmd {
 fn ensure_stdimage(interp: &mut Interp, cmd: &Cmd) {
     // `Stdimage` builds explicitly and reports; the rest are the commands that must stay
     // instant, where a first-run build would BE the command's whole runtime.
-    if matches!(
-        cmd,
-        Cmd::Stdimage | Cmd::Completions { .. } | Cmd::Complete { .. }
-    ) {
+    if matches!(cmd, Cmd::Stdimage) {
         return;
     }
     ensure_stdimage_now(interp);
@@ -245,8 +204,7 @@ fn main() {
     brood::cli_support::install_crash_dump();
     // A subcommand implemented in Brood (`std/tool/nest.blsp`, ADR-322) is routed there
     // BEFORE clap sees argv: clap would reject its flags, which it no longer knows. The list
-    // is the routing table AND the completion table's Rust half, so it cannot go stale
-    // against the `Cmd` enum — a name is in exactly one of the two.
+    // is the routing table; a name is in exactly one of it and the `Cmd` enum.
     let argv: Vec<String> = std::env::args().collect();
     if let Some((max_parallel, rest)) = blsp_routed(&argv[1..]) {
         run_on_main_stack("nest-main", move || run_blsp(max_parallel, rest));
@@ -285,6 +243,8 @@ const BLSP_SUBCOMMANDS: &[&str] = &[
     "repl",
     "observe",
     "attach",
+    "completions",
+    "complete",
 ];
 
 /// Is this argv (after the binary name) a Brood-implemented subcommand? Returns the value
@@ -297,6 +257,12 @@ fn blsp_routed(args: &[String]) -> Option<(Option<usize>, Vec<String>)> {
     let mut rest: Vec<String> = Vec::new();
     let mut i = 0;
     while let Some(word) = args.get(i) {
+        // Past a `--` every word is the subcommand's (`nest complete -- test -j 4`), so the
+        // global option is no longer ours to take.
+        if word == "--" {
+            rest.extend(args[i..].iter().cloned());
+            break;
+        }
         let value = match word.as_str() {
             "-j" | "--max-parallel" | "--jobs" => {
                 i += 1;
@@ -377,7 +343,10 @@ fn run_blsp(max_parallel: Option<usize>, argv: Vec<String>) {
     brood::cli_support::warn_nondefault_gc_env();
     arm_test_env(&argv);
     let mut interp = Interp::new();
-    if std::env::var_os("BROOD_NO_STDIMAGE").is_none() {
+    // `complete` runs on a keypress: read an image if there is one, never spend the
+    // keypress building it.
+    let completing = argv.first().is_some_and(|c| c == "complete");
+    if std::env::var_os("BROOD_NO_STDIMAGE").is_none() && !completing {
         ensure_stdimage_now(&mut interp);
     }
     let code = format!("(nest/main {})", blsp_string_list(&argv));
@@ -413,19 +382,6 @@ fn run_main(cli: Cli) {
     // Flag a stressed/retuned heap so a benchmark can't silently measure one.
     brood::cli_support::warn_nondefault_gc_env();
 
-    // Completion runs on a KEYPRESS, so it must not pay interpreter boot for an
-    // answer clap already knows. Both arms were below the unconditional
-    // `Interp::new()` and so paid it anyway — 31 ms against a 9 ms floor for
-    // `nest complete -- te`, whose answer ("test") is a static subcommand name; the
-    // project-dependent path paid it TWICE, once here and once in
-    // `print_dynamic_values`. Handle them before any interpreter exists, which is
-    // what the module comment already claimed happened.
-    match &cli.cmd {
-        Cmd::Completions { shell } => return cmd_completions(*shell),
-        Cmd::Complete { words } => return cmd_complete(words),
-        _ => {}
-    }
-
     let mut interp = Interp::new();
 
     // Make the stdlib startup image standard for a project, without asking. The image is what
@@ -448,7 +404,6 @@ fn run_main(cli: Cli) {
 
     match cli.cmd {
         // Handled above, before the interpreter is built.
-        Cmd::Completions { .. } | Cmd::Complete { .. } => unreachable!(),
         // Nothing but the prelude is loaded when this runs — see the variant's doc for why
         // that is the whole point, and why `stdimage/build` refuses otherwise (KI-112).
         Cmd::Stdimage => run(
@@ -787,219 +742,6 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
             std::process::exit(1);
         }
     }
-}
-
-// ── shell completion ────────────────────────────────────────────────────────
-//
-// Two halves, split by what owns the truth:
-//
-//   * Subcommand and flag names are read out of clap's OWN model
-//     (`Cli::command()`), never a hand-kept list. That is the whole point: a flag
-//     added to the `Cmd` enum is completable the same day, and a flag renamed
-//     can't leave a stale completion behind.
-//   * A Brood-routed subcommand (`BLSP_SUBCOMMANDS`) is handed to `nest/complete`, which
-//     reads the same table the parser does — flags, fixed positionals, and the
-//     project-dependent VALUES (tags, dep names, modules, test files) via
-//     `std/tool/complete.blsp` — and only then pays interpreter boot.
-//
-// Everything here must be silent and total: completion runs on a keypress, so it
-// prints candidates or nothing, exits 0, and never reports an error.
-
-/// Every subcommand name clap knows about, hidden ones excluded.
-fn subcommand_names() -> Vec<String> {
-    Cli::command()
-        .get_subcommands()
-        .filter(|s| !s.is_hide_set())
-        .map(|s| s.get_name().to_string())
-        .chain(BLSP_SUBCOMMANDS.iter().map(|s| s.to_string()))
-        .collect()
-}
-
-/// Completion for a Brood-implemented subcommand: its flags and positional values live in
-/// `std/tool/nest.blsp`'s table, the one source of truth for what it accepts, so ask it.
-/// Costs an interpreter boot, as the project-dependent values already did.
-fn print_blsp_completion(subcommand: &str, prior: &[String], current: &str) {
-    let mut interp = Interp::new();
-    let code = format!(
-        "(nest/complete {} {} {})",
-        blsp_string(subcommand),
-        blsp_string_list(prior),
-        blsp_string(current)
-    );
-    let _ = interp.eval_str(&code);
-}
-
-/// The `--long` flags of one subcommand, plus the global ones.
-fn flag_names(subcommand: &str) -> Vec<String> {
-    let root = Cli::command();
-    let Some(sub) = root.get_subcommands().find(|s| s.get_name() == subcommand) else {
-        return Vec::new();
-    };
-    sub.get_arguments()
-        .chain(root.get_arguments())
-        .filter(|a| !a.is_hide_set())
-        .filter_map(|a| a.get_long().map(|l| format!("--{l}")))
-        .collect()
-}
-
-/// Does this argument take a value (so the word after it is a value, not a flag)?
-fn takes_value(subcommand: &str, long: &str) -> bool {
-    let root = Cli::command();
-    let sub_takes = root
-        .get_subcommands()
-        .find(|s| s.get_name() == subcommand)
-        .and_then(|sub| {
-            sub.get_arguments()
-                .find(|a| a.get_long() == Some(long))
-                .map(|a| a.get_num_args().is_none_or(|n| n.takes_values()))
-        });
-    sub_takes.unwrap_or_else(|| {
-        root.get_arguments()
-            .find(|a| a.get_long() == Some(long))
-            .is_some_and(|a| a.get_num_args().is_none_or(|n| n.takes_values()))
-    })
-}
-
-/// The `--long` value-taking arg immediately before the cursor, if any.
-fn pending_value_flag(subcommand: &str, words: &[String]) -> Option<String> {
-    let previous = words.last()?;
-    let long = previous.strip_prefix("--")?;
-    // `--flag=value` is already complete; only a bare `--flag` leaves a value pending.
-    if long.contains('=') {
-        return None;
-    }
-    takes_value(subcommand, long).then(|| long.to_string())
-}
-
-/// `nest completions <shell>` — emit a shell integration script.
-///
-/// The scripts are deliberately thin: each one forwards the current words to
-/// `nest complete` and offers whatever comes back, so there is exactly ONE
-/// implementation of completion logic and the shells can't disagree with it (or go
-/// stale when a flag is added). Each also falls back to the shell's own filename
-/// completion when `nest complete` returns nothing, so a path is always typeable.
-fn cmd_completions(shell: CompletionShell) {
-    match shell {
-        // `-o default` is the fallback: with no candidates, bash resumes normal
-        // filename completion instead of offering nothing.
-        CompletionShell::Bash => print!(
-            r#"# nest completion for bash — eval "$(nest completions bash)"
-_nest_complete() {{
-    local IFS=$'\n'
-    local words=("${{COMP_WORDS[@]:1:COMP_CWORD}}")
-    # An empty trailing word means "completing a fresh word": keep it, so
-    # `nest test <TAB>` differs from `nest tes<TAB>`.
-    [[ ${{#words[@]}} -eq 0 ]] && words=("")
-    COMPREPLY=($(nest complete -- "${{words[@]}}" 2>/dev/null))
-    return 0
-}}
-complete -o default -o bashdefault -F _nest_complete nest
-"#
-        ),
-        // NB the locals are `parts`/`candidates`, NOT `words`: zsh's completion
-        // context provides `$words`, so declaring `local -a words` would blank it
-        // before it could be read and every completion would see an empty command
-        // line.
-        CompletionShell::Zsh => print!(
-            r#"# nest completion for zsh — eval "$(nest completions zsh)"
-_nest_complete() {{
-    local -a candidates parts
-    parts=("${{(@)words[2,$CURRENT]}}")
-    (( ${{#parts}} == 0 )) && parts=("")
-    candidates=("${{(@f)$(nest complete -- "${{parts[@]}}" 2>/dev/null)}}")
-    # `_files` is the fallback when nest has no opinion, so paths stay completable.
-    if (( ${{#candidates}} == 0 )) || [[ -z "${{candidates[1]}}" ]]; then
-        _files
-    else
-        compadd -- "${{candidates[@]}}"
-    fi
-}}
-compdef _nest_complete nest
-"#
-        ),
-        // fish has no "fall back to files" switch, so ask for both: nest's
-        // candidates plus the usual file list.
-        CompletionShell::Fish => print!(
-            r#"# nest completion for fish — nest completions fish | source
-function __nest_complete
-    set -l tokens (commandline -opc) (commandline -ct)
-    nest complete -- $tokens[2..-1] 2>/dev/null
-end
-complete -c nest -f -a '(__nest_complete)'
-complete -c nest -a '(__fish_complete_path)'
-"#
-        ),
-    }
-}
-
-/// `nest complete -- <words…>` — print one candidate per line for the word being
-/// typed. `words` is everything after `nest`, with the (possibly empty) partial
-/// word last. Always exits 0.
-fn cmd_complete(words: &[String]) {
-    // The word under the cursor, and the settled words before it.
-    let (current, prior) = match words.split_last() {
-        Some((last, rest)) => (last.clone(), rest.to_vec()),
-        None => (String::new(), Vec::new()),
-    };
-    let subcommand = prior
-        .iter()
-        .find(|w| !w.starts_with('-'))
-        .cloned()
-        .filter(|w| subcommand_names().contains(w));
-
-    // Static candidates are filtered and printed here; dynamic ones are printed by
-    // Brood (which also filters), so `kind` is resolved and then handed over.
-    let statics: Vec<String> = match &subcommand {
-        // Still choosing a subcommand.
-        None => subcommand_names(),
-        Some(sub) if BLSP_SUBCOMMANDS.contains(&sub.as_str()) => {
-            let after: Vec<String> = prior
-                .iter()
-                .skip_while(|w| w != &sub)
-                .skip(1)
-                .cloned()
-                .collect();
-            return print_blsp_completion(sub, &after, &current);
-        }
-        Some(sub) => {
-            if current.starts_with('-') {
-                flag_names(sub)
-            } else if pending_value_flag(sub, &prior).is_some() {
-                // A value position of a clap-side subcommand. None of these has a
-                // project-dependent kind any more — every subcommand with one is
-                // Brood-routed and completes through `nest/complete` — so print nothing and
-                // let the shell fall back to filenames, which beats a confidently wrong list.
-                return;
-            } else if let Some(values) = positional_possible_values(sub) {
-                // A `ValueEnum` positional (`nest completions <SHELL>`) — choices come from
-                // the enum definition, not a restated list.
-                values
-            } else {
-                return;
-            }
-        }
-    };
-
-    for c in statics {
-        if !c.is_empty() && c.starts_with(&current) {
-            println!("{c}");
-        }
-    }
-}
-
-/// A positional's `ValueEnum` choices (e.g. `nest grammar <TARGET>`), so those
-/// come from the enum definition rather than being restated.
-fn positional_possible_values(subcommand: &str) -> Option<Vec<String>> {
-    let values: Vec<String> = Cli::command()
-        .get_subcommands()
-        .find(|s| s.get_name() == subcommand)?
-        .get_positionals()
-        .next()?
-        .get_possible_values()
-        .iter()
-        .map(|v| v.get_name().to_string())
-        .collect();
-    (!values.is_empty()).then_some(values)
 }
 
 /// Guard a project-scoped subcommand at the `nest` boundary.

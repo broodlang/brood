@@ -12408,3 +12408,25 @@ both formatters, the 747 lib tests, 164 nest/cli tests, ~50 in-language files ru
 The trap for next time: **std/ is baked into the binary** (`include_str!`), so a `.blsp`
 edit is invisible to every gate until `cargo build --bin brood --bin nest`. One round of
 "still failing" here was exactly that.
+
+## 2026-09-11 — `nest completions` / `nest complete` are Brood (ADR-322, item 6)
+
+The last two policy arms of `nest` left `main.rs`: the three shell scripts and the
+completion candidate engine are `std/tool/nest.blsp` entries like every other subcommand
+(`complete` is `:hidden`), routed through `BLSP_SUBCOMMANDS`. `main.rs` is 776 lines; what
+it still hosts is mechanism — `stdimage` (KI-112), `mcp`'s transport, `release`'s byte
+assembly and boot check — and the clap definitions of those three.
+
+The one design point: the Rust arms' flags used to be read out of clap's model, so a flag
+added to `Cmd::Release` completed the same day. That truth now lives in two places —
+clap, and `nest/*rust-commands*` — so `crates/nest/tests/complete.rs` pins the mirror
+through the binary: the `--long` flags `nest release --help` prints must be exactly what
+`nest complete -- release --` offers, and every subcommand `nest --help` lists must be
+offered. Sabotage-verified (dropping `--no-smoke` from the mirror reds the gate).
+
+Cost, stated honestly: a static answer (`nest complete -- te`) used to be served before any
+interpreter existed, ~9 ms; it now boots one, **72 ms** on this build with the stdlib image
+present (the dynamic answers already paid that). Per the dogfooding rule the policy stays in
+Brood; `complete` deliberately reads an image but never spends the keypress building one.
+Also fixed on the way: `blsp_routed` took `-j N` out of the words after a `--`, so
+`nest complete -- test -j 4 <TAB>` completed the wrong command line.
