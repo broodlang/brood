@@ -291,6 +291,20 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 #
 # ~2.4 s here, once, so the herd hits a warm cache. The script exits 0 on every
 # failure path: warming is an optimisation and must never redden a run.
+# --- KI-126: sweep the previous run's temp fixtures, so /tmp stays bounded ---
+#
+# The `.blsp` suite already does this per file (`purge-stale-temp`, KI-30's convention,
+# gated by `tests/temp_purge_coverage_test.blsp`). The Rust half never did: its fixture
+# names carry the test process's pid, so each site's opening `remove_dir_all` matches a
+# path no previous run used, and the closing one is skipped by every early return and
+# every panic. 1109 entries / 340 MB had accumulated over six weeks.
+#
+# Here rather than at ~40 call sites: the convention is "drop the previous run's
+# leftovers before this run creates any", and a setup script is exactly that moment for
+# the whole fan-out. Housekeeping — exits 0 on every path, off switch BROOD_NO_TEMP_PURGE=1.
+[scripts.setup.purge-stale-temp]
+command = 'scripts/purge-stale-temp.sh'
+
 [scripts.setup.warm-boot-cache]
 command = 'scripts/warm-boot-cache.sh'
 
@@ -311,4 +325,8 @@ command = 'scripts/build-std-image.sh'
 
 [[profile.default.scripts]]
 filter = 'all()'
-setup = ['warm-boot-cache', 'build-std-image']
+# nextest runs setup scripts in the order their TABLES are declared above, not in this
+# list's order (verified) — which is why the purge's table is declared first. It would be
+# correct either way, since the age guard is what keeps it off a live run's fixtures, but
+# "sweep before the run writes anything" is the convention and worth having be literally true.
+setup = ['purge-stale-temp', 'warm-boot-cache', 'build-std-image']

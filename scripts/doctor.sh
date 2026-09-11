@@ -44,7 +44,18 @@ echo "1. build drift"
 # binary is old enough not to report one at all — which is itself the finding.
 binary_sha() { "$1" --version 2>/dev/null | sed -n 's/.*(\([0-9a-f]\{7,\}\)).*/\1/p'; }
 
-for b in target/release-fast/brood target/release/brood "$(command -v brood 2>/dev/null)"; do
+# `nest` is here for the same reason `brood` is, and it was missing: `brood` is the
+# binary a MEASUREMENT lies through, `nest` the one a GATE lies through. A stale
+# installed `nest` is what runs `nest check` / `nest test` in every downstream project,
+# so it reports a clean tree against a standard library it does not carry — which is
+# exactly how a brood-side std change and a bedit-side adoption of it were both verified
+# green while the installed toolchain could not have run either (2026-09-11).
+#
+# `brood-lsp` is deliberately NOT here: it has no `--version` (it speaks LSP on stdio
+# and answers one with a protocol error), so it can only ever be reported as "reports no
+# build sha", which is a false finding rather than a check.
+for b in target/release-fast/brood target/release-fast/nest target/release/brood \
+         "$(command -v brood 2>/dev/null)" "$(command -v nest 2>/dev/null)"; do
   [ -n "$b" ] && [ -x "$b" ] || continue
   sha=$(binary_sha "$b")
   if [ -z "$sha" ]; then
@@ -64,7 +75,7 @@ done
 # fails more confusingly, because the file on disk plainly contains the function the binary
 # says is unbound. That cost a session: a suite was reported as failing when it passed, read
 # through a binary built before the `std/` edit under test.
-for b in target/release-fast/brood target/release/brood; do
+for b in target/release-fast/brood target/release-fast/nest target/release/brood; do
   [ -x "$b" ] || continue
   newer=$(find crates -name '*.rs' -newer "$b" -print -quit 2>/dev/null || true)
   [ -z "$newer" ] && newer=$(find std -name '*.blsp' -newer "$b" -print -quit 2>/dev/null || true)
