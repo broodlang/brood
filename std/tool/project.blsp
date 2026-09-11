@@ -483,6 +483,8 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; Recursively collect every <name>_test.blsp path under `dir` (skipping nothing
 ;; else). Returns a list of full paths; nil if `dir` isn't a directory.
 (defn project-collect-tests (dir)
+  "Every `<name>_test.blsp` under `dir`, recursively, as a list of full paths — nil when
+`dir` is not a directory."
   ;; `cons` a file (O(1)); splice a subdir's list with `%append-two` (copies only the small
   ;; subdir list, SHARES `acc`). A plain `(append acc …)` recopies the growing accumulator
   ;; per entry — O(files²), which made discovery quadratic on a large project. Order is
@@ -533,6 +535,9 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; `tests/` file. Scans the source paths only; `tests/` files come from
 ;; `project-collect-tests`.
 (defn project-colocated-test-files (root)
+  "The project's source files that carry co-located tests (ADR-225), so a `describe` written
+beside the code runs under `nest test` without a `tests/` file. Scans the source paths
+only; `tests/` files come from `project-collect-tests`."
   (filter (fold (abs-paths root *project-source-paths*)
             nil
             (fn (acc d) (append acc (collect-sources d))))

@@ -81,6 +81,7 @@ Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordin
 - `*print-level*`
 - `*print-string-length*`
 - `*project-brood*`
+- `*project-bundled-packages*`
 - `*project-dependencies*`
 - `*project-description*`
 - `*project-dev-dependencies*`

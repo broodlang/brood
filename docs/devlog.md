@@ -12430,3 +12430,24 @@ present (the dynamic answers already paid that). Per the dogfooding rule the pol
 Brood; `complete` deliberately reads an image but never spends the keypress building one.
 Also fixed on the way: `blsp_routed` took `-j N` out of the words after a `--`, so
 `nest complete -- test -j 4 <TAB>` completed the wrong command line.
+
+## 2026-09-11 — CI on the structure pass: three gates the local run could not reach
+
+`dbe52727`'s CI failed on three things the capped, targeted local runs did not cover —
+each a gate doing its job, none a behavioural fault:
+
+- **`audit_test` / `bare_names_test`** (the full suite): the seven `project.blsp` names the
+  split made public (`project-cache-dir`, `project-module-infos`,
+  `project-require-closures`, `project-entry-fn`, `project-no-entry-advice`,
+  `project-collect-tests`, `project-colocated-test-files`) carried no docstring, and the
+  new `*project-bundled-packages*` dyn was not in `docs/bare-names.md`. Both written.
+- **`jit_tier_frame_pairing`**: the `inline_installed` reader allow-list names files, and
+  three readers now live in files that did not exist (`jit_runtime/{dispatch,deopt}.rs`,
+  `compile/closure.rs`). Listed, each with its justification — two diagnostics and an
+  initialiser, no new frame-sizing read.
+- **downstream bedit**: `project/build-info` and `project/build-stamp-text` are
+  `project-release/…` now. The 46 public names that left the `project` module are in the
+  rename ledger (`renames.rs`, ADR-325), so a downstream `nest check` says
+  `renamed to project-release/build-info (ADR-325)` and `--fix-renames` applies it. The
+  CI job stays red until `BEDIT_REF` moves to a bedit commit on the new names — bedit's
+  working tree already is.

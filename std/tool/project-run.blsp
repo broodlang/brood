@@ -356,6 +356,9 @@ as unchanged (only when some were)."
 ;; implementation, not a copy per caller that can answer differently. `who` names
 ;; the caller in the error text.
 (defn project-entry-fn (who modname fname)
+  "Resolve the entry point `modname/fname` (falling back to the bare `fname`) to a callable,
+or raise the error a real boot would — `who` names the caller in its text. The ONE
+implementation `run`, `check-boot` and a released bundle share."
   (let (qual (symbol (str (->string modname) "/" (->string fname))))
     (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
       (when (nil? target)
@@ -370,6 +373,8 @@ as unchanged (only when some were)."
 ;; module they never wrote, named after a default they never typed. The question
 ;; behind it is always one of three, and which one it is decides the fix.
 (defn project-no-entry-advice (modname)
+  "Why the entry point `modname` is missing, phrased as the thing the user can act on: no
+source paths, no such module under them, or no `:main` naming it."
   (let (name (->string modname)
         where (string/join *project-source-paths* ", "))
     (cond

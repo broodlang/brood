@@ -49,6 +49,16 @@ const ALLOWED: &[(&str, &str)] = &[
          reads go through `frame_size_for_code` (the pointer, not the flag)",
     ),
     (
+        "crates/lisp/src/eval/compile/jit_runtime/dispatch.rs",
+        "the native-side call/tail dispatch split out of jit_runtime.rs: reports the flag in \
+         the frame-mismatch diagnostic only, beside the size it was actually built to",
+    ),
+    (
+        "crates/lisp/src/eval/compile/jit_runtime/deopt.rs",
+        "the deopt/resume path split out of jit_runtime.rs: reports the flag in the \
+         checkpoint-shape diagnostic only, never sizes a frame from it",
+    ),
+    (
         "crates/lisp/src/eval/compile/vm_run_bc.rs",
         "the trampoline: reads it ONCE to decide the size this frame is built to, captures \
          that into `frame_nslots`, and hands it to `jit_tier_in_frame` / `jit_dispatch_tail`",
@@ -62,6 +72,11 @@ const ALLOWED: &[(&str, &str)] = &[
     (
         "crates/lisp/src/eval/compile.rs",
         "arm construction only — initialises the field to false; it never reads it",
+    ),
+    (
+        "crates/lisp/src/eval/compile/closure.rs",
+        "arm construction (compile_arm / the shared body cache) — initialises the field to \
+         false; it never reads it",
     ),
     (
         "crates/lisp/src/eval/compile/tests.rs",
