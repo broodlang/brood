@@ -1,0 +1,31 @@
+;; std/humanize.blsp — the one human-readable byte count, and the `ls -h` spelling of it.
+;; Pure functions over integers, so every case is asserted here; the rounding edges are
+;; the interesting ones (a size that rounds up a whole unit must read in the coarser
+;; unit, which is what stopped the old copies printing "1024.0 KB" for 1.0 MB).
+
+(defmodule humanize-test (:use humanize) (:use test))
+
+(describe "humanize/byte-size"
+  (test "whole bytes below a kilobyte"
+    (assert= (byte-size 0) "0 B")
+    (assert= (byte-size 512) "512 B")
+    (assert= (byte-size 1023) "1023 B"))
+  (test "one decimal above a kilobyte"
+    (assert= (byte-size 1024) "1.0 KB")
+    (assert= (byte-size 13500) "13.2 KB")
+    (assert= (byte-size 4404019) "4.2 MB"))
+  (test "a size that rounds up a whole unit reads in the coarser one"
+    (assert= (byte-size 1048575) "1.0 MB")
+    (assert= (byte-size 1073741823) "1.0 GB"))
+  (test "it climbs no further than petabytes"
+    (assert= (byte-size (* 1024 1125899906842624)) "1024.0 PB")))
+
+(describe "humanize/byte-size-short"
+  (test "ls -h: bare bytes, then a lowercase unit with no space"
+    (assert= (byte-size-short 900) "900")
+    (assert= (byte-size-short 1456) "1.4k")
+    (assert= (byte-size-short 4404019) "4.2m"))
+  (test "no decimal at ten units and up"
+    (assert= (byte-size-short 12288) "12k")
+    (assert= (byte-size-short 10240) "10k")
+    (assert= (byte-size-short 10188) "9.9k")))

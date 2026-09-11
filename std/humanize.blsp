@@ -1,0 +1,73 @@
+;; std/humanize.blsp — a quantity as a person reads it.
+;;
+;; Why this is a module and not a helper beside its caller: "a byte count a human can
+;; read" had been written SIX times across this tree and its downstream editor — the
+;; `nest release` summary, the observer's MEM column, the test runner's peak-memory line,
+;; and in bedit a statusbar chip, the *Process List* MEM column and Plume's `ls -h`
+;; file-size column. Six implementations of one sentence, and they disagreed: `13 KB`
+;; from one, `13.2 KB` from the next, and `1024.0 KB` from a third for a size that a
+;; person calls 1.0 MB.
+;;
+;; The public one of the six lived in `std/tool/project.blsp`, so reaching it from an app
+;; meant loading 3800 lines of project tooling — which is why bedit kept its own copies
+;; rather than calling it. Hence a module of its own, small and dependency-free enough
+;; that an editor's render path can load it and nothing else.
+;;
+;; Integer math throughout, no float formatting: the rounding is exact and identical on
+;; every platform, and `(/ n 1024.0)` on a petabyte-scale count loses digits that
+;; `math/quot` keeps.
+(defmodule humanize
+  "Quantities the way a person reads them: a byte count at human scale, in full
+(`4.2 MB`) or in the terse `ls -h` spelling (`4.2m`).")
+
+;; Long spelling and `ls -h` spelling side by side, so the two can never drift.
+(def- humanize-byte-units [["B" ""] ["KB" "k"] ["MB" "m"] ["GB" "g"] ["TB" "t"] ["PB" "p"]])
+
+(defn- humanize-tenths (n div)
+  "`n/div` in tenths, rounded to nearest — the whole calculation, in integers."
+  (math/quot (+ (* n 10) (math/quot div 2)) div))
+(sig humanize-tenths (int int -> int))
+
+(defn- humanize-byte-unit (n div units)
+  "The `[divisor [long short]]` that `n` bytes reads in: the largest 1024-power that
+still leaves a whole part, with no coarser unit left to climb to.
+
+Comparing the ROUNDED value (`>= 10240` tenths, i.e. 1024 whole units) is what keeps
+1048575 out of `1024.0 KB` — it rounds to 1024 KB, which is a person's `1.0 MB`."
+  (if (or (empty? (rest units)) (< (humanize-tenths n div) 10240))
+    [div (first units)]
+    (humanize-byte-unit n (* div 1024) (rest units))))
+(sig humanize-byte-unit (int int seqable -> vector))
+
+(defn byte-size (n)
+  "`n` bytes as a short human string: whole bytes below 1 KB, one decimal above it.
+
+    (humanize/byte-size 512)       → \"512 B\"
+    (humanize/byte-size 1024)      → \"1.0 KB\"
+    (humanize/byte-size 13500)     → \"13.2 KB\"
+    (humanize/byte-size 4404019)   → \"4.2 MB\"
+    (humanize/byte-size 1048575)   → \"1.0 MB\""
+  (let ([div unit] (humanize-byte-unit n 1 humanize-byte-units))
+    (if (= div 1)
+      (str n " B")
+      (let (tenths (humanize-tenths n div))
+        (str (math/quot tenths 10) "." (math/rem tenths 10) " " (first unit))))))
+(sig byte-size (int -> string))
+
+(defn byte-size-short (n)
+  "`n` bytes the way `ls -h` writes it: lowercase unit, no space, and no decimal at ten
+units or more — the spelling for a column where every character costs.
+
+    (humanize/byte-size-short 900)     → \"900\"
+    (humanize/byte-size-short 1456)    → \"1.4k\"
+    (humanize/byte-size-short 12288)   → \"12k\"
+    (humanize/byte-size-short 4404019) → \"4.2m\""
+  (let ([div unit] (humanize-byte-unit n 1 humanize-byte-units))
+    (if (= div 1)
+      (->string n)
+      (let (tenths (humanize-tenths n div)
+            short (second unit))
+        (if (>= tenths 100)
+          (str (math/quot tenths 10) short)
+          (str (math/quot tenths 10) "." (math/rem tenths 10) short))))))
+(sig byte-size-short (int -> string))

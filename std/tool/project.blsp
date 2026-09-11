@@ -3704,21 +3704,6 @@ warning. An explicit `-o PATH` is the user's own choice and stays unrestricted.
     (not (includes? s (string/codepoints-> [0])))))
 (sig release-plain-filename? (string -> bool))
 
-(defn human-size (bytes)
-  "Human-friendly byte size for a release summary — whole bytes up to 1 KB, one
-decimal above it.
-
-    (project/human-size 512) → \"512 B\"
-    (project/human-size 4404019) → \"4.2 MB\""
-  (letrec (go (fn (n units)
-                (if (and (>= n 1024.0) (not (empty? (rest units))))
-                  (go (/ n 1024.0) (rest units))
-                  (if (= (first units) "B")
-                    (str bytes " B")
-                    (string/format "%.1f %s" n (first units))))))
-    (go (->float bytes) ["B" "KB" "MB" "GB"])))
-(sig human-size (int -> string))
-
 (defn release-plan (name output targets pinned-runtime?)
   "Decide which binaries a `nest release` writes, as a flat list of strings the
 `nest` side consumes: `(\"ok\" triple0 out0 triple1 out1 …)` with an empty triple
@@ -3772,7 +3757,7 @@ modules it embeds, its size, and the target triple when there was one.
     " module"
     (if (= module-count 1) "" "s")
     ", "
-    (human-size size)
+    (humanize/byte-size size)
     (if triple (str ", " triple) "")
     ")"))
 

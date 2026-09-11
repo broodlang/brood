@@ -1261,6 +1261,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("gui", "std/gui.blsp"),
     // The rope text-engine seam: policy over the `%rope-*` primitives → `text/*`.
     embedded_module!("text", "std/text.blsp"),
+    // A quantity as a person reads it → `humanize/*`. Tiny and dependency-free on
+    // purpose: an editor's render path loads it without loading project tooling, which is
+    // where the one public byte formatter used to live.
+    embedded_module!("humanize", "std/humanize.blsp"),
     // Seeded PRNG (xorshift32): public face of the prelude's `%rand-*` mechanism → `rand/*`.
     embedded_module!("rand", "std/rand.blsp"),
     // OS & environment surface → `os/*` (getenv, run-process, now, …).

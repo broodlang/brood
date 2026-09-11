@@ -41,10 +41,14 @@
     (assert= (observer/observe-fit "hello" 3) "hel")
     (assert= (observer/observe-fit "hi" 10) "hi")
     (assert= (observer/observe-fit "abc" 0) ""))
-  (test "observer/observe-bytes->human scales B / KB / MB"
-    (assert= (observer/observe-bytes->human 512) "512 B")
-    (assert= (observer/observe-bytes->human 2048) "2 KB")
-    (assert= (observer/observe-bytes->human 3145728) "3 MB"))
+  ;; The MEM column is `humanize/byte-size` now, not a copy of its own — asserted here
+  ;; because the column is 8 wide (`observe-cells`) and the shared formatter has to keep
+  ;; fitting it.
+  (test "the MEM column renders a byte count through humanize, within its 8-wide column"
+    (assert= (humanize/byte-size 512) "512 B")
+    (assert= (humanize/byte-size 2048) "2.0 KB")
+    (assert= (humanize/byte-size 3145728) "3.0 MB")
+    (assert= (string/length (humanize/byte-size 248704614)) 8))
   (test "observer/observe-opt renders a value or a dash when absent"
     (assert= (observer/observe-opt nil ->string) "-")
     (assert= (observer/observe-opt :foo ->string) "foo"))
@@ -154,7 +158,7 @@
       (is (includes? (nth ls 0) "node nonode"))
       (is (includes? (nth ls 0) "3 processes"))
       (is (includes? (nth ls 1) "workers 4 (peak 6)"))
-      (is (includes? (nth ls 1) "2 KB"))
+      (is (includes? (nth ls 1) "2.0 KB"))
       ;; :ok shows no indicator; :stale / :down flag the link
       (refute (includes? (nth ls 0) "•"))
       (is (includes? (nth (observer/observe-node-lines node 3 :down) 0) "DISCONNECTED"))
