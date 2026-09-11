@@ -108,6 +108,14 @@ fn file_warnings_mode(src: &str, strict: bool) -> Vec<String> {
         .collect()
 }
 
+/// A type written as a `sig` would write it — `(record :a int)`, `(vector int)` — for
+/// asking the lattice relations directly.
+fn ty_of_sig(src: &str) -> Ty {
+    let mut heap = Heap::new();
+    let form = reader::read_one(&mut heap, src).expect("parse");
+    super::annot::parse_type(&heap, form).expect("a type")
+}
+
 /// The checker's type of one expression, rendered — for pinning the answers the
 /// precision rules give. Wrapped in `(list …)` so the position-keyed query has a call to
 /// anchor on; `arg_ty_at` then types item 1, the expression itself.

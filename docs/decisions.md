@@ -21171,3 +21171,40 @@ at ~1,500 lines; `lib.rs` ~350; `gui.rs` 350; `gc.rs` ~960;
 `project-check.blsp` at ~1,500. Every path in
 `CLAUDE.md`, `architecture.md` and `components.md` was rewritten to the new tree; the
 historical docs (devlog, decisions, known-issues) keep the names they had at the time.
+
+## ADR-326 — Strict inclusion is consistent subtyping: a nested unknown is the gradual unknown
+
+**Status:** accepted; implemented 2026-09-11 (`Ty::is_consistent_subtype`, read by
+`GradualTy::consistent_with_mode`).
+
+**Context.** ADR-298 made `--strict` read a dynamic value whose bound is narrower than `any`
+by inclusion, `bound ⊆ expected`, keeping the overlap reading only for the bare unknown. The
+unknown was recognised at ONE place — the top of the type, `GradualTy::dynamic` — and `⊆`
+below it is the static lattice. So the same unknown read differently depending on where it
+sat: `(:end r)` on an untyped `r` handed to an `int` parameter passed, while
+`(assoc b :mark (:end r))` handed to a `buffer` parameter warned, because the record's
+`mark` field now held `any` and `any ⊆ nil | int` is false. bedit's strict sweep had
+nineteen of exactly this shape, every one a value the checker could not have typed better
+without a `sig` on a parameter that had nothing to do with the field.
+
+**Decision.** Strict inclusion is **consistent subtyping** (Siek & Taha: `A ≲ B ⟺ ∃ A' ⊑ A.
+A' ⊆ B` — some way of filling in the unknowns fits). An unknown is the gradual `?` wherever
+it appears — a record field, a vector's elements, a map's keys and values, a tuple slot —
+and an absent refinement is the unknown too (`vector` IS `vector<any>`). In a covariant
+position the filling that always fits is `never`, so the relation is `⊆` after substituting
+`never` for every nested unknown. What is *positively* known stays read by inclusion:
+`vector<number>` into `vector<int>` warns exactly as before, and so does `number` into
+`int` at the top. Arrow parameters are contravariant and left as they are; a shape's `rest`
+is a positive fact (open versus closed), not an unknown.
+
+`⊆` itself is untouched. It is the lattice, and the impossible-guard lint (ADR-315), the
+exhaustiveness check and union absorption need its exact answer; only the "can this value
+be used here" question is gradual, and that question already had its own entry point.
+
+**Consequences.** Strict mode says the same thing about an unknown at every depth, which is
+what makes "the answer to a strict warning is a `sig` on the enclosing function" true: the
+warning now points at the parameter whose type is missing, never at a field that inherited
+its unknown-ness. std stays at zero in both modes. A bare `map` handed where a record is
+expected still warns — the shape is absent, and no filling of a missing shape proves the
+required keys are present — which is the right side of the line: that IS a positive fact
+the caller has not established.

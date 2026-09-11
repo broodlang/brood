@@ -1121,6 +1121,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   does not declare reads as unknown, so go through a declared accessor. A user predicate
   narrows once it is DECLARED a guard — `(sig order? (any -> (is order)))` — exactly like
   the built-in `int?`/`string?`; an undeclared one proves nothing.
+  Inclusion there is *consistent* subtyping (ADR-326): an unknown is the gradual `?` at
+  every depth — a record field or an element the checker could not type never warns on
+  its own; a *positively* known one (`vector<number>` into `vector<int>`) does.
 - **A `(record …)` is CLOSED** (ADR-264) — it names every key, and one it doesn't
   declare reads as `nil`. Write `(record &open :k T)` when a value may carry more,
   which is what a *parameter* usually wants. Closedness is what makes a tagged union

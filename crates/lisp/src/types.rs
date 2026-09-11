@@ -1754,6 +1754,76 @@ impl Ty {
             .all(|a| term_covered(a, &other_terms))
     }
 
+    /// **Consistent subtyping** — `self ≲ other`, the gradual reading of `⊆`. A component
+    /// of `self` that is UNKNOWN (`any`, or `any` less what a guard excluded — see
+    /// [`is_known_only_by_exclusion`](Self::is_known_only_by_exclusion)) is the gradual `?`
+    /// wherever it sits, not a static top: a record field the checker could not type, the
+    /// elements of a bare `vector`, the keys and values of a bare `map`. Siek & Taha's
+    /// definition — `A ≲ B ⟺ ∃ A' ⊑ A. A' ⊆ B`, some way of filling in the unknowns fits —
+    /// and in a covariant position the filling that always fits is `never`, so the relation
+    /// is `⊆` after that substitution. Arrow parameters are contravariant and left alone: an
+    /// unknown there is already the widest domain, which is what a parameter wants.
+    ///
+    /// This is the inclusion `nest check --strict` reads (`GradualTy::consistent_with_mode`).
+    /// Strict exists to flag a value POSITIVELY known to be wider than expected — `number`
+    /// into `int` — and a nested unknown is not that: `(assoc b :mark (:end r))` on an
+    /// untyped `r` yields a buffer whose `mark` is unknown, and reading that field by plain
+    /// inclusion (`any ⊆ nil | int`, false) flagged the value where the SAME unknown handed
+    /// over bare would have passed. A positively-known nested type is still read by
+    /// inclusion: `vector<number>` into `vector<int>` warns exactly as before. `⊆` itself is
+    /// untouched — it is the lattice, and the impossible-guard and exhaustiveness lints need
+    /// its exact answer.
+    pub fn is_consistent_subtype(&self, other: &Ty) -> bool {
+        self.unknowns_as_never().is_subtype(other)
+    }
+
+    /// `self` with every nested unknown component replaced by `never` — the most specific
+    /// filling of a gradual `?` in a covariant position. Recursive through the data
+    /// refinements (elements, tuple slots, map keys and values, record fields). An absent
+    /// refinement is the unknown too (`vector` IS `vector<any>`), except where a sibling
+    /// slot already describes the same members (a tuple term's elements, a record's
+    /// keys and values) — filling in `never` beside it would answer for members it does
+    /// not own. A shape's `rest` is left alone: open-versus-closed is a positive fact
+    /// about the undeclared keys, not an unknown. The top level is not filled either —
+    /// that is `GradualTy`'s `dynamic` bit, decided by the caller.
+    fn unknowns_as_never(&self) -> Ty {
+        fn fill(ty: &Ty) -> Ty {
+            if ty.is_known_only_by_exclusion() {
+                Ty::NEVER
+            } else {
+                ty.unknowns_as_never()
+            }
+        }
+        let filled = self.terms_vec().into_iter().map(|term| {
+            let mut out = term.clone();
+            if term.tags & SEQ_BITS != 0 && term.tuple.is_none() {
+                out.elem = Some(Arc::new(term.elem.as_deref().map_or(Ty::NEVER, fill)));
+            }
+            if let Some(elems) = &term.tuple {
+                out.tuple = Some(Arc::new(elems.iter().map(fill).collect()));
+            }
+            if term.tags & MAP_BIT != 0 {
+                match (&term.map_kv, &term.fields) {
+                    (Some(kv), _) => out.map_kv = Some(Arc::new((fill(&kv.0), fill(&kv.1)))),
+                    (None, Some(shape)) => {
+                        let fields = shape
+                            .fields
+                            .iter()
+                            .map(|(name, (ty, required))| (*name, (fill(ty), *required)))
+                            .collect();
+                        out.fields = Some(Arc::new(RecordShape {
+                            fields,
+                            rest: shape.rest.clone(),
+                        }));
+                    }
+                    (None, None) => out.map_kv = Some(Arc::new((Ty::NEVER, Ty::NEVER))),
+                }
+            }
+            out
+        });
+        Ty::from_terms(filled.collect())
+    }
+
     /// This term restricted to a single tag — the piece of `self` whose runtime tag is
     /// exactly `tag_bit`, carrying only the refinements that constrain that tag. A term
     /// is the disjoint union of these projections, which is what makes
@@ -2740,14 +2810,16 @@ impl GradualTy {
     /// narrower by inclusion, `bound ⊆ expected`, exactly like a static one. That is the
     /// "warn on the merely-wider" precision the gradual overlap rule deliberately gives
     /// up for reload-safety (docs/type-gating.md, B1): a `number` handed to an `int`
-    /// parameter is *consistent* by overlap, and *rejected* strictly.
+    /// parameter is *consistent* by overlap, and *rejected* strictly. Inclusion here is
+    /// [`Ty::is_consistent_subtype`]: a NESTED unknown (a record field, an element) is
+    /// the gradual `?` in either mode — only what is positively known is read strictly.
     pub fn consistent_with_mode(&self, expected: Ty, strict: bool) -> bool {
         // Strict applies to a bound that is POSITIVELY known. `any ∖ nil` — what a
         // `(when x …)` guard leaves — says what the value is not, never what it is; it
         // is still the unknown, and reading it by inclusion would flag every guarded
         // use of an untyped parameter.
         if self.dynamic && strict && !self.bound.is_known_only_by_exclusion() {
-            return self.bound.is_subtype(&expected);
+            return self.bound.is_consistent_subtype(&expected);
         }
         if self.dynamic {
             // **A failure is never a valid materialisation** of a domain that excludes
@@ -2790,7 +2862,7 @@ impl GradualTy {
             // refined type that provably can't fit is caught here too.
             !self.bound.is_disjoint(&expected)
         } else {
-            self.bound.is_subtype(&expected)
+            self.bound.is_consistent_subtype(&expected)
         }
     }
 
