@@ -1682,6 +1682,51 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             }
         }
     }
+    // `(update r :k f …)`, `(assoc-in r [:k …] v)`, `(update-in r [:k …] f …)` — the
+    // record-keeping siblings of `assoc`. Each replaces ONE top-level key, named by a
+    // literal keyword (the first path element for the `-in` forms), with a value the
+    // checker does not compute (`f`'s result, or a nested write): the shape survives with
+    // that field unknown — exactly what `assoc` answers for an untyped value — and the
+    // other fields keep their types. An open shape stays open, a closed one closed. On a
+    // receiver with no shape and a keyword key the answer is `map`, as for `assoc`: an
+    // editor's model is threaded through `(update m :kill-ring …)` and `(assoc-in m
+    // [:timers :blink] …)` as often as through `assoc`, and falling to the declared
+    // `-> any` at each dropped a declared `model` to nothing at the first one.
+    if items.len() >= 3
+        && (value::symbol_is(head, "update")
+            || value::symbol_is(head, "assoc-in")
+            || value::symbol_is(head, "update-in"))
+    {
+        let key = if value::symbol_is(head, "update") {
+            match items[2] {
+                Value::Keyword(name) => Some(name),
+                _ => None,
+            }
+        } else {
+            match items[2] {
+                Value::Vector(id) => match heap.vector(id).first() {
+                    Some(Value::Keyword(name)) => Some(*name),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        if let Some(key) = key {
+            let map_ty = expr_ty(heap, items[1], ctx);
+            if let Some(shape) = record_shape_of(map_ty.as_ref()) {
+                let mut fields = shape.fields;
+                fields.insert(key, (Ty::ANY, true));
+                return Some(if shape.open {
+                    Ty::record_of_open(fields)
+                } else {
+                    Ty::record_of(fields)
+                });
+            }
+            if map_ty.as_ref().and_then(Ty::map_kv).is_none() {
+                return Some(Ty::of(Tag::Map));
+            }
+        }
+    }
     // `(assoc m k1 v1 …)` → `map<K, V>` with the assoc'd keys and values UNIONED into
     // the refinement. Carrying `K`/`V` forward unchanged — which this did, on the stated
     // grounds of "no false-positive risk either way" — is not sound in the direction

@@ -493,3 +493,25 @@ fn assoc_with_keyword_keys_on_an_unknown_receiver_is_a_map() {
     let strict = file_warnings_mode(src, true);
     assert!(strict.is_empty(), "{strict:?}");
 }
+
+// `update` / `assoc-in` / `update-in` keep a record shape the way `assoc` and `dissoc`
+// do: the named field becomes unknown, the others keep their types, and on an unknown
+// receiver with a keyword key the answer is `map`.
+#[test]
+fn update_and_assoc_in_keep_a_record_shape() {
+    assert_eq!(ty_str("(fn (x) (update x :k inc))"), "(any) -> map");
+    assert_eq!(ty_str("(fn (x) (assoc-in x [:a :b] 1))"), "(any) -> map");
+    let src = "\
+         (defmodule t)\n\
+         (deftype st (record &open :n int :name string))\n\
+         (sig bump (st -> st))\n\
+         (defn bump (s) (update s :n inc))\n\
+         (sig nest (st -> st))\n\
+         (defn nest (s) (assoc-in s [:meta :seen] true))\n\
+         (sig deep (st -> st))\n\
+         (defn deep (s) (update-in s [:meta :count] inc))\n\
+         (sig name-of (st -> string))\n\
+         (defn name-of (s) (:name (update s :n inc)))";
+    let strict = file_warnings_mode(src, true);
+    assert!(strict.is_empty(), "{strict:?}");
+}
