@@ -475,6 +475,10 @@ fn clap_subcommands() -> Vec<String> {
     block
         .lines()
         .take_while(|l| !l.trim().is_empty())
+        // A subcommand row starts at column 2; a wrapped description continues at the
+        // description column, so its first word is not a name (CI's narrower terminal
+        // wrapped `mcp`'s, and "can" was read as a subcommand).
+        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
         .filter_map(|l| l.split_whitespace().next())
         .filter(|name| *name != "help")
         .map(str::to_string)
