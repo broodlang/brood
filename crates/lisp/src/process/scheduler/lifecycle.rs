@@ -455,6 +455,7 @@ pub fn spawn_root_program(
     src: &str,
     file: Option<String>,
     preamble: Option<&str>,
+    want_result: bool,
 ) -> Result<Arc<crate::eval::compile::ProgramExit>, LispError> {
     let prelude = heap.prelude_arc();
     let runtime = heap.runtime_arc();
@@ -498,7 +499,7 @@ pub fn spawn_root_program(
         positions.push(*pos);
     }
 
-    let exit = crate::eval::compile::ProgramExit::new();
+    let exit = crate::eval::compile::ProgramExit::new(want_result);
     let prog =
         crate::eval::compile::ProgramState::new(root_base, positions, file, Arc::clone(&exit));
 
