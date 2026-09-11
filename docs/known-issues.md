@@ -127,6 +127,7 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-123 | **KI-117's fix cost `errors-deep` 61% — a native frame's trace entry was built, then thrown away** — `brood_rt_trace_push` runs once per native level as an error unwinds, and it constructed the `TraceFrame` (cloning the arm's file name into a fresh `String`) BEFORE calling `push_trace`, which drops the frame once the trace hits its 32-frame cap. A 50-deep unwind paid 50 allocations to keep 32; `errors-deep` throws 50,000 times, so 2.5M frames were built per run where v0.24.0 built none | ✅ **FIXED 2026-09-10.** Two changes, each measured with `make ab BASE=c9876132 --floor` (the commit before KI-117's fix): the callback now returns early on `is_control() || trace_full()`, the guard the VM's own walker `attach_vm_trace_callers` has always had (+61% → +51%); and `TraceFrame.file` is an `Arc<str>` rather than a `String`, since every producer already holds the arm's `src_file` as one — the copy was pure waste (+51% → **+19%**). Found by the 0.27.0 brood-benchmarks column refresh, which read +72% on the row across three interleaved invocations with a 0.6% spread. Residue recorded below |
 | KI-124 | **macOS has not compiled since 2026-09-03, and only a pushed tag could tell you** — `os/spawn-pty` added `libc::ioctl(0, libc::TIOCSCTTY, 0)` in `crates/lisp/src/subprocess.rs`. libc types that constant as `c_uint` in its Apple bindings and `c_ulong` on Linux, while `ioctl` takes `c_ulong` on both, so the call is a hard `E0308` on both mac arms and green on every Linux job in CI | ✅ **FIXED 2026-09-10.** The constant gets `.into()` — an identity/widening conversion that is correct on every target and cannot truncate, where a hardcoded `as u64` would have traded the macOS break for a musl one (Linux's `Ioctl` alias is `c_ulong` on gnu but `c_int` on musl). The gap that let it live a week was structural, not local: **every** CI job ran `ubuntu-latest`, so nothing compiled this tree for macOS except the Release workflow's build matrix — which runs on a pushed TAG. v0.26.0 and v0.27.0 could not have caught it either; both died at the version-drift gate *before* reaching a build (KI-121's fix is what let v0.27.1 get far enough to fail here) |
 | KI-125 | **`brood/gui` has never compiled on macOS** — `crates/lisp/src/gui.rs` imports `winit::platform::wayland::{EventLoopBuilderExtWayland, WindowAttributesExtWayland}` and calls `EventLoopBuilder::with_any_thread`, all Linux/Wayland-only winit APIs, with no `cfg(target_os)` guard; the code's own comment says "on Linux we explicitly allow the dedicated GUI thread to own the loop" without one. `cargo check --features brood/gui` on `macos-14` gives `E0432: unresolved import winit::platform::wayland` + `E0599: no method named with_any_thread` ✅ **FIXED 2026-09-11.** Two changes. The Wayland-only import and the `with_any_thread` call are `cfg`-gated to the platforms that have them, so the feature compiles everywhere. And the event loop can now be hosted on the **process main thread**, which is the only place macOS will run it: the runtime already lives on a spawned thread (`cli_support::run_on_main_stack` sizes it for the stack-budget guard), so the main thread was merely blocked in `join` — it now parks on a channel instead and runs the loop there if a window is ever opened. `BROOD_GUI_MAIN_THREAD=1` selects that path on Linux, which is what makes it testable at all; verified live by thread name (with the lever there is **no `brood-gui` thread** and the loop is on tid == pid), with identical output and exit codes both ways |
+| KI-127 | **a top-level form's value was rendered to a string on every native run, and thrown away** — `7a72135b` ungated the wasm result path so the playground's shipped entry point became host-testable (KI-115), which also made `finish_form` call `printer::print` on EVERY top-level form on the native path, where `run_program` discards it. Cost is proportional to the value's size, so a program binding one large structure pays in full: the `sort` benchmark (`(def data (sort …))` over a 375k-element list) went 132 -> 146 ms, **+10.6%**. `nest run FILE` paid it too, via `%run-program-file` | ✅ **FIXED 2026-09-11** — `ProgramExit::want_result`, set once at construction so nothing races the program starting: `run_program_repr` (the playground) true, `run_program`/`with_preamble`/`spawn_program_for_test`/`%run-program-file` false. The path stays UNGATED — that is what makes it host-testable, and KI-115's guard is untouched; the work is simply skipped when the answer is discarded. Measured interleaved with every arm verified `:state :live`, best-of-15, 0.7% control: pre-regression 134 ms · regressed 145 ms · fixed **135 ms**, i.e. inside the control. Guards `run_program_does_not_render_a_result_nobody_reads` (asserts `take_result()` is None after `run_program` — the observable consequence, not the flag) and `run_program_repr_still_renders_the_result` (so the first cannot be satisfied by deleting rendering); sabotage-verified, reverting the fix reds the first alone |
 | KI-126 | **the Rust half of the suite never purged its `/tmp` fixtures — KI-30's shape, in the half KI-30's gate cannot see** — 1109 entries / 340 MB of `/tmp/brood-*`, `/tmp/brood_*`, `/tmp/nest-*` on an ordinary dev box, oldest 2026-08-30, found by `make doctor`'s own litter check. Every site *looks* like it follows the convention (`remove_dir_all` before creating, and again at the end) and cannot: the fixture name carries the test process's pid, so the opening purge names a path no previous run ever used | ✅ **FIXED 2026-09-11** — one nextest setup script (`scripts/purge-stale-temp.sh`) rather than ~40 call sites: the convention is "drop the previous run's leftovers before this run makes any", and a setup script is exactly that moment for the whole fan-out. Age-guarded (`-mmin +60`, own-uid, `-maxdepth 1`) so a CONCURRENT run keeps its fixtures — the `.blsp` version needs no guard because it runs at file load, before that file's fixtures exist. Verified: 942 of 1109 swept, two freshly-made fixtures survived, `BROOD_TEMP_PURGE_AGE_MIN=0` sweeps the rest, and nextest runs it as SETUP 1/3 |
 | KI-120 | **`brood_suite_passes` still goes TMT at 900 s with spawned children dying on bare `def-face`, `ui-run`, `highlight-spans` and qualified `editor/serve/*` — on the KI-119-fixed tree, with the stdlib image rebuilt exactly once at the run's start** (mtime 14:13:33, untouched for the 17 min after). Two of three full runs on 2026-09-08 (F-waves 12/8/22/4/8/3/19/76 in the second); the wrapper alone with `BROOD_SCOPE_DBG=1` never produced this shape (its one hit was KI-119). KI-80's third pass called it the `%isolate` rollback and fixed three things around it; the shape is back | ✅ **FIXED 2026-09-08** — the instrumented run named it: a supervisor among a file's stragglers respawns a child in the window between the runner's ONE quiesce pass and the `%isolate` restore, and that fresh child loads an editor module and `provide`s it AFTER the restore rolled its globals back — `*features*` then marks it loaded over an empty namespace and the next file's `(:use editor/serve)` imports nothing. `test-quiesce-file` now LOOPS (kill non-`before`, await, re-scan) until the set is empty, killing the supervisor so respawns stop; the `[refer] imported NOTHING` / `[unbound] recorded loaded but not bound` diagnostics are default-on where safe. Before: ~40% of full runs. After: 2 full loaded runs 0 deaths / 0 empty-imports / 0 give-ups |
 | KI-119 | **a module materialised from the stdlib image came back with another module's bytes — `unbound symbol` on a name that exists, under load** — `%image-index` read the section directory once at boot and `%image-load-section` re-opened the file BY PATH per module, arbitrarily later; any rebuild in between (nextest's setup script, `nest` on a stale image, a sibling test) replaced the file, and two builds of ONE tree are not byte-identical, so the old offsets landed on other sections. Seen as a `brood_suite_passes` run dying on bare `set` in a spawned child (then a receive waiting forever, into the 900 s cap) while a sibling loop rebuilt the image, and as a fresh `nest run` dying `unbound symbol: file/regular?` / `format/vec->list` with `[image] format` already in its own trace at **20 entries where the section holds 172** | ✅ **FIXED 2026-09-08** — the reader holds the handle it indexed (`OPEN_IMAGES`): an open descriptor pins the old inode across the writer's atomic rename, so a directory and the bytes it names cannot come from two builds. Guard `tests/startup_image_test.blsp` "a section is read from the file that was indexed" (sabotage-verified: fresh-open-per-read fails it). Fast repro before: 2 of 80 rebuild-then-`nest run` loops; after: **0 of 60**, and one full suite with the wrapper green on try 1 while that loop rebuilt the image beside it — but the wrapper's `def-face`/`editor/serve/*` shape recurred on the fixed tree with NO rebuild in the window, so that one is a second mechanism: **KI-120**, open. KI-80's `%isolate`-rollback attribution was wrong for the `set`/`nest run` runs (`BROOD_SCOPE_DBG` printed nothing) and is undecided for KI-120 |
@@ -9315,6 +9316,69 @@ red from the same runner, toolchain and target on the unfixed source; the new jo
 it only in `cargo check` versus `cargo build`, and a type error is diagnosed in the same pass
 either way. If a cheap way to red the job on purpose appears — a throwaway branch with the
 conversion reverted — take it and replace this paragraph.
+
+## KI-127 — a top-level value rendered on every native run, and discarded ✅ fixed 2026-09-11
+
+**Symptom.** `sort` — the benchmark suite's heaviest allocation row — was ~10% slower than
+early September, against a fixed baseline, with no plausible commit in sight.
+
+**Cause.** `7a72135b` ("the shipped run path is testable off-wasm") ungated a
+`#[cfg(target_arch = "wasm32")]` block. That was the right fix for a real gap: the playground
+calls `run_program_repr`, and gated, no host test could name the function that ships. But the
+same commit ungated this, in `ProgramState::finish_form`:
+
+```rust
+self.last_repr = Some(crate::syntax::printer::print(heap, v));
+```
+
+so the NATIVE path began rendering every top-level form's value to a string. `run_program`
+discards it. The cost is proportional to the value's size, so it is invisible until a program's
+top level binds something big — `sort`'s is `(def data (sort …))` over a 375k-element list.
+
+**The ungating WAS measured**, and that is the part worth keeping: "200 top-level forms each a
+20k-element vector run in 0.58s here against 0.60s on the gated build — no cost worth a cfg
+for." Many small top-level values, never one large one. The measurement was sound; it did not
+cover the shape that bites. A per-form cost proportional to the form's value needs a workload
+with one *big* value, not many small ones.
+
+**Fix.** `ProgramExit::want_result`, set once at construction so nothing races the program
+starting. `run_program_repr` passes true; `run_program`, `run_program_with_preamble`,
+`spawn_program_for_test` and `%run-program-file` pass false. The path stays **ungated** — that
+is what makes it host-testable — and KI-115's guard is untouched; the work is skipped when the
+answer is thrown away. `%run-program-file` is the site the diagnosis nearly missed: `nest run
+FILE` routes through it, so every run script was paying this too.
+
+**Measured** (interleaved, one session, every arm verified `:state :live`, best-of-15):
+
+| arm | min | vs pre-regression |
+|---|---|---|
+| `b388f120` (pre-regression) | 134 ms | — |
+| `7a72135b` (regressed) | 145 ms | +8.2% |
+| fixed | **135 ms** | **+0.7%** |
+| control (same binary twice) | 134 ms | 0.7% |
+
+**Guards, sabotage-verified.** `run_program_does_not_render_a_result_nobody_reads` asserts
+`take_result()` is `None` after `run_program` — the observable consequence, not the flag, so a
+regression that sets `want_result` without honouring it still fails. Reverting the fix reds
+exactly that case while the other four pass. `run_program_repr_still_renders_the_result` is the
+other side, so the first cannot be satisfied by deleting the rendering outright.
+
+**How it was found, and three measurement lessons that cost most of the hunt.** The
+brood-benchmarks 0.27.2 column refresh. Note the column-vs-column "`sort` +8.6%" reported by the
+*previous* refresh was a different, non-finding — cross-session drift on a power-managed laptop
+— and this real one was hiding underneath it.
+
+1. **`--floor` bounds error WITHIN one `ab-bench` run, not across runs.** A bisect built from
+   one-baseline-per-run deltas manufactured a ramp and "converged" on a commit that changes four
+   lines of markdown. That absurd answer was the tell; `FRONTIER.md` already warns that a bisect
+   must return something.
+2. **Every arm must be `:state :live`.** A hand-rolled interleaved harness compared
+   source-booting baselines against an imaged HEAD — a ~10 ms handicap on a 146 ms row, in
+   exactly the direction that erases a HEAD slowdown. It produced a confident *retraction* of a
+   true finding. `ab-bench` refuses this configuration (`stdimage MISMATCH`); bypassing it
+   reintroduced the bias by hand.
+3. **`stdimage`'s `prune` keeps `max-keep 4`**, so at most 4 baselines + HEAD can be compared
+   imaged in one session. A fifth silently evicts the earliest arm into a source boot.
 
 ## KI-126 — the Rust tests never purged their `/tmp` fixtures ✅ fixed 2026-09-11
 

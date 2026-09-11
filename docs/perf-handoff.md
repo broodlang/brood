@@ -1,17 +1,29 @@
 # Perf handoff — work that must run on a benchmark box
 
 **Why this file exists.** The primary development machine for this repo does not run
-benchmarks: it is a 28-core workstation shared with other work, its thermal and cache state
-drifts across a session (a `pingpong` baseline wandered ~10% across one day's runs), and it
-has repeatedly produced confident, wrong perf verdicts. So perf verification is *deferred*
-rather than skipped, and this file is the queue. Anything here needs a quiet, pinned box.
+benchmarks well: `whklat` is a **12-core laptop** (i5-11500H, `powersave` governor, clocking
+0.8-3.7 GHz per core) shared with other work, its thermal and cache state drifts across a
+session (a `pingpong` baseline wandered ~10% across one day's runs), and it has repeatedly
+produced confident, wrong perf verdicts. So perf verification is *deferred* rather than
+skipped, and this file is the queue.
+
+(Corrected 2026-09-11: this said "28-core workstation", which is not this machine and made
+the core-pinning advice below read wrongly — the harness pins compute rows to cores **8-11**
+here, not 24-27.)
+
+**What the box CAN do, measured 2026-09-11:** *within* one session it is better than this file
+assumed — `make ab --floor` read a **0.7% floor** on `sort`, and the same binary measured twice
+interleaved reads 0.0-0.7%. What it cannot do is compare **across** sessions: the same unchanged
+binary read 115.7 ms in one session and 121.8-125 ms in another, weeks apart. So a
+fixed-baseline A/B measured in one sitting is trustworthy here; a number compared against a
+stored one is not.
 
 Read `docs/benchmarking.md` for *how* to measure and the `Commands` section of `CLAUDE.md`
 for the traps. This file is only *what* to measure, *why*, and *what a pass looks like*.
 
 ---
 
-## Before anything: three ways the measurement lies
+## Before anything: six ways the measurement lies
 
 These have each cost a wrong verdict in this repo. They are not general advice.
 
@@ -35,6 +47,22 @@ Also: **`make ab` pins compute rows to one core**, which charges the benchmark f
 JIT compilation. Right for judging generated-code quality, wrong for any change that alters
 *how much* the compiler does. If the change touches tiering, re-run the row unpinned.
 `BROOD_JIT_DUMP_IR=1 … | grep -c '^\[jit-ir\]'` counts the compiles.
+
+4. **`--floor` bounds error WITHIN one `ab-bench` run, not ACROSS runs.** It measures
+   base-vs-base inside a single invocation, so it says nothing about comparing one run's delta
+   to another's. A bisect built from one-baseline-per-run deltas (2026-09-11, KI-127)
+   manufactured a smooth ramp and "converged" on a commit that changes four lines of markdown.
+   To compare several commits, put them all in ONE session, interleaved, with the same binary
+   measured twice as a control.
+5. **Every arm must be `:state :live`, and you must check.** A hand-rolled interleaved harness
+   compared source-booting baselines against an imaged HEAD — ~10 ms on a 146 ms row, in exactly
+   the direction that erases a HEAD slowdown — and produced a confident *retraction* of a true
+   finding. `ab-bench` refuses this (`stdimage MISMATCH`) and was right three times that day;
+   hand-rolling around it reintroduced the bias. Probe each binary with
+   `(%print (stdimage/status))` and refuse the run unless every arm says `:live`.
+6. **`stdimage`'s `prune` keeps `max-keep 4`** (`std/tool/stdimage.blsp`), so at most **4
+   baselines + HEAD** can be compared imaged in one session. Building a fifth image silently
+   evicts the earliest arm into a source boot — which is trap 5, arriving without a warning.
 
 ---
 
@@ -78,7 +106,26 @@ dev box; check that first.
 
 ---
 
-## Task 1 — does KI-114's fix hold KI-109's closure?
+## Task 1 — does KI-114's fix hold KI-109's closure? ✅ ANSWERED 2026-09-11
+
+> ### The magnitude sweep is done too — nothing moved
+>
+> Measured against `8a2aaa01` with `--floor`, box idle, both arms imaged:
+> **`mandelbrot` +0.4%** (floor 1.3%) and **`nbody` +1.2%** (floor 0.4%) — the two float-heavy
+> rows `as_f64_pair` sits in the middle of, both inside their floors. Together with the
+> structural answer below (the arm lowers, nothing thrash-latches), **KI-109's closure holds on
+> magnitude as well as mechanism.**
+>
+> **`matmul`, the third float row, could not be measured against this baseline** and is NOT
+> claimed: ADR-302/308's data-first reorder (2026-09-02) means current bench rows call
+> `(reduce coll init f)` while brood 0.19.1 expects `(reduce f init coll)`, so `matmul` dies on
+> the baseline arm. Twelve of the 31 rows are unreachable from `8a2aaa01` for this reason —
+> see the note at the end of this file. Measure `matmul` against a post-09-02 baseline instead.
+>
+> The full 30-row sweep is therefore a **19-row** sweep here. Of those, one row moved and it was
+> real: `sort`, root-caused and fixed as **KI-127** (a top-level value rendered and discarded on
+> every native run — unrelated to KI-114). `errors-deep` +17..27% is KI-123's documented
+> post-fix residue against a pre-KI-117 baseline, not new.
 
 **Priority: high.** This is a *possible silent regression*, not a suspected one.
 
@@ -204,7 +251,25 @@ float/int operation somewhere the guard test does not reach.
 
 ---
 
-## Task 3 — re-take KI-100's re-baseline if the runtime has moved
+## Task 3 — re-take KI-100's re-baseline if the runtime has moved ✅ ANSWERED 2026-09-11
+
+> **They moved, and one of them was a real regression.** Re-taken against `8a2aaa01`,
+> `--floor`, both arms imaged, each flagged row re-run solo at best-of-15:
+>
+> | row | 2026-09-04 | 2026-09-11 | |
+> |---|---|---|---|
+> | `startup` | −18.2% | **−9.7%** | still a large win |
+> | `sort` | −7.6% | **+5.0%** | → root-caused as **KI-127**, now fixed |
+> | `fib` | −4.2% | +3.7% | 4x its floor but under the 5% bar; not pursued |
+> | `bintree` | −2.9% | −3.8% | unchanged |
+>
+> `sort`'s swing is the whole finding: it is not drift, it is KI-127 (`7a72135b` rendering every
+> top-level value on the native path). Fixed, and `sort` is back inside the control of its
+> pre-regression commit. Re-take this row after the fix lands to refresh the numbers above.
+>
+> `ring` deserves its own note as a methodology datum: it read **+5.5% in the sweep and +3.7%
+> solo**, i.e. the sweep-interleaving drift this file warns about, caught by the mandated solo
+> re-run rather than reported as a regression.
 
 **Priority: low.** KI-100 was resolved as filed on 2026-09-04 by re-baselining against
 `8a2aaa01`: `startup` −18.2%, `sort` −7.6%, `fib` −4.2%, `bintree` −2.9%. Those numbers
@@ -275,6 +340,35 @@ is work becoming runnable *without* a spawn — a timer or I/O wake enqueued ont
 worker while every other worker is deep-idle. The owner still runs it after its current
 quantum; what waits up to 500 ms is a *thief* taking it off that owner instead. Construct it
 with a long-idle process holding one busy worker, then a timer fire onto that same worker.
+
+---
+
+## How far back the bench corpus can measure (2026-09-11)
+
+**`8a2aaa01` is no longer a fully usable baseline, and neither is any pre-2026-09-02 commit.**
+The benchmark programs live in `brood-benchmarks` and track the *current* language; ADR-302/308's
+data-first argument reorder means they call `(reduce coll init f)` where brood 0.19.1 expects
+`(reduce f init coll)`. The baseline arm then dies with `type error: empty?: expected collection`
+and `ab-bench` aborts the whole sweep on the first such row.
+
+Measured by running every row against the `8a2aaa01` binary:
+
+- **Reachable (19):** `ackermann bintree collatz errors errors-deep fib loop mandelbrot nbody
+  pfib pingpong primes regex ring sieve sort spawn startup latency`
+- **Unreachable (12):** `base64 json matmul nqueens persistent-map pipeline reduce strings
+  wordcount spawn-live supervisor` (argument order) and `http` (times out)
+
+Task 3's four rows are all reachable, which is why the 2026-09-04 re-baseline succeeded despite
+ADR-302 having already landed — those four happen not to use the reordered combinators.
+
+**The rule this earns, and it cuts both ways.** A bench row may only use names and argument
+orders that have existed for as long as the oldest baseline anyone will measure against. A
+language change that reorders or renames a std function silently shortens the corpus's reach,
+and nothing reports it: brood-benchmarks' own CI builds brood from `main`, so a row that runs
+only on `main` looks perfectly healthy. The same trap caught a fix of ours the same day — a
+guard written with `failure?` (which arrived with ADR-310 on 2026-09-02) made every row
+unrunnable on any older baseline, and only a perf sweep noticed. It was rewritten with `int?`
+and `bytes?`, which predate 0.19.1.
 
 ---
 
