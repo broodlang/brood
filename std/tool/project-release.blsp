@@ -1,0 +1,561 @@
+;; std/tool/project-release.blsp
+
+(defmodule project-release
+  "Single-binary release (ADR-038): collect what a bundle ships, name the artifacts
+(`release-plan`), report what was written (`release-report`), and answer
+`--brood-build-info` from inside one. The byte assembly and the boot check of the
+written binary stay in the `nest` binary, which hosts the runtime it embeds.")
+
+;; --- single-binary release (ADR-038) -----------------------------------------
+;; `nest release` appends a project's source to a copy of the `brood` binary;
+;; the resulting executable boots `:main` with no interpreter, project dir, or
+;; source files on the target. Two halves: `bundle-collect` (here) gathers the
+;; source for `nest` to embed, and `run-bundle` (below) boots it inside the
+;; embedded runtime. Mechanism (append/extract the archive) is Rust; this is the
+;; policy (ADR-006).
+
+;; The module name `require` knows a source file by — its path **relative to the
+;; source dir it lives under**, without the `.blsp` extension. For a top-level file
+;; that's just the stem (`src/main.blsp` → `main`); for a namespaced module it keeps
+;; the namespace (`…/sse.blsp` under `…/src` → `sse`), exactly the key
+;; `require 'sse` looks up. So a bundle keyed this way resolves through the same
+;; `%builtin-module` path as the baked-in std (whose table is likewise keyed by full
+;; name, e.g. `editor/buffer`) — with no load-path on disk.
+;; ── Co-located test stripping (ADR-225) ─────────────────────────────────────
+;; Tests live beside the code as top-level `deftest`/`describe` forms and run under
+;; `nest test`, but must never SHIP. `strip-test-forms` excises them from a source
+;; string for the release bundle: it finds each top-level test form via the
+;; positioned CST (`sexp/top-level-forms`) and drops its half-open char span,
+;; keeping every other byte verbatim. A file that is only tests strips to empty.
+
+;; A positioned top-level CST node whose head symbol is `deftest`/`describe`.
+(defn- test-form-node? (node source)
+  (and (= (get node :kind) :list)
+    (let (head (first (sexp/forms-of node)))
+      (and (not (nil? head))
+        (= (get head :kind) :symbol)
+        (let (name (string/substring source (get head :start) (get head :end)))
+          (or (= name "describe") (= name "deftest")))))))
+
+;; `source` with each half-open [start end) span in `spans` (ascending,
+;; non-overlapping) removed — the kept gaps concatenated.
+(defn- string-drop-spans (source spans)
+  (let (n (string/length source))
+    (letrec (go (fn (pos spans acc)
+                  (if (empty? spans)
+                    (str acc (string/substring source pos n))
+                    (let ([s e] (first spans))
+                      (go e (rest spans) (str acc (string/substring source pos s)))))))
+      (go 0 spans ""))))
+
+;; A source string with its co-located `deftest`/`describe` forms excised (ADR-225).
+;; Unchanged when it carries none, so a test-free file pays only one parse.
+(defn- strip-test-forms (source)
+  (let (spans (fold (sexp/top-level-forms source)
+                nil
+                (fn (acc n)
+                  (if (test-form-node? n source)
+                    (cons [(get n :start) (get n :end)] acc)
+                    acc))))
+    (if (empty? spans)
+      source
+      (string-drop-spans source (reverse spans)))))
+
+(defn- project-bundle-name (dir path)
+  (let (prefix (if (string/ends-with? dir "/") dir (str dir "/"))
+        rel (if (string/starts-with? path prefix)
+              (string/substring path (string/length prefix) (string/length path))
+              (path/basename path)))
+    (if (string/ends-with? rel ".blsp")
+      (string/substring rel 0 (- (string/length rel) 5))
+      rel)))
+
+(defn bundle-collect (root)
+  "Collect a project's shippable source for `nest release`: a flat list of
+strings `(manifest-src name0 src0 name1 src1 …)` the `nest` side embeds in the
+binary (ADR-038). Includes resolved dependency sources; excludes `tests/`. The
+root project's own modules are keyed by their require-name — the path relative to the
+source dir, sans `.blsp`, so a namespaced module (`sse`) keeps its namespace and
+resolves like the baked-in std. A DEPENDENCY's modules are keyed by their PACKAGE-ROOTED
+name (`foo/parser`), so two deps each providing a `parser` coexist in one flat bundle —
+dev/release parity for package-rooting (ADR-070). Errors if `root` is nil (not in a project)."
+  (when (nil? root)
+    (error "bundle-collect: not in a Brood project (no project.blsp found)"))
+  ;; Load `package` explicitly (project↔package cycle, as in project-ensure-deps-on-path):
+  ;; auto-require via the bare qualified ref below would load it mid-cycle, leaving
+  ;; `package/ensure-deps` unbound during `nest release` (not exercised by nest check/suite).
+  (require-one 'package)
+  (let (manifest (file/slurp (path/join root "project.blsp")))
+    ;; Apply the manifest as DATA (not `reflect/load`) to learn its source paths + deps,
+    ;; mirroring `setup`. We don't load any source here — just read it.
+    (let (form (reflect/read-first manifest))
+      (when (and (pair? form) (= (first form) 'project)) (project/apply-config (rest form))))
+    ;; Project source dirs first, then resolved dependency dirs (so a project
+    ;; module wins a stem clash with a dep — matches `*load-path*` ordering).
+    ;; `*project-dependencies*` only — never `*project-dev-dependencies*` (ADR-172): a
+    ;; `:dev-dependencies` is test/dev-only, so it is deliberately excluded from the
+    ;; shipped bundle. (This is the payoff of keeping dev-deps in their own slot.)
+    (let (src-dirs (project/abs-paths root *project-source-paths*)
+          ;; `ensure-deps` resolves the deps AND, via `package-register-rooting`, writes each
+          ;; dep module's ROOTED name → path into `*module-files*` — the exact map the
+          ;; dep-embedding below reads. Returns the dep source dirs (used only to attribute
+          ;; those registry entries to a bundled dep).
+          dep-dirs (if *project-dependencies*
+                     (do (package/ensure-deps root *project-dependencies*))
+                     nil))
+      ;; The ROOT PROJECT's own modules are embedded by their UNROOTED require-name
+      ;; (`src/main.blsp` → `main`, `src/sse.blsp` → `sse`) — a single package cannot
+      ;; collide with itself, so the root project stays unrooted in the bundle exactly as it
+      ;; loads there (at ROOT context). Only DEPENDENCIES root. Strip each file's co-located
+      ;; `deftest`/`describe` forms (ADR-225) as it is slurped: tests run under `nest test`
+      ;; but never ship (a test-only file strips to empty source — harmless, `require`s nothing).
+      (let (project-pairs (fold src-dirs
+                            nil
+                            (fn (acc d)
+                              (fold (project/collect-sources d)
+                                acc
+                                (fn (a f)
+                                  (cons (list (project-bundle-name d f)
+                                          (strip-test-forms (file/slurp f)))
+                                    a)))))
+            ;; DEPENDENCY modules are embedded by their ROOTED name (`foo/parser`) so two deps
+            ;; each providing a `parser` coexist in one flat bundle — dev/release parity for
+            ;; package-rooting (ADR-070). The rooted-name → path entries are what `ensure-deps`
+            ;; just wrote into `*module-files*`; take those whose file lives under a
+            ;; bundled dep dir (so this is independent of any earlier `setup` that may
+            ;; also have registered the root project's own rooted modules there). `run-bundle`
+            ;; rebuilds the matching `*package-modules-of*` at boot and loads each under context.
+            dep-pairs (fold (seq *module-files*)
+                        nil
+                        (fn (acc kv)
+                          (let (rooted-key (first kv) path (second kv))
+                            (if (bundle-dep-file? path dep-dirs)
+                              (cons (list rooted-key (strip-test-forms (file/slurp path))) acc)
+                              acc))))
+            pairs (append project-pairs dep-pairs)
+            ;; The FULL set of dependency packages rooted in this bundle (transitive included):
+            ;; the distinct leading segment of every DEP-rooted key (`store/repo` -> `store`).
+            ;; `dep-pairs` is exactly the dependency modules — the root project's own `web/…`
+            ;; modules are in `project-pairs`, so they never leak in here as a bogus package.
+            ;; Baked into the manifest as `:bundled-packages` so `run-bundle` roots every one,
+            ;; fixing the transitive-dep case the old direct-deps-only rooting missed.
+            dep-packages (seq/distinct (map dep-pairs (fn (p) (bundle-key-package (first p))))))
+        ;; With deps rooted, a same-named module in two deps no longer clashes. This guard now
+        ;; only catches a genuine bundle-key collision — two of your own source files declaring
+        ;; the same module, or a root-project module keyed identically to a dep's rooted name —
+        ;; a loud stop beats the silent last-embedded-wins clobber.
+        (bundle-reject-duplicate-names (map pairs first))
+        (bundle-reject-missing-entry (map pairs first))
+        (cons (bundle-augment-manifest manifest dep-packages)
+          (fold pairs nil (fn (acc p) (cons (first p) (cons (second p) acc)))))))))
+
+;; A bundle whose entry module was never collected is a 22 MB binary that cannot boot,
+;; and nothing before the user's first run says so: `nest release` reported success, and
+;; `nest check`/`nest test` never load `main` at all (KI-66). `--smoke` catches it by
+;; running the artifact — but it is opt-in, and this costs one list lookup, so the
+;; cheap half of that check is not left optional. Found by `nest release` succeeding in
+;; the brood repo itself, which has no Brood app and therefore no entry point.
+(defn- bundle-reject-missing-entry (names)
+  (let (entry (or *project-main-override* *project-main*)
+        modname (->string (first entry)))
+    (unless (or (includes? names modname)
+              ;; A baked-in std module as the entry is odd but not this guard's business
+              ;; to refuse — it is embedded in every runtime, so the bundle would boot.
+              (includes? (map (reflect/builtin-modules) ->string) modname))
+      (error "release: "
+        (project-run/project-no-entry-advice (first entry))
+        ". A release bundle boots by calling its entry fn, so one that names no"
+        " reachable module would be an executable that cannot start."))))
+
+;; The package segment of a rooted bundle key: `store/repo` -> `store`, `hatch/web/router`
+;; -> `hatch`, and a bare key (a root-project module) -> itself.
+(defn- bundle-key-package (key)
+  (first (string/split key "/")))
+
+;; Re-emit the bundle manifest with `:bundled-packages` (every rooted dependency package,
+;; transitive included) added, so `run-bundle` roots all of them — not just the direct deps
+;; `:dependencies` names. Serialised as DATA: the embedded manifest is only ever read back with
+;; `reflect/read-first` + `apply`, so dropping comments/formatting is fine.
+;;
+;; This is also where a release gets DATED. `:built-at` (epoch ms) and `:built-with` (the
+;; `build-id` of the runtime that ran `nest release`) are stamped in here rather than into a
+;; new archive field precisely because the manifest is already an opaque string in the bundle
+;; format — so "when was this built, and by which brood" costs no format-version bump, and
+;; `apply-config` ignores keys it doesn't know. Nothing writes them to the on-disk
+;; project.blsp: a build stamp is a fact about an artifact, not about the source.
+(defn- bundle-augment-manifest (manifest dep-packages)
+  (let (form (reflect/read-first manifest))
+    (if (and (pair? form) (= (first form) 'project))
+      (pr-str (cons 'project
+                (append (rest form)
+                  (list :bundled-packages
+                    (/apply vector dep-packages)
+                    :built-at (os/now)
+                    :built-with (system/build-id)))))
+      manifest)))
+
+;; True if `path` (an absolute .blsp file) lives under one of `dep-dirs` (the bundled
+;; dependency source dirs) — separates a dependency's rooted module from the root
+;; project's own when reading the `*module-files*` registry in `bundle-collect`.
+(defn- bundle-dep-file? (path dep-dirs)
+  (any? dep-dirs (fn (d) (string/starts-with? path (if (string/ends-with? d "/") d (str d "/"))))))
+
+;; Error on the first require-name two bundled files share (see `bundle-collect`);
+;; returns nil when all are distinct (a guard, called for effect).
+(defn- bundle-reject-duplicate-names (names)
+  (fold names
+    nil
+    (fn (seen nm)
+      (if (includes? seen nm)
+        (error "bundle: two source files would embed under the same module name '"
+          nm "' — a release bundle keys modules by name and cannot hold both. Rename one"
+          " module (two dependencies sharing a module name work at dev time via"
+          " package-rooting, but a bundle is flat — ADR-070).")
+        (cons nm seen))))
+  nil)
+
+;; Reconstruct `*package-modules-of*` for a running release bundle (ADR-070 dev/release
+;; parity), so its embedded dependency modules — keyed `pkg/mod` — load under their package
+;; context. A dependency contributes every embedded module key prefixed by its `:name`; the
+;; short names (the part after `pkg/`) are that package's intra-package set — the same map
+;; `%register-package-modules!` builds from disk deps at `setup`. Deps are known from
+;; the embedded manifest (`*project-dependencies*`, already applied); their paths are gone,
+;; but the bundle needs only the names. The root project's own modules stay unrooted (they
+;; are not registered here), so they load at ROOT, matching how `bundle-collect` embedded them.
+(defn- bundle-register-dep-rooting ()
+  ;; `*project-bundled-packages*` is the FULL rooted-package set `bundle-collect` baked into the
+  ;; manifest (transitive deps included) — use it. Fall back to the direct `:dependencies` names
+  ;; for a bundle built before this field existed (its transitive deps stay unrooted, as before).
+  (let (dep-names (or *project-bundled-packages*
+                    (map *project-dependencies* (fn (d) (->string (get d :name)))))
+        keys (%bundle-module-names))
+    (map dep-names
+      (fn (pkg)
+        (let (marker (str pkg "/")
+              shorts (fold keys
+                       nil
+                       (fn (acc key)
+                         (if (string/starts-with? key marker)
+                           (cons (symbol (string/substring key
+                                           (string/length marker)
+                                           (string/length key)))
+                             acc)
+                           acc))))
+          (when shorts (%register-package-modules! pkg shorts)))))
+    nil))
+
+;; The shared boot prefix of `run-bundle` and `check-bundle-boot`: apply the embedded
+;; manifest, restore the dependency package-rooting context, load every embedded module,
+;; and return the entry `[modname fname]`. Factored out so the check cannot boot the
+;; bundle differently from the way the bundle boots itself — the only property that makes
+;; a smoke test worth running.
+(defn- bundle-boot-load ()
+  (let (form (reflect/read-first (or (%bundle-manifest) "")))
+    (when (and (pair? form) (= (first form) 'project)) (project/apply-config (rest form))))
+  ;; Rebuild the package-rooting context for the embedded DEPENDENCY modules (ADR-070
+  ;; dev/release parity): each is embedded under its rooted key `pkg/mod`, and must load
+  ;; under `pkg`'s context so its `(defmodule mod)` roots and its intra-package `(:use …)`
+  ;; targets root — exactly as `%require-force-package` does from disk. Must run BEFORE the
+  ;; loads below (it is what makes `%require-force`'s embedded branch pick the right context).
+  (bundle-register-dep-rooting)
+  ;; Load every embedded module once. Order-independent: cross-module
+  ;; `:use`/`require` resolve through the same embedded table, and require is
+  ;; idempotent — so a `(:use foo)` in the first module pulls `foo` on demand.
+  (map (%bundle-module-names) require-one)
+  (let (entry (or *project-main-override* *project-main*))
+    ;; No `%root-module-name` here (unlike `run`): a bundle's own modules are embedded
+    ;; under their require-name and the rooting context is rebuilt above.
+    [(first entry) (second entry)]))
+
+;; (run-bundle args) — boot an embedded release bundle. The `brood` binary,
+;; detecting its appended archive, calls this instead of starting a REPL. No
+;; disk/cwd: every module comes from the embedded archive via `%builtin-module`
+;; (which `require-one` consults). Mirrors `run`'s entry resolution minus
+;; the project walk and the advisory checker (a shipped app isn't a dev image).
+(defn run-bundle (args)
+  "Run an embedded release bundle's entry point, passing `args` (a list of CLI
+string arguments). The `brood` binary calls this when it detects it is a `nest
+release` bundle. Loads the embedded manifest + modules and invokes `:main`
+(default module `main`, fn `main`). Errors if the entry fn is missing/uncallable."
+  (let ([modname fname] (bundle-boot-load))
+    (require-one modname)
+    (%crash-report-arm-default)
+    (/apply (project-run/project-entry-fn "run-bundle" modname fname) args)))
+
+;; The bundle half of the boot check (KI-66) — the one that matters, because it runs
+;; the ARTIFACT rather than the tree that produced it. Reached via the runtime-reserved
+;; `--brood-boot-check` argument (see `crates/cli/src/main.rs`), and by `nest release
+;; --smoke`, which spawns each freshly written binary this way before reporting success.
+;;
+;; Checking the dev tree and shipping a bundle are not the same act: the bundle carries
+;; a *snapshot* of every dependency's source, so a dependency updated on disk after the
+;; last `nest fetch`, a module missing from `:source-paths`, or a `:main` naming a module
+;; that was never collected are all invisible to `check-boot` and fatal here.
+(defn check-bundle-boot ()
+  "Load this release bundle's embedded modules and resolve its entry point, running
+nothing. Returns 0; raises if a module fails to load or the entry fn is missing or not
+callable. Reached by running a bundle with the reserved `--brood-boot-check` argument,
+which is what `nest release --smoke` does to the binary it just wrote."
+  (unless (%bundled?)
+    (error "check-bundle-boot: this executable is not a `nest release` bundle"))
+  (let ([modname fname] (bundle-boot-load))
+    (require-one modname)
+    (project-run/project-entry-fn "check-bundle-boot" modname fname)
+    (io/puts (str "boot ok: "
+               (->string modname)
+               "/"
+               (->string fname)
+               " ("
+               (count (%bundle-module-names))
+               " modules loaded, nothing run)"))
+    0))
+
+;; --- `nest release`: naming the artifacts, and saying what was written -------
+;; `nest` keeps the release MECHANISM, because it is bound to the `nest` binary
+;; itself: which base runtime to append to (its own embedded copy, a cache entry,
+;; `--runtime`), the byte assembly in `brood::bundle`, and running the artifact's
+;; boot check. What the artifacts are CALLED, which names are refused, and what
+;; the command prints are policy — and policy is Brood (ADR-028/322).
+
+(defn release-target-suffix (triple)
+  "Short, human-friendly artifact suffix for a target `triple`. An unrecognized OS
+keeps the whole triple: always unambiguous, just longer. The libc stays visible on
+Linux so a gnu + musl matrix cannot collide.
+
+    (project-release/release-target-suffix \"aarch64-apple-darwin\") → \"macos-arm64\"
+    (project-release/release-target-suffix \"x86_64-unknown-linux-gnu\") → \"linux-x86_64\"
+    (project-release/release-target-suffix \"x86_64-unknown-linux-musl\") → \"linux-musl-x86_64\"
+    (project-release/release-target-suffix \"wasm32-wasip1\") → \"wasm32-wasip1\""
+  (let (arch (let (a (first (string/split triple "-"))) (if (= a "aarch64") "arm64" a))
+        os (cond
+             (includes? triple "apple-darwin") "macos"
+             (includes? triple "windows") "windows"
+             (includes? triple "linux") (if (string/ends-with? triple "musl") "linux-musl" "linux")
+             (includes? triple "freebsd") "freebsd"
+             :else nil))
+    (if os (str os "-" arch) triple)))
+(sig release-target-suffix (string -> string))
+
+(defn release-windows-triple? (triple)
+  "Is `triple` a Windows target — i.e. does its artifact need a `.exe` suffix?
+
+    (project-release/release-windows-triple? \"x86_64-pc-windows-msvc\") → true
+    (project-release/release-windows-triple? \"x86_64-unknown-linux-gnu\") → false"
+  (includes? triple "windows"))
+(sig release-windows-triple? (string -> bool))
+
+(defn release-plain-filename? (s)
+  "Is `s` a bare filename, safe to use as a DEFAULTED output path?
+
+A defaulted name is manifest data, not an argument: `:name` is read out of a
+`project.blsp` that may not be ours. `(project :name |../../escaped-app|)` wrote a
+30 MB executable two directories above the project root, with no `-o` and no
+warning. An explicit `-o PATH` is the user's own choice and stays unrestricted.
+
+    (project-release/release-plain-filename? \"app\") → true
+    (project-release/release-plain-filename? \"../escape\") → false
+    (project-release/release-plain-filename? \"..\") → false
+    (project-release/release-plain-filename? \"\") → false"
+  (and (not (= s ""))
+    (not (= s "."))
+    (not (= s ".."))
+    (not (includes? s "/"))
+    (not (includes? s "\\"))
+    (not (includes? s (string/codepoints-> [0])))))
+(sig release-plain-filename? (string -> bool))
+
+(defn release-plan (name output targets pinned-runtime?)
+  "Decide which binaries a `nest release` writes, as a flat list of strings the
+`nest` side consumes: `(\"ok\" triple0 out0 triple1 out1 …)` with an empty triple
+meaning the host, or `(\"error\" message exit-code)`.
+
+`name` is the manifest's `:name`, `output` the `-o` path (nil if unset), `targets`
+the `--target` triples (empty for a host-only release), and `pinned-runtime?`
+whether `--runtime` named a specific base binary. With one target `-o` is the exact
+output path; with several, each binary gets a per-target suffix.
+
+    (project-release/release-plan \"app\" nil [] false) → (\"ok\" \"\" \"app\")
+    (project-release/release-plan \"app\" nil [\"x86_64-pc-windows-msvc\"] false) → (\"ok\" \"x86_64-pc-windows-msvc\" \"app-windows-x86_64.exe\")
+    (project-release/release-plan \"app\" \"out\" [\"a\" \"b\"] true) → (\"error\" \"--runtime names one base binary; use it with at most one --target\" \"2\")"
+  (cond
+    ;; `--runtime` names ONE base binary, so it cannot serve a matrix.
+    (and pinned-runtime? (> (count targets) 1))
+      (list "error" "--runtime names one base binary; use it with at most one --target" "2")
+
+    (and (nil? output) (not (release-plain-filename? name)))
+      (list "error"
+        (str "the manifest's :name (\""
+          name "\") is not a plain filename, so it cannot"
+          " name the output binary.\n  Give the path explicitly: nest release -o <path>")
+        "2")
+
+    :else
+      (let (stem (or output name))
+        (cons "ok"
+          (if (empty? targets)
+            (list "" stem)
+            (mapcat targets
+              (fn (t)
+                (list t
+                  (if (and output (= (count targets) 1))
+                    stem
+                    (str stem
+                      "-"
+                      (release-target-suffix t)
+                      (if (release-windows-triple? t) ".exe" "")))))))))))
+
+(defn release-report (out module-count size triple)
+  "The line `nest release` prints for one artifact it wrote: the path, how many
+modules it embeds, its size, and the target triple when there was one.
+
+    (project-release/release-report \"app\" 1 512 nil) → \"Wrote app (1 module, 512 B)\"
+    (project-release/release-report \"app\" 3 512 \"x86_64-unknown-linux-gnu\") → \"Wrote app (3 modules, 512 B, x86_64-unknown-linux-gnu)\""
+  (str "Wrote "
+    out
+    " ("
+    module-count
+    " module"
+    (if (= module-count 1) "" "s")
+    ", "
+    (humanize/byte-size size)
+    (if triple (str ", " triple) "")
+    ")"))
+
+;; --- what is this binary? (the `--brood-build-info` surface) -----------------
+;; Answering "which brood built this, with which features" meant grepping the binary
+;; over SSH — and the first attempt used `strings`, which `debian:bookworm-slim` does
+;; not ship, so it reported 0 matches and read exactly like "no JIT". Every fact below
+;; already existed in the runtime; nothing could ask the artifact for them.
+;;
+;; Deliberately reads only the manifest and the module *directory*, never loading a
+;; module: this has to answer on a bundle that is broken, since "is this even the right
+;; build?" is the first question asked when one is.
+
+;; What a from-source run has instead of a release stamp. `nest run` builds nothing, so
+;; there is no build to date — HEAD's commit date is the closest honest answer, and the
+;; short hash beside it says which tree is running. Best-effort by construction: no repo,
+;; no `git` on PATH, or a shallow/empty history all yield nils rather than an error,
+;; because "what am I running" must still answer on a source tree that is not a checkout.
+(defn- project-source-stamp (root)
+  ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
+  (let (result (check-allow :discarded-catch
+                 (try (os/cmd "git" ["-C" root "log" "-1" "--format=%ct %h"]) (catch e nil)))
+        line (if (and result (os/cmd-ok? result)) (os/cmd-out result) "")
+        parts (if (= line "") nil (string/split line " "))
+        secs (and parts (string/->number (first parts))))
+    (if (int? secs) [(* secs 1000) (second parts)] [nil nil])))
+
+(defn- project-source-mtime (root)
+  ;; The newest mtime across the project's own sources, or nil when none can be read. This is
+  ;; what "built" MEANS for a run from source: `nest run` compiles nothing, so the only honest
+  ;; answer to "how old is the code I am running" is when that code last changed.
+  (let (times (seq/keep (try (project-image/source-files root) (catch _ '()))
+                (fn (f) (file/mtime f))))
+    (if (empty? times) nil (fold times 0 (fn (a b) (if (> b a) b a))))))
+
+(defn build-info ()
+  "A map describing THIS executable — `:brood-version`, `:build-id`, `:brood-built-at`
+(when the runtime binary itself was built, epoch ms), `:features` (the optional build
+features, so `:jit` present or absent is a fact rather than a guess), and `:bundled?`.
+
+It also carries the app it is shipping: `:app`, `:app-version` and `:built-at` (epoch
+milliseconds, nil when unknown). A `nest release` bundle reads those from the manifest
+stamped in at release and adds `:built-with` (the `build-id` of the runtime that built it)
+and `:module-count`; a from-source run reads them from the on-disk `project.blsp` and dates
+itself by the git HEAD commit, naming the tree in `:commit`. So an app can state its own
+version and vintage in development as well as once shipped — [[build-stamp-text]] words
+the two cases.
+
+Loads no project module, so it answers on a bundle whose modules are broken — which is when
+it is asked. See [[build-info-report]] for the printed form."
+  (let (base {:brood-version (system/brood-version)
+              :build-id (system/build-id)
+              :brood-built-at (system/build-time)
+              :features (system/features)
+              :bundled? (%bundled?)})
+    (if (%bundled?)
+      (let (form (reflect/read-first (or (%bundle-manifest) ""))
+            opts (if (and (pair? form) (= (first form) 'project)) (rest form) nil))
+        (assoc base
+          :app (project/plist-get opts :name)
+          :app-version (project/plist-get opts :version)
+          :built-at (project/plist-get opts :built-at)
+          :built-with (project/plist-get opts :built-with)
+          :module-count (count (%bundle-module-names))))
+      (let (root (or *project-root* (project/find-root (file/cwd))))
+        (if (nil? root)
+          base
+          ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
+          (let (form (check-allow :discarded-catch
+                       (try
+                         (reflect/read-first (file/slurp (path/join root "project.blsp")))
+                         (catch e nil)))
+                opts (if (and (pair? form) (= (first form) 'project)) (rest form) nil)
+                [head-at commit] (project-source-stamp root)
+                edited-at (project-source-mtime root)
+                ;; The LATER of the two. Both are real answers to different halves of the
+                ;; question, and the newer one describes the code that is actually running.
+                ;; HEAD's commit date alone was wrong in the way that matters daily: edit a
+                ;; file, `nest run` again, and the reported build time never moved — it said
+                ;; the code was two hours old while you were looking at what you had just
+                ;; typed. A source tree's build time has to track the tree.
+                dirty? (and head-at edited-at (> edited-at head-at))
+                built-at (cond
+                           (nil? head-at) edited-at
+                           (nil? edited-at) head-at
+                           dirty? edited-at
+                           else head-at))
+            (assoc base
+              :app (project/plist-get opts :name)
+              :app-version (project/plist-get opts :version)
+              :built-at built-at
+              :commit commit
+              ;; Edited since the commit it names, so the hash says where this code came
+              ;; FROM rather than what it is. Reporting `a5e2405` flat for a modified tree
+              ;; names a commit whose code is not the code that just ran.
+              :modified? (= dirty? true))))))))
+
+(defn build-stamp-text (info)
+  "The human `built` line for a [[build-info]] map: `\"2026-08-29 14:03 UTC\"` for a release
+bundle, `\"2026-08-29 07:13 UTC (a5e2405, from source)\"` for a run out of a clean working
+tree, `\"2026-08-29 08:40 UTC (a5e2405 + edits, from source)\"` for one with uncommitted
+changes, and `\"unknown\"` when nothing could be read.
+
+The one place those cases are worded, so `--brood-build-info` and an app's own about/version
+screen never drift apart on what \"built\" means. Both carry a TIME, not just a date — two
+builds of one afternoon are the pair anyone comparing versions actually has, and a date alone
+cannot tell them apart. What distinguishes the cases is the parenthetical: a bundle's stamp is
+when `nest release` ran, a source run's is when HEAD was committed, and the second says so
+rather than passing itself off as a build."
+  (let (ms (get info :built-at)
+        commit (get info :commit)
+        at (when ms (str (datetime/format (datetime/epoch-ms-> ms) "%Y-%m-%d %H:%M") " UTC")))
+    (cond
+      (nil? at) (if commit (str "from source (" commit ")") "unknown")
+      (get info :bundled?) at
+      else
+        (str at
+          (cond
+            (and commit (get info :modified?)) (str " (" commit " + edits, from source)")
+            commit (str " (" commit ", from source)")
+            else " (from source)")))))
+
+(defn build-info-report ()
+  "Print [[build-info]] as aligned `key: value` lines and return 0. What a bundle run with
+the reserved `--brood-build-info` argument prints."
+  (let (info (build-info))
+    (when (get info :app)
+      (io/puts (str "app:      "
+                 (or (get info :app) "(unnamed)")
+                 (let (v (get info :app-version)) (if v (str " " v) ""))))
+      (io/puts (str "built:    " (build-stamp-text info))))
+    (when (get info :bundled?)
+      (io/puts (str "modules:  " (get info :module-count)))
+      (let (with (get info :built-with))
+        (when with (io/puts (str "built-by: " with)))))
+    (io/puts (str "brood:    " (get info :brood-version)))
+    (io/puts (str "build-id: " (get info :build-id)))
+    (io/puts (str "features: "
+               (let (fs (get info :features))
+                 (if (empty? fs) "(none)" (string/join (map fs ->string) " ")))))
+    0))

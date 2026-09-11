@@ -541,14 +541,14 @@ pub enum Value {
         node: Symbol,
         id: u64,
     },
-    /// A TCP socket — an id into the global socket registry (`crate::net`). Like a
+    /// A TCP socket — an id into the global socket registry (`crate::host::net`). Like a
     /// `Pid`/`Ref` it is a scalar handle, not a heap object: the GC never traces or
     /// moves it, and it carries a live OS resource. Process-local mechanism (the
     /// owning process drives it via the non-blocking `tcp-*` primitives); **never**
     /// sent across processes. The TLS counterpart reuses this same handle.
     Socket(u64),
     /// A child process — an id into the global subprocess registry
-    /// (`crate::subprocess`). Like a `Socket` it is a scalar handle, not a heap object:
+    /// (`crate::host::subprocess`). Like a `Socket` it is a scalar handle, not a heap object:
     /// the GC never traces or moves it, and it carries a live OS resource (a spawned
     /// process plus its stdin pipe and stdout/stderr reader threads). Process-local
     /// mechanism (the owning process drives it via the `proc-*` primitives and
@@ -1230,7 +1230,7 @@ pub struct NativeFn {
     /// (every primitive declares its type) is enforced *here* — there is no
     /// way to construct a `NativeFn` without one. A primitive whose args/result
     /// aren't usefully typed uses `Sig::any()`, the explicit "no useful info"
-    /// signature (which still satisfies the contract). See `types/mod.rs` and
+    /// signature (which still satisfies the contract). See `types.rs` and
     /// `types/check.rs`.
     pub sig: crate::types::Sig,
 }

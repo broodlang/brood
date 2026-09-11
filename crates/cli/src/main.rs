@@ -122,13 +122,13 @@ fn main() {
         match brood::bundle::reserved_command(&args) {
             Some(BUNDLE_BUILD_INFO_ARG) => {
                 run_on_main_stack("brood-main", || {
-                    run_bundle_meta("(project/build-info-report)")
+                    run_bundle_meta("(project-release/build-info-report)")
                 });
                 return;
             }
             Some(BUNDLE_BOOT_CHECK_ARG) => {
                 run_on_main_stack("brood-main", || {
-                    run_bundle_meta("(project/check-bundle-boot)")
+                    run_bundle_meta("(project-release/check-bundle-boot)")
                 });
                 return;
             }
@@ -148,7 +148,7 @@ fn run(cli: Cli) {
     // Answered before anything else: it is a question about the binary, not a run, so it
     // must not depend on limits, an Interp, or a file argument being present.
     if cli.debug_flags {
-        brood::debug_flags::print_catalogue();
+        brood::diagnostics::debug_flags::print_catalogue();
         return;
     }
     if let Some(n) = cli.max_parallel {
@@ -182,13 +182,13 @@ fn run(cli: Cli) {
     }
     if cli.test {
         run_test_files(&mut interp, &cli.files);
-        brood::perf::dump_if_requested(); // BROOD_PERF_STATS=1 — VM work attribution
+        brood::diagnostics::perf::dump_if_requested(); // BROOD_PERF_STATS=1 — VM work attribution
         brood::process::l1_stats::dump_if_requested(); // BROOD_L1_STATS=1
         return;
     }
     if !cli.files.is_empty() {
         run_files(&mut interp, &cli.files);
-        brood::perf::dump_if_requested(); // BROOD_PERF_STATS=1 — VM work attribution
+        brood::diagnostics::perf::dump_if_requested(); // BROOD_PERF_STATS=1 — VM work attribution
         brood::process::l1_stats::dump_if_requested(); // BROOD_L1_STATS=1
         return;
     }
@@ -234,7 +234,7 @@ fn run_bundle(args: Vec<String>) {
         .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(a)))
         .collect::<Vec<_>>()
         .join(" ");
-    let code = format!("(project/run-bundle (list {list}))");
+    let code = format!("(project-release/run-bundle (list {list}))");
     let result = {
         let _guard = RawTermGuard;
         interp.eval_str(&code)

@@ -59,28 +59,32 @@ Brood/
   crates/
     lisp/               the language (this is the substance today)
       src/              the directory tree mirrors the layers (see lib.rs)
-        lib.rs          the `Interp` entry point; bundles the prelude
-        core/           substrate — what everything is addressed through
+        lib.rs          the module map + the `Interp` entry point
+        boot.rs + boot/ how a runtime comes to hold the prelude (image / cache / source);
+                        boot/image.rs the startup-image mechanism (ADR-218)
+        core.rs + core/ substrate — what everything is addressed through
           value.rs        Value, Tag, handle types, symbol interner, Closure/Arity
-          heap.rs         per-process heap + shared regions, env chain, promotion, equality
+          heap.rs + heap/ per-process heap + shared regions; env chain, promotion,
+                          equality, gc, freeze, positions as child modules
           alloc.rs        process-wide byte-counting global allocator
-        syntax/         surface syntax (reader/printer round-trip + the tooling CST)
+        syntax.rs + syntax/   surface syntax (reader/printer round-trip + the tooling CST)
           reader.rs       text -> Value (recursive-descent parser)
           printer.rs      Value -> text
-        eval/           the evaluation engine
-          mod.rs          tree-walking evaluator + special forms + tail calls
-          compile/        the closure-compiling bytecode VM — the DEFAULT engine (ADR-076)
+        eval.rs + eval/ the evaluation engine
+          eval.rs         tree-walking evaluator + special forms + tail calls
+          compile.rs + compile/   the closure-compiling bytecode VM — the DEFAULT engine (ADR-076)
           macros.rs       quasiquote, macroexpand, the compile pass + pattern lowering
-        types/          advisory types (nothing gates on it)
-          mod.rs          the Ty / GradualTy set-theoretic lattice
-          check.rs        advisory type checker over expanded forms
-        builtins/         the primitive kernel — Rust functions, split by area
-                          (numeric / sequences / io / terminal / system / bytes)
+        types.rs + types/   advisory types (nothing gates on it)
+          types.rs        the Ty / GradualTy set-theoretic lattice
+          check.rs + check/   advisory type checker over expanded forms
+        builtins.rs + builtins/   the primitive kernel — one Rust file per domain, each
+                          owning its implementations AND its registrations
         process.rs + process/   green-process scheduler (spawn/send/receive/monitor)
         dist.rs + dist/         distributed nodes (handshake/heartbeat/wire, ADR-033/034)
-        jit/              tier-1 Cranelift JIT callback surface (feature = "jit", ADR-101)
-        net.rs            non-blocking TCP socket mechanism (ADR-062)
-        gui.rs, audio.rs, treesit.rs   optional feature-gated frontends/parsers
+        jit.rs + jit/     tier-1 Cranelift JIT callback surface (feature = "jit", ADR-101)
+        host.rs + host/   feature-gated machine bindings: net (ADR-062), subprocess,
+                          wasm, treesit, audio, text_width, gui + gui/ (the frontend)
+        diagnostics.rs + diagnostics/   coverage, perf counters, profiler, debug flags
         bundle.rs         single-binary app bundling (ADR-038)
         error.rs          LispError / LispResult / source Pos
         cli_support.rs    file-runner / error-reporting shared by the binaries
@@ -92,8 +96,8 @@ Brood/
     lsp/                the `brood-lsp` binary: language server (ADR-025, lsp.md)
       src/main.rs
   std/                  grouped (ADR-085); bare module names despite the folders
-    prelude.blsp        the core library, written in Brood itself
-    tool/               the toolchain — test framework, project runner, docs, repl, …
+    prelude/            the core library, written in Brood itself (nine files, in order)
+    tool/               the toolchain — test framework, project runner, docs, repl, dev, …
     editor/             the buffer/display/ui/keymap framework (M2/M3)
   tests/                the in-language suite (`tests/**/*_test.blsp`)
   docs/                 you are here  (see components.md for the full map)

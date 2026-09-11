@@ -87,7 +87,7 @@ item predicted. That was the last seam worth cutting; nothing further is queued 
 
 **Nothing to port.** The item said "do `gen` first, then decide `release`". There is no `gen`
 arm in `main.rs` — the name does not appear in the file — and `release` was split by ADR-322
-(`96d959ff`): `cmd_release` calls `project/bundle-collect` for the collection and keeps only
+(`96d959ff`): `cmd_release` calls `project-release/bundle-collect` for the collection and keeps only
 the byte assembly and the boot-check smoke. Both halves of the "Do" were already answered.
 
 **What is still Rust, and why each stays** (`main.rs`, 1,039 lines — all mechanism):
@@ -311,12 +311,12 @@ One item per session is fine. Each item says what to do, how to verify, and what
 ### Item 1 — Retire and catalogue the environment flags ✅ DONE 2026-09-04 (ADR-319)
 
 **Why.** The runtime reads 96 `BROOD_*` variables; the catalogue in
-`crates/lisp/src/debug_flags.rs` lists 60. Twenty are `BROOD_NO_*` opt-outs of defaults that
+`crates/lisp/src/diagnostics/debug_flags.rs` lists 60. Twenty are `BROOD_NO_*` opt-outs of defaults that
 have held for weeks.
 
 **Do.**
 1. List the gap: `comm -23 <(grep -rhoE 'BROOD_[A-Z0-9_]+' crates/lisp/src --include=*.rs |
-   sort -u) <(grep -oE '"BROOD_[A-Z0-9_]+"' crates/lisp/src/debug_flags.rs | tr -d '"' | sort -u)`.
+   sort -u) <(grep -oE '"BROOD_[A-Z0-9_]+"' crates/lisp/src/diagnostics/debug_flags.rs | tr -d '"' | sort -u)`.
 2. For each uncatalogued flag: find where it is read (`grep -rn NAME crates/lisp/src`), read
    the comment, and either **add it to the catalogue** (one `f(NAME, GROUP, "…")` entry) or
    **delete the read and the branch behind it** if it is a dead experiment lever. Do not delete
@@ -373,7 +373,7 @@ should be the same thin shell.
 
 **Do (incrementally, one subcommand per commit).**
 1. Read `crates/nest/src/main.rs` and `std/tool/project.blsp`; list which subcommands already
-   have a Brood function (`project/check`, `project/run`, `project/run-tests`, …) and which
+   have a Brood function (`project-check/check`, `project-run/run`, `project-run/run-tests`, …) and which
    logic lives only in Rust.
 2. Add a `std/tool/nest.blsp` with `(nest/main argv)` that parses argv (use `os/argv`-style
    vectors; `nest completions` needs the same table) and calls the `project/*` functions.
@@ -1012,7 +1012,7 @@ concluded nothing recent. `make green-all` adds the examples and stress corpus g
   layer). Found because hive's `/docs` renderer had called bare `max` for weeks with a green
   `bin/ci`. Vectors and maps now descend; the first run over `std/` + `tests/` returned
   exactly one warning and it was real (the fifth dead `project-*` call site — the MCP
-  `callers` tool, now `project/all-files`).
+  `callers` tool, now `project-check/all-files`).
 - **22 harnesses of rename rot** in `examples/` and the stress corpus, and both live docs
   (`language.md`, `brood-for-claude.md`) still teaching `print`/`println`/`eprint`/`eprintln`,
   `spawn-server`, and bare `quot`/`mod`/`rem`/`floor`/`min`/`max`.
@@ -2001,7 +2001,7 @@ Each was measured to a conclusion. Re-deriving them costs a session each.
   `(defn step (acc x) (%add acc x))` as the callee and measured the global head at **1
   ns/call against the computed head's 160** — an apparent 160× that reads as a screaming
   case for the IC. That shape is a *passthrough to a `%`-native*, which `resolve_prim`
-  (`compile/mod.rs:668`) inlines to a `Prim2` at the call site, so the row was measuring a
+  (`compile.rs:668`) inlines to a `Prim2` at the call site, so the row was measuring a
   deleted call. A callee is only measuring a *call* if it cannot be inlined — and a row
   reporting ~1 ns/call is reporting that its work is gone, which is why the committed
   version prints total ms and the accumulator beside every figure.

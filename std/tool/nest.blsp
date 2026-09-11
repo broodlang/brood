@@ -518,7 +518,7 @@ surfaced as `check-file-deps: cannot read …` with a four-frame Brood trace."
     2))
 
 (defn- checker-exit-code (result)
-  "`project/check` and friends return a warning (or unresolved-name) count: 0 is clean."
+  "`project-check/check` and friends return a warning (or unresolved-name) count: 0 is clean."
   (cond
     (= result 0) 0
     (int? result) 1
@@ -534,17 +534,17 @@ surfaced as `check-file-deps: cannot read …` with a four-frame Brood trace."
         (do
           (project/load-config)
           (require-one 'test)
-          (checker-exit-code (project/suggest-sigs files)))
+          (checker-exit-code (project-check/suggest-sigs files)))
       (get flags "--fix-sigs")
         (do
           (project/load-config)
           (require-one 'test)
-          (checker-exit-code (project/fix-sigs files true)))
+          (checker-exit-code (project-check/fix-sigs files true)))
       (get flags "--fix-renames")
         (do
           (project/load-config)
           (require-one 'test)
-          (checker-exit-code (project/fix-renames (not (get flags "--dry-run")))))
+          (checker-exit-code (project-check/fix-renames (not (get flags "--dry-run")))))
       (and (empty? files)
         (not (require-project "check" "To check one file outside a project: nest check <file>.blsp")))
         2
@@ -553,8 +553,8 @@ surfaced as `check-file-deps: cannot read …` with a four-frame Brood trace."
       ;; project image first so cross-module names resolve (the single-file path once
       ;; skipped that and false-flagged every `:use`d name as unbound).
       (empty? files)
-        (do (project/load-config) (require-one 'test) (checker-exit-code (project/check)))
-      else (do (require-one 'test) (checker-exit-code (project/check-files files))))))
+        (do (project/load-config) (require-one 'test) (checker-exit-code (project-check/check)))
+      else (do (require-one 'test) (checker-exit-code (project-check/check-files files))))))
 
 ;; `nest test` ------------------------------------------------------------------------
 
@@ -595,7 +595,7 @@ out of range — exits 0 having run zero tests, which in CI reads as green. Say 
       else nil)))
 
 (defn- test-opts (flags lines)
-  "The option list `project/run-tests` and friends take, from the parsed flags: bare
+  "The option list `project-run/run-tests` and friends take, from the parsed flags: bare
 keywords for switches, `keyword value` pairs otherwise, and a `:filter` only when something
 narrows or reorders the run — the plain case passes none, so the runner keeps its fast path."
   (let (f (fn (k) (get flags k))
@@ -666,7 +666,7 @@ file) is rethrown for the normal error report."
         (do
           (require-one 'test)
           (project/load-config)
-          (run-suite (fn () (apply project/run-tests (test-opts flags lines)))))
+          (run-suite (fn () (apply project-run/run-tests (test-opts flags lines)))))
       else
       ;; Named files: load each (registering its cases) and run the suite once. Inside a
       ;; project the image is loaded first so cross-module names resolve, and the run
@@ -681,7 +681,7 @@ file) is rethrown for the normal error report."
           (doseq (p paths) (reflect/load p))
           (run-suite (fn ()
                        (if root
-                         (apply project/run-loaded-tests (test-opts flags lines))
+                         (apply project-run/run-loaded-tests (test-opts flags lines))
                          (apply test/run-tests (test-opts flags lines)))))))))
 
 ;; `nest run` -------------------------------------------------------------------------
@@ -761,7 +761,7 @@ reason was already printed, so the caller exits silently."
               else nil)
             (when (and main file) (eputs "nest run: --main is ignored when a FILE is given"))
             ;; Advisory single-file pre-flight for an explicit FILE (`:main` runs check via
-            ;; `project/run`); `BROOD_NO_CHECK=1` opts out, as everywhere.
+            ;; `project-run/run`); `BROOD_NO_CHECK=1` opts out, as everywhere.
             (when (and file (not (= (os/env "BROOD_NO_CHECK") "1")))
               (doseq (w (%check-file file)) (io/puts w :to *err*)))
             ;; `--name`: a local Unix-socket node before the program runs (the Emacs
@@ -771,10 +771,11 @@ reason was already printed, so the caller exits silently."
             ;; live trigger for ADR-123's soundness-under-reload).
             (when (not (empty? watch))
               (require-one 'reload)
-              (let (on-reload (if in-project (fn (_p) (project/check-sources)) nil))
+              (let (on-reload (if in-project (fn (_p) (project-check/check-sources)) nil))
                 (doseq (w watch) (reload/on-change w on-reload))))
             (let (thunk (cond
-                          (nil? file) (fn () (project/run all-args no-check (not (empty? watch))))
+                          (nil? file)
+                            (fn () (project-run/run all-args no-check (not (empty? watch))))
                           ;; Unwrapped, a FILE runs as its own green process (ADR-135) so it
                           ;; matches `brood FILE`; wrapped it is already inside a spawn, and a
                           ;; nested program-process spawn+block would native-nest.
@@ -799,7 +800,7 @@ reason was already printed, so the caller exits silently."
         (do
           (project/load-config)
           (when main (project/set-project-main main))
-          (project/check-boot)
+          (project-run/check-boot)
           0)
       else
         (run-program file

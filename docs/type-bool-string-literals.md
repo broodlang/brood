@@ -7,7 +7,7 @@
 
 ## Design
 
-Mirrors ADR-117's `lit_int` pattern twice more in `crates/lisp/src/types/mod.rs`:
+Mirrors ADR-117's `lit_int` pattern twice more in `crates/lisp/src/types.rs`:
 
 - `const BOOL_BIT`/`const STR_BIT`, `lit_bool: Option<Arc<BTreeSet<bool>>>`,
   `lit_str: Option<Arc<BTreeSet<String>>>` — independent fields/tags, so any
@@ -53,7 +53,7 @@ bool/string literal arguments are no longer declared-sig-only.
 
 ## Tests
 
-`crates/lisp/src/types/mod.rs`: `bool_literal_*`/`str_literal_*` — render,
+`crates/lisp/src/types.rs`: `bool_literal_*`/`str_literal_*` — render,
 union-exact-but-widens, subtyping, disjointness, intersection — mirroring
 every `int_literal_*` test exactly. `tests/contract_test.blsp`:
 `describe "bool/string-literal type contracts"` — exact match passes, the

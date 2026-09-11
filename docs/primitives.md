@@ -327,7 +327,7 @@ literal — no constructor call.
 |  | `mem-soft-limit` | 0 | Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint. |
 ## Special forms (not primitives)
 
-These are evaluation rules in `crates/lisp/src/eval/mod.rs`, not functions — they
+These are evaluation rules in `crates/lisp/src/eval.rs`, not functions — they
 control how their arguments are evaluated and cannot be passed as values:
 
 ```

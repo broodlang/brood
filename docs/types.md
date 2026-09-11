@@ -37,7 +37,7 @@ lineage behind it.
 
 A `Ty` **is a set of values**, and the type operations *are* set operations:
 
-| Type op | Set op | In `types/mod.rs` |
+| Type op | Set op | In `types.rs` |
 |---|---|---|
 | union (`int \| float`) | `∪` | `Ty::union` (bitwise OR) |
 | intersection | `∩` | `Ty::intersect` (AND) |
@@ -126,13 +126,13 @@ on every builtin enforced at one gate (`eval::call_native`).
 **Done:** tag is observable; errors name op/wanted/got; arity is metadata.
 
 ### Step 1 — the set-theoretic `Ty` lattice ✅
-`crates/lisp/src/types/mod.rs`: `Ty` as a set of tags with union/intersect/negate/
+`crates/lisp/src/types.rs`: `Ty` as a set of tags with union/intersect/negate/
 difference, semantic subtyping, `NEVER`/`ANY`/`NUMBER`/`LIST`, `of_value` bridge,
 `Display`. Pure algebra; nothing in the language consumes it yet.
 **Done:** the algebra exists and is unit-tested in isolation.
 
 ### Step 2 — `dynamic()`, the gradual type ✅
-`types/mod.rs`: `GradualTy { bound: Ty, dynamic: bool }` — `dynamic(bound)` kept
+`types.rs`: `GradualTy { bound: Ty, dynamic: bool }` — `dynamic(bound)` kept
 *inside* the lattice (pure `dynamic()` = `dynamic(ANY)`). `consistent_with` is
 **derived from set inclusion** (static → `bound ⊆ expected`; dynamic → `bound ∩
 expected ≠ ⊥`), not a primitive consistency axiom — so pure `dynamic()` is
@@ -168,7 +168,7 @@ constraint solve; see the rationale in
 one-step-deep inferencer** that now covers control-flow, recursion, and complex closures:
 
 - ✅ **Primitives** — every [`NativeFn`](../crates/lisp/src/core/value.rs)
-  carries a [`Sig`](../crates/lisp/src/types/mod.rs) field next to its `Arity`
+  carries a [`Sig`](../crates/lisp/src/types.rs) field next to its `Arity`
   (compatibility-contract point #6, **enforced** — there's no way to construct
   a `NativeFn` without one). The checker reads it via a global-env lookup
   (`check::primitive_sig`); there is no parallel hand-maintained table.
@@ -463,7 +463,7 @@ never a false positive.
 
 With everything above, Step 4 is **done**, including the operand-position
 unbound check and a single unified `nest check` path (whole-project *and*
-file-list checks both load the project image first via Brood `project/check-files`
+file-list checks both load the project image first via Brood `project-check/check-files`
 / `check-project`, so cross-namespace imports resolve identically — no second
 code path). The only meaningful next move is the upgrade to Step 5+ (structured
 types) when a real need surfaces.
@@ -680,7 +680,7 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
    `Decimal`, `Set`), and the lattice's tag bitset is a **`u32`** (`Ty { tags: u32,
    … }`, ADR-078), so it has headroom to 32 atoms. `UNIVERSE` computes in `u64` and narrows to dodge
    the `1u32 << 32` const-overflow at the cap; a *33rd* tag must widen the `tags`
-   field to `u64` (the `TAG_COUNT <= 32` assert in `types/mod.rs` is the tripwire).
+   field to `u64` (the `TAG_COUNT <= 32` assert in `types.rs` is the tripwire).
 2. **A type is a set of values.** Don't add a typing concept that isn't a set
    (no nominal-only identity, no escape hatch that breaks set semantics).
    Structured types arrive as proper set-theoretic extensions, never bolt-ons.
@@ -754,7 +754,7 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
 
 (After the `core/` / `syntax/` / `eval/` / `types/` module split.)
 
-- `crates/lisp/src/types/mod.rs` — the `Ty` lattice (step 1), `GradualTy`
+- `crates/lisp/src/types.rs` — the `Ty` lattice (step 1), `GradualTy`
   (step 2), and `tested_by` (the guard-narrowing bridge for step 4).
 - `crates/lisp/src/types/check.rs` — the checker's entry points (`check_form`,
   `check_file`) + the in-source test suite; the work is split across the
@@ -774,6 +774,6 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
     (ADR-119 Phase 2).
 - `crates/lisp/src/core/value.rs` — `Tag` (the atoms), `value::tag`, `NativeFn`
   (carries the `Sig` the checker reads — contract point #6).
-- `crates/lisp/src/eval/mod.rs` — `call_native` (the arity gate).
+- `crates/lisp/src/eval.rs` — `call_native` (the arity gate).
 - `crates/lisp/src/eval/macros.rs` — `macroexpand_all`, the pass the checker runs
   after.

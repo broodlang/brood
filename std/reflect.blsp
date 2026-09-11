@@ -13,7 +13,7 @@
 ;; the code rather than as a call into a tool.
 ;;
 ;; Ten of this module's names are KERNEL primitives, registered under `reflect/` in Rust
-;; the way `bit/and` and `proc/register` are (`crates/lisp/src/builtins/mod.rs`): Rust
+;; the way `bit/and` and `proc/register` are (`crates/lisp/src/builtins.rs`): Rust
 ;; supplies the mechanism, the namespace is Brood's. Until 2026-08-28 they were spelled
 ;; bare — eval, load, global-names, special-forms, doc-forms, builtin-modules, current-ns,
 ;; eval-string, dynamic?, private? (named without backticks here on purpose: those

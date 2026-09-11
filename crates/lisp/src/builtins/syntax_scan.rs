@@ -1,13 +1,55 @@
-// Editor syntax-scanning / span / highlight / clipboard builtins — extracted from
-// sequences.rs (these are editor tooling, not string ops).
-#![allow(unused_imports)]
 use super::numeric::{arg, expect_int, expect_string, expect_string_ref};
-use super::sequences::*;
-use super::*;
+use super::string::scan_bar;
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
-use crate::syntax::printer;
+
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::{Sig, Ty};
+    primitives.def(
+        "%scan-tokens",
+        Arity::exact(1),
+        Sig::new(vec![string], vec_ty),
+        &["s"],
+        "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens).",
+        scan_tokens);
+    primitives.def(
+        "%span-runs",
+        Arity::range(3, 4),
+        Sig::with_rest(vec![string, int, any], any, list_ty),
+        &["text", "base", "spans", "ranges"],
+        "Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. With optional overlay ranges ([lo hi face], may overlap/be unordered) each char's face is its span face with every covering range face merged on top (later wins). Adjacent equal-face runs coalesce. The highlight span->runs tiler (fontify-runs), in Rust. Faces are opaque maps.",
+        span_runs);
+    // Registered LAST (not beside its scan-tokens sibling) on purpose: registration
+    // order feeds the keyword/symbol intern table, and small-map key iteration order is
+    // currently downstream of intern ids — an insertion mid-list reshuffles map key
+    // order image-wide (record_test's field-order assertion catches it). Appending
+    // preserves every existing id. The real fix is insertion-ordered map iteration.
+    primitives.def(
+        "%scan-form-start",
+        Arity::exact(2),
+        Sig::new(vec![string, int], int),
+        &["s", "pos"],
+        "The greatest char offset <= pos of a top-level (bracket depth 0) open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. Depth-tracked, not the Emacs column-0 heuristic, so a mis-indented open bracket at column 0 inside an unclosed form is not a form start. The required forward lexical pass (a backward scan cannot know string state) runs natively: O(pos) at native speed instead of interpreted per-char cost on every eldoc/fontify-restart in a large buffer.",
+        scan_form_start);
+    primitives.def(
+        "%scan-form-start-2",
+        Arity::exact(2),
+        Sig::new(vec![string, int], Ty::vector_of(int)),
+        &["s", "pos"],
+        "[prev start] — the greatest top-level (depth-0) form-start offset <= pos AND the one before it, from a SINGLE forward pass. What tool/sexp narrowing actually wants: computing the pair as two scan-form-start calls runs the O(pos) lexical pass twice over the same prefix. prev is 0 when there is no earlier form start, matching what the second call returned there.",
+        scan_form_start_2);
+    primitives.def(
+        "%scan-form-end",
+        Arity::exact(3),
+        Sig::new(vec![string, int, int], int),
+        &["s", "from", "n-forms"],
+        "The char offset just after n-forms top-level forms starting at char offset from, skipping strings/comments and tracking bracket depth, or (string/length s) if the text ends first. The forward window-end companion to scan-form-start: tool/sexp narrowing uses the pair to bound structural motion to the neighbourhood of point in ONE native pass, replacing an interpreted char-at loop that was the dominant cost of every keystroke-driven motion.",
+        scan_form_end);
+}
 
 pub(super) fn scan_atom_kind(t: &str) -> &'static str {
     if t.starts_with(':') || t == "nil" || t == "true" || t == "false" {
@@ -628,58 +670,6 @@ pub(super) fn span_runs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
         })
         .collect();
     Ok(heap.list_from_slice(&out))
-}
-
-/// OS clipboard access (the `clipboard` feature, via `arboard`). The handle lives in a
-/// `OnceLock` for the whole process: on X11/Wayland the selection *owner* must stay
-/// alive to answer paste requests, so a fresh handle per call would lose the copied text
-/// the moment it dropped. Init failure (no display server) is cached as `None`, so the
-/// builtins degrade to no-ops rather than retrying.
-#[cfg(feature = "clipboard")]
-mod clipboard {
-    use arboard::Clipboard;
-    use std::sync::{Mutex, OnceLock};
-    static CB: OnceLock<Option<Mutex<Clipboard>>> = OnceLock::new();
-    fn handle() -> Option<&'static Mutex<Clipboard>> {
-        CB.get_or_init(|| Clipboard::new().ok().map(Mutex::new))
-            .as_ref()
-    }
-    pub fn get_text() -> Option<String> {
-        handle()?.lock().ok()?.get_text().ok()
-    }
-    pub fn set_text(s: &str) {
-        if let Some(m) = handle() {
-            if let Ok(mut cb) = m.lock() {
-                let _ = cb.set_text(s.to_owned());
-            }
-        }
-    }
-}
-
-/// `(clipboard-get)` — the OS clipboard's text, or nil when it's empty / non-text /
-/// unavailable (no display server, or a build without the `clipboard` feature). The
-/// editor's yank consults this so text copied in another app pastes in.
-pub(super) fn clipboard_get(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    #[cfg(feature = "clipboard")]
-    if let Some(s) = clipboard::get_text() {
-        return Ok(heap.alloc_string(&s));
-    }
-    #[cfg(not(feature = "clipboard"))]
-    let _ = &heap;
-    Ok(Value::nil())
-}
-
-/// `(clipboard-set s)` — copy string `s` to the OS clipboard so other apps can paste
-/// it; returns `s` (so it threads). A no-op (still returns `s`) when no clipboard is
-/// available or the `clipboard` feature is off, so callers needn't special-case headless
-/// builds. The editor's kill/copy commands call this so a kill is system-wide.
-pub(super) fn clipboard_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "clipboard-set", arg(args, 0))?;
-    #[cfg(feature = "clipboard")]
-    clipboard::set_text(&s);
-    #[cfg(not(feature = "clipboard"))]
-    let _ = &s;
-    Ok(arg(args, 0))
 }
 
 #[cfg(test)]

@@ -10,6 +10,70 @@ use crate::error::{error_codes, LispError, LispResult};
 
 use super::numeric::{arg, expect_int};
 
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    // ---- raw bytes (Value::Bytes) ----
+    primitives.def(
+        "bytes",
+        Arity::any(),
+        Sig::variadic(any, bytes_ty),
+        &["&", "byte-ints"],
+        "Build a bytes value from byte integers 0–255: (bytes 1 2 3), or (bytes [1 2 3]) / (bytes (list …)) taking a single vector/list as the sequence. An existing bytes value passes through unchanged.",
+        bytes_make);
+    primitives.def(
+        "%byte-length",
+        Arity::exact(1),
+        Sig::new(vec![bytes_ty], int),
+        &["b"],
+        "The number of bytes in b. O(1).",
+        byte_length,
+    );
+    primitives.def(
+        "%byte-at",
+        Arity::exact(2),
+        Sig::new(vec![bytes_ty, int], int),
+        &["b", "i"],
+        "The byte at index i of b as an int 0–255; errors if i is out of range.",
+        byte_at,
+    );
+    primitives.def(
+        "%subbytes",
+        Arity::range(2, 3),
+        Sig::variadic(any, bytes_ty),
+        &["b", "start", "&optional", "end"],
+        "The byte slice [start, end) of b as a fresh bytes value (end defaults to the length). Errors if the range is out of bounds.",
+        subbytes);
+    primitives.def(
+        "%bytes-concat",
+        Arity::any(),
+        Sig::variadic(iolist, bytes_ty),
+        &["&", "iolists"],
+        "One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model.",
+        bytes_concat);
+    // String<->bytes conversion is UTF-8 (a Brood string is UTF-8, like Rust's),
+    // exposed under the explicit `string->utf8-bytes` / `utf8-bytes->string` names
+    // (registered above) — the former duplicate `string->bytes` / `bytes->string`
+    // prims were removed (they did the identical UTF-8 encode/decode).
+    primitives.def(
+        "%bytes->list",
+        Arity::exact(1),
+        Sig::new(vec![bytes_ty], pair),
+        &["b"],
+        "The bytes b as a list of integers 0–255.",
+        bytes_to_list,
+    );
+    primitives.def(
+        "%bytes-index-of",
+        Arity::range(2, 3),
+        Sig::new(vec![bytes_ty, bytes_ty], int),
+        &["haystack", "needle", "&optional", "from"],
+        "The first index of the needle bytes within haystack at or after from (default 0), or -1 if absent. The byte-protocol workhorse (locate a \\r\\n\\r\\n, a frame delimiter, …).",
+        bytes_index_of);
+}
+
 /// Borrow a `Value::Bytes`'s raw bytes, or a type error. The borrow is a guarded
 /// [`SlabRef`](crate::core::heap::SlabRef) (derefs to `&[u8]`) so a RUNTIME bytes
 /// value's generation can't be freed while it's read (ADR-091 Stage 4).
@@ -115,7 +179,7 @@ pub(super) fn subbytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 pub(super) fn bytes_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mut out = Vec::new();
     for &v in args {
-        super::io::flatten_iolist(heap, "bytes-concat", v, &mut out)?;
+        flatten_iolist(heap, "bytes-concat", v, &mut out)?;
     }
     Ok(heap.alloc_bytes(SharedBlob::new(&out)))
 }
@@ -153,4 +217,131 @@ pub(super) fn bytes_to_list(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
         .map(|&x| Value::int(x as i64))
         .collect();
     Ok(heap.list(items))
+}
+
+/// Extract raw bytes from a `Value`: a `bytes` value, or (leniently) a vector
+/// or list of byte ints (0–255).
+pub(super) fn collect_bytes(
+    name: &'static str,
+    bv: Value,
+    heap: &mut Heap,
+) -> Result<Vec<u8>, LispError> {
+    match bv {
+        Value::Bytes(id) => Ok(heap.bytes(id).as_bytes().to_vec()),
+        Value::Vector(id) => {
+            let vec = heap.vector(id).to_vec();
+            vec.iter()
+                .map(|v| match v {
+                    Value::Int(n) if *n >= 0 && *n <= 255 => Ok(*n as u8),
+                    other => Err(LispError::wrong_type(
+                        heap,
+                        name,
+                        "byte int (0-255)",
+                        *other,
+                    )),
+                })
+                .collect::<Result<Vec<u8>, LispError>>()
+        }
+        Value::Pair(_) | Value::Nil => {
+            let mut out = Vec::new();
+            let mut cur = bv;
+            loop {
+                match cur {
+                    Value::Nil => break,
+                    Value::Pair(id) => {
+                        let (h, t) = heap.pair(id);
+                        match h {
+                            Value::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
+                            other => {
+                                return Err(LispError::wrong_type(
+                                    heap,
+                                    name,
+                                    "byte int (0-255)",
+                                    other,
+                                ))
+                            }
+                        }
+                        cur = t;
+                    }
+                    other => return Err(LispError::wrong_type(heap, name, "proper list", other)),
+                }
+            }
+            Ok(out)
+        }
+        other => Err(LispError::wrong_type(heap, name, "vector or list", other)),
+    }
+}
+
+/// Allocate a raw-byte result (digest, HMAC, derived key) as a Brood `bytes`
+/// value — the raw-byte counterpart of the Brood `bytes->hex` shaping. The byte-oriented
+/// crypto layer (store-driver findings 2/3) returns these so digests can be
+/// chained over bytes without a hex round-trip at each step.
+pub(super) fn bytes_to_value(bytes: impl AsRef<[u8]>, heap: &mut Heap) -> Value {
+    heap.alloc_bytes(crate::core::blob::SharedBlob::new(bytes.as_ref()))
+}
+
+/// Flatten an **iolist** into `out` at a write boundary (ADR-139): a leaf — a
+/// string, a `bytes`, or a byte int 0–255 — or an arbitrarily nested proper
+/// list/vector of iolists (`nil` = empty; an improper tail is a final leaf, as
+/// in Erlang). Callers describe output as a tree
+/// (`[status-line headers "\r\n\r\n" body]`) and nothing is copied until this
+/// single flatten at the device write — which deletes the O(n²)
+/// `(str acc chunk)` accumulation class at its root. A string leaf is **always
+/// its UTF-8 bytes**, whatever the device's mode — raw bytes are what `bytes`
+/// values are for (the pre-`bytes` "Latin-1 byte-string" send rule is gone with
+/// the carrier-string era, ADR-141). Iterative worklist, so nesting depth is
+/// heap-bounded — and immutable data cannot be cyclic, so termination is
+/// structural, no visited set needed.
+pub(super) fn flatten_iolist(
+    heap: &Heap,
+    who: &str,
+    root: Value,
+    out: &mut Vec<u8>,
+) -> Result<(), LispError> {
+    let mut stack: Vec<Value> = vec![root];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Nil => {}
+            Value::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
+            Value::Bytes(b) => out.extend_from_slice(heap.bytes(b).as_bytes()),
+            Value::Str(id) => {
+                let s = heap.string(id);
+                out.extend_from_slice(s.as_bytes());
+            }
+            Value::Pair(p) => {
+                // Process car first; the cdr is the rest of the iolist (a leaf
+                // there is Erlang's improper tail).
+                let (car, cdr) = {
+                    let cell = heap.pair(p);
+                    (cell.0, cell.1)
+                };
+                stack.push(cdr);
+                stack.push(car);
+            }
+            Value::Vector(id) => {
+                let items = heap.vector(id).to_vec();
+                for &item in items.iter().rev() {
+                    stack.push(item);
+                }
+            }
+            other => {
+                return Err(LispError::wrong_type(
+                    heap,
+                    who,
+                    "iolist (string, bytes, byte int 0-255, or a nested list/vector of those)",
+                    other,
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Lower a tcp-send/proc-send payload to raw bytes: any **iolist** (ADR-139).
+/// String leaves are always UTF-8 — the device's binary flag affects only the
+/// inbound decode (ADR-141); raw bytes go out as `bytes` values.
+pub(super) fn send_payload(heap: &Heap, who: &str, v: Value) -> Result<Vec<u8>, LispError> {
+    let mut out = Vec::new();
+    flatten_iolist(heap, who, v, &mut out)?;
+    Ok(out)
 }

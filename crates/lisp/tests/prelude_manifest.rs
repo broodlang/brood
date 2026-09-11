@@ -52,7 +52,7 @@ fn every_prelude_file_is_included_in_the_concat() {
 
     for (name, body) in &files {
         assert!(
-            brood::PRELUDE.contains(body.as_str()),
+            brood::boot::PRELUDE.contains(body.as_str()),
             "std/prelude/{name} is not in the PRELUDE const — add its include_str! line to \
              the concat! in crates/lisp/src/lib.rs (at the right position: evaluation \
              order is load-bearing)"
@@ -86,19 +86,19 @@ fn prelude_const_is_exactly_the_split_files() {
             panic!("EXTRA_PRELUDE_FILES names {extra}, which will not read: {e}")
         });
         assert!(
-            brood::PRELUDE.contains(body.as_str()),
+            brood::boot::PRELUDE.contains(body.as_str()),
             "{extra} is listed in EXTRA_PRELUDE_FILES but is not in PRELUDE — either add its \
              include_str! line to the concat! in lib.rs, or drop it from that list"
         );
         total += body.len();
     }
     assert_eq!(
-        brood::PRELUDE.len(),
+        brood::boot::PRELUDE.len(),
         total,
         "PRELUDE is {} bytes but std/prelude/*.blsp + EXTRA_PRELUDE_FILES total {total} — \
          the concat! list in lib.rs includes something twice, includes a file listed in \
          neither, or is missing one. A deliberate non-prelude/ addition goes in \
          EXTRA_PRELUDE_FILES with a note saying why it is core.",
-        brood::PRELUDE.len()
+        brood::boot::PRELUDE.len()
     );
 }

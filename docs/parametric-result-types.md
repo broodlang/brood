@@ -100,7 +100,7 @@ A new helper `callback_ret(heap, callback_form, elem_in, ctx) -> Option<Ty>`:
 - `crates/lisp/src/types/check/guards.rs`
   - `seq_aware_call_ty`: add `map` / `filter` arms (and later `reduce`/`fold`).
   - new `fn callback_ret(...)` helper (uses `sig_of`, `ctx.bind`, `expr_ty`).
-- No change to `crates/lisp/src/types/mod.rs` (no new `Ty` kind — the win of Option
+- No change to `crates/lisp/src/types.rs` (no new `Ty` kind — the win of Option
   B). `Ty::list_of` / `union` / `elem_ty` / `as_arrow` already exist.
 - `crates/lisp/src/types/check/sigs.rs` — unchanged (the curated `map`/`filter`
   sigs stay as the *flat fallback* / arity+arrow source; the refinement layers on

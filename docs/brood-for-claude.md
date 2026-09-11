@@ -52,7 +52,7 @@ name  foo-bar?  +       ; symbol (kebab-case is idiomatic)
 
 ## Special forms
 
-Only these eight are *special* (evaluator rules in `eval/mod.rs`); everything
+Only these eight are *special* (evaluator rules in `eval.rs`); everything
 else is a function or a macro:
 
 ```

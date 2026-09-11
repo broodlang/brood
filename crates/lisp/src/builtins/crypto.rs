@@ -9,8 +9,89 @@ use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 
-use super::io::{bytes_to_value, collect_bytes};
+use super::bytes::{bytes_to_value, collect_bytes};
 use super::numeric::{arg, expect_int};
+
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::{Arity, Tag};
+    use crate::types::{Sig, Ty};
+    // The two hashing primitives. `%digest` and `%hmac` take an algorithm keyword
+    // (:md5/:sha1/:sha256/:sha384/:sha512) + byte-sequence input and return the
+    // RAW digest/MAC as a bytes value. Everything else — string input (via
+    // `string->utf8-bytes`), hex output (via `bytes->hex`), and the public
+    // `sha256`/`hmac-sha256`/… names — is Brood policy in std/hash.blsp. (Collapsed
+    // the former 15 `%sha*`/`%md5` + 6 `%hmac-*` prims to these two: ADR-006, the
+    // variation was pure formatting Brood can do.) The package manager (ADR-037)
+    // hashes files/trees in Brood over these.
+    primitives.def(
+        "%digest",
+        Arity::exact(2),
+        Sig::new(vec![kw, any], bytes_ty),
+        &["algo", "bytes"],
+        "Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp.",
+        digest);
+    primitives.def(
+        "%hmac",
+        Arity::exact(3),
+        Sig::new(vec![kw, any, any], bytes_ty),
+        &["algo", "key-bytes", "msg-bytes"],
+        "HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp.",
+        hmac);
+    primitives.def(
+        "%random-bytes",
+        Arity::exact(1),
+        Sig::new(vec![int], bytes_ty),
+        &["n"],
+        "n cryptographically-strong random bytes as a bytes value.",
+        random_bytes,
+    );
+    // ed25519 signing (ADR-212): the one new primitive for package signing. Raw bytes
+    // in/out; key storage, the publish/verify flow, and the TOFU pin are Brood policy.
+    primitives.def(
+        "%ed25519-keygen",
+        Arity::exact(0),
+        Sig::new(vec![], Ty::of(Tag::Vector)),
+        &[],
+        "A fresh ed25519 keypair as a [public private] vector — public the 32-byte verifying key, private the 32-byte signing seed, both bytes values (ADR-212). The one key-generation primitive; storage + the publish/verify flow are Brood policy.",
+        ed25519_keygen);
+    primitives.def(
+        "%ed25519-sign",
+        Arity::exact(2),
+        Sig::new(vec![any, any], bytes_ty),
+        &["private-bytes", "message-bytes"],
+        "The 64-byte ed25519 signature of message-bytes under the 32-byte private-bytes signing seed, as a bytes value. Errors only when the key is not 32 bytes.",
+        ed25519_sign);
+    primitives.def(
+        "%ed25519-verify",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], Ty::of(Tag::Bool)),
+        &["public-bytes", "message-bytes", "signature-bytes"],
+        "true when signature-bytes (64 bytes) is a valid ed25519 signature of message-bytes under the 32-byte public-bytes key, else false. Never errors — a malformed or bad signature is simply false.",
+        ed25519_verify);
+    primitives.def(
+        "%chacha20-encrypt",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], bytes_ty),
+        &["key-bytes", "nonce-bytes", "plaintext-bytes"],
+        "Encrypt plaintext-bytes with ChaCha20-Poly1305 (AEAD). key-bytes must be 32 bytes; nonce-bytes must be 12 bytes. Returns ciphertext bytes (plaintext + 16-byte auth tag). NEVER reuse a (key, nonce) pair — use a fresh nonce per message (see crypto/random-nonce).",
+        chacha20_encrypt);
+    primitives.def(
+        "%chacha20-decrypt",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], any),
+        &["key-bytes", "nonce-bytes", "ciphertext-bytes"],
+        "Decrypt ciphertext-bytes with ChaCha20-Poly1305. Returns plaintext bytes, or :error if authentication fails.",
+        chacha20_decrypt);
+    primitives.def(
+        "%pbkdf2-sha256-bytes",
+        Arity::exact(4),
+        Sig::new(vec![any, any, int, int], bytes_ty),
+        &["password-bytes", "salt-bytes", "iterations", "key-len"],
+        "PBKDF2-HMAC-SHA256 key derivation over byte-sequence password and salt (raw bytes, not UTF-8 strings — a binary salt round-trips faithfully). Returns a key-len-byte bytes value. Use iterations >= 600000 for password storage.",
+        pbkdf2_sha256_fn);
+}
 
 /// Hash algorithm selector for `%digest` / `%hmac`, decoded from the leading
 /// keyword arg. This is the single place the kernel enumerates digest

@@ -128,7 +128,7 @@ what it always was — the interpreter never sees the opcode, and there is no
 per-instruction runtime check to pay for. The instruction carries the line only; the
 file comes from the executing arm's `CompiledArm::src_file`, which `exec_chunk`
 already holds, so nothing new is threaded through the hot executor. Hits land in one
-process-wide set (`crates/lisp/src/coverage.rs`) because green processes are
+process-wide set (`crates/lisp/src/diagnostics/coverage.rs`) because green processes are
 multiplexed across OS threads: a line executed by any process counts.
 
 The flag has to be set **before anything builds an `Interp`** — the prelude is

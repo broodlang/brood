@@ -1566,7 +1566,7 @@ sha256 pin still holds."
 ;; inode is stable across manifest rewrites. `/tmp` is the fallback when there is no
 ;; cache dir (no HOME), so an edit is always serialised.
 (defn- package-manifest-lock (root)
-  (let (dir (or (project/project-cache-dir root) "/tmp"))
+  (let (dir (or (project-check/project-cache-dir root) "/tmp"))
     (path/join dir (str "manifest-" (hash/sha256 root) ".lock"))))
 
 ;; Attempts are bounded so a pathological writer can't spin here forever; each retry

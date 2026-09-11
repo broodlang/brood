@@ -226,7 +226,7 @@ fn import_providers(interp: &mut Interp, root: &Node, src: &str, name: &str) -> 
         .filter(|g| !interp.heap.is_private(brood::core::value::intern(g)))
         .filter_map(|g| g.strip_suffix(&suffix).map(str::to_string))
         // A non-empty module (not a leading `/name` root escape). The `--` module-path
-        // guard is the separate private-*module* heuristic, kept as in `eval/mod.rs`.
+        // guard is the separate private-*module* heuristic, kept as in `eval.rs`.
         .filter(|m| !m.is_empty() && !m.contains("--"))
         .filter(|m| own.as_deref() != Some(m.as_str()))
         .filter(|m| !imported.iter().any(|i| i == m))

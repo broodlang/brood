@@ -623,7 +623,7 @@ module's namespace-rooted globals (ADR-070) back to it."
     (when (nil? root)
       (error "doctest: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (setup root)
-    (project/load-sources-cached root)
+    (project-image/load-sources-cached root)
     (doctest-report (collect-doctests (str *project-name* "/")))))
 
 (defn generate (& args)

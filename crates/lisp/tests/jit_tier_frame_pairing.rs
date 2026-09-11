@@ -60,7 +60,7 @@ const ALLOWED: &[(&str, &str)] = &[
          declines rather than overshoots",
     ),
     (
-        "crates/lisp/src/eval/compile/mod.rs",
+        "crates/lisp/src/eval/compile.rs",
         "arm construction only — initialises the field to false; it never reads it",
     ),
     (

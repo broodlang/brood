@@ -1477,7 +1477,7 @@ fn reader_promotes_out_of_range_integer_literal_to_bignum() {
 /// `(apply f …)` recursing on itself grew the Rust stack ~4 frames per
 /// level because `apply` → `apply_closure` → `eval(last)` recursed through
 /// native code rather than trampolining; with the `apply_with_tco` loop in
-/// `eval/mod.rs`, the recursion stays O(1) on the Rust stack.
+/// `eval.rs`, the recursion stays O(1) on the Rust stack.
 #[test]
 fn apply_tail_recursion_does_not_overflow() {
     let src = "

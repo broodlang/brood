@@ -1,7 +1,7 @@
 //! `nest release` mechanism — the runtime-resolution + target-triple plumbing
 //! behind the `cmd_release` orchestration in `main.rs` (ADR-038). Collection of
-//! the project's sources is *policy* (Brood: `project/bundle-collect`), and so is
-//! naming the artifacts (`project/release-plan`); byte assembly is in
+//! the project's sources is *policy* (Brood: `project-release/bundle-collect`), and so is
+//! naming the artifacts (`project-release/release-plan`); byte assembly is in
 //! `brood::bundle`. What is left here is the Rust glue that can only live in this
 //! binary: picking which base runtime to append to, out of the one embedded in
 //! *this* `nest` at install time, the local cache, or a `--runtime` path. Split out

@@ -212,7 +212,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;;   * The NUMERATOR is recorded by the kernel. `%coverage-lines` reads what the
 ;;     bytecode's `RecordLine` instructions logged — emitted at COMPILE time and only
 ;;     when coverage is armed, so an ordinary run's bytecode is unchanged. See
-;;     `crates/lisp/src/coverage.rs`, including why the tree-walking evaluator is NOT
+;;     `crates/lisp/src/diagnostics/coverage.rs`, including why the tree-walking evaluator is NOT
 ;;     a viable seam (a compiled body never goes through it).
 ;;   * The DENOMINATOR comes from the SAME place, not from the source text. Every
 ;;     `RecordLine` the compiler emits is registered as it is emitted, and

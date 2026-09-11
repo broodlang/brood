@@ -35,7 +35,7 @@
 //! # What consolidating them removed
 //!
 //! [`jit_spill_reserve`] and [`jit_ckpt_depth`] were each defined **twice**: a real version
-//! inside the jit-gated `jit_lower`, and a zero/`None` stub in `compile/mod.rs` for builds
+//! inside the jit-gated `jit_lower`, and a zero/`None` stub in `compile.rs` for builds
 //! without the feature. `jit_lower` *also* carried its own `#[cfg(not(feature = "jit"))]`
 //! copies, which could never compile at all — the module they sit in only exists when the
 //! feature is on. Four definitions, two of them unreachable; one each now.

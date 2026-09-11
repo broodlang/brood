@@ -25,7 +25,7 @@ is the same shape. The protocol is shared by every Brood→Brood call, so cuttin
 
 1. **Stage operands** `[callee?, arg0..argc-1]` onto `roots` — **one `brood_rt_push` FFI call per
    operand** (`compile/jit_lower.rs`; the callback is `brood_rt_push` in `jit/rt.rs`).
-2. **`brood_rt_call_slow`** (FFI, `jit/rt.rs`) → **`jit_dispatch_call`** (`compile/mod.rs`):
+2. **`brood_rt_call_slow`** (FFI, `jit/rt.rs`) → **`jit_dispatch_call`** (`compile.rs`):
    the IC probe (`vm_call_ic_fast_link`), `truncate_roots` + `extend_roots_to_nil` to lay out the
    callee frame, env save/restore, `jit_native_depth` bump, `transmute` + call the callee's native
    `fn(*mut Heap, base)`, then outcome handling (0=ok/3=err/1,2,4=deopt-preempt-tail).
@@ -188,7 +188,7 @@ against the uncapped spill (the regression cause is removed). Keep the conservat
 the benefit gate is revisited (that's the lever-2/allocation interaction, `allocation-elimination.md`).
 
 **DONE (2026-06-17) — Phase B / Phase 3 shipped, ~1.7× on fib.** The §6b self-inliner landed on top
-of Phase A: `shift_slots` + `inline_self_calls` + `self_inline_arm` in `compile/mod.rs`, gated exactly as
+of Phase A: `shift_slots` + `inline_self_calls` + `self_inline_arm` in `compile.rs`, gated exactly as
 designed (top-level no-capture recursive `defn`, no `SelfCall`/`MakeClosure`, fixed arity,
 `SELF_INLINE_MAX_BODY = 64`). fib(35) 0.53 → 0.31 s (~1.7×, ~4.4× → ~2.6× of Elixir); the inlined arm
 lowers to native (4 leaf calls, 3-handle spill — Phase A was the prerequisite). `BROOD_NO_INLINE=1`
@@ -211,7 +211,7 @@ structural lever after the incremental allocation levers measured neutral, devlo
 **SUPERSEDED (same day, 2026-06-17): the inliner shipped default-ON after all**, via two-stage
 tiering (dual-body: the VM keeps the small original, only the JIT runs the inlined body, with
 per-engine frame sizing + a deferred lower-priority inlined upgrade — see
-`crates/lisp/src/eval/compile/mod.rs` around `jit_tier`). `BROOD_JIT_INLINE=1` is gone; the lever is
+`crates/lisp/src/eval/compile.rs` around `jit_tier`). `BROOD_JIT_INLINE=1` is gone; the lever is
 now the opt-*out* `BROOD_NO_INLINE=1`.
 
 **UPDATE (2026-07-19): Phase 2 (leaf-callee inlining) implemented; default ON since the same
@@ -311,7 +311,7 @@ The original spec, as implemented:
 
 ## Technique A — increment 1 implementation spec (2026-06-18, code-grounded)
 
-Begun by reading the real code (`jit_dispatch_call` in `compile/mod.rs`, the `Inst::Call` lowering
+Begun by reading the real code (`jit_dispatch_call` in `compile.rs`, the `Inst::Call` lowering
 in `compile/jit_lower.rs`, `vm_call_ic_fast_link` + `CallIcEntry` heap.rs). Confirmed frontier with fresh `--bin`
 numbers: `jit_dispatch_call` = **40.9% of fib(35)**. The cost is the Rust dispatch itself (IC probe +
 frame setup + env/depth bookkeeping + the native call + outcome), not the FFI arg-staging (fib stages

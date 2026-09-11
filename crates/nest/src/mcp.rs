@@ -729,7 +729,11 @@ const RESOURCES: &[(&str, &str, &str)] = &[
         "Stable error codes (`E0010`, `E0030`, …) and the catch shape",
         include_str!("../../../docs/error-codes.md"),
     ),
-    ("brood://prelude", "Brood prelude source", brood::PRELUDE),
+    (
+        "brood://prelude",
+        "Brood prelude source",
+        brood::boot::PRELUDE,
+    ),
 ];
 
 fn list_resources() -> Vec<Json> {

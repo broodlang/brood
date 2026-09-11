@@ -348,7 +348,7 @@ where
     // joins on our behalf and, on a platform that needs it, hosts the event loop right here
     // if a window is ever opened. Where a dedicated GUI thread is fine this is exactly the
     // `join` it replaces, and the no-gui build's stub is literally that.
-    crate::gui::host_main_thread(handle, name)
+    crate::host::gui::host_main_thread(handle, name)
 }
 
 /// Warn once if this binary's baked-in standard library is **older than the tree it is

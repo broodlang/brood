@@ -69,7 +69,7 @@ Before starting new work:
   test that creates a `table` (its 64 MB virtual region is merely the mapping that lands on
   the wall; measured 2026-08-30 with `strace -e mmap`), and that failure is a Brood error
   naming the cap, not a runaway. 16 GB still catches the KI-87 class (19 GB processes).
-  **The wasm exception is GONE (2026-09-04) — do not re-add it.** `tests/wasm_sandbox_limits_test.blsp` used to fail under the cap even run alone, and `tests/wasm_test.blsp` intermittently beside it, so a capped run reporting those two was written off as "the cap, not a regression" — a standing exception that would have hidden a real sandbox regression. The cause was wasmtime RESERVING 4 GiB of address space per linear memory: eight small memories asked for 32 GiB and the sandbox reported the refusal as denying a module it is documented to allow. `crates/lisp/src/wasm.rs` now sets `memory_reservation(MAX_GUEST_BYTES)` — never reserve more than `GuestBudget` will ever let a guest use — and both files pass capped (7/7 and 15/15). A capped run that reds a wasm file is now a real failure. A *diverging* process is indistinguishable from a
+  **The wasm exception is GONE (2026-09-04) — do not re-add it.** `tests/wasm_sandbox_limits_test.blsp` used to fail under the cap even run alone, and `tests/wasm_test.blsp` intermittently beside it, so a capped run reporting those two was written off as "the cap, not a regression" — a standing exception that would have hidden a real sandbox regression. The cause was wasmtime RESERVING 4 GiB of address space per linear memory: eight small memories asked for 32 GiB and the sandbox reported the refusal as denying a module it is documented to allow. `crates/lisp/src/host/wasm.rs` now sets `memory_reservation(MAX_GUEST_BYTES)` — never reserve more than `GuestBudget` will ever let a guest use — and both files pass capped (7/7 and 15/15). A capped run that reds a wasm file is now a real failure. A *diverging* process is indistinguishable from a
   heavy one until it has eaten the machine: KI-87 (a checker cycle guard that un-guarded) put
   three test processes at 19 GB each and a `nest run` at 54 GB, crashing the box three
   sessions running; under the cap the same runs die in ten seconds with the panic site named
@@ -107,8 +107,8 @@ Concretely:
   `completions`/`complete`, `mcp` — and `stdimage`, which must build from a process where
   nothing but the prelude is loaded, and the dispatcher is a std module (KI-112).
   `release` is the one arm SPLIT rather than moved: what a release binary is called, which
-  names are refused and what the command prints are `project/release-plan` +
-  `project/release-report` in Brood, while the Rust side keeps what only this binary can
+  names are refused and what the command prints are `project-release/release-plan` +
+  `project-release/release-report` in Brood, while the Rust side keeps what only this binary can
   host — the runtime embedded in `nest` at install time, the byte assembly, the boot check.)
 - A Rust builtin is an admission that the language can't yet express something.
   Treat each one as a candidate to later replace with Brood once the language
@@ -147,8 +147,9 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   core/        substrate: value.rs (Value, Tag, symbol interner, Closure/Arity),
                heap.rs (per-process heap + shared regions: the Heap/ColdHeap/SharedCode
                records, construction, alloc, and the region-dispatching accessors)
-               with child modules heap/{gc.rs (roots/collection/RUNTIME-compaction/stats +
-               the tuning knobs), gc_runtime.rs, map_ops.rs (CHAMP ops), equality.rs
+               with child modules heap/{gc.rs (the tracing collector: collect, minor/major,
+               the heap verifier — with its own children gc/{roots, accounting, flush, stall,
+               tuning, tests}.rs), gc_runtime.rs, map_ops.rs (CHAMP ops), equality.rs
                (equality/compare/hash), vm_cache.rs (VM body cache + inline caches + the
                shared JIT code cache), facts.rs (side facts, ADR-320), positions.rs (form
                positions, compile context, def sites + name facts), env_globals.rs (the env
@@ -168,13 +169,19 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                map trie), table.rs (shared mutable table — Brood's ETS, ADR-107), sync.rs
   syntax/      reader.rs (text -> Value), scanner.rs, printer.rs, and the tooling
                CST (atom.rs / cst.rs / scope.rs)
-  eval/        mod.rs (evaluator — a `'tail: loop` for tail calls + special forms),
-               compile/ (the closure-compiling VM — the default engine, ADR-076),
-               split into files (all child modules of compile/mod.rs — `use super::*` +
+  eval.rs + eval/   eval.rs (evaluator — a `'tail: loop` for tail calls + special forms),
+               compile.rs + compile/ (the closure-compiling VM — the default engine, ADR-076),
+               split into files (all child modules of compile.rs — `use super::*` +
                `pub(crate) use child::*`):
                  - ir.rs — IR types: PrimOp/PrimOp1, ConstVal, Node, CompiledArm/Closure, Chunk/Inst
-                 - mod.rs — the compiler front-end (compile_arm, compile_node) + shared
-                   IR walkers + run/apply entry points + BcFrame/Suspended
+                 - compile.rs — the tier ceiling, the run/apply entry points +
+                   BcFrame/Suspended, and the child-module map
+                 - lower.rs — the compiler front-end (Scope, compile_node, the compile_*
+                   helpers per special form, the resolve_prim* recognisers)
+                 - walkers.rs — the shared Node-tree walkers (walk_children, local_escapes,
+                   the element-read rewrite)
+                 - closure.rs — compile_arm/compile_closure, the shared body cache
+                   (cache_key/probe_arm_for, ADR-175/215), precompile, the hof_* fast paths
                  - emit.rs — emit_node/compile_chunk (Node → bytecode)
                  - exec_value.rs — exec_value + prim exec helpers (Node tree-walk)
                  - dispatch.rs — the VM arm dispatcher (Call/SelfCall, IC, JIT fast path)
@@ -186,55 +193,93 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                    with or without a JIT) + a `codegen` submodule, gated once, for the
                    subset rule, the profitability gate (plan_general_lowering/BailReason),
                    LICM analysis and the alloc predicates
-                 - jit_runtime.rs — JIT tiering glue (feature = "jit")
+                 - jit_runtime.rs — JIT tiering glue (feature = "jit"): jit_tier_in_frame +
+                   children jit_runtime/{compiler (the background compile thread), support
+                   (global resolution, stack headroom), link (fast link + inline xcall),
+                   dispatch (Brood→Brood call/tail from native), deopt (frame shapes,
+                   checkpoint resume, deopt/suspend feedback)}.rs
                  - jit_lower.rs — jit_lower_arm / jit_lower_arm_inner: the Cranelift
                    lowering, i.e. `jit::JitBackend`'s implementation (feature = "jit").
                    Lives under `compile/` rather than `jit/` because it reads compile's
                    private IR; it decides nothing — see jit_plan.rs
                macros.rs (quasiquote, macroexpand, the compile pass + pattern lowering)
-  types/       mod.rs (Ty/GradualTy set-theoretic lattice), check.rs + check/
-               (advisory checker)
-  builtins/    functions implemented in Rust (the primitive kernel); split into:
-               mod.rs (Reg struct, pub fn register, PRIMITIVE_DOCS, shared helpers),
-               numeric.rs (numeric/bitwise/bitset/math), sequences.rs (pair/list/range/
-               seqview/vector/map/string/rope), io.rs (TCP/table/print/time/fs/hashing/
-               git/crypto), os.rs (env/hostname/os-cmd/run-process/halt), terminal.rs
-               (terminal + GUI, feature-gated), system.rs (eval/load/processes/dist/
-               dynamic/namespaces) + selfhost_macros.rs (macroexpand/check) + tooling.rs
-               (source-positions + introspection, editor/LSP) + errors.rs (throw/try).
-               All submodules use glob re-export (`use X::*`) so register() is untouched
+  types.rs + types/   types.rs (Ty/GradualTy set-theoretic lattice), sig.rs, display.rs,
+               check.rs + check/ (the advisory checker; walk.rs is the dispatch with
+               walk/{shape, calls, binders, unbound, impls}.rs beneath it; its tests are
+               check/tests.rs — the shared harness — plus one themed file per slice under
+               check/tests/)
+  builtins.rs + builtins/   the primitive kernel, one file per domain. EVERY domain file
+               owns both its implementations and its registrations — a
+               `register(&mut Primitives)` listing each name/arity/sig/arglist/docstring
+               it contributes — so a primitive is a one-file edit; builtins.rs is the
+               `Primitives` registrar, the `expect!` macro and the roll-call, and
+               signature_types.rs the `Ty` shorthands the signatures are spelled in.
+               Domains: numeric (numeric/bitwise/bitset/math + number parsing), sequences
+               (pair/list/range/seqview/vector/map), string (case/normalize/graphemes/
+               codepoints/utf-8/substring scans), rope (the editor buffer text), io (console
+               I/O, stdout capture, MCP progress, the stdin reader), filesystem, sockets
+               (`%tcp-*`/`%tls-*`), table (Brood's ETS), subprocesses (child OS processes),
+               os (env/hostname/os-cmd/run-process/halt/time), bytes (+ the iolist
+               flattener), compress, crypto, clipboard, pkg (package fetch mechanism),
+               terminal (terminal + GUI surface — one registration table over
+               terminal/native.rs and the wasm32 stub terminal/wasm.rs), source
+               (read/parse/CST/definition scan), treesit, evaluation (eval/load/
+               reload-defs/%isolate/eval-in), modules (the CORE_MODULES/DEV_MODULES
+               catalogue, namespaces, refer/alias/privacy, bundle manifest), processes
+               (spawn/send/monitor/registry/sysmon/introspection), nodes (distributed
+               nodes), dynamic (defdyn/binding), build_info (version/build id/features),
+               diagnostics (profiler/coverage/trace context/gc + vm stats/memory limits),
+               offload (ADR-144 pool), wasm (feature "wasm"), selfhost_macros
+               (macroexpand/check), tooling (source-positions + introspection, editor/LSP),
+               syntax_scan (editor highlight scanning), errors (throw/try). The four image
+               prims are registered by boot/image.rs, which owns that mechanism.
+  boot.rs + boot/   how a runtime comes to hold the prelude: the shared `SHARED` bundle,
+               the three boot paths (prelude image ADR-314 / text cache ADR-138 / source),
+               `PRELUDE` (std/prelude/*.blsp concatenated in order), `boot_source()`;
+               boot/image.rs the startup-image mechanism (ADR-218: the sectioned stdlib
+               image + the prelude image)
   introspect.rs  doc/arglist/global-names/bound? and friends (ADR-025)
   cli_support.rs file-runner / --test plumbing shared by the binaries
   process.rs + process/   green-process scheduler (mailbox, message, monitor, links,
                timer, sysmon, io_source) with the scheduler itself split under
                process/scheduler/ (pool, lifecycle, guards): spawn/send/receive/monitor
-  subprocess.rs   persistent child-OS-process mechanism (ADR-104) — distinct from
-               process.rs (green processes); renamed from proc.rs to end the name clash
   dist.rs + dist/   distributed nodes (handshake, heartbeat, wire) — ADR-033/034
-  net.rs       thin non-blocking TCP socket mechanism (ADR-062); Brood policy is
-               the in-tree `std/net/*` library (net_wasm.rs is the wasm32 shim)
-  wasm.rs      embedded `wasmtime` host — `%wasm-*` load/call/exports, WIT-typed
-               lower/lift + fuel metering (ADR-071/145; Brood policy `std/wasm.blsp`)
-  treesit.rs   tree-sitter integration for the editor highlighter (std/editor/treesit.blsp)
+  host.rs + host/   the feature-gated machine bindings — mechanism only, policy is Brood:
+               net.rs thin non-blocking TCP socket mechanism (ADR-062; the in-tree
+               `std/net/*` library is the policy; net_wasm.rs is the wasm32 shim);
+               subprocess.rs persistent child-OS-process mechanism (ADR-104) — distinct
+               from process.rs (green processes); wasm.rs embedded `wasmtime` host —
+               `%wasm-*` load/call/exports, WIT-typed lower/lift + fuel metering
+               (ADR-071/145; policy `std/wasm.blsp`); treesit.rs tree-sitter for the
+               editor highlighter (std/editor/treesit.blsp); clipboard.rs the OS clipboard
+               (feature "clipboard", no-ops without it); gui.rs + gui/ the GUI
+               frontend (ADR-046): gui.rs the Op/Key/Mouse vocabulary + the feature
+               switch, gui/disabled.rs the no-`gui` stub, gui/backend.rs the winit event
+               loop + window registry with gui/backend/{input,render,paint}.rs (event
+               translation, the cosmic-text renderer + glyph cache, frame painting +
+               damage), gui/gpu.rs the experimental OpenGL path; audio.rs `audio-beep`;
+               text_width.rs display-cell width of text, shared by the
+               `string/display-width` builtin and the GUI renderer so the two cannot
+               disagree about a cluster
+  diagnostics.rs + diagnostics/   the observability instruments: coverage.rs
+               line-coverage instrumentation (ADR-148); perf.rs/profile.rs VM counters
+               and the sampling profiler; debug_flags.rs the `BROOD_*` catalogue behind
+               `brood --debug-flags`
   bundle.rs    single-binary app bundling (ADR-038) + the RESERVED `--brood-` argv
                namespace a bundle honours in first position (ADR-257): `--brood-build-info`
-               and `--brood-boot-check`. Everything else in argv is the app's;
-               gui.rs the GUI frontend (ADR-046);
-               gui_gpu.rs the experimental OpenGL backend; audio.rs `audio-beep`
-  jit/         the JIT's ABI + backend registry (feature = "jit", ADR-101/220):
+               and `--brood-boot-check`. Everything else in argv is the app's
+  jit.rs + jit/   the JIT's ABI + backend registry (feature = "jit", ADR-101/220):
                backend.rs (the `JitBackend` contract — six obligations a backend must
                satisfy), rt.rs (the `brood_rt_*` callback table, the ONLY heap/GC interface
                native code has — backend-independent), cranelift.rs (`CraneliftBackend`:
-               the Cranelift `JITModule` owner + the impl), mod.rs (sentinels +
+               the Cranelift `JITModule` owner + the impl), jit.rs (sentinels +
                `ActiveBackend`). The lowering itself is `eval/compile/jit_lower*`
   renames.rs   the rename ledger — where a deliberately renamed public name went (ADR-304),
                so a downstream `unbound symbol` can name its replacement
-  text_width.rs display-cell width of text, shared by the `string/display-width` builtin and
-               the GUI renderer so the two cannot disagree about a cluster
-  coverage.rs  line-coverage instrumentation (ADR-148); perf.rs/profile.rs VM counters;
-               debug_flags.rs the `BROOD_*` catalogue behind `brood --debug-flags`
   error.rs     LispError / LispResult / source Pos
-  lib.rs       the `Interp` entry point; bundles std/prelude/*.blsp (concatenated in order)
+  lib.rs       the module map + the `Interp` entry point (boot lives in boot.rs)
+  Module convention: a parent is `foo.rs` beside its `foo/` directory (never `foo/mod.rs`);
+  children reach the parent's private items via `use super::*`.
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
 crates/nest/src/         the `nest` binary — project tooling (main.rs + mcp.rs) — ADR-028
 crates/lsp/src/main.rs   the `brood-lsp` binary — language server (ADR-025, docs/lsp.md)
@@ -246,7 +291,7 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          and documents the surface; the ops are Rust, registered as
                          `bit/and`, `decimal/of`, `proc/register`, the way
                          `string/length` always has been.
-                         prelude/ (split across ~9 bare-root files (core, predicates, map, …), concatenated in the order lib.rs lists) + ~30 bare-core modules (io, file, set, regex,
+                         prelude/ (split across ~9 bare-root files (core, predicates, map, …), concatenated in the order boot.rs lists) + ~50 bare-core modules (io, file, set, regex,
                          json, format, task, log, version, resolver, crypto, hash, csv,
                          datetime, encoding, url, uuid, template, stream, …); the
                          perf-triage module `std/tool/perf.blsp` (`perf/report`,
@@ -259,15 +304,21 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          disk but with BARE (single-segment) module names, so a qualified
                          call is `gen/spawn-server`, `http/get`, `test/run` — never a
                          double slash (test, project, package, complete, coverage, debug,
-                         docs, eval-server, explain, grammar, mcp, observer, proctree,
-                         nest, repl, scaffold, sexp, reload). `std/editor/*` is the one
+                         dev, docs, doc-catalog, docsite, doctest, eval-server, explain,
+                         grammar, mcp, observer, proctree, nest, repl, scaffold, sexp,
+                         reload, renames, stdimage, audit, codemod, workspace, and the
+                         project tool split by concern: project (the model), project-image,
+                         project-check, project-run, project-release) — grouping
+                         on disk is by what a module is FOR, not by feature gate: `dev`,
+                         `docsite` and `doc-catalog` are CORE modules that live under
+                         `tool/` because they are tooling. `std/editor/*` is the one
                          exception — it keeps the `editor/` prefix (a cohesive framework
                          whose names, `buffer`/`ui`/`pane`/`ansi`, are deliberately generic
                          and would collide/land-grab bare; `ansi` already exists top-level). The
                          net library and `supervisor` were briefly externalized (Move 2)
                          then re-bundled in-tree (ADR-097, batteries-included default);
                          the Rust socket *mechanism* stays in-tree too
-                         (`crates/lisp/src/net.rs`, ADR-062). The REPL is Brood too
+                         (`crates/lisp/src/host/net.rs`, ADR-062). The REPL is Brood too
                          (`std/tool/repl.blsp`, ADR-048); the binaries bootstrap
                          into `(repl-run)`.
 docs/                    architecture, language, roadmap, decisions, devlog,
@@ -277,7 +328,8 @@ docs/                    architecture, language, roadmap, decisions, devlog,
 
 The CLI is split (ADR-028, the `rustc`/`cargo` model): **`brood` runs the
 language**, **`nest` runs the project**. Both embed the `brood` lib (no
-subprocess); `nest` is a thin shell over `std/tool/project.blsp`. `nest` subcommands
+subprocess); `nest` is a thin shell over `std/tool/nest.blsp` and the `project*` modules
+(`project` the model, `project-image`, `project-check`, `project-run`, `project-release`). `nest` subcommands
 today: `new`, `test`, `check` (with `--fix-renames`, which applies the *unambiguous* half of
 a rename wave's recovery, consulting the rename ledger first — ADR-304), `run` (refuses to launch over an *unbound symbol* in the entry point's require-closure — the checker already ran there and bedit ignored it for hours; `--no-check` skips the pre-flight, ADR-304 — with `--watch`, and `--check-boot`: load every
 module, resolve `:main`, run **nothing**, exit nonzero — the question `check` and `test`
@@ -506,7 +558,7 @@ contention races).
 | `BROOD_RT_GC_FLOOR=<count>` | Threshold floor (RUNTIME closures) for reclaiming the shared code region — single-process compaction when uniquely owned, else the unconditional 2-generation collector (ADR-091; default 4096). The shared-region counterpart of `BROOD_GC_FLOOR`. |
 | `BROOD_TRACE_COMPILE=1` | Name every closure the VM **bytecode-compiles**, with its cache key and body region (`[compile] id_region=… key=Body(…) body=…`). The question it answers: is a compiled body being *reused*? A key repeated once per process means the shared cache is missing — which is exactly how ADR-215 was found (100 154 compiles for 100 000 spawned processes, 8.1 µs each). Works in release; compiles are rare once sharing works, so the check is free. |
 | `BROOD_NO_SHARED_ARMS=1` | **Opt-OUT** of runtime-shared compiled code (ADR-175 + ADR-215): every process compiles its own copy of every closure it calls, as before. The A/B lever and the bisect switch for a suspected stale-shared-arm fault; `spawn-live` costs 25% more CPU and 14% more RSS with it set. |
-| `brood --debug-flags` | Not a flag — **the list of them.** Prints **every** `BROOD_*` the runtime reads, from `crates/lisp/src/debug_flags.rs`, grouped with the triage groups first (attribution / JIT / optimizer levers / GC / scheduler / engine) and the rest after (diagnostics-and-checking / host environment), with a dependency's flags marked `[not brood's]`. Exists because this table is the only place the flags were documented and it does not ship in the binary. **Both directions are gated by tests** (2026-09-04): every catalogued name must still exist in the source, so a rename cannot leave a line telling you to set something the runtime ignores; and every `BROOD_*` read under `crates/*/src` or `std/` must be catalogued, so the gap cannot re-open. It had re-opened to 43 of 101 — the worker count, the reduction budget and every GC tuning knob were undocumented here on the theory that the printed list should stay a *performance* subset, which is exactly what they are. Build-time names (`BROOD_GIT_SHA`, `BROOD_STDLIB_HASH`, `BROOD_EMBED_RUNTIME`) are exempted by an explicit allow-list, not by omission. |
+| `brood --debug-flags` | Not a flag — **the list of them.** Prints **every** `BROOD_*` the runtime reads, from `crates/lisp/src/diagnostics/debug_flags.rs`, grouped with the triage groups first (attribution / JIT / optimizer levers / GC / scheduler / engine) and the rest after (diagnostics-and-checking / host environment), with a dependency's flags marked `[not brood's]`. Exists because this table is the only place the flags were documented and it does not ship in the binary. **Both directions are gated by tests** (2026-09-04): every catalogued name must still exist in the source, so a rename cannot leave a line telling you to set something the runtime ignores; and every `BROOD_*` read under `crates/*/src` or `std/` must be catalogued, so the gap cannot re-open. It had re-opened to 43 of 101 — the worker count, the reduction budget and every GC tuning knob were undocumented here on the theory that the printed list should stay a *performance* subset, which is exactly what they are. Build-time names (`BROOD_GIT_SHA`, `BROOD_STDLIB_HASH`, `BROOD_EMBED_RUNTIME`) are exempted by an explicit allow-list, not by omission. |
 | `BROOD_PERF_STATS=1` | Dump the VM work-attribution counters (`(vm-stats)`) to stderr after a file/`--test` run — closure activations, IC hit/miss, prim inline/fallback, env-chain hops, allocs, defers — **plus the `ns_*` TIMING accumulators** (`perf_time!`: spawn, deliver, message copy in/out, receive, matcher resolve, teardown, and one scheduler quantum, which nests the rest). **Needs `--features perf-stats`** (else prints a hint; both compile to nothing by default). The counts answer "how much work"; the `ns_*` shares answer "**where**" — read shares of `ns_quantum`, not a sum, and confirm any winner with a counter-free A/B, since the atomics perturb timing. See `docs/benchmarking.md`. |
 | `BROOD_JIT_DUMP_IR=1` | Dump each fully-lowered JIT arm's **bytecode opcode fingerprint + Cranelift CLIF** to stderr (`[jit-ir]` lines), for diagnosing a JIT miscompile — read the IR, diff against the intended semantics. **Needs `--features jit`**; only fires for arms that lower (a bailed arm never reaches the dump — pair with `BROOD_JIT_BAIL_TRACE` for the refusals). Run a *targeted* program to limit which arms compile. Since 2026-08-11 the **scalar-register worker reports too** (`scalar-register: i64\|f64` in place of `ckpt_slot:`, no CLIF — its IR is built and finalized in one pass): it previously emitted nothing, so `fib`/`pfib` — the arms it wins biggest on — read as never-lowered here, and an arm that stopped taking that path was invisible to every gate but a benchmark. |
 | `BROOD_JIT_BAIL_TRACE=1` | Name each arm a lowering **refuses or demotes**, with the reason (`[jit-bail] arm=<name> reason=…` — the profitability gate's `call-mediated-boxed` (`jit_plan::plan_general_lowering`), pre-checks like `chunk-outside-jit-subset`, mid-emit refusals like `call-spill-exhausted`, and runtime demotions like `deopt-thrash-latched` and `suspend-latched`). The complement of `BROOD_JIT_DUMP_IR`: that tool shows what lowered, so a refusal was only ever visible as *absence* — indistinguishable from an arm that was never hot or never tried. Reach for it when a row is slower than expected and you want to know whether the hot arm was rejected on purpose. **Needs `--features jit`**; one cached `var_os` when off. |
@@ -546,7 +598,7 @@ contention races).
 | `MIMALLOC_PURGE_DELAY=0` | Not ours — mimalloc's own env option. The allocator holds freed pages, so RSS on a churny workload sits above the live working set; setting this recovers **17%** on a light workload and **~2.3×** on a heavy-churn one, for ~4% throughput. Live data in those runs was ~59 KB against hundreds of MB of RSS, so **RSS is not a proxy for live bytes on this runtime**. The default is the deliberate "spend memory for speed" choice (devlog 2026-06-15). See `docs/runtime-frontier.md` A8 — and note that entry's warning: measure with a FIXED iteration count, never a fixed duration. |
 | `BROOD_NO_RECV_MARK=1` | **Opt-OUT** of the **receive-mark** (ADR-195) — default ON since 2026-07-30. A `receive` whose clauses all pin a `ref` this process minted starts its scan past every message that predates the ref (sound: a message enqueued before the ref existed cannot carry it), making a request/reply receive O(1) in the mailbox backlog instead of O(backlog): 32k backlog costs 4 µs armed, 262 µs with this set. Reach for it as the A/B lever, to bisect, or as the stopgap if a message is ever suspected of being skipped — which is why this one has a switch at all: a wrong skip does not crash, it silently fails to deliver. |
 | `BROOD_NO_SHARE_FN=1` | **Opt-OUT** of handing an **already-shared closure** across a local send by handle instead of deep-copying its code (`copy_cross_heap`, the L1 parked-receiver path) — default ON since 2026-07-30. Only fires for a closure that is already a RUNTIME-region value (one capturing **no locals**, e.g. the idiomatic `:start (fn () (spawn-link (worker)))`) and only between processes of the **same** runtime; a capturing closure and every cross-node send still copy. Worth 2.4× on supervised `start-child` and 6 µs vs 54 µs per closure send. Set it to A/B, to bisect, or as the stopgap if a shared handle is ever implicated in a fault. **Deliberately does not promote a local closure to make it shareable** — measured, that grows the append-only RUNTIME region proportionally to closures sent (541 MB at 800k transient sends vs 150 MB); see `docs/runtime-frontier.md` A3 before re-attempting. |
-| `BROOD_DBG_CONST=1` | Trace JIT constant-pool decisions (`jit/mod.rs`). For diagnosing a wrong-constant miscompile. **Needs `--features jit`**. |
+| `BROOD_DBG_CONST=1` | Trace JIT constant-pool decisions (`jit.rs`). For diagnosing a wrong-constant miscompile. **Needs `--features jit`**. |
 | `BROOD_GUI_GPU=1` | Select the experimental **OpenGL** render backend at *runtime*, so one installed binary can default to softbuffer and opt into the GPU path per run (build with `--with-gui-gpu`). |
 | `BROOD_GUI_MAIN_THREAD=1` | Host the winit event loop on the **process main thread** instead of the dedicated `brood-gui` one. **Forced on macOS/Windows and not switchable off there** — AppKit's run loop is main-thread-only and winit's `with_any_thread` escape hatch is Wayland/X11-only, which is why `brood/gui` did not compile for macOS at all until 2026-09-11 (KI-125). On Linux the dedicated thread stays the default and this is the lever that makes the *other* path runnable: there is no macOS in this project's CI beyond a compile check, so without it the main-thread code would ship having never executed. Verify by thread name — with it set there is **no `brood-gui` thread** and the loop runs on tid == pid, with a `brood-main-join` waiting on the runtime. Costs nothing when unset (one cached `var`). |
 | `BROOD_GUI_HEADLESS=1` | Run the GUI/display layer with no real window — also silences audio, so a windowing/audio test stays safe on a headless CI box. |
@@ -555,8 +607,8 @@ contention races).
 | `BROOD_NO_STDIMAGE=1` | **Opt-OUT** of the stdlib **startup image** (ADR-256/281) — **default ON since 2026-08-28**. A `require`d std module materialises its bindings from `~/.cache/brood/std-image-<stdlib-id>.bin` instead of re-reading and re-evaluating its source: `json` 6.5 → 1.7 ms, `http` 12.0 → 3.6 ms, and a three-module **script 46.5 → 36.2 ms** — a saving a short-lived run pays on every invocation, where a long-lived one amortises it away. Safe by construction: the key is a **content hash** of every baked-in `.blsp` plus the git sha, so a stale image cannot be read, and with none present `install` returns nil in ~30 µs. The runtime never BUILDS one (~1 s, which would land on the short-lived runs it helps); **`nest` writes it**. Stands aside under `BROOD_COVERAGE` — coverage instruments the compiler, and a materialised module is never compiled. It was default-on once before and reverted the same day (KI-72); what justifies the flip now is not that one fix but **ADR-280's differential**, which loads every module from source and from the image and requires the resulting state to match — the first construction-level gate this feature has had. **The trap to know:** the id moves with every commit and every `std/` edit, so an image silently goes stale and the run you believe is imaged is reading source. That is not only a speed question — the source path is a documented amplifier for KI-89, and deleting the images took a green 5514-test `nest test` to **106 failures in 469 s**. **Since 2026-09-04 four things say so out loud, so stop diagnosing this by experiment:** the suite summary prints `(stdlib image: N sections)` or `none — std/ loaded from SOURCE` with the reason; `make doctor` §4 asks each binary directly; `nest` prints one line when it *rebuilds* the image, because that command itself ran from source; and `(stdimage/status)` now carries **`:installed`** — what THIS process materialised at boot — beside `:state`, which reads the disk NOW. Read `:installed` when you want to know what a run actually did; the two disagree exactly when it matters. Note `scripts/build-std-image.sh` defaults to the **debug** profile: pass `release` when the binary you are about to run is `target/release`, or it writes a perfectly good image for the other binary and reports success (it now names which). |
 | `BROOD_IMAGE_TRACE=1` | Name every module actually **materialised from an image** (`[image] json`), and time the boot install. The complement to the section-load line, which reports only that a section was read: this is what distinguishes a module served by the image from one that loaded from source anyway. **Reach for it before believing any image measurement** — a suite that reports "99 sections installed" and 0 `[image]` lines has exercised none of the image path. Works in release. |
 | `BROOD_NO_PRELUDE_IMAGE=1` | **Opt-OUT** of the **prelude image** (ADR-314) — **default ON since 2026-09-04**. A warm boot materialises the prelude's ~808 bindings from `~/.cache/brood/prelude-expanded-<id>.img` instead of reading and evaluating the 544 expanded forms in the text cache beside it: release boot **21.6 → 13.5 ms**, `make ab --floor` reads **`startup` −11.1%** (0.0% floor) with `pipeline` −13.5%, `sieve` −7.3%, `reduce` −7.1%, `strings` −6.8%, `errors-deep` −6.7% and **no regression on any of 30 rows**. Set it to fall back to ADR-138's text cache (which itself falls back to the source boot), for an A/B or to bisect a suspected bad artifact; CI's tree-walker job sets it so the text path keeps deliberate coverage. **It shipped default-on twice before and was reverted the same day both times**, each on a fact the evaluation *records* rather than binds: KI-105 (a stale stdlib section directory restored from the image — `%std-image-reinstall!`) and KI-106 (the registry-name set was not carried, so a multi-file `nest check` lost every derived multimethod mirror). Both fixed with sabotage-verified guards; the boot differential compares the registry set; and **`make check-imaged` runs the project's own checker gate with the image on**, because every test written *for* the image passed while KI-106 was live. The cold boot is unaffected by design — it does the full source boot and writes both artifacts. Stands aside under `BROOD_COVERAGE` (a materialised binding is never compiled). The trap to know: this restores **bindings**, so anything the evaluation merely *recorded* — `defdyn` marks, def sites, `meta`, privacy, registry marks — has to be written explicitly; five of those were missed in a row while building it. |
-| `BROOD_NO_CHECK_CACHE=1` | Bypass the incremental `nest check` result cache (ADR-129) — recheck everything from scratch. Reach for it when a checker change is in flight and cached results would mask it. Implemented in `std/tool/project.blsp`. |
-| `BROOD_TEST_NO_SCOPE=1` | Revert `nest test` from the default **per-file scoped** run (each file `load`ed inside its own `%isolate`) to the legacy load-all-then-run-all path. The escape hatch for a suite that genuinely relies on cross-file top-level `def`s; also the A/B lever for the promoted-code accumulation the scoped path fixed. Presence-checked, so any value enables it. Implemented in `std/tool/project.blsp`. |
+| `BROOD_NO_CHECK_CACHE=1` | Bypass the incremental `nest check` result cache (ADR-129) — recheck everything from scratch. Reach for it when a checker change is in flight and cached results would mask it. Implemented in `std/tool/project-check.blsp`. |
+| `BROOD_TEST_NO_SCOPE=1` | Revert `nest test` from the default **per-file scoped** run (each file `load`ed inside its own `%isolate`) to the legacy load-all-then-run-all path. The escape hatch for a suite that genuinely relies on cross-file top-level `def`s; also the A/B lever for the promoted-code accumulation the scoped path fixed. Presence-checked, so any value enables it. Implemented in `std/tool/project-run.blsp`. |
 | `BROOD_HISTORY=<path>` | Override where the REPL stores its history (`std/tool/repl.blsp`). |
 | `RUST_BACKTRACE` | `brood`/`nest` **default it to `1`** (set in each `main`); `RUST_BACKTRACE=0` opts out, `full` for verbose. |
 
@@ -708,9 +760,10 @@ co-author trailer, overriding any default that would append one.
 
 ## When you add a feature
 
-1. Implement it (special form in `eval/mod.rs`, or builtin in `builtins.rs`, or
-   prelude fn in `std/prelude/*.blsp` — nine bare-root files concatenated in the order
-   `lib.rs` lists, NOT the single `std/prelude.blsp` that older docs name).
+1. Implement it (special form in `eval.rs`; a builtin in its `builtins/<domain>.rs` —
+   implementation AND registration in the same file; or a prelude fn in
+   `std/prelude/*.blsp` — nine bare-root files concatenated in the order `boot.rs`
+   lists, NOT the single `std/prelude.blsp` that older docs name).
 2. Add tests — an `(assert= …)`/`(is …)` inside a `(test …)` within a `describe`
    block in a `tests/*_test.blsp` file (in-language, via the `std/tool/test.blsp`
    framework: open the file with `(defmodule foo-test (:use test) (:use foo))`
@@ -863,7 +916,7 @@ process viewer; **M4 server/daemon** — distributed nodes (TCP, location-transp
 `send`, monitors, closure-shipping, HMAC handshake) plus a userland
 `std/proc/supervisor.blsp` (kernel-supervised processes were tried and reverted — see
 roadmap/ADR-039). **Native WASM interop** shipped too (ADR-071/145): an embedded
-`wasmtime` host with WIT-typed marshalling + fuel metering (`crates/lisp/src/wasm.rs`,
+`wasmtime` host with WIT-typed marshalling + fuel metering (`crates/lisp/src/host/wasm.rs`,
 `std/wasm.blsp`), plus an in-browser playground built on the wasm32 target
 (`crates/playground`). The editor app itself is a separate downstream project, out of
 scope for this repo and its roadmap. **M4 is delivered** — this line used to end "still ahead

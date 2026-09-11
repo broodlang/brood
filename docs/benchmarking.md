@@ -32,7 +32,7 @@ next to each other; `scripts/bench_ratio.py` pairs them by `(bench, size)`. What
 matters is one process, not one screen line.)
 
 The grid is built from `Tier::ALL` and the labels come from `Tier::short()`
-(`eval/compile/mod.rs`), so a new tier gets rows in every eval bench and a column in
+(`eval/compile.rs`), so a new tier gets rows in every eval bench and a column in
 `bench_ratio.py` without either being edited. `Tw` stays the reference — it is the stable
 baseline the method rests on, not a tier under test.
 
@@ -124,7 +124,7 @@ scripts/ab-bench.sh --floor fib loop collatz   # the default ceiling, single-thr
 ## 2. Attribution — where the VM spends work
 
 Build with the `perf-stats` cargo feature to arm process-global work counters
-(`crates/lisp/src/perf.rs`). **Off by default** — every counter compiles to
+(`crates/lisp/src/diagnostics/perf.rs`). **Off by default** — every counter compiles to
 nothing, so normal builds and the timing benches pay zero cost.
 
 ```bash

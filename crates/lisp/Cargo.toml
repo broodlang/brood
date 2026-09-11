@@ -45,7 +45,7 @@ dev-tools = []
 # raw CPU framebuffer, and cosmic-text shapes + rasterises glyphs (with font
 # fallback and color emoji, via its bundled swash) into the monospace cell grid.
 # The display *protocol* is unchanged Brood data (render ops); these just paint it
-# to a window instead of a terminal. See src/gui.rs and std/tool/observer.blsp's `(observe)`.
+# to a window instead of a terminal. See src/host/gui.rs and std/tool/observer.blsp's `(observe)`.
 gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "clipboard"]
 # Audio output (the `audio-beep` builtin), via `rodio`. OPT-IN and independent of
 # `gui` on purpose: rodio→cpal links `libasound.so.2` as a hard runtime dependency
@@ -69,7 +69,7 @@ gui-gpu = ["gui", "dep:glow", "dep:glutin", "dep:raw-window-handle"]
 # stack. `arboard` keeps a process-lifetime handle so an X11/Wayland paste survives
 # while the editor runs (the selection owner must stay alive to serve paste requests).
 clipboard = ["dep:arboard"]
-# VM work-attribution counters (src/perf.rs): allocations, call/IC hit-miss,
+# VM work-attribution counters (src/diagnostics/perf.rs): allocations, call/IC hit-miss,
 # prim inline-vs-fallback, self-tail-calls, env-get chain hops, tree-walker
 # defers. Off by default — every counter compiles to nothing, so a normal/release
 # build and the timing benches carry ZERO cost. Build with `--features perf-stats`
@@ -104,7 +104,7 @@ jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "de
 # language grammar — the kernel deliberately knows no specific language. A grammar
 # is opt-in: `--features treesit-ruby` (or `treesit-grammars` for the lot) links
 # its vendored C parser and lights up `:ruby` in `tree-sitter-parse`. Add a
-# language = a `treesit-<lang>` feature here + one cfg'd arm in `src/treesit.rs`.
+# language = a `treesit-<lang>` feature here + one cfg'd arm in `src/host/treesit.rs`.
 # (Dynamic runtime grammar loading — no compile-time enum at all — is the planned
 # end state; see ROADMAP.md.)
 treesit = ["dep:tree-sitter", "dep:tree-sitter-language", "dep:libloading"]

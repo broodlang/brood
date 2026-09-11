@@ -58,8 +58,8 @@ the call can go straight to the impl.
 `crates/lisp/src/lib.rs:463-483`.
 
 The compiler lowers each macroexpanded form into a `Node` IR via `compile_node`
-(`eval/compile/mod.rs:736`). An ability call is an ordinary `Node::Call` on
-`Node::Global(op)` (`compile/mod.rs:984-1015`). There is already a Node→Node optimizer
+(`eval/compile.rs:736`). An ability call is an ordinary `Node::Call` on
+`Node::Global(op)` (`compile.rs:984-1015`). There is already a Node→Node optimizer
 seam — `eval/compile/inline.rs` (linear-map rewrite, self/leaf inlining;
 `call_head_sym` at `inline.rs:26` extracts a call's resolved global symbol and is
 directly reusable). **The rewrite belongs here**: when the flag is on and the target is
@@ -125,7 +125,7 @@ won't move hot-loop benchmarks. *Decision pending — the user is returning to t
 
 ## Flag pattern
 
-Off-by-default, cached, Rust-side — copy `hof_fast_enabled` (`eval/compile/mod.rs:1710`):
+Off-by-default, cached, Rust-side — copy `hof_fast_enabled` (`eval/compile.rs:1710`):
 
 ```rust
 fn mono_enabled() -> bool {
@@ -155,15 +155,15 @@ Closest precedent for a *type-driven* off-by-default gate: `BROOD_CONTRACTS`
 ## Anchors
 
 - Pipeline dispatch: `crates/lisp/src/lib.rs:463-483`
-- VM overview + `BROOD_VM`: `crates/lisp/src/eval/compile/mod.rs:1-24`, `57-77`
-- AST→IR call lowering + call-site IC: `eval/compile/mod.rs:736`, `984-1015`
+- VM overview + `BROOD_VM`: `crates/lisp/src/eval/compile.rs:1-24`, `57-77`
+- AST→IR call lowering + call-site IC: `eval/compile.rs:736`, `984-1015`
 - Node→Node optimizer seam (rewrite home): `eval/compile/inline.rs:1-33`
 - Runtime call dispatch: `eval/compile/dispatch.rs:185`
 - Ability op expansion (the dispatch to monomorphize): `std/ability.blsp:171-212`
 - `impl-for` / `*impls*` / anonymous impl fns: `std/ability.blsp:124-128`, `214-238`
 - Static proof already computed by the checker: `types/check/protocol.rs:529`
   (`arg_identity`), `818-838` (`check_ability_call_inferred`), `559-610` (`AbilityInfo`)
-- Flag patterns: `eval/compile/mod.rs:1710` (`BROOD_NO_HOF`), the `sig` macro in `std/prelude/core.blsp`
+- Flag patterns: `eval/compile.rs:1710` (`BROOD_NO_HOF`), the `sig` macro in `std/prelude/core.blsp`
   (`BROOD_CONTRACTS`)
 - Related: [protocol-dispatch-design.md](protocol-dispatch-design.md) (the facility this
   optimizes), [language.md §Polymorphism](language.md) (reference docs).

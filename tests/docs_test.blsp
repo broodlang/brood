@@ -182,7 +182,7 @@
 ;; ---------------------------------------------------------------------------
 ;; The doc catalogue must not name things that do not exist.
 ;;
-;; `std/doc-catalog.blsp` maps every public bare name to a category, and its own
+;; `std/tool/doc-catalog.blsp` maps every public bare name to a category, and its own
 ;; docstring says to "regenerate when the builtin/prelude surface changes" — a manual
 ;; step, which is exactly what rotted. Found 2026-08-17: **13 stale entries**, including
 ;; `require` (removed by ADR-229, so `nest docs --all` and hive's hosted /reference were

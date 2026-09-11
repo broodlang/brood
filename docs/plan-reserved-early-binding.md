@@ -25,12 +25,12 @@ Target callees: reserved **prelude defns** (`get`, `map`, `filter`, `reduce`,
 ## What already exists (do NOT rebuild)
 
 - `Heap::is_reserved_global(sym)` — the reserved test; already consulted for the KI-19
-  staging exemption (`compile/mod.rs` ~1055, `let staged = … && !is_reserved_global`).
+  staging exemption (`compile.rs` ~1055, `let staged = … && !is_reserved_global`).
   Note its module-load carve-out: it reports **false** while a module defines its own
   reserved surface, so any resolution keyed on it is automatically conservative there.
-- `resolve_prim` (`compile/mod.rs:646`) / `resolve_prim1` (`:742`) — the model for
+- `resolve_prim` (`compile.rs:646`) / `resolve_prim1` (`:742`) — the model for
   compile-time head resolution to inline ops. Phase 1 adds the *defn* analogue.
-- The BROOD_MONO devirtualization (`compile/mod.rs` ~1021, ADR-182) — already turns a
+- The BROOD_MONO devirtualization (`compile.rs` ~1021, ADR-182) — already turns a
   call head into a **`Const` callee** and the exec/dispatch path already runs one. This
   is the closest existing precedent for baking a resolved callee; reuse its shape, but
   see the caveat under Step B (a plain `Const` callee falls to the *computed-head*
@@ -59,7 +59,7 @@ self-contained, improves warnings, and touches none of the perf-critical code.
 
 ### Step B — Compiler: resolve reserved-defn call heads at compile time
 
-In `compile/mod.rs` `compile_call`, where a free-symbol head becomes `Node::Global(h)`
+In `compile.rs` `compile_call`, where a free-symbol head becomes `Node::Global(h)`
 (~1013-1016): when `h` resolves to a reserved global whose value is a `Value::Fn(id)` in
 the PRELUDE region with a compiled arm for this argc, emit a **new resolved-call node**
 (working name `Node::ResolvedCall { id, arm_hint, args, site, pos }`) instead of
@@ -78,7 +78,7 @@ Key constraints:
   compile time (prelude self-build ordering — a forward ref during prelude construction;
   fall back to `Node::Global`).
 
-Files: `compile/mod.rs` (the head arm + a new `Node` variant in `ir.rs`), `emit.rs`
+Files: `compile.rs` (the head arm + a new `Node` variant in `ir.rs`), `emit.rs`
 (lower the new node — mostly a thin wrapper over the existing elided-call emit).
 
 ### Step C — JIT/dispatch: drop the staleness guard for a reserved-resolved call

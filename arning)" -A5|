@@ -1,0 +1,1 @@
+cd /home/wilhelm/src/broodlang/brood && cargo build --bin brood --bin nest 2>&1 | grep -E "^(error

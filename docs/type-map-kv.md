@@ -57,7 +57,7 @@ The check walks `(%map-pairs m)` and verifies each `[k v]` pair:
 when `type-matches?` is called. `second` = `(fn (p) (first (rest p)))` or can be
 inlined. This is the entire runtime change, pure Brood.
 
-### Static checker (`annot.rs` + `types/mod.rs`)
+### Static checker (`annot.rs` + `types.rs`)
 
 Two slices with different cost:
 
@@ -149,6 +149,6 @@ doesn't warn against a `number` sink; `(string-length (get m k))` warns when
    Update grammar in `type-annotations.md`.
 2. **Checker parse-accept** (`annot.rs`, ~5 lines). Parses and discards K/V,
    produces flat `Ty::Map`. No `Ty` struct change.
-3. **Full refinement** (`types/mod.rs` + `guards.rs`, significant). Add
+3. **Full refinement** (`types.rs` + `guards.rs`, significant). Add
    `map_kv` field; wire `get`/`keys`/`vals`/`assoc` result rules. Do when a
    concrete consumer (LSP hover, a heavy map-using project) justifies the cost.

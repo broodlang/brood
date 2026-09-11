@@ -73,7 +73,7 @@ process's OS user can; that process is the trust boundary."
   (check-allow :discarded-catch
     (try
       (let (root (project/find-root (file/cwd)))
-        (if (nil? root) nil (project/file-shadow-warnings file root)))
+        (if (nil? root) nil (project-check/file-shadow-warnings file root)))
       (catch _ nil))))
 
 (defn- load-checked (file)
@@ -302,7 +302,7 @@ check after the first invocation."
   "`check` — advisory type-check the project. Returns
 `{:diagnostics [{:file :line :col :message} ...]}` (one entry per warning,
 position omitted when the checker can't supply one — ADR-024). Backed by
-`(check-structured *project-root*)` in `std/tool/project.blsp` (step 1c-a). `(or … [])`
+`(project-check/check-structured *project-root*)` in `std/tool/project-check.blsp` (step 1c-a). `(or … [])`
 so a clean project renders as `{:diagnostics []}` rather than `{:diagnostics
 null}` — agents shouldn't have to disambiguate \"no warnings\" from
 \"missing field\"."
@@ -310,23 +310,23 @@ null}` — agents shouldn't have to disambiguate \"no warnings\" from
     ;; `*project-root*` explicitly, not the implicit `(file/cwd)` this used to rely on. The
     ;; server serves ONE project — that root is what the write sandbox is pinned to
     ;; (`project-path`) and what every other project-scoped tool here already reads
-    ;; (`project/all-files *project-root*`) — so taking the checked project from cwd
+    ;; (`project-check/all-files *project-root*`) — so taking the checked project from cwd
     ;; made `check` the one tool that could disagree with the rest if the host process
     ;; ever moved. It also made the tool untestable without process-global state, which
     ;; is how its test came to type-check the whole brood repo (KI-46). Nil root keeps
     ;; the old behaviour: `check-structured` falls back to `(file/cwd)` and reports
     ;; "not in a Brood project" the same way.
-    {:diagnostics (or (check-structured *project-root*) [])}
+    {:diagnostics (or (project-check/check-structured *project-root*) [])}
     (catch e
       {:error (error-shape e)})))
 
 (defn run-tests-tool (args)
   "`run-tests` — run the project test suite. Returns the structured runner
-result from `(run-tests-structured)` — `{:total :passed :failed
+result from `(project-run/run-tests-structured)` — `{:total :passed :failed
 :failed-assertions :ms :results [{:group :name :passed :ms :failures ...}]}`.
 Outside a Brood project, returns `{:error msg}`."
   (try
-    (run-tests-structured)
+    (project-run/run-tests-structured)
     (catch e
       {:error (error-shape e)})))
 
@@ -429,7 +429,7 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
   (let (name (get args :name))
     (when (not (string? name))
       (throw "callers: :name must be a string"))
-    {:references (mapcat (project/all-files *project-root*)
+    {:references (mapcat (project-check/all-files *project-root*)
                    (fn (f)
                      (try
                        (map (reflect/references-in-source name (file/slurp f))

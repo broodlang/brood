@@ -12340,3 +12340,71 @@ checkable on macOS this whole time and nothing checked it, because `WITH_GUI ?= 
 `config.mk` that flips it on is gitignored. The feature was on for every developer who could
 have noticed and off in every place that could have reported it. `macos-check` now compiles
 the gui in its own step.
+
+## 2026-09-11 — Structure pass over the `brood` crate (ADR-325)
+
+A structural review of the crate turned into ten fixes, all mechanical and all verified
+against the same gates (clippy on CI's flags, the 747 lib tests, the 142 light integration
+tests, 207 binary-crate tests, ~90 in-language test files run capped). The design is
+ADR-325; the short list:
+
+- **`builtins/mod.rs::register` (4,180 lines, one function) is gone.** Each domain file
+  registers its own primitives beside their implementations; `builtins.rs` is the
+  `Primitives` registrar and a 25-line roll-call. The `expect!` macro is defined once.
+- **`builtins/system.rs` (3,886 lines) is eleven domain files** — `source`, `treesit`,
+  `evaluation`, `modules`, `processes`, `nodes`, `dynamic`, `build_info`, `diagnostics`,
+  `offload`, `wasm` — and the three files that still `use super::system::*` behind
+  `#![allow(unused_imports)]` import what they use. `terminal` keeps one registration
+  table over `terminal/native.rs` and the wasm32 stub `terminal/wasm.rs`.
+- **`gui.rs` (3,971 lines) is `gui.rs` + `gui/{disabled,backend,gpu}.rs` +
+  `gui/backend/{input,render,paint}.rs`.**
+- **`lib.rs` is the map + `Interp`;** the three-way boot is `boot.rs`, and the
+  startup-image mechanism moved from `builtins/startup_image.rs` to `boot/image.rs`.
+- **`types/check/tests.rs` (8,427 lines) is 19 themed files** under `check/tests/`.
+- **Root files grouped:** `host/` (gui, audio, net, subprocess, wasm, treesit,
+  text_width), `diagnostics/` (coverage, perf, profile, debug_flags).
+- **One module convention:** `foo.rs + foo/`; the seven `mod.rs` parents were renamed.
+- **`std/dev`, `std/docsite`, `std/doc-catalog` → `std/tool/`** (still CORE).
+- **Docs:** `components.md` described `core/heap.rs` as "~726 LOC, 6 concerns" with W2/W3
+  open — it is 14 child modules and both were done; `CLAUDE.md`'s builtins list was seven
+  files short and its std count off by ~20. Both rewritten, plus `architecture.md`; every
+  `mod.rs`/moved-file path in the current docs and source comments updated.
+
+Two traps met on the way, for the next such pass: a relative `include_bytes!`/`include_str!`
+moves with its file (the fonts and `docs/primitives.md`), and a `#[path]` on a
+non-`mod.rs` parent resolves against the directory the parent sits IN, not the parent's
+own directory — so `host.rs`'s wasm32 socket stub is `#[path = "host/net_wasm.rs"]`.
+A child test module named like a checker module (`tests/discarded_catch.rs`) shadows it
+through `use super::*`; renamed `discarded_catch_lint`.
+
+## 2026-09-11 — Structure pass, second round (ADR-325 continued)
+
+The remaining tier of the same review, all verified the same way (clippy on CI's flags,
+both formatters, the 747 lib tests, 164 nest/cli tests, ~50 in-language files run capped,
+`nest check` at zero warnings, the doctest gate):
+
+- **`builtins/io.rs`** (2,587 lines, eight domains by its own markers) → `io` (console),
+  `filesystem`, `sockets`, `table`, `subprocesses`; time joined `os`, the gc/vm statistics
+  joined `diagnostics`, number parsing joined `numeric`, the iolist helpers joined `bytes`.
+- **`sequences.rs`** → `string` and `rope` split out. **Clipboard** is a host mechanism
+  (`host/clipboard.rs`) with its two prims in `builtins/clipboard.rs`, no longer inside
+  the highlighter's scanning file.
+- **Four large cohesive files split at their seams:** `gc.rs` → `gc/{roots, accounting,
+  flush, stall, tuning, tests}`; `walk.rs` → `walk/{shape, calls, binders, unbound,
+  impls}`; `compile.rs` → `compile/{lower, walkers, closure}`; `jit_runtime.rs` →
+  `jit_runtime/{compiler, support, link, dispatch, deopt}`. Two stale doc paragraphs that
+  had sat above `node_has_rt_handles` (they describe `compile_closure` and `compile_arm`)
+  are now on the functions they describe.
+- **`std/tool/project.blsp`** (3,962 lines) → `project`, `project-image`,
+  `project-check`, `project-run`, `project-release`. A rename wave: 27 files, the `nest`
+  binary's embedded Brood, docstring examples, and `(:use-internals project)` in two
+  tests. Three things the first attempt missed, each caught by a gate: `nest check` does
+  not check `std/` here (the `std_check` test does — two bare calls in `mcp.blsp`);
+  docstring examples are strings, which a symbol rewriter skips (the doctest gate); and a
+  global `def`'d inside a function body (`*project-bundled-packages*`) is invisible to a
+  column-0 definition scan — it is now a `defdyn` beside its siblings. Also found: a
+  latent double definition of `source-files` (public sorted, then private unsorted).
+
+The trap for next time: **std/ is baked into the binary** (`include_str!`), so a `.blsp`
+edit is invisible to every gate until `cargo build --bin brood --bin nest`. One round of
+"still failing" here was exactly that.

@@ -1,7 +1,7 @@
 ;; Brood prelude / core library
 ;; ------------------------------
 ;; Most of the language lives here, in Brood itself. Rust provides only a small
-;; primitive kernel (see crates/lisp/src/builtins/mod.rs — the `%`-prefixed ops and
+;; primitive kernel (see crates/lisp/src/builtins.rs — the `%`-prefixed ops and
 ;; a few constructors/predicates); everything below is ordinary Brood.
 ;;
 ;; Style note: code is made of lists, so parameter lists are written as lists —

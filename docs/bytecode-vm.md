@@ -183,7 +183,7 @@ the last blocker on the Stage-3 default-on cutover.
 
 ## 1. Where the time goes today
 
-`eval::eval` (`crates/lisp/src/eval/mod.rs`) is a `'tail:` trampoline. Every
+`eval::eval` (`crates/lisp/src/eval.rs`) is a `'tail:` trampoline. Every
 combination re-pays, *per call*:
 
 - a special-form `SymbolMap` lookup + enum match (`special_form`);
@@ -464,7 +464,7 @@ cache; the lexical-addressing deferral this resolves), ADR-061 (collect at any e
 depth — the operand stack the VM frames reuse), ADR-054/055/072 (generational
 copying GC — what `arena_flip` relocates), ADR-047 (multi-arity dispatch), ADR-022
 (the macroexpand-all compile pass), ADR-026 (immutability), ADR-011 (defer power
-features). Key files: `crates/lisp/src/eval/mod.rs` (trampoline, `eval_arguments`,
+features). Key files: `crates/lisp/src/eval.rs` (trampoline, `eval_arguments`,
 `bind_params`), `crates/lisp/src/core/heap.rs` (`arena_flip`, `roots`/`env_roots`,
 `root_at`, `global_lookup_cached`, closure tracer), `crates/lisp/src/eval/macros.rs`
 (`compile`/`resolve` — where `lex_resolve` slots in), `crates/lisp/src/core/value.rs`

@@ -44,7 +44,7 @@ immutable maps, transducers, processes, `defserver`/`hatch`, selective
 receive, pattern matching, gensym macros, and timing.
 **Blockers:** multi-thread scheduler race under default `-j 0` (fan-out
 ~20+ workers reliably crashes with bogus "unbound symbol" errors and a
-Rust panic in `eval/mod.rs`); type-checker noise around
+Rust panic in `eval.rs`); type-checker noise around
 `(require 'hatch)` (five "unbound symbol" warnings on `defserver` /
 `cast` / `!` / `gen-call` look like errors); `nest format` collapses
 multi-line `let` / `cond` / `defmacro` bodies onto 100+ char lines.

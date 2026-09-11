@@ -136,7 +136,7 @@
 >      the proposed mechanism was on the row's hot path — it was wrong about the mechanism.
 >      Separately, both JIT fast frames now **fill** capture slots from the captured env rather
 >      than refusing a capturing arm (`jit_runtime.rs`'s native→native link and `hof_apply_native`
->      in `compile/mod.rs` — verified present 2026-08-14), so there is no bail left to drop.
+>      in `compile.rs` — verified present 2026-08-14), so there is no bail left to drop.
 >      **What shipped instead** was `hof_apply_native` (jump the step arm's installed native
 >      directly, skipping `vm_apply`→`vm_run_bc`): **`nqueens` ~18%**, and **`pipeline` flat** —
 >      which is the datum that redirected this lever. Pure computed-head arm-caching was killed in
@@ -569,7 +569,7 @@ GC-quiet discipline), and driving the transducer's `rf` protocol from Rust is re
 fragile under the green scheduler. Verdict: **deferred as low-ROI** — it doesn't clear the
 "optimize only to build a *broad* primitive" bar (`~/CLAUDE.md`); the view path already fuses
 the stages, which was the real win. Entry if revisited: `%string-join` in
-`builtins/sequences.rs` + the `apply` callback helper in `builtins/mod.rs`.
+`builtins/sequences.rs` + the `apply` callback helper in `builtins.rs`.
 
 A second, immutability-enabled lever for the memory side (and for `spawn`/`pfib`'s
 message cost): **zero-copy message passing.** Today `to_message` *deep-copies* a value

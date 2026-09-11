@@ -1,0 +1,468 @@
+;; std/tool/project-image.blsp
+
+(defmodule project-image
+  "The project startup image (ADR-218 for a project): fingerprint the project's sources,
+write every module's bindings to one sectioned image, and materialise them on the next
+run instead of re-evaluating source. `load-sources-cached` is the entry `project/setup`
+takes; everything else is the mechanism behind it.")
+
+(def *project-image-file* ".brood/image.bin")
+
+;; A registry global is one that LOADING mutates rather than creates — `*impls*`,
+;; `*methods*`, `*module-docs*`, … They already exist after the prelude, so the "names that
+;; appeared" diff below cannot see them, and an image without them is silently wrong.
+;;
+;; They used to be NAMED here, and that list went stale three times with no error to show for
+;; it:
+;; `declared_sigs` first (the checker quietly weakened from `expects int` to
+;; `expects number | map`), then an audit found seven ability/multimethod registries missing,
+;; and `*method-from*` after that (cross-module `defmethod` conflicts stopped being
+;; reported). A hand-maintained inclusion list fails in the silent direction every time,
+;; because nothing about adding a registry reminds you it exists.
+;;
+;; So the set is DERIVED: `%registry-update!` / `%registry-cas!` are the only ways a registry
+;; is written, and the kernel records the names they write (`%registry-names`). A registry
+;; added later is carried without anyone remembering to, and what is left below is an
+;; EXCLUSION list — where forgetting an entry costs speed or a redundant load, never a wrong
+;; answer.
+(def *project-image-registry-exclusions*
+  ;; `*features*` — with a sectioned image (ADR-218) `require` is what materialises a
+  ;; module, so restoring a `*features*` that already lists every module makes `require-one`
+  ;; early-return: nothing is ever loaded and the modules silently do not exist. `require`
+  ;; re-provides each feature as it materialises it, and a feature with no section (a std
+  ;; module pulled in during the build) is re-required from the embedded source, which is
+  ;; idempotent and cheap.
+  ['*features*
+    ;; In-flight loads, keyed to the loader's pid — empty by the time an image is written,
+    ;; and a pid is meaningless in the next process anyway.
+    '*features-loading*
+    ;; ADR-070's dependency-module maps. The image already carries a dep's bindings, and
+    ;; restoring these would only send `require` down the source-load branch for modules the
+    ;; image can serve directly.
+    '*module-files* '*package-modules-of*])
+
+(defn image-path (root)
+  "Where `root`'s startup image lives."
+  (path/join root *project-image-file*))
+(sig image-path (string -> string))
+
+;; The staleness key: every source file's path + size + mtime, plus the running
+;; binary's build id. Any edit, add or delete changes it, as does a new `brood`.
+;; Cheap — one `stat` per file, ~20 ms for 16 000 files — and it never says "fresh"
+;; for a tree that has changed, which is the only direction that matters.
+;; Every source file under the project's source paths, sorted so the fingerprint is
+;; stable across directory-listing order.
+(defn source-files (root)
+  "Every `.blsp` file under `root`'s source paths, sorted so the fingerprint is stable across directory-listing order."
+  (sort (fold (project/abs-paths root *project-source-paths*)
+          nil
+          (fn (acc dir) (%append-two (project/collect-sources dir) acc)))))
+
+(defn- project-image-fingerprint (root)
+  (project-fingerprint-of (source-files root)))
+
+;; Split from `project-image-fingerprint` so a caller that already has the file list
+;; (the loader, which wants to report the count) does not walk and stat the tree twice.
+(defn- project-fingerprint-of (files)
+  ;; Not hashed: the fingerprint is only ever compared for equality, and hashing
+  ;; would pull `hash` into the loader's dependencies for nothing. Even 16 000 files
+  ;; make ~1.5 MB, which is noise beside the image itself.
+  ;;
+  ;; DEPENDENCY files count too, because their bindings are in the image (ADR-070/218): a
+  ;; dep lives outside `:source-paths` — in `_deps/`, or anywhere at all for a `:path` dep —
+  ;; so the source-tree walk alone cannot see one change, and an imaged start would go on
+  ;; serving the old code. They come from `*module-files*`, which `setup`
+  ;; populates before any fingerprint is taken, on the cold and warm paths alike.
+  (str (system/build-id)
+    "\n"
+    (string/join (map (%append-two files (project-dep-module-files))
+                   (fn (f) (str f ":" (file/size f) ":" (file/mtime f))))
+      "\n")))
+
+;; The file behind every DEPENDENCY module, sorted for a stable fingerprint. A project roots
+;; its own modules under its `:name` too (ADR-070), so both live in `*module-files*`
+;; and the prefix is what separates them — the project's own files are already in the source
+;; walk, and listing them twice would only make the key longer.
+(defn- project-dep-module-files ()
+  ;; `distinct`: a dep file declaring more than one module (ADR-223) now has one
+  ;; `*module-files*` entry per module, all pointing at the same path — the
+  ;; fingerprint wants each file once, not once per module it declares.
+  (sort (seq/distinct (map (seq/remove (seq *module-files*)
+                             (fn (kv) (not (project-image-dep-module? (first kv)))))
+                        second))))
+
+;; `before` as a SET. As a list, `member?` is a linear scan run once per global — ~4000 x
+;; ~313 000 on a big project, which measured 7 s of a 9 s image write and was invisible
+;; until the phase trace showed the time landing outside every measured phase. Exactly the
+;; shape ADR-216 removed from `*features*`. Built once and passed to both users below: a
+;; second set of the same size costs ~3% of the cold path, measured.
+(defn- project-image-seen (before)
+  (fold before {} (fn (m n) (assoc m n true))))
+
+;; The globals the load CREATED: everything bound now that was not bound before it ran.
+(defn- project-image-fresh-names (seen)
+  (seq/remove (reflect/global-names) (fn (n) (contains? seen n))))
+
+;; The registries the load MUTATED — derived from the funnel, minus the exclusions above,
+;; minus any that ride their OWN materialised section (writing them here too would double
+;; the entry). A registry the load created sections with its own module — but ONLY a
+;; project/dep module's section is ever materialised from the image. A registry in a STD
+;; module (`editor/layers/*type-layers*`, served from embedded source — its section is never
+;; read back, see `project-image-sections`) or a root-level one has no section to ride, so it
+;; MUST stay in root even though the load created it. Excluding it — as a bare `seen` test
+;; did — dropped it from the image entirely: a deferred module's buffer type vanished on an
+;; imaged start (register-type-layers runs at that module's load, which materialising skips).
+(defn- project-image-registry-names (seen)
+  (seq/remove (%registry-names)
+    (fn (n)
+      (or (includes? *project-image-registry-exclusions* n)
+        (and (not (contains? seen n))
+          (let (mod (project-image-section-of n))
+            (and mod (contains? *module-files* mod))))))))
+
+;; The module a global belongs to: its name minus the last segment, which IS the feature
+;; name `require` uses (a global `myproj/shapes/area` comes from feature `myproj/shapes`).
+;; nil for a root-level name — a registry, or a def from a file with no `defmodule`.
+(defn- project-image-section-of (n)
+  (let (parts (string/split (->string n) "/"))
+    (cond
+      (< (count parts) 2) nil
+      else (string/join (take parts (- (count parts) 1)) "/"))))
+
+;; Whether module key `k` belongs to a DEPENDENCY rather than to this project. A project
+;; roots its own modules under its `:name` (ADR-070) exactly as a dep's are rooted under
+;; theirs, so both appear in `*module-files*` and membership alone does not separate
+;; them — the prefix does. Used for the fingerprint (a dep's files are outside the source
+;; walk, so they must be stat'd from the registry) rather than to exclude anything: a dep's
+;; modules ARE imaged, which is why its files have to be in the staleness key.
+(defn- project-image-dep-module? (k)
+  (and (contains? *module-files* k)
+    (not (= (first (string/split k "/")) (if *project-name* (->string *project-name*) nil)))))
+
+;; Group the image's globals into per-module sections, so `require` can materialise one
+;; module at a time (ADR-218). The `""` section is the one the loader always materialises,
+;; and it carries the registries, the root-level defs (a file with no `defmodule`) and — added
+;; by `%image-write` — the declared sigs. It is built even when every other name is
+;; module-qualified.
+;;
+;; Registries go to `""` by NAME, not by spelling: a module-qualified one (a std module's
+;; registry that this load happened to write) would otherwise be grouped into that module's
+;; section, and a std feature is served from its embedded source rather than the image — so
+;; the section would never be materialised and the registry silently lost, which is the whole
+;; class this is guarding against.
+(defn- project-image-sections (before)
+  (let (seen (project-image-seen before)
+        fresh (project-image-fresh-names seen)
+        grouped (fold fresh
+                  {}
+                  (fn (m n)
+                    (let (k (or (project-image-section-of n) ""))
+                      (assoc m k (cons n (or (get m k) nil))))))
+        root (%append-two (project-image-registry-names seen)
+               (or (get grouped "") nil)))
+    (cons ["" root]
+      (map
+        (seq/remove (keys grouped)
+          (fn (k)
+            ;; A non-root section is materialised from the image only for the project's
+            ;; own modules and its dependencies — both live in `*module-files*`
+            ;; (a project roots its own modules under its `:name` too, ADR-070). A
+            ;; std/embedded module (regex, editor/ui, …) always loads from its baked-in
+            ;; source, so its section would never be read back — writing it is dead
+            ;; weight, and it is exactly where a runtime-only value like
+            ;; `regex/regex-states-cache` (a mutable cache table) makes the whole image
+            ;; write fail. Skip it. (Its bare globals still ride the always-materialised
+            ;; root section; a builtin there images by name.)
+            (or (= k "") (not (contains? *module-files* k)))))
+        (fn (k) [k (get grouped k)])))))
+
+;; A module this image does NOT carry: neither the project's own nor a dependency's (both
+;; live in `*module-files*`, ADR-070). Its registrations belong to whoever loads it.
+(defn- image-foreign-owner? (m) (not (contains? *module-files* m)))
+
+(defn- image-preexisting-reg-keys (before-regs)
+  "The `[registry key]` pairs already registered BEFORE this project's sources loaded, as a
+set. Everything in it belongs to the prelude (or the binary), not to any module this load
+brought in — so no module load will ever replay it, and pruning it loses it for good."
+  (fold (keys before-regs)
+    #{}
+    (fn (acc m)
+      (fold (get before-regs m) acc (fn (acc2 t) (conj acc2 [(get t 0) (get t 1)]))))))
+(sig image-preexisting-reg-keys (map -> set))
+
+(defn image-prune-foreign-registrations (before-regs)
+  "Remove from the live registries every registration OWNED by a module this project's
+image does not carry — a std module (or anything else outside `*module-files*`) that
+happened to be loaded in the session that built the image. Returns how many were removed.
+
+The registries travel in the image's root section as whole values, and a value snapshot
+carries the build session's load state with it: on 2026-09-03 the image of this very repo
+held `:tempo/tempo`, `:pq/pq`, `:queue/queue`, `:multimap/multimap`, `:log/line-backend`
+… — record ids of std modules the BUILD had loaded but an imaged boot never does — so
+every scoped `nest test` started with seven registered record ids whose constructors did
+not exist, an ability table that disagreed with the modules present, and any test asserting
+over the registries (`ability_test.blsp:471`) red from its first instruction. That was
+KI-89's residual. A registration is data about a module: it must arrive with that module,
+which the stdlib image already gets right by replaying each module's registrations as it
+materialises (`stdimage/registrations-by-module`, `%replay-std-regs!`). Pruning the
+foreign ones here is the project-image half of the same rule — the std module re-registers
+its own entries when it loads, from source or from its image. Root-level registrations
+(an unqualified key, no owner) and project/dependency-owned ones are kept.
+
+**`before-regs` is what the prune must NOT touch** (KI-106). Ownership is decided by the
+QUALIFIER of a registration's key, which is not always its registrar: `num/mul`'s qualifier
+is `num`, and `std/num.blsp` is a real module — but the `(defmulti num/mul :commutative)`
+that registers it lives in the PRELUDE. So the entry was judged foreign, pruned, and baked
+out of the image, and loading `num` never put it back because `num` never registered it.
+An imaged boot then restored a `*multi-algebra*` holding one entry instead of five, the
+checker lost every `num/*` algebra, and every commutative mirror it derives from them went
+with it — `(* 3 (usd 500))` warned `no num/mul method for [:int :record-test/usd]` while
+the runtime dispatched it correctly.
+
+The rule that fixes it needs no name heuristics: a registration that was already there
+before this project loaded a single file cannot be owned by anything this load brought in.
+Skip those, prune the rest.
+
+`write-image` calls this inside an `%isolate`, so the pruning is rolled back the moment
+the image is written and the running session keeps every registration it had — but the
+image on disk keeps whatever the prune left, which is why pruning too much is silent and
+permanent rather than transient."
+  (let (regs (stdimage/registrations-by-module)
+        impls (stdimage/%std-impls-by-module)
+        keep (image-preexisting-reg-keys before-regs)
+        n-regs (fold (filter (keys regs) image-foreign-owner?)
+                 0
+                 (fn (n m)
+                   (fold (get regs m)
+                     n
+                     (fn (n2 t)
+                       (if (contains? keep [(get t 0) (get t 1)])
+                         n2
+                         (do (%registry-update! (get t 0) :dissoc (get t 1) nil) (+ n2 1)))))))
+        n-impls (fold (filter (keys impls) image-foreign-owner?)
+                  0
+                  (fn (n m)
+                    (fold (get impls m)
+                      n
+                      (fn (n2 r)
+                        (let (aname (get r 0)
+                              op (get r 1)
+                              key (get r 2))
+                          (%registry-update! '*impls* :dissoc [[aname op] key] nil)
+                          (%registry-update! '*impl-from* :dissoc [[aname op key]] nil)
+                          (+ n2 1)))))))
+    (+ n-regs n-impls)))
+(sig image-prune-foreign-registrations (map -> int))
+
+(defn write-image (root before before-regs)
+  "Snapshot the bindings this project load produced into `root`'s image, grouped into
+per-module sections. `before` is the `(reflect/global-names)` list captured *before* the sources
+were loaded. Returns the entry count. Written from a scope in which registrations owned by
+modules the image does not carry are pruned (`image-prune-foreign-registrations`); the
+`%isolate` puts them back once the file is on disk."
+  (let (dir (path/dirname (image-path root)))
+    (when (not (file/dir? dir)) (file/mkdir dir))
+    (%isolate (fn ()
+                (image-prune-foreign-registrations before-regs)
+                (%image-write (image-path root)
+                  (project-image-sections before)
+                  (project-image-fingerprint root))))))
+(sig write-image (string any map -> any))
+
+;; Install `root`'s image as a source of features, if it is current. Materialises the root
+;; section (registries + declared sigs — small, and needed before anything else) and hands
+;; `require` the directory for everything else, so each module materialises on first use.
+;; Returns the section count, or nil for a miss (absent, stale, corrupt).
+;; `[registry-symbol value]` for every registry the kernel knows in this process — the
+;; state a root-section load is about to overwrite.
+(defn- project-registry-snapshot ()
+  (map (%registry-names) (fn (r) [r (reflect/eval r)])))
+
+;; Union of two registry values, `live` winning on a key both hold; a two-level registry
+;; (`*impls*` `{[ability op] {id f}}`, `*methods*`) unions its inner maps too.
+(defn- project-registry-merge-values (image live)
+  (cond
+    (nil? live) image
+    (nil? image) live
+    (and (map? image) (map? live))
+      (fold (%map-pairs live)
+        image
+        (fn (acc kv)
+          (let ([k v] kv
+                cur (%map-get acc k nil))
+            (%map-assoc acc
+              k
+              (if (and (map? v) (map? cur))
+                (fold (%map-pairs v) cur (fn (a2 kv2) (%map-assoc a2 (first kv2) (second kv2))))
+                v)))))
+    else live))
+
+;; Re-merge the pre-load registrations into whatever the root section installed. Through
+;; `%registry-cas!` — the registry write path — never `def`, which in module code would
+;; bind `project/*impls*` and leave the real registry untouched.
+(defn- project-registry-merge-live! (live)
+  (doseq (kv live)
+    (let ([r before] kv
+          after (reflect/eval r))
+      (when (not (= after before))
+        (%registry-cas! r after (project-registry-merge-values after before))))))
+
+(defn- project-install-image (root fp)
+  (let (path (image-path root)
+        idx (%image-index path fp))
+    (cond
+      (nil? idx) nil
+      else
+        (do
+          ;; Through the prelude's setter, not `def`: this is module code, and a `def` here
+          ;; would bind `project/*image-sections*` while `%require-force` kept reading the
+          ;; empty root one — which is how an imaged start came to restore the root section
+          ;; and then load every module from source anyway.
+          (%set-image-source! path (dissoc idx ""))
+          (let (root-sec (get idx ""))
+            (when root-sec
+              ;; The root section REPLACES every registry global with the image's value —
+              ;; which cannot be allowed to erase what modules loaded BEFORE this point had
+              ;; registered (KI-89): `nest` boots with `datetime`, `io`, `project` … already
+              ;; loaded, and their impls were being wiped by an image whose `*impls*` did not
+              ;; happen to contain them (it did by accident before write-time pruning; with
+              ;; it, `Temporal/->iso` lost its `:datetime/date` impl on every imaged boot).
+              ;; So: snapshot the live registries, load the section, merge the live entries
+              ;; back — live wins on a conflict, because it is the loaded module's own word.
+              (let (live (project-registry-snapshot))
+                (%image-load-section path (first root-sec) (second root-sec))
+                (project-registry-merge-live! live))
+              ;; The root section carries the registries, so `*require-edges*` only exists
+              ;; after that load — and it is also where a headerless file's defs live, so its
+              ;; own load-time requires are recorded under `""` and have to be replayed here
+              ;; (KI-37). A module's edges are replayed by `require` when its section
+              ;; materialises; the root section has no `require` to hang them on.
+              (fold (or (get *require-edges* "") nil) nil (fn (_ d) (require-one d)))))
+          (count idx)))))
+
+(defn materialize-all ()
+  "Materialise every module the installed image holds — for tools that genuinely need the
+whole project in the heap (`nest test`, `nest check`, the LSP). `nest run` deliberately does
+NOT call this: it requires its entry point and lets the rest stay on disk."
+  (let (ks (keys *image-sections*))
+    (fold ks nil (fn (_ k) (require-one k)))
+    (count ks)))
+
+;; Whether an image may be used at all this run. Line coverage (ADR-148 tier 2)
+;; instruments at COMPILE time — the compiler prefixes positioned nodes with a
+;; `RecordLine` opcode — so code restored from an image was never compiled in this
+;; process and carries no instrumentation, and the report would silently come back
+;; empty. An instrumented run therefore always loads from source. Silent wrong output
+;; is exactly the failure mode worth a special case.
+(defn image-usable? ()
+  "Whether a cached startup image may be used — false under `BROOD_COVERAGE`, whose instrumentation an image cannot represent."
+  (nil? (os/env "BROOD_COVERAGE")))
+
+;; Milliseconds as "12.3s" / "845ms" — build output should read at a glance.
+(defn- project-ms-str (ms)
+  (if (< ms 1000)
+    (str ms "ms")
+    (str (math/quot ms 1000) "." (math/quot (math/mod ms 1000) 100) "s")))
+
+(defn setup-lazy-image (root)
+  "Install `root`'s startup image WITHOUT materialising its modules, so `require` pulls each
+one in on first use (ADR-218). Returns the section count, or nil when there is no current
+image — in which case the caller must fall back to a source load.
+
+This is what makes `nest run` pay only for the modules its entry point actually reaches: on
+a 16 300-module project an entry touching twenty of them materialises twenty, not 16 300."
+  (cond
+    (not (image-usable?)) nil
+    else (project-install-image root (project-image-fingerprint root))))
+
+;; CONTRACT for tools that instrument the live image (trace-fn/break-fn, ADR-184, or
+;; any global rebind): build FIRST, then instrument, then run. On a COLD run this fn
+;; re-evaluates clean source to build the image, which overwrites any rebinding done
+;; before it — so a trace installed first is silently wiped on a project's first run
+;; (and only the first: a warm run hits the image and skips the reload). The image
+;; itself is always clean (the snapshot is taken right after this reload), so this is a
+;; wipe, never a leak. See ADR-218 §"Runtime instrumentation must follow the build".
+(defn load-sources-cached (root & opts)
+  "Load the project the fast way: from its startup image when that is current,
+otherwise from source — and in that case write the image, so the NEXT run is fast.
+This is what `nest run` / `nest test` / `nest check` use, which is why none of them
+ever require a separate build step to have been run first (ADR-218). Image writing is
+best-effort: a read-only or full disk costs speed, never correctness.
+
+Reports the build on stderr when it actually builds, and says nothing on an image
+hit — a cold load of a large project takes tens of seconds, and silence there is
+indistinguishable from a hang. stderr, not stdout, so `nest run`'s output stays the
+program's and the LSP's protocol channel stays clean."
+  (let (t-a (os/now-ns)
+        files (source-files root)
+        t-b (os/now-ns)
+        fp (project-fingerprint-of files)
+        t-c (os/now-ns)
+        hit (cond
+              (image-usable?)
+                (let (n (project-install-image root fp))
+                  (cond
+                    (nil? n) nil
+                    ;; Everything, because this entry point is for the tools that need the
+                    ;; whole project. `nest run` uses `setup-lazy-image` instead.
+                    else (do (materialize-all) n)))
+              else nil)
+        t-d (os/now-ns)
+        _ (when (os/env "BROOD_IMAGE_TRACE")
+            (io/puts (str "[loader] collect "
+                       (math/quot (- t-b t-a) 1000000)
+                       " ms, fingerprint "
+                       (math/quot (- t-c t-b) 1000000)
+                       " ms, image-read "
+                       (math/quot (- t-d t-c) 1000000)
+                       " ms")
+              :to *err*)))
+    (cond
+      hit hit
+      else
+        (let (name (or *project-name* (path/basename root))
+              n (count files)
+              _ (io/puts (str "Building " name " (" n " file" (if (= n 1) "" "s") ")")
+                  :to *err*)
+              t0 (os/now-ns)
+              before (reflect/global-names)
+              ;; Captured HERE, beside `before`, and for the same reason: what the prune may
+              ;; remove is decided by what this load introduced, so both baselines have to be
+              ;; taken before a single source file is read (KI-106).
+              before-regs (stdimage/registrations-by-module)
+              _ (/apply project/load-sources (cons root opts))
+              t-load (math/quot (- (os/now-ns) t0) 1000000)
+              ;; A project whose globals are not all portable — a `table` global is the
+              ;; documented mutable-state idiom, and a table is deliberately local to its
+              ;; runtime — simply cannot be imaged. That is correct (loading from source is
+              ;; always right), but swallowing it meant such a project silently loaded cold
+              ;; forever with no way to find out why. Say so, once, and carry on.
+              wrote (cond
+                      (image-usable?)
+                        (try
+                          (write-image root before before-regs)
+                          (catch e
+                            ;; No once-per-key guard needed: this is the cold path, which
+                            ;; already prints Building/Built exactly once per build.
+                            (do
+                              (io/puts (str "note: "
+                                         name
+                                         " cannot use a startup image, so it loads from"
+                                         " source every time — "
+                                         (get e :message))
+                                :to *err*)
+                              nil)))
+                      else nil)
+              t-all (math/quot (- (os/now-ns) t0) 1000000))
+          (io/puts (str "Built "
+                     name
+                     " in "
+                     (project-ms-str t-load)
+                     (cond
+                       wrote (str " (+" (project-ms-str (- t-all t-load)) " image)")
+                       else ""))
+            :to *err*)
+          nil))))
+
+;; Load the manifest (if present) and put the project's source dirs on *load-path*
+;; so its modules are require-able by name.

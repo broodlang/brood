@@ -5,7 +5,7 @@
 //! This exercises the `brood`-side half of `nest release`: footer detection on
 //! `current_exe`, mounting the archive, resolving an app module from the bundle
 //! through `require` (via the extended `%builtin-module`), and dispatching to
-//! `project/run-bundle`. The `nest`-side collection is covered by the unit tests
+//! `project-release/run-bundle`. The `nest`-side collection is covered by the unit tests
 //! in `crates/lisp/src/bundle.rs` plus this manual archive construction.
 
 use std::process::Command;

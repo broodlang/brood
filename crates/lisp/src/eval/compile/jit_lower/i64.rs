@@ -420,7 +420,7 @@ fn lower_i64_arith(
                 PrimOp::Rem => b.ins().srem(x, y),
                 PrimOp::Quot => b.ins().sdiv(x, y),
                 // `/` on two ints is an Int result only when it divides evenly (matching
-                // `prim_apply`'s inline fast path, `compile/mod.rs`); a nonzero remainder
+                // `prim_apply`'s inline fast path, `compile.rs`); a nonzero remainder
                 // means the VM would build a Float, which this worker can't return — guard
                 // it as inexact and deopt (the VM recomputes with full generality).
                 PrimOp::Div => {

@@ -8,7 +8,7 @@
 //! worker until woken.
 //!
 //! This module is the one reusable seam for that pattern. A blocking source
-//! (`crate::net` sockets today; `gui`/`dist`/terminal input are slated to migrate
+//! (`crate::host::net` sockets today; `gui`/`dist`/terminal input are slated to migrate
 //! onto it) calls [`spawn_io_source`] with the subscriber process and a body that
 //! reads its resource and `emit`s [`Message`]s. `Message` is a plain enum and
 //! symbols are a global interner, so the body builds messages off-heap without

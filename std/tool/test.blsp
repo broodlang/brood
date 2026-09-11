@@ -1233,7 +1233,7 @@ the test rather than hanging the run."
 
 ;; Chunk `coll` into ≤`n`-sized groups, KEEPING a short trailing group (`partition`
 ;; drops it — which here would silently skip tests).
-;; See `project/project-chunk-list`: same five lines, same gap — `seq` has no
+;; See `project-check/project-chunk-list`: same five lines, same gap — `seq` has no
 ;; list-returning chunker that keeps the trailing partial chunk.
 (defn- run-chunks (n coll acc)
   (if (empty? coll)

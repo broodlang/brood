@@ -31,7 +31,7 @@
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
 ;; recursively, reversed), then build the string in one `apply str` pass.
 
-;; `string-split` is now a native builtin (crates/lisp/src/builtins/mod.rs) — one O(n)
+;; `string-split` is now a native builtin (crates/lisp/src/builtins.rs) — one O(n)
 ;; pass via Rust's `str::split`. The former pure-Brood version re-`substring`ed the
 ;; tail each step, which is O(n²) (char-indexed substring is O(index)); a 174 KB
 ;; `git ls-files` output took ~840 ms in the editor's project scan, now ~10 ms.

@@ -21091,3 +21091,83 @@ never executed. With it, the identical code runs on Linux where the GUI is exerc
 topology is directly observable: no `brood-gui` thread, a `brood-main-join`, and the loop on
 tid == pid. A gate that can only compile is worth less than one that can run, and the cheapest
 way to get the second is to make the foreign path selectable at home.
+
+## ADR-325 — A primitive's registration lives beside its implementation; the crate is grouped by layer
+
+**Context.** `builtins/mod.rs::register` had grown to one 4,180-line function holding all
+424 primitives' names, arities, signatures, arglists and docstrings, while each primitive's
+*implementation* lived in a domain file — so adding one was a two-file edit and a docstring
+sat up to 4,000 lines from the code it described. `builtins/system.rs` (3,886 lines) had
+become the grab bag its section markers admitted to: self-hosting, processes, distributed
+nodes, dynamic variables, the offload pool, the WASM host and coverage. The earlier split
+out of it had stalled — `errors.rs`, `selfhost_macros.rs` and `tooling.rs` opened with
+`#![allow(unused_imports)]` and `use super::system::*`, and the `expect!` macro was
+copy-pasted into four files. The same drift showed elsewhere: `gui.rs` was 3,971 lines in
+one file, `lib.rs` carried the whole three-way boot, `types/check/tests.rs` was 8,427 lines
+in one module, 21 flat files sat at the crate root, and parent modules were `foo/mod.rs` in
+eight places and `foo.rs + foo/` in six.
+
+**Decision.**
+1. **A domain file owns its registrations.** Every `builtins/<domain>.rs` exports a
+   `register(&mut Primitives)` listing the name, arity, signature, arglist and docstring of
+   each primitive it implements; `builtins.rs` is the `Primitives` registrar, the one
+   `expect!`, and the roll-call. `signature_types.rs` holds the `Ty` shorthands. A primitive
+   is a one-file edit, and the docstring sits above the code it describes.
+2. **`system.rs` is eleven domains**, cut by what the primitives are *about*: `source`,
+   `treesit`, `evaluation`, `modules`, `processes`, `nodes`, `dynamic`, `build_info`,
+   `diagnostics`, `offload`, `wasm` (+ `try_catch` into `errors`). The `terminal` domain
+   keeps ONE registration table over two implementations (`terminal/native.rs`,
+   `terminal/wasm.rs`), so the wasm32 stub can never drift from the native surface.
+3. **The crate root is grouped by layer.** `host/` (gui, audio, net, subprocess, wasm,
+   treesit, text_width — feature-gated machine bindings), `diagnostics/` (coverage, perf,
+   profile, debug_flags) and `boot/` (the prelude boot out of `lib.rs`; `boot/image.rs` the
+   startup-image mechanism out of `builtins/`). `lib.rs` is the module map and `Interp`.
+4. **One module convention**: a parent is `foo.rs` beside `foo/`, never `foo/mod.rs`
+   (Rust's recommended layout, and what the newer splits already used).
+5. **`gui` is a directory**: the `Op`/`Key`/`Mouse` vocabulary and the feature switch in
+   `gui.rs`, the stub in `gui/disabled.rs`, the event loop and window registry in
+   `gui/backend.rs` with `backend/{input,render,paint}.rs`, the OpenGL path in `gui/gpu.rs`.
+6. **The checker's tests are themed files** under `types/check/tests/`, one per slice of the
+   checker's behaviour, sharing the harness in `tests.rs`.
+7. **`std/` groups by what a module is for, not by feature gate**: `dev`, `docsite` and
+   `doc-catalog` are tooling and live under `std/tool/`; they remain CORE modules.
+
+**Registration order.** Registration interns each primitive's name, and small-map key
+iteration order is downstream of intern ids. The split permutes the names *within* the
+registration block — the same names are interned before anything else, so every id
+outside the block (every user keyword) is unchanged; only a map keyed by primitive names as
+symbols could reorder. `record_test` already compares as maps for this reason. Inserting a
+name mid-list still shifts every later id, as before.
+
+**Not done, and why.** `core/heap/vm_cache.rs` depends upward on `eval::compile` (it stores
+compiled arms and calls `jit_tier`), so `core` is not a strict substrate; moving it under
+`eval/compile/` would expose a dozen private `Heap` fields for no behavioural gain. Recorded
+on the heap's card in `components.md` instead.
+
+**The second pass (same day).** `io.rs` had the same shape as `system.rs` — console I/O,
+time, memory, sockets, the table, child processes, process introspection and the
+filesystem in one file — and is now `io` (console) + `filesystem`, `sockets`, `table`,
+`subprocesses`, with time in `os`, the gc/vm statistics in `diagnostics` and number parsing
+in `numeric`; `string` and `rope` came out of `sequences`; the clipboard mechanism moved
+from `syntax_scan.rs` to `host/clipboard.rs` with its two primitives in
+`builtins/clipboard.rs`. Four cohesive-but-large files were split at their real seams:
+`core/heap/gc.rs` (the collector, with `gc/{roots, accounting, flush, stall, tuning,
+tests}`), `types/check/walk.rs` (the dispatch, with `walk/{shape, calls, binders,
+unbound, impls}`), `eval/compile.rs` (the entry points, with `compile/{lower, walkers,
+closure}`) and `eval/compile/jit_runtime.rs` (the tiering entry, with
+`jit_runtime/{compiler, support, link, dispatch, deopt}`). And `std/tool/project.blsp`
+(3,962 lines) is five modules — `project` (the model), `project-image`, `project-check`,
+`project-run`, `project-release` — referencing each other only by qualified name (a
+refer-all into a module still loading is an error; a qualified reference loads lazily).
+That split was a rename wave in the ADR-302 sense: ~110 qualified references across 27
+files including the `nest` binary's embedded Brood, the docstring examples the doctest gate
+executes, and two tests that reached private names through `(:use-internals project)`.
+It also surfaced a latent override — `source-files` was defined twice in `project.blsp`,
+a public sorted one and a later private unsorted one that silently replaced it.
+
+**Consequences.** `builtins.rs` is ~230 lines; the largest builtins file is `sequences.rs`
+at ~1,500 lines; `lib.rs` ~350; `gui.rs` 350; `gc.rs` ~960;
+`walk.rs` ~980; `compile.rs` ~620; `jit_runtime.rs` ~560; the largest Brood module is
+`project-check.blsp` at ~1,500. Every path in
+`CLAUDE.md`, `architecture.md` and `components.md` was rewritten to the new tree; the
+historical docs (devlog, decisions, known-issues) keep the names they had at the time.
