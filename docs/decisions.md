@@ -21208,3 +21208,42 @@ its unknown-ness. std stays at zero in both modes. A bare `map` handed where a r
 expected still warns — the shape is absent, and no filling of a missing shape proves the
 required keys are present — which is the right side of the line: that IS a positive fact
 the caller has not established.
+
+## ADR-327 — `deftype` names a structural type for the checker
+
+**Status:** accepted; implemented 2026-09-11 (prelude `deftype` → `%register-type`;
+`annot::alias_ty`, `protocol::type_alias_table`).
+
+**Context.** A `sig` could name a base type, a sealed ability or a `defrecord`; every
+other shape had to be spelt out where it was used. The editor toolkit's panes, dividers
+and layouts are plain maps whose shape lives in a docstring (`{:path :payload :selected
+:rect}`), and bedit's `--strict` sweep showed the cost: fifty findings traced to
+`[x y w h] (:rect pane)` on a parameter nobody had typed, and typing any one function
+over it moved the report into that function's body, because the shape had no name to
+declare it by. The two existing routes were both wrong for this: a `defrecord` makes the
+value nominal (a `:__id__` key, `=` no longer equal to the literal map, every hand-built
+`{:rect …}` no longer a pane), and `(record &open :rect (tuple int int int int) …)` in
+twenty signatures is a shape with twenty chances to drift.
+
+**Decision.** `(deftype name T)` declares that `name`, in a type expression, IS `T` —
+structural, exactly as written: a record shape, a union, a tuple, another alias.
+Module-scoped the way a `sig` is: declared in `m` it is `m/name` everywhere, and a bare
+`name` resolves in the checked file's own namespace first, then to the one loaded module
+declaring it — two candidates decline, so an ambiguous bare name is an unknown type
+rather than a silent guess, exactly as a record name resolves. A declaration only:
+`name` is not bound at runtime, so a reference to it outside a `sig` is unbound (types
+are not values). A recursive alias reads as `any` where it meets itself.
+
+It rides the declared-sig store rather than adding one: `%register-type` writes the
+type-expression under the alias's qualified name wrapped as `(%type T)`, and only the
+alias table unwraps that marker (`parse_type` declines it, so no reader of the store can
+take an alias for a signature). Everything a `sig` already has — module qualification,
+image persistence, the checker's dep-tracked read, the same-file collection from the
+expanded tree of a file that is checked but never evaluated — an alias gets for free.
+
+**Consequences.** A shape is declared once, in the module that builds it, and every
+consumer's sig names it; a change to the shape is one edit and every sig follows. The
+first user is `std/editor/pane` (`pane`, `divider`, `layout`), which is what lets bedit
+declare its pane geometry in types at all. Not in scope: resolution through a file's
+`(:use …)` imports (an alias resolves like a record name, by unique suffix), a `nest doc`
+entry for an alias, and recursive types.

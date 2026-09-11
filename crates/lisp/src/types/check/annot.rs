@@ -59,6 +59,65 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+thread_local! {
+    /// The type aliases in scope — `(deftype name T)`, ADR-327 — by QUALIFIED name, the
+    /// raw type-expression each denotes. Loaded modules' from the heap's declared-sig
+    /// store, this file's from its expanded `%register-type` forms
+    /// (`protocol::type_alias_table`), since a checked file has not been evaluated.
+    /// Populated and cleared per file with the tables above.
+    static TYPE_ALIASES: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+    /// The namespace of the file being checked — a bare alias name resolves there first,
+    /// so a module's own `(deftype pane …)` is the `pane` its sigs mean even when another
+    /// loaded module declared one too.
+    static ALIAS_FILE_NS: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The aliases currently being expanded — a recursive alias (`(deftype t (or nil
+    /// (vector t)))`) would otherwise expand forever. A name met again on its own path
+    /// reads as `any`: the checker has no recursive types, and unknown is the sound answer.
+    static ALIASES_EXPANDING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Install the type-alias table for this file (see [`TYPE_ALIASES`]).
+pub(super) fn set_type_aliases(map: HashMap<String, Value>, file_ns: Option<String>) {
+    TYPE_ALIASES.with(|m| *m.borrow_mut() = map);
+    ALIAS_FILE_NS.with(|n| *n.borrow_mut() = file_ns);
+}
+
+/// The type an alias `name` denotes, or `None` when no alias is in scope by that name.
+/// Resolution: the file's own namespace first (`ns/name` — a module's own alias is the one
+/// its sigs mean), then the spelling itself (already qualified), then the ONE alias in
+/// scope whose qualified name ends in `/name` — two candidates decline, as a record name's
+/// `record_id_for` does, so an ambiguous bare name is reported as unknown rather than
+/// silently picking a module.
+fn alias_ty(heap: &Heap, name: &str) -> Option<Ty> {
+    let (qualified, form) = TYPE_ALIASES.with(|m| {
+        let aliases = m.borrow();
+        let own = ALIAS_FILE_NS.with(|n| n.borrow().as_ref().map(|ns| format!("{ns}/{name}")));
+        if let Some(form) = own.as_ref().and_then(|own| aliases.get(own)) {
+            return Some((own.clone().unwrap_or_default(), *form));
+        }
+        if let Some(form) = aliases.get(name) {
+            return Some((name.to_string(), *form));
+        }
+        let suffix = format!("/{name}");
+        let mut hits = aliases.iter().filter(|(id, _)| id.ends_with(&suffix));
+        let first = hits.next().map(|(id, form)| (id.clone(), *form))?;
+        if hits.next().is_some() {
+            return None;
+        }
+        Some(first)
+    })?;
+    let recursive = ALIASES_EXPANDING.with(|v| v.borrow().contains(&qualified));
+    if recursive {
+        return Some(Ty::ANY);
+    }
+    ALIASES_EXPANDING.with(|v| v.borrow_mut().push(qualified));
+    let ty = parse_type(heap, form);
+    ALIASES_EXPANDING.with(|v| {
+        v.borrow_mut().pop();
+    });
+    ty
+}
+
 /// Install this file's records' declared field types (see [`RECORD_FIELD_TYPES`]).
 pub(super) fn set_record_field_types(map: HashMap<String, BTreeMap<Symbol, (Ty, bool)>>) {
     RECORD_FIELD_TYPES.with(|m| *m.borrow_mut() = map);
@@ -348,6 +407,7 @@ pub fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             base_ty(&name)
                 .or_else(|| ability_type(&name))
                 .or_else(|| record_ty(heap, &name))
+                .or_else(|| alias_ty(heap, &name))
         }
         // `nil` reads as the literal `Value::Nil`, not a symbol — so a type-expr
         // like `(or int nil)` lands here, not in `base_ty`.
@@ -744,6 +804,8 @@ fn parse_type_term(heap: &Heap, form: Value, vars: &mut HashMap<String, u32>) ->
             }
             base_ty(&name)
                 .or_else(|| ability_type(&name))
+                .or_else(|| record_ty(heap, &name))
+                .or_else(|| alias_ty(heap, &name))
                 .map(SigTerm::Ty)
         }
         Value::Nil => Some(SigTerm::Ty(Ty::of(Tag::Nil))),

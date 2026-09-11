@@ -249,3 +249,66 @@ fn sealed_mixing_records_and_kinds_accepts_every_member() {
     );
     assert!(!ws.iter().any(|w| w.contains("argument 1")), "{ws:?}");
 }
+
+// `(deftype name T)` names a type for the checker (ADR-327): structural, so `name` in a
+// `sig` IS `T` — a record shape, a tuple, another alias. Resolved for THIS file from its
+// expanded `%register-type` forms (a checked file is never evaluated), qualified to the
+// file's namespace; a recursive alias reads as `any` rather than looping; an unknown name
+// is still an unknown type.
+#[test]
+fn deftype_names_a_structural_type_for_sigs() {
+    let src = "\
+         (defmodule t)\n\
+         (deftype pane (record &open :rect (tuple int int int int) :selected bool))\n\
+         (deftype cell (tuple int int))\n\
+         (deftype maybe-cell (or nil cell))\n\
+         (deftype loopy (or nil (vector loopy)))\n\
+         (sig rows (pane -> int))\n\
+         (defn rows (p) (let ([x y w h] (:rect p)) (math/quot (dec h) 2)))\n\
+         (sig bad-field (pane -> int))\n\
+         (defn bad-field (p) (string/length (:rect p)))\n\
+         (sig first-of (maybe-cell -> int))\n\
+         (defn first-of (c) (if (nil? c) 0 (first c)))\n\
+         (sig f-loop (loopy -> int))\n\
+         (defn f-loop (l) 0)\n\
+         (sig f-unknown (nosuch -> int))\n\
+         (defn f-unknown (x) 0)\n\
+         (defn bad-call () (rows \"not a pane\"))\n\
+         (defn own-ns () (rows {:rect [0 0 80 24] :selected true}))";
+    let strict = file_warnings_mode(src, true);
+    // the alias resolves: a field read through it is typed, and a wrong argument is named
+    assert!(
+        strict.iter().any(|w| w
+            .contains("string/length: argument 1 expects string, got (tuple int, int, int, int)")),
+        "{strict:?}"
+    );
+    assert!(
+        strict.iter().any(|w| w.contains("t/rows: argument 1 expects {rect: (tuple int, int, int, int), selected: bool, ...}, got \"not a pane\"")),
+        "{strict:?}"
+    );
+    // an unknown name is still reported (ADR-259); the alias names are not
+    assert!(
+        strict
+            .iter()
+            .any(|w| w.contains("sig f-unknown: unknown type `nosuch`")),
+        "{strict:?}"
+    );
+    assert!(
+        !strict.iter().any(|w| w.contains("unknown type `pane`")
+            || w.contains("unknown type `cell`")
+            || w.contains("unknown type `maybe-cell`")
+            || w.contains("unknown type `loopy`")),
+        "{strict:?}"
+    );
+    // `(dec h)` off the tuple is an int, `(first c)` off the narrowed alias is an int, and a
+    // literal that fits the shape passes — strictly.
+    assert!(
+        !strict
+            .iter()
+            .any(|w| w.contains("t/rows: argument 1") && w.contains("own-ns")
+                || w.contains("math/quot")
+                || w.contains("first-of")),
+        "{strict:?}"
+    );
+    assert_eq!(strict.len(), 3, "{strict:?}");
+}

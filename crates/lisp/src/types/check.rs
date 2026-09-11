@@ -1140,6 +1140,7 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
     // leak a stale table into a `(check 'form)` — defensive: an ability type is sound
     // regardless, but an empty table here is unambiguously so.
     annot::clear_ability_types();
+    annot::set_type_aliases(HashMap::new(), None);
     // …and the inference memos, whose entries were computed against that file's Ctx
     // tables (`fn_form`, `clause_arms`) — `signature_string` already does this.
     sigs::clear_sig_memo();
@@ -1378,6 +1379,7 @@ pub fn check_file_mode(
     // expanded tree is built, so a bare `(sig f (Shape -> …))` resolves. Cleared here so a
     // panic mid-check can't leak one file's abilities into the next.
     annot::clear_ability_types();
+    annot::set_type_aliases(HashMap::new(), None);
     // Pass 1: macroexpand each form (recording the expanded shape we'll also
     // walk in pass 2). A macroexpand failure isn't this pass's job to report,
     // so we fall back to the un-expanded form silently.
@@ -1577,6 +1579,12 @@ pub fn check_file_mode(
         // Which ids are records — the tiebreak for an unqualified sealed member that also
         // spells a built-in kind (`ratio`, `map`, …). See `annot::sealed_members_ty`.
         annot::set_record_ids(protocol::record_id_names(heap, &expanded));
+        // The type aliases a `sig` may name (ADR-326): loaded modules' from the heap, this
+        // file's from its expanded `%register-type` forms, qualified to the file's namespace.
+        annot::set_type_aliases(
+            protocol::type_alias_table(heap, &expanded, file_ns_name.as_deref()),
+            file_ns_name.clone(),
+        );
         // ADR-299: the operator sugar's domains — `number` plus the records `num/*` /
         // `compare-to` have methods for — from this file's `defmethod`s + the registry.
         sigs::set_operator_domains(protocol::operator_domains(&protocol::build_multi_info(

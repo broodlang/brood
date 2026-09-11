@@ -519,6 +519,7 @@
    "%show-print-hook" :meta
    "meta" :meta
    "sig" :meta
+   "deftype" :meta
    "sig!" :meta
    "%sig-pos" :meta
    "sleep" :processes

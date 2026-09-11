@@ -1110,7 +1110,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   The **definition** owns the arity, so a sig cannot make a wrong call look right.
   Type grammar beyond the basics: `(or A B)`, `(and A B)`, `(not T)` — so "anything
   but nil" is `(and any (not nil))` — `(vector E)`, `(map K V)`, `(tuple A B)`,
-  `(record :k T)`, and bare literals (`:ok`, `5`, `true`, `"GET"`).
+  `(record :k T)`, and bare literals (`:ok`, `5`, `true`, `"GET"`). **Name a shape once
+  with `(deftype pane (record &open :rect (tuple int int int int)))`** and write
+  `(pane -> int)` — structural, module-scoped like a `sig`, not a runtime value (ADR-327).
 - **`nest check --strict` reads a known bound by inclusion.** Plain `nest check` warns only
   on a *provable* misuse (`∩ = ∅`); `--strict` also warns where a value is merely wider
   than the parameter — `number` where `int` is declared, `nil | string` from `nth`/`first`

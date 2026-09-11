@@ -958,7 +958,9 @@ fn hints_name_only_features_that_exist() {
     // `(:use ability)` import. Abilities are now CORE (folded into the prelude), so the
     // hint must name them as built-in — no import — and the names must be bound bare in
     // the live image with no require at all.
-    let d = hint("(deftype foo)");
+    // (`deftype` left this table when it became Brood's own form — ADR-326's structural
+    // type alias — so the foreign spelling probed here is `definterface`.)
+    let d = hint("(definterface foo)");
     assert!(d.contains("defability"), "{d}");
     assert!(d.contains("defrecord"), "{d}");
     // …and the claim is checked against the live image: `defability`/`impl`/`defrecord`
