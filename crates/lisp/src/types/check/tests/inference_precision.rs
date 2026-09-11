@@ -476,3 +476,20 @@ fn a_vector_literal_keeps_its_arity_over_unknown_elements() {
         "{strict:?}"
     );
 }
+
+// `(assoc x :k v)` on an unknown `x` is a `map`, not `vector | map`: a keyword key on a
+// vector raises, so a keyword-keyed call that returns at all returns a map. An int key
+// keeps the honest `vector | map`. This is every `(assoc (step m) :k v)` in an editor's
+// `model -> model` chain, and the strict finding at each of them.
+#[test]
+fn assoc_with_keyword_keys_on_an_unknown_receiver_is_a_map() {
+    assert_eq!(ty_str("(fn (x) (assoc x :k 1))"), "(any) -> map");
+    assert_eq!(ty_str("(fn (x) (assoc x 0 1))"), "(any) -> vector | map");
+    let src = "\
+         (defmodule t)\n\
+         (defn step (m) (assoc m :n 1))\n\
+         (sig f (map -> map))\n\
+         (defn f (m) (assoc (step m) :k 2))";
+    let strict = file_warnings_mode(src, true);
+    assert!(strict.is_empty(), "{strict:?}");
+}

@@ -607,6 +607,7 @@ land in a later slice."
 ;; assoc'd on: reuse the lock's pinned tag when its resolved version still
 ;; satisfies the range (network-free — keeps a plain `nest run` offline); else
 ;; `%git-list-tags` and pick the newest match (or error, naming the range + tags).
+(sig package-git-concrete-ref (map any -> map))
 (defn- package-git-concrete-ref (dep locked)
   (let (range (get dep :version))
     (if (nil? range)

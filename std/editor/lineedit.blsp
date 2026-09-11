@@ -45,6 +45,10 @@ Built on `std/editor/highlight.blsp` (pure analysis) and the inline `term-*` sea
 
 ;; ---- editor state -----------------------------------------------------------
 
+;; The editor's state, named once (ADR-326): `:text` and `:point` are what every step
+;; reads; the rest (`:hscroll`, `:width`, `:done`, `:last-row`, …) rides on the open shape.
+(deftype state (record &open :text string :point int))
+
 (defn lineedit-init (prompt prefix history &optional opts)
   "The fresh editor state for one read: empty line, point at 0, the read-only `prefix`
 (legacy single-line form context) and `history` (newest-first submitted lines).
@@ -775,6 +779,7 @@ matched pair reversed, or a lone unmatched bracket in the error face."
 
 ;; ---- layout + rendering (IO) ------------------------------------------------
 
+(sig lineedit-cols (-> int))
 (defn- lineedit-cols ()
   "The terminal width in columns, with a sane fallback when the terminal reports no
 size (e.g. a pty with no winsize), so layout never collapses to a 1-column window."
@@ -793,6 +798,7 @@ terminal multiplexer), which is the same reason `lineedit-init` is public."
       (get state :prompt)
       (str "(reverse-i-search)`" (get s :query) "': "))))
 
+(sig lineedit-reflow (state -> state))
 (defn- lineedit-reflow (state)
   "Recompute the horizontal-scroll window so point is visible, and cache the width,
 available text columns, and prompt width for rendering."
@@ -954,7 +960,7 @@ once. Stops as soon as the read is `:done`."
     state
     (let (k (term/poll 0))
       (if (nil? k) state (lineedit-drain (lineedit-handle state k))))))
-(sig lineedit-drain (map -> map))
+(sig lineedit-drain (state -> state))
 
 (defn- lineedit-finish (state)
   "End the read: repaint the final line, drop to a new line, and return the result

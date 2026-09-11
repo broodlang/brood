@@ -1722,6 +1722,16 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             }
             return Some(Ty::map_of(key_ty, val_ty));
         }
+        // No usable receiver type (an untyped parameter, an unsigged call) but every key a
+        // literal keyword: the result is a `map`. `assoc`'s body is `(if (vector? coll)
+        // (%vector-assoc …) (%map-assoc …))`, which inferred as `vector | map` — but
+        // `%vector-assoc` takes an int index and RAISES on a keyword, so a keyword-keyed
+        // call that returns at all returns a map. This is the shape every `model -> model`
+        // step in an editor has (`(assoc (step m) :k v)` on an unsigged `step`), and
+        // `vector | map` where `map` was declared was the strict finding at every one.
+        if literal_keyword_pairs(&items[2..]).is_some() {
+            return Some(Ty::of(Tag::Map));
+        }
     }
     // `(string/->number "1")` is `1`, not `number | failure`. The declared signature has to
     // admit a failure because most calls can fail — but a call whose argument is a known
