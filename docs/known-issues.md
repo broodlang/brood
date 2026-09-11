@@ -126,7 +126,8 @@ scheduler, dist, GC or the JIT — run it repeatedly.
 | KI-122 | **the KI-120 `[refer] imported NOTHING` tripwire cried wolf on bedit** — every cold `nest check` of the flagship downstream project printed `(:use fuzzy) imported NOTHING — no public `fuzzy/` global is bound`, and the claim was false: both of `fuzzy`'s publics were bound. `src/completion.blsp` opens `(:use fuzzy :exclude [filter match])` — `fuzzy`'s entire public surface — and calls `fuzzy/filter` qualified | ✅ **FIXED 2026-09-09** — the diagnostic counted `referred` (names this `:use` took), which is 0 both when the globals are missing (the bug it hunts) and when the caller excluded all of them (healthy). It now counts `public_seen` (names the module exposes), so the message means what it says; the KI-120 signal is preserved by construction, the added condition being false only when the globals exist. The exclude-everything shape was already listed in the code as one that must stay silent (`clpb2`), but the guard chosen — `is_embedded_module` — excuses a USER module that excludes everything and not a std one. Deterministic repro: `rm ../bedit/.brood/image.bin && nest check` (the run that shows it is the one that rebuilds the image, which is why it read as a one-off). Guard `crates/cli/tests/refer_excluded_all.rs`, sabotage-verified: the old guard reds the exclude-all case and leaves the refer-all control green |
 | KI-123 | **KI-117's fix cost `errors-deep` 61% — a native frame's trace entry was built, then thrown away** — `brood_rt_trace_push` runs once per native level as an error unwinds, and it constructed the `TraceFrame` (cloning the arm's file name into a fresh `String`) BEFORE calling `push_trace`, which drops the frame once the trace hits its 32-frame cap. A 50-deep unwind paid 50 allocations to keep 32; `errors-deep` throws 50,000 times, so 2.5M frames were built per run where v0.24.0 built none | ✅ **FIXED 2026-09-10.** Two changes, each measured with `make ab BASE=c9876132 --floor` (the commit before KI-117's fix): the callback now returns early on `is_control() || trace_full()`, the guard the VM's own walker `attach_vm_trace_callers` has always had (+61% → +51%); and `TraceFrame.file` is an `Arc<str>` rather than a `String`, since every producer already holds the arm's `src_file` as one — the copy was pure waste (+51% → **+19%**). Found by the 0.27.0 brood-benchmarks column refresh, which read +72% on the row across three interleaved invocations with a 0.6% spread. Residue recorded below |
 | KI-124 | **macOS has not compiled since 2026-09-03, and only a pushed tag could tell you** — `os/spawn-pty` added `libc::ioctl(0, libc::TIOCSCTTY, 0)` in `crates/lisp/src/subprocess.rs`. libc types that constant as `c_uint` in its Apple bindings and `c_ulong` on Linux, while `ioctl` takes `c_ulong` on both, so the call is a hard `E0308` on both mac arms and green on every Linux job in CI | ✅ **FIXED 2026-09-10.** The constant gets `.into()` — an identity/widening conversion that is correct on every target and cannot truncate, where a hardcoded `as u64` would have traded the macOS break for a musl one (Linux's `Ioctl` alias is `c_ulong` on gnu but `c_int` on musl). The gap that let it live a week was structural, not local: **every** CI job ran `ubuntu-latest`, so nothing compiled this tree for macOS except the Release workflow's build matrix — which runs on a pushed TAG. v0.26.0 and v0.27.0 could not have caught it either; both died at the version-drift gate *before* reaching a build (KI-121's fix is what let v0.27.1 get far enough to fail here) |
-| KI-125 | **`brood/gui` has never compiled on macOS** — `crates/lisp/src/gui.rs` imports `winit::platform::wayland::{EventLoopBuilderExtWayland, WindowAttributesExtWayland}` and calls `EventLoopBuilder::with_any_thread`, all Linux/Wayland-only winit APIs, with no `cfg(target_os)` guard; the code's own comment says "on Linux we explicitly allow the dedicated GUI thread to own the loop" without one. `cargo check --features brood/gui` on `macos-14` gives `E0432: unresolved import winit::platform::wayland` + `E0599: no method named with_any_thread` | ⚠️ **OPEN — documented, not fixed 2026-09-10.** Not a regression and not shipped-broken: the Makefile defaults `WITH_GUI ?= 0` and CI's release build has no `config.mk`, so **the macOS binaries a release publishes contain no GUI** and nothing a user installs is affected. What is affected is anyone running `./configure --with-gui` on a Mac — that has never worked. Found by the new `macos-check` job (KI-124) on its very first run, which had the gui feature forced on; the job now matches the release feature set instead, with a comment saying why the feature must not be added back before a port |
+| KI-125 | **`brood/gui` has never compiled on macOS** — `crates/lisp/src/gui.rs` imports `winit::platform::wayland::{EventLoopBuilderExtWayland, WindowAttributesExtWayland}` and calls `EventLoopBuilder::with_any_thread`, all Linux/Wayland-only winit APIs, with no `cfg(target_os)` guard; the code's own comment says "on Linux we explicitly allow the dedicated GUI thread to own the loop" without one. `cargo check --features brood/gui` on `macos-14` gives `E0432: unresolved import winit::platform::wayland` + `E0599: no method named with_any_thread` ✅ **FIXED 2026-09-11.** Two changes. The Wayland-only import and the `with_any_thread` call are `cfg`-gated to the platforms that have them, so the feature compiles everywhere. And the event loop can now be hosted on the **process main thread**, which is the only place macOS will run it: the runtime already lives on a spawned thread (`cli_support::run_on_main_stack` sizes it for the stack-budget guard), so the main thread was merely blocked in `join` — it now parks on a channel instead and runs the loop there if a window is ever opened. `BROOD_GUI_MAIN_THREAD=1` selects that path on Linux, which is what makes it testable at all; verified live by thread name (with the lever there is **no `brood-gui` thread** and the loop is on tid == pid), with identical output and exit codes both ways |
+| KI-126 | **the Rust half of the suite never purged its `/tmp` fixtures — KI-30's shape, in the half KI-30's gate cannot see** — 1109 entries / 340 MB of `/tmp/brood-*`, `/tmp/brood_*`, `/tmp/nest-*` on an ordinary dev box, oldest 2026-08-30, found by `make doctor`'s own litter check. Every site *looks* like it follows the convention (`remove_dir_all` before creating, and again at the end) and cannot: the fixture name carries the test process's pid, so the opening purge names a path no previous run ever used | ✅ **FIXED 2026-09-11** — one nextest setup script (`scripts/purge-stale-temp.sh`) rather than ~40 call sites: the convention is "drop the previous run's leftovers before this run makes any", and a setup script is exactly that moment for the whole fan-out. Age-guarded (`-mmin +60`, own-uid, `-maxdepth 1`) so a CONCURRENT run keeps its fixtures — the `.blsp` version needs no guard because it runs at file load, before that file's fixtures exist. Verified: 942 of 1109 swept, two freshly-made fixtures survived, `BROOD_TEMP_PURGE_AGE_MIN=0` sweeps the rest, and nextest runs it as SETUP 1/3 |
 | KI-120 | **`brood_suite_passes` still goes TMT at 900 s with spawned children dying on bare `def-face`, `ui-run`, `highlight-spans` and qualified `editor/serve/*` — on the KI-119-fixed tree, with the stdlib image rebuilt exactly once at the run's start** (mtime 14:13:33, untouched for the 17 min after). Two of three full runs on 2026-09-08 (F-waves 12/8/22/4/8/3/19/76 in the second); the wrapper alone with `BROOD_SCOPE_DBG=1` never produced this shape (its one hit was KI-119). KI-80's third pass called it the `%isolate` rollback and fixed three things around it; the shape is back | ✅ **FIXED 2026-09-08** — the instrumented run named it: a supervisor among a file's stragglers respawns a child in the window between the runner's ONE quiesce pass and the `%isolate` restore, and that fresh child loads an editor module and `provide`s it AFTER the restore rolled its globals back — `*features*` then marks it loaded over an empty namespace and the next file's `(:use editor/serve)` imports nothing. `test-quiesce-file` now LOOPS (kill non-`before`, await, re-scan) until the set is empty, killing the supervisor so respawns stop; the `[refer] imported NOTHING` / `[unbound] recorded loaded but not bound` diagnostics are default-on where safe. Before: ~40% of full runs. After: 2 full loaded runs 0 deaths / 0 empty-imports / 0 give-ups |
 | KI-119 | **a module materialised from the stdlib image came back with another module's bytes — `unbound symbol` on a name that exists, under load** — `%image-index` read the section directory once at boot and `%image-load-section` re-opened the file BY PATH per module, arbitrarily later; any rebuild in between (nextest's setup script, `nest` on a stale image, a sibling test) replaced the file, and two builds of ONE tree are not byte-identical, so the old offsets landed on other sections. Seen as a `brood_suite_passes` run dying on bare `set` in a spawned child (then a receive waiting forever, into the 900 s cap) while a sibling loop rebuilt the image, and as a fresh `nest run` dying `unbound symbol: file/regular?` / `format/vec->list` with `[image] format` already in its own trace at **20 entries where the section holds 172** | ✅ **FIXED 2026-09-08** — the reader holds the handle it indexed (`OPEN_IMAGES`): an open descriptor pins the old inode across the writer's atomic rename, so a directory and the bytes it names cannot come from two builds. Guard `tests/startup_image_test.blsp` "a section is read from the file that was indexed" (sabotage-verified: fresh-open-per-read fails it). Fast repro before: 2 of 80 rebuild-then-`nest run` loops; after: **0 of 60**, and one full suite with the wrapper green on try 1 while that loop rebuilt the image beside it — but the wrapper's `def-face`/`editor/serve/*` shape recurred on the fixed tree with NO rebuild in the window, so that one is a second mechanism: **KI-120**, open. KI-80's `%isolate`-rollback attribution was wrong for the `set`/`nest run` runs (`BROOD_SCOPE_DBG` printed nothing) and is undecided for KI-120 |
 | KI-116 | **nine `nest check --strict` warnings in the test tree are the checker being RIGHT** — an ability's non-`self` param is a different implementor, `:or` destructuring genuinely answers `T \| nil`, `first` of an empty vector is nil under a `-> string` contract, an undeclared map shape, and `math/pow` answering `number` because a negative exponent yields a ratio | ☑️ **NOT A BUG — recorded 2026-09-08.** Corrected from an earlier revision of this entry that claimed TWENTY such warnings: eleven of those were unverified regex patches of mine that had silently failed to match, reported as deliberate without re-checking. The sweep went 269 -> 9. Two of the "limitations" it originally named were also wrong and are now fixed in the checker: an ability impl's `self` is seeded from the record it dispatches on, and a multimethod's params from its dispatch key |
@@ -9315,7 +9316,69 @@ it only in `cargo check` versus `cargo build`, and a type error is diagnosed in 
 either way. If a cheap way to red the job on purpose appears — a throwaway branch with the
 conversion reverted — take it and replace this paragraph.
 
-## KI-125 — `brood/gui` cannot compile on macOS ⚠️ open (documented) 2026-09-10
+## KI-126 — the Rust tests never purged their `/tmp` fixtures ✅ fixed 2026-09-11
+
+**Filed as its own entry, for the reason KI-30 gives.** This *is* KI-30 — "seven `temp-dir`
+prefixes were never purged" — in the half of the suite KI-30's fix and its gate cannot see. An
+adjacent finding recorded inside a fixed entry is invisible, so it gets a number.
+
+**Measured**, by `make doctor`'s own litter check (`> 200 /tmp/brood-*` notes "the KI-30 shape;
+check the temp-dir purge still runs" — it was right):
+
+| prefix | entries | source |
+|---|---|---|
+| `nest-blsp-` | 404 | `crates/nest/tests/blsp_dispatch.rs` |
+| `brood-prelude-` | 106 | `crates/cli/tests/prelude_image_matches_source.rs` |
+| `brood-fixsigs-` | 97 | the `--fix-sigs` tests |
+| `brood-relaid-` | 96 | `prelude_image_survives_a_relaid_stdlib_image.rs` |
+| `brood-pkg-` · `brood-startup-` · `brood-scaf-` · `brood-float-` · … | 39 and below each | the rest of `crates/*/tests` |
+
+**1109 entries, 340 MB, oldest 2026-08-30** — six weeks at roughly one directory per test per
+run. Nothing accumulated fast, which is why nobody saw it.
+
+**The mechanism is the part worth keeping.** Every site is written to look exactly like the
+convention:
+
+```rust
+let dir = temp_dir().join(format!("brood-startup-image-{tag}-{}", process::id()));
+let _ = fs::remove_dir_all(&dir);            // purge, at the start
+// … test …
+let _ = fs::remove_dir_all(&dir);            // and again at the end
+```
+
+and it cannot be the convention, because **the name carries the test process's pid**. KI-30's
+rule is "at load, drop the *previous run's* leftovers" — a prefix match against names an
+earlier run chose. A pid-scoped path names something no earlier run ever created, so the
+opening `remove_dir_all` always removes nothing. The only cleanup that ever fires is the
+closing one, and that is skipped by every early return, every failed assertion and every panic.
+The pid is not the bug — it is what keeps concurrent nextest cases apart, which is its job.
+
+**Fix.** `scripts/purge-stale-temp.sh`, registered as a nextest setup script, so the Rust half
+gets at the start of a run what the `.blsp` half gets at file load. One place instead of ~40
+call sites in 15 files, and it covers fixtures that do not exist yet. Three guards, because it
+removes files outside the repo: `-maxdepth 1` (fixture roots only, never a path inside one),
+`-user` (never another account's entries on a shared `/tmp`), and `-mmin +60` — a live run's
+fixtures are minutes old (per-case cap 2 min, full suite ~10), so an hour untouched cannot
+belong to a running suite and a **concurrent** run keeps its own. The `.blsp` version needs no
+age guard: it runs before that file's fixtures exist. A setup script runs once for the whole
+process tree, so it asks about age instead.
+
+**Verified.** 942 of 1109 swept on the spot (the 167 left were that hour's runs), 340 MB → 6.4
+MB; two fixtures created seconds earlier survived, which is the age guard doing its job;
+`BROOD_TEMP_PURGE_AGE_MIN=0` then took the remainder; `BROOD_NO_TEMP_PURGE=1` skips with a line;
+and `cargo nextest run` reports `SETUP [1/3] purge-stale-temp` — first, because nextest runs
+setup scripts in the order their tables are declared, not in the `setup = [...]` list's order.
+
+**Deliberately not done: a source-scan gate like KI-30's.** `temp_purge_coverage_test.blsp`
+exists because the `.blsp` convention is per-file discipline, and discipline needs a gate. This
+fix is not discipline — no test has to remember anything, and a new test that invents a fresh
+`brood-…` prefix is swept without being told. The gate to keep is `make doctor`'s litter check,
+which is what found this one.
+
+**Not a correctness risk**, same as KI-30: every fixture name is freshly randomised, nothing
+reads a stale one. It was disk, and noise when reading `/tmp`.
+
+## KI-125 — `brood/gui` could not compile on macOS ✅ fixed 2026-09-11
 
 **Symptom.** `cargo check -p cli --features brood/gui` on `macos-14`:
 
@@ -9326,33 +9389,67 @@ error[E0599]: no method named `with_any_thread` found for struct `EventLoopBuild
 error: could not compile `brood` (lib) due to 2 previous errors
 ```
 
-**Cause.** `crates/lisp/src/gui.rs` reaches for Linux/Wayland-only winit surface with no
-`cfg(target_os)` guard — `use winit::platform::wayland::EventLoopBuilderExtWayland` (:452),
-`use winit::platform::wayland::WindowAttributesExtWayland` (:1262), and
-`builder.with_any_thread(true)` (:1999). The last one is not incidental: winit requires the
-event loop on the main thread, and `with_any_thread` is the Linux-only escape hatch that lets
-Brood's *dedicated GUI thread* own it. Its comment already says "on Linux" — the `cfg` that
-sentence describes was simply never written. So this is not a small portability patch: macOS
-has no equivalent, and a port has to move the loop to the main thread.
+**Cause — two layers, and only the first is a typo-shaped problem.** `crates/lisp/src/gui.rs`
+reached for Linux/Wayland-only winit surface with no `cfg(target_os)` guard:
+`use winit::platform::wayland::EventLoopBuilderExtWayland` and `builder.with_any_thread(true)`.
+(A third site, `WindowAttributesExtWayland`, was already gated — which is what made the
+omission easy to miss.)
+
+The second layer is the real one. `with_any_thread` is not a detail; it is the **only reason
+the GUI could live on a thread of its own**. winit requires the event loop on the process
+main thread, and Wayland/X11 offer that opt-out while **macOS does not** — AppKit's run loop
+is main-thread-only, full stop. So gating the call would have made the code compile and then
+fail at the first `gui-open`. Porting meant giving the loop somewhere legal to run.
 
 **Why it survived.** Nothing ever compiled the gui feature for macOS. Every CI job was
 `ubuntu-latest` (KI-124), and the one thing that did build macOS — the Release matrix — runs
 `make release` with **no `config.mk`**, where `WITH_GUI ?= 0`. The `config.mk` that turns the
 gui on is written by `./configure` and is gitignored, so a developer's local `make release`
-compiles the gui and CI's never does. That asymmetry is the whole reason this went unseen: the
-feature is on for everyone who would notice and off everywhere it would be checked.
+compiles the gui and CI's never does. The feature was on for everyone who would notice and
+off everywhere it would be checked.
 
-**Impact, stated precisely so it is not over- or under-read.** Released macOS binaries are
-unaffected — they contain no GUI and never claimed to. What does not work is
-`./configure --with-gui` on a Mac, which has never worked. No user of a published artifact is
-broken by this.
+**Fix** (rationale and the constraints it creates: **ADR-324**). The gate, plus main-thread
+hosting — which turned out to be far smaller than feared, because the runtime *already* runs
+on a spawned thread. `cli_support::run_on_main_stack`
+has always moved the work off the main thread (to size the stack for the ADR-043 budget
+guard), leaving the main thread doing nothing but `join()`. So there was a free main thread
+the whole time; it simply had no way to be asked for.
 
-**Fix.** None yet — deliberately. Porting the event loop to macOS's main-thread requirement is
-real work and was well outside the release it was found during. Recorded rather than silently
-absorbed.
+It now parks instead of joining: a small `brood-main-join` thread waits on the runtime while
+the main thread blocks on a channel, and `start_thread` either spawns the usual `brood-gui`
+thread (Wayland/X11) or hands the loop to the main thread (everywhere else). The one case
+needing care is a runtime that *returns* while winit owns the main thread — nothing would
+notice, so the joiner ends the process the way a returning `main` would have. Every non-zero
+exit already went through `std::process::exit` on the runtime thread and is untouched.
 
-**Guard.** None, and that is a deliberate non-fix too: the honest guard would be
-`--features brood/gui` in `macos-check`, which would red CI permanently for a platform the
-release does not target. The job therefore matches the release feature set exactly, and
-carries a comment naming this entry so the next person does not add the feature back thinking
-it was an omission. When the port lands, add the feature to that job in the same commit.
+`main_thread_hosting_required()` is forced true wherever a dedicated thread is illegal, and
+**the lever cannot switch it off there** — `BROOD_GUI_MAIN_THREAD=0` on macOS would not read
+as a config mistake, it would read as a GUI that fails to start.
+
+**Guard, and what it does and does not prove.** This project has no macOS to run anything on;
+`macos-check` compiles and stops. So the port would otherwise have shipped *executed nowhere*.
+Hence `BROOD_GUI_MAIN_THREAD=1`, which selects the main-thread path on Linux — not a
+preference knob, but the thing that makes the macOS code path runnable where the GUI is
+actually tested.
+
+- **Live, on Linux, both modes, same binary** — the probe opens a real window, paints a
+  frame, and closes. Output and exit codes are identical (`exit=3` for a `system/halt 3`
+  under both; `0` and `5` with the lever set and no window ever opened, which is the
+  `RuntimeDone` path). The decisive evidence is the thread table: **default** shows
+  `brood-gui` and no joiner; **`BROOD_GUI_MAIN_THREAD=1`** shows **no `brood-gui` thread at
+  all** and a `brood-main-join`, i.e. the loop is on tid == pid. That is the macOS topology,
+  observed.
+- **Unit tests** `gui::backend::main_thread_hosting::*` pin the decision itself, as a pure
+  function of (platform-permits-dedicated, lever) so every platform's answer is testable from
+  this one. They run in CI's existing `cargo test -p brood --features gui,gui-gpu --lib gui`
+  step. Sabotage-verified: letting the lever disable hosting where nothing else is legal reds
+  `a_platform_with_nowhere_else_always_hosts_on_main` with `lever Some("0") must not move the
+  loop off the main thread`, and only that test.
+- **`macos-check` now compiles `brood/gui`** in its own step, so the original break cannot
+  return silently.
+
+**What is still not proven, stated plainly:** no window has been opened on an actual Mac. The
+topology and the handoff are verified, the code compiles for Apple, and the AppKit
+main-thread rule is what the design now satisfies — but "a window appears on macOS" is an
+observation nobody has made. The first person with a Mac should run the probe; if it fails it
+will fail at `gui-open`, not at compile time.

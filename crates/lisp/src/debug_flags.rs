@@ -556,6 +556,11 @@ pub const FLAGS: &[DebugFlag] = &[
     ),
     // ---- host environment ----
     f(
+        "BROOD_GUI_MAIN_THREAD",
+        HOST,
+        "host the GUI event loop on the process MAIN thread instead of a dedicated one — forced on macOS/Windows, where AppKit allows nowhere else; the lever exists so Linux can exercise that path (KI-125)",
+    ),
+    f(
         "BROOD_GUI_HEADLESS",
         HOST,
         "run the GUI/display layer with no real window, and no audio — for a headless CI box",

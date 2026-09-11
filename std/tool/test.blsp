@@ -526,15 +526,6 @@ the test rather than hanging the run."
     (go nil sorted)))
 (defn- sort-by-ms (xs) (fold xs nil (fn (acc x) (insert-by-ms x acc))))
 
-;; A "N.N MB" formatter for the memory line (`quot` is the prelude's).
-(defn- mb-str (bytes)
-  (let (tenths (math/quot (+ (* bytes 10) 524288) 1048576)
-        ; round to nearest 0.1 MB
-        whole (math/quot tenths 10)
-        frac (math/rem tenths 10))
-    (str whole "." frac " MB")))
-(sig mb-str (int -> string))
-
 ;; --- results -----------------------------------------------------------------
 ;; A result is (group name fails ms): `fails` is the list of failure records for
 ;; that test (empty = passed). A failure record is (loc detail-lines); `loc` is
@@ -1845,7 +1836,7 @@ read the un-imaged path as evidence about the imaged one."
                " failed assertions"
                extra
                ")"))
-    (io/puts (str "  (" elapsed " ms wall, peak " (mb-str (dev/mem-peak)) ")"))
+    (io/puts (str "  (" elapsed " ms wall, peak " (humanize/byte-size (dev/mem-peak)) ")"))
     (io/puts (image-summary-line))
     (io/puts (boot-summary-line))
     ;; Echo the seed whenever the order was randomised, so the run can be

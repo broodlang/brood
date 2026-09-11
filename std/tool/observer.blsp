@@ -102,13 +102,6 @@ attach). Drive the standalone app from the shell with `nest observe`."
   (if (> (string/length s) w) (string/substring s 0 (math/max 0 w)) s))
 (sig observe-fit (string int -> string))
 
-(defn- observe-bytes->human (n)
-  "A compact human-readable byte count: `B` / `KB` / `MB` (integer-rounded)."
-  (cond
-    (< n 1024) (str n " B")
-    (< n 1048576) (str (math/quot n 1024) " KB")
-    else (str (math/quot n 1048576) " MB")))
-
 (defn- observe-opt (v f)
   "Render optional field `v` with `f`, or `\"-\"` when it's absent (nil)."
   (if (nil? v) "-" (f v)))
@@ -145,7 +138,7 @@ stands out at a glance (cumulative only tells you lifetime work). `mem` and
       nm
       (observe-opt (get p :status) ->string)
       (get p :mailbox)
-      (observe-opt (get p :memory) observe-bytes->human)
+      (observe-opt (get p :memory) humanize/byte-size)
       (observe-opt (get p :reductions) str)
       (observe-opt (get p :reds-rate) str)
       (get p :monitored-by))))
@@ -172,7 +165,7 @@ the colours live in one place (`:observer/*`)."
     (let (s (get p :status)) (if (nil? s) "?" (->string s)))
     " · mailbox "
     (get p :mailbox)
-    (let (m (get p :memory)) (if (nil? m) "" (str " · mem " (observe-bytes->human m))))
+    (let (m (get p :memory)) (if (nil? m) "" (str " · mem " (humanize/byte-size m))))
     (let (gc (get p :collections)) (if (or (nil? gc) (= gc 0)) "" (str " · gc " gc)))
     (let (r (get p :reductions)) (if (or (nil? r) (= r 0)) "" (str " · reds " r)))
     (let (rr (get p :reds-rate)) (if (nil? rr) "" (str " · reds/s " rr)))
@@ -205,9 +198,9 @@ the colours live in one place (`:observer/*`)."
       (get node
         :spawned)
       " · mem "
-      (observe-bytes->human (get node :mem))
+      (humanize/byte-size (get node :mem))
       " (peak "
-      (observe-bytes->human (get node :mem-peak))
+      (humanize/byte-size (get node :mem-peak))
       ")"
       (let (ps (get node
                  :peers))
