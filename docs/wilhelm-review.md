@@ -13,7 +13,7 @@ if the question had never been asked. Same rule as `decisions.md` and `known-iss
 ## Math and Numbers
 
 - [x] **is `compare` Math and Number or is it an ability? how does that compare with `==`?**
-      Checked: `compare` is a **kernel builtin** (`builtins/mod.rs:571`), a 3-way
+      Checked: `compare` is a **kernel builtin** (`builtins.rs:571`), a 3-way
       `-1/0/1` structural comparison over any two values. There is **no `==` in Brood** —
       `=` is the only equality, and `%ord-compare` is the record-aware wrapper that
       `sort`/`sort-by` use (a record defers to its `Ord` `compare-to`). So the surface is
@@ -32,7 +32,7 @@ if the question had never been asked. Same rule as `decisions.md` and `known-iss
       strict rule, and the antisymmetry law itself is now a test.
 - [x] **`dev/inc` can be under math** — **already true, no change needed.** `inc`/`dec` are
       bare in `std/prelude/core.blsp` and catalogued `:math`, so the reference already lists
-      them under "Math and numbers". `std/dev.blsp` has no `inc` at all — it is 19 runtime
+      them under "Math and numbers". `std/tool/dev.blsp` has no `inc` at all — it is 19 runtime
       diagnostics (`mem-bytes`, `gc-stats`, `vm-stats`, …).
 - [x] **`num-div` does not make sense to me** — **done: the family is now `num/add`,
       `num/sub`, `num/mul`, `num/div`**, with `std/num.blsp` declaring and documenting the
@@ -62,7 +62,7 @@ if the question had never been asked. Same rule as `decisions.md` and `known-iss
       The pair *looked* symmetric and was not — that asymmetry was the real finding.
 
       **Reopened 2026-08-30 and closed properly.** Staying bare was right; the *code* did
-      not say so. `std/doc-catalog.blsp` categorised `index-of` (and its private scan helper)
+      not say so. `std/tool/doc-catalog.blsp` categorised `index-of` (and its private scan helper)
       as `:strings`, so the generated reference filed a collection op under "Strings and
       text", and it was defined inside the strings section of `std/prelude/string.blsp`.
       Both now say collection: catalogued `:collections`, and moved — with `includes?`, its

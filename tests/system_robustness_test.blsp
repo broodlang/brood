@@ -1,4 +1,4 @@
-;;; Robustness regressions for the `builtins/system.rs` primitives — the kernel
+;;; Robustness regressions for the `builtins/{evaluation,processes,modules}.rs` primitives — the kernel
 ;;; entry points behind `nest check`'s per-file scan, `%isolate`, `%binding` and
 ;;; the `{:name :node}` address readers. Each case here pins a failure the
 ;;; runtime used to have:

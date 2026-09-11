@@ -10,7 +10,7 @@
   ;; `project-advisory-warning?` is module-private: the stability tests below assert that a
   ;; deprecation PRINTS but does not gate the build, and that classifier is the thing that
   ;; decides it (ADR-283).
-  (:use-internals project))
+  (:use-internals project-check))
 
 (defn c-add (a b) (+ a b))
 (sig! c-add (int int -> int))
@@ -357,9 +357,9 @@
     ;; The point of a deprecation is to say "this is going away" while the code still
     ;; works. One that fails CI is a removal with extra steps.
     (assert= true
-      (project/project-advisory-warning? "f.blsp:1:1: warning: `x` is deprecated since 0.14.0 — use `y` instead"))
+      (project-check/project-advisory-warning? "f.blsp:1:1: warning: `x` is deprecated since 0.14.0 — use `y` instead"))
     (assert= false
-      (project/project-advisory-warning? "f.blsp:1:1: warning: unbound symbol: zz")))
+      (project-check/project-advisory-warning? "f.blsp:1:1: warning: unbound symbol: zz")))
 
   (test "`:beta` warns with its reason"
     (let (msgs (stability-messages "(defn u (s) (contract-test/m-wobbly s))"))

@@ -287,7 +287,7 @@ fn a_failing_suite_exits_1_without_reporting_the_runner_internals() {
     );
     let all = format!("{out}{err}");
     assert!(
-        !all.contains("at project/run-tests") && !all.contains("test(s) failed\n    at "),
+        !all.contains("at project-run/run-tests") && !all.contains("test(s) failed\n    at "),
         "the failure signal must not be reported as an error:\n{all}"
     );
 }

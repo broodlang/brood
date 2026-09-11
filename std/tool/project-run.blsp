@@ -1,0 +1,520 @@
+;; std/tool/project-run.blsp
+
+(defmodule project-run
+  "Running a project: `run-tests` (with the `--failed` set, `--stale` skipping and the
+coverage wiring behind `nest test`), `run` (`nest run`, with the entry-point resolution
+and its advice) and `check-boot` (load everything, resolve `:main`, run nothing — KI-66).")
+
+;; --- the `--failed` set (mix test --failed) -----------------------------------
+;; Which tests failed last time, as full `"group › name"` labels, persisted beside
+;; the check caches. Maintained as a SET-DIFFERENCE, not an overwrite: a test that
+;; just ran and passed leaves the set, a test that just failed joins it, and a test
+;; that wasn't run at all (because of a filter) keeps its previous state. That's
+;; what makes `nest test --failed` usable repeatedly — fix one test, re-run, and
+;; only the still-broken ones remain.
+(defn- project-failed-file (root)
+  (let (dir (project-check/project-cache-dir root))
+    (if (nil? dir) nil (path/join dir "last-failed.blsp"))))
+
+;; Stored as a `{:failed (label …)}` record rather than a bare list, because an
+;; empty list IS nil in a Lisp — a bare list can't distinguish "never run" from
+;; "last run was green", and those two want different messages.
+(defn- project-read-failed-record (root)
+  "The previous run's `{:failed (label …)}` record, or nil when there is none (no cache dir, never run here, or an unreadable/corrupt file)."
+  (let (f (project-failed-file root))
+    (if (or (nil? f) (not (file/exists? f)))
+      nil
+      ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
+      (let (form (check-allow :discarded-catch
+                   (try (reflect/read-first (file/slurp f)) (catch _ nil))))
+        (if (map? form) form nil)))))
+
+(defn- project-write-failed (root ran failed)
+  "Update the on-disk `--failed` set: drop everything in `ran` that isn't in `failed`, then add `failed`. Best-effort — a project with no writable cache dir simply keeps no record."
+  (let (f (project-failed-file root))
+    (when (not (nil? f))
+      (let (previous (or (get (project-read-failed-record root) :failed) (list))
+            kept (filter previous (fn (l) (not (includes? (or ran (list)) l))))
+            merged (append kept (or failed (list))))
+        ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
+        (check-allow :discarded-catch (try (file/spit f (pr-str {:failed merged})) (catch _ nil)))))))
+
+;; --- `--stale`: skip test files whose dependencies are unchanged ---------------
+;; `mix test --stale`: a test file only re-runs when it, or one of the source files it
+;; transitively requires, has changed since it last ran. The dependency graph is the KI-17
+;; require-closure already computed for the checker (`project-require-closures`); the
+;; "changed" signal is the newest mtime across a test file + its dependency source files,
+;; compared to what was recorded last run. Stored `{test-file -> max-dep-mtime}` in the
+;; project cache dir, like `--failed`. Only project files carry an mtime — a std/prelude
+;; module in the closure has no file to track and can't change under a --stale run.
+(defn- project-stale-file (root)
+  (let (dir (project-check/project-cache-dir root))
+    (if (nil? dir) nil (path/join dir "last-run-mtimes.blsp"))))
+
+(defn- project-read-stale-record (root)
+  "The previous run's `{test-file -> max-dep-mtime}` map, or `{}` when there is none."
+  (let (f (project-stale-file root))
+    (if (or (nil? f) (not (file/exists? f)))
+      {}
+      ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
+      (let (form (check-allow :discarded-catch
+                   (try (reflect/read-first (file/slurp f)) (catch _ nil))))
+        (if (map? form) form {})))))
+
+(defn- project-module-file-index (infos)
+  "`module-name -> file` from a module-infos map (`{file -> {:module :requires}}`)."
+  (fold infos
+    {}
+    (fn (acc kv) (let ([f info] kv name (get info :module)) (if name (assoc acc name f) acc)))))
+
+(defn- project-test-dep-files (test-file closures module->file)
+  "Every project file `test-file` transitively depends on (mapping its reachable module
+names back to files), including itself. Modules with no project file (std/prelude) drop."
+  (conj (into #{} (seq/keep (or (get closures test-file) []) (fn (m) (get module->file m))))
+    test-file))
+
+(defn- project-file-max-mtime (files)
+  "The newest mtime across `files` (0 when none exist)."
+  (fold files 0 (fn (mx f) (let (mt (or (file/mtime f) 0)) (if (> mt mx) mt mx)))))
+
+(defn- project-stale-mtimes (root files)
+  "`test-file -> current max-dep-mtime` for each test file in `files`, over the whole
+project's require-closure."
+  (let (all (project-check/all-files root)
+        infos (project-check/project-module-infos all)
+        closures (project-check/project-require-closures all)
+        module->file (project-module-file-index infos))
+    (fold files
+      {}
+      (fn (acc tf)
+        (assoc acc
+          tf (project-file-max-mtime (project-test-dep-files tf closures module->file)))))))
+
+(defn- project-stale-filter (root files)
+  "The subset of `files` whose transitive dependencies changed since they last ran (or
+that were never recorded) — the `--stale` run set."
+  (let (prev (project-read-stale-record root)
+        current (project-stale-mtimes root files))
+    (filter files
+      (fn (tf) (let (was (get prev tf) now (get current tf 0)) (or (nil? was) (> now was)))))))
+
+(defn- project-write-stale (root files)
+  "Record the current max-dep-mtime of each file in `files`, merged over the previous
+record so a skipped (unchanged) file keeps its stamp. Best-effort; no writable cache dir
+simply keeps no record."
+  (let (f (project-stale-file root))
+    (when (not (nil? f))
+      (let (merged (fold (project-stale-mtimes root files)
+                     (project-read-stale-record root)
+                     (fn (acc kv) (assoc acc (first kv) (second kv)))))
+        ;; check-allow :discarded-catch — a best-effort cache, manifest or git read/write: absence is the answer
+        (check-allow :discarded-catch (try (file/spit f (pr-str merged)) (catch _ nil)))))))
+
+(defn- project-stale-run-set (root files)
+  "The `--stale` subset of `files` to run, with a one-line note of how many were skipped
+as unchanged (only when some were)."
+  (let (run (project-stale-filter root files)
+        skipped (- (count files) (count run)))
+    (when (> skipped 0)
+      (io/puts (str "stale: "
+                 (count run)
+                 " of "
+                 (count files)
+                 " test files changed ("
+                 skipped
+                 " unchanged, skipped)")))
+    run))
+
+;; Build the `:filter` spec for `--failed`. With nothing to narrow to, run
+;; everything and say why — a command that silently runs zero tests reads as
+;; broken, and "re-run the failures" on a green suite most usefully means "run it".
+(defn- project-failed-filter (root spec)
+  (let (record (project-read-failed-record root)
+        failed (get record :failed))
+    (cond
+      (nil? record)
+        (do
+          (io/puts "warning: --failed: no record of a previous run here — running every test"
+            :to *err*)
+          spec)
+      (empty? failed)
+        (do
+          (io/puts "warning: --failed: nothing failed on the last run — running every test"
+            :to *err*)
+          spec)
+      else (assoc (or spec {}) :names failed))))
+
+(defn run-tests (& opts)
+  "Discover, load (register-only), and run the project's whole test suite once, from the cwd. `opts` pass through to `run-tests` (e.g. `:slow`). Runs an advisory `check` pre-flight. Errors if not in a project or if any test fails. Backs `nest test`."
+  (let (root (project/find-root (file/cwd)))
+    (when (nil? root)
+      (error "run-tests: not in a Brood project (no project.blsp found from "
+        (file/cwd)
+        ")"))
+    (project/setup root)
+    (project-image/load-sources-cached root)
+    ; the project's own src/, so tests use it directly
+    (test/reset-units)
+    ; drop any stale registrations from a prior run (long-lived image / hot reload)
+    (let (dirs (project/abs-paths root *project-test-paths*)
+          ;; The corpus is `tests/**/*_test.blsp` PLUS any source file carrying co-located
+          ;; `deftest`/`describe` forms (ADR-225) — a test found by its forms, wherever it
+          ;; lives, not by a `_test.blsp` filename under `tests/`.
+          files-all (append (fold dirs
+                              nil
+                              (fn (acc d) (append acc (project/project-collect-tests d))))
+                      (project/project-colocated-test-files root))
+          ;; `--stale` drops any test file whose transitive deps are unchanged since it
+          ;; last ran; the record is refreshed after the run (below). Whole-project only.
+          files (if (test/opt? :stale opts)
+                  (project-stale-run-set root files-all)
+                  files-all))
+      ;; Advisory type-check (warnings to stderr). Run it INSIDE `%isolate`: `check`
+      ;; loads every source + test file into the image for cross-file checking, which would
+      ;; otherwise leave all N test modules bound in the global table — and the scoped run
+      ;; below `snapshot-globals`-clones that table once PER FILE, so an O(N) baseline makes
+      ;; the run O(N²). Rolling the check's loads back keeps the run's baseline small (just
+      ;; prelude + src + the test framework), so each file's snapshot is O(1) → linear.
+      ;; (Warnings are stderr I/O, unaffected by the global rollback.)
+      (%isolate (fn () (project-check/check)))
+      ;; Run file-by-file, each in its own rolled-back global scope, so a large
+      ;; suite's promoted code + top-level defs are reclaimed per file instead of
+      ;; accumulating every file's code in one image (the shared-RUNTIME test-runner
+      ;; leak, docs/devlog.md 2026-07-03). Each loader `reflect/load`s one file (registering
+      ;; its units) inside the `%isolate` that `run-tests-scoped` wraps it in.
+      ;; `BROOD_TEST_NO_SCOPE` reverts to the legacy load-all-then-run-all path (the
+      ;; escape hatch, e.g. for a suite that relies on cross-file top-level defs).
+      ;; Instrument for coverage BEFORE the suite and AFTER the sources are loaded
+      ;; (and after `check`, whose `%isolate` would roll the rebindings
+      ;; back). Opt-in: `:cover` in the option plist, from `nest test --cover`.
+      (when (test/opt? :cover opts) (project-coverage-begin root))
+      ;; The line/branch tiers' pre-pass, same timing and for the same reason: it must
+      ;; see the project's functions loaded, and it must not be rolled back. One pass
+      ;; serves both (a precompiled arm records line AND branch denominators).
+      (when (or (test/opt? :cover-lines opts) (test/opt? :cover-branches opts))
+        (project-coverage-lines-begin root))
+      ;; Persist the `--failed` set whichever way the run goes: the interesting
+      ;; case is precisely the failing one, and `run-tests-scoped` RAISES on
+      ;; failure, so catch, record, then re-raise to keep the non-zero exit.
+      (let (resolved (project-resolve-test-opts root opts)
+            outcome (try (project-run-suite files resolved) (catch e (list :%suite-raised e))))
+        (project-write-failed root *test-last-ran* *test-last-failed*)
+        ;; Refresh the --stale record for the files that ran (skipped files keep theirs).
+        (when (test/opt? :stale opts) (project-write-stale root files))
+        ;; Report coverage before propagating a suite failure — a red run is
+        ;; exactly when you still want to see what went unexercised.
+        (let (percent (project-coverage-report root opts))
+          (if (and (pair? outcome) (= (first outcome) :%suite-raised))
+            (throw (second outcome))
+            (do (project-doctest-gate) (project-coverage-gate percent opts))))))))
+
+;; Run the examples in the project's own docstrings (`std/tool/doctest.blsp`). A documented
+;; example is a promise about behaviour, and a wrong one is worse than none: it reads as
+;; authoritative and no other gate sees it — the checker does not evaluate docstrings and no
+;; test covers prose.
+;;
+;; Scoped to the project's OWN package prefix, so a run gates what this project promises and
+;; not what its dependencies or the stdlib do (`std/` has its own gate,
+;; `tests/doc_examples_test.blsp`, over the same engine). A NAMELESS project is skipped
+;; rather than widened to the whole image: without a `:name` its modules are unrooted, so
+;; there is no prefix that means "mine", and running every std example on someone's `nest
+;; test` would be both wrong and slow.
+;;
+;; Runs only once the suite is green — a red suite is already the answer, and a wall of
+;; doctest output underneath it buries the failure that matters.
+(defn- project-doctest-gate ()
+  (when *project-name*
+    (let (fails (doctest/failures-under (str (->string *project-name*) "/")))
+      (when (not (empty? fails))
+        (io/puts (str (count fails) " documented example(s) do not hold:") :to *err*)
+        (each fails (fn (f) (io/puts (str "  " f) :to *err*)))
+        (error "doctest: " (count fails) " documented example(s) do not hold")))))
+
+;; Whichever coverage tier was asked for. Both may be on at once — they measure
+;; different things (was a function entered vs did a line run) — in which case the
+;; LINE percentage is what `--cover-min` gates on, being the stricter number.
+(defn- project-coverage-report (root opts)
+  (let (fn-percent (if (test/opt? :cover opts) (project-coverage-finish root) nil)
+        line-percent (if (test/opt? :cover-lines opts)
+                       (project-coverage-lines-finish root)
+                       nil)
+        branch-percent (if (test/opt? :cover-branches opts)
+                         (project-coverage-branches-finish root)
+                         nil))
+    ;; `--cover-min` gates on the strictest number present: branch > line > function.
+    (or branch-percent line-percent fn-percent)))
+
+(defn- project-coverage-lines-begin (root)
+  (coverage/line-begin (project/abs-paths root *project-source-paths*)))
+
+(defn- project-coverage-lines-finish (root)
+  (coverage/line-report root (project/abs-paths root *project-source-paths*)))
+
+(defn- project-coverage-branches-finish (root)
+  (coverage/branch-report root (project/abs-paths root *project-source-paths*)))
+
+;; --- coverage wiring (nest test --cover) --------------------------------------
+;; `coverage` is required lazily, like `package`: a run without `--cover` never
+;; loads it, and the module is pure policy over `source-location`/`table` (see
+;; std/tool/coverage.blsp).
+(defn- project-coverage-begin (root)
+  (coverage/begin (project/abs-paths root *project-source-paths*)))
+
+(defn- project-coverage-finish (root)
+  (coverage/report root))
+
+;; Enforce `--cover-min N`: a coverage floor is only useful if it can fail the
+;; build, so falling short raises (non-zero exit) exactly like a failing test.
+;; Runs AFTER the suite-failure re-raise, so a red suite reports its own failure
+;; first rather than being masked by a coverage complaint.
+(defn- project-coverage-gate (percent opts)
+  (let (minimum (test/opt-val :cover-min opts nil))
+    (if (and (not (nil? percent)) (not (nil? minimum)) (< percent minimum))
+      ;; Print the verdict, THEN raise the bare signal `nest` recognises. Falling short
+      ;; of a floor is an expected outcome, not a crash: raising the sentence itself
+      ;; appended `1:58: error: …`, `at error` and a version banner to a report the user
+      ;; had already read. Same treatment as a failing suite (`run_expecting_failure_signal`).
+      (do
+        (io/puts "")
+        (io/puts (str "FAILED: coverage " percent "% is below the required minimum " minimum "%"))
+        (error "coverage below minimum"))
+      :ok)))
+
+;; Expand `:failed` in a `nest test` option plist into the `:filter` spec's
+;; `:names`. The resolved `:filter` is CONSed on the front: `opt-val` returns the
+;; first match, so a prepended entry shadows the original without rebuilding the
+;; plist.
+(defn- project-resolve-test-opts (root opts)
+  (if (not (test/opt? :failed opts))
+    opts
+    (cons :filter
+      (cons (project-failed-filter root (test/opt-val :filter opts nil)) opts))))
+
+(defn run-loaded-tests (& opts)
+  "Run the ALREADY-REGISTERED suite — the `nest test FILE…` path, where the CLI has loaded the named files itself. Inside a project this resolves `:failed` against the project's record, updates that record afterwards, and honours `:cover`, so the flags mean the same thing as on a whole-project run; outside a project it is just `run-tests` (with a warning if coverage was asked for, since there are no project sources to instrument)."
+  (let (root (project/find-root (file/cwd)))
+    (if (nil? root)
+      (do
+        (when (test/opt? :cover opts)
+          (io/puts "warning: --cover needs a project (no project.blsp found) — running without coverage"
+            :to *err*))
+        (/apply test/run-tests opts))
+      (let (_ (when (test/opt? :cover opts) (project-coverage-begin root))
+            resolved (project-resolve-test-opts root opts)
+            outcome (try (/apply test/run-tests resolved) (catch e (list :%suite-raised e))))
+        (project-write-failed root *test-last-ran* *test-last-failed*)
+        (let (percent (project-coverage-report root opts))
+          (if (and (pair? outcome) (= (first outcome) :%suite-raised))
+            (throw (second outcome))
+            (project-coverage-gate percent opts)))))))
+
+;; Run the discovered suite — scoped file-by-file (the default) or the legacy
+;; load-all-then-run-all path under `BROOD_TEST_NO_SCOPE`.
+(defn- project-run-suite (files opts)
+  (if (os/env "BROOD_TEST_NO_SCOPE")
+    (do
+      (fold files nil (fn (_ f) (reflect/load f)))
+      (/apply test/run-tests opts))
+    (/apply test/run-tests-scoped (map files (fn (f) (fn () (reflect/load f)))) opts)))
+
+;; Structured analogue of `run-tests` — same bootstrap (discovery,
+;; load, type-check pre-flight) but `(run-tests-structured)` at the end, so
+;; the caller gets `{:total :passed :failed :ms :results [...]}` instead of
+;; printed output + a throw on failure. Backs the `nest mcp` `run-tests`
+;; tool (step 1c-b).
+(defn run-tests-structured (& opts)
+  "Like `run-tests`, but returns the structured result `{:total :passed :failed :ms :results [...]}` instead of printing and raising on failure. Backs the `nest mcp` `run-tests` tool."
+  (let (root (project/find-root (file/cwd)))
+    (when (nil? root)
+      (error "run-tests-structured: not in a Brood project (no project.blsp found from "
+        (file/cwd)
+        ")"))
+    (project/setup root)
+    (project-image/load-sources-cached root)
+    (test/reset-units)
+    ; drop any stale registrations so a re-run in a long-lived `nest mcp` image
+    ; (each `reflect/load` re-registers, ADR-013) counts each test once, not N times
+    (let (dirs (project/abs-paths root *project-test-paths*)
+          files (fold dirs nil (fn (acc d) (append acc (project/project-collect-tests d)))))
+      ;; Per-file scoped run (see `run-tests`) — matters most here: `nest mcp`
+      ;; is a long-lived hot-reload image, so a load-all-then-run would accumulate every
+      ;; file's promoted code on EVERY run-tests call. `BROOD_TEST_NO_SCOPE` reverts.
+      (if (os/env "BROOD_TEST_NO_SCOPE")
+        (do
+          (fold files nil (fn (_ f) (reflect/load f)))
+          (/apply test/run-tests-structured opts))
+        (/apply test/run-tests-scoped-structured (map files (fn (f) (fn () (reflect/load f)))) opts)))))
+
+;; Resolve a project's entry point to the callable it names, or raise saying why
+;; not. A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
+;; module file with no `defmodule` header defines it bare — so prefer the
+;; qualified name and fall back to bare.
+;;
+;; Shared by all FOUR entry paths — `run`, `run-bundle`, and the two boot checks
+;; — deliberately. The boot check's whole value is that it fails exactly where the
+;; real boot would, so "is the entry there, and is it callable?" must have one
+;; implementation, not a copy per caller that can answer differently. `who` names
+;; the caller in the error text.
+(defn project-entry-fn (who modname fname)
+  (let (qual (symbol (str (->string modname) "/" (->string fname))))
+    (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
+      (when (nil? target)
+        (error who ": entry fn '" fname "' is not defined (module '" modname "')"))
+      (let (f (reflect/eval target))
+        (unless (fn? f)
+          (error who ": entry '" fname "' is not callable (" (type-of f) ")"))
+        f))))
+
+;; Why the entry point is missing, phrased as the thing the user can act on.
+;; `require`'s own answer is `cannot find module 'main'` — a true fact about a
+;; module they never wrote, named after a default they never typed. The question
+;; behind it is always one of three, and which one it is decides the fix.
+(defn project-no-entry-advice (modname)
+  (let (name (->string modname)
+        where (string/join *project-source-paths* ", "))
+    (cond
+      *project-main-override*
+        (str "no entry point: `--main` names module '"
+          name "', which does not exist" " (looked in " where ")")
+      ;; A manifest with no `:main` never assigns `*project-main*`, so the default
+      ;; standing means "nothing was declared" — the same advice either way.
+      (= *project-main* (list 'main 'main))
+        (str "no entry point: this project declares no `:main`, and there is no module"
+          " `main` to fall back on. Declare one — `:main app` in project.blsp (module"
+          " `app`, fn `main`) — or add "
+          (or (first *project-source-paths*) "src")
+          "/main.blsp with a `(defn main (args) …)`")
+      else
+        (str "no entry point: `:main` names module '"
+          name "', which does not exist" " (looked in " where ")"))))
+
+;; Require the entry MODULE, rewriting the one failure whose generic message is a
+;; dead end. Only that failure: an error raised while LOADING the entry module is
+;; the entry module's own error and is re-thrown untouched — loading it is the point.
+;; The match is on the exact message for THIS module name, so a nested `require`
+;; of some other missing module still reports itself.
+(defn- project-require-entry (who modname entry)
+  (try
+    (require-one modname)
+    (catch e
+      (if (= (error-message e) (str "require: cannot find module '" (->string modname) "'"))
+        (error who ": " (project-no-entry-advice (first entry)))
+        (throw e)))))
+
+;; (run args) — find the project from the cwd, set it up (which may
+;; override *project-main* via the manifest), `require` the entry module, and
+;; call its entry fn with `args` (a list of strings from the CLI). The default
+;; entry is `(main main)` — module `main`, fn `main` — so most projects ship a
+;; bare manifest and a `(defn main () ...)` in src/main.blsp. Errors if there's
+;; no project here, or if the entry fn isn't defined or callable.
+(defn run (args &optional no-check? watching?)
+  "Run the project's entry point (default module `main`, fn `main`; overridable via the manifest's `:main`), passing `args` (a list of CLI string arguments). Runs the checker over the entry point's require-closure first and REFUSES to launch over an unbound symbol (ADR-304) — other warnings print and do not block; `no-check?` (the `--no-check` flag) skips the pre-flight and launches regardless. Errors if not in a project or the entry fn is missing/uncallable. Backs `nest run`."
+  (let (root (project/find-root (file/cwd)))
+    (when (nil? root)
+      (error "run: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
+    (project/setup root)
+    ;; A `--main` override (set via `set-project-main`) wins over the manifest's
+    ;; `:main`, which `setup` just re-applied into `*project-main*`.
+    (let (entry (or *project-main-override* *project-main*)
+          ;; Root the entry module under the project (ADR-070): `setup` above
+          ;; set the ambient package context, so `main` → `myeditor/main`. A bare-file
+          ;; entry (no `(defmodule …)`, so not a registered module) is left unrooted.
+          modname (%root-module-name (first entry))
+          fname (second entry))
+      ;; Image-backed and LAZY (ADR-218). Install the image's section directory but
+      ;; materialise nothing, then `require` the entry point: `require` pulls in exactly
+      ;; the modules the program reaches, one section at a time, and the rest of the
+      ;; project stays on disk. An entry point touching twenty of 16 300 modules
+      ;; materialises twenty. With no current image, fall through to the ordinary source
+      ;; load — which builds one, so the next run is fast.
+      (when (nil? (project-image/setup-lazy-image root))
+        (project-image/load-sources-cached root))
+      (project-require-entry "run" modname entry)
+      ;; Advisory pre-flight over the entry point's REQUIRE-CLOSURE, not the whole
+      ;; tree: warnings for the code about to execute. Checking is ~3.7 ms/file and
+      ;; verdicts are deliberately not cached, so whole-project checking is ~60-120 s
+      ;; on a 16 300-file project — against a 143 ms image-backed load, i.e. 99.9% of
+      ;; `nest run` was the advisory check. A module the program never reaches is
+      ;; `nest check`/`nest test`'s business. The closure is derived from `modname`'s
+      ;; requires graph rather than read off `*features*`, so a COLD run — which has
+      ;; just loaded every module to build the image — checks the same files a warm
+      ;; one does. Warnings go to stderr so they don't pollute the entry point's own
+      ;; stdout; after `require` so cross-module names see the heap's globals (see
+      ;; `check`).
+      ;;
+      ;; An UNBOUND symbol refuses the launch (ADR-304). It is the one warning that is
+      ;; not advice: the program cannot call that name, and the failure it produces at
+      ;; runtime is the least visible one there is — bedit ran for hours with ten of
+      ;; ADR-302's renames each inside a `(try … (catch e nil))`, launched by exactly
+      ;; this command, which printed all ten and started anyway. Every other warning
+      ;; keeps printing and does not block; `--no-check` launches regardless.
+      ;; `system/halt`, not `error`: the warnings above ARE the report, and a raise
+      ;; would bury the one-line verdict under a trace into this file. Under `--watch`
+      ;; (`watching?`) the report is printed and the program starts anyway: a watch
+      ;; session exists to fix the program while it runs, and refusing to start it
+      ;; over a name you are about to fix would send you back to a cold launch.
+      (when (not no-check?)
+        (let ([_ unbound] (project-check/check-run-closure modname))
+          (when (> unbound 0)
+            (io/puts (str "nest run: "
+                       unbound
+                       " unbound symbol(s) — the program cannot call these; "
+                       (if watching?
+                         "starting anyway under --watch"
+                         "fix them or run with --no-check"))
+              :to *err*)
+            (when (not watching?) (system/halt 1)))))
+      ;; Crash reports for whatever the program spawns and forgets (ADR-305); the
+      ;; entry process itself is excluded — its crash is `nest run`'s to print.
+      (%crash-report-arm-default)
+      (/apply (project-entry-fn "run" modname fname) args))))
+
+;; --- the boot check (KI-66) --------------------------------------------------
+;; `nest check` resolves names against the image and `nest test` runs the suite;
+;; NEITHER loads `main`. That is precisely where a stale dependency dies, and it
+;; took the registry down twice: `unbound symbol: int->char` raised *during*
+;; `require` (a top-level form in a dependency, on no test's path), and
+;; `unbound symbol: os/getenv` on `main`'s own first line. Both were reachable on
+;; the machine that built the artifact and neither gate looked.
+;;
+;; So this is the third question, and it is a different one: not "do the names
+;; resolve?" and not "do the tests pass?" but **"does it boot?"** — load every
+;; module the way the shipped artifact does, resolve the entry point, and then
+;; deliberately run NOTHING. Loading is the whole point: a module's top-level
+;; forms EVALUATE at load time, so this executes the code a static pass cannot
+;; see, without executing the program.
+;;
+;; Every module, not the entry's require-closure — unlike `run`, which is lazy
+;; (ADR-218) because it is optimising a hot dev loop. A gate optimising for
+;; latency is a gate that checks less than it claims to: `run-bundle` requires
+;; every embedded module, so a boot check that walked only the closure would go
+;; green on a dead module the bundle will still load. Slower and honest.
+
+(defn check-boot ()
+  "Load the project the way a shipped bundle does — every source module, then resolve the
+manifest's `:main` — and run nothing. Returns 0 on success; raises if a module fails to
+load, or if the entry point is missing or not callable. Backs `nest run --check-boot`.
+
+The gate between `nest check` (names resolve) and `nest test` (the suite passes): neither
+of those loads the entry point, which is where a stale dependency actually dies (KI-66)."
+  (let (root (project/find-root (file/cwd)))
+    (when (nil? root)
+      (error "check-boot: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
+    (project/setup root)
+    ;; No `setup-lazy-image`: materialising nothing is what `run` wants and the
+    ;; opposite of what a boot check wants. `load-sources-cached` evaluates every
+    ;; module's top-level forms, which is the half `nest check` cannot see.
+    (project-image/load-sources-cached root)
+    (let (entry (or *project-main-override* *project-main*)
+          modname (%root-module-name (first entry))
+          fname (second entry))
+      (require-one modname)
+      (project-entry-fn "check-boot" modname fname)
+      (io/puts (str "boot ok: "
+                 (->string modname)
+                 "/"
+                 (->string fname)
+                 " ("
+                 (count (project-image/source-files root))
+                 " source files loaded, nothing run)"))
+      0)))

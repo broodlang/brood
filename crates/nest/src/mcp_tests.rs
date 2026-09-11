@@ -829,7 +829,7 @@ fn run_tests_structured_returns_a_structured_summary() {
 
 #[test]
 fn std_check_tool_returns_structured_diagnostics_for_the_served_project() {
-    // `check` calls `(project/check-structured *project-root*)` and returns
+    // `check` calls `(project-check/check-structured *project-root*)` and returns
     // `{:diagnostics [...]}`, or `{:error msg}` when there is no project. What *must
     // not* be present is the old "not yet wired" stub marker.
     //

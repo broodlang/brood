@@ -1,4 +1,4 @@
-;; The documentation-site renderer (std/docsite.blsp): a pure `model -> HTML string`.
+;; The documentation-site renderer (std/tool/docsite.blsp): a pure `model -> HTML string`.
 ;; Register-only — discovered and run by `nest test`.
 
 (defmodule docsite-test (:use test) (:use docsite))

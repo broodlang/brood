@@ -42,7 +42,7 @@ zero special-casing. `(or :ok 5)` just ends up with `lit: Some({:ok})` *and*
 `lit_int: Some({5})` — no "which kind won" logic needed, and no change to how
 `lit` itself works.
 
-## Representation (`types/mod.rs`)
+## Representation (`types.rs`)
 
 ```rust
 const INT_BIT: u32 = 1u32 << bit(Tag::Int);
@@ -134,7 +134,7 @@ actually check it.
 ## Soundness
 
 Every new algebra piece has a targeted unit test in
-`crates/lisp/src/types/mod.rs`, mirroring the keyword-literal tests exactly:
+`crates/lisp/src/types.rs`, mirroring the keyword-literal tests exactly:
 `int_literal_renders_as_its_value`, `int_literal_union_is_exact_but_open_int_widens`,
 `int_literal_subtyping`, `int_literal_disjointness_is_precise`,
 `int_literal_intersection`, plus `keyword_and_int_literals_coexist_on_one_ty`
@@ -149,7 +149,7 @@ annotation in the corpus today).
 
 ## Tests
 
-`crates/lisp/src/types/mod.rs`: the 6 unit tests listed above, under "int-literal
+`crates/lisp/src/types.rs`: the 6 unit tests listed above, under "int-literal
 (singleton) types — ADR-117", right after the keyword-literal tests.
 `crates/lisp/src/types/check.rs`: `int_literal_return_type_flows_through_checker`.
 `tests/contract_test.blsp`: `describe "int-literal type contracts"` — enumerated

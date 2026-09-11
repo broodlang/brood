@@ -288,7 +288,7 @@ slice 10 — call-site unification shipped). See
 
 ## The gradual checks (slices 11–13)
 
-These are the first consumers of `GradualTy` (`crates/lisp/src/types/mod.rs`) — the
+These are the first consumers of `GradualTy` (`crates/lisp/src/types.rs`) — the
 *set-theoretic* gradual type `dynamic()` (ADR-024). The key realisation
 ([ADR-110](decisions.md)): the existing **disjointness** pass over `Option<Ty>` gets
 gradual behaviour for free (an unknown is silent = `dynamic()`), so `GradualTy` adds

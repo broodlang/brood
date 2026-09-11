@@ -77,7 +77,7 @@ fn run_suite() {
     // is how coverage quietly diverged between `make test` and `nest test` in the first place.
     if let Err(e) = interp.eval_str(
         "(require-one 'test) (def *test-timeout-ms* 600000) \
-         (project/run-tests)",
+         (project-run/run-tests)",
     ) {
         panic!("Brood test suite failed: {}", e);
     }

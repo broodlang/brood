@@ -111,14 +111,14 @@ pub(crate) fn exec_chunk(
             // why nothing had to be threaded through the executor.
             Inst::RecordLine(line) => {
                 if let Some(file) = arm_arc.src_file.as_deref() {
-                    crate::coverage::record(file, *line);
+                    crate::diagnostics::coverage::record(file, *line);
                 }
             }
             // Branch coverage (ADR-148 tier 2) — as RecordLine, present only in a
             // coverage-armed chunk. Records which edge of a branch was taken.
             Inst::RecordBranch(line, col, taken) => {
                 if let Some(file) = arm_arc.src_file.as_deref() {
-                    crate::coverage::record_branch(file, *line, *col, *taken);
+                    crate::diagnostics::coverage::record_branch(file, *line, *col, *taken);
                 }
             }
             Inst::Pop => {

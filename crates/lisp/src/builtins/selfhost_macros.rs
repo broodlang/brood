@@ -1,14 +1,129 @@
-// Extracted from system.rs (file-organization split).
-#![allow(unused_imports)]
-use super::numeric::{arg, expect_int, expect_string, expect_symbol};
-use super::system::*;
-use super::*;
+use super::numeric::{arg, expect_string};
 use crate::core::heap::Heap;
-use crate::core::keywords as kw;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
-use crate::eval::compile::apply_engine;
-use crate::syntax::{cst, printer, reader};
+use crate::syntax::reader;
+
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    // macros
+    primitives.def(
+        "macroexpand-1",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        &["form"],
+        "Expand form by a single macro step.",
+        macroexpand_1,
+    );
+    // advisory type checker (the Ty lattice's first consumer; see docs/types.md)
+    primitives.def(
+        "%check",
+        Arity::exact(1),
+        Sig::new(vec![any], list_ty),
+        &["form"],
+        "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises.",
+        check_builtin,
+    );
+    primitives.def(
+        "%check-file",
+        Arity::range(1, 2),
+        // 2nd arg (optional required-mods) is a list OR vector of module names — `any`
+        // so a vector closure doesn't trip the arg-type lint on our own callers.
+        Sig::with_rest(vec![string], any, list_ty),
+        &["path", "&optional required-mods"],
+        "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file. `required-mods` is the file's transitive require-closure (module-name strings) — the KI-17 reachability set that flags a qualified `mod/name` whose module the file never requires; omit it (single-file / editor) to disable that lint.",
+        check_file_builtin);
+    primitives.def(
+        "%file-signatures",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        &["path"],
+        "The signature the checker holds for every function the file at path defines: a list of `{:name :sig :declared? :informative?}` maps, `:sig` written in source syntax (`\"(int int -> int)\"`) and ready to paste into a `(sig …)`, or nil where the type names a runtime kind the grammar cannot write. `:declared?` marks the ones a `(sig …)` already states; `:informative?` marks the ones saying something an all-`any` arrow does not. Does not evaluate the file. The bulk counterpart of the editor's declare-sig action.",
+        file_signatures_builtin);
+    primitives.def(
+        "%source-signatures",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        &["src"],
+        "`%file-signatures` for source TEXT rather than a file: the checker's signature for every function `src` defines, as `{:name :sig :declared? :informative?}` maps. `()` when `src` doesn't parse, so a live editor buffer never errors mid-edit. The question `%expr-type` cannot answer — a `(defn …)` form evaluates to its own name, so the type of its VALUE says nothing about the function.",
+        source_signatures);
+    primitives.def(
+        "%check-file-structured",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![string], any, list_ty),
+        &["path", "&optional required-mods"],
+        "Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics). `required-mods`: see check-file.",
+        check_file_structured);
+    primitives.def(
+        "%check-file-deps",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![string], any, any),
+        &["path", "&optional required-mods"],
+        "Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; reuse warnings on a later run iff (check-deps-fp dep-keys) still matches and the file's mtime is unchanged. `required-mods`: see check-file.",
+        check_file_deps);
+    primitives.def(
+        "%module-direct-requires",
+        Arity::exact(1),
+        Sig::new(vec![string], any),
+        &["path"],
+        "Parse the file at path (no eval) and return `{:module <name-or-nil> :requires [<module-name> …]}` — its own module name and the modules it directly `:use`s / `:use-internals`. The edge list `project.blsp` closes transitively into each file's check-file reachability set (KI-17).",
+        module_direct_requires);
+    primitives.def(
+        "%check-strict?",
+        Arity::exact(0),
+        Sig::new(vec![], bool_ty),
+        &[],
+        "Is STRICT checking on for this process (`nest check --strict`, or BROOD_CHECK_STRICT=1)? A verdict depends on the mode that produced it, so the incremental check cache keys its manifest on this — without it a plain run's cached verdicts are reused by a strict one, and the strict gate silently reports less than it found.",
+        check_strict,
+    );
+    primitives.def(
+        "%check-strict!",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        &["on?"],
+        "Set STRICT checking for this process and return the new value. The setter behind the Brood-implemented `nest check --strict` (ADR-322): the mode is a process-wide flag the checker reads, so the command line flips it before the first file is checked.",
+        check_strict_set,
+    );
+    primitives.def(
+        "%check-deps-fp",
+        Arity::exact(1),
+        Sig::new(vec![any], string),
+        &["dep-keys"],
+        "Recompute the fingerprint of a file's dep-keys (from check-file-deps) against the current global image. The incremental check cache reuses a file's warnings iff this equals the stored fingerprint.",
+        check_deps_fp);
+    primitives.def(
+        "%check-string-structured",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        &["src"],
+        "Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics.",
+        check_string_structured);
+    primitives.def(
+        "%expr-type",
+        Arity::exact(1),
+        Sig::new(vec![string], string.union(nil_ty)),
+        &["src"],
+        "The type the advisory checker infers for the FIRST form in source string `src`, written the way a `sig` is (\"int\", \"(list any)\", \"(int -> int)\"), or nil when `src` doesn't parse or the checker has no opinion. reflect/type-signature answers this for a NAMED global; this answers it for an anonymous expression you just typed, which is what a REPL or a scratch/playground buffer has. Nil rather than an error on unparsable input, like %check-string-structured — both get read from a buffer that is mid-edit half the time.",
+        expr_type);
+    // `defn-`/`def-` emit it to record the defined name as module-private (ADR-146).
+    primitives.def(
+        "%register-meta",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        &["name", "clauses"],
+        "Record a global's stability metadata (ADR-283) from a flat `:key value` list — `:since`/`:deprecated`/`:beta` take a version or reason string, `:use` a replacement symbol. The primitive behind the `(meta …)` form; unknown keys are ignored so a newer clause degrades on an older runtime. Cleared by any redefinition of the name, like privacy.",
+        register_meta);
+    primitives.def(
+        "%meta-of",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        &["name"],
+        "The stability metadata a `(meta …)` recorded for `name`, as `{:since :deprecated :use :beta}` with absent facts omitted — nil if none. `name` is resolved to the CURRENT namespace, exactly as a `def` head is, so pass a qualified symbol when asking from anywhere but the defining module.",
+        meta_of);
+}
 
 // ---------- macros ----------
 

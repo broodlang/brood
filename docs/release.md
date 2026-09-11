@@ -98,7 +98,7 @@ is dev-only when it serves *developing* an app, not when the shipped app uses it
 > `run-bundle` loads *every* module the app ships, so one app module with a
 > top-level `(require 'x)` for a stripped `x` makes the released binary die on
 > start (`require: cannot find module 'x'`) even if that feature is never used.
-> Lazily-required modules are no protection. `builtins/system.rs` has a unit test
+> Lazily-required modules are no protection. `builtins/modules.rs` has a unit test
 > pinning `debug`/`eval-server` in `CORE_MODULES` for this reason.
 
 The embedded runtime is built by `make install` under the `release-fast` cargo
@@ -162,8 +162,8 @@ runtime. Only the *stripped* modules above are unavailable to it.
   `(:use …)` resolve an app's own modules through the **existing** module path —
   no load-path-on-disk needed. Modules are keyed by filename **stem** (`foo.blsp`
   → `foo`), exactly the name `require` searches for.
-- Boot policy is Brood: `brood` calls `(project/run-bundle argv)` in
-  `std/tool/project.blsp`, which applies the embedded manifest, loads every embedded
+- Boot policy is Brood: `brood` calls `(project-release/run-bundle argv)` in
+  `std/tool/project-release.blsp`, which applies the embedded manifest, loads every embedded
   module, and invokes `:main` — passing the process's argv to the entry fn.
 
 Rust supplies only mechanism (append/extract the archive, the three
@@ -226,14 +226,14 @@ the payload rather than nesting a second archive.
 
 - `crates/lisp/src/bundle.rs` — wire format, `current_exe` mount, `strip_existing`,
   `write_release` (+ unit tests)
-- `crates/lisp/src/builtins/system.rs` (+ registration in `builtins/mod.rs`) — `%bundled?`, `%bundle-manifest`,
+- `crates/lisp/src/builtins/modules.rs` — `%bundled?`, `%bundle-manifest`,
   `%bundle-module-names`; `%builtin-module` consults the bundle; `CORE_MODULES`
   vs `DEV_MODULES` (the latter `#[cfg(feature = "dev-tools")]`); GC debug builtins
   cfg-gated
 - `crates/lisp/Cargo.toml` / `crates/cli/Cargo.toml` — the `dev-tools` feature
   (default on; `cli` forwards `brood/dev-tools`, off via `--no-default-features`)
 - `Cargo.toml` — the `release-lean` profile (strip + LTO + 1 codegen unit)
-- `std/tool/project.blsp` — `bundle-collect` (gather sources) + `run-bundle` (boot);
+- `std/tool/project-release.blsp` — `bundle-collect` (gather sources) + `run-bundle` (boot);
   no load-time `(:use test)` so a lean runtime can load it
 - `crates/cli/src/main.rs` — `brood` boots the app when bundled
 - `crates/nest/src/main.rs` — `nest release`; `resolve_runtime` (`--runtime` →

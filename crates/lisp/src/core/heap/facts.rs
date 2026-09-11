@@ -21,7 +21,7 @@
 //! **exhaustive match**, and [`Heap::replay_fact`] applies one the same way. Adding a sixth
 //! kind therefore cannot be forgotten at the *carry* step — it is carried by construction —
 //! and the only thing left to write is its encoding, which is another exhaustive match in
-//! `builtins/startup_image.rs`.
+//! `boot/image.rs`.
 //!
 //! That conversion is the whole point: **from a silent omission whose symptom appears in
 //! another subsystem, to a compile error at the point of the change.** Everything else here

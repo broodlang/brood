@@ -1,4 +1,4 @@
-;; Project manifest + entry-point resolution (std/project.blsp). Covers the
+;; Project manifest + entry-point resolution (std/tool/project*.blsp). Covers the
 ;; `:main` parser and the default entry. Register-only — discovered and run by
 ;; `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 ;;
@@ -9,6 +9,10 @@
 
 (defmodule project-test
   (:use-internals project)
+  (:use-internals project-image)
+  (:use-internals project-check)
+  (:use-internals project-run)
+  (:use-internals project-release)
   (:use-internals scaffold)
   (:use-internals package :only [package-guard-collisions])
   (:use test)
@@ -73,7 +77,7 @@
     (def *project-main* '(main main))
     (def *project-main-override* nil)
     (def *project-source-paths* (list "src"))
-    (let (msg (project/project-no-entry-advice 'main))
+    (let (msg (project-run/project-no-entry-advice 'main))
       (is (includes? msg "declares no `:main`"))
       (is (includes? msg "`:main app` in project.blsp"))
       (is (includes? msg "src/main.blsp"))))
@@ -81,7 +85,7 @@
     (def *project-main* '(app start))
     (def *project-main-override* nil)
     (def *project-source-paths* (list "lib" "gen"))
-    (let (msg (project/project-no-entry-advice 'app))
+    (let (msg (project-run/project-no-entry-advice 'app))
       (is (includes? msg "`:main` names module 'app'"))
       (is (includes? msg "lib, gen"))
       ;; not the no-:main advice — the manifest DOES declare one
@@ -89,7 +93,7 @@
   (test "a --main override is blamed on --main, not on the manifest"
     (def *project-main* '(main main))
     (def *project-main-override* '(app main))
-    (let (msg (project/project-no-entry-advice 'app))
+    (let (msg (project-run/project-no-entry-advice 'app))
       (is (includes? msg "`--main` names module 'app'"))
       (is (not (includes? msg "project.blsp")))))
   ;; The guard that stops `nest release` writing a binary that cannot boot.
@@ -97,14 +101,14 @@
     (def *project-main* '(main main))
     (def *project-main-override* nil)
     (let (msg (try
-                (project/bundle-reject-missing-entry (list "util" "web"))
+                (project-release/bundle-reject-missing-entry (list "util" "web"))
                 (catch e (error-message e))))
       (is (includes? msg "release: no entry point"))
       (is (includes? msg "cannot start"))))
   (test "an entry module that WAS collected passes"
     (def *project-main* '(main main))
     (def *project-main-override* nil)
-    (assert= nil (project/bundle-reject-missing-entry (list "util" "main")))))
+    (assert= nil (project-release/bundle-reject-missing-entry (list "util" "main")))))
 
 (describe "project: :dependencies parsing (ADR-037)"
   ;; A parsed dep is a RECORD, one per manifest kind — its identity *is* its kind, so
@@ -294,14 +298,14 @@
   ;; module (sse) keeps its namespace and resolves through %builtin-module — the
   ;; bug behind `./app: require: cannot find module 'sse'` after `nest release`.
   (test "project-bundle-name keeps the namespace relative to the source dir"
-    (assert= (project/project-bundle-name "/p/src" "/p/src/main.blsp") "main")
-    (assert= (project/project-bundle-name "/p/src" "/p/src/sse.blsp") "sse")
-    (assert= (project/project-bundle-name "/p/src/" "/p/src/a/b/c.blsp") "a/b/c"))
+    (assert= (project-release/project-bundle-name "/p/src" "/p/src/main.blsp") "main")
+    (assert= (project-release/project-bundle-name "/p/src" "/p/src/sse.blsp") "sse")
+    (assert= (project-release/project-bundle-name "/p/src/" "/p/src/a/b/c.blsp") "a/b/c"))
   (test "a path not under the source dir falls back to its bare stem"
-    (assert= (project/project-bundle-name "/other" "/p/src/x.blsp") "x")))
+    (assert= (project-release/project-bundle-name "/other" "/p/src/x.blsp") "x")))
 
 (describe "project: namespace-aware duplicate global detection (ADR-065)"
-  (test "project/project-file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
+  (test "project-check/project-file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
       (let (f (path/join dir "a.blsp"))
@@ -309,7 +313,7 @@
           "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
         ;; Under `(defmodule a)` every binding resolves to `a/…`, except the
         ;; ambient `*d*` earmuff which stays root (mirrors the kernel resolver).
-        (assert= (sort (project/project-file-def-names f))
+        (assert= (sort (project-check/project-file-def-names f))
           (sort ["*d*" "a/helper" "a/k" "a/m" "a/main"])))))
   (test "the same short name in two DIFFERENT namespaces is not a collision"
     (let (dir (temp-dir "brood-dup-"))
@@ -318,14 +322,14 @@
         (file/spit fa "(defmodule alpha)\n(defn main () 1)\n")
         (file/spit fb "(defmodule beta)\n(defn main () 2)\n")
         ;; alpha/main vs beta/main — distinct keys, no warning.
-        (assert= (project/project-duplicate-def-warnings-seq [fa fb]) nil))))
+        (assert= (project-check/project-duplicate-def-warnings-seq [fa fb]) nil))))
   (test "the same name in the SAME namespace IS flagged (qualified)"
     (let (dir (temp-dir "brood-dup-"))
       (file/mkdir dir)
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule shared)\n(defn main () 1)\n(defn only-a () 1)\n")
         (file/spit fb "(defmodule shared)\n(defn main () 2)\n(defn only-b () 2)\n")
-        (let (warns (project/project-duplicate-def-warnings-seq [fa fb]))
+        (let (warns (project-check/project-duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
           (is (includes? (first warns) "shared/main"))
           (refute (includes? (first warns) "only-a"))))))
@@ -335,7 +339,7 @@
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule alpha)\n(defdyn *cfg* 1)\n")
         (file/spit fb "(defmodule beta)\n(defdyn *cfg* 2)\n")
-        (let (warns (project/project-duplicate-def-warnings-seq [fa fb]))
+        (let (warns (project-check/project-duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
           (is (includes? (first warns) "*cfg*"))))))
   (test "files with no defmodule share the root namespace — same name still collides"
@@ -344,7 +348,7 @@
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defn main () 1)\n(defn only-a () 1)\n")
         (file/spit fb "(defn main () 2)\n(defn only-b () 2)\n")
-        (let (warns (project/project-duplicate-def-warnings-seq [fa fb]))
+        (let (warns (project-check/project-duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
           (is (includes? (first warns) "main"))
           (refute (includes? (first warns) "only-a"))))))
@@ -354,7 +358,7 @@
       (let (fa (path/join dir "a.blsp") fb (path/join dir "b.blsp"))
         (file/spit fa "(defmodule alpha)\n(defn alpha-fn () 1)\n")
         (file/spit fb "(defmodule beta)\n(defn beta-fn () 2)\n")
-        (assert= (project/project-duplicate-def-warnings-seq [fa fb]) nil))))
+        (assert= (project-check/project-duplicate-def-warnings-seq [fa fb]) nil))))
   ;; The cached, extract-based path (ADR-119) must agree with the sequential one.
   ;; Build extracts by hand (dummy mtime 0) so this needs no disk cache, and compare
   ;; both the duplicate-defs and unused-private derivations against the -seq/-agg forms.
@@ -369,14 +373,14 @@
               extracts (fold files
                          {}
                          (fn (m p)
-                           (let ([c pr dn] (project/project-scan-file-entry p))
+                           (let ([c pr dn] (project-check/project-scan-file-entry p))
                              (%map-assoc m p [0 c pr dn]))))
               source-set (fold files {} (fn (m p) (%map-assoc m p true))))
           ;; duplicate-defs: extract path == sequential path
-          (assert= (sort (project/project-duplicate-def-warnings extracts source-set))
-            (sort (project/project-duplicate-def-warnings-seq files)))
+          (assert= (sort (project-check/project-duplicate-def-warnings extracts source-set))
+            (sort (project-check/project-duplicate-def-warnings-seq files)))
           ;; unused-private: shared-dead is unreferenced (warn), shared-helper is used
-          (let (warns (project/project-unused-private-warnings extracts))
+          (let (warns (project-check/project-unused-private-warnings extracts))
             (assert= (count warns) 1)
             (is (includes? (first warns) "shared-dead"))
             (refute (any? warns (fn (w) (includes? w "shared-helper"))))))))))
@@ -515,7 +519,7 @@
     (let (source (str "(defmodule m (:use test))\n"
                    "(defn keep-me (x) x)\n" "(describe \"grp\" (test \"t\" (assert= 1 1)))\n"
                    "(deftest solo (is true))\n" "(defn keep-too () 2)\n")
-          out (project/strip-test-forms source))
+          out (project-release/strip-test-forms source))
       (is (includes? out "keep-me"))
       (is (includes? out "keep-too"))
       (is (not (includes? out "describe")))
@@ -533,7 +537,7 @@
         (file/spit (path/join src "lib.blsp")
           (str "(defmodule lib (:use test))\n"
             "(defn shipped () 1)\n" "(describe \"lib\" (test \"t\" (assert= 1 (shipped))))\n"))
-        (let (bundle (project/bundle-collect root))
+        (let (bundle (project-release/bundle-collect root))
           (is (any? bundle (fn (s) (and (string? s) (includes? s "defn shipped")))))
           (is (not (any? bundle (fn (s) (and (string? s) (includes? s "describe"))))))))))
   (test "an empty describe warns; a describe with a test does not"
@@ -675,11 +679,12 @@
 (describe "bundle: duplicate module names are rejected"
   (test "two providers of one require-name error loudly"
     (is (includes? (try
-                     (project/bundle-reject-duplicate-names (list "app" "parser" "lib" "parser"))
+                     (project-release/bundle-reject-duplicate-names (list "app"
+                                                                      "parser" "lib" "parser"))
                      (catch e e))
           "same module name")))
   (test "distinct require-names pass"
-    (assert= (project/bundle-reject-duplicate-names (list "app" "sse" "lib")) nil)))
+    (assert= (project-release/bundle-reject-duplicate-names (list "app" "sse" "lib")) nil)))
 
 ;; ---- the :brood runtime-version gate (ADR-209) -------------------------------
 ;; A project may require a minimum/compatible runtime with `:brood "<constraint>"`,
@@ -902,7 +907,7 @@
 ;; that must hold for EVERY binary, bundle or not.
 (describe "project: build-info"
   (test "reports this runtime's identity, unbundled"
-    (let (info (project/build-info))
+    (let (info (project-release/build-info))
       (assert= (get info :bundled?) false)
       (assert= (get info :brood-version) (system/brood-version))
       (assert= (get info :build-id) (system/build-id))
@@ -913,7 +918,7 @@
   ;; must not be able to reach a module load. Reading a manifest and asking git for a date
   ;; are both file/process work, not a load, so the source fallback keeps that property.
   (test "an unbundled binary has no MODULE COUNT — only a bundle can count its modules"
-    (is (nil? (get (project/build-info) :module-count))))
+    (is (nil? (get (project-release/build-info) :module-count))))
   ;; The suite runs inside the brood repo, so the unbundled path finds a real manifest and
   ;; a real git HEAD. That is the whole point of the fallback: an app run from source can
   ;; state its version too, instead of only once shipped.
@@ -922,7 +927,7 @@
   ;; neighbouring parallel test's `setup` happened to leak the value into the shared table,
   ;; and failed the day those neighbours became genuinely `:isolated` (KI-107's fix).
   (test "an unbundled binary in a checkout reads its app from project.blsp and dates it by git"
-    (let (info (project/build-info)
+    (let (info (project-release/build-info)
           root (project/find-root (file/cwd))
           manifest (reflect/read-first (file/slurp (path/join (or root "") "project.blsp")))
           version (project/plist-get (rest manifest) :version))
@@ -937,12 +942,12 @@
       ;; A bundle stamp records who built it; a working tree has no builder to name.
       (is (nil? (get info :built-with)))))
   (test "the runtime dates itself from its own binary, in a unit datetime can format"
-    (let (ms (get (project/build-info) :brood-built-at))
+    (let (ms (get (project-release/build-info) :brood-built-at))
       (is (int? ms))
       (assert= (datetime/format (datetime/epoch-ms-> (or ms 0)) "%Y")
         (datetime/format (datetime/epoch-ms-> (os/now)) "%Y"))))
   (test "the printed report names every field and returns 0"
-    (let (out (with-out-str (assert= (project/build-info-report) 0)))
+    (let (out (with-out-str (assert= (project-release/build-info-report) 0)))
       (is (includes? out "brood:"))
       (is (includes? out "build-id:"))
       (is (includes? out "features:"))
@@ -954,39 +959,41 @@
 ;; build, so the shapes differ deliberately and this pins the difference.
 (describe "project: build-stamp-text"
   (test "a bundle: the stamped instant, to the minute, in UTC"
-    (assert= (project/build-stamp-text {:bundled? true :built-at 1788012180000})
+    (assert= (project-release/build-stamp-text {:bundled? true :built-at 1788012180000})
       "2026-08-29 14:03 UTC"))
   ;; The time, not just the date: two builds of one afternoon are the pair anyone comparing
   ;; versions actually has, and a date alone cannot tell them apart.
   (test "a source run: the commit TIME, naming the tree it came from"
-    (assert= (project/build-stamp-text {:bundled? false :built-at 1788012180000 :commit "a5e2405"})
+    (assert= (project-release/build-stamp-text {:bundled? false
+                                                :built-at 1788012180000
+                                                :commit "a5e2405"})
       "2026-08-29 14:03 UTC (a5e2405, from source)"))
   (test "a source run outside git: still says where it came from, without a hash"
-    (assert= (project/build-stamp-text {:bundled? false :built-at 1788012180000})
+    (assert= (project-release/build-stamp-text {:bundled? false :built-at 1788012180000})
       "2026-08-29 14:03 UTC (from source)"))
   ;; The daily case: you edit a file and run again. Reporting HEAD's commit time flat said the
   ;; code was hours old while you were looking at what you had just typed — and named a commit
   ;; whose code is not what ran. The time tracks the tree; the hash says where it came FROM.
   (test "a modified tree dates itself by the edit, and marks the hash as a starting point"
-    (assert= (project/build-stamp-text {:bundled? false
-                                        :built-at 1788012180000
-                                        :commit "a5e2405"
-                                        :modified? true})
+    (assert= (project-release/build-stamp-text {:bundled? false
+                                                :built-at 1788012180000
+                                                :commit "a5e2405"
+                                                :modified? true})
       "2026-08-29 14:03 UTC (a5e2405 + edits, from source)"))
   ;; No date at all is the shallow-clone / no-git case. Naming the tree is still worth
   ;; something, and "unknown" beats a blank where a date should be.
   (test "a commit but no date"
-    (assert= (project/build-stamp-text {:bundled? false :commit "a5e2405"})
+    (assert= (project-release/build-stamp-text {:bundled? false :commit "a5e2405"})
       "from source (a5e2405)"))
   (test "nothing readable at all"
-    (assert= (project/build-stamp-text {:bundled? false}) "unknown")))
+    (assert= (project-release/build-stamp-text {:bundled? false}) "unknown")))
 
 ;; Where a release gets dated. The stamp goes into the manifest COPY embedded in the
 ;; bundle — never the on-disk project.blsp, which describes source, not an artifact.
 (describe "bundle: the release stamp"
   (test "adds :built-at and :built-with, and the result still parses as a manifest"
     (let (src "(project :name \"app\" :version \"1.2.3\" :main (app main))"
-          stamped (project/bundle-augment-manifest src [])
+          stamped (project-release/bundle-augment-manifest src [])
           opts (rest (reflect/read-first stamped)))
       (assert= (plist-get opts :name) "app")
       (assert= (plist-get opts :version) "1.2.3")
@@ -997,10 +1004,10 @@
   ;; the manifest cheaper than a new archive field (no bundle format bump).
   (test "a stamped manifest still applies as config"
     (let (src "(project :name \"app\" :version \"1.2.3\")"
-          opts (rest (reflect/read-first (project/bundle-augment-manifest src []))))
+          opts (rest (reflect/read-first (project-release/bundle-augment-manifest src []))))
       (assert= (apply-config opts) "app")))
   (test "a manifest that is not a (project …) form is passed through untouched"
-    (assert= (project/bundle-augment-manifest "(something :else 1)" [])
+    (assert= (project-release/bundle-augment-manifest "(something :else 1)" [])
       "(something :else 1)")))
 
 ;; ---- fix-sigs: the bulk, safe form of the editor's declare-sig action ---------
@@ -1022,7 +1029,7 @@
     (file/spit path text)
     path))
 
-(describe "project/fix-sigs"
+(describe "project-check/fix-sigs"
   ;; Two definitions, so the second's insertion point is one the first would move.
   (def pt-two-defns
     (string/join ["(defmodule pt-two)"
@@ -1033,7 +1040,7 @@
   :isolated (test "every signature lands directly above its own definition"
     (let (dir (pt-sig-dir)
           path (pt-sig-file dir "two.blsp" pt-two-defns))
-      (project/fix-sigs (list path) true)
+      (project-check/fix-sigs (list path) true)
       (let (lines (into [] (string/split (file/slurp path) "\n")))
         ;; each `(sig x …)` is immediately followed by the `defn` of x — the property
         ;; the drifting application breaks
@@ -1053,7 +1060,7 @@
   :isolated (test "the rewritten file still parses — which is the gate before writing"
     (let (dir (pt-sig-dir)
           path (pt-sig-file dir "parses.blsp" pt-two-defns))
-      (project/fix-sigs (list path) true)
+      (project-check/fix-sigs (list path) true)
       ;; read-all raises on a malformed file; the point is that it does not
       (is (> (count (reflect/read-all (file/slurp path))) 0))))
 
@@ -1061,15 +1068,15 @@
     (let (dir (pt-sig-dir)
           path (pt-sig-file dir "dry.blsp" pt-two-defns)
           before (file/slurp path))
-      (project/fix-sigs (list path) false)
+      (project-check/fix-sigs (list path) false)
       (assert= (file/slurp path) before)))
 
   :isolated (test "a file whose signatures are already declared is left alone"
     (let (dir (pt-sig-dir)
           path (pt-sig-file dir "done.blsp" pt-two-defns))
-      (project/fix-sigs (list path) true)
+      (project-check/fix-sigs (list path) true)
       (let (once (file/slurp path))
-        (project/fix-sigs (list path) true)
+        (project-check/fix-sigs (list path) true)
         (assert= (file/slurp path) once))))
 
   ;; A `defn` nested inside a wrapper form is never touched, which is what keeps the
@@ -1084,7 +1091,7 @@
                              "    (try (string/length s) (catch e 0))))"]
                 "\n")
           path (pt-sig-file dir "wrap.blsp" src))
-      (project/fix-sigs (list path) true)
+      (project-check/fix-sigs (list path) true)
       (assert= (file/slurp path) src)))
 
   ;; A definition the locator cannot find is skipped rather than guessed at — the
@@ -1097,7 +1104,7 @@
                  (string/join ["(defmodule pt-odd)" "(defn-" "  odd (s)" "  (string/length s))"]
                    "\n"))
           before (file/slurp path))
-      (project/fix-sigs (list path) true)
+      (project-check/fix-sigs (list path) true)
       ;; unchanged, and still parses
       (assert= (file/slurp path) before)
       (is (> (count (reflect/read-all (file/slurp path))) 0)))))

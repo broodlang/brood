@@ -23,7 +23,7 @@ next person fastest.
    ~20+ worker processes that each touch prelude functions reliably
    crashes workers with bogus "unbound symbol" errors on internal
    names (`acc`, `pred`, `fold`, `%eq`) and a Rust panic in
-   `crates/lisp/src/eval/mod.rs:380`. With `-j 1` everything works.
+   `crates/lisp/src/eval.rs:380`. With `-j 1` everything works.
    Until this is fixed, no fan-out demo can credibly ship.
 2. **Type-checker noise around `(require 'hatch)`** — every file using
    `defserver` / `cast` / `!` / `hatch` prints five "unbound symbol"
@@ -61,7 +61,7 @@ I had to:
   `%iterate-times`, `partition`, `frequencies`.
 - Read `std/hatch.blsp` to learn `defserver`/`cast`/`call`/`!`/
   `gen-call`/`hatch`/`sleep` — none of these appear in the quick-ref.
-- Read `crates/lisp/src/builtins/mod.rs` to discover `now` (no other doc
+- Read `crates/lisp/src/builtins.rs` to discover `now` (no other doc
   mentions it).
 - Read `examples/life.blsp` to discover `defserver` exists at all,
   and that ANSI escape codes are first-class (great feature!).
@@ -141,7 +141,7 @@ process 7 died: unbound error: unbound symbol: acc
 process 3 died: unbound error: unbound symbol: pred
 process 10 died: unbound error: unbound symbol: iter
 process 4 died: unbound error: unbound symbol: iter
-thread '<unnamed>' (2552127) panicked at crates/lisp/src/eval/mod.rs:380:45:
+thread '<unnamed>' (2552127) panicked at crates/lisp/src/eval.rs:380:45:
 index out of bounds: the len is 0 but the index is 1
 ```
 
@@ -159,7 +159,7 @@ reliably, but kills the speedup story.
 
 **Suggested investigation:**
 
-- The panic site `eval/mod.rs:380` — start there.
+- The panic site `eval.rs:380` — start there.
 - Whether `Heap` or `EnvId` is `Send` but not actually safe to share.
 - Whether `def` (which the prelude does at load) is racing with
   worker spawns. Note: `defserver`-generated functions are `defn`s,
@@ -432,7 +432,7 @@ graph.
 
 If you can only do **three things**:
 
-1. **Fix the scheduler race in eval/mod.rs:380.** Without this, you
+1. **Fix the scheduler race in eval.rs:380.** Without this, you
    can't ship any concurrent example, and the actor story is what
    makes Brood interesting.
 2. **Fix the type-checker noise** for macros from required modules.
@@ -504,7 +504,7 @@ Then `nest run`. I have not run this exact reproduction, but based on
 the mandel demo's failure mode I expect 1–3 of the 16 workers to die
 with `unbound symbol: acc` / `pred` / `fold` errors, and the rest
 plus main to hang waiting for the missing messages. Confirming this
-is the right starting point before diving into `eval/mod.rs`.
+is the right starting point before diving into `eval.rs`.
 
 ---
 
@@ -519,12 +519,12 @@ method noted next to each item.
 
 | # | Item | Original status | Today | Notes |
 |---|------|------|-------|------|
-| 1 | Multi-thread scheduler race | 🐛 blocker | 🐛 still present | Re-ran the mandel demo at default `-j`; race trips at `crates/lisp/src/eval/mod.rs:446` now (was `:380`). Same symptoms — workers die with "unbound symbol: acc / iter" and one Rust panic. Race appears to have moved, not been fixed. |
+| 1 | Multi-thread scheduler race | 🐛 blocker | 🐛 still present | Re-ran the mandel demo at default `-j`; race trips at `crates/lisp/src/eval.rs:446` now (was `:380`). Same symptoms — workers die with "unbound symbol: acc / iter" and one Rust panic. Race appears to have moved, not been fixed. |
 | 2 | Type-checker noise around `(require 'hatch)` | 🐛 blocker | 🟢 partial fix | `nest check` (project-aware, runs through `(check-project-structured)`) is now silent on hatch macros. `brood file.blsp` directly **still emits all five warnings** (`defserver` / `cast` / `!` / `hatch` / `state`). The project-aware path is the agent path, so this is meaningful progress; the file-direct path needs the same know-what's-required behaviour. |
 | 3 | `nest format` collapses readable code | 🐛 blocker | 🐛 still present | Re-tested with a synthetic multi-line `let` + `cond` probe (8 lines hand-aligned). Formatter rewrote it onto a single 92-char line. Reasoning from §6.1 still applies. |
 | 4 | Quick-ref doc gaps | 🟡 polish | 🟢 partial fix | `docs/brood-for-claude.md` gained a strong "Idiomatic syntax" section on `(` vs `[`, tuple-destructure caveats, and a Filesystem section. Still missing from the builtin lists: `apply`, `now`, `gensym`, `quot`, `mod`, `rem`, `char-at`, `dotimes`/`doseq`/`dolist`, `for`, `defserver` / `hatch` / `!` / `gen-call` / `sleep`. |
 | 5 | Float formatting / no `format` builtin | 🟡 polish | 🟡 unchanged | `std/format.blsp` exists, but it's the **source-code formatter** behind `nest format`, not a `(format "%.2f" x)` helper. No general number/string formatter shipped. |
-| 6 | Pattern-destructure failure surfaces as Rust panic | 🟡 polish | 🐛 still present | Same panic shape (`index out of bounds: the len is N but the index is M`), now at `eval/mod.rs:446`. Structured errors landed (`E00xx`, see §10.3) but this specific failure site hasn't been routed through the new error wrapper yet. |
+| 6 | Pattern-destructure failure surfaces as Rust panic | 🟡 polish | 🐛 still present | Same panic shape (`index out of bounds: the len is N but the index is M`), now at `eval.rs:446`. Structured errors landed (`E00xx`, see §10.3) but this specific failure site hasn't been routed through the new error wrapper yet. |
 
 ### LLM-facing infrastructure (new since this doc)
 
@@ -583,7 +583,7 @@ After this review pass, the priorities re-order:
 If you can only do **three things**:
 
 1. **Fix the multi-thread scheduler race.** Still the blocker for any
-   fan-out demo. Bug has *moved* (`eval/mod.rs:446`) but not gone away.
+   fan-out demo. Bug has *moved* (`eval.rs:446`) but not gone away.
 2. **Soften `nest format` so it doesn't collapse multi-line code.**
    This is now the single most LLM-hostile tool in the chain: every
    call inverts the writer's deliberate layout choices.
@@ -656,7 +656,7 @@ Re-verified against HEAD post the kernel-supervisor strip (`e3d3a0d`,
 | 3 | `nest format` collapses readable code | 🐛 still present | 🟢 **substantially fixed** | Commit `5b19787` ("formatter respects author newlines"). Multi-line `let` / `defmacro` body / `cond` / quasiquoted templates all stay multi-line. **Still normalizes** multi-space alignment within a line (`w       64` → `w 64`) — a standard Lisp-formatter trade-off, not the original 8-lines-to-1 blocker. |
 | 4 | Quick-ref doc gaps | 🟢 partial fix | 🟢 **substantially closed** | `brood-for-claude.md` now covers `format`, `to-fixed`, `pad-left`/`pad-right`, `string-repeat`, `repeat`, `repeatedly`, `round-to`, plus the hatch concurrency surface. Remaining lookups go through the MCP `lookup` tool. |
 | 5 | Float formatting / no `format` builtin | 🟡 unchanged | 🟢 **shipped** | `(to-fixed x n)` has been the float-formatting primitive for a while; `(format "x=%d y=%.2f" 42 3.14)` lands in the prelude today as a small printf-style helper. Specifiers `%s %d %f %.Nf %%`; width via `pad-left`/`pad-right`. Pure Brood, no new Rust. See [`devlog.md`](devlog.md) 2026-05-29. |
-| 6 | Pattern-destructure failure surfaces as Rust panic | 🐛 still present | 🟢 **fixed** | Every destructure-mismatch shape I could construct (vector/list/string/keyword scrutinee, nested, multi-clause `fn` exhaustion, `match` no-clause) now returns a clean Brood `[:match-error :ctx value pattern]`. No `index out of bounds` panic anywhere — the panic line in the original report (`eval/mod.rs:446`) is the structured-error path now. |
+| 6 | Pattern-destructure failure surfaces as Rust panic | 🐛 still present | 🟢 **fixed** | Every destructure-mismatch shape I could construct (vector/list/string/keyword scrutinee, nested, multi-clause `fn` exhaustion, `match` no-clause) now returns a clean Brood `[:match-error :ctx value pattern]`. No `index out of bounds` panic anywhere — the panic line in the original report (`eval.rs:446`) is the structured-error path now. |
 
 ### What's open
 

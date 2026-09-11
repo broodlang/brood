@@ -85,7 +85,7 @@ fn interp_new() -> Interp {
 /// benches, so nothing else noticed).
 #[divan::bench]
 fn parse_prelude(bencher: divan::Bencher) {
-    let src = brood::PRELUDE;
+    let src = brood::boot::PRELUDE;
     bencher
         .with_inputs(Interp::new)
         .bench_refs(|interp| reader::read_all(&mut interp.heap, src).unwrap());

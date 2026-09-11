@@ -195,7 +195,7 @@ pub(crate) fn dispatch(
 ) -> Result<Step, LispError> {
     let mut cur_callee = callee;
     let mut cur_argv = argv;
-    // Outer `'apply` loop: mirrors the TW's `'dispatch` loop (eval/mod.rs). Each
+    // Outer `'apply` loop: mirrors the TW's `'dispatch` loop (eval.rs). Each
     // iteration runs the passthrough-redirect inner loop, then checks for `apply`
     // unfolding. On unfold, `cur_callee`/`cur_argv` are rewritten and the outer
     // loop continues so passthrough can redirect the unfolded callee (e.g.
@@ -251,7 +251,7 @@ pub(crate) fn dispatch(
             cur_argv = next;
         }
         // `apply` unfolding: `(apply real arg... list)` → `(real arg... ...list)`.
-        // Mirrors the TW's inline unfolding (eval/mod.rs `while let Native … "apply"`).
+        // Mirrors the TW's inline unfolding (eval.rs `while let Native … "apply"`).
         // After unfolding, `continue 'apply` re-runs passthrough on the real callee.
         // If the callee is not `apply`, or arity < 2, break and dispatch normally.
         if let ValueRef::Native(id) = cur_callee.unpack() {

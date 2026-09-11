@@ -42,9 +42,9 @@
 use brood::Interp;
 
 /// The install's own bookkeeping, defined once in the runtime — see
-/// [`brood::INSTALL_BOOKKEEPING`] for why these are skipped and where they are asserted
+/// [`brood::boot::INSTALL_BOOKKEEPING`] for why these are skipped and where they are asserted
 /// instead.
-use brood::INSTALL_BOOKKEEPING;
+use brood::boot::INSTALL_BOOKKEEPING;
 
 /// Every global, with the attributes materialisation has historically dropped. Sorted, so
 /// the two arms are comparable line by line and a diff names the offender.

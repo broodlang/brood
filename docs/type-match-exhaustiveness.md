@@ -34,7 +34,7 @@ framing would have made this a 2-3 slice effort. A much smaller design was
 found instead by reading the actual compiler.
 
 Also worth noting up front: **`case` doesn't exist in Brood.**
-`crates/lisp/src/eval/mod.rs` explicitly tells users "Brood has no
+`crates/lisp/src/eval.rs` explicitly tells users "Brood has no
 `case`/`condp` — use `match` (patterns) or `cond`." `kw::CASE` is referenced
 only by the checker itself and is vestigial. So this feature is `match`-only,
 correctly — there's nothing else to wire it into.

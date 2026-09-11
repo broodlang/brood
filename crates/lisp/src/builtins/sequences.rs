@@ -1,75 +1,414 @@
-use crate::core::heap::{Heap, SlabRef};
-use crate::core::value::{self, EnvId, StrId, Value};
-use crate::error::{LispError, LispResult};
-use crate::syntax::printer;
-
-use super::numeric::{
-    arg, expect_int, expect_rope, expect_rope_ref, expect_string, expect_string_ref, num_to_f64,
-    two,
-};
+use super::numeric::{arg, expect_int, expect_rope_ref, two};
 use super::realize_seqview;
+use crate::core::heap::Heap;
+use crate::core::value::{self, EnvId, Value};
+use crate::error::{LispError, LispResult};
 use crate::eval::apply;
-macro_rules! expect {
-    ($heap:expr, $who:expr, $v:expr, $expected:literal, $($pat:pat => $extract:expr),+ $(,)?) => {
-        match $v {
-            $($pat => Ok($extract),)+
-            __other => Err(LispError::wrong_type($heap, $who, $expected, __other)),
-        }
-    };
-}
 
-/// A string argument to a **char-indexed** builtin: its bytes, its cached char count, and
-/// whether a char index is also a byte offset. All three come from one slot resolution
-/// because every one of these builtins needs all three, and the text is **borrowed** —
-/// an owned copy of the haystack per call is what made incremental search quadratic once
-/// already (`expect_string` still does that at ~113 other sites).
-struct StrArg<'h> {
-    id: StrId,
-    s: SlabRef<'h, str>,
-    chars: usize,
-    ascii: bool,
-}
-
-impl StrArg<'_> {
-    /// Byte offset of char `ci`, clamped to the end. Arithmetic when a char index *is* a
-    /// byte offset; otherwise through the slot's sparse char→byte index (ADR-213), which
-    /// is a lookup plus a bounded walk rather than a walk from the start.
-    #[inline]
-    fn char_to_byte(&self, heap: &Heap, ci: usize) -> usize {
-        if self.ascii {
-            ci.min(self.s.len())
-        } else {
-            heap.str_char_to_byte(self.id, ci)
-        }
-    }
-
-    /// The return direction: a byte-level `find`/`match_indices` result as the char index
-    /// the language speaks. `b` must be a char boundary.
-    #[inline]
-    fn byte_to_char(&self, heap: &Heap, b: usize) -> usize {
-        if self.ascii {
-            b
-        } else {
-            heap.str_byte_to_char(self.id, b)
-        }
-    }
-}
-
-/// Require a string, as the [`StrArg`] the char-indexed builtins work through.
-#[inline]
-fn expect_str_arg<'h>(heap: &'h Heap, who: &str, v: Value) -> Result<StrArg<'h>, LispError> {
-    match v {
-        Value::Str(id) => {
-            let (chars, ascii) = heap.str_metrics(id);
-            Ok(StrArg {
-                id,
-                s: heap.string(id),
-                chars,
-                ascii,
-            })
-        }
-        other => Err(LispError::wrong_type(heap, who, "string", other)),
-    }
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    // pair / sequence — `empty?` is Brood (type dispatch over string/length /
+    // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
+    // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
+    // tail is built via `heap.list`), never a vector.
+    primitives.def(
+        "cons",
+        Arity::exact(2),
+        Sig::new(vec![any, any], pair),
+        &["x", "xs"],
+        "A new pair with head x and tail xs.\n\n    (cons 1 (list 2))   → (1 2)",
+        cons,
+    );
+    primitives.def(
+        "first",
+        Arity::exact(1),
+        Sig::new(vec![seqable], any),
+        &["coll"],
+        "The head of any sequence — a list, vector, bytes, set (an element) or map (a [k v] pair) — or nil if empty.\n\n    (first [1 2 3])   → 1\n    (first {:a 1})    → [:a 1]\n    (first [])        → nil",
+        first);
+    primitives.def(
+        "rest",
+        Arity::exact(1),
+        Sig::new(vec![seqable], list_ty),
+        &["coll"],
+        "All but the head of any sequence, as a list (a set yields its remaining elements, a map its remaining [k v] pairs). A one-element sequence yields nil, not an empty list.\n\n    (rest [1 2 3])   → (2 3)\n    (rest [1])       → nil",
+        rest);
+    primitives.def(
+        "nil?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        &["x"],
+        "True if x is nil.\n\n    (nil? nil)   → true",
+        is_nil,
+    );
+    primitives.def(
+        "pair?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        &["x"],
+        "True if x is a cons pair.\n\n    (pair? (list 1))   → true",
+        is_pair,
+    );
+    primitives.def(
+        "empty?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        &["coll"],
+        "True if coll is empty (nil, an empty string/vector/map, or a seq-view that realises to nothing).\n\n    (empty? [])   → true",
+        is_empty);
+    // Lazy reducible range (ADR: reducible range). `%range` constructs it (arg
+    // parsing is in the Brood `range`); the fold-family fast paths in the prelude
+    // call `range?` / `%range-reduce` / `%range-count`; everything else realises
+    // via `%range->list`. A range carries `tag = Pair`, so its surface type is a
+    // list — hence the `list_ty` sigs.
+    primitives.def(
+        "%range",
+        Arity::exact(3),
+        Sig::new(vec![int, int, int], list_ty),
+        &[],
+        "",
+        range_make,
+    );
+    primitives.def(
+        "range?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        &["x"],
+        "True if x is a lazy range (as produced by range). Ranges fold/reduce/sum/count without materialising; other ops treat them as the list they stand for.\n\n    (range? (range 3))   → true",
+        range_pred);
+    primitives.def(
+        "%range-count",
+        Arity::exact(1),
+        Sig::new(vec![list_ty], int),
+        &[],
+        "",
+        range_count,
+    );
+    primitives.def(
+        "%range->list",
+        Arity::exact(1),
+        Sig::new(vec![list_ty], list_ty),
+        &[],
+        "",
+        range_to_list,
+    );
+    primitives.def(
+        "%range-reduce",
+        Arity::exact(3),
+        Sig::new(vec![callable, any, list_ty], any),
+        &[],
+        "",
+        range_reduce,
+    );
+    // The vector counterpart of `%range-reduce`, behind the prelude `fold`'s vector
+    // branch. Same reason: fold the container in a native loop instead of paying a
+    // per-element `apply` — and, on this path specifically, resolve a passthrough
+    // reducer like `+` once rather than per element.
+    primitives.def(
+        "%vector-reduce",
+        Arity::exact(3),
+        Sig::new(vec![callable, any, any], any),
+        &[],
+        "",
+        vector_reduce,
+    );
+    // Lazy seq-view (ADR: lazy seq-view) — the fused result of `map`/`filter`/
+    // `keep`/`remove`. `%seqview` constructs it from `[source xform]`;
+    // `%seqview-parts` returns that pair as a 2-vector for the prelude `fold`
+    // fusion / realisation; `seqview?` is the fold-family fast-path predicate.
+    // A view carries `tag = Pair` (it is the list it stands in for), hence `pair`.
+    primitives.def(
+        "%seqview",
+        Arity::exact(2),
+        Sig::new(vec![any, callable], pair),
+        &[],
+        "",
+        seqview_make,
+    );
+    primitives.def(
+        "%seqview-parts",
+        Arity::exact(1),
+        Sig::new(vec![any], vec_ty),
+        &[],
+        "",
+        seqview_parts,
+    );
+    primitives.def(
+        "seqview?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        &["x"],
+        "True if x is a lazy sequence view — the reducible produced by range/map/filter/… before it is realized (into/count/…).\n\n    (seqview? [1 2])   → false",
+        seqview_pred);
+    // `%sort-asc` is the Rust fast path for the common `(sort coll)` case
+    // (ascending by `<`, no custom comparator). Avoids per-comparison Brood
+    // eval overhead — the old in-Brood mergesort was ~1.5 s on 10 000 items
+    // because every compare went through `eval::apply`. `sort-by` /
+    // `(sort coll cmp)` still routes through the Brood merge sort for
+    // arbitrary comparators. Items must be all-`int` or all-`float`; mixed
+    // numerics work by promotion (matches `<`'s semantics).
+    primitives.def(
+        "%sort-asc",
+        Arity::exact(1),
+        Sig::new(vec![seq_items_ty], list_ty),
+        &[],
+        "",
+        sort_asc,
+    );
+    // `%sort-cmp` is the non-numeric fallback for `(sort coll)`: sorts via the
+    // Rust-side structural total order (`value_cmp`). Lets `(sort [[1 0] [2 1]])`
+    // and the like work without a custom comparator. Brood `sort` (prelude)
+    // dispatches: numeric items go through `%sort-asc` (faster), anything else
+    // through `%sort-cmp`.
+    primitives.def(
+        "%sort-cmp",
+        Arity::exact(1),
+        Sig::new(vec![seq_items_ty], list_ty),
+        &[],
+        "",
+        sort_cmp,
+    );
+    // `(compare a b)` exposes the same structural total order as a binary
+    // comparison (-1/0/1), so `sort-by` / `min-by` / custom comparators work over
+    // any orderable value (strings, keywords, vectors, …), not just numbers.
+    primitives.def(
+        "compare",
+        Arity::exact(2),
+        Sig::new(vec![any, any], int),
+        &["a", "b"],
+        "Structural total-order comparison: -1 if a sorts before b, 0 if equal, 1 if after. Numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by a stable tag rank. The binary form of `sort`'s order — `sort-by` and custom comparators build on it.\n\n    (compare 1 2)   → -1",
+        compare);
+    // vector
+    primitives.def(
+        "vector",
+        Arity::any(),
+        Sig::variadic(any, vec_ty),
+        &["&", "items"],
+        "A vector of the given items.\n\n    (vector 1 2 3)   → [1 2 3]",
+        vector,
+    );
+    primitives.def(
+        "%vector-ref",
+        Arity::exact(2),
+        Sig::new(vec![vec_ty, int], any),
+        &["v", "i"],
+        "The element at index i of vector v.",
+        vector_ref,
+    );
+    primitives.def(
+        "%vector-length",
+        Arity::exact(1),
+        Sig::new(vec![vec_ty], int),
+        &["v"],
+        "The number of elements in vector v.",
+        vector_length,
+    );
+    primitives.def(
+        "%vector-assoc",
+        Arity::exact(3),
+        Sig::new(vec![vec_ty, int, any], vec_ty),
+        &["v", "i", "x"],
+        "A fresh vector like v with index i (in [0, len)) set to x.",
+        vector_assoc,
+    );
+    primitives.def(
+        "%subvec",
+        Arity::range(2, 3),
+        Sig::with_rest(vec![vec_ty, int], int, vec_ty),
+        &["v", "start", "end"],
+        "A fresh vector of v's elements in [start, end); end defaults to the length.",
+        subvec,
+    );
+    // map — the *minimal* kernel: construct, read, two producers, and one
+    // enumerator (`%map-pairs` → [k v] vectors). `keys`/`vals`/`contains?`/
+    // `reduce-kv` and the `get`/`assoc`/`dissoc` surface (variadic + defaults) are
+    // all Brood over these (std/prelude.blsp). Maps are immutable: each op returns
+    // a fresh map.
+    primitives.def(
+        "%hash-map",
+        Arity::any(),
+        Sig::variadic(any, map_ty),
+        &["&", "kvs"],
+        "A map from alternating key/value arguments (last wins on duplicate keys).",
+        hash_map,
+    );
+    primitives.def(
+        "%map-get",
+        Arity::range(2, 3),
+        Sig::with_rest(vec![map_ty, any], any, any),
+        &["m", "k", "default"],
+        "The value at key k in map m, or default (else nil).",
+        map_get,
+    );
+    primitives.def(
+        "%map-assoc",
+        Arity::exact(3),
+        Sig::new(vec![map_ty, any, any], map_ty),
+        &["m", "k", "v"],
+        "A fresh map like m with key k set to v.",
+        map_assoc,
+    );
+    primitives.def(
+        "%map-int-add",
+        Arity::exact(3),
+        Sig::new(vec![map_ty, any, int], map_ty),
+        &["m", "k", "delta"],
+        "A fresh map like m with key k's integer value incremented by delta (inserts delta when k is absent). Single trie traversal — equivalent to (assoc m k (+ (get m k 0) delta)) without the extra walk.",
+        map_int_add);
+    primitives.def(
+        "%map-dissoc",
+        Arity::exact(2),
+        Sig::new(vec![map_ty, any], map_ty),
+        &["m", "k"],
+        "A fresh map like m with key k removed.",
+        map_dissoc,
+    );
+    primitives.def(
+        "%map-pairs",
+        Arity::exact(1),
+        Sig::new(vec![map_ty], list_ty),
+        &["m"],
+        "The entries of m as a list of [k v] vectors, in insertion order.",
+        map_pairs,
+    );
+    primitives.def(
+        "%map-count",
+        Arity::exact(1),
+        Sig::new(vec![map_ty], int),
+        &["m"],
+        "The number of entries in map m. O(1) — the CHAMP root tracks its size.",
+        map_count,
+    );
+    primitives.def(
+        "%map-into",
+        Arity::exact(2),
+        Sig::new(vec![map_ty, any], map_ty),
+        &[],
+        "",
+        map_into,
+    );
+    // Ability dispatch through the per-op inline cache (ADR-172 §7): (impls, op-key, id) →
+    // impl fn or nil. Internal; the op `defability` emits calls it, never user code.
+    primitives.def(
+        "%dispatch",
+        Arity::exact(3),
+        Sig::new(vec![map_ty, any, any], any),
+        &[],
+        "",
+        dispatch,
+    );
+    // Atomic registry update (KI-22): the read-modify-write of a global holding a whole
+    // registry map, done in ONE kernel call so two concurrent registrations cannot each
+    // read the old map and clobber each other. Internal; `register-impl`/`provide`/
+    // `defability`/… in the prelude call it, never user code.
+    primitives.def(
+        "%registry-update!",
+        Arity::exact(4),
+        Sig::new(vec![any, any, any, any], any),
+        &[],
+        "",
+        registry_update,
+    );
+    // The general form of the above (KI-23): compare-and-swap, for a registry whose update
+    // is not a single map/list op. Lets the transform stay a Brood function while the
+    // read-decide-write stays indivisible; `registry-swap!` in the prelude retries on it.
+    primitives.def(
+        "%registry-cas!",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], any),
+        &[],
+        "",
+        registry_cas,
+    );
+    // Cache-bypassing membership test for a registry map (ADR-225): `require`'s load-once
+    // guard must never miss a racing loader's `provide` (which the per-process inline cache
+    // can momentarily hide) and reload the module. Reads the shared globals table directly.
+    primitives.def(
+        "%registry-member?",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        &[],
+        "",
+        registry_member,
+    );
+    // Which globals the two above have actually written (ADR-218): the derived answer to
+    // "what does loading MUTATE rather than create?", which the startup image needs and the
+    // `(reflect/global-names)` diff cannot see. Naming them by hand went stale twice, silently.
+    primitives.def(
+        "%registry-names",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        &[],
+        "Every global a registry update (%registry-update! / %registry-cas!) has written in this runtime, sorted by spelling. The derived answer to \"which globals does LOADING mutate rather than create?\" — the ones a startup image has to carry deliberately, because the (reflect/global-names) diff it is built from cannot see them (ADR-218). Naming them by hand went stale three times, silently; std/tool/project.blsp filters this instead.",
+        registry_names);
+    // set (the `#{…}` kernel type; the `set` library is Brood over these)
+    primitives.def(
+        "%set",
+        Arity::at_least(0),
+        Sig::variadic(any, set_ty),
+        &["&", "xs"],
+        "Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `set` library's constructor is Brood over this.",
+        set_construct);
+    primitives.def(
+        "%set-add",
+        Arity::exact(2),
+        Sig::new(vec![set_ty, any], set_ty),
+        &["s", "x"],
+        "A fresh set like s with element x added (a set already holding x is returned unchanged). O(log n).",
+        set_add);
+    primitives.def(
+        "%set-remove",
+        Arity::exact(2),
+        Sig::new(vec![set_ty, any], set_ty),
+        &["s", "x"],
+        "A fresh set like s with element x removed (absent → unchanged). O(log n).",
+        set_remove,
+    );
+    primitives.def(
+        "%set-has?",
+        Arity::exact(2),
+        Sig::new(vec![set_ty, any], bool_ty),
+        &["s", "x"],
+        "Is x an element of set s? O(log n).",
+        set_has,
+    );
+    primitives.def(
+        "%set-count",
+        Arity::exact(1),
+        Sig::new(vec![set_ty], int),
+        &["s"],
+        "The number of elements in set s. O(1) — the CHAMP root tracks its size.",
+        set_count,
+    );
+    // string
+    primitives.def(
+        "string/length",
+        Arity::exact(1),
+        Sig::new(vec![string], int),
+        &["s"],
+        "The number of characters in string s.\n\n    (string/length \"Hi there\")   → 8",
+        string_length,
+    );
+    primitives.def(
+        "string/display-width",
+        Arity::exact(1),
+        Sig::new(vec![string], int),
+        &["s"],
+        "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string/length.\n\n    (string/display-width \"Hi there\")   → 8",
+        display_width);
+    // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
+    // (std/prelude.blsp) over this one reflective primitive.
+    primitives.def(
+        "type-of",
+        Arity::exact(1),
+        Sig::new(vec![any], kw),
+        &["x"],
+        "The runtime type of x as a keyword (:int, :string, :pair, ...).\n\n    (type-of :k)   → :keyword",
+        type_of,
+    );
 }
 
 // ---------- pair / sequence ----------
@@ -290,7 +629,7 @@ pub(super) fn is_empty(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResul
             Ok(Value::boolean(r.len_chars() == 0))
         }
         Value::Table(_) => {
-            let id = super::io::expect_table(heap, "empty?", x)?;
+            let id = super::table::expect_table(heap, "empty?", x)?;
             Ok(Value::boolean(crate::core::table::count(id)? == 0))
         }
         _ => Err(LispError::wrong_type(heap, "empty?", "collection", x)),
@@ -1097,12 +1436,12 @@ pub(super) fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 /// grapheme clusters (an emoji / flag / CJK char is 2, a combining mark 0). The
 /// width-aware counterpart to `string-length` (which counts codepoints) — the
 /// editor's column / cursor math uses it so a wide glyph advances two columns. The
-/// GUI renderer advances the cell grid by the same measure (`crate::text_width`).
+/// GUI renderer advances the cell grid by the same measure (`crate::host::text_width`).
 pub(super) fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
         Value::Str(id) => Ok(Value::int(
-            crate::text_width::display_width(&heap.string(id)) as i64,
+            crate::host::text_width::display_width(&heap.string(id)) as i64,
         )),
         _ => Err(LispError::wrong_type(
             heap,
@@ -1124,844 +1463,4 @@ pub(super) fn type_of(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     // Cached keyword id per tag — `type-of` is hit per element by the seq
     // predicates, so re-interning the tag name here dominated intern cost.
     Ok(Value::keyword(value::tag(arg(args, 0)).keyword()))
-}
-
-// ---------- value <-> text and I/O ----------
-
-pub(super) fn str_concat(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let args = realize_seqviews(heap, env, args)?;
-    let mut s = String::new();
-    for &a in &args {
-        s.push_str(&printer::display(heap, a));
-    }
-    Ok(heap.alloc_string(&s))
-}
-
-/// `(%string-join sep coll)` — the native fast path behind `join` for a string
-/// separator. Walks `coll` once, appending each element's display form (the same
-/// `str`/`join` use) with `sep` between adjacent elements into one pre-sized
-/// buffer — no intermediate cons list and no `reverse` pass, which is what the
-/// all-Brood `join` paid (≈2N cons cells built then reversed). `coll` is realised
-/// via `seq_items` (list / vector / range; empty → `""`). Semantics match the
-/// prelude `join`: display form per element, separator only between adjacent
-/// elements, so a single-element collection has no trailing separator.
-pub(super) fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let sep = match arg(args, 0) {
-        s @ Value::Str(_) => printer::display(heap, s),
-        v => return Err(LispError::wrong_type(heap, "%string-join", "string", v)),
-    };
-    // Streaming fast path for a lazy int range (`(string/join (range n) ",")`): format
-    // each integer straight into the buffer in one pass — no intermediate Vec of
-    // `Value`s, no per-element string allocation. The range stays immutable; this
-    // only changes how its joined string is *constructed*.
-    if let Value::Range(id) = arg(args, 1) {
-        use std::fmt::Write;
-        let (lo, hi, step) = heap.range_parts(id);
-        let mut s = String::new();
-        let mut first = true;
-        let mut i = lo;
-        while if step > 0 { i < hi } else { i > hi } {
-            if !first {
-                s.push_str(&sep);
-            }
-            first = false;
-            let _ = write!(s, "{i}");
-            i = match i.checked_add(step) {
-                Some(v) => v,
-                None => break,
-            };
-        }
-        return Ok(heap.alloc_string(&s));
-    }
-    let items = heap.seq_items(arg(args, 1))?;
-    // Rough pre-size (separators + a small per-element allowance) to avoid most
-    // re-grows without a second display pass just to compute the exact length.
-    let mut s = String::with_capacity(sep.len() * items.len().saturating_sub(1) + items.len() * 8);
-    for (i, &item) in items.iter().enumerate() {
-        if i > 0 {
-            s.push_str(&sep);
-        }
-        s.push_str(&printer::display(heap, item));
-    }
-    Ok(heap.alloc_string(&s))
-}
-
-pub(super) fn pr_str(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let v = match arg(args, 0) {
-        sv @ Value::SeqView(_) => realize_seqview(heap, env, sv)?,
-        other => other,
-    };
-    let s = printer::print(heap, v);
-    Ok(heap.alloc_string(&s))
-}
-
-/// `(symbol x)` — the symbol whose spelling is `x`. Accepts a string (intern as
-/// a fresh-or-existing symbol), a symbol (identity), or a keyword (same spelling,
-/// retagged as a symbol). The lenient inverse of `->string`; pairs with `keyword`.
-pub(super) fn to_symbol(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    match v {
-        Value::Sym(_) => Ok(v),
-        Value::Keyword(s) => Ok(Value::symbol(s)),
-        Value::Str(id) => {
-            let name = heap.string(id).to_string();
-            Ok(Value::symbol(value::intern(&name)))
-        }
-        _ => Err(LispError::wrong_type(
-            heap,
-            "symbol",
-            "string, symbol, or keyword",
-            v,
-        )),
-    }
-}
-
-/// `(keyword x)` — the keyword whose spelling is `x`. Accepts a string (intern),
-/// a keyword (identity), or a symbol (same spelling, retagged as a keyword).
-/// Mirrors `symbol`; the two share an interner so a keyword and a symbol with the
-/// same spelling carry equal `Symbol` ids (the tag is the only distinction).
-pub(super) fn to_keyword(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    match v {
-        Value::Keyword(_) => Ok(v),
-        Value::Sym(s) => Ok(Value::keyword(s)),
-        Value::Str(id) => {
-            let name = heap.string(id).to_string();
-            Ok(Value::keyword(value::intern(&name)))
-        }
-        _ => Err(LispError::wrong_type(
-            heap,
-            "keyword",
-            "string, symbol, or keyword",
-            v,
-        )),
-    }
-}
-
-/// `(string/substring s start [end])` — the characters of `s` in `[start, end)`,
-/// char-indexed (consistent with `string-length`). `end` defaults to the
-/// string's length, so `(string/substring s start)` is "from `start` to the end".
-/// Errors if out of range.
-
-pub(super) fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    // The hot one: `char-at`, `starts-with?` and `ends-with?` are all Brood over this
-    // (`std/prelude.blsp`), so its per-call cost is the floor for most string code. It had
-    // three separate O(whole string) steps for what is usually a tiny result — an owned
-    // `expect_string` copy, a `chars().count()` length, and a `chars().skip()` walk. With
-    // a 216 KB haystack, `(string/char-at s 3)` cost ~11.5 µs and did not care that it was reading
-    // the 4th character: measured with the CALL COUNT FIXED, the cost tracked the string's
-    // size (1/6/23 ms as it grew 13.5k → 54k → 216k chars).
-    let v = arg(args, 0);
-    let start = expect_int(heap, "string/substring", arg(args, 1))?;
-    let sub: String = {
-        let h: &Heap = heap;
-        let a = expect_str_arg(h, "string/substring", v)?;
-        // The cached char count, O(1) — it used to be a `chars().count()` per call.
-        let len = a.chars as i64;
-        let end = match args.get(2) {
-            Some(_) => expect_int(h, "string/substring", arg(args, 2))?,
-            None => len,
-        };
-        if start < 0 || end < start || end > len {
-            return Err(LispError::runtime(format!(
-                "string/substring: range [{}, {}) out of bounds for length {}",
-                start, end, len
-            ))
-            .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
-        }
-        // Both ends converted, so this is a direct slice — O(result) rather than O(end),
-        // on multi-byte text as well. `chars().skip(start)` used to walk from byte 0 on
-        // every call, which is what made a per-character scan quadratic off the ASCII path.
-        let lo = a.char_to_byte(h, start as usize);
-        let hi = a.char_to_byte(h, end as usize);
-        a.s[lo..hi].to_string()
-    };
-    Ok(heap.alloc_string(&sub))
-}
-
-/// Shared body of `string-span` / `string-span-until`: from char `start`, count the
-/// maximal run of chars whose membership in the set `chars` equals `in_set`, and
-/// return the char index just past it. Char-indexed, like `substring`/`char-at`. The
-/// forward char-class scan a tokenizer runs its inner loops on (skip a whitespace /
-/// digit / delimiter run) — O(run) native instead of O(run) interpreted recursion.
-pub(super) fn string_span_impl(
-    args: &[Value],
-    heap: &mut Heap,
-    who: &str,
-    in_set: bool,
-) -> LispResult {
-    // A tokenizer calls this once per token over one document, so an O(whole document)
-    // step here is O(tokens x document) overall. It had three: the owned `expect_string`
-    // copy, `chars().count()` for the length, and `chars().skip(start)`. Borrow, read the
-    // cached count, and start from a byte offset the slot converts in O(1) (ASCII) or a
-    // one-stride walk (multi-byte).
-    let v = arg(args, 0);
-    let start = expect_int(heap, who, arg(args, 1))?;
-    let h: &Heap = heap;
-    let a = expect_str_arg(h, who, v)?;
-    let set = expect_string_ref(h, who, arg(args, 2))?;
-    let len = a.chars as i64;
-    if start < 0 || start > len {
-        return Err(LispError::runtime(format!(
-            "{}: start {} out of bounds for length {}",
-            who, start, len
-        ))
-        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
-    }
-    let byte_start = a.char_to_byte(h, start as usize);
-    let mut idx = start as usize;
-    for c in a.s[byte_start..].chars() {
-        if set.contains(c) == in_set {
-            idx += 1;
-        } else {
-            break;
-        }
-    }
-    Ok(Value::int(idx as i64))
-}
-
-/// `(string/span s start chars)` — the char index just past the maximal run of chars
-/// drawn from the set `chars`, beginning at `start` (so `start` itself when the char
-/// there isn't in the set). For skipping a run *of* a class — whitespace, digits.
-pub(super) fn string_span(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    string_span_impl(args, heap, "string/span", true)
-}
-
-/// `(string/span-until s start chars)` — the char index of the first char in the set
-/// `chars` at or after `start` (or the length if none): the maximal run of chars
-/// *not* in the set. For scanning up to a delimiter — comment-to-newline,
-/// atom-to-delimiter, string-body-to-quote.
-pub(super) fn string_span_until(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    string_span_impl(args, heap, "string/span-until", false)
-}
-
-/// Lexical category of an atom token (a maximal run of non-delimiter chars), matching
-/// `std/editor/highlight`'s `hl--atom-face` shape: a `:`-prefixed or `nil`/`true`/`false`
-/// constant is a `keyword`; one that parses as an int/float (like `string/->number`) is a
-/// `number`; anything else is a plain `symbol`. The head-position special-form vs call
-/// distinction is left to the consumer (it needs the surrounding `(`).
-
-/// Scan a `|…|` bar body from `from` (just past the opening `|`) to just past the
-/// closing `|` — honouring `\|`/`\\` escapes — or to `n` if unterminated. Shared by
-/// the two `scan-tokens` bar arms (symbol and keyword).
-pub(super) fn scan_bar(chars: &[char], n: usize, from: usize) -> usize {
-    let mut j = from;
-    while j < n {
-        match chars[j] {
-            '\\' => j += 2,
-            '|' => {
-                j += 1;
-                break;
-            }
-            _ => j += 1,
-        }
-    }
-    j.min(n)
-}
-
-/// `(%str-index-of s needle)` — the 0-based **char** index of the first
-/// occurrence of `needle` in `s`, or -1 if absent. Linear: Rust's byte-level
-/// `str::find`, then a one-pass byte→char-index conversion of the prefix. The
-/// empty needle matches at 0 (matching `index-of`'s contract). The search
-/// primitive the Brood `index-of`/`includes?` ride on; see the
-
-pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    // Borrowed, not owned: `expect_string` would copy the whole haystack per call, which
-    // is the difference between a linear incremental search and a quadratic one.
-    let h: &Heap = heap;
-    let a = expect_str_arg(h, "%str-index-of", arg(args, 0))?;
-    let needle = expect_string_ref(h, "%str-index-of", arg(args, 1))?;
-    // Optional 3rd arg: the CHAR index to start searching at. It exists so `index-of`'s
-    // `from` does not have to build `(string/substring coll from n)` first — that copy is what
-    // made "incremental search" over one string quadratic, the same trap the comment
-    // above `string-split`'s registration describes for splitting. Searching a suffix
-    // must not allocate one.
-    let start = match args.get(2) {
-        None | Some(Value::Nil) => 0usize,
-        Some(&v) => match v {
-            Value::Int(n) => n.max(0) as usize,
-            other => return Err(LispError::wrong_type(heap, "%str-index-of", "int", other)),
-        },
-    };
-    // Char index → byte offset and back, both through the slot: O(1) for a pure-ASCII
-    // string (where the two numbers are equal) and an indexed lookup plus a bounded walk
-    // otherwise. That is what makes an incremental search over one string linear rather
-    // than O(position) per call **in both encoding regimes** — a char-count cache alone
-    // could only do it for ASCII, because its mechanism is the ASCII test itself.
-    //
-    // A start past the end converts to the end, so an out-of-range start simply finds
-    // nothing (matching the clamp the Brood side used to do).
-    let byte_start = if start == 0 {
-        0
-    } else {
-        a.char_to_byte(h, start)
-    };
-    let idx = match a.s[byte_start..].find(&*needle) {
-        Some(rel) => a.byte_to_char(h, byte_start + rel) as i64,
-        None => -1,
-    };
-    Ok(Value::int(idx))
-}
-
-/// `(%str-last-index-of s needle before)` — the char index of the **last** occurrence of
-/// `needle` in `s` starting strictly before char index `before`, or -1.
-///
-/// Genuinely needs Rust, for the same reason as `string-split` and the `from` offset above:
-/// the Brood version walked forward calling `(index-of s needle i)` per match, and every one
-/// of those re-derives a char offset (and, before that offset existed, allocated a copy of
-/// the suffix) — so a reverse search was O(matches x length). Measured 16.5x then 16.4x per
-/// 4x of input, where linear is 4x. This is one forward pass with an advancing cursor.
-///
-/// It is on an editor hot path in both directions: `buffer.blsp`'s reverse search runs over
-/// whole buffer text, and `lineedit.blsp` finds the current line's start (`last-index-of
-/// text "\n" p`) on every keystroke.
-pub(super) fn str_last_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    // Borrowed, not owned — see `%str-index-of`.
-    let h: &Heap = heap;
-    let a = expect_str_arg(h, "%str-last-index-of", arg(args, 0))?;
-    let needle = expect_string_ref(h, "%str-last-index-of", arg(args, 1))?;
-    // Cached char count, O(1); `char_len` used to be a full scan.
-    let char_len = a.chars;
-    let before = match args.get(2) {
-        None | Some(Value::Nil) => char_len as i64,
-        Some(&v) => match v {
-            Value::Int(n) => n,
-            other => {
-                return Err(LispError::wrong_type(
-                    heap,
-                    "%str-last-index-of",
-                    "int",
-                    other,
-                ))
-            }
-        },
-    };
-    // The empty needle matches at every position 0..=len, so the last start strictly before
-    // `before` is `before - 1` (clamped). Kept as an explicit branch, exactly as the Brood
-    // version had it: the general scan below would loop forever on a zero-width match.
-    if needle.is_empty() {
-        return Ok(Value::int(if before <= 0 {
-            -1
-        } else if before > char_len as i64 {
-            char_len as i64
-        } else {
-            before - 1
-        }));
-    }
-    if before <= 0 {
-        return Ok(Value::int(-1));
-    }
-    // Byte limit for `before` (clamped past-the-end to the whole string). A match may START
-    // before the limit and extend past it — that is still a match, so the bound is on the
-    // match's start, not on the slice searched.
-    let limit = if before as usize >= char_len {
-        a.s.len()
-    } else {
-        a.char_to_byte(h, before as usize)
-    };
-    let mut best: Option<usize> = None;
-    for (b, _) in a.s.match_indices(&*needle) {
-        if b >= limit {
-            break;
-        }
-        best = Some(b);
-    }
-    Ok(Value::int(match best {
-        Some(b) => a.byte_to_char(h, b) as i64,
-        None => -1,
-    }))
-}
-
-/// `(%str-splice-diff old new)` — the minimal single splice `[lo hi repl]` that
-/// turns `old` into `new`: replace `old[lo, hi)` (0-based CHAR indices) with the
-/// string `repl`. The common prefix and suffix are trimmed off (the suffix never
-/// overlaps the prefix), so the span is minimal; equal strings give `[n n ""]`.
-/// One native byte-level pass snapped to char boundaries. Genuinely needs Rust:
-/// this runs per keystroke on every process-hosted editor buffer (the myedit
-/// flip), where the pure-Brood per-char scan (fn call + `char-at` per char) cost
-/// ~40 ms/keystroke on a 300-line buffer — ~100× this pass.
-pub(super) fn str_splice_diff(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    // Borrowed, not owned: this runs per keystroke over the WHOLE buffer text (twice),
-    // and `expect_string` copied both. The result is three small values, so the borrows
-    // end before the allocation below — the pattern every convertible `expect_string`
-    // site takes (`seam`: the ones that allocate per piece *while* scanning, like
-    // `string-split` and `scan-tokens`, cannot use it).
-    let h: &Heap = heap;
-    let old = expect_string_ref(h, "%str-splice-diff", arg(args, 0))?;
-    let new = expect_string_ref(h, "%str-splice-diff", arg(args, 1))?;
-    let ob = old.as_bytes();
-    let nb = new.as_bytes();
-    // Common byte prefix, snapped BACK to a char boundary in both (a boundary in
-    // one is a boundary in the other: the prefixes are byte-identical).
-    let mut p = ob.iter().zip(nb.iter()).take_while(|(a, b)| a == b).count();
-    while p > 0 && !old.is_char_boundary(p) {
-        p -= 1;
-    }
-    // Common byte suffix over the remainders (capped so it can't overlap the
-    // prefix), snapped FORWARD (shrunk) to a char boundary in both.
-    let max_suf = (ob.len() - p).min(nb.len() - p);
-    let mut s = ob
-        .iter()
-        .rev()
-        .zip(nb.iter().rev())
-        .take(max_suf)
-        .take_while(|(a, b)| a == b)
-        .count();
-    while s > 0 && !(old.is_char_boundary(ob.len() - s) && new.is_char_boundary(nb.len() - s)) {
-        s -= 1;
-    }
-    let lo = old[..p].chars().count() as i64;
-    let hi = lo + old[p..ob.len() - s].chars().count() as i64;
-    let repl_str = new[p..nb.len() - s].to_string();
-    drop((old, new));
-    let repl = heap.alloc_string(&repl_str);
-    Ok(heap.alloc_vector(vec![Value::int(lo), Value::int(hi), repl]))
-}
-
-/// `(string/split s &optional sep)` — split `s` into a list of substrings on each
-/// occurrence of `sep`, in one O(n) pass. `sep` defaults to a single space: splitting
-/// on words is what a bare `split` is reached for, and `(string/split line " ")` was
-/// the separator spelled out at nearly every call site. An empty separator splits `s`
-/// into its individual characters (1-char strings). Mirrors the semantics of the former
-/// pure-Brood `string-split`/`string->list`, but without the O(n²) tail-substring rebuild.
-pub(super) fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "string/split", arg(args, 0))?;
-    let sep = match args.get(1) {
-        Some(v) => expect_string(heap, "string/split", *v)?,
-        None => " ".to_string(),
-    };
-    let out: Vec<Value> = if sep.is_empty() {
-        s.chars()
-            .map(|c| heap.alloc_string(&c.to_string()))
-            .collect()
-    } else {
-        s.split(sep.as_str())
-            .map(|part| heap.alloc_string(part))
-            .collect()
-    };
-    Ok(heap.list_from_slice(&out))
-}
-
-/// `(string/->codepoints s)` — the characters of `s` as a **vector of integer Unicode
-/// codepoints**, one O(n) pass. The random-access text-scanning primitive:
-/// parsers (std/regex, std/json, std/encoding) index code points with O(1)
-/// `nth` and compare them as ints. Building the same vector in Brood —
-/// `(apply vector (map string/char->int (string/->list s)))` — costs a 1-char string
-/// allocation per char plus a closure call per char, and measured ~40 % of the
-/// whole regex benchmark. Like `string-split`/`string-span`, this is text-access
-/// *mechanism*; the parsers themselves stay in Brood.
-pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    // Borrowed: the codepoints are ints, so nothing is allocated while the borrow is
-    // live — one copy of the string saved per call, on the parsers' hot path.
-    let codes: Vec<Value> = {
-        let s = expect_string_ref(heap, "string/->codepoints", arg(args, 0))?;
-        s.chars().map(|c| Value::int(c as i64)).collect()
-    };
-    Ok(heap.alloc_vector(codes))
-}
-
-/// `(%codepoints->string codes)` — a string from a sequence of integer Unicode code
-/// points: the **inverse of `string/->codepoints`**, which until now had none.
-///
-/// Its absence was a real gap, not a convenience. `string/->codepoints` is a native that
-/// every text parser in `std/` uses to get an indexable code vector — and every one of them
-/// then rebuilt its result with `(apply str (map int->char cs))`, which allocates a seq
-/// view, calls a closure per code point to make a **one-character string**, and then
-/// concatenates N of those variadically. That is what `std/string.blsp`'s
-/// `codepoints->` was, so `json`'s per-string assembly, the regex matcher's and the hex
-/// encoder's all paid it. One O(n) pass into a `String` replaces the whole shape.
-///
-/// Accepts a vector or list (and a `bytes` value, where a byte *is* its code point), so it
-/// mirrors what the parsers actually hold. A value that is not an integer, or is not a
-/// Unicode scalar (negative, above U+10FFFF, or a surrogate in D800–DFFF), is a clean
-/// error naming the offender — a surrogate cannot be a `char`, and letting one through
-/// would either panic or silently produce U+FFFD.
-pub(super) fn codepoints_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let arg0 = arg(args, 0);
-    // Collect the ints first, so the string is built without a live heap borrow.
-    let codes: Vec<i64> = match arg0 {
-        Value::Bytes(id) => heap
-            .bytes(id)
-            .as_bytes()
-            .iter()
-            .map(|b| *b as i64)
-            .collect(),
-        Value::Vector(id) => heap
-            .vector(id)
-            .to_vec()
-            .iter()
-            .map(int_code)
-            .collect::<Result<_, _>>()
-            .map_err(|v| bad_codepoint(heap, v))?,
-        Value::Pair(_) | Value::Nil => {
-            let mut out = Vec::new();
-            let mut cur = arg0;
-            while let Value::Pair(id) = cur {
-                let (h, t) = heap.pair(id);
-                out.push(int_code(&h).map_err(|v| bad_codepoint(heap, v))?);
-                cur = t;
-            }
-            out
-        }
-        other => {
-            return Err(LispError::wrong_type(
-                heap,
-                "%codepoints->string",
-                "vector, list or bytes of codepoint ints",
-                other,
-            ))
-        }
-    };
-    let mut out = String::with_capacity(codes.len());
-    for c in codes {
-        match u32::try_from(c).ok().and_then(char::from_u32) {
-            Some(ch) => out.push(ch),
-            None => {
-                return Err(LispError::runtime(format!(
-                    "%codepoints->string: {c} is not a Unicode scalar value (0..=0x10FFFF, \
-                     excluding the surrogates 0xD800..=0xDFFF)"
-                )))
-            }
-        }
-    }
-    Ok(heap.alloc_string(&out))
-}
-
-/// The int in `v`, or `v` itself when it is not one — the error carries the offender so
-/// [`codepoints_to_string`] can name it.
-fn int_code(v: &Value) -> Result<i64, Value> {
-    match v {
-        Value::Int(n) => Ok(*n),
-        other => Err(*other),
-    }
-}
-
-fn bad_codepoint(heap: &Heap, v: Value) -> LispError {
-    LispError::wrong_type(heap, "%codepoints->string", "codepoint int", v)
-}
-
-/// `(string/->graphemes s)` — the **extended grapheme clusters** of `s` as a vector
-/// of strings, one O(n) pass. The sibling of `string/->codepoints`, and the unit a
-/// human means by "character": `"é"` written as `e` + U+0301 is two code points but
-/// one grapheme, and a flag emoji is four code points and one grapheme. Cursor
-/// motion, column arithmetic and truncation in `std/editor/*` all want this unit —
-/// stepping a cursor by code point splits a cluster and corrupts the text. Not
-/// bootstrappable: the boundary rules are UAX #29 tables, not a rule Brood can
-/// express. `string/display-width` already segments the same way internally.
-pub(super) fn string_to_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use unicode_segmentation::UnicodeSegmentation;
-    let s = expect_string(heap, "string/->graphemes", arg(args, 0))?;
-    // `true` = *extended* grapheme clusters (UAX #29's recommended default, and
-    // what the renderer and `string/display-width` use).
-    let parts: Vec<String> = s.graphemes(true).map(|g| g.to_string()).collect();
-    let vals: Vec<Value> = parts.iter().map(|g| heap.alloc_string(g)).collect();
-    Ok(heap.alloc_vector(vals))
-}
-
-/// `(string/grapheme-count s)` — how many **extended grapheme clusters** `s` has: the
-/// length a human means, and the exclusive upper bound for `grapheme-at`. One O(n)
-/// segmentation pass that allocates nothing (`string->graphemes` had to build a
-/// vector of n strings just to be counted).
-pub(super) fn grapheme_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use unicode_segmentation::UnicodeSegmentation;
-    let s = expect_string_ref(heap, "string/grapheme-count", arg(args, 0))?;
-    Ok(Value::int(s.graphemes(true).count() as i64))
-}
-
-/// `(string/grapheme-at s i)` / `(string/grapheme-at s i default)` — the `i`-th grapheme cluster
-/// of `s` as a string, or `default`/`nil` when `i` is out of range (never an error,
-/// matching `nth`/`get`).
-///
-/// Why this is a primitive and not `(nth (string/->graphemes s) i)`: the docs require
-/// a cursor to step by *cluster*, so that spelling was the only correct way to read
-/// one character — and it builds a vector of every cluster in the string on **every
-/// keystroke**. This walks to `i` and stops, allocating one string. The editor's
-/// hottest path stops being O(n) in the buffer line's length.
-pub(super) fn grapheme_at(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use unicode_segmentation::UnicodeSegmentation;
-    let i = expect_int(heap, "string/grapheme-at", arg(args, 1))?;
-    let default = args.get(2).copied().unwrap_or(Value::nil());
-    if i < 0 {
-        return Ok(default);
-    }
-    // Borrowed — the editor reads a cluster per keystroke, so a copy of the line (or the
-    // buffer) per call is exactly what this path cannot afford.
-    let found = {
-        let s = expect_string_ref(heap, "string/grapheme-at", arg(args, 0))?;
-        s.graphemes(true).nth(i as usize).map(|g| g.to_string())
-    };
-    match found {
-        Some(g) => Ok(heap.alloc_string(&g)),
-        None => Ok(default),
-    }
-}
-
-/// `(string/substring-graphemes s start)` / `(… s start end)` — the half-open cluster range
-/// `[start, end)` of `s` as a string, clamped to the ends (so it never errors, like
-/// `take`/`drop`). The grapheme-indexed counterpart of `substring`, which is
-/// codepoint-indexed and will happily slice a cluster in half — splitting `"é"`
-/// (e + U+0301) into a bare `e` and an orphan combining mark.
-pub(super) fn substring_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use unicode_segmentation::UnicodeSegmentation;
-    let start = expect_int(heap, "string/substring-graphemes", arg(args, 1))?.max(0) as usize;
-    let end = match args.get(2) {
-        None | Some(Value::Nil) => None,
-        Some(_) => {
-            Some(expect_int(heap, "string/substring-graphemes", arg(args, 2))?.max(0) as usize)
-        }
-    };
-    let out: String = {
-        let s = expect_string_ref(heap, "string/substring-graphemes", arg(args, 0))?;
-        match end {
-            Some(e) if e <= start => String::new(),
-            Some(e) => s.graphemes(true).skip(start).take(e - start).collect(),
-            None => s.graphemes(true).skip(start).collect(),
-        }
-    };
-    Ok(heap.alloc_string(&out))
-}
-
-/// `(string/normalize s form)` — `s` in Unicode normalisation `form`, one of the
-/// keywords `:nfc` `:nfd` `:nfkc` `:nfkd`. Text that a human reads as identical can
-/// be several different strings — "é" is U+00E9 *or* U+0065 U+0301 — and Brood's `=`
-/// is byte-structural, so only normalisation makes those compare equal. Canonical
-/// (`nfc`/`nfd`) preserves meaning; compatibility (`nfkc`/`nfkd`) also folds
-/// presentation differences (the ligature "ﬁ" → "fi", superscript "²" → "2"), which
-/// is right for search and identifier matching and wrong for round-tripping text.
-/// One primitive with a form keyword rather than four functions (ADR-011).
-pub(super) fn string_normalize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use unicode_normalization::UnicodeNormalization;
-    let s = expect_string(heap, "string/normalize", arg(args, 0))?;
-    let form = arg(args, 1);
-    let name = match form {
-        Value::Keyword(k) => crate::core::value::symbol_name(k),
-        _ => {
-            return Err(LispError::wrong_type(
-                heap,
-                "string/normalize",
-                "keyword",
-                form,
-            ))
-        }
-    };
-    let out: String = match name.as_str() {
-        "nfc" => s.nfc().collect(),
-        "nfd" => s.nfd().collect(),
-        "nfkc" => s.nfkc().collect(),
-        "nfkd" => s.nfkd().collect(),
-        other => {
-            return Err(LispError::runtime(format!(
-                "string/normalize: unknown form :{other} (expected :nfc, :nfd, :nfkc or :nfkd)"
-            )))
-        }
-    };
-    Ok(heap.alloc_string(&out))
-}
-
-/// `(math/->fixed x n)` — x rendered with exactly `n` digits after the decimal point
-/// (rounded). The one float→text op the language can't bootstrap: `str`/`pr-str`
-/// print the shortest round-tripping form (full f64 precision, e.g.
-/// `0.015873015873015872`), which is wrong for tabular/console output. An int `x`
-/// is promoted, so `(math/->fixed 3 2)` is `"3.00"`. `n` must be non-negative.
-pub(super) fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let x = num_to_f64(heap, "->fixed", arg(args, 0))?;
-    let n = expect_int(heap, "->fixed", arg(args, 1))?;
-    if n < 0 {
-        return Err(LispError::runtime(format!(
-            "->fixed: decimal places must be non-negative, got {}",
-            n
-        ))
-        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
-    }
-    // Bound the width: `format!("{:.*}", n, x)` materialises an `n`-digit string,
-    // so an unbounded `n` (e.g. `(math/->fixed 1.0 1000000000)`) allocates ~1 GB on the
-    // Rust side, bypassing the GC/soft-memory cap. An f64 carries ~17 significant
-    // digits; past that the tail is just zeros, so 1000 is far beyond any real use
-    // while keeping the worst-case alloc to ~1 KB.
-    const MAX_DECIMALS: i64 = 1000;
-    if n > MAX_DECIMALS {
-        return Err(LispError::runtime(format!(
-            "->fixed: decimal places {n} too large (math/max {MAX_DECIMALS}); an f64 has \
-             ~17 significant digits, so a larger count only pads zeros"
-        ))
-        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
-    }
-    let s = format!("{:.*}", n as usize, x);
-    Ok(heap.alloc_string(&s))
-}
-
-/// `(string/upper s)` — `s` with every character upper-cased. Case folding is
-/// Unicode-aware (e.g. `ß` → `SS`), so it leans on the standard library's tables
-/// rather than being expressible in Brood.
-pub(super) fn upper(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string_ref(heap, "string/upper", arg(args, 0))?;
-    Ok(heap.alloc_string(&s.to_uppercase()))
-}
-
-/// `(string/lower s)` — `s` with every character lower-cased (Unicode-aware, like `upper`).
-pub(super) fn lower(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string_ref(heap, "string/lower", arg(args, 0))?;
-    Ok(heap.alloc_string(&s.to_lowercase()))
-}
-
-pub(super) fn char_to_int(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "string/char->int", arg(args, 0))?;
-    match s.chars().next() {
-        Some(c) => Ok(Value::int(c as i64)),
-        None => Err(LispError::runtime("string/char->int: empty string")),
-    }
-}
-
-pub(super) fn int_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let n = expect_int(heap, "string/int->char", arg(args, 0))?;
-    // Guard the u32 range *before* the cast: `n as u32` would silently truncate a
-    // value outside [0, u32::MAX] and could alias a valid codepoint (returning the
-    // wrong char) instead of erroring.
-    let c = u32::try_from(n)
-        .ok()
-        .and_then(char::from_u32)
-        .ok_or_else(|| {
-            LispError::runtime(format!(
-                "string/int->char: {} is not a valid Unicode codepoint",
-                n
-            ))
-        })?;
-    let mut buf = [0u8; 4];
-    Ok(heap.alloc_string(c.encode_utf8(&mut buf)))
-}
-
-pub(super) fn string_to_utf8_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "string->utf8-bytes", arg(args, 0))?;
-    let bytes = s.as_bytes().to_vec();
-    Ok(super::io::bytes_to_value(&bytes, heap))
-}
-
-pub(super) fn utf8_bytes_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    // Accepts a `bytes` value, or (leniently) a vector or list of byte ints.
-    let bytes = super::io::collect_bytes("utf8-bytes->string", arg(args, 0), heap)?;
-    match String::from_utf8(bytes) {
-        Ok(s) => Ok(heap.alloc_string(&s)),
-        Err(e) => Err(LispError::runtime(format!(
-            "utf8-bytes->string: invalid UTF-8: {}",
-            e
-        ))),
-    }
-}
-
-// ---------- rope (editor buffer text — ADR-045) ----------
-//
-// All indices are **character** indices (matching the language's char-based
-// string indexing), not bytes. Edits return a *fresh* rope (immutability):
-// ropey clones share structure, so `clone()`-then-edit only copies touched
-// B-tree nodes. Out-of-range indices raise a clean E-code error rather than
-// letting ropey panic.
-
-/// Raise a uniform out-of-range error attributed to `who`.
-pub(super) fn rope_oob(who: &str, what: &str, got: i64, max: usize) -> LispError {
-    LispError::runtime(format!(
-        "{}: {} {} out of bounds (valid 0..={})",
-        who, what, got, max
-    ))
-    .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)
-}
-
-/// `(string->rope s)` — a rope holding the text of string `s`.
-pub(super) fn string_to_rope(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "%string->rope", arg(args, 0))?;
-    Ok(heap.alloc_rope(ropey::Rope::from_str(&s)))
-}
-
-/// `(rope->string r)` — the full text of rope `r` as a string.
-pub(super) fn rope_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "%rope->string", arg(args, 0))?;
-    Ok(heap.alloc_string(&r.to_string()))
-}
-
-/// `(rope-length r)` — the number of characters in `r`.
-pub(super) fn rope_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "%rope-length", arg(args, 0))?;
-    Ok(Value::int(r.len_chars() as i64))
-}
-
-/// `(rope-line-count r)` — the number of lines in `r` (ropey counts a trailing
-/// newline as ending a line, so `"a\n"` is 2 lines and `""` is 1).
-pub(super) fn rope_line_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "%rope-line-count", arg(args, 0))?;
-    Ok(Value::int(r.len_lines() as i64))
-}
-
-/// `(rope-insert r idx s)` — a fresh rope with string `s` inserted at character
-/// index `idx` (0..=length).
-pub(super) fn rope_insert(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let mut r = expect_rope(heap, "%rope-insert", arg(args, 0))?;
-    let idx = expect_int(heap, "%rope-insert", arg(args, 1))?;
-    let s = expect_string(heap, "%rope-insert", arg(args, 2))?;
-    let len = r.len_chars();
-    if idx < 0 || idx as usize > len {
-        return Err(rope_oob("%rope-insert", "index", idx, len));
-    }
-    r.insert(idx as usize, &s);
-    Ok(heap.alloc_rope(r))
-}
-
-/// `(rope-delete r start end)` — a fresh rope with characters `[start, end)`
-/// removed.
-pub(super) fn rope_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let mut r = expect_rope(heap, "%rope-delete", arg(args, 0))?;
-    let start = expect_int(heap, "%rope-delete", arg(args, 1))?;
-    let end = expect_int(heap, "%rope-delete", arg(args, 2))?;
-    let len = r.len_chars();
-    if start < 0 || end < start || end as usize > len {
-        return Err(rope_oob("%rope-delete", "range end", end, len));
-    }
-    r.remove(start as usize..end as usize);
-    Ok(heap.alloc_rope(r))
-}
-
-/// `(rope-slice r start end)` — the text of characters `[start, end)` as a string.
-pub(super) fn rope_slice(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "%rope-slice", arg(args, 0))?;
-    let start = expect_int(heap, "%rope-slice", arg(args, 1))?;
-    let end = expect_int(heap, "%rope-slice", arg(args, 2))?;
-    let len = r.len_chars();
-    if start < 0 || end < start || end as usize > len {
-        return Err(rope_oob("%rope-slice", "range end", end, len));
-    }
-    let s = r.slice(start as usize..end as usize).to_string();
-    Ok(heap.alloc_string(&s))
-}
-
-/// `(rope-line r n)` — the text of line `n` (0-based), including its trailing
-/// newline if present. The viewport-rendering primitive.
-pub(super) fn rope_line(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "%rope-line", arg(args, 0))?;
-    let n = expect_int(heap, "%rope-line", arg(args, 1))?;
-    let lines = r.len_lines();
-    if n < 0 || n as usize >= lines {
-        return Err(rope_oob("%rope-line", "line", n, lines.saturating_sub(1)));
-    }
-    let s = r.line(n as usize).to_string();
-    Ok(heap.alloc_string(&s))
-}
-
-/// `(rope-char->line r idx)` — the 0-based line index containing character `idx`.
-pub(super) fn rope_char_to_line(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "%rope-char->line", arg(args, 0))?;
-    let idx = expect_int(heap, "%rope-char->line", arg(args, 1))?;
-    let len = r.len_chars();
-    if idx < 0 || idx as usize > len {
-        return Err(rope_oob("%rope-char->line", "index", idx, len));
-    }
-    Ok(Value::int(r.char_to_line(idx as usize) as i64))
-}
-
-/// `(rope-line->char r n)` — the character index where line `n` (0-based) begins.
-pub(super) fn rope_line_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let r = expect_rope_ref(heap, "%rope-line->char", arg(args, 0))?;
-    let n = expect_int(heap, "%rope-line->char", arg(args, 1))?;
-    let lines = r.len_lines();
-    if n < 0 || n as usize > lines {
-        return Err(rope_oob("%rope-line->char", "line", n, lines));
-    }
-    Ok(Value::int(r.line_to_char(n as usize) as i64))
 }

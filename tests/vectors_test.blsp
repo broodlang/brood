@@ -138,7 +138,7 @@
   (test "non-collection errors"
     (assert= (try (conj 42 1) (catch e :err)) :err)))
 
-;; Constant folding of vector literals (compile/mod.rs). An all-constant literal is
+;; Constant folding of vector literals (compile.rs). An all-constant literal is
 ;; folded to a single shared instance — sound only because Brood data is immutable.
 ;; The trap: an element is a value-position *expression*, so the fold must not keep
 ;; the source form. `'go` reads as the list `(quote go)` and evaluates to the symbol

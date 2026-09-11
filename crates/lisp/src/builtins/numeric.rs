@@ -4,7 +4,362 @@ use crate::core::keywords as kw;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 
-pub(super) fn arg(args: &[Value], i: usize) -> Value {
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::core::value::Tag;
+    use crate::types::Sig;
+    use crate::types::Ty;
+    // numeric primitives — `%add`..`%div` accept and return the wider NUMBER
+    // (int + int may overflow into Float; the others always do on a Float arg).
+    // `%lt` is comparison → bool; `%eq` accepts anything and returns bool.
+    primitives.def(
+        "%add",
+        Arity::exact(2),
+        Sig::new(vec![num, num], num),
+        &[],
+        "",
+        prim_add,
+    );
+    primitives.def(
+        "%sub",
+        Arity::exact(2),
+        Sig::new(vec![num, num], num),
+        &[],
+        "",
+        prim_sub,
+    );
+    primitives.def(
+        "%mul",
+        Arity::exact(2),
+        Sig::new(vec![num, num], num),
+        &[],
+        "",
+        prim_mul,
+    );
+    primitives.def(
+        "%div",
+        Arity::exact(2),
+        Sig::new(vec![num, num], num),
+        &[],
+        "",
+        prim_div,
+    );
+    primitives.def(
+        "%lt",
+        Arity::exact(2),
+        Sig::new(vec![num, num], bool_ty),
+        &[],
+        "",
+        prim_lt,
+    );
+    primitives.def(
+        "%le",
+        Arity::exact(2),
+        Sig::new(vec![num, num], bool_ty),
+        &[],
+        "",
+        prim_le,
+    );
+    // `min`/`max` accept a number OR an `Ord` record — they route through the `compare-to`
+    // multimethod on the record cold path (ADR-179), returning the same domain.
+    let num_or_record = num.union(map_ty);
+    primitives.def(
+        "%max",
+        Arity::at_least(1),
+        Sig::variadic(num_or_record.clone(), num_or_record.clone()),
+        &["x", "&", "more"],
+        "The greatest of one or more numbers (int/float/decimal), compared numerically; the result keeps its own type.",
+        prim_max);
+    primitives.def(
+        "%min",
+        Arity::at_least(1),
+        Sig::variadic(num_or_record.clone(), num_or_record),
+        &["x", "&", "more"],
+        "The least of one or more numbers (int/float/decimal), compared numerically; the result keeps its own type.",
+        prim_min);
+    primitives.def(
+        kw::EQ_PRIM,
+        Arity::exact(2),
+        Sig::new(vec![any, any], bool_ty),
+        &[],
+        "",
+        prim_eq,
+    );
+    // `mod` is Brood over `rem` (std/prelude.blsp); only `rem` is primitive.
+    primitives.def(
+        "%rem",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        &["a", "b"],
+        "Integer remainder of a / b (truncated, taking the sign of the dividend).",
+        remainder,
+    );
+    // `%quot` — truncating integer division (toward zero), the kernel `quot`
+    // passes through to so the VM inlines it as one op. (It used to be Brood over
+    // `(/ (- a (math/rem a b)) b)` — three dispatched calls per use, which made tight
+    // integer loops like `collatz` pay rem+sub+div every step.)
+    primitives.def(
+        "%quot",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        &[],
+        "",
+        prim_quot,
+    );
+    // Ratio parts + conversions (exact rationals, ADR-196). `math/numerator`/`math/denominator`
+    // accept an int (math/numerator = itself, denominator = 1) or a ratio.
+    let int_or_ratio = int.union(ratio_ty);
+    primitives.def(
+        "math/numerator",
+        Arity::exact(1),
+        Sig::new(vec![int_or_ratio.clone()], int),
+        &["x"],
+        "The numerator of a ratio (`(math/numerator 3/4)` → 3), or an integer itself.",
+        prim_numerator,
+    );
+    primitives.def(
+        "math/denominator",
+        Arity::exact(1),
+        Sig::new(vec![int_or_ratio], int),
+        &["x"],
+        "The positive denominator of a ratio (`(math/denominator 3/4)` → 4), or 1 for an integer.",
+        prim_denominator,
+    );
+    primitives.def(
+        "decimal/number->",
+        Arity::exact(1),
+        Sig::new(vec![num], decimal_ty),
+        &["x"],
+        "A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision.",
+        prim_to_decimal);
+    // `floor` is the single irreducible Float→Int crossing; ceil/round/pow/
+    // sqrt are all Brood over it + rem/`/`/`*`/`<` (std/prelude.blsp).
+    primitives.def(
+        "math/floor",
+        Arity::exact(1),
+        Sig::new(vec![num], int),
+        &["x"],
+        "Round x toward negative infinity to an integer. Accepts the whole numeric tower; a ratio floors exactly (not through f64), so it stays correct past 2^53. Toward NEGATIVE infinity, so a negative argument rounds away from zero.\n\n    (math/floor 3.7)    → 3\n    (math/floor -3.2)   → -4",
+        floor);
+    // bitwise — integer bit-twiddling on the i64 two's-complement representation.
+    // Table stakes for hashing, flags, and PRNGs (the std xorshift PRNG is built
+    // on these); they were a noted gap (docs/feedback-retro-game-of-life.md).
+    primitives.def(
+        "bit/and",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        &["a", "b"],
+        "Bitwise AND of integers a and b.\n\n    (bit/and 12 10)   → 8",
+        bit_and,
+    );
+    primitives.def(
+        "bit/or",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        &["a", "b"],
+        "Bitwise (inclusive) OR of integers a and b.\n\n    (bit/or 12 10)   → 14",
+        bit_or,
+    );
+    primitives.def(
+        "bit/xor",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        &["a", "b"],
+        "Bitwise exclusive-OR of integers a and b.\n\n    (bit/xor 12 10)   → 6",
+        bit_xor,
+    );
+    primitives.def(
+        "bit/not",
+        Arity::exact(1),
+        Sig::new(vec![int], int),
+        &["a"],
+        "Bitwise complement of integer a (two's-complement, so (bit/not n) = (- (- n) 1)).\n\n    (bit/not 12)   → -13",
+        bit_not,
+    );
+    primitives.def(
+        "bit/shift-left",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        &["a", "n"],
+        "Shift integer a left by n bits (0 <= n < 64); bits shifted past bit 63 are discarded.\n\n    (bit/shift-left 12 10)   → 12288",
+        bit_shift_left,
+    );
+    primitives.def(
+        "bit/shift-right",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        &["a", "n"],
+        "Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64).\n\n    (bit/shift-right 12 10)   → 0",
+        bit_shift_right,
+    );
+    primitives.def(
+        "bit/count",
+        Arity::exact(1),
+        Sig::new(vec![int], int),
+        &["a"],
+        "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit/count -1) = 64). For a bignum it is the popcount of the magnitude.\n\n    (bit/count 12)   → 2",
+        bit_count);
+    primitives.def(
+        "bit/positions",
+        Arity::exact(1),
+        Sig::new(vec![int], vec_ty),
+        &["a"],
+        "A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit/positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit/shift-left 1 i); handy for enumerating the set bits of an integer.\n\n    (bit/positions 12)   → [2 3]",
+        bit_positions);
+    // Bit-level reinterpretation of a binary64 — not expressible over the other
+    // primitives (no bitcast, no frexp), and the only way to compare two floats
+    // *exactly* (`-0.0` vs `0.0`, NaN payloads). Used by the conformance corpora.
+    primitives.def(
+        "bit/float->",
+        Arity::exact(1),
+        Sig::new(vec![num], int),
+        &["x"],
+        "The IEEE 754 binary64 bit pattern of x, as a non-negative integer (a bignum when the sign bit is set). Reinterpretation, not conversion — the only exact float comparison there is: it separates -0.0 from 0.0 and distinguishes NaN payloads, both of which = collapses. The inverse of bits->float.\n\n    (bit/float-> 12)   → 4622945017495814144",
+        float_to_bits);
+    primitives.def(
+        "bit/->float",
+        Arity::exact(1),
+        Sig::new(vec![int], float),
+        &["n"],
+        "The binary64 float whose bit pattern is n (0 <= n < 2^64). The inverse of float->bits.\n\n    (bit/->float 12)   → 6e-323",
+        bits_to_float,
+    );
+    // `decimal` constructs an exact base-10 decimal from a string ("1.50"), an
+    // int (3), or a float (inexact source — uses its shortest round-trip form).
+    primitives.def(
+        "decimal/of",
+        Arity::exact(1),
+        Sig::new(vec![string.union(num)], decimal_ty),
+        &["x"],
+        "Construct an exact arbitrary-precision base-10 decimal from x: a string (\"1.50\"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M.\n\n    (decimal/of \"1.50\")   → 1.50M",
+        prim_decimal);
+    primitives.def(
+        "decimal/->string",
+        Arity::exact(1),
+        Sig::new(vec![decimal_ty], string),
+        &["d"],
+        "The canonical decimal string of decimal d (no M suffix).\n\n    (decimal/->string (decimal/of \"1.50\"))   → \"1.50\"",
+        prim_decimal_to_string,
+    );
+    primitives.def(
+        "decimal/->float",
+        Arity::exact(1),
+        Sig::new(vec![decimal_ty], float),
+        &["d"],
+        "Decimal d as an (inexact) float.\n\n    (decimal/->float (decimal/of \"1.50\"))   → 1.5",
+        prim_decimal_to_float,
+    );
+    primitives.def(
+        "%atan2",
+        Arity::exact(2),
+        Sig::new(vec![num, num], float),
+        &["y", "x"],
+        "The angle in radians of the vector (x, y) from the positive x-axis, in (-π, π]. Handles x=0.",
+        math_atan2);
+    primitives.def(
+        "%f64-sqrt",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The IEEE 754 square root of x (f64::sqrt). x must be non-negative; raises otherwise. Handles subnormals and ±0 correctly. Any number coerces to f64 first — int, float, bignum, decimal or ratio.",
+        math_f64_sqrt);
+    // transcendental math — hardware f64 ops that can't be approximated in Brood
+    // over `floor`/`rem`/`*` at the precision level scripts actually need.
+    primitives.def(
+        "%sin",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The sine of x (radians). Returns a float.",
+        math_sin,
+    );
+    primitives.def(
+        "%cos",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The cosine of x (radians). Returns a float.",
+        math_cos,
+    );
+    primitives.def(
+        "%tan",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The tangent of x (radians). Returns a float.",
+        math_tan,
+    );
+    primitives.def(
+        "%asin",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The arcsine of x in radians. x must be in [-1, 1]; raises otherwise.",
+        math_asin,
+    );
+    primitives.def(
+        "%acos",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The arccosine of x in radians. x must be in [-1, 1]; raises otherwise.",
+        math_acos,
+    );
+    primitives.def(
+        "%atan",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The arctangent of x in radians (result in [-π/2, π/2]).",
+        math_atan,
+    );
+    primitives.def(
+        "%exp",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "e raised to the power x. Returns a float.",
+        math_exp,
+    );
+    primitives.def(
+        "%ln",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The natural logarithm of x. x must be positive; raises otherwise.",
+        math_ln,
+    );
+    primitives.def(
+        "%log2",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The base-2 logarithm of x. x must be positive; raises otherwise.",
+        math_log2,
+    );
+    primitives.def(
+        "%log10",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        &["x"],
+        "The base-10 logarithm of x. x must be positive; raises otherwise.",
+        math_log10,
+    );
+    // string/->number returns int *or* float *or* nil (the parse-failed case).
+    // The optional radix is what ADR-169 pointed at when it reserved `0x1F` as syntax
+    // rather than a name: with no radix literals, this is the only way to read one.
+    primitives.def(
+        "string/->number",
+        Arity::range(1, 2),
+        Sig::with_optional(vec![string], vec![int], num.union(Ty::of(Tag::Failure))),
+        &["s", "&optional", "radix"],
+        "Parse s strictly as an int (a bignum when out of i64 range), else a float, else a falsy failure value naming the input (unlike reflect/read-string). The inverse of str. With radix (2-36) the parse is integer-only in that base — the only way to read hex/octal/binary, since Brood has no radix literals; give the digits alone, no 0x/0b/0o prefix. A radix outside 2-36 raises.\n\n    (string/->number \"42\")   → 42",
+        string_to_number);
+}
+
+pub(crate) fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).copied().unwrap_or(Value::nil())
 }
 
@@ -24,23 +379,6 @@ pub(super) fn two(args: &[Value], who: &str) -> Result<(Value, Value), LispError
 }
 
 // ---------- numeric ----------
-
-/// Require a value of a particular shape, or raise a self-identifying type
-/// error attributed to `who` (the primitive that needed it). One macro behind
-/// every `expect_*` helper below — the alternative was six hand-written
-/// `match v { Value::X(id) => Ok(id), _ => Err(wrong_type(…, "kind", v)) }`
-/// copies that drifted on the error helper used (`expect_node_name` chose
-/// `type_err` over `wrong_type` and lost the offending value from its
-/// message). The macro lifts that one rule into one place; the human-readable
-/// `$expected` string is what the error message will say.
-macro_rules! expect {
-    ($heap:expr, $who:expr, $v:expr, $expected:literal, $($pat:pat => $extract:expr),+ $(,)?) => {
-        match $v {
-            $($pat => Ok($extract),)+
-            __other => Err(LispError::wrong_type($heap, $who, $expected, __other)),
-        }
-    };
-}
 
 /// Require a number, coerced to `f64`; otherwise a self-identifying type error
 /// attributed to `who` (the primitive that needed it).
@@ -1099,4 +1437,124 @@ pub(super) fn math_atan2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     let y = num_to_f64(heap, "%atan2", arg(args, 0))?;
     let x = num_to_f64(heap, "%atan2", arg(args, 1))?;
     Ok(Value::float(y.atan2(x)))
+}
+
+/// `(string/->number s &optional radix)` — parse `s` as an integer if it is one, else as
+/// a float, else a **failure** value naming the input (falsy, so `(or … d)` still
+/// defaults, but it says *why* where `nil` could not). The inverse of `str`. A robust parse can't be
+/// expressed over `reflect/read-string` (which would read `"3abc"` as `3` and stop), so
+/// the strict parse is a primitive. Surrounding whitespace is not accepted —
+/// `trim` first if the input may carry any.
+///
+/// **`radix` is the only way to read hex, octal or binary in Brood.** ADR-169 reserved
+/// `0x1F`/`0b1010`/`0o17` as syntax rather than names *on the grounds that this function
+/// covers the need at runtime* — and the reader's own hint, `syntax/atom.rs`'s
+/// `reserved_numeric_hint`, has been telling people to call `(string/->number "1F" 16)`
+/// since. It took two arguments nowhere: the arity was `exact(1)`, so the hint named a
+/// call that raised, and the language could not read a radix at all (found 2026-08-30).
+///
+/// With a radix the parse is **integer-only**, for every radix including 10: a radix
+/// describes an integer notation, and `"3.5"` in base 16 is not a number anyone means.
+/// A leading `-`/`+` is accepted; a `0x`/`0b`/`0o` *prefix* is not (the digits alone —
+/// the prefix is the syntax this function exists to replace). Out of `2..=36` the radix
+/// is a caller bug, so it raises rather than answering `nil`, which would be
+/// indistinguishable from unparseable text.
+/// How `string/->number` reads a string — heap-free, allocation-free, and the SINGLE
+/// classification both the runtime below and the type checker use.
+///
+/// The checker specializes `(string/->number "1")` to the literal `1` rather than the
+/// declared `number | failure`, which is only honest if it decides parseability exactly the
+/// way the runtime does. Two implementations of "is this text a number" would drift, and the
+/// drift would be a type that contradicts the value — so there is one, called twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumericText {
+    /// Parses as an `i64` — the checker can name the exact literal.
+    Int(i64),
+    /// An integer past the `i64` range: a bignum, never a lossy `f64`.
+    Big,
+    /// Parses only as a float (never reached when a radix is given — a radix describes an
+    /// integer notation).
+    Float,
+    /// `string/->number` answers a `failure` for this text.
+    NotANumber,
+}
+
+/// Classify `s` the way [`string_to_number`] does. `radix` mirrors the optional second
+/// argument; out-of-range radices are the caller's problem (the runtime raises, and the
+/// checker simply declines to specialize).
+pub(crate) fn classify_numeric_text(s: &str, radix: Option<u32>) -> NumericText {
+    if let Some(radix) = radix {
+        if !(2..=36).contains(&radix) {
+            return NumericText::NotANumber;
+        }
+        return match i64::from_str_radix(s, radix) {
+            Ok(i) => NumericText::Int(i),
+            Err(_) => match num_bigint::BigInt::parse_bytes(s.as_bytes(), radix) {
+                Some(_) => NumericText::Big,
+                None => NumericText::NotANumber,
+            },
+        };
+    }
+    if let Ok(i) = s.parse::<i64>() {
+        NumericText::Int(i)
+    } else if s.parse::<num_bigint::BigInt>().is_ok() {
+        NumericText::Big
+    } else if s.parse::<f64>().is_ok() {
+        NumericText::Float
+    } else {
+        NumericText::NotANumber
+    }
+}
+
+pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "string/->number", arg(args, 0))?;
+    if args.len() >= 2 {
+        let radix = expect_int(heap, "string/->number", arg(args, 1))?;
+        if !(2..=36).contains(&radix) {
+            return Err(LispError::type_err(format!(
+                "string/->number: radix must be between 2 and 36, got {radix}"
+            )));
+        }
+        let radix = radix as u32;
+        // Same no-demotion reasoning as the decimal path below: past i64 the value is a
+        // bignum, never a lossy f64. Classification is shared with the checker.
+        return Ok(match classify_numeric_text(&s, Some(radix)) {
+            NumericText::Int(i) => Value::int(i),
+            NumericText::Big | NumericText::Float => {
+                match num_bigint::BigInt::parse_bytes(s.as_bytes(), radix) {
+                    Some(n) => heap.alloc_bigint(n),
+                    None => heap.alloc_failure(&format!(
+                        "string/->number: not a base-{radix} integer: {s:?}"
+                    )),
+                }
+            }
+            NumericText::NotANumber => heap.alloc_failure(&format!(
+                "string/->number: not a base-{radix} integer: {s:?}"
+            )),
+        });
+    }
+    match classify_numeric_text(&s, None) {
+        NumericText::Int(i) => return Ok(Value::int(i)),
+        NumericText::NotANumber => {
+            // Text this cannot interpret is a *known failure*, not an absence: it comes
+            // back naming the input, so anything that looks at the value learns why.
+            return Ok(heap.alloc_failure(&format!("string/->number: not a number: {s:?}")));
+        }
+        NumericText::Big | NumericText::Float => {}
+    }
+    if let Ok(n) = s.parse::<num_bigint::BigInt>() {
+        // An integer too big for i64 is a bignum — mirroring the reader's
+        // over-range literal path — NOT a lossy f64 (which silently rounded
+        // `(str big)` away from round-tripping, kernel audit).
+        // Reaching here means the i64 parse failed, so `n` is out of range
+        // and `alloc_bigint`'s no-demotion invariant holds.
+        Ok(heap.alloc_bigint(n))
+    } else if let Ok(f) = s.parse::<f64>() {
+        Ok(Value::float(f))
+    } else {
+        // Text this cannot interpret is a *known failure*, not an absence: it comes
+        // back as a falsy `failure` naming the input, so `(or (string/->number s) 0)`
+        // still defaults while anything that looks at the value learns why.
+        Ok(heap.alloc_failure(&format!("string/->number: not a number: {s:?}")))
+    }
 }

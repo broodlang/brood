@@ -1,14 +1,160 @@
-// Extracted from system.rs (file-organization split).
-#![allow(unused_imports)]
-use super::numeric::{arg, expect_int, expect_string, expect_symbol};
-use super::system::*;
-use super::*;
+use super::numeric::{arg, expect_string};
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
-use crate::eval::compile::apply_engine;
-use crate::syntax::{cst, printer, reader};
+use crate::syntax::{cst, printer};
+
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    // The rename ledger (ADR-304): the Rust table `crate::renames::RENAMES` handed to
+    // Brood as a map `{old {:to new :adr adr}}`, so `nest check --fix-renames` reads the
+    // SAME table the runtime error and the checker diagnostic read.
+    primitives.def(
+        "%renames",
+        Arity::exact(0),
+        Sig::new(vec![], map_ty),
+        &[],
+        "The rename ledger (ADR-304): a map of old public name (string) to `{:to new-name :adr adr}` for every deliberate rename the runtime still points at. Backs `renames/ledger`.",
+        renames_ledger,
+    );
+    // `macroexpand` (the fixpoint loop) is written in Brood (`std/prelude.blsp`)
+    // over this single-step primitive — ADR-064, so its loop state is auto-rooted
+    // rather than hand-rooted in Rust. `macros::macroexpand` (Rust) stays for the
+    // compile pass, which runs under MACRO_BLOCK.
+    // gensym accepts anything as a prefix (string/sym/keyword/nil/anything is
+    // turned into its `display` form), so its prefix slot is `any` — not the
+    // narrower `string` the original Sig claimed, which made the checker warn
+    // on legitimate `(gensym 'foo)` calls.
+    primitives.def(
+        "gensym",
+        Arity::range(0, 1),
+        Sig::new(vec![any], sym),
+        &["prefix"],
+        "A fresh, unique symbol, with an optional name prefix.",
+        gensym,
+    );
+    // source positions (editor tooling; see docs/tooling.md)
+    primitives.def(
+        "%form-pos",
+        Arity::exact(1),
+        Sig::new(vec![any], vec_ty.union(nil_ty)),
+        &["form"],
+        "A form's [line col] source position, or nil.",
+        form_pos,
+    );
+    primitives.def(
+        "%current-file",
+        Arity::exact(0),
+        Sig::nullary(string.union(nil_ty)),
+        &[],
+        "The path of the file currently being loaded, or nil.",
+        current_file,
+    );
+    primitives.def(
+        "%source-location",
+        Arity::exact(1),
+        Sig::new(vec![sym], vec_ty.union(nil_ty)),
+        &["name"],
+        "Where global name was defined, as [file line col], or nil. Quote it: (reflect/source-location 'foo).",
+        source_location);
+    primitives.def(
+        "reflect/private?",
+        Arity::exact(1),
+        Sig::new(vec![sym], bool_ty),
+        &["name"],
+        "Whether the global `name` is module-private (ADR-146). Quote the qualified symbol: (reflect/private? 'mod/helper).\n\n    (reflect/private? 'map)   → false",
+        private_p);
+    primitives.def(
+        "%references-in-source",
+        Arity::exact(2),
+        Sig::new(vec![sym.union(string), string], any),
+        &["name", "source"],
+        "Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded.",
+        references_in_source);
+    primitives.def(
+        "%source-deps",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        &["src"],
+        "Per TOP-LEVEL form of `src`, in document order, what it defines and what globals it uses: a list of `{:defines (…) :references (…)}` maps of name strings. What a live evaluator needs to re-run only the forms an edit could affect instead of everything below it. Syntactic, read the way find-references reads: locals are excluded, a quoted `'…` is data. It cannot see a name a macro introduces, nor a side effect through which one form reaches another without naming anything.",
+        source_deps);
+    primitives.def(
+        "%type-signature",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(string)], string.union(nil_ty)),
+        &["name"],
+        "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (reflect/type-signature 'map).",
+        type_signature);
+    // introspection (editor tooling; see docs/lsp.md) — derive what we can from
+    // the bound value (arglist, doc); enumerate the global table for completion.
+    primitives.def(
+        "doc",
+        Arity::exact(1),
+        Sig::new(vec![any], string.union(nil_ty)),
+        &["f"],
+        "The docstring of a function, macro, or primitive, or nil.",
+        doc,
+    );
+    primitives.def(
+        "arglist",
+        Arity::exact(1),
+        Sig::new(vec![any], list_ty),
+        &["f"],
+        "The parameter list of a function, macro, or primitive, or nil.",
+        arglist,
+    );
+    primitives.def(
+        "reflect/global-names",
+        Arity::exact(0),
+        Sig::nullary(list_ty),
+        &[],
+        "Every globally bound symbol, sorted by spelling.",
+        global_names,
+    );
+    primitives.def(
+        "reflect/special-forms",
+        Arity::exact(0),
+        Sig::nullary(list_ty),
+        &[],
+        "The special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter and the LSP.",
+        special_forms);
+    primitives.def(
+        "reflect/doc-forms",
+        Arity::exact(0),
+        Sig::nullary(map_ty),
+        &[],
+        "The def... heads that carry a docstring, as head -> :fn or :head — the canonical list shared by the syntax highlighter and the LSP. :fn means the head builds a function, where a lone trailing string is the return value, not a doc.",
+        doc_forms,
+    );
+    primitives.def(
+        "bound?",
+        Arity::exact(1),
+        Sig::new(vec![sym], bool_ty),
+        &["sym"],
+        "Whether sym is bound in scope. Quote it: (bound? 'foo).\n\n    (bound? 'first)   → true\n    (bound? 'nope)    → false",
+        bound_p,
+    );
+    primitives.def(
+        "%prelude-global?",
+        Arity::exact(1),
+        Sig::new(vec![sym], bool_ty),
+        &["name"],
+        "Is `name` a global the PRELUDE bound — its own definitions, every native builtin, the registries it seeds? Fixed at the freeze, identical in every process of a binary. `stdimage/build` audits with it that every root global a std module defines reached an owning section (KI-112).",
+        prelude_global_p,
+    );
+    primitives.def(
+        "%global-generation",
+        Arity::exact(1),
+        Sig::new(vec![sym], int),
+        &["sym"],
+        "The rebinding generation of global sym: grows with every def of that name in this runtime, 0 for a name never def'd here. For restoring a TEMPORARY rebinding without clobbering a redefinition made in between (debug/untrace-fn). Quote it: (%global-generation 'foo).",
+        global_generation,
+    );
+}
 
 // ---------- source positions (editor tooling; see docs/tooling.md) ----------
 

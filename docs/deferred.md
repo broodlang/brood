@@ -227,7 +227,7 @@ formatter-behaviour issue.
 ## 6. Call-site argument literal precision for int/bool/string — ✅ SHIPPED (B0, 2026-07-07)
 
 **Status.** Done, not deferred — the note below is kept for the record but the feature
-exists. `Ty::of_value` (`crates/lisp/src/types/mod.rs:492`) now makes int and bool
+exists. `Ty::of_value` (`crates/lisp/src/types.rs:492`) now makes int and bool
 literals singletons exactly like keywords, and `expr_ty`
 (`crates/lisp/src/types/check/infer.rs:296`) builds the string singleton where it has
 the heap. So `(status-handler 999)` against a declared `(or 200 404 500)` is caught at
@@ -448,7 +448,7 @@ calls in constant stack" exceeded its 2 s evaluation budget and rendered as
 sized down to 250,000 to fit — a workaround for this entry, and it says so at
 the call site (`bedit`, `src/tutor-lessons.blsp`, "Recursion is the loop").
 
-**Where it is.** `crates/lisp/src/builtins/system.rs`, `eval_builtin` — three
+**Where it is.** `crates/lisp/src/builtins/evaluation.rs`, `eval_builtin` — three
 lines:
 
 ```rust

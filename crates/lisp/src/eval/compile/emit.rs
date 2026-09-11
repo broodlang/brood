@@ -16,7 +16,7 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
     // Line coverage (ADR-148 tier 2): when armed, prefix each positioned node with a
     // `RecordLine`. Compile-time rather than a runtime check per instruction, so a
     // normal run's bytecode is unchanged — nothing to pay for when coverage is off.
-    if crate::coverage::enabled() {
+    if crate::diagnostics::coverage::enabled() {
         if let Some(pos) = node_pos(node) {
             code.push(Inst::RecordLine(pos.line));
         }
@@ -38,7 +38,7 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             // decision is instrumented — a constant test is already folded away in
             // `compile_node`, and a test with no position (a bare `Local`/`Global`) is
             // skipped (line coverage still covers it).
-            let branch_pos = if crate::coverage::enabled() {
+            let branch_pos = if crate::diagnostics::coverage::enabled() {
                 node_pos(cond)
             } else {
                 None

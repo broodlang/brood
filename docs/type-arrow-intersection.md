@@ -42,7 +42,7 @@ arrow-specific handling plus a new checker consumer that resolves a call's
 return type per candidate arm — not a new keyword, and it doesn't touch
 `(map K V)`/`(vector E)`/`elem`/`fields` intersect logic at all.
 
-## Representation (`types/mod.rs`)
+## Representation (`types.rs`)
 
 `Ty` gained an `overload: Option<Arc<Vec<Sig>>>` refinement, tagged `FN_BITS`
 like `arrow`. It only ever holds **2+ distinct** signatures — a single one
@@ -231,7 +231,7 @@ warnings across the whole `std/` + `tests/` corpus.
 
 ## Soundness
 
-Every new piece has a targeted unit test in `crates/lisp/src/types/mod.rs`
+Every new piece has a targeted unit test in `crates/lisp/src/types.rs`
 (`intersect_of_two_distinct_arrows_builds_an_overload`,
 `intersect_of_identical_arrows_collapses_to_a_single_arrow`,
 `intersect_with_any_function_keeps_the_others_candidates_unchanged`,
@@ -258,7 +258,7 @@ everything that doesn't use it).
 
 ## Tests
 
-`crates/lisp/src/types/mod.rs`: the 7 unit tests listed above, under the
+`crates/lisp/src/types.rs`: the 7 unit tests listed above, under the
 "overloaded arrows (intersection of arrows) — ADR-116" section, right after
 the existing arrow tests. `crates/lisp/src/types/check.rs`:
 `overload_refinement_flows_through_checker`, right after

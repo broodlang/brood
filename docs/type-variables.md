@@ -116,7 +116,7 @@ Type variables are valid Brood symbols starting with `?`. `parse_type` on a
 change it will return `Ty::ANY` (accept everything — the checker substitution
 handles the precision). No change to `type-matches?` or `sig!`.
 
-### Rust side (`annot.rs` + `types/mod.rs` + `walk.rs`)
+### Rust side (`annot.rs` + `types.rs` + `walk.rs`)
 
 **Option A: `Ty::Var(u32)` lattice change.**
 
@@ -132,7 +132,7 @@ The lattice grows a new kind that breaks the "a type is a bitset of tags" invari
 `SigTerm` enum used only in `Sig` fields — not in `Ty` itself:
 
 ```rust
-// crates/lisp/src/types/mod.rs  (or check/annot.rs)
+// crates/lisp/src/types.rs  (or check/annot.rs)
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SigTerm {
     Ty(Ty),

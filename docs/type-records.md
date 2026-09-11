@@ -85,7 +85,7 @@ k)` on a missing key returns `nil`, and `type-matches?` on the bare field type
 then fails on its own unless that type happens to accept `nil` — the same
 trick `(map K V)`'s branch already relies on for its key/value checks.
 
-### Static checker — the `fields` refinement (`types/mod.rs`)
+### Static checker — the `fields` refinement (`types.rs`)
 
 `Ty` carries a `fields: Option<Arc<BTreeMap<Symbol, (Ty, bool)>>>` refinement
 (field name → declared type, `required?`), alongside `arrow`/`elem`/`map_kv`
@@ -146,7 +146,7 @@ fn record_fields_is_subtype(
 This is **sound but not complete** by construction (`docs/types.md` contract
 #5): it may miss a true subtype relation (e.g. an empty record *is* a subtype
 of any-record-with-only-optional-fields, but this algorithm says no), but it
-never claims a false one. See `crates/lisp/src/types/mod.rs`'s
+never claims a false one. See `crates/lisp/src/types.rs`'s
 `record_subtyping_is_width_and_depth_but_conservative` test for the exact
 cases this covers and deliberately doesn't.
 
@@ -225,7 +225,7 @@ Smaller items, each additive, gated on a real consumer (ADR-011):
   `record_subtyping_is_width_and_depth_but_conservative`,
   `record_union_widens_on_field_mismatch_but_keeps_a_match`, and
   `record_is_disjoint_only_on_tags_like_every_other_refinement` in
-  `crates/lisp/src/types/mod.rs`, plus `record_field_refinement_flows_through_checker`
+  `crates/lisp/src/types.rs`, plus `record_field_refinement_flows_through_checker`
   in `crates/lisp/src/types/check.rs`. The record-literal inference (the
   highest-blast-radius piece — it changes the inferred type of *every* map
   literal project-wide) was diffed against `nest check` output across the
@@ -240,7 +240,7 @@ runtime-contract coverage (required/optional/open, non-map rejection).
 (grammar + malformed-annotation handling) and
 `record_field_refinement_flows_through_checker` (the `get` sink + literal
 inference, both the false-negative-avoidance and the true-positive cases).
-`crates/lisp/src/types/mod.rs`: `record_renders_as_a_field_shape`,
+`crates/lisp/src/types.rs`: `record_renders_as_a_field_shape`,
 `record_subtyping_is_width_and_depth_but_conservative`,
 `record_union_widens_on_field_mismatch_but_keeps_a_match`,
 `record_is_disjoint_only_on_tags_like_every_other_refinement`.

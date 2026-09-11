@@ -776,7 +776,7 @@ pub(crate) fn build_inlined_body(
 }
 
 // The runtime JIT off-switch used to live here as its own `BROOD_NO_JIT` read. It is now a
-// **tier ceiling** below `Tier::Native` (ADR-222) — `tier_ceiling()` in `compile/mod.rs` reads
+// **tier ceiling** below `Tier::Native` (ADR-222) — `tier_ceiling()` in `compile.rs` reads
 // `BROOD_TIER`, with `BROOD_NO_JIT` kept as an alias for ceiling 1. Deleted rather than left
 // delegating, so there is one source of truth for how high the ladder may go instead of two
 // unrelated env reads in two modules.

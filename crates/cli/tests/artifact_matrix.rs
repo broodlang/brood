@@ -204,13 +204,13 @@ fn fingerprint(cache: &Path, cell: &Cell, program: &Path) -> String {
     // Skip the install's own bookkeeping. These record which artifacts THIS process loaded,
     // so they differ between cells by design — that is their entire content, and item 2 of
     // this cleanup deliberately made the fact MORE visible. One definition, in the runtime:
-    // see `brood::INSTALL_BOOKKEEPING` for why they are skipped and where the facts they
+    // see `brood::boot::INSTALL_BOOKKEEPING` for why they are skipped and where the facts they
     // carry are asserted positively instead.
     out.lines()
         .skip_while(|l| !l.starts_with("REGISTRIES "))
         .filter(|l| {
             let name = l.split_whitespace().next().unwrap_or(l);
-            !brood::INSTALL_BOOKKEEPING.contains(&name)
+            !brood::boot::INSTALL_BOOKKEEPING.contains(&name)
         })
         .collect::<Vec<_>>()
         .join("\n")

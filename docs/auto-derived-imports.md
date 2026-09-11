@@ -107,7 +107,7 @@ Two decisive questions both resolved favorably, so this is **small-to-medium** w
   (~1055-1080) already extract a module's def-heads **from source with zero evaluation**. It
   recognises `DEF | DEF_PRIVATE | DEFN | DEFN_PRIVATE | DEFMACRO | DEFDYN` heads.
 - Every curated module's **full source is baked into the binary** as `CORE_MODULES`
-  (`crates/lisp/src/builtins/system.rs` ~914; `EmbeddedModule { key, source, path }`), reachable
+  (`crates/lisp/src/builtins/modules.rs`; `EmbeddedModule { key, source, path }`), reachable
   via `%builtin-module`.
 - **⇒ Build a curated `name → module` reverse index once at boot** by parsing seq/map/math's
   embedded source and running `scan_regions` with a **public/private head filter** (skip
@@ -125,14 +125,14 @@ Two decisive questions both resolved favorably, so this is **small-to-medium** w
   `require`/mutate. → defer the load (below).
 
 ### The one-vs-ambiguous decision — already written
-- `unbound_namespace_hint` (`crates/lisp/src/eval/mod.rs` ~1555-1597) already computes
+- `unbound_namespace_hint` (`crates/lisp/src/eval.rs` ~1555-1597) already computes
   "exactly one module owns `/foo`" vs "ambiguous", by scanning `global_symbols()` and stripping
   the suffix (skipping `is_private` and `--` paths). Mirror this logic against the **pre-load
   curated index** (not the live-globals scan, which only sees loaded modules).
 
 ### Triggering the load — deferred to the compile driver
 - Load path: `require` → `%require-force-in` (`std/prelude/tools.blsp`), `%builtin-module`
-  branch → `%load-module-source` (Rust, `system.rs` ~690). Cannot be called from the blocked
+  branch → `%load-module-source` (Rust, `builtins/evaluation.rs`). Cannot be called from the blocked
   resolver.
 - **Plan:** the resolver records intent (push `(bare, module)` to a non-GC side buffer —
   `RefCell`/thread-local, no heap alloc), and the **compile driver** (macros.rs ~695-727, where
@@ -143,7 +143,7 @@ Two decisive questions both resolved favorably, so this is **small-to-medium** w
   it's the only real plumbing; everything else is table lookups.
 
 ### The `:use`/refer mechanics to reuse
-- `%refer` (`system.rs` ~2563-2629) → `refer_add` (~2500-2535) → `heap.add_import(bare,
+- `%refer` (`builtins/modules.rs`) → `refer_add` → `heap.add_import(bare,
   qualified)` (`heap.rs` ~3836) — that's the `imports` entry the resolver reads at macros.rs
   ~1222. Use a **single-entry** `add_import` per auto-derived name (not a full refer-all).
 

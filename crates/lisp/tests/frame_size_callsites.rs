@@ -31,7 +31,7 @@ const ALLOWED: &[(&str, &str)] = &[
          and passes it on (its own comment: the two must agree on the same frame boundary)",
     ),
     (
-        "crates/lisp/src/eval/compile/mod.rs",
+        "crates/lisp/src/eval/compile.rs",
         "`hof_apply_native` builds the HOF fast frame; captures once into `nslots`",
     ),
     (

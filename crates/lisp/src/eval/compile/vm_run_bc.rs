@@ -511,8 +511,8 @@ pub(crate) fn vm_run_bc(
         // Profiler sample: when armed and the ticker's epoch moved, record this
         // driver's named-frame stack (cur + pending callers, innermost first).
         // Off (the default): one relaxed bool load per frame boundary.
-        if crate::profile::armed() {
-            let ep = crate::profile::epoch();
+        if crate::diagnostics::profile::armed() {
+            let ep = crate::diagnostics::profile::epoch();
             if ep != profiled_epoch {
                 profiled_epoch = ep;
                 let mut stack: Vec<value::Symbol> = Vec::with_capacity(frames.len() + 1);
@@ -524,7 +524,7 @@ pub(crate) fn vm_run_bc(
                         stack.push(n);
                     }
                 }
-                crate::profile::record(&stack);
+                crate::diagnostics::profile::record(&stack);
             }
         }
         // Per-iteration safepoint / preemption / deadline — relocates every frame's

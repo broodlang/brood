@@ -555,7 +555,7 @@ fn cmd_mcp(interp: &mut Interp) {
 
 /// `nest release [-o PATH] [--runtime PATH] [--target TRIPLE]…` — bundle the
 /// project into one self-contained executable per target (ADR-038). Collection
-/// is policy (Brood: `project/bundle-collect`); byte assembly + I/O is mechanism
+/// is policy (Brood: `project-release/bundle-collect`); byte assembly + I/O is mechanism
 /// (Rust: `brood::bundle`). See `crates/lisp/src/bundle.rs` for the wire format.
 fn cmd_release(
     interp: &mut Interp,
@@ -574,7 +574,7 @@ fn cmd_release(
     let collected = run_for_value(
         interp,
         "(let (root (project/find-root (file/cwd))) \
-         (project/bundle-collect root))",
+         (project-release/bundle-collect root))",
     );
     let strings = string_list(interp, "bundle-collect", collected);
     let (manifest, rest) = match strings.split_first() {
@@ -615,12 +615,12 @@ fn cmd_release(
     let archive = brood::bundle::serialize(manifest, &modules);
 
     // 4. What are the binaries CALLED, and is any name refused? Policy, so Brood
-    //    answers it (`project/release-plan`): a flat `("ok" triple out …)` list with
+    //    answers it (`project-release/release-plan`): a flat `("ok" triple out …)` list with
     //    an empty triple meaning the host, or `("error" message exit-code)`.
     let planned = run_for_value(
         interp,
         &format!(
-            "(project/release-plan {} {} {} {})",
+            "(project-release/release-plan {} {} {} {})",
             blsp_string(&name),
             output.map(blsp_string).unwrap_or_else(|| "nil".to_string()),
             blsp_string_list(targets),
@@ -653,11 +653,11 @@ fn cmd_release(
             std::process::exit(1);
         }
         let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
-        // What the command SAYS it wrote is policy too (`project/release-report`).
+        // What the command SAYS it wrote is policy too (`project-release/release-report`).
         let line = run_for_value(
             interp,
             &format!(
-                "(project/release-report {} {} {} {})",
+                "(project-release/release-report {} {} {} {})",
                 blsp_string(&out.display().to_string()),
                 modules.len(),
                 size,
@@ -1006,7 +1006,7 @@ fn positional_possible_values(subcommand: &str) -> Option<Vec<String>> {
 ///
 /// Without this, running one outside a project surfaced a raw Brood `error`: a
 /// bogus source position pointing into the bootstrap string (`1:58`), an internal
-/// function name (`project/run-tests`), and an internal line number — for
+/// function name (`project-run/run-tests`), and an internal line number — for
 /// what is only a wrong-directory mistake. Compare `cargo`: "could not find
 /// `Cargo.toml` in /x or any parent directory". `hint` names the file-scoped
 /// alternative when the command has one, so the error also teaches the way out.

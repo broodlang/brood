@@ -127,7 +127,7 @@ already bound*; otherwise leave the existing binding untouched. This is Emacs's
 behaviour uses `defn`/`def`.
 
 It's a **pure prelude macro — no kernel change at all**, because the needed
-predicate `(bound? 'sym)` already exists (`crates/lisp/src/builtins/system.rs`) and `unless` is in
+predicate `(bound? 'sym)` already exists (`crates/lisp/src/builtins/tooling.rs`) and `unless` is in
 the prelude:
 
 ```clojure
@@ -166,13 +166,13 @@ green. → **ADR-042 (shipped 2026-05-29).**
 
 ## Stage 2 — `system/reload-defs` hardening: atomic, honest detection
 
-**Problem.** Two sub-issues with `system/reload-defs` (`crates/lisp/src/builtins/system.rs`):
+**Problem.** Two sub-issues with `system/reload-defs` (`crates/lisp/src/builtins/evaluation.rs`):
 - **Atomicity.** It evals forms one at a time and `break`s on the first error,
   which *can* leave a file half-reloaded. (Note: a **syntax error is already
   atomic** — `read_all_positioned` parses the whole file before any eval, so a
   half-saved/unparseable file applies *zero* defs. The residual window is a
   *runtime* error while evaluating form N, after forms 1..N-1 already landed.)
-- **Detection.** `head.starts_with("def")` (`crates/lisp/src/builtins/system.rs`) over-matches a
+- **Detection.** `head.starts_with("def")` (`crates/lisp/src/builtins/evaluation.rs`) over-matches a
   top-level call to a user fn named `default-…` and under-matches a definition
   produced by a user macro whose name doesn't start with `def`.
 
@@ -347,7 +347,7 @@ hardest upgrade case, nominal schema migration.
 old expansion (gap #5).
 
 **Design — warn, don't track (for now).** Mirror the existing arity-change
-diagnostic (`eval/mod.rs:195`): when `defmacro` *rebinds* an existing macro,
+diagnostic (`eval.rs:195`): when `defmacro` *rebinds* an existing macro,
 print `[reload] macro X redefined; callers compiled before now keep the old
 expansion — re-eval them`. A true reverse dependency index (who expanded X) is
 deferred; the warning is 90% of the value at 5% of the cost.

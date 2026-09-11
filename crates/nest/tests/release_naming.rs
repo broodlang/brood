@@ -1,7 +1,7 @@
 //! **`nest release` refuses a name it must not write, and says why.**
 //!
 //! Deciding what a release binary is CALLED is policy, so it lives in Brood
-//! (`project/release-plan` in `std/tool/project.blsp`); `nest` keeps only the mechanism
+//! (`project-release/release-plan` in `std/tool/project.blsp`); `nest` keeps only the mechanism
 //! it alone can host — the runtime embedded in this binary, the byte assembly, the boot
 //! check. These cases drive the real `nest` through that seam: argv in, exit code and
 //! message out.

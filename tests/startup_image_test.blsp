@@ -206,7 +206,7 @@
   ;; Found by `nest::coverage_lines` failing, not by reasoning, which is why it is pinned.
   (test "an instrumented run declines the image"
     (is (nil? (os/env "BROOD_COVERAGE")))
-    (is (project/image-usable?))))
+    (is (project-image/image-usable?))))
 
 ;; Values a cross-process MESSAGE cannot carry — a builtin (a Rust primitive with no data
 ;; form) and a raw-bytes literal — can still be IMAGED, because the image restores bindings in
@@ -327,7 +327,7 @@
       ;; one owned by a module the image carries (present in `*module-files*`) is kept
       (%registry-update! '*module-files* :assoc ["zz-imgproj/shapes"] "/nonexistent/shapes.blsp")
       (%registry-update! '*record-ids* :assoc [:zz-imgproj/shapes/circle] 'zz-imgproj/shapes/circle)
-      (let (n (project/image-prune-foreign-registrations before-regs))
+      (let (n (project-image/image-prune-foreign-registrations before-regs))
         (is (> n 0))
         (is (not (contains? *record-ids* :tempo/tempo)))
         (is (contains? *record-ids* :zz-image-root-probe))
@@ -343,5 +343,5 @@
   :isolated (test "a prelude-registered entry whose qualifier names a module is kept"
     (let (before-regs (stdimage/registrations-by-module))
       (is (contains? *multi-algebra* 'num/mul))
-      (project/image-prune-foreign-registrations before-regs)
+      (project-image/image-prune-foreign-registrations before-regs)
       (is (contains? *multi-algebra* 'num/mul)))))

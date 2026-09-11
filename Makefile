@@ -472,7 +472,7 @@ enable-perf-check: ## Report whether `perf` can profile here (no root, no change
 	@./scripts/enable-perf.sh --check
 
 perf-brood: ## Build a counter-armed `brood` into $(RELEASE_DIR) — the attribution build ((perf/report), BROOD_PERF_STATS, BROOD_DEOPT_TRACE)
-	# The VM work-attribution counters are a cargo feature (`perf.rs`), so a normal
+	# The VM work-attribution counters are a cargo feature (`diagnostics/perf.rs`), so a normal
 	# binary — including an installed one — cannot answer "where does the time go".
 	# This is that binary, and the reason it is a target rather than a documented
 	# command line: the flags have to match `release-brood`'s exactly except for the
@@ -565,7 +565,7 @@ hooks: ## Install the local git pre-push hook (both format gates, before CI sees
 clippy: ## Lint with clippy (all targets + all features; warnings are FATAL via -D warnings)
 	# `--all-features` type-checks + lints the optional backends (the `gui`
 	# feature: winit/softbuffer/fontdue) too, so a dependency bump that breaks
-	# `gui.rs` is caught here at the gate, not at `make install`. Compile/lint
+	# `host/gui.rs` is caught here at the gate, not at `make install`. Compile/lint
 	# only — GUI *runtime* behaviour still needs an on-display check (WITH_GUI=1).
 	# `-D warnings` makes warning-clean a hard gate — a new lint fails the build.
 	# The deliberate style exceptions are documented `#![allow(...)]`s in

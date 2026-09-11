@@ -40,7 +40,7 @@ Other realistic uses:
 
 ## The algebra is already there
 
-`Ty::intersect` exists in `types/mod.rs` and is already used internally (guard
+`Ty::intersect` exists in `types.rs` and is already used internally (guard
 narrowing, `is_subtype`, `difference`). The gap is purely at the *surface*:
 
 - `parse_type` in `annot.rs` doesn't recognise `(and …)`.
@@ -92,7 +92,7 @@ arrow/elem refinements narrow on match). A `(and int string)` produces
 
 ### What needs no change
 
-- `types/mod.rs` — `Ty::intersect` is already there.
+- `types.rs` — `Ty::intersect` is already there.
 - `walk.rs` / `guards.rs` — the checker's disjointness path consumes a `Ty`
   from the sig; an intersection `Ty` is just a narrower set, handled identically.
 - Grammar description in `type-annotations.md` — add `(and type type+)` to the

@@ -49,7 +49,7 @@ references, plus one comment in `ir.rs`.
 crates/lisp/src/eval/compile/jit_lower.rs           44 refs   2522 lines
 crates/lisp/src/eval/compile/jit_lower/i64.rs       39         945
 crates/lisp/src/eval/compile/jit_lower/emit.rs      33        1166
-crates/lisp/src/jit/mod.rs                           6        1227
+crates/lisp/src/jit.rs                           6        1227
 crates/lisp/src/eval/compile/jit_lower/{call,prim,control}.rs
                                                      2 each    549 / 916 / 185
 crates/lisp/src/eval/compile/jit_lower/prepass.rs    0          108
@@ -57,7 +57,7 @@ crates/lisp/src/eval/compile/ir.rs                   1 (a comment)
 ```
 
 So the backend is ~6.4 kLOC under `jit_lower*` plus the Cranelift-module owner at the head of
-`jit/mod.rs`; `ir.rs` — `Node` / `Inst` / `Chunk` / `CompiledArm` / `PrimOp*` — is
+`jit.rs`; `ir.rs` — `Node` / `Inst` / `Chunk` / `CompiledArm` / `PrimOp*` — is
 Cranelift-free. **The IR is the seam, and it already holds.**
 
 **The production invocation surface is two places.** `jit_runtime.rs` reaches the backend from
@@ -74,14 +74,14 @@ tests alone. Six obligations:
 2. **output** — `extern "C" fn(heap: *mut Heap, base: i64) -> i64`, reading frame slots from
    `roots[base..]`, boxing its result into `roots[base]`.
 3. **outcome codes** — `0` Done, `3` error, `1`/`2`/`4` deopt / preempt / tail.
-4. **the `brood_rt_*` table** (`jit/mod.rs`) as the *only* legal heap or GC interaction.
+4. **the `brood_rt_*` table** (`jit.rs`) as the *only* legal heap or GC interaction.
 5. **roots-only value discipline** — no `Value` in a register across a safepoint; unboxed
-   `i64`/`f64` only, within a safepoint-free segment (`jit/mod.rs` module docs).
+   `i64`/`f64` only, within a safepoint-free segment (`jit.rs` module docs).
 6. **epoch guard + sentinels** — `jit_code` is null (untried) / `BAILED` / `QUEUED` / a real
    8-aligned pointer; plus the deopt journal and resume-arm protocol (ADR-210).
 
 **And the engine selector is a `bool`, not an abstraction.** `vm_enabled()` and
-`set_forced_engine(Option<bool>)` in `eval/compile/mod.rs`: `Some(true)` VM, `Some(false)`
+`set_forced_engine(Option<bool>)` in `eval/compile.rs`: `Some(true)` VM, `Some(false)`
 tree-walker, `None` defers to `BROOD_VM`. That is *fine* as far as it goes — and the reason
 engine swapping is tractable here is not the selector but the **differential harness** around
 it: both engines live in every binary, `make test-both` and a dedicated CI job
@@ -112,13 +112,13 @@ installs over the small one — a different arm shape with its own epoch check, 
 shared request. And no `name()`: the sketch had one "for traces", nothing called it, and per
 ADR-011 an unused knob is a tax. Whoever adds a second backend adds what that backend needs.
 
-**File moves.** `jit/mod.rs` currently holds two unrelated things: the Cranelift `JITModule`
+**File moves.** `jit.rs` currently holds two unrelated things: the Cranelift `JITModule`
 owner (`Jit`, roughly its first 280 lines) and the `brood_rt_*` callback table (the remaining
 ~945 lines, which is backend-independent ABI). Split accordingly:
 
 | new file | contents |
 |---|---|
-| `jit/mod.rs` | sentinels (`BAILED`/`QUEUED`), the backend selection, re-exports |
+| `jit.rs` | sentinels (`BAILED`/`QUEUED`), the backend selection, re-exports |
 | `jit/rt.rs` | the `brood_rt_*` table — obligation 4, backend-independent |
 | `jit/backend.rs` | the `JitBackend` trait + the obligations as doc-comments |
 | `jit/cranelift.rs` | `CraneliftBackend` (today's `Jit`) — the `JITModule` owner |
@@ -233,7 +233,7 @@ anything".
 
 **What the hoist actually removed.** `jit_spill_reserve` and `jit_ckpt_depth` were each defined
 **twice** — a real version in the jit-gated `jit_lower`, and a zero/`None` stub in
-`compile/mod.rs` — *and* `jit_lower` carried its own `#[cfg(not(feature = "jit"))]` copies,
+`compile.rs` — *and* `jit_lower` carried its own `#[cfg(not(feature = "jit"))]` copies,
 which could never compile at all, since the module they sit in only exists when the feature is
 on. Both decisions are frame layout, which the VM needs whether or not a backend exists, so one
 ungated definition is not merely tidier — it is the correct shape. Four definitions became two.
@@ -295,7 +295,7 @@ and `bench_ratio.py` pairs by `(bench, size)` regardless of print order. The doc
   tool.)
 - **`std/tool/perf.blsp`** (a DEV module) — `(perf/report)`, `(perf/summary)`,
   `(perf/measure thunk)`, carrying §2's reading rules so they need not be recalled.
-- **`brood --debug-flags`** — the `BROOD_*` catalogue (`crates/lisp/src/debug_flags.rs`),
+- **`brood --debug-flags`** — the `BROOD_*` catalogue (`crates/lisp/src/diagnostics/debug_flags.rs`),
   grouped by attribution / JIT / optimizer opt-outs / GC / scheduler / engine, with a
   dependency's flags (`MIMALLOC_PURGE_DELAY`) marked `[not brood's]`. A curated performance
   subset on purpose; CLAUDE.md's table stays the long form because it carries the measurement

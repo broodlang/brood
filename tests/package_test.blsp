@@ -1367,7 +1367,7 @@
         " :source-paths [\"src\"] :dependencies [[alpha :path \"../alpha\"] [beta :path \"../beta\"]]")
       ;; No error (two bare `parser`s would have tripped `bundle-reject-duplicate-names`),
       ;; and both modules are present under their ROOTED keys — never the bare name.
-      (let (collected (project/bundle-collect app-dir))
+      (let (collected (project-release/bundle-collect app-dir))
         (is (includes? collected "alpha/parser"))
         (is (includes? collected "beta/parser"))
         (refute (includes? collected "parser"))

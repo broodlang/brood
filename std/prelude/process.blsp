@@ -484,7 +484,7 @@ moment it was needed (the reporter is the one process whose own death nobody rep
 (defn %crash-report-arm-default ()
   "Arm the default crash reporter (ADR-305) unless `BROOD_NO_CRASH_REPORT` is set, and
 unless one is already running. Returns the listener pid, or nil when opted out.
-`brood file`, `nest run`, `project/run-bundle` and the REPL call this before the program
+`brood file`, `nest run`, `project-release/run-bundle` and the REPL call this before the program
 starts; `nest test` deliberately does not.
 
 Lives in the prelude rather than in `crash-report` because a function that decides

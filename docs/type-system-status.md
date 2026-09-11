@@ -143,7 +143,7 @@ genuine element-typed seqable needs extending the `elem` refinement beyond `Pair
 
 ## Inventory — what exists
 
-### The lattice (`types/mod.rs`)
+### The lattice (`types.rs`)
 Set-theoretic + gradual (ADR-023/024). A `Ty` is a **union of terms** (ADR-262): one term is
 a tag bitset plus at most one refinement per slot — function **arrows** and **overloads**
 (arrow intersections), sequence **element types**, **`(map K V)`**, **record shapes**,
@@ -193,7 +193,7 @@ requires a new special form to declare what its body is for.
 
 | Concern | File |
 |---|---|
-| Lattice (`Ty`, ops, named unions), `GradualTy`, `Sig` | `crates/lisp/src/types/mod.rs`, `types/sig.rs` |
+| Lattice (`Ty`, ops, named unions), `GradualTy`, `Sig` | `crates/lisp/src/types.rs`, `types/sig.rs` |
 | Checker entry + passes (`check_file`) | `crates/lisp/src/types/check.rs` |
 | The walk (special-form handling, call checks, arity) | `crates/lisp/src/types/check/walk.rs` |
 | Signature sources + inference | `crates/lisp/src/types/check/sigs.rs`, `infer.rs` |
@@ -312,7 +312,7 @@ these (ADR-268). `(or :ok :err) ∩ ¬:ok` is `:err`. The four literal slots car
 back to positive so every rule may assume an `Out` set has an infinite complement.
 Consumers outside the lattice read literals through `members()`, which reports `None` for
 a negative set — the same conservative widening they already handled, so nothing outside
-`types/mod.rs` changed.
+`types.rs` changed.
 
 The equality guard is biconditional **where the guard type is exact**: `(= tag :ok)`
 narrows both branches, `(= m "x")` still narrows only the true one, because `of_value` has

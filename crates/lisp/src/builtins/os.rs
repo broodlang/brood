@@ -1,11 +1,135 @@
 // OS / environment / subprocess builtins — extracted from io.rs (file-organization split).
-#![allow(unused_imports)]
-use super::io::*;
 use super::numeric::{arg, expect_int, expect_string};
-use super::*;
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
+
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    // system / environment
+    primitives.def(
+        "%getenv",
+        Arity::exact(1),
+        Sig::new(vec![string], string.union(nil_ty)),
+        &["name"],
+        "The value of environment variable name, or nil if unset.",
+        getenv,
+    );
+    primitives.def(
+        "%hostname",
+        Arity::exact(0),
+        Sig::nullary(string),
+        &[],
+        "This machine's short hostname (no domain). Used to qualify a node name as name@host.",
+        hostname,
+    );
+    primitives.def(
+        "%install-interrupt-handler",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        &[],
+        "Take over SIGINT so Ctrl-C records a request instead of terminating the runtime; returns true when installed (false with no Unix signals). Idempotent, and clears any pending request. Opt-in, so a script keeps dying on Ctrl-C: the REPL installs it, nothing else does.",
+        install_interrupt_handler);
+    primitives.def(
+        "%restore-interrupt-handler",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        &[],
+        "Restore the default SIGINT disposition (Ctrl-C terminates again) and clear any pending request — the uninstall half of %install-interrupt-handler, so a transient REPL (pry) inside a script gives the script its Ctrl-C back. Returns true when restored.",
+        restore_interrupt_handler);
+    primitives.def(
+        "%interrupt-taken?",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        &[],
+        "True if an interrupt arrived since the last call, clearing it (read-and-clear, so one Ctrl-C is acted on once). Poll this while a spawned evaluation runs and (exit pid :kill) it.",
+        interrupt_taken);
+    primitives.def(
+        "%run-process",
+        Arity::exact(2),
+        Sig::new(vec![string, seq], int),
+        &["prog", "args"],
+        "Run external program prog with an args list, inheriting stdio; returns its exit code.",
+        run_process,
+    );
+    primitives.def(
+        "%env-all",
+        Arity::exact(0),
+        Sig::nullary(map_ty),
+        &[],
+        "All environment variables as a map of string→string.",
+        env_all,
+    );
+    primitives.def(
+        "%argv",
+        Arity::exact(0),
+        Sig::nullary(seq),
+        &[],
+        "Command-line arguments as a vector of strings (including argv[0]).",
+        argv_builtin,
+    );
+    primitives.def(
+        "%script-args",
+        Arity::exact(0),
+        Sig::nullary(seq),
+        &[],
+        "Arguments meant for this program, without the host CLI's own — everything after \
+         `--` in `brood file.blsp -- a b`. For a bundled app (no host CLI), everything \
+         after argv[0].",
+        script_args_builtin,
+    );
+    primitives.def(
+        "%os-type",
+        Arity::exact(0),
+        Sig::nullary(kw),
+        &[],
+        "The host OS as a keyword: :linux, :macos, or :windows.",
+        os_type_builtin,
+    );
+    primitives.def(
+        "%os-cmd",
+        Arity::at_least(1),
+        Sig::new(vec![string, seq], map_ty),
+        &["prog", "&", "args", "dir"],
+        "Run prog (with optional args list, and an optional working directory) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}.",
+        os_cmd);
+    primitives.def(
+        "%os-cmd-stdin",
+        Arity::at_least(3),
+        Sig::new(vec![string, seq, string], map_ty),
+        &[],
+        "",
+        os_cmd_stdin,
+    );
+    primitives.def(
+        "%halt",
+        Arity::exact(1),
+        Sig::new(vec![int], nil_ty),
+        &["code"],
+        "Terminate the process with exit code. Never returns.",
+        halt_builtin,
+    );
+    // time
+    primitives.def(
+        "%now",
+        Arity::exact(0),
+        Sig::nullary(int),
+        &[],
+        "Wall-clock milliseconds since the Unix epoch.",
+        now,
+    );
+    primitives.def(
+        "%now-ns",
+        Arity::exact(0),
+        Sig::nullary(int),
+        &[],
+        "Wall-clock nanoseconds since the Unix epoch (finer-grained than now).",
+        now_ns,
+    );
+}
 
 /// `(%getenv name)` — the value of environment variable `name` as a string, or nil
 /// if it is unset. Lets Brood locate things like the user config directory.
@@ -371,4 +495,28 @@ pub(super) fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
             .with_hint("check that the program is on PATH and the args are well-formed")),
     }
+}
+
+// ---------- time ----------
+
+/// `(%now)` — wall-clock milliseconds since the Unix epoch, as an integer.
+/// Subtract two readings to measure elapsed time (see `std/tool/test.blsp`).
+pub(super) fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Ok(Value::int(ms))
+}
+
+/// `(now-ns)` — wall-clock nanoseconds since the Unix epoch, as an integer.
+/// The fine-grained partner to `now`; subtract two readings to time sub-
+/// millisecond work that `now`'s resolution would round to zero. (i64
+/// nanoseconds since 1970 stays in range until the year 2262.)
+pub(super) fn now_ns(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let ns = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    Ok(Value::int(ns))
 }

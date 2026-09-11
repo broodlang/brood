@@ -57,7 +57,7 @@ pub const THROW: &str = "throw";
 pub const TRY_PRIM: &str = "%try";
 pub const EQ_PRIM: &str = "%eq";
 // Table (ETS) primitive names. Shared across five sites — the `def` registration
-// (builtins/mod.rs), the IR PrimOp fast-path (compile/ir.rs), the linmap rewrite's
+// (builtins.rs), the IR PrimOp fast-path (compile/ir.rs), the linmap rewrite's
 // emitted call heads (compile/inline.rs, eval/macros.rs), and the checker's effect
 // list (types/check/guard_effects.rs) — so renaming one is a single edit the compiler
 // then enforces at every site. A bare string here once desynced silently (a rename hit

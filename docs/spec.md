@@ -197,7 +197,7 @@ Special forms are reserved symbols recognised in operator position. `body...`
 denotes zero or more forms evaluated as an implicit `do`.
 
 Only `quote`, `if`, `do`, `def`, `fn`, `let`, `letrec`, and `quasiquote` are
-**true core special forms** (the evaluator's own rules, in `eval/mod.rs`) — eight
+**true core special forms** (the evaluator's own rules, in `eval.rs`) — eight
 in all. `defmacro`, `when`, `unless`, `cond`, `and`, and `or` are **prelude macros**
 — they expand to the core forms and so can be shadowed or passed over like any
 binding; they are tabled here only so the whole surface reads in one place.

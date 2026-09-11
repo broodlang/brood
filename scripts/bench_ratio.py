@@ -8,7 +8,7 @@ the point: under load they slow down together, so the ratio holds where the abso
 times wander (see docs/benchmarking.md §1). Ratio < 1 ⇒ that engine beats the reference.
 
 Engine-agnostic: labels come from `Engine::short()` in
-`crates/lisp/src/eval/compile/mod.rs` and the grid is built from `Engine::ALL`, so a third
+`crates/lisp/src/eval/compile.rs` and the grid is built from `Engine::ALL`, so a third
 engine shows up here as an extra column without touching this script. `Tw` (the
 tree-walker) is the reference because it is the stable in-process baseline the methodology
 rests on — it is not the engine under test.

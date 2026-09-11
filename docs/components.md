@@ -21,11 +21,13 @@ one with e.g. *"do backlog item W2 from docs/components.md."*
                          └───────────────────────────────┬──────────────────────────────────────┘
                                                           │ embeds
    POLICY (Brood)  ─────────────────────────────────────▼────────────────────────────────────────
-        std/prelude/*.blsp std/tool/test.blsp   std/tool/project.blsp        ← redefinable at runtime
+        std/prelude/*.blsp std/tool/test.blsp   std/tool/project*.blsp       ← redefinable at runtime
    ───────────────────────────────────────────────────────────────────────────────────────────────
    MECHANISM (Rust)        language pipeline                          advisory types
         reader → macros → eval → printer                              types  ←  check
                           builtins/ (the primitive kernel, split by domain)
+        host/ (gui, net, subprocess, wasm, treesit, audio — feature-gated machine bindings)
+        diagnostics/ (coverage, perf, profile, debug_flags)     boot/ (prelude + images)
    ─────────────────────────────────── substrate ───────────────────────────────────────────────
         value (Value, Tag, handles, interner)      heap (regions, env, promotion, equality)
         error      alloc (byte counter)            process (green-process scheduler)
@@ -33,9 +35,13 @@ one with e.g. *"do backlog item W2 from docs/components.md."*
 
 On disk the `crates/lisp/src` tree mirrors these layers, so the listing reads as
 the architecture: `core/` (value, heap, alloc), `syntax/` (reader, printer),
-`eval/` (evaluator + macros), `types/` (lattice + checker), with `error.rs`,
-`process.rs`, `builtins/`, and `lib.rs` at the top level. `lib.rs`'s module
-block is the annotated table of contents.
+`eval/` (evaluator + macros), `types/` (lattice + checker), `builtins/` (the
+kernel), `host/` (machine bindings), `diagnostics/` (instruments), `boot/` (how the
+prelude arrives), with `error.rs`, `process.rs`, `dist.rs`, `jit.rs`, `bundle.rs`,
+`introspect.rs`, `cli_support.rs`, `renames.rs` and `lib.rs` at the top level.
+`lib.rs`'s module block is the annotated table of contents. A parent module is
+`foo.rs` beside its `foo/` directory — never `foo/mod.rs` — and children reach the
+parent's private items via `use super::*`.
 
 Two boundaries do most of the structural work:
 
@@ -78,23 +84,34 @@ before working in any Rust component:
 - **Depends on:** `error`, and `heap` only in type signatures (`NativeFnPtr`).
 - **Exposes:** the vocabulary every other component is written in.
 - **Work here independently:** adding a `Value` kind is the highest-blast-radius
-  change in the repo — it needs a matching `Tag` (and a bit in `types/mod.rs`, guarded
+  change in the repo — it needs a matching `Tag` (and a bit in `types.rs`, guarded
   by a test) and touches `printer`, `eval`, `heap`, `process::Message`. Check the
   compatibility contract in [types.md](types.md) first.
 
-### `core/heap.rs` — heap, regions, environments · ~726 LOC (the heaviest)
+### `core/heap.rs` + `core/heap/` — heap, regions, environments (the heaviest)
 - **Owns:** the per-process LOCAL data heap (slab `Vec`s); the shared `SharedCode`
   (PRELUDE) and `RuntimeCode` (RUNTIME) regions + their `Arc`s; allocation
-  (`alloc_*`, `list`); access (`pair`/`car`/`cdr`/`vector`/`string`/`closure`);
-  the **environment chain** (`env_get`/`env_define`/`env_set`/`env_root`/`new_env`,
-  the `GLOBAL` sentinel → shared global table); **promotion** (LOCAL→RUNTIME deep
-  copy on `def`/`spawn`); structural **equality** (`equal`, the basis of `=`);
-  **memory reclamation** (`checkpoint`/`reset_local_to`); the prelude **freeze**;
-  and editor **source metadata** (`form_pos`, `current_file`).
-- **Depends on:** `value`, `error`, `boxcar`.
+  (`alloc_*`, `list`); access (`pair`/`car`/`cdr`/`vector`/`string`/`closure`).
+  `heap.rs` is the records, construction and the region-dispatching accessors; each
+  further concern is a child module reaching the private fields via `use super::*`:
+  `env_globals.rs` (the **environment chain** + the global table), `promote.rs`
+  (LOCAL→RUNTIME deep copy on `def`/`spawn`), `equality.rs` (structural **equality**,
+  the basis of `=`), `gc.rs` (the tracing collector, with `gc/{roots, accounting,
+  flush, stall, tuning}.rs` beneath it) / `gc_runtime.rs` (**memory reclamation**),
+  `freeze.rs` (the prelude **freeze**), `positions.rs` (**source metadata** — form
+  positions, def sites), `facts.rs`, `map_ops.rs`, `local_string.rs`, `slabs.rs`,
+  `runtime_code.rs`, `roots_buf.rs`, and `vm_cache.rs` (below).
+- **Depends on:** `value`, `error`, `boxcar` — **and, upward, on `eval::compile`,
+  `process` and `dist`.** `vm_cache.rs` stores `CompiledArm`/`CompiledClosure` and calls
+  `jit_tier`/`jit_run_fast_link`; `gc.rs`/`gc_runtime.rs`/`env_globals.rs` ask `process`
+  for the current pid and drain state; `equality.rs` asks `dist::is_local`. Legal inside
+  one crate and partly inherent — the heap is where compiled code physically lives —
+  but it means `core` is not a strict substrate: `vm_cache.rs` is the VM's cache
+  living in the heap. A stricter cut would move it under `eval/compile/` with the heap
+  exposing storage only; not done, because every accessor it needs is a private field
+  of `Heap` and the split would expose a dozen of them for no behavioural gain.
 - **Exposes:** `Heap`, `SharedCode`, `RuntimeCode`, `LocalCheckpoint`.
-- **Work here independently:** this is several concerns in one file (see the
-  assessment below). The hot-reload / region rules in
+- **Work here independently:** the hot-reload / region rules in
   [shared-code.md](shared-code.md) are load-bearing — read it before changing
   promotion or the global table.
 
@@ -138,11 +155,11 @@ before working in any Rust component:
 - **Depends on:** `heap`, `value`.
 - **Work here independently:** output side only; the inverse contract of `reader`.
 
-### `eval/mod.rs` — the evaluator · ~539 LOC
+### `eval.rs` — the evaluator · ~539 LOC
 - **Owns:** the `'tail: loop` tree-walker, **special forms** (`quote if do def
   fn/lambda quasiquote defmacro let`), closure application,
   parameter binding (`&optional`/`& rest`), and the native-call arity gate.
-  Alongside it sits `eval/compile/` (`mod.rs`, `ir.rs`, `jit_lower.rs`) — the
+  Alongside it sits `eval/compile.rs` + `eval/compile/` (`ir.rs`, `jit_lower.rs`, …) — the
   closure-compiling bytecode VM + tier-1 JIT, the **default engine** (ADR-076);
   the tree-walker is the legacy/fallback path.
 - **Depends on:** `heap`, `value`, `macros` (lazy expansion + `fn`/`let` lowering
@@ -165,15 +182,20 @@ before working in any Rust component:
   (eval calls back for the lowering fallback). Pattern-match *policy* is in the
   prelude; this file only lowers the surface to `match*`.
 
-### `builtins/` — the primitive kernel (split by domain)
-- **Owns:** every Rust-implemented primitive, registered into the prelude builder
-  by `proc/register`. One file per domain: `mod.rs` (the `Reg` struct, the single
-  `proc/register` table, `PRIMITIVE_DOCS`, and the shared helpers), `numeric.rs`
-  (numeric/bitwise/bitset/math), `sequences.rs` (pair/list/range/vector/map/
-  string/rope), `io.rs` (TCP/table/print/time/fs/hashing/git/crypto),
-  `terminal.rs` (terminal + GUI, feature-gated), `system.rs` (eval/load/macros/
-  introspection/errors/processes/dist/dynamic/namespaces), and `bytes.rs`
-  (the raw-bytes surface).
+### `builtins.rs` + `builtins/` — the primitive kernel (split by domain)
+- **Owns:** every Rust-implemented primitive. One file per domain, and **each domain
+  file owns its registrations as well as its implementations** — a
+  `register(&mut Primitives)` listing every name, arity, signature, arglist and
+  docstring it contributes — so adding a primitive is a one-file edit. `builtins.rs`
+  is the `Primitives` registrar, the shared `expect!` macro and the roll-call of the
+  domains; `signature_types.rs` the `Ty` shorthands signatures are spelled in. The
+  domains: `numeric`, `sequences`, `string`, `rope`, `io` (console), `filesystem`,
+  `sockets`, `table`, `subprocesses`, `os`, `bytes`, `compress`, `crypto`, `clipboard`,
+  `pkg`, `terminal` (one registration table over `terminal/native.rs` and the wasm32
+  stub `terminal/wasm.rs`), `source`, `treesit`, `evaluation`, `modules`, `processes`,
+  `nodes`, `dynamic`, `build_info`, `diagnostics`, `offload`, `wasm`,
+  `selfhost_macros`, `tooling`, `syntax_scan`, `errors`. The four image primitives are
+  registered by `boot/image.rs`, which owns that mechanism.
 - **Depends on:** nearly everything — `heap`, `eval`, `value`, `printer`,
   `reader`, `macros`, `check`, `process`, `alloc`, `error`.
 - **Exposes:** `register(&mut Heap, EnvId)` — the single install point.
@@ -184,7 +206,7 @@ before working in any Rust component:
 
 ## Rust kernel — types (advisory; nothing gates on it)
 
-### `types/mod.rs` — the type lattice · ~491 LOC
+### `types.rs` — the type lattice · ~491 LOC
 - **Owns:** `Ty` (a set of `Tag`s; union/intersect/negate; subtyping = inclusion)
   and `GradualTy` (`dynamic()` inside the lattice). Pure algebra + its own tests.
 - **Depends on:** `value` (for `Tag`).
@@ -199,13 +221,37 @@ before working in any Rust component:
 
 ## Embedding + binary
 
-### `lib.rs` — the `Interp` embedding API · ~152 LOC
-- **Owns:** building the shared prelude bundle once (`SHARED`), seeding a runtime,
-  installing the counting allocator, and the top-level eval loop with
-  per-form arena reset. The public face of the whole `brood` library crate.
+### `lib.rs` — the module map + the `Interp` embedding API
+- **Owns:** the crate's module map (grouped by layer), the counting allocator, and
+  `Interp` — seeding a runtime from the shared prelude bundle and the top-level eval
+  loop with per-form arena reset. The public face of the whole `brood` library crate.
 - **Exposes:** `Interp::{new, eval_str, eval_source, print}`.
 - **Work here independently:** this is the contract embedders (and the CLI) use;
   keep it small.
+
+### `boot.rs` + `boot/` — how a runtime comes to hold the prelude
+- **Owns:** the shared `SHARED` bundle and the three paths that build it — the prelude
+  image (ADR-314), the expanded-prelude text cache (ADR-138), the full source boot —
+  plus `PRELUDE` (the `std/prelude/*.blsp` concatenation, in order), `boot_source()`
+  (which path THIS process took) and the cache pruning. `boot/image.rs` is the
+  startup-image mechanism (ADR-218): the sectioned stdlib image and the prelude image.
+- **Work here independently:** the trap is documented on `boot_source` — the first
+  run after any build is a source boot; verify an image change against `:installed`.
+
+### `host.rs` + `host/` — the machine bindings (feature-gated mechanism)
+- **Owns:** `net` (non-blocking TCP, ADR-062; `net_wasm.rs` the wasm32 stub),
+  `subprocess` (child OS processes, ADR-104), `wasm` (the wasmtime host, ADR-071/145),
+  `treesit`, `audio`, `text_width`, and `gui` — `gui.rs` the `Op`/`Key`/`Mouse`
+  vocabulary and the feature switch, `gui/disabled.rs` the stub, `gui/backend.rs` the
+  winit event loop and window registry with `gui/backend/{input,render,paint}.rs`, and
+  `gui/gpu.rs` the experimental OpenGL path.
+- **Depends on:** `process` (message delivery) and `core`; nothing depends on `host`
+  except the builtins that expose it.
+
+### `diagnostics.rs` + `diagnostics/` — the observability instruments
+- **Owns:** `coverage` (ADR-148), `perf` (the `perf-stats` counters), `profile` (the
+  sampling profiler), `debug_flags` (the `BROOD_*` catalogue). Off unless a feature or
+  flag arms them; nothing here changes what a program computes.
 
 ### `crates/cli/src/main.rs` — the `brood` language binary
 - **Owns:** arg parsing (`-j`/`--max-parallel`), the file runner, `--test`
@@ -225,7 +271,7 @@ before working in any Rust component:
   No subprocess — it embeds the lib like `brood` does.
 - **Work here independently:** the subcommands are a *thin* shell that drives
   Brood by embedding source strings (`(require 'project) …`); the policy lives in
-  `std/tool/project.blsp`. A deliberate bootstrap — moving the tool into Brood is the
+  `std/tool/project*.blsp`. A deliberate bootstrap — moving the tool into Brood is the
   roadmap goal.
 
 ## Brood standard library (policy — redefinable at runtime)
@@ -248,11 +294,20 @@ before working in any Rust component:
 - **Work here independently:** see [testing.md](testing.md). Depends on the
   process primitives and `%isolate`.
 
-### `std/tool/project.blsp` — project model, runner, scaffolding · ~209 LOC
-- **Owns:** the `project.blsp` manifest, test discovery + `run-project-tests`,
-  the user config (`~/.config/brood/config.blsp`), and `nest new` scaffolding.
-  The policy behind `nest`'s `test`/`new`.
-- **Depends on:** the filesystem primitives + `test`. See ADR-020.
+### `std/tool/project*.blsp` — the project tool, split by concern
+- **Owns:** `project` — the `project.blsp` manifest and its dependencies, `find-root`,
+  source/test discovery, `setup`, the user config (`~/.config/brood/config.blsp`);
+  `project-image` — the project startup image (fingerprint, write, materialise);
+  `project-check` — the `nest check` driver, its result cache, the whole-project lints
+  and the `--fix-renames` / `--suggest-sigs` aids; `project-run` — `run-tests` (with
+  `--failed`, `--stale`, coverage), `run` and `check-boot`; `project-release` — bundle
+  collection, artifact naming, the release report and `--brood-build-info`. Bare module
+  names (ADR-085), so a call is `project-check/check`, `project-run/run-tests`.
+  `nest new` scaffolding is `scaffold`, the dispatch is `nest` (ADR-322).
+- **Depends on:** the filesystem primitives + `test` (loaded only when tests run — a lean
+  release runtime strips it). The five reference each other only by qualified name, never
+  `(:use …)`: a qualified reference loads lazily, so the cycle `project` ⇄ `project-image`
+  is fine, where a refer-all into a module still loading is an error. See ADR-020.
 
 ## Tests & benches
 
@@ -282,22 +337,18 @@ before working in any Rust component:
 
 ### Coupling hotspots (ranked)
 
-1. **`core/heap.rs` is a god-object (~726 LOC, ~6 concerns).** It bundles slab
-   allocation, the three regions + freeze/promotion, the **environment chain**,
-   structural **equality**, memory-reclamation **checkpoints**, and editor
-   **source metadata** (`form_pos`/`current_file`). The environment logic used to
-   be its own `env.rs` (architecture.md still says so); the source-metadata fields
-   are tooling state that has nothing to do with allocation. These are the parts
-   most likely to be edited by *different* people for *different* reasons.
-   *Recommendation:* split out `env.rs` (the chain operations over heap-stored
-   frames) and move `form_pos`/`current_file` to a small `source.rs` (or onto the
-   reader/load path). Equality could also move to a `value`-adjacent module.
+1. **`core/heap.rs` god-object — resolved.** *(Resolved.)* The ~6 concerns are now
+   the `core/heap/` child modules (`env_globals.rs`, `equality.rs`, `promote.rs`,
+   `gc.rs`, `freeze.rs`, `positions.rs`, …); `heap.rs` keeps the records and the
+   region-dispatching accessors. What remains is the **upward dependency** noted on
+   the card: `vm_cache.rs` is the VM's cache living in the heap.
 
-2. **`builtins.rs` monolith — resolved.** *(Resolved.)* The old 10-domain
-   single file is now the `builtins/` directory, one file per domain
-   (`mod.rs`/`numeric.rs`/`sequences.rs`/`io.rs`/`terminal.rs`/`system.rs`/
-   `bytes.rs`) with the single `proc/register` table in `mod.rs`, and the dead
-   never-registered functions were deleted along the way (backlog W1/W4).
+2. **`builtins.rs` monolith — resolved twice.** *(Resolved.)* The old 10-domain
+   single file became the `builtins/` directory (W4); then the 4,000-line
+   `register()` that still held every primitive's name/sig/docstring in one place
+   was split too — each domain file registers its own, and `system.rs` (a 3,900-line
+   grab bag of eval/load/processes/dist/dynamic/namespaces/offload/wasm/coverage) is
+   eleven domain files.
 
 3. **`docs/architecture.md` — now current.** *(Resolved.)* Its layout/component
    map matches the `core`/`syntax`/`eval`/`types` tree (no more `env.rs`), the
@@ -312,8 +363,8 @@ before working in any Rust component:
 ## Work backlog (dispatchable)
 
 Each item is self-contained: hand Claude the item ID plus this file and it has
-everything it needs. One pair shares a file — **coordinate or sequence them**:
-W2 and W3 both edit `core/heap.rs`. (W1 and W4 — the `builtins/` split — are done.)
+everything it needs. All four are done; the list stays as the record of what was
+asked and how it landed.
 
 ### W1 — Delete dead primitive functions · ✅ done
 - **Was:** delete the never-registered `is_*` predicates and `println` from the
@@ -321,21 +372,21 @@ W2 and W3 both edit `core/heap.rs`. (W1 and W4 — the `builtins/` split — are
   Brood over `print`).
 - **Done** as part of W4 — the dead functions were not carried into `builtins/`.
 
-### W2 — Extract `env.rs` from `core/heap.rs` · medium, mechanical
+### W2 — Extract `env.rs` from `core/heap.rs` · ✅ done (as `core/heap/env_globals.rs`)
 - **Goal:** give the environment chain its own module.
 - **Do:** move `EnvFrame` and the chain ops (`new_env`, `env_get`, `env_define`,
   `env_set`, `env_root`, plus the `EnvId::GLOBAL` → `runtime.globals` routing) into
   `crates/lisp/src/core/heap.rs` (the env-chain section). Frame *storage* stays in the heap slabs
   (`local.envs`, `runtime.code.envs`); the env-chain code operates over the heap via
   accessors (add `pub(crate)` ones as needed). Declare `pub mod env;` in
-  `core/mod.rs`; update call sites in `eval/mod.rs` and the builtins.
+  `core.rs`; update call sites in `eval.rs` and the builtins.
 - **Why:** `core/heap.rs` bundles ~6 concerns; the env chain was historically its own
   module.
 - **Verify:** `cargo test` green, incl. `tail_calls_do_not_overflow`; behaviour
   identical.
 - **Risk:** medium. **Shares `core/heap.rs` with W3** — do them together or in sequence.
 
-### W3 — Move source metadata out of `Heap` · low–medium
+### W3 — Move source metadata out of `Heap` · ✅ done (as `core/heap/positions.rs`)
 - **Goal:** decouple editor-tooling state from the allocator.
 - **Do:** relocate `form_pos` / `current_file` and their methods (`set_form_pos`,
   `form_pos`, `set_current_file`, `current_file`) out of the `Heap` struct — into a
@@ -347,10 +398,9 @@ W2 and W3 both edit `core/heap.rs`. (W1 and W4 — the `builtins/` split — are
 - **Risk:** low–medium. **Shares `core/heap.rs` with W2.**
 
 ### W4 — Split `builtins.rs` into `builtins/` by domain · ✅ done
-- **Was:** convert the single `crates/lisp/src/builtins/mod.rs` into a directory,
+- **Was:** convert the single `crates/lisp/src/builtins.rs` into a directory,
   one cohesive file per primitive domain, keeping the full `proc/register` table in
   `mod.rs` so every primitive + arity stays visible in one place.
-- **Done:** the split exists on disk as `crates/lisp/src/builtins/` — `mod.rs`
-  (the `proc/register` table + `PRIMITIVE_DOCS` + shared helpers), `numeric.rs`,
-  `sequences.rs`, `io.rs`, `terminal.rs`, `system.rs`, `bytes.rs`. Includes W1
+- **Done:** the split exists on disk as `crates/lisp/src/builtins/`, and since
+  2026-09-11 each domain file also owns its registrations (see the card). Includes W1
   (the dead functions were not carried over).

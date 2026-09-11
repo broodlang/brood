@@ -11,6 +11,66 @@ use crate::error::{error_codes, LispError, LispResult};
 
 use super::numeric::{arg, expect_int, expect_string};
 
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
+    // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
+    // layout / lock file / conflict policy are all Brood (std/tool/package.blsp).
+    primitives.def(
+        "%git-resolve-ref",
+        Arity::exact(2),
+        Sig::new(vec![string, string], string.union(nil_ty)),
+        &["url", "ref"],
+        "Resolve git `ref` (tag/branch/commit) at remote `url` to a commit hash (via `git ls-remote`), or nil if not found. The package manager's ref-pinning mechanism (ADR-037).",
+        git_resolve_ref);
+    primitives.def(
+        "%git-clone",
+        Arity::exact(4),
+        Sig::new(vec![string, string, string, string], kw),
+        &["url", "dest", "ref", "commit"],
+        "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037).",
+        git_clone);
+    // The remote's published tag names, for resolving a git dep's `:version` range
+    // to a concrete tag (ADR-209). List-of-strings, nil when the remote has no tags.
+    primitives.def(
+        "%git-list-tags",
+        Arity::exact(1),
+        Sig::new(vec![string], pair.union(nil_ty)),
+        &["url"],
+        "The tag names published by the remote at `url`, as a list of strings (via `git ls-remote --tags --refs`); nil when the remote has no tags. Backs resolving a git dep's `:version` range to the newest matching tag (ADR-209).",
+        git_list_tags);
+    // Files not committed-clean under a dir (modified/staged/untracked), for a
+    // git-aware `nest format --changed` narrower scope. nil if not a git repo.
+    primitives.def(
+        "%git-changed-files",
+        Arity::exact(1),
+        Sig::new(vec![string], pair.union(nil_ty).union(kw)),
+        &["dir"],
+        "Absolute paths of files NOT committed-clean under `dir` (modified, staged, or untracked — the union `git status --porcelain` reports). Returns a list of strings (nil when the tree is clean — an empty list is nil), or the keyword :not-a-repo when `dir` is not inside a git work tree. Backs `nest format --changed`.",
+        git_changed_files);
+    // Extract a gzip'd tar archive into a dir, stripping N leading path components.
+    // The tarball source-delivery mechanism (ADR-037 tarball deps); shells to `tar`.
+    primitives.def(
+        "%untar-gz",
+        Arity::exact(3),
+        Sig::new(vec![string, string, int], kw),
+        &["archive", "dest", "strip"],
+        "Extract a gzip'd tar `archive` into `dest`, stripping `strip` leading path components (package convention: 1). Shells to `tar`. Returns :ok or throws. The tarball-dep delivery mechanism (ADR-037).",
+        untar_gz);
+    // Delete a cached dependency tree. Bounded to paths under `_deps/` — refuses
+    // anything else, so a mis-pathed `nest update` can't rm the wrong directory.
+    primitives.def(
+        "%rm-rf",
+        Arity::exact(1),
+        Sig::new(vec![string], kw),
+        &["path"],
+        "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037).",
+        rm_rf);
+}
+
 /// Reject a git *operand* (a URL, ref, or commit) that git's own option parser
 /// would read as an OPTION rather than a value.
 ///

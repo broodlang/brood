@@ -27,7 +27,7 @@
 //!   the backstop that guarantees the *host* survives any allocation pattern,
 //!   including a single huge allocation between eval safepoints.
 //! - **Soft limit** ([`soft_limit_hit`]): *not* enforced here — checked at the
-//!   eval safepoint (`eval/mod.rs`), which raises a clean, catchable `LispError`
+//!   eval safepoint (`eval.rs`), which raises a clean, catchable `LispError`
 //!   (`E0043`). Set below the hard limit so a runaway *loop* fails gracefully
 //!   (only the offending process dies / `try`-`catch` can recover) long before
 //!   the hard abort fires. The single-shot giant allocation is the only case

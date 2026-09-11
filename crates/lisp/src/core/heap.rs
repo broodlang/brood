@@ -862,7 +862,7 @@ pub struct Heap {
     next_ic_base: std::cell::Cell<u32>,
     next_gic_base: std::cell::Cell<u32>,
     /// Depth of live tree-walker→VM re-entries (`eval`'s closure application routing a
-    /// VM-eligible callee through `vm_apply` — see `tw_vm_route` in `eval/mod.rs`).
+    /// VM-eligible callee through `vm_apply` — see `tw_vm_route` in `eval.rs`).
     /// Each re-entry is a real Rust frame, so unbounded routing would turn a
     /// mixed-eligibility mutual TAIL loop (VM-eligible `f` ↔ ineligible `g`) — which
     /// today runs flat because the tree-walker absorbs both sides in its `'tail` loop —

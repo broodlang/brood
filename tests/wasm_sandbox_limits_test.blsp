@@ -11,7 +11,7 @@
 ;;     was never charged at all (measured: 851 MB RSS from one `%wasm-load`).
 ;;
 ;; Both are one `%wasm-load` away from any program that runs untrusted wasm, and a
-;; host OOM is a SIGKILL — no Brood `try` can catch it. `crates/lisp/src/wasm.rs`
+;; host OOM is a SIGKILL — no Brood `try` can catch it. `crates/lisp/src/host/wasm.rs`
 ;; therefore runs its own whole-store `GuestBudget`: memories AND tables charged
 ;; against ONE 256 MiB pot. These cases pin that budget's shape, so a future
 ;; refactor back onto per-object limits fails here instead of in production.

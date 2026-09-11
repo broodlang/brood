@@ -22,8 +22,74 @@ use crate::core::heap::Heap;
 use crate::core::value::{EnvId, Value};
 use crate::error::{LispError, LispResult};
 
-use super::io::{bytes_to_value, collect_bytes};
+use super::bytes::{bytes_to_value, collect_bytes};
 use super::numeric::{arg, expect_int};
+
+/// Every primitive this file contributes: name, arity, signature, arglist, docstring.
+pub(super) fn register(primitives: &mut super::Primitives) {
+    use super::signature_types::*;
+    use crate::core::value::Arity;
+    use crate::types::Sig;
+    // Compression prims (the `flate2` crate) — a byte sequence in, `bytes` out, one
+    // encode/decode pair per container format. The public names
+    // (gzip/gunzip, compress/uncompress, zip/unzip) are Brood in std/zlib.blsp.
+    primitives.def(
+        "%gzip",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![any], int, bytes_ty),
+        &["bytes", "level"],
+        "gzip-compress a byte sequence (RFC 1952, the `Content-Encoding: gzip` wire format), returned as a bytes value. Optional `level` is 0-9 (0 = store, 9 = best; default 6). The one gzip primitive; the `zlib/gzip` wrapper is Brood over it in std/zlib.blsp.",
+        gzip);
+    primitives.def(
+        "%gunzip",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        &["bytes"],
+        "Decompress gzip data (RFC 1952) back to a bytes value; errors on data that isn't valid gzip. See `zlib/gunzip`.",
+        gunzip);
+    primitives.def(
+        "%zlib-compress",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![any], int, bytes_ty),
+        &["bytes", "level"],
+        "zlib-compress a byte sequence (RFC 1950 — 2-byte header + Adler-32), returned as bytes. Optional `level` is 0-9 (default 6). See `zlib/compress`.",
+        zlib_compress);
+    primitives.def(
+        "%zlib-uncompress",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        &["bytes"],
+        "Decompress zlib data (RFC 1950) to a bytes value; errors on invalid data. See `zlib/uncompress`.",
+        zlib_uncompress);
+    primitives.def(
+        "%deflate",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![any], int, bytes_ty),
+        &["bytes", "level"],
+        "Raw-DEFLATE-compress a byte sequence (RFC 1951 — no header or checksum), returned as bytes. Optional `level` is 0-9 (default 6). See `zlib/zip`.",
+        deflate);
+    primitives.def(
+        "%inflate",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        &["bytes"],
+        "Decompress raw DEFLATE data (RFC 1951) to a bytes value; errors on invalid data. See `zlib/unzip`.",
+        inflate);
+    primitives.def(
+        "%brotli",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![any], int, bytes_ty),
+        &["bytes", "quality"],
+        "Brotli-compress a byte sequence (RFC 7932, the `Content-Encoding: br` wire format), returned as bytes. Optional `quality` is 0-11 (0 = fastest, 11 = best; default 5). See `zlib/brotli`.",
+        brotli);
+    primitives.def(
+        "%unbrotli",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        &["bytes"],
+        "Decompress brotli data (RFC 7932) to a bytes value; errors on invalid data. See `zlib/unbrotli`.",
+        unbrotli);
+}
 
 /// The compression level for an encoder prim's optional 2nd arg: absent → the
 /// library default (6), else an integer clamped to the valid `0..=9` (0 = store,
