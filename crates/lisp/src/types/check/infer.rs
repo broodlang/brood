@@ -192,16 +192,20 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
         // `vector<E>`. Sound and strictly more precise (a `tuple` is already a
         // subtype of the corresponding uniform `vector<E>` — `Ty::is_subtype`
         // derives that fallback — so every check that passed under the old
-        // widened inference still passes). Any unknown element → the whole
-        // literal falls back to unrefined `vector` (same all-or-nothing
-        // strictness `element_union` already had).
+        // widened inference still passes). An unknown element is `any` in ITS
+        // slot: the literal's arity is a fact whatever its elements are, so
+        // `[row col]` over untyped params is a 2-tuple, which is what a
+        // `(tuple int int)` parameter wants (the unknown slots read gradually,
+        // ADR-325) and what a 3-tuple parameter must reject. Falling back to a
+        // bare `vector` on one unknown element — the all-or-nothing rule
+        // `element_union` has — threw the arity away with the element.
         Value::Vector(id) => {
             let items = heap.vector(id).to_vec();
-            let elems: Option<Vec<Ty>> = items.iter().map(|&it| expr_ty(heap, it, ctx)).collect();
-            Some(match elems {
-                Some(e) => Ty::tuple_of(e),
-                None => Ty::of(Tag::Vector),
-            })
+            let elems: Vec<Ty> = items
+                .iter()
+                .map(|&it| expr_ty(heap, it, ctx).unwrap_or(Ty::ANY))
+                .collect();
+            Some(Ty::tuple_of(elems))
         }
         // A set literal `#{a b …}` — `set<a | b | …>`; `#{}` is `set<never>`, the set
         // with no element type to speak of, which every `set<T>` admits. An element

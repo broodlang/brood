@@ -450,3 +450,29 @@ fn division_with_a_float_operand_is_still_contagious() {
         "the float declaration is correct — {ws:?}"
     );
 }
+
+// A vector literal keeps its arity whatever its elements are: `[row col]` over untyped
+// params is `(tuple any any)`, which a `(tuple int int)` parameter accepts (the unknown
+// slots read gradually) and a 3-tuple parameter rejects. It used to fall back to a bare
+// `vector` on one unknown element, which threw the arity away with it.
+#[test]
+fn a_vector_literal_keeps_its_arity_over_unknown_elements() {
+    assert_eq!(ty_str("(fn (r c) [r c])"), "(any, any) -> (tuple any, any)");
+    let src = "\
+         (defmodule t)\n\
+         (sig at ((tuple int int) -> int))\n\
+         (defn at (p) (first p))\n\
+         (sig at3 ((tuple int int int) -> int))\n\
+         (defn at3 (p) (first p))\n\
+         (defn ok (row col) (at [row col]))\n\
+         (defn bad (row col) (at3 [row col]))";
+    let strict = file_warnings_mode(src, true);
+    assert!(!strict.iter().any(|w| w.contains("t/at:")), "{strict:?}");
+    assert!(
+        strict
+            .iter()
+            .any(|w| w
+                .contains("t/at3: argument 1 expects (tuple int, int, int), got (tuple any, any)")),
+        "{strict:?}"
+    );
+}
