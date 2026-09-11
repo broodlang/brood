@@ -646,7 +646,10 @@ closure and returns, the body never runs (a silent no-op that looks like "spawn
 didn't work"). Same for `(spawn name expr)`.
 
 Each process has its own heap; messages are **deep-copied** on `send`. `(self)`
-is the current process's pid. **Closures can be sent** — a `send`-ed function
+is the current process's pid. A `send` target is a pid, a **registered name** —
+`(proc/register :editor (self))` then `(send :editor msg)` from anywhere, Erlang's
+`Name ! Msg`; an unregistered name drops the message and warns once, never raises —
+or a `{:name :node}` address for a peer node. **Closures can be sent** — a `send`-ed function
 carries its code and its captured locals (deep-copied with it); only its *free
 global* references are late-bound on the receiver. So builtins/prelude names
 always resolve, and any `def`/`defn` the receiving image also has resolves
