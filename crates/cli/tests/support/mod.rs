@@ -168,10 +168,24 @@ pub fn dies_with_parent(cmd: &mut Command) {
         // `getppid` and `_exit` all are; nothing here allocates or takes a lock.
         unsafe {
             cmd.pre_exec(move || {
+                // `prctl`/`PR_SET_PDEATHSIG` is LINUX-ONLY — it does not exist in Apple's
+                // libc — so the `cfg(unix)` above is too wide for this one line and the
+                // file did not compile on macOS at all. That cost the `macos-check` job
+                // its `--all-targets`: the job was written, reddened on this, and narrowed.
+                // Gated rather than replaced, because there is no async-signal-safe BSD
+                // equivalent to reach for here (kqueue's `EVFILT_PROC` is a parent-side
+                // watch, not a child-side death signal).
+                #[cfg(target_os = "linux")]
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                 // Close the one hole: if the parent died in the window between the fork and
                 // that `prctl`, the signal was already missed and will never arrive. Then we
                 // are the orphan KI-29 is about, so leave instead.
+                //
+                // On a non-Linux unix this check is the WHOLE guarantee rather than the
+                // backstop: it catches a parent that died before the exec, and nothing
+                // catches one that dies after. Net 1 (`BroodChild`'s own `Drop` kill) still
+                // applies there, and no gate runs this suite off Linux today — so this is
+                // the honest reading, not a regression to fix blind.
                 if libc::getppid() != parent as libc::pid_t {
                     libc::_exit(0);
                 }
