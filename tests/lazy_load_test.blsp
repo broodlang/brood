@@ -9,6 +9,7 @@
 (defmodule lazy-load-test (:use test))
 
 (purge-stale-temp "lazyload-")
+(purge-stale-temp "loadpath-")
 
 (def- *dir* (temp-dir "lazyload-"))
 (file/mkdir *dir*)
