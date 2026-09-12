@@ -34,7 +34,11 @@ client shares. Run `(run)` as the child's whole program; it prints
 `{:ready true}` and then answers one `pr-str`ed request map per stdin line —
 `{:id 7 :src \"(+ 1 2)\" :timeout-ms 2000}` — with one reply line:
 `{:id 7 :ok true :value \"3\" :output \"\" :ms 0}` (or `:ok false` with `:error`,
-or `:timeout true`). A request may carry `:trace [\"fn-name\" …]`: those globals
+or `:timeout true`). A request carrying `:check true` asks the CHECKER instead of the
+evaluator and is answered `{:id 7 :ok true :diagnostics ({:line :col :message} …) :ms}`,
+the list whole — an editor's buffer diagnostics, run in the child's image and project
+so nothing of that project is loaded into the editor. A request may carry `:trace
+[\"fn-name\" …]`: those globals
 are boundary-traced (`debug/trace-fn`) for the duration of the request — installed
 as soon as each name becomes a function, so a `defn` and its call in one request
 still trace — and the reply gains `:spy [{:kind :fn :args :value} …]` (bounded).
@@ -65,11 +69,20 @@ server default, `trace` an optional vector of fn-name strings to boundary-trace 
             {:id id :src src :timeout-ms timeout-ms}
             {:id id :src src :timeout-ms timeout-ms :trace trace})))
 
+(defn evsrv-encode-check (id src timeout-ms)
+  "One CHECK request line: `{:id :src :timeout-ms :check true}` — the server answers with
+the advisory type-checker's verdict on `src` (`reflect/check-string-structured`), as
+`{:id :ok true :diagnostics ({:line :col :message} …) :ms}`, the list whole rather than
+display-bounded. What an editor sends for a buffer's diagnostics: the check runs in the
+child — its image, its project — and nothing of that project is loaded into the editor."
+  (pr-str {:id id :src src :timeout-ms timeout-ms :check true}))
+
 (defn evsrv-decode-request (line)
   "The request map in `line`, or nil when the line isn't one (garbage, blank, a
 stray print). A request must carry an int `:id` and a string `:src`; a present
 `:timeout-ms` must be an int (a malformed field is a nil, never a raise later —
-one bad line must not kill the server) and a present `:trace` a vector."
+one bad line must not kill the server), a present `:trace` a vector, and a present
+`:check` a boolean."
   ;; check-allow :discarded-catch — a line that is not the expected map, or a not-yet-defined trace target, is skipped
   (check-allow :discarded-catch
     (try
@@ -78,7 +91,8 @@ one bad line must not kill the server) and a present `:trace` a vector."
               (int? (get v :id))
               (string? (get v :src))
               (let (t (get v :timeout-ms)) (or (nil? t) (int? t)))
-              (let (tr (get v :trace)) (or (nil? tr) (vector? tr) (= tr :all))))
+              (let (tr (get v :trace)) (or (nil? tr) (vector? tr) (= tr :all)))
+              (let (c (get v :check)) (or (nil? c) (bool? c))))
           v
           nil))
       (catch _ nil))))
@@ -296,6 +310,15 @@ image and so took wrappers away from requests that were still running (KI-107)."
     (eval-server-try-traces names acc)
     value))
 
+(defn check-structured (src)
+  "Advisory type-check `src` (the `:check` request's core): `{:ok true :diagnostics
+(…) :ms}` with the checker's `{:line :col :message}` maps whole — `()` for a source that
+does not parse — or `:ok false` with `:error` when the checker itself raised. Never throws."
+  (let (t0 (os/now))
+    (try
+      {:ok true :diagnostics (or (reflect/check-string-structured src) ()) :ms (- (os/now) t0)}
+      (catch e {:ok false :error (error-message e) :ms (- (os/now) t0)}))))
+
 (defn eval-capturing (src &optional trace-names)
   "Evaluate source string `src` (all its forms, in order) with stdout captured;
 return `{:ok true :value <pr-str-bounded> :output <string> :ms <int>}` or
@@ -408,9 +431,12 @@ process died without answering."
         ;; request later.
         session-ctx (%compile-context)
         _ (eval-server-flush-stale)
+        ;; a `:check` request asks the checker, not the evaluator: the same child,
+        ;; deadline and kill, a structured reply
+        work (if (get req :check) (fn () (check-structured src)) (fn () (eval-capturing src trace)))
         child (spawn (do
                        (%restore-compile-context session-ctx)
-                       (send me [:evsrv-result id (eval-capturing src trace) (%compile-context)])))
+                       (send me [:evsrv-result id (work) (%compile-context)])))
         ref (monitor child))
     (receive
       ([:evsrv-result ^id r ctx]

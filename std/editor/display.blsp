@@ -208,11 +208,25 @@ no `:cursor` contribute nothing."
 ;; selection pill live here, so every overlay elevates identically — surfaces + hairlines,
 ;; no shadow (dark-UI chrome; see the editor's docs/ui-chrome.md).
 
+(defn- clamp-cell (v hi)
+  "`v` clamped to `0..hi` — a screen cell coordinate, so an integer in and an integer out.
+
+`math/max`/`math/min` would say this more briefly, and did. They are polymorphic over
+`ordered` (they compare strings just as happily), so their result types as `ordered` and the
+integer-ness is lost the moment it leaves here — `(+ mr i)` in the caller below then had a
+non-number where a number belongs. Written as comparisons the type follows the values."
+  (cond
+    (< v 0) 0
+    (> v hi) hi
+    else v))
+
+(sig clamp-cell (number number -> number))
+
 (defn card-rect (row col w h cols rows)
   "The clamped top-left `[mr mc]` of a `w`×`h`-cell card anchored at `(row, col)`: shifted
 so the whole card stays on the `cols`×`rows` screen. Shared by a card's renderer and any
 click/hover hit-test, so a card near a screen edge stays interactive exactly where drawn."
-  [(math/max 0 (math/min (- rows h) row)) (math/max 0 (math/min (- cols w) col))])
+  [(clamp-cell row (- rows h)) (clamp-cell col (- cols w))])
 
 (defn card-surface (row col w h face &optional (gui? false) (opts {}))
   "Render ops for a floating card's **surface** — the raised panel other overlays sit on:

@@ -81,6 +81,42 @@ pub fn take_skip_next_edge() -> bool {
     SKIP_NEXT_EDGE.with(|skip| skip.replace(false))
 }
 
+/// Modules a require has already failed to FIND, with nothing loaded since — see
+/// [`ensure_required`], which is the only reader. Process-wide rather than per-process
+/// because module resolution reads the filesystem and the load path, both of which are
+/// too; a `RwLock` because the common access is the read on the miss path.
+static ABSENT_MODULES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<Symbol>>> =
+    std::sync::OnceLock::new();
+
+fn absent_modules() -> &'static std::sync::RwLock<std::collections::HashSet<Symbol>> {
+    ABSENT_MODULES.get_or_init(Default::default)
+}
+
+fn module_known_absent(module: Symbol) -> bool {
+    absent_modules()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&module)
+}
+
+fn note_module_absent(module: Symbol) {
+    absent_modules()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(module);
+}
+
+/// Forget every recorded absence. Called when the inputs to module resolution change: a
+/// successful load (in [`ensure_required`]) and a load-path change (`reflect/set-load-path`).
+/// Clearing wholesale rather than per-module is deliberate — a new load path can make any
+/// number of previously-absent modules resolvable, and the set is small.
+pub fn clear_absent_modules() {
+    absent_modules()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
 /// The module a qualified reference `s` should auto-require, if any. `None` for a bare
 /// name, a root-escape (`/foo`) or bare `/`, or an alias prefix (`m/…` from
 /// `(require … :as m)` — its target was loaded by that require). Otherwise the module
@@ -345,6 +381,22 @@ fn ensure_required(heap: &mut Heap, env: EnvId, module: Symbol) -> LispResult {
     let Some(loader) = heap.env_get(EnvId::GLOBAL, require_one) else {
         return Ok(Value::nil());
     };
+    // A module we have already failed to FIND, with nothing loaded since: skip it. Resolving
+    // a module name is a filesystem search, and the miss path runs it on every lookup of an
+    // unbound qualified name — so `(mod/nope)` in a loop, which is what error-testing code
+    // is, pays that search per iteration. Measured under the tree-walker, 2000 lookups:
+    // 1.22 s for an absent module against 0.07 s for an unbound name in a module that IS
+    // loaded (there `require-one` short-circuits on `*features*`) and 0.12 s for an unbound
+    // bare name. That 10x is what turned the tree-walker suite job red.
+    //
+    // ADR-335 declined a negative memo because "a module absent now may exist later", which
+    // is true and is why this one is not permanent: any successful load clears it (below),
+    // as does a load-path change ([`clear_absent_modules`], called from `set-load-path`).
+    // What it removes is only the repeat of a search whose inputs have not changed since it
+    // failed.
+    if module_known_absent(module) {
+        return Ok(Value::nil());
+    }
     let root = heap.env_root(env);
     // An INFERRED load records no require-edge (ADR-335): the edges exist so a module
     // materialised from an image gets the modules its source load would have pulled in, and
@@ -356,13 +408,21 @@ fn ensure_required(heap: &mut Heap, env: EnvId, module: Symbol) -> LispResult {
     let loaded = crate::eval::compile::apply_engine(heap, loader, &[Value::symbol(module)], root);
     SKIP_NEXT_EDGE.with(|skip| skip.set(false)); // not consumed (no loader ran) — clear it
     match loaded {
-        Ok(value) => Ok(value),
+        Ok(value) => {
+            // Something loaded, so the module set changed: a name that could not be found
+            // before may be reachable now (the loaded module may add to the load path).
+            clear_absent_modules();
+            Ok(value)
+        }
         // Best-effort: inferring a require must not turn a reference into a compile error.
         // A module that cannot be found falls through to the normal handling — an in-file
         // module the checker knows without loading, or a genuine typo that surfaces as an
         // ordinary `unbound symbol: mod/name`. A real error *inside* a found module still
         // propagates, so a broken module is never silently hidden behind "unbound".
-        Err(error) if error.message.contains("cannot find module") => Ok(Value::nil()),
+        Err(error) if error.message.contains("cannot find module") => {
+            note_module_absent(module);
+            Ok(Value::nil())
+        }
         // A transitive cycle: a module we auto-require refers back (qualified) into one
         // that is still loading. The reference is being satisfied by that in-progress
         // load itself, so inferring a re-require here must not become a hard error —

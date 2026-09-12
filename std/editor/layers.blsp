@@ -343,7 +343,11 @@ shebang. The version suffix is kept (`python3`), a trailing newline and argument
                                                          (string/length line)))
                               " ")
                   (fn (w) (= w "")))
-          prog (if (empty? words) nil (path/basename (first words)))
+          ;; `string?` on the word itself, not `empty?` on the list: both reject the same
+          ;; input, but only this one narrows `(first words)` from `nil | string` for the
+          ;; checker — `path/basename` takes a string.
+          prog (let (first-word (first words))
+                 (if (string? first-word) (path/basename first-word) nil))
           name (if (and (= prog "env") (> (count words) 1))
                  ;; `env -S bash`: skip env's own flags
                  (seq/find (rest words) (fn (w) (not (string/starts-with? w "-"))))
