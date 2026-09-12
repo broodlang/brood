@@ -378,6 +378,17 @@
   (test "split then join round-trips"
     (assert= (string/join (string/split "x,y,z" ",") ",") "x,y,z")))
 
+(describe "fields (split, trimmed, empties dropped)"
+  (test "doubled and stray separators produce no empty pieces"
+    (assert= (string/fields " 1  2 ") (list "1" "2")))
+  (test "each piece is trimmed, on any separator"
+    (assert= (string/fields "a , b,," ",") (list "a" "b")))
+  (test "only separators yields nil — the one way it differs from split's contract"
+    (assert= (string/fields "   ") nil)
+    (assert= (string/split "   ") (list "" "" "" "")))
+  (test "a piece that is only whitespace is empty after trimming, so it is dropped"
+    (assert= (string/fields "a,  ,b" ",") (list "a" "b"))))
+
 (describe "replace"
   (test "replaces every occurrence" (assert= (string/replace "a-b-c" "-" "+") "a+b+c"))
   (test "multi-char old / new"

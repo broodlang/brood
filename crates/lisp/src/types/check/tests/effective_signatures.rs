@@ -89,7 +89,10 @@ fn a_named_same_file_callback_flows_its_result_under_the_combinators_inputs() {
          (defn calc (input) (first (reduce (string/split input \" \") '() token)))",
     );
     let calc = sigs.iter().find(|s| s.0 == "calc").expect("calc");
-    assert_eq!(calc.1, "(string) -> nil | number | failure", "{sigs:?}");
+    // No `nil`: `string/split` never returns an empty list (`""` splits to `("")`), so the
+    // fold ran its step at least once and `first` has an element — `run` above keeps its
+    // `nil` because a `seqable` may be empty.
+    assert_eq!(calc.1, "(string) -> number | failure", "{sigs:?}");
     // `map` with a named callback flows its return the same way.
     let sigs = signatures(
         "(defn g (v) (string/->number v))
@@ -114,7 +117,10 @@ fn an_inline_pattern_clause_callback_flows_its_result_too() {
                  ((acc val) (conj acc (string/->number val)))))))",
     );
     let calc = sigs.iter().find(|s| s.0 == "calc").expect("calc");
-    assert_eq!(calc.1, "(string) -> nil | number | failure", "{sigs:?}");
+    // No `nil`: `string/split` never returns an empty list (`""` splits to `("")`), so the
+    // fold ran its step at least once and `first` has an element — `run` above keeps its
+    // `nil` because a `seqable` may be empty.
+    assert_eq!(calc.1, "(string) -> number | failure", "{sigs:?}");
     // A single-clause literal with a destructuring parameter lowers the same way.
     let sigs = signatures("(defn firsts (pairs) (map pairs (fn ([k v]) k)))");
     let firsts = sigs.iter().find(|s| s.0 == "firsts").expect("firsts");

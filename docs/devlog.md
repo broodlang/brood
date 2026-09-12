@@ -12516,3 +12516,24 @@ each a gate doing its job, none a behavioural fault:
 - **`make smoke-bedit ARGS=--bump`** moves `BEDIT_REF` to bedit's pushed HEAD after a green
   run, and the script now says when the checkout is not the pinned commit. The rename-wave
   checklist in CLAUDE.md ends with it.
+
+## 2026-09-12 — A fold over a non-empty sequence ran its step; and `string/fields`
+
+An inlay hint in bedit read `calc : (string -> (or failure nil number))` for an RPN
+reducer — `(first (reduce (string/split expr) '() …))` — and the question "when is this
+nil?" had the answer "never": `string/split` always returns at least one piece (`""` splits
+to `("")`) and its signature already says so (`list<string>` is the `pair` tag alone). The
+`nil` was the fold's: `reduce`/`fold` joined the empty-input case (`init`) into the result
+regardless of the collection. Over a PROVABLY non-empty sequence the step runs at least
+once, so the result is a step result and `init` stays out (`infer.rs`); `first` of it then
+needs no `nil`. Two pins that had recorded the imprecise answer moved to the precise one
+(`effective_signatures.rs`, `introspection_test.blsp`); a maybe-empty collection
+(`filter`'s `nil | list<T>`) keeps the `nil`, and the new guard asserts both. 755/755.
+
+The same question asked for split-with-trim / drop-empties flags. The type system is the
+argument against flags: `split` never returns an empty list and the checker leans on
+that; a `:drop-empty` flag would make the result possibly-nil for every call, or lie for
+some. So it is a second function with its own honest signature — `string/fields`
+(`(string &optional string -> (or nil (list string)))`): split, trim each piece, drop the
+empties. Brood, four lines, and it replaced the same idiom inside `string/fill`; the
+five copies in `std/path.blsp` filter empties without trimming and are left as they are.

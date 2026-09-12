@@ -361,10 +361,12 @@
   ;; Rust tests pin — and it read `(string -> any)` while the named spelling was precise,
   ;; because the literal is lowered to a variadic `match*` lambda before call sites are
   ;; typed. The surface pre-pass now records the literal's clauses by printed head list
-  ;; and `clause_lambda_ret` recovers them (found on an RPN reduce, 2026-08-31).
+  ;; and `clause_lambda_ret` recovers them (found on an RPN reduce, 2026-08-31). No `nil`
+  ;; in the answer: `string/split` never yields an empty list, so the fold stepped at
+  ;; least once and `first` has an element (2026-09-12).
   (test "an inline pattern-clause reduce callback keeps the named spelling's precision"
     (let (hit (first (reflect/source-signatures "(defn calc (expr) (-> expr (string/split) (reduce '() (fn (((x y & acc) \"+\") (conj acc (+ x y))) ((acc val) (conj acc (string/->number val))))) (first)))")))
-      (assert= (:sig hit) "(string -> (or failure nil number))")))
+      (assert= (:sig hit) "(string -> (or failure number))")))
 
   (test "a declared sig is reported as declared, and wins"
     (let (hit (first (reflect/source-signatures "(sig ixs-d (int -> int))\n(defn ixs-d (x) x)")))

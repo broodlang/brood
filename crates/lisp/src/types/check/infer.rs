@@ -1895,7 +1895,14 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             }
             _ => return None,
         };
-        let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
+        let coll_ty = expr_ty(heap, coll, ctx);
+        let elem = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        // Over a PROVABLY non-empty sequence (`list<T>` is the `pair` tag alone — the empty
+        // list is `nil`) the step runs at least once, so the result is a STEP result and
+        // the empty-input case (`init`) does not join in. `(first (reduce (string/split s)
+        // '() …))` read `nil | string` for this reason alone: `string/split` never returns
+        // an empty list and says so, but the fold put `init`'s `nil` back.
+        let ran_at_least_once = coll_ty.as_ref().is_some_and(provably_non_empty);
         // A numeric operator folded over a numeric sequence stays inside the operator's
         // closure: by induction the accumulator is `init` at first and `(op acc x)` after,
         // so with `init` and every element in a closed set the result is in it too —
@@ -1922,13 +1929,14 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                     callback_ret(heap, f, &[Some(acc.clone()), Some(e.clone())], ctx)
                 {
                     if again.is_subtype(&acc) {
-                        return Some(acc);
+                        return Some(if ran_at_least_once { again } else { acc });
                     }
                 }
             }
         }
         let b = callback_ret(heap, f, &[Some(Ty::ANY), elem], ctx);
         return match (init_ty, b) {
+            (Some(_), Some(b)) if ran_at_least_once => Some(b),
             (Some(i), Some(b)) => Some(i.union(b)),
             _ => None,
         };

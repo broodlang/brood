@@ -463,3 +463,24 @@ fn the_sequence_accessors_stay_silent_on_what_actually_works() {
         "no seqable warning should fire on valid accessor uses, got {ws:?}"
     );
 }
+
+// ---- a fold over a provably non-empty sequence ran its step at least once ----
+// `(first (reduce (string/split s) '() (fn (acc x) (conj acc x))))` read as `nil | string`:
+// the reduce joined the empty-input case (`init`, here `nil`) into its result, so `first`
+// had to allow the empty list — though `string/split` never returns one (`""` splits to
+// `("")`), which `list<string>` (the `pair` tag alone) already states.
+
+#[test]
+fn a_reduce_over_a_non_empty_sequence_is_its_step_result_not_the_init() {
+    let sigs = signatures(
+        "(defn g (s) (first (reduce (string/split s) '() (fn (acc x) (conj acc x)))))",
+    );
+    let (_, sig, _) = sigs.iter().find(|(n, _, _)| n == "g").unwrap_or_else(|| panic!("{sigs:?}"));
+    assert!(!sig.contains("nil"), "no empty case for a split's fold: {sig}");
+    // …and over a sequence that MAY be empty, the init stays in — `nil` is honest there.
+    let sigs = signatures(
+        "(defn h () (first (reduce (filter (list 1 2) int?) '() (fn (acc x) (conj acc x)))))",
+    );
+    let (_, sig, _) = sigs.iter().find(|(n, _, _)| n == "h").unwrap_or_else(|| panic!("{sigs:?}"));
+    assert!(sig.contains("nil"), "a maybe-empty fold keeps the empty case: {sig}");
+}

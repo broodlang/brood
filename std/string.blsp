@@ -262,6 +262,19 @@ Prepending to `done` is O(1) (the caller reverses once), so a whole fill is O(wo
       (<= (+ (string/length cur) 1 (string/length word)) width) [(str cur " " word) done]
       else [word (cons cur done)])))
 
+(defn fields (s &optional (sep " "))
+  "The non-empty, whitespace-trimmed pieces of `s` split on `sep` (default a single
+space) — the tokens, where `split` is the exact partition. Stray and doubled separators
+therefore vanish instead of producing empty pieces, and the result MAY be empty (nil),
+which is why this is its own function rather than a flag on `split`: `split` always
+returns at least one piece, and the checker leans on that.
+
+    (string/fields \" 1  2 \")   → (\"1\" \"2\")
+    (string/fields \"a , b,,\" \",\")   → (\"a\" \"b\")
+    (string/fields \"   \")   → nil"
+  (filter (map (split s sep) trim) (fn (piece) (not (= piece "")))))
+(sig fields (string &optional string -> (or nil (list string))))
+
 (defn fill (s width)
   "Greedily wrap `s` to `width` columns: collapse every run of whitespace (newlines, tabs,
 spaces) to a single space, then re-break on word boundaries so each line is as full as it
@@ -271,7 +284,7 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
 
     (string/fill \"abc\" 10)   → \"abc\"   ; already fits, so unchanged"
   (let (flat (replace (replace s "\n" " ") "\t" " ")
-        words (filter (string/split flat " ") (fn (w) (not (= w ""))))
+        words (fields flat)
         [cur done] (fold words ["" ()] (fn (acc w) (fill-pack acc w width))))
     (join (reverse (if (= cur "") done (cons cur done))) "\n")))
 (sig fill (string any -> string))

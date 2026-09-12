@@ -564,6 +564,7 @@
    "string/span" :strings
    "string/span-until" :strings
    "string/split" :strings
+   "string/fields" :strings
    "string?" :predicates
    "string/substring" :strings
    "string/substring-graphemes" :strings
