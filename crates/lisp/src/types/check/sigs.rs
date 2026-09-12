@@ -200,8 +200,13 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // end, so both of its arities survive the change unchanged in meaning.
     let cb1 = Ty::arrow(Sig::new(vec![any], any));
     let cb2 = Ty::arrow(Sig::new(vec![any, any], any));
+    // The result is a LIST, exactly: both build with `cons` over whatever they walk —
+    // a vector, a set, a map, a seq-view — and answer `nil` for nothing. `seqable` was
+    // honest and loose, and the looseness cost every consumer with a narrower domain:
+    // `(sort (map …))` read as `seqable` into `nil | pair | vector | set` under
+    // `--strict`, at every one of the six such sites in bedit.
     for n in ["map", "filter"] {
-        put(n, Sig::new(vec![seq, cb1.clone()], seq));
+        put(n, Sig::new(vec![seq, cb1.clone()], Ty::LIST));
     }
     put("reduce", Sig::new(vec![seq, any, cb2.clone()], any));
     put("fold", Sig::new(vec![seq, any, cb2], any));
@@ -214,13 +219,15 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // (drop can return its input unchanged, so even "list" would be wrong);
     // precise results for the inferable ones come from `infer.rs`'s arms, which
     // run independently of these domains.
-    for n in ["mapcat", "each", "take-while", "drop-while"] {
+    for n in ["each", "take-while", "drop-while"] {
         put(n, Sig::new(vec![seq, cb1.clone()], any));
     }
-    // `seq/` — qualified, like `seq/index-where` above (a bare key would suppress
+    // `mapcat`, `seq/keep` and `seq/remove` build a fresh list like `map` does
+    // (`append` / `cons`; `nil` for nothing) — so `list`, for the reason given there.
+    // `seq/` is qualified, like `seq/index-where` above (a bare key would suppress
     // the unbound lint on names that no longer exist bare, ADR-227).
-    for n in ["seq/keep", "seq/remove"] {
-        put(n, Sig::new(vec![seq, cb1.clone()], any));
+    for n in ["mapcat", "seq/keep", "seq/remove"] {
+        put(n, Sig::new(vec![seq, cb1.clone()], Ty::LIST));
     }
     // The count is `number`, not `int`: the merely-wider residue (a provably-int
     // value typed `number` — observer's `start`, string.blsp's `(inc lim)`) is the
