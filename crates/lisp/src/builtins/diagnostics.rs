@@ -151,6 +151,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         gc_stats);
     #[cfg(feature = "dev-tools")]
     primitives.def(
+        "%native-tier?",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        &[],
+        "True when this run may reach the NATIVE tier (ADR-222): the binary carries the JIT and the ceiling is not lowered by `BROOD_TIER`/`BROOD_NO_JIT`. The sibling of `%tree-walker?`, for a test whose assertion is about what happens at a tiering election — such a test has nothing to assert when no arm can tier. Asks the runtime, not the environment, for the same reason.",
+        native_tier_p);
+    #[cfg(feature = "dev-tools")]
+    primitives.def(
         "%tree-walker?",
         Arity::exact(0),
         Sig::nullary(bool_ty),
@@ -540,6 +548,17 @@ pub(super) fn tree_walker_p(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResu
         crate::eval::compile::Tier::TreeWalk
     );
     Ok(Value::boolean(is_tw))
+}
+
+/// `(%native-tier?)` — see the registration.
+#[cfg(feature = "dev-tools")]
+pub(super) fn native_tier_p(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    let native = cfg!(feature = "jit")
+        && matches!(
+            crate::eval::compile::tier_ceiling(),
+            crate::eval::compile::Tier::Native
+        );
+    Ok(Value::boolean(native))
 }
 
 // Registered only under `dev-tools` (mod.rs's DEV block, whose comment says the fn defs

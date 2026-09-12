@@ -21641,12 +21641,20 @@ is a `failure` and `0x1F` in source is `31`, and neither can be mistaken for the
   `NodeKind::Error`, so the LSP flagged `99999999999999999999` as malformed while the
   reader read it as a bignum and the program ran. It is `NodeKind::Int` now, and
   `RadixOverflow` maps the same way.
-- **The two highlighters do not see it yet.** `std/editor/highlight.blsp`'s `hl-number?`
-  decides by `string/->number`, which by design refuses the prefix — so bedit paints
-  `0xFF` as a symbol. That gap is not new: the same test already misses `1/2` and `1.5M`,
-  since neither is data the function reads. The tree-sitter scanner in `brood-treesitter`
-  (`looks_number`) has the same shape. Both want the reader's own classification rather
-  than a third hand-written approximation of it, which is a separate change.
+- **The highlighters had their own idea of a number — three of them.** `scan-tokens`
+  (the token kind the fontifier paints) tested `str::parse::<i64>() || parse::<f64>()`;
+  `std/editor/highlight.blsp`'s `hl-number?` (is this callee data?) asked
+  `string/->number`, which by design refuses the prefix; and `nest grammar`'s TextMate
+  rule was the regex `-?[0-9]+(\.[0-9]+)?`. None saw `0xFF`, and none had seen `1/2` or
+  `1.50M` either — the gap was as old as those literals. Fixed the same day
+  (`2026-09-12`, the follow-up commit): `scan_atom_kind` is a map over `atom::classify`,
+  `hl-number?` asks `scan-tokens`, and the TextMate rule is `grammar-number`, a regex
+  that mirrors the classifier by hand because a TextMate rule can be nothing else — held
+  to the reader's own verdict per spelling in `tests/grammar_test.blsp`. A digit-led
+  token the reader *refuses* (`0xZZ`, `1e`) colours as a number: number-shaped and
+  malformed is how every editor treats a bad literal, and the LSP carries the error. The
+  tree-sitter scanner in `brood-treesitter` (`looks_number`) is the one copy left, in
+  its own repo.
 - The freeze list (ADR-170) drops `0x1F` from its digit-led row and records this as the
   second relaxation the freeze allows.
 
@@ -21785,6 +21793,31 @@ else**.
    effects — an `impl` registration, a `def-face`, a top-level side effect — before its first
    call into the module says so with one of them. `(require-one 'mod)` remains the
    computed-name form.
+
+7. **`%isolate` and the runner: the one thing this interacts with, found as a flake the same
+   day (KI-131).** `%isolate` snapshots the global table and swaps it back, and is sound
+   only while nothing else mutates globals — which the test runner ensures by quiescing the
+   file's workers before an `:isolated` unit. Lazy loading adds a mutator the quiesce
+   cannot see: a *module load on first use*, by whichever process first needs the module.
+   When that first user was the isolated unit itself, the module loaded inside its snapshot
+   and was rolled back with it — while the runner's driver, running beside the unit, had
+   meanwhile started depending on it. `process 2 died: unbound symbol: math/max` in
+   `test/collect-loop`, one run in three of any file with an `:isolated` unit; the same
+   with the JIT off. Before this ADR the invariant held by accident: every std module the
+   runner could touch was loaded before the first isolate opened, because the runner's
+   references loaded at its load. It is now declared: `(:load a b …)`, a fourth `defmodule`
+   header clause that loads modules at the file's load and refers nothing — the explicit
+   eager request in its pure form — and `std/tool/test.blsp` `:load`s its whole dependency
+   closure (the sixteen modules a source load of it pulls in).
+   `crates/cli/tests/test_framework_closure.rs` measures that closure (a source load under
+   the eager policy) and fails naming any module the clause lacks. Separately, `%isolate`'s
+   restore now waits for any other process's in-flight load to finish before the swap
+   (`wait_for_inflight_loads`, on the `*features-loading*` claim, bounded like the reap): a
+   load straddling the swap would keep its `*features*` record and lose its bindings —
+   KI-89's asymmetry, now reachable from any bystander, not only an unquiesced straggler.
+   The general rule for a program that uses `%isolate` — there is one, the runner —
+   is that nothing outside the isolate may first-use a module while it is open; `:load` is
+   how a module states that about itself.
 
 **What a program can observe** (the honest list; each is a deliberate consequence, not a
 gap): `(bound? 'json/parse)` and `*features*` are false before the first use of `json` —

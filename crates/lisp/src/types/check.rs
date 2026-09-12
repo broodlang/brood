@@ -841,7 +841,7 @@ fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
 /// reached by any of these is genuinely required. Kept separate from
 /// [`extract_use_module_names`], whose `:use`-only view backs the unused-import lint.
 fn extract_import_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
-    extract_clause_modules(heap, forms, &["use", "use-internals", "alias"])
+    extract_clause_modules(heap, forms, &["use", "use-internals", "alias", "load"])
 }
 
 /// The module names listed by any header clause whose keyword is in `keywords`
@@ -865,7 +865,16 @@ fn extract_clause_modules(heap: &Heap, forms: &[Value], keywords: &[&str]) -> Ve
             if let Some(items) = list_items(heap, clause) {
                 if let Some(Value::Keyword(kw_sym)) = items.first() {
                     if keywords.iter().any(|k| value::symbol_is(*kw_sym, k)) {
-                        if let Some(&Value::Sym(mod_sym)) = items.get(1) {
+                        if value::symbol_is(*kw_sym, "load") {
+                            // `(:load a b …)` names several modules (ADR-335); every symbol
+                            // after the keyword is one. The other clauses take one module
+                            // and may carry a symbol that is NOT a module (`:alias m :as short`).
+                            for item in items.iter().skip(1) {
+                                if let Value::Sym(mod_sym) = item {
+                                    result.push(value::symbol_name(*mod_sym).to_string());
+                                }
+                            }
+                        } else if let Some(&Value::Sym(mod_sym)) = items.get(1) {
                             result.push(value::symbol_name(mod_sym).to_string());
                         }
                     }

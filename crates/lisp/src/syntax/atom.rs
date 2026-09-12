@@ -294,15 +294,15 @@ fn classify_radix(token: &str) -> AtomKind {
 /// the reader for the same reason [`reserved_numeric_hint`] does (ADR-025).
 pub fn radix_invalid_hint(token: &str) -> &'static str {
     match radix_parts(token) {
-        Some((16, digits, _)) if digits.is_empty() => {
+        Some((16, "", _)) => {
             "`0x` needs at least one hex digit — write `0x1F`, or `0` for zero."
         }
         Some((16, _, _)) => "a hex literal holds only `0`–`9`, `a`–`f`, `A`–`F`.",
-        Some((2, digits, _)) if digits.is_empty() => {
+        Some((2, "", _)) => {
             "`0b` needs at least one binary digit — write `0b1010`, or `0` for zero."
         }
         Some((2, _, _)) => "a binary literal holds only `0` and `1`.",
-        Some((8, digits, _)) if digits.is_empty() => {
+        Some((8, "", _)) => {
             "`0o` needs at least one octal digit — write `0o17`, or `0` for zero."
         }
         Some((8, _, _)) => "an octal literal holds only `0`–`7`.",

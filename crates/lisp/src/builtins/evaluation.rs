@@ -674,6 +674,72 @@ pub(super) fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
     })
 }
 
+
+/// Hold the wholesale globals swap until no OTHER process has a module load in flight.
+///
+/// A load is `require-one`'s claim → define every binding → `provide` (+ release), and only
+/// the registry writes in it are serialised against the swap (`registry_lock`, KI-89). A
+/// swap landing between the defines and the `provide` discards the bindings and keeps the
+/// feature record — KI-89's asymmetry: `*features*` says `math` is loaded, `math/max` is
+/// unbound, and stays so for every process, because `require-one` trusts the record.
+///
+/// Before ADR-335 that window was reachable only from a straggler the runner had failed to
+/// quiesce; with modules loading on FIRST USE any bystander can be mid-load at any time.
+///
+/// `*features-loading*` marks exactly that window (set at the claim, cleared after the
+/// `provide`), so wait for it to empty. A load that STARTS after the swap reads the restored
+/// table and is consistent; one that finishes before it is wiped whole — bindings and record
+/// together. Our own claims cannot be present: this process's loads are synchronous and the
+/// thunk has returned. Bounded, like the reap above, so a loader that has wedged cannot hang
+/// the run; the same yield-then-micro-sleep shape, for the same reason (a thread sleep on a
+/// green worker is acceptable here, the loader retires on another worker).
+///
+/// What this does NOT cover, and what does: a module that a bystander legitimately
+/// depends on being loaded INSIDE the window — by the isolated unit itself, say — is wiped
+/// whole at the swap, and the bystander's next use finds it unbound. That is how the test
+/// runner's driver died on `math/max` (one run in three of any file with an `:isolated`
+/// unit): `math` was first used by an isolated unit, the driver's collect loop started
+/// relying on it, the unit's restore removed it. The runner therefore `(:load …)`s its
+/// entire dependency closure in `std/tool/test.blsp`'s header, before any isolate opens,
+/// pinned by `crates/cli/tests/test_framework_closure.rs`.
+fn wait_for_inflight_loads(heap: &Heap) {
+    let marker = crate::core::value::intern("*features-loading*");
+    // A claim whose owner has died is not in flight — it is the stale marker
+    // `%require-await` clears on the next require — so it must not hold the swap for
+    // the whole bound on every isolate after a crashed loader.
+    let inflight = |heap: &Heap| match heap.env_get(heap.global(), marker) {
+        Some(Value::Map(id)) if heap.map_size(id) > 0 => {
+            let live = crate::process::list_local_pids();
+            heap.map_entries(id).into_iter().any(|(_, owner)| match owner {
+                Value::Pid { node, id } if crate::dist::is_local(node) => live.contains(&id),
+                _ => true, // a remote or unreadable owner: assume in flight
+            })
+        }
+        _ => false,
+    };
+    if !inflight(heap) {
+        return; // the common case: one global read
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut spins = 0u32;
+    while inflight(heap) {
+        if std::time::Instant::now() >= deadline {
+            if std::env::var_os("BROOD_SCOPE_DBG").is_some() {
+                eprintln!(
+                    "[scope] RESTORE by {} proceeding with a module load still in flight after 5s",
+                    crate::process::self_pid()
+                );
+            }
+            break;
+        }
+        if spins < 64 {
+            spins += 1;
+            crate::process::yield_now();
+        } else {
+            std::thread::sleep(std::time::Duration::from_micros(500));
+        }
+    }
+}
 /// `(%isolate thunk)` — call `thunk` (no args) with a *private copy* of the
 /// runtime's global bindings: any `def` it makes is rolled back when it
 /// returns, so it cannot affect other code. The test framework wraps each
@@ -928,6 +994,7 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
             );
         }
     }
+    wait_for_inflight_loads(heap);
     heap.restore_globals(saved);
     // Both registries are restored on the error path too — `result` is returned below
     // rather than `?`-propagated, so a throwing thunk rolls back exactly as a clean one

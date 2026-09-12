@@ -845,10 +845,51 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — the GUI retains its frame and repaints by cell row (ADR-332): a keystroke paints 0.3 ms instead of 4–13; whole-pixel ppem, subpixel text at 1× (`gui-text-aa!`), snapped hairlines, `gui-line-height!`
 - **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 - **2026-09-12** — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
+- **2026-09-12** — KI-131: lazy loading met `%isolate`; the runner declares its closure with a new `(:load …)` header clause
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-12 — KI-131: lazy loading met `%isolate`, and the runner declares its closure with a new `(:load …)` header clause
+
+Looping the new `tests/lazy_load_test.blsp` after ADR-335 landed: **3 of 20 runs**, and 4 of
+12 of `startup_image_test.blsp`, died with `process 2 died: unbound symbol: math/max` from
+`test/collect-loop` — the runner's own driver, not a test. `BROOD_NO_JIT=1` died the same way,
+which ruled out the one path ADR-335 deliberately leaves raising (a native miss).
+
+**Mechanism.** `%isolate` is sound only while nothing else mutates globals, and the runner
+ensures that by quiescing a file's workers before an `:isolated` unit. Lazy loading adds a
+mutator the quiesce cannot see: a module load *on first use*, by whoever gets there first.
+The isolated unit was the first to use `math`; `math` materialised inside its snapshot and was
+rolled back with it — whole, consistently — while the driver beside it had started relying on
+it. Before ADR-335 the runner was immune by accident: everything it could touch loaded when
+the `test` module loaded, before any isolate. Nobody had stated that.
+
+**The wrong fix first.** The define→`provide` window (KI-89's record-without-bindings
+asymmetry) is real, is now reachable from any bystander rather than only an unquiesced
+straggler, and is closed: `%isolate`'s restore waits for another process's in-flight load
+(`wait_for_inflight_loads`, the `*features-loading*` claim, a dead-owner check, the reap's
+bound). Written first, on that theory; the loop still failed 3/20. The module was not torn.
+
+**The fix.** State the invariant. `(:load a b …)` is a fourth `defmodule` header clause —
+load these at this file's load, refer nothing; the explicit eager request in its pure form,
+where `(:use …)` also refers and `(:alias …)` also renames. `std/tool/test.blsp` `:load`s
+its whole dependency closure, `bit dev file humanize io json map math os path proc reflect
+seq stdimage string system` — exactly what a source load under the eager policy pulls in,
+and **`crates/cli/tests/test_framework_closure.rs` measures that closure and fails naming any
+module the clause lacks** (sabotage: drop `math`, it names `math`). The checker's header
+scanner (`extract_clause_modules`) reads the clause as direct requires; `%native-tier?`
+joins `%tree-walker?` so the tier-up assertion in the guard file has something honest to say
+under `BROOD_NO_JIT=1`; the guard's head-deferral fixture moved from `humanize` to `url`
+because `humanize` is now in the runner's closure and so loaded before any test can see it
+absent.
+
+**Verified.** 25/25 on the reproducing file, 6/6 with the JIT off, 4/4 with no image,
+15/15 on `startup_image_test.blsp`; 1106 tests across 46 affected files green; the
+checker/modules/image Rust slices (438) green; workspace clippy on CI's flags green — which
+also meant fixing three `redundant_guards` in `syntax/atom.rs` from the radix-literal commit
+(ADR-334), since a red clippy step skips every CI step behind it.
 
 ## 2026-09-12 — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
 
@@ -950,11 +991,22 @@ lets `0b102` earn its specific diagnostic instead of the generic reserved-token 
 `NodeKind::Error`, so the LSP flagged `99999999999999999999` as malformed while the reader
 read it as a bignum and the program ran fine. It is an `Int` node now.
 
-**Not done, and named so nobody assumes it.** The editor highlighter (`hl-number?`) and
-the tree-sitter scanner both decide "is this a number" with their own approximation —
-`string/->number` and a hand-written `looks_number` — and neither sees a `0x`. That gap
-already existed for `1/2` and `1.5M`; radix joins it. The fix is one classification, the
-reader's, exposed to both, and it is a separate change.
+**Three highlighters had their own idea of a number, and none of them was the reader's.**
+Written first as "not done": `hl-number?` decides by `string/->number`, the tree-sitter
+scanner by a hand-written `looks_number`, and neither sees a `0x`. Looking properly found
+a third — `scan-tokens`, the native token stream the fontifier actually paints from,
+tested `str::parse::<i64>() || parse::<f64>()` — and a fourth, `nest grammar`'s TextMate
+rule, the regex `-?[0-9]+(\.[0-9]+)?`. So the *face* was wrong too, not only the callee
+test, and had been wrong for `1/2` and `1.50M` since those literals shipped; the Rust
+parse also took `infinity` for a number where the reader reads a symbol. Fixed in the
+follow-up commit by collapsing to one answer: `scan_atom_kind` is a map over
+`atom::classify`; `hl-number?` asks `scan-tokens`; and the TextMate rule is
+`grammar-number`, a regex that mirrors the classifier by hand because a TextMate rule can
+be nothing else — so its test holds each spelling to `reflect/read-string`'s verdict rather
+than to the regex's own opinion. A digit-led token the reader refuses (`0xZZ`, `1e`)
+colours as a number on purpose: number-shaped and malformed is how every editor treats a
+bad literal, and the LSP carries the error. The tree-sitter scanner is the one copy left,
+in `brood-treesitter`.
 
 **The verification that mattered.** `tests/reader_hints_test.blsp` moves `0x1F` from the
 must-error list into the must-read case beside `1/2`, and adds the per-radix errors, the

@@ -3270,8 +3270,12 @@ first use; a broken or absent module errors at first use (the checker still repo
 statically). A file that needs a module loaded *before* its first call says so with
 `(:use mod)` or `(:alias mod)`, which load at the referencing file's load as they always have.
 There is **no bare-name magic**: a bare
-`sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly three clauses — `(:use …)`,
-`(:use-internals …)`, and `(:alias …)`; **anything else is a hard error**. (It used
+`sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly four clauses — `(:use …)`,
+`(:use-internals …)`, `(:alias …)`, and `(:load a b …)`, which loads modules at this file's load
+and refers nothing: the explicit eager request for code that must have a module BEFORE its first
+call reaches it (ADR-335 — the test runner declares its whole dependency closure this way, since
+a module first used inside an `:isolated` unit is rolled back with it); **anything else is a
+hard error**. (It used
 to be silently ignored, so a misspelled `(:use-internal m)` or a Clojure-style
 `(:require m)` looked like it imported names or granted access and did nothing at
 all — the worst failure mode for a header that governs imports *and* privacy. That

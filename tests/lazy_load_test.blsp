@@ -19,11 +19,15 @@
 
 ;; A plain module; its load writes a marker.
 (fixture "lazyprobe-a"
-  (str "(file/spit \"" (path/join *dir* "a-loaded") "\" \"yes\")\n"
+  (str "(file/spit \""
+    (path/join *dir* "a-loaded")
+    "\" \"yes\")\n"
     "(defn answer () 42)\n"))
 ;; The racing module appends to its marker, so a double load would leave two bytes.
 (fixture "lazyprobe-race"
-  (str "(file/spit-append \"" (path/join *dir* "race-loaded") "\" \"x\")\n"
+  (str "(file/spit-append \""
+    (path/join *dir* "race-loaded")
+    "\" \"x\")\n"
     "(defn answer () 42)\n"))
 ;; The module a hot function's COLD branch references.
 (fixture "lazyprobe-jit" "(defn answer () 42)\n")
@@ -59,8 +63,11 @@
     ;; Well past the tiering threshold; the branch is never taken.
     (assert= 5000050000 (hot-drive 0 100000 0))
     ;; The pre-load ran when the arm was elected for compilation: the module is loaded
-    ;; although nothing ever called into it …
-    (is (loaded? "lazyprobe-jit"))
+    ;; although nothing ever called into it … — when an election can happen at all. Under
+    ;; `BROOD_NO_JIT=1` / `BROOD_TIER=1` no arm tiers, nothing pre-loads, and the branch
+    ;; below loads it on first use like any other reference.
+    (when (%native-tier?)
+      (is (loaded? "lazyprobe-jit")))
     ;; … and the cold branch works when finally taken.
     (assert= 42 (hot-pick -1)))
 
@@ -74,13 +81,16 @@
     (let (msg (try (let (f lazyprobe-broken/anything) f) (catch e (error-message e))))
       (is (includes? msg "deliberately broken")))))
 
-(describe "lazy loading under concurrency" :isolated
-  (test "sixteen processes racing the same first use produce ONE load"
+(describe "lazy loading under concurrency"
+  :isolated (test "sixteen processes racing the same first use produce ONE load"
     (is (not (loaded? "lazyprobe-race")))
     (let (me (self))
       (doseq (_ (range 16))
-        (spawn (send me [:race (try (let (f lazyprobe-race/answer) (f))
-                                 (catch e [:err (error-message e)]))])))
+        (spawn (send me
+                 [:race
+                   (try
+                     (let (f lazyprobe-race/answer) (f))
+                     (catch e [:err (error-message e)]))])))
       (let (results (map (range 16)
                       (fn (_) (receive ([:race r] r) (after *test-wait-ms* :timeout)))))
         (is (every? results (fn (r) (= r 42))))
@@ -96,7 +106,7 @@
 ;; only assert the deferral when this process materialised one (CI's source-path job runs
 ;; with `BROOD_NO_STDIMAGE=1`).
 
-(fixture "lazyprobe-head" "(defn go () (humanize/byte-size 1024))\n")
+(fixture "lazyprobe-head" "(defn go () (url/percent-encode \"a b\"))\n")
 (fixture "lazyprobe-mac" "(defn go () (telemetry/span [:lazy-load-test :probe] {} 7))\n")
 
 ;; The fixtures are reached through OPERAND references (`run-fixture f`), never a call head:
@@ -106,12 +116,12 @@
 
 (describe "lazy call heads (the image's kind index)"
   (test "a function head into an imaged module loads at first call, not at the referencing load"
-    (is (not (loaded? "humanize")))
+    (is (not (loaded? "url")))
     (require-one 'lazyprobe-head)
     (when (%std-image-installed)
-      (is (not (loaded? "humanize"))))
-    (assert= "1.0 KB" (run-fixture lazyprobe-head/go))
-    (is (loaded? "humanize")))
+      (is (not (loaded? "url"))))
+    (assert= "a%20b" (run-fixture lazyprobe-head/go))
+    (is (loaded? "url")))
 
   (test "a MACRO head into an imaged module still loads before expansion, and expands"
     (is (not (loaded? "telemetry")))

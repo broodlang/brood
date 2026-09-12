@@ -1175,7 +1175,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (ADR-227 follow-up), for any module, so naming where something comes from loads
   it on demand (`mod/foo`). No bare-name magic, though — a bare `sqrt` with no
   `math/` prefix and no `(:use math)` stays unbound. The header understands exactly `(:use …)`,
-  `(:use-internals …)` and `(:alias …)`; **anything else is an error** —
+  `(:use-internals …)`, `(:alias …)` and `(:load a b …)` (load now, refer nothing — the
+  eager request, since a plain reference loads on first use, ADR-335); **anything else is
+  an error** —
   `(:require …)` and a misspelled `(:use-internal …)` are rejected rather than
   silently ignored.
 - **Not Clojure**: no transients, and **no `loop`/`recur`** — Brood has proper tail

@@ -74,7 +74,15 @@
   "A tiny ExUnit-style test framework, written in Brood. `describe` groups related
 cases and `test` names one; cases run concurrently by default, with `:serial` /
 `:isolated` opt-outs. `run-tests` runs the registered suite once. See
-docs/testing.md for the full guide.")
+docs/testing.md for the full guide."
+  ;; The runner's whole dependency closure, loaded HERE — before any `%isolate` opens — and
+  ;; not on first use (ADR-335). The runner's driver runs beside every isolated unit; a
+  ;; module it first needed while one was open would be loaded inside that unit's snapshot
+  ;; and rolled back with it, and the driver died on `unbound symbol: math/max` one run in
+  ;; three. This list is the transitive closure a source load of this module pulls in, and
+  ;; `crates/cli/tests/test_framework_closure.rs` fails when the two drift apart.
+  (:load bit
+    dev file humanize io json map math os path proc reflect seq stdimage string system))
 
 (defdyn *units* nil)
 ; all registered units, newest first

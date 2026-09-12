@@ -593,6 +593,19 @@ one call site is inside `defmodule`'s template — see the note there."
   (let (key (->string mod))
     (if (contains? *features-loading* key) key (provide key))))
 
+;; `(:load a b …)` loads modules at THIS file's load and refers nothing (ADR-335). It is the
+;; explicit eager request for code whose references would otherwise load on first use —
+;; the hazard it exists for is `%isolate`: a module first used INSIDE an isolated unit is
+;; rolled back with it, and a bystander (the test runner's driver) that started depending
+;; on it meanwhile dies on `unbound symbol` — `math/max` in `test/collect-loop`, one run in
+;; three. `std/tool/test.blsp` declares its closure this way, and a gate pins the list.
+(defn- %defmodule-load-forms (clauses)
+  (apply append
+    (map (%filter clauses (fn (c) (and (pair? c) (= (first c) :load))))
+      (fn (c)
+        (map (rest c)
+          (fn (m) (list 'require-one (list '%root-module-name (list 'quote m)))))))))
+
 ;; The only clauses the header understands. Anything else in a `defmodule` header
 ;; used to be silently IGNORED — so a misspelled `(:use-internal m)` or a
 ;; Clojure-style `(:require m)` looked like it imported names / granted access and
@@ -604,7 +617,7 @@ one call site is inside `defmodule`'s template — see the note there."
 ;; missing from this list, so tightening the header (above) turned every
 ;; protocol-implementing module into a load error — found by a downstream app whose
 ;; whole test suite stopped loading.
-(def- %defmodule-clause-heads [:use :use-internals :alias :implements])
+(def- %defmodule-clause-heads [:use :use-internals :alias :load :implements])
 
 ;; A header clause that is a bare string or symbol is almost never a typo'd clause — it is
 ;; the tail of a DOCSTRING that ended early, because someone wrote an unescaped `"` inside
@@ -632,7 +645,7 @@ one call site is inside `defmodule`'s template — see the note there."
       (->string mod)
       ": unrecognised header form "
       (pr-str clause)
-      " — a `defmodule` header takes only (:use mod [:only [names]]),"
+      " — a `defmodule` header takes only (:use mod [:only [names]]), (:load mod …),"
       " (:use-internals mod), (:alias mod [:as short]), and (:implements Protocol)."
       " Check the spelling;"
       " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers)."
@@ -670,6 +683,7 @@ feature. Put it first. e.g. (defmodule gen \"A gen_server …\")."
        (%record-module-doc! root-key# ~doc)
        (%defmodule-provide root-key#)
        (%in-ns '~mod)
+       ~@(%defmodule-load-forms clauses)
        ~@(%defmodule-use-forms clauses)
        ~@(%defmodule-internals-forms clauses)
        ~@(%defmodule-alias-forms clauses))))
