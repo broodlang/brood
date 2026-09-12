@@ -139,6 +139,25 @@ pub(super) fn register(primitives: &mut super::Primitives) {
     // Package-rooted namespaces (ADR-070): `%root-module-name` roots an intra-package
     // module reference to `prefix/name` under a dep load; `%set-package-context`
     // enters/clears a dep's load context. Emitted by the prelude loader + `defmodule`.
+    // ADR-335: the sticky eager-load switch, for a tool whose WHOLE run must load what it
+    // names (`nest run --check-boot` promises every module loads). The checker holds its
+    // own Rust-side scope; this is the Brood-side knob.
+    primitives.def(
+        "%load-edge-skipped?",
+        Arity::exact(0),
+        Sig::new(vec![], bool_ty),
+        &[],
+        "Consume the one-shot flag the kernel sets for a load it INFERRED from a qualified reference (ADR-335): true exactly once, for the `require-one` that load invokes, so `%require-record-edge!` records no load-time edge for it — a body reference is satisfied on first use by the miss path, imaged or not, and only a header clause (`:use`/`:alias`) is an edge an image must replay. False for every other call.",
+        load_edge_skipped,
+    );
+    primitives.def(
+        "%eager-loads!",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        &["on?"],
+        "Pin the inferred-load policy (ADR-335): with `on?` truthy every qualified reference loads its module when the referencing file loads (the eager policy); otherwise a function reference loads on its first use. Process-wide and sticky. Returns the previous setting. The checker pins eager around its own pass without this; `nest run --check-boot` pins it for the run, because its promise is that every module loads.",
+        eager_loads,
+    );
     primitives.def(
         "%root-module-name",
         Arity::exact(1),
@@ -988,6 +1007,18 @@ pub(super) fn restore_compile_context(args: &[Value], _: EnvId, heap: &mut Heap)
 pub(super) fn root_module_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let sym = expect_symbol(heap, "%root-module-name", arg(args, 0))?;
     Ok(Value::symbol(heap.root_module_name(sym)))
+}
+
+/// `(%load-edge-skipped?)` — see the registration.
+pub(super) fn load_edge_skipped(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Bool(crate::eval::derive::take_skip_next_edge()))
+}
+
+/// `(%eager-loads! on?)` — see the registration. Mechanism only; the policy of WHO pins it
+/// is Brood (`project-run/check-boot`).
+pub(super) fn eager_loads(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let on = crate::eval::truthy(arg(args, 0));
+    Ok(Value::Bool(crate::eval::derive::set_eager_loads(on)))
 }
 
 /// `(%set-package-context 'foo '(a b c))` — enter dep `foo`'s load with its provided

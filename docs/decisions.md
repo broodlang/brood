@@ -21465,6 +21465,166 @@ module to resolve against, a bare reference is left as written rather than point
 `#d-nil-<name>`: a visible `[[name]]` is a missing argument a reader can report, a dead link
 is not.
 
+## ADR-335 — A qualified reference loads its module on first use, not when the referencing file loads
+
+**Status:** accepted and implemented 2026-09-12. Refines [ADR-227](#adr-227)'s
+inferred load (a qualified `mod/name` needs no load line) by moving *when* the inference is
+paid. Generalises the prelude's hand-rolled `%autoload` stubs (KI-61) into the engine.
+
+**Context — the number.** `nest complete -- te` is a static answer, one subcommand name,
+and costs **72 ms** on the dev build with the stdlib image present: ~20 ms process floor,
+~10 ms prelude boot, under 1 ms for the completion, and **~50 ms materialising the
+62-module closure `std/tool/nest.blsp` drags in** — `project*`, `package`, `http`, `tls`,
+`crypto`, `observer`, `editor/*`, `gui`, `repl`, `resolver`, `doctest`, … (`BROOD_IMAGE_TRACE=1`
+lists them). It was 9 ms in Rust before ADR-322 moved the dispatcher into Brood; per the
+dogfooding rule the policy stays in Brood, and this is the language gap it surfaced. It is
+not a `nest` problem: `(io/puts "hi")` as a whole program materialises **eight** modules —
+`io`, then `file` for `io`'s single `file/spit-append` reference, then `seq`, `math`, `map`,
+`path`, `string`, `reflect` behind `file` — where `(println "hi")` materialises one. Every
+program pays the transitive closure of its first qualified reference, at load, whether or not
+the referencing code ever runs.
+
+**Why the closure loads.** ADR-227's inference fires while the *referencing* module is being
+loaded, because every `defn` body is expanded then: `require_qualified_head` loads a
+qualified call head eagerly at macroexpand (a macro must be loaded before its use can
+expand), and `resolve_sym` records a qualified operand for `drain_pending` to load before the
+form is evaluated. Both are correct for a macro and premature for a function. A dispatcher
+module therefore loads every subcommand's world to run one, and a library loads every
+library it *could* call.
+
+**What the code already knows.** Three facts make this a bounded change rather than a
+redesign. (1) Resolving a qualified reference needs nothing from its module: `resolve_sym`
+rewrites an alias prefix and roots an intra-package name (ADR-070) from the *reference's*
+spelling and the package context — it never reads the target module. (2) `require-one` is
+already the concurrency-safe loader (ADR-136/225): a process that requires a module another
+process is mid-loading waits for that load, never sees a partial module, and the CAS claim
+means two first-requirers produce one load. (3) The prelude already does exactly this by hand:
+`%autoload` (KI-61) binds `string/join`, `seq/find` and eleven other names to stubs that load
+their module on first call, because force-loading `string` and `seq` at boot was 12 ms of a
+26 ms boot. That mechanism is per-name, hand-declared, and guarded by a hygiene test that
+every prelude reference into a lazy module is declared — the shape a general capability
+replaces.
+
+**Decision.** *A qualified reference `mod/name` is a promise that `mod/name` is bound when the
+reference is evaluated.* The load is inferred at the latest point that keeps the program's
+meaning: **at expansion for a macro** (unchanged), **at first evaluation for everything
+else**.
+
+1. **The miss path is the mechanism.** A global lookup that misses on a *requireable* name —
+   one with a module prefix, after the same exclusions `module_to_require` applies (a root
+   escape `/name`, an alias prefix, the module being loaded) — requires that module through
+   `require-one` and looks the name up again; only if it is still unbound does the ordinary
+   `unbound symbol` error follow. **A hit pays nothing**: the change is entirely on the path
+   that today constructs an error. One choke point, `eval::global_miss(heap, env, sym)`,
+   replaces the `None => Err(unbound_error(..))` arm at every engine's lookup site — the
+   tree-walker's two, `exec_value`'s seven, `exec_chunk`'s three (`Global`, `GlobalIc` on and
+   off the global env) and `dispatch`'s one — so the engines cannot disagree about it. The
+   error rules are `ensure_required`'s today: a module that cannot be found falls through to
+   the plain unbound error (a typo `jsn/parse` reads exactly as it does now), a `still
+   loading` cycle falls through likewise, and an error *inside* a found module propagates,
+   so a broken module is never hidden behind "unbound". No negative memo: a miss is already
+   the error path, and a module absent now may exist later.
+
+2. **Macro heads stay eager unless the kind is known.** `require_qualified_head` must load a
+   qualified call head into an unloaded module *if it might be a macro*, and whether it is a
+   macro is unknowable without loading — except that the startup image records each
+   binding's kind (`KIND_MACRO`). The image format goes to **v6**: each section's macro
+   names ride in the footer region `%image-index` already reads whole (beside the `defdyn`
+   marks v5 put there), so at boot the runtime holds, for every imaged module, the set of
+   its macros without materialising anything. A head into an imaged module whose name is not
+   in that set **defers**; a head into an un-imaged module, or into an imaged module's macro,
+   loads eagerly as today. Performance is therefore an image property — which is ADR-256's
+   story already: `nest` writes the image and a run without one is the source path, correct
+   and slower. *Rejected:* scanning the embedded source for `(defmacro …)` — it misses a
+   macro a macro defines, and the failure of a wrong answer is a call form that should have
+   expanded and did not, i.e. a silently different program. The image is written from the
+   evaluated bindings and cannot be wrong about a kind.
+
+3. **Operand references stop loading.** `record_qualified` keeps recording; under the lazy
+   policy `drain_pending` no longer requires what was recorded. The record is kept because the
+   checker drains it (item 5).
+
+4. **Native code never loads a module.** A JIT runtime callback runs with the arm's live
+   values in registers and no spill, so `brood_rt_global`/`brood_rt_global_ic` cannot run
+   `require-one`; and the entry hoist already turns an unbound hoisted global into a
+   **deopt** — which under lazy loading would become a cliff: a hot arm with a cold branch
+   into a not-yet-loaded module deopts on every activation until the thrash latch marks it
+   BAILED, and runs interpreted for the rest of the program without ever loading anything.
+   So the invariant is established *before* native code runs: **at the tier-up request** —
+   VM side, a safe point — every requireable global the arm's chunk names, including the
+   chunks of callees the lowering will splice in, is loaded if unbound. An arm hot enough to
+   compile has earned the load of what it names, and the cost lands once per arm, where
+   today it landed at file load (`preload_arm_globals`, at the tiering election in
+   `jit_tier_in_frame`, before the float-global profile). A *residual* native miss on a
+   requireable name (the invariant slipped) raises the plain unbound error from the
+   callback — loud, never a load from native code, never silent. The hoist's own
+   unbound-deopt stays as it was; with the pre-load it cannot fire for a lazily-loaded module.
+
+5. **Two load policies, one switch — and the policy governs the COMPILE PASS only.** The
+   runtime carries a *lazy*/*eager* load policy. **Eager** — every recorded reference loads
+   at drain, every head loads at expansion, as before — for the advisory checker (`nest
+   check`, `brood --check`, the LSP, `nest run`'s pre-flight), because its unbound verdict
+   for `json/prase` depends on `json` being loaded (`is_unbound` stays silent on a prefix it
+   does not know, so a lazy checker would stop catching qualified typos); for `nest run
+   --check-boot`, whose promise is "every module loads" (KI-66; it pins the policy with
+   `%eager-loads!`); and under **`BROOD_NO_LAZY_LOAD=1`**, the A/B and bisect lever,
+   catalogued in `debug_flags.rs`. **Lazy** everywhere else. The checker opens a Rust-side
+   `EagerLoadScope` around its own pass, so `nest check` run from a lazily-booted `nest`
+   still checks the *project* eagerly. The miss path itself (item 1) is **not** gated on the
+   policy: a module materialised from the stdlib image had no compile pass in this process
+   at all — its body references were loaded at *image-build* time, by the builder's policy —
+   so a process pinned eager still needs the net, or `io`'s `file/spit-append` would be an
+   unbound error under `BROOD_NO_LAZY_LOAD=1` against an image built lazily.
+
+5b. **An inferred load records no require-edge.** The image replays each module's recorded
+   `*require-edges*` when it materialises the module, precisely because materialising runs
+   no compile pass — the edges were how a body reference's module still arrived. That made
+   the first implementation circular: the image builder ran from source with no kind index
+   yet, every head loaded eagerly, every load was recorded as an edge, and the image then
+   replayed the whole closure on materialise — 27 modules for `nest complete` instead of 62,
+   not 5. So `ensure_required` sets a one-shot flag (`%load-edge-skipped?`) that the
+   loader's first `%require-record-edge!` consumes: a load inferred from a reference is not
+   a load-time edge, whatever the policy, because the miss path satisfies the reference at
+   first use imaged or not. Only the header clauses — `(:use …)`, `(:alias …)`, an explicit
+   `require-one` — remain edges an image must replay. One-shot so the loaded module's own
+   header edges are recorded as usual.
+
+6. **The explicit eager request is unchanged.** `(:use mod)` and `(:alias mod)` both expand
+   to `require-one` at the referencing file's load; a file that needs a module's *load-time*
+   effects — an `impl` registration, a `def-face`, a top-level side effect — before its first
+   call into the module says so with one of them. `(require-one 'mod)` remains the
+   computed-name form.
+
+**What a program can observe** (the honest list; each is a deliberate consequence, not a
+gap): `(bound? 'json/parse)` and `*features*` are false before the first use of `json` —
+`bound?` is a *read* and does not load, which is what its existing docstring already says of
+a module not yet loaded; a module's load-time effects happen at first use; a module that is
+broken, or does not exist, errors at first use rather than when the referencing file loads —
+the checker, running eager, still reports both statically; the first call into a module pays
+its materialisation (~2 ms imaged, ~10 ms from source) in whichever process makes it. A
+`%isolate`d test file rolls lazily-loaded modules back with the rest, as it does eager ones.
+
+**Consequences.** `%autoload` and its two `prelude_hygiene` gates are deleted — the prelude's
+references into `string` and `seq` miss and load like any other, and the arity mirror the
+stubs had to maintain goes with them. `process/message.rs`'s `(require-one 'mod)` for a
+shipped closure's module on the receiving node becomes redundant (the closure's free global
+would autoload on first read) and can go once the suite says so. `std/tool/nest.blsp` is
+untouched: the point of the change is that a dispatcher needs no special handling.
+
+**Verification.** Measured on the dev build, 2026-09-12: `nest complete -- te` **72 -> 20 ms**,
+with `BROOD_IMAGE_TRACE=1` listing `nest`, `seq`, `map`, `string`, `io` — five modules where
+it listed 62 — and `(io/puts "hi")` materialises `io` alone where it materialised eight. The
+intermediate state (miss path + kind index, edges still recorded) read 27 modules and 35 ms,
+which is what found item 5b. `tests/lazy_load_test.blsp` pins, each sabotage-verified: a module absent from
+`*features*` before a first qualified use and present after; a qualified macro head into an
+imaged module expanding (the kind index); N processes racing the same first use producing one
+load (`*features-loading*` never double-claimed); a hot arm with a cold branch into an
+unloaded module tiering without a deopt (`BROOD_DEOPT_TRACE` silent) — the cliff item 4
+exists for; the checker under eager policy still flagging a qualified typo; `--check-boot`
+still failing on a broken transitively-referenced module. `make ab --floor` must read
+`startup` flat on a machine where it may run — a lazy load can only remove work from the
+rows, so a movement there is a mechanism cost on the hit path, which item 1 forbids.
+
 ## ADR-334 — Radix literals: `0xFF`, `0b1010`, `0o17` read as plain ints
 
 **Status:** accepted; implemented 2026-09-12. Cashes in the second of [ADR-169](#adr-169)'s

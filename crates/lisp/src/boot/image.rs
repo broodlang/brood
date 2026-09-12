@@ -100,7 +100,12 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
 /// dynamic global's value but skips the module load that ran the `defdyn`, so without this the
 /// mark is missing and `binding` rejects the var. A v4 image has no such list, so a v5 reader
 /// must reject it (else it would read the footer as the dynamic-name count); the bump does that.
-const MAGIC: &[u8] = b"brood-image-v5\n";
+/// v6 records, after the dynamic marks, the names of every MACRO the image holds (ADR-335):
+/// a qualified call head into an imaged module may defer its load to first use only once the
+/// runtime knows the head is not a macro, and the kind is a fact only the image has without
+/// materialising the section. A v5 reader would read the list as trailing garbage and a v6
+/// reader would mis-read a v5 footer, so the bump is required.
+const MAGIC: &[u8] = b"brood-image-v6\n";
 
 /// Entry kinds inside a section.
 const KIND_GLOBAL: u8 = 0;
@@ -369,6 +374,10 @@ pub(crate) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 
     let mut dir: Vec<(String, u64, u32)> = Vec::new();
     let mut total: u32 = 0;
+    // Every MACRO among the imaged names, for the v6 kind index (see `MAGIC`). Collected
+    // from the live bindings as the sections are walked — the same fact `encode_section`
+    // tags each entry with, gathered once so the footer can be read without the payload.
+    let mut macro_names: Vec<String> = Vec::new();
     // Table handles seen anywhere in this write, so an aliased pair is caught across
     // sections and not just within one (see `encode_section`).
     let mut tables_seen: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
@@ -381,6 +390,13 @@ pub(crate) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         }
         let name = need_str(heap, pair[0], "%image-write")?;
         let syms = seq_items(heap, pair[1])?;
+        for nv in &syms {
+            if let value::ValueRef::Sym(s) = nv.unpack() {
+                if let Some(Value::Macro(_)) = heap.env_get(heap.global(), s) {
+                    macro_names.push(value::symbol_name(s));
+                }
+            }
+        }
         // The unnamed root/project section takes every sig; a named one takes its own.
         let all_sigs = name.is_empty();
         let (bytes, n) = encode_section(
@@ -414,6 +430,12 @@ pub(crate) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let dyn_names = value::dynamic_names();
     put_u32(&mut body, dyn_names.len() as u32);
     for name in &dyn_names {
+        put_str(&mut body, name);
+    }
+    // v6: the macro names (ADR-335's kind index), same region, same reason — read at open,
+    // never from the payload.
+    put_u32(&mut body, macro_names.len() as u32);
+    for name in &macro_names {
         put_str(&mut body, name);
     }
     put_u64(&mut body, dir_off);
@@ -592,10 +614,12 @@ pub(crate) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         return Ok(Value::Nil);
     };
     let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n as usize);
+    let mut section_names: Vec<String> = Vec::with_capacity(n as usize);
     for _ in 0..n {
         let Some(name) = get_str(&mut dr) else {
             return Ok(Value::Nil);
         };
+        section_names.push(name.clone());
         let p = dr.position() as usize;
         let b = dr.get_ref();
         if p + 12 > b.len() {
@@ -621,6 +645,21 @@ pub(crate) fn image_index(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             }
         }
     }
+    // The kind index (v6, ADR-335): which of the imaged modules' names are macros. With it
+    // registered, a qualified call head into one of these modules can wait for its first
+    // call unless it names a macro — see `derive::require_qualified_head`. Registered from
+    // the same open pass as the dynamic marks, so it is in place before any form that
+    // references an imaged module expands.
+    let mut macro_names: Vec<String> = Vec::new();
+    if let Some(macro_count) = get_u32(&mut dr) {
+        for _ in 0..macro_count {
+            match get_str(&mut dr) {
+                Some(name) => macro_names.push(name),
+                None => break,
+            }
+        }
+    }
+    crate::eval::derive::register_image_kinds(&section_names, &macro_names);
     Ok(heap.map_from_pairs(pairs))
 }
 

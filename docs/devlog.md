@@ -842,10 +842,84 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-330), and docstring `[[links]]` finally render (ADR-331)
 - **2026-09-12** — pre-compilation, counted: bytecode is 2.5 ms of `json`, Cranelift is 60–80 ms, and both persistence ideas are dead (compute-frontier §7.11)
 - **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
+- **2026-09-12** — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
 
 ---
 
 ## Recent — full entries
+
+## 2026-09-12 — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
+
+**The number that started it.** `nest complete -- te` — one subcommand name, a static
+answer — cost 72 ms on the dev build with the stdlib image present, and ~50 ms of that was
+materialising the 62-module closure `std/tool/nest.blsp` drags in. Not a `nest` problem:
+`(io/puts "hi")` as a whole program materialised eight modules (`io` → `file` for one
+`file/spit-append` reference → `seq`, `math`, `map`, `path`, `string`, `reflect`). ADR-227's
+inferred load fired while the *referencing* file loaded, because every `defn` body expands
+then — so a dispatcher loaded every subcommand's world to run one.
+
+**The decision (ADR-335).** A qualified reference is a promise that `mod/name` is bound *when
+it is evaluated*; the load is inferred at the latest point that keeps the promise — at
+expansion for a macro, at first evaluation for everything else. Six parts, in order of what
+the code taught:
+
+1. **The miss path is the mechanism.** `derive::global_miss` replaces the `None =>
+   Err(unbound_error(..))` arm at every engine's lookup — the tree-walker's two,
+   `exec_value`'s seven, `exec_chunk`'s six (three global reads, the Prim1 fallback, the
+   call-IC miss and the no-IC resolve), `dispatch`'s one. A hit pays nothing. Each site had
+   to be read for Rust-held handles: `exec_chunk`'s call path rebuilds `argv` from `roots`
+   after a load, the tree-walker roots `call_form` + `env` and re-derives the spine exactly
+   as its computed-head arm does.
+2. **Heads stay eager unless the image vouches for the kind.** Image format **v6** puts
+   every imaged macro's name in the footer `%image-index` already reads whole, beside v5's
+   `defdyn` marks, and registers it (`register_image_kinds`). A head into an imaged module
+   whose name is not a recorded macro defers; a macro, or a head into an un-imaged module,
+   loads at expansion as before. Source-scanning for `(defmacro` was rejected — a wrong
+   answer there is a call that should have expanded and did not.
+3. **Value references only record** under the lazy policy; `drain_pending` loads nothing.
+4. **Native code never loads a module.** The JIT's entry hoist already deopts on an unbound
+   global — under lazy loading that is a cliff: a hot arm with a cold branch into an unloaded
+   module deopts every activation until latched BAILED, interpreted for good, loading nothing.
+   `preload_arm_globals` runs at the tiering election (VM side, frame on `roots`) over the
+   arm's chunk and its direct callees' chunks (the splice candidates). Sabotage-verified:
+   without it the cold-branch case reds on "module loaded although never called".
+5. **Two policies, one switch — for the compile pass only.** The checker opens an
+   `EagerLoadScope` (its `is_unbound` is silent on a prefix it does not know, so a lazy checker
+   would stop catching `json/prase`); `nest run --check-boot` pins `%eager-loads!`;
+   `BROOD_NO_LAZY_LOAD=1` is the lever, catalogued. **The miss path is deliberately not
+   gated**: a module materialised from the image had no compile pass in this process — its
+   body references were loaded at image-build time by the *builder's* policy — so a process
+   pinned eager still needs the net against a lazily-built image.
+6. **An inferred load records no require-edge.** This one the first measurement found. The
+   image replays each module's `*require-edges*` on materialise, precisely because
+   materialising runs no compile pass. With the miss path + kind index in place the run read
+   27 modules and 35 ms, not 5 and 20: the image builder runs from source with no kind index
+   yet, every head loaded eagerly, every load was recorded as an edge, and the image replayed
+   the closure. `ensure_required` now sets a one-shot flag the loader's first
+   `%require-record-edge!` consumes (`%load-edge-skipped?`) — a body reference is satisfied
+   at first use imaged or not, so only `(:use …)`/`(:alias …)` are edges an image must
+   replay. One-shot, so the loaded module's own header edges are kept.
+
+**Measured (dev build):** `nest complete -- te` **72 → 20 ms**, `BROOD_IMAGE_TRACE=1` listing
+`nest seq map string io`; `(io/puts "hi")` materialises `io` alone. The A/B sweep is owed on
+a machine where it may run; a lazy load can only remove work from the rows, so a `startup`
+movement there would be a hit-path cost, which item 1 forbids.
+
+**Observable, on purpose:** `(bound? 'json/parse)` and `*features*` are false until `json`'s
+first use; load-time effects happen at first use; a broken module errors at first use (the
+checker still reports it statically). `(:use mod)`/`(:alias mod)` remain the explicit eager
+request. Guard: `tests/lazy_load_test.blsp` — temp-dir fixture modules on `*load-path*` so
+nothing else can load them behind the assertions; operand deferral, the JIT cold branch,
+unchanged error text for a typo, a broken module's error surfacing, sixteen processes racing
+one first use (one byte in the marker file), a function head deferring under the kind index
+and a macro head still expanding. Trap met while writing it: a call head into a temp-dir
+fixture is eager (no image describes it), so `(lazyprobe-mac/go)` written in a test body
+loads the fixture while the `describe` compiles — the fixtures are reached through operand
+references.
+
+**Left for the follow-up commit:** the prelude's hand-rolled `%autoload` stubs (KI-61) and
+their `prelude_hygiene` gates are now redundant — the references they stand in for would
+miss and load like any other.
 
 ## 2026-09-12 — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 

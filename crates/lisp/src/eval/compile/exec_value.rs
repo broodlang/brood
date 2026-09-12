@@ -287,11 +287,16 @@ pub(crate) fn prim2_dispatch_rooted(
     let cur_env = heap.read_root_env(genv);
     let callee = match heap.env_get(cur_env, head) {
         Some(c) => c,
-        None => {
-            heap.truncate_roots(save);
-            return Err(tag_pos(crate::eval::unbound_error(heap, head), pos));
-        }
+        // Autoload (ADR-335): operands are rooted at `save..`; `cur_env` is re-read.
+        None => match crate::eval::derive::global_miss(heap, cur_env, head) {
+            Ok(c) => c,
+            Err(e) => {
+                heap.truncate_roots(save);
+                return Err(tag_pos(e, pos));
+            }
+        },
     };
+    let cur_env = heap.read_root_env(genv);
     let sa = heap.root_at(save);
     let sb = heap.root_at(save + 1);
     let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
@@ -314,11 +319,16 @@ pub(crate) fn prim3_dispatch_rooted(
     let cur_env = heap.read_root_env(genv);
     let callee = match heap.env_get(cur_env, head) {
         Some(c) => c,
-        None => {
-            heap.truncate_roots(save);
-            return Err(tag_pos(crate::eval::unbound_error(heap, head), pos));
-        }
+        // Autoload (ADR-335): operands are rooted at `save..`; `cur_env` is re-read.
+        None => match crate::eval::derive::global_miss(heap, cur_env, head) {
+            Ok(c) => c,
+            Err(e) => {
+                heap.truncate_roots(save);
+                return Err(tag_pos(e, pos));
+            }
+        },
     };
+    let cur_env = heap.read_root_env(genv);
     let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[
         heap.root_at(save),
         heap.root_at(save + 1),
@@ -345,10 +355,13 @@ pub(crate) fn exec_value(
         // Slot read — depth 0: the callee's own frame. (Deeper depths arrive with
         // the full compiler; the slice only binds params.)
         Node::Local(i) => Ok(heap.root_at(frame_base + i)),
-        Node::Global(s) => match heap.env_get(heap.read_root_env(genv), *s) {
-            Some(v) => Ok(v),
-            None => Err(crate::eval::unbound_error(heap, *s)),
-        },
+        Node::Global(s) => {
+            let env = heap.read_root_env(genv);
+            match heap.env_get(env, *s) {
+                Some(v) => Ok(v),
+                None => crate::eval::derive::global_miss(heap, env, *s), // ADR-335
+            }
+        }
         Node::GlobalIc { sym, site } => {
             let env = heap.read_root_env(genv);
             // The IC engages only when free names resolve through the process
@@ -371,12 +384,12 @@ pub(crate) fn exec_value(
                         }
                         Ok(v)
                     }
-                    None => Err(crate::eval::unbound_error(heap, *sym)),
+                    None => crate::eval::derive::global_miss(heap, env, *sym), // ADR-335
                 };
             }
             match heap.env_get(env, *sym) {
                 Some(v) => Ok(v),
-                None => Err(crate::eval::unbound_error(heap, *sym)),
+                None => crate::eval::derive::global_miss(heap, env, *sym), // ADR-335
             }
         }
         Node::If(cond, then, els) => {
@@ -580,11 +593,16 @@ pub(crate) fn exec_value(
             let cur_env = heap.read_root_env(genv);
             let callee = match heap.env_get(cur_env, *head) {
                 Some(c) => c,
-                None => {
-                    heap.truncate_roots(save);
-                    return Err(tag(crate::eval::unbound_error(heap, *head)));
-                }
+                // Autoload (ADR-335): the operand is rooted at `save`; `cur_env` re-read.
+                None => match crate::eval::derive::global_miss(heap, cur_env, *head) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        heap.truncate_roots(save);
+                        return Err(tag(e));
+                    }
+                },
             };
+            let cur_env = heap.read_root_env(genv);
             let sa = heap.root_at(save);
             let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa]);
             let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
@@ -684,12 +702,19 @@ pub(crate) fn exec_value(
             let cur_env = heap.read_root_env(genv);
             let callee = match heap.env_get(cur_env, *head) {
                 Some(c) => c,
-                None => {
-                    heap.truncate_roots(save);
-                    return Err(tag(crate::eval::unbound_error(heap, *head)));
-                }
+                // Autoload (ADR-335): both operands are rooted at `save`/`save + 1`, so
+                // they are re-read from there rather than from the pre-load locals.
+                None => match crate::eval::derive::global_miss(heap, cur_env, *head) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        heap.truncate_roots(save);
+                        return Err(tag(e));
+                    }
+                },
             };
-            let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
+            let cur_env = heap.read_root_env(genv);
+            let argv: SmallVec<[Value; 4]> =
+                SmallVec::from_slice(&[heap.root_at(save), heap.root_at(save + 1)]);
             let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
             heap.truncate_roots(save);
             result.map_err(tag)
@@ -731,11 +756,16 @@ pub(crate) fn exec_value(
             let cur_env = heap.read_root_env(genv);
             let callee = match heap.env_get(cur_env, *head) {
                 Some(cv) => cv,
-                None => {
-                    heap.truncate_roots(save);
-                    return Err(tag(crate::eval::unbound_error(heap, *head)));
-                }
+                // Autoload (ADR-335): operands rooted at `save..save + 3`; `cur_env` re-read.
+                None => match crate::eval::derive::global_miss(heap, cur_env, *head) {
+                    Ok(cv) => cv,
+                    Err(e) => {
+                        heap.truncate_roots(save);
+                        return Err(tag(e));
+                    }
+                },
             };
+            let cur_env = heap.read_root_env(genv);
             let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[
                 heap.root_at(save),
                 heap.root_at(save + 1),

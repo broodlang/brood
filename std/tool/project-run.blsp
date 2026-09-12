@@ -506,6 +506,10 @@ of those loads the entry point, which is where a stale dependency actually dies 
     (when (nil? root)
       (error "check-boot: not in a Brood project (no project.blsp found from " (file/cwd) ")"))
     (project/setup root)
+    ;; Every inferred load is EAGER for this run (ADR-335): a qualified reference into a
+    ;; std or dependency module loads on first USE under the default policy, and a boot
+    ;; check runs nothing — so without this it would never see a broken one.
+    (%eager-loads! true)
     ;; No `setup-lazy-image`: materialising nothing is what `run` wants and the
     ;; opposite of what a boot check wants. `load-sources-cached` evaluates every
     ;; module's top-level forms, which is the half `nest check` cannot see.

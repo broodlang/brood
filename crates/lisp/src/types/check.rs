@@ -1537,6 +1537,13 @@ fn check_forms(
     // checker's allocations are bounded (one file) and reclaimed at the next real
     // safepoint after it returns. See ADR-054 / `docs/memory-review.md`.
     let _gc_block = crate::process::GcBlockGuard::enter();
+    // Every inferred load is EAGER for the duration (ADR-335): the unbound verdict for a
+    // qualified typo (`json/prase`) depends on `json` being loaded — `is_unbound` stays
+    // silent on a prefix it does not know — so the checker must load what the file names,
+    // where a program would load it on first use.
+    // Guarded by `unknown_module_qualified_name_is_not_unbound` (`(io/no-such-fn 1)` must warn),
+    // which reds without this scope.
+    let _eager = crate::eval::derive::EagerLoadScope::enter();
     // Fresh per-pass signature-inference memo: this file's inferred sigs must not leak
     // into another file, nor (in the long-lived LSP) survive a source edit (KI-13).
     sigs::clear_sig_memo();

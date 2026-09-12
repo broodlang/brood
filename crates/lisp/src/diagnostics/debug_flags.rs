@@ -223,6 +223,11 @@ pub const FLAGS: &[DebugFlag] = &[
         "trace which arms qualify for self/leaf inlining (pairs with the two NO_*INLINE flags)",
     ),
     f(
+        "BROOD_NO_LAZY_LOAD",
+        OPTOUT,
+        "opt OUT of lazy module loading (ADR-335, default ON): a qualified FUNCTION reference loads its module on first use (at the global-lookup miss) instead of when the referencing file loads — `nest complete` stopped materialising 62 modules to print one name. Set it to A/B, to bisect, or as the stopgap if a first-use load is ever implicated. The checker and `nest run --check-boot` load eagerly regardless",
+    ),
+    f(
         "BROOD_NO_STDIMAGE",
         OPTOUT,
         "opt OUT of the stdlib startup image (ADR-281, default ON): `require` materialises a module's bindings from ~/.cache/brood instead of evaluating its source (json 6.5 -> 1.7 ms; a three-module script 46.5 -> 36.2 ms). Set it to A/B, to bisect a suspected materialise fault, or as the stopgap if one is found",

@@ -73,10 +73,13 @@ pub(crate) fn exec_chunk(
             }
             Inst::Global(s) => {
                 let env = heap.read_root_env(genv);
-                match heap.env_get(env, *s) {
-                    Some(v) => heap.push_root(v),
-                    None => return Err(crate::eval::unbound_error(heap, *s)),
-                }
+                // A miss may LOAD the name's module (ADR-335) — arbitrary eval, a collection;
+                // the operand stack is on `roots`, so only `env` (re-read inside) is at stake.
+                let v = match heap.env_get(env, *s) {
+                    Some(v) => v,
+                    None => crate::eval::derive::global_miss(heap, env, *s)?,
+                };
+                heap.push_root(v);
             }
             Inst::GlobalIc { sym, site } => {
                 let env = heap.read_root_env(genv);
@@ -94,13 +97,14 @@ pub(crate) fn exec_chunk(
                                 }
                                 v
                             }
-                            None => return Err(crate::eval::unbound_error(heap, *sym)),
+                            // Autoload (ADR-335); not cached — the load bumped the epoch.
+                            None => crate::eval::derive::global_miss(heap, env, *sym)?,
                         }
                     }
                 } else {
                     match heap.env_get(env, *sym) {
                         Some(v) => v,
-                        None => return Err(crate::eval::unbound_error(heap, *sym)),
+                        None => crate::eval::derive::global_miss(heap, env, *sym)?,
                     }
                 };
                 heap.push_root(v);
@@ -267,8 +271,12 @@ pub(crate) fn exec_chunk(
                 let cur_env = heap.read_root_env(genv);
                 let callee = match heap.env_get(cur_env, *head) {
                     Some(c) => c,
-                    None => return Err(tag_pos(crate::eval::unbound_error(heap, *head), pos)),
+                    // Autoload (ADR-335): a load collects; the operand is on `roots` and
+                    // `cur_env` is re-read below.
+                    None => crate::eval::derive::global_miss(heap, cur_env, *head)
+                        .map_err(|e| tag_pos(e, pos))?,
                 };
+                let cur_env = heap.read_root_env(genv);
                 let sa = heap.root_at(n - 1);
                 let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa]);
                 let result =
@@ -425,7 +433,7 @@ pub(crate) fn exec_chunk(
                 let argc = *argc;
                 let staged = *staged;
                 let n = heap.roots_len();
-                let cur_env = heap.read_root_env(genv);
+                let mut cur_env = heap.read_root_env(genv);
                 // The top `argc` operands are always the args. A **free-global** head
                 // (`head = Some`) is NOT staged — no preceding `Global` inst pushed it — so
                 // the operands are just `[args]` (`drop_base = n - argc`) and the callee is
@@ -500,10 +508,14 @@ pub(crate) fn exec_chunk(
                             let v = match heap.env_get(cur_env, *sym) {
                                 Some(v) => v,
                                 None => {
-                                    return Err(tag_pos(
-                                        crate::eval::unbound_error(heap, *sym),
-                                        pos,
-                                    ))
+                                    // Autoload (ADR-335). The load collects: re-read the
+                                    // env and the args, which sit on `roots` above `drop_base`.
+                                    let v = crate::eval::derive::global_miss(heap, cur_env, *sym)
+                                        .map_err(|e| tag_pos(e, pos))?;
+                                    cur_env = heap.read_root_env(genv);
+                                    argv.clear();
+                                    argv.extend((0..argc).map(|k| heap.root_at(drop_base + k)));
+                                    v
                                 }
                             };
                             // Cache the resolved callee + (for a non-passthrough VM closure)
@@ -546,7 +558,13 @@ pub(crate) fn exec_chunk(
                         let v = match heap.env_get(cur_env, *sym) {
                             Some(v) => v,
                             None => {
-                                return Err(tag_pos(crate::eval::unbound_error(heap, *sym), pos))
+                                // Autoload (ADR-335); see the IC-miss arm above.
+                                let v = crate::eval::derive::global_miss(heap, cur_env, *sym)
+                                    .map_err(|e| tag_pos(e, pos))?;
+                                cur_env = heap.read_root_env(genv);
+                                argv.clear();
+                                argv.extend((0..argc).map(|k| heap.root_at(drop_base + k)));
+                                v
                             }
                         };
                         (v, drop_base)

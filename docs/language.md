@@ -3259,7 +3259,17 @@ bare, and otherwise **a qualified reference `mod/name` auto-infers the load**
 (ADR-227 follow-up) — naming where something comes from loads it on demand (its names
 stay qualified, `mod/foo`), for *any* module. This holds for a qualified
 macro head (loaded before it expands), a qualified value reference, and top-level
-references in a header-less script or the REPL. There is **no bare-name magic**: a bare
+references in a header-less script or the REPL. **The load happens on first use, not when
+the referencing file loads** (ADR-335): a qualified reference promises `mod/name` is bound
+*when it is evaluated*, so a function reference loads its module at the first call that
+reaches it (a macro head still loads before it expands, and so does a head into a module the
+startup image does not describe, since only the image knows a name's kind without loading).
+Consequences: `(bound? 'json/parse)` and `*features*` are false until `json` is first used;
+a module's load-time effects — an `impl`, a `def-face`, a top-level side effect — happen at
+first use; a broken or absent module errors at first use (the checker still reports both
+statically). A file that needs a module loaded *before* its first call says so with
+`(:use mod)` or `(:alias mod)`, which load at the referencing file's load as they always have.
+There is **no bare-name magic**: a bare
 `sqrt` with neither a `math/` prefix nor `(:use math)` stays unbound. The header understands exactly three clauses — `(:use …)`,
 `(:use-internals …)`, and `(:alias …)`; **anything else is a hard error**. (It used
 to be silently ignored, so a misspelled `(:use-internal m)` or a Clojure-style

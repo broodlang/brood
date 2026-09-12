@@ -213,11 +213,17 @@ fn eval_tail_loop(
     'tail: loop {
         match expr.unpack() {
             ValueRef::Sym(s) => {
-                let expr_sym = expr;
-                return heap
-                    .env_get(env, s)
-                    .ok_or_else(|| unbound_error(heap, s))
-                    .map_err(|e| e.or_form_pos(heap, expr_sym));
+                return match heap.env_get(env, s) {
+                    Some(v) => Ok(v),
+                    // A miss may autoload the name's module (ADR-335) — a collection — so
+                    // the form is rooted across it for the position tag.
+                    None => heap.root_scope(|heap| {
+                        let expr_r = heap.root(expr);
+                        let looked_up = crate::eval::derive::global_miss(heap, env, s);
+                        let expr = heap.read_root(expr_r);
+                        looked_up.map_err(|e| e.or_form_pos(heap, expr))
+                    }),
+                };
             }
             ValueRef::Vector(id) => {
                 // A vector literal evaluates each element. Those evals can collect
@@ -789,12 +795,30 @@ fn eval_tail_loop(
                 // `continue 'tail`) exits this eval frame directly — no outer
                 // `or_form_pos` will see it. Attach `call_form`'s position
                 // here so the diagnostic points at the failing call's line,
-                // not the enclosing top-level form's start. (No GC can run
-                // between here and the lookup — `env_get` doesn't eval.)
-                let v = heap
-                    .env_get(env, s)
-                    .ok_or_else(|| unbound_error(heap, s))
-                    .map_err(|e| e.or_form_pos(heap, call_form))?;
+                // not the enclosing top-level form's start. A hit does no GC work;
+                // a MISS may autoload the module (ADR-335), which collects — so that
+                // path roots `call_form` + `env` and re-derives the spine, exactly as
+                // the computed-head arm below does.
+                let v = match heap.env_get(env, s) {
+                    Some(v) => v,
+                    None => {
+                        let (v, new_call_form, new_env) = heap.root_scope(|heap| {
+                            let call_form_r = heap.root(call_form);
+                            let env_r = heap.root_env(env);
+                            let looked_up = crate::eval::derive::global_miss(heap, env, s);
+                            let call_form = heap.read_root(call_form_r);
+                            let v = looked_up.map_err(|e| e.or_form_pos(heap, call_form))?;
+                            Ok((v, call_form, heap.read_root_env(env_r)))
+                        })?;
+                        call_form = new_call_form;
+                        env = new_env;
+                        spine = match call_form.unpack() {
+                            ValueRef::Pair(p) => heap.pair(p).1,
+                            _ => Value::nil(),
+                        };
+                        v
+                    }
+                };
                 if let ValueRef::Macro(mid) = v.unpack() {
                     // Macro expansion can collect at any depth (ADR-061); root
                     // `env` across it so the `continue 'tail` re-reads the

@@ -1049,9 +1049,16 @@ image and before any `require`."
   ;; (only a load sets it), which is exactly the requires that are not load-time edges.
   ;; `*require-parent*` is the fallback for a file with no `(defmodule …)` header, which
   ;; establishes no namespace but is still `require`able by its filename.
-  (let (ns (reflect/current-ns)
+  ;; A load the kernel INFERRED from a qualified reference is not an edge either (ADR-335):
+  ;; the miss path satisfies a body reference on first use, imaged or not, so only a header
+  ;; clause is something an image has to replay. `%load-edge-skipped?` is one-shot — true for
+  ;; exactly this `require-one`, consumed here BEFORE the parent test so it cannot leak to a
+  ;; later call when `parent` is nil.
+  (let (skipped (%load-edge-skipped?)
+        ns (reflect/current-ns)
         parent (if ns (->string ns) *require-parent*))
     (when (and parent
+            (not skipped)
             (not (= parent key))
             (not (includes? (or (get *require-edges* parent) nil) key)))
       (%swap-registry! *require-edges*

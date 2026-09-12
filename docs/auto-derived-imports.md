@@ -40,6 +40,33 @@ The checker's KI-17 *"reference to an unrequired module"* lint (`unrequired_modu
 `walk.rs`) is now permanently obsolete — a qualified reference requires its own module —
 and is neutralized to a no-op (its `required_mods`/`raw_qualified` scaffolding retained).
 
+### When the load happens: first use, not file load (ADR-335, 2026-09-12)
+
+The inference above originally *paid* at the referencing file's load — every `defn` body is
+expanded then, so a dispatcher module loaded every subcommand's world to run one (`nest
+complete -- te` materialised 62 modules, 72 ms) and `(io/puts "hi")` materialised eight.
+Since ADR-335 a qualified reference is a promise that `mod/name` is bound **when it is
+evaluated**, and the load is inferred at the latest point that keeps the promise:
+
+- a **macro** head still loads at expansion (it has to — it expands now);
+- a **function** head into a module the startup image describes defers: the image's v6
+  footer carries every imaged macro's name, so the kind is known without materialising
+  anything (`image_says_function`). A head into an un-imaged module stays eager, because
+  its kind is unknowable;
+- a **value** reference only records its module; `drain_pending` loads nothing under the
+  default lazy policy;
+- the load itself happens on the **global-lookup miss** — `derive::global_miss`, the one
+  arm every engine's unbound site calls — so a hit pays nothing, or at an arm's **tiering
+  election** (`preload_arm_globals`), because native code never loads a module and the JIT's
+  entry hoist deopts on an unbound global.
+
+The **eager** policy (`EagerLoadScope` in the checker, `%eager-loads!` in `nest run
+--check-boot`, `BROOD_NO_LAZY_LOAD=1`) restores the compile-time loads; the miss path stays
+live under both, since a module materialised from the image had no compile pass here at
+all. An inferred load records **no require-edge** (`%load-edge-skipped?`): only `(:use …)`
+and `(:alias …)` are edges an image has to replay. Result: `nest complete -- te` 72 → 20 ms,
+five modules. Guard: `tests/lazy_load_test.blsp`.
+
 --------------------------------------------------------------------------------
 **Everything below is the ORIGINAL Design-B plan — superseded, kept for reasoning.**
 --------------------------------------------------------------------------------

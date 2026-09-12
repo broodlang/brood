@@ -29,9 +29,25 @@
 //!    `resolve` is identity), scans the form for qualified references so a top-level
 //!    qualified value auto-requires too. Gated so it never runs during prelude boot.
 //!
+//! ## When the load happens — lazy by default (ADR-335)
+//!
+//! A qualified reference is a promise that `mod/name` is bound WHEN IT IS EVALUATED, and the
+//! load is inferred at the latest point that keeps that promise. Under the default LAZY
+//! policy hook 2 only records, and hook 1 defers a head that an opened image vouches is a
+//! function ([`image_says_function`]); the load then happens on the global-lookup miss —
+//! [`global_miss`], which every engine's unbound arm calls — or, for an arm about to go
+//! native, at its tiering election (`preload_arm_globals`). A macro head, or a head into a
+//! module no image describes, still loads at expansion. Under the EAGER policy
+//! ([`EagerLoadScope`], `%eager-loads!`, `BROOD_NO_LAZY_LOAD=1`) the hooks load as they
+//! always did; the checker runs eager so its unbound verdict sees the modules a file names.
+//! Either way an inferred load records no require-edge ([`take_skip_next_edge`]): the image
+//! replays edges so a materialised module has what its source load pulled in, and a body
+//! reference no longer pulls anything in.
+//!
 //! See `docs/auto-derived-imports.md`.
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Symbol, Value, ValueRef};
@@ -52,6 +68,17 @@ thread_local! {
     /// path must not hard-error a hover).
     static PENDING_AMBIGUOUS: RefCell<Vec<(Symbol, Vec<Symbol>)>> =
         const { RefCell::new(Vec::new()) };
+    /// Set by [`ensure_required`] for the load it is about to run, consumed by the loader's
+    /// next `%require-record-edge!` (via [`take_skip_next_edge`]): an inferred load is not a
+    /// load-time edge. One-shot, so the edges of the loaded module's OWN header clauses are
+    /// recorded as usual.
+    static SKIP_NEXT_EDGE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Consume the one-shot "this load is inferred, record no edge" flag. Called by the
+/// `%load-edge-skipped?` primitive at the top of `require-one`.
+pub fn take_skip_next_edge() -> bool {
+    SKIP_NEXT_EDGE.with(|skip| skip.replace(false))
 }
 
 /// The module a qualified reference `s` should auto-require, if any. `None` for a bare
@@ -99,6 +126,12 @@ pub fn require_qualified_head(heap: &mut Heap, env: EnvId, s: Symbol) -> LispRes
     // A reference to our own module's (forward-declared) name — it is mid-load, so never
     // re-require it (mirrors `record_qualified`'s self-namespace filter).
     if heap.compile_ns() == Some(module) {
+        return Ok(Value::nil());
+    }
+    // Lazy policy (ADR-335): a head an image vouches is a FUNCTION waits for its first call
+    // — the miss path (`global_miss`) loads it then. Only a macro, or a head into a module
+    // no image describes, must load before expansion.
+    if lazy_loads() && image_says_function(module, rooted) {
         return Ok(Value::nil());
     }
     ensure_required(heap, env, module)?;
@@ -282,6 +315,12 @@ pub fn drain_pending(heap: &mut Heap, env: EnvId) -> LispResult {
     if pending.is_empty() {
         return Ok(Value::nil()); // the common case — no root/env work at all
     }
+    // Lazy policy (ADR-335): an operand reference's module loads on first use, at the
+    // lookup miss (`global_miss`), not here. The record is still taken so it cannot leak
+    // into the next pass.
+    if lazy_loads() {
+        return Ok(Value::nil());
+    }
     // Each `ensure_required` loads a module, which collects. `env` may be a LOCAL
     // frame that the collector relocates, so root it and read it back per iteration
     // rather than holding a stale copy across the loads.
@@ -307,7 +346,16 @@ fn ensure_required(heap: &mut Heap, env: EnvId, module: Symbol) -> LispResult {
         return Ok(Value::nil());
     };
     let root = heap.env_root(env);
-    match crate::eval::compile::apply_engine(heap, loader, &[Value::symbol(module)], root) {
+    // An INFERRED load records no require-edge (ADR-335): the edges exist so a module
+    // materialised from an image gets the modules its source load would have pulled in, and
+    // a body reference no longer pulls anything in — the miss path loads it on first use,
+    // imaged or not. Only the header clauses (`:use`/`:alias`) are load-time edges now. The
+    // flag is one-shot and consumed by the loader's FIRST `%require-record-edge!` — the one
+    // for `module` itself — so the edges of everything `module` in turn loads are kept.
+    SKIP_NEXT_EDGE.with(|skip| skip.set(true));
+    let loaded = crate::eval::compile::apply_engine(heap, loader, &[Value::symbol(module)], root);
+    SKIP_NEXT_EDGE.with(|skip| skip.set(false)); // not consumed (no loader ran) — clear it
+    match loaded {
         Ok(value) => Ok(value),
         // Best-effort: inferring a require must not turn a reference into a compile error.
         // A module that cannot be found falls through to the normal handling — an in-file
@@ -323,4 +371,143 @@ fn ensure_required(heap: &mut Heap, env: EnvId, module: Symbol) -> LispResult {
         Err(error) if error.message.contains("still loading") => Ok(Value::nil()),
         Err(error) => Err(error),
     }
+}
+
+// ===== Load policy + the miss-path autoload (ADR-335) =====================================
+//
+// A qualified reference is a promise that `mod/name` is bound WHEN THE REFERENCE IS
+// EVALUATED. The hooks above infer the load at expansion time, which is right for a macro
+// (it must expand now) and premature for a function: a dispatcher module loaded every
+// subcommand's world to run one, and `(io/puts "hi")` materialised eight modules. Under the
+// LAZY policy an operand reference only records its module, and the load happens on the
+// global-lookup MISS path — `global_miss` — so a hit pays nothing. Under EAGER every
+// recorded module loads at drain, as before: the checker needs that (its unbound verdict for
+// `json/prase` depends on `json` being loaded), `nest run --check-boot` promises it, and
+// `BROOD_NO_LAZY_LOAD=1` is the A/B and bisect lever.
+
+/// `BROOD_NO_LAZY_LOAD=1` — pin the eager policy for the whole process. One cached read.
+fn lazy_by_env() -> bool {
+    use std::sync::OnceLock;
+    static LAZY: OnceLock<bool> = OnceLock::new();
+    *LAZY.get_or_init(|| std::env::var_os("BROOD_NO_LAZY_LOAD").is_none())
+}
+
+/// Nesting depth of [`EagerLoadScope`]s — any open scope forces eager, process-wide. Eager
+/// is always correct, so a concurrent lazy loader going eager for the duration is harmless.
+static EAGER_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+/// The sticky process-wide switch behind `%eager-loads!` — for a tool whose whole run must
+/// load eagerly (`nest run --check-boot`), where a Rust scope guard has no place to live.
+static EAGER_STICKY: AtomicBool = AtomicBool::new(false);
+
+/// Is the lazy policy in force right now?
+pub fn lazy_loads() -> bool {
+    lazy_by_env() && EAGER_DEPTH.load(Ordering::Relaxed) == 0 && !EAGER_STICKY.load(Ordering::Relaxed)
+}
+
+/// Set the sticky eager switch (`%eager-loads!`); returns the previous setting.
+pub fn set_eager_loads(on: bool) -> bool {
+    EAGER_STICKY.swap(on, Ordering::Relaxed)
+}
+
+/// Scope under which every inferred load is EAGER (today's behaviour): the checker opens one
+/// around its compile pass. Counted, so nested scopes compose.
+pub struct EagerLoadScope;
+
+impl EagerLoadScope {
+    pub fn enter() -> Self {
+        EAGER_DEPTH.fetch_add(1, Ordering::Relaxed);
+        EagerLoadScope
+    }
+}
+
+impl Drop for EagerLoadScope {
+    fn drop(&mut self) {
+        EAGER_DEPTH.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The global-lookup MISS path for every engine: a lookup of `sym` in `env` found nothing.
+/// A *requireable* name — one with a module prefix, after the same exclusions
+/// [`module_to_require`] applies — loads its module and is looked up again; only if it is
+/// still unbound does the ordinary `unbound symbol` error follow. For a bare name this IS the
+/// unbound error, so a caller's `None` arm is unchanged in cost and result.
+///
+/// Deliberately NOT gated on [`lazy_loads`]: the policy governs when the *compile pass*
+/// loads, and this is the net under both. A module materialised from the stdlib image never
+/// had a compile pass here — its body references were loaded at IMAGE-BUILD time, by the
+/// builder's policy, and replayed as require-edges — so a lazily-built image needs this path
+/// even in a process pinned eager, or `io`'s `file/spit-append` is an unbound error under
+/// `BROOD_NO_LAZY_LOAD=1`.
+///
+/// The load is arbitrary evaluation and therefore a collection: `env` is rooted across it
+/// here, but every OTHER handle the caller holds (an operand, a form, a cached `EnvId`) must
+/// be rooted by the caller and re-read afterwards, exactly as across a call. The error rules
+/// are [`ensure_required`]'s: a module that cannot be found, or a `still loading` cycle,
+/// falls through to the plain unbound error; an error inside a found module propagates.
+pub(crate) fn global_miss(heap: &mut Heap, env: EnvId, sym: Symbol) -> LispResult {
+    if let Some(module) = module_to_require(heap, sym) {
+        // A module's reference to its OWN not-yet-defined name while it is mid-load:
+        // never re-require it (mirrors `require_qualified_head`).
+        if heap.compile_ns() != Some(module) {
+            let env_base = heap.env_roots_len();
+            let env_root = heap.root_env(env);
+            let loaded = ensure_required(heap, env, module);
+            let env = heap.read_root_env(env_root);
+            heap.truncate_env_roots(env_base);
+            loaded?;
+            if let Some(v) = heap.env_get(env, sym) {
+                return Ok(v);
+            }
+        }
+    }
+    Err(crate::eval::unbound_error(heap, sym))
+}
+
+// ===== The image's kind index: which qualified HEADS may defer (ADR-335 item 2) ===========
+//
+// A qualified call head into an unloaded module must load NOW if it might be a macro — a
+// macro expands at compile time — and whether it is one is unknowable without loading,
+// except that a startup image records every binding's kind. `%image-index` registers, for
+// each image it opens, the modules it holds and the macro names among them (the v6 footer),
+// so a head into an imaged module whose name is not a recorded macro is a FUNCTION and may
+// wait for its first call. A head into an un-imaged module, or to a recorded macro, loads
+// eagerly as it always has. An image is fingerprint-rejected before it reaches this, so a
+// stale kind cannot be registered.
+
+struct ImageKinds {
+    modules: std::collections::HashSet<Symbol>,
+    macros: std::collections::HashSet<Symbol>,
+}
+
+fn image_kinds() -> &'static std::sync::RwLock<ImageKinds> {
+    static KINDS: std::sync::OnceLock<std::sync::RwLock<ImageKinds>> = std::sync::OnceLock::new();
+    KINDS.get_or_init(|| {
+        std::sync::RwLock::new(ImageKinds {
+            modules: Default::default(),
+            macros: Default::default(),
+        })
+    })
+}
+
+/// Record the modules (section names) and macro names an opened image holds. Additive: the
+/// stdlib image and a project image both register, and nothing un-registers — a module that
+/// later loads from source is simply bound, which every check here tests first.
+pub fn register_image_kinds(modules: &[String], macros: &[String]) {
+    let mut kinds = image_kinds().write().unwrap_or_else(|e| e.into_inner());
+    for module in modules {
+        if !module.is_empty() {
+            kinds.modules.insert(value::intern(module));
+        }
+    }
+    for name in macros {
+        kinds.macros.insert(value::intern(name));
+    }
+}
+
+/// Does an opened image vouch that `qualified` (in `module`) is NOT a macro? True only for
+/// a module some image holds whose recorded macros do not include the name.
+pub fn image_says_function(module: Symbol, qualified: Symbol) -> bool {
+    let kinds = image_kinds().read().unwrap_or_else(|e| e.into_inner());
+    kinds.modules.contains(&module) && !kinds.macros.contains(&qualified)
 }

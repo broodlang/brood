@@ -1,0 +1,122 @@
+;;; Lazy module loading (ADR-335): a qualified reference loads its module on FIRST USE, not
+;;; when the referencing file loads.
+;;;
+;;; The fixtures are tiny modules written to a temp dir on `*load-path*` at file load, so
+;;; nothing else in the suite can load them behind the assertions' back — the "not loaded
+;;; yet" half of every case depends on that. Each fixture's top level leaves a marker file,
+;;; which is how a load-time EFFECT is observed from outside.
+
+(defmodule lazy-load-test (:use test))
+
+(purge-stale-temp "lazyload-")
+
+(def- *dir* (temp-dir "lazyload-"))
+(file/mkdir *dir*)
+(reflect/add-load-path *dir*)
+
+(defn- fixture (name body)
+  (file/spit (path/join *dir* (str name ".blsp")) (str "(defmodule " name ")\n" body)))
+
+;; A plain module; its load writes a marker.
+(fixture "lazyprobe-a"
+  (str "(file/spit \"" (path/join *dir* "a-loaded") "\" \"yes\")\n"
+    "(defn answer () 42)\n"))
+;; The racing module appends to its marker, so a double load would leave two bytes.
+(fixture "lazyprobe-race"
+  (str "(file/spit-append \"" (path/join *dir* "race-loaded") "\" \"x\")\n"
+    "(defn answer () 42)\n"))
+;; The module a hot function's COLD branch references.
+(fixture "lazyprobe-jit" "(defn answer () 42)\n")
+;; A module whose load throws — the error must surface at first use, not be hidden.
+(fixture "lazyprobe-broken" "(error \"lazyprobe-broken: deliberately broken\")\n")
+
+(defn- loaded? (name) (contains? *features* name))
+
+;; ── an operand reference is deferred ──────────────────────────────────────────
+;; `lazyprobe-a/answer` in VALUE position: recorded at compile, loaded at first use.
+
+(defn- use-a () (let (f lazyprobe-a/answer) (f)))
+
+;; ── the JIT shape ──────────────────────────────────────────────────────────────
+;; A hot function whose cold branch holds the only reference to `lazyprobe-jit`. The entry
+;; hoist resolves every global the arm mentions, so without the tier-up pre-load this arm
+;; would deopt on every activation (interpreted for good) and never load anything.
+(defn- hot-pick (n) (if (< n 0) (apply lazyprobe-jit/answer nil) (+ n 1)))
+(defn- hot-drive (i n acc)
+  (if (= i n) acc (hot-drive (+ i 1) n (+ acc (hot-pick i)))))
+
+(describe "lazy module loading (ADR-335)"
+  (test "a qualified operand reference loads its module on first use, not at load"
+    (is (not (loaded? "lazyprobe-a")))
+    (is (not (file/exists? (path/join *dir* "a-loaded"))))
+    (assert= 42 (use-a))
+    (is (loaded? "lazyprobe-a"))
+    ;; The module's load-time effect happened at first use — and exactly then.
+    (is (file/exists? (path/join *dir* "a-loaded"))))
+
+  (test "a hot function's cold branch into an unloaded module is pre-loaded at tier-up"
+    (is (not (loaded? "lazyprobe-jit")))
+    ;; Well past the tiering threshold; the branch is never taken.
+    (assert= 5000050000 (hot-drive 0 100000 0))
+    ;; The pre-load ran when the arm was elected for compilation: the module is loaded
+    ;; although nothing ever called into it …
+    (is (loaded? "lazyprobe-jit"))
+    ;; … and the cold branch works when finally taken.
+    (assert= 42 (hot-pick -1)))
+
+  (test "the unbound error is unchanged for a typo, in a module that exists or not"
+    (let (in-module (try (let (f lazyprobe-a/nope) f) (catch e (error-message e)))
+          no-module (try (let (f nomod-xyz/thing) f) (catch e (error-message e))))
+      (is (includes? in-module "unbound symbol: lazyprobe-a/nope"))
+      (is (includes? no-module "unbound symbol: nomod-xyz/thing"))))
+
+  (test "an error inside the module surfaces at first use rather than being hidden"
+    (let (msg (try (let (f lazyprobe-broken/anything) f) (catch e (error-message e))))
+      (is (includes? msg "deliberately broken")))))
+
+(describe "lazy loading under concurrency" :isolated
+  (test "sixteen processes racing the same first use produce ONE load"
+    (is (not (loaded? "lazyprobe-race")))
+    (let (me (self))
+      (doseq (_ (range 16))
+        (spawn (send me [:race (try (let (f lazyprobe-race/answer) (f))
+                                 (catch e [:err (error-message e)]))])))
+      (let (results (map (range 16)
+                      (fn (_) (receive ([:race r] r) (after *test-wait-ms* :timeout)))))
+        (is (every? results (fn (r) (= r 42))))
+        (is (loaded? "lazyprobe-race"))
+        ;; One byte: the module body evaluated exactly once.
+        (assert= "x" (file/slurp (path/join *dir* "race-loaded")))))))
+
+;; ── a qualified CALL HEAD defers too, when an image vouches for its kind ──────
+;; A head must load eagerly if it might be a macro. The stdlib image records every
+;; binding's kind (the v6 footer), so a head into an imaged std module whose name is not a
+;; recorded macro waits for its first call; a recorded macro still loads before expansion.
+;; Without an installed image there is no kind index and heads are eager, so these cases
+;; only assert the deferral when this process materialised one (CI's source-path job runs
+;; with `BROOD_NO_STDIMAGE=1`).
+
+(fixture "lazyprobe-head" "(defn go () (humanize/byte-size 1024))\n")
+(fixture "lazyprobe-mac" "(defn go () (telemetry/span [:lazy-load-test :probe] {} 7))\n")
+
+;; The fixtures are reached through OPERAND references (`run-fixture f`), never a call head:
+;; a head into a temp-dir module no image describes is eager, so `(lazyprobe-mac/go)` written
+;; in a test body would load the fixture while the `describe` compiled — before the test runs.
+(defn- run-fixture (f) (f))
+
+(describe "lazy call heads (the image's kind index)"
+  (test "a function head into an imaged module loads at first call, not at the referencing load"
+    (is (not (loaded? "humanize")))
+    (require-one 'lazyprobe-head)
+    (when (%std-image-installed)
+      (is (not (loaded? "humanize"))))
+    (assert= "1.0 KB" (run-fixture lazyprobe-head/go))
+    (is (loaded? "humanize")))
+
+  (test "a MACRO head into an imaged module still loads before expansion, and expands"
+    (is (not (loaded? "telemetry")))
+    (require-one 'lazyprobe-mac)
+    ;; The macro's module had to load while `lazyprobe-mac` compiled — a call form that
+    ;; should have expanded and did not would be a silently different program.
+    (is (loaded? "telemetry"))
+    (assert= 7 (run-fixture lazyprobe-mac/go))))

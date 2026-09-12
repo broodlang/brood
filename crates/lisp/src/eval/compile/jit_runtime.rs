@@ -216,6 +216,9 @@ pub(crate) fn jit_tier_in_frame(
             // The frame profile types only *params*; record the arm's float-valued free
             // globals too, so a float-context arm whose floats arrive from a `def`'d
             // constant isn't lowered onto the integer path (see `record_float_globals`).
+            // ADR-335: load what the arm names BEFORE it goes native (see its doc) — this
+            // may collect, so `genv` is read after it.
+            preload_arm_globals(arm, heap, heap.read_root_env(env));
             let genv = heap.read_root_env(env);
             record_float_globals(arm, heap, genv);
             record_self_global_ok(arm, heap, genv);

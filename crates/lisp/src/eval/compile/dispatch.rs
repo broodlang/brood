@@ -63,7 +63,13 @@ pub(crate) fn exec_call(
                     let env = heap.read_root_env(genv);
                     let v = match heap.env_get(env, *sym) {
                         Some(v) => v,
-                        None => return Err(tag(crate::eval::unbound_error(heap, *sym))),
+                        None => {
+                            // Autoload (ADR-335): the load collects and bumps the epoch,
+                            // so install nothing — the next call fills the IC. Nothing
+                            // else read so far is a heap handle (`args` are still nodes).
+                            cv = crate::eval::derive::global_miss(heap, env, *sym).map_err(tag)?;
+                            break 'resolve;
+                        }
                     };
                     if !value::is_dynamic(*sym) {
                         let arm = match v.unpack() {

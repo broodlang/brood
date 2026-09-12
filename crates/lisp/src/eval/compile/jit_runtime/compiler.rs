@@ -68,6 +68,76 @@ pub(super) fn float_global_unbox_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_FLOAT_GLOBAL").is_none())
 }
 
+/// Load, before `arm` is handed to the compiler, every module a qualified global in its
+/// chunk names that is not yet bound (ADR-335 item 4). **Native code never loads a module**:
+/// a runtime callback runs with the arm's live values unspilled, so it cannot run
+/// `require-one`; and the entry hoist already DEOPTS on an unbound global, which under lazy
+/// loading would be a cliff — a hot arm with a cold branch into a not-yet-loaded module
+/// deopting on every activation until the thrash latch marks it BAILED, interpreted for the
+/// rest of the program without ever loading anything. So the invariant is established here,
+/// on the VM side at the tiering election (the frame is on `roots`, a safe point): an arm
+/// hot enough to compile has earned the load of what it names. Direct callees' chunks are
+/// walked too, since the leaf inliner splices their bodies — and their global reads — into
+/// this arm's native code.
+///
+/// Not gated on the load policy, for the reason `global_miss` gives: a module materialised
+/// from the image had no compile pass, so its body references are unbound under either.
+/// A name whose module cannot be found stays unbound (`global_miss`'s error is dropped —
+/// the VM raises the real error if that branch ever runs); a broken module's error is
+/// dropped here too, for the same reason: tiering is not the place to raise it.
+#[cfg(feature = "jit")]
+pub(super) fn preload_arm_globals(arm: &CompiledArm, heap: &mut Heap, env: EnvId) {
+    use crate::core::value::Symbol;
+    fn globals_of(chunk: &Chunk, out: &mut Vec<Symbol>) {
+        for inst in &chunk.code {
+            let sym = match inst {
+                Inst::Global(s) | Inst::GlobalIc { sym: s, .. } => *s,
+                Inst::Call { head: Some(s), .. } => *s,
+                _ => continue,
+            };
+            if !out.contains(&sym) {
+                out.push(sym);
+            }
+        }
+    }
+    let Some(chunk) = arm.chunk.as_ref() else {
+        return;
+    };
+    let mut syms: Vec<Symbol> = Vec::new();
+    globals_of(chunk, &mut syms);
+    // One level of callees: the splice candidates. Their own callees are not spliced.
+    let direct: Vec<Symbol> = syms.clone();
+    for sym in direct {
+        if let Some(Value::Fn(id)) = heap.env_get(env, sym) {
+            // One compiled body per fixed arity the callee declares; an arm that has
+            // not compiled yet has no chunk to splice and nothing to read here.
+            let arities: Vec<usize> =
+                heap.closure(id).arms.iter().map(|a| a.params.len()).collect();
+            for argc in arities {
+                if let Some(callee) = cached_arm_for(heap, id, argc) {
+                    if let Some(c) = callee.chunk.as_ref() {
+                        globals_of(c, &mut syms);
+                    }
+                }
+            }
+        }
+    }
+    // Only a QUALIFIED unbound name can load anything; `global_miss` applies the same
+    // exclusions the compile-time hooks do. The env is rooted across each load by the
+    // callee; nothing else here is a heap handle.
+    let env_base = heap.env_roots_len();
+    let env_root = heap.root_env(env);
+    for sym in syms {
+        if crate::core::value::symbol_name_ref(sym).contains('/') {
+            let env = heap.read_root_env(env_root);
+            if heap.env_get(env, sym).is_none() {
+                let _ = crate::eval::derive::global_miss(heap, env, sym);
+            }
+        }
+    }
+    heap.truncate_env_roots(env_base);
+}
+
 /// Snapshot which free globals this arm reads currently hold a `Value::Float` into
 /// [`CompiledArm::float_globals`] (see that field for why the param profile alone is not
 /// enough). Runs on the thread that wins the tiering election — the only place that has

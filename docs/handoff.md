@@ -173,7 +173,31 @@ and the macro's list disagree, so a new template has to be classified rather tha
 left un-run. Verified under CI's exact feature set (`--features brood/treesit-grammars`,
 which notably does NOT include gui); binary is 31/31.
 
-### 6 — Lazy module loading for qualified references (measured 2026-09-12; an ADR, not a patch)
+### 6 — Lazy module loading for qualified references ✅ DONE 2026-09-12 (ADR-335)
+
+Shipped as designed: the miss path (`derive::global_miss` at every engine's unbound arm),
+the image's v6 kind index for call heads, the JIT tier-up pre-load, the eager scope for the
+checker and `--check-boot`, `BROOD_NO_LAZY_LOAD=1` — plus the one thing the design missed
+and the first measurement found: an inferred load must record **no require-edge**, or the
+image replays the whole closure on materialise anyway (27 modules and 35 ms, not 5 and 20).
+`nest complete -- te` **72 → 20 ms**. Guard `tests/lazy_load_test.blsp`; devlog + ADR carry
+the six-part write-up. Still open from it, small:
+
+- **Delete `%autoload`** (`std/prelude/tools.blsp`, KI-61's stubs) and the two
+  `prelude_hygiene` gates in `crates/lisp/src/lib.rs` — the prelude's `string/join`, `seq/find`
+  & co. references miss and load like any other now. Do it as its own commit and run the
+  prelude-hygiene + bare-names tests before and after.
+- **`process/message.rs`'s `(require-one 'mod)` for a shipped closure's module** on the
+  receiving node is redundant for the same reason; delete once the dist tests say so.
+- **The A/B sweep** on a machine where it may run: `startup` must read flat; a lazy load can
+  only remove work from the rows.
+- A `--check-boot` fixture whose broken module is reached ONLY by a qualified reference from
+  a project module (a dependency or a load-path module, not a source file — those load
+  regardless): the eager pin is what makes it fail, and nothing pins that yet.
+
+Original item text follows for the measurement and the design questions it posed.
+
+#### (original item 6 text)
 
 **The number.** `nest complete -- te` — a static answer, one subcommand name — costs **72 ms**
 on the dev build with the stdlib image present: 20 ms process floor (`brood hello.blsp`),
