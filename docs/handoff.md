@@ -173,6 +173,34 @@ and the macro's list disagree, so a new template has to be classified rather tha
 left un-run. Verified under CI's exact feature set (`--features brood/treesit-grammars`,
 which notably does NOT include gui); binary is 31/31.
 
+### 6 — Lazy module loading for qualified references (measured 2026-09-12; an ADR, not a patch)
+
+**The number.** `nest complete -- te` — a static answer, one subcommand name — costs **72 ms**
+on the dev build with the stdlib image present: 20 ms process floor (`brood hello.blsp`),
+10 ms prelude boot (`BROOD_BOOT_TRACE=1`: register 0.9 + image 7.8 + freeze 1.3), **~50 ms
+materialising the 62-module closure `nest.blsp` drags in** (`BROOD_IMAGE_TRACE=1` lists them:
+`project*`, `package`, `http`, `tls`, `crypto`, `observer`, `editor/*`, `gui`, `repl`, …),
+and under 1 ms for the completion itself. It was 9 ms in Rust (ADR-322 item 6 moved it; the
+dynamic answers already paid the boot). Per the dogfooding rule the policy stays in Brood and
+this is the gap it surfaced.
+
+**Why the closure loads.** ADR-227: a qualified reference `mod/name` infers a load of `mod` —
+`require_qualified_head` eagerly at macroexpand for a call head (a macro must be loaded
+before its use expands), and `record_qualified` for an operand, drained after resolve. Both
+fire while `nest.blsp` is being *loaded*, because every `run-*` body is expanded then. A
+dispatcher module therefore loads every subcommand's world to run one.
+
+**The general capability (do not patch `nest.blsp` around it).** Defer a body-level qualified
+FUNCTION reference to first call: a runtime autoload on the global-lookup *miss* path (so hits
+pay nothing) that requires the module and retries — `require-one` is idempotent and already
+cycle-aware. Heads must stay eager only when the name is a *macro*, which is unknowable
+without loading — except that the stdlib image records each binding's kind (`KIND_MACRO`), so
+for an imaged std module the answer is one index read. Design questions for the ADR: what the
+tree-walker/VM do on a miss today (`eval::unbound_error` is where the ledger hint lives — the
+autoload sits in front of it); whether the checker's "already loaded?" test (`feature_loaded`)
+needs to see the lazy set; and the measurement — `nest complete` should land near the 30 ms
+floor+boot, and `make ab --floor`'s `startup` row must not move.
+
 ### 5 — Documentation debt (old item 7; do a slice when a session has time)
 
 Docstring examples (each is an executed test via `doc_examples_test.blsp`); the archive split of

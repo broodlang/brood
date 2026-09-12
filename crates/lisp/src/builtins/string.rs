@@ -33,14 +33,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(3),
         Sig::new(vec![string, int, string], int),
         &["s", "start", "chars"],
-        "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string/span-until.",
+        "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string/span-until.\n\n    (string/span \"  abc\" 0 \" \")   → 2\n    (string/span \"abc\" 0 \" \")   → 0",
         string_span);
     primitives.def(
         "string/span-until",
         Arity::exact(3),
         Sig::new(vec![string, int, string], int),
         &["s", "start", "chars"],
-        "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string/length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string/span.",
+        "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string/length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string/span.\n\n    (string/span-until \"abc def\" 0 \" \")   → 3\n    (string/span-until \"abc\" 0 \" \")   → 3",
         string_span_until);
     // Linear substring search — like `substring`/`lower`, it genuinely needs Rust:
     // Brood has no O(1) char access (char indexing into UTF-8 is O(index)), so a
@@ -131,7 +131,7 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         // the checker can type it. `Sig::new` left it undeclarable (audit/sig-arity).
         Sig::with_optional(vec![string, int], vec![any], any),
         &["s", "i", "default"],
-        "The i-th grapheme cluster of s as a string, or default (else nil) when i is out of range. The grapheme-indexed char-at: walks to i instead of materialising every cluster, so a cursor step is not O(line length).",
+        "The i-th grapheme cluster of s as a string, or default (else nil) when i is out of range. The grapheme-indexed char-at: walks to i instead of materialising every cluster, so a cursor step is not O(line length).\n\n    (string/grapheme-at \"héllo\" 1)   → \"é\"",
         grapheme_at);
     primitives.def(
         "string/substring-graphemes",
@@ -139,14 +139,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         // `end` is the OPTIONAL third argument the arity allows (audit/sig-arity).
         Sig::with_optional(vec![string, int], vec![int], string),
         &["s", "start", "end"],
-        "The half-open grapheme-cluster range [start, end) of s (end optional = to the end), clamped to the ends. The grapheme-indexed substring — plain substring is codepoint-indexed and can slice a cluster in half.",
+        "The half-open grapheme-cluster range [start, end) of s (end optional = to the end), clamped to the ends. The grapheme-indexed substring — plain substring is codepoint-indexed and can slice a cluster in half.\n\n    (string/substring-graphemes \"héllo\" 1 3)   → \"él\"\n    (string/substring-graphemes \"héllo\" 3)   → \"lo\"",
         substring_graphemes);
     primitives.def(
         "string/normalize",
         Arity::exact(2),
         Sig::new(vec![string, kw], string),
         &["s", "form"],
-        "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text.",
+        "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text.\n\n    (string/length (string/normalize \"é\" :nfd))   → 2\n    (string/normalize \"ﬁ\" :nfkc)   → \"fi\"",
         string_normalize);
     // The minimal-splice diff of two strings — one O(n) byte pass, char-indexed
     // result. Needs Rust like the search/split above (no O(1) char access), and it
@@ -186,14 +186,14 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         Arity::exact(1),
         Sig::new(vec![string], int),
         &["s"],
-        "Unicode codepoint of the first character of string s (identical to the byte value for ASCII).",
+        "Unicode codepoint of the first character of string s (identical to the byte value for ASCII).\n\n    (string/char->int \"A\")   → 65",
         char_to_int);
     primitives.def(
         "string/int->char",
         Arity::exact(1),
         Sig::new(vec![int], string),
         &["n"],
-        "A 1-char string for Unicode codepoint n. Errors on an invalid codepoint.",
+        "A 1-char string for Unicode codepoint n. Errors on an invalid codepoint.\n\n    (string/int->char 955)   → \"λ\"",
         int_to_char,
     );
     primitives.def(

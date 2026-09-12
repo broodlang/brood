@@ -33,12 +33,18 @@ pub(super) fn nominal_ids(
     if members.is_empty() {
         return None;
     }
-    Some(
-        members
-            .iter()
-            .map(|s| value::symbol_name_ref(*s).to_string())
-            .collect(),
-    )
+    // By NAME, not by the set's own order: a `LitSet` is keyed by `Symbol`, and a symbol's
+    // id is the order it was interned in — which in a test binary is the order the tests
+    // happened to run. `t/circle | t/rect` in one run and `t/rect | t/circle` in the next
+    // is the same type wearing two spellings, and a message a reader compares against a
+    // sig must not depend on which test interned `rect` first. The keyword renderer sorts
+    // for the same reason (`kw_parts.sort()` below); this is its nominal counterpart.
+    let mut names: Vec<String> = members
+        .iter()
+        .map(|s| value::symbol_name_ref(*s).to_string())
+        .collect();
+    names.sort();
+    Some(names)
 }
 
 /// Render a term's **subtractions**, if any: `(not X)` when the positive part is the whole

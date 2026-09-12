@@ -319,7 +319,10 @@ the `@`, or nil — it is **not** part of `:host`, so an allow-list or SSRF chec
 `:query-params` is a map encoded via `query-encode`; `:query` is a raw query string
 (used only when `:query-params` is absent). `:userinfo`, `:port` and `:fragment` are
 optional — `:userinfo` is emitted as `userinfo@` before the host, so a `parse-url`
-round-trip is lossless."
+round-trip is lossless.
+
+    (url/build {:scheme \"https\" :host \"example.com\" :path \"/a\" :query-params {:q \"x y\"}})   → \"https://example.com/a?q=x+y\"
+    (url/build {:scheme \"http\" :host \"h\" :port 8080 :path \"/p\" :fragment \"top\"})   → \"http://h:8080/p#top\""
   (let (scheme (get parts :scheme)
         host (get parts :host)
         userinfo (get parts :userinfo)

@@ -429,7 +429,10 @@ bound only at runtime), **`:unrequired`** (ADR-189 — a qualified `mod/name` wh
 module the file deliberately reaches via another require, e.g. a circular dependency
 that can't `(require 'mod)` at the top level), **`:deprecated`** (ADR-283), and
 **`:discarded-catch`** (a `(catch e nil)` whose nothing is genuinely the
-answer — read by `check/discarded_catch.rs` on the un-expanded forms). An unrecognised
+answer — read by `check/discarded_catch.rs` on the un-expanded forms), and
+**`:duplicate-def`** (one file binding the same top-level name twice in one module — the
+later definition silently replaces the earlier; wrap a deliberate override, read on the
+un-expanded forms like the sig collector). An unrecognised
 category suppresses nothing — a typo is a
 no-op that still lints, never a silent blanket opt-out. This is what lets
 `nest check` stay at **zero** warnings project-wide without weakening any lint.

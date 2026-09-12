@@ -103,7 +103,9 @@ Returns a list of `[:keep line]`, `[:delete line]`, `[:insert line]` ops.
 
 (defn summary (ops)
   "Count `[:keep]`, `[:delete]`, and `[:insert]` operations in a diff result.
-Returns `{:keeps n :deletes n :inserts n}`."
+Returns `{:keeps n :deletes n :inserts n}`.
+
+    (diff/summary (diff/lines \"a\\nb\\nc\" \"a\\nx\\nc\"))   → {:keeps 2 :deletes 1 :inserts 1}"
   (fold ops
     {:keeps 0 :deletes 0 :inserts 0}
     (fn (acc op)

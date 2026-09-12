@@ -300,7 +300,9 @@ doubled. Rows are separated by `\\n`.
 
 (defn encode-maps (maps headers)
   "Serialize a list of maps to CSV, with the given `headers` list determining
-column order. The header row is written first. Missing keys produce empty fields."
+column order. The header row is written first. Missing keys produce empty fields.
+
+    (csv/encode-maps (list {:a 1 :b \"x\"} {:a 2}) [\"a\" \"b\"])   → \"a,b\\n1,x\\n2,\""
   (let (header-row (into [] headers)
         data-rows (map maps (fn (m) (into [] (csv-map->row m headers)))))
     (encode (cons header-row (into [] data-rows)))))

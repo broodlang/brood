@@ -597,6 +597,112 @@ fn sig_arity(sig: &Sig) -> Arity {
     }
 }
 
+/// Warn when one file binds the same top-level name twice in one module (Pass 2.9): the
+/// later `def`/`defn`/`defn-`/`defmacro`/`defdyn`/`defrecord` silently replaces the
+/// earlier, so the first is dead code that still reads as the definition. Found the hard
+/// way: `project.blsp` carried a public sorted `source-files` and, 1,300 lines later, a
+/// private unsorted one — every caller ran the second while the first's docstring made
+/// the sortedness promise. Nothing said so: the cross-file duplicate-global lint is
+/// per-namespace across files, and one file's rebinding of its own name is legal.
+///
+/// Reads the *un-expanded* forms, descending `(do …)` and `(check-allow …)` wrappers the
+/// way the sig collector does. Region-aware (ADR-223): a `(defmodule …)` starts a fresh
+/// name set, so two modules in one file may each bind `helper`. Suppress a deliberate
+/// override with `(check-allow :duplicate-def …)` around the second definition.
+fn lint_duplicate_defs(heap: &mut Heap, forms: &[Value], out: &mut Vec<(Option<Pos>, String)>) {
+    let mut seen: HashMap<Symbol, Option<Pos>> = HashMap::new();
+    for &form in forms {
+        lint_duplicate_defs_in(heap, form, false, &mut seen, out);
+    }
+}
+
+fn lint_duplicate_defs_in(
+    heap: &mut Heap,
+    form: Value,
+    allowed: bool,
+    seen: &mut HashMap<Symbol, Option<Pos>>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    // Recurses through nested `(do (do …))`, like `collect_register_sig_forms` beside it,
+    // and for the same reason grows the stack in heap-backed segments: a 30 000-deep
+    // legal chain (`checker_survives_pathologically_deep_forms`) overflowed the native
+    // stack here — the one walker of the un-expanded tree that lacked the guard, and a
+    // SIGSEGV `catch_unwind` cannot catch.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        lint_duplicate_defs_in_inner(heap, form, allowed, seen, out)
+    })
+}
+
+fn lint_duplicate_defs_in_inner(
+    heap: &mut Heap,
+    form: Value,
+    allowed: bool,
+    seen: &mut HashMap<Symbol, Option<Pos>>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    let Ok(items) = heap.list_to_vec(form) else {
+        return;
+    };
+    let Some(&Value::Sym(head)) = items.first() else {
+        return;
+    };
+    if value::symbol_is(head, kw::DEFMODULE) {
+        seen.clear();
+        return;
+    }
+    if value::symbol_is(head, kw::DO) {
+        for &it in &items[1..] {
+            lint_duplicate_defs_in(heap, it, allowed, seen, out);
+        }
+        return;
+    }
+    if value::symbol_is(head, "check-allow") || value::symbol_is(head, "%lint-allow") {
+        let here = allowed
+            || matches!(items.get(1), Some(&Value::Keyword(k)) if value::symbol_is(k, "duplicate-def"));
+        for &it in &items[2..] {
+            lint_duplicate_defs_in(heap, it, here, seen, out);
+        }
+        return;
+    }
+    let is_def = [
+        kw::DEF,
+        kw::DEFN,
+        kw::DEF_PRIVATE,
+        kw::DEFN_PRIVATE,
+        kw::DEFMACRO,
+        kw::DEFDYN,
+        kw::DEFRECORD,
+    ]
+    .iter()
+    .any(|k| value::symbol_is(head, k));
+    if !is_def {
+        return;
+    }
+    let Some(&Value::Sym(name)) = items.get(1) else {
+        return;
+    };
+    let pos = heap.form_pos_only(form);
+    match seen.get(&name) {
+        Some(first) if !allowed => {
+            let where_first = first
+                .map(|p| format!(" at line {}", p.line))
+                .unwrap_or_default();
+            out.push((
+                pos,
+                format!(
+                    "`{}` is defined twice in this file: this definition replaces the one{where_first}, \
+                     which is now dead code — remove one, or wrap a deliberate override in \
+                     (check-allow :duplicate-def …)",
+                    value::symbol_name(name)
+                ),
+            ));
+        }
+        _ => {
+            seen.insert(name, pos);
+        }
+    }
+}
+
 /// Validate this file's hand-written `(sig …)` declarations (Pass 2.85) — see the
 /// call site for why an unreadable annotation is worse than no annotation.
 ///
@@ -1799,6 +1905,7 @@ pub fn check_file_mode(
         // (which *suppressed* the correct arity check — the call then type-checked clean
         // and died at run time); and a sig for a name the file never defines.
         check_sig_declarations(heap, &forms, file_ns_name.as_deref(), &ctx, &mut out);
+        lint_duplicate_defs(heap, &forms, &mut out);
         // With the signature passes done, hand the per-function answer to a `file_signatures`
         // capture if one is armed (a no-op otherwise).
         capture_file_signatures(heap, &expanded, &ctx);

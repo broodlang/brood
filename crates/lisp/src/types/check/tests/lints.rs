@@ -453,3 +453,58 @@ fn combinator_collection_slot_rejects_the_old_argument_order() {
         assert!(warnings(src).is_empty(), "{src}: {:?}", warnings(src));
     }
 }
+
+// ---- one file, one name, two definitions (Pass 2.9) ----
+// `project.blsp` carried a public sorted `source-files` and, 1,300 lines later, a private
+// unsorted one; every caller ran the second while the first's docstring made the promise.
+// The cross-file lint is per-namespace across files; this is the same-file half.
+
+/// The file-mode warnings for `src`, filtered to the duplicate-definition lint.
+fn duplicate_warnings(src: &str) -> Vec<String> {
+    file_warnings(src)
+        .into_iter()
+        .filter(|w| w.contains("is defined twice in this file"))
+        .collect()
+}
+
+#[test]
+fn a_second_top_level_definition_of_a_name_is_flagged_once_naming_both() {
+    let w = duplicate_warnings(
+        "(defmodule dup)\n(defn helper (x) x)\n(defn other () 1)\n(defn- helper (x) (+ x 1))",
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(
+        w[0].contains("`helper`") && w[0].contains("line 2") && w[0].contains("dead code"),
+        "{w:?}"
+    );
+    // Every definer counts, not just `defn`: a `def` shadowed by a `defdyn` is the same bug.
+    let w = duplicate_warnings("(defmodule dup)\n(def *x* 1)\n(defdyn *x* 2)");
+    assert_eq!(w.len(), 1, "{w:?}");
+}
+
+#[test]
+fn the_duplicate_lint_stays_silent_where_a_second_binding_is_legitimate() {
+    // Distinct names, and a name rebound inside a body (not top level).
+    assert!(
+        duplicate_warnings("(defmodule dup)\n(defn a () 1)\n(defn b () (def c 1) (def c 2))")
+            .is_empty()
+    );
+    // A second module in the same file (ADR-223 regions) starts a fresh name set.
+    assert!(duplicate_warnings(
+        "(defmodule one)\n(defn helper () 1)\n(defmodule two)\n(defn helper () 2)"
+    )
+    .is_empty());
+    // A deliberate override says so.
+    assert!(duplicate_warnings(
+        "(defmodule dup)\n(def *x* :first)\n(check-allow :duplicate-def (def *x* :second))"
+    )
+    .is_empty());
+    // …and a `check-allow` for a DIFFERENT category does not silence it.
+    assert_eq!(
+        duplicate_warnings(
+            "(defmodule dup)\n(def *x* :first)\n(check-allow :unbound (def *x* :second))"
+        )
+        .len(),
+        1
+    );
+}

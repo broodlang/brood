@@ -59,7 +59,9 @@ UTF-8-encodes a string.
 (sig hex-encode-bytes ((or bytes seqable) -> string))
 
 (defn hex-encode-bytes-upper (bytes)
-  "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as uppercase hexadecimal."
+  "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as uppercase hexadecimal.
+
+    (encoding/hex-encode-bytes-upper [222 173 190 239])   → \"DEADBEEF\""
   (encoding-hex-encode-codes bytes encoding-hex-upper-codes))
 (sig hex-encode-bytes-upper ((or bytes seqable) -> string))
 
@@ -179,12 +181,16 @@ binary payload (digests, salts, wire bytes)."
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
 standard Base64. The byte-faithful counterpart of `base64-encode`, which first
 UTF-8-encodes a string — so a byte ≥ 0x80 encodes as one byte, not its two-byte
-UTF-8 form."
+UTF-8 form.
+
+    (encoding/base64-encode-bytes [255 0 1])   → \"/wAB\""
   (encoding-b64-encode bytes encoding-b64-std-codes))
 (sig base64-encode-bytes ((or bytes seqable) -> string))
 
 (defn base64-url-encode-bytes (bytes)
-  "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as URL-safe Base64."
+  "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as URL-safe Base64.
+
+    (encoding/base64-url-encode-bytes [251 255])   → \"-_8=\""
   (encoding-b64-encode bytes encoding-b64-url-codes))
 (sig base64-url-encode-bytes ((or bytes seqable) -> string))
 

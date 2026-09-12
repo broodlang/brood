@@ -12499,3 +12499,20 @@ each a gate doing its job, none a behavioural fault:
   `renamed to project-release/build-info (ADR-325)` and `--fix-renames` applies it. The
   CI job stays red until `BEDIT_REF` moves to a bedit commit on the new names — bedit's
   working tree already is.
+
+## 2026-09-12 — Four follow-ups from the structure pass
+
+- **`nest check` warns on a same-file duplicate definition** (Pass 2.9, `:duplicate-def`
+  to allow one). The bug class ADR-325's split found by accident — `project.blsp`'s two
+  `source-files` — is now a gate; std/ + tests/ had exactly one other case, the deliberate
+  `def`/`def` contrast in `defonce_test`. Sabotage-verified.
+- **The completion keypress, measured** (handoff item 6): 72 ms = 20 floor + 10 boot + ~50
+  materialising `nest.blsp`'s 62-module closure + <1 for the answer. The fix is lazy loading
+  of body-level qualified function references — an ADR, written up in the handoff with the
+  design questions, not done here.
+- **29 more executed docstring examples** (handoff item 5), every value computed by the
+  running system and the gate sabotage-checked both ways. `string/format` is printf-style;
+  `(string/normalize "é" :nfd)` is two chars that print as one.
+- **`make smoke-bedit ARGS=--bump`** moves `BEDIT_REF` to bedit's pushed HEAD after a green
+  run, and the script now says when the checkout is not the pinned commit. The rename-wave
+  checklist in CLAUDE.md ends with it.

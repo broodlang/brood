@@ -30,16 +30,28 @@
 #
 # `--require` makes a missing BEDIT_DIR a failure (CI); by default it is a note and
 # exit 0, so `make green-all` still works on a machine without the sibling checkout.
+#
+# THE PIN. CI runs bedit at `BEDIT_REF` (.github/workflows/ci.yml), not at whatever
+# ../bedit is checked out at — so a green run here proves nothing about CI unless the two
+# agree. The script says so up front, and `--bump` closes the gap: after a green run it
+# rewrites `BEDIT_REF` to bedit's HEAD, refusing a HEAD that is not on bedit's origin
+# (CI cannot fetch an unpushed commit) or a dirty checkout (the commit is not what ran).
+# The rule the pin's comment states — "bump it in the SAME brood commit that lands the
+# change" — became a step somebody had to remember after ADR-325's rename wave; now it
+# is `make smoke-bedit ARGS=--bump`.
 set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 require=0
+bump=0
 for arg in "$@"; do
   case "$arg" in
     --require) require=1 ;;
-    *) echo "usage: $0 [--require]" >&2; exit 2 ;;
+    --bump) bump=1 ;;
+    *) echo "usage: $0 [--require] [--bump]" >&2; exit 2 ;;
   esac
 done
+ci_yml=$root/.github/workflows/ci.yml
 
 BEDIT_DIR=${BEDIT_DIR:-$root/../bedit}
 SMOKE_ULIMIT_KB=${SMOKE_ULIMIT_KB:-16000000}
@@ -83,6 +95,13 @@ bedit_dirty=$(git -C "$BEDIT_DIR" status --porcelain 2>/dev/null | wc -l)
 echo "  nest:  $NEST ($nest_version, built $(date -r "$NEST" '+%Y-%m-%d %H:%M'))"
 echo "  brood: HEAD $tree_sha"
 echo "  bedit: $BEDIT_DIR @ $bedit_sha ($bedit_dirty modified files)"
+# Is this the bedit CI will run? A green smoke against a different commit is a fact about
+# the wrong bedit.
+pinned=$(sed -n 's/^  BEDIT_REF: \([0-9a-f]*\).*/\1/p' "$ci_yml" | head -1)
+bedit_full=$(git -C "$BEDIT_DIR" rev-parse HEAD 2>/dev/null || echo "?")
+if [ -n "$pinned" ] && [ "$pinned" != "$bedit_full" ]; then
+  note "CI pins bedit @ ${pinned:0:8} (BEDIT_REF), not the $bedit_sha checked out here — pass --bump after a green run to move the pin"
+fi
 case "$nest_version" in
   *"$tree_sha"*) ;;
   *) note "nest was built from a different commit than HEAD — rebuild (cargo build -p nest) if the tree moved" ;;
@@ -114,6 +133,22 @@ run_step "nest test" env BROOD_GUI_HEADLESS=1 "$NEST" test
 
 if [ "$fail" = 0 ]; then
   echo "smoke-bedit: green — bedit @ $bedit_sha checks, boots and tests against $nest_version"
+  if [ "$bump" = 1 ]; then
+    if [ "$bedit_dirty" != 0 ]; then
+      red "--bump refused: bedit has $bedit_dirty modified file(s); the commit is not what just ran"
+      exit 1
+    fi
+    if ! git -C "$BEDIT_DIR" fetch -q origin 2>/dev/null || ! git -C "$BEDIT_DIR" merge-base --is-ancestor "$bedit_full" origin/main 2>/dev/null; then
+      red "--bump refused: bedit $bedit_sha is not on origin/main — push it first, CI cannot fetch an unpushed commit"
+      exit 1
+    fi
+    if [ "$pinned" = "$bedit_full" ]; then
+      ok "BEDIT_REF already pins $bedit_sha"
+    else
+      sed -i "s/^  BEDIT_REF: [0-9a-f]*/  BEDIT_REF: $bedit_full/" "$ci_yml"
+      ok "BEDIT_REF ${pinned:0:8} -> $bedit_sha in $(realpath --relative-to="$root" "$ci_yml") — commit it with the change bedit adopted"
+    fi
+  fi
   exit 0
 fi
 echo "smoke-bedit: $fail of 3 gates FAILED (bedit @ $bedit_sha, $nest_version)"

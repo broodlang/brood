@@ -134,10 +134,31 @@ fn run_fan(interp: &mut Interp, module: &str, call: &str, expected: &str) {
         (def root (self))
         ;; 24 processes reach the stub with no ordering between them: one wins the load
         ;; claim, the rest must WAIT for its provide rather than see a half-loaded module.
+        ;;
+        ;; Every child is MONITORED and the wait is BOUNDED. This fan once sat asleep for
+        ;; 48 minutes inside `cargo test` (2026-09-11, under a full-workspace rebuild and a
+        ;; second suite's load; KI-127): a bare `receive` on `[:r v]` cannot tell "the reply
+        ;; is slow" from "the child is dead", so a child that died before replying — for
+        ;; any reason — hung the parent forever with nothing on the terminal. Now a death
+        ;; is a `[:down …]` that fails the run naming its reason, and a reply that is
+        ;; neither delivered nor died-for is reported with what did arrive. The 60 s is
+        ;; twice `%require-await`'s own loud backstop, so a genuine loader stall surfaces
+        ;; there first, with its own message.
         (defn fan (k)
           (do
-            (dotimes (_ k) (spawn (send root [:r {call}])))
-            (reduce (range k) (list) (fn (acc _) (receive ([:r v] (cons v acc)))))))
+            (dotimes (_ k) (spawn-monitor (send root [:r {call}])))
+            (reduce (range k) (list)
+              (fn (acc _)
+                (receive
+                  ([:r v] (cons v acc))
+                  ;; A child exits `:normal` right after replying, and that `:down` can sit
+                  ;; ahead of the next child's reply — only an ABNORMAL death is news.
+                  ([:down _ pid reason] :when (not (= reason :normal))
+                    (error (str "a racing child " pid " died before replying: " (pr-str reason)
+                             " — after " (count acc) " of " k " replies")))
+                  (after 60000
+                    (error (str "no reply and no death for 60s — " (count acc) " of " k
+                             " replies arrived: " (pr-str acc)))))))))
 
         ;; Distinct-count inline rather than through `seq/distinct`, which is itself one of
         ;; the stubs under test — and naming it would load `seq` before the race starts.

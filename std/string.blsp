@@ -80,7 +80,9 @@ another type live here too, module-rooted: `string/->number`, `string/->symbol`.
 
 (defn codepoints-> (cs)
   "Build a string from a list (or vector) of Unicode codepoint integers — the
-inverse of the `string/->codepoints` primitive."
+inverse of the `string/->codepoints` primitive.
+
+    (string/codepoints-> [104 105])   → \"hi\""
   ;; One native O(n) pass. This was `(apply str (map int->char cs))`, which allocated a
   ;; seq view, called a closure per code point to make a ONE-CHARACTER string, and then
   ;; concatenated N of those variadically — for a shape every text parser in std/ uses to
@@ -154,7 +156,11 @@ leaves `s` unchanged.
   "The 0-based char index of the **last** occurrence of `needle` in string `s` whose
 start is strictly **before** `before` (default `(string/length s)`), or -1 if there is
 none. The backward counterpart of `(index-of s needle from)` — what reverse
-incremental search rides on."
+incremental search rides on.
+
+    (string/last-index-of \"a.b.c\" \".\")   → 3
+    (string/last-index-of \"a.b.c\" \".\" 3)   → 1
+    (string/last-index-of \"abc\" \"z\")   → -1"
   ;; One native pass. This used to walk forward in Brood calling `(index-of s needle i)`
   ;; per match; every one of those re-derives a char offset (and, before `index-of` took a
   ;; `from`, allocated a copy of the suffix), so a reverse search was O(matches × length) —
@@ -359,7 +365,9 @@ subsumes the other.
 
 Module-rooted rather than bare `format` because that name is also the source FORMATTER
 (`std/format.blsp`, the 81 names behind `nest format`), and one word meaning two unrelated
-things in the same image is a name worth spending to fix."
+things in the same image is a name worth spending to fix.
+
+    (string/format \"%s has %d items (%.1f%%)\" \"cart\" 3 42.26)   → \"cart has 3 items (42.3%)\""
   (format-loop template 0 (string/length template) args ""))
 
 (defn- format-loop (template i n args acc)

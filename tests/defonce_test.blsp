@@ -12,8 +12,9 @@
 (defonce *dx* :second)
 
 ;; A plain second `def` DOES overwrite — the contrast that proves defonce is doing the guard.
+;; (The override is the point here, so the duplicate-definition lint is told so.)
 (def *dy* :first)
-(def *dy* :second)
+(check-allow :duplicate-def (def *dy* :second))
 
 (describe "defonce (module-level)"
   (test "a second defonce of a bound module var is a no-op"
