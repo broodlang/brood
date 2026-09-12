@@ -246,6 +246,33 @@ the name on the head line so every arm lands on its own line."
   "True if node kind `k` re-emits as exactly its own source text (a leaf literal)."
   (contains? *verbatim-kinds* k))
 
+;; ---- labelled bodies --------------------------------------------------------
+;; A body whose items include a LABEL — a bare symbol ending in `:` (`next:`,
+;; `done:`), the assembler convention an `(asm …)` DSL reads as data — lays out the
+;; way an assembler listing does: labels at the body indent, everything else two
+;; further in, one item per line, nothing riding the head line:
+;;
+;;     (aarch64/asm
+;;       (adr x1 message)
+;;     next:
+;;       (ldrb w2 [x1] 1)
+;;       (cbz w2 done)
+;;     done:
+;;       (b done))
+;;
+;; Labels sit at the body indent and instructions +2 from it, so the label
+;; column is the body column and the instruction column is body+2 (the listing above
+;; shows the shape as `nest format` emits it). `brood-indent` in bedit mirrors this.
+(defn label-node? (c)
+  "True for a bare symbol ending in `:` — a label in a labelled body (`next:`). A
+keyword (`:next`) is not one."
+  (and (= (node-kind c) :symbol)
+    (let (t (node-text c)) (and (> (string/length t) 1) (string/ends-with? t ":")))))
+
+(defn labelled-body? (forms)
+  "True when any of the body `forms` (the args after a head) is a label."
+  (any? forms label-node?))
+
 ;; Single-line emit: returns the string, or nil if the node cannot legally
 ;; appear on one line (it contains a comment, or a string with a literal
 ;; newline). Recursive — a list inlines only if every child does.
@@ -416,6 +443,7 @@ the name on the head line so every arm lands on its own line."
               hdr-count (head-header-count head)
               pair-bind (pair-bindings? head)
               pair-bd (pair-body? head)
+              labelled (labelled-body? args)
               body-ind (+ indent 2)
               ;; eff-hdr: how many args ride on the head line. Body-form
               ;; counts (>= 0) override the default; for generic calls
@@ -427,6 +455,8 @@ the name on the head line so every arm lands on its own line."
                         ;; Riding is a *call* affordance — `(head arg)` — only. (Maps
                         ;; are pair-broken elsewhere and never reach here.)
                         (not (= open "(")) 0
+                        ;; a labelled body (an asm listing): nothing rides the head line
+                        labelled 0
                         (multi-arity-defn? head args) 1
                         (>= hdr-count 0) (math/min hdr-count (count args))
                         (nil? args) 0
@@ -455,7 +485,9 @@ the name on the head line so every arm lands on its own line."
                               first-body-idx
                               body-ind
                               (and (< hdr-count 0)
-                                (not (body-has-container? kids first-body-idx))))))
+                                (not labelled)
+                                (not (body-has-container? kids first-body-idx)))
+                              labelled)))
             ;; If the body ends in a comment, the close delimiter must drop to
             ;; its own line at the opening indent — appended directly it would
             ;; land *inside* the comment (`;; note)`), commenting out the `)`
@@ -878,7 +910,7 @@ if you are reintroducing hoisting, they are what you have to write back."
       (when (and (< j n) (not (comment? (seq/vector-ref kids j)))) j))))
 (sig keyword-value-at (vector int int -> (or int nil)))
 
-(defn- render-body (kids start-idx body-ind fill?)
+(defn- render-body (kids start-idx body-ind fill? &optional (labelled? false))
   ;; Walk kids from start-idx, emitting each structural form (and each comment) at
   ;; body-ind. `nl` mirrors the root walker: it tracks the newline count between
   ;; the last emitted block and the cursor, so a blank line in the source survives
@@ -891,9 +923,11 @@ if you are reintroducing hoisting, they are what you have to write back."
   ;; than one tall stack. The +2 indent is kept (no align-to-head, which would
   ;; reflow on every rename). `col` = the column the next arg would fill to, or nil
   ;; to force a fresh line (start of body, after a comment, after a multi-line arg).
-  (render-body-at kids start-idx (seq/vector-length kids) body-ind 0 "" fill? nil))
+  ;; `labelled?` (a labelled body, see `label-node?`): a label sits at `body-ind`,
+  ;; every other item two further in.
+  (render-body-at kids start-idx (seq/vector-length kids) body-ind 0 "" fill? nil labelled?))
 
-(defn- render-body-at (kids i n body-ind nl acc fill? col)
+(defn- render-body-at (kids i n body-ind nl acc fill? col labelled?)
   (if (= i n)
     acc
     (let (c (seq/vector-ref kids i))
@@ -906,7 +940,8 @@ if you are reintroducing hoisting, they are what you have to write back."
             (+ nl (count-newlines (node-text c)))
             acc
             fill?
-            col)
+            col
+            labelled?)
         (comment? c)
           (render-body-at kids
             (inc i)
@@ -918,9 +953,13 @@ if you are reintroducing hoisting, they are what you have to write back."
               (indent-of body-ind)
               (comment-strip-trailing-nl (node-text c)))
             fill?
-            nil)
+            nil
+            labelled?)
         else
-          (let (ind (indent-of body-ind)
+          (let (
+                ;; in a labelled body an item that is not a label indents two further
+                item-ind (if (and labelled? (not (label-node? c))) (+ body-ind 2) body-ind)
+                ind (indent-of item-ind)
                 ;; A KEYWORD ARGUMENT and the value after it are one unit, so they are
                 ;; rendered together and never split across lines. Without this,
                 ;; `(io/puts "…" :to (io/stderr-port))` broke as
@@ -940,8 +979,8 @@ if you are reintroducing hoisting, they are what you have to write back."
                 form-rendr (if kw-val-idx
                              (str (node-text c)
                                " "
-                               (render (seq/vector-ref kids kw-val-idx) body-ind))
-                             (render c body-ind))
+                               (render (seq/vector-ref kids kw-val-idx) item-ind))
+                             (render c item-ind))
                 ;; Skip past the value too when the pair was emitted as one.
                 i (if kw-val-idx kw-val-idx i)
                 c (if kw-val-idx (seq/vector-ref kids kw-val-idx) c)
@@ -970,7 +1009,8 @@ if you are reintroducing hoisting, they are what you have to write back."
                   (str acc " " form-rendr)
                   fill?
                   ;; `can-fill` proved `col` non-nil; the `or` only says so to the checker.
-                  (+ (or col 0) 1 w))
+                  (+ (or col 0) 1 w)
+                  labelled?)
               (nil? tc-idx)
                 (render-body-at kids
                   (inc i)
@@ -979,7 +1019,8 @@ if you are reintroducing hoisting, they are what you have to write back."
                   0
                   (str acc (if (>= nl 2) "\n\n" "\n") ind form-rendr)
                   fill?
-                  next-col)
+                  next-col
+                  labelled?)
               ;; Keep a same-line trailing comment WHERE THE AUTHOR PUT IT — after the
               ;; form, on the same line. It used to be hoisted onto its own line above
               ;; the form, which is what made `nest format` disagree with the whole tree
@@ -999,8 +1040,9 @@ if you are reintroducing hoisting, they are what you have to write back."
                     " "
                     (comment-strip-trailing-nl (node-text (seq/vector-ref kids tc-idx))))
                   fill?
-                  nil)))))))
-(sig render-body-at (vector int int int int string any (or int nil) -> string))
+                  nil
+                  labelled?)))))))
+(sig render-body-at (vector int int int int string any (or int nil) bool -> string))
 
 ;; ---- top-level walk ---------------------------------------------------------
 ;; `source src` parses src, renders the root, and ensures exactly one

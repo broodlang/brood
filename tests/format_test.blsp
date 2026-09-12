@@ -440,3 +440,19 @@
       (file/spit path "(defn f (x) (+ x 1))\n")
       (format/file path)
       (assert= (format/file path) :unchanged))))
+
+(describe "labelled bodies — an asm listing's labels at the body indent, instructions +2"
+  (test "labels sit at the body column, every other item two further in, nothing rides the head"
+    (let (src "(def image\n(aarch64/asm\n (mov x0 ~uart) (adr x1 message)\nnext:\n(ldrb w2 [x1] 1)\n  done:\n (b done)\nmessage:\n(asciz \"hi\")))"
+          out (source src))
+      (assert= out
+        (str "(def image\n"
+          "  (aarch64/asm\n" "      (mov x0 ~uart)\n" "      (adr x1 message)\n" "    next:\n"
+          "      (ldrb w2 [x1] 1)\n" "    done:\n" "      (b done)\n" "    message:\n"
+          "      (asciz \"hi\")))\n"))
+      ;; idempotent, like every layout
+      (assert= (source out) out)))
+  (test "a keyword is not a label, and a body without one is laid out as before"
+    (assert= (source "(f :a\n(g)\n(h))") "(f :a\n  (g)\n  (h))\n")
+    (is (not (label-node? (first (node-children (reflect/parse-source ":next"))))))
+    (is (label-node? (first (node-children (reflect/parse-source "next:")))))))
