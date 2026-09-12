@@ -263,4 +263,22 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["color"],
         "Set the window background colour: the fill for :clear, the per-frame pre-clear, and — being outside every cell — the gui-inset! margin and the cell-grid snap remainder. So a GUI app's padding matches its own theme background instead of the hardcoded default. color is a keyword named colour, an [r g b] vector (0..255 per channel), or a \"#rrggbb\"/\"#rgb\" hex string; nil restores the default. Applies to every open window and the default for ones opened later (a pure repaint — no grid change). Needs --features gui. Returns nil.",
         gui_bg);
+    // The line height (`gui-line-height!`): the cell height as a multiple of the font
+    // px — 1.4 by default (an editor's breathing room); denser code wants ~1.25.
+    primitives.def(
+        "%gui-line-height!",
+        Arity::exact(1),
+        Sig::new(vec![Ty::of_tags(&[Tag::Int, Tag::Float])], nil_ty),
+        &["mult"],
+        "Set the cell height as a multiple of the font pixel size (the line height): 1.4 by default — an editor's vertical breathing room — clamped to 0.8..3.0. A metric change like gui-font!: the row count moves, so every open window is told its new (cols, rows) and re-renders; also the default for windows opened later. Needs --features gui. Returns nil.",
+        gui_line_height);
+    // Text anti-aliasing (`gui-text-aa!`): gray (one coverage per pixel) or subpixel
+    // (one per colour channel — LCD text, three times the horizontal resolution).
+    primitives.def(
+        "%gui-text-aa!",
+        Arity::exact(1),
+        Sig::new(vec![Ty::of_tags(&[Tag::Keyword])], nil_ty),
+        &["mode"],
+        "Set how monochrome text is anti-aliased: :gray (one coverage value per pixel), :subpixel (one per colour channel, each a third of a pixel apart — LCD text, three times the horizontal resolution of every stem, for a panel whose subpixels run red-green-blue), :bgr (the same for a blue-first panel), or :auto (the default: subpixel at a 1× scale where text has the fewest pixels to spend, gray on HiDPI where grayscale is already sharp and a scaled or rotated surface would turn subpixel fringes into colour noise). Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.",
+        gui_text_aa);
 }

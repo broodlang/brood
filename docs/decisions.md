@@ -21465,6 +21465,71 @@ module to resolve against, a bare reference is left as written rather than point
 `#d-nil-<name>`: a visible `[[name]]` is a missing argument a reader can report, a dead link
 is not.
 
+## ADR-332 — The GUI retains its frame and repaints by cell row; text is hinted at whole pixels, subpixel at 1×, hairlines snapped
+
+**Status:** accepted; implemented 2026-09-12 (`host::gui::backend::paint` / `render`;
+`gui-text-aa!`, `gui-line-height!`).
+
+**Context.** The windowed frontend painted every frame from scratch: clear the whole
+framebuffer, rasterise every glyph on screen, diff the pixels against the last presented
+buffer to find the damage, copy the buffer for the next diff, present. Measured on bedit
+at 1920×1045 (1×), a paint was 4–13 ms with the body (clear + ~2 300 glyph blits + the
+7 MB memcmp) dominating — and it scaled with pixels, so a 2× HiDPI window would have
+spent 15–35 ms per keystroke, past a frame. The Brood side of a keystroke (`update` +
+`view`) was 3–5 ms, and every cursor blink paid the full paint for one cell.
+
+Three smaller things kept the text softer than it needed to be. The rasteriser hints
+outlines to the pixel grid, but the font size was `15 × scale` unrounded, so a 1.25× desktop
+hinted at 18.75 ppem — stems straddling pixels. Anti-aliasing was grayscale only: swash can
+render one coverage per colour channel (LCD text, three times the horizontal resolution of a
+stem), and the compositing path explicitly threw that away. And `fill_rrect` with a zero
+radius gave every pixel in `floor(x)..ceil(x+w)` full coverage, so bedit's 0.05-cell hairline
+(0.45 px) painted as 1 *or* 2 solid pixels depending on where its fractional centre fell — a
+stacked split's divider was twice the weight of the mode line's rule.
+
+**Decision.**
+
+1. **The frame is retained and diffed by cell row.** The renderer keeps the last frame's ops
+   and the canvas they rasterised to. A new frame is flattened to leaves (a `ScrollRegion`
+   contributes its children, each carrying its shift), each leaf is assigned the pixel-row
+   *strips* (the top margin, each cell row, the bottom remainder) its conservative band
+   covers, and a strip is dirty iff its sequence of covering leaves differs from the previous
+   frame's — compared as values, `Op: PartialEq`. Dirty strips are cleared and re-rasterised
+   with every primitive clipped to the band (`Canvas`); only those rows are copied into the
+   window buffer and declared as damage, unioned over the buffer's age as before. A frame
+   equal to the one on screen is dropped at the `Draw` event and never reaches the painter.
+   `BROOD_GUI_DAMAGE=0` keeps its meaning: full raster, full present, every frame.
+2. **Whole pixels per em.** `px = round(base × scale)`.
+3. **Subpixel text at 1×, a knob everywhere.** `gui-text-aa!` takes `:gray`, `:subpixel`,
+   `:bgr` or `:auto` (the default: subpixel when the scale factor is exactly 1, gray on HiDPI
+   — where grayscale is already sharp and a compositor may scale or rotate the surface, which
+   turns subpixel fringes into colour noise). The per-channel mask is rendered by swash
+   directly, hinted like the gray path, baked into the same glyph cache (keyed by the mode)
+   and blended per channel in linear light like `blend`.
+4. **Hairlines snap.** An `frect` dimension under one logical pixel becomes exactly
+   `max(1, round(scale))` device pixels centred where it was asked for, square-cornered.
+5. **Line height is a primitive.** `gui-line-height!` sets the cell height as a multiple of
+   the font px (1.4 by default), a metric change routed like `gui-font!`.
+
+**Consequences.** On bedit at 1920×1045 a cursor blink repaints one 21-px row in ~0.18 ms;
+a keystroke-shaped change (a text row and the mode line) ~0.3 ms, against 4–13 ms for the
+full paint that opening or resizing the window still costs. The paint no longer scales with
+the window: a HiDPI display changes nothing per keystroke. The cost is one clone of the
+frame's ops per paint and a canvas the size of the window. The diff is conservative by
+construction — a band may be wider than the pixels an op touches, never narrower — and the
+property the scheme rests on (an incremental raster of a frame sequence equals a full raster
+of the last frame, pixel for pixel) is a unit test. `BROOD_GUI_TRACE=1` prints every paint
+with the rows it repainted; `BROOD_GUI_DUMP=<path.ppm>` writes the canvas so the raster can
+be inspected from a script.
+
+**Alternatives rejected.** *Finish the GPU backend* — the glyph atlas is still the right
+long-term answer for smooth scrolling on HiDPI, but the row diff gets the per-keystroke win
+on the CPU path in one afternoon, and the GPU path can adopt the same diff. *Blink in the
+backend* — a cursor overlay the GUI thread toggles itself would hide state from the model;
+with the row diff the model-driven blink costs one cell, so the TEA shape stays. *Diff pixels
+harder* — the old memcmp already found the damage; the cost was producing the pixels, which
+only an op-level diff avoids.
+
 ## ADR-334 — Radix literals: `0xFF`, `0b1010`, `0o17` read as plain ints
 
 **Status:** accepted; implemented 2026-09-12. Cashes in the second of [ADR-169](#adr-169)'s
