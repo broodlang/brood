@@ -829,13 +829,26 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
     // An extremum hands back ONE OF ITS OPERANDS — `(math/max a b)` is `a` or `b` — so its
     // result is the union of the operand types, not the operator's whole domain (`ordered`,
     // which is what the registry-derived sig says and what made `(+ 1 (math/min i n))` read
-    // as `number + ordered` under `--strict`). Every operand must type; one unknown defers to
-    // the sig. Sound: the union of the operands is exactly the set of values it can return.
+    // as `number + ordered` under `--strict`). Sound: the union of the operands is exactly
+    // the set of values it can return.
+    //
+    // And an operand the checker cannot type makes that union the UNKNOWN — `0 ∪ ?` is `?`
+    // — not the sig's `ordered`. This used to defer to the sig, which reads the same value
+    // two ways: the unknown `s` passes into an `int` parameter untouched, but `(math/max 1
+    // s)` — which IS `s` or `1` — came back positively `ordered` and warned into the same
+    // parameter. That is the rule's own semantics dropped exactly where it mattered (41 of
+    // bedit's strict findings, every one a clamp over an untyped bound). It is not the
+    // arithmetic case: `(dec s)` computes a NEW value that is positively a `number`
+    // whatever `s` was, and `number` into `int` is the merely-wider ADR-298 exists to
+    // flag; an extremum computes nothing. `Some(any)` — not `None`, which would fall to
+    // the sig — reads as `dynamic_within(any)` at the call: the bare unknown.
     if is_extremum(head) {
         let args = items.get(1..)?;
         let mut acc: Option<Ty> = None;
         for &arg in args {
-            let t = expr_ty(heap, arg, ctx)?;
+            let Some(t) = expr_ty(heap, arg, ctx) else {
+                return Some(Ty::ANY);
+            };
             acc = Some(match acc {
                 Some(u) => u.union(t),
                 None => t,

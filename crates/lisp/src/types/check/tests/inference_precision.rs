@@ -515,3 +515,38 @@ fn update_and_assoc_in_keep_a_record_shape() {
     let strict = file_warnings_mode(src, true);
     assert!(strict.is_empty(), "{strict:?}");
 }
+
+// An extremum over an operand the checker cannot type is the UNKNOWN, not the sig's
+// `ordered`: `(math/max 1 s)` IS `s` or `1`, and the same `s` that passes into an `int`
+// parameter untouched must not come back positively `ordered` for having been clamped.
+// Arithmetic is different — `(dec s)` computes a new value that is positively a `number`.
+#[test]
+fn an_extremum_over_an_unknown_operand_is_the_unknown() {
+    let src = "\
+         (defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (n) n)\n\
+         (defn clamp (s) (want-int (math/max 1 s)))\n\
+         (defn shift (s) (want-int (dec s)))\n\
+         (defn known (a b) (want-int (math/max 1.5 2)))";
+    let strict = file_warnings_mode(src, true);
+    assert!(
+        !strict
+            .iter()
+            .any(|w| w.contains("t/want-int") && w.contains("ordered")),
+        "{strict:?}"
+    );
+    assert!(
+        strict
+            .iter()
+            .any(|w| w.contains("t/want-int: argument 1 expects int, got number")),
+        "{strict:?}"
+    );
+    assert!(
+        strict.iter().any(
+            |w| w.contains("t/want-int: argument 1 expects int, got 2 | float")
+                || w.contains("t/want-int: argument 1 expects int, got float | 2")
+        ),
+        "{strict:?}"
+    );
+}

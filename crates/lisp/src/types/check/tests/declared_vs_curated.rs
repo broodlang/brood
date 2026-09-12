@@ -573,8 +573,10 @@ fn max_and_min_take_and_return_the_ordered_domain() {
     assert_eq!(ty_str("(%max 1 2)"), "1 | 2");
     assert_eq!(ty_str("(math/min 3 4)"), "3 | 4");
     assert_eq!(ty_str("(math/min 3 4 5)"), "3 | 4 | 5");
-    // An untyped operand defers to the declared domain.
-    assert_eq!(ty_str("(math/min 3 x)"), "number");
+    // An untyped operand makes the result the UNKNOWN — `3 ∪ ?` — not the declared domain:
+    // the value IS one of the operands, and an unknown operand is unknown wherever it goes
+    // (arithmetic differs: `(dec x)` is a new value, positively `number`).
+    assert_eq!(ty_str("(math/min 3 x)"), "any");
     let ws = file_warnings("(defmodule t)\n(sig g (string -> int))\n(defn g (s) (%max 1 s))");
     assert!(
         ws.iter()
