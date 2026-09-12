@@ -259,11 +259,29 @@ and a set its elements, as everywhere else `seq` applies.
   "Concatenate any number of lists into one, left to right.
 
     (append '(1 2) '(3) '(4 5))   → (1 2 3 4 5)
-    (append)                      → nil"
-  ;; O(total length) and fully tail-recursive — so `mapcat` (via `apply append`)
-  ;; stays stack-safe on many/long lists. The previous left fold of `%append-two`
-  ;; re-reversed the growing accumulator each step, making it O(lists²).
-  (reverse (fold lists nil %append-onto)))
+    (append)                      → nil
+
+The LAST list is shared, not copied — the result's tail IS that list (every value is
+immutable, so nothing can tell) — and only the lists before it are walked. So
+`(append small big)` costs O(small), the shape a loop that splices a few items in
+front of an accumulated remainder wants; a vector last is converted."
+  ;; Right to left: the last argument becomes the tail as it is (a list) or as a list
+  ;; (a vector), and each earlier one is copied in front — two walks of it, none of the
+  ;; tail. O(everything but the last) and fully tail-recursive, so `mapcat` (via `apply
+  ;; append`) stays stack-safe on many/long lists. The previous shape reversed the
+  ;; whole result, walking every argument twice — 27 µs to put five items in front of
+  ;; 240, which a per-frame splice paid fifty times over.
+  (if (empty? lists)
+    nil
+    (let (rl (reverse lists)
+          last (first rl)
+          ;; a pair chain (or nil) is shared as it is; a vector or a range — `list?` and
+          ;; `pair?` too, standing in for its list — is materialised, so the result is a
+          ;; plain list rather than a chain ending in a range
+          tail (if (or (nil? last) (and (pair? last) (not (range? last))))
+                 last
+                 (%reverse-onto (reverse last) nil)))
+      (fold (rest rl) tail (fn (acc l) (%reverse-onto (reverse l) acc))))))
 (sig append (& seqable -> any))
 
 (defn- %count-acc (coll n) (if (empty? coll) n (%count-acc (rest coll) (%add n 1))))
