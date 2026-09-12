@@ -34,7 +34,7 @@ The groups below are coarse on purpose: they carry the *kind* of justification, 
 per name. `*earmuffed*` dynamics and operators are bare by convention and need no argument;
 the `core` list is the one worth pushing back on, and the one to read before adding to it.
 
-Counts are as of 2026-09-09: **264** bare public names.
+Counts are as of 2026-09-11: **265** bare public names.
 
 ## operator (13)
 
@@ -81,6 +81,7 @@ Dynamic variables (`defdyn`) — earmuffed, so they cannot be mistaken for ordin
 - `*print-level*`
 - `*print-string-length*`
 - `*project-brood*`
+- `*project-bundled-packages*`
 - `*project-dependencies*`
 - `*project-description*`
 - `*project-dev-dependencies*`
@@ -163,7 +164,7 @@ Predicates — `x?` type and shape tests. Bare because they read as English at a
 - `type-matches?`
 - `vector?`
 
-## core (149)
+## core (150)
 
 Core vocabulary — the language's own words: special-form companions, sequence and map operations, the process primitives, and the test/dev macros. **This is the group with a real budget.** Before adding here, ask whether the name belongs to a module instead: `string/`, `seq/`, `proc/`, `test/` all exist precisely so a name does not have to be bare.
 - `*e`
@@ -208,6 +209,7 @@ Core vocabulary — the language's own words: special-form companions, sequence 
 - `defn-`
 - `defonce`
 - `defrecord`
+- `deftype`
 - `demonitor`
 - `disj`
 - `dissoc`

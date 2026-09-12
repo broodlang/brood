@@ -176,6 +176,30 @@ excluded — for a polymorphic-sequence parameter without falling back to `any`,
 `number` plus every record with a `num/*` / `compare-to` method, the domains of `+` and `<`
 as the registry stands — ADR-299, …).
 
+**Naming a type — `(deftype name T)` (ADR-327).** A structural alias: `name` in any
+`sig` IS `T` exactly as written — a record shape, a union, a tuple, another alias.
+
+```lisp
+(deftype pane (record &open :path list :payload map :selected bool
+                      :rect (tuple int int int int)))
+(sig pane-at (layout (tuple int int) -> (or nil pane)))
+(sig pane-rows (pane -> int))                ; every consumer names the shape once
+```
+
+What a `defrecord` gives a *nominal* value, this gives a shape that stays a plain map:
+the toolkit's panes, dividers and layouts are documented-in-prose maps, and every
+function over them either spelt the shape or left the parameter `any`. Module-scoped
+like a `sig` — declared in `m`, it is `m/name` everywhere; a bare `name` resolves in
+the file's own namespace first, then to the one loaded module that declares it (two
+candidates decline, and the sig reports an unknown type, as a record name does). A
+declaration only: `name` is not bound at runtime, so a stray reference to it is unbound
+rather than a type-turned-value. A recursive alias reads as `any` where it meets
+itself — the checker has no recursive types, and unknown is the sound answer.
+
+Under the hood it is a declared-sig entry wrapped `(%type T)`, which is why it survives
+an image, is read through the checker's dep-tracked path, and costs no new store;
+`parse_type` declines the marker, so nothing reads an alias as a signature.
+
 ### A declaration that cannot be read is reported, not dropped (ADR-259)
 
 A `sig` is read *first* — ahead of the primitive table, the curated table and

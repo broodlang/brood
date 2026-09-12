@@ -12456,3 +12456,46 @@ ADR-302's argument reorder means the bench corpus can no longer run on a pre-09-
 Tasks 1 and 3 from the perf queue are answered in the same file. Task 1: `mandelbrot` +0.4%,
 `nbody` +1.2%, both inside floor — KI-109's closure holds on magnitude as well as mechanism.
 Task 3: the KI-100 re-baseline numbers moved, and `sort`'s swing was KI-127 rather than drift.
+
+## 2026-09-11 — `nest completions` / `nest complete` are Brood (ADR-322, item 6)
+
+The last two policy arms of `nest` left `main.rs`: the three shell scripts and the
+completion candidate engine are `std/tool/nest.blsp` entries like every other subcommand
+(`complete` is `:hidden`), routed through `BLSP_SUBCOMMANDS`. `main.rs` is 776 lines; what
+it still hosts is mechanism — `stdimage` (KI-112), `mcp`'s transport, `release`'s byte
+assembly and boot check — and the clap definitions of those three.
+
+The one design point: the Rust arms' flags used to be read out of clap's model, so a flag
+added to `Cmd::Release` completed the same day. That truth now lives in two places —
+clap, and `nest/*rust-commands*` — so `crates/nest/tests/complete.rs` pins the mirror
+through the binary: the `--long` flags `nest release --help` prints must be exactly what
+`nest complete -- release --` offers, and every subcommand `nest --help` lists must be
+offered. Sabotage-verified (dropping `--no-smoke` from the mirror reds the gate).
+
+Cost, stated honestly: a static answer (`nest complete -- te`) used to be served before any
+interpreter existed, ~9 ms; it now boots one, **72 ms** on this build with the stdlib image
+present (the dynamic answers already paid that). Per the dogfooding rule the policy stays in
+Brood; `complete` deliberately reads an image but never spends the keypress building one.
+Also fixed on the way: `blsp_routed` took `-j N` out of the words after a `--`, so
+`nest complete -- test -j 4 <TAB>` completed the wrong command line.
+
+## 2026-09-11 — CI on the structure pass: three gates the local run could not reach
+
+`dbe52727`'s CI failed on three things the capped, targeted local runs did not cover —
+each a gate doing its job, none a behavioural fault:
+
+- **`audit_test` / `bare_names_test`** (the full suite): the seven `project.blsp` names the
+  split made public (`project-cache-dir`, `project-module-infos`,
+  `project-require-closures`, `project-entry-fn`, `project-no-entry-advice`,
+  `project-collect-tests`, `project-colocated-test-files`) carried no docstring, and the
+  new `*project-bundled-packages*` dyn was not in `docs/bare-names.md`. Both written.
+- **`jit_tier_frame_pairing`**: the `inline_installed` reader allow-list names files, and
+  three readers now live in files that did not exist (`jit_runtime/{dispatch,deopt}.rs`,
+  `compile/closure.rs`). Listed, each with its justification — two diagnostics and an
+  initialiser, no new frame-sizing read.
+- **downstream bedit**: `project/build-info` and `project/build-stamp-text` are
+  `project-release/…` now. The 46 public names that left the `project` module are in the
+  rename ledger (`renames.rs`, ADR-325), so a downstream `nest check` says
+  `renamed to project-release/build-info (ADR-325)` and `--fix-renames` applies it. The
+  CI job stays red until `BEDIT_REF` moves to a bedit commit on the new names — bedit's
+  working tree already is.

@@ -202,6 +202,7 @@ fn get_str(r: &mut Cursor<Vec<u8>>) -> Option<String> {
 /// Deterministic: 3/3 with the image, 0/3 without.
 fn encode_section(
     heap: &mut Heap,
+    section: &str,
     syms: &[Value],
     all_sigs: bool,
     ns_to_msg: &mut u64,
@@ -287,7 +288,11 @@ fn encode_section(
     }
     // Sigs: every one for the root/project section, else exactly this section's own — so a
     // signature materialises with the module that declared it, and a module this binary does
-    // not bake never contributes one.
+    // not bake never contributes one. "Its own" is a sig on one of the section's globals OR
+    // one keyed in the section's namespace: a `(deftype …)` alias (ADR-326) is a declaration
+    // with no global behind it, and matching on globals alone dropped every alias std
+    // declared — a module restored from the image came back with its sigs but with every
+    // `pane` in them an unknown type.
     let sig_pairs: Vec<(value::Symbol, Value)> = if all_sigs {
         heap.declared_sigs_snapshot()
     } else {
@@ -298,9 +303,10 @@ fn encode_section(
                 _ => None,
             })
             .collect();
+        let prefix = format!("{section}/");
         heap.declared_sigs_snapshot()
             .into_iter()
-            .filter(|(sym, _)| mine.contains(sym))
+            .filter(|(sym, _)| mine.contains(sym) || value::symbol_name(*sym).starts_with(&prefix))
             .collect()
     };
     for (sym, tv) in sig_pairs {
@@ -366,6 +372,7 @@ pub(crate) fn image_write(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         let all_sigs = name.is_empty();
         let (bytes, n) = encode_section(
             heap,
+            &name,
             &syms,
             all_sigs,
             &mut ns_to_msg,
@@ -985,6 +992,7 @@ pub(crate) fn write_prelude_image(
 
     let (mut body, _count) = encode_section(
         heap,
+        "",
         &syms,
         true,
         &mut 0u64,

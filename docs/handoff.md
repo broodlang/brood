@@ -479,7 +479,9 @@ a design change, not a patch.
 builds an image).** `main.rs` is at 1,054 (from 2,771). Left: `completions`/`complete`
 (shell scripts + the router), `mcp` (Rust transport in `mcp.rs`), `release` (the bundle
 pipeline), `gen` — each with Rust mechanism in it. Item 4's "done when" was `main.rs` under
-~300 lines; what is left is mostly `release` and the completion scripts. The table
+~300 lines; what is left is mostly `release` and the completion scripts. *(2026-09-11:
+completion moved — twenty-five subcommands are Brood, `main.rs` is 776; the remainder is
+mechanism.)* The table
 now carries typed flags (`{:value :int :repeat :complete}`), `:many`, `:trailing`, and the
 clap constraints as data; the Rust seam for `test` is `arm_test_env` (pre-boot env flags +
 memory ceiling), the pattern for anything else that must precede `Interp::new()`. Next:

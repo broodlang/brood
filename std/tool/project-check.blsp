@@ -31,6 +31,8 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
 
 ;; {file -> {:module name :requires [dep …]}} for every file — one native parse each.
 (defn project-module-infos (files)
+  "`{file -> {:module name :requires [dep …]}}` for every file in `files` — one native
+`%module-direct-requires` parse each; the graph `project-require-closures` closes."
   (fold files
     {}
     (fn (acc f)
@@ -56,6 +58,9 @@ the fifth, and it hid inside a map literal until the checker learned to walk one
 ;; (including its own module), built from the whole `files` universe. Passed to
 ;; `check-file` as its KI-17 reachability set.
 (defn project-require-closures (files)
+  "`{file -> [reachable-module-name …]}`: each file's transitive require-closure (its own
+module included), built from the whole `files` universe — the KI-17 reachability set
+`check-file` and `nest run`'s pre-flight read."
   (let (infos (project-module-infos files)
         module->deps (fold infos
                        {}
@@ -842,6 +847,8 @@ Returns nil when there is nothing to report."
         (catch _ nil)))))
 
 (defn project-cache-dir (root)
+  "The per-project cache directory (`$XDG_CACHE_HOME/brood/<project>` or `~/.cache/…`) the
+check-result cache and the `--failed`/`--stale` records live in; created on demand."
   (let (xdg (os/env "XDG_CACHE_HOME")
         home (os/env "HOME")
         base (cond

@@ -450,3 +450,68 @@ fn division_with_a_float_operand_is_still_contagious() {
         "the float declaration is correct — {ws:?}"
     );
 }
+
+// A vector literal keeps its arity whatever its elements are: `[row col]` over untyped
+// params is `(tuple any any)`, which a `(tuple int int)` parameter accepts (the unknown
+// slots read gradually) and a 3-tuple parameter rejects. It used to fall back to a bare
+// `vector` on one unknown element, which threw the arity away with it.
+#[test]
+fn a_vector_literal_keeps_its_arity_over_unknown_elements() {
+    assert_eq!(ty_str("(fn (r c) [r c])"), "(any, any) -> (tuple any, any)");
+    let src = "\
+         (defmodule t)\n\
+         (sig at ((tuple int int) -> int))\n\
+         (defn at (p) (first p))\n\
+         (sig at3 ((tuple int int int) -> int))\n\
+         (defn at3 (p) (first p))\n\
+         (defn ok (row col) (at [row col]))\n\
+         (defn bad (row col) (at3 [row col]))";
+    let strict = file_warnings_mode(src, true);
+    assert!(!strict.iter().any(|w| w.contains("t/at:")), "{strict:?}");
+    assert!(
+        strict
+            .iter()
+            .any(|w| w
+                .contains("t/at3: argument 1 expects (tuple int, int, int), got (tuple any, any)")),
+        "{strict:?}"
+    );
+}
+
+// `(assoc x :k v)` on an unknown `x` is a `map`, not `vector | map`: a keyword key on a
+// vector raises, so a keyword-keyed call that returns at all returns a map. An int key
+// keeps the honest `vector | map`. This is every `(assoc (step m) :k v)` in an editor's
+// `model -> model` chain, and the strict finding at each of them.
+#[test]
+fn assoc_with_keyword_keys_on_an_unknown_receiver_is_a_map() {
+    assert_eq!(ty_str("(fn (x) (assoc x :k 1))"), "(any) -> map");
+    assert_eq!(ty_str("(fn (x) (assoc x 0 1))"), "(any) -> vector | map");
+    let src = "\
+         (defmodule t)\n\
+         (defn step (m) (assoc m :n 1))\n\
+         (sig f (map -> map))\n\
+         (defn f (m) (assoc (step m) :k 2))";
+    let strict = file_warnings_mode(src, true);
+    assert!(strict.is_empty(), "{strict:?}");
+}
+
+// `update` / `assoc-in` / `update-in` keep a record shape the way `assoc` and `dissoc`
+// do: the named field becomes unknown, the others keep their types, and on an unknown
+// receiver with a keyword key the answer is `map`.
+#[test]
+fn update_and_assoc_in_keep_a_record_shape() {
+    assert_eq!(ty_str("(fn (x) (update x :k inc))"), "(any) -> map");
+    assert_eq!(ty_str("(fn (x) (assoc-in x [:a :b] 1))"), "(any) -> map");
+    let src = "\
+         (defmodule t)\n\
+         (deftype st (record &open :n int :name string))\n\
+         (sig bump (st -> st))\n\
+         (defn bump (s) (update s :n inc))\n\
+         (sig nest (st -> st))\n\
+         (defn nest (s) (assoc-in s [:meta :seen] true))\n\
+         (sig deep (st -> st))\n\
+         (defn deep (s) (update-in s [:meta :count] inc))\n\
+         (sig name-of (st -> string))\n\
+         (defn name-of (s) (:name (update s :n inc)))";
+    let strict = file_warnings_mode(src, true);
+    assert!(strict.is_empty(), "{strict:?}");
+}

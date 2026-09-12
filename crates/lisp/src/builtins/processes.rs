@@ -46,13 +46,13 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "",
         spawn_named,
     );
-    // `send`'s target is a pid OR a `{:name :node}` address map.
+    // `send`'s target is a pid, a registered name (keyword), OR a `{:name :node}` address map.
     primitives.def(
         "send",
         Arity::exact(2),
-        Sig::new(vec![pid_ty.union(map_ty), any], nil_ty),
+        Sig::new(vec![pid_ty.union(map_ty).union(kw), any], nil_ty),
         &["target", "msg"],
-        "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil.",
+        "Copy msg into target's mailbox; target is a pid, a registered name (a keyword — the local node's `{:name :node}`), or a {:name :node} address. Routes locally or over a node link. Returns nil.",
         send);
     // Arg shape: (matcher: callable, timeout: int|nil, tags: vector|nil). The
     // `receive` macro in `std/prelude.blsp` expands to exactly this. The matcher

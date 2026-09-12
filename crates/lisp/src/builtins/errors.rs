@@ -3,6 +3,8 @@ use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 use crate::eval::compile::apply_engine;
+// Only the debug-only `%force-panic` renders a value; a release build has no use for it.
+#[cfg(debug_assertions)]
 use crate::syntax::printer;
 
 /// Every primitive this file contributes: name, arity, signature, arglist, docstring.

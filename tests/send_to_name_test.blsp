@@ -1,0 +1,30 @@
+;; `send` to a REGISTERED NAME — Erlang's `Name ! Msg`. A bare keyword target is the
+;; local-node case of the `{:name :node}` address `send` already took: no `proc/whereis`
+;; round trip, whose `nil | pid` answer every caller either guarded or handed to `send`
+;; and raised on. An unregistered name has the address form's semantics — the message
+;; is dropped and the name table warns once — never a raise.
+(defmodule send-to-name-test (:use test))
+
+(describe "send to a registered name"
+  (test "a keyword target reaches the process holding that name"
+    (let (me (self))
+      (proc/register :send-to-name-test-echo me)
+      (send :send-to-name-test-echo [:hello 42])
+      (assert= [:hello 42] (receive ([:hello n] [:hello n]) (after 1000 :timeout)))
+      (proc/unregister :send-to-name-test-echo)))
+
+  (test "it is the same delivery as the address form"
+    (let (me (self))
+      (proc/register :send-to-name-test-addr me)
+      (send {:name :send-to-name-test-addr :node (node/name)} [:via :address])
+      (send :send-to-name-test-addr [:via :keyword])
+      (assert= [:via :address] (receive ([:via k] [:via k]) (after 1000 :timeout)))
+      (assert= [:via :keyword] (receive ([:via k] [:via k]) (after 1000 :timeout)))
+      (proc/unregister :send-to-name-test-addr)))
+
+  (test "an unregistered name drops the message rather than raising"
+    (assert= nil (send :send-to-name-test-nobody [:lost]))
+    (assert= :nothing (receive ([:lost] :arrived) (after 50 :nothing))))
+
+  (test "the checker admits a keyword where a pid was the only spelling"
+    (assert= nil (reflect/check '(send :some-name [:msg])))))

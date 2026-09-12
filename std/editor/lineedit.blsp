@@ -45,6 +45,10 @@ Built on `std/editor/highlight.blsp` (pure analysis) and the inline `term-*` sea
 
 ;; ---- editor state -----------------------------------------------------------
 
+;; The editor's state, named once (ADR-326): `:text` and `:point` are what every step
+;; reads; the rest (`:hscroll`, `:width`, `:done`, `:last-row`, …) rides on the open shape.
+(deftype state (record &open :text string :point int))
+
 (defn lineedit-init (prompt prefix history &optional opts)
   "The fresh editor state for one read: empty line, point at 0, the read-only `prefix`
 (legacy single-line form context) and `history` (newest-first submitted lines).
@@ -144,7 +148,7 @@ newline, or 0)."
   "Point `p` as `[row col]` — `row` the count of newlines before `p`, `col` the offset
 within that line."
   [(lineedit-count-nl (string/substring text 0 p)) (- p (lineedit-line-start text p))])
-(sig lineedit-cursor-rc (string int -> (vector int)))
+(sig lineedit-cursor-rc (string int -> (tuple int int)))
 
 (defn- lineedit-up-point (text p)
   "Point one line up from `p`, keeping the column (clamped to the shorter line), or nil
@@ -779,6 +783,7 @@ matched pair reversed, or a lone unmatched bracket in the error face."
   "The terminal width in columns, with a sane fallback when the terminal reports no
 size (e.g. a pty with no winsize), so layout never collapses to a 1-column window."
   (let ([c r] (term/size)) (if (< c 1) 80 c)))
+(sig lineedit-cols (-> int))
 
 (defn lineedit-display-prompt (state)
   "The prompt to show for `state`: the `(reverse-i-search)\`query':` prompt while
@@ -806,6 +811,7 @@ available text columns, and prompt width for rendering."
               (>= point (+ hs avail)) (inc (- point avail))
               else hs))
     (assoc state :hscroll hs2 :width width :avail avail :promptw promptw)))
+(sig lineedit-reflow (state -> state))
 
 (defn- lineedit-chunk-ops (chunks)
   "Turn `[substring face]` highlight chunks into `[:print str face]` ops."
@@ -954,7 +960,7 @@ once. Stops as soon as the read is `:done`."
     state
     (let (k (term/poll 0))
       (if (nil? k) state (lineedit-drain (lineedit-handle state k))))))
-(sig lineedit-drain (map -> map))
+(sig lineedit-drain (state -> state))
 
 (defn- lineedit-finish (state)
   "End the read: repaint the final line, drop to a new line, and return the result

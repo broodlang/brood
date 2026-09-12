@@ -11,7 +11,8 @@
 ;; arm and adds an entry to `*commands*`. What stays in Rust is what needs Rust: building the
 ;; interpreter, the exit code, the crash dump, the stdlib-image bootstrap, the process-wide
 ;; knobs that must be set before the interpreter exists (the scheduler pool size, the
-;; coverage env flags), and — for now — the subcommands not yet moved.
+;; coverage env flags), and the two arms that are Rust mechanism: `stdimage` (KI-112) and
+;; `mcp`'s transport — plus `release`'s byte assembly and boot check.
 ;;
 ;; `(nest/main argv)` returns the process exit code as an int; it never exits itself, so it
 ;; can be called from a test in-image. Errors it does not expect propagate: the Rust side
@@ -190,14 +191,28 @@ Brood (ADR-322). `(nest/main argv)` runs one and returns its exit code.")
              :flags {"--cookie" "COOKIE"}
              :positional ["spec" nil]
              :arity 1
-             :run (fn (o) (run-attach o))}})
+             :run (fn (o) (run-attach o))}
+   "completions" {:about "Print a shell integration script enabling TAB completion for `nest` — install it by sourcing: bash `eval \"$(nest completions bash)\"`, zsh `eval \"$(nest completions zsh)\"`, fish `nest completions fish | source`."
+                  :flags {}
+                  :positional ["shell" ["bash" "zsh" "fish"]]
+                  :arity 1
+                  :run (fn (o) (run-completions o))}
+   ;; Hidden: the candidate engine the shell scripts call on every keypress
+   ;; (`nest complete -- <words…>`), not a command a person types.
+   "complete" {:about "Print completion candidates for a partial command line, one per line (used by the scripts from `nest completions`; not usually run by hand). Always exits 0 — a completion must never fail."
+               :hidden true
+               :flags {}
+               :positional ["words" nil]
+               :many true
+               :trailing true
+               :run (fn (o) (run-complete o))}})
 
 ;; Short flags are aliases; canonicalise on parse so handlers read one spelling.
 (def- *short-aliases* {"-c" "--check" "-o" "--out" "-t" "--template"})
 
 (defn subcommands ()
-  "The subcommands this module implements, sorted."
-  (sort (keys *commands*)))
+  "The subcommands this module implements, sorted — hidden ones (`complete`) excluded."
+  (sort (filter (keys *commands*) (fn (c) (not (get (get *commands* c) :hidden))))))
 
 (defn flags-of (cmd)
   "The flag spellings of `cmd`, sorted — `()` for a command this module does not own."
@@ -1003,13 +1018,18 @@ command's usage."
 ;; every Brood-routed subcommand under BROOD_CONTRACTS=1 (found by KI-113's sweep).
 (sig main (list -> int))
 
+(defn- print-matching (candidates current)
+  "Print each of `candidates` that starts with `current`, one per line, skipping empties."
+  (doseq (c candidates)
+    (when (and (not (= c "")) (string/starts-with? c current)) (io/puts c))))
+
 (defn complete (cmd prior current)
   "Print the completion candidates for `cmd` given the words typed so far: the value of a
 flag left pending by the previous word (its `:complete` kind, or nothing — the shell then
-falls back to filenames, which beats a wrong list), flags when `current` starts with `-`,
-else the positional's allowed values or the candidates of its kind (`doc`'s module names,
-`check`'s `.blsp` files, `test`'s test files). Never raises; prints nothing when it cannot
-tell."
+falls back to filenames, which beats a wrong list), flags when `current` starts with `-`
+(the command's own plus the global `--max-parallel`/`--jobs`), else the positional's
+allowed values or the candidates of its kind (`doc`'s module names, `check`'s `.blsp`
+files, `test`'s test files). Never raises; prints nothing when it cannot tell."
   (try
     (let (spec (get *commands* cmd)
           previous (last prior)
@@ -1023,12 +1043,140 @@ tell."
             (when (flag-complete-kind pending)
               (complete/print-candidates (flag-complete-kind pending) current))
           (string/starts-with? current "-")
-            (doseq (f (flags-of cmd))
-              (when (string/starts-with? f current) (io/puts f)))
-          (not (empty? (positional-values cmd)))
-            (doseq (v (positional-values cmd))
-              (when (string/starts-with? v current) (io/puts v)))
+            (print-matching (sort (append (flags-of cmd) *global-flags*)) current)
+          (not (empty? (positional-values cmd))) (print-matching (positional-values cmd) current)
           (positional-kind spec) (complete/print-candidates (positional-kind spec) current)
           else nil)))
-    (catch _ (check-allow :discarded-catch nil)))
-  nil)
+    (catch _ (check-allow :discarded-catch nil))))
+
+;; ── completion: the whole command line ───────────────────────────────────────────────
+;;
+;; `nest complete -- <words…>` is what the shell scripts call on every keypress. It used to
+;; be Rust, because the subcommand list and the flags of the clap-side arms came from clap's
+;; own model; with every command but three in `*commands*` the model IS this table, and the
+;; three that remain (`release`, `mcp`, `stdimage`) are mirrored below — a mirror that
+;; `crates/nest/tests/complete.rs` asserts against clap's definition through the binary, so
+;; a flag added on one side fails the build until the other side has it.
+
+;; The subcommands still implemented in Rust, with the flags clap defines for them.
+(def *rust-commands*
+  {"release" {:flags {"--output" "PATH"
+                      "-o" "PATH"
+                      "--runtime" "PATH"
+                      "--target" "TRIPLE"
+                      "--no-smoke" :bool}}
+   "mcp" {:flags {}}
+   "stdimage" {:flags {}}})
+
+;; The one option clap owns for every subcommand (`-j` is its short form; only `--long`
+;; spellings are offered, as before).
+(def- *global-flags* (list "--max-parallel" "--jobs"))
+
+(defn all-subcommands ()
+  "Every subcommand `nest` accepts, hidden ones excluded, sorted: this module's plus the
+ones still implemented in Rust."
+  (sort (append (subcommands) (keys *rust-commands*))))
+
+(defn- rust-flags-of (cmd)
+  "The flag spellings of a Rust-side `cmd`, sorted — `()` for an unknown one."
+  (let (spec (get *rust-commands* cmd))
+    (if spec (sort (keys (get spec :flags))) (list))))
+
+(defn- complete-rust (cmd prior current)
+  "Candidates for a Rust-side subcommand: its flags (plus the global ones) when `current`
+starts with `-`; nothing for a pending value or a positional, so the shell falls back to
+filenames — which beats a confidently wrong list."
+  (let (previous (last prior)
+        pending (and previous
+                  (string/starts-with? previous "--")
+                  (not (includes? previous "="))
+                  (let (kind (get (get (get *rust-commands* cmd) :flags) previous))
+                    (and kind (not (= kind :bool))))))
+    (cond
+      pending nil
+      (string/starts-with? current "-")
+        (print-matching (sort (append (rust-flags-of cmd) *global-flags*)) current)
+      else nil)))
+
+(defn complete-words (words)
+  "Print the candidates for `words` — everything typed after `nest`, the (possibly empty)
+partial word last, one candidate per line. With no settled subcommand yet, the subcommand
+names; a Brood-implemented one completes through [[complete]] from `*commands*`, a
+Rust-side one through its mirror in `*rust-commands*`. Never raises."
+  (try
+    (let (current (or (last words) "")
+          prior (if (empty? words) (list) (seq/drop-last words 1))
+          known (into #{} (all-subcommands))
+          cmd (seq/find prior (fn (w) (and (not (string/starts-with? w "-")) (contains? known w)))))
+      (cond
+        (nil? cmd) (print-matching (all-subcommands) current)
+        (get *commands* cmd) (complete cmd (rest (drop prior (index-of prior cmd))) current)
+        else (complete-rust cmd prior current)))
+    (catch _ (check-allow :discarded-catch nil))))
+
+(defn- run-complete (o)
+  (complete-words (get o :positionals))
+  0)
+
+;; ── completion: the shell scripts ────────────────────────────────────────────────────
+;;
+;; Deliberately thin: each script forwards the current words to `nest complete` and offers
+;; whatever comes back, so there is exactly ONE implementation of completion logic and the
+;; shells cannot disagree with it (or go stale when a flag is added). Each also falls back
+;; to the shell's own filename completion when `nest complete` returns nothing, so a path
+;; is always typeable.
+
+;; `-o default` is the fallback: with no candidates, bash resumes normal filename
+;; completion instead of offering nothing.
+(def- *bash-script*
+  "# nest completion for bash — eval \"$(nest completions bash)\"
+_nest_complete() {
+    local IFS=$'\\n'
+    local words=(\"${COMP_WORDS[@]:1:COMP_CWORD}\")
+    # An empty trailing word means \"completing a fresh word\": keep it, so
+    # `nest test <TAB>` differs from `nest tes<TAB>`.
+    [[ ${#words[@]} -eq 0 ]] && words=(\"\")
+    COMPREPLY=($(nest complete -- \"${words[@]}\" 2>/dev/null))
+    return 0
+}
+complete -o default -o bashdefault -F _nest_complete nest
+")
+
+;; NB the locals are `parts`/`candidates`, NOT `words`: zsh's completion context provides
+;; `$words`, so declaring `local -a words` would blank it before it could be read and every
+;; completion would see an empty command line.
+(def- *zsh-script*
+  "# nest completion for zsh — eval \"$(nest completions zsh)\"
+_nest_complete() {
+    local -a candidates parts
+    parts=(\"${(@)words[2,$CURRENT]}\")
+    (( ${#parts} == 0 )) && parts=(\"\")
+    candidates=(\"${(@f)$(nest complete -- \"${parts[@]}\" 2>/dev/null)}\")
+    # `_files` is the fallback when nest has no opinion, so paths stay completable.
+    if (( ${#candidates} == 0 )) || [[ -z \"${candidates[1]}\" ]]; then
+        _files
+    else
+        compadd -- \"${candidates[@]}\"
+    fi
+}
+compdef _nest_complete nest
+")
+
+;; fish has no "fall back to files" switch, so ask for both: nest's candidates plus the
+;; usual file list.
+(def- *fish-script*
+  "# nest completion for fish — nest completions fish | source
+function __nest_complete
+    set -l tokens (commandline -opc) (commandline -ct)
+    nest complete -- $tokens[2..-1] 2>/dev/null
+end
+complete -c nest -f -a '(__nest_complete)'
+complete -c nest -a '(__fish_complete_path)'
+")
+
+(defn- run-completions (o)
+  (io/write (case (first (get o :positionals))
+              "bash" *bash-script*
+              "zsh" *zsh-script*
+              "fish" *fish-script*))
+  0)

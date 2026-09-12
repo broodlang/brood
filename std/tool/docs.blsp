@@ -487,6 +487,7 @@ module's namespace-rooted globals (ADR-070) back to it."
           :mode :none
           :buf nil)
       else state)))
+(sig md-flush (map -> map))
 
 (defn- md-line (state line)
   (let (mode (get state :mode) t (string/trim line) end (string/length (string/trim line)))
@@ -519,6 +520,7 @@ module's namespace-rooted globals (ADR-070) back to it."
       else
         (let (s (if (= mode :para) state (md-flush state)))
           (assoc s :mode :para :buf (cons line (get s :buf)))))))
+(sig md-line (map string -> map))
 
 (defn markdown->html (md)
   "Render a Markdown string to HTML — a small subset (ATX headings, fenced ``` code, `- `

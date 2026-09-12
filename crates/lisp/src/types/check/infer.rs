@@ -192,16 +192,20 @@ fn expr_ty_inner(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
         // `vector<E>`. Sound and strictly more precise (a `tuple` is already a
         // subtype of the corresponding uniform `vector<E>` — `Ty::is_subtype`
         // derives that fallback — so every check that passed under the old
-        // widened inference still passes). Any unknown element → the whole
-        // literal falls back to unrefined `vector` (same all-or-nothing
-        // strictness `element_union` already had).
+        // widened inference still passes). An unknown element is `any` in ITS
+        // slot: the literal's arity is a fact whatever its elements are, so
+        // `[row col]` over untyped params is a 2-tuple, which is what a
+        // `(tuple int int)` parameter wants (the unknown slots read gradually,
+        // ADR-325) and what a 3-tuple parameter must reject. Falling back to a
+        // bare `vector` on one unknown element — the all-or-nothing rule
+        // `element_union` has — threw the arity away with the element.
         Value::Vector(id) => {
             let items = heap.vector(id).to_vec();
-            let elems: Option<Vec<Ty>> = items.iter().map(|&it| expr_ty(heap, it, ctx)).collect();
-            Some(match elems {
-                Some(e) => Ty::tuple_of(e),
-                None => Ty::of(Tag::Vector),
-            })
+            let elems: Vec<Ty> = items
+                .iter()
+                .map(|&it| expr_ty(heap, it, ctx).unwrap_or(Ty::ANY))
+                .collect();
+            Some(Ty::tuple_of(elems))
         }
         // A set literal `#{a b …}` — `set<a | b | …>`; `#{}` is `set<never>`, the set
         // with no element type to speak of, which every `set<T>` admits. An element
@@ -1678,6 +1682,51 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             }
         }
     }
+    // `(update r :k f …)`, `(assoc-in r [:k …] v)`, `(update-in r [:k …] f …)` — the
+    // record-keeping siblings of `assoc`. Each replaces ONE top-level key, named by a
+    // literal keyword (the first path element for the `-in` forms), with a value the
+    // checker does not compute (`f`'s result, or a nested write): the shape survives with
+    // that field unknown — exactly what `assoc` answers for an untyped value — and the
+    // other fields keep their types. An open shape stays open, a closed one closed. On a
+    // receiver with no shape and a keyword key the answer is `map`, as for `assoc`: an
+    // editor's model is threaded through `(update m :kill-ring …)` and `(assoc-in m
+    // [:timers :blink] …)` as often as through `assoc`, and falling to the declared
+    // `-> any` at each dropped a declared `model` to nothing at the first one.
+    if items.len() >= 3
+        && (value::symbol_is(head, "update")
+            || value::symbol_is(head, "assoc-in")
+            || value::symbol_is(head, "update-in"))
+    {
+        let key = if value::symbol_is(head, "update") {
+            match items[2] {
+                Value::Keyword(name) => Some(name),
+                _ => None,
+            }
+        } else {
+            match items[2] {
+                Value::Vector(id) => match heap.vector(id).first() {
+                    Some(Value::Keyword(name)) => Some(*name),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        if let Some(key) = key {
+            let map_ty = expr_ty(heap, items[1], ctx);
+            if let Some(shape) = record_shape_of(map_ty.as_ref()) {
+                let mut fields = shape.fields;
+                fields.insert(key, (Ty::ANY, true));
+                return Some(if shape.open {
+                    Ty::record_of_open(fields)
+                } else {
+                    Ty::record_of(fields)
+                });
+            }
+            if map_ty.as_ref().and_then(Ty::map_kv).is_none() {
+                return Some(Ty::of(Tag::Map));
+            }
+        }
+    }
     // `(assoc m k1 v1 …)` → `map<K, V>` with the assoc'd keys and values UNIONED into
     // the refinement. Carrying `K`/`V` forward unchanged — which this did, on the stated
     // grounds of "no false-positive risk either way" — is not sound in the direction
@@ -1717,6 +1766,16 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
                 val_ty = val_ty.union(expr_ty(heap, pair[1], ctx).unwrap_or(Ty::ANY));
             }
             return Some(Ty::map_of(key_ty, val_ty));
+        }
+        // No usable receiver type (an untyped parameter, an unsigged call) but every key a
+        // literal keyword: the result is a `map`. `assoc`'s body is `(if (vector? coll)
+        // (%vector-assoc …) (%map-assoc …))`, which inferred as `vector | map` — but
+        // `%vector-assoc` takes an int index and RAISES on a keyword, so a keyword-keyed
+        // call that returns at all returns a map. This is the shape every `model -> model`
+        // step in an editor has (`(assoc (step m) :k v)` on an unsigged `step`), and
+        // `vector | map` where `map` was declared was the strict finding at every one.
+        if literal_keyword_pairs(&items[2..]).is_some() {
+            return Some(Ty::of(Tag::Map));
         }
     }
     // `(string/->number "1")` is `1`, not `number | failure`. The declared signature has to

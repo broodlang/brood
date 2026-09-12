@@ -99,13 +99,16 @@ Concretely:
   should ultimately be Brood**, with Rust only hosting the thinnest necessary
   substrate. (The REPL already moved into Brood — `std/tool/repl.blsp`, ADR-048;
   the binaries just bootstrap into `(repl-run)`. The `nest` CLI dispatch is moving the
-  same way — `std/tool/nest.blsp` owns twenty-three subcommands (ADR-322): `doc`, `docs`,
+  same way — `std/tool/nest.blsp` owns twenty-five subcommands (ADR-322): `doc`, `docs`,
   `doctest`, `grammar`, `format`, `check`, `test`, `run`, `new`, `update-tooling`, `rename`
   and the package manager (`fetch`, `update`, `tree`, `add`, `remove`, `publish`, `search`,
-  `key`, `ws`), `repl`, `observe` and `attach`; `main.rs` routes a name in its
-  `BLSP_SUBCOMMANDS` there before clap runs and deletes the Rust arm. Still Rust:
-  `completions`/`complete`, `mcp` — and `stdimage`, which must build from a process where
-  nothing but the prelude is loaded, and the dispatcher is a std module (KI-112).
+  `key`, `ws`), `repl`, `observe`, `attach`, and shell completion (`completions`, the
+  scripts; `complete`, the candidate engine — the three Rust-side commands' flags are
+  mirrored in `nest/*rust-commands*`, and `crates/nest/tests/complete.rs` pins that mirror
+  to clap's own `--help` through the binary); `main.rs` routes a name in its
+  `BLSP_SUBCOMMANDS` there before clap runs and deletes the Rust arm. Still Rust: `mcp` —
+  and `stdimage`, which must build from a process where nothing but the prelude is loaded,
+  and the dispatcher is a std module (KI-112).
   `release` is the one arm SPLIT rather than moved: what a release binary is called, which
   names are refused and what the command prints are `project-release/release-plan` +
   `project-release/release-report` in Brood, while the Rust side keeps what only this binary can

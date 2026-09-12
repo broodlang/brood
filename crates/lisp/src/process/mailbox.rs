@@ -1072,11 +1072,22 @@ pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispEr
                 node,
             )
         }
-        _ => {
-            return Err(LispError::type_err(
-                "send: target must be a pid or a {:name :node} address",
-            ))
+        // A bare registered name — Erlang's `Name ! Msg`. The local-node case of the
+        // `{:name :node}` address, so a process that registered itself is reachable as
+        // `(send :editor msg)` with no `whereis` round trip: that lookup answered
+        // `nil | pid`, and every caller either guarded it or handed `nil` to `send` and
+        // raised — where the name table already knows how to say "nobody holds this
+        // name" (`route` drops and warns once). Same drop semantics as the map form.
+        Value::Keyword(name) => {
+            let node = crate::dist::local_node();
+            (
+                crate::dist::route(node, crate::dist::Target::Name(name), msg),
+                node,
+            )
         }
+        _ => return Err(LispError::type_err(
+            "send: target must be a pid, a registered name (a keyword), or a {:name :node} address",
+        )),
     };
     if !routed && heap.proc_send_errors() {
         return Err(LispError::runtime(format!(

@@ -660,6 +660,16 @@ for variadic tails."
              (%contract-defer! (%register-sig '~name '~type) '~type)))
         nil)))
 
+(defmacro deftype (name type)
+  "Name a type for the checker — `(deftype pane (record &open :rect (tuple int int int int)))`
+— so a signature can say `(pane -> int)` instead of spelling the shape at every use.
+Structural: `name` IS `type`, exactly as written, wherever a `sig` names it — a record
+shape, a union, a tuple, another alias. Module-scoped like a `sig`: declared in module
+`m`, it is `m/name` everywhere and `name` where that is unambiguous. A declaration only —
+`name` is not bound at runtime, and a bare reference to it is unbound as it should be
+(types are not values). Read by the advisory checker (ADR-327)."
+  `(%register-type '~name '~type))
+
 ;; ---- checker suppression: `(check-allow :category form…)` -------------------
 ;; A form-level opt-out for an advisory lint the author deliberately trips — a
 ;; non-tail-recursive function written to exercise the deep-recursion path, a

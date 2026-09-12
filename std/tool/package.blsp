@@ -630,6 +630,7 @@ land in a later slice."
                 (if (empty? tags) "none" (string/join tags ", "))
                 ")")
               (assoc dep :ref (first chosen) :resolved-version (second chosen)))))))))
+(sig package-git-concrete-ref (map any -> map))
 
 (defn- package-resolve-git (root raw-dep raw-locked)
   (let (locked raw-locked

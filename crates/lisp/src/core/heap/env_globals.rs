@@ -959,6 +959,22 @@ impl Heap {
             .collect()
     }
 
+    /// Every declaration in BOTH stores — the prelude image's and the runtime's — as
+    /// `(qualified-name, type-expression)`. What the checker's type-alias table is built
+    /// from (`protocol::type_alias_table`): an alias declared in the prelude or std is in
+    /// the prelude store, one from a loaded module in the runtime's, and a bare alias
+    /// name has to be resolved against all of them.
+    pub fn declared_sigs_everywhere(&self) -> Vec<(Symbol, Value)> {
+        let mut out: Vec<(Symbol, Value)> = self
+            .prelude
+            .declared_sigs
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        out.extend(self.declared_sigs_snapshot());
+        out
+    }
+
     /// The raw type-expression `Value` a `(sig …)` declared for the qualified global
     /// `sym`, or `None`. The checker (`sig_of`) parses it to a signature and gives it
     /// precedence over primitive/curated/inferred sigs. See [`Heap::set_declared_sig`].

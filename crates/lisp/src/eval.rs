@@ -1658,9 +1658,10 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
              transients; `conj`/`disj`/`assoc`/`dissoc`/`into` return fresh values."
         }
         // Polymorphism/type constructs from other languages → point at `ability`
-        // (`defprotocol`/`defimpl` were retired in its favour).
-        "deftype" | "definterface" | "reify" | "defprotocol" | "defimpl" | "defmulti"
-        | "defmethod" => {
+        // (`defprotocol`/`defimpl` were retired in its favour). `deftype` is NOT here: it
+        // is Brood's own form since ADR-327 — a structural type alias for the checker,
+        // not Clojure's nominal class — so a bare `(deftype …)` is a real call.
+        "definterface" | "reify" | "defprotocol" | "defimpl" | "defmulti" | "defmethod" => {
             "Brood has no nominal types — for a named, optionally-typed record use \
              `defrecord` (sugar over a plain map, so records stay structural). For \
              polymorphism, `defability`/`impl`/`defrecord` are built in (core, no \

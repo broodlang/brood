@@ -430,3 +430,92 @@ fn run_main_offers_modules_not_file_paths() {
         positional.lines()
     );
 }
+
+// ── the Rust-side mirror ───────────────────────────────────────────────────
+//
+// Completion is Brood (`std/tool/nest.blsp`, ADR-322), and the three subcommands still in
+// Rust — `release`, `mcp`, `stdimage` — are mirrored there as `nest/*rust-commands*` so
+// their flags complete without booting clap's model. A mirror drifts; these cases pin it
+// to clap's own definition through the binary: the `--long` flags `nest <sub> --help`
+// prints are exactly the ones `nest complete -- <sub> --` offers, and the subcommands
+// `nest --help` lists are exactly the Rust-side ones completion knows about.
+
+fn help_for(args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_nest"))
+        .args(args)
+        .arg("--help")
+        .output()
+        .expect("run nest --help");
+    assert!(out.status.success(), "nest {args:?} --help failed");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The `--long` flags a clap `--help` prints (its own and the global ones; aliases
+/// included, since `[alias: --jobs]` is a spelling the shell accepts).
+fn long_flags_in_help(help: &str) -> Vec<String> {
+    let mut flags: Vec<String> = help
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '[' || c == ']')
+        .filter(|w| w.starts_with("--") && w.len() > 2)
+        .map(|w| w.trim_end_matches(':').to_string())
+        .collect();
+    flags.sort();
+    flags.dedup();
+    flags
+}
+
+/// The subcommands clap itself still owns, read from `nest --help`'s `Commands:` block
+/// (`help` excluded — clap's own, never completed).
+fn clap_subcommands() -> Vec<String> {
+    let help = help_for(&[]);
+    let block = help
+        .split("Commands:")
+        .nth(1)
+        .expect("a Commands: block")
+        .trim_start_matches('\n');
+    block
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        // A subcommand row starts at column 2; a wrapped description continues at the
+        // description column, so its first word is not a name (CI's narrower terminal
+        // wrapped `mcp`'s, and "can" was read as a subcommand).
+        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn the_rust_side_flags_complete_exactly_as_clap_defines_them() {
+    let subs = clap_subcommands();
+    assert!(
+        subs.contains(&"release".to_string()),
+        "clap owns release: {subs:?}"
+    );
+    for sub in &subs {
+        let expected = long_flags_in_help(&help_for(&[sub]))
+            .into_iter()
+            // `--help` and `--version` are clap's, offered by no completion.
+            .filter(|f| f != "--help" && f != "--version")
+            .collect::<Vec<_>>();
+        let proj = project();
+        let completion = complete_in(&proj.path, &[sub, "--"]);
+        let mut got: Vec<String> = completion.lines().into_iter().map(str::to_string).collect();
+        got.sort();
+        assert_eq!(
+            got, expected,
+            "`nest complete -- {sub} --` must offer exactly the flags `nest {sub} --help` prints \
+             (edit `*rust-commands*` in std/tool/nest.blsp beside the clap definition)"
+        );
+    }
+}
+
+#[test]
+fn every_clap_subcommand_is_offered_by_completion() {
+    let proj = project();
+    let completion = complete_in(&proj.path, &[""]);
+    let all = completion.lines();
+    for sub in clap_subcommands() {
+        assert!(all.contains(&sub.as_str()), "{sub} missing from {all:?}");
+    }
+}

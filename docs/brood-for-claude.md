@@ -646,7 +646,10 @@ closure and returns, the body never runs (a silent no-op that looks like "spawn
 didn't work"). Same for `(spawn name expr)`.
 
 Each process has its own heap; messages are **deep-copied** on `send`. `(self)`
-is the current process's pid. **Closures can be sent** — a `send`-ed function
+is the current process's pid. A `send` target is a pid, a **registered name** —
+`(proc/register :editor (self))` then `(send :editor msg)` from anywhere, Erlang's
+`Name ! Msg`; an unregistered name drops the message and warns once, never raises —
+or a `{:name :node}` address for a peer node. **Closures can be sent** — a `send`-ed function
 carries its code and its captured locals (deep-copied with it); only its *free
 global* references are late-bound on the receiver. So builtins/prelude names
 always resolve, and any `def`/`defn` the receiving image also has resolves
@@ -1110,7 +1113,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   The **definition** owns the arity, so a sig cannot make a wrong call look right.
   Type grammar beyond the basics: `(or A B)`, `(and A B)`, `(not T)` — so "anything
   but nil" is `(and any (not nil))` — `(vector E)`, `(map K V)`, `(tuple A B)`,
-  `(record :k T)`, and bare literals (`:ok`, `5`, `true`, `"GET"`).
+  `(record :k T)`, and bare literals (`:ok`, `5`, `true`, `"GET"`). **Name a shape once
+  with `(deftype pane (record &open :rect (tuple int int int int)))`** and write
+  `(pane -> int)` — structural, module-scoped like a `sig`, not a runtime value (ADR-327).
 - **`nest check --strict` reads a known bound by inclusion.** Plain `nest check` warns only
   on a *provable* misuse (`∩ = ∅`); `--strict` also warns where a value is merely wider
   than the parameter — `number` where `int` is declared, `nil | string` from `nth`/`first`
@@ -1121,6 +1126,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   does not declare reads as unknown, so go through a declared accessor. A user predicate
   narrows once it is DECLARED a guard — `(sig order? (any -> (is order)))` — exactly like
   the built-in `int?`/`string?`; an undeclared one proves nothing.
+  Inclusion there is *consistent* subtyping (ADR-326): an unknown is the gradual `?` at
+  every depth — a record field or an element the checker could not type never warns on
+  its own; a *positively* known one (`vector<number>` into `vector<int>`) does.
 - **A `(record …)` is CLOSED** (ADR-264) — it names every key, and one it doesn't
   declare reads as `nil`. Write `(record &open :k T)` when a value may carry more,
   which is what a *parameter* usually wants. Closedness is what makes a tagged union

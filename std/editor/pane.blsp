@@ -38,6 +38,16 @@ content-agnostic — the editor supplies the payload and the keybindings."
 ;; plain tree recursion (cf. std/sexp.blsp's CST walk). Don't contort them into an
 ;; explicit-stack tail loop — there's no overflow to prevent here.
 
+;; ---- the shapes, named once (ADR-326) ---------------------------------------
+;; What `pane-layout` hands out. A frontend keeps these as plain maps (no `defrecord`
+;; identity — a literal `{:rect …}` in a test IS a pane), and every consumer's `sig`
+;; names the shape here instead of spelling it: `(sig pane-rows (pane -> int))`. Open,
+;; because a value may carry more than the layout put there.
+(deftype rect (tuple int int int int))
+(deftype pane (record &open :path list :payload any :selected bool :rect rect))
+(deftype divider (record &open :path list :dir (or :row :col) :rect rect :split-rect rect))
+(deftype layout (record &open :panes (list pane) :dividers (or nil (list divider))))
+
 ;; ---- nodes ------------------------------------------------------------------
 
 (defn pane-single (payload)
@@ -217,7 +227,7 @@ returned unchanged — you can't delete the only one."
 ;; `sig_placement.rs` and, under BROOD_CONTRACTS=1 from source, its deferred contract landed
 ;; at `provide` — after the loader's reserved-name exemption — and was refused, failing the
 ;; module (2026-09-06). The gate now reads indented sigs too.
-(sig pane-layout-go (any list (vector int) -> map))
+(sig pane-layout-go (any list rect -> layout))
 
 (defn pane-layout (tree rect)
   "Lay `tree` out in `rect` (`[x y w h]` cells): a map `{:panes :dividers}` where
@@ -226,6 +236,7 @@ each pane is `{:path :payload :selected :rect}` and each divider is `{:path :dir
 that split feeds `pane-ratio-for`). Pure — the frontend paints each pane's payload
 into its rect and the dividers between them."
   (pane-layout-go tree () rect))
+(sig pane-layout (any rect -> layout))
 
 ;; ---- hit-testing + resize (drag-to-resize over :drag mouse events) ----------
 
@@ -233,6 +244,7 @@ into its rect and the dividers between them."
   "Whether `point` (`[row col]`) falls inside `rect` (`[x y w h]`)."
   (let ([x y w h] rect [row col] point)
     (and (>= col x) (< col (+ x w)) (>= row y) (< row (+ y h)))))
+(sig pane-in-rect? (rect (tuple int int) -> bool))
 
 (defn- pane-find (items point)
   "The first `{:rect …}` in `items` whose rect contains `point`, or nil."
@@ -244,11 +256,13 @@ into its rect and the dividers between them."
 (defn pane-at (layout point)
   "The pane (`{:path :payload :selected :rect}`) under `point`, or nil."
   (pane-find (get layout :panes) point))
+(sig pane-at (layout (tuple int int) -> (or nil pane)))
 
 (defn divider-at (layout point)
   "The divider (`{:path :dir :rect :split-rect}`) under `point`, or nil — what a
 frontend stashes on a left-press to begin a drag-resize."
   (pane-find (get layout :dividers) point))
+(sig divider-at (layout (tuple int int) -> (or nil divider)))
 
 (defn pane-select-at (tree layout point)
   "Move selection to the pane under `point` (a click selects it); unchanged if the
@@ -263,6 +277,7 @@ i.e. dragging the divider to the pointer. Feed the result to `pane-set-ratio`."
     (if (= (get divider :dir) :col)
       (/ (- col x) (math/max 1 (- w 1)))
       (/ (- row y) (math/max 1 (- h 1))))))
+(sig pane-ratio-for (divider (tuple int int) -> number))
 
 (defn pane-set-ratio (tree path ratio)
   "Set the `:ratio` of the split at `path` (clamped to `[0.1 0.9]` so neither pane

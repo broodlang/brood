@@ -1207,6 +1207,78 @@ pub(super) fn record_id_names(
     out
 }
 
+/// The type aliases in scope for a check of `expanded` (ADR-327): every `(deftype …)` a
+/// loaded module registered — a `(%type T)`-wrapped entry in the declared-sig store — plus
+/// THIS file's, read off its expanded `(%register-type (quote name) (quote T))` forms and
+/// qualified to `file_ns` as the runtime would qualify them, since a checked file has not
+/// been evaluated. Same two-source union as `record_id_names`, for the same reason.
+pub(super) fn type_alias_table(
+    heap: &Heap,
+    expanded: &[Value],
+    file_ns: Option<&str>,
+) -> std::collections::HashMap<String, Value> {
+    let mut out = std::collections::HashMap::new();
+    for (sym, form) in heap.declared_sigs_everywhere() {
+        if let Some(inner) = unwrap_type_alias(heap, form) {
+            out.insert(value::symbol_name(sym), inner);
+        }
+    }
+    for &form in expanded {
+        collect_register_types(heap, form, file_ns, &mut out);
+    }
+    out
+}
+
+/// The `T` of a `(%type T)` alias entry, or `None` for an ordinary signature.
+fn unwrap_type_alias(heap: &Heap, form: Value) -> Option<Value> {
+    let items = list_items(heap, form)?;
+    match items.as_slice() {
+        [Value::Sym(h), inner]
+            if value::symbol_is(*h, crate::builtins::modules::TYPE_ALIAS_MARKER) =>
+        {
+            Some(*inner)
+        }
+        _ => None,
+    }
+}
+
+/// Walk for `(%register-type (quote name) (quote T))` — what `deftype` expands to —
+/// through the `(do …)` wrappers a top-level macro may leave.
+fn collect_register_types(
+    heap: &Heap,
+    form: Value,
+    file_ns: Option<&str>,
+    out: &mut std::collections::HashMap<String, Value>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        let Some(&Value::Sym(h)) = items.first() else {
+            return;
+        };
+        if value::symbol_is(h, "do") {
+            for &it in &items[1..] {
+                collect_register_types(heap, it, file_ns, out);
+            }
+            return;
+        }
+        if !value::symbol_is(h, "%register-type") || items.len() != 3 {
+            return;
+        }
+        let (Some(Value::Sym(name)), Some(ty)) = (unquote(heap, items[1]), unquote(heap, items[2]))
+        else {
+            return;
+        };
+        let bare = value::symbol_name(name);
+        let qualified = match file_ns {
+            Some(ns) if !bare.contains('/') => format!("{ns}/{bare}"),
+            _ => bare,
+        };
+        out.insert(qualified, ty);
+    })
+}
+
 /// Walk for `(%record-register :ns/name (quote name))` — what `defrecord` expands to. The id
 /// is a BARE keyword here, unlike `%register-sealed`'s quoted ability name, so it is read
 /// directly rather than through `unquote`.

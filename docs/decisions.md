@@ -21171,3 +21171,92 @@ at ~1,500 lines; `lib.rs` ~350; `gui.rs` 350; `gc.rs` ~960;
 `project-check.blsp` at ~1,500. Every path in
 `CLAUDE.md`, `architecture.md` and `components.md` was rewritten to the new tree; the
 historical docs (devlog, decisions, known-issues) keep the names they had at the time.
+
+## ADR-326 — Strict inclusion is consistent subtyping: a nested unknown is the gradual unknown
+
+**Status:** accepted; implemented 2026-09-11 (`Ty::is_consistent_subtype`, read by
+`GradualTy::consistent_with_mode`).
+
+**Context.** ADR-298 made `--strict` read a dynamic value whose bound is narrower than `any`
+by inclusion, `bound ⊆ expected`, keeping the overlap reading only for the bare unknown. The
+unknown was recognised at ONE place — the top of the type, `GradualTy::dynamic` — and `⊆`
+below it is the static lattice. So the same unknown read differently depending on where it
+sat: `(:end r)` on an untyped `r` handed to an `int` parameter passed, while
+`(assoc b :mark (:end r))` handed to a `buffer` parameter warned, because the record's
+`mark` field now held `any` and `any ⊆ nil | int` is false. bedit's strict sweep had
+nineteen of exactly this shape, every one a value the checker could not have typed better
+without a `sig` on a parameter that had nothing to do with the field.
+
+**Decision.** Strict inclusion is **consistent subtyping** (Siek & Taha: `A ≲ B ⟺ ∃ A' ⊑ A.
+A' ⊆ B` — some way of filling in the unknowns fits). An unknown is the gradual `?` wherever
+it appears — a record field, a vector's elements, a map's keys and values, a tuple slot —
+and an absent refinement is the unknown too (`vector` IS `vector<any>`). In a covariant
+position the filling that always fits is `never`, so the relation is `⊆` after substituting
+`never` for every nested unknown. What is *positively* known stays read by inclusion:
+`vector<number>` into `vector<int>` warns exactly as before, and so does `number` into
+`int` at the top. Arrow parameters are contravariant and left as they are; a shape's `rest`
+is a positive fact (open versus closed), not an unknown.
+
+`⊆` itself is untouched. It is the lattice, and the impossible-guard lint (ADR-315), the
+exhaustiveness check and union absorption need its exact answer; only the "can this value
+be used here" question is gradual, and that question already had its own entry point.
+
+A map's *shape* is a component like any other. A bare `map` — no shape, no key/value
+types, which is what `(assoc x :k v)` on an unknown `x` answers — has unknown fields, and
+an open record's undeclared keys are unknown; both fill to `never` and so fit any record
+shape. An earlier draft of this decision drew the line the other way ("no filling of a
+missing shape proves the required keys are present"), and the first large program typed
+under it showed why that is the lattice's line and not the gradual one: declaring an
+editor's `model` shape made every `(assoc (step m) :k v)` over an unsigged `step` a
+finding at the next typed parameter, six hundred at once, and the only way out was to
+declare the entire program in one move — which is exactly what gradual typing exists to
+make unnecessary. An unknown shape proves nothing about which keys are absent, as
+unknown elements prove nothing about what they are. What still does not fit: a closed
+record lacking a required key (its shape is positively known), and a `map<K, V>` with
+positively known `K`/`V` (it says its keys need not be present).
+
+**Consequences.** Strict mode says the same thing about an unknown at every depth, which is
+what makes "the answer to a strict warning is a `sig` on the enclosing function" true: the
+warning now points at the parameter whose type is missing, never at a field that inherited
+its unknown-ness — and a program can be declared one function at a time, each new sig
+checked against what its neighbours positively established and nothing else. std stays at
+zero in both modes.
+
+## ADR-327 — `deftype` names a structural type for the checker
+
+**Status:** accepted; implemented 2026-09-11 (prelude `deftype` → `%register-type`;
+`annot::alias_ty`, `protocol::type_alias_table`).
+
+**Context.** A `sig` could name a base type, a sealed ability or a `defrecord`; every
+other shape had to be spelt out where it was used. The editor toolkit's panes, dividers
+and layouts are plain maps whose shape lives in a docstring (`{:path :payload :selected
+:rect}`), and bedit's `--strict` sweep showed the cost: fifty findings traced to
+`[x y w h] (:rect pane)` on a parameter nobody had typed, and typing any one function
+over it moved the report into that function's body, because the shape had no name to
+declare it by. The two existing routes were both wrong for this: a `defrecord` makes the
+value nominal (a `:__id__` key, `=` no longer equal to the literal map, every hand-built
+`{:rect …}` no longer a pane), and `(record &open :rect (tuple int int int int) …)` in
+twenty signatures is a shape with twenty chances to drift.
+
+**Decision.** `(deftype name T)` declares that `name`, in a type expression, IS `T` —
+structural, exactly as written: a record shape, a union, a tuple, another alias.
+Module-scoped the way a `sig` is: declared in `m` it is `m/name` everywhere, and a bare
+`name` resolves in the checked file's own namespace first, then to the one loaded module
+declaring it — two candidates decline, so an ambiguous bare name is an unknown type
+rather than a silent guess, exactly as a record name resolves. A declaration only:
+`name` is not bound at runtime, so a reference to it outside a `sig` is unbound (types
+are not values). A recursive alias reads as `any` where it meets itself.
+
+It rides the declared-sig store rather than adding one: `%register-type` writes the
+type-expression under the alias's qualified name wrapped as `(%type T)`, and only the
+alias table unwraps that marker (`parse_type` declines it, so no reader of the store can
+take an alias for a signature). Everything a `sig` already has — module qualification,
+image persistence, the checker's dep-tracked read, the same-file collection from the
+expanded tree of a file that is checked but never evaluated — an alias gets for free.
+
+**Consequences.** A shape is declared once, in the module that builds it, and every
+consumer's sig names it; a change to the shape is one edit and every sig follows. The
+first user is `std/editor/pane` (`pane`, `divider`, `layout`), which is what lets bedit
+declare its pane geometry in types at all. Not in scope: resolution through a file's
+`(:use …)` imports (an alias resolves like a record name, by unique suffix), a `nest doc`
+entry for an alias, and recursive types.

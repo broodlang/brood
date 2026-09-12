@@ -179,6 +179,15 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         "",
         register_sig,
     );
+    // `deftype` emits it to record a type alias for the checker (ADR-327).
+    primitives.def(
+        "%register-type",
+        Arity::exact(2),
+        Sig::new(vec![sym, any], sym),
+        &[],
+        "",
+        register_type,
+    );
     primitives.def(
         "%mark-private",
         Arity::exact(1),
@@ -1033,6 +1042,28 @@ pub(super) fn register_sig(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     heap.set_declared_sig(qualified, type_value);
     Ok(Value::symbol(qualified))
 }
+
+/// `(%register-type 'name 'type)` — record a **type alias** `(deftype name type)` for the
+/// advisory checker (ADR-327). Rides the declared-sig store: the same qualified key a
+/// `(sig name …)` would use (so an alias is module-scoped, survives an image, and is read
+/// through the same dep-tracked path), with the type-expression wrapped as `(%type T)` so
+/// that no reader of the store can mistake it for a signature — `parse_type` declines a
+/// `%type` head, and only the alias table (`protocol::type_alias_table`) unwraps it. A
+/// runtime value-producing call (returns the qualified name), like `%register-sig`.
+pub(super) fn register_type(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_symbol(heap, "%register-type", arg(args, 0))?;
+    let type_value = arg(args, 1);
+    let qualified = crate::eval::macros::resolve_reference(heap, name);
+    let wrapped = heap.list(vec![
+        Value::symbol(value::intern(TYPE_ALIAS_MARKER)),
+        type_value,
+    ]);
+    heap.set_declared_sig(qualified, wrapped);
+    Ok(Value::symbol(qualified))
+}
+
+/// The head that marks a declared-sig entry as a type ALIAS rather than a signature.
+pub const TYPE_ALIAS_MARKER: &str = "%type";
 
 /// `(%mark-private 'name)` — record the global `name` as module-private (ADR-146).
 /// Emitted by the `defn-`/`def-` macros alongside their `def`. `name` is qualified

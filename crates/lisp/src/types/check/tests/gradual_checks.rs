@@ -961,3 +961,64 @@ fn callback_arity_is_skipped_when_unknown() {
         "a local callback must be skipped: {w:?}"
     );
 }
+
+// Strict inclusion is CONSISTENT subtyping (`Ty::is_consistent_subtype`): a nested unknown
+// is the gradual `?` wherever it sits. `(assoc r :mark (:end x))` on an untyped `x` yields a
+// record whose `mark` is unknown; reading that field by plain `⊆` (`any ⊆ nil | int`, false)
+// flagged the value where the SAME unknown handed over bare would have passed. What is
+// positively known stays read by inclusion — `mark: number` into `nil | int` still warns —
+// and so does the unknown at the top level of a merely-wider bound (`number` into `int`).
+#[test]
+fn strict_mode_reads_a_nested_unknown_as_the_gradual_unknown() {
+    let src = "\
+         (defmodule t)\n\
+         (sig take-r ((record :point int :mark (or nil int)) -> int))\n\
+         (defn take-r (r) (:point r))\n\
+         (sig mk (-> (record :point int :mark (or nil int))))\n\
+         (defn mk () {:point 0 :mark nil})\n\
+         (defn unknown-field (x) (take-r (assoc (mk) :mark (:end x))))\n\
+         (defn known-field (x) (take-r (assoc (mk) :mark (+ 1.5 (:end x)))))\n\
+         (sig want-ints ((vector int) -> int))\n\
+         (defn want-ints (xs) 0)\n\
+         (sig bare (-> vector))\n\
+         (defn bare () [])\n\
+         (sig nums (-> (vector number)))\n\
+         (defn nums () [1])\n\
+         (defn unknown-elems () (want-ints (bare)))\n\
+         (defn known-elems () (want-ints (nums)))";
+    let strict = file_warnings_mode(src, true);
+    let arg1: Vec<&String> = strict.iter().filter(|w| w.contains("argument 1")).collect();
+    assert_eq!(arg1.len(), 2, "{strict:?}");
+    assert!(
+        arg1.iter()
+            .any(|w| w.contains("t/take-r") && w.contains("mark: number")),
+        "{strict:?}"
+    );
+    assert!(
+        arg1.iter()
+            .any(|w| w.contains("t/want-ints") && w.contains("vector<number>")),
+        "{strict:?}"
+    );
+    // The relation itself, on the lattice: an unknown field fills to fit; a known one does
+    // not; the top level is never filled (that is `GradualTy`'s `dynamic` bit to decide).
+    let unknown_mark = ty_of_sig("(record :point int :mark any)");
+    let known_mark = ty_of_sig("(record :point int :mark number)");
+    let want = ty_of_sig("(record :point int :mark (or nil int))");
+    assert!(unknown_mark.is_consistent_subtype(&want));
+    assert!(!unknown_mark.is_subtype(&want));
+    assert!(!known_mark.is_consistent_subtype(&want));
+    assert!(ty_of_sig("vector").is_consistent_subtype(&ty_of_sig("(vector int)")));
+    assert!(ty_of_sig("(vector (record :a any))")
+        .is_consistent_subtype(&ty_of_sig("(vector (record :a int))")));
+    assert!(!Ty::ANY.is_consistent_subtype(&Ty::of(Tag::Int)));
+    // A map's SHAPE is a component too: a bare `map` (what `(assoc x :k v)` on an unknown
+    // `x` answers) and an open record's undeclared keys are unknowns, so they fit any
+    // shape; a closed record that lacks a required key, and a `map<K, V>` with positively
+    // known key and value types (its keys need not be present), still do not.
+    assert!(ty_of_sig("map").is_consistent_subtype(&want));
+    assert!(ty_of_sig("(record &open :point int)").is_consistent_subtype(&want));
+    let needs_name = ty_of_sig("(record :point int :name string)");
+    assert!(!ty_of_sig("(record :point int)").is_consistent_subtype(&needs_name));
+    assert!(!ty_of_sig("(map keyword int)").is_consistent_subtype(&needs_name));
+    assert!(ty_of_sig("map").is_consistent_subtype(&needs_name));
+}

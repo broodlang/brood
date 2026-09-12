@@ -49,6 +49,16 @@ const ALLOWED: &[(&str, &str)] = &[
          reads go through `frame_size_for_code` (the pointer, not the flag)",
     ),
     (
+        "crates/lisp/src/eval/compile/jit_runtime/dispatch.rs",
+        "the native-side call/tail dispatch split out of jit_runtime.rs: reports the flag in \
+         the frame-mismatch diagnostic only, beside the size it was actually built to",
+    ),
+    (
+        "crates/lisp/src/eval/compile/jit_runtime/deopt.rs",
+        "the deopt/resume path split out of jit_runtime.rs: reports the flag in the \
+         checkpoint-shape diagnostic only, never sizes a frame from it",
+    ),
+    (
         "crates/lisp/src/eval/compile/vm_run_bc.rs",
         "the trampoline: reads it ONCE to decide the size this frame is built to, captures \
          that into `frame_nslots`, and hands it to `jit_tier_in_frame` / `jit_dispatch_tail`",
@@ -64,30 +74,13 @@ const ALLOWED: &[(&str, &str)] = &[
         "arm construction only — initialises the field to false; it never reads it",
     ),
     (
+        "crates/lisp/src/eval/compile/closure.rs",
+        "arm construction (compile_arm / the shared body cache) — initialises the field to \
+         false; it never reads it",
+    ),
+    (
         "crates/lisp/src/eval/compile/tests.rs",
         "tests that stage the flag directly to assert the guard's behaviour",
-    ),
-    // ADR-325 (e2acbf87) split three allowlisted files by domain, and the entries below are
-    // that move, not new readers. Verified individually rather than pattern-matched on the
-    // refactor: NONE of the three derives a frame size from the flag, which is the only thing
-    // this gate is about.
-    (
-        "crates/lisp/src/eval/compile/closure.rs",
-        "arm construction only — two `AtomicBool::new(false)` initialisers that moved out of \
-         `compile.rs`; it never loads the flag, and the comment at its one frame-sizing site \
-         says the size comes from the `code` pointer loaded above",
-    ),
-    (
-        "crates/lisp/src/eval/compile/jit_runtime/deopt.rs",
-        "diagnostic only — prints the flag in a deopt trace (`inline_installed={}`); moved out \
-         of `jit_runtime.rs`. Its doc comments are the anti-pattern's own description, and the \
-         code selects a frame by the size the caller BUILT, never by re-reading the flag",
-    ),
-    (
-        "crates/lisp/src/eval/compile/jit_runtime/dispatch.rs",
-        "diagnostic only — prints the flag in a tier trace; moved out of `jit_runtime.rs`. The \
-         sizing comment beside it states the fast path keys on the `code` pointer loaded \
-         above, NOT on the flag",
     ),
 ];
 
