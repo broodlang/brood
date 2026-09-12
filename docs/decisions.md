@@ -21460,3 +21460,54 @@ to nothing; and an unclosed `[[` is prose. Rendering runs *after* HTML escaping,
 module to resolve against, a bare reference is left as written rather than pointed at
 `#d-nil-<name>`: a visible `[[name]]` is a missing argument a reader can report, a dead link
 is not.
+
+## ADR-333 — The tier threshold is a CALL threshold, and it is 128; loops keep their own
+
+**Status:** accepted; implemented 2026-09-12.
+
+**Context.** An arm was handed to the background compiler after **8** activations. That
+number was set when the JIT had a handful of arms to compile and never revisited; meanwhile
+the prelude grew to ~800 bindings and boot alone came to tier **~139 arms** (`startup` runs
+18 ms and queues 139 compiles — counted with a throwaway probe on the enqueue and compile
+sites, `docs/compute-frontier.md` §7.11). The compiler drains a FIFO, one Cranelift lowering
+at a time (median 275 µs, p90 1.4 ms, `json/object-acc` 7.6 ms), so a program's own hot
+function sat in the queue behind tens of milliseconds of boot-path code that had run eight
+times and would never run again. The same probe showed the queue is otherwise healthy — the
+compiler goes idle 40–70 ms into every row and the deferred queue never starves — so the
+cost was purely *latency to native for the arm that mattered*, plus, when cores are scarce,
+the compile CPU itself (`make ab` pins to one core: `json` 130 → 204 ms there).
+
+**Decision.** `TIER_THRESHOLD = 128` (`eval/compile/jit_runtime.rs`), a named constant with
+the measurement in its doc comment, replacing the local `const THRESHOLD: u32 = 8`.
+
+**And a loop's tiering is decoupled from it.** A self-tail loop is ONE activation; it reached
+the compiler by exiting to the driver every `BACKEDGE_TIER_INTERVAL` (256) iterations while
+untried, each exit counting as one call — so 8 boundaries, 2048 iterations. Raising the call
+threshold alone would have multiplied that by 16: `sieve` read +6–7% at 64 and 128 with the
+old weight, its 1M-iteration `count-primes` interpreting 32k iterations before enqueueing.
+`BACKEDGE_TIER_WEIGHT = TIER_THRESHOLD / 8` makes one boundary exit worth sixteen calls
+(`exec_chunk` adds `WEIGHT − 1` at the boundary; `jit_tier` adds the last unit on re-entry),
+so a spinning loop still tiers at eight boundaries whatever the call threshold says. With it
+`sieve` reads −1.6%.
+
+**Measured** (interleaved best-of-7, unpinned — the protocol for a compile-volume change —
+with a same-binary control that read ±4%): 8 → 128 is **`spawn` −31%, `fib` −18%,
+`bintree` −14%, `collatz` −14%, `pipeline` −11%, `nqueens` −9%, `base64` −8%, `nbody` −7%,
+`pfib` −8%, `mandelbrot` −4%, `ackermann` −4%**, and `json`/`regex`/`sort`/`strings`/
+`reduce`/`ring`/`startup`/`persistent-map` within the control. 64 is the same within noise;
+**256 and 512 lose** — `sort` +4/+12%, `sieve` +10/+25%, `persistent-map` +10/+24% — which
+is the other side of the trade: an arm called a few hundred times with real work in it stays
+interpreted. 128 sits with margin on both sides. Compile counts per row fall 140–230 → 32–133.
+Pinned (`make ab --floor`, the official gate) is recorded in the devlog entry.
+
+**What it does not change.** The threshold on a hot-reload re-tier and a depth bail is
+still "promptly" (`jit_calls` is set to the threshold, not zero); `JIT_QUEUED_SYNC_EDGES`
+(2048) still sync-compiles a loop stuck QUEUED; the shared-code install path
+(`jit_shared_lookup`) still short-circuits the count for an arm a peer already compiled.
+
+**Rejected on the way.** *Persisting bytecode chunks in the stdlib image*: `compile_arm`
+is 2.5 ms of `json`'s 140 ms (243 arms). *Persisting tiering decisions*: bails are 9.5 of
+79 ms of compile-thread time. *Cranelift `single_pass` regalloc*: −25% compile CPU but
+`fib` +48%, `nbody` +47%. *A hotness-ordered compile queue* was not needed once the queue
+stopped filling with boot arms; it remains the next lever if a row ever shows an arm waiting
+behind genuinely hot work. All in `compute-frontier.md` §7.11.

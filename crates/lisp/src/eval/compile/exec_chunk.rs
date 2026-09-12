@@ -817,6 +817,15 @@ pub(crate) fn exec_chunk(
                             || code.is_null()
                             || edges.is_multiple_of(JIT_QUEUED_SYNC_EDGES)
                         {
+                            // A boundary exit is worth more than one call toward the tier
+                            // threshold (`BACKEDGE_TIER_WEIGHT`): `jit_tier` adds the last
+                            // unit itself on re-entry.
+                            if code.is_null() {
+                                arm.jit_calls.fetch_add(
+                                    BACKEDGE_TIER_WEIGHT - 1,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
                             return Ok(ChunkExit::SelfTail);
                         }
                     }

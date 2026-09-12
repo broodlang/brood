@@ -5,7 +5,7 @@
 //! fires on compiled code*: the unit tests in `eval/compile.rs` prove the lowering
 //! mechanism; these prove a warmed program stays bit-identical to the interpreter.
 //!
-//! Every program **warms** its hot function past the tiering threshold (8 activations)
+//! Every program **warms** its hot function past the tiering threshold (`TIER_THRESHOLD`, 128 activations)
 //! by calling it from a driver loop tens of thousands of times, which also gives the
 //! async background compiler ample time to install native code. Correctness holds
 //! whether or not a given run has tiered yet (so these never flake), while in practice

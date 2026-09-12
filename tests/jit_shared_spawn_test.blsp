@@ -8,7 +8,7 @@
 ;; recompile and swamp the background compiler, so most run interpreted (spawn 14x).
 ;;
 ;; These two tests prove the shared install is CORRECT, not just fast:
-;;  - a fan-out past the tier threshold (8) returns the right checksum (the shared
+;;  - a fan-out past the tier threshold (`TIER_THRESHOLD`, 128) returns the right checksum (the shared
 ;;    native code computes the same value as the VM), and
 ;;  - a redefinition between batches takes effect (the `def` bumps the runtime epoch,
 ;;    which must invalidate the shared cache entry — a stale shared pointer would
