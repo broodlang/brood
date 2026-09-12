@@ -447,3 +447,20 @@
       (assert= (get called :value) "7")
       (is (get back :ok))
       (assert= (get root :value) "nil"))))
+
+(describe ":check requests — the checker's verdict, structured and whole"
+  (test "the codec round-trips a check request, and a non-boolean :check is rejected"
+    (let (line (evsrv-encode-check 3 "(+ 1 x)" 2000)
+          req (evsrv-decode-request line))
+      (assert= (get req :id) 3)
+      (assert= (get req :check) true)
+      (is (nil? (evsrv-decode-request "{:id 3 :src \"x\" :check 1}")))))
+  (test "answer runs the checker instead of the evaluator: diagnostics as maps, nothing evaluated"
+    (let (r (answer {:id 11 :src "(io/puts (undefined-fn-zz 1))" :check true}))
+      (assert= (get r :ok) true)
+      (is (nil? (get r :value))) ; not an eval
+      (is (any? (get r :diagnostics) (fn (d) (includes? (get d :message) "undefined-fn-zz"))))
+      (is (every? (get r :diagnostics) (fn (d) (and (int? (get d :line)) (int? (get d :col))))))))
+  (test "a clean source checks to an empty list; a source that does not parse too"
+    (assert= (get (answer {:id 12 :src "(+ 1 2)" :check true}) :diagnostics) ())
+    (assert= (get (answer {:id 13 :src "(+ 1" :check true}) :diagnostics) ())))
