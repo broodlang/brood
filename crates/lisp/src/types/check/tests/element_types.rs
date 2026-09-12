@@ -472,15 +472,26 @@ fn the_sequence_accessors_stay_silent_on_what_actually_works() {
 
 #[test]
 fn a_reduce_over_a_non_empty_sequence_is_its_step_result_not_the_init() {
-    let sigs = signatures(
-        "(defn g (s) (first (reduce (string/split s) '() (fn (acc x) (conj acc x)))))",
+    let sigs =
+        signatures("(defn g (s) (first (reduce (string/split s) '() (fn (acc x) (conj acc x)))))");
+    let (_, sig, _) = sigs
+        .iter()
+        .find(|(n, _, _)| n == "g")
+        .unwrap_or_else(|| panic!("{sigs:?}"));
+    assert!(
+        !sig.contains("nil"),
+        "no empty case for a split's fold: {sig}"
     );
-    let (_, sig, _) = sigs.iter().find(|(n, _, _)| n == "g").unwrap_or_else(|| panic!("{sigs:?}"));
-    assert!(!sig.contains("nil"), "no empty case for a split's fold: {sig}");
     // …and over a sequence that MAY be empty, the init stays in — `nil` is honest there.
     let sigs = signatures(
         "(defn h () (first (reduce (filter (list 1 2) int?) '() (fn (acc x) (conj acc x)))))",
     );
-    let (_, sig, _) = sigs.iter().find(|(n, _, _)| n == "h").unwrap_or_else(|| panic!("{sigs:?}"));
-    assert!(sig.contains("nil"), "a maybe-empty fold keeps the empty case: {sig}");
+    let (_, sig, _) = sigs
+        .iter()
+        .find(|(n, _, _)| n == "h")
+        .unwrap_or_else(|| panic!("{sigs:?}"));
+    assert!(
+        sig.contains("nil"),
+        "a maybe-empty fold keeps the empty case: {sig}"
+    );
 }
