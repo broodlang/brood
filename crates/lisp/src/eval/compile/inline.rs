@@ -1320,9 +1320,18 @@ pub(crate) fn leaf_inline_probe(
     if LEAF_RESOLVING.with(|g| g.get()) {
         return None;
     }
+    let declined = |why: &str| {
+        if std::env::var("BROOD_INLINE_DBG").is_ok() {
+            let who = self_name
+                .map(crate::core::value::symbol_name_ref)
+                .unwrap_or("<closure>");
+            eprintln!("[inline-dbg] leaf probe {who} declined: {why}");
+        }
+    };
     // Don't splice into an oversized caller (i-cache + lowering limits — the same
     // reasoning as the self-inliner's bound).
     if node_count(body) > SELF_INLINE_MAX_BODY {
+        declined(&format!("caller-too-big nodes={}", node_count(body)));
         return None;
     }
     // No RUNTIME-handle consts in the caller either, for the reason
@@ -1333,6 +1342,7 @@ pub(crate) fn leaf_inline_probe(
     // reached from inside a native run whose own residual call did the `def` — so keeping
     // the stored bits handle-free is what makes that path inert rather than merely gated.
     if node_has_rt_handles(body) {
+        declined("caller-has-runtime-handles");
         return None;
     }
     // Splice once from the tight base to find out whether a journal is needed at all.
@@ -1342,11 +1352,13 @@ pub(crate) fn leaf_inline_probe(
         let mut blocks = 0usize;
         let n = leaf_inline_splice(heap, &mut spliced, &mut next_base, &mut blocks, self_name);
         if n == 0 {
+            declined("no-qualifying-callee");
             return None;
         }
         let chunk = compile_chunk(&spliced)?;
         // Foreign prims arrived with the callee bodies — validate them now (see doc above).
         if !chunk_ops_native(heap, &chunk) {
+            declined("spliced-ops-not-native");
             return None;
         }
         Some((spliced, chunk, next_base, n))
@@ -1370,6 +1382,7 @@ pub(crate) fn leaf_inline_probe(
     };
     let needs_journal = if needs_journal(&chunk) {
         if !partial_leaf_enabled() {
+            declined("residual-call-and-partial-splicing-off");
             return None;
         }
         // Re-splice clear of the small layout's own reserves (see doc above).

@@ -1851,6 +1851,73 @@ one artifact over.
    handles baked as immediates, tag-snapshot keying and epoch validity — a multi-day project
    whose failure mode is wrong code. Not until 2–3 are done and a row still wants it.
 
+### 7.12 After the threshold: where the call-heavy rows' time is, counted (2026-09-12, evening)
+
+The four items from the post-ADR-333 plan, each taken to its measurement. Everything here is
+at `TIER_THRESHOLD` 128 on `d7a36979`.
+
+**1. The gate-refused class IS the hot core of every call-heavy row.** A throwaway counter
+on the BAILED branch of `jit_tier_in_frame` (activations of arms the gate refused, per run):
+
+| row | refused arms | activations | the top of the list |
+|---|---|---|---|
+| json | 24 | **107 952** | `seq` 12.8k, `reverse` 11.3k, `json/json-value` 9.7k, `->string`/`%identity-of` 8.2k, `json/needs-escape?`/`enc-string`/`enc-escapes` 7.8k |
+| nqueens | 14 | **108 702** | `solve` 34.8k, `range` 34.1k, `reduce` 34.1k |
+| regex | 20 | 74 718 | `count` 19.3k, `regex/regex-compile` 18.9k, `regex/regex-exit` 18.4k |
+| matmul | 14 | 69 814 | one `<closure>` 62.4k (`chunk-outside-jit-subset`) |
+| nbody | 12 | 56 132 | `advance` 49.1k (five calls in a row, no loop) |
+| wordcount / sort / pipeline | 11–12 | 5.5–8.6k | `seq`, `reverse`, `%match-count-sym`, `%match-splice-fail-in` |
+
+Symbolized `perf` of the main thread, warm run, grouped: **dispatch (`exec_chunk`,
+`vm_run_bc`, `dispatch`, `push_frame`, `jit_tier`) is 43% of json, 50% of regex, 33% of
+nqueens, 30% of pipeline**; native arms are 4% of json. So the interpreter's dispatch of
+these refused arms is the single largest cost on the rows that are 5–8× behind the field.
+
+**Leaf admission — built, traced, NOT landed.** The idea: the gate counts `int?`/`vector?`/
+`not` as calls, but the leaf inliner would splice exactly those, so gate the *spliced* body
+and admit a refused arm through its derivation when no Brood→Brood call survives (a Rust
+builtin is one FFI, not the ceremony the gate's cost model measured). Implemented on the
+BAILED branch with the inlined-upgrade's swap; measured on json/regex/nqueens with the new
+decline traces (kept — `BROOD_INLINE_DBG` now names why a leaf probe declines):
+
+- `seq` (74 nodes) and `get` (77) have **no derivation**: the leaf probe reuses the
+  self-inliner's caller bound `SELF_INLINE_MAX_BODY = 64`. Raisable.
+- The heavy refused arms **keep real Brood calls after splicing**: `%identity-of` 1
+  (→ `get`), `json/enc-key` 3, `json/json-object` 2, `record?` 1; `reverse`, `count`,
+  `regex-compile`, `solve`, `range`, `reduce`, `advance` have no leaf callee at all.
+- A derivation is **stale after any `def`** (`%match-bind-sym?` on regex: `leaf-derivation-stale`).
+- The one arm admitted on json, `json/num-end`, fails in Cranelift's `define_function` —
+  the same five-arm failure §7.10 lead 1 named, now blocking a second path.
+
+Net: one arm on json, zero installed. The mechanism is correct and reaches ~a fifth of the
+refused activations at best (`seq`/`get`/`nth`, after the bound and the staleness); the
+other four fifths are arms whose cost is the **native→native call**. That is the lever,
+and it is not a gate tweak: a call convention cheap enough that admitting a call-mediated
+arm wins (§7.5 increment 4's X-register convention), or equivalently a baseline tier whose
+calls do not pay `jit_run_fast_link`'s field save/restores and frame window. Days, not
+hours; the numbers above are its case.
+
+**2. The float/array rows.** `nbody`'s `advance` (49k activations) is refused for being
+five calls with no loop; `matmul`'s hot `<closure>` (62k) is `chunk-outside-jit-subset`; its
+def'd rows are RUNTIME-region vectors, which `vector_ref` sends to the `brood_rt_vector_ref`
+FFI (the inline slab read is LOCAL-only). Typed float vectors are not the first move: the
+first two are the same call-cost problem as item 1, the third is extending the inline read
+to the RUNTIME region.
+
+**3. The process rows** (`BROOD_PERF_STATS`, shares of `ns_quantum`): receive + matcher is
+**40% of `supervisor`** (`ns_receive` 305 ms + `ns_match_run` 218 ms of 1.31 s), **55% of
+`ring`** (400 + 145 + 61 of 1 027), **35% of `spawn-live`** (1.82 s + 1.26 s of 8.9 s, plus
+`ns_spawn` 1.07 s and `ns_teardown` 0.32 s). And `spawn-live`'s inline caches miss as often
+as they hit — `call_ic` 921k/921k, `global_ic` 900k/905k — because every spawned process
+starts with cold per-process caches (ADR-215 shares the compiled arm, not its ICs). Two
+leads: receive/matcher cost (§7.3's receive-as-native-exit) and a warm IC seed for a
+spawned copy of a shared arm.
+
+**4. A hotness-ordered compile queue — not needed.** The queue probe (§7.11) showed the
+compiler idle from 42–72 ms into every row once boot stopped feeding it; what remains
+arrives one arm at a time. Ordering a queue that is rarely deeper than one changes nothing
+measurable. Closed on the count.
+
 ### The measurement discipline (each of these burned someone this week)
 
 Image `:live` on **both** arms, verified per run (`(stdimage/status)` — any commit

@@ -842,6 +842,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — `filter` joins its complement in `seq/`; `remove` becomes `reject` (ADR-330), and docstring `[[links]]` finally render (ADR-331)
 - **2026-09-12** — pre-compilation, counted: bytecode is 2.5 ms of `json`, Cranelift is 60–80 ms, and both persistence ideas are dead (compute-frontier §7.11)
 - **2026-09-12** — the tier threshold is a call threshold and it is 128 (ADR-333): boot stopped queueing 139 compiles ahead of the hot arm — `spawn` −31%, `fib` −18%, `bintree` −14%
+- **2026-09-12** — the refused arms are the hot core (108k activations on json, dispatch 43% of its main thread); leaf admission built and not landed; the lever is the native→native call (compute-frontier §7.12)
 - **2026-09-12** — the GUI retains its frame and repaints by cell row (ADR-332): a keystroke paints 0.3 ms instead of 4–13; whole-pixel ppem, subpixel text at 1× (`gui-text-aa!`), snapped hairlines, `gui-line-height!`
 - **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 - **2026-09-12** — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
@@ -12997,3 +12998,20 @@ band) and still re-lexes the band; the face resolution is once per pass now (−
 the rest of that pass is KI-132 — the JIT deopt-thrashes every helper of `hl-spans` and
 latches the walk onto the VM at 2.4 µs a token. Filed, not worked: the JIT is another
 session's this week.
+
+### 2026-09-12 — after the threshold: the refused arms are the rows, counted
+
+Four measurements, one direction. Activations of arms the profitability gate refused:
+**108k on json, 109k on nqueens, 75k on regex** per run — `seq`, `reverse`, `nth`, `get`,
+`range`, `reduce` and each row's own driver (`json-value`, `solve`, `regex-compile`,
+`advance`). Symbolized perf: dispatch is 43–50% of json's and regex's main thread, native
+code 4%. Leaf admission — gate the leaf-spliced body instead of the raw one — was built,
+traced and withdrawn: `seq`/`get` get no derivation (the probe borrows the self-inliner's
+64-node caller bound), the heavy arms keep real Brood calls after splicing, derivations go
+stale on any `def`, and the one arm it did admit dies in Cranelift's `define_function`
+(§7.10 lead 1 again). Kept: `BROOD_INLINE_DBG` now names why a leaf probe declines. The
+process rows: receive + matcher is 40–55% of quantum, and a spawned process's inline caches
+miss as often as they hit. The hotness-ordered compile queue is closed on the queue probe's
+count — the compiler idles from ~50 ms in. All in compute-frontier §7.12; the lever it
+leaves is the native→native call convention.
+
