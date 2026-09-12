@@ -511,3 +511,17 @@ fn seq_find_answers_the_element_or_nil() {
     let strict = file_warnings_mode(src, true);
     assert!(strict.is_empty(), "{strict:?}");
 }
+
+// `seq/remove` with a type predicate answers the elements the predicate REJECTS —
+// `(seq/remove xs nil?)` over `list<nil | int>` is `list<int>`.
+#[test]
+fn seq_remove_drops_what_the_predicate_admits() {
+    assert_eq!(
+        ty_str("(seq/remove (list 1 nil 2) nil?)"),
+        "nil | list<1 | 2>"
+    );
+    assert_eq!(
+        ty_str("(seq/remove (list 1 \"a\") string?)"),
+        "nil | list<1>"
+    );
+}

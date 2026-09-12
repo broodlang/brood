@@ -1549,11 +1549,24 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "drop-while")
         || value::symbol_is(head, "seq/take-last")
         || value::symbol_is(head, "seq/drop-last")
-        || value::symbol_is(head, "seq/remove")
     {
         let coll = *items.get(1)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         return list_result(a);
+    }
+    // `(seq/remove coll pred)` keeps what `pred` REJECTS — the complement of `filter`: with
+    // a type predicate the survivors are `elem ∖ tested`, so `(seq/remove xs nil?)` — the
+    // idiom for "the matches, minus the misses" — answers `list<T>` from a `list<nil | T>`.
+    // Its element type used to pass through unchanged, and the `nil` the call exists to
+    // drop reached the next consumer as a finding.
+    if value::symbol_is(head, "seq/remove") && items.len() == 3 {
+        let coll_ty = expr_ty(heap, items[1], ctx);
+        let a = coll_ty.as_ref().and_then(|t| t.elem_ty());
+        let a = match (a, predicate_tested_ty(items[2])) {
+            (Some(elem), Some(tested)) => Some(elem.difference(tested)),
+            (elem, _) => elem,
+        };
+        return list_result(a).or_else(|| coll_ty.map(|_| Ty::LIST));
     }
     // `(cons x xs)` — prepend `x` onto `xs`; the result element type is
     // `type(x) | elem(xs)`. Both must be known; if either is unknown the element

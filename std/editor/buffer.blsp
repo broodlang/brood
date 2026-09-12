@@ -1093,6 +1093,8 @@ remote participants' cursors on a shared buffer."
   "Remove marker `id`. A no-op if it (or any marker) isn't set."
   (let (m (get buf :markers))
     (if (nil? m) buf (assoc buf :markers (dissoc m id)))))
+(sig buffer-marker-delete (buffer any -> buffer))
+(sig buffer-marker (buffer any -> (or nil int)))
 
 (defn buffer-markers (buf)
   "The marker map `{id -> pos}` (positions clamped to the current length), or `{}` if none."
