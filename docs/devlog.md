@@ -12409,7 +12409,7 @@ The trap for next time: **std/ is baked into the binary** (`include_str!`), so a
 edit is invisible to every gate until `cargo build --bin brood --bin nest`. One round of
 "still failing" here was exactly that.
 
-## 2026-09-11 (later) — KI-127: a value rendered on every native run, and four ways the measurement lied
+## 2026-09-11 (later) — KI-128: a value rendered on every native run, and four ways the measurement lied
 
 The brood-benchmarks 0.27.2 column refresh turned up `sort` slower than early September. Chasing
 it took most of a session, most of that spent being wrong in instructive ways.
@@ -12455,7 +12455,7 @@ ADR-302's argument reorder means the bench corpus can no longer run on a pre-09-
 
 Tasks 1 and 3 from the perf queue are answered in the same file. Task 1: `mandelbrot` +0.4%,
 `nbody` +1.2%, both inside floor — KI-109's closure holds on magnitude as well as mechanism.
-Task 3: the KI-100 re-baseline numbers moved, and `sort`'s swing was KI-127 rather than drift.
+Task 3: the KI-100 re-baseline numbers moved, and `sort`'s swing was KI-128 rather than drift.
 
 ## 2026-09-11 — `nest completions` / `nest complete` are Brood (ADR-322, item 6)
 
