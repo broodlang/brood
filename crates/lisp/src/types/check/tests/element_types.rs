@@ -495,3 +495,19 @@ fn a_reduce_over_a_non_empty_sequence_is_its_step_result_not_the_init() {
         "a maybe-empty fold keeps the empty case: {sig}"
     );
 }
+
+// `seq/find` answers one element or `nil`, carrying the collection's element type — so a
+// `(nil? x)` guard on the result leaves the element, not an unknown.
+#[test]
+fn seq_find_answers_the_element_or_nil() {
+    assert_eq!(ty_str("(seq/find (range 3) (fn (i) (> i 1)))"), "nil | int");
+    assert_eq!(ty_str("(seq/find [1 \"a\"] string?)"), "\"a\" | nil");
+    let src = "\
+         (defmodule t)\n\
+         (sig want-int (int -> int))\n\
+         (defn want-int (n) n)\n\
+         (sig f (int -> int))\n\
+         (defn f (n) (let (line (seq/find (range n) (fn (i) (> i 1)))) (if (nil? line) 0 (want-int (inc line)))))";
+    let strict = file_warnings_mode(src, true);
+    assert!(strict.is_empty(), "{strict:?}");
+}

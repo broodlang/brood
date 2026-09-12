@@ -1296,6 +1296,21 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // `(filter pred (file/ls d))` declared `(list string)` is not "seqable ⊄ list".
         return list_result(a).or_else(|| coll_ty.map(|_| Ty::LIST));
     }
+    // `(seq/find coll pred)` is ONE item that passes, or `nil` — the element type
+    // (narrowed by a type predicate exactly as `filter`'s is) with `nil` for "none did".
+    // It fell to the curated `any`, so `(inc (seq/find (range n) …))` behind a `(nil?
+    // line)` guard read as arithmetic on an unknown rather than on the `int` the guard
+    // had just established.
+    if value::symbol_is(head, "seq/find") && items.len() == 3 {
+        let coll_ty = expr_ty(heap, items[1], ctx)?;
+        let a = coll_ty.elem_ty();
+        let a = match (a, predicate_tested_ty(items[2])) {
+            (Some(elem), Some(tested)) => Some(elem.intersect(tested)),
+            (None, tested @ Some(_)) => tested,
+            (elem, None) => elem,
+        };
+        return a.map(|elem| elem.union(Ty::of(Tag::Nil)));
+    }
     // Element-preserving reshapers whose sequence is the *first* argument — the
     // same elements, fewer / reordered: `reverse`, `rest` (drop the head),
     // `but-last`, `distinct` / `dedupe` (drop duplicates). `nil | list<A>`.
