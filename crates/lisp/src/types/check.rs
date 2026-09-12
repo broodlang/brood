@@ -156,6 +156,40 @@ fn is_require_form(heap: &Heap, form: Value) -> bool {
     false
 }
 
+/// A top-level form that changes **where** a module is found, and so has to be
+/// evaluated in pass 1 for the same reason `(require …)` is: the whole file is
+/// checked before any of it runs, so a path the program sets up for itself does
+/// not exist yet when the forms that depend on it are walked.
+///
+/// Without this, a file that puts its own directory on the path and then uses a
+/// MACRO from it had that macro read as an unknown head — and an unknown head's
+/// arguments are walked as if they were evaluated code, so every operand of the
+/// macro was reported as an unbound symbol. Found on wos, an OS written in
+/// Brood, whose `(reflect/add-load-path "compiler")` precedes an assembler macro:
+/// nine false warnings per build on a file that assembles, boots and prints.
+///
+/// Evaluating it is what makes the checker MORE complete here, not less: with
+/// the module resolved, `resolves_to_macro` recognises the head, the existing
+/// macro rule leaves its arguments alone, and every *other* form in the file —
+/// including the module's own definitions — is checked normally. Silencing the
+/// walk instead would have traded one false positive for a blind spot.
+///
+/// The cost, stated plainly: `*load-path*` is runtime-wide, so it is WIDER for the
+/// duration of the check. `check_forms` restores it, but a concurrent process
+/// resolving a module inside that window sees the wider path. That is the same
+/// property evaluating a `(require …)` already has — it loads the module globally
+/// — so this extends an existing trade rather than opening a new one.
+fn is_load_path_form(heap: &Heap, form: Value) -> bool {
+    if let Value::Pair(p) = form {
+        let (head, _) = heap.pair(p);
+        if let Value::Sym(s) = head {
+            return crate::core::value::symbol_is(s, "reflect/add-load-path")
+                || crate::core::value::symbol_is(s, "reflect/set-load-path");
+        }
+    }
+    false
+}
+
 /// Is module `name` already loaded — i.e. present in the `*features*` registry the
 /// runtime's `require-one` consults? The checker's "do I need to load this `(:use …)`
 /// target?" test (see `setup_check_imports`).
@@ -1591,6 +1625,14 @@ fn check_forms(
     } else {
         declared_ns
     };
+    // `*load-path*` is a global, and pass 1 evaluates any form that changes it (see
+    // `is_load_path_form`). Save it here and restore below so one file's path setup
+    // cannot change how the NEXT file of a project check resolves its modules: a
+    // relative entry like "compiler" names a different directory from each file, so
+    // leaking it is order-dependent in a way `require`'s idempotent module load is not.
+    // Safe to hold across the check — GC is blocked for its whole duration above.
+    let load_path_sym = crate::core::value::intern("*load-path*");
+    let saved_load_path = heap.env_get(heap.global(), load_path_sym);
     let prev_ns = heap.set_compile_ns(file_ns);
     // Region model (ADR-223): a file may declare more than one `(defmodule …)`. Install the
     // per-module forward-ref pre-scan and start the active set on the FIRST module's region;
@@ -1690,7 +1732,7 @@ fn check_forms(
                     heap.activate_ns_region(m);
                 }
                 import_scope.extend(setup_check_imports(heap, f));
-            } else if is_require_form(heap, exp) {
+            } else if is_require_form(heap, exp) || is_load_path_form(heap, exp) {
                 let _ = crate::eval::eval(heap, exp, root);
             }
         }
@@ -2147,6 +2189,10 @@ fn check_forms(
     // Balance the GC roots pushed for pass 1 (input forms + their expansions) and
     // restore the compile-namespace state — on the clean AND the panic path.
     heap.truncate_roots(roots_base);
+    if let Some(saved) = saved_load_path {
+        let global = heap.global();
+        heap.env_define(global, load_path_sym, saved);
+    }
     heap.set_compile_ns(prev_ns);
     heap.set_ns_known_names(prev_known);
     heap.set_ns_known_by_module(prev_by_module);

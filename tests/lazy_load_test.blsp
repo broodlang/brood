@@ -130,3 +130,55 @@
     ;; should have expanded and did not would be a silently different program.
     (is (loaded? "telemetry"))
     (assert= 7 (run-fixture lazyprobe-mac/go))))
+
+;; --- ADR-335 follow-up: a load path the FILE sets up ---------------------------
+;;
+;; The checker walks a whole file before any of it runs, so a `*load-path*` entry
+;; the program adds for itself did not exist yet when the forms that depend on it
+;; were checked. A MACRO reached that way therefore read as an unknown head — and
+;; an unknown head's arguments are walked as if they were evaluated code, so every
+;; operand of the macro was reported as an unbound symbol.
+;;
+;; Found on wos, an OS written in Brood: an aarch64 assembler exposed as
+;; `(aarch64/asm (movz x0, 0x0900, lsl 16) …)` behind `(reflect/add-load-path
+;; "compiler")`. Nine false warnings per build on a file that assembles, boots and
+;; prints.
+;;
+;; The fix evaluates a top-level load-path form during the check, exactly as the
+;; checker already evaluates a top-level `(require …)` and for the same reason. It
+;; makes the checker MORE complete, not less: the module resolves, so the macro is
+;; recognised and its arguments are left alone, while every other form in the file
+;; — and every genuine error in it — is still checked.
+;; :isolated because checking one of these strings EVALUATES its `add-load-path`
+;; — see `is_load_path_form` — which mutates the runtime-wide `*load-path*` for
+;; the duration of the check. The check restores it, but another process
+;; resolving a module inside that window would see the wider path, and the suite
+;; runs its tests concurrently by design. Same property `(require …)` in a
+;; checked file already has; this block simply does not race it.
+(describe "a load path the file sets up is honoured by the checker"
+  :isolated (def- *lp-dir* (temp-dir "loadpath-"))
+  (file/mkdir *lp-dir*)
+  (file/spit (path/join *lp-dir* "lpmacro.blsp")
+    "(defmodule lpmacro)\n(defmacro shout (& forms) (count forms))\n")
+
+  (test "a macro behind a file's own add-load-path resolves, so its arguments are syntax"
+    (let (src (str "(reflect/add-load-path \""
+                *lp-dir* "\")\n" "(defn go () (lpmacro/shout (movz x0 255) (wfe)))\n")
+          warnings (map (reflect/check-string-structured src) (fn (w) (get w :message))))
+      (is (not (any? warnings (fn (w) (includes? w "unbound symbol: movz")))))
+      (is (not (any? warnings (fn (w) (includes? w "unbound symbol: wfe")))))))
+
+  (test "and every other form in the same file is still checked"
+    ;; the point of resolving rather than silencing: real errors must survive
+    (let (src (str "(reflect/add-load-path \""
+                *lp-dir* "\")\n" "(defn go () (lpmacro/shout (movz x0 255)))\n"
+                "(defn oops () (genuinely-missing 1))\n")
+          warnings (map (reflect/check-string-structured src) (fn (w) (get w :message))))
+      (is (any? warnings (fn (w) (includes? w "unbound symbol: genuinely-missing"))))))
+
+  (test "a call into a module that truly cannot be resolved is still walked into"
+    ;; the recursion stays: silencing an unknown head's arguments would trade one
+    ;; false positive for a blind spot, and this is the half that proves it did not
+    (let (warnings (map (reflect/check-string-structured "(defn go () (nosuchmod/emit (genuinely-missing 1)))")
+                     (fn (w) (get w :message))))
+      (is (any? warnings (fn (w) (includes? w "unbound symbol: genuinely-missing")))))))
