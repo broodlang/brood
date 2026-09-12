@@ -238,6 +238,23 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ;; else. The error direction is one-sided on purpose.
 (def- *require-edges* {})
 
+;; DECLARE it a registry here, at prelude build, rather than leaving that to whichever load
+;; happens to write the first edge. A registry name enters `(%registry-names)` as a
+;; consequence of a WRITE, which was fine while every boot loaded the same modules: the
+;; prelude's own `seq/reject` (in `%add-load-path`) pulled `seq` in, `seq`'s header recorded
+;; `seq -> map`, and the registry existed by the time anything could ask. Under ADR-335 that
+;; call head defers when an image vouches it a function, so an IMAGED boot loads no module at
+;; all until one is called, and `*require-edges*` did not exist where a source boot had it —
+;; two registry-name sets for the same program, which is the KI-106 class the ADR-280 boot
+;; differential exists to catch. Which registries EXIST must not depend on load timing.
+;;
+;; Assoc-then-dissoc because marking is a side effect of a successful write and there is no
+;; declare-only op: the assoc marks the name, the dissoc takes the value back out, and the
+;; registry is left `{}` — the same value the `def-` above gives it — but now present in the
+;; name set of every boot, and frozen into the prelude image along with it.
+(%registry-update! '*require-edges* :assoc ["%declare"] nil)
+(%registry-update! '*require-edges* :dissoc ["%declare"] nil)
+
 ;; The feature whose body is currently being evaluated, or nil. `require-one` attributes
 ;; each edge to it. Dynamic (not a parameter) because the edge is discovered arbitrarily
 ;; deep inside `reflect/load`ing the parent's source, with no call path to thread it down.
