@@ -568,7 +568,17 @@ pub const FLAGS: &[DebugFlag] = &[
     f(
         "BROOD_GUI_DAMAGE",
         HOST,
-        "`=0`: blit the whole buffer each frame instead of the damage region (the safe fallback)",
+        "`=0`: re-rasterise and blit the whole buffer each frame instead of the changed rows (the safe fallback)",
+    ),
+    f(
+        "BROOD_GUI_TRACE",
+        HOST,
+        "`=1`: print every GUI paint's breakdown (rows repainted, clusters, timing) — BROOD_STALL_MS at threshold 0 without the per-native-call flood",
+    ),
+    f(
+        "BROOD_GUI_DUMP",
+        HOST,
+        "`=<path.ppm>`: write the retained canvas as a PPM after every paint — look at the raster (text AA, hairlines) from a script",
     ),
     f(
         "BROOD_AUDIO",

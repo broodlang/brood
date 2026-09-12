@@ -1457,6 +1457,62 @@ pub(in crate::builtins) fn gui_bg(args: &[Value], _: EnvId, heap: &mut Heap) -> 
     Ok(Value::nil())
 }
 
+/// `(gui-line-height! mult)` — set the cell height as a multiple of the font px on
+/// every open window + the default for ones opened later. GUI only; returns nil.
+pub(in crate::builtins) fn gui_line_height(
+    args: &[Value],
+    _: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
+    let mult = match arg(args, 0) {
+        Value::Int(n) => n as f32,
+        Value::Float(f) => f as f32,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%gui-line-height!",
+                "a number (a multiple of the font size)",
+                other,
+            ))
+        }
+    };
+    crate::host::gui::line_height(mult).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
+/// `(gui-text-aa! mode)` — set how monochrome text is anti-aliased (`:auto` / `:gray` /
+/// `:subpixel` / `:bgr`) on every open window + the default for ones opened later.
+/// GUI only; returns nil.
+pub(in crate::builtins) fn gui_text_aa(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crate::host::gui::TextAa;
+    let mode = match arg(args, 0) {
+        Value::Keyword(k) => match value::symbol_name_ref(k) {
+            "auto" => TextAa::Auto,
+            "gray" | "grey" | "grayscale" => TextAa::Gray,
+            "subpixel" | "rgb" | "lcd" => TextAa::Subpixel,
+            "bgr" => TextAa::Bgr,
+            _ => {
+                return Err(LispError::wrong_type(
+                    heap,
+                    "%gui-text-aa!",
+                    "one of :auto, :gray, :subpixel, :bgr",
+                    arg(args, 0),
+                ))
+            }
+        },
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%gui-text-aa!",
+                "a keyword: :auto, :gray, :subpixel, or :bgr",
+                other,
+            ))
+        }
+    };
+    crate::host::gui::text_aa(mode).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
 /// `(gui-font-register name styles)` — register font family `name` (a keyword) from
 /// `styles`, a map of style → TTF file path: `{:regular "…" :bold "…" :italic "…"
 /// :bold-italic "…"}`. Only `:regular` is required; a missing style reuses the
