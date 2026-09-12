@@ -128,6 +128,75 @@ const DEFAULT_PX: f32 = 15.0;
 // editor, not a console. Drives `cell_h` (and so the row count) in `recompute`.
 const LINE_HEIGHT: f32 = 1.4;
 
+/// The velocity a wheel notch of `dy` (±1 per notch on most mice) leaves the kinetic
+/// scroll with, on top of the `carried` velocity of a glide already running the same
+/// way: the notch's impulse, boosted by its place in a `streak` of quick notches.
+fn wheel_velocity(carried: f64, streak: u32, dy: f64) -> f64 {
+    let boost = (1.0 + WHEEL_STREAK_BOOST * streak as f64).min(WHEEL_STREAK_CAP);
+    carried + WHEEL_IMPULSE * boost * dy.signum() * dy.abs().max(1.0)
+}
+
+/// Where a glide starting at `v0` lines per tick ends up, in lines, decaying at `decay`
+/// per tick until the `about_to_wait` cutoff — the geometric sum, stepped as the ticker
+/// steps it (the test's oracle for the calibration constants).
+#[cfg(test)]
+fn glide_distance(mut v: f64, decay: f64) -> f64 {
+    let mut total = 0.0;
+    while v.abs() >= 0.0005 {
+        total += v;
+        v *= decay;
+    }
+    total
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    /// One notch glides about three lines — the distance a plain wheel notch scrolled
+    /// before it glided — and a notch against a running glide starts over.
+    #[test]
+    fn a_single_notch_glides_about_three_lines() {
+        let v0 = wheel_velocity(0.0, 0, 1.0);
+        let lines = glide_distance(v0, WHEEL_DECAY);
+        assert!((2.7..3.3).contains(&lines), "a notch glides {lines} lines");
+        assert!(wheel_velocity(0.0, 0, -1.0) < 0.0);
+    }
+
+    /// A streak accelerates slightly and is capped: the fifth quick notch scrolls
+    /// farther than the first, the twentieth no farther than the cap allows.
+    #[test]
+    fn a_streak_accelerates_slightly_and_is_capped() {
+        let first = wheel_velocity(0.0, 0, 1.0);
+        let fifth = wheel_velocity(0.0, 4, 1.0);
+        let twentieth = wheel_velocity(0.0, 19, 1.0);
+        assert!(
+            fifth > first * 1.5 && fifth < first * 2.0,
+            "fifth: {fifth} vs first {first}"
+        );
+        assert!(
+            (twentieth - first * WHEEL_STREAK_CAP).abs() < 1e-9,
+            "the cap holds"
+        );
+        // and a notch on top of a running glide adds to it rather than replacing it
+        assert!(wheel_velocity(0.3, 0, 1.0) > first);
+    }
+}
+
+/// Kinetic scrolling (`about_to_wait`): the velocity decay per nominal 12 ms tick. A
+/// trackpad flick coasts long; a wheel notch glides for about half a second.
+const TRACKPAD_DECAY: f64 = 0.97;
+const WHEEL_DECAY: f64 = 0.85;
+/// Lines one wheel notch scrolls in total, as the geometric sum of its glide:
+/// `WHEEL_IMPULSE / (1 - WHEEL_DECAY)` — 0.45 per tick decaying at 0.85 is 3 lines.
+const WHEEL_IMPULSE: f64 = 0.45;
+/// A notch within this many ms of the previous one joins a streak; each notch of a
+/// streak scrolls `1 + WHEEL_STREAK_BOOST × streak` as far, up to `WHEEL_STREAK_CAP` —
+/// the slight acceleration of a spun wheel, without a flung page.
+const WHEEL_STREAK_MS: u128 = 220;
+const WHEEL_STREAK_BOOST: f64 = 0.18;
+const WHEEL_STREAK_CAP: f64 = 2.2;
+
 // The rendering *mechanism's* fallback colours — used ONLY when Brood supplies
 // none: `Op::Clear` / the inset-margin fill when no `gui-bg!` is set, and a face
 // with no `:bg`/`:fg`. Brood owns the actual palette as *policy* — every render op
@@ -903,6 +972,13 @@ struct Win {
     /// `true` while kinetic momentum is running after a gesture lift-off. Cleared by the
     /// next `Started/Moved/LineDelta` event or when velocity decays below threshold.
     scroll_momentum_active: bool,
+    /// The per-12 ms velocity decay of the running momentum: `TRACKPAD_DECAY` after a
+    /// gesture lift-off (a long coast), `WHEEL_DECAY` for a wheel notch (a short glide).
+    scroll_decay: f64,
+    /// When the last wheel notch arrived and how many came in quick succession —
+    /// the streak that gives a spun wheel its slight acceleration.
+    wheel_last: Option<Instant>,
+    wheel_streak: u32,
     /// The earliest wall-clock time the next momentum step may fire. Guards against
     /// about_to_wait being called too frequently (e.g. on every UserEvent::Draw).
     scroll_next_tick: Instant,
@@ -1031,6 +1107,9 @@ fn build_window(
         shape: None,
         scroll_velocity: 0.0,
         scroll_momentum_active: false,
+        scroll_decay: TRACKPAD_DECAY,
+        wheel_last: None,
+        wheel_streak: 0,
         scroll_next_tick: Instant::now(),
         scroll_last_tick: Instant::now(),
         scroll_pending: false,
@@ -1346,7 +1425,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
 
     fn window_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -1605,13 +1684,38 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 let ch = w.renderer.cell_h.max(1);
                 match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
+                        // A wheel notch is an IMPULSE into the same kinetic scroll a
+                        // trackpad flick runs, not a three-line jump: the glide reaches
+                        // the notch's distance over ~half a second of fractional steps
+                        // (`WHEEL_DECAY`), so the text moves rather than snaps. Notches in
+                        // quick succession form a streak that scrolls slightly farther
+                        // each — a spun wheel accelerates — capped so it never flings.
+                        // A notch against the running direction stops the glide first.
                         let dy = y as f64;
-                        w.scroll_momentum_active = false;
-                        w.scroll_pending = false;
-                        w.scroll_velocity = 0.0;
-                        if dy != 0.0 {
-                            deliver_scroll(w, dy);
+                        if dy == 0.0 {
+                            return;
                         }
+                        let now = Instant::now();
+                        let streak = match w.wheel_last {
+                            Some(t) if now.duration_since(t).as_millis() <= WHEEL_STREAK_MS => {
+                                w.wheel_streak.saturating_add(1)
+                            }
+                            _ => 0,
+                        };
+                        w.wheel_last = Some(now);
+                        w.wheel_streak = streak;
+                        let boost =
+                            (1.0 + WHEEL_STREAK_BOOST * streak as f64).min(WHEEL_STREAK_CAP);
+                        let same_way = w.scroll_momentum_active && w.scroll_velocity * dy > 0.0;
+                        let carried = if same_way { w.scroll_velocity } else { 0.0 };
+                        w.scroll_velocity =
+                            carried + WHEEL_IMPULSE * boost * dy.signum() * dy.abs().max(1.0);
+                        w.scroll_decay = WHEEL_DECAY;
+                        w.scroll_pending = false;
+                        w.scroll_momentum_active = true;
+                        w.scroll_next_tick = now;
+                        w.scroll_last_tick = now;
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(now));
                     }
                     MouseScrollDelta::PixelDelta(p) => {
                         let dy = p.y / ch as f64;
@@ -1629,6 +1733,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                                 }
                                 if w.scroll_velocity.abs() > 0.01 {
                                     let now = Instant::now();
+                                    w.scroll_decay = TRACKPAD_DECAY;
                                     w.scroll_momentum_active = true;
                                     w.scroll_next_tick = now;
                                     w.scroll_last_tick = now;
@@ -1712,10 +1817,11 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 });
                 continue;
             }
-            // Time-proportional decay: 0.97 per 12 ms nominal, scaled by actual
-            // elapsed so the coast curve is independent of render throughput.
+            // Time-proportional decay: `scroll_decay` per 12 ms nominal (a trackpad's
+            // long coast or a wheel notch's short glide), scaled by actual elapsed so
+            // the curve is independent of render throughput.
             let elapsed_ms = now.duration_since(w.scroll_last_tick).as_secs_f64() * 1000.0;
-            let decay = 0.97_f64.powf((elapsed_ms / 12.0).clamp(0.5, 4.0));
+            let decay = w.scroll_decay.powf((elapsed_ms / 12.0).clamp(0.5, 4.0));
             w.scroll_velocity *= decay;
             if w.scroll_velocity.abs() < 0.0005 {
                 w.scroll_momentum_active = false;
