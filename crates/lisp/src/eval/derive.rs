@@ -402,7 +402,9 @@ static EAGER_STICKY: AtomicBool = AtomicBool::new(false);
 
 /// Is the lazy policy in force right now?
 pub fn lazy_loads() -> bool {
-    lazy_by_env() && EAGER_DEPTH.load(Ordering::Relaxed) == 0 && !EAGER_STICKY.load(Ordering::Relaxed)
+    lazy_by_env()
+        && EAGER_DEPTH.load(Ordering::Relaxed) == 0
+        && !EAGER_STICKY.load(Ordering::Relaxed)
 }
 
 /// Set the sticky eager switch (`%eager-loads!`); returns the previous setting.

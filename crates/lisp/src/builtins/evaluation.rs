@@ -674,7 +674,6 @@ pub(super) fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
     })
 }
 
-
 /// Hold the wholesale globals swap until no OTHER process has a module load in flight.
 ///
 /// A load is `require-one`'s claim → define every binding → `provide` (+ release), and only
@@ -710,10 +709,12 @@ fn wait_for_inflight_loads(heap: &Heap) {
     let inflight = |heap: &Heap| match heap.env_get(heap.global(), marker) {
         Some(Value::Map(id)) if heap.map_size(id) > 0 => {
             let live = crate::process::list_local_pids();
-            heap.map_entries(id).into_iter().any(|(_, owner)| match owner {
-                Value::Pid { node, id } if crate::dist::is_local(node) => live.contains(&id),
-                _ => true, // a remote or unreadable owner: assume in flight
-            })
+            heap.map_entries(id)
+                .into_iter()
+                .any(|(_, owner)| match owner {
+                    Value::Pid { node, id } if crate::dist::is_local(node) => live.contains(&id),
+                    _ => true, // a remote or unreadable owner: assume in flight
+                })
         }
         _ => false,
     };

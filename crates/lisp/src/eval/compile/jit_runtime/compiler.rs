@@ -111,8 +111,12 @@ pub(super) fn preload_arm_globals(arm: &CompiledArm, heap: &mut Heap, env: EnvId
         if let Some(Value::Fn(id)) = heap.env_get(env, sym) {
             // One compiled body per fixed arity the callee declares; an arm that has
             // not compiled yet has no chunk to splice and nothing to read here.
-            let arities: Vec<usize> =
-                heap.closure(id).arms.iter().map(|a| a.params.len()).collect();
+            let arities: Vec<usize> = heap
+                .closure(id)
+                .arms
+                .iter()
+                .map(|a| a.params.len())
+                .collect();
             for argc in arities {
                 if let Some(callee) = cached_arm_for(heap, id, argc) {
                     if let Some(c) = callee.chunk.as_ref() {
