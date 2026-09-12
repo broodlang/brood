@@ -1,0 +1,148 @@
+;; std/editor/shell.blsp — lexical shell-script (sh / bash / zsh) highlighting.
+;;
+;; The shell analogue of editor/dotenv: a pure data→data tokenizer, no IO and no kernel
+;; surface. `(shell-spans src)` returns `[start end face]` colour spans (character
+;; offsets, end-exclusive, ascending, non-overlapping) in exactly the `highlight-spans`
+;; shape, so it drops straight into the editor's `:fontify` mode service and the shared
+;; `fontify-runs` tiler (ADR-052). Line-oriented — one regex alternation per line, so the
+;; per-character work is the native regex engine, not a Brood loop — which is what lets a
+;; band re-lex on every keystroke: a comment, a `"…"` / `'…'` string, a `$var` /
+;; `${…}` / `$(…)` expansion, a `name()` definition, a keyword (`if` `fi` `for` …) and a
+;; builtin (`echo` `cd` `export` …). A string that spans lines is coloured on its first
+;; line only, and a heredoc body is plain text: the costs of staying line-oriented, and
+;; the same trade dotenv and markdown make.
+;;
+;; Faces are the shared `:syntax/*` registry (`editor/face`), resolved once per pass like
+;; `editor/highlight`'s, so an app's theme restyles this mode with the rest.
+
+(defmodule editor/shell
+  "Lexical highlighting for shell scripts (sh / bash / zsh), as a pure function over a
+source string — `(shell-spans src)` returns `[start end face]` colour spans in the
+`highlight-spans` shape (ascending, non-overlapping, end-exclusive), feeding the editor's
+`:fontify` service and the shared `fontify-runs` tiler unchanged. Per line: `#` comments
+(the shebang included), quoted strings, `$` expansions, `name()` definitions, keywords and
+builtins, in the `:syntax/*` faces. Pure, so independently testable."
+  (:use editor/face))
+
+;; ---- the vocabulary ---------------------------------------------------------
+
+(def shell-keywords
+  ;; the reserved words: control flow and the declaration words that shape a script
+  ["if"
+    "then" "else" "elif" "fi" "for" "while" "until" "do" "done" "case" "esac" "in" "function"
+    "select" "time" "return" "exit" "break" "continue" "local" "export" "readonly" "declare"
+    "typeset" "unset" "source" "alias"])
+
+(def shell-builtins
+  ;; the builtins a script leans on, coloured as calls
+  ["echo"
+    "printf" "cd" "pwd" "test" "read" "shift" "eval" "exec" "set" "trap" "wait" "kill" "true"
+    "false" "let" "getopts" "command" "type" "hash" "ulimit" "umask" "exit" "pushd" "popd" "dirs"
+    "jobs" "fg" "bg" "sleep" "mkdir" "rm" "cp" "mv" "ln" "cat" "grep" "sed" "awk" "find" "xargs"
+    "sort" "cut" "tr" "head" "tail" "tee" "chmod" "chown" "touch" "basename" "dirname" "which" "env"
+    "sudo" "git" "make" "curl" "wget" "tar"])
+
+;; Two regex passes per line, merged. The STRUCTURED pass finds the tokens whose extent
+;; is not a word — groups in this order:
+;;   1 comment (to end of line; only where a `#` starts a word)
+;;   2 double-quoted string   3 single-quoted string
+;;   4 expansion: `${…}` `$(…)` `$name` `$1` `$@` `$?` …
+;; Leftmost match wins across the alternatives, so a `#` inside a string is the
+;; string's. The WORD pass finds every identifier whole (maximal munch — `file` never
+;; yields `fi`, `done_` never `done`), and a word outside every structured span is a
+;; keyword, a builtin or a function name by exact lookup; that is what a word boundary
+;; means here, with no `\b` in the engine.
+(def- shell-structured-pattern
+  (str "(?:^|[\\s;&|(])(#.*)"
+    "|(\"(?:[^\"\\\\]|\\\\.)*\")" "|('[^']*')"
+    "|(\\$\\{[^}]*\\}|\\$\\([^)]*\\)|\\$[A-Za-z_][A-Za-z0-9_]*|\\$[0-9@#?*!$-])"))
+
+(def- shell-word-pattern "[A-Za-z_][A-Za-z0-9_]*")
+
+(def- shell-keyword-set (into {} (map shell-keywords (fn (w) [w true]))))
+(def- shell-builtin-set (into {} (map shell-builtins (fn (w) [w true]))))
+
+(defn- shell-faces ()
+  "The `:syntax/*` faces one pass paints with, resolved once."
+  {:comment (face :syntax/comment)
+   :string (face :syntax/string)
+   :expansion (face :syntax/keyword)
+   :function (face :syntax/function)
+   :keyword (face :syntax/special)
+   :builtin (face :syntax/function)})
+
+(defn- shell-structured-spans (line faces)
+  "The comment / string / expansion spans of `line`, line-relative, ascending."
+  (seq/keep (regex/find-all shell-structured-pattern line)
+    (fn (m)
+      (let (groups (get m :groups)
+            which (seq/find [0 1 2 3] (fn (i) (not (nil? (nth groups i))))))
+        (if (nil? which)
+          nil
+          (let (g (nth groups which)
+                f (nth [(:comment faces) (:string faces) (:string faces) (:expansion faces)] which))
+            ;; the GROUP's extent — a comment's leading separator is not coloured
+            [(get g :start) (get g :end) f]))))))
+
+(defn- shell-inside? (spans s e)
+  "Does `[s e)` fall inside any of `spans` (`[start end face]`, ascending)?"
+  (any? spans (fn ([a b _]) (and (>= s a) (<= e b)))))
+
+(defn- shell-defines-after? (line e)
+  "Is the word ending at `e` followed by `()` (spaces allowed) — a function definition?"
+  (regex/match? "^\\s*\\(\\)" (string/substring line e (string/length line))))
+
+(defn- shell-word-spans (line structured faces)
+  "The keyword / builtin / function-name spans of `line`: each identifier outside the
+structured spans, by exact lookup. A word after `function`, or before `()`, names a
+function."
+  (let (words (regex/find-all shell-word-pattern line))
+    (first (fold words
+             [(list) false]
+             (fn (acc m)
+               (let ([out after-function?] acc
+                     w (get m :text)
+                     s (get m :start)
+                     e (get m :end))
+                 (cond
+                   (shell-inside? structured s e) [out false]
+                   (or after-function? (shell-defines-after? line e))
+                     [(cons [s e (:function faces)] out) false]
+                   (get shell-keyword-set w) [(cons [s e (:keyword faces)] out) (= w "function")]
+                   (get shell-builtin-set w) [(cons [s e (:builtin faces)] out) false]
+                   else [out false])))))))
+
+(defn- shell-merge (a b base acc)
+  "Merge two ascending span lists, offset by `base`, in reverse onto `acc`."
+  (cond
+    (and (empty? a) (empty? b)) acc
+    (or (empty? b) (and (not (empty? a)) (<= (first (first a)) (first (first b)))))
+      (let ([s e f] (first a)) (shell-merge (rest a) b base (cons [(+ base s) (+ base e) f] acc)))
+    else
+      (let ([s e f] (first b)) (shell-merge a (rest b) base (cons [(+ base s) (+ base e) f] acc)))))
+
+(defn- shell-line-spans (line base faces)
+  "The spans for one `line` starting at offset `base`, ascending — the structured
+tokens and the classified words, merged."
+  (let (structured (shell-structured-spans line faces)
+        words (reverse (shell-word-spans line structured faces)))
+    (reverse (shell-merge structured words base (list)))))
+
+(defn- shell-lex (src i n faces acc)
+  "Tail-recursive line walker, accumulating each line's spans in reverse."
+  (if (>= i n)
+    (reverse acc)
+    (let (e (math/min n (string/span-until src i "\n"))
+          spans (shell-line-spans (string/substring src i e) i faces))
+      (shell-lex src (inc e) n faces (fold spans acc (fn (a s) (cons s a)))))))
+(sig shell-lex (string int int map list -> list))
+
+(defn shell-spans (src)
+  "Lexically tokenize shell `src` into a list of `[start end face]` colour spans
+(character offsets, end-exclusive, ascending, non-overlapping) — comments, quoted
+strings, `$` expansions, function definitions, keywords and builtins — in the
+`:syntax/*` faces, resolved once per call.
+
+    (map (editor/shell/shell-spans \"echo $HOME # hi\") (fn ([s e _]) [s e]))   → ([0 4] [5 10] [11 15])"
+  (shell-lex src 0 (string/length src) (shell-faces) '()))
+(sig shell-spans (string -> any))

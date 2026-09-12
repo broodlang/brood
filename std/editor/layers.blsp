@@ -92,6 +92,7 @@ core knows nothing about buffers."
 ;;   (register-type-layers :magit-status '(magit/layer))     ; type → layers
 ;;   (register-file-type ".el" :elisp)                       ; filename → type (suffix)
 ;;   (register-file-type (fn (f) (= f "Makefile")) :make)    ; …or a predicate
+;;   (register-interpreter-type "bash" :shell)              ; `#!` line → type (no extension)
 ;;
 ;;   (init-buffer-layers buf)                ; file → type → seed :layers, fire :activate
 ;;   (init-buffer-layers (set-buffer-type buf :magit-status))  ; fileless/special buffer
@@ -293,6 +294,10 @@ returns `[ctx' pending']`. The bridge from layers to keymap — compose, then st
 ;; ordered filename→type rules, newest-first (first match wins). Each is
 ;; `{:match <suffix-string | (fn (filename) -> bool)> :type <type>}`.
 (defonce *auto-type-by-file* ())
+;; interpreter → type, for a file whose FIRST LINE is a `#!` (Emacs `interpreter-mode-alist`):
+;; `{"bash" :shell "python3" :python}`. Consulted after the filename rules, so an
+;; extensionless script (`run`, `deploy`) still finds its mode.
+(defonce *auto-type-by-interpreter* {})
 
 ;; Always-on **system layers** — included (at lowest precedence) on every buffer by
 ;; `init-buffer-layers`, regardless of type. The home for global behaviour (a
@@ -321,6 +326,39 @@ or a predicate `(fn (filename) -> bool)`. Prepended, so the most-recently-regist
 rule wins — a project can override a default."
   (%swap-registry! editor/layers/*auto-type-by-file* (fn (l) (cons {:match spec :type type} l))))
 
+(defn register-interpreter-type (name type)
+  "Map the interpreter `name` a `#!` line names — the program's basename, or the word
+after `env` (`#!/usr/bin/env bash` and `#!/bin/bash` are both `\"bash\"`) — to `type`.
+The Emacs `interpreter-mode-alist`: a script with no extension is typed by its shebang."
+  (%swap-registry! editor/layers/*auto-type-by-interpreter* (fn (m) (assoc m name type))))
+
+(defn shebang-interpreter (line)
+  "The interpreter a `#!` `line` names — `\"bash\"` for `#!/usr/bin/env bash` and for
+`#!/bin/bash -e`, `\"python3\"` for `#!/usr/bin/python3` — or nil for a line that is not a
+shebang. The version suffix is kept (`python3`), a trailing newline and arguments are not."
+  (if (not (string/starts-with? line "#!"))
+    nil
+    (let (words (seq/reject (string/split (string/trim (string/substring line
+                                                         2
+                                                         (string/length line)))
+                              " ")
+                  (fn (w) (= w "")))
+          prog (if (empty? words) nil (path/basename (first words)))
+          name (if (and (= prog "env") (> (count words) 1))
+                 ;; `env -S bash`: skip env's own flags
+                 (seq/find (rest words) (fn (w) (not (string/starts-with? w "-"))))
+                 prog))
+      (if (or (nil? name) (= name "")) nil name))))
+(sig shebang-interpreter (string -> (or nil string)))
+
+(defn- layers-match-interpreter (buf)
+  "The type `*auto-type-by-interpreter*` gives `buf`'s shebang line, or nil."
+  (let (rope (get buf :rope))
+    (if (nil? rope)
+      nil
+      (let (name (shebang-interpreter (text/line rope 0)))
+        (if (nil? name) nil (get *auto-type-by-interpreter* name))))))
+
 (defn layers-for-type (type)
   "The layer refs bound to `type`, or () if none."
   (or (get *type-layers* type) ()))
@@ -342,12 +380,12 @@ rule wins — a project can override a default."
   "The type of `buf`. An explicitly-set `:type` wins — it was either stamped by a
 prior `init-buffer-layers` (the open-time auto-detection) or set by an explicit mode
 switch, and both should stick. When `:type` is nil (a freshly-created buffer), matches
-`:file` against `*auto-type-by-file*` (first match wins), then falls back to
-`:fundamental`."
+`:file` against `*auto-type-by-file*` (first match wins), then the first line's `#!`
+against `*auto-type-by-interpreter*`, then falls back to `:fundamental`."
   (let (explicit (get buf :type)
         file (get buf :file)
         matched (if (nil? file) nil (layers-match-file file *auto-type-by-file*)))
-    (or explicit matched :fundamental)))
+    (or explicit matched (layers-match-interpreter buf) :fundamental)))
 
 (defn set-buffer-type (buf type)
   "Set `buf`'s `:type` explicitly — the Brood-side override for fileless or special
