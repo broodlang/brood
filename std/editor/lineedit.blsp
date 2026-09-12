@@ -181,8 +181,11 @@ the last line."
   "State with point moved to `p` (clamped)."
   (assoc state :point (lineedit-clamp (get state :text) p)))
 
-(defn- lineedit-insert (state s)
-  "State with string `s` inserted at point; point advances past it."
+(defn lineedit-insert (state s)
+  "State with string `s` inserted at point; point advances past it. Public because it
+is how a HOST pastes into the line: an editor's `C-y` in its minibuffer yanks the
+editor's kill ring (and the OS clipboard), which the line editor cannot know — the
+line's own `C-y` (`lineedit-yank`) inserts only what `C-k`/`C-w` cut from the line."
   (let (text (get state :text) p (get state :point))
     (assoc state
       :text (str (string/substring text 0 p) s (string/substring text p (string/length text)))
