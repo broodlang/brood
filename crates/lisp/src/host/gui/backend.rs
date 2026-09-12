@@ -1304,9 +1304,11 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                     .borrow_mut()
                     .register(name, regular, bold, italic, bold_italic);
                 // a re-registration replaces a family; clear caches keyed by the
-                // old glyphs and repaint.
+                // old glyphs, forget the retained frame (its ops are unchanged but
+                // their glyphs are not), and repaint.
                 for w in self.wins.values_mut() {
                     w.renderer.cache.clear();
+                    w.renderer.invalidate();
                     w.window.request_redraw();
                 }
             }

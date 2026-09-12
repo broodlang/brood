@@ -557,17 +557,18 @@ pub(super) fn raster_frame(
     fb_h: usize,
     force: bool,
 ) -> Vec<(usize, usize)> {
-    let n = fb_w * fb_h;
     let (cw, ch) = (r.cell_w.max(1), r.cell_h.max(1));
     let (ox, oy) = r.grid_origin(fb_w, fb_h);
     let strips = Strips::new(oy, ch, fb_h);
-    let fresh = r.canvas.len() != n;
+    let fresh = r.canvas_size != (fb_w, fb_h);
     if fresh {
-        r.canvas = vec![0u32; n];
+        r.canvas = vec![0u32; fb_w * fb_h];
+        r.canvas_size = (fb_w, fb_h);
     }
+    let same = frame == r.prev_ops.as_slice();
     let bands = if fresh || force || r.prev_ops.is_empty() || !gui_damage_enabled() {
         vec![(0, fb_h)]
-    } else if frame == r.prev_ops.as_slice() {
+    } else if same {
         Vec::new()
     } else {
         dirty_bands(&strip_diff(frame, &r.prev_ops, &strips, oy, ch), &strips)
@@ -585,7 +586,7 @@ pub(super) fn raster_frame(
         render_ops(frame, &mut canvas, r, ox, oy, cw, ch, bg0, 0);
     }
     r.canvas = pixels;
-    if !bands.is_empty() || r.prev_ops.is_empty() {
+    if !same {
         r.prev_ops = frame.to_vec();
     }
     bands
@@ -619,7 +620,7 @@ pub(super) fn paint(
     // `Op` row/col are BASE cells (top-left pixel = col*cell_w, row*cell_h); a
     // face `:scale n` multiplies into that same physical grid (n×n base cells).
     let t_setup = Instant::now();
-    let resized = r.canvas.len() != fb_w * fb_h;
+    let resized = r.canvas_size != (fb_w, fb_h);
     let bands = raster_frame(r, frame, fb_w, fb_h, false);
     let t_body = Instant::now();
     // Present. The window buffer softbuffer hands us may hold content from
@@ -630,7 +631,12 @@ pub(super) fn paint(
     // one-line edit ships one line to the compositor.
     let mut buf = match surface.buffer_mut() {
         Ok(b) => b,
-        Err(_) => return,
+        Err(_) => {
+            // The rows just rasterised never reached the window; forget the retained
+            // frame so the next paint rasterises and presents everything.
+            r.invalidate();
+            return;
+        }
     };
     let full = DamageRect {
         x0: 0,
@@ -1146,6 +1152,20 @@ mod strip_diff_tests {
             raster_frame(&mut full, frame, fb_w, fb_h, true);
             assert!(incremental.canvas == full.canvas, "frame {i} differs");
         }
+    }
+
+    /// A window whose width and height swap keeps its pixel count; the canvas must
+    /// still be treated as fresh, or the diff would trust rows of the wrong shape.
+    #[test]
+    fn a_same_area_resize_rerasterises_everything() {
+        let frame = editor_frame(&["alpha", "beta"], 0);
+        let mut r = Renderer::new(1.0, default_families(), 14.0);
+        raster_frame(&mut r, &frame, 96, 80, false);
+        let bands = raster_frame(&mut r, &frame, 80, 96, false);
+        assert_eq!(bands, vec![(0, 96)]);
+        let mut full = Renderer::new(1.0, default_families(), 14.0);
+        raster_frame(&mut full, &frame, 80, 96, true);
+        assert!(r.canvas == full.canvas);
     }
 
     #[test]

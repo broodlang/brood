@@ -221,6 +221,9 @@ pub(crate) struct Renderer {
     // `canvas`; `damage_ring` is the per-frame list of changed pixel bands of recent
     // frames (oldest→newest), so a present can cover the last `buffer.age()` frames.
     pub(super) canvas: Vec<u32>,
+    /// `canvas`'s `(width, height)` — compared as a pair, not a length: a rotation of
+    /// the window (800×600 → 600×800) keeps the pixel count and changes every row.
+    pub(super) canvas_size: (usize, usize),
     pub(super) prev_ops: Vec<Op>,
     pub(super) damage_ring: Vec<Vec<DamageRect>>,
 }
@@ -242,6 +245,7 @@ impl Renderer {
             text_aa: TextAa::Auto,
             cache: HashMap::new(),
             canvas: Vec::new(),
+            canvas_size: (0, 0),
             prev_ops: Vec::new(),
             damage_ring: Vec::new(),
         };
@@ -392,7 +396,7 @@ impl Renderer {
     pub(super) fn set_text_aa(&mut self, mode: TextAa) {
         self.text_aa = mode;
         self.cache.clear();
-        self.prev_ops.clear();
+        self.invalidate();
     }
 
     /// Whether text is rasterised per colour channel right now: the explicit mode, or
@@ -729,8 +733,9 @@ pub(super) fn composite_cluster_subpixel(
     baseline: i32,
     bgr: bool,
 ) -> bool {
+    use cosmic_text::CacheKeyFlags;
     use swash::scale::{Render, Source};
-    use swash::zeno::{Format, Vector};
+    use swash::zeno::{Angle, Format, Transform, Vector};
     let mut drew = false;
     for run in tb.layout_runs() {
         for gl in run.glyphs.iter() {
@@ -739,20 +744,34 @@ pub(super) fn composite_cluster_subpixel(
             let Some(font) = shared.fs.get_font(key.font_id, key.font_weight) else {
                 continue;
             };
+            // The same scaler settings cosmic-text's own (alpha) rasteriser uses for
+            // this cache key — hinting, a synthesised italic for a family without an
+            // italic face, whole-pixel offsets for a pixel font — so the subpixel glyph
+            // is the gray glyph with three coverages, not a differently shaped one.
+            let flags = key.flags;
             let mut scaler = shared
                 .scaler
                 .builder(font.as_swash())
                 .size(f32::from_bits(key.font_size_bits))
-                .hint(true)
+                .hint(!flags.contains(CacheKeyFlags::DISABLE_HINTING))
                 .build();
             let format = if bgr {
                 Format::subpixel_bgra()
             } else {
                 Format::Subpixel
             };
+            let offset = if flags.contains(CacheKeyFlags::PIXEL_FONT) {
+                Vector::new(key.x_bin.as_float().round(), key.y_bin.as_float().round())
+            } else {
+                Vector::new(key.x_bin.as_float(), key.y_bin.as_float())
+            };
+            let transform = flags
+                .contains(CacheKeyFlags::FAKE_ITALIC)
+                .then(|| Transform::skew(Angle::from_degrees(14.0), Angle::from_degrees(0.0)));
             let Some(img) = Render::new(&[Source::Outline])
                 .format(format)
-                .offset(Vector::new(key.x_bin.as_float(), key.y_bin.as_float()))
+                .offset(offset)
+                .transform(transform)
                 .render(&mut scaler, key.glyph_id)
             else {
                 continue;
