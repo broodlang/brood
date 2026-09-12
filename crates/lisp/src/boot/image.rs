@@ -69,7 +69,7 @@ pub(crate) fn register(primitives: &mut crate::builtins::Primitives) {
         Arity::exact(0),
         Sig::new(vec![], any),
         &[],
-        "How THIS process's prelude arrived, as a keyword: `:prelude-image` (ADR-314), `:boot-cache` (ADR-138's expanded text), or `:source` (a cold boot, which also WRITES the two artifacts). The question every image measurement depends on and none could ask: the cache id embeds the binary's build id, so the first run after any rebuild is a source boot and every later one is not — a developer checking an image fix meets the un-imaged path exactly when they least expect it. Three \"it is fixed\" readings during KI-106 were cold boots, and ADR-314 records the same trap corrupting a diagnosis in a session already caught by it twice.",
+        "How THIS process's prelude arrived, as a keyword: `:prelude-image` (ADR-314) or `:source` (a cold boot, which also WRITES the image — or `BROOD_NO_PRELUDE_IMAGE=1`, which reads and writes nothing; ADR-329). The question every image measurement depends on and none could ask: the cache id embeds the binary's build id, so the first run after any rebuild is a source boot and every later one is not — a developer checking an image fix meets the un-imaged path exactly when they least expect it. Three \"it is fixed\" readings during KI-106 were cold boots, and ADR-314 records the same trap corrupting a diagnosis in a session already caught by it twice.",
         boot_source_prim);
     primitives.def(
         "%image-index",
@@ -158,6 +158,19 @@ fn put_u64(w: &mut Vec<u8>, n: u64) {
 fn put_str(w: &mut Vec<u8>, s: &str) {
     put_u32(w, s.len() as u32);
     w.extend_from_slice(s.as_bytes());
+}
+
+fn get_u64(r: &mut Cursor<Vec<u8>>) -> Option<u64> {
+    let p = r.position() as usize;
+    let n = {
+        let b = r.get_ref();
+        if p + 8 > b.len() {
+            return None;
+        }
+        u64::from_le_bytes(b[p..p + 8].try_into().ok()?)
+    };
+    r.set_position((p + 8) as u64);
+    Some(n)
 }
 
 fn get_u32(r: &mut Cursor<Vec<u8>>) -> Option<u32> {
@@ -936,7 +949,7 @@ fn put_fact(out: &mut Vec<u8>, fact: &crate::core::heap::Fact) {
 }
 
 /// Decode one side fact, or `None` for a truncated or unknown-tag file — which fails the
-/// whole load, so the text cache takes over rather than a partial fact set being installed.
+/// whole load, so the source boot takes over rather than a partial fact set being installed.
 fn get_fact(r: &mut Cursor<Vec<u8>>) -> Option<crate::core::heap::Fact> {
     use crate::core::heap::Fact;
     let p = r.position() as usize;
@@ -966,13 +979,14 @@ fn get_fact(r: &mut Cursor<Vec<u8>>) -> Option<crate::core::heap::Fact> {
 
 /// Write the prelude image for `fingerprint` to `path`: every non-native binding in `root`,
 /// plus declared sigs, privacy and `meta`. Best-effort — an error simply means the next boot
-/// takes the text-cache path, exactly as a missing file does.
+/// takes the source boot, exactly as a missing file does.
 pub(crate) fn write_prelude_image(
     heap: &mut Heap,
     root: EnvId,
     skip: &std::collections::HashSet<value::Symbol>,
     path: &std::path::Path,
     fingerprint: &str,
+    gensym_floor: u64,
 ) -> Result<(), LispError> {
     // `skip` is the set of names bound immediately after `builtins::register` — exactly
     // what the warm path re-creates for itself, and therefore the only thing safe to leave
@@ -1016,8 +1030,7 @@ pub(crate) fn write_prelude_image(
     }
 
     let mut out = Vec::with_capacity(body.len() + 64);
-    out.extend_from_slice(PRELUDE_MAGIC);
-    put_str(&mut out, fingerprint);
+    write_prelude_header(&mut out, fingerprint, gensym_floor);
     out.extend_from_slice(&body);
 
     let dir = path
@@ -1025,37 +1038,53 @@ pub(crate) fn write_prelude_image(
         .ok_or_else(|| LispError::runtime("prelude image: no parent dir"))?;
     std::fs::create_dir_all(dir).map_err(|e| LispError::runtime(format!("prelude image: {e}")))?;
     // Temp + rename, so a concurrently booting process never reads a torn file — the same
-    // discipline the text cache uses, and it matters more here (many nextest processes).
+    // write-then-rename discipline, and it matters here (many nextest processes boot at once).
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, &out).map_err(|e| LispError::runtime(format!("prelude image: {e}")))?;
     std::fs::rename(&tmp, path).map_err(|e| LispError::runtime(format!("prelude image: {e}")))?;
     Ok(())
 }
 
-/// Bumped to v2 when the five per-fact blocks became one side-fact journal (ADR-320). The
-/// fingerprint below already invalidates on any binary or `std/` change, so this is belt and
-/// braces — but a magic that tracks the LAYOUT is what makes a hand-copied or half-written
-/// file fail as "not my format" instead of decoding into nonsense.
-const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v2\n";
+/// v3 (2026-09-12): the header gained the gensym floor. It used to live in the header of
+/// the ADR-138 text cache beside this file — the one fact that made the text cache
+/// impossible to delete without carrying it here first.
+const PRELUDE_MAGIC: &[u8] = b"brood-prelude-image-v3\n";
+
+/// The image header: magic, the build fingerprint, and the gensym counter the writing boot
+/// reached. A reader must start its own `gensym` above that counter, or a fresh name could
+/// collide with one baked into the image's closures.
+fn write_prelude_header(out: &mut Vec<u8>, fingerprint: &str, gensym_floor: u64) {
+    out.extend_from_slice(PRELUDE_MAGIC);
+    put_str(out, fingerprint);
+    put_u64(out, gensym_floor);
+}
+
+/// Parse [`write_prelude_header`]'s output, positioning `r` at the first entry. `None` on a
+/// wrong magic (another version's file) or a fingerprint that is not this binary's — either
+/// means "not our image", and the caller takes the source boot.
+fn read_prelude_header(r: &mut Cursor<Vec<u8>>, fingerprint: &str) -> Option<u64> {
+    if !r.get_ref().starts_with(PRELUDE_MAGIC) {
+        return None;
+    }
+    r.set_position(PRELUDE_MAGIC.len() as u64);
+    if get_str(r)? != fingerprint {
+        return None;
+    }
+    get_u64(r)
+}
 
 /// Restore a prelude image into `root`. `None` for any miss — absent, stale, truncated,
-/// or a value that will not decode — and the caller falls back to the text cache. Returns
+/// or a value that will not decode — and the caller falls back to the source boot. Returns
 /// the number of entries defined.
 pub(crate) fn load_prelude_image(
     heap: &mut Heap,
     root: EnvId,
     path: &std::path::Path,
     fingerprint: &str,
-) -> Option<usize> {
+) -> Option<(usize, u64)> {
     let bytes = std::fs::read(path).ok()?;
-    if !bytes.starts_with(PRELUDE_MAGIC) {
-        return None;
-    }
     let mut r = Cursor::new(bytes);
-    r.set_position(PRELUDE_MAGIC.len() as u64);
-    if get_str(&mut r)? != fingerprint {
-        return None;
-    }
+    let gensym_floor = read_prelude_header(&mut r, fingerprint)?;
     let count = get_u32(&mut r)?;
     let mut done = 0usize;
     for _ in 0..count {
@@ -1083,11 +1112,37 @@ pub(crate) fn load_prelude_image(
     // The side facts, replayed through the same entry points ordinary evaluation uses, so a
     // restored fact is indistinguishable from a recorded one (see the writer, and ADR-320).
     // A truncated file fails `get_u32`/`get_fact` here and the WHOLE load returns None — the
-    // text cache takes over, and a half-restored fact set is never observable.
+    // source boot takes over, and a half-restored fact set is never observable.
     let fact_count = get_u32(&mut r)?;
     for _ in 0..fact_count {
         let fact = get_fact(&mut r)?;
         heap.replay_fact(&fact);
     }
-    Some(done)
+    Some((done, gensym_floor))
+}
+
+#[cfg(test)]
+mod prelude_header_tests {
+    use super::*;
+
+    #[test]
+    fn the_gensym_floor_survives_the_header_round_trip() {
+        let mut out = Vec::new();
+        write_prelude_header(&mut out, "build-abc", 0xDEAD_BEEF_0000_0042);
+        let mut r = Cursor::new(out);
+        assert_eq!(
+            read_prelude_header(&mut r, "build-abc"),
+            Some(0xDEAD_BEEF_0000_0042),
+            "the floor written must be the floor read — a boot that loses it can mint a \
+             gensym that collides with a name baked into the image"
+        );
+    }
+
+    #[test]
+    fn another_builds_image_is_not_ours() {
+        let mut out = Vec::new();
+        write_prelude_header(&mut out, "build-abc", 7);
+        let mut r = Cursor::new(out);
+        assert_eq!(read_prelude_header(&mut r, "build-xyz"), None);
+    }
 }

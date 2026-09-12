@@ -1779,8 +1779,8 @@ read the un-imaged path as evidence about the imaged one."
   (str "  (prelude: "
     (cond
       (= (%boot-source) :prelude-image) "image"
-      (= (%boot-source) :boot-cache) "expanded-text cache"
-      (= (%boot-source) :source) "SOURCE — cold boot; this run wrote the artifacts"
+      (= (%boot-source) :source)
+        "SOURCE — read and evaluated: a cold boot after a rebuild, or BROOD_NO_PRELUDE_IMAGE"
       else "unknown")
     ")"))
 

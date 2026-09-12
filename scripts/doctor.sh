@@ -15,7 +15,7 @@
 #      debugging session burns CPU and skews every subsequent timing. KI-29 was the test
 #      -orphan version of this (one child found alive 9 days later); an interactive session
 #      leaving a sampler running is the other.
-#   3. BOOT-CACHE STATE — the expanded-prelude cache is keyed on the executable's mtime, so
+#   3. BOOT-CACHE STATE — the prelude image is keyed on the executable's build id, so
 #      every rebuild colds it. A cold boot is ~1.2 s against ~16 ms warm (KI-38), which is
 #      larger than most benchmark rows.
 #   4. STDLIB IMAGE — default-on, and its fallback is silent by design. Without it the suite
@@ -117,12 +117,12 @@ fi
 echo
 echo "3. boot cache"
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/brood"
-n_cache=$(find "$cache_dir" -name 'prelude-expanded-*.blsp' 2>/dev/null | wc -l | tr -d ' ')
+n_cache=$(find "$cache_dir" -name 'prelude-expanded-*.img' 2>/dev/null | wc -l | tr -d ' ')
 if [ "${n_cache:-0}" -eq 0 ]; then
-  note "no expanded-prelude cache — the next boot of each binary pays ~1.2 s instead of ~16 ms"
+  note "no prelude image — the next boot of each binary pays the full source boot instead of ~16 ms"
   echo "     warm it with scripts/warm-boot-cache.sh before timing or fanning out a suite"
 else
-  ok "$n_cache expanded-prelude cache file(s) in $cache_dir"
+  ok "$n_cache prelude image(s) in $cache_dir"
   stale=$(find "$cache_dir" -name 'prelude-expanded-*.blsp' -mtime +14 2>/dev/null | wc -l | tr -d ' ')
   [ "${stale:-0}" -gt 0 ] && note "$stale cache file(s) older than 14 days — keyed on binaries that are probably gone"
 fi

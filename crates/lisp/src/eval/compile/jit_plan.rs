@@ -943,15 +943,14 @@ pub(super) mod codegen {
 
     /// Report a refusal under `BROOD_JIT_BAIL_TRACE=1` and hand it back. One `var_os` behind a
     /// cached bool when off, so an ordinary run pays nothing.
-    fn trace_bail(arm: &CompiledArm, reason: BailReason) -> BailReason {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
-            let name = arm
-                .dbg_name
-                .map(crate::core::value::symbol_name_ref)
-                .unwrap_or("<closure>");
-            eprintln!("[jit-bail] arm={name} reason={}", reason.as_str());
-        }
+    fn trace_bail(_arm: &CompiledArm, reason: BailReason) -> BailReason {
+        // Record only. The caller drops this `Err` through `.ok()?`, and
+        // `jit_runtime::trace_lower_declined` then prints the ONE arm-named `[jit-bail]`
+        // line with whatever was recorded. This used to print its own line here too and
+        // record nothing, so every plan refusal produced two lines — this one, and a
+        // second reading `lowering-returned-none`: the "unexplained" bail one line after
+        // its explanation. With the record in place, a print here is a duplicate.
+        crate::eval::compile::jit_lower::record_mid_emit_reason(reason.as_str());
         reason
     }
 }

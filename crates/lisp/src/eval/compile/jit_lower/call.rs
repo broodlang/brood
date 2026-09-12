@@ -7,6 +7,7 @@
 #![cfg(feature = "jit")]
 use super::emit::{box_scalar, read_words, store_int, store_op, Frame, Funcs, TICK_BATCH};
 use super::Op;
+use super::OrBail;
 use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT};
 use crate::core::value::Symbol;
 use crate::eval::compile::inline::icall_enabled;
@@ -83,12 +84,10 @@ fn trace_call_bail<T>(reason: &'static str) -> Option<T> {
     // `jit_runtime::trace_lower_declined` picks this up, so grepping `arm=` sees the
     // specific reason — the bare `(mid-emit)` line below has no arm name and a filtered
     // trace read used to lose it.
-    super::record_mid_emit_reason(reason);
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
-        eprintln!("[jit-bail] (mid-emit) reason={reason}");
-    }
-    None
+    // Record only: the arm-named line `trace_lower_declined` prints carries this. The
+    // bare `(mid-emit)` line this used to print had no `arm=` and read as a second,
+    // unattributed refusal.
+    super::bail(reason)
 }
 
 /// `Inst::MakeClosure` — a `(fn …)` literal. The callback runs `exec_chunk`'s arm verbatim,
@@ -119,7 +118,10 @@ pub(super) fn emit_make_closure(
     let out_slot = funcs.out_slot;
     // Spill deeper live Handles across the safepoint — same loop, same reasoning as
     // `emit_call` above.
-    let below = stack.len().checked_sub(ncap)?;
+    let below = stack
+        .len()
+        .checked_sub(ncap)
+        .or_bail("operand-stack-underflow")?;
     for d in 0..below {
         if matches!(stack[d], Op::Handle(..)) {
             if *spill_next >= reserve {
@@ -135,7 +137,7 @@ pub(super) fn emit_make_closure(
     // staging push (push_room may realloc `roots`, so no slot read after it).
     let mut ops: Vec<Op> = Vec::with_capacity(ncap);
     for _ in 0..ncap {
-        ops.push(stack.pop()?);
+        ops.push(stack.pop().or_bail("operand-stack-underflow")?);
     }
     ops.reverse(); // back to `names` order — the order exec_chunk reads them in
     let mut worded: Vec<[Value; 3]> = Vec::with_capacity(ncap);
@@ -236,7 +238,10 @@ pub(super) fn emit_call(
     // store writes the handle's three words into the frame *before* any `brood_rt_push`
     // (which may realloc `roots`), so the read-all-then-stage discipline below is
     // preserved. Out of reserved slots → bail to the VM.
-    let below = stack.len().checked_sub(n_ops)?;
+    let below = stack
+        .len()
+        .checked_sub(n_ops)
+        .or_bail("operand-stack-underflow")?;
     for d in 0..below {
         if matches!(stack[d], Op::Handle(..)) {
             if *spill_next >= reserve {
@@ -253,7 +258,7 @@ pub(super) fn emit_call(
     // after a push (the read-all-then-store discipline, same as `SelfCall`).
     let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
     for _ in 0..n_ops {
-        ops.push(stack.pop()?);
+        ops.push(stack.pop().or_bail("operand-stack-underflow")?);
     }
     ops.reverse(); // computed callee (if any) first, then args in source order
     let mut worded: Vec<[Value; 3]> = Vec::with_capacity(ops.len());
@@ -778,11 +783,11 @@ pub(super) fn emit_self_call(
     // register here.
     let mut ops = Vec::with_capacity(argc);
     for _ in 0..argc {
-        ops.push(stack.pop()?);
+        ops.push(stack.pop().or_bail("operand-stack-underflow")?);
     }
     ops.reverse(); // ops[i] = the i-th positional arg → frame slot i
     if !stack.is_empty() {
-        return None;
+        return super::bail("staged-args-leftover-operand-stack");
     }
     // Each arg becomes a list of (byte-offset, word) stores. An `Int` is boxed (tag at 0,
     // payload at PAYLOAD_OFFSET — the third word is left alone, irrelevant to an Int). A
@@ -932,7 +937,7 @@ pub(super) fn emit_self_call(
     // reduction rate) and runs the hoisted-global epoch guard (a rebind is observed within
     // one batch — the guard's "eventually" contract; the frame slots hold the current
     // iteration's args every iteration, so both deopt and preempt resume exactly).
-    let loop_top = leader_block[0]?;
+    let loop_top = leader_block[0].or_bail("jump-target-not-a-leader")?;
     let bv = b.use_var(tick_budget);
     let nv = b.ins().iadd_imm_s(bv, -1);
     b.def_var(tick_budget, nv);

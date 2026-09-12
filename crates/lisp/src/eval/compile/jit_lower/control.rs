@@ -7,6 +7,7 @@
 #![cfg(feature = "jit")]
 use super::emit::{as_block_arg, param_repr, store_result, Frame, ParamRepr};
 use super::Op;
+use super::OrBail;
 use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL};
 use cranelift_codegen::ir::{condcodes::IntCC, types, Block, BlockArg, InstBuilder, MemFlagsData};
 use cranelift_frontend::FunctionBuilder;
@@ -78,7 +79,8 @@ pub(super) fn emit_jump(
                 .enumerate()
                 .map(|(i, &op)| BlockArg::Value(as_block_arg(b, op, i, frame)))
                 .collect();
-            b.ins().jump(leader_block[t]?, &args);
+            b.ins()
+                .jump(leader_block[t].or_bail("jump-target-not-a-leader")?, &args);
         } else {
             // Type-mixed join (see `record_block_flags`): this edge's scalar typing
             // disagrees with the block's — deopt to the VM.
@@ -115,8 +117,16 @@ pub(super) fn emit_jump_if_false(
     // (no args) instead — see `record_block_flags`.
     let t_ok = record_block_flags(&mut bool_param[t], flags.clone());
     let f_ok = record_block_flags(&mut bool_param[j + 1], flags);
-    let tgt = if t_ok { leader_block[t]? } else { deopt }; // falsy → else
-    let fall = if f_ok { leader_block[j + 1]? } else { deopt }; // truthy → fall-through
+    let tgt = if t_ok {
+        leader_block[t].or_bail("jump-target-not-a-leader")?
+    } else {
+        deopt
+    }; // falsy → else
+    let fall = if f_ok {
+        leader_block[j + 1].or_bail("jump-target-not-a-leader")?
+    } else {
+        deopt
+    }; // truthy → fall-through
     let args: Vec<BlockArg> = stack
         .iter()
         .enumerate()

@@ -21321,6 +21321,44 @@ motion; an editor that wants the plain motion under a modifier binds it. The voc
 closed (a dozen keys × eight modifier sets) so each spelling is built once and kept for the
 process, which is what lets `Key` stay `Copy` and the GUI thread deliver it heap-free.
 
+## ADR-329 — The prelude image stands alone: the ADR-138 text cache is deleted
+
+**Date:** 2026-09-12
+
+**Context.** Boot had three paths: the prelude image (ADR-314), the expanded-prelude *text
+cache* (ADR-138), and the full source boot, tried in that order. The text cache was ADR-138's
+answer to a 31 ms boot of which 27 ms was macro-expansion: store the expanded prelude as text,
+skip the expansion. ADR-314 then made the image the default, and the text cache became the
+fallback *under* it — a second artifact per build (`prelude-expanded-<hash>.blsp` beside the
+`.img`), its own reader, its own prune (over a `.blsp`/`.img` PAIR by shared stem, which once
+dropped one half and kept the other), a second opt-out knob (`BROOD_NO_BOOT_CACHE`) whose
+meaning overlapped `BROOD_NO_PRELUDE_IMAGE`'s, and a third boot-source state to report.
+
+One coupling made it un-deletable: the image carried **no gensym counter of its own** and read
+the floor from the text cache's header. Delete the text cache blind and every imaged boot
+starts `gensym` at zero, free to mint a name already baked into the image's closures.
+
+**Decision.** Delete the text cache. Boot is image → source. The gensym floor moves into the
+image header (`brood-prelude-image-v3`: magic, fingerprint, `u64` floor), written and read by
+two small functions with a round-trip unit test that a sabotage (drop the `put_u64`) reds.
+`BROOD_NO_PRELUDE_IMAGE=1` is the one knob and means neither read nor written; `%boot-source`
+reports `prelude-image` or `source`. The prune is single-artifact. CI's tree-walker job, which
+set the opt-out "to keep the text path covered", now keeps the *source* path covered — the
+fallback that actually exists.
+
+**Why now.** This is the first step of persisting *compiled* state across runs (bytecode
+chunks in the stdlib image; devlog 2026-09-12). Extending a persistence format that already
+had two formats and a text tier under it would have meant three artifacts and two fallback
+chains to keep coherent, and both prior image defaults were reverted the same day over a
+recorded-not-bound fact (KI-105, KI-106). Fewer artifacts, fewer of those.
+
+**Consequences.** −263 lines; one file per build in `~/.cache/brood`. A cold boot (first run
+after any build) does the full source boot as before and writes the image. Anything that read
+the text cache's header — only the image's own floor read did — is gone. `scripts/ki38/` is
+archival and still describes the deleted cache; left as history.
+
+**Supersedes** ADR-138 (the artifact); ADR-314's design is unchanged except the header.
+
 ## ADR-330 — `filter` joins its complement: the pair lives in `seq/`, and `remove` becomes `reject`
 
 **Status:** accepted; implemented 2026-09-12. Follows [ADR-227](#adr-227) (core stays bare,

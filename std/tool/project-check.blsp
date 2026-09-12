@@ -821,7 +821,7 @@ Returns nil when there is nothing to report."
 ;; directory behind for good — a test fixture in /tmp, a scratch build, a checkout that
 ;; moved. Measured on one dev machine: 6458 directories and 83 MB accumulated over twelve
 ;; days, none of them ever reachable again. The boot cache has always pruned by age
-;; (`boot_cache_prune` in lib.rs); this is the same policy for its sibling.
+;; (`prelude_image_prune` in boot.rs); this is the same policy for its sibling.
 ;;
 ;; Once per run, not per file: `*project-cache-pruned*` latches. Never prunes the directory
 ;; in use. Best-effort throughout — a cache is an optimisation, so a prune that cannot read

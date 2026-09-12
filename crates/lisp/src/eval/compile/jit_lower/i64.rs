@@ -4,6 +4,7 @@
 //! self-contained set of functions used only by the `jit_lower_arm` dispatcher (it
 //! never touches `jit_lower_arm_inner`), so it moves cleanly. Reaches the parent's
 //! items (IR types, `jit_i64_enabled`, subset helpers, cranelift) via `use super::*`.
+use super::OrBail;
 use super::*;
 
 /// The scalar the unboxed register worker specializes to. `Int` (i64, overflow-checked → deopt
@@ -52,15 +53,15 @@ fn arm_scalar_kind(arm: &CompiledArm) -> Option<Scalar> {
         || arm.rest_slot.is_some()
         || !arm.capture_names.is_empty()
     {
-        return None;
+        return super::bail("i64-worker-ineligible-shape");
     }
     // Use `dbg_name` (every top-level defn has it) rather than `inline_name` (set only when the
     // arm ALSO qualifies for the depth-2 inliner — which excludes e.g. Ackermann, whose inlined
     // expansion is too big). The worker needs no inlining; it just needs the self symbol.
-    let self_sym = arm.dbg_name?;
+    let self_sym = arm.dbg_name.or_bail("i64-anonymous-arm")?;
     // A prior depth-bail switched this fn to the boxed path (which drains deep recursion).
     if i64_too_deep(self_sym) || !i64_has_self_call(&arm.body) {
-        return None;
+        return super::bail("i64-no-self-call-or-latched-too-deep");
     }
     // The worker lowers a *non-tail* `(f …)` whose head is `dbg_name` to a direct call to
     // itself. `dbg_name` is only the symbol this closure was first `def`'d under, so that
@@ -72,7 +73,7 @@ fn arm_scalar_kind(arm: &CompiledArm) -> Option<Scalar> {
         .self_global_ok
         .load(std::sync::atomic::Ordering::Relaxed)
     {
-        return None;
+        return super::bail("i64-self-global-rebound");
     }
     let empty = std::collections::HashSet::new();
     [Scalar::Int, Scalar::Float]
@@ -632,7 +633,7 @@ pub(super) fn jit_lower_i64_arm(
     let sty = kind.clif(); // i64 or f64 — the worker's arg/result register type
     let body = &arm.body;
     let nargs = arm.nrequired;
-    let self_sym = arm.dbg_name?; // present — arm_scalar_kind already required it
+    let self_sym = arm.dbg_name.or_bail("i64-anonymous-arm")?; // present — arm_scalar_kind already required it
 
     const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
     let m = jit.module();
@@ -651,7 +652,8 @@ pub(super) fn jit_lower_i64_arm(
     wsig.returns.push(AbiParam::new(sty));
     let worker_id = m
         .declare_function(&format!("brood_jit_i64w_{seq}"), Linkage::Export, &wsig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let mut xsig = m.make_signature();
     xsig.params.push(AbiParam::new(ptr_ty)); // heap
     xsig.params.push(AbiParam::new(types::I64)); // base
@@ -659,17 +661,20 @@ pub(super) fn jit_lower_i64_arm(
     xsig.returns.push(AbiParam::new(types::I64)); // outcome
     let wrap_id = m
         .declare_function(&format!("brood_jit_i64x_{seq}"), Linkage::Export, &xsig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // Wrapper imports.
     let mut ptr_sig = m.make_signature();
     ptr_sig.params.push(AbiParam::new(ptr_ty));
     ptr_sig.returns.push(AbiParam::new(ptr_ty));
     let rb_id = m
         .declare_function("brood_rt_roots_base", Linkage::Import, &ptr_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     let ovp_id = m
         .declare_function("brood_rt_i64_overflow_ptr", Linkage::Import, &ptr_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // The throw callback: (heap, payload_bits, is_float) -> sentinel (3 = error parked, 1 = deopt).
     let mut throw_sig = m.make_signature();
     throw_sig.params.push(AbiParam::new(ptr_ty));
@@ -678,7 +683,8 @@ pub(super) fn jit_lower_i64_arm(
     throw_sig.returns.push(AbiParam::new(types::I64));
     let throw_id = m
         .declare_function("brood_rt_i64_throw", Linkage::Import, &throw_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
     // brood_rt_trace_push(heap, arm): one `:trace` frame per worker level an error unwinds
     // through (KI-117). Declared here, called from the worker's `poisoned` block.
     let mut tp_sig = m.make_signature();
@@ -686,7 +692,8 @@ pub(super) fn jit_lower_i64_arm(
     tp_sig.params.push(AbiParam::new(types::I64));
     let tp_id = m
         .declare_function("brood_rt_trace_push", Linkage::Import, &tp_sig)
-        .ok()?;
+        .ok()
+        .or_bail("cranelift-declare-function")?;
 
     // ---- Worker ----
     {
@@ -814,7 +821,9 @@ pub(super) fn jit_lower_i64_arm(
         b.ins().return_(&[zero]);
         b.seal_block(poisoned);
         b.finalize(m.target_config());
-        m.define_function(worker_id, &mut ctx).ok()?;
+        m.define_function(worker_id, &mut ctx)
+            .ok()
+            .or_bail("cranelift-define-function")?;
         m.clear_context(&mut ctx);
     }
 
@@ -974,11 +983,15 @@ pub(super) fn jit_lower_i64_arm(
         let od = b.ins().iconst(types::I64, 1);
         b.ins().return_(&[od]);
         b.finalize(m.target_config());
-        m.define_function(wrap_id, &mut ctx).ok()?;
+        m.define_function(wrap_id, &mut ctx)
+            .ok()
+            .or_bail("cranelift-define-function")?;
         m.clear_context(&mut ctx);
     }
 
-    m.finalize_definitions().ok()?;
+    m.finalize_definitions()
+        .ok()
+        .or_bail("cranelift-finalize")?;
     // Report this lowering under `BROOD_JIT_DUMP_IR` like the general path does. It did not,
     // which made the scalar-register path — `fib`/`pfib`, the JIT's biggest wins — invisible to
     // the one tool CLAUDE.md points at for "did this arm ever lower?", where absence is the

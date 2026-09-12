@@ -12589,3 +12589,41 @@ some. So it is a second function with its own honest signature — `string/field
 (`(string &optional string -> (or nil (list string)))`): split, trim each piece, drop the
 empties. Brood, four lines, and it replaced the same idiom inside `string/fill`; the
 five copies in `std/path.blsp` filter empties without trimming and are left as they are.
+
+## 2026-09-12 — the JIT's "unexplained" bails, explained
+
+`lowering-returned-none` was the #1 bail reason on `json` (42 arms), `regex` (25) and
+`base64` (13) — the string rows, the ones furthest behind every other runtime. It is the
+printer's fallback for "the lowering said `None` and nothing said why", and it was mostly an
+echo: the three internal `trace_*_bail` helpers printed an arm line but never *recorded*, so
+the outer printer followed each with a second line calling the same bail unexplained. The rest
+were ~80 bare `?`s and ~10 leaf `return None`s with no name.
+
+Now every give-up path records (`bail`/`or_bail` in `jit_lower.rs`, optional detail token),
+and only `trace_lower_declined` prints — one arm-named line per refusal. `returned-none` is 0
+on all five rows checked; sabotage (dropping one record) brings 40 back on `json`.
+
+The names are the deliverable. **Five `json` arms fail inside Cranelift's `define_function`**
+(`json/num-end`, `%match-parse-clause`, `%match-splice-fail-in`, `%pattern-vars`) and run on
+the VM at ~27×; two arms hit `operand-stack-underflow`; one `tail-nonempty-stack`. None was
+visible before. compute-frontier §7.10 has the list and the order to take them in.
+
+Method note: my first attempt landed the `use super::OrBail;` import *inside* a multi-line
+`use super::emit::{…}` group, because the regex matched the line that opens it. Inserting
+BEFORE the first `use` cannot fail that way; order is irrelevant in Rust. Also: counting
+sites with `grep -c` counts *lines* — two `stack.pop()?` on one line made "7" really 9, and an
+assertion caught it before any write.
+
+## 2026-09-12 (later) — the boot text cache is gone; the image carries its own gensym floor
+
+Boot had image → text cache → source. The middle tier existed only as the net under the
+image: a second file per build, its own reader, a paired-file prune with a known hazard, and
+a second knob overlapping the first. Deleted (ADR-329): −263 lines, boot is image → source,
+`BROOD_NO_PRELUDE_IMAGE` is the one switch, `%boot-source` has two answers.
+
+The part that mattered: the image read its **gensym floor from the text cache's header** —
+the one fact tying the two together, and the KI-105/106 class exactly (a fact the evaluation
+records rather than binds). It is in the image header now (`v3`), behind a round-trip test.
+Found by reading the call site before deleting, not after.
+
+Done so that persisting compiled chunks (the next item) extends ONE format with ONE fallback.

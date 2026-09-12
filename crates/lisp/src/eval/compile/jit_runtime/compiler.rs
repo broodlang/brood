@@ -198,7 +198,11 @@ pub(crate) fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) 
 pub(super) fn trace_lower_declined(arm: &CompiledArm, inlined: bool) {
     // Take (and clear) any mid-emit reason regardless of the trace flag, so a reason
     // recorded under a flagless run cannot leak into a later flagged one.
-    let reason = super::take_mid_emit_reason().unwrap_or("lowering-returned-none");
+    // `lowering-returned-none` is the FALLBACK — it means a give-up path that recorded
+    // nothing, which every path now does. Seeing it in a trace is itself the finding.
+    let (reason, detail) =
+        super::take_mid_emit_reason().unwrap_or(("lowering-returned-none", None));
+    let detail = detail.map(|d| format!(":{d}")).unwrap_or_default();
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ON.get_or_init(|| std::env::var_os("BROOD_JIT_BAIL_TRACE").is_some()) {
         let name = arm
@@ -214,7 +218,7 @@ pub(super) fn trace_lower_declined(arm: &CompiledArm, inlined: bool) {
             .map(crate::eval::compile::jit_plan::codegen::inst_opcode_name)
             .collect();
         eprintln!(
-            "[jit-bail] arm={name} reason={reason} inlined={inlined} nslots={} ops=[{}]",
+            "[jit-bail] arm={name} reason={reason}{detail} inlined={inlined} nslots={} ops=[{}]",
             arm.nslots,
             ops.join(" ")
         );

@@ -294,14 +294,14 @@ pub(super) fn emit_arith(
         PrimOp::BitAnd => b.ins().band(x, y),
         PrimOp::BitOr => b.ins().bor(x, y),
         PrimOp::BitXor => b.ins().bxor(x, y),
-        PrimOp::Cons => return None, // allocates — never in the JIT subset
-        PrimOp::VectorRef => return None, // heap slab read — not lowered; out of subset
+        PrimOp::Cons => return super::bail("prim-cons-allocates"), // never in the JIT subset
+        PrimOp::VectorRef => return super::bail("prim-vector-ref-slab-read"), // out of subset
         // Table ops: not an int-arith op — lowered as a runtime callback in the
         // Inst::Prim2 arm below (never through this integer emitter).
-        PrimOp::TableHas | PrimOp::TableGet => return None,
+        PrimOp::TableHas | PrimOp::TableGet => return super::bail("prim-table-op-not-int-arith"),
         // CHAMP probe through the runtime callback, like the table ops — not integer
         // arithmetic, so it is lowered in `prim.rs`, not here.
-        PrimOp::MapGet => return None,
+        PrimOp::MapGet => return super::bail("prim-map-get-not-int-arith"),
     })
 }
 
@@ -341,7 +341,7 @@ pub(super) fn emit_float_arith(
         // arm to the VM, whose `prim_apply_float` likewise returns `None` for `Eq`
         // and defers to the structural native `prim_eq`. (Lt/Le are safe: ordering
         // coerces int↔float identically on both engines.)
-        _ => return None,
+        _ => return super::bail("float-eq-mixed-int-float-unsafe"),
     })
 }
 

@@ -32,36 +32,26 @@ pub(crate) struct SharedBundle {
 }
 
 pub(crate) static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
-    // Fast path: boot from the expanded-prelude cache (ReadyToRun-lite). The
-    // full source boot costs ~31 ms, ~27 ms of which is macro-EXPANSION of the
-    // prelude (measured 2026-07-19; see the devlog) — parse, eval, and freeze
-    // together are ~4 ms. So the cache stores the *post-compile* (expanded +
-    // resolved + static-quasiquote) forms as plain text, keyed by `system/build-id`
-    // (the prelude is `include_str!`'d, so any binary change invalidates), and
-    // a warm boot skips `eval::macros::compile` entirely. Any mismatch or
-    // failure falls back to the source boot, which rewrites the cache.
-    if std::env::var_os("BROOD_NO_BOOT_CACHE").is_none() {
-        // ADR-314: the prelude image rebuilds the bindings structurally, skipping the
-        // read + eval the text cache still pays. Tried first; any miss falls through to
-        // the text cache, and that to the source boot, so a bad artifact costs a slower
-        // boot and never a wrong one.
-        // DEFAULT ON since 2026-09-04 (ADR-314); `BROOD_NO_PRELUDE_IMAGE=1` opts out to the
-        // text cache. Two earlier attempts to make it the default failed on the same day they
-        // shipped, each on a fact the evaluation RECORDS rather than binds: KI-105 (a stale
-        // stdlib section directory restored from the image — `%std-image-reinstall!` clears it
-        // before installing) and KI-106 (the registry-name set was not carried, so a multi-file
-        // `nest check` lost every derived multimethod mirror — the image writes and re-marks
-        // it now). Both are fixed with sabotage-verified guards, the boot differential compares
-        // the registry set, and `make check-imaged` runs the project's own checker gate with
-        // the image on. Measured: `startup` -11%, no regression on 30 rows.
-        if std::env::var_os("BROOD_NO_PRELUDE_IMAGE").is_none() {
-            if let Some(bundle) = boot_from_prelude_image() {
-                set_boot_source(BOOT_PRELUDE_IMAGE);
-                return bundle;
-            }
-        }
-        if let Some(bundle) = boot_from_cache() {
-            set_boot_source(BOOT_TEXT_CACHE);
+    // Two boot paths (2026-09-12; there were three until the ADR-138 expanded-prelude TEXT
+    // cache was deleted). The prelude image (ADR-314) materialises the prelude's bindings
+    // structurally from `~/.cache/brood/prelude-expanded-<build-id-hash>.img`; any miss —
+    // no file, a different build, a torn or undecodable artifact — falls through to the
+    // full source boot, which rewrites the image. A bad artifact therefore costs a slower
+    // boot and never a wrong one.
+    //
+    // `BROOD_NO_PRELUDE_IMAGE=1` is the ONE knob: neither read nor written. (It used to
+    // sit beside `BROOD_NO_BOOT_CACHE`, and the two meant different subsets of a
+    // three-artifact chain; with one artifact there is one switch.)
+    //
+    // The image shipped default-on twice before and was reverted the same day both times
+    // (KI-105, KI-106), each on a fact the evaluation RECORDS rather than binds. Both are
+    // fixed with sabotage-verified guards and the boot differential
+    // (`prelude_image_matches_source.rs`) compares image against source. The gensym floor
+    // is now such a fact carried IN the image header — it used to be read from the text
+    // cache's header, which is the coupling that made the text cache impossible to delete.
+    if std::env::var_os("BROOD_NO_PRELUDE_IMAGE").is_none() {
+        if let Some(bundle) = boot_from_prelude_image() {
+            set_boot_source(BOOT_PRELUDE_IMAGE);
             return bundle;
         }
     }
@@ -99,7 +89,7 @@ pub const INSTALL_BOOKKEEPING: &[&str] = &[
     "*std-require-edges*",
 ];
 
-/// Which of the three boot paths actually ran, as an atomic so it can be read after the
+/// Which of the two boot paths actually ran, as an atomic so it can be read after the
 /// fact from anywhere without threading it through the bundle.
 ///
 /// **This exists because "was that run imaged?" had no answer, and guessing it wrong is the
@@ -115,158 +105,79 @@ pub const INSTALL_BOOKKEEPING: &[&str] = &[
 // gets `unknown` rather than a plausible-looking lie.
 static BOOT_SOURCE_KIND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 const BOOT_PRELUDE_IMAGE: u8 = 1;
-const BOOT_TEXT_CACHE: u8 = 2;
-const BOOT_SOURCE: u8 = 3;
+const BOOT_SOURCE: u8 = 2;
 
 fn set_boot_source(kind: u8) {
     BOOT_SOURCE_KIND.store(kind, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// How this process's prelude arrived: `"prelude-image"`, `"boot-cache"`, `"source"`, or
-/// `"unknown"` before the shared prelude has been built. Read by `%boot-source`.
+/// How this process's prelude arrived: `"prelude-image"`, `"source"`, or `"unknown"`
+/// before the shared prelude has been built. Read by `%boot-source`.
 pub fn boot_source() -> &'static str {
     match BOOT_SOURCE_KIND.load(std::sync::atomic::Ordering::Relaxed) {
         BOOT_PRELUDE_IMAGE => "prelude-image",
-        BOOT_TEXT_CACHE => "boot-cache",
         BOOT_SOURCE => "source",
         _ => "unknown",
     }
 }
 
-/// The expanded-prelude cache file for THIS binary:
-/// `~/.cache/brood/prelude-expanded-<hash-of-build-id>.blsp`. Per-binary
-/// naming (not one shared file) because the staleness key — `system/build-id` —
-/// embeds each executable's own mtime: `brood`, `nest`, and every test binary
-/// carry different stamps, and a single shared file would be endlessly
-/// overwritten by whichever booted last, never hitting. Old builds' files are
-/// pruned by age at write time (see `boot_cache_prune`).
-fn boot_cache_path() -> Option<std::path::PathBuf> {
+/// The prelude image for THIS binary:
+/// `~/.cache/brood/prelude-expanded-<hash-of-build-id>.img`. Per-binary, because the
+/// prelude is `include_str!`'d and any binary change invalidates it; the fingerprint
+/// inside the file is checked too, so a hash collision cannot serve another build's image.
+fn prelude_image_path() -> Option<std::path::PathBuf> {
     use std::hash::{Hash, Hasher};
     use std::path::PathBuf;
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    // DefaultHasher is deterministic across processes (fixed keys — unlike
-    // RandomState), so every run of the same binary derives the same name.
     let mut h = std::collections::hash_map::DefaultHasher::new();
     builtins::build_id_string().hash(&mut h);
     Some(
         base.join("brood")
-            .join(format!("prelude-expanded-{:016x}.blsp", h.finish())),
+            .join(format!("prelude-expanded-{:016x}.img", h.finish())),
     )
 }
 
-/// Best-effort prune of OTHER builds' expanded-prelude caches: keep the
-/// `MAX_KEEP` most recently modified BUILDS (plus `keep`'s) and delete the rest,
-/// and separately drop anything older than `MAX_AGE`.
+/// Best-effort prune of OTHER builds' prelude images: keep the `MAX_KEEP` most recent,
+/// drop anything older than `MAX_AGE`, never touch `keep` (the one just written).
 ///
-/// **A build, not a file — because a build now has two artifacts.** ADR-314 added
-/// `prelude-expanded-<hash>.img` beside the `.blsp`, keyed identically
-/// (`prelude_image_path` is the text cache's path `.with_extension("img")`). This
-/// function matched on `.blsp` alone, so it pruned the text caches and left every
-/// image behind, and the failure the count cap was written to fix came straight
-/// back in the new artifact: **1057 `.img` files / 450 MB** measured on this repo's
-/// dev machine on 2026-09-05, against 18 `.blsp` correctly held at the cap. Grouping
-/// by file STEM fixes it for this pair and for the next one: a build is the unit,
-/// every file sharing a stem lives or dies with it, and an artifact added later is
-/// carried as soon as it is written beside its siblings.
-///
-/// **Bounded by COUNT, not only by age, because age does not bound anything.**
-/// The cache name hashes `system/build-id`, which embeds the binary's mtime, so
-/// every rebuild of every binary — `brood`, `nest`, `brood-lsp`, each test
-/// binary, each `target/ab/<sha>` worktree — mints a *new* ~190 KB file. The
-/// original 7-day rule then deletes nothing at all on a machine that rebuilds
-/// more than a handful of times a week: measured 2026-08-27 on this repo's own
-/// dev machine, **4192 files / 732 MB**, none of them week-old. Worse, the prune
-/// itself walks that directory and stats every entry on each cache-writing boot
-/// — **7.6 ms**, which is an entire warm boot (7.6 ms) spent tidying.
-///
-/// Deleting a *recent* file that another live binary is still hitting is safe:
-/// that binary pays one source boot and rewrites its own cache. The failure mode
-/// is a slower boot once, never a wrong one — so a count cap is the right shape,
-/// and the age rule stays as a floor for a directory that is under the cap but
-/// full of long-dead builds.
-fn boot_cache_prune(dir: &std::path::Path, keep: &std::path::Path) {
+/// Bounded by COUNT and not only by age, for the reason the stdlib image's `prune` records:
+/// on a machine that is editing the standard library — the only kind that writes these —
+/// every rebuild mints a new file and nothing is ever old enough for an age rule to catch.
+/// One artifact per build now; this used to prune a `.blsp`/`.img` PAIR by shared stem and
+/// once dropped the text half while keeping the image (boot.rs history), a hazard that
+/// disappeared with the second artifact.
+fn prelude_image_prune(dir: &std::path::Path, keep: &std::path::Path) {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
-    /// Enough for the binaries plausibly in play at once (`brood`, `nest`,
-    /// `brood-lsp`, a couple of test binaries, an `ab` worktree or two) — at
-    /// ~190 KB of text plus ~400 KB of image each, this bounds the prelude cache
-    /// at ~9 MB rather than at whatever a week of rebuilding produces.
     const MAX_KEEP: usize = 16;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    // Skip `keep`'s whole BUILD, not just the one file: `keep` is this binary's own
-    // freshly-written text cache, and its `.img` sibling shares the stem and is just
-    // as live. Deleting the image out from under the binary that wrote it costs a
-    // source boot for no reason.
-    let keep_stem = keep.file_stem().map(|s| s.to_os_string());
-    // stem -> (newest mtime among its files, all its files)
-    let mut found: std::collections::HashMap<
-        std::ffi::OsString,
-        (std::time::SystemTime, Vec<std::path::PathBuf>),
-    > = std::collections::HashMap::new();
+    let mut others: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
     for e in entries.flatten() {
         let p = e.path();
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("prelude-expanded-") {
+        if !(name.starts_with("prelude-expanded-") && name.ends_with(".img")) || p == keep {
             continue;
         }
-        if !(name.ends_with(".blsp") || name.ends_with(".img")) {
-            continue;
-        }
-        let Some(stem) = p.file_stem().map(|s| s.to_os_string()) else {
-            continue;
-        };
-        if keep_stem.as_ref() == Some(&stem) {
-            continue;
-        }
-        let Ok(modified) = e.metadata().and_then(|m| m.modified()) else {
-            // Unreadable metadata: treat as ancient so it sorts to the drop end
-            // rather than occupying a keep slot it cannot justify.
-            let _ = std::fs::remove_file(&p);
-            continue;
-        };
-        let slot = found
-            .entry(stem)
-            .or_insert((modified, Vec::with_capacity(2)));
-        // A build is as fresh as its freshest artifact: the image is written after the
-        // text cache, so taking the older of the pair would age every build by the gap.
-        if modified > slot.0 {
-            slot.0 = modified;
-        }
-        slot.1.push(p);
-    }
-    // Newest build first, then every build past the cap goes, plus anything stale.
-    let mut builds: Vec<(std::time::SystemTime, Vec<std::path::PathBuf>)> =
-        found.into_values().collect();
-    builds.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
-    for (i, (modified, paths)) in builds.iter().enumerate() {
-        let stale = modified.elapsed().ok().is_some_and(|age| age > MAX_AGE);
-        if i >= MAX_KEEP || stale {
-            for p in paths {
-                let _ = std::fs::remove_file(p);
+        match e.metadata().and_then(|m| m.modified()) {
+            Ok(modified) => others.push((modified, p)),
+            // Unreadable metadata: not worth keeping around.
+            Err(_) => {
+                let _ = std::fs::remove_file(&p);
             }
         }
     }
-}
-
-/// The boot cache's header line for THIS binary: `;; brood-boot-cache v1
-/// <build-id> gensym=` (the caching boot's final gensym counter follows). A
-/// cache whose header doesn't match byte-for-byte is stale and ignored.
-fn boot_cache_header_prefix() -> String {
-    format!(
-        ";; brood-boot-cache v2 {} gensym=",
-        builtins::build_id_string()
-    )
-}
-
-/// The prelude image for THIS binary, beside the text cache and keyed the same way.
-fn prelude_image_path() -> Option<std::path::PathBuf> {
-    let p = boot_cache_path()?;
-    Some(p.with_extension("img"))
+    others.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
+    for (i, (modified, p)) in others.iter().enumerate() {
+        let stale = modified.elapsed().ok().is_some_and(|age| age > MAX_AGE);
+        if i >= MAX_KEEP || stale {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// Boot the shared bundle by **materialising** the prelude's bindings (ADR-314) rather
@@ -295,7 +206,8 @@ fn boot_from_prelude_image() -> Option<SharedBundle> {
     // Parity with the text path: materialise the on-disk prelude copy the def sites name,
     // so stdlib `M-.` can actually open the file the image points at.
     heap.set_current_file(prelude_source_path());
-    let n = image::load_prelude_image(&mut heap, root, &path, &builtins::build_id_string())?;
+    let (n, gensym_floor) =
+        image::load_prelude_image(&mut heap, root, &path, &builtins::build_id_string())?;
     heap.set_current_file(None);
     // REPLAY what the prelude's evaluation DID, not just what it recorded. The prelude has a
     // top-level form that runs `%std-image-install`, and the imaged path never evaluates it —
@@ -332,22 +244,11 @@ fn boot_from_prelude_image() -> Option<SharedBundle> {
         );
     }
     let t_load = t_start.elapsed();
-    // The image carries no gensym counter of its own: the names baked into its closures
-    // were minted by the caching boot, so the floor the text cache records applies here
-    // too. Read it from that file's header if it is present; a missing one only means a
-    // runtime `gensym` starts lower, which is safe (it can still never collide, because
-    // the image's own names are already interned).
-    if let Some(text_path) = boot_cache_path() {
-        if let Ok(head) = std::fs::read_to_string(&text_path) {
-            if let Some(line) = head.lines().next() {
-                if let Some(rest) = line.strip_prefix(&boot_cache_header_prefix()) {
-                    if let Ok(g) = rest.trim().parse::<u64>() {
-                        core::value::gensym_floor(g);
-                    }
-                }
-            }
-        }
-    }
+    // The names baked into the image's closures were minted by the boot that wrote it, so
+    // a runtime `gensym` must start ABOVE that counter or a fresh name could collide with a
+    // baked one. The image carries the floor in its header (it used to be read from the
+    // deleted text cache's header — the one fact that tied the two artifacts together).
+    core::value::gensym_floor(gensym_floor);
     let private = heap.private_names_snapshot();
     let name_meta = heap.name_meta_snapshot();
     let t_pre_freeze = t_start.elapsed();
@@ -369,105 +270,8 @@ fn boot_from_prelude_image() -> Option<SharedBundle> {
     })
 }
 
-/// Boot the shared bundle from the expanded-prelude cache. `None` (fall back
-/// to [`boot_from_source`]) if the cache is absent, stale, or fails ANY step —
-/// a failing cache file is deleted so the source boot's rewrite starts clean.
-/// Each cached line carries its form's source position and the def-names the
-/// *un-expanded* form contributed, so LSP stdlib navigation is identical on both
-/// paths without re-reading the prelude: that positioned read was 3.5 ms of a
-/// 26 ms warm boot and produced nothing else. Only the ~27 ms compile pass and
-/// that read are skipped.
-fn boot_from_cache() -> Option<SharedBundle> {
-    let t_start = web_time::Instant::now();
-    let path = boot_cache_path()?;
-    let text = std::fs::read_to_string(&path).ok()?;
-    let (header, body) = text.split_once('\n')?;
-    // A non-matching header is a stale build — leave the file; the source boot
-    // rewrites it.
-    let gensym_max: u64 = header
-        .strip_prefix(&boot_cache_header_prefix())?
-        .trim()
-        .parse()
-        .ok()?;
-    let run = || -> Option<SharedBundle> {
-        let mut heap = Heap::new();
-        let root = heap.new_env(None);
-        heap.set_global(root);
-        builtins::register(&mut heap, root);
-        heap.set_current_file(prelude_source_path());
-        // Each line is `<line>:<col>:<def-name,…> <printed form>` — the position and
-        // the un-expanded form's def-names, recorded by the source boot that wrote
-        // this file, then the expansion that drives evaluation.
-        let mut meta = Vec::new();
-        // One bulk read of the expansions, not one per line: the reader amortises
-        // its scanner across a single buffer, and splitting it per form measured
-        // +1 ms on a 23 ms boot.
-        let mut source = String::with_capacity(body.len());
-        for line in body.lines().filter(|l| !l.is_empty()) {
-            let (head, printed) = line.split_once(' ')?;
-            let mut parts = head.splitn(3, ':');
-            let l: u32 = parts.next()?.parse().ok()?;
-            let c: u32 = parts.next()?.parse().ok()?;
-            meta.push((crate::error::Pos { line: l, col: c }, parts.next()?));
-            source.push_str(printed);
-            source.push('\n');
-        }
-        let cached = syntax::reader::read_all(&mut heap, &source).ok()?;
-        // 1:1 by construction (one printed form per line) — any drift is a torn file.
-        if cached.len() != meta.len() {
-            return None;
-        }
-        // The cached expansions embed gensyms minted up to `gensym_max` in the
-        // caching boot; floor the counter so runtime gensyms can't collide.
-        core::value::gensym_floor(gensym_max);
-        let t_read = t_start.elapsed();
-        for ((pos, names), form) in meta.into_iter().zip(cached) {
-            // The un-expanded form's def-names, recorded by the boot that wrote this
-            // file — the raw prelude is not read here.
-            for name in names.split(',').filter(|n| !n.is_empty()) {
-                heap.record_def_site(core::value::intern(name), pos);
-            }
-            heap.note_definition(form, pos);
-            eval::eval(&mut heap, form, root).ok()?;
-        }
-        let t_eval = t_start.elapsed();
-        heap.set_current_file(None);
-        let private = heap.private_names_snapshot();
-        let name_meta = heap.name_meta_snapshot();
-        let t_pre_freeze = t_start.elapsed();
-        let (code, bindings) = heap.freeze_as_shared_code(root);
-        if std::env::var_os("BROOD_BOOT_TRACE").is_some() {
-            // The cache-hit phase breakdown, the counterpart of the source boot's
-            // line below. Without it the only number this path reported was its
-            // total, which cannot say whether a boot regression is in reading the
-            // cache, in evaluating the prelude, or in one `require` inside it.
-            eprintln!(
-                "[boot] parse={:?} eval={:?} freeze={:?}",
-                t_read,
-                t_eval - t_read,
-                t_start.elapsed() - t_pre_freeze
-            );
-        }
-        Some(SharedBundle {
-            code: Arc::new(code),
-            bindings,
-            private,
-            meta: name_meta,
-        })
-    };
-    let bundle = run();
-    if bundle.is_none() {
-        // Current-build header but the body failed to read/eval: the file is
-        // corrupt — remove it so the next source boot rewrites from scratch.
-        let _ = std::fs::remove_file(&path);
-    } else if std::env::var_os("BROOD_BOOT_TRACE").is_some() {
-        eprintln!("[boot] cache hit — total={:?}", t_start.elapsed());
-    }
-    bundle
-}
-
 /// The full source boot: parse + macro-expand + eval + freeze the prelude,
-/// then (best-effort) write the expanded-prelude cache for the next boot.
+/// then (best-effort) write the prelude image for the next boot.
 fn boot_from_source() -> SharedBundle {
     let t_start = web_time::Instant::now();
     // Build the prelude + builtins in a throwaway builder heap, then relocate it
@@ -499,9 +303,7 @@ fn boot_from_source() -> SharedBundle {
     // The boot cache's payload: each compiled form, printed. A form whose
     // print→read→print round-trip isn't a fixpoint poisons the whole cache
     // (never write a file we can't provably re-read into the same forms).
-    let write_cache = std::env::var_os("BROOD_NO_BOOT_CACHE").is_none();
-    let mut cache_ok = write_cache;
-    let mut printed_forms: Vec<String> = Vec::new();
+    let write_image = std::env::var_os("BROOD_NO_PRELUDE_IMAGE").is_none();
     for (form, pos) in forms {
         // Try the raw form first — catches `defn`/`defmacro` before lowering
         // discards their source positions. Then also try the expanded form so
@@ -512,7 +314,10 @@ fn boot_from_source() -> SharedBundle {
         // Recording variant: the cache-hit boot does not read the raw prelude, so
         // the names this *un-expanded* form contributes are captured here and
         // written into the cache line below.
-        let raw_names = heap.note_definition_recording(form, pos);
+        // Records the RAW form's definition sites (LSP navigation into the prelude is
+        // identical on both boot paths because of this). Its returned names fed the
+        // deleted text cache; the side effect is what matters.
+        heap.note_definition_recording(form, pos);
         // Compile pass (expand macros, then namespace-resolve — a no-op here since
         // the prelude is the root namespace), then evaluate. Form-by-form so a
         // macro defined by one form is visible to the next.
@@ -524,28 +329,6 @@ fn boot_from_source() -> SharedBundle {
             eprintln!("[boot-form] {:?} at {:?}", d, pos);
         }
         t_expand += d;
-        if cache_ok {
-            let printed = syntax::printer::print(&heap, form);
-            match syntax::reader::read_all(&mut heap, &printed) {
-                Ok(v) if v.len() == 1 && syntax::printer::print(&heap, v[0]) == printed => {
-                    let names: Vec<&str> = raw_names
-                        .iter()
-                        .map(|&n| core::value::symbol_name_ref(n))
-                        .collect();
-                    // A printed form never contains a newline (the printer emits one
-                    // line) and a symbol never contains a space, so `line:col:names `
-                    // is unambiguous against the form that follows it.
-                    printed_forms.push(format!(
-                        "{}:{}:{} {}",
-                        pos.line,
-                        pos.col,
-                        names.join(","),
-                        printed
-                    ));
-                }
-                _ => cache_ok = false,
-            }
-        }
         heap.note_definition(form, pos);
         eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
     }
@@ -557,8 +340,8 @@ fn boot_from_source() -> SharedBundle {
     // ADR-314: write the prelude image before the freeze consumes the builder heap. The
     // cold boot is allowed to be slow — it runs once per binary build — so this is pure
     // addition; every later boot skips the read+eval this one just did. Best-effort: a
-    // failure leaves the next boot on the text-cache path, which is where it was before.
-    if cache_ok {
+    // failure leaves the next boot on the source path, which is where it was before.
+    if write_image {
         if let Some(img) = prelude_image_path() {
             let _ = image::write_prelude_image(
                 &mut heap,
@@ -566,33 +349,13 @@ fn boot_from_source() -> SharedBundle {
                 &builtin_names,
                 &img,
                 &builtins::build_id_string(),
-            );
+                core::value::gensym_counter(),
+            )
+            .map(|()| img.parent().map(|d| prelude_image_prune(d, &img)));
         }
     }
     let (code, bindings) = heap.freeze_as_shared_code(root);
     let t_freeze = t_mark.elapsed();
-    if cache_ok {
-        if let Some(path) = boot_cache_path() {
-            // Atomic-enough for the purpose: write to a sibling temp file and
-            // rename, so a concurrent booting process never reads a torn file.
-            let _ = (|| -> std::io::Result<()> {
-                let dir = path.parent().expect("cache path has a dir");
-                std::fs::create_dir_all(dir)?;
-                let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-                let mut payload = format!(
-                    "{}{}\n",
-                    boot_cache_header_prefix(),
-                    core::value::gensym_counter()
-                );
-                payload.push_str(&printed_forms.join("\n"));
-                payload.push('\n');
-                std::fs::write(&tmp, payload)?;
-                std::fs::rename(&tmp, &path)?;
-                boot_cache_prune(dir, &path);
-                Ok(())
-            })();
-        }
-    }
     if std::env::var_os("BROOD_BOOT_TRACE").is_some() {
         eprintln!(
             "[boot] builtins={:?} read={:?} expand={:?} eval={:?} freeze={:?} total={:?} (source boot{})",
@@ -602,7 +365,7 @@ fn boot_from_source() -> SharedBundle {
             t_eval - t_expand,
             t_freeze,
             t_start.elapsed(),
-            if cache_ok { ", cache written" } else { "" }
+            if write_image { ", image written" } else { "" }
         );
     }
     SharedBundle {
@@ -1084,142 +847,74 @@ mod prelude_hygiene {
 }
 
 #[cfg(test)]
-mod boot_cache_prune_tests {
-    use super::boot_cache_prune;
-    use std::io::Write;
+mod prelude_image_prune_tests {
+    use super::prelude_image_prune;
 
-    /// Create `n` `prelude-expanded-*.blsp` files with ascending mtimes and return their
-    /// paths oldest-first. Ascending mtimes are what makes "keeps the NEWEST" testable.
     fn seed(dir: &std::path::Path, n: usize) -> Vec<std::path::PathBuf> {
         let mut out = Vec::new();
         for i in 0..n {
-            let p = dir.join(format!("prelude-expanded-{i:016x}.blsp"));
-            let mut f = std::fs::File::create(&p).unwrap();
-            f.write_all(b"x").unwrap();
-            // Every build writes BOTH artifacts (ADR-314), so the fixture must too —
-            // seeding only the text cache is what let the image leak go unnoticed.
-            let img = p.with_extension("img");
-            std::fs::File::create(&img)
-                .unwrap()
-                .write_all(b"i")
-                .unwrap();
-            set_mtime(&img, std::time::SystemTime::now());
-            // Stamp mtimes explicitly rather than relying on creation order: the
-            // filesystem's timestamp granularity is coarse enough that files written in
-            // one loop can share an mtime, which would make the ordering assertion
-            // below pass or fail by luck.
+            let p = dir.join(format!("prelude-expanded-{i:016x}.img"));
+            std::fs::write(&p, b"i").unwrap();
+            // Stamp mtimes explicitly: filesystem timestamp granularity is coarse enough
+            // that files written in a tight loop can share one, and the prune's ordering
+            // is what these tests assert.
             let t = std::time::SystemTime::now() - std::time::Duration::from_secs((n - i) as u64);
             set_mtime(&p, t);
-            set_mtime(&img, t);
             out.push(p);
         }
         out
     }
-
-    /// Stamp `p`'s mtime. `std::fs::FileTimes` rather than the `filetime` crate — this is
-    /// the only place in the workspace that needs it, and a dev-dependency for two tests
-    /// is not worth it.
     fn set_mtime(p: &std::path::Path, t: std::time::SystemTime) {
         let f = std::fs::File::options().write(true).open(p).unwrap();
         f.set_times(std::fs::FileTimes::new().set_modified(t))
             .unwrap();
     }
-
     fn remaining(dir: &std::path::Path) -> usize {
-        count_ext(dir, ".blsp")
-    }
-
-    /// Files with `ext` left in `dir`. Counting `.img` separately is the point: the
-    /// prune matched `.blsp` alone for as long as the image existed, so the text caches
-    /// were bounded and the images grew without limit — 1057 files / 450 MB when found.
-    fn count_ext(dir: &std::path::Path, ext: &str) -> usize {
         std::fs::read_dir(dir)
             .unwrap()
             .flatten()
             .filter(|e| {
                 let n = e.file_name();
                 let n = n.to_string_lossy();
-                n.starts_with("prelude-expanded-") && n.ends_with(ext)
+                n.starts_with("prelude-expanded-") && n.ends_with(".img")
             })
             .count()
     }
 
-    /// The regression this exists for. The prune used to bound by AGE ONLY, and the cache
-    /// name hashes `build-id` (which embeds the binary's mtime), so every rebuild minted a
-    /// new ~190 KB file and the 7-day rule deleted none of them: measured 4192 files /
-    /// 732 MB on a dev machine, with the prune's own directory walk costing 7.6 ms — a
-    /// whole warm boot — on every cache-writing boot.
     #[test]
-    fn prune_bounds_the_cache_by_count_not_only_by_age() {
+    fn prune_bounds_the_images_by_count_not_only_by_age() {
         let dir = std::env::temp_dir().join(format!("brood-prune-count-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // All freshly stamped and none stale, so an age-only prune removes NOTHING here —
-        // which is exactly the bug. Sabotage-checked: reverting to the age-only body
-        // leaves all 40 and fails this assertion.
         let files = seed(&dir, 40);
-        let keep = dir.join("prelude-expanded-keep.blsp");
+        let keep = dir.join("prelude-expanded-keep.img");
         std::fs::write(&keep, b"k").unwrap();
-        let keep_img = keep.with_extension("img");
-        std::fs::write(&keep_img, b"k").unwrap();
-
-        boot_cache_prune(&dir, &keep);
-
-        // 16 kept by the cap + `keep` itself, which is never a candidate.
+        prelude_image_prune(&dir, &keep);
         assert_eq!(remaining(&dir), 17, "count cap did not bound the directory");
-        assert!(keep.exists(), "the caller's own fresh cache was deleted");
-        // …and it kept the NEWEST, not an arbitrary 16: the oldest must be gone and the
-        // newest must survive. A prune that keeps the wrong 16 costs a source boot on
-        // every binary in use, which is the cost it exists to avoid.
-        assert!(!files[0].exists(), "kept the oldest file");
-        assert!(files[files.len() - 1].exists(), "deleted the newest file");
-        // The image half is bounded by the same cap. Before the stem grouping this read
-        // 41: every image survived because the prune only ever matched `.blsp`.
-        assert_eq!(
-            count_ext(&dir, ".img"),
-            17,
-            "the prelude IMAGES were not bounded — the artifact the count cap forgot"
-        );
-        // A dropped build takes BOTH its files, never one: an orphaned image is dead
-        // weight no boot will ever read, since its text-cache sibling is gone.
-        assert!(
-            !files[0].with_extension("img").exists(),
-            "dropped a build's text cache but kept its image"
-        );
-        // …and the caller's own build keeps both halves.
-        assert!(
-            keep_img.exists(),
-            "deleted the image belonging to the caller's own fresh cache"
-        );
-
+        assert!(keep.exists(), "the caller's own fresh image was deleted");
+        assert!(!files[0].exists(), "kept the oldest image");
+        assert!(files[files.len() - 1].exists(), "deleted the newest image");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The age rule is still a floor: under the count cap, a long-dead build goes anyway.
     #[test]
-    fn prune_still_drops_a_stale_file_under_the_count_cap() {
+    fn prune_still_drops_a_stale_image_under_the_count_cap() {
         let dir = std::env::temp_dir().join(format!("brood-prune-age-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let fresh = dir.join("prelude-expanded-0000000000000001.blsp");
-        let old = dir.join("prelude-expanded-0000000000000002.blsp");
+        let fresh = dir.join("prelude-expanded-0000000000000001.img");
+        let old = dir.join("prelude-expanded-0000000000000002.img");
         std::fs::write(&fresh, b"f").unwrap();
         std::fs::write(&old, b"o").unwrap();
-        std::fs::write(fresh.with_extension("img"), b"f").unwrap();
-        std::fs::write(old.with_extension("img"), b"o").unwrap();
         let ancient = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
         set_mtime(&old, ancient);
-        set_mtime(&old.with_extension("img"), ancient);
-        let keep = dir.join("prelude-expanded-keep.blsp");
+        let keep = dir.join("prelude-expanded-keep.img");
         std::fs::write(&keep, b"k").unwrap();
-
-        boot_cache_prune(&dir, &keep);
-
-        assert!(fresh.exists(), "a fresh file under the cap was deleted");
-        assert!(!old.exists(), "a month-old build survived the age floor");
+        prelude_image_prune(&dir, &keep);
+        assert!(fresh.exists(), "a fresh image under the cap was deleted");
         assert!(
-            !old.with_extension("img").exists(),
-            "the stale build's image outlived its text cache"
+            !old.exists(),
+            "a month-old build's image survived the age floor"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
