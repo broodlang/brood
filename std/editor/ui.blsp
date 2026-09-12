@@ -225,7 +225,8 @@ removed-then-re-added timer re-arms clean and stale entries can't leak), and sta
         armed0 (select-keys (or (get clock :armed) {}) ks)
         fired (select-keys (or (get clock :fired) {}) ks)
         armed (fold ks armed0 (fn (a k) (if (contains? a k) a (assoc a k now)))))
-    {:last-input last-input :armed armed :fired fired}))
+    ;; `:memo` (the view's memoised fragments, ADR-336) rides along untouched
+    (assoc clock :last-input last-input :armed armed :fired fired)))
 
 (defn- ui-poll-ms (timers clock now)
   "How long to park the poll: the soonest *live* timer deadline minus `now` (at least
@@ -293,6 +294,61 @@ already-open window instead of opening a duplicate (e.g. a repeated `(observe)`)
 `where` names the phase it came from (`\"view\"` / `\"update\"`). Returns nil."
   (io/puts (str "ui-run: " where " error (recovering to last good frame): " (error-message e))
     :to *err*))
+
+;; ---- memoised view fragments (ADR-336) --------------------------------------
+;; A `view` is pure, so a fragment of the frame is a function of a few values — a
+;; buffer line's ops of its text, its syntax spans and its highlights; a pane's mode
+;; line of the fields it shows. Yet the view can't remember last turn's result: it
+;; has no state, and the loop hands it only the model. `ui-memo` is the missing
+;; primitive, Elm's `Html.Lazy` in TEA-honest form: the loop keeps the previous
+;; turn's fragments as a table bound to `*ui-memo*` while `view` runs, a fragment
+;; reads its own entry there and reuses the ops when its `deps` are unchanged, and
+;; the fragments of THIS turn travel back to the loop inside the frame itself — as
+;; `[:ui/memo key deps ops]` markers `ui-harvest` collects into the next table and
+;; splices away before the frontend sees the frame. No cell is written anywhere.
+;;
+;; The `deps` comparison is `=`, which is O(1) on a value that is the same heap cell
+;; (a cached band, a rope) and a real walk otherwise — so name as deps the values a
+;; fragment actually reads, prefer ones the model keeps between turns, and keep them
+;; small. A fragment that is not emitted this turn is simply not in the next table:
+;; the memo is bounded by the frame, and nothing needs evicting.
+
+(defdyn *ui-memo* nil)
+;; The previous turn's memo table — `{key -> [deps ops]}` — while `view` runs inside
+;; `ui-loop`; nil outside a loop (a test calling a view directly, a headless render),
+;; where `ui-memo` computes every fragment and emits no marker, so a frame is the
+;; same plain data it always was.
+
+(defn ui-memo (key deps thunk)
+  "The ops of a view fragment, remembered across turns. `key` names the fragment
+(anything `=`-comparable: `[:line 12]`, `[:modeline pane-path]`); `deps` are the values
+its ops depend on; `(thunk)` computes the ops — a list or vector of render ops. Inside a
+running `ui-run` the previous turn's ops are reused when the key's `deps` are `=`, and the
+result is a one-element list holding a `[:ui/memo key deps ops]` marker the loop harvests
+(`ui-harvest`); splice it where the ops would go (`mapcat`/`append`). Outside a loop it is
+just `(thunk)` — as is a nil `key`, the way a caller opts a fragment out (a pane whose
+ops are transformed after this). Omit from `deps` nothing the thunk reads, or a stale
+fragment is painted."
+  (if (or (nil? *ui-memo*) (nil? key))
+    (thunk)
+    (let (prev (get *ui-memo* key)
+          ops (if (and prev (= (first prev) deps)) (second prev) (thunk)))
+      (list [:ui/memo key deps ops]))))
+(sig ui-memo (any any fn -> any))
+
+(defn ui-memo-marker? (op)
+  "True for a `[:ui/memo key deps ops]` marker."
+  (and (vector? op) (= (first op) :ui/memo)))
+
+(defn ui-harvest (frame)
+  "`[frame' table]`: `frame` with every `ui-memo` marker spliced away (a plain frame the
+frontend paints), and the table of this turn's fragments — what `*ui-memo*` is bound to
+for the next turn. The loop calls it on every rendered frame; a frame without markers
+comes back as it went in, with an empty table. Recurses into a marker's ops and a
+`:scroll-region`'s. Native (`%ui-harvest`): it walks every op of every frame, where a
+Brood-level walk cost about a millisecond — more than the paint the memo saves."
+  (%ui-harvest frame))
+(sig ui-harvest (any -> vector))
 
 ;; ---- per-turn tracing (BROOD_UI_TRACE=1) ------------------------------------
 ;; Where a turn's time goes on the BROOD side of the loop: `view` (model → frame),
@@ -386,8 +442,15 @@ re-raises, surfacing a genuine startup bug instead of spinning."
           ;; render this model; a `[:frame …]` result is the frame to draw, `:failed`
           ;; means `view` threw (already logged) and we must fall back to `last-good`.
           rendered (try
-                     (let ([frame ms] (ui-timed (fn () (view model cols rows))))
-                       (do (ui-trace "view" ms (str (count frame) " ops")) [:frame frame]))
+                     ;; the previous turn's memoised fragments are in scope for `ui-memo`
+                     ;; (ADR-336) — nil outside a loop, `{}` on the first turn
+                     (let ([frame ms] (ui-timed (fn ()
+                                                  (binding (*ui-memo* (or (get clock :memo) {}))
+                                                    (view model cols rows))))
+                           [flat table] (ui-harvest frame))
+                       (do
+                         (ui-trace "view" ms (str (count flat) " ops, " (count table) " memo"))
+                         [:frame flat table]))
                      (catch e
                        (if (nil? last-good)
                          ; first render failed — a real startup bug, not a wedge
@@ -397,67 +460,71 @@ re-raises, surfacing a genuine startup bug instead of spinning."
         ;; couldn't render `model` — roll back to the last model that did, and re-render it
         ;; (the clock keeps advancing — it's wall-clock reality, not model state).
         (ui-loop last-good last-good clock view update display)
-        (do
-          (ui-trace "draw" (second (ui-timed (fn () ((get display :draw) (second rendered))))) "")
-          ;; `model` rendered cleanly: it's now the fallback point for the next turns.
-          ;; Named timers are opt-in via the `:timers` key — `timers` is nil for a
-          ;; pre-timers app (the legacy `:tick-ms`/`:tick` path) and the clock is just
-          ;; passed through untouched; with timers, the poll parks until the soonest is
-          ;; due and `ui-fire` decides what (if anything) fired.
-          (let (timers (get model :timers)
-                now1 (ui-now model)
-                clock1 (if (nil? timers) clock (ui-clock-init clock timers now1))
-                poll-ms (if (nil? timers) (ui-tick-ms model) (ui-poll-ms timers clock1 now1))
-                raw ((get display :poll) poll-ms))
-            (cond
-              ;; the window's close button always quits; `ui-run` then runs `:leave`
-              (quit-request? raw) nil
-              ;; raise-to-front request: act on the display, keep the model untouched and
-              ;; do NOT advance `:last-input` (a focus message from another process is
-              ;; not user input — it must not reset idle timers).
-              (focus-request? raw)
-                (let (f (get display :focus))
-                  (do
-                    (when f (f))
-                    (ui-loop model model clock1 view update display)))
-              ;; poll timed out (nil). Legacy: deliver the bare `:tick`. Timers: fire the
-              ;; earliest due timer (if any), else re-park without folding.
-              (nil? raw)
-                (if (nil? timers)
-                  (let (next (ui-fold update model :tick cols rows))
-                    (ui-loop next model clock1 view update display))
-                  (let (fr (ui-fire timers clock1 (ui-now model))
-                        event (first fr)
-                        clock2 (second fr))
-                    (if (nil? event)
-                      (ui-loop model model clock2 view update display)
-                      (let (next (ui-fold update model event cols rows))
-                        (ui-loop next model clock2 view update display)))))
-              ;; a real key/mouse/system event: with timers, stamp `:last-input` (resets
-              ;; idle timers); then fold it. A throwing `update` drops this input.
-              else
-                (let (clock2 (if (nil? timers)
-                               clock1
-                               (assoc clock1 :last-input (ui-now model)))
-                      next0 (ui-fold update model raw cols rows)
-                      ;; a `:coalesce-input?` app also drains any inputs ALREADY queued
-                      ;; into this same fold, so a burst renders once instead of once
-                      ;; per event (`ui-drain-input`); a control message pulled mid-drain
-                      ;; comes back as `pending` for the loop to act on. Default apps skip
-                      ;; the drain and render per input exactly as before.
-                      drained (if (get model :coalesce-input?)
-                                (ui-drain-input next0 update display cols rows *ui-input-batch*)
-                                [next0 nil])
-                      next (first drained)
-                      pending (second drained))
-                  (cond
-                    (quit-request? pending) nil
-                    (focus-request? pending)
-                      (let (f (get display :focus))
-                        (do
-                          (when f (f))
-                          (ui-loop next next clock2 view update display)))
-                    else (ui-loop next model clock2 view update display))))))))))
+        (let (
+              ;; this turn's fragments become next turn's memo table — loop bookkeeping
+              ;; on `clock`, like the timers: never rolled back with the model
+              clock (assoc clock :memo (nth rendered 2)))
+          (do
+            (ui-trace "draw" (second (ui-timed (fn () ((get display :draw) (second rendered))))) "")
+            ;; `model` rendered cleanly: it's now the fallback point for the next turns.
+            ;; Named timers are opt-in via the `:timers` key — `timers` is nil for a
+            ;; pre-timers app (the legacy `:tick-ms`/`:tick` path) and the clock is just
+            ;; passed through untouched; with timers, the poll parks until the soonest is
+            ;; due and `ui-fire` decides what (if anything) fired.
+            (let (timers (get model :timers)
+                  now1 (ui-now model)
+                  clock1 (if (nil? timers) clock (ui-clock-init clock timers now1))
+                  poll-ms (if (nil? timers) (ui-tick-ms model) (ui-poll-ms timers clock1 now1))
+                  raw ((get display :poll) poll-ms))
+              (cond
+                ;; the window's close button always quits; `ui-run` then runs `:leave`
+                (quit-request? raw) nil
+                ;; raise-to-front request: act on the display, keep the model untouched and
+                ;; do NOT advance `:last-input` (a focus message from another process is
+                ;; not user input — it must not reset idle timers).
+                (focus-request? raw)
+                  (let (f (get display :focus))
+                    (do
+                      (when f (f))
+                      (ui-loop model model clock1 view update display)))
+                ;; poll timed out (nil). Legacy: deliver the bare `:tick`. Timers: fire the
+                ;; earliest due timer (if any), else re-park without folding.
+                (nil? raw)
+                  (if (nil? timers)
+                    (let (next (ui-fold update model :tick cols rows))
+                      (ui-loop next model clock1 view update display))
+                    (let (fr (ui-fire timers clock1 (ui-now model))
+                          event (first fr)
+                          clock2 (second fr))
+                      (if (nil? event)
+                        (ui-loop model model clock2 view update display)
+                        (let (next (ui-fold update model event cols rows))
+                          (ui-loop next model clock2 view update display)))))
+                ;; a real key/mouse/system event: with timers, stamp `:last-input` (resets
+                ;; idle timers); then fold it. A throwing `update` drops this input.
+                else
+                  (let (clock2 (if (nil? timers)
+                                 clock1
+                                 (assoc clock1 :last-input (ui-now model)))
+                        next0 (ui-fold update model raw cols rows)
+                        ;; a `:coalesce-input?` app also drains any inputs ALREADY queued
+                        ;; into this same fold, so a burst renders once instead of once
+                        ;; per event (`ui-drain-input`); a control message pulled mid-drain
+                        ;; comes back as `pending` for the loop to act on. Default apps skip
+                        ;; the drain and render per input exactly as before.
+                        drained (if (get model :coalesce-input?)
+                                  (ui-drain-input next0 update display cols rows *ui-input-batch*)
+                                  [next0 nil])
+                        next (first drained)
+                        pending (second drained))
+                    (cond
+                      (quit-request? pending) nil
+                      (focus-request? pending)
+                        (let (f (get display :focus))
+                          (do
+                            (when f (f))
+                            (ui-loop next next clock2 view update display)))
+                      else (ui-loop next model clock2 view update display)))))))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —

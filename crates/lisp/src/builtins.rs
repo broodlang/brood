@@ -49,6 +49,7 @@ mod filesystem;
 mod io;
 // `pub(crate)` for `eval::unbound_error`'s KI-120 diagnostic, which asks whether a missing
 // qualified name belongs to a baked-in module that `*features*` records as loaded.
+mod editor_native;
 pub(crate) mod modules;
 mod nodes;
 pub(crate) mod numeric;
@@ -161,6 +162,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     wasm::register(&mut primitives);
     build_info::register(&mut primitives);
     nodes::register(&mut primitives);
+    // Last: registration order feeds the intern table (see `syntax_scan::register`).
+    editor_native::register(&mut primitives);
 }
 
 // (The doc comment and `#[rustfmt::skip]` that used to sit here belonged to the

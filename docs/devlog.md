@@ -846,6 +846,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 - **2026-09-12** — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
 - **2026-09-12** — KI-131: lazy loading met `%isolate`; the runner declares its closure with a new `(:load …)` header clause
+- **2026-09-12** — memoised view fragments (ADR-336): `ui-memo`, the frame carries its cache back; `=` is O(1) on the same cell, `append` shares its last list; `BROOD_UI_TRACE`; KI-132 filed
 
 ---
 
@@ -12944,3 +12945,33 @@ Two smaller things the same probes settled: the 44 repeated bytecode compiles on
 and lead 1 of §7.11 as first written — "the deferred queue starves" — was wrong, and is
 corrected there.
 
+
+## 2026-09-12 — the Brood side of a keystroke: memoised view fragments, and what the trace found
+
+ADR-332 left the paint at 0.3 ms and said the Brood side was "3–5 ms". Measured properly —
+`BROOD_UI_TRACE=1` now prints `view`, `draw` and `update` per turn beside the paint trace —
+bedit on a fontified file at the window's 213×49 grid was 2.7 ms of `view` and 3.1 ms of
+`update` per typed character, and a cursor blink paid the whole `view` to flip one cell. The
+first profile said `require-one` was a third of it; that was the runtime's inferred load
+being paid on every `(reflect/eval 'mod/fn)` a service lookup makes, and ADR-335 landed the
+same afternoon and removed it (`drain_pending` returns before the loader under the lazy
+policy). The real costs were duller: 47 line renders a frame, the gutter's ops rebuilt from
+cached cells, a nine-segment mode line laid out from scratch, and — for typing — the whole
+111-line band re-lexed on every keystroke, half of it a `(face :syntax/…)` inherit-chain
+walk per coloured token.
+
+`ui-memo` (ADR-336) is the memo a pure view could not have: the loop binds last turn's
+fragments to `*ui-memo*` while `view` runs, a fragment reuses its ops while its deps are
+`=`, and this turn's fragments ride back inside the frame as markers the loop harvests and
+splices away. No cell anywhere. Two things had to be true for it to pay: `=` had to be O(1)
+on a value that is the same heap cell (it walked a 1000-element list to say a list equals
+itself — 53 µs — and now answers identity first), and the harvest had to be native (the
+Brood walk of 250 ops cost 0.8 ms, more than the paint). `append` turned out to copy its
+last argument too — 27 µs to put five items in front of 240 — and shares it now.
+
+bedit memoises each visible line, the gutter ops and the mode-line layout. A blink turn's
+`view`: 2.7 → 0.68 ms. A typed character still misses every line (its deps name the whole
+band) and still re-lexes the band; the face resolution is once per pass now (−0.4 ms), and
+the rest of that pass is KI-132 — the JIT deopt-thrashes every helper of `hl-spans` and
+latches the walk onto the VM at 2.4 µs a token. Filed, not worked: the JIT is another
+session's this week.

@@ -1,6 +1,6 @@
 //! Natives added for the editor toolkit (`std/editor/*`), registered LAST: registration
 //! order feeds the intern table, and a primitive inserted mid-list reshuffles small-map
-//! key order image-wide (see `syntax_scan::register`). Two live here:
+//! key order image-wide (see `syntax_scan::register`).
 //!
 //! `%ui-harvest` — the per-frame pass under `editor/ui`'s memoised view fragments
 //! (ADR-336). A `view` marks a fragment it memoised as `[:ui/memo key deps ops]` inside
@@ -17,8 +17,8 @@ use crate::error::{LispError, LispResult};
 
 pub(super) fn register(primitives: &mut super::Primitives) {
     use super::signature_types::*;
-    use crate::core::value::{Arity, Tag};
-    use crate::types::{Sig, Ty};
+    use crate::core::value::Arity;
+    use crate::types::Sig;
     primitives.def(
         "%ui-harvest",
         Arity::exact(1),
@@ -26,17 +26,6 @@ pub(super) fn register(primitives: &mut super::Primitives) {
         &["frame"],
         "[frame' table]: frame (a vector or list of render ops) with every [:ui/memo key deps ops] marker replaced by its ops, and a map key -> [deps ops] of the markers. Recurses into a marker's ops and into a [:scroll-region frac ops] vector (its ops come back as a vector, as they went in). The pass behind editor/ui's memoised view fragments (ADR-336), native because it runs once per frame over every op.",
         ui_harvest,
-    );
-    // The text contrast exponent (`gui-text-contrast!`, ADR-337): partial glyph coverage
-    // lifted where text is lighter than its ground — light-on-dark text under a
-    // linear-light blend reads thin, and this is the knob every such renderer grows.
-    primitives.def(
-        "%gui-text-contrast!",
-        Arity::exact(1),
-        Sig::new(vec![Ty::of_tags(&[Tag::Int, Tag::Float])], nil_ty),
-        &["gamma"],
-        "Set the text contrast exponent γ (1.0 by default, clamped to 0.5..3.0): a monochrome glyph's partial coverage is lifted to cov^(1/γ) where the text is lighter than the pixel it lands on, so light-on-dark text — which a linear-light blend renders with thin stems — reads fuller without touching a glyph's interior, its exterior, dark-on-light text or colour emoji. 1.0 is the plain blend; 1.4–1.8 is the range other linear-light renderers ship. Applies to every open window and the default for ones opened later; a pure repaint. Needs --features gui. Returns nil.",
-        gui_text_contrast,
     );
 }
 
@@ -126,20 +115,3 @@ fn ui_harvest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_vector2(flat, map))
 }
 
-/// `(%gui-text-contrast! gamma)` — see the registration. GUI only; returns nil.
-fn gui_text_contrast(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let gamma = match arg(args, 0) {
-        Value::Int(n) => n as f32,
-        Value::Float(f) => f as f32,
-        other => {
-            return Err(LispError::wrong_type(
-                heap,
-                "%gui-text-contrast!",
-                "a number (the contrast exponent, 1.0 = plain)",
-                other,
-            ))
-        }
-    };
-    crate::host::gui::text_contrast(gamma).map_err(LispError::runtime)?;
-    Ok(Value::nil())
-}

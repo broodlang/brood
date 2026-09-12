@@ -21848,3 +21848,59 @@ exists for; the checker under eager policy still flagging a qualified typo; `--c
 still failing on a broken transitively-referenced module. `make ab --floor` must read
 `startup` flat on a machine where it may run — a lazy load can only remove work from the
 rows, so a movement there is a mechanism cost on the hit path, which item 1 forbids.
+
+## ADR-336 — Memoised view fragments: `ui-memo`, and the frame carries its own cache
+
+**Status:** accepted and implemented 2026-09-12 (`std/editor/ui.blsp`: `*ui-memo*`,
+`ui-memo`, `ui-harvest`; the native `%ui-harvest`). Two supporting changes stand on their
+own: `=` short-circuits on an identical heap cell, and `append` shares its last argument.
+
+**Context — the number.** With ADR-332 a keystroke's paint is 0.3 ms; the Brood side of
+the same keystroke on bedit, measured with the new `BROOD_UI_TRACE=1`, is 2.7 ms of `view`
+and 3.1 ms of `update` — and a cursor blink, which changes one cell, pays the full `view`.
+The view is pure: a buffer line's ops are a function of its text, its syntax spans and its
+highlights; a pane's mode line of nine segment strings. Nothing in it can remember last
+turn's answer, because the loop hands `view` only the model, and the model is the
+application's. Elm has `Html.Lazy` for exactly this; TEA loops without it re-render
+everything, and that is where bedit stood.
+
+**Decision.**
+
+1. **A memo table is loop state, bound around `view`.** `ui-loop` keeps the previous
+   turn's fragments as a map `{key -> [deps ops]}` on its `clock` bookkeeping (like the
+   timers: never rolled back with the model) and binds it to the dynamic `*ui-memo*`
+   (ADR-032) while `view` runs. Outside a loop the var is nil, so a test that calls a
+   view directly gets the plain frame it always did.
+2. **`(ui-memo key deps thunk)` is the fragment.** Inside a loop it reuses the previous
+   ops when the key's `deps` are `=`, else runs the thunk — and returns a one-element
+   list holding a marker `[:ui/memo key deps ops]`, spliced where the ops would go. A nil
+   key opts a fragment out (a pane whose ops are transformed after this).
+3. **The frame carries the cache back.** `ui-harvest` walks the rendered frame once:
+   every marker is replaced by its ops (the frontend never sees one) and tabled for the
+   next turn. No cell is written anywhere; a fragment not emitted this turn is simply
+   absent from the next table, so the memo is bounded by the frame. The walk is native
+   (`%ui-harvest`) for the same reason `%span-runs` is: it runs over every op of every
+   frame, and in Brood it cost 0.8 ms — more than the paint the memo saves.
+4. **`=` is O(1) on an identical cell.** Structural equality on the same list, vector,
+   map, set, string, rope or bytes handle returned true only after walking it — 53 µs for
+   a 1000-element list. Immutability makes identity exact, so `Heap::equal` answers a
+   shared handle immediately (a NaN float, a scalar, keeps its IEEE answer). This is what
+   lets a fragment name a cached span band or the rope itself as a dep at no cost.
+5. **`append` shares its last argument.** The prelude reversed the whole result, walking
+   every argument twice; the last list is now the result's tail, as in every Lisp, and
+   only the lists before it are copied. `(append small big)` is O(small).
+
+**Consequences.** bedit memoises each visible line (`[:line x row]`), the gutter ops and
+the mode-line layout. A blink turn's `view` is 2.7 → 0.68 ms with 49 fragments hit; the
+harvest is 48 µs. A cursor motion next to a bracket and a typed character still miss
+every line — their deps name the whole span band and the whole override list — and cost
+what they did; the per-line refinement (a line's own spans and overrides as its deps) is
+the open item, and `update`'s re-lex of the band on every keystroke (2.5 ms, half of it a
+face resolved per token, now once per pass) is the larger one. The deps are the author's
+promise: omit something a thunk reads and a stale fragment is painted, which is why every
+fragment names values the model keeps between turns.
+
+**Alternatives rejected.** *A mutable memo handle* (`memoize`): the one place state
+would leak into a pure view, and unbounded. *Threading the table through `view`'s
+signature*: every `ui-run` app changes for a feature most never touch. *Diffing harder in
+the frontend*: the frontend already diffs; the cost was producing the ops.
