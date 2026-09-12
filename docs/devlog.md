@@ -846,6 +846,7 @@ Every session, oldest first. Early sessions' full text is in
 - **2026-09-12** — the GUI retains its frame and repaints by cell row (ADR-332): a keystroke paints 0.3 ms instead of 4–13; whole-pixel ppem, subpixel text at 1× (`gui-text-aa!`), snapped hairlines, `gui-line-height!`
 - **2026-09-12** — `0xFF` reads: radix literals, the second ADR-169 reservation to pay out (ADR-334)
 - **2026-09-12** — a qualified reference loads its module on first use (ADR-335): `nest complete` 72 → 20 ms, five modules instead of 62
+- **2026-09-12** — the lazy-load wave's two artifact divergences: `REGISTRIES` closed (`bd88a386`), `FACTS`/`GLOBALS` shown to be the lazy-load win and normalised in the gate
 - **2026-09-12** — KI-131: lazy loading met `%isolate`; the runner declares its closure with a new `(:load …)` header clause
 - **2026-09-12** — memoised view fragments (ADR-336): `ui-memo`, the frame carries its cache back; `=` is O(1) on the same cell, `append` shares its last list; `BROOD_UI_TRACE`; KI-132 filed
 - **2026-09-12** — text contrast is a setting (ADR-337): `gui/text-contrast` lifts light-on-dark stems under the linear-light blend; bedit ships 1.4
@@ -855,6 +856,59 @@ Every session, oldest first. Early sessions' full text is in
 ---
 
 ## Recent — full entries
+
+## 2026-09-12 — the lazy-load wave's two artifact divergences: one closed, one shown to be the win itself
+
+`cli::artifact_matrix` went red with the lazy-load wave and stayed red through four
+commits. It is two unrelated divergences wearing one failure, and the first line of the
+fingerprint hid the second.
+
+**`REGISTRIES` — a real defect, fixed (`bd88a386`).** A registry name enters
+`(%registry-names)` as a consequence of a WRITE. That was sound while every boot loaded the
+same modules: the prelude reached `seq`, `seq`'s `(:use map)` header recorded an edge, and
+`*require-edges*` existed before anything could ask. Under ADR-335 an imaged boot loads no
+module at all until one is called, so the registry did not exist where a source boot had it
+— two registry-name sets for the same program, which is exactly the KI-106 class this
+differential exists to catch. The prelude now declares it at build: assoc-then-dissoc,
+because marking is a side effect of a successful write and there is no declare-only op, so
+the name is marked and the value goes back to the `{}` the `def-` already gave it. Which
+registries EXIST must not depend on load timing.
+
+Two things tried first, both wrong, both worth recording. Writing the served record in
+`%std-edges-for` does not close it — that path is not reached in the imaged cell (the other
+session reached the same conclusion independently, `7c76b921`). Deferring the prelude's own
+qualified heads during the prelude build is a **complete no-op**, proven by A/B rather than
+inspection: the 8→6 module change that looked like its effect was another commit's.
+
+**`FACTS`/`GLOBALS` — not a defect.** With the first line matching, the next one reads 813
+facts against 794, and ~129 globals with it. The cause, found by a backtrace in
+`ensure_required` rather than by reading: **every one of those loads comes from inside
+`macroexpand_all_depth`**. Expanding any program walks prelude macro bodies, whose
+expansions carry qualified heads, and `require_qualified_head` loads such a head at
+expansion unless something vouches it a function. The stdlib image's kind index is that
+voucher — so an imaged boot defers all six and a source boot loads them. Nothing is lost on
+either side; one cell is simply further ahead. That is the ADR-335 win, and a fingerprint
+taken mid-flight was measuring which cell got there first.
+
+So the gate now loads the prelude's expansion closure before it measures. Every binding,
+fact, sig and def-site is still compared in full — KI-105's stale section directory and
+KI-106's lost registry names fail exactly as before; only "has not been loaded yet" leaves
+the diff.
+
+Sabotage-verified, and the first attempt at that is the instructive part: reverting the
+registry declaration does **not** red it any more, because the prologue loads `seq` in both
+cells and `seq`'s header records the edge either way — the normalisation subsumes the
+`REGISTRIES` fix, so that sabotage proves nothing. The gate is instead verified against the
+class it exists for: neutering `%replay-std-regs!` so a materialised module loses the
+registrations its load performed reds it at once (8 s), and restoring it returns it to
+green. `bd88a386` is kept regardless — a registry set that depends on which modules a boot
+happened to load is worth removing on its own, test or no test.
+
+**The trap this cost an hour to:** rebuilding the binary invalidates the stdlib image (it is
+keyed on build-id), so an A/B that rebuilds between arms silently turns the "imaged" cell
+into a source cell — and the two then agree, for the wrong reason. CLAUDE.md says the run
+you believe is imaged may be reading source; it is worth believing before the measurement,
+not after.
 
 ## 2026-09-12 — KI-131: lazy loading met `%isolate`, and the runner declares its closure with a new `(:load …)` header clause
 

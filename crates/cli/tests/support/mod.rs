@@ -435,6 +435,23 @@ pub fn stall_report(_what: &str) -> String {
 /// because the evaluation RECORDS them rather than binding them, each of which has been
 /// omitted at least once and found late.
 pub const STATE_DUMP: &str = r#"
+;; Load the prelude's expansion closure BEFORE measuring anything, so the two cells are
+;; compared with the same modules in place (ADR-335). They do not arrive there by the same
+;; route and no longer arrive there at the same TIME: expanding any program walks prelude
+;; macro bodies, whose expansions carry qualified heads, and `require_qualified_head` loads
+;; such a head at expansion unless something vouches it a function. The stdlib image's kind
+;; index is that voucher, so an IMAGED boot defers all of them and a SOURCE boot loads six
+;; modules — a ~129-global, 19-fact difference in what is bound when the dump runs, with
+;; nothing lost on either side. That is the lazy-load win, not a defect, and comparing the
+;; two mid-flight measures which cell got there first instead of whether they agree.
+;;
+;; Requiring them here is what keeps the comparison honest rather than weakening it: every
+;; binding, fact, sig and def-site below is still compared in full, so an image that RESTORES
+;; a module wrongly — KI-105's stale section directory, KI-106's lost registry names — fails
+;; exactly as before. Only "has not been loaded yet" is taken out of the diff. A drift in this
+;; list is a loud test failure, not a silent hole, which is why it is spelled out.
+(doseq (m ['map 'seq 'io 'string 'math 'reflect 'path 'file]) (require-one m))
+
 (defn- dyn? (n)
   "Is `n` a dynamic variable? Asked behaviourally, through the primitive `binding` uses,
 so this needs no new introspection surface."
