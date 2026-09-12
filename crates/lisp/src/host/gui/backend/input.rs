@@ -3,6 +3,7 @@
 //! bookkeeping that turns raw events into `[:key …]` / `[:mouse …]` messages.
 
 use super::*;
+use crate::host::gui::named_key;
 
 /// Max gap between consecutive presses (same button, same cell) that still counts
 /// as part of one click chain — the double/triple-click window, in milliseconds.
@@ -181,41 +182,41 @@ pub(super) fn shift_char(c: char) -> char {
 pub(super) fn translate_key(ke: &KeyEvent, mods: ModifiersState) -> Option<Key> {
     use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
     match &ke.logical_key {
-        WKey::Named(n) => Some(match n {
-            // Shift on a motion key is encoded (`:shift-up`, `:shift-home`, …) so the
-            // editor binds shift-select (extend the region) distinctly from a plain
-            // arrow; other named keys drop Shift as before.
-            NamedKey::ArrowUp if mods.shift_key() => Key::Named("shift-up"),
-            NamedKey::ArrowUp => Key::Named("up"),
-            NamedKey::ArrowDown if mods.shift_key() => Key::Named("shift-down"),
-            NamedKey::ArrowDown => Key::Named("down"),
-            NamedKey::ArrowLeft if mods.shift_key() => Key::Named("shift-left"),
-            NamedKey::ArrowLeft => Key::Named("left"),
-            NamedKey::ArrowRight if mods.shift_key() => Key::Named("shift-right"),
-            NamedKey::ArrowRight => Key::Named("right"),
-            NamedKey::Enter => Key::Named("enter"),
-            NamedKey::Escape => Key::Named("escape"),
-            NamedKey::Backspace => Key::Named("backspace"),
-            // Shift+Tab is back-tab — match the crossterm frontend's :back-tab.
-            NamedKey::Tab if mods.shift_key() => Key::Named("back-tab"),
-            NamedKey::Tab => Key::Named("tab"),
-            NamedKey::Delete => Key::Named("delete"),
-            NamedKey::Home if mods.shift_key() => Key::Named("shift-home"),
-            NamedKey::Home => Key::Named("home"),
-            NamedKey::End if mods.shift_key() => Key::Named("shift-end"),
-            NamedKey::End => Key::Named("end"),
-            NamedKey::PageUp => Key::Named("page-up"),
-            NamedKey::PageDown => Key::Named("page-down"),
-            // Space carries modifiers like a character key would, so Ctrl/Alt
-            // survive (Emacs `C-SPC` set-mark → :ctrl- , `C-M-SPC` mark-sexp →
-            // :ctrl-meta- , matching crossterm) rather than collapsing to a
-            // self-inserted space. The Ctrl+Alt arm must come first.
-            NamedKey::Space if mods.control_key() && mods.alt_key() => Key::CtrlAlt(' '),
-            NamedKey::Space if mods.control_key() => Key::Ctrl(' '),
-            NamedKey::Space if mods.alt_key() => Key::Alt(' '),
-            NamedKey::Space => Key::Char(' '),
-            _ => return None,
-        }),
+        WKey::Named(n) => {
+            // The named keys carry their modifiers in the name (`crate::host::gui::named_key`,
+            // the rule both frontends share): `:ctrl-left`, `:alt-shift-up`, … — so the
+            // editor binds `C-<left>` / `C-S-<arrow>` as distinctly as `:shift-up`
+            // (shift-select) from a plain arrow. Tab and Escape keep their own spellings.
+            let with_mods = |base: &'static str| {
+                Key::Named(named_key(base, mods.control_key(), mods.alt_key(), mods.shift_key()))
+            };
+            Some(match n {
+                NamedKey::ArrowUp => with_mods("up"),
+                NamedKey::ArrowDown => with_mods("down"),
+                NamedKey::ArrowLeft => with_mods("left"),
+                NamedKey::ArrowRight => with_mods("right"),
+                NamedKey::Enter => with_mods("enter"),
+                NamedKey::Escape => Key::Named("escape"),
+                NamedKey::Backspace => with_mods("backspace"),
+                // Shift+Tab is back-tab — match the crossterm frontend's :back-tab.
+                NamedKey::Tab if mods.shift_key() => Key::Named("back-tab"),
+                NamedKey::Tab => Key::Named("tab"),
+                NamedKey::Delete => with_mods("delete"),
+                NamedKey::Home => with_mods("home"),
+                NamedKey::End => with_mods("end"),
+                NamedKey::PageUp => with_mods("page-up"),
+                NamedKey::PageDown => with_mods("page-down"),
+                // Space carries modifiers like a character key would, so Ctrl/Alt
+                // survive (Emacs `C-SPC` set-mark → :ctrl- , `C-M-SPC` mark-sexp →
+                // :ctrl-meta- , matching crossterm) rather than collapsing to a
+                // self-inserted space. The Ctrl+Alt arm must come first.
+                NamedKey::Space if mods.control_key() && mods.alt_key() => Key::CtrlAlt(' '),
+                NamedKey::Space if mods.control_key() => Key::Ctrl(' '),
+                NamedKey::Space if mods.alt_key() => Key::Alt(' '),
+                NamedKey::Space => Key::Char(' '),
+                _ => return None,
+            })
+        }
         WKey::Character(s) => {
             // For a Ctrl/Alt chord, read the key WITHOUT modifiers, so layout
             // composition (on some layouts Alt+`-` composes to en-dash `–`, Alt+

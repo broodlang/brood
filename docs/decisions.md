@@ -21260,3 +21260,33 @@ first user is `std/editor/pane` (`pane`, `divider`, `layout`), which is what let
 declare its pane geometry in types at all. Not in scope: resolution through a file's
 `(:use …)` imports (an alias resolves like a record name, by unique suffix), a `nest doc`
 entry for an alias, and recursive types.
+
+## ADR-328 — A named key spells its modifiers the way a character chord does
+
+**Status:** accepted; implemented 2026-09-12 (`host::gui::named_key`, used by both
+frontends' key translation).
+
+**Context.** A character chord has always carried its modifiers in its name: `:ctrl-x`,
+`:alt-f`, `:ctrl-meta-f`. A *named* key — an arrow, Home, Delete, Backspace — kept only
+Shift, and only on the motion keys (`:shift-up`, for shift-select), because that was the
+one binding the editor needed at the time. Ctrl and Alt on a named key were dropped by
+both frontends, so `C-<left>` arrived as a plain `:left`: Emacs' `right-word`, `C-<backspace>`
+(`backward-kill-word`), and the `C-S-<arrow>` window swap of `buffer-move` could not be
+bound at all — and a user who pressed them got a silent plain motion instead of the
+"undefined key" that would have told them why.
+
+**Decision.** One rule, in one function (`named_key`), for the named keys that take
+modifiers — the arrows, Home, End, Page Up/Down, Delete, Backspace, Enter:
+`[ctrl-meta-|ctrl-|alt-][shift-]<name>` — `:ctrl-left`, `:alt-shift-up`,
+`:ctrl-meta-delete`. The prefix order mirrors the character chords' (`ctrl-meta-` first)
+with Shift innermost, so `:shift-up` is unchanged and a shifted chord reads as the plain
+chord's name with `shift-` before the key. Tab keeps its own spelling (Shift+Tab is
+`:back-tab`, as both frontends already agreed) and Escape carries no modifiers. The GUI
+(winit) and the terminal (crossterm) call the same function, so a binding reads the same
+whichever delivered it — the property the two `key_to_value`s have kept by hand until now.
+
+**Consequences.** `C-<arrow>`, `M-<arrow>`, `C-S-<arrow>`, `C-<backspace>` and their kin
+are bindable keys. A held Ctrl or Alt on an arrow no longer falls through to the plain
+motion; an editor that wants the plain motion under a modifier binds it. The vocabulary is
+closed (a dozen keys × eight modifier sets) so each spelling is built once and kept for the
+process, which is what lets `Key` stay `Copy` and the GUI thread deliver it heap-free.

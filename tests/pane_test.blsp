@@ -172,3 +172,68 @@
         (spawn (send me (count (get (pane-layout t [0 0 80 24]) :panes)))))
       ;; fold the 8 replies; every worker must see 3 panes
       (assert= (fold (range 8) 0 (fn (acc _) (+ acc (receive)))) 24))))
+
+;; ---- moving panes around: swap / rotate / transpose / flip / neighbour -------------
+
+(describe "moving panes around"
+  ;; wt-tree3: top row a|b (buf 0 selected, buf 1), bottom full-width c (buf 2)
+  (defn payloads (t) (map (pane-leaf-paths t) (fn (p) (get (pane-payload-at t p) :buf))))
+
+  (test "pane-swap exchanges two payloads and leaves selection where it was"
+    (let (t (wt-tree3)
+          [pa pb pc] (into [] (pane-leaf-paths t))
+          s (pane-swap t pa pc))
+      (assert= (payloads s) (list 2 1 0))
+      (assert= (pane-selected-path s) pa) ; the marker stayed on the position
+      (assert= (pane-swap t pa pa) t)))
+
+  (test "pane-rotate turns the payloads through traversal order, either way"
+    (let (t (wt-tree3))
+      (assert= (payloads (pane-rotate t)) (list 2 0 1))
+      (assert= (payloads (pane-rotate t 2)) (list 1 2 0))
+      (assert= (payloads (pane-rotate t -1)) (list 1 2 0))
+      (assert= (payloads (pane-rotate (pane-rotate (pane-rotate t)))) (list 0 1 2))
+      (assert= (pane-rotate (pane-single {:buf 0})) (pane-single {:buf 0}))))
+
+  (test "pane-transpose turns every split the other way, order and ratios kept"
+    (let (t (pane-set-ratio (wt-tree3) '() 0.3)
+          x (pane-transpose t))
+      (assert= (get x :dir) :col)
+      (assert= (get (get x :a) :dir) :row)
+      (assert= (get x :ratio) 0.3)
+      (assert= (payloads x) (list 0 1 2))
+      (assert= (pane-transpose x) t)))
+
+  (test "pane-flip mirrors the layout, inverting ratios so sizes stay; a dir restricts it"
+    (let (t (pane-set-ratio (wt-tree3) '() 0.3)
+          f (pane-flip t))
+      (assert= (payloads f) (list 2 1 0)) ; both splits mirrored: c on top, then b|a
+      (assert= (get f :ratio) 0.7)
+      (assert= (payloads (pane-flip t :col)) (list 1 0 2)) ; only the side-by-side split
+      (assert= (payloads (pane-flip t :row)) (list 2 0 1))
+      (assert= (payloads (pane-flip f)) (list 0 1 2))
+      (is (< (math/abs (- (get (pane-flip f) :ratio) 0.3)) 0.000001))))
+
+  (test "pane-neighbor answers windmove's question from the layout's geometry"
+    (let (t (wt-tree3)
+          [pa pb pc] (into [] (pane-leaf-paths t))
+          l (pane-layout t [0 0 80 24]))
+      (assert= (get (pane-neighbor l pa :right) :path) pb)
+      (assert= (get (pane-neighbor l pb :left) :path) pa)
+      (assert= (get (pane-neighbor l pa :down) :path) pc)
+      (assert= (get (pane-neighbor l pb :down) :path) pc)
+      (is (nil? (pane-neighbor l pa :left)))
+      (is (nil? (pane-neighbor l pa :up)))
+      (is (nil? (pane-neighbor l pc :down)))
+      (is (nil? (pane-neighbor l '(:x) :up))))) ; no such pane
+
+  (test "pane-neighbor picks, of several panes along the edge, the one most in line"
+    ;; bottom pane c is full width; going UP from it, a and b both qualify. Split evenly
+    ;; they tie exactly (c's centre column is the divider) and the first in order, a,
+    ;; wins; with a narrow a, b's centre is the nearer to c's
+    (let (t (wt-tree3)
+          [pa pb pc] (into [] (pane-leaf-paths t))
+          even (pane-layout t [0 0 80 24])
+          narrow (pane-layout (pane-set-ratio t '(:a) 0.3) [0 0 80 24]))
+      (assert= (get (pane-neighbor even pc :up) :path) pa)
+      (assert= (get (pane-neighbor narrow pc :up) :path) pb))))

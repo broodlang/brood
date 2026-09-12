@@ -249,22 +249,36 @@ pub(in crate::builtins) fn key_to_value(heap: &mut Heap, k: crossterm::event::Ke
             Value::keyword(value::intern(&format!("alt-{ch}")))
         }
         KeyCode::Char(c) => heap.alloc_string(&c.to_string()),
-        KeyCode::Up => value::kw("up"),
-        KeyCode::Down => value::kw("down"),
-        KeyCode::Left => value::kw("left"),
-        KeyCode::Right => value::kw("right"),
-        KeyCode::Enter => value::kw("enter"),
+        // The named keys carry their modifiers in the name — `crate::host::gui::named_key`,
+        // the one rule the GUI frontend uses too: `:ctrl-left`, `:alt-shift-up`, … so an
+        // Emacs `C-<left>` or a `C-S-<arrow>` window swap binds in a terminal as well.
+        KeyCode::Up => named_kw("up", &k),
+        KeyCode::Down => named_kw("down", &k),
+        KeyCode::Left => named_kw("left", &k),
+        KeyCode::Right => named_kw("right", &k),
+        KeyCode::Enter => named_kw("enter", &k),
         KeyCode::Esc => value::kw("escape"),
-        KeyCode::Backspace => value::kw("backspace"),
+        KeyCode::Backspace => named_kw("backspace", &k),
         KeyCode::Tab => value::kw("tab"),
         KeyCode::BackTab => value::kw("back-tab"),
-        KeyCode::Delete => value::kw("delete"),
-        KeyCode::Home => value::kw("home"),
-        KeyCode::End => value::kw("end"),
-        KeyCode::PageUp => value::kw("page-up"),
-        KeyCode::PageDown => value::kw("page-down"),
+        KeyCode::Delete => named_kw("delete", &k),
+        KeyCode::Home => named_kw("home", &k),
+        KeyCode::End => named_kw("end", &k),
+        KeyCode::PageUp => named_kw("page-up", &k),
+        KeyCode::PageDown => named_kw("page-down", &k),
         _ => Value::nil(),
     }
+}
+
+/// A named key's keyword under the event's modifiers (`named_key`'s spelling).
+fn named_kw(base: &'static str, k: &crossterm::event::KeyEvent) -> Value {
+    use crossterm::event::KeyModifiers;
+    value::kw(crate::host::gui::named_key(
+        base,
+        k.modifiers.contains(KeyModifiers::CONTROL),
+        k.modifiers.contains(KeyModifiers::ALT),
+        k.modifiers.contains(KeyModifiers::SHIFT),
+    ))
 }
 
 /// `(term-draw frame)` — paint a frame: a vector of op vectors `[:clear]`,
@@ -1742,5 +1756,39 @@ mod mouse_event_tests {
             panic!("expected a [:mouse …] vector");
         };
         assert_eq!(heap.vector(id).len(), 6, "a release has no trailing count");
+    }
+}
+
+#[cfg(test)]
+mod key_to_value_tests {
+    use super::key_to_value;
+    use crate::core::heap::Heap;
+    use crate::core::value::{self, Value};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn kw_of(code: KeyCode, mods: KeyModifiers) -> String {
+        let mut heap = Heap::new();
+        match key_to_value(&mut heap, KeyEvent::new(code, mods)) {
+            Value::Keyword(s) => value::symbol_name(s),
+            other => panic!("not a keyword: {other:?}"),
+        }
+    }
+
+    // The named keys spell their modifiers the way character chords do — the same rule
+    // the GUI frontend applies (`host::gui::named_key`), so a binding reads the same in
+    // both. A plain arrow is unchanged.
+    #[test]
+    fn named_keys_carry_their_modifiers() {
+        assert_eq!(kw_of(KeyCode::Left, KeyModifiers::NONE), "left");
+        assert_eq!(kw_of(KeyCode::Left, KeyModifiers::SHIFT), "shift-left");
+        assert_eq!(kw_of(KeyCode::Left, KeyModifiers::CONTROL), "ctrl-left");
+        assert_eq!(
+            kw_of(KeyCode::Up, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            "ctrl-shift-up"
+        );
+        assert_eq!(kw_of(KeyCode::Down, KeyModifiers::ALT), "alt-down");
+        assert_eq!(kw_of(KeyCode::Backspace, KeyModifiers::CONTROL), "ctrl-backspace");
+        assert_eq!(kw_of(KeyCode::BackTab, KeyModifiers::SHIFT), "back-tab");
+        assert_eq!(kw_of(KeyCode::Esc, KeyModifiers::CONTROL), "escape");
     }
 }

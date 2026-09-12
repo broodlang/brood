@@ -270,6 +270,65 @@ pub enum Key {
     Named(&'static str),
 }
 
+/// The name of a named key under modifiers — ONE rule for both frontends, so a chord
+/// reads the same whether it arrived from winit or from crossterm: `[ctrl-meta-|ctrl-|
+/// alt-][shift-]<name>` — `:ctrl-left`, `:alt-shift-up`, `:ctrl-meta-delete`. Character
+/// chords already spell their modifiers this way (`:ctrl-x`, `:ctrl-meta-f`); named keys
+/// used to keep only Shift, and only on the motion keys, so `C-<left>` (Emacs
+/// `right-word`) and `C-S-<arrow>` (swap a window with its neighbour) could not be bound
+/// at all. Tab keeps its own spelling (Shift+Tab is `:back-tab`) and Escape carries none.
+///
+/// Returns a `&'static str` — the vocabulary is closed (a dozen keys × eight modifier
+/// sets), so each spelling is built once and kept for the process, which lets [`Key`]
+/// stay `Copy`.
+pub fn named_key(base: &'static str, ctrl: bool, alt: bool, shift: bool) -> &'static str {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    if !(ctrl || alt || shift) {
+        return base;
+    }
+    let name = format!(
+        "{}{}{}",
+        match (ctrl, alt) {
+            (true, true) => "ctrl-meta-",
+            (true, false) => "ctrl-",
+            (false, true) => "alt-",
+            (false, false) => "",
+        },
+        if shift { "shift-" } else { "" },
+        base
+    );
+    static NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut names = NAMES.get_or_init(|| Mutex::new(HashSet::new())).lock().unwrap();
+    if let Some(s) = names.get(name.as_str()) {
+        return s;
+    }
+    let leaked: &'static str = Box::leak(name.into_boxed_str());
+    names.insert(leaked);
+    leaked
+}
+
+#[cfg(test)]
+mod named_key_tests {
+    use super::named_key;
+    #[test]
+    fn spells_modifiers_the_way_character_chords_do() {
+        assert_eq!(named_key("left", false, false, false), "left");
+        assert_eq!(named_key("left", false, false, true), "shift-left");
+        assert_eq!(named_key("left", true, false, false), "ctrl-left");
+        assert_eq!(named_key("up", false, true, false), "alt-up");
+        assert_eq!(named_key("up", true, true, false), "ctrl-meta-up");
+        assert_eq!(named_key("right", true, false, true), "ctrl-shift-right");
+        assert_eq!(named_key("delete", false, true, true), "alt-shift-delete");
+    }
+    #[test]
+    fn the_same_chord_is_the_same_static_str() {
+        let a = named_key("home", true, false, true);
+        let b = named_key("home", true, false, true);
+        assert!(std::ptr::eq(a, b));
+    }
+}
+
 /// A mouse button, mirrored from winit's; the Brood side keywords it (`:left`).
 #[derive(Clone, Copy, PartialEq)]
 pub enum MouseButton {

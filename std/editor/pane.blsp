@@ -25,9 +25,11 @@
 display seam. A leaf shows an opaque payload; a `:row`/`:col` split divides its rect
 by a `:ratio`, reserving one cell for a divider. `pane-layout` turns a tree + a
 rect into pane rects + divider rects; `pane-split`/`pane-delete`/`pane-other`
-restructure it; `divider-at` + `pane-ratio-for` + `pane-set-ratio` implement
-drag-to-resize over the kernel's `:drag` mouse events (ADR-077). Pure and
-content-agnostic — the editor supplies the payload and the keybindings."
+restructure it; `pane-swap`/`pane-rotate`/`pane-transpose`/`pane-flip` move panes
+around and `pane-neighbor` finds the pane in a direction (windmove); `divider-at` +
+`pane-ratio-for` + `pane-set-ratio` implement drag-to-resize over the kernel's `:drag`
+mouse events (ADR-077). Pure and content-agnostic — the editor supplies the payload and
+the keybindings."
   (:use math))
 
 ;; Note on recursion: the helpers below walk the layout *tree*, so they recurse on
@@ -186,6 +188,136 @@ returned unchanged — you can't delete the only one."
   "Collapse the layout to just the selected pane, filling the whole frame (Emacs
 `C-x 1`)."
   (pane-single (pane-selected-payload tree)))
+
+;; ---- moving panes around (swap / rotate / transpose) ------------------------
+;; The window-management verbs of Emacs' `windmove-swap-states-*`, `buffer-move` and
+;; `transpose-frame`. All of them move PAYLOADS between leaves or re-shape splits; none
+;; creates or removes a pane, so every path stays valid across the call. Selection is a
+;; leaf marker, so it stays with the POSITION — the editor decides whether to follow the
+;; payload it just moved (a swap that keeps the reader on their buffer selects the other
+;; leaf afterwards).
+
+(defn pane-swap (tree path-a path-b)
+  "The tree with the payloads of the panes at `path-a` and `path-b` exchanged; the same
+tree when the two paths are equal. Selection stays where it was."
+  (if (= path-a path-b)
+    tree
+    (let (pa (pane-payload-at tree path-a)
+          pb (pane-payload-at tree path-b))
+      (pane-update-path (pane-update-path tree path-a (fn (_) pb)) path-b (fn (_) pa)))))
+
+(defn pane-rotate (tree &optional (n 1))
+  "Rotate every pane's payload `n` steps forward through traversal order (each pane takes
+the payload of the pane `n` before it; the first takes the last's) — a negative `n` turns
+the other way. Selection stays put, so the reader ends up looking at a different buffer
+in the same place (Emacs `rotate-frame`'s buffer half)."
+  (let (paths (pane-leaf-paths tree)
+        k (count paths)
+        payloads (map paths (fn (p) (pane-payload-at tree p))))
+    (fold (seq/zip paths (range k))
+      tree
+      (fn (t pair)
+        (let ([path i] pair
+              from (nth payloads (math/mod (- i n) k)))
+          (pane-update-path t path (fn (_) from)))))))
+
+;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
+(check-allow :non-tail-recursion
+  (defn pane-transpose (tree)
+    "Every split turned the other way — `:row` becomes `:col` and back — so a layout of
+  stacked panes becomes side-by-side ones and vice versa, ratios and order kept
+  (`transpose-frame`)."
+    (if (pane-leaf? tree)
+      tree
+      (assoc tree
+        :dir (if (= (get tree :dir) :row) :col :row)
+        :a (pane-transpose (get tree :a))
+        :b (pane-transpose (get tree :b))))))
+
+;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
+(check-allow :non-tail-recursion
+  (defn pane-flip (tree &optional (dir nil))
+    "Every split's children exchanged — the layout mirrored — with `:ratio` inverted so
+  each pane keeps its size. `dir` restricts it to splits of that direction: `:col` mirrors
+  left-right (`flop-frame`), `:row` top-bottom (`flip-frame`), nil both."
+    (if (pane-leaf? tree)
+      tree
+      (let (a (pane-flip (get tree :a) dir)
+            b (pane-flip (get tree :b) dir))
+        (if (or (nil? dir) (= dir (get tree :dir)))
+          (assoc tree :a b :b a :ratio (- 1 (get tree :ratio)))
+          (assoc tree :a a :b b))))))
+
+;; ---- neighbours: which pane lies in a direction (windmove) -------------------
+
+(defn- pane-rect-centre (rect)
+  (let ([x y w h] rect) [(+ y (math/quot h 2)) (+ x (math/quot w 2))]))
+(sig pane-rect-centre (rect -> (tuple int int)))
+
+(defn- pane-beside? (rect from dir)
+  "Whether `rect` lies wholly in direction `dir` of `from` and shares rows (for
+`:left`/`:right`) or columns (for `:up`/`:down`) with it."
+  (let ([x y w h] rect [fx fy fw fh] from)
+    (cond
+      (= dir :left) (and (<= (+ x w) fx) (< y (+ fy fh)) (< fy (+ y h)))
+      (= dir :right) (and (>= x (+ fx fw)) (< y (+ fy fh)) (< fy (+ y h)))
+      (= dir :up) (and (<= (+ y h) fy) (< x (+ fx fw)) (< fx (+ x w)))
+      else (and (>= y (+ fy fh)) (< x (+ fx fw)) (< fx (+ x w))))))
+(sig pane-beside? (rect rect keyword -> bool))
+
+(defn- pane-gap (rect from dir)
+  "How far `rect` is from `from` in direction `dir` — the nearest candidate wins."
+  (let ([x y w h] rect [fx fy fw fh] from)
+    (cond
+      (= dir :left) (- fx (+ x w))
+      (= dir :right) (- x (+ fx fw))
+      (= dir :up) (- fy (+ y h))
+      else (- y (+ fy fh)))))
+(sig pane-gap (rect rect keyword -> int))
+
+(defn- pane-nearest (cands from dir best)
+  (if (empty? cands)
+    best
+    (let (c (first cands)
+          better? (or (nil? best) (< (pane-gap (get c :rect) from dir) (pane-gap (get best :rect) from dir))))
+      (pane-nearest (rest cands) from dir (if better? c best)))))
+(sig pane-nearest (list rect keyword (or nil pane) -> (or nil pane)))
+
+(defn- pane-across (rect dir)
+  ;; a rect's centre coordinate ACROSS the direction of travel: its row for a sideways
+  ;; move, its column for a vertical one — what breaks a tie between panes along an edge
+  (let ([crow ccol] (pane-rect-centre rect))
+    (if (or (= dir :left) (= dir :right)) crow ccol)))
+(sig pane-across (rect keyword -> int))
+
+(defn- pane-most-aligned (cands dir across best)
+  (if (empty? cands)
+    best
+    (let (c (first cands)
+          d (fn (p) (math/abs (- (pane-across (get p :rect) dir) across)))
+          better? (or (nil? best) (< (d c) (d best))))
+      (pane-most-aligned (rest cands) dir across (if better? c best)))))
+(sig pane-most-aligned (list keyword int (or nil pane) -> (or nil pane)))
+
+(defn pane-neighbor (layout path dir)
+  "The pane (`{:path :payload :selected :rect}`) beside the pane at `path` in direction
+`dir` (`:left` `:right` `:up` `:down`) in the laid-out `layout`, or nil at the edge.
+Among the panes on that side that share rows/columns with it, the nearest; ties —
+several panes stacked along the edge — go to the one whose centre is most in line with
+the source's, first in traversal order on an exact tie. `windmove`'s question, answered
+from the geometry `pane-layout` already computed."
+  (let (me (seq/find (get layout :panes) (fn (p) (= (get p :path) path))))
+    (if (nil? me)
+      nil
+      (let (from (get me :rect)
+            beside (filter (get layout :panes) (fn (p) (pane-beside? (get p :rect) from dir)))
+            nearest (pane-nearest beside from dir nil))
+        (if (nil? nearest)
+          nil
+          (let (gap (pane-gap (get nearest :rect) from dir)
+                tied (filter beside (fn (p) (= (pane-gap (get p :rect) from dir) gap))))
+            (pane-most-aligned tied dir (pane-across from dir) nil)))))))
+(sig pane-neighbor (layout list keyword -> (or nil pane)))
 
 ;; ---- layout (tree + rect -> pane rects + divider rects) ---------------------
 ;; A rect is `[x y w h]` in cells (x = column origin, y = row origin). A point (from

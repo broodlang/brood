@@ -131,8 +131,9 @@ The terminal primitives:
 - `(term/size)` → `[cols rows]`
 - `(term/poll ms)` → a key, or `nil` on timeout. A printable key is a **1-char
   string** (`"a"`); special keys are **keywords** (`:up :down :left :right :enter
-  :escape :backspace :tab :delete :home :end :page-up :page-down`, and control
-  combos like `:ctrl-c`/`:ctrl-s`). Always pass a finite `ms`.
+  :escape :backspace :tab :delete :home :end :page-up :page-down`, control
+  combos like `:ctrl-c`/`:ctrl-s`, and a named key under modifiers spelled the same
+  way: `:ctrl-left`, `:alt-shift-up`, `:shift-home`). Always pass a finite `ms`.
 - `(term/draw frame)` — paint a frame.
 
 ## 4. Render a buffer to a frame
