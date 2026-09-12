@@ -217,12 +217,16 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy.
 (defn v3 (ns-uuid name)
   "Generate a name-based UUID v3 (MD5). Given the same `ns-uuid` and `name`,
 always returns the same UUID. Use `uuid/ns-dns`, `uuid/ns-url`, `uuid/ns-oid`,
-or `uuid/ns-x500` as the namespace, or supply your own UUID string."
+or `uuid/ns-x500` as the namespace, or supply your own UUID string.
+
+    (uuid/v3 uuid/ns-dns \"example.com\")   → \"9073926b-929f-31c2-abc9-fad77ae3e8eb\""
   (name-based ns-uuid name hash/md5-bytes 3))
 
 (defn v5 (ns-uuid name)
   "Generate a name-based UUID v5 (SHA-1). Given the same `ns-uuid` and `name`,
 always returns the same UUID. Prefer v5 over v3 (SHA-1 > MD5). Use
 `uuid/ns-dns`, `uuid/ns-url`, `uuid/ns-oid`, or `uuid/ns-x500` as the
-namespace, or supply your own UUID string."
+namespace, or supply your own UUID string.
+
+    (uuid/v5 uuid/ns-dns \"example.com\")   → \"cfbff0d1-9375-5685-968c-48ce8b15ae17\""
   (name-based ns-uuid name hash/sha1-bytes 5))

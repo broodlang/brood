@@ -51,7 +51,9 @@
 (sig int (bytes int int -> any))
 
 (defn int-le (bs off n)
-  "Read `n` bytes (1–8) of `bs` at `off` as a little-endian signed (two's-complement) integer."
+  "Read `n` bytes (1–8) of `bs` at `off` as a little-endian signed (two's-complement) integer.
+
+    (bytes/int-le #b\"\\xff\\xff\" 0 2)   → -1"
   (do
     (bytes-width-check "bytes-int-le" n)
     (let (bt (bytes/at bs (+ off (- n 1))))
@@ -66,14 +68,19 @@
 (sig uint (bytes int int -> any))
 
 (defn uint-le (bs off n)
-  "Read `n` bytes (1–8) of `bs` at `off` as a little-endian unsigned integer."
+  "Read `n` bytes (1–8) of `bs` at `off` as a little-endian unsigned integer.
+
+    (bytes/uint-le #b\"\\xff\\xff\" 0 2)   → 65535"
   (bytes-acc-le bs off (+ off (- (bytes-width-check "bytes-uint-le" n) 1)) 0))
 (sig uint-le (bytes int int -> any))
 
 (defn int-> (v n)
   "Encode integer `v` as `n` bytes (1–8), big-endian two's complement. Bits
 above `n` bytes are truncated (the bit-syntax convention), so negatives encode
-to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
+to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\".
+
+    (bytes/int-> 258 2)   → #b\"\\x01\\x02\"
+    (bytes/int-> -1 2)   → #b\"\\xff\\xff\""
   (bytes (int->bytes-be v (bytes-width-check "int->bytes" n) nil)))
 
 (defn int-le-> (v n)

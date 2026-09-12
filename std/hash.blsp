@@ -95,7 +95,9 @@ value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. S
 ;; ---- SHA-384 ----------------------------------------------------------------
 
 (defn sha384 (s)
-  "Lowercase hex SHA-384 of string `s`'s UTF-8 bytes."
+  "Lowercase hex SHA-384 of string `s`'s UTF-8 bytes.
+
+    (hash/sha384 \"abc\")   → \"cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7\""
   (bytes->hex (%digest :sha384 (string/->bytes s))))
 (sig sha384 (string -> string))
 
@@ -144,7 +146,9 @@ SHA-1 is not collision-resistant; prefer hmac-sha256 for new protocols."
 (sig hmac-sha1 (string string -> string))
 
 (defn hmac-sha512 (key message)
-  "HMAC-SHA512 of `message` using `key`. Both are strings; result is lowercase hex."
+  "HMAC-SHA512 of `message` using `key`. Both are strings; result is lowercase hex.
+
+    (hash/hmac-sha512 \"key\" \"abc\")   → \"3926a207c8c42b0c41792cbd3e1a1aaaf5f7a25704f62dfc939c4987dd7ce060009c5bb1c2447355b3216f10b537e9afa7b64a4e5391b0d631172d07939e087a\""
   (bytes->hex (%hmac :sha512 (string/->bytes key) (string/->bytes message))))
 (sig hmac-sha512 (string string -> string))
 
@@ -175,6 +179,8 @@ bytes value (raw MAC, not hex)."
 
 (defn string (s)
   "A fast non-cryptographic integer hash of string `s` (djb2 variant).
-Suitable for hash tables and sharding; NOT cryptographically secure."
+Suitable for hash tables and sharding; NOT cryptographically secure.
+
+    (hash/string \"abc\")   → 160395583"
   (fold (string/->list s) 5381 (fn (h c) (bit/xor (* h 31) (string/char->int c)))))
 (sig string (string -> int))

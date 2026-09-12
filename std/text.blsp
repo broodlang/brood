@@ -47,12 +47,16 @@
 (sig line-count (rope -> int))
 
 (defn char->line (r idx)
-  "The 0-based line index containing character idx."
+  "The 0-based line index containing character idx.
+
+    (text/char->line (text/from-string \"ab\\ncd\\nef\") 4)   → 1"
   (%rope-char->line r idx))
 (sig char->line (rope int -> int))
 
 (defn line->char (r n)
-  "The character index where line n (0-based) begins."
+  "The character index where line n (0-based) begins.
+
+    (text/line->char (text/from-string \"ab\\ncd\\nef\") 2)   → 6"
   (%rope-line->char r n))
 (sig line->char (rope int -> int))
 

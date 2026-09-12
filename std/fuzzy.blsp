@@ -93,7 +93,10 @@ still lowered here — the case-insensitive subsequence test needs the lower-cas
 (defn match (query cand)
   "`nil` if `query` isn't a case-insensitive subsequence of `cand`, else
 `{:score <int> :positions [i …]}`. The empty query matches anything (score 0) —
-handled directly, since its empty position list is indistinguishable from `nil`."
+handled directly, since its empty position list is indistinguishable from `nil`.
+
+    (fuzzy/match \"abc\" \"xAxbxC\")   → {:score 18 :positions (1 3 5)}
+    (fuzzy/match \"zz\" \"abc\")   → nil"
   (if (= query "")
     {:score 0 :positions ()}
     (fuzzy-match-lc (string/lower query) (string/length query) cand)))

@@ -9,7 +9,9 @@
 ;; qualified name defined in the prelude, not a definition relocated into the module file.
 
 (defn string/->symbol (s)
-  "The symbol whose spelling is the string `s`. Errors if `s` isn't a string."
+  "The symbol whose spelling is the string `s`. Errors if `s` isn't a string.
+
+    (string/->symbol \"foo\")   → foo"
   (if (string? s) (symbol s) (error "string/->symbol: expected a string, got " (type-of s))))
 
 ;; ---- strings ----------------------------------------------------------------

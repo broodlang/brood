@@ -66,6 +66,8 @@ its ISO form — rather than as its field map."
 ;; ---- render-all -------------------------------------------------------------
 
 (defn render-all (tmpl rows)
-  "Apply `render` to `tmpl` for each map in list `rows`. Returns a list of strings."
+  "Apply `render` to `tmpl` for each map in list `rows`. Returns a list of strings.
+
+    (template/render-all \"hi {{name}}\" (list {:name \"a\"} {:name \"b\"}))   → (\"hi a\" \"hi b\")"
   (map rows (fn (row) (render tmpl row))))
 (sig render-all (any seqable -> (or nil (list any))))
