@@ -50,7 +50,7 @@ JIT compilation. Right for judging generated-code quality, wrong for any change 
 
 4. **`--floor` bounds error WITHIN one `ab-bench` run, not ACROSS runs.** It measures
    base-vs-base inside a single invocation, so it says nothing about comparing one run's delta
-   to another's. A bisect built from one-baseline-per-run deltas (2026-09-11, KI-127)
+   to another's. A bisect built from one-baseline-per-run deltas (2026-09-11, KI-128)
    manufactured a smooth ramp and "converged" on a commit that changes four lines of markdown.
    To compare several commits, put them all in ONE session, interleaved, with the same binary
    measured twice as a control.
@@ -123,7 +123,7 @@ dev box; check that first.
 > see the note at the end of this file. Measure `matmul` against a post-09-02 baseline instead.
 >
 > The full 30-row sweep is therefore a **19-row** sweep here. Of those, one row moved and it was
-> real: `sort`, root-caused and fixed as **KI-127** (a top-level value rendered and discarded on
+> real: `sort`, root-caused and fixed as **KI-128** (a top-level value rendered and discarded on
 > every native run — unrelated to KI-114). `errors-deep` +17..27% is KI-123's documented
 > post-fix residue against a pre-KI-117 baseline, not new.
 
@@ -259,11 +259,11 @@ float/int operation somewhere the guard test does not reach.
 > | row | 2026-09-04 | 2026-09-11 | |
 > |---|---|---|---|
 > | `startup` | −18.2% | **−9.7%** | still a large win |
-> | `sort` | −7.6% | **+5.0%** | → root-caused as **KI-127**, now fixed |
+> | `sort` | −7.6% | **+5.0%** | → root-caused as **KI-128**, now fixed |
 > | `fib` | −4.2% | +3.7% | 4x its floor but under the 5% bar; not pursued |
 > | `bintree` | −2.9% | −3.8% | unchanged |
 >
-> `sort`'s swing is the whole finding: it is not drift, it is KI-127 (`7a72135b` rendering every
+> `sort`'s swing is the whole finding: it is not drift, it is KI-128 (`7a72135b` rendering every
 > top-level value on the native path). **Re-taken 2026-09-12 with the fix in: `sort` vs
 > `8a2aaa01` reads −4.2%** (0.0% floor, best-of-15, both arms imaged) — back on the fast side,
 > consistent with the 2026-09-04 direction.
